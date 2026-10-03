@@ -54,8 +54,10 @@ use trace_commons_server::versioned_pipeline::*;
 use trace_commons_server::versioned_pipeline_activation::{
     ACTIVATION_ACTOR_INVALID_LABEL, ACTIVATION_READINESS_FAILED_LABEL,
     ACTIVATION_STATE_INVALID_LABEL, ActivationAction, ActivationReadiness, ActivationRequest,
-    EARLIER_QUALIFIED_BUNDLE_REQUIRED_LABEL, PipelineActivationStore, ReceiptOwner,
-    ReceiptOwnership, RoutingState, TenantRouting, evaluate_activation_readiness,
+    EARLIER_QUALIFIED_BUNDLE_REQUIRED_LABEL, ExpectedRecord, ExpectedRouting,
+    PIPELINE_ROUTING_EXPECTATION_REQUIRED_LABEL, PIPELINE_ROUTING_STATE_CHANGED_LABEL,
+    PipelineActivationStore, ReceiptOwner, ReceiptOwnership, RoutingExpectation, RoutingState,
+    TenantRouting, evaluate_activation_readiness,
 };
 use trace_commons_server::versioned_pipeline_authority::{
     PipelineAuthorityProvider, PipelinePrivacyBoundary, StaticPipelineAuthorityProvider,
@@ -32985,6 +32987,12 @@ fn routing_tenant(tag: &str) -> String {
     format!("routing-{tag}-{}", uuid::Uuid::new_v4())
 }
 
+/// The expectation of a caller that read `routing`, the answer of the change
+/// before its own: that row's record id.
+fn expecting(routing: &TenantRouting) -> RoutingExpectation {
+    RoutingExpectation::record(ExpectedRecord::of(Some(routing)))
+}
+
 /// Counts the rows of `table` that the runtime login can see while the
 /// tenant setting names `tenant_id`.
 async fn visible_rows(backend: &Arc<PgBackend>, tenant_id: &str, table: &str) -> i64 {
@@ -33073,7 +33081,7 @@ async fn containment_and_deactivation_write_the_row_and_an_event() {
     assert_eq!(contained.evidence_hash, expected_hash);
 
     let legacy = store
-        .deactivate(&tenant, &actor, "return_to_legacy")
+        .deactivate_expecting(&tenant, &actor, "return_to_legacy", expecting(&contained))
         .await
         .expect("deactivate a contained tenant");
     assert_eq!(legacy.routing_state, RoutingState::Legacy);
@@ -33142,12 +33150,12 @@ async fn containment_records_the_active_bundle_in_both_bundle_columns() {
         Some(run.bundle_id.clone())
     );
 
-    store
+    let contained = store
         .contain(&tenant, &actor, "contain_first_rollout")
         .await
         .unwrap();
     store
-        .deactivate(&tenant, &actor, "return_to_legacy")
+        .deactivate_expecting(&tenant, &actor, "return_to_legacy", expecting(&contained))
         .await
         .unwrap();
 
@@ -33438,7 +33446,7 @@ async fn a_routing_row_that_names_an_old_event_is_refused() {
         .await
         .unwrap();
     let legacy = store
-        .deactivate(&tenant, &actor, "return_to_legacy")
+        .deactivate_expecting(&tenant, &actor, "return_to_legacy", expecting(&contained))
         .await
         .unwrap();
     assert_eq!(routing_generations(&tenant).await, (2, 2));
@@ -33548,7 +33556,7 @@ async fn a_routing_change_commits_when_an_event_has_a_later_recorded_at() {
     assert_eq!(routing_generations(&tenant).await, (1, 1));
 
     let legacy = store
-        .deactivate(&tenant, &actor, "return_to_legacy")
+        .deactivate_expecting(&tenant, &actor, "return_to_legacy", expecting(&contained))
         .await
         .expect("a deactivation commits beside an event of its own generation");
     assert_eq!(legacy.routing_state, RoutingState::Legacy);
@@ -33618,9 +33626,12 @@ async fn every_routing_change_shares_its_id_with_its_event() {
         ActivationAction::Rollback,
     ));
     check_routing_change(&store, &tenant, &changes).await;
+    // The tenant is contained: the deactivation names the row that the
+    // rollback left.
+    let rolled_back = expecting(&changes.last().expect("the rollback").0);
     changes.push((
         store
-            .deactivate(&tenant, &actor, "return_to_legacy")
+            .deactivate_expecting(&tenant, &actor, "return_to_legacy", rolled_back)
             .await
             .unwrap(),
         ActivationAction::Deactivate,
@@ -38506,7 +38517,23 @@ impl QualifiedBundles {
     /// Activates `package` for `tenant` with every term of the gate holding:
     /// a ready promotion for it on `gate_revision`, that revision as the
     /// deployed one, its production profile, and the tenant's readiness now.
+    /// It names the record id that the routing view shows just before the
+    /// request (`expected_record`).
     async fn activate(&self, tenant: &str, package: &BundlePackage) -> TenantRouting {
+        let expected = expected_record(&self.activation_store(), tenant).await;
+        self.activate_expecting(tenant, package, expected)
+            .await
+            .expect("every term of the gate holds")
+    }
+
+    /// `activate` with the caller's `expected_record_id`: a request that an
+    /// operator prepared at an earlier time.
+    async fn activate_expecting(
+        &self,
+        tenant: &str,
+        package: &BundlePackage,
+        expected: ExpectedRecord,
+    ) -> Result<TenantRouting, DatabaseError> {
         let readiness = self.readiness(tenant).await;
         evaluate_activation_readiness(&readiness, chrono::Utc::now()).expect("the tenant is ready");
         let revision = gate_revision();
@@ -38523,11 +38550,11 @@ impl QualifiedBundles {
                     &promotion,
                     &revision,
                     &profile,
+                    expected,
                 ),
                 &readiness,
             )
             .await
-            .expect("every term of the gate holds")
     }
 
     /// Rolls `tenant` back to `package`, with a ready promotion for it on
@@ -38543,12 +38570,27 @@ impl QualifiedBundles {
     }
 
     /// `roll_back` with the caller's promotion, whose evidence hash the
-    /// rollback's event records.
+    /// rollback's event records. It names the record id that the routing
+    /// view shows just before the request (`expected_record`).
     async fn roll_back_with(
         &self,
         tenant: &str,
         package: &BundlePackage,
         promotion: &PromotionDecision,
+    ) -> Result<TenantRouting, DatabaseError> {
+        let expected = expected_record(&self.activation_store(), tenant).await;
+        self.roll_back_expecting(tenant, package, promotion, expected)
+            .await
+    }
+
+    /// `roll_back_with` with the caller's `expected_record_id`: a request
+    /// that an operator prepared at an earlier time.
+    async fn roll_back_expecting(
+        &self,
+        tenant: &str,
+        package: &BundlePackage,
+        promotion: &PromotionDecision,
+        expected: ExpectedRecord,
     ) -> Result<TenantRouting, DatabaseError> {
         let revision = gate_revision();
         let profile = self.profile(package);
@@ -38562,6 +38604,7 @@ impl QualifiedBundles {
                 promotion,
                 &revision,
                 &profile,
+                expected,
             ))
             .await
     }
@@ -38575,6 +38618,7 @@ fn gate_request<'a>(
     promotion: &'a PromotionDecision,
     revision: &'a str,
     profile: &'a ProductionDependencyProfile,
+    expected_record_id: ExpectedRecord,
 ) -> ActivationRequest<'a> {
     ActivationRequest {
         tenant_id: tenant,
@@ -38584,8 +38628,23 @@ fn gate_request<'a>(
         promotion,
         runtime_code_revision_hash: revision,
         dependencies: profile,
-        expected_state: None,
+        expected_record_id,
     }
+}
+
+/// What an operator names as `expected_record_id` for `tenant` now: the
+/// record id of the routing row that the routing view shows
+/// (`PipelineActivationStore::routing_view`, what `GET routing` answers), or
+/// `NoRow` for a tenant with no row. Read just before the request.
+async fn expected_record(store: &PipelineActivationStore, tenant: &str) -> ExpectedRecord {
+    ExpectedRecord::of(
+        store
+            .routing_view(tenant, 1)
+            .await
+            .expect("the routing view reads")
+            .routing
+            .as_ref(),
+    )
 }
 
 fn assert_gate_refused(
@@ -38811,6 +38870,7 @@ async fn activate_with_break(
                 &promotion,
                 &revision,
                 &profile,
+                expected_record(&fixture.activation_store(), tenant).await,
             ),
             &readiness,
         )
@@ -39046,6 +39106,7 @@ async fn activation_requires_every_term_of_the_gate() {
                     &promotion,
                     &revision,
                     &profile,
+                    expected_record(&store, &tenant).await,
                 ),
                 &readiness,
             )
@@ -39064,6 +39125,7 @@ async fn activation_requires_every_term_of_the_gate() {
                 &promotion,
                 &revision,
                 &profile,
+                expected_record(&store, &tenant).await,
             ),
             &readiness,
         )
@@ -39188,6 +39250,7 @@ async fn a_refused_activation_changes_nothing() {
                     &promotion,
                     &revision,
                     &profile,
+                    expected_record(&store, &tenant).await,
                 ),
                 &readiness,
             )
@@ -39217,6 +39280,7 @@ async fn a_refused_activation_changes_nothing() {
                 &promotion,
                 &revision,
                 &profile,
+                expected_record(&store, &tenant).await,
             ),
             &readiness,
         )
@@ -39318,6 +39382,7 @@ async fn a_bundle_is_qualified_once_for_each_code_revision() {
                     &on_third,
                     &third,
                     &profile,
+                    expected_record(&store, &tenant).await,
                 ),
                 &readiness,
             )
@@ -39336,6 +39401,7 @@ async fn a_bundle_is_qualified_once_for_each_code_revision() {
                 &on_second,
                 &second,
                 &profile,
+                expected_record(&store, &tenant).await,
             ),
             &readiness,
         )
@@ -39349,6 +39415,396 @@ async fn a_bundle_is_qualified_once_for_each_code_revision() {
             .as_deref(),
         Some(a.bundle_id.as_str())
     );
+}
+
+// The expectation of a routing change (review round 1, point 2; amendment
+// A6). An activation and a rollback name the routing row they read
+// (`ExpectedRecord`); a containment may; a deactivation of a contained tenant
+// must name the row or its state.
+
+/// An activation is a compare-and-set on the routing row's record id. A
+/// tenant with no row is activated only by a request that names `NoRow`. A
+/// request prepared before a containment names the row that the containment
+/// replaced: it is refused with `pipeline_routing_state_changed`, the tenant
+/// stays contained, and nothing is written. The same holds after contain,
+/// reopen, contain (the state is `contained` both times; the id is not): a
+/// request that names the FIRST containment is refused, and one that names
+/// the row in force reopens intake.
+#[tokio::test]
+async fn an_activation_names_the_routing_row_it_read() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let fixture = two_qualified_bundles(backend.clone(), &dir).await;
+    let store = fixture.activation_store();
+    let tenant = routing_tenant("activate-expects");
+    let actor = routing_actor();
+    fixture.qualify(&tenant, &fixture.a, &gate_revision()).await;
+
+    // No row: a record id is refused, `NoRow` passes, and `NoRow` is then
+    // refused, because the tenant has a row.
+    let before = activation_rows(&tenant).await;
+    assert_gate_refused(
+        fixture
+            .activate_expecting(
+                &tenant,
+                &fixture.a,
+                ExpectedRecord::Record(uuid::Uuid::new_v4()),
+            )
+            .await,
+        PIPELINE_ROUTING_STATE_CHANGED_LABEL,
+        "a record id for a tenant with no row",
+    );
+    assert_eq!(activation_rows(&tenant).await, before);
+    let activated = fixture
+        .activate_expecting(&tenant, &fixture.a, ExpectedRecord::NoRow)
+        .await
+        .expect("a first activation names no row");
+    assert_eq!(activated.routing_state, RoutingState::Pipeline);
+    let before = activation_rows(&tenant).await;
+    assert_gate_refused(
+        fixture
+            .activate_expecting(&tenant, &fixture.a, ExpectedRecord::NoRow)
+            .await,
+        PIPELINE_ROUTING_STATE_CHANGED_LABEL,
+        "no row, for a tenant that has one",
+    );
+    assert_eq!(activation_rows(&tenant).await, before);
+
+    // The reviewer's sequence: prepared while `pipeline`, sent after an
+    // incident's containment.
+    let prepared = ExpectedRecord::of(Some(&activated));
+    let first = store
+        .contain(&tenant, &actor, "contain_for_incident")
+        .await
+        .unwrap();
+    let before = activation_rows(&tenant).await;
+    assert_gate_refused(
+        fixture
+            .activate_expecting(&tenant, &fixture.a, prepared)
+            .await,
+        PIPELINE_ROUTING_STATE_CHANGED_LABEL,
+        "an activation prepared before the containment",
+    );
+    assert_eq!(
+        activation_rows(&tenant).await,
+        before,
+        "the tenant stays contained and no event is written"
+    );
+    assert_eq!(
+        store.routing(&tenant).await.unwrap(),
+        Some(first.clone()),
+        "contained"
+    );
+
+    // Contain, reopen, contain: a request that names the first containment.
+    let prepared = ExpectedRecord::of(Some(&first));
+    let reopened = fixture
+        .activate_expecting(&tenant, &fixture.a, prepared)
+        .await
+        .expect("an activation that names the containment in force reopens intake");
+    assert_eq!(reopened.routing_state, RoutingState::Pipeline);
+    let second = store
+        .contain(&tenant, &actor, "contain_for_second_incident")
+        .await
+        .unwrap();
+    assert_eq!(second.routing_state, first.routing_state);
+    let before = activation_rows(&tenant).await;
+    assert_gate_refused(
+        fixture
+            .activate_expecting(&tenant, &fixture.a, prepared)
+            .await,
+        PIPELINE_ROUTING_STATE_CHANGED_LABEL,
+        "an activation that names the first containment",
+    );
+    assert_eq!(activation_rows(&tenant).await, before);
+    assert_eq!(store.routing(&tenant).await.unwrap(), Some(second.clone()));
+    let reopened = fixture
+        .activate_expecting(&tenant, &fixture.a, ExpectedRecord::of(Some(&second)))
+        .await
+        .expect("the id in force for the contained tenant reopens intake");
+    assert_eq!(reopened.routing_state, RoutingState::Pipeline);
+    assert_eq!(store.events(&tenant, 10).await.unwrap().len(), 5);
+}
+
+/// A rollback is a compare-and-set on the routing row's record id. With B
+/// active, an operator prepares a rollback to A. Another operator rolls back
+/// to A and activates B again: the state (`pipeline`) and the active bundle
+/// (B) are what the first operator read, and the row is another one. The
+/// prepared rollback is refused with `pipeline_routing_state_changed`, before
+/// any other check, and writes nothing; one that names the row in force
+/// passes.
+#[tokio::test]
+async fn a_rollback_names_the_routing_row_it_read() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let fixture = two_qualified_bundles(backend.clone(), &dir).await;
+    let store = fixture.activation_store();
+    let tenant = routing_tenant("rollback-expects");
+    let revision = gate_revision();
+    fixture.qualify(&tenant, &fixture.a, &revision).await;
+    fixture.qualify(&tenant, &fixture.b, &revision).await;
+    let promotion = fixture.promotion(&fixture.a, &revision);
+    fixture.activate(&tenant, &fixture.a).await;
+    let on_b = fixture.activate(&tenant, &fixture.b).await;
+    let prepared = ExpectedRecord::of(Some(&on_b));
+
+    fixture
+        .roll_back(&tenant, &fixture.a)
+        .await
+        .expect("another operator's rollback to A");
+    let again = fixture.activate(&tenant, &fixture.b).await;
+    assert_eq!(again.routing_state, on_b.routing_state);
+    assert_eq!(
+        PgPipelineStore::new(backend.clone())
+            .active_bundle_id(&tenant)
+            .await
+            .unwrap(),
+        Some(fixture.b.bundle_id.clone()),
+        "the state and the bundle that the first operator read"
+    );
+
+    let before = activation_rows(&tenant).await;
+    assert_gate_refused(
+        fixture
+            .roll_back_expecting(&tenant, &fixture.a, &promotion, prepared)
+            .await,
+        PIPELINE_ROUTING_STATE_CHANGED_LABEL,
+        "a rollback prepared before another operator's rollback",
+    );
+    // The comparison comes before the state check: a tenant with no row.
+    let unrouted = routing_tenant("rollback-expects-unrouted");
+    fixture.qualify(&unrouted, &fixture.a, &revision).await;
+    assert_gate_refused(
+        fixture
+            .roll_back_expecting(&unrouted, &fixture.a, &promotion, prepared)
+            .await,
+        PIPELINE_ROUTING_STATE_CHANGED_LABEL,
+        "a record id for a tenant with no row",
+    );
+    assert_eq!(activation_rows(&tenant).await, before);
+    let rolled_back = fixture
+        .roll_back_expecting(
+            &tenant,
+            &fixture.a,
+            &promotion,
+            ExpectedRecord::of(Some(&again)),
+        )
+        .await
+        .expect("a rollback that names the row in force");
+    assert_eq!(rolled_back.routing_state, RoutingState::Pipeline);
+    assert_eq!(store.events(&tenant, 10).await.unwrap().len(), 5);
+}
+
+/// A deactivation of a contained tenant needs an expectation (plan review
+/// G11): with none it is refused with `pipeline_routing_expectation_required`
+/// and the tenant stays contained, so a deactivation prepared for a
+/// `pipeline` tenant does not send a tenant that an incident contained back
+/// to the legacy path. An expectation that does not hold is
+/// `pipeline_routing_state_changed`. The state `contained`, the record id in
+/// force, or both pass. From `pipeline` a deactivation needs none.
+#[tokio::test]
+async fn a_deactivation_of_a_contained_tenant_names_what_it_read() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let fixture = two_qualified_bundles(backend.clone(), &dir).await;
+    let store = fixture.activation_store();
+    let tenant = routing_tenant("deactivate-expects");
+    let actor = routing_actor();
+    fixture.qualify(&tenant, &fixture.a, &gate_revision()).await;
+    let activated = fixture.activate(&tenant, &fixture.a).await;
+    let contained = store
+        .contain(&tenant, &actor, "contain_for_incident")
+        .await
+        .unwrap();
+
+    let refusals = [
+        (
+            "no expectation",
+            RoutingExpectation::NONE,
+            PIPELINE_ROUTING_EXPECTATION_REQUIRED_LABEL,
+        ),
+        (
+            "the state before the containment",
+            RoutingExpectation::state(ExpectedRouting::Pipeline),
+            PIPELINE_ROUTING_STATE_CHANGED_LABEL,
+        ),
+        (
+            "the record before the containment",
+            expecting(&activated),
+            PIPELINE_ROUTING_STATE_CHANGED_LABEL,
+        ),
+        (
+            "the right state and an earlier record",
+            RoutingExpectation {
+                state: Some(ExpectedRouting::Contained),
+                ..expecting(&activated)
+            },
+            PIPELINE_ROUTING_STATE_CHANGED_LABEL,
+        ),
+        (
+            "the right record and another state",
+            RoutingExpectation {
+                state: Some(ExpectedRouting::Pipeline),
+                ..expecting(&contained)
+            },
+            PIPELINE_ROUTING_STATE_CHANGED_LABEL,
+        ),
+    ];
+    let before = activation_rows(&tenant).await;
+    for (what, expectation, label) in refusals {
+        assert_gate_refused(
+            store
+                .deactivate_expecting(&tenant, &actor, "return_to_legacy", expectation)
+                .await,
+            label,
+            what,
+        );
+        assert_eq!(activation_rows(&tenant).await, before, "{what}");
+    }
+    assert_gate_refused(
+        store.deactivate(&tenant, &actor, "return_to_legacy").await,
+        PIPELINE_ROUTING_EXPECTATION_REQUIRED_LABEL,
+        "the plain deactivation",
+    );
+    assert_eq!(
+        store.routing(&tenant).await.unwrap(),
+        Some(contained.clone()),
+        "the tenant stays contained"
+    );
+
+    // Each form of the expectation passes.
+    let mut contained = contained;
+    for form in 0..3 {
+        let expectation = match form {
+            0 => RoutingExpectation::state(ExpectedRouting::Contained),
+            1 => expecting(&contained),
+            _ => RoutingExpectation {
+                state: Some(ExpectedRouting::Contained),
+                ..expecting(&contained)
+            },
+        };
+        let legacy = store
+            .deactivate_expecting(&tenant, &actor, "return_to_legacy", expectation)
+            .await
+            .unwrap_or_else(|error| panic!("form {form}: {error:?}"));
+        assert_eq!(legacy.routing_state, RoutingState::Legacy);
+        contained = store
+            .contain(&tenant, &actor, "contain_for_incident")
+            .await
+            .expect("a containment with no expectation passes from legacy");
+    }
+
+    // From `pipeline` the expectation stays optional.
+    fixture.activate(&tenant, &fixture.a).await;
+    let legacy = store
+        .deactivate(&tenant, &actor, "return_to_legacy")
+        .await
+        .expect("a pipeline tenant is deactivated with no expectation");
+    assert_eq!(legacy.routing_state, RoutingState::Legacy);
+}
+
+/// An emergency stop needs no read first: a containment with no expectation
+/// passes from every state (no row, `contained`, `pipeline`, `legacy`). When
+/// it names an expectation, every named part must hold
+/// (`pipeline_routing_state_changed`).
+#[tokio::test]
+async fn a_containment_with_no_expectation_passes_from_every_state() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let fixture = two_qualified_bundles(backend.clone(), &dir).await;
+    let store = fixture.activation_store();
+    let tenant = routing_tenant("contain-expects");
+    let actor = routing_actor();
+    fixture.qualify(&tenant, &fixture.a, &gate_revision()).await;
+
+    let mut previous_states = Vec::new();
+    let from_no_row = store.contain(&tenant, &actor, "contain_one").await.unwrap();
+    previous_states.push(store.events(&tenant, 1).await.unwrap()[0].previous_state);
+    let from_contained = store.contain(&tenant, &actor, "contain_two").await.unwrap();
+    previous_states.push(store.events(&tenant, 1).await.unwrap()[0].previous_state);
+    assert_ne!(
+        from_contained.activation_record_id,
+        from_no_row.activation_record_id
+    );
+    fixture.activate(&tenant, &fixture.a).await;
+    let from_pipeline = store
+        .contain(&tenant, &actor, "contain_three")
+        .await
+        .unwrap();
+    previous_states.push(store.events(&tenant, 1).await.unwrap()[0].previous_state);
+    let legacy = store
+        .deactivate_expecting(
+            &tenant,
+            &actor,
+            "return_to_legacy",
+            expecting(&from_pipeline),
+        )
+        .await
+        .unwrap();
+    let from_legacy = store
+        .contain(&tenant, &actor, "contain_four")
+        .await
+        .unwrap();
+    previous_states.push(store.events(&tenant, 1).await.unwrap()[0].previous_state);
+    assert_eq!(
+        previous_states,
+        vec![
+            None,
+            Some(RoutingState::Contained),
+            Some(RoutingState::Pipeline),
+            Some(RoutingState::Legacy),
+        ]
+    );
+    assert_eq!(from_legacy.routing_state, RoutingState::Contained);
+
+    let before = activation_rows(&tenant).await;
+    for (what, expectation) in [
+        (
+            "another state",
+            RoutingExpectation::state(ExpectedRouting::Legacy),
+        ),
+        ("no row", RoutingExpectation::record(ExpectedRecord::NoRow)),
+        ("an earlier record", expecting(&legacy)),
+        (
+            "the right state and an earlier record",
+            RoutingExpectation {
+                state: Some(ExpectedRouting::Contained),
+                ..expecting(&legacy)
+            },
+        ),
+        (
+            "the right record and another state",
+            RoutingExpectation {
+                state: Some(ExpectedRouting::Legacy),
+                ..expecting(&from_legacy)
+            },
+        ),
+    ] {
+        assert_gate_refused(
+            store
+                .contain_expecting(&tenant, &actor, "contain_prepared_earlier", expectation)
+                .await,
+            PIPELINE_ROUTING_STATE_CHANGED_LABEL,
+            what,
+        );
+        assert_eq!(activation_rows(&tenant).await, before, "{what}");
+    }
+    let both = RoutingExpectation {
+        state: Some(ExpectedRouting::Contained),
+        ..expecting(&from_legacy)
+    };
+    store
+        .contain_expecting(&tenant, &actor, "contain_with_both", both)
+        .await
+        .expect("both parts hold");
 }
 
 /// Review Focus 4 (LAB-003, SCN-007): a rollback selects an earlier qualified
@@ -39678,6 +40134,7 @@ async fn an_activation_races_a_receipt_without_rebinding_it() {
                             &promotion,
                             &revision,
                             &profile,
+                            expected_record(&store, &tenant).await,
                         ),
                         &readiness,
                     )
@@ -39879,6 +40336,7 @@ async fn a_rollback_needs_no_readiness_and_an_activation_does() {
                     &promotion,
                     &revision,
                     &profile,
+                    expected_record(&store, &tenant).await,
                 ),
                 &readiness,
             )

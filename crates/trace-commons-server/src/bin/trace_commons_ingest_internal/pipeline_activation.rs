@@ -9,8 +9,9 @@
 //! Every route starts with `authenticate_with_tenant_access_grant` and
 //! `require_admin`, and takes its tenant and its actor from the credential
 //! alone: `TenantAuth::tenant_id` and `TenantAuth::principal_ref`. A request
-//! body names only a bundle, a reason, signed check results, or (for a
-//! qualification) the signed package; each body refuses any other field
+//! body names only a bundle, a reason, signed check results, the routing the
+//! caller expects, or (for a qualification) the signed package; each body
+//! refuses any other field
 //! (`deny_unknown_fields`), so a body that names a tenant is refused before
 //! anything is read.
 //!
@@ -58,9 +59,9 @@ use trace_commons_server::versioned_pipeline::{
     PolicyOperationalStatus, is_bundle_id,
 };
 use trace_commons_server::versioned_pipeline_activation::{
-    ActivationEvent, ActivationReadiness, ActivationRequest, ExpectedRouting,
+    ActivationEvent, ActivationReadiness, ActivationRequest, ExpectedRecord, ExpectedRouting,
     LEGACY_DRAIN_REPORT_TIMEOUT_LABEL, LegacyDrainReport, PIPELINE_ROUTING_BUSY_LABEL,
-    RoutingState, TenantRouting,
+    RoutingExpectation, RoutingState, TenantRouting,
 };
 use trace_commons_server::versioned_pipeline_bundle::PIPELINE_BUNDLE_INVALID_LABEL;
 use trace_commons_server::versioned_pipeline_qualification::{
@@ -599,54 +600,74 @@ pub(crate) struct QualifyBody {
 
 /// `POST /v1/admin/pipeline/activate` and `POST /v1/admin/pipeline/rollback`.
 ///
-/// `expected_state` is optional (final fix wave A23): the routing state the
-/// operator read from `GET /v1/admin/pipeline/routing` before the request
-/// (`legacy`, `pipeline`, `contained`, or `none` for a tenant with no routing
-/// row). With it, the store refuses the change with `409
-/// pipeline_routing_state_changed` when the state under the routing lock is
-/// another; without it, the change behaves as before. The handler passes it
-/// to the store and reads no routing state itself. Any other value is `422
-/// pipeline_request_invalid`, as every body that does not parse. An explicit
-/// `null` is such a value (`present_expected_state`): only an absent field
-/// means "no expectation".
+/// `expected_record_id` is required (review round 1, point 2; amendment A6):
+/// the `activation_record_id` the operator read from `GET
+/// /v1/admin/pipeline/routing` before the request, or the string `none` for a
+/// tenant with no routing row (`ExpectedRecord`). The store refuses the
+/// change with `409 pipeline_routing_state_changed` when the routing row
+/// under the routing lock is another one. The handler passes it to the store
+/// and reads no routing row itself. A body without the field, with a `null`,
+/// or with any other value is `422 pipeline_request_invalid`, as every body
+/// that does not parse, and writes nothing. `expected_state` is not a field
+/// of these two routes: a body that sends it is refused as every unknown
+/// field is.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ActivateBody {
     bundle_id: String,
     reason_code: String,
     attestations: Vec<PipelineCheckAttestation>,
-    #[serde(default, deserialize_with = "present_expected_state")]
-    expected_state: Option<ExpectedRouting>,
+    expected_record_id: ExpectedRecord,
 }
 
-/// An `expected_state` field that is present in a body: one of
-/// `ExpectedRouting`'s four values. `null` is none of them: it is refused as
-/// a value that does not parse, where a plain `Option` field would read it as
-/// an absent one. The routing view shows `routing_state: null` for a tenant
-/// with no row, and a body that copies that value must not become a change
-/// with no expectation: the value for "no row" is `none`. The refusal is a
-/// data error of the parser, so the route answers it as it answers any other
-/// unknown value (`422` `pipeline_request_invalid`); its text is never
+/// An optional expectation field that is present in a body: a value of `T`.
+/// `null` is no value of `T`: it is refused as a value that does not parse,
+/// where a plain `Option` field would read it as an absent one. The routing
+/// view shows `routing_state: null` and `activation_record_id: null` for a
+/// tenant with no row, and a body that copies that value must not become a
+/// change with no expectation: the value for "no row" is `none`. The refusal
+/// is a data error of the parser, so the route answers it as it answers any
+/// other unknown value (`422` `pipeline_request_invalid`); its text is never
 /// answered.
-fn present_expected_state<'de, D>(deserializer: D) -> Result<Option<ExpectedRouting>, D::Error>
+fn present_expectation<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
 where
     D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
 {
     use serde::de::Error as _;
-    Option::<ExpectedRouting>::deserialize(deserializer)?
+    Option::<T>::deserialize(deserializer)?
         .map(Some)
-        .ok_or_else(|| D::Error::custom("expected_state_null"))
+        .ok_or_else(|| D::Error::custom("expectation_null"))
 }
 
-/// `POST /v1/admin/pipeline/contain` and `POST /v1/admin/pipeline/deactivate`,
-/// with the optional `expected_state` of `ActivateBody`. A `contain` in an
-/// emergency needs none.
+/// `POST /v1/admin/pipeline/contain` and `POST /v1/admin/pipeline/deactivate`.
+///
+/// The expectation is optional here, in two fields: `expected_record_id` (as
+/// in `ActivateBody`) and `expected_state` (final fix wave A23: `legacy`,
+/// `pipeline`, `contained`, or `none` for a tenant with no routing row). The
+/// store checks each one that the body has under the routing lock (`409
+/// pipeline_routing_state_changed`); when both are sent, both must hold. A
+/// `contain` in an emergency needs none. A `deactivate` of a contained tenant
+/// needs one (`409 pipeline_routing_expectation_required`, the store's
+/// refusal). Only an absent field means "no expectation": an explicit `null`
+/// is `422 pipeline_request_invalid` (`present_expectation`).
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ReasonBody {
     reason_code: String,
-    #[serde(default, deserialize_with = "present_expected_state")]
+    #[serde(default, deserialize_with = "present_expectation")]
+    expected_record_id: Option<ExpectedRecord>,
+    #[serde(default, deserialize_with = "present_expectation")]
     expected_state: Option<ExpectedRouting>,
+}
+
+impl ReasonBody {
+    fn expectation(&self) -> RoutingExpectation {
+        RoutingExpectation {
+            record: self.expected_record_id,
+            state: self.expected_state,
+        }
+    }
 }
 
 /// `POST /v1/admin/pipeline/policy-interventions`.
@@ -666,11 +687,14 @@ pub(crate) struct InterventionQuery {
     bundle_id: String,
 }
 
-/// `GET /v1/admin/pipeline/routing`: the tenant's routing state (`None` with
-/// no routing row), its active bundle, and its newest routing events.
+/// `GET /v1/admin/pipeline/routing`: the tenant's routing state and the
+/// record id of the routing row in force (both `None` with no routing row),
+/// its active bundle, and its newest routing events. The record id is what an
+/// operator sends as `expected_record_id` with the next change.
 #[derive(Debug, Serialize)]
 pub(crate) struct PipelineRoutingView {
     routing_state: Option<RoutingState>,
+    activation_record_id: Option<Uuid>,
     active_bundle_id: Option<String>,
     events: Vec<ActivationEvent>,
 }
@@ -702,7 +726,7 @@ impl GateInputs<'_> {
             promotion: &self.promotion,
             runtime_code_revision_hash: self.revision,
             dependencies: &self.dependencies,
-            expected_state: body.expected_state,
+            expected_record_id: body.expected_record_id,
         }
     }
 }
@@ -794,8 +818,8 @@ async fn gate_inputs<'a>(
     })
 }
 
-/// `GET /v1/admin/pipeline/routing`: the routing state, the active bundle,
-/// and the newest events, read at one instant
+/// `GET /v1/admin/pipeline/routing`: the routing state, the record id in
+/// force, the active bundle, and the newest events, read at one instant
 /// (`PipelineActivationStore::routing_view`). Needs the routing store, not a
 /// runtime. Records the read, as the operational summary does.
 pub(crate) async fn pipeline_routing_handler(
@@ -817,7 +841,8 @@ pub(crate) async fn pipeline_routing_handler(
     .await
     .map_err(internal_error)?;
     Ok(Json(PipelineRoutingView {
-        routing_state: view.routing.map(|routing| routing.routing_state),
+        routing_state: view.routing.as_ref().map(|routing| routing.routing_state),
+        activation_record_id: view.routing.map(|routing| routing.activation_record_id),
         active_bundle_id: view.active_bundle_id,
         events: view.events,
     }))
@@ -972,7 +997,7 @@ pub(crate) async fn pipeline_contain_handler(
             &tenant.tenant_id,
             &tenant.principal_ref,
             &body.reason_code,
-            body.expected_state,
+            body.expectation(),
         )
         .await
         .map_err(activation_error)?;
@@ -996,7 +1021,7 @@ pub(crate) async fn pipeline_deactivate_handler(
             &tenant.tenant_id,
             &tenant.principal_ref,
             &body.reason_code,
-            body.expected_state,
+            body.expectation(),
         )
         .await
         .map_err(activation_error)?;
@@ -1503,6 +1528,7 @@ mod tests {
             PIPELINE_POLICY_INTERVENTION_BUSY_LABEL,
             LEGACY_DRAIN_REPORT_TIMEOUT_LABEL,
             "pipeline_routing_state_changed",
+            "pipeline_routing_expectation_required",
             BUNDLE_PACKAGE_MISSING_LABEL,
             PACKAGE_RUNTIME_REVISION_UNKNOWN_LABEL,
             ROUTING_READ_SURFACE,

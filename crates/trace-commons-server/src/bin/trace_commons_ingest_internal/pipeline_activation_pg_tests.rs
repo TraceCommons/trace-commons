@@ -3228,23 +3228,39 @@ impl RouteFixture {
         })
     }
 
-    /// The body of `POST activate` (and `rollback`) for `package`.
-    fn activate_body(
+    /// The value of `expected_record_id` for `tenant` now, as an operator
+    /// reads it: the `activation_record_id` of the routing view
+    /// (`PipelineActivationStore::routing_view`, what `GET routing` answers),
+    /// or `none` for a tenant with no routing row. Read through the store, so
+    /// the read leaves no answer body and no read audit behind.
+    async fn record_id_in_force(&self, tenant: &str) -> serde_json::Value {
+        self.store()
+            .routing_view(tenant, 1)
+            .await
+            .expect("the routing view reads")
+            .routing
+            .map_or_else(
+                || serde_json::json!("none"),
+                |routing| serde_json::json!(routing.activation_record_id),
+            )
+    }
+
+    /// The body of `POST activate` (and `rollback`) for `package`, with the
+    /// record id that is in force for the fixture's tenant when the body is
+    /// built (`record_id_in_force`). Build it just before the request.
+    async fn activate_body(
         &self,
         package: &trace_commons_gate_api::pipeline::BundlePackage,
         reason_code: &str,
     ) -> serde_json::Value {
-        serde_json::json!({
-            "bundle_id": package.bundle_id,
-            "reason_code": reason_code,
-            "attestations": self.attestations(package),
-        })
+        let in_force = self.record_id_in_force(&self.tenant).await;
+        self.activate_body_expecting(package, reason_code, &in_force)
     }
 
     /// The nine routes, each with a body it accepts, and whether it needs a
     /// pipeline runtime (`GET routing` and `GET legacy-drain` need only the
     /// routing store).
-    fn routes(&self) -> Vec<(&'static str, String, Option<serde_json::Value>, bool)> {
+    async fn routes(&self) -> Vec<(&'static str, String, Option<serde_json::Value>, bool)> {
         vec![
             ("GET", "/v1/admin/pipeline/routing".to_string(), None, false),
             (
@@ -3256,13 +3272,13 @@ impl RouteFixture {
             (
                 "POST",
                 "/v1/admin/pipeline/activate".to_string(),
-                Some(self.activate_body(&self.a, "activate_bundle_a")),
+                Some(self.activate_body(&self.a, "activate_bundle_a").await),
                 true,
             ),
             (
                 "POST",
                 "/v1/admin/pipeline/rollback".to_string(),
-                Some(self.activate_body(&self.a, "roll_back_to_a")),
+                Some(self.activate_body(&self.a, "roll_back_to_a").await),
                 true,
             ),
             (
@@ -3408,7 +3424,7 @@ impl RouteFixture {
             .admin_call(
                 "POST",
                 "/v1/admin/pipeline/activate",
-                Some(self.activate_body(&self.a, "activate_bundle_a")),
+                Some(self.activate_body(&self.a, "activate_bundle_a").await),
             )
             .await;
         assert_eq!(status, StatusCode::OK, "{routing}");
@@ -3421,7 +3437,7 @@ impl RouteFixture {
             .admin_call(
                 "POST",
                 "/v1/admin/pipeline/activate",
-                Some(self.activate_body(&self.b, "activate_bundle_b")),
+                Some(self.activate_body(&self.b, "activate_bundle_b").await),
             )
             .await;
         assert_eq!(status, StatusCode::OK, "{routing}");
@@ -3431,7 +3447,7 @@ impl RouteFixture {
             .admin_call(
                 "POST",
                 "/v1/admin/pipeline/rollback",
-                Some(self.activate_body(&self.a, "roll_back_to_a")),
+                Some(self.activate_body(&self.a, "roll_back_to_a").await),
             )
             .await;
         assert_eq!(status, StatusCode::OK, "{routing}");
@@ -3450,15 +3466,24 @@ impl RouteFixture {
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{refused}");
         assert_eq!(refused["error"], "pipeline_receipt_intake_contained");
 
+        // A deactivation of a contained tenant names its expectation: the
+        // record id that the containment answered.
+        let contained_record_id = routing["activation_record_id"].clone();
+        assert_eq!(contained_record_id, self.record_id_in_force(tenant).await);
         let (status, routing) = self
             .admin_call(
                 "POST",
                 "/v1/admin/pipeline/deactivate",
-                Some(serde_json::json!({ "reason_code": "deactivate_to_legacy" })),
+                Some(serde_json::json!({
+                    "reason_code": "deactivate_to_legacy",
+                    "expected_record_id": contained_record_id,
+                })),
             )
             .await;
         assert_eq!(status, StatusCode::OK, "{routing}");
         assert_eq!(routing["routing_state"], "legacy");
+        let legacy_record_id = routing["activation_record_id"].clone();
+        assert_ne!(legacy_record_id, contained_record_id);
         let (status, receipt, legacy_id) = self.upload(&self.state, "deactivated").await;
         assert_eq!(status, StatusCode::OK, "{receipt}");
         assert_ne!(
@@ -3484,10 +3509,20 @@ impl RouteFixture {
                 .keys()
                 .map(String::as_str)
                 .collect::<BTreeSet<_>>(),
-            BTreeSet::from(["routing_state", "active_bundle_id", "events"]),
+            BTreeSet::from([
+                "routing_state",
+                "activation_record_id",
+                "active_bundle_id",
+                "events"
+            ]),
             "{view}"
         );
         assert_eq!(view["routing_state"], "legacy");
+        assert_eq!(
+            view["activation_record_id"], legacy_record_id,
+            "the view shows the record id that the last change answered"
+        );
+        assert_eq!(view["events"][0]["event_id"], legacy_record_id);
         assert_eq!(view["active_bundle_id"], self.a.bundle_id);
         let events = view["events"].as_array().expect("the events");
         assert_eq!(
@@ -3584,7 +3619,8 @@ impl RouteFixture {
     /// bundle the tenant does not have, `terminate`, the drain precondition,
     /// the drain report, and the bystander's own containment.
     async fn refuse_every_way(&self) {
-        let activate = Some(self.activate_body(&self.a, "activate_bundle_a"));
+        let activate = Some(self.activate_body(&self.a, "activate_bundle_a").await);
+        let expected = self.record_id_in_force(&self.tenant).await;
         let cases: Vec<(
             Arc<AppState>,
             &str,
@@ -3649,6 +3685,7 @@ impl RouteFixture {
                     "bundle_id": self.a.bundle_id,
                     "reason_code": "activate_bundle_a",
                     "attestations": vec![self.attestations(&self.a)[0].clone(); 65],
+                    "expected_record_id": expected.clone(),
                 })),
             ),
             (
@@ -3660,6 +3697,7 @@ impl RouteFixture {
                     "bundle_id": format!("sha256:{}", "0".repeat(64)),
                     "reason_code": "activate_unknown_bundle",
                     "attestations": self.attestations(&self.a),
+                    "expected_record_id": expected.clone(),
                 })),
             ),
             (
@@ -3739,7 +3777,7 @@ async fn the_admin_routes_require_an_admin_and_a_runtime() {
         )
         .await;
     assert_eq!(reference.0, StatusCode::UNAUTHORIZED, "{}", reference.1);
-    let routes = fixture.routes();
+    let routes = fixture.routes().await;
     for (method, path, body, _) in &routes {
         assert_eq!(
             fixture
@@ -3838,7 +3876,7 @@ async fn a_test_deployment_cannot_qualify_or_activate_through_the_route() {
             "POST",
             "/v1/admin/pipeline/activate",
             Some(&fixture.admin),
-            Some(fixture.activate_body(&fixture.a, "activate_bundle_a")),
+            Some(fixture.activate_body(&fixture.a, "activate_bundle_a").await),
         )
         .await;
     assert_eq!(status, StatusCode::CONFLICT, "{refused}");
@@ -3885,11 +3923,11 @@ async fn the_routes_refuse_without_a_trust_store_or_a_revision() {
         ),
         (
             "/v1/admin/pipeline/activate",
-            fixture.activate_body(&fixture.a, "activate_bundle_a"),
+            fixture.activate_body(&fixture.a, "activate_bundle_a").await,
         ),
         (
             "/v1/admin/pipeline/rollback",
-            fixture.activate_body(&fixture.a, "roll_back_to_a"),
+            fixture.activate_body(&fixture.a, "roll_back_to_a").await,
         ),
     ];
     for (what, state) in [
@@ -3943,6 +3981,7 @@ async fn the_routes_refuse_without_a_trust_store_or_a_revision() {
         );
     }
     let attestation = fixture.attestations(&fixture.a)[0].clone();
+    let expected = fixture.record_id_in_force(&fixture.tenant).await;
     for (path, body) in [
         (
             "/v1/admin/pipeline/qualifications",
@@ -3957,6 +3996,7 @@ async fn the_routes_refuse_without_a_trust_store_or_a_revision() {
                 "bundle_id": fixture.a.bundle_id,
                 "reason_code": "activate_bundle_a",
                 "attestations": vec![attestation.clone(); 65],
+                "expected_record_id": expected,
             }),
         ),
     ] {
@@ -4019,7 +4059,7 @@ async fn an_activation_through_the_route_keeps_the_startup_checks() {
                 "POST",
                 "/v1/admin/pipeline/activate",
                 Some(&fixture.admin),
-                Some(fixture.activate_body(&fixture.a, "activate_bundle_a")),
+                Some(fixture.activate_body(&fixture.a, "activate_bundle_a").await),
             )
             .await;
         assert_eq!(
@@ -4036,7 +4076,7 @@ async fn an_activation_through_the_route_keeps_the_startup_checks() {
         .admin_call(
             "POST",
             "/v1/admin/pipeline/activate",
-            Some(fixture.activate_body(&fixture.a, "activate_bundle_a")),
+            Some(fixture.activate_body(&fixture.a, "activate_bundle_a").await),
         )
         .await;
     assert_eq!(status, StatusCode::OK, "{routing}");
@@ -4059,7 +4099,7 @@ async fn a_route_never_acts_on_another_tenant() {
         .admin_call(
             "POST",
             "/v1/admin/pipeline/activate",
-            Some(fixture.activate_body(&fixture.a, "activate_bundle_a")),
+            Some(fixture.activate_body(&fixture.a, "activate_bundle_a").await),
         )
         .await;
     assert_eq!(status, StatusCode::OK, "{routing}");
@@ -4092,6 +4132,7 @@ async fn a_route_never_acts_on_another_tenant() {
         Some(RoutingState::Contained)
     );
 
+    let bystander_record_id = fixture.record_id_in_force(other).await;
     for (path, body) in [
         (
             "/v1/admin/pipeline/contain",
@@ -4107,6 +4148,7 @@ async fn a_route_never_acts_on_another_tenant() {
                 "bundle_id": fixture.a.bundle_id,
                 "reason_code": "activate_named_tenant",
                 "attestations": fixture.attestations(&fixture.a),
+                "expected_record_id": bystander_record_id,
                 "tenant_id": tenant,
             }),
         ),
@@ -4516,6 +4558,7 @@ async fn the_routes_take_only_results_a_check_key_signed() {
                 "bundle_id": fixture.a.bundle_id,
                 "reason_code": "activate_bundle_a",
                 "attestations": by_package_key,
+                "expected_record_id": fixture.record_id_in_force(&fixture.tenant).await,
             })),
         )
         .await;
@@ -4568,11 +4611,11 @@ async fn a_request_cannot_supply_a_gate_input() {
             ),
             (
                 "/v1/admin/pipeline/activate",
-                fixture.activate_body(&fixture.a, "activate_bundle_a"),
+                fixture.activate_body(&fixture.a, "activate_bundle_a").await,
             ),
             (
                 "/v1/admin/pipeline/rollback",
-                fixture.activate_body(&fixture.a, "roll_back_to_a"),
+                fixture.activate_body(&fixture.a, "roll_back_to_a").await,
             ),
         ] {
             for (field, value) in &fields {
@@ -4618,7 +4661,7 @@ async fn an_activation_through_the_route_reads_the_tenants_readiness() {
             .admin_call(
                 "POST",
                 "/v1/admin/pipeline/activate",
-                Some(fixture.activate_body(package, reason)),
+                Some(fixture.activate_body(package, reason).await),
             )
             .await;
         assert_eq!(status, StatusCode::OK, "{routing}");
@@ -4647,7 +4690,7 @@ async fn an_activation_through_the_route_reads_the_tenants_readiness() {
         .admin_call(
             "POST",
             "/v1/admin/pipeline/activate",
-            Some(fixture.activate_body(&fixture.a, "activate_bundle_a")),
+            Some(fixture.activate_body(&fixture.a, "activate_bundle_a").await),
         )
         .await;
     assert_eq!(
@@ -4669,7 +4712,7 @@ async fn an_activation_through_the_route_reads_the_tenants_readiness() {
         .admin_call(
             "POST",
             "/v1/admin/pipeline/rollback",
-            Some(fixture.activate_body(&fixture.a, "roll_back_to_a")),
+            Some(fixture.activate_body(&fixture.a, "roll_back_to_a").await),
         )
         .await;
     assert_eq!(
@@ -4810,6 +4853,7 @@ async fn a_malformed_bundle_id_is_refused_before_any_store_call() {
     };
     let tenant = fixture.tenant.as_str();
     let attestations = fixture.attestations(&fixture.a);
+    let expected = fixture.record_id_in_force(tenant).await;
     let malformed = [
         ("a word", "not-a-bundle".to_string()),
         ("upper-case hex", format!("sha256:{}", "A".repeat(64))),
@@ -4826,6 +4870,7 @@ async fn a_malformed_bundle_id_is_refused_before_any_store_call() {
                         "bundle_id": bundle_id,
                         "reason_code": "malformed_bundle_id",
                         "attestations": attestations,
+                        "expected_record_id": expected,
                     })),
                 )
                 .await;
@@ -4939,17 +4984,20 @@ async fn the_routes_take_a_body_of_at_most_one_mebibyte() {
         pipeline_activation::PIPELINE_ADMIN_BODY_MAX_BYTES,
         1_048_576
     );
+    let expected = fixture.record_id_in_force(&fixture.tenant).await;
     let body_of = |length: usize| {
         let empty = serde_json::json!({
             "bundle_id": fixture.a.bundle_id,
             "reason_code": "",
             "attestations": [],
+            "expected_record_id": expected,
         });
         let padding = length - empty.to_string().len();
         let body = serde_json::json!({
             "bundle_id": fixture.a.bundle_id,
             "reason_code": "a".repeat(padding),
             "attestations": [],
+            "expected_record_id": expected,
         });
         assert_eq!(body.to_string().len(), length);
         body
@@ -5059,6 +5107,7 @@ async fn an_evidence_age_above_the_ceiling_is_refused_at_every_route() {
     fixture.qualify(&fixture.a).await;
     for maximum_age_seconds in [u64::MAX, QUALIFICATION_EVIDENCE_AGE_CEILING_SECONDS + 1] {
         let attestations = fixture.attestations_aged(&fixture.a, maximum_age_seconds, None);
+        let expected = fixture.record_id_in_force(&fixture.tenant).await;
         for (path, body) in [
             (
                 "/v1/admin/pipeline/qualifications",
@@ -5073,6 +5122,7 @@ async fn an_evidence_age_above_the_ceiling_is_refused_at_every_route() {
                     "bundle_id": fixture.a.bundle_id,
                     "reason_code": "activate_bundle_a",
                     "attestations": attestations,
+                    "expected_record_id": expected,
                 }),
             ),
             (
@@ -5081,6 +5131,7 @@ async fn an_evidence_age_above_the_ceiling_is_refused_at_every_route() {
                     "bundle_id": fixture.a.bundle_id,
                     "reason_code": "roll_back_to_a",
                     "attestations": attestations,
+                    "expected_record_id": expected,
                 }),
             ),
         ] {
@@ -5128,7 +5179,7 @@ async fn a_refused_promotion_answers_its_blockers() {
             .admin_call(
                 "POST",
                 "/v1/admin/pipeline/activate",
-                Some(fixture.activate_body(package, reason)),
+                Some(fixture.activate_body(package, reason).await),
             )
             .await;
         assert_eq!(status, StatusCode::OK, "{routing}");
@@ -5136,6 +5187,7 @@ async fn a_refused_promotion_answers_its_blockers() {
     let events_before = fixture.store().events(&fixture.tenant, 10).await.unwrap();
     let stale = fixture.attestations_aged(&fixture.a, 3_600, Some("pipeline_crash_matrix"));
     let blockers = serde_json::json!(["qualification_evidence_stale:pipeline_crash_matrix"]);
+    let expected = fixture.record_id_in_force(&fixture.tenant).await;
     for (path, body, label) in [
         (
             "/v1/admin/pipeline/qualifications",
@@ -5151,6 +5203,7 @@ async fn a_refused_promotion_answers_its_blockers() {
                 "bundle_id": fixture.a.bundle_id,
                 "reason_code": "activate_bundle_a",
                 "attestations": stale,
+                "expected_record_id": expected,
             }),
             "bundle_activation_promotion_not_ready",
         ),
@@ -5160,6 +5213,7 @@ async fn a_refused_promotion_answers_its_blockers() {
                 "bundle_id": fixture.a.bundle_id,
                 "reason_code": "roll_back_to_a",
                 "attestations": stale,
+                "expected_record_id": expected,
             }),
             "bundle_activation_promotion_not_ready",
         ),
@@ -5210,7 +5264,7 @@ async fn an_altered_stored_package_is_refused_as_missing() {
             .admin_call(
                 "POST",
                 path,
-                Some(fixture.activate_body(&fixture.a, reason)),
+                Some(fixture.activate_body(&fixture.a, reason).await),
             )
             .await;
         assert_eq!(
@@ -5258,7 +5312,7 @@ async fn an_activation_or_rollback_out_of_scope_is_refused() {
             .admin_call(
                 "POST",
                 "/v1/admin/pipeline/activate",
-                Some(fixture.activate_body(package, reason)),
+                Some(fixture.activate_body(package, reason).await),
             )
             .await;
         assert_eq!(status, StatusCode::OK, "{routing}");
@@ -5287,11 +5341,11 @@ async fn an_activation_or_rollback_out_of_scope_is_refused() {
         for (path, body) in [
             (
                 "/v1/admin/pipeline/activate",
-                fixture.activate_body(&fixture.a, "activate_bundle_a"),
+                fixture.activate_body(&fixture.a, "activate_bundle_a").await,
             ),
             (
                 "/v1/admin/pipeline/rollback",
-                fixture.activate_body(&fixture.a, "roll_back_to_a"),
+                fixture.activate_body(&fixture.a, "roll_back_to_a").await,
             ),
         ] {
             let (status, refused) = fixture
@@ -5340,7 +5394,7 @@ async fn a_package_key_no_longer_trusted_stops_activation_and_rollback() {
             .admin_call(
                 "POST",
                 "/v1/admin/pipeline/activate",
-                Some(fixture.activate_body(package, reason)),
+                Some(fixture.activate_body(package, reason).await),
             )
             .await;
         assert_eq!(status, StatusCode::OK, "{routing}");
@@ -5363,11 +5417,11 @@ async fn a_package_key_no_longer_trusted_stops_activation_and_rollback() {
     for (path, body) in [
         (
             "/v1/admin/pipeline/activate",
-            fixture.activate_body(&fixture.a, "activate_bundle_a"),
+            fixture.activate_body(&fixture.a, "activate_bundle_a").await,
         ),
         (
             "/v1/admin/pipeline/rollback",
-            fixture.activate_body(&fixture.a, "roll_back_to_a"),
+            fixture.activate_body(&fixture.a, "roll_back_to_a").await,
         ),
     ] {
         let (status, refused) = fixture
@@ -5391,7 +5445,7 @@ async fn a_package_key_no_longer_trusted_stops_activation_and_rollback() {
         .admin_call(
             "POST",
             "/v1/admin/pipeline/rollback",
-            Some(fixture.activate_body(&fixture.a, "roll_back_to_a")),
+            Some(fixture.activate_body(&fixture.a, "roll_back_to_a").await),
         )
         .await;
     assert_eq!(status, StatusCode::OK, "{routing}");
@@ -5410,20 +5464,25 @@ async fn a_rollback_of_a_contained_tenant_keeps_it_contained() {
     };
     fixture.qualify(&fixture.a).await;
     fixture.qualify(&fixture.b).await;
-    for (path, body) in [
+    // Each body is built just before its request: it names the record id
+    // that the change before it left in force.
+    for (path, package, reason) in [
         (
             "/v1/admin/pipeline/activate",
-            fixture.activate_body(&fixture.a, "activate_bundle_a"),
+            Some(&fixture.a),
+            "activate_bundle_a",
         ),
         (
             "/v1/admin/pipeline/activate",
-            fixture.activate_body(&fixture.b, "activate_bundle_b"),
+            Some(&fixture.b),
+            "activate_bundle_b",
         ),
-        (
-            "/v1/admin/pipeline/contain",
-            serde_json::json!({ "reason_code": "contain_for_incident" }),
-        ),
+        ("/v1/admin/pipeline/contain", None, "contain_for_incident"),
     ] {
+        let body = match package {
+            Some(package) => fixture.activate_body(package, reason).await,
+            None => serde_json::json!({ "reason_code": reason }),
+        };
         let (status, answer) = fixture.admin_call("POST", path, Some(body)).await;
         assert_eq!(status, StatusCode::OK, "{path}: {answer}");
     }
@@ -5431,7 +5490,7 @@ async fn a_rollback_of_a_contained_tenant_keeps_it_contained() {
         .admin_call(
             "POST",
             "/v1/admin/pipeline/rollback",
-            Some(fixture.activate_body(&fixture.a, "roll_back_to_a")),
+            Some(fixture.activate_body(&fixture.a, "roll_back_to_a").await),
         )
         .await;
     assert_eq!(status, StatusCode::OK, "{routing}");
@@ -5455,7 +5514,7 @@ async fn a_rollback_of_a_contained_tenant_keeps_it_contained() {
         .admin_call(
             "POST",
             "/v1/admin/pipeline/activate",
-            Some(fixture.activate_body(&fixture.a, "reopen_bundle_a")),
+            Some(fixture.activate_body(&fixture.a, "reopen_bundle_a").await),
         )
         .await;
     assert_eq!(status, StatusCode::OK, "{routing}");
@@ -5465,144 +5524,620 @@ async fn a_rollback_of_a_contained_tenant_keeps_it_contained() {
     assert_eq!(receipt["status"], "processing");
 }
 
-/// Final fix wave (A23, the final review's G35): `activate`, `rollback`,
-/// `contain`, and `deactivate` take an optional `expected_state` (`legacy`,
-/// `pipeline`, `contained`, or `none` for a tenant with no routing row). The
-/// store compares it with the state it reads under the exclusive routing
-/// lock: a different state is `409 pipeline_routing_state_changed` and
-/// changes nothing (the routing row, the active bundle, the events); the
-/// matching state proceeds. Without the field a change behaves as before
-/// (`contain` in an emergency). Any other value is `422
-/// pipeline_request_invalid`, and so is an explicit `null`: the routing view
-/// shows `routing_state: null` for a tenant with no row, and a body that
-/// copies it must not read as "no expectation" (the value for that is
-/// `none`).
+// Review round 1, point 2 (amendment A6, owner answer O2): the expectation
+// of a routing change. `activate` and `rollback` must name the record id
+// that is in force (`expected_record_id`: the `activation_record_id` of the
+// routing view, or `none` for a tenant with no routing row). `contain` keeps
+// an optional expectation. `deactivate` needs one when the tenant is
+// contained.
+
+impl RouteFixture {
+    /// `activate_body` with the caller's `expected_record_id`: a request that
+    /// an operator prepared at an earlier time.
+    fn activate_body_expecting(
+        &self,
+        package: &trace_commons_gate_api::pipeline::BundlePackage,
+        reason_code: &str,
+        expected_record_id: &serde_json::Value,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "bundle_id": package.bundle_id,
+            "reason_code": reason_code,
+            "attestations": self.attestations(package),
+            "expected_record_id": expected_record_id,
+        })
+    }
+
+    /// `POST path` with `body` and the tenant's admin credential answers
+    /// `200`; returns the routing row of the answer.
+    async fn change_routing(&self, path: &str, body: serde_json::Value) -> serde_json::Value {
+        let (status, routing) = self.admin_call("POST", path, Some(body)).await;
+        assert_eq!(status, StatusCode::OK, "{path}: {routing}");
+        assert_eq!(
+            routing["activation_record_id"],
+            self.record_id_in_force(&self.tenant).await,
+            "{path}: the answer carries the record id that is now in force"
+        );
+        routing
+    }
+
+    /// `POST path` with `body` and the tenant's admin credential is refused
+    /// with `status` and `label`, and changes nothing: the routing row, the
+    /// active bundle, and the events are as they were.
+    async fn assert_change_refused(
+        &self,
+        path: &str,
+        body: serde_json::Value,
+        status: StatusCode,
+        label: &str,
+        context: &str,
+    ) {
+        let before = self.store().routing_view(&self.tenant, 100).await.unwrap();
+        let answer = self.admin_call("POST", path, Some(body)).await;
+        assert_eq!(
+            answer,
+            (status, serde_json::json!({ "error": label })),
+            "{context}: {path}"
+        );
+        assert_eq!(
+            self.store().routing_view(&self.tenant, 100).await.unwrap(),
+            before,
+            "{context}: {path}: the routing row, the active bundle, and the events"
+        );
+    }
+}
+
+const ACTIVATE: &str = "/v1/admin/pipeline/activate";
+const ROLLBACK: &str = "/v1/admin/pipeline/rollback";
+const CONTAIN: &str = "/v1/admin/pipeline/contain";
+const DEACTIVATE: &str = "/v1/admin/pipeline/deactivate";
+
+/// An `activate` and a `rollback` whose body has no `expected_record_id` are
+/// `422 pipeline_request_invalid` and write nothing: an absent field, an
+/// explicit `null`, a value that is neither a UUID nor `none`, and a body
+/// that sends the earlier `expected_state` (an unknown field on these two
+/// routes, with or without the record id). For a tenant with no routing row,
+/// and for a `pipeline` tenant whose rollback would otherwise pass.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_routing_change_with_an_expected_state_is_refused_when_the_state_changed() {
+async fn an_activate_or_a_rollback_without_expected_record_id_is_refused() {
     let Some(fixture) = RouteFixture::new().await else {
         return;
     };
-    let tenant = fixture.tenant.as_str();
     fixture.qualify(&fixture.a).await;
     fixture.qualify(&fixture.b).await;
-    let with_expected = |mut body: serde_json::Value, expected: serde_json::Value| {
-        body["expected_state"] = expected;
-        body
-    };
-    let contain = serde_json::json!({ "reason_code": "contain_for_incident" });
-    let deactivate = serde_json::json!({ "reason_code": "deactivate_to_legacy" });
-    let steps = [
-        (
-            "/v1/admin/pipeline/activate",
-            fixture.activate_body(&fixture.a, "activate_bundle_a"),
-            "pipeline",
-            "none",
-            "pipeline",
-        ),
-        (
-            "/v1/admin/pipeline/activate",
-            fixture.activate_body(&fixture.b, "activate_bundle_b"),
-            "contained",
-            "pipeline",
-            "pipeline",
-        ),
-        (
-            "/v1/admin/pipeline/rollback",
-            fixture.activate_body(&fixture.a, "roll_back_to_a"),
-            "legacy",
-            "pipeline",
-            "pipeline",
-        ),
-        (
-            "/v1/admin/pipeline/contain",
-            contain.clone(),
-            "none",
-            "pipeline",
-            "contained",
-        ),
-        (
-            "/v1/admin/pipeline/deactivate",
-            deactivate.clone(),
-            "pipeline",
-            "contained",
-            "legacy",
-        ),
-    ];
-    for (path, body, stale, current, resulting) in steps {
-        let before = fixture.store().routing_view(tenant, 100).await.unwrap();
-        let (status, refused) = fixture
-            .admin_call(
-                "POST",
-                path,
-                Some(with_expected(body.clone(), serde_json::json!(stale))),
-            )
-            .await;
-        assert_eq!(
-            (status, refused),
-            (
-                StatusCode::CONFLICT,
-                serde_json::json!({ "error": "pipeline_routing_state_changed" })
-            ),
-            "{path} expecting {stale}"
-        );
-        assert_eq!(
-            fixture.store().routing_view(tenant, 100).await.unwrap(),
-            before,
-            "{path} expecting {stale}: the routing row, the active bundle, and the events"
-        );
-        let (status, routing) = fixture
-            .admin_call(
-                "POST",
-                path,
-                Some(with_expected(body, serde_json::json!(current))),
-            )
-            .await;
-        assert_eq!(
-            status,
-            StatusCode::OK,
-            "{path} expecting {current}: {routing}"
-        );
-        assert_eq!(routing["routing_state"], resulting, "{path}");
-    }
-    // Without the field, as before: an emergency containment.
-    let (status, routing) = fixture
-        .admin_call("POST", "/v1/admin/pipeline/contain", Some(contain.clone()))
-        .await;
-    assert_eq!(status, StatusCode::OK, "{routing}");
-    assert_eq!(routing["routing_state"], "contained");
-    for (path, body) in [
-        (
-            "/v1/admin/pipeline/activate",
-            fixture.activate_body(&fixture.a, "activate_bundle_a"),
-        ),
-        (
-            "/v1/admin/pipeline/rollback",
-            fixture.activate_body(&fixture.b, "roll_back_to_b"),
-        ),
-        ("/v1/admin/pipeline/contain", contain),
-        ("/v1/admin/pipeline/deactivate", deactivate),
-    ] {
-        let before = fixture.store().routing_view(tenant, 100).await.unwrap();
-        for unparsed in [serde_json::json!("paused"), serde_json::Value::Null] {
-            let (status, refused) = fixture
-                .admin_call(
-                    "POST",
-                    path,
-                    Some(with_expected(body.clone(), unparsed.clone())),
-                )
-                .await;
-            assert_eq!(
-                (status, refused),
+    for activated in [false, true] {
+        if activated {
+            for (package, reason) in [
+                (&fixture.a, "activate_bundle_a"),
+                (&fixture.b, "activate_bundle_b"),
+            ] {
+                let body = fixture.activate_body(package, reason).await;
+                fixture.change_routing(ACTIVATE, body).await;
+            }
+        }
+        let in_force = fixture.record_id_in_force(&fixture.tenant).await;
+        let state = if activated { "pipeline" } else { "none" };
+        for path in [ACTIVATE, ROLLBACK] {
+            let complete = fixture.activate_body_expecting(&fixture.a, "no_expectation", &in_force);
+            let edits: [(&str, Option<serde_json::Value>, Option<&str>); 7] = [
+                ("no expected_record_id", None, None),
+                ("a null", Some(serde_json::Value::Null), None),
+                ("a word", Some(serde_json::json!("paused")), None),
+                ("a state", Some(serde_json::json!(state)), None),
+                ("a number", Some(serde_json::json!(17)), None),
+                ("expected_state in its place", None, Some(state)),
                 (
-                    StatusCode::UNPROCESSABLE_ENTITY,
-                    serde_json::json!({ "error": "pipeline_request_invalid" })
+                    "expected_state beside the record id",
+                    Some(in_force.clone()),
+                    Some(state),
                 ),
-                "{path} with the expected state {unparsed}"
-            );
-            assert_eq!(
-                fixture.store().routing_view(tenant, 100).await.unwrap(),
-                before
-            );
+            ];
+            for (what, record_id, expected_state) in edits {
+                // `none` is the record id of a tenant with no row, so "a
+                // state" is a malformed value only for a tenant that has one.
+                if what == "a state" && !activated {
+                    continue;
+                }
+                let mut body = complete.clone();
+                let fields = body.as_object_mut().expect("an object");
+                fields.remove("expected_record_id");
+                if let Some(record_id) = record_id {
+                    fields.insert("expected_record_id".to_string(), record_id);
+                }
+                if let Some(expected_state) = expected_state {
+                    fields.insert(
+                        "expected_state".to_string(),
+                        serde_json::json!(expected_state),
+                    );
+                }
+                fixture
+                    .assert_change_refused(
+                        path,
+                        body,
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        "pipeline_request_invalid",
+                        &format!("{what}, routing {state}"),
+                    )
+                    .await;
+            }
         }
     }
+}
+
+/// The reviewer's sequence: an operator prepares an `activate` while the
+/// tenant is `pipeline`, an incident's `contain` commits, and the prepared
+/// request arrives. It names the record id that the containment replaced, so
+/// it is `409 pipeline_routing_state_changed`: the tenant stays contained, no
+/// event is written, and a new upload is still refused.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_activate_prepared_before_a_contain_does_not_reopen_intake() {
+    let Some(fixture) = RouteFixture::new().await else {
+        return;
+    };
+    fixture.qualify(&fixture.a).await;
+    let body = fixture.activate_body(&fixture.a, "activate_bundle_a").await;
+    let activated = fixture.change_routing(ACTIVATE, body).await;
+    let prepared = fixture.activate_body_expecting(
+        &fixture.a,
+        "activate_prepared_earlier",
+        &activated["activation_record_id"],
+    );
+    let contained = fixture
+        .change_routing(
+            CONTAIN,
+            serde_json::json!({ "reason_code": "contain_for_incident" }),
+        )
+        .await;
+    assert_eq!(contained["routing_state"], "contained");
+
+    fixture
+        .assert_change_refused(
+            ACTIVATE,
+            prepared,
+            StatusCode::CONFLICT,
+            "pipeline_routing_state_changed",
+            "an activate prepared before the containment",
+        )
+        .await;
+    let (status, view) = fixture
+        .admin_call("GET", "/v1/admin/pipeline/routing", None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{view}");
+    assert_eq!(view["routing_state"], "contained");
+    assert_eq!(
+        view["activation_record_id"],
+        contained["activation_record_id"]
+    );
+    assert_eq!(view["events"][0]["action"], "contain");
+    let (status, refused, _) = fixture.upload(&fixture.state, "still_contained").await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{refused}");
+    assert_eq!(refused["error"], "pipeline_receipt_intake_contained");
+}
+
+/// The sequence that a comparison of the state lets through (plan review
+/// G12): contain, activate, contain, and then an `activate` that was prepared
+/// during the FIRST containment. The state is `contained` both times; the
+/// record id is another one, so the prepared request is `409
+/// pipeline_routing_state_changed` and the tenant stays contained. An
+/// `activate` that names the id in force reopens intake.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_activate_that_names_an_earlier_containment_is_refused() {
+    let Some(fixture) = RouteFixture::new().await else {
+        return;
+    };
+    fixture.qualify(&fixture.a).await;
+    let contain = serde_json::json!({ "reason_code": "contain_for_incident" });
+    let first = fixture.change_routing(CONTAIN, contain.clone()).await;
+    let prepared = fixture.activate_body_expecting(
+        &fixture.a,
+        "activate_prepared_earlier",
+        &first["activation_record_id"],
+    );
+    // Another operator reopens intake (the body names the first containment,
+    // which is in force), and a second incident contains the tenant again.
+    let body = fixture.activate_body(&fixture.a, "reopen_bundle_a").await;
+    assert_eq!(body["expected_record_id"], first["activation_record_id"]);
+    let reopened = fixture.change_routing(ACTIVATE, body).await;
+    assert_eq!(reopened["routing_state"], "pipeline");
+    let second = fixture.change_routing(CONTAIN, contain).await;
+    assert_eq!(second["routing_state"], "contained");
+    assert_ne!(
+        second["activation_record_id"],
+        first["activation_record_id"]
+    );
+
+    fixture
+        .assert_change_refused(
+            ACTIVATE,
+            prepared,
+            StatusCode::CONFLICT,
+            "pipeline_routing_state_changed",
+            "an activate that names the first containment",
+        )
+        .await;
+    let (status, refused, _) = fixture.upload(&fixture.state, "contained_again").await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{refused}");
+    assert_eq!(refused["error"], "pipeline_receipt_intake_contained");
+
+    // The id in force for the contained tenant: intake opens.
+    let body = fixture.activate_body_expecting(
+        &fixture.a,
+        "reopen_bundle_a_again",
+        &second["activation_record_id"],
+    );
+    let reopened = fixture.change_routing(ACTIVATE, body).await;
+    assert_eq!(reopened["routing_state"], "pipeline");
+    let (status, receipt, _) = fixture.upload(&fixture.state, "reopened_again").await;
+    assert_eq!(status, StatusCode::OK, "{receipt}");
+    assert_eq!(receipt["status"], "processing");
+}
+
+/// A first activation of a tenant with no routing row names `none`: a record
+/// id is refused (`409 pipeline_routing_state_changed`) and writes nothing,
+/// `none` activates, and `none` is then refused, because the tenant has a
+/// row. The routing view of a tenant with no row shows a null record id.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_first_activation_names_none() {
+    let Some(fixture) = RouteFixture::new().await else {
+        return;
+    };
+    fixture.qualify(&fixture.a).await;
+    let (status, view) = fixture
+        .admin_call("GET", "/v1/admin/pipeline/routing", None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{view}");
+    assert_eq!(view["routing_state"], serde_json::Value::Null);
+    assert_eq!(view["activation_record_id"], serde_json::Value::Null);
+    assert_eq!(
+        fixture.record_id_in_force(&fixture.tenant).await,
+        serde_json::json!("none")
+    );
+
+    let some_record = serde_json::json!(Uuid::new_v4());
+    fixture
+        .assert_change_refused(
+            ACTIVATE,
+            fixture.activate_body_expecting(&fixture.a, "activate_bundle_a", &some_record),
+            StatusCode::CONFLICT,
+            "pipeline_routing_state_changed",
+            "a record id for a tenant with no row",
+        )
+        .await;
+    assert_eq!(
+        fixture.store().routing(&fixture.tenant).await.unwrap(),
+        None
+    );
+    let none = serde_json::json!("none");
+    let activated = fixture
+        .change_routing(
+            ACTIVATE,
+            fixture.activate_body_expecting(&fixture.a, "activate_bundle_a", &none),
+        )
+        .await;
+    assert_eq!(activated["routing_state"], "pipeline");
+    fixture
+        .assert_change_refused(
+            ACTIVATE,
+            fixture.activate_body_expecting(&fixture.a, "activate_bundle_a", &none),
+            StatusCode::CONFLICT,
+            "pipeline_routing_state_changed",
+            "none for a tenant that has a row",
+        )
+        .await;
+}
+
+/// A `rollback` prepared before another operator's rollback is refused. The
+/// tenant is `pipeline` with B active when the first operator prepares a
+/// rollback to A. A second operator rolls back to A and activates B again:
+/// the state and the active bundle are what the first operator read, and the
+/// record id is not. The prepared rollback is `409
+/// pipeline_routing_state_changed`; one that names the id in force passes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_rollback_prepared_before_another_operators_rollback_is_refused() {
+    let Some(fixture) = RouteFixture::new().await else {
+        return;
+    };
+    fixture.qualify(&fixture.a).await;
+    fixture.qualify(&fixture.b).await;
+    let mut in_force = serde_json::Value::Null;
+    for (package, reason) in [
+        (&fixture.a, "activate_bundle_a"),
+        (&fixture.b, "activate_bundle_b"),
+    ] {
+        let body = fixture.activate_body(package, reason).await;
+        in_force = fixture.change_routing(ACTIVATE, body).await["activation_record_id"].clone();
+    }
+    let prepared =
+        fixture.activate_body_expecting(&fixture.a, "roll_back_prepared_earlier", &in_force);
+
+    let body = fixture.activate_body(&fixture.a, "roll_back_to_a").await;
+    let rolled_back = fixture.change_routing(ROLLBACK, body).await;
+    assert_eq!(rolled_back["routing_state"], "pipeline");
+    let body = fixture
+        .activate_body(&fixture.b, "activate_bundle_b_again")
+        .await;
+    let again = fixture.change_routing(ACTIVATE, body).await;
+    let view = fixture
+        .store()
+        .routing_view(&fixture.tenant, 10)
+        .await
+        .unwrap();
+    assert_eq!(
+        view.active_bundle_id.as_deref(),
+        Some(fixture.b.bundle_id.as_str())
+    );
+    assert_eq!(
+        view.routing.map(|routing| routing.routing_state),
+        Some(RoutingState::Pipeline),
+        "the state and the bundle that the first operator read"
+    );
+
+    fixture
+        .assert_change_refused(
+            ROLLBACK,
+            prepared,
+            StatusCode::CONFLICT,
+            "pipeline_routing_state_changed",
+            "a rollback prepared before another operator's rollback",
+        )
+        .await;
+    let body = fixture.activate_body_expecting(
+        &fixture.a,
+        "roll_back_to_a_again",
+        &again["activation_record_id"],
+    );
+    fixture.change_routing(ROLLBACK, body).await;
+    assert_eq!(
+        fixture
+            .store()
+            .routing_view(&fixture.tenant, 1)
+            .await
+            .unwrap()
+            .active_bundle_id
+            .as_deref(),
+        Some(fixture.a.bundle_id.as_str())
+    );
+}
+
+/// A `deactivate` of a contained tenant needs an expectation (plan review
+/// G11): with none it is `409 pipeline_routing_expectation_required` and the
+/// tenant stays contained, so a request prepared for a `pipeline` tenant
+/// cannot reopen intake on the legacy path after an incident's `contain`.
+/// With `expected_state = contained`, or with the record id in force, it
+/// passes. An expectation that does not hold is `409
+/// pipeline_routing_state_changed`. A `deactivate` of a `pipeline` tenant
+/// needs none.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_deactivate_of_a_contained_tenant_needs_an_expectation() {
+    let Some(fixture) = RouteFixture::new().await else {
+        return;
+    };
+    fixture.qualify(&fixture.a).await;
+    let contain = serde_json::json!({ "reason_code": "contain_for_incident" });
+    let activated = {
+        let body = fixture.activate_body(&fixture.a, "activate_bundle_a").await;
+        fixture.change_routing(ACTIVATE, body).await
+    };
+    let contained = fixture.change_routing(CONTAIN, contain.clone()).await;
+
+    fixture
+        .assert_change_refused(
+            DEACTIVATE,
+            serde_json::json!({ "reason_code": "deactivate_to_legacy" }),
+            StatusCode::CONFLICT,
+            "pipeline_routing_expectation_required",
+            "no expectation for a contained tenant",
+        )
+        .await;
+    let (status, refused, _) = fixture.upload(&fixture.state, "not_deactivated").await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{refused}");
+    assert_eq!(refused["error"], "pipeline_receipt_intake_contained");
+    // Requests prepared while the tenant was `pipeline`.
+    for (what, stale) in [
+        (
+            "the state before the containment",
+            serde_json::json!({ "expected_state": "pipeline" }),
+        ),
+        (
+            "the record id before the containment",
+            serde_json::json!({ "expected_record_id": activated["activation_record_id"] }),
+        ),
+        (
+            "the right state and an earlier record id",
+            serde_json::json!({
+                "expected_state": "contained",
+                "expected_record_id": activated["activation_record_id"],
+            }),
+        ),
+        (
+            "the right record id and another state",
+            serde_json::json!({
+                "expected_state": "pipeline",
+                "expected_record_id": contained["activation_record_id"],
+            }),
+        ),
+    ] {
+        let mut body = stale;
+        body["reason_code"] = serde_json::json!("deactivate_prepared_earlier");
+        fixture
+            .assert_change_refused(
+                DEACTIVATE,
+                body,
+                StatusCode::CONFLICT,
+                "pipeline_routing_state_changed",
+                what,
+            )
+            .await;
+    }
+    for unparsed in [serde_json::json!("paused"), serde_json::Value::Null] {
+        for field in ["expected_state", "expected_record_id"] {
+            let mut body = serde_json::json!({ "reason_code": "deactivate_to_legacy" });
+            body[field] = unparsed.clone();
+            fixture
+                .assert_change_refused(
+                    DEACTIVATE,
+                    body,
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "pipeline_request_invalid",
+                    &format!("{field} = {unparsed}"),
+                )
+                .await;
+        }
+    }
+
+    // Each form of the expectation passes from `contained`.
+    let legacy = fixture
+        .change_routing(
+            DEACTIVATE,
+            serde_json::json!({
+                "reason_code": "deactivate_to_legacy",
+                "expected_state": "contained",
+            }),
+        )
+        .await;
+    assert_eq!(legacy["routing_state"], "legacy");
+    let contained = fixture.change_routing(CONTAIN, contain.clone()).await;
+    let legacy = fixture
+        .change_routing(
+            DEACTIVATE,
+            serde_json::json!({
+                "reason_code": "deactivate_to_legacy",
+                "expected_record_id": contained["activation_record_id"],
+            }),
+        )
+        .await;
+    assert_eq!(legacy["routing_state"], "legacy");
+    let contained = fixture.change_routing(CONTAIN, contain).await;
+    let legacy = fixture
+        .change_routing(
+            DEACTIVATE,
+            serde_json::json!({
+                "reason_code": "deactivate_to_legacy",
+                "expected_state": "contained",
+                "expected_record_id": contained["activation_record_id"],
+            }),
+        )
+        .await;
+    assert_eq!(legacy["routing_state"], "legacy");
+
+    // From `pipeline` the expectation stays optional.
+    let body = fixture.activate_body(&fixture.a, "activate_bundle_a").await;
+    fixture.change_routing(ACTIVATE, body).await;
+    let legacy = fixture
+        .change_routing(
+            DEACTIVATE,
+            serde_json::json!({ "reason_code": "deactivate_to_legacy" }),
+        )
+        .await;
+    assert_eq!(legacy["routing_state"], "legacy");
+}
+
+/// An emergency stop needs no read first: `contain` with no expectation
+/// passes from every state (no row, `contained`, `pipeline`, `legacy`). The
+/// expectation stays optional there: `expected_state`, `expected_record_id`,
+/// or both, and when both are sent both must hold, else `409
+/// pipeline_routing_state_changed`. A value that does not parse, a `null`
+/// too, is `422 pipeline_request_invalid`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_contain_with_no_expectation_passes_from_every_state() {
+    let Some(fixture) = RouteFixture::new().await else {
+        return;
+    };
+    fixture.qualify(&fixture.a).await;
+    let contain = serde_json::json!({ "reason_code": "contain_for_incident" });
+    // No row, then `contained`.
+    for previous in [serde_json::Value::Null, serde_json::json!("contained")] {
+        let contained = fixture.change_routing(CONTAIN, contain.clone()).await;
+        assert_eq!(contained["routing_state"], "contained");
+        let (_, view) = fixture
+            .admin_call("GET", "/v1/admin/pipeline/routing", None)
+            .await;
+        assert_eq!(view["events"][0]["previous_state"], previous, "{view}");
+    }
+    // `pipeline`.
+    let body = fixture.activate_body(&fixture.a, "activate_bundle_a").await;
+    let activated = fixture.change_routing(ACTIVATE, body).await;
+    assert_eq!(activated["routing_state"], "pipeline");
+    let contained = fixture.change_routing(CONTAIN, contain.clone()).await;
+    assert_eq!(contained["routing_state"], "contained");
+    // `legacy`.
+    let legacy = fixture
+        .change_routing(
+            DEACTIVATE,
+            serde_json::json!({
+                "reason_code": "deactivate_to_legacy",
+                "expected_record_id": contained["activation_record_id"],
+            }),
+        )
+        .await;
+    assert_eq!(legacy["routing_state"], "legacy");
+    let contained = fixture.change_routing(CONTAIN, contain.clone()).await;
+    assert_eq!(contained["routing_state"], "contained");
+
+    // The optional expectation of `contain`.
+    let in_force = contained["activation_record_id"].clone();
+    for (what, expectation) in [
+        (
+            "another state",
+            serde_json::json!({ "expected_state": "pipeline" }),
+        ),
+        (
+            "none for a tenant that has a row",
+            serde_json::json!({ "expected_record_id": "none" }),
+        ),
+        (
+            "an earlier record id",
+            serde_json::json!({ "expected_record_id": legacy["activation_record_id"] }),
+        ),
+        (
+            "the right state and an earlier record id",
+            serde_json::json!({
+                "expected_state": "contained",
+                "expected_record_id": legacy["activation_record_id"],
+            }),
+        ),
+        (
+            "the right record id and another state",
+            serde_json::json!({ "expected_state": "legacy", "expected_record_id": in_force }),
+        ),
+    ] {
+        let mut body = expectation;
+        body["reason_code"] = serde_json::json!("contain_prepared_earlier");
+        fixture
+            .assert_change_refused(
+                CONTAIN,
+                body,
+                StatusCode::CONFLICT,
+                "pipeline_routing_state_changed",
+                what,
+            )
+            .await;
+    }
+    for unparsed in [serde_json::json!("paused"), serde_json::Value::Null] {
+        for field in ["expected_state", "expected_record_id"] {
+            let mut body = contain.clone();
+            body[field] = unparsed.clone();
+            fixture
+                .assert_change_refused(
+                    CONTAIN,
+                    body,
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "pipeline_request_invalid",
+                    &format!("{field} = {unparsed}"),
+                )
+                .await;
+        }
+    }
+    let contained = fixture
+        .change_routing(
+            CONTAIN,
+            serde_json::json!({
+                "reason_code": "contain_with_both",
+                "expected_state": "contained",
+                "expected_record_id": in_force,
+            }),
+        )
+        .await;
+    assert_eq!(contained["routing_state"], "contained");
+    assert_ne!(contained["activation_record_id"], in_force);
 }

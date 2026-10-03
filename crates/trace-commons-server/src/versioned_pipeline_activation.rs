@@ -37,10 +37,15 @@ pub const ACTIVATION_ACTOR_INVALID_LABEL: &str = "activation_actor_invalid";
 pub const ACTIVATION_STATE_INVALID_LABEL: &str = "activation_state_invalid";
 pub const ACTIVATION_READINESS_FAILED_LABEL: &str = "activation_readiness_failed";
 pub const EARLIER_QUALIFIED_BUNDLE_REQUIRED_LABEL: &str = "earlier_qualified_bundle_required";
-/// A routing change that names the state its caller expected
-/// (`ExpectedRouting`) and found another under the routing lock: nothing is
-/// written.
+/// A routing change that names the routing its caller expected (the record
+/// id, `ExpectedRecord`, or the state, `ExpectedRouting`) and found another
+/// under the routing lock: nothing is written.
 pub const PIPELINE_ROUTING_STATE_CHANGED_LABEL: &str = "pipeline_routing_state_changed";
+/// A `deactivate` of a contained tenant that names no expectation
+/// (`RoutingExpectation`): nothing is written. A request prepared before an
+/// incident's `contain` must not send the tenant back to the legacy path.
+pub const PIPELINE_ROUTING_EXPECTATION_REQUIRED_LABEL: &str =
+    "pipeline_routing_expectation_required";
 /// A routing change (`activate`, `rollback`, `contain`, `deactivate`) that
 /// waited its lock timeout (5 s, `PIPELINE_ADMIN_LOCK_TIMEOUT_SQL`) for the
 /// tenant's routing lock, or for a row it locks after it, and did not get
@@ -96,14 +101,14 @@ impl RoutingState {
     }
 }
 
-/// The routing a caller read before it asked for a routing change (final fix
-/// wave A23, the final review's G35): one of the three states, or `none` for
-/// a tenant with no routing row. A change that carries one is a
-/// compare-and-set: the store compares it with the state it reads under the
-/// exclusive routing lock and refuses with `pipeline_routing_state_changed`
-/// when they differ, so an action prepared before another operator's
-/// `contain` cannot reopen intake after that `contain` returned. A change
-/// that carries none behaves as before, whatever the state is.
+/// The routing state a caller read before it asked for a `contain` or a
+/// `deactivate` (final fix wave A23, the final review's G35): one of the
+/// three states, or `none` for a tenant with no routing row. A change that
+/// carries one is a compare-and-set: the store compares it with the state it
+/// reads under the exclusive routing lock and refuses with
+/// `pipeline_routing_state_changed` when they differ. The state alone does
+/// not tell two containments apart; `ExpectedRecord` does, and `activate` and
+/// `rollback` take only that one.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ExpectedRouting {
@@ -126,14 +131,145 @@ impl ExpectedRouting {
     }
 }
 
+/// The routing row a caller read before it asked for a routing change
+/// (review round 1, point 2; amendment A6): the row's `activation_record_id`,
+/// or `none` for a tenant with no routing row. Every change gives the row a
+/// new id (V110 refuses an update that keeps it), so the id names one version
+/// of the row. A change that carries it is a compare-and-set: the store
+/// compares it with the row it reads under the exclusive routing lock and
+/// refuses with `pipeline_routing_state_changed` when they differ. So an
+/// action prepared before another operator's change cannot take effect after
+/// that change returned: an `activate` prepared before a `contain` (the same
+/// state after contain, reopen, contain too), or a `rollback` prepared before
+/// another rollback.
+///
+/// In JSON it is a string: a UUID, or `none`. A `null` is neither.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExpectedRecord {
+    /// The tenant has no routing row.
+    NoRow,
+    /// The row's `activation_record_id`.
+    Record(Uuid),
+}
+
+impl ExpectedRecord {
+    /// The JSON string for "no routing row".
+    const NO_ROW: &'static str = "none";
+
+    /// What a caller that read `routing` names: its record id, or `NoRow`.
+    pub fn of(routing: Option<&TenantRouting>) -> Self {
+        routing.map_or(Self::NoRow, |routing| {
+            Self::Record(routing.activation_record_id)
+        })
+    }
+
+    fn is(self, current: Option<CurrentRouting>) -> bool {
+        match self {
+            Self::NoRow => current.is_none(),
+            Self::Record(id) => current.is_some_and(|row| row.activation_record_id == id),
+        }
+    }
+}
+
+impl Serialize for ExpectedRecord {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::NoRow => serializer.serialize_str(Self::NO_ROW),
+            Self::Record(id) => id.serialize(serializer),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ExpectedRecord {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::Error as _;
+        // A fixed message: the parser's text never holds the value.
+        let value = String::deserialize(deserializer)?;
+        if value == Self::NO_ROW {
+            return Ok(Self::NoRow);
+        }
+        Uuid::parse_str(&value)
+            .map(Self::Record)
+            .map_err(|_| D::Error::custom("expected_record_id_invalid"))
+    }
+}
+
+/// What a `contain` or a `deactivate` expects of the routing row, each part
+/// optional: the record id, the state, or both. Every part that is named must
+/// hold under the routing lock, else `pipeline_routing_state_changed`. A
+/// `contain` may name none (an emergency stop needs no read first). A
+/// `deactivate` of a contained tenant must name one
+/// (`pipeline_routing_expectation_required`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RoutingExpectation {
+    pub record: Option<ExpectedRecord>,
+    pub state: Option<ExpectedRouting>,
+}
+
+impl RoutingExpectation {
+    /// No expectation: the change applies to whatever routing the tenant has.
+    pub const NONE: Self = Self {
+        record: None,
+        state: None,
+    };
+
+    /// An expectation of the record id alone.
+    pub fn record(record: ExpectedRecord) -> Self {
+        Self {
+            record: Some(record),
+            state: None,
+        }
+    }
+
+    /// An expectation of the state alone.
+    pub fn state(state: ExpectedRouting) -> Self {
+        Self {
+            record: None,
+            state: Some(state),
+        }
+    }
+
+    fn is_named(self) -> bool {
+        self.record.is_some() || self.state.is_some()
+    }
+}
+
+/// The routing row as a routing change reads it under the routing lock: its
+/// state, and the record id that names this version of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CurrentRouting {
+    state: RoutingState,
+    activation_record_id: Uuid,
+}
+
 /// Refuses with `pipeline_routing_state_changed` when the caller expected a
-/// state and `current`, read under the exclusive routing lock, is another.
-fn require_expected_routing(
-    expected: Option<ExpectedRouting>,
-    current: Option<RoutingState>,
+/// record id and `current`, read under the exclusive routing lock, has
+/// another, or is absent.
+fn require_expected_record(
+    expected: ExpectedRecord,
+    current: Option<CurrentRouting>,
 ) -> Result<(), DatabaseError> {
-    match expected {
-        Some(expected) if !expected.is(current) => Err(DatabaseError::Constraint(
+    if expected.is(current) {
+        Ok(())
+    } else {
+        Err(DatabaseError::Constraint(
+            PIPELINE_ROUTING_STATE_CHANGED_LABEL.to_string(),
+        ))
+    }
+}
+
+/// Refuses with `pipeline_routing_state_changed` when a part of `expected`
+/// that the caller named does not hold for `current`, read under the
+/// exclusive routing lock. An expectation that names nothing passes.
+fn require_expected_routing(
+    expected: RoutingExpectation,
+    current: Option<CurrentRouting>,
+) -> Result<(), DatabaseError> {
+    if let Some(record) = expected.record {
+        require_expected_record(record, current)?;
+    }
+    match expected.state {
+        Some(state) if !state.is(current.map(|row| row.state)) => Err(DatabaseError::Constraint(
             PIPELINE_ROUTING_STATE_CHANGED_LABEL.to_string(),
         )),
         _ => Ok(()),
@@ -805,10 +941,11 @@ pub fn evaluate_activation_readiness(
 /// bundle's verified check results, evaluated just before the call;
 /// `runtime_code_revision_hash` is the revision the deployed code was built
 /// from (`DEPLOYED_CODE_REVISION_HASH`); `dependencies` is the bundle's
-/// profile on the running service. `expected_state` is the routing the
-/// caller read before the request, when it names one (`ExpectedRouting`):
-/// the change is then refused with `pipeline_routing_state_changed` unless
-/// the state under the routing lock is that one.
+/// profile on the running service. `expected_record_id` is the routing row
+/// the caller read before the request (`ExpectedRecord`): the change is
+/// refused with `pipeline_routing_state_changed` unless the row under the
+/// routing lock is that one. It is not optional: an `activate` or a
+/// `rollback` with no expectation could reopen a contained tenant's intake.
 #[derive(Debug, Clone, Copy)]
 pub struct ActivationRequest<'a> {
     pub tenant_id: &'a str,
@@ -818,7 +955,7 @@ pub struct ActivationRequest<'a> {
     pub promotion: &'a PromotionDecision,
     pub runtime_code_revision_hash: &'a str,
     pub dependencies: &'a ProductionDependencyProfile,
-    pub expected_state: Option<ExpectedRouting>,
+    pub expected_record_id: ExpectedRecord,
 }
 
 /// The evidence hash that a routing change which selects a bundle records, in
@@ -888,18 +1025,24 @@ fn routing_busy(error: DatabaseError) -> DatabaseError {
     lock_timeout_as(error, PIPELINE_ROUTING_BUSY_LABEL)
 }
 
-/// The tenant's routing state in `tx`; `None` for a tenant with no row. A
-/// stored state that does not decode is an error, never `None`.
+/// The tenant's routing state and record id in `tx`; `None` for a tenant with
+/// no row. A stored state that does not decode is an error, never `None`.
 async fn routing_state_in(
     tx: &Transaction<'_>,
     tenant_id: &str,
-) -> Result<Option<RoutingState>, DatabaseError> {
+) -> Result<Option<CurrentRouting>, DatabaseError> {
     tx.query_opt(
-        "SELECT routing_state FROM pipeline_tenant_routing WHERE tenant_id = $1",
+        "SELECT routing_state, activation_record_id
+           FROM pipeline_tenant_routing WHERE tenant_id = $1",
         &[&tenant_id],
     )
     .await?
-    .map(|row| RoutingState::from_db(row.get::<_, String>("routing_state").as_str()))
+    .map(|row| {
+        Ok(CurrentRouting {
+            state: RoutingState::from_db(row.get::<_, String>("routing_state").as_str())?,
+            activation_record_id: row.get("activation_record_id"),
+        })
+    })
     .transpose()
 }
 
@@ -1255,26 +1398,32 @@ impl PipelineActivationStore {
     /// Stops the tenant's new receipts. Contained is the state of a tenant
     /// whose intake is held, for a first rollout or an incident; it changes
     /// no bundle and no receipt that already has an owner. From any state,
-    /// with no expected state: `contain_expecting` with `None`.
+    /// with no expectation: `contain_expecting` with
+    /// `RoutingExpectation::NONE`.
     pub async fn contain(
         &self,
         tenant_id: &str,
         actor_principal_ref: &str,
         reason_code: &str,
     ) -> Result<TenantRouting, DatabaseError> {
-        self.contain_expecting(tenant_id, actor_principal_ref, reason_code, None)
-            .await
+        self.contain_expecting(
+            tenant_id,
+            actor_principal_ref,
+            reason_code,
+            RoutingExpectation::NONE,
+        )
+        .await
     }
 
     /// `contain`, refused with `pipeline_routing_state_changed` when
-    /// `expected` names a routing that is not the one the tenant has under
-    /// the routing lock (`ExpectedRouting`).
+    /// `expected` names a record id or a state that is not the one the
+    /// tenant has under the routing lock (`RoutingExpectation`).
     pub async fn contain_expecting(
         &self,
         tenant_id: &str,
         actor_principal_ref: &str,
         reason_code: &str,
-        expected: Option<ExpectedRouting>,
+        expected: RoutingExpectation,
     ) -> Result<TenantRouting, DatabaseError> {
         validate_actor(
             actor_principal_ref,
@@ -1294,28 +1443,41 @@ impl PipelineActivationStore {
 
     /// Returns a tenant that has a routing row to the legacy path. A tenant
     /// that has no row, or is already `Legacy`, has nothing to deactivate.
-    /// With no expected state: `deactivate_expecting` with `None`.
+    /// With no expectation: `deactivate_expecting` with
+    /// `RoutingExpectation::NONE`, which a contained tenant refuses.
     pub async fn deactivate(
         &self,
         tenant_id: &str,
         actor_principal_ref: &str,
         reason_code: &str,
     ) -> Result<TenantRouting, DatabaseError> {
-        self.deactivate_expecting(tenant_id, actor_principal_ref, reason_code, None)
-            .await
+        self.deactivate_expecting(
+            tenant_id,
+            actor_principal_ref,
+            reason_code,
+            RoutingExpectation::NONE,
+        )
+        .await
     }
 
     /// `deactivate`, refused with `pipeline_routing_state_changed` when
-    /// `expected` names a routing that is not the one the tenant has under
-    /// the routing lock (`ExpectedRouting`). That comparison comes first: a
-    /// state the caller did not expect is reported as changed, not as
-    /// `activation_state_invalid`.
+    /// `expected` names a record id or a state that is not the one the
+    /// tenant has under the routing lock (`RoutingExpectation`). That
+    /// comparison comes first: a routing the caller did not expect is
+    /// reported as changed, not as `activation_state_invalid`.
+    ///
+    /// A contained tenant needs an expectation (plan review G11): with none,
+    /// the deactivation is refused with
+    /// `pipeline_routing_expectation_required` and writes nothing. A
+    /// deactivation prepared for a `pipeline` tenant would otherwise send a
+    /// tenant that an incident contained back to the legacy path, with no
+    /// gate. From `pipeline` the expectation stays optional.
     pub async fn deactivate_expecting(
         &self,
         tenant_id: &str,
         actor_principal_ref: &str,
         reason_code: &str,
-        expected: Option<ExpectedRouting>,
+        expected: RoutingExpectation,
     ) -> Result<TenantRouting, DatabaseError> {
         validate_actor(
             actor_principal_ref,
@@ -1347,10 +1509,9 @@ impl PipelineActivationStore {
     /// the activation: the canonical hash of the readiness hash, the
     /// promotion hash, and the bundle (`bundle_selection_evidence_hash`). A
     /// refusal writes nothing. An actor or a reason that is not a label is
-    /// `activation_actor_invalid`, before any read. With
-    /// `request.expected_state`, a routing state under the lock that is not
-    /// the expected one is `pipeline_routing_state_changed`, before the
-    /// readiness and the gate.
+    /// `activation_actor_invalid`, before any read. A routing row under the
+    /// lock that is not the one `request.expected_record_id` names is
+    /// `pipeline_routing_state_changed`, before the readiness and the gate.
     pub async fn activate_tenant(
         &self,
         request: ActivationRequest<'_>,
@@ -1379,10 +1540,12 @@ impl PipelineActivationStore {
         readiness: &ActivationReadiness,
     ) -> Result<TenantRouting, DatabaseError> {
         lock_routing(tx, request.tenant_id).await?;
-        // Any state may be activated; the read refuses a row it cannot
-        // decode, before the gate, and gives the event its previous state.
+        // Any state may be activated, by a caller that names the row it
+        // read; the read refuses a row it cannot decode, before the gate,
+        // and gives the event its previous state.
         let current = routing_state_in(tx, request.tenant_id).await?;
-        require_expected_routing(request.expected_state, current)?;
+        require_expected_record(request.expected_record_id, current)?;
+        let current = current.map(|row| row.state);
         let now = Utc::now();
         evaluate_activation_readiness(readiness, now).map_err(DatabaseError::Constraint)?;
         let previous_bundle_id = PipelineQualificationStore::activate_qualified_bundle_in(
@@ -1432,8 +1595,8 @@ impl PipelineActivationStore {
     /// as `activate_tenant`; the event is `rollback`, and its evidence hash
     /// is the canonical hash of the promotion hash and the bundle (the rule
     /// of `bundle_selection_evidence_hash`, with no readiness). A refusal
-    /// writes nothing. With `request.expected_state`, a routing state under
-    /// the lock that is not the expected one is
+    /// writes nothing. A routing row under the lock that is not the one
+    /// `request.expected_record_id` names is
     /// `pipeline_routing_state_changed`, before any other check.
     pub async fn rollback_bundle(
         &self,
@@ -1461,7 +1624,8 @@ impl PipelineActivationStore {
         let tenant_id = request.tenant_id;
         lock_routing(tx, tenant_id).await?;
         let current = routing_state_in(tx, tenant_id).await?;
-        require_expected_routing(request.expected_state, current)?;
+        require_expected_record(request.expected_record_id, current)?;
+        let current = current.map(|row| row.state);
         if !matches!(
             current,
             Some(RoutingState::Pipeline | RoutingState::Contained)
@@ -1826,7 +1990,7 @@ impl PipelineActivationStore {
         reason_code: &str,
         action: ActivationAction,
         resulting: RoutingState,
-        expected: Option<ExpectedRouting>,
+        expected: RoutingExpectation,
     ) -> Result<TenantRouting, DatabaseError> {
         let mut client = self.backend.trace_pool().get().await?;
         let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
@@ -1853,11 +2017,22 @@ impl PipelineActivationStore {
         reason_code: &str,
         action: ActivationAction,
         resulting: RoutingState,
-        expected: Option<ExpectedRouting>,
+        expected: RoutingExpectation,
     ) -> Result<TenantRouting, DatabaseError> {
         lock_routing(tx, tenant_id).await?;
         let current = routing_state_in(tx, tenant_id).await?;
         require_expected_routing(expected, current)?;
+        let current = current.map(|row| row.state);
+        // A contained tenant leaves containment for the legacy path only at
+        // the word of a caller that names what it read (G11).
+        if action == ActivationAction::Deactivate
+            && current == Some(RoutingState::Contained)
+            && !expected.is_named()
+        {
+            return Err(DatabaseError::Constraint(
+                PIPELINE_ROUTING_EXPECTATION_REQUIRED_LABEL.to_string(),
+            ));
+        }
         let active_bundle_id: Option<String> = tx
             .query_opt(
                 "SELECT bundle_id FROM pipeline_active_bundles WHERE tenant_id = $1",
@@ -2102,6 +2277,97 @@ mod tests {
         assert_eq!(ready.max_work_age_seconds, 12);
         assert_eq!(ready.error_count, 0);
         assert!(evaluate_activation_readiness(&ready, now).is_ok());
+    }
+
+    /// `expected_record_id` in JSON: a UUID string or `none`. A `null`, a
+    /// state name, another word, and a number are refused, and the refusal's
+    /// text for a string never holds the value.
+    #[test]
+    fn an_expected_record_is_a_uuid_or_none() {
+        let id = Uuid::new_v4();
+        assert_eq!(
+            serde_json::from_value::<ExpectedRecord>(serde_json::json!("none")).unwrap(),
+            ExpectedRecord::NoRow
+        );
+        assert_eq!(
+            serde_json::from_value::<ExpectedRecord>(serde_json::json!(id)).unwrap(),
+            ExpectedRecord::Record(id)
+        );
+        for expected in [ExpectedRecord::NoRow, ExpectedRecord::Record(id)] {
+            let json = serde_json::to_value(expected).unwrap();
+            assert!(json.is_string(), "{json}");
+            assert_eq!(
+                serde_json::from_value::<ExpectedRecord>(json).unwrap(),
+                expected
+            );
+        }
+        for refused in [
+            serde_json::Value::Null,
+            serde_json::json!("contained"),
+            serde_json::json!("None"),
+            serde_json::json!(""),
+            serde_json::json!(17),
+        ] {
+            let error = serde_json::from_value::<ExpectedRecord>(refused.clone())
+                .expect_err("neither a UUID nor none");
+            if let Some(text) = refused.as_str().filter(|text| !text.is_empty()) {
+                assert!(!error.to_string().contains(text), "{error}");
+            }
+        }
+    }
+
+    /// The comparison of an expectation with the row under the lock: the
+    /// record id names one version of the row, `NoRow` only a tenant with no
+    /// row, and each named part of a `RoutingExpectation` must hold.
+    #[test]
+    fn an_expectation_holds_only_for_the_row_it_names() {
+        let row = CurrentRouting {
+            state: RoutingState::Contained,
+            activation_record_id: Uuid::new_v4(),
+        };
+        let this = ExpectedRecord::Record(row.activation_record_id);
+        let other = ExpectedRecord::Record(Uuid::new_v4());
+        let changed = |result: Result<(), DatabaseError>| {
+            matches!(result, Err(DatabaseError::Constraint(label))
+                if label == PIPELINE_ROUTING_STATE_CHANGED_LABEL)
+        };
+        assert!(require_expected_record(this, Some(row)).is_ok());
+        assert!(require_expected_record(ExpectedRecord::NoRow, None).is_ok());
+        assert!(changed(require_expected_record(other, Some(row))));
+        assert!(changed(require_expected_record(this, None)));
+        assert!(changed(require_expected_record(
+            ExpectedRecord::NoRow,
+            Some(row)
+        )));
+
+        assert!(require_expected_routing(RoutingExpectation::NONE, Some(row)).is_ok());
+        assert!(require_expected_routing(RoutingExpectation::NONE, None).is_ok());
+        let both = |record, state| RoutingExpectation {
+            record: Some(record),
+            state: Some(state),
+        };
+        assert!(
+            require_expected_routing(both(this, ExpectedRouting::Contained), Some(row)).is_ok()
+        );
+        assert!(changed(require_expected_routing(
+            both(other, ExpectedRouting::Contained),
+            Some(row)
+        )));
+        assert!(changed(require_expected_routing(
+            both(this, ExpectedRouting::Pipeline),
+            Some(row)
+        )));
+        assert!(changed(require_expected_routing(
+            RoutingExpectation::state(ExpectedRouting::NoRow),
+            Some(row)
+        )));
+        assert!(changed(require_expected_routing(
+            RoutingExpectation::record(other),
+            Some(row)
+        )));
+        assert!(RoutingExpectation::record(this).is_named());
+        assert!(RoutingExpectation::state(ExpectedRouting::Contained).is_named());
+        assert!(!RoutingExpectation::NONE.is_named());
     }
 
     #[test]
