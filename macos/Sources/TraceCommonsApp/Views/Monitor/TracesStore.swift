@@ -21,6 +21,23 @@ final class TracesStore {
     private(set) var tree = TracesTree(tools: [], unplaced: [])
     /// The `set_project_mode` write in flight, by folder id.
     private(set) var writing: Set<String> = []
+    /// The last `status` read; nil when it has not been read or failed. The
+    /// badge is its `decisions_owed`, never `queue_depth`.
+    private(set) var status: DaemonData.Status?
+    /// The last `tool_destinations` read: the core's verdict on where each
+    /// tool's sessions go. Nil when unread or unreadable, and then the map
+    /// draws no session flow at all.
+    private(set) var destinations: DaemonData.ToolDestinations?
+    /// A review action (R7) in flight, by entry id.
+    private(set) var acting: Set<String> = []
+    /// The session last kept on this Mac, while its undo is offered.
+    private(set) var lastKept: String?
+    /// The last review action the core refused, by entry id.
+    private(set) var actionError: (entryId: String, error: DaemonDataError)?
+
+    /// The Traces badge: decisions owed, unknown (a dash) when the core did
+    /// not say, never a count derived from the queue.
+    var decisionsOwed: Int? { status?.decisionsOwed }
     /// The last write the core refused, by folder id (or tool id for a
     /// source declaration). It stays beside that row until the next write to
     /// it: a reload does not clear it, and it never stands in for the core
@@ -40,6 +57,20 @@ final class TracesStore {
     /// decoded once rather than on every redraw. Nil leaves a label out
     /// rather than writing one here.
     let words: MonitorTracesCopy? = MonitorTracesCopy.decode(fromJSON: TCCoreCopy.monitorTracesCopyJSON())
+    /// The consent gate's words, from the core, decoded once rather than on
+    /// every redraw. Without them Contribute stays disarmed: the shell never
+    /// words consent itself.
+    let consent: ConsentCopy? = TCConsentCopy.copyJSON().flatMap(ConsentCopy.decode(fromJSON:))
+
+    /// A Contribute the core took, while its hold lets it be taken back:
+    /// the core's toast for it, and whether Undo (`cancel`) is offered.
+    struct Contributed: Equatable {
+        let entryId: String
+        let toast: SubmitToast
+    }
+
+    /// The last contribution, until it is undone or another is made.
+    private(set) var lastContributed: Contributed?
 
     /// The sample set drawn, in a debug build over sample data; nil over
     /// the daemon. `sampleUnknown` is a `TRACE_COMMONS_SAMPLE` that named no
@@ -155,7 +186,7 @@ final class TracesStore {
     func run() async {
         await load()
         for await event in client.events() {
-            if Task.isCancelled { break }
+            if Task.isCancelled { return }
             switch event {
             case .snapshot, .queueChanged, .statusChanged, .resyncRequired:
                 await load()
@@ -163,6 +194,19 @@ final class TracesStore {
                 break
             }
         }
+        guard !Task.isCancelled else { return }
+        lost()
+    }
+
+    /// The event stream ended without this view going: the core went away
+    /// (`LiveDaemonClient.finishEvents()`). The badge reads unknown rather
+    /// than keeping its last count, and the tab says the core is not
+    /// answering over the last tree it reported.
+    func lost() {
+        generation += 1
+        status = nil
+        destinations = nil
+        phase = .failed(.unreachable)
     }
 
     func load() async {
@@ -174,17 +218,163 @@ final class TracesStore {
             // Settings only decide the tool switches. Unreadable settings
             // are unknown: no switch, never off, and the row says so.
             async let settings = try? client.settings()
+            async let status = try? client.status()
+            async let destinations = try? client.toolDestinations()
             let built = TracesTree.build(
                 entries: try await entries, projects: try await projects.projects, settings: await settings,
                 scansWhenUnset: Self.scansWhenUnset)
+            let read = await status
+            let routes = await destinations
             guard mine == generation else { return }
             tree = built
+            self.status = read
+            self.destinations = routes
             phase = .loaded
         } catch {
             // An older failure never overwrites a newer read either.
             guard mine == generation else { return }
             phase = .failed(error as? DaemonDataError ?? .undecodable(method: "list_pending"))
+            status = nil
+            destinations = nil
         }
+    }
+
+    // MARK: Review (R7)
+
+    enum ReviewAction: Equatable {
+        case contribute, undoContribute, keep, undoKeep, dismiss
+    }
+
+    /// Whether Contribute is armed, as the review sheet decides it: the
+    /// preview pinned an enrollment (`enrolled`, not merely a summary --
+    /// and the caller passes the summary asked for THIS session), the core's
+    /// consent words are in hand, and the session is one the shared table
+    /// offers Contribute for. Asked again when it is pressed.
+    static func contributeArmed(
+        enrolled: Bool?, consent: ConsentCopy?, eligibility: ContributionEligibility?, calls: EligibilityCalls
+    ) -> Bool {
+        consent != nil && ReadGate.canContribute(hasPinnedPreview: enrolled == true)
+            && EligibilitySurface.offersContribute(eligibility, calls: calls)
+    }
+
+    /// What the tab says for a refused action: a skipped approve in the
+    /// submit toast's words, anything else in the core's line. Never the
+    /// error's fixed label.
+    func message(for error: DaemonDataError) -> String? {
+        if case .notApproved(let reason) = error {
+            return SubmitToast.render(
+                approved: 0, redactions: 0, flagged: 0, skipped: reason.map { [$0] } ?? []
+            ).line
+        }
+        return words?.line(for: error)
+    }
+
+    /// One review action on one session, then a reload. Nothing is applied
+    /// optimistically: the tree redraws from the core's answer.
+    func perform(_ action: ReviewAction, on entryId: String) async {
+        guard !acting.contains(entryId) else { return }
+        acting.insert(entryId)
+        defer { acting.remove(entryId) }
+        actionError = nil
+        do {
+            switch action {
+            case .contribute:
+                // The core's answer is kept, not thrown away: its toast, and
+                // the hold Undo can still reach. A skipped approve throws
+                // `notApproved` and is said as a refusal, never as success.
+                let response = try await client.approve(entryId: entryId)
+                lastContributed = Contributed(entryId: entryId, toast: response.toast)
+                // A newer decision ends the older Keep's undo.
+                lastKept = nil
+            case .undoContribute:
+                try await client.cancel(entryId: entryId)
+                lastContributed = nil
+            case .keep:
+                _ = try await client.keep(entryId: entryId)
+                lastKept = entryId
+            case .undoKeep:
+                _ = try await client.undoKeep(entryId: entryId)
+                lastKept = nil
+            case .dismiss:
+                try await client.dismiss(entryId: entryId)
+                lastKept = nil
+            }
+        } catch {
+            let error = error as? DaemonDataError ?? .undecodable(method: "\(action)")
+            // A core that did not answer is the tab's state, and its last
+            // count is no longer known.
+            if case .unreachable = error { lost() }
+            actionError = (entryId, error)
+            return
+        }
+        await load()
+    }
+
+    // MARK: Queue safeguards
+
+    /// A reason approved sessions are not moving, in the words the main
+    /// window shows for the same status.
+    struct Safeguard: Equatable {
+        let title: String
+        let body: String?
+    }
+
+    /// What the queue's safeguards say right now: a spent daily budget, a
+    /// busy privacy witness, folders the automatic gate is holding, and the
+    /// daemon's health label when none of those already says it. Each is
+    /// drawn independently, as the main window draws them, because the
+    /// daemon's one health slot can hide the others.
+    var safeguards: [Safeguard] { Self.safeguards(status) }
+
+    static func safeguards(_ status: DaemonData.Status?) -> [Safeguard] {
+        guard let status else { return [] }
+        var out: [Safeguard] = []
+        var said: Set<String> = []
+        if let budget = status.dailyBudget, budget.blocked == true {
+            out.append(Safeguard(
+                title: DailyBudgetCopy.title,
+                body: DailyBudgetCopy.detail(blockedEntries: budget.blockedEntries ?? 0, resetsAt: budget.resetsAt)))
+            said.insert("daily-cap-reached")
+        }
+        if let capacity = status.witnessCapacity, (capacity.waitingSessions ?? 0) > 0,
+            let wire = Self.wire(capacity),
+            let notice = TCConsentCopy.witnessCapacityNoticeJSON(forCapacity: wire).flatMap(WitnessCapacityNotice.decode(fromJSON:))
+        {
+            out.append(Safeguard(title: notice.title, body: notice.body))
+            said.insert("witness-saturated")
+        }
+        if let held = status.automaticContributionHeld, (held.heldSessions ?? 0) > 0,
+            let wire = Self.wire(held),
+            let notice = TCConsentCopy.gateHeldNoticeJSON(forHeld: wire).flatMap(GateHeldNotice.decode(fromJSON:))
+        {
+            out.append(Safeguard(title: notice.title, body: notice.body))
+            said.insert(GateHeld.label)
+        }
+        if let label = status.health?.lastErrorLabel, !said.contains(label) {
+            let health = HealthCopy.forLabel(label)
+            out.insert(Safeguard(title: health.title, body: health.detail), at: 0)
+        }
+        return out
+    }
+
+    /// A status part as the wire JSON the core's notice functions read.
+    static func wire(_ value: some Encodable) -> String? {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        return (try? encoder.encode(value)).map { String(decoding: $0, as: UTF8.self) }
+    }
+
+    /// Whether something waiting is worth a second look (nothing matched, or
+    /// trimmed to fit), as the main window's queue shield reads it. The
+    /// badge pairs with it, so it never says only a count.
+    var shield: QueueShieldState { Self.shield(tree.allSessions) }
+
+    static func shield(_ sessions: [DaemonData.QueueEntry]) -> QueueShieldState {
+        let reasons = sessions.map { Set($0.secondLook ?? []) }
+        return QueueShieldState.state(
+            waiting: sessions.count,
+            nothingMatched: reasons.filter { $0.contains("nothing-matched") }.count,
+            trimmed: reasons.filter { $0.contains("trimmed-to-fit") }.count)
     }
 
     /// A tool's source declaration, from its switch after the core's

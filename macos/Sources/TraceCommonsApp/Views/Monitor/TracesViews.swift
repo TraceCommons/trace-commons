@@ -2,6 +2,7 @@
 import SwiftUI
 import TCBridge
 import TCDesign
+import TCBridge
 import TCShellCore
 
 /// The Traces tab (R6 of #1173): the tool › folder › session tree.
@@ -70,6 +71,13 @@ struct TracesTreeView: View {
             }
             if let notice = store.folderNotice {
                 GlassNotice(tone: .ask) { Text(notice) }
+            }
+            // Why approved sessions are not moving, beside the tree and
+            // before Contribute is reached, in the words the main window uses.
+            ForEach(store.safeguards, id: \.title) { safeguard in
+                GlassNotice(tone: .ask, title: safeguard.title) {
+                    if let body = safeguard.body { Text(body) }
+                }
             }
             if case .failed(let error) = store.phase, let line = store.words?.line(for: error) {
                 // The core's line for a core that does not answer, or for a
@@ -449,18 +457,14 @@ struct TracesTreeView: View {
     }
 }
 
-/// The inspector for the selected session (R6): what the core reports
-/// about it, from the `preview` summary.
+/// The inspector for the selected session: what the core reports about it
+/// (R6), and its review (R7): what would leave this Mac, the consent gate in
+/// the core's words, and Contribute, Keep or Dismiss.
 struct SessionInspectorView: View {
-    let client: any DaemonDataClient
+    let store: TracesStore
     let entry: DaemonData.QueueEntry?
-    /// The tab's words, from the core.
-    let words: MonitorTracesCopy?
-    /// The core's eligibility and attestation sentences for this session
-    /// (`TracesStore.eligibilityValue` / `attestationValue`); nil leaves the
-    /// row out.
-    var eligibility: String? = nil
-    var attestation: String? = nil
+    /// The tab's words, from the core, decoded once by the store.
+    private var words: MonitorTracesCopy? { store.words }
 
     /// The preview, keyed by the session it was asked for. Only the
     /// selected session's answer is ever read out of it.
@@ -473,9 +477,15 @@ struct SessionInspectorView: View {
     /// no preview until it stops; `preview` is a full read-parse-redact pass
     /// the daemon cannot cancel.
     static let previewSettle: Duration = .milliseconds(300)
+    /// The consent gate, from the Rust core, decoded once by the store.
+    private var consent: ConsentCopy? { store.consent }
 
     var body: some View {
-        Group {
+        VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
+            // Above the selection, never inside it: selecting another
+            // session must not hide an Undo that can still take something
+            // back, and an Undo that failed is said here, beside it.
+            pendingUndo
             if let entry {
                 ScrollView {
                     VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
@@ -486,10 +496,23 @@ struct SessionInspectorView: View {
                         if let failure, let line = words?.line(for: failure) {
                             GlassNotice(tone: .outside, title: line) { EmptyView() }
                         }
+                        // The opening prompt in full, unless it is no more
+                        // than the title above it (the title is its first line).
+                        if let prompt = summary?.openingPrompt, !prompt.isEmpty, prompt != summary?.title {
+                            GlassCard(quiet: true) {
+                                Text(prompt)
+                                    .glassType(GlassTokens.TypeScale.body)
+                                    .foregroundStyle(GlassColor.textPrimary)
+                                    .lineLimit(8)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                        }
                         if let words {
                             GlassKeyValueList(Self.rows(
-                                entry, summary, words: words, eligibility: eligibility, attestation: attestation))
+                                entry, summary, words: words,
+                                eligibility: store.eligibilityValue(entry), attestation: store.attestationValue(entry)))
                         }
+                        if let summary { redactions(summary) }
                         if let reasons = entry.secondLook, !reasons.isEmpty {
                             // The core's fixed reason labels until K4 gives
                             // them words.
@@ -497,14 +520,156 @@ struct SessionInspectorView: View {
                                 ForEach(reasons, id: \.self) { GlassChip($0, status: .ask) }
                             }
                         }
+                        review(entry)
                     }
                 }
                 .scrollIndicators(.never)
                 .task(id: entry.entryId) { await load(entry.entryId) }
             } else {
-                Color.clear
+                Spacer(minLength: 0)
             }
         }
+    }
+
+    /// The contribution and the keep that can still be taken back, each
+    /// with the core's words and any refusal of its undo.
+    @ViewBuilder
+    private var pendingUndo: some View {
+        if let contributed = store.lastContributed, let words {
+            GlassNotice(tone: .ask, title: contributed.toast.line) {
+                if contributed.toast.offerUndo {
+                    Button(words.undoContribute) {
+                        Task { await store.perform(.undoContribute, on: contributed.entryId) }
+                    }
+                    .buttonStyle(GlassButtonStyle(.glass))
+                    .disabled(store.acting.contains(contributed.entryId))
+                }
+            }
+            refusal(for: contributed.entryId)
+        }
+        if let kept = store.lastKept, let words {
+            Button(words.undoKeep) { Task { await store.perform(.undoKeep, on: kept) } }
+                .buttonStyle(GlassButtonStyle(.glass))
+                .disabled(store.acting.contains(kept))
+            refusal(for: kept)
+        }
+    }
+
+    /// The core's words for a refused action on `entryId`, if there is one.
+    @ViewBuilder
+    private func refusal(for entryId: String) -> some View {
+        if let refused = store.actionError, refused.entryId == entryId, let line = store.message(for: refused.error) {
+            GlassNotice(tone: .outside, title: line) { EmptyView() }
+        }
+    }
+
+    /// What scrubbing removed, and what it found but left in, as the core
+    /// groups, splits and words it (`tc_redaction_summary_json`), the way
+    /// the review sheet renders it. No counts, or an answer that will not
+    /// parse, lists nothing rather than claiming nothing matched. Distinct
+    /// counts are sent only with a full summary; absent, the core reads them
+    /// as none.
+    @ViewBuilder
+    private func redactions(_ summary: DaemonData.PreviewSummary) -> some View {
+        if let occurrences = summary.redactions,
+            let rows = RedactionSummary.rows(fromJSON: TCCoreCopy.redactionSummaryJSON(
+                occurrences: occurrences, distinct: summary.redactionsDistinct ?? [:]))
+        {
+            redactionRows(rows)
+        }
+    }
+
+    @ViewBuilder
+    private func redactionRows(
+        _ rows: (removed: [RedactionSummaryRow], stillPresent: [RedactionSummaryRow])
+    ) -> some View {
+        if !rows.removed.isEmpty {
+            GlassCard(quiet: true) {
+                VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
+                    ForEach(rows.removed, id: \.family) { row in
+                        Text(row.countLine)
+                            .glassType(GlassTokens.TypeScale.label)
+                            .foregroundStyle(GlassColor.textSecondary)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+        if !rows.stillPresent.isEmpty {
+            GlassNotice(tone: .outside) {
+                VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
+                    ForEach(rows.stillPresent, id: \.family) { row in
+                        Text(row.countLine)
+                    }
+                }
+            }
+        }
+    }
+
+    /// The consent gate and the three actions. Contribute needs the
+    /// summary (what would leave) and the core's consent words in front of
+    /// the contributor.
+    @ViewBuilder
+    private func review(_ entry: DaemonData.QueueEntry) -> some View {
+        let busy = store.acting.contains(entry.entryId)
+        // The scrubbing caveat, repeated at the commit as the review sheet
+        // repeats it, then the gate statement, at reading weight: they sit
+        // directly above an irreversible button.
+        ScrubbingCaveatAtCommit()
+        if let consent {
+            Text(consent.gateStatement)
+                .glassType(GlassTokens.TypeScale.label)
+                .foregroundStyle(GlassColor.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        // Why this session cannot be contributed, beside the disarmed
+        // button, in the shared table's words.
+        if let eligibility = TracesStore.eligibility(entry),
+            !EligibilitySurface.offersContribute(eligibility, calls: TracesStore.eligibilityCalls),
+            let reason = eligibility.reason,
+            let line = TracesStore.eligibilityCalls.reasonLine(reason)
+        {
+            Text(line)
+                .glassType(GlassTokens.TypeScale.caption)
+                .foregroundStyle(GlassColor.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        refusal(for: entry.entryId)
+        if let words {
+            HStack(spacing: GlassTokens.Space.s4) {
+                Button(words.dismiss) { act(.dismiss, entry) }
+                    .buttonStyle(GlassButtonStyle(.glass))
+                Button(words.keep) { act(.keep, entry) }
+                    .buttonStyle(GlassButtonStyle(.glass))
+                Spacer(minLength: 0)
+                Button(words.contribute) { act(.contribute, entry) }
+                    .buttonStyle(GlassButtonStyle(.primary, small: true))
+                    .disabled(!armed(entry))
+                    // Why it is armed or not, in the core's words, as the
+                    // review sheet's Contribute says it.
+                    .help(consent == nil ? "" : TCConsentCopy.gateHelp(pinned: armed(entry)) ?? "")
+            }
+            .disabled(busy)
+        }
+    }
+
+    /// Contribute's gate for `entry`, on the preview asked for it.
+    private func armed(_ entry: DaemonData.QueueEntry) -> Bool {
+        TracesStore.contributeArmed(
+            enrolled: slot.summary(for: entry.entryId)?.enrolled, consent: consent,
+            eligibility: TracesStore.eligibility(entry), calls: TracesStore.eligibilityCalls)
+    }
+
+    private func act(_ action: TracesStore.ReviewAction, _ entry: DaemonData.QueueEntry) {
+        if action == .contribute {
+            // Asked again at the press, on the session as the tree now has
+            // it: the summary or the eligibility may have moved since the
+            // button was drawn.
+            guard let live = store.tree.allSessions.first(where: { $0.entryId == entry.entryId }),
+                armed(live)
+            else { return }
+        }
+        Task { await store.perform(action, on: entry.entryId) }
     }
 
     private func load(_ entryId: String) async {
@@ -516,7 +681,7 @@ struct SessionInspectorView: View {
         }
         let result: Result<DaemonData.PreviewSummary, DaemonDataError>
         do {
-            result = .success(try await client.preview(entryId: entryId))
+            result = .success(try await store.client.preview(entryId: entryId))
         } catch {
             result = .failure(error as? DaemonDataError ?? .undecodable(method: "preview"))
         }
@@ -554,6 +719,14 @@ struct SessionInspectorView: View {
         // sentences; left out when the core has nothing to say.
         if let eligibility { rows.append(.init(words.eligibility, eligibility)) }
         if let attestation { rows.append(.init(words.attestation, attestation)) }
+        // Only the full preview carries these. Categories only: the matched
+        // text is never reported. The risk is the core's label.
+        if let labels = summary?.piiLabelsPresent, !labels.isEmpty {
+            rows.append(.init(words.personalInformation, labels.joined(separator: ", ")))
+        }
+        if let risk = summary?.residualRisk, !risk.isEmpty {
+            rows.append(.init(words.residualRisk, risk.replacingOccurrences(of: "_", with: " ")))
+        }
         return rows
     }
 }

@@ -25,6 +25,9 @@ public struct MonitorTracesCopy: Decodable, Equatable, Sendable {
     public let attestation: String
     public let held: String
     public let sample: String
+    public let residualRisk: String
+    public let personalInformation: String
+    public let secondLookWaiting: String
     public let contribute: String
     public let keep: String
     public let dismiss: String
@@ -36,6 +39,9 @@ public struct MonitorTracesCopy: Decodable, Equatable, Sendable {
     enum CodingKeys: String, CodingKey {
         case review, tool, folder, started, length, prompts, size, sends, marks, unsure
         case eligibility, attestation, held, sample
+        case residualRisk = "residual_risk"
+        case personalInformation = "personal_information"
+        case secondLookWaiting = "second_look_waiting"
         case contribute, keep, dismiss
         case undoContribute = "undo_contribute"
         case undoKeep = "undo_keep"
@@ -46,7 +52,8 @@ public struct MonitorTracesCopy: Decodable, Equatable, Sendable {
     /// The payload fields this shell decodes, by wire name.
     public static let consumedFields = [
         "review", "tool", "folder", "started", "length", "prompts", "size", "sends", "marks", "unsure",
-        "eligibility", "attestation", "held", "sample", "contribute", "keep", "dismiss", "undo_contribute", "undo_keep", "core_unreachable", "request_failed",
+        "eligibility", "attestation", "held", "sample", "residual_risk", "personal_information",
+        "second_look_waiting", "contribute", "keep", "dismiss", "undo_contribute", "undo_keep", "core_unreachable", "request_failed",
     ]
 
     /// Decode the payload, or nil if it will not parse or a field is empty.
@@ -59,6 +66,7 @@ public struct MonitorTracesCopy: Decodable, Equatable, Sendable {
         let words = [
             copy.review, copy.tool, copy.folder, copy.started, copy.length, copy.prompts, copy.size,
             copy.sends, copy.marks, copy.unsure, copy.eligibility, copy.attestation, copy.held, copy.sample,
+            copy.residualRisk, copy.personalInformation, copy.secondLookWaiting,
             copy.contribute, copy.keep, copy.dismiss,
             copy.undoContribute, copy.undoKeep, copy.coreUnreachable, copy.requestFailed,
         ]

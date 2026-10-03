@@ -5558,6 +5558,20 @@ pub extern "C" fn tc_monitor_traces_copy_json() -> *mut c_char {
     })
 }
 
+/// The glass monitor's other screens' words
+/// (`preview_copy::monitor_screens_copy`): a JSON object of
+/// `MonitorScreensCopy`'s fields.
+///
+/// Returns an owned JSON string; free it with [`tc_string_free`]. NULL only
+/// on a caught panic.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_monitor_screens_copy_json() -> *mut c_char {
+    guarded_string_no_err(|| {
+        let copy = trace_commons_contributor::preview_copy::monitor_screens_copy();
+        Ok(to_owned_cstring(&serde_json::to_string(&copy)?))
+    })
+}
+
 /// The grant screens' words for one disclosure the daemon chose and named
 /// (`consent_copy::automatic_grant_copy_named`): a JSON object of
 /// `AutomaticGrantCopy`'s fields. An armed folder's `list_projects` row says
