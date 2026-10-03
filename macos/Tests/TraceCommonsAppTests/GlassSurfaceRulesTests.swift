@@ -14,6 +14,7 @@ final class GlassSurfaceRulesTests: XCTestCase {
     static let files: [String] = [
         "Views/Settings/GlassSettingsContent.swift",
         "Views/Settings/ConnectionSection.swift",
+        "Views/Settings/StartupSection.swift",
         "Views/Settings/WatchingSection.swift",
         "Views/Settings/ChangesSection.swift",
         "Views/Settings/SettingsStateRow.swift",

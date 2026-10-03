@@ -272,12 +272,9 @@ struct SettingsContent: View {
                     set: { newValue in if newValue { setLoginItem(enabled: true) } }
                 ))
             case .requiresApproval:
-                Text("Waiting on approval in System Settings.")
+                Text(SettingsLegacyWords.waitingOnApproval)
                     .font(TC.Font_.body)
-                Text("""
-                Turn it on in System Settings -> General -> Login Items to let \
-                Trace Commons start automatically.
-                """)
+                Text(SettingsLegacyWords.turnOnInSystemSettings)
                 .font(TC.Font_.caption)
                 .foregroundStyle(.secondary)
             }
@@ -296,7 +293,7 @@ struct SettingsContent: View {
     /// re-earn -- which is the same rule `DesignSystem.swift` states for the
     /// rest of the window chrome.
     private func startupToggle(isOn: Binding<Bool>) -> some View {
-        Toggle("Start Trace Commons when you log in", isOn: isOn)
+        Toggle(SettingsLegacyWords.startAtLogin, isOn: isOn)
             .toggleStyle(.switch)
             .tint(TC.accent)
             .font(TC.Font_.body)
@@ -309,11 +306,11 @@ struct SettingsContent: View {
             case .enabled, .requiresApproval:
                 break
             case .failed(let message):
-                loginItemActionError = "Couldn't turn this on: \(message)"
+                loginItemActionError = SettingsLegacyWords.couldNotTurnOn(message)
             }
         } else {
             if case .failed(let message) = LoginItemManager.unregister() {
-                loginItemActionError = "Couldn't turn this off: \(message)"
+                loginItemActionError = SettingsLegacyWords.couldNotTurnOff(message)
             }
         }
         loginItemState = LoginItemManager.currentState
@@ -388,7 +385,7 @@ struct SettingsContent: View {
 
             switch updates.mode {
             case .selfUpdating:
-                TCTag(text: "Checks daily", tone: .clear, symbol: "arrow.triangle.2.circlepath")
+                TCTag(text: SettingsLegacyWords.checksDaily, tone: .clear, symbol: "arrow.triangle.2.circlepath")
                 Text(lastCheckSentence)
                     .font(TC.Font_.meta)
                     .foregroundStyle(.secondary)
@@ -398,9 +395,7 @@ struct SettingsContent: View {
                 // download follows the yes. Copy that promised an
                 // already-downloaded update would be describing a
                 // configuration this app does not ship.
-                Text("""
-                    Trace Commons checks for updates automatically and asks before installing.
-                    """)
+                Text(SettingsLegacyWords.checksAutomatically)
                     .font(TC.Font_.meta)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -409,11 +404,8 @@ struct SettingsContent: View {
                     .disabled(!updates.canCheckNow)
 
             case .managedByHomebrew(let command):
-                TCTag(text: "Updates managed by Homebrew", tone: .held, symbol: "shippingbox")
-                Text("""
-                    Homebrew installed this copy, so Homebrew replaces it. Run \
-                    this in a terminal:
-                    """)
+                TCTag(text: SettingsLegacyWords.managedByHomebrew, tone: .held, symbol: "shippingbox")
+                Text(SettingsLegacyWords.homebrewReplaces)
                     .font(TC.Font_.meta)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -432,7 +424,7 @@ struct SettingsContent: View {
                 }
 
             case .disabled(let reason):
-                TCTag(text: "Updates unavailable", tone: .refused, symbol: "arrow.down.circle")
+                TCTag(text: SettingsLegacyWords.updatesUnavailable, tone: .refused, symbol: "arrow.down.circle")
                 Text(disabledSentence(reason))
                     .font(TC.Font_.meta)
                     .foregroundStyle(.secondary)
@@ -443,11 +435,11 @@ struct SettingsContent: View {
 
     private var lastCheckSentence: String {
         guard let date = updates.lastCheckDate else {
-            return "Not checked yet on this machine."
+            return SettingsLegacyWords.notCheckedYet
         }
         let formatter = RelativeDateTimeFormatter()
         formatter.unitsStyle = .full
-        return "Last checked \(formatter.localizedString(for: date, relativeTo: Date()))."
+        return SettingsLegacyWords.lastChecked(formatter.localizedString(for: date, relativeTo: Date()))
     }
 
     /// Turns the policy's stable label into a sentence. The label itself is
@@ -455,18 +447,11 @@ struct SettingsContent: View {
     private func disabledSentence(_ reason: String) -> String {
         switch reason {
         case UpdatePolicy.noFeedReason:
-            return """
-                This build has no update feed configured, so it will not look \
-                for new versions. Development builds are like this. Install \
-                from a release DMG to receive updates.
-                """
+            return SettingsLegacyWords.noFeed
         case UpdatePolicy.insecureFeedReason:
-            return """
-                This build's update feed is not HTTPS, so it has been refused. \
-                Reinstall from a release DMG.
-                """
+            return SettingsLegacyWords.insecureFeed
         default:
-            return "Updates are turned off for this build."
+            return SettingsLegacyWords.updatesOff
         }
     }
 
@@ -2161,6 +2146,36 @@ enum SettingsLegacyWords {
     static func stateLabel(_ title: String, _ value: Bool) -> String {
         "\(title): \(value ? "yes" : "no")"
     }
+    static let startAtLogin = "Start Trace Commons when you log in"
+    static let waitingOnApproval = "Waiting on approval in System Settings."
+    static let turnOnInSystemSettings = """
+        Turn it on in System Settings -> General -> Login Items to let \
+        Trace Commons start automatically.
+        """
+    static func couldNotTurnOn(_ message: String) -> String { "Couldn't turn this on: \(message)" }
+    static func couldNotTurnOff(_ message: String) -> String { "Couldn't turn this off: \(message)" }
+    static let checksDaily = "Checks daily"
+    static let checksAutomatically = """
+        Trace Commons checks for updates automatically and asks before installing.
+        """
+    static let managedByHomebrew = "Updates managed by Homebrew"
+    static let homebrewReplaces = """
+        Homebrew installed this copy, so Homebrew replaces it. Run \
+        this in a terminal:
+        """
+    static let updatesUnavailable = "Updates unavailable"
+    static let notCheckedYet = "Not checked yet on this machine."
+    static func lastChecked(_ relative: String) -> String { "Last checked \(relative)." }
+    static let noFeed = """
+        This build has no update feed configured, so it will not look \
+        for new versions. Development builds are like this. Install \
+        from a release DMG to receive updates.
+        """
+    static let insecureFeed = """
+        This build's update feed is not HTTPS, so it has been refused. \
+        Reinstall from a release DMG.
+        """
+    static let updatesOff = "Updates are turned off for this build."
     static let notificationsRenderedHere = "Notifications rendered by this app"
     static let pausedNothingSent = "Paused. Nothing is being queued or sent."
     static let auditHeading = SettingsContent.auditHeading

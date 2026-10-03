@@ -35,18 +35,6 @@ struct GlassSettingsContent: View {
 // Stubs: each later task replaces its stub with the real section file and
 // deletes the stub here. Until then the legacy body draws the section.
 
-struct StartupSection: View {
-    var body: some View { SettingsContent(section: .startup) }
-}
-
-struct NotificationsSection: View {
-    var body: some View { SettingsContent(section: .notifications) }
-}
-
-struct UpdatesSection: View {
-    var body: some View { SettingsContent(section: .updates) }
-}
-
 struct ConsentSection: View {
     var body: some View { SettingsContent(section: .consent) }
 }

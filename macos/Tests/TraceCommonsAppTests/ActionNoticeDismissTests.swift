@@ -34,7 +34,7 @@ import XCTest
 ///   surface saying nothing about a state that still holds.
 /// - `AppModel.summaryErrors[id]`, `credentialAttempt` and
 ///   `harnessExposureRequest` are each cleared on their own completion path.
-/// - `SettingsView.loginItemActionError`, `SettingsView.consentSaveError`,
+/// - `StartupSection.loginItemActionError`, `SettingsView.consentSaveError`,
 ///   `OnboardingRootsView.failure` and `PreviewSheet.failure` are view-local
 ///   `@State`, cleared at the top of each attempt and gone with the view.
 ///
