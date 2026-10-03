@@ -3068,6 +3068,7 @@ mod tests {
             // The witness the disclosure screen would have shown: the one
             // configured now.
             params: serde_json::json!({
+                "confirmed": true,
                 "witness_signing_address": f
                     .shared
                     .store
@@ -3142,9 +3143,16 @@ mod tests {
     async fn the_enforced_gate_holds_a_session_in_a_project_the_grant_armed() {
         ENFORCE_GATE_FOR_TEST.with(|c| c.set(true));
         let f = WatcherFixture::new();
-        f.shared.store.save_config(&grant_test_cfg(&[])).unwrap();
+        // The daemon refuses a grant over an empty scope list, so the grant
+        // is given under a chosen scope; narrowing the list to nothing
+        // afterwards is what the enforced gate refuses on.
+        f.shared
+            .store
+            .save_config(&grant_test_cfg(&["debugging_evaluation"]))
+            .unwrap();
         f.write_session("old", "11111111-1111-1111-1111-111111111111", 0);
         grant_automatic(&f);
+        f.shared.store.save_config(&grant_test_cfg(&[])).unwrap();
         f.settle(Utc::now() + chrono::Duration::hours(30)).await;
         f.write_session("old", "22222222-2222-2222-2222-222222222222", 0);
         f.write_session("new", "33333333-3333-3333-3333-333333333333", 0);

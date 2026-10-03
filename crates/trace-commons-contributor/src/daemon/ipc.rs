@@ -3261,9 +3261,16 @@ fn automatic_grant_value(shared: &DaemonShared) -> serde_json::Value {
     }
 }
 
+/// `grant_automatic` refused: the request did not carry `confirmed: true`,
+/// the grant screen's button. The same label `flow1::grant_precondition`
+/// refuses with in a shell, so the daemon holds the confirmation for every
+/// IPC caller rather than trusting each shell to have asked.
+pub const ERR_GRANT_CONFIRMATION_REQUIRED: &str = crate::flow1::GRANT_CONFIRMATION_REQUIRED;
 /// `grant_automatic` refused: the saved consent scopes were never chosen
-/// through `set_consent_scopes` (R7). An enrollment saves the floor scope
-/// with nobody having picked it, so a non-empty list is not a choice.
+/// through `set_consent_scopes` (R7), or the saved list is empty. An
+/// enrollment saves the floor scope with nobody having picked it, so a
+/// non-empty list is not a choice; and a choice recorded over an empty list
+/// names nothing to grant under.
 pub const ERR_GRANT_SCOPES_NOT_CHOSEN: &str = "automatic-grant-scopes-not-chosen";
 /// `grant_automatic` refused: the caller did not say which witness the
 /// contributor was shown (`witness_signing_address`, a string or `null`).
@@ -3272,15 +3279,22 @@ pub const ERR_GRANT_WITNESS_REQUIRED: &str = "automatic-grant-witness-required";
 /// contributor was shown.
 pub const ERR_GRANT_WITNESS_CHANGED: &str = "automatic-grant-witness-changed";
 
-/// Why the Flow 1 grant may not be given under `cfg`, given the witness
-/// signing address the caller says the contributor was shown. `None` when it
-/// may. The labels are fixed and carry no content.
+/// Why the Flow 1 grant may not be given under `cfg`, given the caller's
+/// confirmation and the witness signing address the caller says the
+/// contributor was shown. `None` when it may. The labels are fixed and carry
+/// no content.
 fn grant_automatic_refusal(
     cfg: &crate::config::ContributorConfig,
     params: &serde_json::Value,
 ) -> Option<&'static str> {
-    // R7: a scope nobody chose never carries a standing grant.
-    if !cfg.consent_scopes_chosen {
+    // The grant screen's button. Only a JSON `true` is a confirmation: an
+    // absent key, `false`, and a string or number are not.
+    if params.get("confirmed").and_then(serde_json::Value::as_bool) != Some(true) {
+        return Some(ERR_GRANT_CONFIRMATION_REQUIRED);
+    }
+    // R7: a scope nobody chose never carries a standing grant, and an empty
+    // list names nothing to grant under.
+    if !cfg.consent_scopes_chosen || cfg.consent_scopes.is_empty() {
         return Some(ERR_GRANT_SCOPES_NOT_CHOSEN);
     }
     // The witness shown on the disclosure screen, or `null` for none. It
@@ -3300,8 +3314,9 @@ fn grant_automatic_refusal(
 // Give the Flow 1 grant: arm projects discovered from now on (K3), never
 // anything already on disk (K4). Refused without terms to grant under, like
 // arming one project, and recorded before it takes effect. Refused, too,
-// unless the contributor chose the scopes (R7) and the witness configured
-// now is the one the disclosure screen showed.
+// unless the caller states the contributor confirmed (`confirmed: true`),
+// the contributor chose a non-empty scope list (R7), and the witness
+// configured now is the one the disclosure screen showed.
 fn handle_grant_automatic(shared: &DaemonShared, req: &Request) -> Response {
     let Ok(Some(cfg)) = shared.store.load_config() else {
         return Response::err(req.id, ERR_UNAVAILABLE, "arming-terms-unavailable");
@@ -6558,7 +6573,19 @@ fn probe_credential(req: &Request) -> Result<(u16, String, std::path::PathBuf), 
             // treated as absent, because falling through to the
             // environment would answer about a path the caller did not ask
             // about.
-            Some(dir) if !dir.is_empty() => Some(std::path::PathBuf::from(dir)),
+            Some(dir) if !dir.is_empty() => {
+                // Relative would resolve against the daemon's working
+                // directory, which no shell controls: the same floor
+                // `set_settings` holds a saved declaration to.
+                if !std::path::Path::new(dir).is_absolute() {
+                    return Err(Box::new(Response::err(
+                        req.id,
+                        ERR_BAD_PARAMS,
+                        super::settings::ERR_ROUTING_TOKEN_DIR_MUST_BE_ABSOLUTE,
+                    )));
+                }
+                Some(std::path::PathBuf::from(dir))
+            }
             _ => {
                 return Err(Box::new(Response::err(
                     req.id,
@@ -13639,6 +13666,24 @@ mod tests {
             .expect("a non-string token_dir is refused");
         assert_eq!(error.code, ERR_BAD_PARAMS);
         assert_eq!(error.message, "token-dir-invalid");
+        // A relative token_dir would be read against the daemon's working
+        // directory: the probe refuses it with the label `set_settings`
+        // uses, so a shell cannot be told a token was found at a path no
+        // saved declaration could ever name.
+        let req = Request {
+            id: 7,
+            method: "probe_routing".to_string(),
+            params: serde_json::json!({"port": 8463, "token_dir": "relative/ironwire"}),
+        };
+        let error = handle_probe_routing(&req)
+            .await
+            .error
+            .expect("a relative token_dir is refused");
+        assert_eq!(error.code, ERR_BAD_PARAMS);
+        assert_eq!(
+            error.message,
+            super::super::settings::ERR_ROUTING_TOKEN_DIR_MUST_BE_ABSOLUTE
+        );
         drop(dir);
     }
 
