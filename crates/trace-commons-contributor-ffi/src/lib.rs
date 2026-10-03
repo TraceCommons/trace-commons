@@ -5440,6 +5440,77 @@ pub unsafe extern "C" fn tc_arming_offer_copy_json(
     })
 }
 
+/// The menu-bar Contribution mode pill (#1173,
+/// `project_copy::contribution_mode_copy`): a JSON object `{title, mixed,
+/// choices, override_active, clear}`, `choices` being `[{mode, label,
+/// line}]` for Ask me, Auto contribute and Never, in that order. `mode` is
+/// what `set_contribution_override` takes. DRAFT, NEEDS APPROVAL, every
+/// sentence.
+///
+/// Returns an owned JSON string; free it with [`tc_string_free`]. NULL only
+/// on a caught panic.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_contribution_mode_copy_json() -> *mut c_char {
+    guarded_string_no_err(|| {
+        let copy = trace_commons_contributor::project_copy::contribution_mode_copy();
+        Ok(to_owned_cstring(&serde_json::to_string(&copy)?))
+    })
+}
+
+/// The confirmation for one contribution override (#1173,
+/// `project_copy::contribution_override_confirm_copy`): a JSON object
+/// `{mode, title, body, confirm, cancel, arming}`. `mode` is
+/// `"notify_only"`, `"auto_upload"` or `"ignore"`, as
+/// `set_contribution_override` takes it.
+///
+/// `arming` is the arming disclosure -- the Flow 1 grant screens' table,
+/// with the disclosure the core chose for the configuration in
+/// `config_dir` -- for `auto_upload`, and `null` otherwise. `config_dir` is
+/// read for `auto_upload` only, and may be NULL for the other two.
+///
+/// Returns an owned JSON string; free it with [`tc_string_free`]. NULL for a
+/// NULL, non-UTF-8 or unknown `mode`; for `auto_upload`, also for a NULL or
+/// non-UTF-8 `config_dir` or a configuration that cannot be read, since the
+/// disclosure is not guessed; and on a caught panic.
+///
+/// # Safety
+/// `mode` and `config_dir`, if non-null, must point to valid, NUL-terminated
+/// C strings.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_contribution_override_confirm_json(
+    mode: *const c_char,
+    config_dir: *const c_char,
+) -> *mut c_char {
+    use trace_commons_contributor::daemon::policy::ProjectMode;
+    guarded_string_no_err(|| {
+        let Some(mode) = (unsafe { borrow_optional_str(mode) }) else {
+            return Ok(std::ptr::null_mut());
+        };
+        let Ok(mode) = serde_json::from_value::<ProjectMode>(serde_json::json!(mode)) else {
+            return Ok(std::ptr::null_mut());
+        };
+        let config = if mode == ProjectMode::AutoUpload {
+            let Some(dir) = (unsafe { borrow_optional_str(config_dir) }) else {
+                return Ok(std::ptr::null_mut());
+            };
+            let Ok(store) = ConfigStore::open(std::path::PathBuf::from(dir)) else {
+                return Ok(std::ptr::null_mut());
+            };
+            let Ok(config) = store.load_config() else {
+                return Ok(std::ptr::null_mut());
+            };
+            config
+        } else {
+            None
+        };
+        let copy = trace_commons_contributor::project_copy::contribution_override_confirm_copy(
+            mode,
+            config.as_ref(),
+        );
+        Ok(to_owned_cstring(&serde_json::to_string(&copy)?))
+    })
+}
+
 /// The offer to move a legacy invite identity to a NEAR AI account
 /// (`consent_copy::legacy_migration_offer`), as a JSON object of
 /// `LegacyMigrationOfferCopy`'s fields. Shown only while
@@ -5755,6 +5826,354 @@ pub unsafe extern "C" fn tc_external_url_is_allowed(url: *const c_char) -> i32 {
         Ok(i32::from(
             trace_commons_contributor::external_url::is_allowed(url),
         ))
+    })
+}
+
+// ---------------------------------------------------------------------------
+// K5 (#1173): the disclosure bundle and the Flow 1 decisions, which were
+// taken in the Tauri shell and are now core functions. Each export below is
+// the C ABI route to one of them; none chooses or writes anything itself.
+// ---------------------------------------------------------------------------
+
+/// The disclosure bundle (`disclosure_copy::contributor_disclosure_copy`):
+/// the JSON object Tauri's `contributor_disclosure_copy` command returns,
+/// with every shared copy table the onboarding, settings, history and
+/// Private AI screens read.
+///
+/// `private_inference.states` maps each runtime state label the daemon
+/// reports to `{line, working}`: the core's sentence, and whether an
+/// indicator may paint that state as working. A label not in the map is
+/// `private_inference.state_unknown` and an absent one
+/// `private_inference.state_unreported`, neither working.
+///
+/// Returns an owned JSON string; free it with [`tc_string_free`]. NULL only
+/// on a caught panic.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_contributor_disclosure_copy_json() -> *mut c_char {
+    guarded_string_no_err(|| {
+        let copy = trace_commons_contributor::disclosure_copy::contributor_disclosure_copy();
+        Ok(to_owned_cstring(&serde_json::to_string(&copy)?))
+    })
+}
+
+/// What a shell checks before asking the daemon for the Flow 1 grant
+/// (`flow1::grant_precondition`), for the configuration in `config_dir`.
+///
+/// `confirmed` is the grant screen's button: 1 pressed, anything else not.
+/// Returns the EMPTY STRING when the grant may be asked for, and otherwise
+/// the refusal's fixed label: `automatic-grant-confirmation-required`,
+/// `automatic-grant-not-enrolled`, `automatic-grant-scope-required` (no
+/// scope chosen through the picker; a saved floor scope is not a choice), or
+/// `contributor-config-unreadable`. The daemon's `grant_automatic` still
+/// refuses on its own -- without `confirmed: true` in the request, without a
+/// chosen non-empty scope list, and on a changed witness; this is the first
+/// line.
+///
+/// Returns an owned string; free it with [`tc_string_free`]. NULL for a NULL
+/// or non-UTF-8 `config_dir`, and on a caught panic.
+///
+/// # Safety
+/// `config_dir`, if non-null, must point to a valid, NUL-terminated C
+/// string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_grant_precondition_text(
+    confirmed: i32,
+    config_dir: *const c_char,
+) -> *mut c_char {
+    guarded_string_no_err(|| {
+        use trace_commons_contributor::flow1;
+        let Some(dir) = (unsafe { borrow_optional_str(config_dir) }) else {
+            return Ok(std::ptr::null_mut());
+        };
+        let config =
+            ConfigStore::open(std::path::PathBuf::from(dir)).and_then(|store| store.load_config());
+        let refusal = match config {
+            Err(_) => Some(flow1::CONFIG_UNREADABLE),
+            Ok(config) => flow1::grant_precondition(confirmed == 1, config.as_ref()).err(),
+        };
+        Ok(to_owned_cstring(refusal.unwrap_or("")))
+    })
+}
+
+/// Whether the scope picker may continue (`flow1::scope_choice`): a JSON
+/// object `{can_continue, missing_required}`.
+///
+/// `options_json` is `consent_options`'s answer passed through -- the object
+/// `{"scopes": [...]}` or its array -- each scope at least `{name,
+/// always_on}`. `selected_json` is a JSON array of the scope names ticked.
+///
+/// Returns an owned JSON string; free it with [`tc_string_free`]. NULL for a
+/// NULL, non-UTF-8 or unparseable argument, and on a caught panic.
+///
+/// # Safety
+/// `options_json` and `selected_json`, if non-null, must each point to a
+/// valid, NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_scope_choice_json(
+    options_json: *const c_char,
+    selected_json: *const c_char,
+) -> *mut c_char {
+    guarded_string_no_err(|| {
+        use trace_commons_contributor::flow1::{ScopeOption, scope_choice};
+        let Some(options) = unsafe { borrow_optional_str(options_json) }
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(text).ok())
+        else {
+            return Ok(std::ptr::null_mut());
+        };
+        let options = match options {
+            serde_json::Value::Object(mut object) => {
+                object.remove("scopes").unwrap_or(serde_json::Value::Null)
+            }
+            other => other,
+        };
+        let Ok(options) = serde_json::from_value::<Vec<ScopeOption>>(options) else {
+            return Ok(std::ptr::null_mut());
+        };
+        let Some(selected) = unsafe { borrow_optional_str(selected_json) }
+            .and_then(|text| serde_json::from_str::<Vec<String>>(text).ok())
+        else {
+            return Ok(std::ptr::null_mut());
+        };
+        let choice = scope_choice(&options, &selected);
+        Ok(to_owned_cstring(&serde_json::to_string(&choice)?))
+    })
+}
+
+/// Where the Flow 1 onboarding starts (`flow1::start`): a JSON object
+/// `{step, progress, privacy_included}`. `regrant` 1 is the re-grant (K10)
+/// for a contributor already enrolled, which starts at the scope picker with
+/// nothing carried over; anything else is a first run, at the welcome.
+///
+/// Returns an owned JSON string; free it with [`tc_string_free`]. NULL only
+/// on a caught panic.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_flow1_start_json(regrant: i32) -> *mut c_char {
+    guarded_string_no_err(|| {
+        let state = trace_commons_contributor::flow1::start(regrant == 1);
+        Ok(to_owned_cstring(&serde_json::to_string(&state)?))
+    })
+}
+
+/// The Flow 1 onboarding's next state (`flow1::apply`): `state_json` is the
+/// state this export or [`tc_flow1_start_json`] last returned, passed back
+/// as given, and `event_json` what the contributor did, `{"event": <name>,
+/// ...}`. The step order, which step Back goes to, and that Back and a new
+/// path or scope choice leave both disclosures unread, are the core's.
+///
+/// A shell sets `progress.connected` from the daemon's status before each
+/// call; it is never a step remembered.
+///
+/// Returns an owned JSON string; free it with [`tc_string_free`]. NULL for a
+/// NULL, non-UTF-8 or unparseable argument, an event this build does not
+/// know, an event the step on screen does not offer
+/// (`flow1::event_belongs_to`; Back from the welcome or once done included),
+/// and on a caught panic. A NULL leaves the state the shell holds as it was.
+///
+/// # Safety
+/// `state_json` and `event_json`, if non-null, must each point to a valid,
+/// NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_flow1_apply_json(
+    state_json: *const c_char,
+    event_json: *const c_char,
+) -> *mut c_char {
+    guarded_string_no_err(|| {
+        use trace_commons_contributor::flow1::{Flow1Event, Flow1State, apply};
+        let Some(state) = unsafe { borrow_optional_str(state_json) }
+            .and_then(|text| serde_json::from_str::<Flow1State>(text).ok())
+        else {
+            return Ok(std::ptr::null_mut());
+        };
+        let Some(event) = unsafe { borrow_optional_str(event_json) }
+            .and_then(|text| serde_json::from_str::<Flow1Event>(text).ok())
+        else {
+            return Ok(std::ptr::null_mut());
+        };
+        // An event the step on screen does not offer moves nothing.
+        let Ok(next) = apply(&state, event) else {
+            return Ok(std::ptr::null_mut());
+        };
+        Ok(to_owned_cstring(&serde_json::to_string(&next)?))
+    })
+}
+
+/// Every step still standing between the contributor and the grant
+/// (`flow1::grant_blockers`), as a JSON array of labels in step order:
+/// `connect`, `scope`, `path`, `scrub_disclosure`, `witness_disclosure`.
+/// Empty when none is. A field missing from `progress_json` reads as that
+/// step not done.
+///
+/// Returns an owned JSON string; free it with [`tc_string_free`]. NULL for a
+/// NULL, non-UTF-8 or unparseable `progress_json`, and on a caught panic.
+///
+/// # Safety
+/// `progress_json`, if non-null, must point to a valid, NUL-terminated C
+/// string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_flow1_grant_blockers_json(progress_json: *const c_char) -> *mut c_char {
+    guarded_string_no_err(|| {
+        use trace_commons_contributor::flow1::{Flow1Progress, grant_blockers};
+        let Some(progress) = unsafe { borrow_optional_str(progress_json) }
+            .and_then(|text| serde_json::from_str::<Flow1Progress>(text).ok())
+        else {
+            return Ok(std::ptr::null_mut());
+        };
+        Ok(to_owned_cstring(&serde_json::to_string(&grant_blockers(
+            &progress,
+        ))?))
+    })
+}
+
+/// Whether a shell may ask the daemon for the grant now
+/// (`flow1::grant_request`): a JSON object `{ready, blockers,
+/// witness_signing_address}`. `ready` is true exactly when `blockers` is
+/// empty, and only then is `witness_signing_address` the witness the
+/// disclosure screen showed (null for none) to pass to `grant_automatic`;
+/// while anything blocks it is null and the grant is not asked for.
+///
+/// Returns an owned JSON string; free it with [`tc_string_free`]. NULL for a
+/// NULL, non-UTF-8 or unparseable `progress_json`, and on a caught panic.
+///
+/// # Safety
+/// `progress_json`, if non-null, must point to a valid, NUL-terminated C
+/// string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_flow1_grant_request_json(progress_json: *const c_char) -> *mut c_char {
+    guarded_string_no_err(|| {
+        use trace_commons_contributor::flow1::{Flow1Progress, grant_request};
+        let Some(progress) = unsafe { borrow_optional_str(progress_json) }
+            .and_then(|text| serde_json::from_str::<Flow1Progress>(text).ok())
+        else {
+            return Ok(std::ptr::null_mut());
+        };
+        let value = match grant_request(&progress) {
+            Ok(witness) => serde_json::json!({
+                "ready": true,
+                "blockers": [],
+                "witness_signing_address": witness,
+            }),
+            Err(blockers) => serde_json::json!({
+                "ready": false,
+                "blockers": blockers,
+                "witness_signing_address": null,
+            }),
+        };
+        Ok(to_owned_cstring(&serde_json::to_string(&value)?))
+    })
+}
+
+/// The notice for one element of `status.grant_voids`, for a shell that can
+/// give the Flow 1 grant (`consent_copy::void_notice_for_wire_with_regrant`):
+/// [`tc_grant_void_notice`]'s object, plus `regrant` and `regrant_action`,
+/// the sentence and the button that open the grant screens again. Both are
+/// present on the automatic grant's notice and null on a project's; which
+/// is the core's choice. A shell that cannot yet give the grant calls
+/// [`tc_grant_void_notice`] instead.
+///
+/// Returns an owned JSON string; free it with [`tc_string_free`]. NULL for a
+/// NULL, non-UTF-8 or unparseable argument, one that is not a JSON object,
+/// and on a caught panic.
+///
+/// # Safety
+/// `void_json`, if non-null, must point to a valid, NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_grant_void_notice_regrant_json(
+    void_json: *const c_char,
+) -> *mut c_char {
+    guarded_string_no_err(|| {
+        let Some(value) = unsafe { borrow_optional_str(void_json) }
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(text).ok())
+        else {
+            return Ok(std::ptr::null_mut());
+        };
+        let Some(notice) =
+            trace_commons_contributor::consent_copy::void_notice_for_wire_with_regrant(&value)
+        else {
+            return Ok(std::ptr::null_mut());
+        };
+        Ok(to_owned_cstring(&serde_json::to_string(&notice)?))
+    })
+}
+
+/// The health banner's words (R6/R7, #1173): `health_copy::core_down_copy`
+/// when `reachable` is 0, or `health_copy::health_copy_for_label` for
+/// `label` when the daemon answered.
+///
+/// `reachable` is the caller's own liveness fact -- whether its IPC call to
+/// the daemon answered at all -- and is never derived here; this export has
+/// no way to probe a daemon on its own. When `reachable` is non-zero, a NULL
+/// or empty `label` means a reachable daemon reported nothing wrong, and this
+/// returns NULL: there is no banner to draw. A non-empty `label` this build
+/// does not know -- including one that is not UTF-8 -- still gets the
+/// on-hold banner, never NULL (which a shell reads as healthy) and never
+/// raw-label text.
+///
+/// `max_queue_entries` is the daemon's configured queue limit
+/// (`get_settings.max_queue_entries`), used only for `queue-full`'s count; 0
+/// or negative means the caller does not know it, and the sentence then
+/// names no number.
+///
+/// Returns an owned JSON string of `{title, detail, action, action_kind,
+/// severity}`; free it with [`tc_string_free`]. NULL for nothing to show,
+/// and on a caught panic.
+///
+/// # Safety
+/// `label`, if non-null, must point to a valid, NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_health_copy_json(
+    reachable: i32,
+    label: *const c_char,
+    max_queue_entries: i64,
+) -> *mut c_char {
+    use trace_commons_contributor::health_copy;
+    guarded_string_no_err(|| {
+        if reachable == 0 {
+            let copy = health_copy::core_down_copy();
+            return Ok(to_owned_cstring(&serde_json::to_string(&copy)?));
+        }
+        if label.is_null() {
+            return Ok(std::ptr::null_mut());
+        }
+        let bytes = unsafe { CStr::from_ptr(label) }.to_bytes();
+        if bytes.is_empty() {
+            return Ok(std::ptr::null_mut());
+        }
+        let max = u64::try_from(max_queue_entries).ok().filter(|max| *max > 0);
+        let copy = match std::str::from_utf8(bytes) {
+            Ok(label) => health_copy::health_copy_for_label(label, max),
+            // A condition is being reported; this build just cannot read
+            // its name.
+            Err(_) => health_copy::on_hold_copy(),
+        };
+        Ok(to_owned_cstring(&serde_json::to_string(&copy)?))
+    })
+}
+
+/// The explanatory line under a `second_look` reason (R6/R7, #1173;
+/// **DRAFT, NEEDS APPROVAL** -- `preview_copy::second_look_line` is itself
+/// unapproved): why one scrubbed session waits for a person instead of
+/// moving on its own.
+///
+/// `reason` is one of `preview_copy`'s fixed `second_look` labels
+/// (`nothing-matched`, `looks-unsure`, `trimmed-to-fit`). A NULL, non-UTF-8
+/// or unrecognised `reason` returns NULL: this build has no sentence for it,
+/// and a shell must not invent one or show the raw label.
+///
+/// Returns an owned string; free it with [`tc_string_free`]. NULL for an
+/// unrecognised reason, and on a caught panic.
+///
+/// # Safety
+/// `reason`, if non-null, must point to a valid, NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_second_look_line_text(reason: *const c_char) -> *mut c_char {
+    guarded_string_no_err(|| {
+        let Some(reason) = (unsafe { borrow_optional_str(reason) }) else {
+            return Ok(std::ptr::null_mut());
+        };
+        match trace_commons_contributor::preview_copy::second_look_line(reason) {
+            Some(line) => Ok(to_owned_cstring(line)),
+            None => Ok(std::ptr::null_mut()),
+        }
     })
 }
 

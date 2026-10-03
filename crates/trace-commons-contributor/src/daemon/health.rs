@@ -84,6 +84,28 @@ pub const LABEL_AUTOMATIC_CONTRIBUTION_HELD: &str = "automatic-contribution-held
 /// A declared export cannot be imported by this build's qualified reader.
 pub const LABEL_OPENCODE_EXPORT_VERSION_UNSUPPORTED: &str = "opencode-export-version-unsupported";
 
+/// Every label this daemon can put in `last_error_label`, in precedence
+/// order. One list for every test that must cover them all (the health
+/// copy's, among others), so a new label is covered the day it is added;
+/// `all_labels_lists_every_label_constant` fails if a `LABEL_` constant is
+/// left out.
+pub const ALL_LABELS: [&str; 14] = [
+    LABEL_NOT_LOGGED_IN,
+    LABEL_NEAR_AI_NOTICE_PENDING,
+    LABEL_CANARY_FAILED,
+    LABEL_PII_FILTER_UNAVAILABLE,
+    LABEL_CLAIM_MINT_FAILED,
+    LABEL_ADMISSION_REFUSED,
+    LABEL_INGEST_UNREACHABLE,
+    LABEL_QUEUE_FULL,
+    LABEL_WITNESS_SATURATED,
+    LABEL_AUTOMATIC_CONTRIBUTION_HELD,
+    LABEL_ADMISSION_LIMIT_REACHED,
+    LABEL_DAILY_CAP_REACHED,
+    LABEL_SESSION_TOO_LARGE,
+    LABEL_OPENCODE_EXPORT_VERSION_UNSUPPORTED,
+];
+
 /// Labels describing a condition the contributor cannot resolve by making a
 /// decision about a trace. While one of these is in force, pending entries do
 /// not age out.
@@ -223,6 +245,28 @@ mod tests {
     use super::*;
 
     use crate::daemon::test_support::at;
+
+    /// `ALL_LABELS` names every `pub const LABEL_*` in this file, once, and
+    /// each is a label `precedence` knows. Counted off this file's own
+    /// source, so a label added without a place in the list fails here.
+    #[test]
+    fn all_labels_lists_every_label_constant() {
+        let source = include_str!("health.rs");
+        let declared = source
+            .lines()
+            .filter(|line| line.starts_with("pub const LABEL_"))
+            .count();
+        assert_eq!(
+            declared,
+            ALL_LABELS.len(),
+            "a LABEL_ constant is missing from ALL_LABELS"
+        );
+        let unique: std::collections::BTreeSet<&str> = ALL_LABELS.iter().copied().collect();
+        assert_eq!(unique.len(), ALL_LABELS.len(), "ALL_LABELS repeats a label");
+        for label in ALL_LABELS {
+            assert!(precedence(label) < precedence("not-a-label"), "{label}");
+        }
+    }
 
     #[test]
     fn a_fresh_state_is_healthy() {
