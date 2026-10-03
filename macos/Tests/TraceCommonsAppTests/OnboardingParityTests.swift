@@ -87,11 +87,24 @@ final class OnboardingParityTests: XCTestCase {
                       ".accessibilityLabel([project.displayLabel, move].joined(separator: \", \"))",
                       ".buttonStyle(GlassButtonStyle(.glass))", ".buttonStyle(GlassButtonStyle(.primary))",
                       ".keyboardShortcut(.defaultAction)"]),
+        Step(file: "Views/OnboardingDoneView.swift",
+             bindings: ["LoginItemManager.currentState", "LoginItemManager.register()", "Notifier.shared.authorizationStatus()",
+                        "Notifier.shared.requestAuthorization()", "Button(OnboardingDoneWords.done, action: onFinish)"],
+             copySources: ["Notifier.copy?.doneBody", "Notifier.copy?.notificationOffer", "Notifier.copy?.notNow",
+                           "Notifier.copy?.notificationAllow", "Notifier.copy?.notificationAllowed",
+                           "Notifier.copy?.notificationDenied", "Notifier.copy?.systemSettings", "Notifier.purpose",
+                           "OnboardingDoneWords.setUpNothingSent", "OnboardingDoneWords.startAtLoginQuestion",
+                           "OnboardingDoneWords.needsToBeRunning", "OnboardingDoneWords.willStartNextLogin",
+                           "OnboardingDoneWords.almostThere", "OnboardingDoneWords.couldNotTurnOn("],
+             guards: [".disabled(notificationRequestPending)", "notificationStatus == .notDetermined",
+                      "GlassStatusLabel(OnboardingDoneWords.setUpNothingSent, status: .on)",
+                      ".buttonStyle(GlassButtonStyle(.primary))", ".buttonStyle(GlassButtonStyle(.glass))",
+                      ".keyboardShortcut(.defaultAction)"]),
     ]
 
     /// Rows the table must hold; each task that adds a step raises it, so a
     /// dropped row fails here instead of passing silently.
-    static let minimumSteps = 6
+    static let minimumSteps = 7
 
     func test_theTableKeepsEveryRowAdded() {
         XCTAssertGreaterThanOrEqual(Self.steps.count, Self.minimumSteps)
@@ -175,6 +188,40 @@ final class OnboardingParityTests: XCTestCase {
         XCTAssertTrue(source.contains("struct ProjectErrorNotice: View {"))
         XCTAssertTrue(source.contains(
             "Button(Self.dismissLabel ?? ActionMessageBanner.dismissWord) { model.lastActionError = nil }"))
+    }
+
+    /// Done is the only place onboarding is marked complete, and the only
+    /// place the system is asked about notifications is a button under the
+    /// purpose sentence. The file itself never completes onboarding or
+    /// calls the model; its one exit is `onFinish`.
+    func test_doneCompletesOnlyFromItsButtonAndAsksOnlyFromAButton() throws {
+        let source = try Self.text("Views/OnboardingDoneView.swift")
+        XCTAssertFalse(source.contains("markOnboardingComplete"), "Done completes onboarding itself")
+        XCTAssertEqual(source.components(separatedBy: "Button(OnboardingDoneWords.done, action: onFinish)").count - 1, 1)
+        XCTAssertFalse(source.contains("onFinish()"), "Done calls onFinish from somewhere other than its button")
+        XCTAssertEqual(source.components(separatedBy: "Notifier.shared.requestAuthorization()").count - 1, 1)
+        XCTAssertEqual(source.components(separatedBy: "Button(Notifier.copy?.notificationAllow ?? \"\")").count - 1, 1)
+        let flat = source.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        let purpose = try XCTUnwrap(flat.range(of: "Text(Notifier.purpose)"))
+        let allow = try XCTUnwrap(flat.range(of: "Button(Notifier.copy?.notificationAllow"))
+        XCTAssertLessThan(purpose.lowerBound, allow.lowerBound, "the ask must sit under the purpose sentence")
+        let ask = try XCTUnwrap(flat.range(of: "Notifier.shared.requestAuthorization()"))
+        XCTAssertGreaterThan(ask.lowerBound, allow.lowerBound, "the request left the allow button")
+    }
+
+    /// Content structs hold no ScrollView; the wrapper scrolls once.
+    func test_doneScrollsOnce() throws {
+        let source = try Self.text("Views/OnboardingDoneView.swift")
+        XCTAssertEqual(source.components(separatedBy: "ScrollView {").count - 1, 1)
+    }
+
+    /// The refreshes hang on the always-present container, never on a
+    /// conditional branch.
+    func test_doneRefreshesHangOnTheAlwaysPresentContainer() throws {
+        let source = try Self.text("Views/OnboardingDoneView.swift")
+            .split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        XCTAssertTrue(source.contains(".padding(GlassTokens.Space.panePadding) .frame(maxWidth: .infinity, alignment: .leading) .task { await refreshStatus() }"))
+        XCTAssertTrue(source.contains(".onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification))"))
     }
 
     /// No rebuilt step reads the legacy palette.

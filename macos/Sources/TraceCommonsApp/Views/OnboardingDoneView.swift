@@ -1,5 +1,6 @@
 import SwiftUI
 import TCBridge
+import TCDesign
 import UserNotifications
 
 /// Onboarding screen 6, "Done" -- the last onboarding screen and, by design,
@@ -29,6 +30,10 @@ struct OnboardingDoneView: View {
 /// silently at first launch. `ImageRenderer` (see `DebugScreenshot`) never
 /// fires a button tap, so rendering this for a screenshot only ever reads
 /// `LoginItemManager.currentState` -- it cannot trigger `register()`.
+///
+/// The only way out is `onFinish`, from Done's own button: nothing here
+/// completes onboarding by itself, and the button is disabled while a
+/// notification request is pending so the answer cannot be abandoned.
 struct OnboardingDoneContent: View {
     var onFinish: () -> Void
 
@@ -44,34 +49,43 @@ struct OnboardingDoneContent: View {
     @State private var notificationRequestPending = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: TC.Space.xl) {
-            HStack(spacing: TC.Space.s) {
-                Image(systemName: TC.Tone.clear.symbol)
-                    .font(.system(size: 18))
-                    .foregroundStyle(TC.statusOn)
-                    .accessibilityHidden(true)
-                Text("You're set up. Nothing has been sent.")
-                    .font(TC.Font_.sectionTitle)
+        VStack(alignment: .leading, spacing: GlassTokens.Space.s6) {
+            VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
+                GlassStatusLabel(OnboardingDoneWords.setUpNothingSent, status: .on)
+                Text(Notifier.copy?.doneBody ?? "")
+                    .glassType(GlassTokens.TypeScale.body)
+                    .foregroundStyle(GlassColor.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
-
-            Text(Notifier.copy?.doneBody ?? "")
-                .font(.body)
 
             loginItemOffer
             notificationOffer
 
-            Button("Done", action: onFinish)
-                .disabled(notificationRequestPending)
-                .tcPrimaryAction()
-                .keyboardShortcut(.defaultAction)
+            HStack(spacing: GlassTokens.Space.s4) {
+                Spacer(minLength: 0)
+                Button(OnboardingDoneWords.done, action: onFinish)
+                    .buttonStyle(GlassButtonStyle(.primary))
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(notificationRequestPending)
+            }
         }
-        .padding(TC.Space.xxl)
-        .tcColumn(TC.Measure.prose)
-        .tcScreen()
-        .task { notificationStatus = await Notifier.shared.authorizationStatus() }
+        .padding(GlassTokens.Space.panePadding)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .task { await refreshStatus() }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
-            Task { notificationStatus = await Notifier.shared.authorizationStatus() }
+            Task { await refreshStatus() }
         }
+    }
+
+    private func refreshStatus() async {
+        notificationStatus = await Notifier.shared.authorizationStatus()
+    }
+
+    private func caption(_ sentence: String) -> some View {
+        Text(sentence)
+            .glassType(GlassTokens.TypeScale.caption)
+            .foregroundStyle(GlassColor.textSecondary)
+            .fixedSize(horizontal: false, vertical: true)
     }
 
     /// The permission prompt, where the spec puts it: at the end of
@@ -79,46 +93,51 @@ struct OnboardingDoneContent: View {
     /// It used to be fired from launch, before the app had said what it
     /// was. Shown only while the system has never been asked; a yes or a
     /// no already given is not re-asked here, and Settings shows the state
-    /// either way.
+    /// either way. Until the system answers nothing is drawn: an unanswered
+    /// status is never read as a state.
     @ViewBuilder
     private var notificationOffer: some View {
         if notificationStatus == .denied {
-            Text(Notifier.copy?.notificationDenied ?? "")
-                .font(.callout).foregroundStyle(.secondary)
-            Link(Notifier.copy?.systemSettings ?? "", destination: Notifier.systemSettingsURL)
-                .tint(TC.accentText)
-        } else if Notifier.canPostDigest(notificationStatus) {
-            Text(Notifier.copy?.notificationAllowed ?? "")
-                .font(.callout).foregroundStyle(.secondary)
-        } else if !notificationOfferDismissed && notificationStatus == .notDetermined {
-            VStack(alignment: .leading, spacing: 10) {
-                Text(Notifier.copy?.notificationOffer ?? "")
-                    .font(.callout.weight(.semibold))
-                Text(Notifier.purpose)
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                HStack(spacing: 12) {
-                    Button(Notifier.copy?.notNow ?? "") {
-                        notificationOfferDismissed = true
-                    }
-                    .tint(.primary)
-                    Button(Notifier.copy?.notificationAllow ?? "") {
-                        guard !notificationRequestPending else { return }
-                        notificationRequestPending = true
-                        Task {
-                            defer { notificationRequestPending = false }
-                            _ = await Notifier.shared.requestAuthorization()
-                            notificationStatus = await Notifier.shared.authorizationStatus()
-                        }
-                    }
-                    .tcPrimaryAction()
-                }
-                .disabled(notificationRequestPending)
+            VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
+                caption(Notifier.copy?.notificationDenied ?? "")
+                Link(Notifier.copy?.systemSettings ?? "", destination: Notifier.systemSettingsURL)
+                    .glassType(GlassTokens.TypeScale.body)
+                    .foregroundStyle(GlassColor.accentText)
             }
-            .padding(TC.Space.l)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .tcCard()
+        } else if Notifier.canPostDigest(notificationStatus) {
+            caption(Notifier.copy?.notificationAllowed ?? "")
+        } else if !notificationOfferDismissed && notificationStatus == .notDetermined {
+            GlassCard {
+                VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
+                    Text(Notifier.copy?.notificationOffer ?? "")
+                        .glassType(GlassTokens.TypeScale.bodyStrong)
+                    Text(Notifier.purpose)
+                        .glassType(GlassTokens.TypeScale.caption)
+                        .foregroundStyle(GlassColor.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    HStack(spacing: GlassTokens.Space.s3) {
+                        Button(Notifier.copy?.notNow ?? "") {
+                            notificationOfferDismissed = true
+                        }
+                        .buttonStyle(GlassButtonStyle(.glass))
+                        Button(Notifier.copy?.notificationAllow ?? "") {
+                            requestAuthorization()
+                        }
+                        .buttonStyle(GlassButtonStyle(.primary))
+                    }
+                    .disabled(notificationRequestPending)
+                }
+            }
+        }
+    }
+
+    private func requestAuthorization() {
+        guard !notificationRequestPending else { return }
+        notificationRequestPending = true
+        Task {
+            defer { notificationRequestPending = false }
+            _ = await Notifier.shared.requestAuthorization()
+            await refreshStatus()
         }
     }
 
@@ -130,28 +149,25 @@ struct OnboardingDoneContent: View {
         if let registerOutcome {
             loginItemResult(registerOutcome)
         } else if !offerDismissed && LoginItemManager.currentState != .enabled {
-            VStack(alignment: .leading, spacing: 10) {
-                Text("Start Trace Commons when you log in?")
-                    .font(.callout.weight(.semibold))
-                Text("It needs to be running to notice finished sessions.")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                HStack(spacing: 12) {
-                    Button("Not now") {
-                        offerDismissed = true
+            GlassCard {
+                VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
+                    Text(OnboardingDoneWords.startAtLoginQuestion)
+                        .glassType(GlassTokens.TypeScale.bodyStrong)
+                    caption(OnboardingDoneWords.needsToBeRunning)
+                    HStack(spacing: GlassTokens.Space.s3) {
+                        // Declining is the quiet button; the accent means
+                        // "yes" everywhere else in the app.
+                        Button(OnboardingDoneWords.notNow) {
+                            offerDismissed = true
+                        }
+                        .buttonStyle(GlassButtonStyle(.glass))
+                        Button(OnboardingDoneWords.startAtLogin) {
+                            registerOutcome = LoginItemManager.register()
+                        }
+                        .buttonStyle(GlassButtonStyle(.primary))
                     }
-                    // Untinted: declining should not wear the accent that
-                    // means "yes" everywhere else in the app.
-                    .tint(.primary)
-                    Button("Start at login") {
-                        registerOutcome = LoginItemManager.register()
-                    }
-                .tcPrimaryAction()
                 }
             }
-            .padding(TC.Space.l)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .tcCard()
         }
     }
 
@@ -164,20 +180,28 @@ struct OnboardingDoneContent: View {
     private func loginItemResult(_ outcome: LoginItemManager.RegisterOutcome) -> some View {
         switch outcome {
         case .enabled:
-            Text("Trace Commons will start automatically next time you log in.")
-                .font(.callout)
-                .foregroundStyle(.secondary)
+            caption(OnboardingDoneWords.willStartNextLogin)
         case .requiresApproval:
-            Text("""
-            Almost there -- macOS needs you to approve this in System Settings -> \
-            General -> Login Items before it will start automatically.
-            """)
-            .font(.callout)
-            .foregroundStyle(.secondary)
+            caption(OnboardingDoneWords.almostThere)
         case .failed(let message):
-            Text("Couldn't turn this on: \(message)")
-                .font(.callout)
-                .foregroundStyle(.secondary)
+            caption(OnboardingDoneWords.couldNotTurnOn(message))
         }
     }
+}
+
+/// This screen's sentences, held verbatim from the legacy screen. The
+/// notification words are the core's (`Notifier.copy`).
+enum OnboardingDoneWords {
+    static let setUpNothingSent = "You're set up. Nothing has been sent."
+    static let startAtLoginQuestion = "Start Trace Commons when you log in?"
+    static let needsToBeRunning = "It needs to be running to notice finished sessions."
+    static let willStartNextLogin = "Trace Commons will start automatically next time you log in."
+    static let almostThere = """
+        Almost there -- macOS needs you to approve this in System Settings -> \
+        General -> Login Items before it will start automatically.
+        """
+    static func couldNotTurnOn(_ message: String) -> String { "Couldn't turn this on: \(message)" }
+    static let notNow = "Not now"
+    static let startAtLogin = "Start at login"
+    static let done = "Done"
 }
