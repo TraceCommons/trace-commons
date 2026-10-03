@@ -198,7 +198,7 @@ struct MainWindowView: View {
             // window; Compute is a destination of its own here.
             ScrollView {
                 ForEach(SettingsSection.allCases.filter { $0 != .compute }) {
-                    GlassSettingsContent(navigation: navigation, section: $0)
+                    GlassSettingsContent(section: $0)
                 }
             }
         case .compute: EmptyView()
@@ -481,6 +481,7 @@ struct MainWindowCommands: Commands {
     var compute: ComputeModel
     var navigation: MainWindowNavigation
     var missionDrafts: MissionDraftsModel
+    @Environment(\.openWindow) private var openWindow
 
     /// Cmd-N for the Nth destination.
     static let destinationModifiers: EventModifiers = [.command]
@@ -509,8 +510,11 @@ struct MainWindowCommands: Commands {
         // than a blank one.
         if !label.isEmpty {
             Button(label) {
+                // The legacy window's own sidebar, opened directly; it
+                // leaves with this window in T11 (ruling R-33).
                 navigation.section = item
-                OpenMainWindow.request()
+                NSApp.activate(ignoringOtherApps: true)
+                openWindow(id: WindowID.main)
             }
             .keyboardShortcut(
                 item.shortcut.map { KeyEquivalent($0) } ?? "0",
@@ -537,10 +541,7 @@ struct MainWindowCommands: Commands {
                 MenuBarContent.performPrivateInferenceTray(
                     on: on,
                     turnOff: { model.applyPrivateInference(false) },
-                    open: {
-                        navigation.section = .privateInference
-                        OpenMainWindow.request()
-                    })
+                    open: { OpenMonitor.request(.inference) })
             }
             .keyboardShortcut(KeyEquivalent(Self.toggleKey), modifiers: Self.toggleModifiers)
             // Only the writing direction can be unavailable. Navigation stays

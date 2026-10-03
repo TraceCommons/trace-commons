@@ -20,10 +20,11 @@ final class ComputeNavigationTests: XCTestCase {
         let root = try directory()
         let trace = AppModel()
         let compute = ComputeModel()
-        let navigation = MainWindowNavigation()
-        navigation.section = .compute
+        // A quit refusal's destination opens Settings at Compute, whatever
+        // onboarding says.
+        let destination = MonitorDestination.settings(.compute)
         await compute.start(configDirectory: root.path)
-        XCTAssertTrue(navigation.displaysCompute)
+        XCTAssertEqual(destination.settingsSection, .compute)
         XCTAssertEqual(trace.startup, .starting)
         XCTAssertFalse(trace.status.loggedIn)
         XCTAssertFalse(trace.isOnboardingComplete)
@@ -50,13 +51,10 @@ final class ComputeNavigationTests: XCTestCase {
         XCTAssertEqual(trace.startup, .needsRoots, "fresh launch must refuse watcher before scanning")
         let compute = ComputeModel()
         await compute.start(configDirectory: root.path)
-        let navigation = MainWindowNavigation()
-        navigation.section = .compute
-        XCTAssertTrue(navigation.displaysCompute)
+        XCTAssertEqual(MonitorDestination.settings(.compute).settingsSection, .compute)
         XCTAssertNotNil(compute.snapshot)
-        for section: MainWindowView.Section in [.queue, .history, .settings] {
-            navigation.section = section
-            XCTAssertFalse(navigation.displaysCompute)
+        for destination: MonitorDestination in [.traces(entryId: nil), .home(.history), .settings(.watchedFolders)] {
+            XCTAssertNotEqual(destination.settingsSection, .compute)
             XCTAssertEqual(trace.startup, .needsRoots)
             XCTAssertFalse(trace.traceNavigationReady)
             XCTAssertFalse(trace.isOnboardingComplete)
@@ -89,9 +87,7 @@ final class ComputeNavigationTests: XCTestCase {
         try Data("invalid".utf8).write(to: settings.appendingPathComponent("settings.json"))
         let compute = ComputeModel()
         await compute.start(configDirectory: root.path)
-        let navigation = MainWindowNavigation()
-        navigation.section = .compute
-        XCTAssertTrue(navigation.displaysCompute)
+        XCTAssertEqual(MonitorDestination.settings(.compute).settingsSection, .compute)
         XCTAssertNotNil(compute.copy)
         XCTAssertNil(compute.snapshot)
         XCTAssertNotNil(compute.failureLabel)

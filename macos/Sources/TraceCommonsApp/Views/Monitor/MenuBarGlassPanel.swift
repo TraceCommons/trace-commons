@@ -23,7 +23,6 @@ import TCShellCore
 /// - No projected credit, and the badge is decisions owed.
 struct MenuBarGlassPanel: View {
     @EnvironmentObject private var model: AppModel
-    @Environment(\.openWindow) private var openWindow
     @Environment(\.openSettings) private var openSettings
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let navigation: MainWindowNavigation
@@ -258,14 +257,14 @@ struct MenuBarGlassPanel: View {
         if let copy = model.privateInferenceCopy {
             GlassOptionRow(MenuWords.on, sub: privateAIOn == true ? nil : copy.trayOpenToTurnOn,
                            fill: .solid(GlassTokens.Color.menuModeArmed), checked: privateAIOn == true) {
-                openMain(.privateInference)
+                open(.inference)
                 sub = nil
             }
             GlassOptionRow(MonitorWords.off, sub: privateAIOn == true ? copy.trayTurnOff : nil,
                            fill: .solid(GlassTokens.Color.menuPillOff), checked: privateAIOn == false) {
                 MenuBarContent.performPrivateInferenceTray(
                     on: privateAIOn == true, turnOff: { model.applyPrivateInference(false) },
-                    open: { openMain(.privateInference) })
+                    open: { open(.inference) })
                 sub = nil
             }
             .disabled(privateAIOn == true && (model.privateInferenceBusy || model.daemonSettings?.privateInference == nil))
@@ -314,9 +313,9 @@ struct MenuBarGlassPanel: View {
                 ForEach(rows) { row in
                     GlassActivityRow(tool: row.tool, text: row.text, trailing: row.trailing) {
                         switch row.kind {
-                        case .waiting: openMain(.queue)
-                        case .contributed: openMain(.history)
-                        case .call: openMain(.privateInference)
+                        case .waiting: open(.traces(entryId: nil))
+                        case .contributed: open(.home(.history))
+                        case .call: open(.inference)
                         }
                     }
                 }
@@ -329,7 +328,7 @@ struct MenuBarGlassPanel: View {
     private var menuItems: some View {
         VStack(alignment: .leading, spacing: 0) {
             hairline
-            Button { openMain(.queue) } label: {
+            Button { open(.traces(entryId: nil)) } label: {
                 HStack {
                     Text(FlowMapScene.pair(MenuWords.flagged, store.stale ? nil : MenuPanelData.flagged(store.pending)))
                     Spacer(minLength: 0)
@@ -337,7 +336,7 @@ struct MenuBarGlassPanel: View {
                 }
             }
             hairline
-            Button(MenuWords.manageRules) { openMain(.settings) }
+            Button(MenuWords.manageRules) { open(.settings(.watchedFolders)) }
             Button(MenuWords.settings) {
                 NSApp.activate(ignoringOtherApps: true)
                 openSettings()
@@ -353,10 +352,9 @@ struct MenuBarGlassPanel: View {
             .accessibilityHidden(true)
     }
 
-    private func openMain(_ section: MainWindowView.Section) {
-        navigation.section = section
-        NSApp.activate(ignoringOtherApps: true)
-        openWindow(id: WindowID.main)
+    /// The Monitor (or first run) at a destination; the handler raises it.
+    private func open(_ destination: MonitorDestination) {
+        OpenMonitor.request(destination)
     }
 }
 

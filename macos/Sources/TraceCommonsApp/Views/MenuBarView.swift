@@ -137,12 +137,6 @@ struct MenuBarGlyph: View {
 
 struct MenuBarContent: View {
     @EnvironmentObject private var model: AppModel
-    @Environment(\.openWindow) private var openWindow
-
-    /// Where the window is pointed before it is raised. Optional so the
-    /// screenshot hook can render this menu without one; a menu with no
-    /// navigation still opens the window, it just opens it where it was.
-    var navigation: MainWindowNavigation?
 
     var body: some View {
         Group {
@@ -166,7 +160,7 @@ struct MenuBarContent: View {
             // set here. Tokens are applied where they survive -- the status
             // item in `MenuBarLabel` above, and every window this menu opens.
             Button {
-                openMain()
+                openWaiting()
             } label: {
                 Label("Review waiting sessions…", systemImage: "tray.full")
             }
@@ -429,9 +423,14 @@ struct MenuBarContent: View {
 
     // MARK: - Opening the window
 
+    /// The Monitor (or first run) where it was; the handler raises it.
     private func openMain() {
-        NSApp.activate(ignoringOtherApps: true)
-        openWindow(id: WindowID.main)
+        OpenMonitor.request()
+    }
+
+    /// The waiting sessions, in the Monitor's Traces tab.
+    private func openWaiting() {
+        OpenMonitor.request(.traces(entryId: nil))
     }
 
     /// The window, at the model-calls destination.
@@ -441,8 +440,7 @@ struct MenuBarContent: View {
     /// exposes is on screen when the switch is, and a window raised at
     /// whatever screen it was last on would not carry it.
     private func openPrivateInference() {
-        navigation?.section = .privateInference
-        openMain()
+        OpenMonitor.request(.inference)
     }
 }
 

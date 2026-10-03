@@ -161,6 +161,171 @@ final class MonitorNavigationTests: XCTestCase {
         await store.load()
         XCTAssertEqual(store.phase, .loaded)
     }
+
+    // MARK: Opening the Monitor from outside (Review Focus 4)
+
+    func test_aRequestBeforeTheHandlerIsReplayedOnce() {
+        OpenMonitor.reset()
+        addTeardownBlock { @MainActor in OpenMonitor.reset() }
+        var opened: [MonitorDestination?] = []
+        OpenMonitor.request(.traces(entryId: nil))
+        OpenMonitor.request(.settings(.compute))
+        XCTAssertTrue(opened.isEmpty)
+        OpenMonitor.handler = { opened.append($0) }
+        XCTAssertEqual(opened.count, 1, "a held request replays exactly once")
+        XCTAssertEqual(opened.first, .settings(.compute), "the last destination wins")
+        OpenMonitor.request(nil)
+        XCTAssertEqual(opened.count, 2)
+        XCTAssertEqual(opened.last, .some(nil))
+        // A handler installed again replays nothing: the hold was spent.
+        OpenMonitor.handler = { opened.append($0) }
+        XCTAssertEqual(opened.count, 2, "a held request replays once, not once per handler")
+    }
+
+    /// A request with no destination (a Dock click, an invite link) is held
+    /// as a request, not dropped because it carries no destination.
+    func test_aRequestWithNoDestinationIsHeldToo() {
+        OpenMonitor.reset()
+        addTeardownBlock { @MainActor in OpenMonitor.reset() }
+        var opened: [MonitorDestination?] = []
+        OpenMonitor.request()
+        OpenMonitor.handler = { opened.append($0) }
+        XCTAssertEqual(opened.count, 1)
+        XCTAssertEqual(opened.first, .some(nil))
+    }
+
+    /// With no request before it, installing the handler opens nothing.
+    func test_noRequestNoReplay() {
+        OpenMonitor.reset()
+        addTeardownBlock { @MainActor in OpenMonitor.reset() }
+        var opened = 0
+        OpenMonitor.handler = { _ in opened += 1 }
+        XCTAssertEqual(opened, 0)
+    }
+
+    func test_firstRunWinsWhileOnboardingIsRequired() {
+        XCTAssertEqual(LaunchRouting.window(requiresOnboarding: true), .firstRun)
+        XCTAssertEqual(LaunchRouting.window(requiresOnboarding: false), .monitor)
+    }
+
+    /// Each destination lands on its tab; Inference reveals the inspector,
+    /// where the Private AI switch and sign-in are; a session's id selects
+    /// it and shows its review.
+    func test_eachDestinationLandsOnItsTab() {
+        var tab = MonitorWindowView.Tab.home
+        var page = HomeTabView.Page.overview
+        var session = ""
+        var inspector = false
+        func land(_ destination: MonitorDestination) {
+            MonitorWindowView.land(destination, tab: &tab, homePage: &page,
+                                   selectedSession: &session, showsInspector: &inspector)
+        }
+
+        land(.inference)
+        XCTAssertEqual(tab, .inference)
+        XCTAssertTrue(inspector, "the Private AI switch and sign-in live in the Inference inspector")
+
+        inspector = false
+        land(.traces(entryId: nil))
+        XCTAssertEqual(tab, .traces)
+        XCTAssertEqual(session, "", "no id selects nothing")
+        XCTAssertFalse(inspector)
+
+        land(.traces(entryId: "entry-7"))
+        XCTAssertEqual(session, "entry-7")
+        XCTAssertTrue(inspector)
+
+        land(.home(.history))
+        XCTAssertEqual(tab, .home)
+        XCTAssertEqual(page, .history)
+
+        // Settings is its own window: the Monitor's tabs stay as they were.
+        land(.settings(.compute))
+        XCTAssertEqual(tab, .home)
+        XCTAssertEqual(page, .history)
+    }
+
+    func test_onlySettingsDestinationsNameASettingsSection() {
+        XCTAssertEqual(MonitorDestination.settings(.compute).settingsSection, .compute)
+        XCTAssertEqual(MonitorDestination.settings(.watchedFolders).settingsSection, .watchedFolders)
+        for destination: MonitorDestination in [.inference, .traces(entryId: nil), .traces(entryId: "x"),
+                                                .home(.overview), .home(.history)] {
+            XCTAssertNil(destination.settingsSection, "\(destination) opens Settings")
+        }
+    }
+
+    /// Until R15 (T11) a release build has only the legacy window, which
+    /// is opened at the matching legacy section; a quit refusal still lands
+    /// on Compute there. T11 deletes this with `section` (ruling R-33).
+    func test_aReleaseBuildOpensTheLegacyWindowAtTheMatchingSection() {
+        XCTAssertEqual(MainWindowNavigation.legacySection(for: .settings(.compute)), .compute)
+        XCTAssertEqual(MainWindowNavigation.legacySection(for: .settings(.watchedFolders)), .settings)
+        XCTAssertEqual(MainWindowNavigation.legacySection(for: .traces(entryId: nil)), .queue)
+        XCTAssertEqual(MainWindowNavigation.legacySection(for: .home(.history)), .history)
+        XCTAssertEqual(MainWindowNavigation.legacySection(for: .inference), .privateInference)
+        XCTAssertNil(MainWindowNavigation.legacySection(for: .home(.overview)), "no legacy overview: stays where it was")
+        XCTAssertNil(MainWindowNavigation.legacySection(for: nil))
+    }
+
+    /// Every outside opener goes through OpenMonitor; nothing names the
+    /// deleted main window's opener. (`WindowID.main` itself leaves
+    /// TraceCommonsAppMain.swift with the legacy window in T11, ruling R-33.)
+    func test_everyOpenerUsesOpenMonitor() throws {
+        let delegate = try Self.text("AppDelegate.swift")
+        XCTAssertTrue(delegate.contains("OpenMonitor.request(.settings(.compute))"), "quit refusal must land on Compute")
+        XCTAssertTrue(delegate.contains("if !hasVisibleWindows { OpenMonitor.request() }"), "Dock reopen")
+        XCTAssertTrue(delegate.contains("NSApp.activate(ignoringOtherApps: true)\n            OpenMonitor.request()\n"),
+                      "an invite link opens the Monitor")
+        XCTAssertTrue(delegate.contains("D-14"), "the invite-link comment must say a deep link only opens the Monitor")
+        XCTAssertFalse(delegate.contains("OpenMainWindow"))
+        XCTAssertFalse(delegate.contains("navigation?.section"))
+        let main = try Self.text("TraceCommonsAppMain.swift")
+        XCTAssertTrue(main.contains("Notifier.shared.onReview = { OpenMonitor.request(.traces(entryId: nil)) }"))
+        XCTAssertTrue(main.contains("TRACE_COMMONS_SHOW_WINDOW"))
+        XCTAssertTrue(main.contains("OpenMonitor.handler = { destination in"))
+        XCTAssertTrue(main.contains("switch LaunchRouting.window(requiresOnboarding: model.requiresOnboarding) {"))
+        XCTAssertTrue(main.contains("MonitorWindowView(navigation: navigation)"))
+        XCTAssertFalse(main.contains("OpenMainWindow"))
+        let panel = try Self.text("Views/Monitor/MenuBarGlassPanel.swift")
+        XCTAssertFalse(panel.contains("MainWindowView.Section"))
+        XCTAssertFalse(panel.contains("openMain("))
+        XCTAssertTrue(panel.contains("OpenMonitor.request(destination)"))
+        for needle in ["open(.inference)", "open(.traces(entryId: nil))", "open(.home(.history))",
+                       "open(.settings(.watchedFolders))"] {
+            XCTAssertTrue(panel.contains(needle), "the menu panel never opens \(needle)")
+        }
+        let menu = try Self.text("Views/MenuBarView.swift")
+        XCTAssertFalse(menu.contains("openWindow(id: WindowID.main)"), "the shipping menu opens the Monitor by destination")
+        XCTAssertTrue(menu.contains("OpenMonitor.request(.inference)"))
+        XCTAssertTrue(menu.contains("OpenMonitor.request(.traces(entryId: nil))"))
+        let pointer = try Self.text("Views/Settings/PrivateAISection.swift")
+        XCTAssertTrue(pointer.contains("Button(copy.destination) {\n                            OpenMonitor.request(.inference)\n"))
+        // The Monitor consumes the destination on an always-present
+        // container, initially too, and lands Inference on its inspector.
+        let window = try Self.text("Views/MonitorWindowView.swift")
+        XCTAssertTrue(window.contains(".glassWindow()\n        .onChange(of: navigation.pending, initial: true) {"))
+        // From `land`, not the file's first `case .inference:` (the tab's
+        // title switch comes first).
+        let land = try XCTUnwrap(window.range(of: "static func land("))
+        let inference = try XCTUnwrap(window.range(of: "case .inference:", range: land.upperBound ..< window.endIndex))
+        XCTAssertTrue(window[inference.upperBound...].prefix(200).contains("showsInspector = true"),
+                      "the Private AI switch and sign-in live in the Inference inspector")
+        XCTAssertTrue(window.contains(".onChange(of: navigation.settingsSection, initial: true) {"),
+                      "Settings already open must still move to the asked-for section")
+    }
+
+    /// D-11: services no longer wait for the main window to leave Insights;
+    /// the first request starts them, once.
+    func test_servicesStartOnTheFirstRequestWhateverTheSection() {
+        let navigation = MainWindowNavigation()
+        var starts = 0
+        navigation.activateServicesIfNeeded { starts += 1 }
+        navigation.activateServicesIfNeeded { starts += 1 }
+        navigation.activateServicesForWindow()
+        XCTAssertEqual(starts, 1)
+        XCTAssertNil(navigation.pending)
+        XCTAssertNil(navigation.settingsSection)
+    }
 }
 
 /// Answers `tc_call` from a sample set's daemon-shaped replies, as the

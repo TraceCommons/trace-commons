@@ -37,6 +37,9 @@ struct MonitorWindowView: View {
         case privateAI
     }
 
+    /// Where an outside opener asked this window to go (`OpenMonitor`).
+    let navigation: MainWindowNavigation
+
     @EnvironmentObject private var model: AppModel
     @Environment(\.openSettings) private var openSettings
 
@@ -162,6 +165,14 @@ struct MonitorWindowView: View {
             }
         }
         .glassWindow()
+        .onChange(of: navigation.pending, initial: true) { _, destination in
+            // An outside opener's destination, consumed once; initially
+            // too, for a request that opened this window.
+            guard let destination else { return }
+            Self.land(destination, tab: &tab, homePage: &homePage,
+                      selectedSession: &selectedSession, showsInspector: &showsInspector)
+            navigation.pending = nil
+        }
         // The app's live client, re-attached whenever the daemon restarts;
         // with none, each store draws the core as down.
         .task(id: model.liveData.map(ObjectIdentifier.init)) {
@@ -223,6 +234,28 @@ struct MonitorWindowView: View {
     static func review(_ entryId: String, selection: inout String, showsInspector: inout Bool) {
         selection = entryId
         showsInspector = true
+    }
+
+    /// Where a destination lands in this window. A Settings destination
+    /// opens the Settings window (`Launcher`) and leaves the tabs alone.
+    static func land(
+        _ destination: MonitorDestination, tab: inout Tab, homePage: inout HomeTabView.Page,
+        selectedSession: inout String, showsInspector: inout Bool
+    ) {
+        switch destination {
+        case .home(let page):
+            tab = .home
+            homePage = page
+        case .inference:
+            // The Private AI switch and sign-in are in the inspector.
+            tab = .inference
+            showsInspector = true
+        case .traces(let entryId):
+            tab = .traces
+            if let entryId { review(entryId, selection: &selectedSession, showsInspector: &showsInspector) }
+        case .settings:
+            break
+        }
     }
 
     /// The first time this window lays out, open the panes its width suits.
@@ -461,7 +494,7 @@ struct MonitorSettingsWindow: View {
                     }
                 default:
                     ScrollView {
-                        GlassSettingsContent(navigation: navigation, section: section)
+                        GlassSettingsContent(section: section)
                     }
                 }
             }
@@ -469,6 +502,13 @@ struct MonitorSettingsWindow: View {
             .id(section)
         }
         .frame(minWidth: 760, minHeight: 520)
+        // A request for a section (a quit refusal's Compute), consumed
+        // once, whether or not this window was already open.
+        .onChange(of: navigation.settingsSection, initial: true) { _, wanted in
+            guard let wanted else { return }
+            section = wanted
+            navigation.settingsSection = nil
+        }
     }
 }
 #endif

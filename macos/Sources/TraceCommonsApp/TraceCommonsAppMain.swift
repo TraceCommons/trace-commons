@@ -56,7 +56,7 @@ struct TraceCommonsShell: App {
         // Exactly one of the two menu-bar items is inserted, so exactly one
         // `Launcher` (which starts the app's services) runs.
         MenuBarExtra(isInserted: .constant(!Self.glassMenu)) {
-            MenuBarContent(navigation: navigation)
+            MenuBarContent()
                 .environmentObject(model)
                 .tint(TC.accent)
         } label: {
@@ -111,10 +111,10 @@ struct TraceCommonsShell: App {
         // in debug builds until the screens they frame match the design.
         // TRACE_COMMONS_MONITOR=1 opens the monitor at launch.
         Window("Monitor", id: WindowID.monitor) {
-            MonitorWindowView()
+            MonitorWindowView(navigation: navigation)
                 .environmentObject(model)
-                // The monitor reads the daemon whatever the main window
-                // shows (Insights defers services).
+                // The monitor reads the daemon, so it starts services on
+                // appear (D-11).
                 .onAppear { navigation.activateServicesForWindow() }
                 .environment(compute)
                 .tint(TC.accent)
@@ -147,9 +147,9 @@ struct TraceCommonsShell: App {
         Settings {
             MonitorSettingsWindow(navigation: navigation)
                 .environmentObject(model)
-                // Settings loads and saves through the daemon; opened with
-                // ⌘, while the main window rests on Insights it would
-                // otherwise show nothing and drop edits.
+                // Settings loads and saves through the daemon; opened
+                // before services started it would otherwise show nothing
+                // and drop edits.
                 .onAppear { navigation.activateServicesForWindow() }
                 .environment(compute)
                 .tint(TC.accent)
@@ -192,11 +192,13 @@ private struct Launcher: View {
     var menuPanel: MenuPanelStore?
     #endif
     @Environment(\.openWindow) private var openWindow
+    #if DEBUG
+    @Environment(\.openSettings) private var openSettings
+    #endif
 
     var body: some View {
         label
             .task { launch() }
-            .onChange(of: navigation.section) { activateServices() }
     }
 
     @ViewBuilder
@@ -217,9 +219,8 @@ private struct Launcher: View {
         navigation.activateServicesIfNeeded { startServices() }
     }
 
-    /// The service start, once, from whichever comes first: the main
-    /// window leaving Insights, or a window that needs services (Settings,
-    /// the monitor) opening.
+    /// The service start, once, from whichever comes first: launch, or a
+    /// window that needs services (Settings, the monitor) opening (D-11).
     @MainActor
     private func startServices() {
         model.start()
@@ -237,17 +238,17 @@ private struct Launcher: View {
     @MainActor
     private func launch() {
         missionDrafts.loadCopy()
-        OpenMainWindow.handler = {
+        OpenMonitor.handler = { destination in
             NSApp.activate(ignoringOtherApps: true)
-            openWindow(id: WindowID.main)
+            open(destination)
         }
         appDelegate.compute = compute
-        appDelegate.navigation = navigation
         appDelegate.model = model
         navigation.registerServiceStart { startServices() }
         activateServices()
-        // The only thing a notification action may do is open this window.
-        Notifier.shared.onReview = { OpenMainWindow.request() }
+        // The only thing a notification action may do is open the Monitor
+        // at Traces.
+        Notifier.shared.onReview = { OpenMonitor.request(.traces(entryId: nil)) }
 
         NotificationCenter.default.addObserver(
             forName: NSApplication.willTerminateNotification,
@@ -274,7 +275,7 @@ private struct Launcher: View {
         // that do not -- a login launch, and `open -g`.
         if ProcessInfo.processInfo.environment["TRACE_COMMONS_SHOW_WINDOW"] == "1" {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                OpenMainWindow.request()
+                OpenMonitor.request()
             }
         }
         #if DEBUG
@@ -297,6 +298,32 @@ private struct Launcher: View {
         DebugScreenshot.scheduleIfRequested(model: model)
         SelfTest.runIfRequested(model: model)
     }
+
+    /// One `OpenMonitor` request: first run while onboarding is required,
+    /// the Monitor otherwise, which consumes `navigation.pending`; a
+    /// Settings destination also opens Settings at its section.
+    @MainActor
+    private func open(_ destination: MonitorDestination?) {
+        #if DEBUG
+        navigation.pending = destination
+        switch LaunchRouting.window(requiresOnboarding: model.requiresOnboarding) {
+        case .firstRun: openWindow(id: WindowID.firstRun)
+        case .monitor: openWindow(id: WindowID.monitor)
+        }
+        if let section = destination?.settingsSection {
+            navigation.settingsSection = section
+            openSettings()
+        }
+        #else
+        // Until R15 a release build has only the legacy window: open it at
+        // the matching section. T11 deletes this branch with the window
+        // (ruling R-33).
+        if let section = MainWindowNavigation.legacySection(for: destination) {
+            navigation.section = section
+        }
+        openWindow(id: WindowID.main)
+        #endif
+    }
 }
 
 enum WindowID {
@@ -308,36 +335,4 @@ enum WindowID {
     /// The menu-bar item and popover in a window (R13), for review where
     /// the menu bar has no room for the item. Debug builds only.
     static let menuPreview = "trace-commons-menu-preview"
-}
-
-/// Opening the window from outside a SwiftUI view (a notification action, a
-/// Dock-icon click, an invite link) needs a hook that is not
-/// `@Environment(\.openWindow)`.
-///
-/// Requests that arrive before the handler exists are held rather than
-/// dropped. That is not defensive coding: the handler is installed from a
-/// `.task` on the menu-bar label, and both of the new callers can genuinely
-/// beat it. `applicationDidFinishLaunching` runs first by definition, and a
-/// `tracecommons://` link that launches the app is delivered while SwiftUI is
-/// still assembling its scenes. Dropping those would make exactly the
-/// cold-start cases fail while every warm test passed.
-enum OpenMainWindow {
-    @MainActor static var handler: (() -> Void)? {
-        didSet {
-            guard handler != nil, pending else { return }
-            pending = false
-            handler?()
-        }
-    }
-
-    @MainActor private static var pending = false
-
-    @MainActor
-    static func request() {
-        guard let handler else {
-            pending = true
-            return
-        }
-        handler()
-    }
 }
