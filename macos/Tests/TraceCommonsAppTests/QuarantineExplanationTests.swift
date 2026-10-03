@@ -81,25 +81,8 @@ final class QuarantineExplanationTests: XCTestCase {
 
     /// The held copy must not tell a contributor that a person is reading
     /// their session. An agent inspects these; saying otherwise is both wrong
-    /// and the more alarming of the two readings.
-    func testHeldCopyDoesNotClaimAHumanReader() {
-        let copy = HistoryView.heldReviewBody.lowercased()
-        for forbidden in ["a person at", "someone at", "our team", "a human", "staff", "the reviewer"]
-        {
-            XCTAssertFalse(
-                copy.contains(forbidden),
-                "held copy must not imply a human reads these: \(forbidden)")
-        }
-        XCTAssertTrue(
-            copy.contains("agent"), "held copy must say what actually inspects a held trace")
-        // The denial this section exists to carry, and no promised wait.
-        XCTAssertTrue(copy.contains("have not been rejected"))
-        for forbidden in ["48 hours", "business days", "within a week", "usually takes"] {
-            XCTAssertFalse(copy.contains(forbidden), "no turnaround time may be stated")
-        }
-    }
-
-    /// The same rule on the core's sentence, which glass History draws.
+    /// and the more alarming of the two readings. The core's sentence, which
+    /// glass History draws (the legacy screen's own went with it, R15).
     func testCoreHeldCopyDoesNotClaimAHumanReader() throws {
         let words = try XCTUnwrap(MonitorScreensCopy.decode(fromJSON: TCCoreCopy.monitorScreensCopyJSON()))
         let copy = words.heldExplanation.lowercased()

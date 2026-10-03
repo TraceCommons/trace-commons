@@ -28,7 +28,7 @@ struct ProjectErrorNotice: View {
                     Text(error)
                         .fixedSize(horizontal: false, vertical: true)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                    Button(ActionMessageBanner.coreDismissWord ?? ActionMessageBanner.dismissWord) { model.lastActionError = nil }
+                    Button(ActionNoticeWords.coreDismissWord ?? ActionNoticeWords.dismissWord) { model.lastActionError = nil }
                         .buttonStyle(GlassButtonStyle(.glass))
                 }
             }

@@ -77,9 +77,11 @@ final class ActionNoticeDismissTests: XCTestCase {
                 let rendered = lines[(index + 1)...].prefix(glass ? 12 : 3).joined(separator: " ")
                 let location = "\(path):\(index + 1) (\(property))"
                 if glass { glassSites += 1 }
-                if !glass && !rendered.contains("ActionMessageBanner(") {
+                // The legacy banner left with the legacy shell (R15): every
+                // render site is a glass notice.
+                if !glass {
                     failures.append(
-                        "\(location) renders without a dismiss control: \(rendered.trimmed)")
+                        "\(location) renders outside a dismissible GlassNotice: \(rendered.trimmed)")
                 } else if !rendered.contains("model.\(property) = nil") {
                     failures.append(
                         "\(location) has a banner whose dismiss does not clear \(property): "
@@ -108,7 +110,7 @@ final class ActionNoticeDismissTests: XCTestCase {
         let text = try XCTUnwrap(sources["Views/Settings/ProjectsSection.swift"])
         XCTAssertTrue(text.contains("if let error = model.lastActionError {"))
         XCTAssertTrue(
-            text.contains("Button(ActionMessageBanner.coreDismissWord ?? ActionMessageBanner.dismissWord) { model.lastActionError = nil }"),
+            text.contains("Button(ActionNoticeWords.coreDismissWord ?? ActionNoticeWords.dismissWord) { model.lastActionError = nil }"),
             "the dismiss button must not depend on the core's word loading")
     }
 

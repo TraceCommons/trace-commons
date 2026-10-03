@@ -11,7 +11,7 @@ import TCShellCore
 /// figure here is money spent. Only `verified` is drawn as proof.
 ///
 /// The ledger needs the daemon, so the tab reads its startup first, as the
-/// legacy destination does (`PrivateInferenceActivationView`): the roots
+/// retired legacy destination did: the roots
 /// screen when folders are owed, a spinner while starting, the core's down
 /// title over the refusal's sentence.
 struct InferenceTabView: View {

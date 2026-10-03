@@ -11,8 +11,7 @@ import TCShellCore
 /// them: the same daemon calls, the same consent order, the same resume
 /// rules. This view draws the frame and the progress, and nothing else.
 ///
-/// It is gated as the main window gates its own onboarding
-/// (`MainWindowView`): the coordinator is drawn only while
+/// It is the onboarding gate (R15): the coordinator is drawn only while
 /// `model.requiresOnboarding`, and the window closes itself as soon as
 /// that is false and opens the Monitor, so an onboarded person never lands
 /// in the flow.

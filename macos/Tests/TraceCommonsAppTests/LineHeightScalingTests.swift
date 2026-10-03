@@ -94,22 +94,6 @@ final class LineHeightScalingTests: XCTestCase {
         XCTAssertEqual(TC.Font_.LineHeight.spacing(for: 11, 1.0), 0)
     }
 
-    /// The brand faces are `.custom`, so they do not scale -- but their size
-    /// is still stated once and read from there by face, tracking and
-    /// leading alike.
-    func testTheBrandLeadingIsDerivedFromTheBrandSize() {
-        XCTAssertEqual(
-            CommunityBrand.Font_.ledeLineSpacing,
-            TC.Font_.LineHeight.spacing(
-                for: CommunityBrand.Font_.ledeSize, CommunityBrand.Font_.ledeLineHeight),
-            accuracy: 0.001)
-        XCTAssertEqual(
-            CommunityBrand.Font_.bodyLineSpacing,
-            TC.Font_.LineHeight.spacing(
-                for: CommunityBrand.Font_.bodySize, CommunityBrand.Font_.bodyLineHeight),
-            accuracy: 0.001)
-    }
-
     /// `.../macos/Tests/TraceCommonsAppTests/<this file>` ->
     /// `.../macos/Sources`, located from this file's own path the way
     /// `ShellWordingTests` does.

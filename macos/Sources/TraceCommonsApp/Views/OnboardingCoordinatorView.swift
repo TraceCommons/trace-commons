@@ -69,8 +69,8 @@ import TCDesign
 /// This is what keeps a crash or quit between `enroll` and Done from ever
 /// landing a contributor in the main window with an unset (floor-only)
 /// consent choice they never actually confirmed -- the forbidden outcome.
-/// `TraceCommonsAppMain`/`MainWindowView` is what reads `isOnboardingComplete`
-/// to make that branch; this view only needs `startAt` to know where in the
+/// `LaunchRouting` and the first-run window read `isOnboardingComplete`
+/// (through `requiresOnboarding`) to make that branch; this view only needs `startAt` to know where in the
 /// sequence to resume.
 struct OnboardingCoordinatorView: View {
     @EnvironmentObject private var model: AppModel
@@ -229,7 +229,7 @@ struct OnboardingCoordinatorView: View {
     /// An error is never undismissable: the word is the banner's own, by
     /// reference.
     private func dismissButton(_ action: @escaping () -> Void) -> some View {
-        Button(ActionMessageBanner.dismissWord, action: action)
+        Button(ActionNoticeWords.dismissWord, action: action)
             .buttonStyle(GlassButtonStyle(.glass))
     }
 

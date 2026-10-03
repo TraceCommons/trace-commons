@@ -1,3 +1,6 @@
+import TCBridge
+import TCShellCore
+
 // The legacy Settings screen's words, at the path the wording ratchet
 // (`ShellWordingTests`) records them under.
 //
@@ -116,4 +119,21 @@ enum SettingsLegacyWords {
     static func auditSentence(_ action: String, project: String?) -> String {
         SettingsContent.auditSentence(action, project: project)
     }
+}
+
+// MARK: - The notices' dismiss word
+
+/// What every glass notice that can be put away names its dismiss control.
+/// Moved verbatim from the retired legacy banner (R15), with its counted
+/// sentence: the core's word first, this file's when the core's copy does
+/// not decode, so no notice is ever left undismissable.
+enum ActionNoticeWords {
+    /// The dismiss control's name, reachable so a glass notice that cannot
+    /// reach the core's word still names its control.
+    static let dismissWord = "Dismiss this message"
+
+    /// The core's word for dismissing a notice, for every glass notice that
+    /// can be put away; nil when the core's copy does not decode, and the
+    /// caller falls back to `dismissWord`.
+    static let coreDismissWord = MonitorTracesCopy.decode(fromJSON: TCCoreCopy.monitorTracesCopyJSON())?.dismiss
 }

@@ -137,13 +137,14 @@ final class OnboardingParityTests: XCTestCase {
         }
     }
 
-    /// The Folders step scrolls exactly once, whichever host draws it: the
-    /// wrapper owns the only ScrollView and the activation host adds none.
+    /// The Folders step scrolls exactly once: the wrapper owns the only
+    /// ScrollView, and its one host, the first-run pane, adds none. (The
+    /// legacy activation host left with the legacy window, R15.)
     func test_foldersStepScrollsOnce() throws {
         let roots = try Self.text("Views/OnboardingRootsView.swift")
         XCTAssertEqual(roots.components(separatedBy: "ScrollView {").count - 1, 1)
-        let host = try Self.text("Views/PrivateInferenceActivationView.swift")
-        XCTAssertFalse(host.contains("ScrollView {"), "the activation host nests a second ScrollView")
+        let host = try Self.text("Views/Monitor/FirstRunViews.swift")
+        XCTAssertFalse(host.contains("ScrollView {"), "the first-run pane nests a second ScrollView")
     }
 
     /// Each coordinator notice keeps its tone: the text sits directly under
@@ -237,7 +238,7 @@ final class OnboardingParityTests: XCTestCase {
         let source = try Self.text("Views/Settings/ProjectsSection.swift")
         XCTAssertTrue(source.contains("struct ProjectErrorNotice: View {"))
         XCTAssertTrue(source.contains(
-            "Button(ActionMessageBanner.coreDismissWord ?? ActionMessageBanner.dismissWord) { model.lastActionError = nil }"))
+            "Button(ActionNoticeWords.coreDismissWord ?? ActionNoticeWords.dismissWord) { model.lastActionError = nil }"))
     }
 
     /// Done is the only place onboarding is marked complete, and the only

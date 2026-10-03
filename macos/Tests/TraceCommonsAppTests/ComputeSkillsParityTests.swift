@@ -245,10 +245,10 @@ final class ComputeSkillsParityTests: XCTestCase {
         XCTAssertNil(source.range(of: #"\bTC\."#, options: .regularExpression))
         XCTAssertFalse(source.contains("DisclosureGroup("))
         // A failure is never undismissable; the word is the core's, with the
-        // banner's as the fallback by reference.
+        // shell's own (`ActionNoticeWords`) as the fallback by reference.
         XCTAssertTrue(source.contains(
-            "Button(ActionMessageBanner.coreDismissWord ?? ActionMessageBanner.dismissWord) { dismissedFailure = message }"))
-        XCTAssertTrue(try Self.text("Views/ActionMessageBanner.swift").contains(
+            "Button(ActionNoticeWords.coreDismissWord ?? ActionNoticeWords.dismissWord) { dismissedFailure = message }"))
+        XCTAssertTrue(try Self.text("Views/SettingsView.swift").contains(
             "static let coreDismissWord = MonitorTracesCopy.decode(fromJSON: TCCoreCopy.monitorTracesCopyJSON())?.dismiss"))
     }
 }

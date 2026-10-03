@@ -20,14 +20,13 @@ final class ShellNoticesPlacementTests: XCTestCase {
     }
 
     /// One definition of the stack and of each card, in the new file only,
-    /// so the windows cannot drift on what they tell.
-    func test_theCardsAreDefinedOnceAndNotInTheLegacyFile() throws {
+    /// so the windows cannot drift on what they tell. (The legacy window
+    /// that once defined them is gone: `LegacyShellRetiredTests`.)
+    func test_theCardsAreDefinedOnce() throws {
         let notices = try MonitorNavigationTests.text("Views/ShellNotices.swift")
-        let main = try MonitorNavigationTests.text("Views/MainWindowView.swift")
         for name in ["ShellNotices", "AttachedDaemonNotice", "GrantVoidNotices", "GrantVoidNoticeCard",
                      "ArmingRewordingNotices", "ArmingRewordedNoticeCard", "GateHeldNoticeCard", "LegacyMigrationNoticeCard"] {
             XCTAssertEqual(notices.components(separatedBy: "struct \(name): View").count - 1, 1, "\(name) is not defined once")
-            XCTAssertFalse(main.contains("struct \(name): View"), "\(name) is still defined in MainWindowView.swift")
         }
         XCTAssertEqual(notices.components(separatedBy: "GrantVoidNotices(").count - 1, 1)
     }

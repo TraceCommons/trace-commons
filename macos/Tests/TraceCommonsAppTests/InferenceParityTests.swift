@@ -86,33 +86,21 @@ final class InferenceParityTests: XCTestCase {
                        "isOn ?? false", "busy || isOn == nil", "GlassToggleStyle(.settings)",
                        "let label = Self.stateLabel(state: state, copy: copy, calls: calls)",
                        "GlassStatusLabel(label.line, status: label.status)",
-                       "CredentialSection(copy: copy, prominent: true)", "HarnessListSection(copy: copy)",
                        "GlassExpander(copy.settingsTitle, isOpen:",
                        "GlassNotice(tone: .outside, title: refusal)",
-                       "Button(ActionMessageBanner.coreDismissWord ?? ActionMessageBanner.dismissWord, action: onDismiss)"] {
+                       "Button(ActionNoticeWords.coreDismissWord ?? ActionNoticeWords.dismissWord, action: onDismiss)"] {
             XCTAssertTrue(source.contains(needle), "PrivateInferenceView.swift lacks \(needle)")
         }
         XCTAssertFalse(source.contains("privateInferenceOn ? .on"), "the state must come from the tone, not the switch")
         XCTAssertEqual(source.components(separatedBy: "GlassStatusLabel(").count - 1, 1,
                        "the card's one state label is the only status drawn")
-        XCTAssertFalse(source.contains("static func palette("), "the TC palette moved to QueueView.swift")
+        XCTAssertFalse(source.contains("static func palette("), "the TC palette left with the legacy queue")
         XCTAssertFalse(source.contains("ActionMessageBanner(text:"), "the refusal is the card's, not a legacy banner")
         XCTAssertEqual(PrivateInferenceIndicator.status(.clear), .on)
         for tone in [PrivateInferenceTone.held, .attention, .refused, .neutral] {
             XCTAssertNotEqual(PrivateInferenceIndicator.status(tone), .on, "\(tone) must never read as working")
         }
         try LegacySymbols.assertClean("Views/PrivateInferenceView.swift")
-    }
-
-    /// The legacy window draws the same card, bound to the model's switch,
-    /// its busy flag, its write and its refusal.
-    func test_theLegacyDestinationDrawsTheCardOnTheModel() throws {
-        let source = try Self.text("Views/PrivateInferenceView.swift")
-        for needle in ["isOn: model.daemonSettings?.privateInference,", "state: model.privateInferenceState,",
-                       "busy: model.privateInferenceBusy,", "refusal: model.lastActionError,",
-                       "onSet: model.applyPrivateInference,", "onDismiss: { model.lastActionError = nil }"] {
-            XCTAssertTrue(source.contains(needle), "PrivateInferenceContent lacks \(needle)")
-        }
     }
 
     /// The core's own copy and calls, as `AppModel` wires them.

@@ -39,8 +39,7 @@ struct ConsentScopesView: View {
     }
 }
 
-/// The screen's content, split out of its `ScrollView` for the same reason
-/// `QueueContent` is split out of `QueueView`: `ImageRenderer` renders a
+/// The screen's content, split out of its `ScrollView`: `ImageRenderer` renders a
 /// `ScrollView` as blank, and this is the highest-stakes screen in the app
 /// to be leaving unverified.
 struct ConsentScopesContent: View {

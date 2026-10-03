@@ -830,8 +830,8 @@ final class AppModel: ObservableObject {
     /// Nothing here clears it on the way to somewhere else -- only two
     /// actions ever assign it, so unlike `lastActionError` it is not
     /// overwritten by the next thing that goes wrong. Its dismiss control on
-    /// the Waiting screen is therefore the only way out of it, which is why
-    /// it has one: see `ActionMessageBanner`.
+    /// the Traces tab (`TracesOffersBar`'s notice) is therefore the only way
+    /// out of it, which is why it has one.
     @Published var lastActionNotice: String?
 
     private var daemon: TCDaemon?
@@ -1899,6 +1899,7 @@ final class AppModel: ObservableObject {
     }
     func setDaemonSettingsForTesting(_ settings: DaemonSettingsView) { publishIfChanged(\.daemonSettings, settings) }
     func setStartupForTesting(_ startup: Startup) { self.startup = startup }
+    func setHistoryForTesting(_ history: [HistoryRecord]) { publishIfChanged(\.history, history) }
 
     func setStatusForTesting(_ status: DaemonStatus) {
         publishIfChanged(\.status, status)
@@ -1930,9 +1931,10 @@ final class AppModel: ObservableObject {
     /// before #353/#357 made the queue's row list a `LazyVStack`. Doing so
     /// here would mean asking the daemon about all 500 entries the instant
     /// a snapshot arrives, which defeats the point of realizing rows lazily
-    /// in the first place: `QueueRow.onAppear` drives `requestPreview(for:)`
-    /// for whatever the viewport actually realizes, so this stays
-    /// proportional to what is on screen.
+    /// in the first place: the legacy queue row drove `requestPreview(for:)`
+    /// from `onAppear` for whatever the viewport realized, so this stayed
+    /// proportional to what was on screen. Since R15 the glass Traces tab
+    /// reads previews through `TracesStore`, and only `SelfTest` asks here.
     ///
     /// Internal rather than private so a test can land a snapshot and watch
     /// what a view holding this model would see. `pending` is
@@ -1958,10 +1960,11 @@ final class AppModel: ObservableObject {
     }
 
     /// One `preview_request` per card, requirement 1 of the scheduler
-    /// design: draw a pending card immediately ("Reading it locally...",
-    /// see `QueueRow`) and never block waiting for the daemon's answer.
+    /// design: draw a pending card immediately and never block waiting for
+    /// the daemon's answer.
     ///
-    /// Called from `QueueRow.onAppear` -- the same trigger #357 introduced
+    /// Called by `SelfTest` since R15; before it, from the legacy queue
+    /// row's `onAppear` -- the same trigger #357 introduced
     /// as `requestSummary(for:)`, kept here under the scheduler's name
     /// because what changed is not when a row asks, only what happens once
     /// it does: this goes through the daemon's bounded preview scheduler

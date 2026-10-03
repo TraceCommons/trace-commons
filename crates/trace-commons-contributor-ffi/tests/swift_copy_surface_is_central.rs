@@ -630,26 +630,9 @@ const ALLOWED: &[(&str, &str, &str)] = &[
         "Credit still pending is forfeited.",
         "per-tier withdrawal credit note; no core export yet",
     ),
-    // The rollup tallies over History and the queue's week figures name a
-    // count of rows in a state, in the same words as the row's status tag.
-    // The core exports the row label (`history_status_labels`) but no tally
-    // heading yet, so these headings stay Swift's until it does. The row
-    // tag itself reads the core (see `history_rows_read_the_cores_status_words`).
-    (
-        "TraceCommonsApp/Views/HistoryView.swift",
-        "Held for privacy review",
-        "rollup tally heading; no core tally export yet",
-    ),
-    (
-        "TraceCommonsApp/Views/HistoryView.swift",
-        "Waiting to be scored",
-        "rollup tally heading; no core tally export yet",
-    ),
-    (
-        "TraceCommonsApp/Views/QueueView.swift",
-        "Held for privacy review",
-        "week tally heading; no core tally export yet",
-    ),
+    // The legacy History rollup tallies and the queue's week figures, which
+    // held the core's status words as headings, left the shell with the
+    // legacy screens (R15); their allowances went with them.
 ];
 
 #[test]
@@ -800,7 +783,7 @@ const SURFACES: &[(&str, &str, &str, &str, &str)] = &[
     ),
     (
         "ignore project",
-        "TraceCommonsApp/Views/QueueFolderRow.swift",
+        "TraceCommonsApp/Views/Monitor/TracesViews.swift",
         "TCCoreCopy.projectIgnoreCopyJSON",
         "TCBridge/TCCoreCopy.swift",
         "tc_project_ignore_copy_json",
@@ -835,7 +818,7 @@ const SURFACES: &[(&str, &str, &str, &str, &str)] = &[
     ),
     (
         "arming offer",
-        "TraceCommonsApp/Views/QueueView.swift",
+        "TraceCommonsApp/Views/Monitor/TracesViews.swift",
         "TCCoreCopy.armingOfferCopyJSON",
         "TCBridge/TCCoreCopy.swift",
         "tc_arming_offer_copy_json",
@@ -853,13 +836,6 @@ const SURFACES: &[(&str, &str, &str, &str, &str)] = &[
         "TCCoreCopy.armingOfferCopyJSON",
         "TCBridge/TCCoreCopy.swift",
         "tc_arming_offer_copy_json",
-    ),
-    (
-        "surviving secret",
-        "TraceCommonsApp/Views/QueueView.swift",
-        "TCCoreCopy.residualSecretLine",
-        "TCBridge/TCCoreCopy.swift",
-        "tc_residual_secret_line_text",
     ),
     (
         "surviving secret in Traces",
@@ -997,24 +973,24 @@ fn history_rows_read_the_cores_status_words() {
         "PublicRunCopy.historyStatusLabel(for:) no longer reads historyStatusLabels"
     );
 
-    let history = read("TraceCommonsApp/Views/HistoryView.swift");
+    let history = read("TraceCommonsApp/Views/Monitor/HomeViews.swift");
     let start = history
-        .find("static func statusSentence(")
-        .expect("HistoryRow.statusSentence exists");
+        .find("static func historyStatusLabel(")
+        .expect("HomeFormat.historyStatusLabel exists");
     let end = history[start..]
         .find("\n    }\n")
         .map(|at| start + at)
-        .expect("statusSentence has a body");
+        .expect("historyStatusLabel has a body");
     let body = &history[start..end];
     assert!(
         swift_code(body).contains("historyStatusLabel(for:"),
-        "HistoryRow.statusSentence must read the core's table"
+        "HomeFormat.historyStatusLabel must read the core's table"
     );
     let literals = swift_literals(body);
     for row in trace_commons_contributor::history_copy::STATUS_LABELS {
         assert!(
             !literals.iter().any(|lit| lit.contains(row.label)),
-            "HistoryRow.statusSentence types the core's word {:?} for {}",
+            "HomeFormat.historyStatusLabel types the core's word {:?} for {}",
             row.label,
             row.status
         );
