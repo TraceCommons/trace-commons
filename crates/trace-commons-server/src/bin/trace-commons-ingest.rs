@@ -57946,20 +57946,10 @@ async fn gate_evaluate_worker_handler(
     require_vector_operator(&tenant)?;
     // Zaki review 1, minor item M-f: a submission the versioned pipeline
     // scores and credits is not evaluated here, so this path cannot award it
-    // a second `NoveltyUtility` credit under another idempotency key. Without
-    // a pipeline runtime there are no pipeline runs to find.
-    if let Some(pipeline) = state.pipeline_service.as_ref()
-        && pipeline
-            .store()
-            .submission_has_pipeline_run(&tenant.tenant_id, body.submission_id)
-            .await
-            .map_err(internal_error)?
-    {
-        return Err(api_error(
-            StatusCode::CONFLICT,
-            PIPELINE_RUN_OWNS_SUBMISSION,
-        ));
-    }
+    // a second `NoveltyUtility` credit under another idempotency key. The
+    // check reads the database, so a process with no pipeline runtime
+    // refuses a pipeline submission too.
+    refuse_a_pipeline_submission(state.as_ref(), &tenant.tenant_id, body.submission_id).await?;
 
     let outcome = evaluate_and_record_gate(state.as_ref(), &tenant.tenant_id, body.submission_id)
         .await

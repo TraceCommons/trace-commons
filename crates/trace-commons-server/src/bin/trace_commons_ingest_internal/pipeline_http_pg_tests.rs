@@ -5752,7 +5752,13 @@ async fn mains_gate_evaluate_route_refuses_a_submission_with_a_pipeline_run() {
         &vector_token,
         TokenRole::VectorWorker,
     );
-    Arc::make_mut(&mut fixture.state).tokens = Arc::new(tokens);
+    {
+        // The route reads the pipeline's rows through the database store,
+        // which ingest holds with every database, with or without a runtime.
+        let state = Arc::make_mut(&mut fixture.state);
+        state.tokens = Arc::new(tokens);
+        state.pipeline_store = Some(Arc::new(PgPipelineStore::new(fixture.runtime.clone())));
+    }
     let principal = static_token_principal_ref(&fixture.token);
     let run = completed_pipeline_run(&fixture.service, &fixture.tenant, &principal).await;
 
@@ -5795,6 +5801,60 @@ async fn mains_gate_evaluate_route_refuses_a_submission_with_a_pipeline_run() {
         body["error"], "pipeline_run_owns_submission",
         "a submission with no run is not refused by this check ({status})"
     );
+}
+
+/// Multi-lens review C20: the gate evaluate route refuses a pipeline
+/// submission through the database (`AppState::pipeline_store`), as the
+/// other `main` routes do, so a process with no pipeline runtime injected
+/// (the repository binary, a rollback) refuses it too and writes no gate
+/// decision and no second `NoveltyUtility` credit.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mains_gate_evaluate_route_refuses_a_pipeline_submission_with_no_runtime_injected() {
+    let Some(fixture) = withdrawal_fixture().await else {
+        return;
+    };
+    let vector_token = format!("token-vector-{}", Uuid::new_v4().simple());
+    let mut tokens = (*fixture.state.tokens).clone();
+    insert_token(
+        &mut tokens,
+        &fixture.tenant,
+        &vector_token,
+        TokenRole::VectorWorker,
+    );
+    let principal = static_token_principal_ref(&fixture.token);
+    let run = completed_pipeline_run(&fixture.service, &fixture.tenant, &principal).await;
+    let mut runtime_less = fixture.state.clone();
+    {
+        let state = Arc::make_mut(&mut runtime_less);
+        state.tokens = Arc::new(tokens);
+        state.pipeline_service = None;
+        state.pipeline_store = Some(Arc::new(PgPipelineStore::new(fixture.runtime.clone())));
+    }
+
+    let (status, body) = route_request(
+        runtime_less,
+        "POST",
+        "/v1/workers/gate/evaluate",
+        auth_headers(&vector_token),
+        Some(serde_json::json!({"submission_id": run.submission_id})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["error"], "pipeline_run_owns_submission");
+    let decisions: i64 = fixture
+        .owner
+        .trace_pool_for_test()
+        .get()
+        .await
+        .unwrap()
+        .query_one(
+            "SELECT COUNT(*) FROM trace_gate_decisions WHERE submission_id = $1",
+            &[&run.submission_id],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(decisions, 0, "nothing was scored");
 }
 
 // ---------------------------------------------------------------------------
