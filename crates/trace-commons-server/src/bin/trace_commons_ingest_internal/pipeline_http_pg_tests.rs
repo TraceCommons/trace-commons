@@ -9872,6 +9872,8 @@ async fn the_receipt_transactions_routing_answer_wins_over_the_handlers_read() {
 struct AdmissionRoutingFixture {
     admin: PgBackend,
     backend: Arc<PgBackend>,
+    /// The default bundle of the served runtime (the tenant's active bundle).
+    bundle_id: String,
     tenant: String,
     anchor: String,
     submission_id: Uuid,
@@ -9901,6 +9903,7 @@ impl AdmissionRoutingFixture {
 
         let dir = tempfile::tempdir().expect("temp dir");
         let service = o1_pipeline_service(backend.clone(), &dir);
+        let bundle_id = service.bundle_id().to_string();
         let (provider, provider_key, signer, trust) = o1_evidence_identity();
         let mut state = test_state_with_tokens(dir.path().to_path_buf(), tokens);
         let state_mut = Arc::make_mut(&mut state);
@@ -9945,6 +9948,7 @@ impl AdmissionRoutingFixture {
         Some(Self {
             admin,
             backend,
+            bundle_id,
             tenant,
             anchor,
             submission_id,
@@ -10138,6 +10142,82 @@ async fn a_not_served_upload_releases_its_admission_attempt() {
         );
         assert_eq!(fixture.runs().await, 0, "{attempt}");
     }
+
+    fixture.shutdown().await;
+}
+
+/// Final fix wave (G1): the same release for an upload under a suspended
+/// Admission policy of the tenant's active bundle. The route decision reads
+/// the policy and refuses with `503 bundle_policy_not_runnable` before the
+/// attempt is marked `processing`, so the attempt is `released`, its cost
+/// bound is given back, and a retry is refused for the same reason, not as in
+/// progress. After `resume` the retry is accepted and completes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_suspended_admission_upload_releases_its_admission_attempt() {
+    let Some(fixture) =
+        AdmissionRoutingFixture::new("near-suspended-admission-release-token", true).await
+    else {
+        return;
+    };
+    let tenant = fixture.tenant.as_str();
+    write_routing_as_operator(tenant, "pipeline").await;
+    // The server registers the tenant's default bundle before it serves.
+    let health = reqwest::get(format!("{}/health", fixture.base))
+        .await
+        .expect("the server answers");
+    assert!(health.status().is_success());
+    let store = PgPipelineStore::new(fixture.backend.clone());
+    let actor = format!("principal_sha256:{}", "ab".repeat(32));
+    store
+        .intervene_policy(
+            tenant,
+            &fixture.bundle_id,
+            Phase::Admission,
+            "suspend",
+            &actor,
+            "hold_intake",
+        )
+        .await
+        .expect("suspend the Admission policy");
+    let (_, global_before) = fixture.cost_bound_used().await;
+
+    for attempt in ["first", "retry"] {
+        let (status, refused) = fixture.post().await;
+        assert_eq!(
+            status,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "{attempt}: {refused}"
+        );
+        assert_eq!(refused["error"], "bundle_policy_not_runnable", "{attempt}");
+        assert_eq!(
+            fixture.ledger_status().await.as_deref(),
+            Some("released"),
+            "{attempt}: the attempt was reserved, not processing, and released"
+        );
+        assert_eq!(
+            fixture.cost_bound_used().await,
+            (0, global_before),
+            "{attempt}: the reservation's cost bound is given back"
+        );
+        assert_eq!(fixture.runs().await, 0, "{attempt}");
+    }
+
+    store
+        .intervene_policy(
+            tenant,
+            &fixture.bundle_id,
+            Phase::Admission,
+            "resume",
+            &actor,
+            "release_intake",
+        )
+        .await
+        .expect("resume the Admission policy");
+    let (status, accepted) = fixture.post().await;
+    assert_eq!(status, StatusCode::OK, "{accepted}");
+    assert_eq!(accepted["status"], "processing");
+    assert_eq!(fixture.runs().await, 1);
+    assert_eq!(fixture.ledger_status().await.as_deref(), Some("completed"));
 
     fixture.shutdown().await;
 }

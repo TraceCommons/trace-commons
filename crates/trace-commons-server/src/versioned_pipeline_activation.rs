@@ -926,6 +926,58 @@ impl PipelineActivationStore {
         row.as_ref().map(routing_from_row).transpose()
     }
 
+    /// What the upload path reads to decide where a new receipt goes (final
+    /// fix wave G1): the tenant's committed routing row, as `routing`, and
+    /// whether the Admission policy of the tenant's active bundle is runnable
+    /// (Task 5's definition, `PgPipelineStore::policy_is_runnable`: the
+    /// status row's `runnable`, and not runnable without a row), read in the
+    /// same transaction with no lock. A tenant with no active bundle reads
+    /// `true`: there is no policy to refuse for, and the receipt's own
+    /// transaction answers for the missing bundle.
+    ///
+    /// The caller refuses a pipeline receipt under a suspended Admission
+    /// policy before it does any work for it. This read decides nothing for
+    /// good: the receipt's staging and commit transactions check the policy
+    /// again, the commit under the row's lock.
+    pub async fn routing_for_new_receipt(
+        &self,
+        tenant_id: &str,
+    ) -> Result<(Option<TenantRouting>, bool), DatabaseError> {
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
+        let row = tx
+            .query_opt(
+                "SELECT routing_state, activation_record_id, actor_principal_ref,
+                        reason_code, evidence_hash, recorded_at
+                   FROM pipeline_tenant_routing
+                  WHERE tenant_id = $1",
+                &[&tenant_id],
+            )
+            .await?;
+        let admission_runnable: bool = tx
+            .query_one(
+                "SELECT NOT EXISTS (
+                     SELECT 1 FROM pipeline_active_bundles active
+                      WHERE active.tenant_id = $1
+                        AND NOT COALESCE((
+                                SELECT status.runnable
+                                  FROM pipeline_bundle_policy_status status
+                                 WHERE status.tenant_id = active.tenant_id
+                                   AND status.bundle_id = active.bundle_id
+                                   AND status.phase = 'admission'
+                            ), FALSE)
+                 )",
+                &[&tenant_id],
+            )
+            .await?
+            .get(0);
+        tx.commit().await?;
+        Ok((
+            row.as_ref().map(routing_from_row).transpose()?,
+            admission_runnable,
+        ))
+    }
+
     /// The tenant's newest `limit` routing changes, newest first.
     pub async fn events(
         &self,

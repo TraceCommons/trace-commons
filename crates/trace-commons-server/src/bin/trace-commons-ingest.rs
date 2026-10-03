@@ -14452,7 +14452,11 @@ enum UploadRoute<'a> {
 /// (`decide_new_receipt_route`). The `PipelineReceipts` list is the scope of
 /// this process; the row decides inside it:
 ///
-/// - `pipeline` for a listed tenant: the pipeline.
+/// - `pipeline` for a listed tenant: the pipeline, unless the Admission
+///   policy of the tenant's active bundle is suspended: `503
+///   bundle_policy_not_runnable` (final fix wave G1; the read is
+///   `PipelineActivationStore::routing_for_new_receipt`, with the routing row
+///   and with no lock).
 /// - `pipeline` for a tenant that is not listed: `503
 ///   pipeline_tenant_not_served`. A row cannot widen the scope, and the
 ///   upload is not sent to the legacy path.
@@ -14480,8 +14484,11 @@ enum UploadRoute<'a> {
 /// before this (`pipeline_owned_submission_receipt`, the legacy record
 /// read), so a routing change never moves a retry to another owner and a
 /// retry adds no routing read. A refusal that only the receipt transaction
-/// finds (a row that changes after this read) comes after
-/// `attempt.processing`, as `main`'s quota refusal does.
+/// finds (a routing row or a policy that changes after this read: a
+/// `contain` or a `suspend` that commits while the upload is in flight) comes
+/// after `attempt.processing`, as `main`'s quota refusal does: the attempt
+/// then stays `processing` until its lease ends, because `Attempt::finish`
+/// releases an attempt only from `reserved`.
 async fn decide_upload_route<'a>(
     state: &'a AppState,
     tenant: &TenantCtx,
@@ -14504,8 +14511,8 @@ async fn decide_upload_route<'a>(
             PIPELINE_ROUTING_UNAVAILABLE_LABEL,
         ));
     };
-    let routing = activation
-        .routing(tenant.tenant_id())
+    let (routing, admission_runnable) = activation
+        .routing_for_new_receipt(tenant.tenant_id())
         .await
         .map_err(|error| {
             tracing::warn!(
@@ -14533,6 +14540,14 @@ async fn decide_upload_route<'a>(
         NewReceiptRoute::NotServed => Err(api_error(
             StatusCode::SERVICE_UNAVAILABLE,
             PIPELINE_TENANT_NOT_SERVED_LABEL,
+        )),
+        // An operator suspended the Admission policy of the tenant's active
+        // bundle: the receipt would be refused in its own transaction, after
+        // the attempt is `processing` and after the re-scrub, the classifier,
+        // and the encryption. Refused here instead, for the whole suspension.
+        NewReceiptRoute::Pipeline if !admission_runnable => Err(api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            PIPELINE_POLICY_NOT_RUNNABLE_LABEL,
         )),
         NewReceiptRoute::Pipeline => Ok(UploadRoute::Pipeline(pipeline_service)),
     }
@@ -14983,11 +14998,12 @@ async fn submit_trace_handler(
         // Tenant routing decision (D3, D15): the `PipelineReceipts` list is
         // the scope of this process and the tenant's committed routing row
         // decides inside it. Decided here, before the admission attempt is
-        // marked processing, so that a refusal (contained, not served, or
-        // routing unavailable) leaves the attempt reserved and the
-        // `attempt.finish(false)` below releases it, refunding a bounded
-        // account's charge, instead of leaving it processing with a live
-        // lease. The decision reads the row once, and not at all for a retry
+        // marked processing, so that a refusal (contained, not served, a
+        // suspended Admission policy, or routing unavailable) leaves the
+        // attempt reserved and the `attempt.finish(false)` below releases it,
+        // refunding a bounded account's charge, instead of leaving it
+        // processing with a live lease. The decision reads the row once, and
+        // not at all for a retry
         // (answered above) or a remediation (the legacy path owns its id);
         // `route_pipeline_receipt` acts on it after every legacy check.
         let upload_route =
