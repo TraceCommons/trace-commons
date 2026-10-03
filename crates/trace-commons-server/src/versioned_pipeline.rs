@@ -181,8 +181,14 @@ pub const PIPELINE_INDEX_DISPATCH_BUDGET_SECONDS: i64 = 30;
 /// The key of a pipeline NEAR outbox line's stored call that records the
 /// settlement mode that submitted it (`dry_run` or `http`); only that mode
 /// confirms the line (Zaki review 3, Z3-L2). A line with no key reads as
-/// `http` (multi-lens review C3).
+/// `PIPELINE_NEAR_SUBMISSION_MODE_DEFAULT` (multi-lens review C3).
 pub const PIPELINE_NEAR_SUBMISSION_MODE_KEY: &str = "pipeline_submission_mode";
+/// The mode a pipeline NEAR outbox line with no
+/// `PIPELINE_NEAR_SUBMISSION_MODE_KEY` reads as: code from before the key
+/// submitted it. The one definition, for the read of the line and for the
+/// confirming `UPDATE`.
+const PIPELINE_NEAR_SUBMISSION_MODE_DEFAULT: PipelineNearSettlementMode =
+    PipelineNearSettlementMode::Http;
 /// Startup refusal labels of `PipelineService::check_tenant_bundles` that
 /// the default package's checks do not share: a tenant bundle whose scorer
 /// or embedder the service does not hold, one no policy family runs, and
@@ -12227,7 +12233,7 @@ impl PipelineService {
                             stored_call
                                 .get(PIPELINE_NEAR_SUBMISSION_MODE_KEY)
                                 .and_then(serde_json::Value::as_str)
-                                .unwrap_or(PipelineNearSettlementMode::Http.as_label())
+                                .unwrap_or(PIPELINE_NEAR_SUBMISSION_MODE_DEFAULT.as_label())
                                 .to_string(),
                         );
                         let call: crate::near_credit::NearCreditReceiptCall =
@@ -12358,7 +12364,7 @@ impl PipelineService {
                       WHERE tenant_id = $1 AND near_outbox_id = $2
                         AND status = 'submitted'
                         AND COALESCE(
-                                near_call_json ->> 'pipeline_submission_mode', 'http'
+                                near_call_json ->> 'pipeline_submission_mode', $6::TEXT
                             ) = $5",
                     &[
                         &run.tenant_id,
@@ -12366,6 +12372,7 @@ impl PipelineService {
                         &evidence.transaction_hash_hash,
                         &evidence.receipt_hash,
                         &mode,
+                        &PIPELINE_NEAR_SUBMISSION_MODE_DEFAULT.as_label(),
                     ],
                 )
                 .await?;
