@@ -70,7 +70,13 @@ node_modules/
 # here because the pipeline's code revision (`pipeline.py revision`) reads the
 # repository's own ignore rules only: an untracked file that only a local
 # exclude hides enters the revision on that host. No tracked file lives
-# under `.claude/` or `.cargo/`.
+# under `.claude/`.
+#
+# `.cargo/` is not listed: a line here would hide a checked-in
+# `.cargo/config.toml` from `git status`. The code revision leaves out an
+# untracked `.cargo/` directory itself (`_code_revision_hash` in
+# `scripts/operator/pipeline_tooling/environment.py`), and includes a tracked
+# one. A host with a local `.cargo/config.toml` in its checkout hides it with
+# a `.cargo/` line in its own `.git/info/exclude`.
 .DS_Store
 .claude/
-.cargo/

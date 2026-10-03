@@ -347,7 +347,12 @@ passed.
   the build as `TRACE_COMMONS_BUILD_CODE_REVISION_HASH`. It hashes the path and
   content of every file that git tracks, and of every untracked file that the
   repository's own `.gitignore` files do not ignore, except the top-level
-  `.local`, `.vscode`, and `target` directories, so any edit changes it. A
+  `.local`, `.vscode`, and `target` directories, so any edit changes it. It
+  also leaves out an untracked `.cargo` directory at any depth (a local cargo
+  configuration); a `.cargo` file that git tracks is part of it. The
+  repository's `.gitignore` has no `.cargo/` line, so a host with a local
+  `.cargo/config.toml` in its checkout sees it in `git status` until that host
+  adds `.cargo/` to its own `.git/info/exclude`. A
   host's `.git/info/exclude` and a user's global excludes file do not change
   it. Compute the revision, qualify, and build on the same clean checkout: a
   stray untracked file changes the revision.

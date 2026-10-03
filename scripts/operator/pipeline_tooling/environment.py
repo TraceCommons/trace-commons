@@ -141,7 +141,18 @@ def _code_revision_hash():
     well). The server compares the revision a release was built with to the
     revision of the run that qualified it, so one checkout must give one
     revision on every host, and a file that only a host's own exclude list
-    hides is part of the tree."""
+    hides is part of the tree.
+
+    One exception: an untracked `.cargo/` directory, at any depth, is left
+    out (`--exclude=.cargo/`). It holds a developer's local cargo
+    configuration (a job count, a target directory), and the repository's
+    `.gitignore` does not list it, because a line there would hide a
+    checked-in `.cargo/config.toml` from `git status`. `--exclude` applies to
+    untracked files only: a tracked file under `.cargo/` is listed by
+    `--cached` and is part of the revision, so a checked-in cargo
+    configuration, which changes how the code builds, changes the revision.
+    With no `.cargo` directory in the checkout the revision is what it was
+    before this exception."""
     listing = subprocess.run(
         [
             "git",
@@ -151,6 +162,7 @@ def _code_revision_hash():
             "--cached",
             "--others",
             "--exclude-per-directory=.gitignore",
+            "--exclude=.cargo/",
             "-z",
         ],
         check=True,

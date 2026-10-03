@@ -4265,8 +4265,9 @@ class CodeRevisionExcludeTests(unittest.TestCase):
     """Final fix wave (G22): the code revision hashes the tracked files and
     the untracked files that the repository's own `.gitignore` files do not
     ignore. A host's `.git/info/exclude` and a user's global excludes file
-    hide nothing, so one checkout gives one revision on every host. These
-    tests run the real `git` in a temporary repository."""
+    hide nothing, so one checkout gives one revision on every host. An
+    untracked `.cargo` directory is the one thing it leaves out by itself.
+    These tests run the real `git` in a temporary repository."""
 
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="revision-excludes-"))
@@ -4313,6 +4314,57 @@ class CodeRevisionExcludeTests(unittest.TestCase):
         self.assertEqual(first, second)
         third = self._revision_after_writing("untracked.txt", "new\n")
         self.assertNotEqual(second, third)
+
+    def test_an_untracked_cargo_config_is_not_part_of_the_revision(self):
+        """Review round 1 of #1240, point 11: the repository's `.gitignore`
+        has no `.cargo/` line (it would hide a checked-in cargo config), and
+        the revision leaves out an untracked `.cargo/` directory itself, at
+        the root and nested, as that line did."""
+        base = environment._code_revision_hash()
+        (self.repo / "crates" / "one").mkdir(parents=True)
+        (self.repo / "crates" / "one" / "lib.rs").write_text("// one\n")
+        with_crate = environment._code_revision_hash()
+        self.assertNotEqual(base, with_crate)
+        for directory in (self.repo / ".cargo", self.repo / "crates" / "one" / ".cargo"):
+            directory.mkdir()
+            for content in ("[build]\njobs = 5\n", "[build]\njobs = 6\n"):
+                (directory / "config.toml").write_text(content)
+                self.assertEqual(environment._code_revision_hash(), with_crate, directory)
+        # Only a directory of that name: a file named like it elsewhere, and
+        # a file whose name only starts with it, are part of the tree.
+        first = self._revision_after_writing(".cargo-notes.txt", "one\n")
+        second = self._revision_after_writing(".cargo-notes.txt", "two\n")
+        self.assertNotEqual(first, second)
+
+    def test_a_tracked_cargo_config_is_part_of_the_revision(self):
+        """A checked-in `.cargo/config.toml` is visible to git (no ignore
+        line hides it) and changes the revision with each edit, at the root
+        and nested."""
+        (self.repo / "crates" / "one").mkdir(parents=True)
+        for directory in (self.repo / ".cargo", self.repo / "crates" / "one" / ".cargo"):
+            directory.mkdir()
+            config = directory / "config.toml"
+            config.write_text("[build]\njobs = 5\n")
+            untracked = environment._code_revision_hash()
+            status = subprocess.run(
+                ["git", "status", "--porcelain", "--untracked-files=all"],
+                cwd=self.repo,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout
+            self.assertIn(str(config.relative_to(self.repo)), status, "git shows the file")
+            self._git("add", str(config.relative_to(self.repo)))
+            tracked = environment._code_revision_hash()
+            self.assertNotEqual(untracked, tracked, directory)
+            config.write_text("[build]\njobs = 6\n")
+            self.assertNotEqual(environment._code_revision_hash(), tracked, directory)
+
+    def test_the_repository_gitignore_has_no_cargo_line(self):
+        """The real `.gitignore`: no line hides `.cargo`, so a checked-in
+        cargo config shows in `git status`."""
+        lines = (Path(__file__).resolve().parents[2] / ".gitignore").read_text().splitlines()
+        self.assertEqual([line for line in lines if line.strip().strip("/") == ".cargo"], [])
 
 
 if __name__ == "__main__":

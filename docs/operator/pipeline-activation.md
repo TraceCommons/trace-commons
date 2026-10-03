@@ -612,7 +612,9 @@ output of `python3 scripts/operator/pipeline.py revision` for the same tree
 (`sha256:` and 64 lowercase hex digits). The tool hashes the path and content
 of every file in the checkout that git tracks, and of every untracked file that
 the repository's own `.gitignore` files do not ignore, except the top-level
-`.local`, `.vscode`, and `target` directories. A host's `.git/info/exclude` and
+`.local`, `.vscode`, and `target` directories, and an untracked `.cargo`
+directory at any depth (a developer's local cargo configuration). A `.cargo`
+file that git tracks is part of the revision. A host's `.git/info/exclude` and
 a user's global excludes file hide nothing from it, so one checkout gives one
 revision on every host. So any edit, a document included, and any stray
 untracked file, changes the revision, and the command needs a git checkout.
