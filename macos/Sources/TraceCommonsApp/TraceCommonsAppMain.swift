@@ -207,9 +207,10 @@ private struct Launcher: View {
         // launch work above can hang from (an `EmptyView` would not run it).
         GlassMenuBarStrip(columns: [], condition: .unavailable, badge: nil)
             .accessibilityElement(children: .ignore)
+            // Says what is drawn: unavailable, whatever the daemon reports.
             .accessibilityLabel(MenuBarStatus.accessibilityLabel(
                 decisionsOwed: model.decisionsOwed, unhealthy: model.health != nil,
-                paused: model.status.paused, available: model.startup == .running))
+                paused: model.status.paused, available: false))
         #endif
     }
 
