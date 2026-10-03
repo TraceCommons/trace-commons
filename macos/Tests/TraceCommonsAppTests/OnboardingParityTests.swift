@@ -1,4 +1,7 @@
+import TCShellCore
 import XCTest
+
+@testable import TraceCommonsApp
 
 /// Each onboarding step keeps its daemon calls, its guards and its copy
 /// sources through the rebuild. The table is the inventory in the plan.
@@ -68,16 +71,20 @@ final class OnboardingParityTests: XCTestCase {
                       ".keyboardShortcut(.defaultAction)", "set: { if let picked = $0 { choice = picked } }"]),
         Step(file: "Views/OnboardingProjectsView.swift",
              bindings: ["ForEach(model.projects) { project in", "if !model.status.answered {",
-                        "model.setProjectMode(project, mode: isIgnored ? .ask : .ignore)",
+                        "let target = OnboardingProjectsModes.target(from: project.mode)",
+                        "model.setProjectMode(project, mode: target)",
                         "if project.isUnresolvedBucket {", "ProjectErrorNotice()",
                         "Button(OnboardingProjectsWords.continueButton)"],
              copySources: ["Text(ProjectCopy.unresolvedBucketNote)", "Text(OnboardingProjectsWords.heading)",
                            "Text(model.projects.isEmpty ? OnboardingProjectsWords.everyProjectAsksFirst : OnboardingProjectsWords.everyProjectAsksFirstIgnore)",
                            "Text(OnboardingProjectsWords.noProjectsYet)",
                            "GlassEyebrowCard(OnboardingProjectsWords.projects)",
-                           "GlassTag(ProjectCopy.modeChoiceLabel(project.mode), tone: isIgnored ? .neutral : .ask)"],
-             guards: ["if ProjectModeWords.table != nil {",
-                      "Button(ProjectCopy.modeChoiceLabel(isIgnored ? .ask : .ignore))",
+                           "label: (ProjectMode) -> String = ProjectCopy.modeChoiceLabel) -> String? {",
+                           "GlassTag(tag, tone: isIgnored ? .neutral : .ask)"],
+             guards: ["if let tag = OnboardingProjectsModes.name(project.mode) {",
+                      "if let move = OnboardingProjectsModes.name(target) {",
+                      "Button(move) {",
+                      ".accessibilityLabel([project.displayLabel, move].joined(separator: \", \"))",
                       ".buttonStyle(GlassButtonStyle(.glass))", ".buttonStyle(GlassButtonStyle(.primary))",
                       ".keyboardShortcut(.defaultAction)"]),
     ]
@@ -134,6 +141,31 @@ final class OnboardingParityTests: XCTestCase {
         XCTAssertFalse(source.contains("offerableModes"), "onboarding Projects reads a list that can hold Automatic")
         XCTAssertFalse(source.contains("ProjectModeChoices"), "onboarding Projects draws the Settings picker")
         XCTAssertEqual(source.components(separatedBy: "model.setProjectMode(").count - 1, 1)
+    }
+
+    /// The toggle moves between Ask me and Never only: Automatic is never
+    /// the target, whatever mode the row is in.
+    func test_projectsToggleMovesOnlyBetweenAskMeAndNever() {
+        XCTAssertEqual(OnboardingProjectsModes.target(from: .ask), .ignore)
+        XCTAssertEqual(OnboardingProjectsModes.target(from: .ignore), .ask)
+        XCTAssertEqual(OnboardingProjectsModes.target(from: .autoUpload), .ignore)
+    }
+
+    /// A mode the core's table does not name has no name here, so neither
+    /// its tag nor the toggle that moves to it is drawn: no control is
+    /// wordless.
+    func test_aModeTheCoreDoesNotNameDrawsNoTagOrToggle() throws {
+        let json = """
+            {"title":"t","mixed":"m","choices":[{"mode":"notify_only","label":"Ask me","line":"l"}],
+             "override_active":"o","clear":"c","auto_partial":"a"}
+            """
+        let copy = try XCTUnwrap(ContributionModeCopy.decode(fromJSON: json))
+        let label: (ProjectMode) -> String = { copy.label(for: $0) ?? "" }
+        XCTAssertNil(OnboardingProjectsModes.name(.ignore, label: label))
+        XCTAssertEqual(OnboardingProjectsModes.name(.ask, label: label), "Ask me")
+        // With the core's own table, both words are there.
+        XCTAssertEqual(OnboardingProjectsModes.name(.ignore), "Never")
+        XCTAssertEqual(OnboardingProjectsModes.name(.ask), "Ask me")
     }
 
     /// The error notice both Projects surfaces draw is dismissible, by the

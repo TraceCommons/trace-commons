@@ -121,6 +121,7 @@ struct OnboardingProjectsContent: View {
 
     private func projectRow(_ project: ProjectRow) -> some View {
         let isIgnored = project.mode == .ignore
+        let target = OnboardingProjectsModes.target(from: project.mode)
         return HStack(alignment: .top, spacing: GlassTokens.Space.s4) {
             VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
                 // The bucket's own label is `unknown-project`, a slug that
@@ -129,8 +130,8 @@ struct OnboardingProjectsContent: View {
                 Text(project.displayLabel)
                     .glassType(GlassTokens.TypeScale.bodyStrong)
                     .fixedSize(horizontal: false, vertical: true)
-                if ProjectModeWords.table != nil {
-                    GlassTag(ProjectCopy.modeChoiceLabel(project.mode), tone: isIgnored ? .neutral : .ask)
+                if let tag = OnboardingProjectsModes.name(project.mode) {
+                    GlassTag(tag, tone: isIgnored ? .neutral : .ask)
                 }
                 if project.isUnresolvedBucket {
                     Text(ProjectCopy.unresolvedBucketNote)
@@ -141,12 +142,14 @@ struct OnboardingProjectsContent: View {
             }
             Spacer(minLength: GlassTokens.Space.s4)
             // Offered on the bucket too: it can be silenced even though it
-            // can never be armed. Named by the mode it moves to.
-            if ProjectModeWords.table != nil {
-                Button(ProjectCopy.modeChoiceLabel(isIgnored ? .ask : .ignore)) {
-                    model.setProjectMode(project, mode: isIgnored ? .ask : .ignore)
+            // can never be armed. Named by the mode it moves to; VoiceOver
+            // hears the project too, since "Never" alone names no row.
+            if let move = OnboardingProjectsModes.name(target) {
+                Button(move) {
+                    model.setProjectMode(project, mode: target)
                 }
                 .buttonStyle(GlassButtonStyle(.glass))
+                .accessibilityLabel([project.displayLabel, move].joined(separator: ", "))
             }
         }
     }
@@ -167,6 +170,21 @@ struct OnboardingProjectsContent: View {
             .buttonStyle(GlassButtonStyle(.primary))
             .keyboardShortcut(.defaultAction)
         }
+    }
+}
+
+/// The two modes this step moves between, and their names. Pure so the
+/// rules are testable: the toggle's target is Never, or back to Ask me, and
+/// never Automatic; a mode the core does not name has no name here, so
+/// neither its tag nor the toggle that moves to it is drawn.
+enum OnboardingProjectsModes {
+    static func target(from mode: ProjectMode) -> ProjectMode {
+        mode == .ignore ? .ask : .ignore
+    }
+
+    static func name(_ mode: ProjectMode, label: (ProjectMode) -> String = ProjectCopy.modeChoiceLabel) -> String? {
+        let name = label(mode)
+        return name.isEmpty ? nil : name
     }
 }
 
