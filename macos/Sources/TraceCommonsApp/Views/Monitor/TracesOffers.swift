@@ -37,9 +37,13 @@ struct TracesOffersBar: View {
             }
             storeUndo
 
-            // The sessions a witness certificate is held for, drawn on every
-            // render including when there are none (`CertificateSection`).
-            CertificateSection(entries: model.awaitingDecision)
+            // The sessions a witness certificate is held for, once the
+            // daemon has answered the queue (`CertificateSection` says when
+            // there are none). An unread queue is not an empty one: before
+            // the answer, nothing.
+            if model.queueAnswered {
+                CertificateSection(entries: model.awaitingDecision)
+            }
 
             if model.showsPrivateInferenceOffer, let copy = model.privateInferenceCopy {
                 PrivateAIOfferGlassCard(
@@ -56,7 +60,10 @@ struct TracesOffersBar: View {
                     onDecline: { model.declineArmingOffer(offer) }
                 )
             }
-            if model.history.isEmpty, let copy = model.witnessCopy?.onboarding {
+            // Only on an answered, empty history; whether anything is under
+            // review reads the answered queue.
+            if model.historyAnswered, model.queueAnswered, model.history.isEmpty,
+               let copy = model.witnessCopy?.onboarding {
                 FirstContributionGlassNote(copy: copy, reviewing: !model.awaitingDecision.isEmpty)
             }
             NotOfferedGlassDisclosure(counts: model.outcomeCounts)
