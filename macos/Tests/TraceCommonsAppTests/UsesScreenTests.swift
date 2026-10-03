@@ -412,13 +412,17 @@ final class UsesScreenTests: XCTestCase {
         XCTAssertEqual(granted.finished, [nil])
 
         // The first-run host gives its runner that mapping, and the notice
-        // is drawn above every section, outside the first-run branch.
+        // is drawn by the shell notices, above every section, outside the
+        // first-run branch.
         let coordinator = try Self.appSource("Views/OnboardingCoordinatorView.swift")
         XCTAssertTrue(coordinator.contains("UsesScreenLayout.finishedNotice("))
+        let notices = try Self.appSource("Views/ShellNotices.swift")
+        let shellNotices = try XCTUnwrap(notices.range(of: "struct ShellNotices"))
+        let body = notices[shellNotices.lowerBound...]
+        XCTAssertTrue(body.contains("if let notice = model.firstRunNotice"))
+        XCTAssertTrue(body.contains("model.firstRunNotice = nil"))
         let window = try Self.appSource("Views/MainWindowView.swift")
-        XCTAssertTrue(window.contains("if let notice = model.firstRunNotice"))
-        let shellNotices = try XCTUnwrap(window.range(of: "struct ShellNotices"))
-        XCTAssertTrue(window[shellNotices.lowerBound...].contains("model.firstRunNotice"))
+        XCTAssertTrue(window.contains("ShellNotices()"))
     }
 
     private static func appSource(_ path: String) throws -> String {

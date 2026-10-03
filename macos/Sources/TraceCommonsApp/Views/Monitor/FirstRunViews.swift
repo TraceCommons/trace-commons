@@ -32,13 +32,19 @@ struct FirstRunWindowView: View {
             if OnboardingNavigation.hostsFirstRun(
                 startup: model.startup, requiresOnboarding: model.requiresOnboarding, entered: entered)
             {
-                // Start writes its marker (the tenant's, or watching
-                // only's) itself; the window closes when it took
-                // (`requiresOnboarding` turns false, below).
-                OnboardingCoordinatorView(onComplete: {})
-                    .frame(width: FirstRunProgress.paneWidth)
-                    .padding(.vertical, GlassTokens.Space.windowPadding * 3)
-                    .onAppear { entered = true }
+                VStack(spacing: GlassTokens.Space.s6) {
+                    // A void or a gate hold can arrive while someone is
+                    // still setting up, and is told here too, above the
+                    // step's own pane.
+                    ShellNotices()
+                    // Start writes its marker (the tenant's, or watching
+                    // only's) itself; the window closes when it took
+                    // (`requiresOnboarding` turns false, below).
+                    OnboardingCoordinatorView(onComplete: {})
+                        .onAppear { entered = true }
+                }
+                .frame(width: FirstRunProgress.paneWidth)
+                .padding(.vertical, GlassTokens.Space.windowPadding * 3)
             } else if model.requiresOnboarding {
                 DaemonStartupNotice(startup: model.startup)
                     .frame(width: FirstRunProgress.paneWidth)
