@@ -50,8 +50,11 @@ struct HistoryDetailInspector: View {
 
     /// The row's status from the core's one table, the same word its list
     /// row shows. An unknown status reads the core's unavailable word; with
-    /// no core copy there is no tag at all. The folder and day only while no
-    /// record resolves: the session detail's heading carries them otherwise.
+    /// no core copy there is no tag at all. The tag only until the session
+    /// detail's overview, which says the status from the same table, is
+    /// drawn (`HistorySelection.tagsStatus`), so the status is said once.
+    /// The folder and day only while no record resolves: the session
+    /// detail's heading carries them otherwise.
     private var summary: some View {
         // The resolved record's status when there is one: `model.withdraw`
         // refreshes the record, so the tag agrees with the Withdraw outcome
@@ -66,7 +69,8 @@ struct HistoryDetailInspector: View {
                     .glassType(GlassTokens.TypeScale.caption)
                     .foregroundStyle(GlassColor.textTertiary)
             }
-            if let tag = HomeFormat.statusWord(status, label: { HomeFormat.historyStatusLabel(copy: model.publicRunCopy, $0) }) {
+            if HistorySelection.tagsStatus(record: record, detail: record.flatMap { model.sessionDetails[$0.submissionID] }),
+               let tag = HomeFormat.statusWord(status, label: { HomeFormat.historyStatusLabel(copy: model.publicRunCopy, $0) }) {
                 GlassTag(tag, tone: HomeFormat.tone(status))
                     .fixedSize()
             }
@@ -118,6 +122,13 @@ struct HistoryDetailInspector: View {
 enum HistorySelection {
     static func record(for submissionId: String, in history: [HistoryRecord]) -> HistoryRecord? {
         history.first { $0.submissionID == submissionId }
+    }
+
+    /// Whether the inspector's own tag says the status: until the session
+    /// detail's overview, which says it from the same History table, is
+    /// drawn, that is while no record resolves or its detail is unread.
+    static func tagsStatus(record: HistoryRecord?, detail: SessionDetail?) -> Bool {
+        record == nil || detail == nil
     }
 }
 #endif

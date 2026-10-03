@@ -121,6 +121,20 @@ final class ComputeSkillsParityTests: XCTestCase {
         XCTAssertNil(HistorySelection.record(for: "", in: [record]))
     }
 
+    /// The inspector's tag says the status until the session detail's
+    /// overview, which says it from the same table, is drawn: once the
+    /// record resolves and its detail has been read. Never both, and never
+    /// neither while a row is selected.
+    func test_theInspectorSaysTheStatusOnce() throws {
+        let record = HistoryRecord(
+            submissionID: "s-1", submittedAt: Date(timeIntervalSince1970: 1_789_000_000), projectID: "p-1",
+            projectLabel: "payments-api", source: "codex", status: "accepted", consentScopes: [],
+            creditPointsPending: 0, creditPointsFinal: nil, explanations: [], lastRefreshedAt: nil)
+        XCTAssertTrue(HistorySelection.tagsStatus(record: nil, detail: nil), "a row with no record has only its tag")
+        XCTAssertTrue(HistorySelection.tagsStatus(record: record, detail: nil), "the detail is still being read")
+        XCTAssertFalse(HistorySelection.tagsStatus(record: record, detail: try detail()), "the overview says it")
+    }
+
     private func detail(
         status: String? = "accepted", taskSuccess: String? = "success", correction: String? = "Use the fixture."
     ) throws -> SessionDetail {

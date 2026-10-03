@@ -35,11 +35,15 @@ final class HistoryParityTests: XCTestCase {
             "model.withdrawing.contains(record.submissionID)", "model.withdraw(record)", "WithdrawalCopy.confirmation(for:",
             "confirmation.gravest", "confirmation.credit", "confirmation.confirmLabel", ".keyboardShortcut(.cancelAction)",
             "WithdrawalCopy.resultSentence(", "WithdrawalCopy.accountSessionRequired", "WithdrawalCopy.failureSentence(label:",
-            "copy.contributionStatusLabel(for: detail.contributionStatus ?? record.status)", "copy.permittedUsesUnavailable",
+            "copy.historyStatusLabel(for: detail.contributionStatus ?? record.status)", "copy.permittedUsesUnavailable",
             "copy.noPermittedUses", "copy.contentUnavailable", "minHeight: 44",
         ] {
             XCTAssertTrue(source.contains(needle), "SessionContributionOverview.swift lacks \(needle)")
         }
+        // One History table for a status (ruling R-17): never the session
+        // detail's "Submitted", which reads as done.
+        XCTAssertFalse(source.contains("contributionStatusLabel("),
+                       "SessionContributionOverview.swift reads the session-detail status table")
         try LegacySymbols.assertClean("Views/SessionContributionOverview.swift")
     }
 
@@ -246,7 +250,11 @@ final class HistoryParityTests: XCTestCase {
             // The resolved record's status when there is one, the word its
             // Withdraw outcome agrees with; the list row's otherwise.
             "let status = record?.status ?? row.status",
-            "if let tag = HomeFormat.statusWord(status, label: { HomeFormat.historyStatusLabel(copy: model.publicRunCopy, $0) }) "
+            // Said once: the tag only while the session detail's overview,
+            // which says the status from the same table, is not drawn.
+            "if HistorySelection.tagsStatus(record: record, "
+                + "detail: record.flatMap { model.sessionDetails[$0.submissionID] }), "
+                + "let tag = HomeFormat.statusWord(status, label: { HomeFormat.historyStatusLabel(copy: model.publicRunCopy, $0) }) "
                 + "{ GlassTag(tag, tone: HomeFormat.tone(status))",
             // The folder and day only while no record resolves: the session
             // detail's own heading carries them otherwise.
