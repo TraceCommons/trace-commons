@@ -135,6 +135,10 @@ struct PublicRunCopy: Decodable, Equatable {
     let feedbackChoices: [PublicRunValueLabel]
     let evidenceKindChoices: [PublicRunValueLabel]
     let contributionStatusChoices: [PublicRunValueLabel]
+    /// The core's label for a status not in `contributionStatusChoices`
+    /// (`history_copy::STATUS_UNAVAILABLE`): "Status unavailable" in every
+    /// shell.
+    let contributionStatusUnavailable: String
     let permittedUseChoices: [PublicRunValueLabel]
     let reusePermissions: [PublicRunReuseChoice]
 
@@ -150,7 +154,7 @@ struct PublicRunCopy: Decodable, Equatable {
     }
 
     func contributionStatusLabel(for value: String) -> String {
-        contributionStatusChoices.first { $0.value == value }?.label ?? unrecognizedValue
+        contributionStatusChoices.first { $0.value == value }?.label ?? contributionStatusUnavailable
     }
 
     func permittedUseLabel(for value: String) -> String {
