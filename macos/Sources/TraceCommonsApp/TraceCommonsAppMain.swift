@@ -196,9 +196,16 @@ private struct Launcher: View {
     @Environment(\.openSettings) private var openSettings
     #endif
 
+    /// Whether the launch has made its one `OpenMonitor` request.
+    @State private var openedAtLaunch = false
+
     var body: some View {
         label
             .task { launch() }
+            .onChange(of: LaunchRouting.launchOpens(startup: model.startup, statusAnswered: model.statusAnswered),
+                      initial: true) { _, ready in
+                openAtLaunch(ready)
+            }
     }
 
     @ViewBuilder
@@ -297,6 +304,20 @@ private struct Launcher: View {
         #endif
         DebugScreenshot.scheduleIfRequested(model: model)
         SelfTest.runIfRequested(model: model)
+    }
+
+    /// The launch's window, once the core has said whether onboarding is
+    /// required (`LaunchRouting.launchOpens`), so the choice is never made
+    /// from the placeholder status. Once, and not over an opener that got
+    /// there first: an invite link or a notification's Review has already
+    /// opened a window, and its destination waits in `navigation.pending`
+    /// for the Monitor, which a plain request would overwrite.
+    @MainActor
+    private func openAtLaunch(_ ready: Bool) {
+        guard ready, !openedAtLaunch else { return }
+        openedAtLaunch = true
+        guard navigation.pending == nil else { return }
+        OpenMonitor.request()
     }
 
     /// One `OpenMonitor` request: first run while onboarding is required,

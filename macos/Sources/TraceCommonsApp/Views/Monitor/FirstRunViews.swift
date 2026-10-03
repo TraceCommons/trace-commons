@@ -15,7 +15,8 @@ import TCShellCore
 /// It is gated as the main window gates its own onboarding
 /// (`MainWindowView`): the coordinator is drawn only while
 /// `model.requiresOnboarding`, and the window closes itself as soon as
-/// that is false, so an onboarded person never lands in the flow.
+/// that is false and opens the Monitor, so an onboarded person never lands
+/// in the flow.
 ///
 /// The passkey popups from #1030 are not here: #1030 hides the passkey card
 /// in the first release (its rule 12), and the passkey client (Z11) does
@@ -67,10 +68,11 @@ struct FirstRunWindowView: View {
                             })
                     }
                 }
+                // Bounded by the window, not grown to the step: each step
+                // scrolls in its own ScrollView, which a pane sized to its
+                // step would let run past the window's bottom edge (a Uses
+                // step with many scopes), out of reach.
                 .frame(width: FirstRunProgress.paneWidth)
-                // As tall as the step, not the window: the pane sits on the
-                // scene rather than filling it.
-                .fixedSize(horizontal: false, vertical: true)
                 .padding(.vertical, GlassTokens.Space.windowPadding * 3)
             }
         }
@@ -79,8 +81,13 @@ struct FirstRunWindowView: View {
         .onChange(of: model.startup, initial: true) { _, startup in
             if asksForFolders == nil { asksForFolders = FirstRunProgress.asksForFolders(startup) }
         }
+        // Finishing first run hands off to the Monitor on Home. Initially
+        // too: first run opened for someone already onboarded closes and
+        // opens the Monitor instead.
         .onChange(of: model.requiresOnboarding, initial: true) { _, requires in
-            if !requires { dismissWindow(id: WindowID.firstRun) }
+            guard !requires else { return }
+            dismissWindow(id: WindowID.firstRun)
+            OpenMonitor.request(.home(.overview))
         }
     }
 }
