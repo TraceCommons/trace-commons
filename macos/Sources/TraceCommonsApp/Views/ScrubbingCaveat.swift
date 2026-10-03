@@ -103,6 +103,6 @@ struct ScrubbingCaveatAtCommit: View {
         GlassStatusLabel(ScrubbingCaveat.canonical, status: .ask)
             .fixedSize(horizontal: false, vertical: true)
             .accessibilityElement(children: .combine)
-        .accessibilityLabel("Before you contribute. \(ScrubbingCaveat.canonical)")
+            .accessibilityLabel("Before you contribute. \(ScrubbingCaveat.canonical)")
     }
 }

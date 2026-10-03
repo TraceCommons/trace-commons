@@ -41,14 +41,16 @@ struct CertificateSection: View {
                         .glassType(GlassTokens.TypeScale.bodyStrong)
                         .foregroundStyle(GlassColor.textPrimary)
                     if held.isEmpty {
-                        Text(model.privateInferenceCopy?.certificateListEmpty ?? "")
-                            .glassType(GlassTokens.TypeScale.caption)
-                            .foregroundStyle(GlassColor.textSecondary)
+                        if let empty = model.privateInferenceCopy?.certificateListEmpty {
+                            Text(empty)
+                                .glassType(GlassTokens.TypeScale.caption)
+                                .foregroundStyle(GlassColor.textSecondary)
+                        }
                     } else if let line = TCCertificate.rowLine(evidenceAdmitted: evidenceAdmitted) {
                         VStack(spacing: 0) {
                             ForEach(Array(held.enumerated()), id: \.element.id) { index, entry in
                                 GlassTableRow(first: index == 0) {
-                                    VStack(alignment: .leading, spacing: 2) {
+                                    VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
                                         Text(entry.projectLabel)
                                             .foregroundStyle(GlassColor.textPrimary)
                                         Text(line)
