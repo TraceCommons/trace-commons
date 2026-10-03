@@ -3211,6 +3211,7 @@ impl RouteFixture {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn attestations_with(
         &self,
         package: &trace_commons_gate_api::pipeline::BundlePackage,

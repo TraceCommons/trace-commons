@@ -38894,6 +38894,7 @@ impl QualifiedBundles {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn gate_request<'a>(
     tenant: &'a str,
     package: &'a BundlePackage,
