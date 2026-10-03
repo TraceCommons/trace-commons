@@ -281,6 +281,21 @@ pub const VOID_REARM_FAILED: &str =
 /// [`VOID_GRANT_REGRANT`] and its button beside this sentence.
 pub const VOID_GRANT_PROJECTS: &str = "Projects still set to contribute automatically carry on. Any project that stopped has its own notice.";
 
+/// **DRAFT, NEEDS APPROVAL.** The title of the "Auto contribute" override's
+/// void notice (`grant_voids` element of kind `contribution_override`).
+pub const VOID_OVERRIDE_TITLE: &str = "Auto contribute turned off";
+
+/// **DRAFT, NEEDS APPROVAL.** What happened. Held to `sweep_grants`: the
+/// override is cleared, so every folder is back on its own setting, and a
+/// folder that asks first waits for you again.
+pub const VOID_OVERRIDE_BODY: &str = "Settings it was turned on under have since changed, so \
+     Auto contribute is off and each folder is back on its own setting. Sessions from folders \
+     that ask first wait for you again.";
+
+/// **DRAFT, NEEDS APPROVAL.** How it is turned back on.
+pub const VOID_OVERRIDE_REARM: &str = "You can turn Auto contribute back on from Contribution \
+     mode. Doing so agrees to the new settings.";
+
 /// The title of a void this build cannot place: a `kind` it does not know,
 /// or a project void without a label. It says what is certain -- automatic
 /// contributing stopped -- and does not guess for what.
@@ -337,6 +352,11 @@ pub fn void_reason_line(label: &str) -> &'static str {
         }
         "attested-bodies-on" => {
             "The full text of your attested AI calls would now be sent with your sessions."
+        }
+        // **DRAFT, NEEDS APPROVAL.** `policy::OVERRIDE_TERMS_UNRECORDED`:
+        // only an "Auto contribute" override saved by a pre-release build.
+        "terms-unrecorded" => {
+            "It was turned on before this app recorded the settings it was turned on under."
         }
         _ => VOID_REASON_UNKNOWN,
     }
@@ -433,6 +453,20 @@ pub fn void_notice_for_wire(void: &serde_json::Value) -> Option<VoidNoticeCopy> 
         label,
     ) {
         (Some("automatic_grant"), _) => Some(void_notice(None, &reasons)),
+        // The "Auto contribute" override (#1208): the pill is back on each
+        // folder's own setting. No button: turning it back on is the pill's
+        // own confirmation, not a one-tap re-arm.
+        (Some("contribution_override"), _) => {
+            let placed = void_notice(None, &reasons);
+            Some(VoidNoticeCopy {
+                title: VOID_OVERRIDE_TITLE.to_string(),
+                body: VOID_OVERRIDE_BODY,
+                rearm: VOID_OVERRIDE_REARM,
+                rearm_action: None,
+                rearm_failed: None,
+                ..placed
+            })
+        }
         (Some("project"), Some(label)) => {
             let notice = void_notice(Some(label), &reasons);
             // The button acts on the element's `project_id`; without one
@@ -2256,6 +2290,24 @@ mod tests {
         assert_eq!(n.title, REWORDED_UNPLACED_TITLE);
         assert!(n.ask_first_action.is_none() && n.ask_first_failed.is_none());
         assert!(arming_reworded_notice_for_wire(&serde_json::json!("x")).is_none());
+    }
+
+    /// #1208: the "Auto contribute" override's void gets its own words --
+    /// not the Flow 1 grant's, not the unplaced fallback -- and no button,
+    /// since turning it back on is the pill's own confirmation.
+    #[test]
+    fn an_override_void_gets_its_own_notice() {
+        let n = void_notice_for_wire(&serde_json::json!({
+            "id": 3, "kind": "contribution_override", "project_id": null,
+            "project_label": null, "reasons": ["scopes-widened"]
+        }))
+        .unwrap();
+        assert_eq!(n.title, VOID_OVERRIDE_TITLE);
+        assert_eq!(n.body, VOID_OVERRIDE_BODY);
+        assert_eq!(n.rearm, VOID_OVERRIDE_REARM);
+        assert_eq!(n.reasons, vec![void_reason_line("scopes-widened")]);
+        assert!(n.rearm_action.is_none() && n.rearm_failed.is_none());
+        assert_ne!(void_reason_line("terms-unrecorded"), VOID_REASON_UNKNOWN);
     }
 
     #[test]
