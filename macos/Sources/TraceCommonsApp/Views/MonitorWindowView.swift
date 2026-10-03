@@ -50,6 +50,8 @@ struct MonitorWindowView: View {
     @SceneStorage("monitor.selectedSession") private var selectedSession = ""
     /// Home's page: the overview or History, restored per window.
     @SceneStorage("monitor.homePage") private var homePage: HomeTabView.Page = .overview
+    /// The selected History row's submission id; empty for none.
+    @SceneStorage("monitor.selectedHistory") private var selectedHistory = ""
 
     /// The screens' data, read through the app's live client
     /// (`AppModel.daemonData`), which the body attaches whenever the daemon
@@ -126,7 +128,7 @@ struct MonitorWindowView: View {
                     HomeTabView(
                         store: home, traces: traces,
                         statusLabel: { status in model.publicRunCopy?.contributionStatusLabel(for: status) },
-                        page: $homePage)
+                        page: $homePage, selection: $selectedHistory)
                 }
             }
         } map: {
@@ -146,7 +148,13 @@ struct MonitorWindowView: View {
                         store: inference, destinationLabel: model.privateInferenceCopy?.destination,
                         sentence: { Self.rowSentence($0, copy: model.privateInferenceCopy, calls: model.harnessCalls) })
                 case .home:
-                    HomeSummaryInspector(store: home)
+                    // History's selected row, while it is still listed; the
+                    // record as a whole otherwise.
+                    if homePage == .history, let row = selectedHistoryRow {
+                        HistoryDetailInspector(row: row)
+                    } else {
+                        HomeSummaryInspector(store: home)
+                    }
                 }
             }
         }
@@ -198,6 +206,12 @@ struct MonitorWindowView: View {
     /// The selected session, while it is still in the tree.
     private var selectedEntry: DaemonData.QueueEntry? {
         traces.tree.allSessions.first { $0.entryId == selectedSession }
+    }
+
+    /// The selected History row, while it is still in the list.
+    private var selectedHistoryRow: DaemonData.HistoryRow? {
+        guard !selectedHistory.isEmpty else { return nil }
+        return home.history?.first { $0.submissionId == selectedHistory }
     }
 
     /// A session's Review: select it and show the inspector, where its

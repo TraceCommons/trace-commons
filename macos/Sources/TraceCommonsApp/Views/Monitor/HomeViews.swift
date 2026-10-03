@@ -22,6 +22,9 @@ struct HomeTabView: View {
     /// The core's label for a history status, when its copy has loaded.
     let statusLabel: (String) -> String?
     @Binding var page: Page
+    /// The selected History row's submission id; empty for none. The
+    /// inspector shows its details.
+    @Binding var selection: String
 
     var body: some View {
         switch page {
@@ -30,7 +33,7 @@ struct HomeTabView: View {
                 store: store, traces: traces, statusLabel: statusLabel,
                 openHistory: { page = .history }, openMissions: { page = .missions })
         case .history:
-            HistoryPage(store: store, statusLabel: statusLabel, back: { page = .overview })
+            HistoryPage(store: store, statusLabel: statusLabel, selection: $selection, back: { page = .overview })
         case .missions:
             MissionsPage(store: store, back: { page = .overview })
         }
@@ -142,6 +145,7 @@ private struct HomeOverview: View {
 private struct HistoryPage: View {
     let store: HomeStore
     let statusLabel: (String) -> String?
+    @Binding var selection: String
     let back: () -> Void
 
     var body: some View {
@@ -168,7 +172,7 @@ private struct HistoryPage: View {
                             GlassCard {
                                 VStack(spacing: 0) {
                                     ForEach(Array(rows.enumerated()), id: \.element.id) { index, row in
-                                        GlassTableRow(first: index == 0) { HistoryRowView(row: row, statusLabel: statusLabel, compact: false) }
+                                        selectable(row, first: index == 0)
                                     }
                                 }
                             }
@@ -180,6 +184,22 @@ private struct HistoryPage: View {
             }
             .scrollIndicators(.never)
         }
+    }
+
+    /// A row a click selects, highlighted across its full width; the
+    /// inspector shows the selected row's details.
+    private func selectable(_ row: DaemonData.HistoryRow, first: Bool) -> some View {
+        let selected = selection == row.submissionId
+        return Button(action: { selection = row.submissionId }) {
+            GlassTableRow(first: first) { HistoryRowView(row: row, statusLabel: statusLabel, compact: false) }
+                .background(
+                    RoundedRectangle(cornerRadius: GlassTokens.Radius.control, style: .continuous)
+                        .fill(selected ? GlassColor.ink(0.12) : Color.clear)
+                )
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(selected ? [.isButton, .isSelected] : .isButton)
     }
 }
 
