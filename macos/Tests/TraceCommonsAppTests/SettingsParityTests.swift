@@ -132,7 +132,7 @@ final class SettingsParityTests: XCTestCase {
                 accessibility: ["GlassToggleStyle(.settings)", ".accessibilityLabel(copy.portTitle)",
                                 ".accessibilityLabel(copy.folderTitle)", ".accessibilityElement(children: .combine)"]),
         Section(glass: "Views/Settings/PrivateAISection.swift",
-                bindings: ["model.privateInferenceCopy", "navigation?.section = .privateInference",
+                bindings: ["model.privateInferenceCopy", "OpenMonitor.request(.inference)",
                            "model.routeDisclosureState", "model.routeDisclosureUnreadableCopy", "model.refreshRouteDisclosure()"],
                 copySources: ["copy.settingsTitle", "copy.settingsMoved", "copy.destination",
                               "copy.route", "copy.localFilter", "witness.heading", "witness.addressLabel", "witness.signingLabel",
@@ -401,7 +401,7 @@ final class SettingsParityTests: XCTestCase {
     /// The window draws the glass content and nothing else.
     func test_theWindowDrawsGlassContent() throws {
         let window = try Self.text("Views/MonitorWindowView.swift")
-        XCTAssertTrue(window.contains("GlassSettingsContent(navigation: navigation, section: section)"))
+        XCTAssertTrue(window.contains("GlassSettingsContent(section: section)"))
         // The glass view's name ends in the legacy one's, so the legacy call
         // is looked for with the glass calls taken out.
         XCTAssertFalse(window.replacingOccurrences(of: "GlassSettingsContent(", with: "").contains("SettingsContent("))

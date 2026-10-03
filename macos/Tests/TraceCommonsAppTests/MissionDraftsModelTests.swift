@@ -138,12 +138,14 @@ final class MissionDraftsModelTests: XCTestCase {
     }
 
     @MainActor
-    func testMissionNavigationDoesNotActivateEnrollmentServices() async throws {
+    func testMissionNavigationNoLongerDefersServices() async throws {
         let navigation = MainWindowNavigation()
         var starts = 0
         navigation.section = .missionDrafts
+        // D-11: Mission drafts is a Home page; no section defers services.
         navigation.activateServicesIfNeeded { starts += 1 }
-        XCTAssertEqual(starts, 0)
+        navigation.activateServicesIfNeeded { starts += 1 }
+        XCTAssertEqual(starts, 1)
         XCTAssertEqual(
             MainWindowView.title(.missionDrafts, compute: nil, privateInference: nil,
                                  missionCopy: ["title": "shared mission title"]),

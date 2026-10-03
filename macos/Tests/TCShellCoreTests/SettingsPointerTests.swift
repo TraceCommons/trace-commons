@@ -26,7 +26,7 @@ final class SettingsPointerTests: XCTestCase {
             source.contains("copy.settingsMoved"),
             "the settings entry must show the sentence saying where the switch went")
         XCTAssertTrue(
-            source.contains("navigation?.section = .privateInference"),
+            source.contains("OpenMonitor.request(.inference)"),
             "the pointer must be a way to the destination, not only a sentence")
     }
 

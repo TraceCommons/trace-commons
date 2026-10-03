@@ -4,7 +4,6 @@ import TCDesign
 /// One Settings section, on the glass system (R11 of #1173). The window's
 /// list picks the section; this draws it. Compute has its own view.
 struct GlassSettingsContent: View {
-    var navigation: MainWindowNavigation?
     let section: SettingsSection
 
     var body: some View {
@@ -19,7 +18,7 @@ struct GlassSettingsContent: View {
             case .watching: WatchingSection()
             case .watchedFolders: WatchedFoldersSection()
             case .tools: ToolsSection()
-            case .privateAI: PrivateAISection(navigation: navigation)
+            case .privateAI: PrivateAISection()
             case .witness: WitnessSection()
             case .projects: ProjectsSection()
             case .changes: ChangesSection()

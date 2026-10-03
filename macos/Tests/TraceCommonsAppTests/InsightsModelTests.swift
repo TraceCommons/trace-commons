@@ -11,9 +11,11 @@ final class InsightsModelTests: XCTestCase {
         let trace = AppModel()
         let navigation = MainWindowNavigation()
         XCTAssertEqual(navigation.section, .insights)
+        // D-11: resting on Insights no longer defers services; the first
+        // request starts them, once, and still advances no contribution gate.
         var starts = 0
         navigation.activateServicesIfNeeded { starts += 1 }
-        XCTAssertEqual(starts, 0)
+        XCTAssertEqual(starts, 1)
         XCTAssertTrue(navigation.displaysInsights)
         XCTAssertEqual(trace.startup, .starting)
         XCTAssertFalse(trace.status.loggedIn)

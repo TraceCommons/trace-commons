@@ -11,11 +11,9 @@ import TCShellCore
 /// credit is shown only beside the commons' own statement of what it waits
 /// on (D6), and never as earned.
 struct HomeTabView: View {
-    enum Page: String {
-        case overview
-        case history
-        case missions
-    }
+    /// Declared top-level (`MonitorNavigation.swift`) so a destination can
+    /// name a page in a release build.
+    typealias Page = HomePage
 
     let store: HomeStore
     let traces: TracesStore

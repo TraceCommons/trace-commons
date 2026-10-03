@@ -10,7 +10,6 @@ import TCShellCore
 /// refresh. Unreadable is said as such and never drawn as some other route.
 struct PrivateAISection: View {
     @EnvironmentObject private var model: AppModel
-    var navigation: MainWindowNavigation?
 
     var body: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
@@ -21,10 +20,12 @@ struct PrivateAISection: View {
                             .glassType(GlassTokens.TypeScale.caption)
                             .foregroundStyle(GlassColor.textSecondary)
                             .fixedSize(horizontal: false, vertical: true)
-                        // The label is the destination's own, so the sidebar
+                        // The label is the destination's own, so the tab
                         // and this pointer can never name it differently.
+                        // It lands on the Inference inspector, where the
+                        // switch is.
                         Button(copy.destination) {
-                            navigation?.section = .privateInference
+                            OpenMonitor.request(.inference)
                         }
                         .buttonStyle(GlassButtonStyle(.link))
                     }
