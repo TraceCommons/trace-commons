@@ -579,13 +579,8 @@ struct SettingsContent: View {
     /// other into dropping a scope neither touched.
     private func setScope(_ scope: ConsentScope, granted: Bool) {
         guard !consentBusy, model.status.loggedIn, !scope.alwaysOn else { return }
-        var scopes = Set(model.status.consentScopes)
-        scopes.formUnion(model.consentScopes.filter(\.alwaysOn).map(\.name))
-        if granted {
-            scopes.insert(scope.name)
-        } else {
-            scopes.remove(scope.name)
-        }
+        let scopes = ConsentScopeRows.nextScopes(
+            reported: model.status.consentScopes, options: model.consentScopes, toggling: scope, granted: granted)
         consentSaveError = nil
         consentBusy = true
         Task {

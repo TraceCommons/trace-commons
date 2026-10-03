@@ -17,6 +17,17 @@ enum ConsentScopeRows {
         }
         return scopes
     }
+
+    /// With no daemon answer nothing reads as granted, the always-on row
+    /// included; otherwise always-on is locked on and the rest follow the
+    /// daemon's list.
+    static func isOn(scope: ConsentScope, granted: Set<String>, unavailable: Bool) -> Bool {
+        !unavailable && (scope.alwaysOn || granted.contains(scope.name))
+    }
+
+    static func isEnabled(scope: ConsentScope, busy: Bool, unavailable: Bool) -> Bool {
+        !scope.alwaysOn && !busy && !unavailable
+    }
 }
 
 struct ConsentSection: View {
@@ -71,7 +82,7 @@ struct ConsentSection: View {
     private func row(_ scope: ConsentScope, granted: Set<String>) -> some View {
         let unavailable = !model.status.loggedIn
         let isOn = Binding<Bool>(
-            get: { scope.alwaysOn || (!unavailable && granted.contains(scope.name)) },
+            get: { ConsentScopeRows.isOn(scope: scope, granted: granted, unavailable: unavailable) },
             set: { setScope(scope, granted: $0) })
         return Toggle(isOn: isOn) {
             VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
@@ -89,7 +100,7 @@ struct ConsentSection: View {
             }
         }
         .toggleStyle(GlassCheckboxStyle())
-        .disabled(scope.alwaysOn || busy || unavailable)
+        .disabled(!ConsentScopeRows.isEnabled(scope: scope, busy: busy, unavailable: unavailable))
         .accessibilityElement(children: .combine)
     }
 
