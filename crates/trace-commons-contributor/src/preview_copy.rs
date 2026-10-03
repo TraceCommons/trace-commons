@@ -116,12 +116,12 @@ pub fn unsure_hint_line(label: &str) -> Option<&'static str> {
 // the tab says when the core does not answer. One table, so the monitor
 // writes none of its own.
 
-/// **DRAFT, NEEDS APPROVAL.** What the Traces tab says when the core does
+/// What the Traces tab says when the core does
 /// not answer. The tree below it is the last one the core reported.
 pub const MONITOR_CORE_UNREACHABLE: &str =
     "The watcher isn't answering. This is what it last reported.";
 
-/// **DRAFT, NEEDS APPROVAL.** What the Traces tab says when a request the
+/// What the Traces tab says when a request the
 /// core answered failed (a refused write, or a reply this build could not
 /// read).
 pub const MONITOR_REQUEST_FAILED: &str = "That didn't go through. Try again.";
