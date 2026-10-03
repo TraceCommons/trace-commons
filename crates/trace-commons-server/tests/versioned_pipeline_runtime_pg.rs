@@ -36508,8 +36508,19 @@ impl QualifiedBundles {
         tenant: &str,
         package: &BundlePackage,
     ) -> Result<TenantRouting, DatabaseError> {
+        let promotion = self.promotion(package, &gate_revision());
+        self.roll_back_with(tenant, package, &promotion).await
+    }
+
+    /// `roll_back` with the caller's promotion, whose evidence hash the
+    /// rollback's event records.
+    async fn roll_back_with(
+        &self,
+        tenant: &str,
+        package: &BundlePackage,
+        promotion: &PromotionDecision,
+    ) -> Result<TenantRouting, DatabaseError> {
         let revision = gate_revision();
-        let promotion = self.promotion(package, &revision);
         let profile = self.profile(package);
         let actor = routing_actor();
         self.activation_store()
@@ -36518,7 +36529,7 @@ impl QualifiedBundles {
                 package,
                 &actor,
                 "roll_back_to_earlier_bundle",
-                &promotion,
+                promotion,
                 &revision,
                 &profile,
             ))
@@ -36587,6 +36598,8 @@ enum GateBreak {
     DecisionNoPackage,
     /// A profile built for the other bundle.
     ProfileForOtherBundle,
+    /// A profile for the bundle whose dependency digest is not the package's.
+    ProfileOtherDependencyDigest,
     /// A profile with the local test infrastructure.
     LocalTestInfrastructure,
     /// A profile whose runtime identity is not the qualified one.
@@ -36600,7 +36613,7 @@ enum GateBreak {
 }
 
 impl GateBreak {
-    const ALL: [Self; 17] = [
+    const ALL: [Self; 18] = [
         Self::PromotionNotReady,
         Self::PromotionReadyFlagFalse,
         Self::PromotionWithBlocker,
@@ -36613,6 +36626,7 @@ impl GateBreak {
         Self::DecisionOtherPackage,
         Self::DecisionNoPackage,
         Self::ProfileForOtherBundle,
+        Self::ProfileOtherDependencyDigest,
         Self::LocalTestInfrastructure,
         Self::OtherRuntimeIdentity,
         Self::ScorePolicySuspended,
@@ -36635,7 +36649,9 @@ impl GateBreak {
             Self::DecisionOtherPackage | Self::DecisionNoPackage => {
                 ACTIVATION_PACKAGE_MISMATCH_LABEL
             }
-            Self::ProfileForOtherBundle => "bundle_qualification_profile_mismatch",
+            Self::ProfileForOtherBundle | Self::ProfileOtherDependencyDigest => {
+                "bundle_qualification_profile_mismatch"
+            }
             // `ProductionInfrastructureProfile::local_test`'s first blocker.
             Self::LocalTestInfrastructure => "artifact_store_not_production",
             Self::OtherRuntimeIdentity => "runtime_dependency_identity_mismatch",
@@ -36704,6 +36720,18 @@ async fn activate_with_break(
         }
         GateBreak::DecisionNoPackage => promotion.package = None,
         GateBreak::ProfileForOtherBundle => profile = fixture.profile(other),
+        GateBreak::ProfileOtherDependencyDigest => {
+            // B shares A's dependency digest, so only an altered digest in a
+            // profile for the bundle itself reaches this half of the check.
+            let mut qualification = fixture.service.bundle_qualification(target).unwrap();
+            qualification.dependency_digest = sha256_prefixed(b"another-dependency-digest");
+            profile =
+                ProductionDependencyProfile::new(qualification, all_production_infrastructure());
+            assert!(
+                profile.blockers().is_empty(),
+                "only the dependency digest differs"
+            );
+        }
         GateBreak::LocalTestInfrastructure => {
             profile = ProductionDependencyProfile::for_bundle(
                 &fixture.service,
@@ -37354,11 +37382,13 @@ async fn rollback_selects_an_earlier_bundle_for_new_runs_only() {
         "R1 stopped before Score"
     );
 
+    let promotion = fixture.promotion(&fixture.a, &revision);
     let rolled_back = fixture
-        .roll_back(&tenant, &fixture.a)
+        .roll_back_with(&tenant, &fixture.a, &promotion)
         .await
         .expect("A was active before B");
     assert_eq!(rolled_back.routing_state, RoutingState::Pipeline);
+    assert_eq!(rolled_back.evidence_hash, promotion.evidence_hash);
     assert_eq!(active(tenant.clone()).await, Some(a.clone()));
     let event = store.events(&tenant, 1).await.unwrap().remove(0);
     assert_eq!(event.action, ActivationAction::Rollback);
@@ -37366,7 +37396,10 @@ async fn rollback_selects_an_earlier_bundle_for_new_runs_only() {
     assert_eq!(event.resulting_state, RoutingState::Pipeline);
     assert_eq!(event.previous_bundle_id.as_deref(), Some(b.as_str()));
     assert_eq!(event.resulting_bundle_id.as_deref(), Some(a.as_str()));
-    assert_eq!(event.evidence_hash, rolled_back.evidence_hash);
+    assert_eq!(
+        event.evidence_hash, promotion.evidence_hash,
+        "a rollback's event records the promotion's evidence hash"
+    );
     service.register_default_bundle(&tenant).await.unwrap();
     assert_eq!(
         active(tenant.clone()).await,
@@ -37439,7 +37472,7 @@ async fn rollback_selects_an_earlier_bundle_for_new_runs_only() {
         .await
         .unwrap();
     let from_contained = fixture
-        .roll_back(&other, &fixture.a)
+        .roll_back_with(&other, &fixture.a, &promotion)
         .await
         .expect("a contained tenant rolls back");
     assert_eq!(from_contained.routing_state, RoutingState::Pipeline);
@@ -37449,6 +37482,7 @@ async fn rollback_selects_an_earlier_bundle_for_new_runs_only() {
     assert_eq!(event.previous_state, Some(RoutingState::Contained));
     assert_eq!(event.previous_bundle_id.as_deref(), Some(b.as_str()));
     assert_eq!(event.resulting_bundle_id.as_deref(), Some(a.as_str()));
+    assert_eq!(event.evidence_hash, promotion.evidence_hash);
 
     // A tenant routed to the legacy path, and one with no routing row.
     store
@@ -37534,8 +37568,12 @@ async fn rollback_selects_an_earlier_bundle_for_new_runs_only() {
 }
 
 /// BND-003: an activation of B races a receipt on a tenant routed with A,
-/// twenty times. Every receipt creates its run, bound to A or to B, and its
-/// Admission outcome carries the run's bundle; every activation completes.
+/// twenty times. Every receipt creates its run, and the stored run is bound
+/// to A or to B, the bundle the receipt answered with, and its Admission
+/// outcome carries that bundle; every activation completes. Which rounds
+/// bind to which bundle depends on timing; the case of a receipt staged
+/// under A that commits after the activation is fixed in
+/// `a_receipt_staged_before_an_activation_commits_on_its_bundle`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_activation_races_a_receipt_without_rebinding_it() {
     let Some(backend) = runtime_backend(8).await else {
@@ -37544,6 +37582,7 @@ async fn an_activation_races_a_receipt_without_rebinding_it() {
     let dir = tempfile::tempdir().unwrap();
     let fixture = two_qualified_bundles(backend.clone(), &dir).await;
     let store = fixture.activation_store();
+    let runs = PgPipelineStore::new(backend.clone());
     let (a, b) = (fixture.a.bundle_id.clone(), fixture.b.bundle_id.clone());
     let revision = gate_revision();
     let actor = routing_actor();
@@ -37586,35 +37625,151 @@ async fn an_activation_races_a_receipt_without_rebinding_it() {
                     .await
             },
         );
-        let run = match received {
+        let answered = match received {
             Ok(PipelineReceiptResult::Created(run)) => run,
             other => panic!("round {round}: the receipt creates a run: {other:?}"),
         };
         activated.unwrap_or_else(|error| panic!("round {round}: the activation fails: {error}"));
-        assert!(
-            run.bundle_id == a || run.bundle_id == b,
-            "round {round}: the run is bound to A or B"
-        );
-        let admission = fixture
-            .service
-            .store()
-            .list_outcomes(&tenant, run.run_id)
+        let stored = runs
+            .get_run(&tenant, answered.run_id)
             .await
             .unwrap()
-            .into_iter()
-            .find(|outcome| outcome.phase == Phase::Admission)
+            .expect("the run is stored");
+        assert!(
+            stored.bundle_id == a || stored.bundle_id == b,
+            "round {round}: the stored run is bound to A or B"
+        );
+        assert_eq!(
+            stored.bundle_id, answered.bundle_id,
+            "round {round}: the stored run has the bundle the receipt answered with"
+        );
+        let admission = runs
+            .outcome_for_phase(&tenant, stored.run_id, Phase::Admission)
+            .await
+            .unwrap()
             .expect("the receipt records its Admission outcome");
         assert_eq!(
-            admission.bundle_id, run.bundle_id,
+            admission.bundle_id, stored.bundle_id,
             "round {round}: the Admission outcome carries the run's bundle"
         );
-        *bound.entry(run.bundle_id).or_default() += 1;
+        *bound.entry(stored.bundle_id).or_default() += 1;
     }
     assert_eq!(count_runs(&backend, &tenant).await, 20, "{bound:?}");
-    eprintln!(
-        "runs bound to A: {}, to B: {}",
-        bound.get(&a).copied().unwrap_or(0),
-        bound.get(&b).copied().unwrap_or(0)
+}
+
+/// BND-003, the deterministic case: a receipt staged under A commits after
+/// an activation of B, and its run keeps A. The receipt carries a source
+/// session, and an owner transaction holds that session row `FOR UPDATE`:
+/// the receipt's staging transaction does not read the row, so it binds the
+/// run to A and stages its attempt; its commit transaction takes the row
+/// before its shared routing lock, so it waits there (PostgreSQL reports the
+/// wait) holding no routing lock. B is activated while it waits, then the
+/// row is released: the receipt commits a run bound to A, with an Admission
+/// outcome that names A, while B is the active bundle.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_receipt_staged_before_an_activation_commits_on_its_bundle() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let owner = owner_backend().await;
+    let dir = tempfile::tempdir().unwrap();
+    let fixture = two_qualified_bundles(backend.clone(), &dir).await;
+    let runs = PgPipelineStore::new(backend.clone());
+    let (a, b) = (fixture.a.bundle_id.clone(), fixture.b.bundle_id.clone());
+    let revision = gate_revision();
+    let tenant = routing_tenant("activation-staged");
+    fixture.qualify(&tenant, &fixture.a, &revision).await;
+    fixture.qualify(&tenant, &fixture.b, &revision).await;
+    fixture.activate(&tenant, &fixture.a).await;
+    let account_id = link_receipt_principal_to_a_new_account(&backend, &tenant).await;
+    let env = model_training_envelope(uuid::Uuid::new_v4()).await;
+    let digest: [u8; 32] = Sha256::digest(tenant.as_bytes())
+        .as_slice()
+        .try_into()
+        .unwrap();
+    assert_eq!(
+        owner
+            .claim_trace_source_session(&tenant, account_id, &digest, env.submission_id)
+            .await
+            .unwrap(),
+        TraceSourceSessionStatus::Active
+    );
+
+    let mut holder_client = owner_client().await;
+    let holder = owner_tenant_tx(&mut holder_client, &tenant).await;
+    holder
+        .query_one(
+            "SELECT 1 FROM trace_source_sessions
+              WHERE tenant_id = $1 AND account_id = $2 AND session_digest = $3
+              FOR UPDATE",
+            &[&tenant, &account_id, &digest.as_slice()],
+        )
+        .await
+        .expect("hold the session row");
+    let xid: String = holder
+        .query_one(
+            "SELECT backend_xid::text FROM pg_stat_activity WHERE pid = pg_backend_pid()",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+
+    let receipt_task = tokio::spawn({
+        let service = fixture.service.clone();
+        let tenant = tenant.clone();
+        let env = env.clone();
+        async move {
+            let raw = serde_json::to_vec(&env).unwrap();
+            let key = env.submission_id.to_string();
+            let mut request = receipt(&tenant, &key, &raw, &env, NO_LIMITS);
+            request.source_session = Some((account_id, digest));
+            service.submit(request).await
+        }
+    });
+    wait_for_a_waiter_on(&backend, &xid, &receipt_task).await;
+    assert_eq!(
+        count_staged_artifacts(&backend, &tenant).await,
+        1,
+        "the receipt staged its attempt before it waited"
+    );
+    assert_eq!(count_runs(&backend, &tenant).await, 0, "no run yet");
+
+    // The waiting receipt holds no routing lock, so the activation does not
+    // wait for it.
+    tokio::time::timeout(HELD_CALL_BOUND, fixture.activate(&tenant, &fixture.b))
+        .await
+        .expect("the activation does not wait for the receipt");
+    assert!(!receipt_task.is_finished(), "the receipt still waits");
+    holder.rollback().await.unwrap();
+
+    let answered = match tokio::time::timeout(HELD_CALL_BOUND, receipt_task)
+        .await
+        .expect("the receipt finishes once the row is released")
+        .expect("the receipt task did not panic")
+    {
+        Ok(PipelineReceiptResult::Created(run)) => run,
+        other => panic!("the receipt creates a run: {other:?}"),
+    };
+    let stored = runs
+        .get_run(&tenant, answered.run_id)
+        .await
+        .unwrap()
+        .expect("the run is stored");
+    assert_eq!(
+        stored.bundle_id, a,
+        "the run keeps the bundle it was staged under"
+    );
+    let admission = runs
+        .outcome_for_phase(&tenant, stored.run_id, Phase::Admission)
+        .await
+        .unwrap()
+        .expect("the receipt records its Admission outcome");
+    assert_eq!(admission.bundle_id, a, "the Admission outcome names A");
+    assert_eq!(
+        runs.active_bundle_id(&tenant).await.unwrap(),
+        Some(b),
+        "B is the active bundle"
     );
 }
 
@@ -37675,10 +37830,17 @@ async fn a_rollback_needs_no_readiness_and_an_activation_does() {
     assert_eq!(activation_rows(&tenant).await, before);
 
     let rolled_back = fixture
-        .roll_back(&tenant, &fixture.a)
+        .roll_back_with(&tenant, &fixture.a, &promotion)
         .await
         .expect("a rollback reads no readiness");
     assert_eq!(rolled_back.routing_state, RoutingState::Pipeline);
+    let event = store.events(&tenant, 1).await.unwrap().remove(0);
+    assert_eq!(event.action, ActivationAction::Rollback);
+    assert_eq!(event.evidence_hash, promotion.evidence_hash);
+    assert_ne!(
+        event.evidence_hash, readiness.evidence_hash,
+        "a rollback records the promotion's hash, not a readiness hash"
+    );
     assert_eq!(
         PgPipelineStore::new(backend.clone())
             .active_bundle_id(&tenant)

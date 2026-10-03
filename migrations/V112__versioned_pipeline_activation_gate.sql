@@ -1,8 +1,9 @@
 -- The activation gate (delivery PR 5).
 
--- A bundle is qualified for one code revision at a time (P5-D10): the gate
--- needs a qualification for the deployed revision, so a bundle that was
--- qualified on an earlier revision can be qualified again on a later one.
+-- A bundle has one qualification row for each code revision (P5-D10), and
+-- the gate needs the row of the deployed revision: a bundle that was
+-- qualified on an earlier revision can be qualified again on a later one,
+-- and its earlier rows stay.
 ALTER TABLE pipeline_bundle_qualifications
     DROP CONSTRAINT pipeline_bundle_qualifications_pkey,
     ADD PRIMARY KEY (tenant_id, bundle_id, code_revision_hash);

@@ -1095,17 +1095,16 @@ impl PipelineActivationStore {
         routing_state_in(&tx, request.tenant_id).await?;
         let now = Utc::now();
         evaluate_activation_readiness(readiness, now).map_err(DatabaseError::Constraint)?;
-        let previous_bundle_id = PipelineQualificationStore::new(self.backend.clone())
-            .activate_qualified_bundle_in(
-                &tx,
-                request.tenant_id,
-                request.bundle_id,
-                request.promotion,
-                request.runtime_code_revision_hash,
-                request.dependencies,
-                now,
-            )
-            .await?;
+        let previous_bundle_id = PipelineQualificationStore::activate_qualified_bundle_in(
+            &tx,
+            request.tenant_id,
+            request.bundle_id,
+            request.promotion,
+            request.runtime_code_revision_hash,
+            request.dependencies,
+            now,
+        )
+        .await?;
         let routing = write_routing_in(
             &tx,
             request.tenant_id,
@@ -1179,17 +1178,16 @@ impl PipelineActivationStore {
                 EARLIER_QUALIFIED_BUNDLE_REQUIRED_LABEL.to_string(),
             ));
         }
-        let previous_bundle_id = PipelineQualificationStore::new(self.backend.clone())
-            .activate_qualified_bundle_in(
-                &tx,
-                tenant_id,
-                request.bundle_id,
-                request.promotion,
-                request.runtime_code_revision_hash,
-                request.dependencies,
-                Utc::now(),
-            )
-            .await?;
+        let previous_bundle_id = PipelineQualificationStore::activate_qualified_bundle_in(
+            &tx,
+            tenant_id,
+            request.bundle_id,
+            request.promotion,
+            request.runtime_code_revision_hash,
+            request.dependencies,
+            Utc::now(),
+        )
+        .await?;
         let routing = write_routing_in(
             &tx,
             tenant_id,

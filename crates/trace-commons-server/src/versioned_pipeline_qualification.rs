@@ -27,7 +27,9 @@ use crate::versioned_pipeline::{
     PIPELINE_POLICY_NOT_RUNNABLE_LABEL, PgPipelineStore, PipelineBundleQualification,
     PipelineService, load_bundle_from_transaction, lock_runnable_policy, sha256_prefixed,
 };
-use crate::versioned_pipeline_bundle::package_configuration_is_qualifiable;
+use crate::versioned_pipeline_bundle::{
+    PIPELINE_BUNDLE_INVALID_LABEL, package_configuration_is_qualifiable,
+};
 use crate::versioned_pipeline_compat::{
     COMPATIBILITY_ADMISSION_IMPLEMENTATION, COMPATIBILITY_REVIEW_IMPLEMENTATION,
     COMPATIBILITY_SCORE_IMPLEMENTATION, COMPATIBILITY_SETTLE_IMPLEMENTATION,
@@ -93,8 +95,9 @@ pub const ACTIVATION_PROMOTION_MAX_AGE_SECONDS: i64 = 15 * 60;
 /// The code revision this binary was built from (P5-D17): the value of
 /// `TRACE_COMMONS_BUILD_CODE_REVISION_HASH` at build time, which a release
 /// build sets to `pipeline.py revision`'s output on the same checkout.
-/// `None` for a binary built without it; such a binary refuses every
-/// qualification and activation (`bundle_runtime_revision_unknown`).
+/// `None` for a binary built without it. Nothing in this module reads it:
+/// the admin routes (Task 10) pass it to the qualification and the gate,
+/// and refuse with `bundle_runtime_revision_unknown` when it is unset.
 pub const DEPLOYED_CODE_REVISION_HASH: Option<&str> =
     option_env!("TRACE_COMMONS_BUILD_CODE_REVISION_HASH");
 
@@ -1611,8 +1614,9 @@ impl PipelineQualificationStore {
     ///    (`bundle_qualification_missing`), on that revision
     ///    (`bundle_runtime_revision_mismatch`).
     /// 4. The stored package loads and validates (`bundle_package_missing`,
-    ///    which is also the label of a tampered package), and the promotion
-    ///    names exactly its three digests
+    ///    which is also the label of a tampered package; a database error on
+    ///    the read returns as it is: `stored_package_or_refusal`), and the
+    ///    promotion names exactly its three digests
     ///    (`bundle_activation_package_mismatch`).
     /// 5. `dependencies` was built for this bundle
     ///    (`bundle_qualification_profile_mismatch`), has no blocker (its
@@ -1625,16 +1629,22 @@ impl PipelineQualificationStore {
     ///
     /// Then the active bundle row is locked `FOR UPDATE` and set to the
     /// bundle (V112's grant; the only statement of the ingest runtime that
-    /// updates it). Lock order inside `tx`, after the caller's exclusive
+    /// updates it), with `selected_at` the database clock at the write
+    /// (`clock_timestamp()`, as the routing row's and the event's
+    /// `recorded_at`; `write_routing_in`). Lock order inside `tx`, after the caller's exclusive
     /// routing lock: the four policy rows (`FOR SHARE`), then the active
     /// bundle row.
     ///
     /// The promotion is the caller's: an activation route evaluates it over
     /// verified check results just before the call. This function reads no
     /// other tenant and takes nothing from the promotion but the terms above.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn activate_qualified_bundle_in(
-        &self,
+    ///
+    /// Crate-private, and reached only through
+    /// `PipelineActivationStore::activate_tenant` and `rollback_bundle`, which
+    /// take the routing lock first and write the routing row and the event in
+    /// the same transaction: a switch through the gate alone would leave no
+    /// event and wait for no receipt.
+    pub(crate) async fn activate_qualified_bundle_in(
         tx: &Transaction<'_>,
         tenant_id: &str,
         bundle_id: &str,
@@ -1676,11 +1686,9 @@ impl PipelineQualificationStore {
         else {
             return refuse(PACKAGE_RUNTIME_REVISION_MISMATCH_LABEL);
         };
-        let package = load_bundle_from_transaction(tx, tenant_id, bundle_id)
-            .await
-            .ok()
-            .flatten()
-            .ok_or_else(|| DatabaseError::Constraint(PIPELINE_BUNDLE_MISSING_LABEL.to_string()))?;
+        let package = stored_package_or_refusal(
+            load_bundle_from_transaction(tx, tenant_id, bundle_id).await,
+        )?;
         let digests = package_digests(&package).map_err(DatabaseError::Constraint)?;
         if !promotion
             .package
@@ -1721,11 +1729,11 @@ impl PipelineQualificationStore {
             .map(|row| row.get(0));
         let selected = tx
             .execute(
-                "INSERT INTO pipeline_active_bundles (tenant_id, bundle_id)
-                 SELECT $1, bundle_id FROM pipeline_bundle_packages
+                "INSERT INTO pipeline_active_bundles (tenant_id, bundle_id, selected_at)
+                 SELECT $1, bundle_id, clock_timestamp() FROM pipeline_bundle_packages
                   WHERE tenant_id = $1 AND bundle_id = $2
                  ON CONFLICT (tenant_id) DO UPDATE
-                    SET bundle_id = EXCLUDED.bundle_id, selected_at = NOW()",
+                    SET bundle_id = EXCLUDED.bundle_id, selected_at = EXCLUDED.selected_at",
                 &[&tenant_id, &bundle_id],
             )
             .await?;
@@ -1735,6 +1743,27 @@ impl PipelineQualificationStore {
             return refuse(PIPELINE_BUNDLE_MISSING_LABEL);
         }
         Ok(previous)
+    }
+}
+
+/// The gate's reading of `load_bundle_from_transaction`'s result. A stored
+/// package that is gone, or that no longer validates (a tampered package,
+/// BND-002: `bundle_package_invalid` from the load), refuses with
+/// `bundle_package_missing`. Any other error is a database error and returns
+/// as it is, never as a refusal label, so a caller reports it as an internal
+/// error rather than as a fact about the package.
+fn stored_package_or_refusal(
+    loaded: Result<Option<BundlePackage>, DatabaseError>,
+) -> Result<BundlePackage, DatabaseError> {
+    match loaded {
+        Ok(Some(package)) => Ok(package),
+        Ok(None) => Err(DatabaseError::Constraint(
+            PIPELINE_BUNDLE_MISSING_LABEL.to_string(),
+        )),
+        Err(DatabaseError::Serialization(label)) if label == PIPELINE_BUNDLE_INVALID_LABEL => Err(
+            DatabaseError::Constraint(PIPELINE_BUNDLE_MISSING_LABEL.to_string()),
+        ),
+        Err(error) => Err(error),
     }
 }
 
@@ -1828,6 +1857,37 @@ mod tests {
 
     fn minimal_test_package() -> BundlePackage {
         minimal_test_package_with_variant(None)
+    }
+
+    /// The gate reads the package load as a refusal only for a package that
+    /// is gone or that does not validate (a tampered package, BND-002); a
+    /// database error returns as it is, never as `bundle_package_missing`.
+    #[test]
+    fn the_gate_refuses_a_missing_or_invalid_package_and_returns_a_database_error() {
+        let refused_as_missing = |result: Result<BundlePackage, DatabaseError>| matches!(result, Err(DatabaseError::Constraint(label)) if label == PIPELINE_BUNDLE_MISSING_LABEL);
+        assert!(refused_as_missing(stored_package_or_refusal(Ok(None))));
+        assert!(refused_as_missing(stored_package_or_refusal(Err(
+            DatabaseError::Serialization(PIPELINE_BUNDLE_INVALID_LABEL.to_string())
+        ))));
+        assert!(matches!(
+            stored_package_or_refusal(Err(DatabaseError::Pool("pool_timeout".to_string()))),
+            Err(DatabaseError::Pool(_))
+        ));
+        assert!(matches!(
+            stored_package_or_refusal(Err(DatabaseError::Query("statement_failed".to_string()))),
+            Err(DatabaseError::Query(_))
+        ));
+        assert!(matches!(
+            stored_package_or_refusal(Err(DatabaseError::Serialization(
+                "pipeline_routing_state_invalid".to_string()
+            ))),
+            Err(DatabaseError::Serialization(label)) if label == "pipeline_routing_state_invalid"
+        ));
+        let package = minimal_test_package();
+        assert_eq!(
+            stored_package_or_refusal(Ok(Some(package.clone()))).unwrap(),
+            package
+        );
     }
 
     fn sample_check_result() -> PipelineCheckResult {
