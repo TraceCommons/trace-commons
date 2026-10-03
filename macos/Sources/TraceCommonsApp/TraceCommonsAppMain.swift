@@ -19,6 +19,12 @@ struct TraceCommonsShell: App {
     @State private var compute = ComputeModel()
     @State private var navigation = MainWindowNavigation()
     @State private var missionDrafts = MissionDraftsModel()
+    #if DEBUG
+    /// The glass menu-bar popover's data (R13), shared by its item and panel.
+    /// No client until the daemon runs: the menu-bar label attaches the
+    /// app's live one (`AppModel.daemonData`), never sample data.
+    @State private var menuPanel = MenuPanelStore(client: nil)
+    #endif
     /// Quit confirmation, Dock reopen and invite links all arrive outside
     /// SwiftUI's reach. See `AppDelegate`.
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
@@ -35,8 +41,21 @@ struct TraceCommonsShell: App {
         RecentSearches.purgeLegacyStore()
     }
 
+    /// Whether the glass menu-bar panel (R13) stands in for the shipping
+    /// menu. Debug builds only, on `TRACE_COMMONS_GLASS_MENU=1`; a release
+    /// build always has the shipping menu.
+    private static let glassMenu: Bool = {
+        #if DEBUG
+        ProcessInfo.processInfo.environment["TRACE_COMMONS_GLASS_MENU"] == "1"
+        #else
+        false
+        #endif
+    }()
+
     var body: some Scene {
-        MenuBarExtra {
+        // Exactly one of the two menu-bar items is inserted, so exactly one
+        // `Launcher` (which starts the app's services) runs.
+        MenuBarExtra(isInserted: .constant(!Self.glassMenu)) {
             MenuBarContent(navigation: navigation)
                 .environmentObject(model)
                 .tint(TC.accent)
@@ -44,6 +63,20 @@ struct TraceCommonsShell: App {
             Launcher(model: model, compute: compute, navigation: navigation,
                      appDelegate: appDelegate, missionDrafts: missionDrafts)
         }
+
+        #if DEBUG
+        // The glass menu-bar panel (R13 of #1173), in place of the shipping
+        // menu when TRACE_COMMONS_GLASS_MENU=1, until R15.
+        MenuBarExtra(isInserted: .constant(Self.glassMenu)) {
+            MenuBarGlassPanel(navigation: navigation, store: menuPanel)
+                .environmentObject(model)
+                .tint(TC.accent)
+        } label: {
+            Launcher(model: model, compute: compute, navigation: navigation,
+                     appDelegate: appDelegate, missionDrafts: missionDrafts, menuPanel: menuPanel)
+        }
+        .menuBarExtraStyle(.window)
+        #endif
 
         Window("Trace Commons", id: WindowID.main) {
             MainWindowView(navigation: navigation, missionDrafts: missionDrafts,
@@ -90,6 +123,16 @@ struct TraceCommonsShell: App {
         .defaultSize(width: GlassThreePane<EmptyView, EmptyView, EmptyView>.defaultWidth,
                      height: GlassTokens.Size.windowHeight)
         .windowResizability(.contentMinSize)
+
+        // The menu-bar item and popover in a window (R13 of #1173), for
+        // review on a menu bar with no room for the item.
+        // TRACE_COMMONS_MENU_PREVIEW=1 opens it at launch.
+        Window("Menu bar", id: WindowID.menuPreview) {
+            MenuBarPreviewWindow(navigation: navigation, store: menuPanel)
+                .environmentObject(model)
+                .tint(TC.accent)
+        }
+        .windowResizability(.contentSize)
 
         // First run in a glass pane over the scene (R12 of #1173).
         // TRACE_COMMONS_FIRST_RUN=1 opens it at launch.
@@ -144,12 +187,29 @@ private struct Launcher: View {
     let navigation: MainWindowNavigation
     let appDelegate: AppDelegate
     let missionDrafts: MissionDraftsModel
+    #if DEBUG
+    /// Set for the glass menu-bar item (R13): its strip replaces the mark.
+    var menuPanel: MenuPanelStore?
+    #endif
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
-        MenuBarLabel(model: model)
+        label
             .task { launch() }
             .onChange(of: navigation.section) { activateServices() }
+    }
+
+    @ViewBuilder
+    private var label: some View {
+        #if DEBUG
+        if let menuPanel {
+            MenuBarStripLabel(model: model, store: menuPanel)
+        } else {
+            MenuBarLabel(model: model)
+        }
+        #else
+        MenuBarLabel(model: model)
+        #endif
     }
 
     @MainActor
@@ -223,6 +283,11 @@ private struct Launcher: View {
                 openWindow(id: WindowID.monitor)
             }
         }
+        if ProcessInfo.processInfo.environment["TRACE_COMMONS_MENU_PREVIEW"] == "1" {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                openWindow(id: WindowID.menuPreview)
+            }
+        }
         if ProcessInfo.processInfo.environment["TRACE_COMMONS_FIRST_RUN"] == "1" {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                 openWindow(id: WindowID.firstRun)
@@ -240,6 +305,9 @@ enum WindowID {
     static let monitor = "trace-commons-monitor"
     /// The glass first-run pane (R12), debug builds only for now.
     static let firstRun = "trace-commons-first-run"
+    /// The menu-bar item and popover in a window (R13), for review where
+    /// the menu bar has no room for the item. Debug builds only.
+    static let menuPreview = "trace-commons-menu-preview"
 }
 
 /// Opening the window from outside a SwiftUI view (a notification action, a

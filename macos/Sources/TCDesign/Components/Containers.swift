@@ -216,7 +216,7 @@ public struct GlassSectionRule: View {
                 .foregroundStyle(GlassColor.accentText)
                 .fixedSize()
                 .accessibilityAddTraits(.isHeader)
-            Rectangle().fill(Color.white.opacity(0.14)).frame(height: 0.5)
+            Rectangle().fill(GlassColor.ink(0.14)).frame(height: 0.5)
         }
         .padding(.top, GlassTokens.Space.s3)
     }

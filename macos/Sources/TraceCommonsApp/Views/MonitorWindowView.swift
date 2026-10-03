@@ -300,7 +300,10 @@ private struct MonitorMapPane: View {
     @EnvironmentObject private var model: AppModel
 
     var body: some View {
-        GlassPane(padding: 0) {
+        // The map is content, not chrome: an opaque pane, so the selector,
+        // zoom and node cards floating on it are its only glass (Apple: no
+        // glass on glass; R14).
+        GlassPane(padding: 0, isContent: true) {
             ZStack(alignment: .topTrailing) {
                 RadialGradient(
                     colors: [GlassTokens.Color.mapFieldInner.color, GlassTokens.Color.mapFieldOuter.color],
