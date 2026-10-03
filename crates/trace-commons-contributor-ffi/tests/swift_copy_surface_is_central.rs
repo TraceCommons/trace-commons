@@ -961,6 +961,63 @@ fn history_rows_read_the_cores_status_words() {
     }
 }
 
+/// A project mode reads by the core's one name (owner decision,
+/// 2026-10-02): `ProjectCopy.modeChoiceLabel(_:)` looks the mode up in the
+/// pill's table (`project_copy::FOLDER_MODE_LABELS`, decoded as
+/// `ContributionModeCopy`) and no Swift literal in the shared label sources
+/// spells a mode -- neither the core's names nor the retired ones. The
+/// sentence ratchet above cannot see one- and two-word labels, so the
+/// sources are checked directly. Scoped to the shared label sources: the
+/// glass screens and onboarding views are being rebuilt separately.
+#[test]
+fn project_mode_names_are_the_cores() {
+    let words = swift_code(&read("TraceCommonsApp/ProjectModeWords.swift"))
+        .replace(char::is_whitespace, "");
+    assert!(
+        words.contains(
+            "ContributionModeCopy.decode(fromJSON:TCCoreCopy.contributionModeCopyJSON())"
+        ),
+        "ProjectModeWords must decode the core's pill table"
+    );
+    assert!(
+        words.contains("staticfuncmodeChoiceLabel(_mode:ProjectMode)->String{"),
+        "ProjectCopy.modeChoiceLabel(_:) must be defined beside the core's table"
+    );
+    assert!(words.contains(".label(for:mode)"));
+    let copy = swift_code(&read("TCShellCore/ContributionModeCopy.swift"))
+        .replace(char::is_whitespace, "");
+    assert!(
+        copy.contains("funclabel(formode:ProjectMode)->String?{choice(for:mode.rawValue)?.label")
+    );
+
+    let retired = [
+        "Ask me first",
+        "Contribute automatically",
+        "Never offer this one",
+        "Auto contribute",
+        "Ignored",
+    ];
+    for rel in [
+        "TCShellCore/ProjectRow.swift",
+        "TCShellCore/ContributionModeCopy.swift",
+        "TraceCommonsApp/ProjectModeWords.swift",
+    ] {
+        let literals = swift_literals(&read(rel));
+        for (mode, label) in trace_commons_contributor::project_copy::FOLDER_MODE_LABELS {
+            assert!(
+                !literals.iter().any(|lit| lit == label),
+                "{rel} types the core's name {label:?} for {mode}"
+            );
+        }
+        for word in retired {
+            assert!(
+                !literals.iter().any(|lit| lit.contains(word)),
+                "{rel} still says the retired mode name {word:?}"
+            );
+        }
+    }
+}
+
 /// "Private inference" is the setting's internal name and a privacy claim
 /// the feature does not make; the destination is "Private AI". No Swift
 /// literal may put it in front of a contributor.
