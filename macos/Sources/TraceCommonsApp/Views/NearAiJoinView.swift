@@ -51,8 +51,13 @@ struct NearAiJoinView: View {
                         .glassType(GlassTokens.TypeScale.body)
                         .foregroundStyle(GlassColor.textSecondary)
                         .fixedSize(horizontal: false, vertical: true)
-                    GlassTextField(model.witnessCopy?.wallet?.commons ?? "", text: $commons)
-                        .disabled(pending)
+                    // The field is drawn only under its own word. Without
+                    // the wallet copy there is no field, so `commons` stays
+                    // empty and Join below stays disabled.
+                    if let commonsLabel = model.witnessCopy?.wallet?.commons {
+                        GlassTextField(commonsLabel, text: $commons)
+                            .disabled(pending)
+                    }
 
                     if joined {
                         Text(copy.nearAiEnrollDone)
