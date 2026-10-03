@@ -8,23 +8,19 @@ final class PrivateInferenceMenuBarTests: XCTestCase {
     /// The menu bar is the surface most likely to be read at a glance and
     /// least likely to be read carefully, so the fail-open matters most
     /// here: none of these states may be drawn the way a working one is.
-    func testMenuBarGlyphFollowsToneNotSwitch() {
-        let working = PrivateInferenceIndicator.status(PrivateInferenceSurface.tone(
-            PrivateInferenceState(label: "running", port: 8080), calls: .testing))
+    func testTheMenuBarPillFollowsToneNotSwitch() {
         for label in ["port_in_use", "start_failed", "crashed", "stopping", "unknown_state", ""] {
-            let state = PrivateInferenceState(label: label, port: nil)
-            XCTAssertFalse(
-                PrivateInferenceSurface.tone(state, calls: .testing).readsAsWorking,
-                "\(label) must not read as working in the menu bar")
+            let tone = PrivateInferenceSurface.tone(PrivateInferenceState(label: label, port: nil), calls: .testing)
+            XCTAssertFalse(tone.readsAsWorking, "\(label) must not read as working in the menu bar")
             XCTAssertNotEqual(
-                PrivateInferenceIndicator.status(PrivateInferenceSurface.tone(state, calls: .testing)), working,
-                "\(label) is drawn with the working status in the menu bar")
+                MenuPanelStatus.privateAI(on: true, tone: tone), .on,
+                "\(label) is drawn On in the menu bar because the switch is on")
         }
     }
 
-    /// The status is a function of the reported state alone: a refused
-    /// listener is never drawn the way a clear one is.
-    func testTheMenuBarSymbolIsAFunctionOfTheReportedStateAlone() {
+    /// The indicator the pill reads tells a refused listener from a clear
+    /// one: a refused listener is never drawn the way a working one is.
+    func testTheIndicatorNeverDrawsARefusedListenerAsClear() {
         XCTAssertNotEqual(PrivateInferenceIndicator.status(.refused), PrivateInferenceIndicator.status(.clear))
     }
 

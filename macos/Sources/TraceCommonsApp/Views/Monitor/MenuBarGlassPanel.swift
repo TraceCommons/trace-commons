@@ -72,7 +72,7 @@ struct MenuBarGlassPanel: View {
             if let label = model.privateInferenceCopy?.destination {
                 pill(.privateAI, caption: label, value: privateAIValue,
                      image: "arrow.left.arrow.right",
-                     fill: .solid(privateAIOn == true ? GlassTokens.Color.dataShared : GlassTokens.Color.menuPillOff))
+                     fill: .solid(privateAIPill == .on ? GlassTokens.Color.dataShared : GlassTokens.Color.menuPillOff))
             }
         }
         .frame(height: 44)
@@ -113,11 +113,25 @@ struct MenuBarGlassPanel: View {
     /// say, which is drawn as unknown, never as off.
     private var privateAIOn: Bool? { model.daemonSettings?.privateInferenceOn }
 
+    /// What the pill draws: the listener's reported tone, never the switch
+    /// alone, so a switch left on over a dead listener never reads On.
+    private var privateAIPill: MenuPanelStatus.PrivateAI {
+        MenuPanelStatus.privateAI(
+            on: privateAIOn,
+            tone: PrivateInferenceSurface.tone(model.privateInferenceState, calls: model.privateInferenceCalls))
+    }
+
+    /// On and Off in the core's words; a listener that is not working while
+    /// the switch is on reads the core's state line for it.
     private var privateAIValue: String {
-        switch privateAIOn {
-        case true?: MenuWords.on
-        case false?: MonitorWords.off
-        case nil: "—"
+        switch privateAIPill {
+        case .on: MenuWords.on
+        case .off: MonitorWords.off
+        case .notWorking:
+            model.privateInferenceCopy.map {
+                PrivateInferenceSurface.stateLine(model.privateInferenceState, copy: $0, calls: model.privateInferenceCalls)
+            } ?? "—"
+        case .unknown: "—"
         }
     }
 
@@ -456,6 +470,26 @@ enum MenuPanelStatus {
         guard available, !stale else { return .unavailable }
         if unhealthy || decisionsOwed == nil { return .attention }
         return paused ? .paused : .live
+    }
+
+    /// The Private AI pill's state.
+    enum PrivateAI: Equatable {
+        /// The core has not said whether the switch is on.
+        case unknown
+        case off
+        /// The switch is on and the listener reports clear.
+        case on
+        /// The switch is on but the listener refused, crashed, is stopping
+        /// or reports anything else: never drawn On.
+        case notWorking
+    }
+
+    /// On only while the switch is on AND the listener's tone is clear
+    /// (`PrivateInferenceIndicator.status`); fail closed otherwise.
+    static func privateAI(on: Bool?, tone: PrivateInferenceTone) -> PrivateAI {
+        guard let on else { return .unknown }
+        guard on else { return .off }
+        return PrivateInferenceIndicator.status(tone) == .on ? .on : .notWorking
     }
 }
 

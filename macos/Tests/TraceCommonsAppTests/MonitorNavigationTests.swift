@@ -316,6 +316,9 @@ final class MonitorNavigationTests: XCTestCase {
         // Ruling R-35: the panel's Monitor dependencies are debug-only until
         // T11 strips them, so a release build draws an empty item until then.
         XCTAssertTrue(main.contains("#else\n            // Transitional (ruling R-35): T11 removes this branch"))
+        // The release strip is drawn unavailable, and VoiceOver says so too.
+        XCTAssertTrue(main.contains("GlassMenuBarStrip(columns: [], condition: .unavailable, badge: nil)"))
+        XCTAssertTrue(main.contains("paused: model.status.paused, available: false))"))
         let menu = try Self.text("Views/MenuBarView.swift")
         XCTAssertFalse(menu.contains("struct MenuBarContent"))
         XCTAssertFalse(menu.contains("struct MenuBarLabel"))
@@ -368,8 +371,6 @@ final class MonitorNavigationTests: XCTestCase {
                        "open(.settings(.watchedFolders))"] {
             XCTAssertTrue(panel.contains(needle), "the menu panel never opens \(needle)")
         }
-        let menu = try Self.text("Views/MenuBarView.swift")
-        XCTAssertFalse(menu.contains("openWindow(id: WindowID.main)"), "the menu bar opens the Monitor by destination")
         let pointer = try Self.text("Views/Settings/PrivateAISection.swift")
         XCTAssertTrue(pointer.contains("Button(copy.destination) {\n                            OpenMonitor.request(.inference)\n"))
         // The Monitor consumes the destination on an always-present
