@@ -342,22 +342,22 @@ pub struct MonitorScreensCopy {
     /// Beside every credit figure, pending included: credit is a record,
     /// not currency. The shipping credit view's sentence, moved here.
     pub credit_not_currency: &'static str,
-    /// DRAFT, NEEDS APPROVAL. History reads a page of rows; when the page
+    /// History reads a page of rows; when the page
     /// is full, how many of the total it shows. `{shown}` and `{total}`
     /// are replaced with numbers.
     pub history_shown_of: &'static str,
-    /// DRAFT, NEEDS APPROVAL. As `history_shown_of`, when the total is
+    /// As `history_shown_of`, when the total is
     /// not known. `{shown}` is replaced with a number.
     pub history_shown: &'static str,
-    /// DRAFT, NEEDS APPROVAL. Home's watching row when the core says
+    /// Home's watching row when the core says
     /// the contributor is not signed in: nothing is contributed.
     pub signed_out: &'static str,
-    /// DRAFT, NEEDS APPROVAL. A mission's credit range: projected credit,
+    /// A mission's credit range: projected credit,
     /// labelled as such (owner ruling, 2026-10-02). Never `pending`, which
     /// is submitted credit still being scored: a contribution mission is
     /// apart from the reward ledger (#1174).
     pub projected: &'static str,
-    /// DRAFT, NEEDS APPROVAL. Beside projected mission credit: what it is,
+    /// Beside projected mission credit: what it is,
     /// and that it is not yet earned.
     pub projected_note: &'static str,
 }
