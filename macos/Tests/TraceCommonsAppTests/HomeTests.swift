@@ -7,6 +7,20 @@ import XCTest
 /// C1's sample sets.
 @MainActor
 final class HomeTests: XCTestCase {
+    /// History says a submission in its own core words, waiting to be
+    /// scored, and not the shared "Submitted" label; every other status
+    /// keeps the shared label, and an unlabelled one its raw value.
+    func test_historySaysASubmissionAsWaitingToBeScored() throws {
+        let words = try XCTUnwrap(MonitorWords.table)
+        let shared: (String) -> String? = { $0 == "submitted" ? "Submitted" : ($0 == "accepted" ? "Accepted into the commons" : nil) }
+        XCTAssertEqual(HomeFormat.statusWord("submitted", table: words, fallback: shared), words.historySubmitted)
+        XCTAssertNotEqual(words.historySubmitted, "Submitted")
+        XCTAssertEqual(HomeFormat.statusWord("accepted", table: words, fallback: shared), "Accepted into the commons")
+        XCTAssertEqual(HomeFormat.statusWord("purged", table: words, fallback: shared), "purged")
+        // Before the core's words load, the shared label stands in.
+        XCTAssertEqual(HomeFormat.statusWord("submitted", table: nil, fallback: shared), "Submitted")
+    }
+
     private func store(_ set: SampleDaemonClient.SampleSet) async -> HomeStore {
         let store = HomeStore(client: SampleDaemonClient(set))
         await store.load()

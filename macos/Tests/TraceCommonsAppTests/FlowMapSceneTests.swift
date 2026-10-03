@@ -365,4 +365,50 @@ final class FlowMapSceneTests: XCTestCase {
         XCTAssertNil(store.calls)
         XCTAssertNotNil(store.failures["inference_calls"])
     }
+
+    /// A node's halo scales with the map, as its disc does: zoomed in, the
+    /// gap and the stroke grow; zoomed out, they shrink. At the design size
+    /// they are the design's 4 and 3.
+    func test_theRingScalesWithZoom() {
+        let field = CGSize(width: FlowMapScene.size.width, height: FlowMapScene.size.height)
+        let base = FlowMapView.ringMetrics(scale: FlowMapGeometry(size: field, zoom: 1).scale)
+        XCTAssertEqual(base.offset, 4, accuracy: 0.0001)
+        XCTAssertEqual(base.lineWidth, 3, accuracy: 0.0001)
+        for zoom in [FlowMapView.zoomRange.lowerBound, 1.5, FlowMapView.zoomRange.upperBound] {
+            let scale = FlowMapGeometry(size: field, zoom: zoom).scale
+            let ring = FlowMapView.ringMetrics(scale: scale)
+            XCTAssertEqual(ring.offset, 4 * zoom, accuracy: 0.0001, "offset at zoom \(zoom)")
+            XCTAssertEqual(ring.lineWidth, 3 * zoom, accuracy: 0.0001, "width at zoom \(zoom)")
+        }
+    }
+
+    /// The Inference tab says what window its counts cover, from the hours
+    /// the core reported, in the core's words; a dash when none was
+    /// reported, never a default window.
+    func test_theInferenceTabSaysItsWindowFromTheData() throws {
+        let decoder = DaemonDataDecoding.decoder()
+        let words = try XCTUnwrap(MonitorWords.table)
+        func page(_ hours: String) throws -> DaemonData.InferenceCallPage {
+            try decoder.decode(DaemonData.InferenceCallPage.self, from: Data(
+                #"{"readable":true,"window_hours":\#(hours),"calls":[],"next_cursor":null}"#.utf8))
+        }
+        func destinations(_ hours: String) throws -> DaemonData.ToolDestinations {
+            try decoder.decode(DaemonData.ToolDestinations.self, from: Data(
+                #"{"private_ai":"off","sessions_route":"local","folders":null,"window_hours":\#(hours),"unattributed_calls":0,"tools":[]}"#.utf8))
+        }
+
+        XCTAssertTrue(words.windowLastHours.contains("{hours}"))
+        let day = InferenceTabView.windowLine(try page("24"), destinations: nil)
+        XCTAssertEqual(day, words.windowLastHours.replacingOccurrences(of: "{hours}", with: "24"))
+        XCTAssertTrue(day.contains("24"), day)
+        // Another window is said as that window, not as 24.
+        XCTAssertTrue(InferenceTabView.windowLine(try page("6"), destinations: nil).contains("6"))
+        // The page's own window first; tool_destinations' when it has none.
+        XCTAssertEqual(InferenceTabView.windowHours(try page("null"), destinations: try destinations("48")), 48)
+        XCTAssertEqual(InferenceTabView.windowHours(try page("12"), destinations: try destinations("48")), 12)
+        // Neither reported a window: a dash.
+        XCTAssertNil(InferenceTabView.windowHours(try page("null"), destinations: try destinations("null")))
+        XCTAssertEqual(InferenceTabView.windowLine(try page("null"), destinations: nil), "\u{2014}")
+        XCTAssertEqual(words.windowLine(hours: nil), "\u{2014}")
+    }
 }
