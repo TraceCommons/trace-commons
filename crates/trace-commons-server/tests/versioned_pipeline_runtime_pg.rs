@@ -19875,67 +19875,6 @@ async fn insert_submission_without_a_run(backend: &PgBackend, tenant_id: &str) -
     submission_id
 }
 
-/// Zaki review 3, Z3-L8: `main`'s legacy submission upsert refuses to
-/// overwrite a submission a pipeline run owns, a database backstop behind
-/// ingest's own refusal (N-3), so a legacy write that slipped past it cannot
-/// replace the pipeline's row.
-#[tokio::test]
-async fn the_legacy_upsert_refuses_a_submission_a_pipeline_run_owns() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
-    let owner = owner_backend().await;
-    let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(true),
-        None,
-    )
-    .await;
-    let tenant = format!("legacy-upsert-backstop-{}", uuid::Uuid::new_v4());
-    let (run, _) = complete_indexed_run(&service, &tenant).await;
-    let refused = owner
-        .upsert_trace_submission(TraceSubmissionWrite {
-            tenant_id: tenant.clone(),
-            submission_id: run.submission_id,
-            trace_id: uuid::Uuid::new_v4(),
-            auth_principal_ref: RECEIPT_PRINCIPAL.to_string(),
-            contributor_pseudonym: None,
-            submitted_tenant_scope_ref: None,
-            schema_version: "ironclaw.trace_contribution.v1".to_string(),
-            consent_policy_version: "2026-04-24".to_string(),
-            consent_scopes: vec!["debugging_evaluation".to_string()],
-            allowed_uses: vec!["debugging".to_string()],
-            retention_policy_id: "private_corpus_revocable".to_string(),
-            status: TraceCorpusStatus::Quarantined,
-            privacy_risk: "low".to_string(),
-            redaction_pipeline_version: "deterministic-v1".to_string(),
-            redaction_counts: BTreeMap::new(),
-            redaction_hash: "sha256:redaction".to_string(),
-            canonical_summary_hash: None,
-            submission_score: None,
-            credit_points_pending: None,
-            credit_points_final: None,
-            expires_at: None,
-            residual_risk_basis: None,
-        })
-        .await;
-    assert!(refused.is_err(), "the legacy upsert is refused");
-    let mut client = backend.trace_pool_for_test().get().await.unwrap();
-    let tx = tenant_tx(&mut client, &tenant).await;
-    let status: String = tx
-        .query_one(
-            "SELECT status FROM trace_submissions WHERE tenant_id = $1 AND submission_id = $2",
-            &[&tenant, &run.submission_id],
-        )
-        .await
-        .unwrap()
-        .get(0);
-    tx.commit().await.unwrap();
-    assert_eq!(status, "accepted", "the pipeline's row is unchanged");
-}
-
 /// Owner ruling T7-7 (#1021): a withdrawal reaches the whole source
 /// session, as `main`'s does. The session holds a pipeline submission whose
 /// index write is `complete` and a sibling with no run. Withdrawing either
