@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Text.Json;
 
 namespace TraceCommons.Interop;
@@ -146,27 +147,27 @@ public static class HistoryCopy
         + "not counted here.";
 
     /// <summary>
-    /// The four states a record can be in, in the same words the stat cards
-    /// and the chips use, so a badge on a record and a card at the top of the
-    /// screen cannot say different things about one state.
+    /// The word a record's status reads as: the core's
+    /// <c>history_copy::STATUS_LABELS</c>, the table every shell reads, so a
+    /// badge on a record and a card at the top of the screen cannot say
+    /// different things about one state.
     /// </summary>
     /// <remarks>
-    /// No status reported yet (<c>null</c>) reads as waiting, as macOS treats
-    /// it as open. Any other status this build has no word for reads as
-    /// <see cref="StatusUnavailable"/>, never as "Waiting to be scored":
-    /// that would render an absent signal as a healthy in-flight state.
+    /// No status reported yet (<c>null</c>) reads as the core's word for
+    /// <c>submitted</c>, as macOS treats it as open. Any other status the
+    /// table has no word for reads as <see cref="StatusUnavailable"/>, never
+    /// as "Waiting to be scored": that would render an absent signal as a
+    /// healthy in-flight state.
     /// </remarks>
-    public static string StatusWord(string? status) => status switch
-    {
-        null => WaitingToBeScored,
-        StatusSubmitted => WaitingToBeScored,
-        StatusAccepted => InTheCommons,
-        StatusQuarantined => QuarantineHeading,
-        StatusWithdrawn => WithdrawnByYou,
-        _ => StatusUnavailable,
-    };
+    public static string StatusWord(string? status) =>
+        StatusLabelsFromCore.Value.TryGetValue(status ?? StatusSubmitted, out string? label)
+            ? label
+            : StatusUnavailable;
 
     private static readonly Lazy<string> StatusUnavailableFromCore = new(ReadStatusUnavailable);
+
+    private static readonly Lazy<Dictionary<string, string>> StatusLabelsFromCore =
+        new(ReadStatusLabels);
 
     /// <summary>
     /// The label on a status this build does not recognise: the core's
@@ -180,21 +181,70 @@ public static class HistoryCopy
 
     private static string ReadStatusUnavailable()
     {
+        using JsonDocument? doc = ReadHistoryUi(out JsonElement history);
+        return doc is not null
+            && history.TryGetProperty("status_unavailable", out JsonElement label)
+            && label.ValueKind == JsonValueKind.String
+            ? label.GetString() ?? string.Empty
+            : string.Empty;
+    }
+
+    /// <summary>
+    /// The disclosure bundle's <c>history_ui.status_labels</c>: wire status
+    /// to the core's word for it. Empty if the core could not produce the
+    /// bundle, so every status then reads as <see cref="StatusUnavailable"/>
+    /// (itself empty) rather than as a word typed here.
+    /// </summary>
+    private static Dictionary<string, string> ReadStatusLabels()
+    {
+        var table = new Dictionary<string, string>(StringComparer.Ordinal);
+        using JsonDocument? doc = ReadHistoryUi(out JsonElement history);
+        if (doc is null
+            || !history.TryGetProperty("status_labels", out JsonElement labels)
+            || labels.ValueKind != JsonValueKind.Object)
+        {
+            return table;
+        }
+
+        foreach (JsonProperty row in labels.EnumerateObject())
+        {
+            if (row.Value.ValueKind == JsonValueKind.String && row.Value.GetString() is { } word)
+            {
+                table[row.Name] = word;
+            }
+        }
+
+        return table;
+    }
+
+    /// <summary>
+    /// The disclosure bundle (<c>tc_contributor_disclosure_copy_json</c>)
+    /// and its <c>history_ui</c> object, or null if either is missing.
+    /// </summary>
+    private static JsonDocument? ReadHistoryUi(out JsonElement history)
+    {
+        history = default;
         string? json = NativeMethods.TakeOwnedString(NativeMethods.tc_contributor_disclosure_copy_json());
-        if (string.IsNullOrEmpty(json)) return string.Empty;
+        if (string.IsNullOrEmpty(json)) return null;
+        JsonDocument doc;
         try
         {
-            using JsonDocument doc = JsonDocument.Parse(json);
-            return doc.RootElement.TryGetProperty("history_ui", out JsonElement history)
-                && history.TryGetProperty("status_unavailable", out JsonElement label)
-                && label.ValueKind == JsonValueKind.String
-                ? label.GetString() ?? string.Empty
-                : string.Empty;
+            doc = JsonDocument.Parse(json);
         }
         catch (JsonException)
         {
-            return string.Empty;
+            return null;
         }
+
+        if (doc.RootElement.ValueKind == JsonValueKind.Object
+            && doc.RootElement.TryGetProperty("history_ui", out history)
+            && history.ValueKind == JsonValueKind.Object)
+        {
+            return doc;
+        }
+
+        doc.Dispose();
+        return null;
     }
 
     /// <summary>

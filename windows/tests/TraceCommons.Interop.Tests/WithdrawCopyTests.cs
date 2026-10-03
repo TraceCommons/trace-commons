@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Text.Json;
 using TraceCommons.Interop;
 using Xunit;
@@ -444,23 +445,99 @@ public sealed class HistoryCopyTests
 
     [Theory]
     [InlineData("a-status-from-the-future")]
-    [InlineData("revoked")]
+    [InlineData("pending")]
     [InlineData("")]
     public void AnUnknownStatusReadsAsTheCoresStatusUnavailable(string status)
     {
         // Never "Waiting to be scored": that renders an absent signal as a
-        // healthy in-flight state.
+        // healthy in-flight state. And it is terminal: no Withdraw beside it.
         string? fromCore = HistoryStatusCopyFromCore();
         Assert.Equal("Status unavailable", fromCore);
         Assert.Equal(fromCore, HistoryCopy.StatusWord(status));
+        Assert.False(WithdrawCopy.OffersWithdrawal(status, "sub-1"));
+    }
+
+    [Theory]
+    [InlineData("received", "Received")]
+    [InlineData("rejected", "Rejected")]
+    [InlineData("revoked", "Withdrawn")]
+    [InlineData("awaiting_pii_backstop", "Waiting for privacy review")]
+    [InlineData("processing", "Waiting to be scored")]
+    [InlineData("expired", "Expired")]
+    [InlineData("purged", "Purged")]
+    public void AStatusThisShellHadNoWordForReadsAsTheCoresLabel(string status, string expected)
+    {
+        // These read "Status unavailable" before the core had a table, a
+        // rejected row beside a Withdraw button among them.
+        Assert.Equal(expected, HistoryCopy.StatusWord(status));
     }
 
     [Fact]
-    public void TheUnavailableLabelIsReadFromTheCoreNotTypedHere()
+    public void EveryStatusInTheCoresTableReadsAsItsLabel()
     {
+        Dictionary<string, string> table = StatusLabelsFromCore();
+        Assert.Equal(11, table.Count);
+        foreach ((string status, string label) in table)
+        {
+            Assert.Equal(label, HistoryCopy.StatusWord(status));
+        }
+    }
+
+    [Fact]
+    public void EveryWithdrawableStatusHasALabel()
+    {
+        // A Withdraw button never sits beside "Status unavailable".
+        Dictionary<string, string> table = StatusLabelsFromCore();
+        foreach (string status in new[]
+                 {
+                     "submitted", "received", "accepted", "quarantined",
+                     "awaiting_pii_backstop", "rejected",
+                 })
+        {
+            Assert.True(WithdrawCopy.OffersWithdrawal(status, "sub-1"), status);
+            Assert.True(table.ContainsKey(status), status);
+        }
+    }
+
+    [Fact]
+    public void TheStatusLabelsAreReadFromTheCoreNotTypedHere()
+    {
+        // Four of the core's words stay constants here, because the stat
+        // cards and WeekBandCopy bind them as consts; they must be the
+        // core's words exactly. No other status word may be typed here.
+        Dictionary<string, string> table = StatusLabelsFromCore();
+        Assert.Equal(HistoryCopy.InTheCommons, table["accepted"]);
+        Assert.Equal(HistoryCopy.WaitingToBeScored, table["submitted"]);
+        Assert.Equal(HistoryCopy.QuarantineHeading, table["quarantined"]);
+        Assert.Equal(HistoryCopy.WithdrawnByYou, table["withdrawn"]);
+        string[] tallyConstants =
+        {
+            HistoryCopy.InTheCommons, HistoryCopy.WaitingToBeScored,
+            HistoryCopy.QuarantineHeading, HistoryCopy.WithdrawnByYou,
+        };
+
         string source = File.ReadAllText(Path.Combine(
             AppContext.BaseDirectory, "shell-source", "TraceCommons.Interop", "HistoryCopy.cs.txt"));
-        Assert.DoesNotContain("\"Status unavailable\"", source, StringComparison.Ordinal);
+        foreach (string label in table.Values.Append("Status unavailable").Except(tallyConstants))
+        {
+            Assert.DoesNotContain("\"" + label + "\"", source, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>The disclosure bundle's <c>history_ui.status_labels</c>, read raw.</summary>
+    private static Dictionary<string, string> StatusLabelsFromCore()
+    {
+        string? json = NativeMethods.TakeOwnedString(NativeMethods.tc_contributor_disclosure_copy_json());
+        Assert.NotNull(json);
+        using var doc = JsonDocument.Parse(json!);
+        var table = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (JsonProperty row in doc.RootElement.GetProperty("history_ui")
+                     .GetProperty("status_labels").EnumerateObject())
+        {
+            table[row.Name] = row.Value.GetString()!;
+        }
+
+        return table;
     }
 
     /// <summary>The disclosure bundle's <c>history_ui.status_unavailable</c>, read raw.</summary>
