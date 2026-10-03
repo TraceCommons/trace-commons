@@ -98,11 +98,6 @@ enum SettingsLegacyWords {
     static let credit = "Credit"
     static let alwaysOn = "always on"
     static let nothingPreselected = "Nothing here is pre-selected on your behalf."
-    /// The legacy consent row's VoiceOver value. The glass row is a
-    /// `Toggle`, which reports its own state, so nothing reads these; they
-    /// stay with the rest of the screen's words until the core exports them.
-    static let granted = "Granted"
-    static let notGranted = "Not granted"
     static let publishedLines = [
         "Your handle — real handles only, no pseudonyms.",
         "Aggregate counts: accepted, novelty credit, accept rate.",

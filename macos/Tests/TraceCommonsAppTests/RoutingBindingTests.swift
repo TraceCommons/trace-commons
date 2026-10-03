@@ -563,9 +563,17 @@ final class RoutingBindingTests: XCTestCase {
             "the rows are not built from what IronWire answered: \(rows)"
         )
         XCTAssertTrue(
-            rows.contains("sourceModes: model.daemonSettings?.routingSourceModes ?? .unset"),
+            rows.contains("sourceModes: settings.routingSourceModes,"),
             "the rows are not built from the daemon's source modes: \(rows)"
         )
+        // Only once the daemon has answered. `unset` is a real mode to the
+        // core ("a tool in use"), so defaulting to it before the answer
+        // could draw a reassuring word for a tool the daemon has turned off.
+        XCTAssertTrue(
+            body.contains("if let settings = model.daemonSettings {\n                    ForEach(\n"),
+            "the tool rows are drawn before the daemon answers: \(body)"
+        )
+        XCTAssertFalse(body.contains("routingSourceModes ?? .unset"), "a tool row defaults the source modes")
         for banned in ["form.on", "form.port", "form.tokenDir", "routingDraft", "routingChecking"] {
             XCTAssertFalse(
                 rows.contains(banned),

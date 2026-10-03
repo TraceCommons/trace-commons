@@ -188,7 +188,6 @@ final class SettingsParityTests: XCTestCase {
         }
     }
 
-    /// The switch draws every section the list offers, by its own case.
     /// The yes/no state of a check row is words and a glyph, not a colour.
     func test_stateRowCarriesItsStateInWords() throws {
         let source = try Self.text("Views/Settings/SettingsStateRow.swift")
@@ -305,6 +304,7 @@ final class SettingsParityTests: XCTestCase {
         XCTAssertEqual(try items(["p1", "p2"]).last?.value, "p1\np2")
     }
 
+    /// The switch draws every section the list offers, by its own case.
     func test_theGlassContentDrawsEverySection() throws {
         let source = try Self.text("Views/Settings/GlassSettingsContent.swift")
         for section in SettingsSection.allCases where section != .compute {

@@ -52,25 +52,30 @@ struct ToolsSection: View {
     private func card(_ copy: RoutingCopy, form: RoutingForm) -> some View {
         GlassEyebrowCard(copy.toolsHeading) {
             VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
-                ForEach(
-                    RoutingSurface.toolRows(
-                        sourceModes: model.daemonSettings?.routingSourceModes ?? .unset,
-                        evidence: model.routingEvidence,
-                        copy: copy,
-                        calls: model.routingCalls
-                    ),
-                    id: \.name
-                ) { row in
-                    HStack {
-                        Text(row.name)
-                        Spacer()
-                        // The tone rides on the row, decided by the same
-                        // shared table that chose the word.
-                        GlassTag(row.word, tone: Self.tone(row.tone))
+                // Only once the daemon has answered: `unset` is a real mode
+                // to the core, so a default would word a tool the daemon may
+                // have turned off. The loading state below covers the card.
+                if let settings = model.daemonSettings {
+                    ForEach(
+                        RoutingSurface.toolRows(
+                            sourceModes: settings.routingSourceModes,
+                            evidence: model.routingEvidence,
+                            copy: copy,
+                            calls: model.routingCalls
+                        ),
+                        id: \.name
+                    ) { row in
+                        HStack {
+                            Text(row.name)
+                            Spacer()
+                            // The tone rides on the row, decided by the same
+                            // shared table that chose the word.
+                            GlassTag(row.word, tone: Self.tone(row.tone))
+                        }
+                        .glassType(GlassTokens.TypeScale.body)
+                        .accessibilityElement(children: .combine)
+                        .accessibilityLabel("\(row.name): \(row.word)")
                     }
-                    .glassType(GlassTokens.TypeScale.body)
-                    .accessibilityElement(children: .combine)
-                    .accessibilityLabel("\(row.name): \(row.word)")
                 }
 
                 Text(copy.intro)
