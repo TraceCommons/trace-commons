@@ -100,7 +100,10 @@ four checks: an export snapshot's requester is `principal_sha256:` or
 view schema ids are labels, and an assessment's resolved quarantine reasons
 are a JSON array. The code already writes only such values. It also
 indexes two foreign keys that had no index on the referencing side: the
-index invalidations by submission and the export items by run.
+index invalidations by submission and the export items by run. Apply V109
+by hand only with `psql --single-transaction -v ON_ERROR_STOP=1`: it lifts
+forced row security on `pipeline_run_settlements` for one statement
+([deployment.md](deployment.md), "V109: pipeline follow-ups").
 
 ## Fail-closed dependency qualification
 

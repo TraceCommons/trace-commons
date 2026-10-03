@@ -848,6 +848,42 @@ SELECT has_table_privilege('<ingest runtime login>', 'public.pipeline_attempt_ar
 SELECT has_column_privilege('<ingest runtime login>', 'public.pipeline_attempt_artifacts', 'ciphertext_sha256', 'UPDATE');
 ```
 
+### V109: pipeline follow-ups
+
+V109 adds no table and changes no grant. It marks the payout of a Trace
+Credit leg that V94-era code seeded `pending` as `disabled`, adds four
+checks on the export and assessment tables, and indexes two foreign keys on
+their referencing side ([pipeline-activation.md](pipeline-activation.md)
+describes each). For the first of these it lifts forced row security on
+`pipeline_run_settlements` for one statement and forces it again, inside the
+migration's transaction.
+
+The ingest migration runner applies each migration in one transaction. To
+apply V109 by hand (the second route above, which also records the version
+in `_trace_commons_migrations`), use one transaction too:
+
+```sh
+psql --single-transaction -v ON_ERROR_STOP=1 -f migrations/V109__versioned_pipeline_followups.sql
+```
+
+Without `--single-transaction`, a failure after the first statement leaves
+`pipeline_run_settlements` without forced row security, and a second run of
+the file stops at a check or an index that the first run added.
+
+Each statement locks its table until the commit. That costs nothing while
+the pipeline tables are empty, which they are until a tenant is routed.
+
+A test or lab database that kept the rows of the #1143 runtime suite fails
+the new requester check (those fixtures hold a requester such as
+`exporter_sha256:exporttest`), and V109 rolls back. Drop that database and
+create it again.
+
+Check afterwards:
+
+```sql
+SELECT relforcerowsecurity FROM pg_class WHERE relname = 'pipeline_run_settlements';
+```
+
 ### Build and install
 
 The pilot host has no Rust toolchain; binaries are built by Cloud Build and

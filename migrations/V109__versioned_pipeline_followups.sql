@@ -10,7 +10,12 @@
 --
 -- Forced row security would hide every row from the migrator here (no tenant
 -- is set), so it is lifted for this one statement, inside the migration's
--- transaction, and forced again at once. No grant changes.
+-- transaction, and forced again at once. No grant changes. Applied by hand,
+-- this file needs `psql --single-transaction -v ON_ERROR_STOP=1`: without one
+-- transaction, a failure after the first statement leaves the table without
+-- forced row security. Every statement of this file locks its table until
+-- the commit; that costs nothing while the pipeline tables are empty, which
+-- they are until a tenant is routed.
 ALTER TABLE pipeline_run_settlements NO FORCE ROW LEVEL SECURITY;
 UPDATE pipeline_run_settlements
    SET payout_state = 'disabled', updated_at = NOW()
@@ -20,11 +25,14 @@ UPDATE pipeline_run_settlements
 ALTER TABLE pipeline_run_settlements FORCE ROW LEVEL SECURITY;
 
 -- poldsam P-8: schema checks V105 and V106 left out. Each matches what the
--- code writes, so no existing row can fail them: a requester is
--- `principal_sha256:` or `exporter_sha256:` and 64 lowercase hex digits (the
--- V106 check accepted `principal_sha256:a`); the resolved quarantine reasons
--- are a JSON array; and the two schema ids are labels, as
--- `selection_policy_id` is.
+-- routes write: a requester is `principal_sha256:` or `exporter_sha256:` and
+-- 64 lowercase hex digits (the V106 check accepted `principal_sha256:a`); the
+-- resolved quarantine reasons are a JSON array; and the two schema ids are
+-- labels, as `selection_policy_id` is. Each check is validated against the
+-- rows that exist. A database that kept the fixtures of the #1143 runtime
+-- suite (a requester such as `exporter_sha256:exporttest`) fails the
+-- requester check, and the migration rolls back: drop that database and
+-- create it again.
 ALTER TABLE pipeline_export_snapshots
     DROP CONSTRAINT pipeline_export_snapshots_requester_principal_ref_check,
     ADD CONSTRAINT pipeline_export_snapshots_requester_principal_ref_check CHECK (
@@ -47,7 +55,8 @@ ALTER TABLE pipeline_export_snapshot_items
 -- `trace_submissions`) and a run delete (the export item's deferred key to
 -- `pipeline_runs`) each found their referencing rows by a scan. Plain
 -- `CREATE INDEX`: a migration runs in one transaction, and both tables are
--- empty until a tenant is routed.
+-- empty until a tenant is routed, as the tables of the data fix and the
+-- checks above are.
 CREATE INDEX idx_pipeline_index_invalidations_submission
     ON pipeline_index_invalidations (tenant_id, submission_id);
 CREATE INDEX idx_pipeline_export_snapshot_items_run
