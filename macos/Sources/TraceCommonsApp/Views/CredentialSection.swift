@@ -97,11 +97,13 @@ struct CredentialSection: View {
             if action == .obtain || balanceAction == .obtain {
                 // The glass pill shows only the chosen provider, so the
                 // chooser's own word is drawn beside it, as the native
-                // picker drew its label.
+                // picker drew its label. VoiceOver hears it once, from the
+                // pill, which carries both the label and the value.
                 HStack(spacing: GlassTokens.Space.s4) {
                     Text(copy.credentialProviderLabel)
                         .glassType(GlassTokens.TypeScale.label)
                         .foregroundStyle(GlassColor.textSecondary)
+                        .accessibilityHidden(true)
                     GlassPicker(
                         copy.credentialProviderLabel,
                         selection: Binding(
