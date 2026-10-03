@@ -23,7 +23,7 @@ final class NativeOnboardingRenderTests: XCTestCase {
                    size: CGSize(width: 560, height: 390), to: directory.appendingPathComponent("native-witness-consent.png"))
         // Constructing this model does not start a daemon or inspect sessions.
         let model = AppModel()
-        try render(QueueContent(previewing: .constant(nil)).environmentObject(model),
+        try render(TracesTreeView(store: TracesStore(client: nil), selection: .constant("")).environmentObject(model),
                    size: CGSize(width: 860, height: 640), to: directory.appendingPathComponent("native-first-contribution.png"))
         try render(NearAccountConnectView(onEnrolled: {}).environmentObject(model),
                    size: CGSize(width: 680, height: 300), to: directory.appendingPathComponent("native-wallet-connect.png"))
@@ -49,7 +49,7 @@ final class NativeOnboardingRenderTests: XCTestCase {
                 try await Task.sleep(for: .milliseconds(10))
             }
             XCTAssertEqual(model.credentialStatus.state, state)
-            try render(PrivateInferenceContent().environmentObject(model),
+            try render(InferenceAccountSection(store: InferenceStore(client: nil)).environmentObject(model),
                        size: CGSize(width: 760, height: 1100),
                        to: directory.appendingPathComponent("private-ai-\(state).png"))
         }
