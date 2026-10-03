@@ -275,5 +275,136 @@ final class InferenceParityTests: XCTestCase {
         XCTAssertTrue(window.contains(
             "return PrivateInferenceIndicator.status(PrivateInferenceSurface.tone(state, calls: calls))"))
     }
+
+    /// No write without the preview, and a first connect asks the exposure
+    /// question first; dismissing either sheet is saying no.
+    func test_connectingAToolKeepsBothQuestions() throws {
+        let source = try Self.text("Views/HarnessListView.swift")
+        for needle in ["model.beginHarnessAction(id: row.id, action: action)", "model.answerHarnessExposure(accepted: false)",
+                       "model.answerHarnessExposure(accepted: true)", "model.cancelHarnessPreview()", "model.confirmHarnessPreview()",
+                       "HarnessSurface.canCommit(", "HarnessSurface.outcomeSentence(", "HarnessSurface.occupiedSentence(",
+                       "CredentialSurface.harnessNotice(", "HarnessSurface.spendSentence(", "copy.harnessesSpendScope",
+                       "copy.harnessesNoneFound", "copy.offerExposure", ".keyboardShortcut(.cancelAction)", "model.harnessBusy"] {
+            XCTAssertTrue(source.contains(needle), "HarnessListView.swift lacks \(needle)")
+        }
+        XCTAssertFalse(source.contains("copy.offerAskedOnce"), "the asked-once sentence is false on this surface")
+        try LegacySymbols.assertClean("Views/HarnessListView.swift")
+    }
+
+    /// Both sheets hang off the section's always-present stack, are shown
+    /// exactly while the model holds their question, and dismissing one is
+    /// its no. Deleting the exposure sheet would leave every call above in
+    /// the file and connect with no question asked; these pins catch it.
+    func test_bothSheetsArePresentedFromTheAlwaysPresentStack() throws {
+        let source = try Self.text("Views/HarnessListView.swift")
+        for needle in ["            }\n        }\n"
+                           + "        .sheet(isPresented: exposureBinding) {\n"
+                           + "            HarnessExposureSheet(copy: copy)\n"
+                           + "        }\n"
+                           + "        .sheet(isPresented: previewBinding) {\n"
+                           + "            if let plan = model.harnessPreview {\n"
+                           + "                HarnessPreviewSheet(plan: plan, copy: copy)\n",
+                       "get: { model.harnessExposureRequest != nil },\n"
+                           + "            set: { if !$0 { model.answerHarnessExposure(accepted: false) } })",
+                       "get: { model.harnessPreview != nil },\n"
+                           + "            set: { if !$0 { model.cancelHarnessPreview() } })"] {
+            XCTAssertTrue(source.contains(needle), "HarnessListView.swift lacks \(needle)")
+        }
+        XCTAssertEqual(source.components(separatedBy: ".sheet(").count - 1, 2, "exactly the two questions")
+        XCTAssertFalse(source.contains(".task(") || source.contains(".onAppear") || source.contains(".onReceive("),
+                       "the list is refreshed by the model, not by a view that may not be drawn")
+    }
+
+    /// Each sheet's words are the core's, verbatim and in full; every
+    /// answer keeps its keyboard role and its busy gate; Confirm exists
+    /// only for a committable plan.
+    func test_theSheetsCarryTheCoresWordsAndEveryGate() throws {
+        let source = try Self.text("Views/HarnessListView.swift")
+        for needle in ["GlassSheet(title: copy.offerTitle) {\n"
+                           + "            Text(copy.offerWhat)",
+                       "Text(copy.offerExposure)", "Text(copy.offerNoRepoint)",
+                       "Button(copy.offerDecline) { model.answerHarnessExposure(accepted: false) }\n"
+                           + "                    .buttonStyle(GlassButtonStyle(.glass))\n"
+                           + "                    .keyboardShortcut(.cancelAction)\n",
+                       "Button(copy.offerAccept) { model.answerHarnessExposure(accepted: true) }\n"
+                           + "                    .buttonStyle(GlassButtonStyle(.primary))\n"
+                           + "                    .keyboardShortcut(.defaultAction)\n"
+                           + "                    .disabled(model.harnessBusy)\n",
+                       "GlassSheet(title: copy.harnessPreviewTitle) {\n",
+                       "Button(copy.harnessPreviewCancel) { model.cancelHarnessPreview() }\n"
+                           + "                    .buttonStyle(GlassButtonStyle(.glass))\n"
+                           + "                    .keyboardShortcut(.cancelAction)\n",
+                       "if HarnessSurface.canCommit(plan, calls: model.harnessCalls) {\n"
+                           + "                    Button(copy.harnessPreviewConfirm) { model.confirmHarnessPreview() }\n"
+                           + "                        .buttonStyle(GlassButtonStyle(.primary))\n"
+                           + "                        .keyboardShortcut(.defaultAction)\n"
+                           + "                        .disabled(model.harnessBusy)\n",
+                       "if !plan.occupied.isEmpty {\n"
+                           + "                Text(HarnessSurface.occupiedSentence(copy: copy))",
+                       "ForEach(Array(plan.changes.enumerated()), id: \\.offset) { _, change in\n"
+                           + "                Text(change)",
+                       ".frame(minWidth: 460)"] {
+            XCTAssertTrue(source.contains(needle), "HarnessListView.swift lacks \(needle)")
+        }
+        XCTAssertEqual(source.components(separatedBy: ".frame(minWidth: 460)").count - 1, 2, "both sheets keep their width")
+        XCTAssertEqual(source.components(separatedBy: "Button(").count - 1, 5,
+                       "the row's action and the four sheet answers, and nothing that would take a slot over")
+    }
+
+    /// A row's state is the shared tone on a worded label, the only primary
+    /// is connect, the action carries the tool's name and waits on busy, and
+    /// the details open in place.
+    func test_aToolRowDrawsItsStateInWordsAndOneAction() throws {
+        let source = try Self.text("Views/HarnessListView.swift")
+        for needle in ["GlassSectionRule(copy.harnessesTitle)",
+                       "GlassStatusLabel(sentence, status: PrivateInferenceIndicator.status(HarnessSurface.tone(state)))",
+                       "Button(HarnessSurface.actionLabel(action, copy: copy)) {\n"
+                           + "                model.beginHarnessAction(id: row.id, action: action)\n"
+                           + "            }\n"
+                           + "            .buttonStyle(GlassButtonStyle(action == .connect ? .primary : .glass))\n"
+                           + "            .accessibilityLabel(Text(row.name) + Text(verbatim: \": \") + Text(HarnessSurface.actionLabel(action, copy: copy)))\n"
+                           + "            .disabled(model.harnessBusy)\n",
+                       "if let tool = HarnessToolArt.tool(harness: row.id) {\n"
+                           + "                GlassToolTile(.tool(tool))\n"
+                           + "            } else {\n"
+                           + "                Image(systemName: \"terminal\")\n"
+                           + "                    .glassGlyph(14)",
+                       "GlassExpander(copy.harnessPreviewTitle, isOpen: $settingsExpanded)\n"
+                           + "                if settingsExpanded {\n",
+                       "HarnessSurface.restartSentence(row, state: state, copy: copy)",
+                       "HarnessSurface.lastCallSentence(row, calls: model.harnessCalls)",
+                       "HarnessSurface.rowSentence(\n                    row, copy: copy, calls: model.harnessCalls)",
+                       ".glassType(GlassTokens.TypeScale.mono)"] {
+            XCTAssertTrue(source.contains(needle), "HarnessListView.swift lacks \(needle)")
+        }
+        XCTAssertFalse(source.contains("palette("), "the row reads the glass status, not the TC palette")
+        XCTAssertEqual(source.components(separatedBy: "GlassStatusLabel(").count - 1, 1, "one worded state per row")
+        // The legacy window draws this list in release; the flow map is
+        // debug-only, so the artwork lives here and the map forwards to it.
+        XCTAssertFalse(source.contains("FlowMapScene"), "a release file must not read the debug-only flow map")
+        let map = try Self.text("Views/Monitor/FlowMapScene.swift")
+        XCTAssertTrue(map.contains("static func glassTool(harness id: String) -> GlassTool? {\n"
+            + "        HarnessToolArt.tool(harness: id)\n    }"), "one mapping, forwarded")
+        XCTAssertEqual(HarnessToolArt.tool(harness: "claude"), .claudeCode)
+        XCTAssertNil(HarnessToolArt.tool(harness: "something-new"))
+    }
+
+    /// Fail closed: only a call that arrived reads as working, a state a
+    /// later daemon grows is unknown, and a list nobody answered draws the
+    /// core's unknown word, never "none found".
+    func test_aToolNeverReadsAsWorkingWithoutACall() throws {
+        XCTAssertEqual(PrivateInferenceIndicator.status(HarnessSurface.tone(.answering)), .on)
+        for state in [HarnessState.unknown, .notConnected, .connectedNoCalls, .activityShared] {
+            XCTAssertNotEqual(PrivateInferenceIndicator.status(HarnessSurface.tone(state)), .on,
+                              "\(state) must never read as working")
+        }
+        XCTAssertEqual(HarnessState.fromABI(999), .unknown)
+        let source = try Self.text("Views/HarnessListView.swift")
+        XCTAssertTrue(source.contains("if model.harnesses == HarnessList.none {\n"
+            + "                RouteDisclosureUnreadableGlassLine(line: nil)\n"
+            + "            } else if model.harnesses.harnesses.isEmpty {\n"
+            + "                Text(copy.harnessesNoneFound)"),
+                      "an unanswered list must not read as an empty one")
+    }
 }
 #endif
