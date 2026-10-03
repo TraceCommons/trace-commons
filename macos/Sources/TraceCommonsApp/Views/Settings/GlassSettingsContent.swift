@@ -41,10 +41,6 @@ struct PrivateAISection: View {
     var body: some View { SettingsContent(navigation: navigation, section: .privateAI) }
 }
 
-struct WitnessSection: View {
-    var body: some View { SettingsContent(section: .witness) }
-}
-
 struct ProjectsSection: View {
     var body: some View { SettingsContent(section: .projects) }
 }

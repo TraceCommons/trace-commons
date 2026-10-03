@@ -117,6 +117,32 @@ final class SettingsParityTests: XCTestCase {
                 confirmations: ["GlassSourceRow.chooseFolder()"],
                 accessibility: ["GlassToggleStyle(.settings)", ".accessibilityLabel(copy.portTitle)",
                                 ".accessibilityLabel(copy.folderTitle)", ".accessibilityElement(children: .combine)"]),
+        Section(glass: "Views/Settings/WitnessSection.swift",
+                bindings: ["model.witnessCopy", "model.witnessState", "model.witnessStateCode", "model.witnessStatus?.refusal",
+                           "model.witnessStatus?.pinnedMeasurementLine", "model.witnessLabel", "model.witnessBusy", "model.witnessCalls",
+                           "ironwireAttestedBodies", "tokenDistributionsContribution", "tokenStorage",
+                           "model.inferenceEvidenceBusy", "model.tokenContributionBusy", "model.tokenStorageNotice",
+                           "model.inferenceEvidenceSaveFailed", "model.tokenContributionSaveFailed",
+                           "model.configureWitness(", "model.clearWitness()", "model.setInferenceEvidence(",
+                           "model.setTokenContribution(", "model.setLocalTokenCapture(", "model.cleanTokenStorage(discard:",
+                           "model.refreshWitness()", "WitnessForm.fromStatus(", "form.canConfigure"],
+                copySources: ["WitnessSurface.stateLine(", "WitnessSurface.tone(forState:", "WitnessSurface.lastResultLine(",
+                              "WitnessSurface.lastResultTone(", "WitnessSurface.offersConfigure(", "WitnessSurface.offersClear(",
+                              "copy.heading", "copy.intro", "copy.certificateMeans", "copy.clear", "copy.clearNote",
+                              "copy.appliesAtOnce", "copy.urlTitle", "copy.signingAddressTitle", "copy.measurementsTitle",
+                              "copy.measurementsNote", "copy.configure", "copy.inferenceHeading", "copy.inferenceDisclosure",
+                              "copy.inferenceCaptureNote", "copy.inferenceScopeNote", "copy.inferenceEnabled", "copy.inferenceDisabled",
+                              "copy.inferenceEnable", "copy.inferenceDisable", "copy.inferenceConfirm", "copy.inferenceCancel",
+                              "copy.inferenceSaveFailed", "copy.tokenHeading", "copy.tokenDisclosure", "copy.tokenCaptureNote",
+                              "copy.tokenScopeNote", "copy.tokenEnabled", "copy.tokenDisabled", "copy.tokenEnable", "copy.tokenDisable",
+                              "copy.tokenConfirm", "copy.tokenCancel", "copy.tokenSaveFailed", "storage.captureLabel",
+                              "storage.captureNotice", "storage.captureConfirmation", "storage.cancelLabel", "storage.stateLine",
+                              "storage.scopeNote", "storage.cleanupLabel", "storage.discardLabel", "storage.confirmLabel",
+                              "storage.discardConfirmation"],
+                confirmations: ["showingInferenceDisclosure", "showingTokenDisclosure", "showingTokenCapture", "showingTokenDiscard",
+                                ".confirmationDialog("],
+                accessibility: [".accessibilityLabel(copy.urlTitle)", ".accessibilityLabel(copy.signingAddressTitle)",
+                                ".accessibilityLabel(copy.measurementsTitle)", ".accessibilityElement(children: .combine)"]),
         Section(glass: "Views/Settings/GlassSourceRow.swift",
                 bindings: ["SourceRowState.answer(", "static func chooseFolder()"],
                 copySources: ["copy.watchCandidate", "tool.decline", "tool.chooseFolder"],
@@ -157,6 +183,30 @@ final class SettingsParityTests: XCTestCase {
         XCTAssertLessThan(anchor.lowerBound, task.lowerBound)
         XCTAssertEqual(body.components(separatedBy: "Notifier.shared.authorizationStatus()").count - 1, 1,
                        "the refresh closure is duplicated")
+    }
+
+    /// The witness card's refresh and its unavailable branch hang on an
+    /// always-present container; the token block keeps its hide-and-disable
+    /// pair; the four dialogs are system confirmation dialogs; and a refusal
+    /// is never drawn as anything but outside.
+    func test_witnessSectionShape() throws {
+        let source = try Self.text("Views/Settings/WitnessSection.swift")
+        let unavailable = try XCTUnwrap(source.range(of: "} else {\n"))
+        let anchor = try XCTUnwrap(source.range(of: "Color.clear.frame(width: 0, height: 0)"))
+        let appear = try XCTUnwrap(source.range(of: ".onAppear {"))
+        XCTAssertLessThan(unavailable.lowerBound, anchor.lowerBound)
+        XCTAssertLessThan(anchor.lowerBound, appear.lowerBound)
+        XCTAssertEqual(source.components(separatedBy: "model.refreshWitness()").count - 1, 1)
+        XCTAssertTrue(source.contains(".opacity(copy.tokenHeading == nil ? 0 : 1)"))
+        XCTAssertTrue(source.contains(".disabled(copy.tokenHeading == nil)"))
+        XCTAssertEqual(source.components(separatedBy: ".confirmationDialog(").count - 1, 4)
+        XCTAssertTrue(source.contains("GlassNotice(tone: .outside)"))
+        XCTAssertFalse(source.contains("NativeFlowNotice"))
+        XCTAssertEqual(WitnessSection.tone(.refused), .outside)
+        XCTAssertEqual(WitnessSection.tone(.attention), .ask)
+        XCTAssertEqual(WitnessSection.tone(.held), .ask)
+        XCTAssertEqual(WitnessSection.tone(.clear), .on)
+        XCTAssertEqual(WitnessSection.tone(.neutral), .off)
     }
 
     func test_theGlassContentDrawsEverySection() throws {
