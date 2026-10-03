@@ -592,7 +592,14 @@ final class TracesFolderSubmitTests: XCTestCase {
     }
 
     func test_attachClearsTheFolderNotice() async throws {
-        let (store, _) = try await loaded()
+        let (store, folder) = try await loaded()
+        // Both seeded first, so the clear is what the asserts below pin:
+        // the folder's undo, then the core's ignore notice (the sample core
+        // purges 0 of the sessions the confirmation promised).
+        await store.contributeFolder(folder, verdict: nil)
+        await store.setFolderMode(folder, .ignore, promised: folder.sessions.count)
+        XCTAssertNotNil(store.lastContributedFolder)
+        XCTAssertNotNil(store.folderNotice)
         store.attach(nil)
         XCTAssertNil(store.folderNotice)
         XCTAssertNil(store.lastContributedFolder)
