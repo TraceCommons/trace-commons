@@ -15,12 +15,12 @@ public struct ContributionModeCopy: Decodable, Equatable, Sendable {
 
     public let title: String
     public let mixed: String
-    /// Ask me, Auto contribute, Never, in that order.
+    /// Ask me, Automatic, Never, in that order.
     public let choices: [Choice]
     /// Said while a contribution override is in force.
     public let overrideActive: String
     public let clear: String
-    /// Under the Auto contribute label exactly when
+    /// Under the Automatic label exactly when
     /// `status.contribution_mode_partial` is true.
     public let autoPartial: String
 
@@ -50,12 +50,17 @@ public struct ContributionModeCopy: Decodable, Equatable, Sendable {
     public func choice(for mode: String?) -> Choice? {
         choices.first { $0.mode == mode }
     }
+
+    /// A project mode's one name (`project_copy::FOLDER_MODE_LABELS`; owner
+    /// decision, 2026-10-02): the word the pill, Settings, onboarding and
+    /// every other shell use for it. Nil if the table does not name it.
+    public func label(for mode: ProjectMode) -> String? { choice(for: mode.rawValue)?.label }
 }
 
 /// One contribution override's confirmation (#1173, #1208), decoded from
 /// `tc_contribution_override_confirm_json`
 /// (`project_copy::contribution_override_confirm_copy`). Every word of it is
-/// the core's, including the Auto contribute arming disclosure (`arming`),
+/// the core's, including the Automatic arming disclosure (`arming`),
 /// which a shell renders whole beside `body` and never words itself.
 public struct ContributionOverrideConfirmCopy: Decodable, Equatable, Sendable {
     /// The `mode` `set_contribution_override` takes.

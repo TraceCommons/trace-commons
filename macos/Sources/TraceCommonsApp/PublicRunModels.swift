@@ -135,6 +135,14 @@ struct PublicRunCopy: Decodable, Equatable {
     let feedbackChoices: [PublicRunValueLabel]
     let evidenceKindChoices: [PublicRunValueLabel]
     let contributionStatusChoices: [PublicRunValueLabel]
+    /// The core's label for a status not in `contributionStatusChoices`
+    /// (`history_copy::STATUS_UNAVAILABLE`): "Status unavailable" in every
+    /// shell.
+    let contributionStatusUnavailable: String
+    /// History's word for each contribution status, the core's
+    /// `history_copy::STATUS_LABELS`: the one table every shell reads. Read
+    /// it through `historyStatusLabel(for:)`.
+    let historyStatusLabels: [PublicRunValueLabel]
     let permittedUseChoices: [PublicRunValueLabel]
     let reusePermissions: [PublicRunReuseChoice]
 
@@ -150,7 +158,17 @@ struct PublicRunCopy: Decodable, Equatable {
     }
 
     func contributionStatusLabel(for value: String) -> String {
-        contributionStatusChoices.first { $0.value == value }?.label ?? unrecognizedValue
+        contributionStatusChoices.first { $0.value == value }?.label ?? contributionStatusUnavailable
+    }
+
+    /// The word a History or monitor row shows for a contribution status:
+    /// the core's (`history_copy::STATUS_LABELS`), so "Waiting to be scored"
+    /// for `submitted` and `processing`, never the session-detail table's
+    /// "Submitted". A status the core does not name reads as
+    /// `contributionStatusUnavailable`, and is terminal
+    /// (`ContributionStatusPresentation`).
+    func historyStatusLabel(for value: String) -> String {
+        historyStatusLabels.first { $0.value == value }?.label ?? contributionStatusUnavailable
     }
 
     func permittedUseLabel(for value: String) -> String {

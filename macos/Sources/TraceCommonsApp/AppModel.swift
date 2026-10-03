@@ -1634,11 +1634,11 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Projects whose "Ask me first" the daemon refused, by project id, so
+    /// Projects whose "Ask me" the daemon refused, by project id, so
     /// the notice can show the Rust's refusal line. Cleared on a retry.
     @Published private(set) var askFirstRefused: Set<String> = []
 
-    /// "Ask me first" on a rewording or held-folder notice. The same call as
+    /// "Ask me" on a rewording or held-folder notice. The same call as
     /// Settings -- `set_project_mode` with the project's id and
     /// `notify_only` -- which also answers a rewording notice. A refusal
     /// changes nothing; the notice stays and says so.

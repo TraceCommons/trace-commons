@@ -32,7 +32,7 @@ export type ArmingRewordedNotice = {
   limit: string;
   no_review: string;
   acknowledge: string;
-  /** "Ask me first", or null when the element names no project. */
+  /** "Ask me", or null when the element names no project. */
   ask_first_action: string | null;
   /** Shown when the switch is refused; null exactly when the button is. */
   ask_first_failed: string | null;
@@ -138,7 +138,7 @@ export function parseArmingRewordedNotice(value: unknown): ArmingRewordedNotice 
 }
 
 /**
- * The project "Ask me first" switches, or null when the core offered no
+ * The project "Ask me" switches, or null when the core offered no
  * button or the element names no project. The button sends
  * `set_project_mode` with this id and `notify_only`, exactly as Settings
  * does.

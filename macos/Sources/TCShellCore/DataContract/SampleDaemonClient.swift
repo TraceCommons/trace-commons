@@ -73,7 +73,7 @@ public final class SampleDaemonClient: DaemonDataClient, @unchecked Sendable {
 
     /// The recorded `status` with the override's three fields, as the
     /// daemon sets them: `contribution_override: {mode, since}`, the roll-up
-    /// is the override's mode, and partial is true only for Auto contribute
+    /// is the override's mode, and partial is true only for Automatic
     /// beside a folder set to Never. (The daemon also counts the unresolved
     /// bucket; no sample set queues a session there.)
     private func statusWithOverride(_ status: String, mode: ProjectMode, since: String) -> String {
@@ -254,7 +254,7 @@ public final class SampleDaemonClient: DaemonDataClient, @unchecked Sendable {
     }
 
     /// Answers as `handle_set_contribution_override` does, in its order:
-    /// Auto contribute without `confirm` is `bad_params` /
+    /// Automatic without `confirm` is `bad_params` /
     /// `confirm-required`; without grant terms -- a set that is not
     /// enrolled (`status.logged_in` false: `empty`, whose store has no
     /// contributor configuration) -- it is `unavailable` /

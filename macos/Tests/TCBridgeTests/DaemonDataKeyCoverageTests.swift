@@ -323,7 +323,7 @@ final class DaemonDataKeyCoverageTests: XCTestCase {
     /// #1208 against the real daemon on a temp store: Ask me and Never set
     /// the override and `status` says so, clear restores it, every key of
     /// each reply (and of `status` while an override is in force) is
-    /// declared, and Auto contribute on a store that is not enrolled is
+    /// declared, and Automatic on a store that is not enrolled is
     /// refused with the real label -- the fail-closed path.
     func testTheContributionOverrideAgainstTheRealDaemon() async throws {
         let daemon = try startDaemonWithOneSession()
@@ -332,17 +332,17 @@ final class DaemonDataKeyCoverageTests: XCTestCase {
         let before = try await client.status()
         XCTAssertNil(before.contributionOverride)
 
-        // Unconfirmed Auto contribute is refused before anything else.
+        // Unconfirmed Automatic is refused before anything else.
         do {
             _ = try await client.setContributionOverride(mode: .autoUpload, confirm: false)
-            XCTFail("an unconfirmed Auto contribute answered")
+            XCTFail("an unconfirmed Automatic answered")
         } catch {
             XCTAssertEqual(error as? DaemonDataError, .daemon(code: "bad_params", message: "confirm-required"))
         }
         // Confirmed, it is still refused here: no grant terms in force.
         do {
             _ = try await client.setContributionOverride(mode: .autoUpload, confirm: true)
-            XCTFail("Auto contribute without grant terms answered")
+            XCTFail("Automatic without grant terms answered")
         } catch {
             XCTAssertEqual(error as? DaemonDataError, .daemon(code: "unavailable", message: "arming-terms-unavailable"))
         }

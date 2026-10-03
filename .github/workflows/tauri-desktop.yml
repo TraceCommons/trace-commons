@@ -26,6 +26,13 @@ jobs:
         with:
           version: 10
       - run: pnpm install --frozen-lockfile
+      # One advisory is ignored in package.json (pnpm.auditConfig.ignoreGhsas):
+      # GHSA-vfj7-8cjw-p6xm, a stack-exhaustion DoS in braces <=3.0.3, which
+      # has no patched release. It reaches us only through the shadcn
+      # package's fast-glob -> micromatch chain. The app uses shadcn solely
+      # for its stylesheet, which Vite inlines at build time, so braces never
+      # ships in the app or runs on untrusted input. Remove the ignore once
+      # braces publishes a fix. Owner decision, 2026-10-02.
       - run: pnpm audit --audit-level=high
       - run: pnpm test
       - run: pnpm build

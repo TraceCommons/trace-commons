@@ -216,8 +216,9 @@ struct HistoryRowView: View {
                     .glassType(GlassTokens.TypeScale.caption)
                     .foregroundStyle(GlassColor.textSecondary)
             }
-            if let status = row.status {
-                GlassTag(HomeFormat.statusWord(status, table: MonitorWords.table, fallback: statusLabel), tone: HomeFormat.tone(status))
+            if let status = row.status,
+               let tag = HomeFormat.statusWord(status, table: MonitorWords.table, fallback: statusLabel) {
+                GlassTag(tag, tone: HomeFormat.tone(status))
                     .fixedSize()
             }
         }
@@ -405,12 +406,15 @@ enum HomeFormat {
     /// A row's status tag. A submission is said in History's own words
     /// (waiting to be scored), not the shared status label, which reads
     /// "Submitted" as though it were done. Every other status takes the
-    /// shared label, then the raw value.
+    /// shared label, which for a status the core does not name is "Status
+    /// unavailable". With no core copy decoded there is no tag at all --
+    /// never the raw wire token, which is not a word a contributor was
+    /// meant to read.
     static func statusWord(
         _ status: String, table: MonitorScreensCopy?, fallback: (String) -> String?
-    ) -> String {
+    ) -> String? {
         if status == "submitted", let word = table?.historySubmitted { return word }
-        return fallback(status) ?? status
+        return fallback(status)
     }
 
     /// Accepted reads as done; held for review and submitted as waiting;

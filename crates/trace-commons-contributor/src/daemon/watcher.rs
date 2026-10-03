@@ -656,7 +656,7 @@ fn sweep_grants(shared: &DaemonShared, ctx: &PassContext) {
         if sweep.changed() && policy.save(&shared.store).is_err() {
             tracing::warn!("could not persist the grant sweep");
         }
-        // A voided "Auto contribute" override leaves folders that ask: what
+        // A voided "Automatic" override leaves folders that ask: what
         // it approved unattended there and has not sent goes back to waiting
         // now, as clearing the override does, rather than showing approved
         // until the send-time check catches it. Queue after policy, as
@@ -763,7 +763,7 @@ fn sweep_arming_wording(shared: &DaemonShared, ctx: &PassContext) {
             },
             ctx.now,
         );
-        // The "Auto contribute" override is armed by its own words (#1208):
+        // The "Automatic" override is armed by its own words (#1208):
         // judged against what the arming offer says now, as a folder that
         // has sent nothing yet is (`claim_in_force` for a key with no entry).
         let override_in_force =
@@ -3015,7 +3015,7 @@ mod tests {
         assert_eq!(persisted.grant_voids.len(), 1, "saved with the void");
     }
 
-    /// #1208, owner decision: an "Auto contribute" override is a grant, so
+    /// #1208, owner decision: an "Automatic" override is a grant, so
     /// R6 reaches it through the watcher. Set over the socket under one set
     /// of scopes, then widened: the override is cleared, the folder it armed
     /// no longer approves a new session on the contributor's behalf, and the
