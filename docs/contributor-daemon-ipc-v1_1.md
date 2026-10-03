@@ -136,6 +136,13 @@ old behaviour, because no application has shipped against `v1` yet. See
   withdrawal; it does not move on a later poll that only re-confirms the same
   status. See
   ["Withdrawal dates on revoked rows (K12)"](#withdrawal-dates-on-revoked-rows-k12).
+- **K15 (the native View menu's Group by and Sort by).** No field is added
+  for this. Every Group by and Sort by option the native Traces tab needs
+  is already answerable from `list_pending`'s entry fields, `list_projects`,
+  and `list_history` -- once K11's `list_projects[].tools` (#1192) lands.
+  K9's `title` (#1191) and K10's `would_send_bytes` and `uploaded_bytes`
+  (#1196) have already landed. See ["View menu: Group by and Sort by
+  (K15)"](#view-menu-group-by-and-sort-by-k15).
 
 `crates/trace-commons-contributor/tests/daemon_ipc_contract.rs` is the
 executable half of this document. `hello` reports its own method list and a
@@ -1967,6 +1974,60 @@ side effects, computed from the same queue and policy state a client already
 fetches `list_projects` to draw. It is always present (never absent, unlike
 `contributable_count`), because whether a session is undecided-and-Ask-me is
 a question every contributor's queue can answer, invited or not.
+
+### View menu: Group by and Sort by (K15)
+
+The native app's View menu (#1146, #1152) offers Group by and Sort by for
+the Traces tab, alongside the already-built "Show ignored folders". Neither
+needs a new field: every option is answerable from `list_pending`'s entry
+fields (`entry_value`), `list_projects`, and `list_history`, below. One of
+those fields is on an open, not-yet-merged PR -- `list_projects[].tools`
+(K11, #1192); the table names it, so nothing here is duplicated when it
+lands. K9's `title` (#1191) and K10's `would_send_bytes` and
+`uploaded_bytes` (#1196) have landed and are listed as existing.
+
+**Group by**
+
+| Option | What it groups on | Source |
+|---|---|---|
+| Tool (default) | an entry's `source` / `declared_source` | `list_pending`, existing |
+| Tool, for a folder with nothing waiting | the per-tool session counts the project has seen | `list_projects[].tools[].source` (K11, #1192) -- until it lands, such a folder cannot be placed and is listed on its own, exactly as #1183 (R6) documents |
+| Folder / project | `project_id` (grouping key) and `project_label` (display) | both existing, on every entry and every `list_projects` row |
+| None (flat list) | no grouping field; every entry already carries enough to render a row on its own | — |
+
+**Sort by**
+
+| Option | What it sorts on | Source |
+|---|---|---|
+| Name | a session's `title`, falling back to its formatted `started_at` when `title` is `null` (the existing fallback, unchanged) | `title` on every `list_pending` entry (K9, existing; `null` on an entry queued before K9, see ["`title`"](#title)); `started_at` existing |
+| Name, for a folder | `project_label` | existing, on every `list_projects` row (already disambiguated when two projects share a basename) |
+| Date | a session's `started_at`, or `discovered_at` when `started_at` is unknown | both existing, on every `list_pending` entry |
+| Date, for a folder | `last_session_at`, falling back to `added_at` for a configured folder the watcher has not yet observed a session in | both existing, on every `list_projects` row |
+| Size | a session's `would_send_bytes` (what an upload would actually send), falling back to `size_bytes` (the raw file) when no envelope is pinned | `would_send_bytes` on `list_pending` (K10, #1196); `size_bytes` existing |
+| Size, in history | `uploaded_bytes` | `list_history` rows (K10, #1196) |
+| Status | `state` and `reason_label` for a queued session, plus `eligibility` where it is present; `status` for a history row | all existing; `eligibility` is ABSENT whenever the signup flag is off (see ["Contribution eligibility"](#contribution-eligibility)), so a client must not require it -- sort an entry without it as `eligible`, since an invited contributor's whole queue is contributable |
+
+No row carries a folder-level size or count total. A client that wants one
+-- to sort folders themselves by total size, say -- already holds every
+session in that folder from `list_pending` and can sum `size_bytes` or
+`would_send_bytes` itself; `list_projects` already carries the plain count
+(`session_count`, `pending_count`). Nothing here asks the daemon to
+pre-aggregate what the client already has the parts for.
+
+**A stable sort key needs no new field.** Every row already carries a
+daemon-issued, stable, unique id to break ties deterministically: `entry_id`
+on a queue entry, `submission_id` on a history row, `project_id` on a
+project. The underlying lists are themselves returned in a deterministic
+order, so two reads with nothing changed produce the same order even before
+a client's own Group by / Sort by choice is applied: `list_pending` is the
+queue's insertion order, and `list_projects` is every configured project
+(sorted by its policy key) followed by every discovered-but-unconfigured
+one (sorted by its key) -- so a configured `/z/repo` precedes a discovered
+`/a/repo`. Neither order is alphabetical by anything a contributor sees; a
+client that offers a sort sorts for itself.
+
+A project's label on an entry needs no new field either: `project_label` is
+a plain (non-optional) `String` on every `QueueEntry`, never absent.
 
 ### The `outcome` verdict
 
