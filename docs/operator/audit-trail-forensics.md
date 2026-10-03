@@ -281,9 +281,11 @@ segment the old build wrote:
    chain failure, and the audit-chain drill reports the resume
    (`db_legacy_segment_resume_count`, `db_legacy_segment_file_event_count`).
    The acceptance flag is not needed here, because a clean run takes no
-   legacy path. A non-dry run on a clean chain, with or without the flag,
-   still records its own `audit_chain_repair` event, as every non-dry repair
-   does. That event is harmless.
+   legacy path. A non-dry run on a clean chain without the flag (or with
+   it, while `TRACE_COMMONS_ALLOW_LEGACY_SEGMENT_RESUME` is set) still
+   records its own `audit_chain_repair` event, as every non-dry repair does.
+   That event is harmless. With the switch off, a run carrying the flag is
+   refused `legacy_segment_resume_disabled` even on a clean chain.
 
 Nothing in-band proves that a rolled-back build wrote the segment. A DB-side
 edit could strip the hashes from the chain's tail, or delete it and plant an

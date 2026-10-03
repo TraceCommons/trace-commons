@@ -578,9 +578,12 @@ the cutover itself.
        1`. The old build's file-only events are counted apart
        (`db_audit_legacy_segment_file_only_event_count`), not as missing
        events or reader-parity gaps.
-  - A non-dry run on a clean chain, with or without `accept_legacy_segment`,
-    still writes one `audit_chain_repair` audit event, as every non-dry run
-    does. It is harmless, but repeat step 3 as a dry run.
+  - A non-dry run on a clean chain without `accept_legacy_segment` (or with
+    it, while `TRACE_COMMONS_ALLOW_LEGACY_SEGMENT_RESUME` is set) still
+    writes one `audit_chain_repair` audit event, as every non-dry run does.
+    It is harmless, but repeat step 3 as a dry run. With the switch off, a
+    run carrying the flag is refused `legacy_segment_resume_disabled` even
+    on a clean chain.
   - A dry run reporting `legacy_segment_resume_interrupted: true` means an
     earlier repair's file line went in but its DB row did not commit. Run
     step 2: it completes that event and writes no second one.
