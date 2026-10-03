@@ -33,6 +33,12 @@ use crate::versioned_pipeline_qualification::{
 pub const PIPELINE_RECEIPT_INTAKE_CONTAINED_LABEL: &str = "pipeline_receipt_intake_contained";
 pub const PIPELINE_TENANT_NOT_SERVED_LABEL: &str = "pipeline_tenant_not_served";
 pub const PIPELINE_ROUTING_UNAVAILABLE_LABEL: &str = "pipeline_routing_unavailable";
+/// A new upload of a tenant whose routing row says `pipeline`, on a process
+/// whose build has a code revision, when the tenant's active bundle has no
+/// qualification row for that revision (review round 1, point 3): the upload
+/// is refused before any work for it. Intake returns when an operator records
+/// the qualification on that revision; no routing change is needed.
+pub const PIPELINE_BUNDLE_NOT_QUALIFIED_LABEL: &str = "pipeline_bundle_not_qualified";
 pub const ACTIVATION_ACTOR_INVALID_LABEL: &str = "activation_actor_invalid";
 pub const ACTIVATION_STATE_INVALID_LABEL: &str = "activation_state_invalid";
 pub const ACTIVATION_READINESS_FAILED_LABEL: &str = "activation_readiness_failed";
@@ -394,12 +400,39 @@ pub struct ActivationEvent {
 
 /// A tenant's routing at one instant (`PipelineActivationStore::routing_view`):
 /// its routing row (`None` for a tenant with none), its active bundle (`None`
-/// for a tenant with none), and its newest routing changes, newest first.
+/// for a tenant with none), whether that bundle has a qualification row for
+/// the revision the caller named, and its newest routing changes, newest
+/// first.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TenantRoutingView {
     pub routing: Option<TenantRouting>,
     pub active_bundle_id: Option<String>,
+    /// Whether `pipeline_bundle_qualifications` holds a row for the tenant,
+    /// its active bundle, and the caller's revision. `None` for a tenant with
+    /// no active bundle, and for a caller with no revision. It says that the
+    /// row exists and nothing more: the activation gate's other terms are not
+    /// read here.
+    pub active_bundle_qualified_on_revision: Option<bool>,
     pub events: Vec<ActivationEvent>,
+}
+
+/// What the upload path reads to decide where a new receipt goes
+/// (`PipelineActivationStore::routing_for_new_receipt`), all from one
+/// statement.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewReceiptRouting {
+    /// The tenant's committed routing row; `None` for a tenant with none.
+    pub routing: Option<TenantRouting>,
+    /// Whether the Admission policy of the tenant's active bundle is
+    /// runnable; `true` for a tenant with no active bundle.
+    pub admission_runnable: bool,
+    /// Whether the tenant has an active bundle and
+    /// `pipeline_bundle_qualifications` holds a row for the tenant, that
+    /// bundle, and the caller's revision. `false` for a caller with no
+    /// revision. It proves that the row exists and nothing more: the
+    /// dependency identity and the settings that the activation gate compares
+    /// are checked by `activate` and `rollback` only.
+    pub active_bundle_qualified: bool,
 }
 
 /// A receipt's permanent owner. A pipeline-owned receipt carries its run.
@@ -1192,24 +1225,63 @@ impl PipelineActivationStore {
     }
 
     /// What the upload path reads to decide where a new receipt goes (final
-    /// fix wave G1): the tenant's committed routing row, as `routing`, and
-    /// whether the Admission policy of the tenant's active bundle is runnable
-    /// (Task 5's definition, `PgPipelineStore::policy_is_runnable`: the
-    /// status row's `runnable`, and not runnable without a row). One
-    /// statement, by primary key, with no lock: it always returns one row,
-    /// whose routing columns are null for a tenant with no routing row. A
-    /// tenant with no active bundle reads `true`: there is no policy to
+    /// fix wave G1; review round 1, points 3 and 4): the tenant's committed
+    /// routing row, as `routing`; whether the Admission policy of the
+    /// tenant's active bundle is runnable (Task 5's definition,
+    /// `PgPipelineStore::policy_is_runnable`: the status row's `runnable`,
+    /// and not runnable without a row); and whether the active bundle has a
+    /// qualification row for `deployed_revision`, the revision the calling
+    /// process was built from (`NewReceiptRouting`). One statement, by
+    /// primary key, with no lock: it always returns one row, whose routing
+    /// columns are null for a tenant with no routing row. A tenant with no
+    /// active bundle reads `admission_runnable` true (there is no policy to
     /// refuse for, and the receipt's own transaction answers for the missing
-    /// bundle.
+    /// bundle) and `active_bundle_qualified` false.
     ///
     /// The caller refuses a pipeline receipt under a suspended Admission
-    /// policy before it does any work for it. This read decides nothing for
-    /// good: the receipt's staging and commit transactions check the policy
-    /// again, the commit under the row's lock.
+    /// policy, or for a bundle with no qualification on its revision, before
+    /// it does any work for it. This read decides nothing for good: the
+    /// receipt's staging and commit transactions check the routing and the
+    /// policy again, the commit under the row's lock. They read no
+    /// qualification: that fact is checked here only.
     pub async fn routing_for_new_receipt(
         &self,
         tenant_id: &str,
-    ) -> Result<(Option<TenantRouting>, bool), DatabaseError> {
+        deployed_revision: Option<&str>,
+    ) -> Result<NewReceiptRouting, DatabaseError> {
+        self.upload_routing(tenant_id, None, deployed_revision)
+            .await
+            .map(|(_, routing)| routing)
+    }
+
+    /// `routing_for_new_receipt`, and whether a pipeline run owns
+    /// `submission_id`, in the same statement (review round 1, amendment
+    /// A11). A process that may not replay the tenant's pipeline receipts
+    /// already asks the database, for each new upload, whether a run owns
+    /// the id (`PgPipelineStore::submission_has_pipeline_run`). This read
+    /// takes that read's place there and brings the routing with it, so the
+    /// routing costs such a process no transaction and no statement of its
+    /// own.
+    pub async fn run_and_routing_for_upload(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+        deployed_revision: Option<&str>,
+    ) -> Result<(bool, NewReceiptRouting), DatabaseError> {
+        self.upload_routing(tenant_id, Some(submission_id), deployed_revision)
+            .await
+    }
+
+    /// The one statement of `routing_for_new_receipt` and
+    /// `run_and_routing_for_upload`. A null `submission_id` finds no run and a
+    /// null `deployed_revision` finds no qualification: a comparison with
+    /// null holds for no row.
+    async fn upload_routing(
+        &self,
+        tenant_id: &str,
+        submission_id: Option<Uuid>,
+        deployed_revision: Option<&str>,
+    ) -> Result<(bool, NewReceiptRouting), DatabaseError> {
         let mut client = self.backend.trace_pool().get().await?;
         let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
         let row = tx
@@ -1227,10 +1299,22 @@ impl PipelineActivationStore {
                                           AND status.bundle_id = active.bundle_id
                                           AND status.phase = 'admission'
                                    ), FALSE)
-                        ) AS admission_runnable
+                        ) AS admission_runnable,
+                        EXISTS (
+                            SELECT 1 FROM pipeline_active_bundles active
+                              JOIN pipeline_bundle_qualifications qualification
+                                ON qualification.tenant_id = active.tenant_id
+                               AND qualification.bundle_id = active.bundle_id
+                               AND qualification.code_revision_hash = $3
+                             WHERE active.tenant_id = $1
+                        ) AS active_bundle_qualified,
+                        EXISTS (
+                            SELECT 1 FROM pipeline_runs run
+                             WHERE run.tenant_id = $1 AND run.submission_id = $2
+                        ) AS has_pipeline_run
                    FROM (SELECT 1) AS one
                    LEFT JOIN pipeline_tenant_routing routing ON routing.tenant_id = $1",
-                &[&tenant_id],
+                &[&tenant_id, &submission_id, &deployed_revision],
             )
             .await?;
         tx.commit().await?;
@@ -1239,7 +1323,14 @@ impl PipelineActivationStore {
             .is_some()
             .then(|| routing_from_row(&row))
             .transpose()?;
-        Ok((routing, row.get("admission_runnable")))
+        Ok((
+            row.get("has_pipeline_run"),
+            NewReceiptRouting {
+                routing,
+                admission_runnable: row.get("admission_runnable"),
+                active_bundle_qualified: row.get("active_bundle_qualified"),
+            },
+        ))
     }
 
     /// The tenant's newest `limit` routing changes, newest first.
@@ -1272,10 +1363,17 @@ impl PipelineActivationStore {
     /// read-only, single-snapshot transaction (`REPEATABLE READ`), as
     /// `legacy_drain_report` reads, so a change that commits meanwhile is in
     /// all three or in none. Three statements, no row lock.
+    ///
+    /// `deployed_revision` is the revision the calling process was built
+    /// from. The active bundle's statement also reads whether the bundle has
+    /// a qualification row for it (`active_bundle_qualified_on_revision`),
+    /// by primary key: what a new upload of a `pipeline` tenant is checked
+    /// against on that process.
     pub async fn routing_view(
         &self,
         tenant_id: &str,
         limit: usize,
+        deployed_revision: Option<&str>,
     ) -> Result<TenantRoutingView, DatabaseError> {
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
         let mut client = self.backend.trace_pool().get().await?;
@@ -1289,13 +1387,26 @@ impl PipelineActivationStore {
                 &[&tenant_id],
             )
             .await?;
-        let active_bundle_id: Option<String> = tx
+        let active = tx
             .query_opt(
-                "SELECT bundle_id FROM pipeline_active_bundles WHERE tenant_id = $1",
-                &[&tenant_id],
+                "SELECT active.bundle_id,
+                        EXISTS (
+                            SELECT 1 FROM pipeline_bundle_qualifications qualification
+                             WHERE qualification.tenant_id = active.tenant_id
+                               AND qualification.bundle_id = active.bundle_id
+                               AND qualification.code_revision_hash = $2
+                        ) AS qualified_on_revision
+                   FROM pipeline_active_bundles active
+                  WHERE active.tenant_id = $1",
+                &[&tenant_id, &deployed_revision],
             )
-            .await?
-            .map(|row| row.get("bundle_id"));
+            .await?;
+        let active_bundle_id: Option<String> = active.as_ref().map(|row| row.get("bundle_id"));
+        // No answer without a revision: `false` would say that a
+        // qualification is missing, and nothing was compared.
+        let active_bundle_qualified_on_revision = deployed_revision
+            .and(active.as_ref())
+            .map(|row| row.get("qualified_on_revision"));
         let events = tx
             .query(
                 "SELECT event_id, action, previous_state, resulting_state,
@@ -1312,6 +1423,7 @@ impl PipelineActivationStore {
         Ok(TenantRoutingView {
             routing: routing.as_ref().map(routing_from_row).transpose()?,
             active_bundle_id,
+            active_bundle_qualified_on_revision,
             events: events
                 .iter()
                 .map(event_from_row)

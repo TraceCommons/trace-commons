@@ -49,6 +49,13 @@
 //! (`404 pipeline runtime not configured`, from `require_pipeline_service`
 //! and `require_pipeline_product`, before the revision or a trust store is
 //! read). None of those texts holds a request field either.
+//!
+//! Four of the nine routes need the routing store and no runtime: `GET
+//! routing`, `GET legacy-drain`, `POST contain`, and `POST deactivate`
+//! (review round 1, amendment A4). A process with no runtime refuses the
+//! uploads of a `pipeline` or `contained` tenant, so it must be able to stop
+//! a tenant and to return one to the legacy path. The other five use the
+//! runtime (the bundle's dependency profile, or the service's store).
 
 use super::*;
 
@@ -58,6 +65,8 @@ use trace_commons_server::versioned_pipeline::{
     PIPELINE_POLICY_INTERVENTION_BUSY_LABEL, PipelinePolicyInterventionRecord,
     PolicyOperationalStatus, is_bundle_id,
 };
+#[cfg(test)]
+use trace_commons_server::versioned_pipeline_activation::PIPELINE_BUNDLE_NOT_QUALIFIED_LABEL;
 use trace_commons_server::versioned_pipeline_activation::{
     ActivationEvent, ActivationReadiness, ActivationRequest, ExpectedRecord, ExpectedRouting,
     LEGACY_DRAIN_REPORT_TIMEOUT_LABEL, LegacyDrainReport, PIPELINE_ROUTING_BUSY_LABEL,
@@ -541,6 +550,106 @@ fn bound_attestations(attestations: &[PipelineCheckAttestation]) -> ApiResult<()
     Ok(())
 }
 
+/// The start warning for a tenant on the receipts list whose routing row says
+/// `pipeline` and whose active bundle has no qualification row for this
+/// build's revision: this process refuses its new uploads (`503
+/// pipeline_bundle_not_qualified`).
+pub(crate) const PIPELINE_ACTIVE_BUNDLE_NOT_QUALIFIED_LABEL: &str =
+    "pipeline_active_bundle_not_qualified";
+/// The start warning of a build with no code revision and a receipts list
+/// that is not empty: this process refuses the new uploads of every
+/// `pipeline` tenant (`503 bundle_runtime_revision_unknown`), and no
+/// qualification can be recorded on it.
+pub(crate) const PIPELINE_CODE_REVISION_UNSET_LABEL: &str = "pipeline_code_revision_unset";
+/// The start warning for a listed tenant whose routing could not be read in
+/// `PIPELINE_START_CHECK_READ_TIMEOUT` (a failed read, or one that ran out of
+/// time): nothing is known about that tenant, and the start goes on.
+pub(crate) const PIPELINE_QUALIFICATION_START_CHECK_INCOMPLETE_LABEL: &str =
+    "pipeline_qualification_start_check_incomplete";
+/// The time limit of each read of the start check: 5 seconds, the wait an
+/// operator's routing change allows itself (`PIPELINE_ADMIN_LOCK_TIMEOUT_SQL`).
+const PIPELINE_START_CHECK_READ_TIMEOUT: StdDuration = StdDuration::from_secs(5);
+
+/// At start, for a process that is not started for unqualified routing
+/// (review round 1, point 3; amendment A9): says which tenants on this
+/// process's receipts list it will refuse new uploads for, because their
+/// routing row says `pipeline` and their active bundle has no qualification
+/// row for `deployed_revision`. One warning for each such tenant
+/// (`pipeline_active_bundle_not_qualified`, with the tenant's
+/// `tenant_storage_ref`, never its id). The receipts list is the scope of
+/// this process, so this lists no tenant from the database (D2).
+///
+/// A build with no revision logs one warning in all
+/// (`pipeline_code_revision_unset`) and reads nothing: no bundle is qualified
+/// on no revision. An empty list logs nothing.
+///
+/// It only logs. Each read has `PIPELINE_START_CHECK_READ_TIMEOUT`; a read
+/// that fails or runs out of time is one warning for its tenant
+/// (`pipeline_qualification_start_check_incomplete`) and the next tenant is
+/// read. It never refuses the start: the upload path makes the same read and
+/// is what refuses. Returns each warning it logged, as `(tenant_storage_ref,
+/// label)` with an empty reference for the revision warning, for the tests.
+pub(crate) async fn warn_pipeline_tenants_not_qualified(
+    activation: &PipelineActivationStore,
+    tenant_rollout_gates: &TraceTenantRolloutGates,
+    deployed_revision: Option<&str>,
+) -> Vec<(String, &'static str)> {
+    let tenant_ids = tenant_rollout_gates.tenant_ids(TraceTenantRolloutFeature::PipelineReceipts);
+    let mut warnings = Vec::new();
+    if tenant_ids.is_empty() {
+        return warnings;
+    }
+    let Some(revision) = deployed_revision else {
+        tracing::warn!(
+            listed_tenant_count = tenant_ids.len(),
+            "{PIPELINE_CODE_REVISION_UNSET_LABEL}"
+        );
+        warnings.push((String::new(), PIPELINE_CODE_REVISION_UNSET_LABEL));
+        return warnings;
+    };
+    for tenant_id in tenant_ids {
+        let storage_ref = tenant_storage_ref(&tenant_id);
+        let read = tokio::time::timeout(
+            PIPELINE_START_CHECK_READ_TIMEOUT,
+            activation.routing_for_new_receipt(&tenant_id, Some(revision)),
+        )
+        .await;
+        let label = match read {
+            Ok(Ok(read)) => {
+                let pipeline = read
+                    .routing
+                    .is_some_and(|routing| routing.routing_state == RoutingState::Pipeline);
+                if !pipeline || read.active_bundle_qualified {
+                    continue;
+                }
+                tracing::warn!(
+                    tenant_storage_ref = %storage_ref,
+                    "{PIPELINE_ACTIVE_BUNDLE_NOT_QUALIFIED_LABEL}"
+                );
+                PIPELINE_ACTIVE_BUNDLE_NOT_QUALIFIED_LABEL
+            }
+            Ok(Err(error)) => {
+                tracing::warn!(
+                    tenant_storage_ref = %storage_ref,
+                    error_hash = %safe_display_error_hash(&error),
+                    "{PIPELINE_QUALIFICATION_START_CHECK_INCOMPLETE_LABEL}"
+                );
+                PIPELINE_QUALIFICATION_START_CHECK_INCOMPLETE_LABEL
+            }
+            Err(_) => {
+                tracing::warn!(
+                    tenant_storage_ref = %storage_ref,
+                    timed_out = true,
+                    "{PIPELINE_QUALIFICATION_START_CHECK_INCOMPLETE_LABEL}"
+                );
+                PIPELINE_QUALIFICATION_START_CHECK_INCOMPLETE_LABEL
+            }
+        };
+        warnings.push((storage_ref, label));
+    }
+    warnings
+}
+
 fn require_activation_store(state: &AppState) -> ApiResult<&PipelineActivationStore> {
     state
         .pipeline_activation
@@ -691,11 +800,20 @@ pub(crate) struct InterventionQuery {
 /// record id of the routing row in force (both `None` with no routing row),
 /// its active bundle, and its newest routing events. The record id is what an
 /// operator sends as `expected_record_id` with the next change.
+///
+/// `active_bundle_qualified_on_revision` (review round 1, amendment A8):
+/// whether the active bundle has a qualification row for the code revision
+/// of the process that answers. `false` means that this process refuses the
+/// new uploads of the tenant while its row says `pipeline` (`503
+/// pipeline_bundle_not_qualified`). `null`: the tenant has no active bundle,
+/// or this build has no revision. A process answers for its own revision
+/// only, so during a deploy an operator asks a process of the new build.
 #[derive(Debug, Serialize)]
 pub(crate) struct PipelineRoutingView {
     routing_state: Option<RoutingState>,
     activation_record_id: Option<Uuid>,
     active_bundle_id: Option<String>,
+    active_bundle_qualified_on_revision: Option<bool>,
     events: Vec<ActivationEvent>,
 }
 
@@ -819,7 +937,8 @@ async fn gate_inputs<'a>(
 }
 
 /// `GET /v1/admin/pipeline/routing`: the routing state, the record id in
-/// force, the active bundle, and the newest events, read at one instant
+/// force, the active bundle, whether that bundle is qualified on this
+/// process's revision, and the newest events, read at one instant
 /// (`PipelineActivationStore::routing_view`). Needs the routing store, not a
 /// runtime. Records the read, as the operational summary does.
 pub(crate) async fn pipeline_routing_handler(
@@ -829,7 +948,11 @@ pub(crate) async fn pipeline_routing_handler(
     let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_admin(&tenant)?;
     let view = require_activation_store(state.as_ref())?
-        .routing_view(&tenant.tenant_id, PIPELINE_ROUTING_EVENT_LIMIT)
+        .routing_view(
+            &tenant.tenant_id,
+            PIPELINE_ROUTING_EVENT_LIMIT,
+            state.pipeline_code_revision_hash.as_deref(),
+        )
         .await
         .map_err(activation_error)?;
     append_control_plane_read_audit(
@@ -844,6 +967,7 @@ pub(crate) async fn pipeline_routing_handler(
         routing_state: view.routing.as_ref().map(|routing| routing.routing_state),
         activation_record_id: view.routing.map(|routing| routing.activation_record_id),
         active_bundle_id: view.active_bundle_id,
+        active_bundle_qualified_on_revision: view.active_bundle_qualified_on_revision,
         events: view.events,
     }))
 }
@@ -982,7 +1106,9 @@ pub(crate) async fn pipeline_rollback_handler(
     Ok(Json(routing))
 }
 
-/// `POST /v1/admin/pipeline/contain`: stops the tenant's new receipts.
+/// `POST /v1/admin/pipeline/contain`: stops the tenant's new receipts. Needs
+/// the routing store, not a runtime: a process with no runtime refuses a
+/// contained tenant's uploads too, and can contain one.
 pub(crate) async fn pipeline_contain_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -990,7 +1116,6 @@ pub(crate) async fn pipeline_contain_handler(
 ) -> ApiResult<Json<TenantRouting>> {
     let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_admin(&tenant)?;
-    require_pipeline_service(state.as_ref())?;
     let body = request_body(body)?;
     let routing = require_activation_store(state.as_ref())?
         .contain_expecting(
@@ -1006,7 +1131,9 @@ pub(crate) async fn pipeline_contain_handler(
 }
 
 /// `POST /v1/admin/pipeline/deactivate`: returns the tenant to the legacy
-/// path.
+/// path. Needs the routing store, not a runtime: it is the exit of a
+/// `pipeline` or `contained` tenant on a deployment that fell back to a
+/// process with no runtime, which refuses that tenant's uploads.
 pub(crate) async fn pipeline_deactivate_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -1014,7 +1141,6 @@ pub(crate) async fn pipeline_deactivate_handler(
 ) -> ApiResult<Json<TenantRouting>> {
     let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_admin(&tenant)?;
-    require_pipeline_service(state.as_ref())?;
     let body = request_body(body)?;
     let routing = require_activation_store(state.as_ref())?
         .deactivate_expecting(
@@ -1529,6 +1655,10 @@ mod tests {
             LEGACY_DRAIN_REPORT_TIMEOUT_LABEL,
             "pipeline_routing_state_changed",
             "pipeline_routing_expectation_required",
+            PIPELINE_BUNDLE_NOT_QUALIFIED_LABEL,
+            PIPELINE_ACTIVE_BUNDLE_NOT_QUALIFIED_LABEL,
+            PIPELINE_CODE_REVISION_UNSET_LABEL,
+            PIPELINE_QUALIFICATION_START_CHECK_INCOMPLETE_LABEL,
             BUNDLE_PACKAGE_MISSING_LABEL,
             PACKAGE_RUNTIME_REVISION_UNKNOWN_LABEL,
             ROUTING_READ_SURFACE,

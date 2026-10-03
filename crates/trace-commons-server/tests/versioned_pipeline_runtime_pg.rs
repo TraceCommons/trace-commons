@@ -38747,7 +38747,7 @@ fn gate_request<'a>(
 async fn expected_record(store: &PipelineActivationStore, tenant: &str) -> ExpectedRecord {
     ExpectedRecord::of(
         store
-            .routing_view(tenant, 1)
+            .routing_view(tenant, 1, None)
             .await
             .expect("the routing view reads")
             .routing

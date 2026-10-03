@@ -3151,7 +3151,24 @@ impl RouteFixture {
         key_id: &str,
         pkcs8: &[u8],
     ) -> Vec<trace_commons_server::versioned_pipeline_qualification::PipelineCheckAttestation> {
-        self.attestations_with(package, key_id, pkcs8, 3_600, None)
+        self.attestations_with(package, &self.revision, key_id, pkcs8, 3_600, None)
+    }
+
+    /// `attestations` for a build of another revision: what an operator
+    /// signs after a deploy, on the new tree.
+    fn attestations_on(
+        &self,
+        package: &trace_commons_gate_api::pipeline::BundlePackage,
+        revision: &str,
+    ) -> Vec<trace_commons_server::versioned_pipeline_qualification::PipelineCheckAttestation> {
+        self.attestations_with(
+            package,
+            revision,
+            ROUTE_CHECK_KEY_ID,
+            &self.check_pkcs8,
+            3_600,
+            None,
+        )
     }
 
     /// `attestations`, each signed by the check key with
@@ -3166,6 +3183,7 @@ impl RouteFixture {
     ) -> Vec<trace_commons_server::versioned_pipeline_qualification::PipelineCheckAttestation> {
         self.attestations_with(
             package,
+            &self.revision,
             ROUTE_CHECK_KEY_ID,
             &self.check_pkcs8,
             maximum_age_seconds,
@@ -3176,6 +3194,7 @@ impl RouteFixture {
     fn attestations_with(
         &self,
         package: &trace_commons_gate_api::pipeline::BundlePackage,
+        revision: &str,
         key_id: &str,
         pkcs8: &[u8],
         maximum_age_seconds: u64,
@@ -3187,9 +3206,8 @@ impl RouteFixture {
         };
 
         let dir = tempfile::tempdir().expect("temp dir");
-        let emitter =
-            PipelineCheckEmitter::new(dir.path().to_path_buf(), "admin_routes", &self.revision)
-                .expect("the emitter's run id and revision are valid");
+        let emitter = PipelineCheckEmitter::new(dir.path().to_path_buf(), "admin_routes", revision)
+            .expect("the emitter's run id and revision are valid");
         PROMOTION_REQUIRED_CHECKS
             .iter()
             .map(|check_id| {
@@ -3235,7 +3253,7 @@ impl RouteFixture {
     /// the read leaves no answer body and no read audit behind.
     async fn record_id_in_force(&self, tenant: &str) -> serde_json::Value {
         self.store()
-            .routing_view(tenant, 1)
+            .routing_view(tenant, 1, None)
             .await
             .expect("the routing view reads")
             .routing
@@ -3258,8 +3276,8 @@ impl RouteFixture {
     }
 
     /// The nine routes, each with a body it accepts, and whether it needs a
-    /// pipeline runtime (`GET routing` and `GET legacy-drain` need only the
-    /// routing store).
+    /// pipeline runtime (`GET routing`, `GET legacy-drain`, `POST contain`,
+    /// and `POST deactivate` need only the routing store).
     async fn routes(&self) -> Vec<(&'static str, String, Option<serde_json::Value>, bool)> {
         vec![
             ("GET", "/v1/admin/pipeline/routing".to_string(), None, false),
@@ -3285,13 +3303,13 @@ impl RouteFixture {
                 "POST",
                 "/v1/admin/pipeline/contain".to_string(),
                 Some(serde_json::json!({ "reason_code": "contain_for_incident" })),
-                true,
+                false,
             ),
             (
                 "POST",
                 "/v1/admin/pipeline/deactivate".to_string(),
                 Some(serde_json::json!({ "reason_code": "deactivate_to_legacy" })),
-                true,
+                false,
             ),
             (
                 "POST",
@@ -3513,6 +3531,7 @@ impl RouteFixture {
                 "routing_state",
                 "activation_record_id",
                 "active_bundle_id",
+                "active_bundle_qualified_on_revision",
                 "events"
             ]),
             "{view}"
@@ -3760,8 +3779,12 @@ impl RouteFixture {
 
 /// Each route answers a request without a credential as the operational
 /// summary does, answers `403 admin token required` to a contributor, and
-/// (but for the routing view and the drain report, which need only the
-/// routing store) `404` in a process with no pipeline runtime.
+/// (but for the four routes that need only the routing store) `404` in a
+/// process with no pipeline runtime. Of those four, the two reads answer
+/// here; the two writes (`contain`, `deactivate`) change the routing, so
+/// their own tests call them on a process with no runtime
+/// (`a_process_with_no_runtime_can_contain_a_pipeline_tenant`,
+/// `a_process_with_no_runtime_can_deactivate_a_pipeline_tenant`).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_admin_routes_require_an_admin_and_a_runtime() {
     let Some(fixture) = RouteFixture::new().await else {
@@ -3809,6 +3832,10 @@ async fn the_admin_routes_require_an_admin_and_a_runtime() {
         state.db_reviewer_reads = true;
     });
     for (method, path, body, needs_runtime) in &routes {
+        if !*needs_runtime && *method != "GET" {
+            // `contain` and `deactivate`: see their own tests.
+            continue;
+        }
         let (status, answer) = fixture
             .call(
                 &no_runtime,
@@ -5572,7 +5599,11 @@ impl RouteFixture {
         label: &str,
         context: &str,
     ) {
-        let before = self.store().routing_view(&self.tenant, 100).await.unwrap();
+        let before = self
+            .store()
+            .routing_view(&self.tenant, 100, None)
+            .await
+            .unwrap();
         let answer = self.admin_call("POST", path, Some(body)).await;
         assert_eq!(
             answer,
@@ -5580,7 +5611,10 @@ impl RouteFixture {
             "{context}: {path}"
         );
         assert_eq!(
-            self.store().routing_view(&self.tenant, 100).await.unwrap(),
+            self.store()
+                .routing_view(&self.tenant, 100, None)
+                .await
+                .unwrap(),
             before,
             "{context}: {path}: the routing row, the active bundle, and the events"
         );
@@ -5859,7 +5893,7 @@ async fn a_rollback_prepared_before_another_operators_rollback_is_refused() {
     let again = fixture.change_routing(ACTIVATE, body).await;
     let view = fixture
         .store()
-        .routing_view(&fixture.tenant, 10)
+        .routing_view(&fixture.tenant, 10, None)
         .await
         .unwrap();
     assert_eq!(
@@ -5890,7 +5924,7 @@ async fn a_rollback_prepared_before_another_operators_rollback_is_refused() {
     assert_eq!(
         fixture
             .store()
-            .routing_view(&fixture.tenant, 1)
+            .routing_view(&fixture.tenant, 1, None)
             .await
             .unwrap()
             .active_bundle_id
@@ -6140,4 +6174,472 @@ async fn a_contain_with_no_expectation_passes_from_every_state() {
         .await;
     assert_eq!(contained["routing_state"], "contained");
     assert_ne!(contained["activation_record_id"], in_force);
+}
+
+// ---------------------------------------------------------------------------
+// Review round 1, points 3 and 4: the route decision reads the qualification
+// of the tenant's active bundle on the revision of the process that answers,
+// and a process with no runtime reads the routing row and can stop a tenant.
+// ---------------------------------------------------------------------------
+
+impl RouteFixture {
+    /// The fixture's state as a process built from `revision` holds it.
+    fn deployed(&self, revision: &str) -> Arc<AppState> {
+        let revision = revision.to_string();
+        self.with(|state| state.pipeline_code_revision_hash = Some(revision))
+    }
+
+    /// The fixture's state as a process with no pipeline runtime holds it:
+    /// no service and no product store, and the stores of a process that has
+    /// a database (the pipeline store, the routing store).
+    fn no_runtime(&self) -> Arc<AppState> {
+        let state = self.with(|state| {
+            state.pipeline_service = None;
+            state.pipeline_product = None;
+        });
+        assert!(state.pipeline_store.is_some() && state.pipeline_activation.is_some());
+        state
+    }
+
+    /// `POST /v1/traces` of `envelope` by the contributor through `state`.
+    async fn upload_envelope(
+        &self,
+        state: &Arc<AppState>,
+        envelope: &TraceContributionEnvelope,
+    ) -> (StatusCode, serde_json::Value) {
+        route_trace(
+            state,
+            &self.contributor,
+            &serde_json::to_vec(envelope).unwrap(),
+        )
+        .await
+    }
+
+    /// The pipeline runs of `submission_id` in the fixture's tenant.
+    async fn runs(&self, submission_id: Uuid) -> i64 {
+        self.owner
+            .trace_pool_for_test()
+            .get()
+            .await
+            .unwrap()
+            .query_one(
+                "SELECT COUNT(*) FROM pipeline_runs WHERE tenant_id = $1 AND submission_id = $2",
+                &[&self.tenant, &submission_id],
+            )
+            .await
+            .unwrap()
+            .get(0)
+    }
+
+    /// Qualifies A and activates it for the tenant on the fixture's state
+    /// (the fixture's revision), and returns the record id of the activation.
+    async fn qualify_and_activate_a(&self) -> serde_json::Value {
+        self.qualify(&self.a).await;
+        let routing = self
+            .change_routing(
+                "/v1/admin/pipeline/activate",
+                self.activate_body(&self.a, "activate_bundle_a").await,
+            )
+            .await;
+        assert_eq!(routing["routing_state"], "pipeline");
+        routing["activation_record_id"].clone()
+    }
+
+    /// The `active_bundle_qualified_on_revision` that `GET routing` answers
+    /// on `state`.
+    async fn qualified_on_revision(&self, state: &Arc<AppState>) -> serde_json::Value {
+        let (status, view) = self
+            .call(
+                state,
+                "GET",
+                "/v1/admin/pipeline/routing",
+                Some(&self.admin),
+                None,
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{view}");
+        assert!(
+            view.as_object()
+                .expect("an object")
+                .contains_key("active_bundle_qualified_on_revision"),
+            "{view}"
+        );
+        view["active_bundle_qualified_on_revision"].clone()
+    }
+}
+
+/// Review round 1, point 3 (the deploy test). A tenant is activated on
+/// revision A. A process built from revision B refuses its new uploads with
+/// `503 pipeline_bundle_not_qualified` and writes nothing (no run, no owner),
+/// while a process of revision A still takes them (a rolling deploy). A retry
+/// of a receipt that exists is answered on B all the same. A qualification
+/// recorded through a B process reopens intake on B with no second
+/// `activate`: the routing row and its events are unchanged.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pipeline_tenant_is_refused_after_a_deploy_until_it_is_requalified() {
+    let Some(fixture) = RouteFixture::new().await else {
+        return;
+    };
+    let tenant = fixture.tenant.as_str();
+    let activation_record_id = fixture.qualify_and_activate_a().await;
+    let before = clean_envelope("deploy_before").await;
+    let (status, receipt) = fixture.upload_envelope(&fixture.state, &before).await;
+    assert_eq!(status, StatusCode::OK, "{receipt}");
+    assert_eq!(receipt["status"], "processing");
+
+    let revision_b = sha256_prefixed("pr5r1-deployed-revision-b");
+    assert_ne!(revision_b, fixture.revision);
+    let replica_b = fixture.deployed(&revision_b);
+    assert!(!replica_b.pipeline_unqualified_routing);
+    let refused_envelope = clean_envelope("deploy_refused").await;
+    for attempt in ["first", "again"] {
+        let (status, refused) = fixture.upload_envelope(&replica_b, &refused_envelope).await;
+        assert_eq!(
+            status,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "{attempt}: {refused}"
+        );
+        assert_eq!(
+            refused["error"], "pipeline_bundle_not_qualified",
+            "{attempt}"
+        );
+        assert_eq!(fixture.runs(refused_envelope.submission_id).await, 0);
+        assert_eq!(
+            fixture
+                .store()
+                .ownership(tenant, refused_envelope.submission_id)
+                .await
+                .expect("the ownership reads"),
+            None,
+            "{attempt}: nothing is claimed for the legacy path either"
+        );
+    }
+    assert_eq!(
+        fixture.qualified_on_revision(&replica_b).await,
+        serde_json::json!(false)
+    );
+    assert_eq!(
+        fixture.qualified_on_revision(&fixture.state).await,
+        serde_json::json!(true)
+    );
+
+    // A replica of revision A still takes a new upload, and B answers the
+    // retry of a receipt that exists.
+    let (status, receipt, _) = fixture.upload(&fixture.state, "deploy_on_a").await;
+    assert_eq!(status, StatusCode::OK, "{receipt}");
+    assert_eq!(receipt["status"], "processing");
+    let (status, replayed) = fixture.upload_envelope(&replica_b, &before).await;
+    assert_eq!(status, StatusCode::OK, "{replayed}");
+    assert_eq!(replayed["status"], "processing");
+    assert_eq!(fixture.runs(before.submission_id).await, 1);
+
+    // A request that reaches an A replica records nothing for B.
+    fixture.qualify(&fixture.a).await;
+    assert_eq!(
+        fixture.qualified_on_revision(&replica_b).await,
+        serde_json::json!(false)
+    );
+
+    // The qualification on B, through a B process.
+    let (status, record) = fixture
+        .call(
+            &replica_b,
+            "POST",
+            "/v1/admin/pipeline/qualifications",
+            Some(&fixture.admin),
+            Some(serde_json::json!({
+                "signed_package": fixture.signed(&fixture.a),
+                "attestations": fixture.attestations_on(&fixture.a, &revision_b),
+            })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{record}");
+    assert_eq!(record["metadata"]["code_revision_hash"], revision_b);
+    assert_eq!(
+        fixture.qualified_on_revision(&replica_b).await,
+        serde_json::json!(true)
+    );
+    let (status, accepted) = fixture.upload_envelope(&replica_b, &refused_envelope).await;
+    assert_eq!(status, StatusCode::OK, "{accepted}");
+    assert_eq!(accepted["status"], "processing");
+    assert_eq!(fixture.runs(refused_envelope.submission_id).await, 1);
+
+    // No routing change reopened it.
+    assert_eq!(
+        fixture.record_id_in_force(tenant).await,
+        activation_record_id
+    );
+    assert_eq!(
+        fixture
+            .store()
+            .events(tenant, 10)
+            .await
+            .expect("the events read")
+            .len(),
+        1,
+        "the one activation"
+    );
+}
+
+/// The replay path reads no qualification: a receipt taken on revision A is
+/// answered on a process of a revision that nobody qualified the bundle on,
+/// from its run, and a new upload there is refused.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_retry_of_an_existing_receipt_is_answered_after_a_deploy() {
+    let Some(fixture) = RouteFixture::new().await else {
+        return;
+    };
+    fixture.qualify_and_activate_a().await;
+    let taken = clean_envelope("retry_after_deploy").await;
+    let (status, receipt) = fixture.upload_envelope(&fixture.state, &taken).await;
+    assert_eq!(status, StatusCode::OK, "{receipt}");
+    assert_eq!(receipt["status"], "processing");
+
+    for (replica, case) in [
+        (
+            fixture.deployed(&sha256_prefixed("pr5r1-unqualified-revision")),
+            "a revision with no qualification",
+        ),
+        (
+            fixture.with(|state| state.pipeline_code_revision_hash = None),
+            "a build with no revision",
+        ),
+    ] {
+        let (status, replayed) = fixture.upload_envelope(&replica, &taken).await;
+        assert_eq!(status, StatusCode::OK, "{case}: {replayed}");
+        assert_eq!(replayed["status"], "processing", "{case}");
+        assert_eq!(fixture.runs(taken.submission_id).await, 1, "{case}");
+        let (status, refused, id) = fixture.upload(&replica, "new_after_deploy").await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{case}: {refused}");
+        assert_eq!(fixture.runs(id).await, 0, "{case}");
+    }
+}
+
+/// Amendment A8: `GET routing` says whether the tenant's active bundle has a
+/// qualification row for the revision of the process that answers: `null`
+/// with no active bundle, `true` on the revision it was qualified on, `false`
+/// on another revision, and `null` on a build with no revision. The route
+/// needs no runtime.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_routing_view_says_whether_the_active_bundle_is_qualified_on_the_revision() {
+    let Some(fixture) = RouteFixture::new().await else {
+        return;
+    };
+    let null = serde_json::Value::Null;
+    assert_eq!(
+        fixture.qualified_on_revision(&fixture.state).await,
+        null,
+        "no active bundle"
+    );
+    // A qualification alone selects no bundle.
+    fixture.qualify(&fixture.a).await;
+    assert_eq!(fixture.qualified_on_revision(&fixture.state).await, null);
+
+    fixture.qualify_and_activate_a().await;
+    assert_eq!(
+        fixture.qualified_on_revision(&fixture.state).await,
+        serde_json::json!(true),
+        "qualified on this revision"
+    );
+    let other = fixture.deployed(&sha256_prefixed("pr5r1-view-other-revision"));
+    assert_eq!(
+        fixture.qualified_on_revision(&other).await,
+        serde_json::json!(false),
+        "another revision"
+    );
+    let no_revision = fixture.with(|state| state.pipeline_code_revision_hash = None);
+    assert_eq!(
+        fixture.qualified_on_revision(&no_revision).await,
+        null,
+        "a build with no revision compares nothing"
+    );
+    assert_eq!(
+        fixture.qualified_on_revision(&fixture.no_runtime()).await,
+        serde_json::json!(true),
+        "the route needs the store only"
+    );
+}
+
+/// Amendment A4: `contain` needs the routing store and no runtime. A process
+/// with no runtime refuses the uploads of a `pipeline` tenant as not served;
+/// it can contain the tenant, and then refuses them as contained.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_process_with_no_runtime_can_contain_a_pipeline_tenant() {
+    let Some(fixture) = RouteFixture::new().await else {
+        return;
+    };
+    fixture.qualify_and_activate_a().await;
+    let no_runtime = fixture.no_runtime();
+    let (status, refused, _) = fixture.upload(&no_runtime, "no_runtime_pipeline").await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{refused}");
+    assert_eq!(refused["error"], "pipeline_tenant_not_served");
+
+    let (status, routing) = fixture
+        .call(
+            &no_runtime,
+            "POST",
+            "/v1/admin/pipeline/contain",
+            Some(&fixture.admin),
+            Some(serde_json::json!({ "reason_code": "contain_for_incident" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{routing}");
+    assert_eq!(routing["routing_state"], "contained");
+    assert_eq!(
+        routing["activation_record_id"],
+        fixture.record_id_in_force(&fixture.tenant).await
+    );
+    let (status, refused, id) = fixture.upload(&no_runtime, "no_runtime_contained").await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{refused}");
+    assert_eq!(refused["error"], "pipeline_receipt_intake_contained");
+    assert_eq!(fixture.runs(id).await, 0);
+
+    // The other tenant's admin contains only its own tenant.
+    assert_eq!(
+        fixture
+            .store()
+            .routing(&fixture.other_tenant)
+            .await
+            .expect("the routing reads"),
+        None
+    );
+}
+
+/// Amendment A4: `deactivate` needs the routing store and no runtime. It is
+/// the exit of a `pipeline` tenant on a deployment that fell back to a
+/// process with no runtime: after it, that process takes the tenant's uploads
+/// on the legacy path, with a claim. A deactivation of a contained tenant
+/// names its expectation there too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_process_with_no_runtime_can_deactivate_a_pipeline_tenant() {
+    let Some(fixture) = RouteFixture::new().await else {
+        return;
+    };
+    let tenant = fixture.tenant.as_str();
+    fixture.qualify_and_activate_a().await;
+    let no_runtime = fixture.no_runtime();
+    let deactivate = |body: serde_json::Value| {
+        fixture.call(
+            &no_runtime,
+            "POST",
+            "/v1/admin/pipeline/deactivate",
+            Some(&fixture.admin),
+            Some(body),
+        )
+    };
+
+    let (status, routing) =
+        deactivate(serde_json::json!({ "reason_code": "deactivate_to_legacy" })).await;
+    assert_eq!(status, StatusCode::OK, "{routing}");
+    assert_eq!(routing["routing_state"], "legacy");
+    let (status, receipt, id) = fixture.upload(&no_runtime, "no_runtime_deactivated").await;
+    assert_eq!(status, StatusCode::OK, "{receipt}");
+    assert_ne!(receipt["status"], "processing", "a legacy receipt");
+    assert_eq!(fixture.runs(id).await, 0);
+    assert_eq!(
+        fixture
+            .store()
+            .ownership(tenant, id)
+            .await
+            .expect("the ownership reads")
+            .map(|row| row.owner),
+        Some(trace_commons_server::versioned_pipeline_activation::ReceiptOwner::Legacy)
+    );
+
+    // From `contained`, on the same process: an expectation is required.
+    let (status, contained) = fixture
+        .call(
+            &no_runtime,
+            "POST",
+            "/v1/admin/pipeline/contain",
+            Some(&fixture.admin),
+            Some(serde_json::json!({ "reason_code": "contain_for_incident" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{contained}");
+    let (status, refused) =
+        deactivate(serde_json::json!({ "reason_code": "deactivate_to_legacy" })).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{refused}");
+    assert_eq!(refused["error"], "pipeline_routing_expectation_required");
+    let (status, routing) = deactivate(serde_json::json!({
+        "reason_code": "deactivate_to_legacy",
+        "expected_record_id": contained["activation_record_id"],
+    }))
+    .await;
+    assert_eq!(status, StatusCode::OK, "{routing}");
+    assert_eq!(routing["routing_state"], "legacy");
+}
+
+/// Amendment A9: the start check says which tenants on the receipts list
+/// this process refuses new uploads for. It warns once for each `pipeline`
+/// tenant whose active bundle has no qualification on the build's revision,
+/// by the tenant's storage reference; a tenant with no row or a qualified
+/// bundle is not named. A build with no revision warns once in all. A read
+/// that fails is a warning for its tenant and the check goes on to the end.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_start_check_warns_for_each_pipeline_tenant_not_qualified() {
+    use pipeline_activation::{
+        PIPELINE_ACTIVE_BUNDLE_NOT_QUALIFIED_LABEL, PIPELINE_CODE_REVISION_UNSET_LABEL,
+        PIPELINE_QUALIFICATION_START_CHECK_INCOMPLETE_LABEL, warn_pipeline_tenants_not_qualified,
+    };
+
+    let Some(fixture) = RouteFixture::new().await else {
+        return;
+    };
+    let store = fixture.store();
+    let gates = &fixture.state.tenant_rollout_gates;
+    let revision_b = sha256_prefixed("pr5r1-start-check-revision-b");
+    assert!(
+        warn_pipeline_tenants_not_qualified(&store, gates, Some(&revision_b))
+            .await
+            .is_empty(),
+        "no tenant has a routing row"
+    );
+
+    fixture.qualify_and_activate_a().await;
+    assert!(
+        warn_pipeline_tenants_not_qualified(&store, gates, Some(&fixture.revision))
+            .await
+            .is_empty(),
+        "qualified on the build's revision"
+    );
+    assert_eq!(
+        warn_pipeline_tenants_not_qualified(&store, gates, Some(&revision_b)).await,
+        vec![(
+            tenant_storage_ref(&fixture.tenant),
+            PIPELINE_ACTIVE_BUNDLE_NOT_QUALIFIED_LABEL
+        )],
+        "only the pipeline tenant, by its storage reference"
+    );
+    assert_eq!(
+        warn_pipeline_tenants_not_qualified(&store, gates, None).await,
+        vec![(String::new(), PIPELINE_CODE_REVISION_UNSET_LABEL)],
+        "one warning for a build with no revision"
+    );
+    let no_list =
+        TraceTenantRolloutGates::for_feature(TraceTenantRolloutFeature::PipelineReceipts, &[]);
+    assert!(
+        warn_pipeline_tenants_not_qualified(&store, &no_list, None)
+            .await
+            .is_empty(),
+        "an empty receipts list warns for nothing"
+    );
+
+    // A store whose database is down: one warning for each listed tenant,
+    // and the check returns.
+    let down = PipelineActivationStore::new(pg_backend_without_a_database().await);
+    let mut incomplete = warn_pipeline_tenants_not_qualified(&down, gates, Some(&revision_b)).await;
+    incomplete.sort();
+    let mut expected = vec![
+        (
+            tenant_storage_ref(&fixture.tenant),
+            PIPELINE_QUALIFICATION_START_CHECK_INCOMPLETE_LABEL,
+        ),
+        (
+            tenant_storage_ref(&fixture.other_tenant),
+            PIPELINE_QUALIFICATION_START_CHECK_INCOMPLETE_LABEL,
+        ),
+    ];
+    expected.sort();
+    assert_eq!(incomplete, expected);
 }
