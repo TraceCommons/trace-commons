@@ -119,6 +119,10 @@ pub struct PublicRunCopy {
     pub feedback_choices: [PublicRunValueLabel; 3],
     pub evidence_kind_choices: [PublicRunValueLabel; 9],
     pub contribution_status_choices: [PublicRunValueLabel; 10],
+    /// The label for a status not in `contribution_status_choices`
+    /// (`history_copy::STATUS_UNAVAILABLE`), never `unrecognized_value` and
+    /// never the raw status.
+    pub contribution_status_unavailable: &'static str,
     pub permitted_use_choices: [PublicRunValueLabel; 6],
     pub reuse_permissions: [PublicRunReuseChoice; 2],
 }
@@ -311,6 +315,7 @@ pub fn public_run_copy() -> PublicRunCopy {
                 label: "Purged",
             },
         ],
+        contribution_status_unavailable: crate::history_copy::STATUS_UNAVAILABLE,
         permitted_use_choices: [
             PublicRunValueLabel {
                 value: "debugging",
@@ -481,6 +486,10 @@ mod tests {
         assert_eq!(copy.feedback_choices.len(), 3);
         assert_eq!(copy.evidence_kind_choices.len(), 9);
         assert_eq!(copy.contribution_status_choices.len(), 10);
+        assert_eq!(
+            copy.contribution_status_unavailable,
+            crate::history_copy::STATUS_UNAVAILABLE
+        );
         assert_eq!(copy.permitted_use_choices.len(), 6);
         assert!(
             copy.contribution_status_choices

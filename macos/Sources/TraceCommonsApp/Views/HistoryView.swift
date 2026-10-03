@@ -447,7 +447,9 @@ struct HistoryRow: View {
                     .font(TC.Font_.footnote)
                     .foregroundStyle(.tertiary)
                 Spacer(minLength: TC.Space.m)
-                TCTag(text: statusSentence, tone: statusTone, symbol: statusSymbol)
+                if let statusSentence {
+                    TCTag(text: statusSentence, tone: statusTone, symbol: statusSymbol)
+                }
             }
             ForEach(Array(record.explanations.enumerated()), id: \.offset) { _, text in
                 Text(text)
@@ -514,8 +516,15 @@ struct HistoryRow: View {
         ContributionStatusPresentation.offersWithdraw(record.status)
     }
 
-    private var statusSentence: String {
-        switch record.status {
+    /// The row's status tag, or nil when there is nothing true to say.
+    ///
+    /// A status this row has no word for reads as `unavailable`, the core's
+    /// "Status unavailable" (`PublicRunCopy.contributionStatusUnavailable`).
+    /// It used to read "Not in the commons", which asserts where the trace
+    /// is; the status says nothing this build understands, so neither may
+    /// the row. With no core copy decoded the row draws no tag.
+    static func statusSentence(for status: String, unavailable: String?) -> String? {
+        switch status {
         case "accepted": return "In the commons"
         case "quarantined": return "Held for privacy review"
         case "submitted": return "Waiting to be scored"
@@ -523,8 +532,13 @@ struct HistoryRow: View {
         // bucket: a withdrawn trace stays on this list, reading as
         // withdrawn, rather than vanishing as though it had never been sent.
         case "withdrawn": return "Withdrawn by you"
-        default: return "Not in the commons"
+        default: return unavailable
         }
+    }
+
+    private var statusSentence: String? {
+        Self.statusSentence(
+            for: record.status, unavailable: model.publicRunCopy?.contributionStatusUnavailable)
     }
 
     private var statusTone: TC.Tone {
