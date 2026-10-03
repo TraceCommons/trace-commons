@@ -16,6 +16,10 @@ private final class SessionPublicationDaemon: DaemonCalling, @unchecked Sendable
     private let lock = NSLock()
     private var recorded: [Call] = []
     private var failures: Set<String> = []
+    /// A failure label other than the method's default, so a test can fail
+    /// a read without the account-ending labels (`session-detail-not-found`
+    /// clears every account-owned record).
+    private var failureMessages: [String: String] = [:]
     private var credentialWarnings: Set<String> = []
     private var publicationVersion = 0
     private var ownerScopeSHA256 = "sha256:owner-a"
@@ -34,6 +38,13 @@ private final class SessionPublicationDaemon: DaemonCalling, @unchecked Sendable
         } else {
             failures.remove(method)
         }
+    }
+
+    func setFailure(_ method: String, message: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        failures.insert(method)
+        failureMessages[method] = message
     }
 
     func setCredentialWarning(_ method: String, enabled: Bool = true) {
@@ -57,13 +68,14 @@ private final class SessionPublicationDaemon: DaemonCalling, @unchecked Sendable
         defer { lock.unlock() }
         recorded.append(Call(method: method, params: paramsJSON))
         if failures.contains(method) {
-            let message: String
+            var message: String
             switch method {
             case "history_detail": message = "session-detail-not-found"
             case "publish_public_run": message = "public-run-conflict"
             case "unpublish_public_run": message = "public-run-unpublish-failed"
             default: message = "synthetic-test-failure"
             }
+            message = failureMessages[method] ?? message
             return #"{"id":1,"error":{"code":"unavailable","message":"\#(message)"}}"#
         }
         switch method {
@@ -479,6 +491,52 @@ final class SessionPublicationTests: XCTestCase {
             consentScopes: [], creditPointsPending: 0, creditPointsFinal: nil, explanations: [], lastRefreshedAt: nil)
         XCTAssertFalse(ContributionStatusPresentation.offersWithdraw(
             SessionDetailView.withdrawalStatus(unknown, detail: detail)))
+    }
+
+    /// A reload keeps the detail it already holds until the daemon answers,
+    /// so the public-run editor drawn from it, and its draft, stay mounted
+    /// (an app switch reloads). A failed reload keeps it, with the error
+    /// beside it.
+    @MainActor
+    func testAFailedReloadKeepsTheDetailItHolds() async throws {
+        let model = AppModel()
+        model.setClientForTesting(client)
+        model.loadSessionDetail(record)
+        try await waitUntil { model.sessionDetails[self.record.submissionID] != nil }
+        let before = model.sessionDetails[record.submissionID]
+
+        daemon.setFailure("history_detail", message: "synthetic-read-failure")
+        model.loadSessionDetail(record)
+        XCTAssertEqual(model.sessionDetails[record.submissionID], before, "the reload unmounted the detail")
+        XCTAssertTrue(model.loadingSessionDetails.contains(record.submissionID))
+        try await waitUntil {
+            !model.loadingSessionDetails.contains(self.record.submissionID)
+                && model.sessionDetailErrors[self.record.submissionID] != nil
+        }
+        XCTAssertEqual(model.sessionDetails[record.submissionID], before, "a failed reload dropped the detail")
+    }
+
+    /// A reload that answers replaces the detail and clears an earlier error.
+    @MainActor
+    func testAnAnsweredReloadReplacesTheDetail() async throws {
+        let model = AppModel()
+        model.setClientForTesting(client)
+        daemon.setFailure("history_detail", message: "synthetic-read-failure")
+        model.loadSessionDetail(record)
+        try await waitUntil { model.sessionDetailErrors[self.record.submissionID] != nil }
+        daemon.setFailure("history_detail", enabled: false)
+        model.loadSessionDetail(record)
+        try await waitUntil { model.sessionDetails[self.record.submissionID] != nil }
+        XCTAssertEqual(model.sessionDetails[record.submissionID]?.publicationVersion, 0)
+        XCTAssertNil(model.sessionDetailErrors[record.submissionID])
+
+        // The daemon's record moves (a publication elsewhere); the reload
+        // draws the new one, not the one it held.
+        _ = try client.publishPublicRun(
+            submissionID: record.submissionID, draft: draft, taskSuccess: "partial",
+            contributedVersion: "trace-contribution/1", expectedPublicationVersion: 0)
+        model.loadSessionDetail(record)
+        try await waitUntil { model.sessionDetails[self.record.submissionID]?.publicationVersion == 1 }
     }
 
     @MainActor

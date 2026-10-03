@@ -2433,6 +2433,11 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Reads a session's detail. The detail already held stays until the
+    /// daemon answers: replaced when it does, kept beside the error when it
+    /// fails, so a reload (one runs on every app switch) never unmounts the
+    /// public-run editor drawn from it, or the draft typed there. An account
+    /// change still clears it (`clearAccountOwnedContent`).
     func loadSessionDetail(_ record: HistoryRecord) {
         guard let client else { return }
         let id = record.submissionID
@@ -2441,7 +2446,6 @@ final class AppModel: ObservableObject {
         sessionDetailRequestSequence &+= 1
         let requestSequence = sessionDetailRequestSequence
         loadingSessionDetails.insert(id)
-        sessionDetails[id] = nil
         sessionDetailErrors[id] = nil
         Task.detached(priority: .userInitiated) {
             let result = Result { try client.sessionDetail(submissionID: id) }
@@ -2453,7 +2457,6 @@ final class AppModel: ObservableObject {
                     self.reconcileAccountOwnedContent(scope: detail.ownerScopeSHA256)
                     self.sessionDetails[id] = detail
                 case .failure(let error):
-                    self.sessionDetails[id] = nil
                     let label = (error as? DaemonClient.Failure)?.message ?? ""
                     if label == "account-session-required"
                         || label == "session-detail-not-found"
