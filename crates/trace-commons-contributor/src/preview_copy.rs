@@ -79,6 +79,20 @@ pub fn second_look_line(reason: &str) -> Option<&'static str> {
     }
 }
 
+/// **DRAFT, NEEDS APPROVAL.** The line for a `second_look` reason
+/// [`second_look_line`] has no sentence for. Only reachable if a reason is
+/// added without one, which `every_second_look_reason_has_its_own_line`
+/// fails on; it exists so `second_look_lines` stays index-for-index with
+/// `second_look` even then, rather than silently dropping a line.
+pub const SECOND_LOOK_FALLBACK_LINE: &str = "This one waits for you to look before it goes.";
+
+/// [`second_look_line`], made total: the reason's own sentence, or
+/// [`SECOND_LOOK_FALLBACK_LINE`].
+#[must_use]
+pub fn second_look_line_or_fallback(reason: &str) -> &'static str {
+    second_look_line(reason).unwrap_or(SECOND_LOOK_FALLBACK_LINE)
+}
+
 /// **DRAFT, NEEDS APPROVAL.** The hint under an unsure span, or `None` for a
 /// label this build does not know.
 pub fn unsure_hint_line(label: &str) -> Option<&'static str> {
