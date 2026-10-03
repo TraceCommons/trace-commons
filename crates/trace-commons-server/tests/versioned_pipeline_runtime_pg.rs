@@ -33226,6 +33226,11 @@ const ROUTING_NEEDS_NEW_EVENT: &str = "pipeline routing change needs a new activ
 /// V110's message for a row whose event has another state or generation.
 const ROUTING_EVENT_MISMATCH: &str = "pipeline routing row does not match its activation event";
 
+/// V110's message for an inserted row whose generation is above the bound.
+const ROUTING_GENERATION_OUT_OF_RANGE: &str = "pipeline routing generation is out of range";
+/// The highest generation that V110 lets an inserted routing row keep (2^62).
+const ROUTING_GENERATION_INSERT_BOUND: i64 = 4_611_686_018_427_387_904;
+
 /// The event's action that leaves a tenant in `state`.
 fn routing_event_action(state: &str) -> &'static str {
     match state {
@@ -33707,7 +33712,7 @@ async fn insert_routing_row_with_generation(
 
 /// A data-only restore loads a routing row with the generation it had
 /// (`pg_restore --data-only`, `COPY`): the row trigger keeps a supplied
-/// generation of 1 or more on an insert, so a row at generation 3 that is
+/// generation from 1 to 2^62 on an insert, so a row at generation 3 that is
 /// deleted and inserted again with generation 3 commits beside its three
 /// events. The commit check still binds the row: an inserted row whose
 /// generation no event of its id and state has is refused, a higher one and a
@@ -33848,6 +33853,177 @@ async fn a_routing_row_inserted_with_its_generation_commits_only_beside_its_even
         .await
         .expect("a generation below 1 is stored as 1 and matches the first event");
     assert_eq!(routing_generations(&fresh).await, (1, 1));
+}
+
+/// An inserted routing row cannot carry a generation near the end of the
+/// type (review round 1 of the fix wave, C1). The update arm adds 1 to the
+/// old value, so a first row at the largest `BIGINT` would make every later
+/// change of the tenant fail, `contain` included. The row trigger refuses an
+/// insert above 2^62, at the statement, for the runtime login too: its grants
+/// allow the statement, so only the trigger refuses. A row at the bound is
+/// kept and still takes a `contain` through the store.
+#[tokio::test]
+async fn an_inserted_routing_row_cannot_carry_a_generation_near_the_end_of_its_type() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let store = PipelineActivationStore::new(backend.clone());
+    let actor = routing_actor();
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+
+    for above in [ROUTING_GENERATION_INSERT_BOUND + 1, i64::MAX] {
+        let tenant = routing_tenant("generation-above-bound");
+        let event_id = uuid::Uuid::new_v4();
+        let tx = tenant_tx(&mut client, &tenant).await;
+        tx.execute(
+            "INSERT INTO trace_tenants (tenant_id) VALUES ($1)
+             ON CONFLICT (tenant_id) DO NOTHING",
+            &[&tenant],
+        )
+        .await
+        .unwrap();
+        insert_routing_event(&tx, &tenant, event_id, "pipeline", above, 0)
+            .await
+            .expect("the runtime login may append an event of any generation");
+        let refused =
+            insert_routing_row_with_generation(&tx, &tenant, "pipeline", event_id, Some(above))
+                .await
+                .expect_err("an inserted row above the bound must be refused");
+        assert_eq!(
+            database_message(&refused),
+            Some(ROUTING_GENERATION_OUT_OF_RANGE),
+            "generation {above}: {refused}"
+        );
+        drop(tx);
+        assert_eq!(store.routing(&tenant).await.unwrap(), None);
+        // The tenant has no row, so its first change through the store
+        // commits at generation 1.
+        store
+            .contain(&tenant, &actor, "contain_first_rollout")
+            .await
+            .expect("a containment commits for a tenant whose bounded insert was refused");
+        assert_eq!(routing_generations(&tenant).await, (1, 1));
+    }
+
+    // The bound itself is kept, and the row still takes a change.
+    let tenant = routing_tenant("generation-at-bound");
+    let event_id = uuid::Uuid::new_v4();
+    let tx = tenant_tx(&mut client, &tenant).await;
+    tx.execute(
+        "INSERT INTO trace_tenants (tenant_id) VALUES ($1)
+         ON CONFLICT (tenant_id) DO NOTHING",
+        &[&tenant],
+    )
+    .await
+    .unwrap();
+    insert_routing_event(
+        &tx,
+        &tenant,
+        event_id,
+        "pipeline",
+        ROUTING_GENERATION_INSERT_BOUND,
+        0,
+    )
+    .await
+    .unwrap();
+    insert_routing_row_with_generation(
+        &tx,
+        &tenant,
+        "pipeline",
+        event_id,
+        Some(ROUTING_GENERATION_INSERT_BOUND),
+    )
+    .await
+    .expect("an inserted row at the bound is kept");
+    tx.commit()
+        .await
+        .expect("a row at the bound commits beside its event");
+    assert_eq!(
+        routing_generations(&tenant).await,
+        (
+            ROUTING_GENERATION_INSERT_BOUND,
+            ROUTING_GENERATION_INSERT_BOUND
+        )
+    );
+    let contained = store
+        .contain(&tenant, &actor, "contain_first_rollout")
+        .await
+        .expect("a row at the bound takes a containment through the store");
+    assert_eq!(contained.routing_state, RoutingState::Contained);
+    assert_eq!(
+        routing_generations(&tenant).await,
+        (
+            ROUTING_GENERATION_INSERT_BOUND + 1,
+            ROUTING_GENERATION_INSERT_BOUND + 1
+        )
+    );
+}
+
+/// Two changes of the routing row in one transaction commit when each version
+/// of the row has its own event: the deferred check runs one time for each
+/// version, against that version's state, event, and generation.
+#[tokio::test]
+async fn two_routing_changes_in_one_transaction_commit_with_an_event_each() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let store = PipelineActivationStore::new(backend.clone());
+    let tenant = routing_tenant("two-changes");
+    let contained = store
+        .contain(&tenant, &routing_actor(), "contain_first_rollout")
+        .await
+        .unwrap();
+    let (second, third) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+
+    // The second version's event has another state than that version: the
+    // commit is refused, although the last version has a matching event.
+    let tx = tenant_tx(&mut client, &tenant).await;
+    insert_routing_event(&tx, &tenant, second, "contained", 2, 0)
+        .await
+        .unwrap();
+    name_routing_event(&tx, &tenant, second, "legacy")
+        .await
+        .unwrap();
+    insert_routing_event(&tx, &tenant, third, "contained", 3, 0)
+        .await
+        .unwrap();
+    name_routing_event(&tx, &tenant, third, "contained")
+        .await
+        .unwrap();
+    let refused = tx
+        .commit()
+        .await
+        .expect_err("a version of the row with no matching event must not commit");
+    assert_eq!(
+        database_message(&refused),
+        Some(ROUTING_EVENT_MISMATCH),
+        "{refused}"
+    );
+    assert_eq!(store.routing(&tenant).await.unwrap(), Some(contained));
+
+    // Each version has its own event.
+    let tx = tenant_tx(&mut client, &tenant).await;
+    insert_routing_event(&tx, &tenant, second, "legacy", 2, 0)
+        .await
+        .unwrap();
+    name_routing_event(&tx, &tenant, second, "legacy")
+        .await
+        .unwrap();
+    insert_routing_event(&tx, &tenant, third, "contained", 3, 0)
+        .await
+        .unwrap();
+    name_routing_event(&tx, &tenant, third, "contained")
+        .await
+        .unwrap();
+    tx.commit()
+        .await
+        .expect("two changes with an event each commit");
+    assert_eq!(routing_generations(&tenant).await, (3, 3));
+    let routing = store.routing(&tenant).await.unwrap().expect("the row");
+    assert_eq!(routing.routing_state, RoutingState::Contained);
+    assert_eq!(routing.activation_record_id, third);
+    assert_eq!(store.events(&tenant, 10).await.unwrap().len(), 3);
 }
 
 #[tokio::test]

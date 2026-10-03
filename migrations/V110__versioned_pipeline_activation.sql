@@ -40,8 +40,8 @@ CREATE TABLE pipeline_activation_events (
 -- `activation_record_id` is the event's id. The key is deferred, because a
 -- routing change writes the row first and its event after it, in one
 -- transaction. `routing_generation` counts the versions of the row; the row
--- trigger below sets it on every update, and an insert may supply it (a
--- restore of the row, see the trigger).
+-- trigger below sets it on every update, and an insert may supply it, up to
+-- a bound (a restore of the row, see the trigger).
 CREATE TABLE pipeline_tenant_routing (
     tenant_id TEXT NOT NULL REFERENCES trace_tenants(tenant_id) ON DELETE CASCADE,
     routing_state TEXT NOT NULL CHECK (
@@ -103,25 +103,37 @@ $$;
 
 -- Sets the generation of each version of the routing row. An update gets the
 -- old value plus 1, whatever the statement names. An insert keeps the value
--- it supplies when that is 1 or more, and gets 1 otherwise (the column
--- default is 1, so an insert that names no generation gets 1). A data-only
--- restore loads a row with the generation it had, beside its events; the
--- commit check below still refuses a row whose generation its event does not
--- have. A tenant has one routing row and the runtime has no DELETE on it, so
--- an insert happens one time for a tenant. The function refuses no insert: an
--- upsert of an existing row fires it for the proposed insert and then for the
--- update, so a check of an insert's value would refuse every upsert, and the
--- proposed row's value is discarded there. Because the trigger assigns on an
--- update, the runtime needs no UPDATE grant on the column. An update that
--- keeps `activation_record_id` is refused: every change of the row names a
--- new event. The function reads only OLD and NEW, so no other row and no
--- clock can make it refuse a change.
+-- it supplies when that is from 1 to 2^62, and gets 1 when it is null or
+-- below 1 (the column default is 1, so an insert that names no generation
+-- gets 1). A data-only restore loads a row with the generation it had,
+-- beside its events; the commit check below still refuses a row whose
+-- generation its event does not have. A tenant has one routing row and the
+-- runtime has no DELETE on it, so an insert happens one time for a tenant.
+--
+-- An insert above 2^62 is refused. The update arm adds 1, so a first row at
+-- the end of the type would make every later change of the tenant fail,
+-- containment too. Below the bound the counter cannot reach the end: each
+-- update adds 1, and 2^62 more updates do not happen. No other value of an
+-- insert is refused: an upsert of an existing row fires the function for the
+-- proposed insert and then for the update, so a check of the proposed value
+-- against the stored row would refuse every upsert, and the proposed row's
+-- value is discarded there (an upsert that proposes a value above the bound
+-- is refused too; the code names no generation).
+--
+-- Because the trigger assigns on an update, the runtime needs no UPDATE
+-- grant on the column. An update that keeps `activation_record_id` is
+-- refused: every change of the row names a new event. The function reads
+-- only OLD and NEW, so no other row and no clock can make it refuse a
+-- change.
 CREATE FUNCTION assign_pipeline_routing_generation()
 RETURNS TRIGGER
 LANGUAGE plpgsql
 AS $$
 BEGIN
     IF TG_OP = 'INSERT' THEN
+        IF NEW.routing_generation > 4611686018427387904 THEN
+            RAISE EXCEPTION 'pipeline routing generation is out of range';
+        END IF;
         IF NEW.routing_generation IS NULL OR NEW.routing_generation < 1 THEN
             NEW.routing_generation := 1;
         END IF;

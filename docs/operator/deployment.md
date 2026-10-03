@@ -900,12 +900,15 @@ too. V110 binds the routing row to its event:
 - A row trigger (`pipeline_tenant_routing_assign_generation`) sets
   `routing_generation`. Each update gets the old value plus 1: an update
   cannot choose the value, and the ingest login has no `UPDATE` grant on the
-  column. An insert keeps the value that it supplies when that is 1 or more,
-  and gets 1 otherwise. A tenant has one routing row and the ingest login
-  cannot delete it, so an insert happens one time for a tenant; the commit
-  check below applies to it too. The same trigger refuses an update that keeps
-  `activation_record_id` (`pipeline routing change needs a new activation
-  event`).
+  column. An insert keeps the value that it supplies when that is from 1 to
+  2^62 (4611686018427387904), and gets 1 when the value is below 1. An insert
+  above 2^62 is refused (`pipeline routing generation is out of range`): a
+  first row near the end of the type would make each later change of the
+  tenant fail, a containment too. A tenant has one routing row and the ingest
+  login cannot delete it, so an insert happens one time for a tenant; the
+  commit check below applies to it too. The same trigger refuses an update
+  that keeps `activation_record_id` (`pipeline routing change needs a new
+  activation event`).
 - A constraint trigger (`pipeline_tenant_routing_event_match`) runs at the
   commit. The event that the row names must have the row's `routing_state` as
   its `resulting_state`, and the row's `routing_generation`. If it does not,
@@ -915,9 +918,9 @@ too. V110 binds the routing row to its event:
 Events are immutable, and each version of the row has a higher generation than
 the versions before it. So an event matches one version of the row and cannot
 be named again: every change of the routing row appends one matching event.
-The two messages are not labels. The routes never cause them, because the code
-writes the row and its event with one id and one generation. Only a direct
-statement can get them.
+The three messages are not labels. The routes never cause them, because the
+code writes the row and its event with one id and one generation, and names no
+generation on an insert. Only a direct statement can get them.
 
 The database does not enforce the activation gate. The ingest login can append
 an event and write a matching row in one transaction, and it can update the

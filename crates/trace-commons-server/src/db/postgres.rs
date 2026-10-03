@@ -8163,8 +8163,10 @@ mod tests {
     /// that a later PR 5 migration adds. The routing row is bound to its
     /// event (review round 1): a deferred foreign key to the event, a
     /// generation column on both tables that a row trigger assigns on every
-    /// update (an insert keeps a supplied value of 1 or more, for a
-    /// data-only restore, and gets 1 otherwise), and a deferred constraint
+    /// update (an insert keeps a supplied value from 1 to 2^62, for a
+    /// data-only restore, gets 1 below that, and is refused above it, so
+    /// that the counter cannot be put at the end of its type), and a
+    /// deferred constraint
     /// trigger that compares the state and the generation. The events come
     /// first, the runtime gets no grant on the row's generation, the events'
     /// generation is not unique, and no function sets a parameter of its
@@ -8187,7 +8189,7 @@ mod tests {
             "routing_generation BIGINT NOT NULL DEFAULT 1,",
             "FOREIGN KEY (tenant_id, activation_record_id)\n        REFERENCES pipeline_activation_events (tenant_id, event_id)\n        DEFERRABLE INITIALLY DEFERRED",
             "CREATE FUNCTION assign_pipeline_routing_generation()",
-            "IF TG_OP = 'INSERT' THEN\n        IF NEW.routing_generation IS NULL OR NEW.routing_generation < 1 THEN\n            NEW.routing_generation := 1;\n        END IF;\n    ELSE",
+            "IF TG_OP = 'INSERT' THEN\n        IF NEW.routing_generation > 4611686018427387904 THEN\n            RAISE EXCEPTION 'pipeline routing generation is out of range';\n        END IF;\n        IF NEW.routing_generation IS NULL OR NEW.routing_generation < 1 THEN\n            NEW.routing_generation := 1;\n        END IF;\n    ELSE",
             "IF NEW.activation_record_id = OLD.activation_record_id THEN\n            RAISE EXCEPTION 'pipeline routing change needs a new activation event';",
             "NEW.routing_generation := OLD.routing_generation + 1;",
             "CREATE TRIGGER pipeline_tenant_routing_assign_generation\n    BEFORE INSERT OR UPDATE ON pipeline_tenant_routing\n    FOR EACH ROW EXECUTE FUNCTION assign_pipeline_routing_generation();",
@@ -8237,7 +8239,8 @@ mod tests {
             // no unique generation on the events (an event that no row
             // names would then block the next change), and no grant that
             // lets a writer choose the generation of an update (an insert
-            // may supply it, for a restore; the commit check binds it).
+            // may supply it up to 2^62, for a restore; the commit check
+            // binds it).
             "SET search_path",
             "public.",
             "UNIQUE",
