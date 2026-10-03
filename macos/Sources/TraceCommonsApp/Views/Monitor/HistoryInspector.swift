@@ -95,15 +95,16 @@ struct HistoryDetailInspector: View {
 
     /// The server's own reasons for this record, of any status (why it was
     /// rejected, why it is held), without opaque digests. A held record the
-    /// server said nothing about reads the held sentence instead, as the
-    /// legacy row does.
+    /// server said nothing about reads the core's held sentence instead
+    /// (`MonitorScreensCopy.heldExplanation`); without the core's words it
+    /// reads nothing, never a blank line.
     @ViewBuilder
     private func explanations(_ record: HistoryRecord) -> some View {
         let lines = HeldExplanations.lines(in: [record.explanations])
         VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
             ForEach(lines, id: \.self) { Text($0).fixedSize(horizontal: false, vertical: true) }
-            if lines.isEmpty, record.status == "quarantined" {
-                Text(HistoryCopy.heldExplanation).fixedSize(horizontal: false, vertical: true)
+            if lines.isEmpty, record.status == "quarantined", !MonitorWords.heldExplanation.isEmpty {
+                Text(MonitorWords.heldExplanation).fixedSize(horizontal: false, vertical: true)
             }
         }
         .glassType(GlassTokens.TypeScale.caption)

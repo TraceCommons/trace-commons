@@ -66,9 +66,10 @@ final class ShellWordingTests: XCTestCase {
         // credit record in the core's words) and MainWindowView.swift (14:
         // the Monitor's words are the core's `MonitorScreensCopy`).
         // Lowered from 26: an unrecognised status reads the core's label.
-        // Lowered from 21 at R15: the screen left; what glass still reads is
-        // `HistoryCopy.heldExplanation` (3) and `HistoryLegacyWords` (2).
-        "TraceCommonsApp/Views/HistoryView.swift": 5,
+        // Lowered from 21 at R15: the screen left, and the held sentence left
+        // for the core (`MonitorScreensCopy.heldExplanation`, #1218; R-37).
+        // What glass still reads is `HistoryLegacyWords` (2).
+        "TraceCommonsApp/Views/HistoryView.swift": 2,
         // Lowered from 11: the AppKit menu left the shell with the glass menu
         // bar (R15); the three pause choices stay in `MenuBarWords` (D-12).
         "TraceCommonsApp/Views/MenuBarView.swift": 3,

@@ -5,20 +5,6 @@
 // `Views/Monitor/`, and those files author no sentence. What it still reads
 // of the old screen's is held here, verbatim, until the core exports it.
 
-// MARK: - Copy
-
-/// History's own sentences. Withdrawal's live in `WithdrawalCopy`; these are
-/// the ones about a state rather than an act.
-enum HistoryCopy {
-    /// What "held for privacy review" means, on the row it applies to. Held,
-    /// never rejected, and with no turnaround time stated -- there is no
-    /// number this app could honour.
-    static let heldExplanation =
-        "Automated checks saw something that might be personal and couldn't decide on "
-        + "their own. It has not been rejected, and it has not been shared with anyone "
-        + "but the reviewer."
-}
-
 /// History's sentences the glass History draws, held once.
 enum HistoryLegacyWords {
     static let withdrawalWordingDefect = "Do not trust the withdrawal wording on this screen."
