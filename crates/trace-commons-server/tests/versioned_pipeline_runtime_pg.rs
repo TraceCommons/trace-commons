@@ -26385,6 +26385,213 @@ async fn the_sweep_recovers_a_revocation_or_withdrawal_whose_follow_up_was_lost(
     );
 }
 
+/// Multi-lens review C1: a run Settle excludes from the index has no index
+/// work, and a delivered export snapshot can still hold it. The sweep finds
+/// its revoked submission through the snapshot item that is not yet
+/// invalidated, and the follow-up invalidates the snapshot and the item; a
+/// recovered submission is not found again.
+#[tokio::test]
+async fn the_sweep_recovers_a_lost_follow_up_of_an_excluded_run_in_a_delivered_export() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let tenant = format!("lost-follow-up-export-{}", uuid::Uuid::new_v4());
+    let env = envelope(uuid::Uuid::new_v4()).await;
+    let run = submit_envelope_and_complete(
+        &service,
+        &tenant,
+        "principal_sha256:lost-follow-up-export",
+        &env,
+    )
+    .await;
+    assert_eq!(run.state, PipelineRunState::Complete);
+    assert_eq!(run.index_membership, "excluded");
+    assert_eq!(run.index_write_state, "none");
+    let snapshot_id = insert_export_snapshot(&run, true).await;
+    let mut owner = owner_client().await;
+    let tx = owner_tenant_tx(&mut owner, &tenant).await;
+    tx.execute(
+        "UPDATE trace_submissions SET status = 'revoked', revoked_at = NOW()
+          WHERE tenant_id = $1 AND submission_id = $2",
+        &[&tenant, &run.submission_id],
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+
+    assert_eq!(
+        service
+            .recover_lost_inoperable_follow_ups(&tenant, "pipeline_worker", 32)
+            .await
+            .unwrap(),
+        1,
+        "the delivered snapshot item names the submission"
+    );
+    let tx = owner_tenant_tx(&mut owner, &tenant).await;
+    let snapshot = tx
+        .query_one(
+            "SELECT state, invalidated_at IS NOT NULL FROM pipeline_export_snapshots
+              WHERE tenant_id = $1 AND snapshot_id = $2",
+            &[&tenant, &snapshot_id],
+        )
+        .await
+        .unwrap();
+    assert_eq!(snapshot.get::<_, String>(0), "invalidated");
+    assert!(snapshot.get::<_, bool>(1));
+    let item = tx
+        .query_one(
+            "SELECT invalidated_at IS NOT NULL, invalidation_reason
+               FROM pipeline_export_snapshot_items
+              WHERE tenant_id = $1 AND snapshot_id = $2",
+            &[&tenant, &snapshot_id],
+        )
+        .await
+        .unwrap();
+    assert!(item.get::<_, bool>(0));
+    assert_eq!(item.get::<_, Option<String>>(1).as_deref(), Some("revoked"));
+    tx.commit().await.unwrap();
+    assert_eq!(
+        service
+            .recover_lost_inoperable_follow_ups(&tenant, "pipeline_worker", 32)
+            .await
+            .unwrap(),
+        0,
+        "an invalidated item is not recovered again"
+    );
+}
+
+/// A test-only trigger that refuses each index invalidation of one
+/// submission, so that submission's follow-up fails. Created and dropped as
+/// the owner; scoped to one tenant and submission, so tests running beside
+/// it are untouched.
+struct InvalidationFault {
+    name: String,
+}
+
+impl InvalidationFault {
+    async fn install(tenant_id: &str, submission_id: uuid::Uuid) -> Self {
+        let name = format!("c2_fault_{}", uuid::Uuid::new_v4().simple());
+        owner_client()
+            .await
+            .batch_execute(&format!(
+                "CREATE FUNCTION {name}() RETURNS TRIGGER LANGUAGE plpgsql AS $$
+                 BEGIN
+                     RAISE EXCEPTION 'injected invalidation failure';
+                 END;
+                 $$;
+                 CREATE TRIGGER {name}
+                     BEFORE INSERT ON pipeline_index_invalidations
+                     FOR EACH ROW
+                     WHEN (
+                         NEW.tenant_id = '{tenant_id}'
+                         AND NEW.submission_id = '{submission_id}'
+                     )
+                     EXECUTE FUNCTION {name}();"
+            ))
+            .await
+            .expect("install the invalidation fault");
+        Self { name }
+    }
+
+    async fn remove(self) {
+        let name = self.name;
+        owner_client()
+            .await
+            .batch_execute(&format!(
+                "DROP TRIGGER {name} ON pipeline_index_invalidations;
+                 DROP FUNCTION {name}();"
+            ))
+            .await
+            .expect("remove the invalidation fault");
+    }
+}
+
+/// Multi-lens review C2: one follow-up that fails does not stop the sweep.
+/// The later submissions of the pass are recovered and their invalidation
+/// step is woken; the failed one is found again on the next pass.
+#[tokio::test]
+async fn the_sweep_goes_on_after_one_failed_follow_up() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(true),
+        None,
+    )
+    .await;
+    let tenant = format!("lost-follow-up-fault-{}", uuid::Uuid::new_v4());
+    let principal = "principal_sha256:lost-follow-up-fault";
+    let mut runs = Vec::new();
+    for _ in 0..2 {
+        let env = envelope(uuid::Uuid::new_v4()).await;
+        let run = submit_envelope_and_complete(&service, &tenant, principal, &env).await;
+        assert_eq!(run.index_write_state, "complete");
+        runs.push(run);
+    }
+    // The sweep takes the submissions in id order: the first one fails.
+    runs.sort_by_key(|run| run.submission_id);
+    let (failing, later) = (&runs[0], &runs[1]);
+    let mut owner = owner_client().await;
+    let tx = owner_tenant_tx(&mut owner, &tenant).await;
+    for run in [failing, later] {
+        tx.execute(
+            "UPDATE trace_submissions SET status = 'revoked', revoked_at = NOW()
+              WHERE tenant_id = $1 AND submission_id = $2",
+            &[&tenant, &run.submission_id],
+        )
+        .await
+        .unwrap();
+    }
+    tx.commit().await.unwrap();
+    drop(owner);
+    // Nothing woke the invalidation step before the sweep.
+    let _ = service.take_follow_ups(&tenant);
+
+    let fault = InvalidationFault::install(&tenant, failing.submission_id).await;
+    let swept = service
+        .recover_lost_inoperable_follow_ups(&tenant, "pipeline_worker", 32)
+        .await;
+    fault.remove().await;
+    assert_eq!(
+        index_invalidation_of(&backend, &tenant, later.run_id).await,
+        Some(("revoked".to_string(), "pending".to_string())),
+        "the follow-up after the failed one ran in the same pass"
+    );
+    assert_eq!(
+        index_invalidation_of(&backend, &tenant, failing.run_id).await,
+        None
+    );
+    assert_eq!(swept.expect("one follow-up succeeded"), 1);
+    assert!(
+        service.take_follow_ups(&tenant).index_invalidations,
+        "the recovered follow-up wakes the invalidation step"
+    );
+
+    assert_eq!(
+        service
+            .recover_lost_inoperable_follow_ups(&tenant, "pipeline_worker", 32)
+            .await
+            .unwrap(),
+        1,
+        "the failed follow-up is recovered on the next pass"
+    );
+    assert_eq!(
+        index_invalidation_of(&backend, &tenant, failing.run_id).await,
+        Some(("revoked".to_string(), "pending".to_string()))
+    );
+}
+
 /// Zaki review 3, Z3-L4: one release of parked runs of inoperable
 /// submissions takes at most its limit, in run id order; the next takes the
 /// rest.

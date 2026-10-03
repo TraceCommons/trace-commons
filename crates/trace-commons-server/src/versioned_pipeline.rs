@@ -3755,19 +3755,26 @@ impl PgPipelineStore {
     /// transaction and the follow-up (`follow_up_revocation`,
     /// `follow_up_withdrawal`) runs in another, so a process that stops
     /// between the two leaves runs with index work and no queued
-    /// invalidation, which nothing else reaches. This finds at most `limit`
-    /// such submissions of `tenant_id`, in submission id order: revoked, or
-    /// with a `trace_withdrawals` row, with a run whose index write started
-    /// (`pending`, `complete`, `failed` or `cancelled`, the states
+    /// invalidation, and export snapshot items that are not invalidated,
+    /// which nothing else reaches. This finds at most `limit` such
+    /// submissions of `tenant_id`, in submission id order: revoked, or with
+    /// a `trace_withdrawals` row, and with either a run whose index write
+    /// started (`pending`, `complete`, `failed` or `cancelled`, the states
     /// `end_runs_of_inoperable_submission_on_tx` queues) and no invalidation
-    /// row at all. For each it runs the follow-up, under reason `withdrawn`
-    /// when the withdrawal row exists and `revoked` otherwise, with
-    /// `actor_principal_ref` as the actor. A follow-up is idempotent and
-    /// queues an invalidation for every such run, so a recovered submission
-    /// is not found again. Returns how many it recovered. The read probes
-    /// every revoked or withdrawn submission of the tenant, recovered or
-    /// not, so the worker runs it at a low cadence
-    /// (`PIPELINE_WORKER_LOST_FOLLOW_UP_INTERVAL`), not on every pass.
+    /// row at all, or an export snapshot item that is not invalidated (a
+    /// run Settle excludes from the index has no index work, and an export
+    /// can still hold it). For each it runs the follow-up, under reason
+    /// `withdrawn` when the withdrawal row exists and `revoked` otherwise,
+    /// with `actor_principal_ref` as the actor. A follow-up is idempotent,
+    /// queues an invalidation for every such run and invalidates every such
+    /// item, so a recovered submission is not found again. A follow-up that
+    /// fails is logged by label and the pass goes on to the next
+    /// submission; the failed one is found again on the next pass. Returns
+    /// how many it recovered, or the first error when every follow-up of
+    /// the pass failed. The read probes every revoked or withdrawn
+    /// submission of the tenant, recovered or not, so the worker runs it at
+    /// a low cadence (`PIPELINE_WORKER_LOST_FOLLOW_UP_INTERVAL`), not on
+    /// every pass.
     pub async fn recover_lost_inoperable_follow_ups(
         &self,
         tenant_id: &str,
@@ -3806,6 +3813,12 @@ impl PgPipelineStore {
                                     WHERE i.tenant_id = r.tenant_id AND i.run_id = r.run_id
                                )
                         )
+                         OR EXISTS (
+                            SELECT 1 FROM pipeline_export_snapshot_items item
+                             WHERE item.tenant_id = $1
+                               AND item.submission_id = c.submission_id
+                               AND item.invalidated_at IS NULL
+                        )
                       GROUP BY c.submission_id
                       ORDER BY c.submission_id
                       LIMIT $2",
@@ -3817,21 +3830,41 @@ impl PgPipelineStore {
                 .map(|row| (row.get::<_, Uuid>(0), row.get::<_, bool>(1)))
                 .collect::<Vec<_>>()
         };
+        let mut recovered = 0;
+        let mut first_error = None;
         for (submission_id, withdrawn) in &lost {
             let reason_code = if *withdrawn {
                 PIPELINE_WITHDRAWAL_INVALIDATION_REASON
             } else {
                 PIPELINE_REVOCATION_INVALIDATION_REASON
             };
-            self.follow_up_inoperable_submission(
-                tenant_id,
-                *submission_id,
-                actor_principal_ref,
-                reason_code,
-            )
-            .await?;
+            match self
+                .follow_up_inoperable_submission(
+                    tenant_id,
+                    *submission_id,
+                    actor_principal_ref,
+                    reason_code,
+                )
+                .await
+            {
+                Ok(_) => recovered += 1,
+                Err(error) => {
+                    // Multi-lens review C2: one failed follow-up does not
+                    // stop the submissions after it.
+                    tracing::warn!(
+                        label = "pipeline_lost_follow_up_failed",
+                        tenant_storage_ref = pipeline_tenant_storage_ref(tenant_id).as_str(),
+                        submission_ref_hash = %sha256_prefixed(submission_id.to_string().as_bytes()),
+                        "a lost pipeline follow-up failed again"
+                    );
+                    first_error.get_or_insert(error);
+                }
+            }
         }
-        Ok(lost.len())
+        match first_error {
+            Some(error) if recovered == 0 => Err(error),
+            _ => Ok(recovered),
+        }
     }
 
     /// The pipeline's follow-up of a submission `main` made inoperable on its
