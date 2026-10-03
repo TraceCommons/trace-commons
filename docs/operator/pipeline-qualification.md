@@ -319,9 +319,10 @@ passed.
   nowhere: put the object in a JSON array in the file that the check trust store
   variable names. Keep this key apart from the package signing key. The server
   refuses to start when one key is in both stores.
-- A holder of the check-signing key can vouch for any result. The key is not held
-  by anyone who holds the tenant's admin credential. Who holds it is decided
-  when the deployment is promoted. This repository's CI runs `qualify` unsigned.
+- A holder of the check-signing key can vouch for any result. The key must not be
+  held by anyone who holds the tenant's admin credential. Nothing in the server
+  enforces this. Who holds it is decided when the deployment is promoted. This
+  repository's CI runs `qualify` unsigned.
 - `pipeline.py revision` prints the code revision hash of the working tree: the
   `code_revision_hash` that every result of a run carries, and the value to give
   the build as `TRACE_COMMONS_BUILD_CODE_REVISION_HASH`. It hashes the path and
@@ -488,31 +489,38 @@ qualification's metadata itself. Nothing in the metadata comes from the request:
   (`TRACE_COMMONS_BUILD_CODE_REVISION_HASH`; see
   [pipeline-activation.md](pipeline-activation.md)).
 
-It fails closed on: an untrusted or tampered package
-(`bundle_package_signature_invalid`, `bundle_package_signer_untrusted`); a
-package outside the compatibility family or with a development or synthetic
-marker (`bundle_implementation_unknown`, `bundle_development_dependency`); a
-package whose own configuration is not qualifiable
-(`bundle_configuration_not_qualifiable`, read from the signed package, not from
-the profile); a profile built for a different bundle
-(`bundle_qualification_profile_mismatch`); a package that pins an instrument with
-another descriptor than a package already registered for the tenant
-(`bundle_instrument_conflict`); a runtime identity that is not the
-profile's (`runtime_dependency_identity_mismatch`); any blocked dependency or
-infrastructure control (the first blocker's label); an attestation that is not
-valid, signed by an untrusted key, or altered
-(`check_attestation_invalid`, `check_attestation_signer_untrusted`,
-`check_attestation_signature_invalid`); a maximum age above seven days
-(`bundle_qualification_evidence_age_above_ceiling`); a promotion that is not
-ready (`bundle_qualification_promotion_not_ready`); a revision or a package that
-the promotion does not share with the qualification
-(`bundle_qualification_code_revision_mismatch`,
-`bundle_qualification_package_mismatch`); and a second call for the same bundle
-and revision with different metadata
-(`bundle_qualification_identity_conflict`). The evidence is evaluated on every
-call, so a repeat of a call that already recorded its row, made after the
-evidence went stale, is refused as `bundle_qualification_promotion_not_ready`
-instead of answering the existing row.
+It fails closed on each of these:
+
+- an untrusted or tampered package (`bundle_package_signature_invalid`,
+  `bundle_package_signer_untrusted`);
+- a package outside the compatibility family, or with a development or synthetic
+  marker (`bundle_implementation_unknown`, `bundle_development_dependency`);
+- a package whose own configuration is not qualifiable
+  (`bundle_configuration_not_qualifiable`, read from the signed package, not from
+  the profile);
+- a package that names a dependency that the running service does not hold
+  (`bundle_dependency_missing`);
+- a profile built for a different bundle (`bundle_qualification_profile_mismatch`);
+- a package that pins an instrument with another descriptor than a package
+  already registered for the tenant (`bundle_instrument_conflict`);
+- a runtime identity that is not the profile's
+  (`runtime_dependency_identity_mismatch`);
+- any blocked dependency or infrastructure control (the first blocker's label);
+- an attestation that is not valid, is signed by an untrusted key, or was altered
+  (`check_attestation_invalid`, `check_attestation_signer_untrusted`,
+  `check_attestation_signature_invalid`);
+- a maximum age above seven days
+  (`bundle_qualification_evidence_age_above_ceiling`);
+- a promotion that is not ready (`bundle_qualification_promotion_not_ready`);
+- a revision or a package that the promotion does not share with the
+  qualification (`bundle_qualification_code_revision_mismatch`,
+  `bundle_qualification_package_mismatch`);
+- a second call for the same bundle and revision with different metadata
+  (`bundle_qualification_identity_conflict`).
+
+The evidence is evaluated on every call. A repeat of a call that already
+recorded its row, made after the evidence went stale, is refused as
+`bundle_qualification_promotion_not_ready` instead of answering the existing row.
 
 A successful call records one append-only row for each `(tenant_id, bundle_id,
 code_revision_hash)` in `pipeline_bundle_qualifications` (migration V107, with

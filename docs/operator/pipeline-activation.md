@@ -4,8 +4,8 @@
 > The routing record, the nine admin routes, containment, rollback, policy
 > suspension, and the legacy drain report are built and tested. No tenant is
 > routed to the pipeline until an operator activates it. A deployment can
-> activate a tenant only with a full set of signed check results, which this
-> repository's local tooling cannot produce on its own (see "Current
+> activate a tenant only with a full set of signed check results. This
+> repository's local tooling cannot produce that set on its own (see "Current
 > completion").
 
 Pipeline activation routes the qualified pipeline for new submissions. Retained
@@ -118,20 +118,20 @@ So each submission id has one owner for good:
   identity is already bound to another receipt`. Ingest uses the submission id
   as the key, so over HTTP the same upload replays instead.
 
-The route is decided after the checks that need no store (authentication, the
-submit rate limit, envelope validation, the admission reservation, the
-tenant-access check, and the check for a retry), and before the server
-re-scrub, the tombstone check, and the submission quota. A refusal therefore
-costs no classifier call. It releases the admission attempt: the attempt is not
-left processing, so a retry is not `409` in progress. A pipeline upload still
-passes the tombstone and quota checks before the pipeline takes it. A tenant
-that is contained or not served gets its `503` before a tombstone or quota
-refusal. An upload that carries anchored evidence has one more limit: a
-released reservation can be retried only while its evidence is unexpired. A
-containment that lasts longer than the evidence stays valid makes that
-submission id unusable on that path (fresh evidence under the same id is a
-conflict). The account-trust path relaxes the time limit for an existing
-binding.
+The route is decided after authentication, the submit rate limit, envelope
+validation, the admission reservation, the tenant-access check, and the check
+for a retry. It is decided before the server re-scrub, the tombstone check, and
+the submission quota. So a refusal costs no classifier call. It also releases
+the admission attempt: the attempt is not left processing, so a retry is not
+`409` in progress. A pipeline upload still passes the tombstone and quota
+checks before the pipeline takes it. A tenant that is contained or not served
+gets its `503` before a tombstone or quota refusal.
+
+An upload that carries anchored evidence has one more limit. A released
+reservation can be retried only while its evidence is unexpired. A containment
+that lasts longer than the evidence stays valid makes that submission id
+unusable on that path: fresh evidence under the same id is a conflict. The
+account-trust path relaxes the time limit for an existing binding.
 
 The test-only rule. `TRACE_COMMONS_PIPELINE_ALLOW_TEST_DEPENDENCIES` also
 sends a tenant on the receipts list that has no routing row to the pipeline.
@@ -216,10 +216,15 @@ route sit under the same prefix. They are older.) Each of the nine is under
 `/v1/admin/pipeline/` and needs an admin credential of the tenant it acts on
 (`403` `admin token required` otherwise). The tenant and the actor come from the
 credential alone. No body names a tenant, and each body refuses any field it
-does not list (`422` `pipeline_request_invalid`). A body is at most 1 MiB
-(`413` `pipeline_request_too_large`). A `reason_code` is a label: lowercase
+does not list. A body that does not parse answers `pipeline_request_invalid`
+with the parser's status: `422` for an unknown, missing, or mistyped field,
+`400` for JSON that is not well formed, and `415` without a JSON content type
+(a query string that does not parse is `400`). A body is at most 1 MiB (`413`
+`pipeline_request_too_large`). A `reason_code` is a label: lowercase
 letters, digits, and `_`, 1 to 64 characters. A bundle id is `sha256:` and 64
-lowercase hex digits; a malformed one is `422`.
+lowercase hex digits. A malformed one is `422` `pipeline_request_invalid` on
+`activate`, `rollback`, and `GET policy-interventions`, and `409`
+`policy_intervention_invalid` on `POST policy-interventions`.
 
 | Route | Body | Answer |
 |---|---|---|
@@ -277,16 +282,24 @@ What each action does:
 
 Every action writes one row to `pipeline_activation_events`, in the same
 transaction as the routing row. The event holds the action, the previous and the
-resulting state (the previous state is null for a tenant that had no row), the
-previous and the resulting bundle, the actor's `principal_ref`, the reason, an
-evidence hash, and the time. The rows are immutable (a trigger refuses `UPDATE`
-and a direct `DELETE`). They are the audit record of a routing change: an action
-adds no row to `main`'s audit log. Each action also logs one line, `pipeline
-admin action recorded`, with the tenant's storage reference, an action label,
-and the evidence hash. Each `GET` route appends one control-plane read audit
-row (the surfaces `pipeline_routing`, `pipeline_policy_interventions`, and
-`pipeline_legacy_drain`); a refused read appends none. A reason that is not a
-label is `409` `activation_actor_invalid`.
+resulting state, the previous and the resulting bundle, the actor's
+`principal_ref`, the reason, an evidence hash, and the time. For a tenant that
+had no row, the previous state is `unselected` in the table and null in the
+route's answer. The rows are immutable: a trigger refuses `UPDATE` and a direct
+`DELETE`. They are the audit record of a routing change, and an action adds no
+row to `main`'s audit log.
+
+Each action also logs one line, `pipeline admin action recorded`, with the
+tenant's storage reference, an action label, and the evidence hash. Each `GET`
+route appends one control-plane read audit row (the surfaces `pipeline_routing`,
+`pipeline_policy_interventions`, and `pipeline_legacy_drain`). A refused read
+appends none. A reason that is not a label is `409` `activation_actor_invalid`.
+
+The ingest login's grants would let a direct statement write
+`pipeline_tenant_routing` and append events (V110) and update the active bundle
+(V112). Only the code limits this: it changes routing through these routes, and
+the bundle through the gate. A direct write skips the gate and writes no event.
+Change routing only through the routes.
 
 ### What the process needs
 
@@ -299,17 +312,23 @@ one key, distinct key ids, and each a 32-byte Ed25519 public key.
 `pipeline.py keygen` writes one such object, so wrap it (or several) in
 `[...]`. Both files are read once, at start.
 
-- A variable that is set and whose file is not valid refuses the start with
-  `pipeline_trust_store_invalid`. The message names the variable, never the
-  path.
+- A variable that is set refuses the start with `pipeline_trust_store_invalid`
+  in these cases: the file cannot be read, it is not a non-empty JSON array of
+  keys, it repeats a key id, a key id is not an identifier, or a key is not a
+  32-byte Ed25519 public key. The message names the variable for the first
+  three (a read or parse failure). It does not name the variable for a bad key
+  id or bad key bytes in a well-formed file. No message names a path or a key.
 - A check key that is also a package key, by public key under any id or by
   key id, refuses the start with `pipeline_trust_store_overlap`. The two
   stores are two key pairs on purpose: a key that signs packages does not
   vouch for check results.
-- A variable that is unset leaves its store empty. `qualifications`,
-  `activate`, and `rollback` then answer `503` `pipeline_trust_store_missing`.
-- The check-signing key is not held by anyone who holds the tenant's admin
-  credential. Who holds it is decided when the deployment is promoted. This
+- A variable that is unset leaves its store empty, and only then do
+  `qualifications`, `activate`, and `rollback` answer `503`
+  `pipeline_trust_store_missing`. A set variable never gives that `503`: its file
+  is read at every start, and a file that cannot be read refuses the start.
+- The check-signing key must not be held by anyone who holds the tenant's admin
+  credential. Nothing in the server enforces this: the server cannot tell who
+  holds a key. Who holds it is decided when the deployment is promoted. This
   repository's CI runs `qualify` unsigned.
 
 The deployed code revision. `TRACE_COMMONS_BUILD_CODE_REVISION_HASH` is a
@@ -322,8 +341,12 @@ included, changes the revision, and the command needs a git checkout. Qualify
 and build from the same tree. A binary built without the variable has no
 revision: `qualifications`, `activate`, and `rollback` answer `409`
 `bundle_runtime_revision_unknown`. Nothing in this repository sets the variable
-for you. The pilot's `cloudbuild.yaml` does not pass it, and its source tree
-has no `.git/`, so a build from it has no revision until you pass one in.
+for you. `cloudbuild.yaml` has no substitution for the revision, and
+`.gcloudignore` drops `.git/` from the uploaded source, so a build cannot compute
+it from its own tree. A Cloud Build binary from this repository answers `409`
+`bundle_runtime_revision_unknown` until you edit `cloudbuild.yaml` to pass
+`TRACE_COMMONS_BUILD_CODE_REVISION_HASH`, with the value that `pipeline.py
+revision` printed in a checkout.
 
 The infrastructure profile. The routes derive it from this process's own
 configuration (the fields `GET /v1/admin/config-status` reports). A request
@@ -349,24 +372,30 @@ activated while any of these holds:
   `hs256_bridge_authentication_enabled`;
 - the pipeline runtime's payout is enabled: `live_external_payout_enabled`.
 
-The bundle's own dependencies add labels of their own:
-`runtime_scorer_not_production`, `runtime_embedder_not_production`,
-`runtime_index_reader_not_production`, `runtime_index_writer_not_production`,
-`runtime_settlement_not_production`, `runtime_authority_not_production`,
-`runtime_privacy_not_production`, `runtime_payout_not_production`, and
-`bundle_configuration_not_qualifiable`. The answer (`409`) is the first label
-that applies, in this order: the bundle's own labels, then the four
-`_not_production` labels (metadata, artifact store, key wrapper,
-authentication), then the flags (plaintext, best-effort mirror, static tokens,
-HS256 bridge, live payout).
+The bundle's own dependencies add labels of their own, but only a
+qualification shows them: `runtime_scorer_not_production`,
+`runtime_embedder_not_production`, `runtime_index_reader_not_production`,
+`runtime_index_writer_not_production`, `runtime_settlement_not_production`,
+`runtime_authority_not_production`, `runtime_privacy_not_production`,
+`runtime_payout_not_production`, and `bundle_configuration_not_qualifiable`. A
+qualification answers (`409`) the first label that applies, in this order: the
+bundle's own labels, then the four `_not_production` labels (metadata, artifact
+store, key wrapper, authentication), then the flags (plaintext, best-effort
+mirror, static tokens, HS256 bridge, live payout). An activation or a rollback
+never reaches the bundle's own labels. Its startup checks (step 4 below) refuse
+the same conditions first, as `pipeline_runtime_dependencies_not_production_qualified`,
+and a dependency that the runtime does not hold as
+`pipeline_tenant_bundle_dependency_missing`. For these two routes the answer from
+the profile is one of the infrastructure labels above, in the same order.
 
 ### The order of checks
 
 An activation or a rollback passes these steps in order. A refusal at any step
 writes nothing.
 
-1. The request. The body must parse (`422`), the bundle id must have its shape
-   (`422`), and the attestations must number at most 64 (`413`).
+1. The request. The body must parse (`pipeline_request_invalid`, with the
+   parser's status above), the bundle id must have its shape (`422`), and the
+   attestations must number at most 64 (`413`).
 2. The process. Both trust stores must exist (`503`
    `pipeline_trust_store_missing`), and the build must have a revision (`409`
    `bundle_runtime_revision_unknown`).
@@ -384,8 +413,11 @@ writes nothing.
    `pipeline_runtime_main_gate_config_mismatch`,
    `pipeline_credit_issuer_principal_missing`, and
    `pipeline_runtime_dependencies_not_production_qualified` (all `409`). The
-   dependency profile is built next; a package whose dependencies the running
-   service does not hold is `409` `bundle_dependency_missing`.
+   last one is the answer for any bundle that is not production qualified: a
+   development dependency, or a configuration that is not qualifiable. A stored
+   package that fails to load or validate when the route first reads it here is
+   refused with `500` `trace commons operation failed` today. The dependency
+   profile is built next.
 5. The readiness, for an activation only: `409` `activation_readiness_failed`.
 6. The gate. It runs in one transaction under the tenant's routing lock.
 
@@ -402,9 +434,16 @@ only when all of these hold:
 - `pending_index_command_count` and `failed_index_command_count` are both 0;
 - `pending_invalidation_count` and `failed_invalidation_count` are both 0.
 
-So a tenant with work in flight, or with a suspended policy that holds a run
-in `retry`, cannot be activated until the work finishes. Activate a tenant
-when it is quiet.
+So a tenant cannot be activated while any of these is true:
+
+- a run is in `retry` (a suspended policy puts its runs there);
+- a run has waited more than 300 seconds in `pending`, `retry`, or `leased`;
+- a settlement leg is held, pending, in `retry`, or leased;
+- an index write is pending or failed;
+- an invalidation is pending or failed.
+
+A run in `pending` or `leased` that is younger than 300 seconds, with no such
+leg, index write, or invalidation, passes. Activate a tenant when it is quiet.
 
 The gate holds when every term holds, in this order. Each `409` label names
 the first term that fails:
@@ -422,13 +461,14 @@ the first term that fails:
 4. The tenant has a qualification of the bundle
    (`bundle_qualification_missing`), on the build's revision
    (`bundle_runtime_revision_mismatch`).
-5. The stored package loads and validates (`bundle_package_missing`; a package
-   that was altered reads the same), and the results name exactly its three
-   digests (`bundle_activation_package_mismatch`).
+5. The stored package loads and validates (`bundle_package_missing` when it is
+   gone, or when it no longer validates by the time the gate loads it), and the
+   results name exactly its three digests (`bundle_activation_package_mismatch`).
 6. The dependency profile was built for this bundle
    (`bundle_qualification_profile_mismatch`), has no blocker (the label of its
-   first one, from the lists above), and its runtime identity is the one the
-   qualification recorded (`runtime_dependency_identity_mismatch`).
+   first one: an infrastructure label from the list above), and its runtime
+   identity is the one the qualification recorded
+   (`runtime_dependency_identity_mismatch`).
 7. The bundle's four policies (Admission, Review, Score, Settle) are runnable
    (`bundle_policy_not_runnable`).
 
@@ -486,8 +526,10 @@ The order of a first rollout:
 5. Contain on doubt: `POST` `contain`. New uploads are refused with `503`, and
    the worker keeps processing what the tenant already has.
 6. Roll back or deactivate. `rollback` selects an earlier qualified bundle for
-   later runs. `deactivate` returns the tenant to the legacy path; then move it
-   to the drain list as "Scope lists and the routing row" says.
+   later runs. A rollback from `contained` reopens the tenant's uploads without
+   the readiness check: read "Rollback and containment" above first.
+   `deactivate` returns the tenant to the legacy path; then move it to the drain
+   list as "Scope lists and the routing row" says.
 
 ## Suspend a policy
 
@@ -597,15 +639,18 @@ Read these rules before you trust a number:
   propagation worker has run for the tenant. Its in-process scheduler covers
   only the tenant of its own token. A legal hold keeps its attachments out of
   the count (`TRACE_COMMONS_LEGAL_HOLD_RETENTION_POLICIES`).
-- Several counts can stay above zero with no legacy code that clears them, and a
-  person has to act: `gate_decision_exhausted`, `awaiting_pii_backstop` after
-  its attempts run out, `quarantine_review_pending`, a
-  `revocation_propagation_pending` item that a crashed run left `in_progress`
-  (the worker never lists it again), `delayed_credit_unsettled` for an account
-  with a credit hold or for credit that a ranking gate or the per-account cap
-  holds back, `vector_index_pending` for a record that a consent check refuses,
-  `near_outbox_pending` for a line `submitted` with no transaction hash, and
-  `near_payout_unqueued` for an account with no payout target.
+- Several counts can stay above zero with no legacy code that clears them. A
+  person has to act:
+  - `gate_decision_exhausted`, and `awaiting_pii_backstop` after its attempts
+    run out;
+  - `quarantine_review_pending`;
+  - `revocation_propagation_pending`, for an item that a crashed run left
+    `in_progress` (the worker never lists it again);
+  - `delayed_credit_unsettled`, for an account with a credit hold or for credit
+    that a ranking gate or the per-account cap holds back;
+  - `vector_index_pending`, for a record that a consent check refuses;
+  - `near_outbox_pending`, for a line `submitted` with no transaction hash;
+  - `near_payout_unqueued`, for an account with no payout target.
 
 The gate driver has two modes, and `gate_driver_enabled` says which one you read.
 The default deployment has the driver off.
@@ -658,10 +703,36 @@ A tenant that fails this is refused with `409`
 configuration. It does not read the tenant's history. A record that exists only
 in the file store, from before the writes were required, is owed work that the
 report cannot see, and it reads zero with `drained` true. Run the database
-mirror backfill for the tenant before you trust the report: `POST
-/v1/admin/maintenance` with the tenant's admin credential and the body
-`{"backfill_db_mirror": true, "prune_export_cache": false}` (the second field
-keeps the call from also pruning the export cache, which it does by default).
+mirror backfill for the tenant before you trust the report. The call is `POST
+/v1/admin/maintenance`, with the tenant's admin credential and the body
+`{"backfill_db_mirror": true, "prune_export_cache": false}`. It is a retention
+call, and the backfill is only one of its effects. With `dry_run` false it also:
+
+- marks the tenant's file records that are past their `expires_at` as expired
+  (a record on a legal hold is left alone), sets each one's final credit figure
+  (0 when it had none), and mirrors the expiry to the database;
+- marks the file records that a tombstone covers as revoked, and mirrors the
+  revocation;
+- marks derived records revoked or expired to match;
+- invalidates the export provenance and the benchmark artifacts that name a
+  revoked or expired source;
+- prunes the export cache, unless the body says `"prune_export_cache": false`;
+- appends a maintenance audit event and writes a retention job record, with
+  an item for each change. A dry run appends the event and the job record too,
+  marked as a dry run.
+
+It purges nothing unless the body names `purge_expired_before`. With exactly
+this body the call is a backfill-only request, and it leaves the pipeline's own
+submissions alone. A call with another field set, or without `"prune_export_cache":
+false`, also expires the pipeline's submissions. Send the call
+first with `"dry_run": true` added, and read the counts in the answer
+(`records_marked_expired`, `records_marked_revoked`, `derived_marked_expired`,
+`derived_marked_revoked`, `export_provenance_invalidated`,
+`benchmark_artifacts_invalidated`, `db_mirror_backfilled`,
+`db_mirror_backfill_failed`). Send it again without `dry_run` only when you accept
+those changes. If `TRACE_COMMONS_REQUIRE_DB_RECONCILIATION_CLEAN` is set, the
+body must also say `"reconcile_db_mirror": true`, and then it is no longer a
+backfill-only request.
 
 The report runs as the ingest runtime login in one read-only, single-snapshot
 transaction (`REPEATABLE READ`): nine or ten statements, one for each count the
@@ -673,10 +744,11 @@ reads these tables: `pipeline_runs`, `pipeline_tenant_routing`,
 `trace_credit_settlement_batches`, `trace_near_credit_outbox`,
 `trace_revocation_propagation_items`, `trace_withdrawals`,
 `trace_submission_sessions`, `trace_source_sessions`, and
-`trace_token_attachments`. Most are older than V62, and the login holds `SELECT`
-on them only through the pilot's V62-era table grants (see
-[deployment.md](deployment.md)). A deployment without those grants answers with a
-`500`, not with a zero. Each call appends one control-plane read audit row.
+`trace_token_attachments`. Eleven of them are older than V62, and the login holds
+`SELECT` on those only through the pilot's V62-era table grants (see
+[deployment.md](deployment.md)). V90 grants the three session and attachment
+tables, and V92 and V110 grant `pipeline_runs` and `pipeline_tenant_routing`. A
+deployment without the V62-era grants answers with a `500`, not with a zero. Each call appends one control-plane read audit row.
 
 The rehearsal runs the legacy work through the legacy routes and reads the
 report at each step:
@@ -1468,10 +1540,10 @@ to start on the first failure:
 | The tenant's bundles can be read. | `pipeline_tenant_bundle_unreadable` |
 
 The activation and rollback routes run the same checks on the bundle they
-select, with the process's own configuration, before their gate (see "The
-order of checks" in "Activate, roll back, contain, deactivate"): the gate
-holds no service, so the routes are what keeps these checks true for a bundle
-that is selected after start.
+select, with the process's own configuration, before their gate (see "The order
+of checks" in "Activate, roll back, contain, deactivate"). The gate holds no
+service. So the routes are what keeps these checks true for a bundle that is
+selected after start.
 
 To change a value the default package carries (a floor, the threshold, the
 delta, the scorer or the embedder), every routed or drained tenant must
@@ -1486,9 +1558,10 @@ while a tenant can still run the old one. For each such tenant:
    `pipeline_tenant_not_served`, and is not sent to `main`'s path.
 2. As the database owner, remove its selection:
    `DELETE FROM pipeline_active_bundles WHERE tenant_id = '<tenant>'`. The
-   runtime login has no `DELETE` on the selection, and its only `UPDATE` on
-   it (`UPDATE (bundle_id, selected_at)`, V112) is the activation gate's, which
-   switches a tenant to a bundle that is qualified on the running revision.
+   runtime login has no `DELETE` on the selection. It does hold `UPDATE
+   (bundle_id, selected_at)` (V112), which the code issues only in the
+   activation gate, for a bundle that is qualified on the running revision. Do
+   not change a selection with a direct statement of the ingest login.
 3. Start ingest with the new configuration and the tenant back on the
    receipts list. Startup finds no old bundle to check for it, registers the
    new default package, and selects it as the tenant's active bundle. The

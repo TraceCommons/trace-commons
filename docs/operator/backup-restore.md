@@ -152,9 +152,8 @@ answers `404` there. Do these steps in this order:
    routing rows, the activation events, the receipt ownership rows, the policy
    interventions, the qualifications, and the rebuild fences are pipeline rows:
    they come back with the database, as they were at the time of the backup. A
-   routing change made after that time is lost with the rest of it. Read each
-   tenant's row and events (`GET /v1/admin/pipeline/routing`) after step 5, and
-   repeat a change that the restore undid.
+   routing change made after that time is lost with the rest of it. Step 3 says
+   how to check the rows before traffic returns.
 2. Restore the encrypted object store.
 3. Start every `trace-commons-ingest` process with
    `TRACE_COMMONS_PIPELINE_RECEIPTS_TENANT_IDS` and
@@ -170,6 +169,14 @@ answers `404` there. Do these steps in this order:
    An upload of a tenant whose row says `contained` is refused with `503`
    `pipeline_receipt_intake_contained`. A tenant with no row, or whose row says
    `legacy`, takes the legacy path.
+
+   Check each tenant's routing before step 5 puts the processes back into client
+   traffic. A containment made after the backup comes back as `pipeline`, and step
+   5 would then take that tenant's uploads. Read each tenant's row and events
+   (`GET /v1/admin/pipeline/routing`, with the tenant's admin credential; it needs
+   only the routing store). Repeat a lost containment first
+   (`POST /v1/admin/pipeline/contain`, which needs a runtime and works in this
+   configuration). Then repeat any other lost change that you still want.
 4. For each tenant, call `POST /v1/workers/pipeline/index-rebuild` with that
    tenant's vector worker bearer token or an admin token -- the same gate
    as `main`'s vector index worker route (see
@@ -207,20 +214,21 @@ answers `404` there. Do these steps in this order:
      row to the run's deadline plus the fence margin (60 seconds,
      `PIPELINE_INDEX_WRITE_FENCE_MARGIN_SECONDS`), and it never shortens it.
      When the rebuild ends it deletes its own row and the tenant's expired rows.
-     It never shortens or deletes another rebuild's row, so two rebuilds of one
-     tenant (a client retry that reaches another replica, for example) each hold
-     their own fence.
+   - A rebuild never shortens or deletes another rebuild's row. Two rebuilds of
+     one tenant (a client retry that reaches another replica, for example) each
+     hold their own fence.
    - A run withdrawn before its entries are written is skipped: the rebuild
      looks at the run again after it has set the fence.
    - A withdrawal of a run whose entries are being written usually waits for
      them, but not always (a lost database session, an abort past the shutdown
      grace period, a process exit). The fence then holds the removal back until
      the write's time has passed.
-   - A rebuild that is lost (a lost session, an abort, a process exit, or an
-     index call still running at the deadline plus the margin) leaves its row,
-     and the row expires on its own. Its fence holds the tenant's index removals
-     back for at most 90 seconds at the defaults: a run deadline of 30 seconds
-     (the smaller of the Settle lease and the 30 second dispatch budget) plus the
+   - A rebuild that is lost leaves its row, and the row expires on its own. A
+     rebuild is lost by a lost session, an abort, a process exit, or an index
+     call still running at the deadline plus the margin.
+   - The fence of a lost rebuild holds the tenant's index removals back for at
+     most 90 seconds at the defaults. That is a run deadline of 30 seconds (the
+     smaller of the Settle lease and the 30 second dispatch budget) plus the
      60 second margin, counted from the lost rebuild's last fence write. The
      worker then claims the removals on its next invalidation pass. No operator
      action is needed. The tenant's next rebuild deletes the expired row when it

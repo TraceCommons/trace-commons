@@ -856,7 +856,8 @@ V110 adds `pipeline_tenant_routing` (one row for each tenant: its routing state)
 V111 adds `operational_status` to `pipeline_bundle_policy_status` and the table
 `pipeline_policy_interventions`. V112 widens the primary key of
 `pipeline_bundle_qualifications` to `(tenant_id, bundle_id, code_revision_hash)`
-and grants the one column `UPDATE` that the activation gate needs. V113 adds
+and grants the `UPDATE` on two columns of `pipeline_active_bundles` (`bundle_id`
+and `selected_at`) that the activation gate needs. V113 adds
 `pipeline_index_rebuild_fences`. Like V92 to V95, each grants
 `trace_ingest_runtime` what the pipeline code reads and writes there, and
 nothing broader, and each refuses to apply if the group does not exist. Each new
@@ -882,11 +883,17 @@ row) or with its bundle's policy rows (an intervention).
 `pipeline_tenant_routing` and
 `pipeline_index_rebuild_fences` are mutable, in the columns above. No grant
 allows `DELETE` on the routing, event, ownership, or intervention tables. The
-runtime login still has no `DELETE` on `pipeline_active_bundles`, and its only
-`UPDATE` on it is the gate's. A change of a tenant's routing is therefore a
-route call (`POST /v1/admin/pipeline/...`, see
-[pipeline-activation.md](pipeline-activation.md)), never a direct statement
-by the ingest login.
+runtime login still has no `DELETE` on `pipeline_active_bundles`.
+
+The grants do not make the routes the only way to change routing. V110 lets the
+ingest login `INSERT` and `UPDATE` `pipeline_tenant_routing` and `INSERT` events,
+and V112 lets it `UPDATE (bundle_id, selected_at)` on `pipeline_active_bundles`.
+Any statement under that login can use them, skip the activation gate, and write
+no event. Only the code limits this: it changes routing through the routes
+(`POST /v1/admin/pipeline/...`, see
+[pipeline-activation.md](pipeline-activation.md)), and the active bundle only
+through the gate. Change routing only through the routes. Do not run a direct
+statement of the ingest login against these tables.
 
 V111 adds a check that requires `runnable` to equal `operational_status =
 'runnable'`, and every existing row gets the status `runnable`. V93 gave the
@@ -905,12 +912,16 @@ routing row, so while a tenant has one, an older replica serves the tenant on th
 legacy path (see "Scope lists and the routing row" in
 [pipeline-activation.md](pipeline-activation.md)).
 
-The drain report (`GET /v1/admin/pipeline/legacy-drain`) reads older tables of
-`main` through the ingest login. No pipeline migration grants anything on them:
-the pilot's V62-era table grants cover them, as they cover the tables in
-"V92 to V95". A deployment without those grants answers the report with a `500`
-(`permission denied`), not with a zero. The tables are listed in
-[pipeline-activation.md](pipeline-activation.md), "Legacy drain report".
+The drain report (`GET /v1/admin/pipeline/legacy-drain`) reads 16 tables through
+the ingest login. Two are pipeline tables that V92 and V110 grant
+(`pipeline_runs`, `pipeline_tenant_routing`). Three are covered by V90's grants
+(`trace_submission_sessions`, `trace_source_sessions`,
+`trace_token_attachments`). The other eleven are older tables of `main`, which
+no pipeline migration grants anything on: the pilot's V62-era table grants cover
+them, as they cover the older tables in "V92 to V95". A deployment without those
+grants answers the report with a `500` (`permission denied`), not with a zero.
+The tables are listed in [pipeline-activation.md](pipeline-activation.md),
+"Legacy drain report".
 
 The three routes that qualify and activate bundles need three settings that no
 earlier build read:
@@ -921,11 +932,12 @@ earlier build read:
 | `TRACE_COMMONS_PIPELINE_CHECK_TRUSTED_KEYS_PATH` | at run time | the same format, for the keys whose signatures make a check result count; no key may also be a package key |
 | `TRACE_COMMONS_BUILD_CODE_REVISION_HASH` | when you build | the output of `python3 scripts/operator/pipeline.py revision` for the tree you build |
 
-An invalid trust store file, or a key in both files, refuses the start. With a
-file missing, or no revision in the build, the routes refuse (`503`
-`pipeline_trust_store_missing`, `409` `bundle_runtime_revision_unknown`). The
-details are in [pipeline-activation.md](pipeline-activation.md), "What the
-process needs".
+A variable that is set to a file that cannot be read, or whose file is not valid,
+refuses the start (`pipeline_trust_store_invalid`), and so does a key that is in
+both files (`pipeline_trust_store_overlap`). With a variable unset, or no
+revision in the build, the routes refuse (`503` `pipeline_trust_store_missing`,
+`409` `bundle_runtime_revision_unknown`). The details are in
+[pipeline-activation.md](pipeline-activation.md), "What the process needs".
 
 Check before deploying:
 

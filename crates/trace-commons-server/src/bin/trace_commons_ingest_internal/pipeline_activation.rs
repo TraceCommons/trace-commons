@@ -82,7 +82,8 @@ pub(crate) const PIPELINE_EVIDENCE_TOO_LARGE_LABEL: &str = "pipeline_evidence_to
 /// A request body or query that does not parse as the route's shape (an
 /// unknown field included); the status is the parser's.
 pub(crate) const PIPELINE_REQUEST_INVALID_LABEL: &str = "pipeline_request_invalid";
-/// `413`: a request body above the ingest body limit (`MAX_INGEST_BODY_BYTES`).
+/// `413`: a request body above the limit of these routes
+/// (`PIPELINE_ADMIN_BODY_MAX_BYTES`, 1 MiB).
 pub(crate) const PIPELINE_REQUEST_TOO_LARGE_LABEL: &str = "pipeline_request_too_large";
 /// `409`: the drain report is asked for while the tenant's legacy records in
 /// the database are not authoritative (`legacy_records_authoritative`).
