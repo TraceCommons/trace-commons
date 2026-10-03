@@ -1,0 +1,52 @@
+{
+  "catalog_present": false,
+  "harnesses": [
+    {
+      "id": "claude",
+      "name": "Claude Code",
+      "installed": true,
+      "connected": true,
+      "config_path": "/Users/sample/.claude/settings.json",
+      "connect_command": "ironwire connect claude",
+      "family": "anthropic",
+      "answers_at": "Anthropic",
+      "state": "answering",
+      "last_call_at": "2026-09-30T09:04:11+00:00",
+      "can_connect": false,
+      "can_disconnect": true
+    },
+    {
+      "id": "codex",
+      "name": "Codex",
+      "installed": true,
+      "connected": false,
+      "config_path": "/Users/sample/.codex/config.toml",
+      "connect_command": "ironwire connect codex",
+      "family": "openai",
+      "answers_at": "OpenAI",
+      "state": "not_connected",
+      "last_call_at": null,
+      "can_connect": true,
+      "can_disconnect": false
+    }
+  ],
+  "activity": {
+    "readable": true,
+    "window_hours": 24,
+    "last_call_at": "2026-09-30T09:04:11+00:00",
+    "families": [
+      {
+        "family": "anthropic",
+        "last_call_at": "2026-09-30T09:04:11+00:00",
+        "calls": 12
+      }
+    ]
+  },
+  "spend": {
+    "known": true,
+    "micros": 1230000
+  },
+  "destination_port": 8463,
+  "destination_credentialed": true,
+  "_sample": "a connected tool needs a live IronWire"
+}
