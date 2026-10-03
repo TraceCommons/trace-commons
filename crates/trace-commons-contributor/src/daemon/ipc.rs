@@ -1626,6 +1626,8 @@ impl DaemonShared {
         let decisions_owed = super::queue::decisions_owed(&queue, &policy, scrub_check);
         let contribution_override = contribution_override_value(&policy);
         let contribution_mode = contribution_mode_value(&policy, &queue);
+        let contribution_mode_partial =
+            policy.contribution_mode_partial(queue.all().iter().map(|e| e.project_key.as_str()));
         drop(policy);
         let health = self.health.lock().expect("health lock");
         let cfg = self.store.load_config().ok().flatten();
@@ -1713,6 +1715,11 @@ impl DaemonShared {
             // override's mode while one is in force; otherwise from every
             // folder's own mode.
             "contribution_mode": contribution_mode,
+            // Additive (#1208). True when `contribution_mode` is
+            // `auto_upload` but a folder set to Never, or sessions from an
+            // unidentified folder, do not upload: the pill adds
+            // `ContributionModeCopy.auto_partial` under its label.
+            "contribution_mode_partial": contribution_mode_partial,
         })
     }
 
@@ -3685,6 +3692,17 @@ fn handle_set_project_mode(shared: &DaemonShared, req: &Request) -> Response {
     if let Err(e) = policy.set_mode(&key, mode, now) {
         return Response::err(req.id, ERR_BAD_PARAMS, &one_line_label(&e.to_string()));
     }
+    // #1208: the folder's mode is saved either way -- it is what clearing a
+    // contribution override returns the folder to -- but while one is in
+    // force and still decides this folder, the reply names it, so a shell
+    // never shows a change that is not yet in effect as in effect. `null`
+    // when the folder now resolves to what was set (always so for Never,
+    // which every override leaves alone).
+    let overridden_by = policy
+        .contribution_override
+        .as_ref()
+        .filter(|_| policy.resolve(&key) != mode)
+        .map(|o| mode_label(o.mode));
     // From here on, memory has changed, and every exit -- success or a
     // failed write -- goes through the one publish point after this block.
     // A failed write keeps the in-memory truth (see below), so the shells
@@ -3816,6 +3834,7 @@ fn handle_set_project_mode(shared: &DaemonShared, req: &Request) -> Response {
                 "purged": purged,
                 "retracted": retracted,
                 "from_now": from_now,
+                "overridden_by": overridden_by,
             }),
         ),
         Err(label) => Response::err(req.id, ERR_UNAVAILABLE, label),
@@ -15146,6 +15165,53 @@ mod tests {
         );
     }
 
+    /// #1208: a per-folder `set_project_mode` while an override is in force
+    /// is saved -- it is what clearing the override returns the folder to --
+    /// and the reply says when the override still governs that folder
+    /// (`overridden_by`). Never is never overridden, so setting a folder to
+    /// Never under "Auto contribute" takes effect and says so with `null`.
+    #[test]
+    fn set_project_mode_reports_when_the_override_still_governs_the_folder() {
+        let s = enrolled_shared();
+        let key = "/tmp/overridden-folder";
+        seed_entry(&s, key);
+        let set_mode = |mode: &str| {
+            handle_request(
+                &s,
+                &req(
+                    "set_project_mode",
+                    serde_json::json!({"project_key": key, "mode": mode}),
+                ),
+            )
+            .result
+            .expect("saved")
+        };
+        assert!(
+            set_mode("notify_only")["overridden_by"].is_null(),
+            "no override"
+        );
+
+        let r = set_override(
+            &s,
+            serde_json::json!({"mode": "auto_upload", "confirm": true}),
+        );
+        assert!(r.error.is_none(), "{:?}", r.error);
+        assert_eq!(set_mode("notify_only")["overridden_by"], "auto_upload");
+        assert!(set_mode("ignore")["overridden_by"].is_null(), "Never wins");
+        assert_eq!(s.policy.lock().unwrap().resolve(key), ProjectMode::Ignore);
+        assert_eq!(set_mode("notify_only")["overridden_by"], "auto_upload");
+
+        // Clearing returns the folder to exactly the latest mode it was set to.
+        handle_request(
+            &s,
+            &req("clear_contribution_override", serde_json::json!({})),
+        );
+        assert_eq!(
+            s.policy.lock().unwrap().resolve(key),
+            ProjectMode::NotifyOnly
+        );
+    }
+
     /// An override that cannot be saved is rolled back, so nothing changed
     /// and the call says so.
     #[test]
@@ -15243,5 +15309,22 @@ mod tests {
         let status = s.status_value();
         assert!(status["contribution_override"].is_null());
         assert_eq!(status["contribution_mode"], "mixed");
+        assert_eq!(status["contribution_mode_partial"], false);
+
+        // #1208: "Auto contribute" with a folder set to Never still rolls up
+        // to auto, and says some folders are left out.
+        s.policy
+            .lock()
+            .unwrap()
+            .set_mode("/tmp/rollup-never", ProjectMode::Ignore, Utc::now())
+            .unwrap();
+        let r = set_override(
+            &s,
+            serde_json::json!({"mode": "auto_upload", "confirm": true}),
+        );
+        assert!(r.error.is_none(), "{:?}", r.error);
+        let status = s.status_value();
+        assert_eq!(status["contribution_mode"], "auto_upload");
+        assert_eq!(status["contribution_mode_partial"], true);
     }
 }

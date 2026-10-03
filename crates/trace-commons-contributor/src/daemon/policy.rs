@@ -630,6 +630,24 @@ impl ProjectPolicy {
         modes.all(|m| m == first).then_some(first)
     }
 
+    /// Whether an `AutoUpload` roll-up ([`Self::contribution_mode`]) leaves
+    /// some folders out (#1208): a folder whose own mode is Never, or the
+    /// unknown bucket, among the configured folders and `discovered`. Under
+    /// an "Auto contribute" override neither uploads, so the pill says
+    /// "Auto contribute" with a sub-line rather than overstating it. False
+    /// for any other roll-up.
+    pub fn contribution_mode_partial<'a>(
+        &self,
+        discovered: impl IntoIterator<Item = &'a str> + Clone,
+    ) -> bool {
+        if self.contribution_mode(discovered.clone()) != Some(ProjectMode::AutoUpload) {
+            return false;
+        }
+        let left_out =
+            |k: &str| k == UNKNOWN_PROJECT_KEY || self.folder_mode(k) == ProjectMode::Ignore;
+        self.projects.keys().any(|k| left_out(k)) || discovered.into_iter().any(left_out)
+    }
+
     fn folder_mode_unless_unknown(&self, project_key: &str) -> Option<ProjectMode> {
         (project_key != UNKNOWN_PROJECT_KEY).then(|| self.folder_mode(project_key))
     }
@@ -3478,6 +3496,27 @@ mod tests {
         )
         .unwrap();
         assert!(p.grant_voids.is_empty(), "setting it again answers it");
+    }
+
+    /// #1208: an `auto_upload` roll-up does not overstate itself. Under an
+    /// "Auto contribute" override, a Never folder or the unknown bucket does
+    /// not upload, and `contribution_mode_partial` says so; with neither,
+    /// or with any other roll-up, it is false.
+    #[test]
+    fn an_auto_roll_up_says_when_some_folders_do_not_upload() {
+        use ProjectMode::*;
+        let at = t("2026-10-02T00:00:00Z");
+        let mut p = ProjectPolicy::new();
+        p.set_mode("/w/a", NotifyOnly, at).unwrap();
+        override_to(&mut p, AutoUpload, at);
+        assert_eq!(p.contribution_mode(["/w/b"]), Some(AutoUpload));
+        assert!(!p.contribution_mode_partial(["/w/b"]), "every folder goes");
+        assert!(p.contribution_mode_partial([UNKNOWN_PROJECT_KEY]));
+        p.set_mode("/w/never", Ignore, at).unwrap();
+        assert_eq!(p.contribution_mode([]), Some(AutoUpload), "still auto");
+        assert!(p.contribution_mode_partial([]), "except Never");
+        override_to(&mut p, NotifyOnly, at);
+        assert!(!p.contribution_mode_partial([UNKNOWN_PROJECT_KEY]));
     }
 
     /// K5 reaches the override too: armed under words that claimed a model

@@ -3286,6 +3286,44 @@ mod tests {
         assert_eq!(armed[0].project_label.as_deref(), Some("new"));
     }
 
+    /// #1173: the Flow 1 grant arms a newly discovered folder's own mode, but
+    /// an "Ask me" contribution override still governs it -- the mode in
+    /// force is read again after `arm_by_default`, so the new session waits
+    /// for a person. Clearing the override leaves the folder armed.
+    #[tokio::test]
+    async fn an_ask_override_governs_a_folder_the_grant_just_armed() {
+        let f = WatcherFixture::new();
+        f.shared
+            .store
+            .save_config(&grant_test_cfg(&["debugging_evaluation"]))
+            .unwrap();
+        grant_automatic(&f);
+        f.settle(Utc::now() + chrono::Duration::hours(30)).await;
+        let resp = super::super::ipc::handle_request(
+            &f.shared,
+            &super::super::ipc::Request {
+                id: 1,
+                method: "set_contribution_override".to_string(),
+                params: serde_json::json!({"mode": "notify_only"}),
+            },
+        );
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+
+        f.write_session("new", "33333333-3333-3333-3333-333333333333", 0);
+        let pass = f.settle(Utc::now() + chrono::Duration::hours(31)).await;
+
+        let key = project_key_for(Some(&abs("Users/testuser/code/new")));
+        let policy = f.shared.policy.lock().unwrap();
+        assert_eq!(
+            policy.folder_mode(&key),
+            ProjectMode::AutoUpload,
+            "the grant armed the folder's own mode"
+        );
+        assert_eq!(policy.resolve(&key), ProjectMode::NotifyOnly);
+        drop(policy);
+        assert_eq!(pass.auto_ready, 0, "the override still asks: {pass:?}");
+    }
+
     /// A project the grant arms by default is still an unattended approval,
     /// so it goes through the gate: enforced, the new project is armed (the
     /// grant is the contributor's), but its session waits and is counted as

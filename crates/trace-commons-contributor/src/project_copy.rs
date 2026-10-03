@@ -230,6 +230,11 @@ pub const CONTRIBUTION_MODE_AUTO_LINE: &str = "Scrubbed sessions go; the digest 
 /// **DRAFT, NEEDS APPROVAL.** The `ignore` sub-list line, from the handoff.
 pub const CONTRIBUTION_MODE_NEVER_LINE: &str = "Nothing is queued or sent.";
 
+/// **DRAFT, NEEDS APPROVAL.** Under the pill's `auto_upload` label when
+/// `status.contribution_mode_partial` is true (#1208): a folder set to Never,
+/// or sessions from a folder the app could not identify, do not upload.
+pub const CONTRIBUTION_MODE_AUTO_PARTIAL: &str = "Except folders set to Never. Sessions from a folder the app can't identify still wait for you.";
+
 /// **DRAFT, NEEDS APPROVAL.** Shown under the pill while an override is in
 /// force (`status.contribution_override` not null), so it reads "override"
 /// rather than a folder roll-up.
@@ -309,6 +314,9 @@ pub struct ContributionModeCopy {
     pub choices: Vec<ContributionModeChoice>,
     pub override_active: &'static str,
     pub clear: &'static str,
+    /// Shown under the `auto_upload` label exactly when
+    /// `status.contribution_mode_partial` is true.
+    pub auto_partial: &'static str,
 }
 
 /// The pill's table. See [`ContributionModeCopy`].
@@ -336,6 +344,7 @@ pub fn contribution_mode_copy() -> ContributionModeCopy {
         ],
         override_active: CONTRIBUTION_OVERRIDE_ACTIVE,
         clear: CONTRIBUTION_OVERRIDE_CLEAR,
+        auto_partial: CONTRIBUTION_MODE_AUTO_PARTIAL,
     }
 }
 
