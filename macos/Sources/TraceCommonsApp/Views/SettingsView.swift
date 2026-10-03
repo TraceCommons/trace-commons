@@ -1640,7 +1640,7 @@ struct SettingsContent: View {
                 ActionMessageBanner(text: error) { model.lastActionError = nil }
             }
             if model.projects.isEmpty {
-                Text("No projects seen yet.").font(TC.Font_.body).foregroundStyle(.secondary)
+                Text(SettingsLegacyWords.noProjectsYet).font(TC.Font_.body).foregroundStyle(.secondary)
             } else {
                 ForEach(model.projects) { project in
                     VStack(alignment: .leading, spacing: TC.Space.xxs) {
@@ -2187,6 +2187,7 @@ enum SettingsLegacyWords {
     ]
     static let doNotTrustProfileWording = "Do not trust the public-profile wording on this screen."
     static let auditHeading = SettingsContent.auditHeading
+    static let noProjectsYet = "No projects seen yet."
     static let nothingChanged = "Nothing has been changed."
     static func auditSentence(_ action: String, project: String?) -> String {
         SettingsContent.auditSentence(action, project: project)
