@@ -100,10 +100,14 @@ final class ComputeSkillsParityTests: XCTestCase {
         XCTAssertTrue(inspector.contains("SessionDetailView(record: record)\n"))
         let detail = try Self.text("Views/SessionDetailView.swift")
         for needle in [
-            "} else if model.loadingSessionDetails.contains(record.submissionID) {\n            Text(copy.readingRecord)\n",
+            // Beside the detail it already holds, never instead of it: a
+            // reload keeps the public-run editor and its draft mounted.
+            "        if model.loadingSessionDetails.contains(record.submissionID) {\n            Text(copy.readingRecord)\n",
             "} else if let message = model.sessionDetailErrors[record.submissionID] {\n"
                 + "            GlassNotice(tone: .outside, title: message) {\n"
                 + "                Button(copy.retryRead) { model.loadSessionDetail(record) }\n",
+            "        }\n        if let detail = model.sessionDetails[record.submissionID] {\n"
+                + "            detailContent(detail, copy: copy)\n        }\n",
         ] {
             XCTAssertTrue(detail.contains(needle), "SessionDetailView.swift lacks \(needle)")
         }

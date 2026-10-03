@@ -317,9 +317,8 @@ final class HistoryParityTests: XCTestCase {
         let flat = source.split(whereSeparator: \.isWhitespace).joined(separator: " ")
         XCTAssertEqual(source.components(separatedBy: "SessionWithdrawalAction(").count - 1, 1)
         XCTAssertTrue(flat.contains(
-            "GlassNotice(tone: .outside, title: message) { Button(copy.retryRead) { model.loadSessionDetail(record) } "
-                + ".buttonStyle(GlassButtonStyle(.glass)) .frame(minHeight: 44) } } \(Self.withdrawCall) "
-                + "localInstalledSkillSurface(copy)"),
+            "if let detail = model.sessionDetails[record.submissionID] { detailContent(detail, copy: copy) } "
+                + "\(Self.withdrawCall) localInstalledSkillSurface(copy)"),
             "Withdraw sits after the detail's reading/failed/read states, outside them")
         XCTAssertTrue(source.contains(
             "static func withdrawalStatus(_ record: HistoryRecord, detail: SessionDetail?) -> String {\n"

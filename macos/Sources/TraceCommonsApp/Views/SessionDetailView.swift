@@ -68,9 +68,10 @@ struct SessionDetailView: View {
                 .foregroundStyle(GlassColor.textSecondary)
         }
 
-        if let detail = model.sessionDetails[record.submissionID] {
-            detailContent(detail, copy: copy)
-        } else if model.loadingSessionDetails.contains(record.submissionID) {
+        // Reading, or why a read failed, beside the detail already held
+        // (`AppModel.loadSessionDetail` keeps it until the daemon answers),
+        // never instead of it: a reload keeps the editor and its draft.
+        if model.loadingSessionDetails.contains(record.submissionID) {
             Text(copy.readingRecord)
                 .glassType(GlassTokens.TypeScale.caption)
                 .foregroundStyle(GlassColor.textSecondary)
@@ -80,6 +81,9 @@ struct SessionDetailView: View {
                     .buttonStyle(GlassButtonStyle(.glass))
                     .frame(minHeight: 44)
             }
+        }
+        if let detail = model.sessionDetails[record.submissionID] {
+            detailContent(detail, copy: copy)
         }
         SessionWithdrawalAction(record: record, currentStatus: Self.withdrawalStatus(record, detail: model.sessionDetails[record.submissionID]), copy: copy)
 
