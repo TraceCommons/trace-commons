@@ -123,5 +123,95 @@ final class TracesParityTests: XCTestCase {
             XCTAssertTrue(certificates.contains(needle), "CertificateSection.swift lacks \(needle)")
         }
     }
+
+    /// The sheet's chrome keeps every binding, confirmation and core-copy
+    /// source the legacy sheet had, and the gate still decides Contribute.
+    func test_thePreviewSheetChromeKeepsEveryBinding() throws {
+        let sheet = try Self.text("Views/PreviewSheet.swift")
+        for needle in [
+            // bindings and writes
+            "model.openPreview(entryID:", "model.supportsWitnessReview()", "model.witnessReviewOutcome(entryID:",
+            "model.dismiss(entry)", "model.approve(entry, verdict: verdict)", "model.approve(entry, verdict: verdict, correction: text)",
+            "model.daemonSettings?.admissionEvidenceOffered == true", "AdmissionPreparationView(entryID:",
+            "SessionSendDisclosureView(", "model.witnessStateCode == 1",
+            // the gate
+            "ReadGate.canContribute(hasPinnedPreview: summary?.enrolled == true)", "EligibilitySurface.mayProceed(",
+            "EligibilitySurface.current(", "TCConsentCopy.copyJSON()", "TCConsentCopy.gateHelp(pinned:",
+            // confirmations and alerts
+            "CorrectionCopy.credentialHeadline", "CorrectionCopy.credentialBody", "WitnessReviewConsent(copy:",
+            // verdict and correction
+            "VerdictCopy.question", "VerdictCopy.caption", "CorrectionCopy.question", "CorrectionCopy.placeholder",
+            "CorrectionCopy.caption", "CorrectionCopy.maxCharacters", "CorrectionCopy.toSend(",
+            // keyboard
+            ".keyboardShortcut(\"f\", modifiers: .command)", ".keyboardShortcut(.cancelAction)",
+            // glass
+            "GlassSegmentedTabs(", "GlassButtonStyle(.primary", "ScrubbingCaveatAtCommit()",
+        ] {
+            XCTAssertTrue(sheet.contains(needle), "PreviewSheet.swift lacks \(needle)")
+        }
+        XCTAssertFalse(sheet.contains(".tcScreen()"))
+        XCTAssertFalse(sheet.contains("CenteredNotice("))
+        XCTAssertFalse(sheet.contains("struct SheetSecondaryButtonStyle"))
+        // Contribute has no keyboard shortcut: an irreversible send is never one keystroke away.
+        let contribute = try XCTUnwrap(sheet.range(of: "contribute()\n"))
+        XCTAssertFalse(sheet[contribute.upperBound...].prefix(240).contains(".keyboardShortcut("))
+        try LegacySymbols.assertClean("Views/SessionSendDisclosureView.swift")
+    }
+
+    /// The chrome is drawn with glass parts, each pinned by its exact call:
+    /// the tabs carry the selection, the eligibility line is a dot with its
+    /// words, the verdict chips say which is chosen, and the witness consent
+    /// is a glass sheet whose heading is the core's.
+    func test_thePreviewSheetChromeIsDrawnOnGlass() throws {
+        let sheet = try Self.text("Views/PreviewSheet.swift")
+        for needle in [
+            ".glassTier(.pane)",
+            "Divider().overlay(GlassColor.hairline)",
+            "GlassSegmentedTabs(model.publicRunCopy?.sessionDetail ?? \"\", selection: $tab,",
+            "GlassStatusLabel(line, status: PrivateInferenceIndicator.status(",
+            ".accessibilityAddTraits(selected ? [.isSelected, .isButton] : .isButton)",
+            "GlassTag(\"nothing sent yet\", tone: .neutral)",
+            "GlassTag(Self.scrubbingFound(summary), tone: .ask)",
+            "SheetNotice(title: copy.heading, detail: copy.working)",
+            "GlassSheet(title: copy.heading) {",
+            "Button(copy.cancel, role: .cancel) { dismiss() }",
+            "Button(copy.confirm) { dismiss(); onConfirm() }",
+            ".accessibilityIdentifier(\"transcript-copy-all\")",
+        ] {
+            XCTAssertTrue(sheet.contains(needle), "PreviewSheet.swift lacks \(needle)")
+        }
+        XCTAssertFalse(sheet.contains("struct SheetHairline"))
+        XCTAssertFalse(sheet.contains("SheetSecondaryButtonStyle"))
+        // The witness consent is the one place its heading is drawn: GlassSheet draws it.
+        let consentStart = try XCTUnwrap(sheet.range(of: "struct WitnessReviewConsent: View {")).lowerBound
+        let consent = String(sheet[consentStart...])
+        XCTAssertFalse(consent.contains("Text(copy.heading)"))
+        XCTAssertFalse(consent.contains(".tcScreen()"))
+        XCTAssertTrue(consent.contains(".frame(width: 560, height: 390)"))
+    }
+
+    /// The per-session send disclosure is glass, its unreadable state is the
+    /// Settings glass line, and its `.onAppear` hangs on the always-present
+    /// stack rather than on a Group of conditional branches.
+    func test_theSessionSendDisclosureIsOnGlass() throws {
+        let disclosure = try Self.text("Views/SessionSendDisclosureView.swift")
+        XCTAssertTrue(disclosure.contains(
+            "RouteDisclosureUnreadableGlassLine(line: model.routeDisclosureUnreadableCopy?.session)"))
+        XCTAssertFalse(disclosure.contains("struct RouteDisclosureUnreadableLine"))
+        XCTAssertFalse(disclosure.contains("Group {"))
+        XCTAssertFalse(disclosure.contains("design: .monospaced"))
+        XCTAssertTrue(disclosure.contains("}\n        .onAppear {"), "the onAppear closes the outer VStack")
+        XCTAssertTrue(GlassSurfaceRulesTests.files.contains("Views/SessionSendDisclosureView.swift"))
+    }
+
+    /// The private-inference tone onto a glass status, as the window's
+    /// Inference dot maps it: only clear is on.
+    func test_thePrivateInferenceToneMapsOntoAGlassStatus() {
+        XCTAssertEqual(PrivateInferenceIndicator.status(.clear), .on)
+        XCTAssertEqual(PrivateInferenceIndicator.status(.held), .ask)
+        XCTAssertEqual(PrivateInferenceIndicator.status(.attention), .ask)
+        XCTAssertEqual(PrivateInferenceIndicator.status(.refused), .ask)
+        XCTAssertEqual(PrivateInferenceIndicator.status(.neutral), .off)
+    }
 }
 #endif

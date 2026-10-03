@@ -1,33 +1,11 @@
 import SwiftUI
+import TCDesign
 import TCShellCore
 
-// The review sheet's per-session send disclosure, moved unchanged from the
-// retired `RouteDisclosureView.swift` when Settings' route-disclosure panel
-// moved to glass (`Views/Settings/PrivateAISection.swift`). The unreadable
-// line moved with it because this view draws it.
-
-/// The unreadable state. Marked by a glyph as well as colour, so it
-/// survives greyscale and colour-blindness; and drawn even when the Rust's
-/// sentence for it could not be read, so the panel is never simply empty.
-struct RouteDisclosureUnreadableLine: View {
-    let line: String?
-
-    var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: TC.Space.s) {
-            Image(systemName: TC.Tone.attention.symbol)
-                .imageScale(.small)
-                .foregroundStyle(TC.Tone.attention.color)
-                .accessibilityHidden(line != nil)
-            if let line {
-                Text(line)
-                    .font(TC.Font_.caption)
-                    .foregroundStyle(TC.Tone.attention.textColor)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-        }
-        .accessibilityElement(children: .combine)
-    }
-}
+// The review sheet's per-session send disclosure, moved from the retired
+// `RouteDisclosureView.swift` when Settings' route-disclosure panel moved to
+// glass (`Views/Settings/PrivateAISection.swift`). Its unreadable state is
+// that panel's `RouteDisclosureUnreadableGlassLine`.
 
 /// For one session in the review sheet: the size before redaction and after,
 /// where each goes, and -- where the witness reviewed it -- what it was
@@ -40,40 +18,63 @@ struct SessionSendDisclosureView: View {
     let wouldSendBytes: Int
 
     var body: some View {
-        Group {
+        VStack(alignment: .leading, spacing: 0) {
             if let disclosure = model.routeDisclosure {
                 let session = disclosure.copy.session
-                VStack(alignment: .leading, spacing: TC.Space.xs) {
-                    TCFieldLabel(session.heading)
-                    Text("\(session.beforeLabel) · \(Format.bytes(rawSessionBytes))").bold()
-                    Text(session.beforeLine)
-                    if let line = disclosure.copy.localFilter { Text(line) }
-                    Text("\(session.afterLabel) · \(Format.bytes(wouldSendBytes))").bold()
-                    Text(session.afterLine)
-                    if disclosure.sendsToWitness { Text(disclosure.copy.route) }
+                VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
+                    eyebrow(session.heading)
+                    Text("\(session.beforeLabel) · \(Format.bytes(rawSessionBytes))")
+                        .glassType(GlassTokens.TypeScale.bodyStrong)
+                        .foregroundStyle(GlassColor.textPrimary)
+                    caption(session.beforeLine)
+                    if let line = disclosure.copy.localFilter { caption(line) }
+                    Text("\(session.afterLabel) · \(Format.bytes(wouldSendBytes))")
+                        .glassType(GlassTokens.TypeScale.bodyStrong)
+                        .foregroundStyle(GlassColor.textPrimary)
+                    caption(session.afterLine)
+                    if disclosure.sendsToWitness { caption(disclosure.copy.route) }
                     if let detail = model.certificateDetails[entry.entryID] {
-                        VStack(alignment: .leading, spacing: TC.Space.micro) {
-                            Text(detail.heading).bold()
-                            TCFieldLabel(detail.measurementLabel)
-                            Text(detail.witnessMeasurement)
-                                .font(.system(.caption, design: .monospaced))
-                            TCFieldLabel(detail.signerLabel)
-                            Text(detail.signer).font(.system(.caption, design: .monospaced))
-                            Text(detail.verifiedAtReview)
+                        VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
+                            Text(detail.heading)
+                                .glassType(GlassTokens.TypeScale.bodyStrong)
+                                .foregroundStyle(GlassColor.textPrimary)
+                            eyebrow(detail.measurementLabel)
+                            mono(detail.witnessMeasurement)
+                            eyebrow(detail.signerLabel)
+                            mono(detail.signer)
+                            caption(detail.verifiedAtReview)
                         }
                     }
                 }
-                .font(TC.Font_.caption)
                 .fixedSize(horizontal: false, vertical: true)
             } else if model.routeDisclosureState == .loading {
                 ProgressView().controlSize(.small)
             } else {
-                RouteDisclosureUnreadableLine(line: model.routeDisclosureUnreadableCopy?.session)
+                RouteDisclosureUnreadableGlassLine(line: model.routeDisclosureUnreadableCopy?.session)
             }
         }
         .onAppear {
             model.refreshRouteDisclosure()
             if entry.holdsCertificate { model.loadCertificateDetail(entryID: entry.entryID) }
         }
+    }
+
+    private func eyebrow(_ text: String) -> some View {
+        Text(text)
+            .glassType(GlassTokens.TypeScale.eyebrow)
+            .foregroundStyle(GlassColor.textTertiary)
+    }
+
+    private func caption(_ text: String) -> some View {
+        Text(text)
+            .glassType(GlassTokens.TypeScale.caption)
+            .foregroundStyle(GlassColor.textSecondary)
+    }
+
+    private func mono(_ text: String) -> some View {
+        Text(text)
+            .glassType(GlassTokens.TypeScale.mono)
+            .foregroundStyle(GlassColor.textPrimary)
+            .textSelection(.enabled)
     }
 }
