@@ -67,8 +67,14 @@ final class HealthQueueReviewTests: XCTestCase {
         XCTAssertEqual(recovery.severity, .actionable)
 
         // No other label reads the recovery copy -- it is the core's
-        // explanation for exactly this hold, not a generic sentence.
-        for label in ["not-logged-in", "queue-full", "daily-cap-reached", "a-status-from-the-future"] {
+        // explanation for exactly this hold, not a generic sentence. The two
+        // other privacy holds are listed because they are the likeliest to
+        // be wired to it by mistake.
+        for label in [
+            "not-logged-in", "queue-full", "daily-cap-reached",
+            "privacy-filter-canary-failed", "pii-filter-unavailable",
+            "a-status-from-the-future",
+        ] {
             let other = HealthCopy.forLabel(label)
             XCTAssertNotEqual(other.title, copy.recoveryTitle, label)
             XCTAssertNotEqual(other.actionTitle, copy.recoveryAction, label)

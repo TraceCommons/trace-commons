@@ -254,6 +254,37 @@ final class CoreCopyExportTests: XCTestCase {
         XCTAssertEqual(hostingPrompt.cancel, attachedPrompt.cancel)
     }
 
+    /// All three roles from the real export (moved here from
+    /// `TCShellCoreTests/QuitPromptTests`, which cannot link the core and
+    /// only round-tripped hand-built JSON): each decodes with the role the
+    /// handle implies and a body of its own, and the heading and buttons are
+    /// shared.
+    func testEachRoleDecodesWithItsOwnBody() throws {
+        let settings = #"{"claude_source":{"mode":"off"},"codex_source":{"mode":"off"}}"#
+        let directory = URL(fileURLWithPath: "/private/tmp/tc-roles-\(UUID().uuidString.prefix(8))")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let hosting = try TCDaemon(configDir: directory.path, settingsJSON: settings)
+        defer { hosting.shutdown() }
+        let attached = try TCDaemon(attachingTo: directory.path)
+        defer { attached.shutdown() }
+
+        let prompts = try [
+            ("hosting", hosting.quitPromptJSON()),
+            ("attached", attached.quitPromptJSON()),
+            ("unavailable", TCCoreCopy.quitPromptWithoutWatcherJSON()),
+        ].map { role, json -> QuitPrompt in
+            let prompt = try XCTUnwrap(QuitPrompt.decode(fromJSON: json), role)
+            XCTAssertEqual(prompt.role, role)
+            return prompt
+        }
+        XCTAssertEqual(Set(prompts.map(\.body)).count, 3, "each role keeps its own body")
+        XCTAssertEqual(Set(prompts.map(\.title)).count, 1)
+        XCTAssertEqual(Set(prompts.map(\.confirm)).count, 1)
+        XCTAssertEqual(Set(prompts.map(\.cancel)).count, 1)
+    }
+
     // MARK: - Withdrawal, and the copy no macOS screen renders yet
 
     func testTheUnknownReachWithdrawalPromptWarnsAboutDistributedCopies() throws {
