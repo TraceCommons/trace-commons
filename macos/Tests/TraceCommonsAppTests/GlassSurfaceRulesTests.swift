@@ -38,6 +38,7 @@ final class GlassSurfaceRulesTests: XCTestCase {
         "Views/OnboardingDoneView.swift",
         "Views/OnboardingCoordinatorView.swift",
         "Views/WhatGetsRemovedSheet.swift",
+        "Views/ComputeView.swift",
     ]
 
     static func text(_ rel: String) throws -> String {
