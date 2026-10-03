@@ -260,13 +260,13 @@ use trace_commons_server::trace_score_attestation::{
     sign_versioned_score_attestation,
 };
 use trace_commons_server::versioned_pipeline::{
-    PIPELINE_LEASE_CONFIG_INVALID_LABEL, PIPELINE_SUBMISSION_INOPERABLE_LABEL, PgPipelineStore,
-    PipelineAdmissionLimits, PipelineFollowUps, PipelineLeaseConfig, PipelineNearPayoutControls,
-    PipelineNearSettlementMode, PipelineNoveltyUtilityChecks, PipelineQuotaScope,
-    PipelineReceiptRequest, PipelineReceiptResult, PipelineReplayReceipt, PipelineRetentionAction,
-    PipelineReviewClaim, PipelineReviewClaimOutcome, PipelineService,
-    PipelineWithdrawalFollowUpState, PipelineWithdrawalOutcome, is_pipeline_artifact_wrapper,
-    is_pipeline_score_object_ref,
+    AttemptSweepCursor, PIPELINE_LEASE_CONFIG_INVALID_LABEL, PIPELINE_SUBMISSION_INOPERABLE_LABEL,
+    PgPipelineStore, PipelineAdmissionLimits, PipelineFollowUps, PipelineIndexRebuildReport,
+    PipelineLeaseConfig, PipelineNearPayoutControls, PipelineNearSettlementMode,
+    PipelineNoveltyUtilityChecks, PipelineQuotaScope, PipelineReceiptRequest,
+    PipelineReceiptResult, PipelineReplayReceipt, PipelineRetentionAction, PipelineReviewClaim,
+    PipelineReviewClaimOutcome, PipelineService, PipelineWithdrawalFollowUpState,
+    PipelineWithdrawalOutcome, is_pipeline_artifact_wrapper, is_pipeline_score_object_ref,
 };
 use trace_commons_server::versioned_pipeline_compat::MainGateConfig;
 use trace_commons_server::versioned_pipeline_product::{
@@ -639,6 +639,10 @@ const TRACE_COMMONS_COMMUNITY_LEADERBOARD_SNAPSHOT_INTERVAL_SECONDS: &str =
     "TRACE_COMMONS_COMMUNITY_LEADERBOARD_SNAPSHOT_INTERVAL_SECONDS";
 const TRACE_COMMONS_ACCEPT_MEDIUM_RISK_SUBMISSIONS: &str =
     "TRACE_COMMONS_ACCEPT_MEDIUM_RISK_SUBMISSIONS";
+/// Emergency-only switch for the audit-chain repair's legacy-segment resume
+/// (`accept_legacy_segment`). Off by default: the pre-#1043 rollback target
+/// it existed for was retired on 2026-10-02.
+const TRACE_COMMONS_ALLOW_LEGACY_SEGMENT_RESUME: &str = "TRACE_COMMONS_ALLOW_LEGACY_SEGMENT_RESUME";
 const TRACE_COMMONS_COMMUNITY_TENANT_IDS: &str = "TRACE_COMMONS_COMMUNITY_TENANT_IDS";
 const TRACE_COMMONS_COMMUNITY_ANALYTICS_PUBLICATION_BASIS: &str =
     "TRACE_COMMONS_COMMUNITY_ANALYTICS_PUBLICATION_BASIS";
@@ -1683,6 +1687,10 @@ struct AppState {
     /// refused at startup without a pipeline runtime
     /// (`validate_pipeline_drain_tenants`).
     pipeline_drain_tenant_ids: Arc<BTreeSet<String>>,
+    /// The index rebuilds this process runs
+    /// (`POST /v1/workers/pipeline/index-rebuild`): one per tenant at a time,
+    /// drained at shutdown (`pipeline_runtime::PipelineIndexRebuilds`).
+    pipeline_index_rebuilds: Arc<pipeline_runtime::PipelineIndexRebuilds>,
     db_contributor_reads: bool,
     db_reviewer_reads: bool,
     db_reviewer_require_object_refs: bool,
@@ -1691,6 +1699,12 @@ struct AppState {
     db_audit_reads: bool,
     db_tenant_policy_reads: bool,
     require_db_mirror_writes: bool,
+    /// `TRACE_COMMONS_ALLOW_LEGACY_SEGMENT_RESUME`, read once at startup. Off
+    /// by default: the audit-chain repair then refuses to resume the DB chain
+    /// across a legacy segment (`legacy_segment_resume_disabled`), and its dry
+    /// run still diagnoses one. For an emergency rollback to a pre-#1043 build
+    /// only.
+    allow_legacy_segment_resume: bool,
     require_postgres_trace_rls_ready: bool,
     postgres_runtime_role_sha256: Option<String>,
     require_derived_export_object_refs: bool,
@@ -4476,6 +4490,7 @@ impl AppState {
             pipeline_runtime_required,
             pipeline_worker_ready,
             pipeline_drain_tenant_ids: Arc::new(pipeline_drain_tenant_ids),
+            pipeline_index_rebuilds: Arc::default(),
             db_contributor_reads,
             db_reviewer_reads,
             db_reviewer_require_object_refs,
@@ -4501,6 +4516,7 @@ impl AppState {
             accept_medium_risk_submissions: env_truthy(
                 TRACE_COMMONS_ACCEPT_MEDIUM_RISK_SUBMISSIONS,
             ),
+            allow_legacy_segment_resume: env_truthy(TRACE_COMMONS_ALLOW_LEGACY_SEGMENT_RESUME),
             community_tenant_ids: Arc::new(community_tenant_ids),
             tenant_rollout_gates,
             max_export_items_per_request,
@@ -8890,6 +8906,10 @@ fn app(state: Arc<AppState>) -> Router {
             post(register_stats_refresh_handler),
         )
         .route("/v1/workers/vector-index", post(vector_index_handler))
+        .route(
+            "/v1/workers/pipeline/index-rebuild",
+            post(pipeline_index_rebuild_handler),
+        )
         .route(
             "/v1/workers/gate/evaluate",
             post(gate_evaluate_worker_handler),
@@ -19776,7 +19796,8 @@ use near_provisioning::{
 #[path = "trace_commons_ingest_internal/pipeline_runtime.rs"]
 mod pipeline_runtime;
 use pipeline_runtime::{
-    IngestPipelineRuntimeAssembler, assemble_ingest_pipeline_runtime, pipeline_readiness_handler,
+    IngestPipelineRuntimeAssembler, assemble_ingest_pipeline_runtime,
+    pipeline_index_rebuild_handler, pipeline_readiness_handler,
     pipeline_runtime_is_production_qualified, run_pipeline_app,
 };
 
@@ -42501,8 +42522,10 @@ fn pipeline_reviewer_principal_ref(principal_ref: &str) -> String {
     )
 }
 
-/// 404 when no pipeline runtime was injected -- the shared refusal for all
-/// three pipeline review routes.
+/// 404 when no pipeline runtime was injected -- the shared refusal for every
+/// route that needs one: the three pipeline review routes, the pipeline
+/// withdrawal route, the admin index-invalidation requeue route, and the
+/// worker index-rebuild route.
 fn require_pipeline_service(state: &AppState) -> ApiResult<&Arc<PipelineService>> {
     state
         .pipeline_service
@@ -70249,10 +70272,16 @@ struct TraceAuditChainRepairRequest {
     /// That path accepts DB rows it cannot verify by hash -- the unhashed
     /// rows a rolled-back build wrote -- so it is a separate, deliberate act
     /// after reviewing the dry run's counts. Without it such a run refuses
-    /// `legacy_segment_not_accepted` and writes nothing.
+    /// `legacy_segment_not_accepted` and writes nothing. The path itself is
+    /// off unless `TRACE_COMMONS_ALLOW_LEGACY_SEGMENT_RESUME` was set at
+    /// startup; while it is off, a non-dry run carrying this flag, or one that
+    /// meets a legacy segment, refuses `legacy_segment_resume_disabled`.
     #[serde(default)]
     accept_legacy_segment: bool,
 }
+
+/// The audit chain repair's refusal while the legacy-segment resume is off.
+const LEGACY_SEGMENT_RESUME_DISABLED: &str = "legacy_segment_resume_disabled";
 
 /// Hash-only: counts, the purpose's hash, and the ids of the audit events
 /// restored (random event ids, not contributor or submission identity).
@@ -70289,6 +70318,11 @@ struct TraceAuditChainRepairResponse {
     legacy_segment_resume_interrupted: bool,
     /// Whether this run wrote the row that resumes the DB chain.
     chain_resumed: bool,
+    /// Whether this process may resume the chain across a legacy segment
+    /// (`TRACE_COMMONS_ALLOW_LEGACY_SEGMENT_RESUME`, off by default). When
+    /// false, a dry run still reports `file_ahead_through_legacy_rows`, and a
+    /// non-dry run against it refuses `legacy_segment_resume_disabled`.
+    legacy_segment_resume_enabled: bool,
     /// The repair's own audit event; absent for a dry run.
     repair_audit_event_id: Option<Uuid>,
 }
@@ -70346,6 +70380,17 @@ async fn run_audit_chain_repair(
     tenant: &TenantAuth,
     request: TraceAuditChainRepairRequest,
 ) -> anyhow::Result<TraceAuditChainRepairResponse> {
+    // The legacy-segment resume is off unless the operator enabled it at
+    // startup. Refuse a request for it before reading or writing anything.
+    if !request.dry_run && request.accept_legacy_segment && !state.allow_legacy_segment_resume {
+        tracing::warn!(
+            refusal = LEGACY_SEGMENT_RESUME_DISABLED,
+            "Trace Commons audit chain repair refused a legacy segment resume"
+        );
+        return Err(anyhow::Error::new(TraceAuditChainRepairRefused(
+            LEGACY_SEGMENT_RESUME_DISABLED,
+        )));
+    }
     let db = state
         .db_mirror
         .as_ref()
@@ -70398,6 +70443,11 @@ async fn run_audit_chain_repair(
                         restored_event_ids: Vec::new(),
                     },
                     Some(resume) => {
+                        // Off by default: say so rather than ask for the
+                        // acceptance flag, which could not help.
+                        if !request.dry_run && !state.allow_legacy_segment_resume {
+                            return Err(refuse(LEGACY_SEGMENT_RESUME_DISABLED));
+                        }
                         if !request.dry_run && !request.accept_legacy_segment {
                             return Err(refuse("legacy_segment_not_accepted"));
                         }
@@ -70506,6 +70556,7 @@ async fn run_audit_chain_repair(
             .as_ref()
             .is_some_and(|resume| resume.interrupted_resume.is_some()),
         chain_resumed: resume_event_id.is_some(),
+        legacy_segment_resume_enabled: state.allow_legacy_segment_resume,
         repair_audit_event_id,
     })
 }

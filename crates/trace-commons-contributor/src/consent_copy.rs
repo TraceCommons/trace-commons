@@ -281,6 +281,31 @@ pub const VOID_REARM_FAILED: &str =
 /// [`VOID_GRANT_REGRANT`] and its button beside this sentence.
 pub const VOID_GRANT_PROJECTS: &str = "Projects still set to contribute automatically carry on. Any project that stopped has its own notice.";
 
+/// The title of the "Automatic" override's
+/// void notice (`grant_voids` element of kind `contribution_override`). It
+/// names the mode by its one name (`project_copy::CONTRIBUTION_MODE_AUTO_LABEL`).
+pub const VOID_OVERRIDE_TITLE: &str = concat!(
+    crate::project_copy::folder_mode_auto_label!(),
+    " turned off"
+);
+
+/// What happened. Held to `sweep_grants`: the
+/// override is cleared, so every folder is back on its own setting, and a
+/// folder that asks first waits for you again.
+pub const VOID_OVERRIDE_BODY: &str = concat!(
+    "Settings it was turned on under have since changed, so ",
+    crate::project_copy::folder_mode_auto_label!(),
+    " is off and each folder is back on its own setting. Sessions from folders that ask first \
+     wait for you again."
+);
+
+/// How it is turned back on.
+pub const VOID_OVERRIDE_REARM: &str = concat!(
+    "You can turn ",
+    crate::project_copy::folder_mode_auto_label!(),
+    " back on from Contribution mode. Doing so agrees to the new settings."
+);
+
 /// The title of a void this build cannot place: a `kind` it does not know,
 /// or a project void without a label. It says what is certain -- automatic
 /// contributing stopped -- and does not guess for what.
@@ -337,6 +362,11 @@ pub fn void_reason_line(label: &str) -> &'static str {
         }
         "attested-bodies-on" => {
             "The full text of your attested AI calls would now be sent with your sessions."
+        }
+        // `policy::OVERRIDE_TERMS_UNRECORDED`:
+        // only an "Automatic" override saved by a pre-release build.
+        "terms-unrecorded" => {
+            "It was turned on before this app recorded the settings it was turned on under."
         }
         _ => VOID_REASON_UNKNOWN,
     }
@@ -433,6 +463,20 @@ pub fn void_notice_for_wire(void: &serde_json::Value) -> Option<VoidNoticeCopy> 
         label,
     ) {
         (Some("automatic_grant"), _) => Some(void_notice(None, &reasons)),
+        // The "Automatic" override (#1208): the pill is back on each
+        // folder's own setting. No button: turning it back on is the pill's
+        // own confirmation, not a one-tap re-arm.
+        (Some("contribution_override"), _) => {
+            let placed = void_notice(None, &reasons);
+            Some(VoidNoticeCopy {
+                title: VOID_OVERRIDE_TITLE.to_string(),
+                body: VOID_OVERRIDE_BODY,
+                rearm: VOID_OVERRIDE_REARM,
+                rearm_action: None,
+                rearm_failed: None,
+                ..placed
+            })
+        }
         (Some("project"), Some(label)) => {
             let notice = void_notice(Some(label), &reasons);
             // The button acts on the element's `project_id`; without one
@@ -690,6 +734,39 @@ pub fn automatic_grant_copy(
     }
 }
 
+/// The sentences a contributor reads on the Flow 1 grant screens, with the
+/// choice between them made here: `automatic_gate::disclosure` picks the
+/// disclosure (R1) and [`automatic_grant_copy`] carries only the scrub
+/// wording that answer allows.
+///
+/// `disclosure(config)` reads configuration only, so it answers
+/// `PatternsOnly`, and that is the right answer for a screen shown before
+/// the grant. Configuration is not evidence that a model ran: the model-scrub
+/// wording is earned only by `automatic_gate::folder_disclosure`, over the
+/// certificates of sessions the witness has already redacted, and before the
+/// grant there are none. So a shell never reads the `auto_scrub_*` fields to
+/// choose, and the model-scrub sentences never reach this screen.
+#[must_use]
+pub fn automatic_contribution_copy(
+    config: Option<&crate::config::ContributorConfig>,
+) -> AutomaticGrantCopy {
+    automatic_grant_copy(crate::daemon::automatic_gate::disclosure(config))
+}
+
+/// The grant screens' words for a disclosure the daemon already chose and
+/// reported by name (`list_projects`' `automatic_disclosure`). `None` for a
+/// name this build does not know, so a shell shows nothing rather than
+/// guessing which wording is true.
+#[must_use]
+pub fn automatic_grant_copy_named(disclosure: &str) -> Option<AutomaticGrantCopy> {
+    use crate::daemon::automatic_gate::Disclosure;
+    match disclosure {
+        "patterns_only" => Some(automatic_grant_copy(Disclosure::PatternsOnly)),
+        "model_scrubbed" => Some(automatic_grant_copy(Disclosure::ModelScrubbed)),
+        _ => None,
+    }
+}
+
 /// The title of the notice a shell shows while approved sessions wait on a
 /// busy witness (`status.witness_capacity`, health label
 /// `witness-saturated`).
@@ -936,10 +1013,11 @@ pub const REWORDED_NOW_HEADING: &str = "What happens to its sessions";
 
 /// The button that switches a reworded folder to ask-first. A shell sends it
 /// as `set_project_mode` with the element's `project_id` and `notify_only`,
-/// which also answers the notice.
+/// which also answers the notice. It names the mode it sets, by the mode's
+/// one name (`project_copy::CONTRIBUTION_MODE_ASK_LABEL`).
 ///
 /// **DRAFT, NEEDS APPROVAL.**
-pub const ASK_ME_FIRST_ACTION: &str = "Ask me first";
+pub const ASK_ME_FIRST_ACTION: &str = crate::project_copy::CONTRIBUTION_MODE_ASK_LABEL;
 
 /// Shown when the daemon refuses that switch. The notice stays.
 ///
@@ -1014,7 +1092,11 @@ pub fn arming_reworded_notice_for_wire(
             body: "Your Scrub check was previously unset. This update makes it Automatic. This folder stays set to share automatically, but more sessions may now wait for your review.",
             now_heading: "What happens now",
             scope: SCRUB_CHECK_AUTOMATIC_HELP,
-            limit: "Choose Ask me first for this folder if you want to review every session from it.",
+            limit: concat!(
+                "Choose ",
+                crate::project_copy::folder_mode_ask_label!(),
+                " for this folder if you want to review every session from it."
+            ),
             no_review: "Held sessions are not sent until you decide.",
             acknowledge: VOID_ACKNOWLEDGE,
             ask_first_action: has_id.then_some(ASK_ME_FIRST_ACTION),
@@ -1051,8 +1133,11 @@ pub const GATE_HELD_RELEASE: &str = "Nothing from these projects is sent while t
 /// [`ASK_ME_FIRST_ACTION`].
 ///
 /// **DRAFT, NEEDS APPROVAL.**
-pub const GATE_HELD_ASK_FIRST: &str =
-    "To review a project's sessions yourself instead, switch it to Ask me first.";
+pub const GATE_HELD_ASK_FIRST: &str = concat!(
+    "To review a project's sessions yourself instead, switch it to ",
+    crate::project_copy::folder_mode_ask_label!(),
+    "."
+);
 
 /// One of the gate's reason labels (`automatic_gate::REASON_*`), as a
 /// sentence. A label this build does not know still gets one.
@@ -2239,6 +2324,24 @@ mod tests {
         assert!(arming_reworded_notice_for_wire(&serde_json::json!("x")).is_none());
     }
 
+    /// #1208: the "Automatic" override's void gets its own words --
+    /// not the Flow 1 grant's, not the unplaced fallback -- and no button,
+    /// since turning it back on is the pill's own confirmation.
+    #[test]
+    fn an_override_void_gets_its_own_notice() {
+        let n = void_notice_for_wire(&serde_json::json!({
+            "id": 3, "kind": "contribution_override", "project_id": null,
+            "project_label": null, "reasons": ["scopes-widened"]
+        }))
+        .unwrap();
+        assert_eq!(n.title, VOID_OVERRIDE_TITLE);
+        assert_eq!(n.body, VOID_OVERRIDE_BODY);
+        assert_eq!(n.rearm, VOID_OVERRIDE_REARM);
+        assert_eq!(n.reasons, vec![void_reason_line("scopes-widened")]);
+        assert!(n.rearm_action.is_none() && n.rearm_failed.is_none());
+        assert_ne!(void_reason_line("terms-unrecorded"), VOID_REASON_UNKNOWN);
+    }
+
     #[test]
     fn an_automatic_default_upgrade_explains_the_new_hold() {
         let copy = arming_reworded_notice_for_wire(&serde_json::json!({
@@ -2544,6 +2647,23 @@ mod tests {
         assert!(!copy.heading.is_empty());
         assert!(!copy.measurement_label.is_empty());
         assert!(!copy.signer_label.is_empty());
+    }
+
+    /// A name the daemon reported reads as exactly that disclosure's words;
+    /// an unknown name reads as nothing.
+    #[test]
+    fn a_named_disclosure_reads_as_the_one_the_daemon_chose() {
+        use crate::daemon::automatic_gate::Disclosure;
+        assert_eq!(
+            automatic_grant_copy_named("patterns_only"),
+            Some(automatic_grant_copy(Disclosure::PatternsOnly))
+        );
+        assert_eq!(
+            automatic_grant_copy_named("model_scrubbed"),
+            Some(automatic_grant_copy(Disclosure::ModelScrubbed))
+        );
+        assert_eq!(automatic_grant_copy_named("scrubbed"), None);
+        assert_eq!(automatic_grant_copy_named(""), None);
     }
 
     /// "Trust relaxes what may be sent, never what may be said": the

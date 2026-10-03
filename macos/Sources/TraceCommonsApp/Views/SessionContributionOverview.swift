@@ -212,7 +212,7 @@ struct SessionWithdrawalAction: View {
     }
 
     private var isWithdrawable: Bool {
-        !ContributionStatusPresentation.isTerminal(currentStatus)
+        ContributionStatusPresentation.offersWithdraw(currentStatus)
     }
 
     private func shouldOfferRetry(_ result: AppModel.WithdrawalResult) -> Bool {
@@ -257,9 +257,22 @@ struct WithdrawalConfirmationView: View {
     let onConfirm: () -> Void
 
     var body: some View {
-        let confirmation = WithdrawalCopy.confirmation(for: .init(status: status))
+        if let confirmation = WithdrawalCopy.confirmation(for: .init(status: status)) {
+            confirmationBody(confirmation)
+        } else {
+            // Not confirmable without the core's words; the way back stays.
+            Button(keepLabel, action: onKeep)
+                .keyboardShortcut(.cancelAction)
+                .frame(minHeight: 44)
+                .font(TC.Font_.footnote)
+        }
+    }
+
+    private func confirmationBody(_ confirmation: WithdrawalCopy.Confirmation) -> some View {
         VStack(alignment: .leading, spacing: TC.Space.s) {
-            Text(confirmation.question).font(TC.Font_.cardTitle)
+            if let question = confirmation.question {
+                Text(question).font(TC.Font_.cardTitle)
+            }
             if let ambiguity = confirmation.ambiguity {
                 Text(ambiguity)
                     .font(TC.Font_.footnote)
@@ -276,9 +289,11 @@ struct WithdrawalConfirmationView: View {
                 .font(TC.Font_.footnote)
                 .foregroundStyle(gravest ? AnyShapeStyle(TC.coralText) : AnyShapeStyle(.primary))
             }
-            Text(confirmation.credit)
-                .font(TC.Font_.footnote)
-                .foregroundStyle(.secondary)
+            if let credit = confirmation.credit {
+                Text(credit)
+                    .font(TC.Font_.footnote)
+                    .foregroundStyle(.secondary)
+            }
             HStack(spacing: TC.Space.s) {
                 Button(keepLabel, action: onKeep)
                     .keyboardShortcut(.cancelAction)

@@ -19,7 +19,7 @@ public enum TrayIconState
     /// <summary>Watching, nothing owed.</summary>
     Idle = 0,
 
-    /// <summary>Paused by the contributor. Nothing is being queued.</summary>
+    /// <summary>Paused by the contributor. Nothing is being queued or sent.</summary>
     Paused = 1,
 
     /// <summary>A health state the contributor should know about.</summary>
@@ -120,7 +120,10 @@ public sealed class TrayModel
             TrayIconState.Attention when !isHealthy => $"{Waiting(owed)} Needs attention.",
             TrayIconState.Attention => Waiting(owed),
             TrayIconState.Unhealthy => "Needs attention.",
-            TrayIconState.Paused => "Paused. Nothing is being queued.",
+            // macOS's sentence, word for word (MainWindowView.swift and
+            // SettingsView.swift; GTK ui/settings.rs says the same). The
+            // core does not export it yet.
+            TrayIconState.Paused => "Paused. Nothing is being queued or sent.",
             _ => "Watching. Nothing waiting.",
         };
 

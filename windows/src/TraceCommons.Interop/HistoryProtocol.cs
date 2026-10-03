@@ -63,7 +63,8 @@ public sealed class HistoryRecord
     /// <summary>
     /// One of <c>submitted</c>, <c>accepted</c>, <c>quarantined</c>, or the
     /// locally stamped <c>withdrawn</c>. Any other value is a status this
-    /// build has no stable name for and degrades to "waiting to be scored".
+    /// build has no stable name for and reads as the core's "Status
+    /// unavailable", with no Withdraw offered.
     /// </summary>
     [JsonPropertyName("status")]
     public string Status { get; set; } = string.Empty;

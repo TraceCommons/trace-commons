@@ -6132,6 +6132,7 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         pipeline_runtime_required: false,
         pipeline_worker_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         pipeline_drain_tenant_ids: Arc::new(BTreeSet::new()),
+        pipeline_index_rebuilds: Arc::default(),
         db_contributor_reads,
         db_reviewer_reads,
         db_reviewer_require_object_refs: false,
@@ -6155,6 +6156,7 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         community_analytics_publication_basis:
             CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism,
         accept_medium_risk_submissions: false,
+        allow_legacy_segment_resume: false,
         community_tenant_ids: Arc::new(Vec::new()),
         tenant_rollout_gates: TraceTenantRolloutGates::default(),
         max_export_items_per_request: DEFAULT_TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST,
@@ -6273,7 +6275,18 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
 
 fn test_artifact_store(root: &Path) -> Arc<LocalEncryptedTraceArtifactStore> {
     let key = trace_commons_server::secrets::keychain::generate_master_key_hex();
-    let crypto = SecretsCrypto::new(SecretString::from(key)).expect("test crypto");
+    test_artifact_store_with_key(root, &key)
+}
+
+/// `test_artifact_store` with a given master key instead of a generated one,
+/// so two processes can read each other's objects: `pipeline.py` passes one
+/// random key per command (`TRACE_COMMONS_PIPELINE_TEST_MASTER_KEY_HEX`,
+/// P4-D18). The key never appears in a panic message.
+fn test_artifact_store_with_key(
+    root: &Path,
+    key_hex: &str,
+) -> Arc<LocalEncryptedTraceArtifactStore> {
+    let crypto = SecretsCrypto::new(SecretString::from(key_hex.to_string())).expect("test crypto");
     Arc::new(LocalEncryptedTraceArtifactStore::new(root, crypto))
 }
 
@@ -10643,6 +10656,31 @@ impl trace_commons_gate_api::IdentifiedPerplexityScorer for QualifiedTestScorer 
     }
 }
 
+/// Wraps `ReferencePerplexityScorer` without overriding `production_qualified`
+/// (the trait default, `false`) -- the unqualified counterpart of
+/// `QualifiedTestScorer`, with its own identity and content descriptor so it
+/// can be held under a different content hash than any other test scorer.
+/// Decision P4-D7: the bundle-qualification tests below use this to prove
+/// both halves of the per-bundle scoping rule -- held-but-unnamed, it must
+/// not block startup; named, it must.
+struct UnqualifiedTestScorer(trace_commons_gate_api::ReferencePerplexityScorer);
+
+impl trace_commons_gate_api::PerplexityScorer for UnqualifiedTestScorer {
+    fn score(&self, plaintext: &[u8]) -> anyhow::Result<trace_commons_gate_api::PerplexityResult> {
+        self.0.score(plaintext)
+    }
+}
+
+impl trace_commons_gate_api::IdentifiedPerplexityScorer for UnqualifiedTestScorer {
+    fn dependency_identity(&self) -> &str {
+        "unqualified_test_perplexity_scorer"
+    }
+
+    fn content_descriptor(&self) -> Vec<u8> {
+        b"trace-commons-unqualified-test-perplexity-scorer.v1".to_vec()
+    }
+}
+
 /// Wraps `ReferenceEmbedder` the same way `QualifiedTestScorer` wraps the
 /// reference scorer.
 struct QualifiedTestEmbedder(trace_commons_gate_api::ReferenceEmbedder);
@@ -10843,8 +10881,33 @@ impl trace_commons_server::versioned_pipeline_authority::PipelinePrivacyBoundary
     }
 }
 
-/// A pipeline service whose scorer, embedder, index, and settlement adapter
-/// are all the `Qualified*` test doubles above, so
+/// The Trace Credit instrument award every `qualified_pipeline_service`
+/// fixture pins, so its default package always has exactly one
+/// settlement-adapter dependency to qualify, and payout has an instrument to
+/// apply to when a test enables it. `minimal_package` itself reads only
+/// `instrument_id` and `descriptor` from this, but `.build()` also resolves
+/// the default package all the way through `from_package_with_runtime`,
+/// which rebuilds an `InstrumentAward` from the stored config and refuses a
+/// zero amount (`ContractError::ZeroInstrumentAward`) -- so `atomic_units`
+/// must be nonzero even though no fixture here ever drives a run to Score.
+fn qualified_test_trace_credit_award()
+-> trace_commons_server::versioned_pipeline_bundle::PipelineInstrumentAwardConfig {
+    trace_commons_server::versioned_pipeline_bundle::PipelineInstrumentAwardConfig {
+        instrument_id: trace_commons_gate_api::pipeline::InstrumentId::trace_credit()
+            .as_str()
+            .to_string(),
+        atomic_units: trace_commons_gate_api::pipeline::AtomicUnits::from_raw(1),
+        descriptor: trace_commons_gate_api::pipeline::InstrumentDescriptor {
+            kind: trace_commons_gate_api::pipeline::InstrumentKind::Nep141,
+            network: "testnet".to_string(),
+            contract: "trace-credit.testnet".to_string(),
+            decimals: trace_commons_gate_api::pipeline::TRACE_CREDIT_DECIMALS,
+        },
+    }
+}
+
+/// A pipeline service whose scorer, embedder, index, and Trace Credit
+/// settlement adapter are all the `Qualified*` test doubles above, so
 /// `pipeline_runtime_is_production_qualified` reports `true` for it. Same
 /// shape as `minimal_pipeline_service`, which stays unqualified (its
 /// settlement adapter registry is empty). `include_authority`/
@@ -10852,7 +10915,12 @@ impl trace_commons_server::versioned_pipeline_authority::PipelinePrivacyBoundary
 /// service that is missing just one of those two controls, to isolate
 /// T2-2's own contribution to the overall qualification check from the
 /// pre-existing scorer/embedder/index/settlement checks. `payout`, when
-/// given, is the NEAR payout adapter and its configuration.
+/// given, is the NEAR payout adapter and its configuration. `extra_scorer`
+/// and `extra_settlement_adapter`, when given, are held (and, for the
+/// adapter, registered) by the service but never named by its default
+/// package -- decision P4-D7's own tests use these to prove a dependency the
+/// default bundle does not use cannot block startup.
+#[allow(clippy::too_many_arguments)]
 fn qualified_pipeline_service(
     backend: Arc<PgBackend>,
     artifact_store: Arc<dyn TraceArtifactStore>,
@@ -10863,6 +10931,8 @@ fn qualified_pipeline_service(
         Arc<dyn trace_commons_server::versioned_pipeline_credit::NearPayoutAdapter>,
         trace_commons_server::versioned_pipeline::PipelinePayoutConfig,
     )>,
+    extra_scorer: Option<Arc<dyn trace_commons_gate_api::IdentifiedPerplexityScorer>>,
+    extra_settlement_adapter: Option<Arc<dyn trace_commons_gate_api::SettlementAdapter>>,
 ) -> anyhow::Result<Arc<PipelineService>> {
     qualified_pipeline_service_with_privacy(
         backend,
@@ -10876,10 +10946,13 @@ fn qualified_pipeline_service(
                 >
         }),
         payout,
+        extra_scorer,
+        extra_settlement_adapter,
     )
 }
 
 /// `qualified_pipeline_service`, with `privacy` as its privacy boundary.
+#[allow(clippy::too_many_arguments)]
 fn qualified_pipeline_service_with_privacy(
     backend: Arc<PgBackend>,
     artifact_store: Arc<dyn TraceArtifactStore>,
@@ -10892,6 +10965,8 @@ fn qualified_pipeline_service_with_privacy(
         Arc<dyn trace_commons_server::versioned_pipeline_credit::NearPayoutAdapter>,
         trace_commons_server::versioned_pipeline::PipelinePayoutConfig,
     )>,
+    extra_scorer: Option<Arc<dyn trace_commons_gate_api::IdentifiedPerplexityScorer>>,
+    extra_settlement_adapter: Option<Arc<dyn trace_commons_gate_api::SettlementAdapter>>,
 ) -> anyhow::Result<Arc<PipelineService>> {
     use trace_commons_gate_api::SettlementAdapter;
     use trace_commons_gate_api::pipeline::InstrumentId;
@@ -10909,7 +10984,7 @@ fn qualified_pipeline_service_with_privacy(
     ));
     let package = MinimalPolicyBundle::minimal_package(
         &PipelineBundleConfig {
-            instrument_awards: vec![],
+            instrument_awards: vec![qualified_test_trace_credit_award()],
             include_index: false,
             variant: None,
         },
@@ -10920,7 +10995,83 @@ fn qualified_pipeline_service_with_privacy(
         trace_commons_server::versioned_pipeline_index::IsolatedPipelineIndex::new(),
     ));
     let adapter: Arc<dyn SettlementAdapter> = Arc::new(QualifiedTestSettlementAdapter {
-        instrument_id: InstrumentId::new("qualified_test_instrument")?,
+        instrument_id: InstrumentId::trace_credit(),
+    });
+    let mut adapters = vec![adapter];
+    if let Some(extra_settlement_adapter) = extra_settlement_adapter {
+        adapters.push(extra_settlement_adapter);
+    }
+    let registry = SettlementAdapterRegistry::new(adapters)?;
+    let mut builder = PipelineServiceBuilder::new(
+        backend,
+        artifact_store,
+        package,
+        index.clone(),
+        index,
+        registry,
+        PipelineCaps {
+            per_instrument_atomic_units: BTreeMap::new(),
+        },
+    )
+    .with_scorer(scorer)
+    .with_embedder(embedder);
+    if let Some(extra_scorer) = extra_scorer {
+        builder = builder.with_scorer(extra_scorer);
+    }
+    if let Some(object_store_name) = object_store_name {
+        builder = builder.with_object_store_name(object_store_name);
+    }
+    if include_authority {
+        builder = builder.with_authority(Arc::new(QualifiedTestAuthority));
+    }
+    if let Some(privacy) = privacy {
+        builder = builder.with_privacy(privacy);
+    }
+    if let Some((adapter, config)) = payout {
+        builder = builder.with_payout(adapter, config);
+    }
+    Ok(Arc::new(builder.build()?))
+}
+
+/// Like `qualified_pipeline_service` (fully qualified authority, privacy,
+/// index, embedder, and the pinned Trace Credit settlement adapter), except
+/// its default package names `UnqualifiedTestScorer` instead of
+/// `QualifiedTestScorer`. The other half of decision P4-D7: a dependency the
+/// default bundle actually names still blocks startup, unlike a same-shaped
+/// unnamed extra scorer the service merely holds.
+fn pipeline_service_with_unqualified_named_scorer(
+    backend: Arc<PgBackend>,
+    artifact_store: Arc<dyn TraceArtifactStore>,
+    object_store_name: Option<String>,
+) -> anyhow::Result<Arc<PipelineService>> {
+    use trace_commons_gate_api::SettlementAdapter;
+    use trace_commons_gate_api::pipeline::InstrumentId;
+    use trace_commons_server::versioned_pipeline::{PipelineCaps, PipelineServiceBuilder};
+    use trace_commons_server::versioned_pipeline_bundle::{
+        MinimalPolicyBundle, PipelineBundleConfig,
+    };
+    use trace_commons_server::versioned_pipeline_credit::SettlementAdapterRegistry;
+
+    let scorer = Arc::new(UnqualifiedTestScorer(
+        trace_commons_gate_api::ReferencePerplexityScorer::new(),
+    ));
+    let embedder = Arc::new(QualifiedTestEmbedder(
+        trace_commons_gate_api::ReferenceEmbedder::new(),
+    ));
+    let package = MinimalPolicyBundle::minimal_package(
+        &PipelineBundleConfig {
+            instrument_awards: vec![qualified_test_trace_credit_award()],
+            include_index: false,
+            variant: None,
+        },
+        scorer.as_ref(),
+        embedder.as_ref(),
+    )?;
+    let index = Arc::new(QualifiedTestIndex(
+        trace_commons_server::versioned_pipeline_index::IsolatedPipelineIndex::new(),
+    ));
+    let adapter: Arc<dyn SettlementAdapter> = Arc::new(QualifiedTestSettlementAdapter {
+        instrument_id: InstrumentId::trace_credit(),
     });
     let registry = SettlementAdapterRegistry::new(vec![adapter])?;
     let mut builder = PipelineServiceBuilder::new(
@@ -10935,18 +11086,11 @@ fn qualified_pipeline_service_with_privacy(
         },
     )
     .with_scorer(scorer)
-    .with_embedder(embedder);
+    .with_embedder(embedder)
+    .with_authority(Arc::new(QualifiedTestAuthority))
+    .with_privacy(Arc::new(QualifiedTestPrivacy));
     if let Some(object_store_name) = object_store_name {
         builder = builder.with_object_store_name(object_store_name);
-    }
-    if include_authority {
-        builder = builder.with_authority(Arc::new(QualifiedTestAuthority));
-    }
-    if let Some(privacy) = privacy {
-        builder = builder.with_privacy(privacy);
-    }
-    if let Some((adapter, config)) = payout {
-        builder = builder.with_payout(adapter, config);
     }
     Ok(Arc::new(builder.build()?))
 }
@@ -11029,8 +11173,23 @@ async fn a_non_qualifiable_compatibility_configuration_fails_the_qualification_g
     };
 
     let local = service(&CompatibilityBundleConfig::local_reference());
-    assert!(!local.dependency_qualification().bundle);
+    assert!(
+        !local
+            .bundle_qualification(local.default_package())
+            .expect("the local reference package resolves")
+            .configuration_qualifiable
+    );
     assert!(!pipeline_runtime_is_production_qualified(&local));
+    // Wave 2 (rebase 9 review, M2): startup reads it as the bundle
+    // qualification's own configuration term, the one `qualify_bundle`
+    // sees, and it is the only blocker of this otherwise qualified runtime.
+    assert_eq!(
+        local
+            .bundle_qualification(local.default_package())
+            .expect("the local reference package resolves")
+            .blockers(),
+        vec!["bundle_configuration_not_qualifiable"]
+    );
 
     let reference = CompatibilityBundleConfig::local_reference();
     // The pilot template's floors: `deploy/pilot-gcp/ingest.env.template`.
@@ -11052,7 +11211,13 @@ async fn a_non_qualifiable_compatibility_configuration_fails_the_qualification_g
         )
         .unwrap_or_else(|error| panic!("{floors} validate: {error}"));
         let production = service(&config);
-        assert!(production.dependency_qualification().bundle, "{floors}");
+        assert!(
+            production
+                .bundle_qualification(production.default_package())
+                .unwrap_or_else(|error| panic!("the {floors} package resolves: {error}"))
+                .configuration_qualifiable,
+            "{floors}"
+        );
         assert!(
             pipeline_runtime_is_production_qualified(&production),
             "{floors}"
@@ -11247,6 +11412,8 @@ async fn a_required_privacy_filter_needs_a_boundary_that_classifies_prose_pii() 
         true,
         true,
         None,
+        None,
+        None,
     )
     .unwrap();
     assert!(pipeline_runtime_is_production_qualified(
@@ -11265,6 +11432,8 @@ async fn a_required_privacy_filter_needs_a_boundary_that_classifies_prose_pii() 
         true,
         false,
         None,
+        None,
+        None,
     )
     .unwrap();
     assert!(validate_pipeline_privacy_filter_requirement(true, &without_a_boundary).is_err());
@@ -11281,6 +11450,8 @@ async fn a_required_privacy_filter_needs_a_boundary_that_classifies_prose_pii() 
             PrivacyFilterBackendTag::None,
             PiiClassifyPolicy::default(),
         ))),
+        None,
+        None,
         None,
     )
     .unwrap();
@@ -11306,6 +11477,8 @@ async fn a_required_privacy_filter_needs_a_boundary_that_classifies_prose_pii() 
             PrivacyFilterBackendTag::Sidecar,
             PiiClassifyPolicy::default(),
         ))),
+        None,
+        None,
         None,
     )
     .unwrap();
@@ -11349,6 +11522,8 @@ impl IngestPipelineRuntimeAssembler for QualifiedAssembler {
             true,
             true,
             None,
+            None,
+            None,
         )
     }
 }
@@ -11372,6 +11547,8 @@ impl IngestPipelineRuntimeAssembler for QualifiedAssemblerWithoutAuthority {
             false,
             true,
             None,
+            None,
+            None,
         )
     }
 }
@@ -11393,8 +11570,173 @@ impl IngestPipelineRuntimeAssembler for QualifiedAssemblerWithoutPrivacy {
             true,
             false,
             None,
+            None,
+            None,
         )
     }
+}
+
+/// Decision P4-D7: like `QualifiedAssembler`, but the service also holds one
+/// more scorer the default package never names, under its own content hash:
+/// `UnqualifiedTestScorer`. A bundle names at most one scorer by content
+/// hash among however many the service holds, so an unqualified one the
+/// default bundle never touches must not block startup.
+struct QualifiedAssemblerWithAnUnnamedUnqualifiedScorer;
+
+impl IngestPipelineRuntimeAssembler for QualifiedAssemblerWithAnUnnamedUnqualifiedScorer {
+    fn assemble(
+        &self,
+        context: pipeline_runtime::IngestPipelineRuntimeContext,
+    ) -> anyhow::Result<Arc<PipelineService>> {
+        qualified_pipeline_service(
+            context.backend,
+            context.artifact_store,
+            Some(context.object_store_name),
+            true,
+            true,
+            None,
+            Some(Arc::new(UnqualifiedTestScorer(
+                trace_commons_gate_api::ReferencePerplexityScorer::new(),
+            ))),
+            None,
+        )
+    }
+}
+
+/// Decision P4-D7: like `QualifiedAssembler`, but the service also holds an
+/// extra, unqualified settlement adapter for an instrument the default
+/// package does not pin (only Trace Credit is pinned). A settlement adapter
+/// a bundle's package never names among its instruments must not block
+/// startup, however unqualified it is.
+struct QualifiedAssemblerWithAnUnpinnedUnqualifiedSettlementAdapter;
+
+impl IngestPipelineRuntimeAssembler
+    for QualifiedAssemblerWithAnUnpinnedUnqualifiedSettlementAdapter
+{
+    fn assemble(
+        &self,
+        context: pipeline_runtime::IngestPipelineRuntimeContext,
+    ) -> anyhow::Result<Arc<PipelineService>> {
+        qualified_pipeline_service(
+            context.backend,
+            context.artifact_store,
+            Some(context.object_store_name),
+            true,
+            true,
+            None,
+            None,
+            Some(
+                trace_commons_server::versioned_pipeline_credit::RecordingSettlementAdapter::new(
+                    trace_commons_gate_api::pipeline::InstrumentId::new("unpinned_test_instrument")
+                        .expect("static instrument id"),
+                    "recording_unpinned_test_instrument",
+                    "none",
+                ),
+            ),
+        )
+    }
+}
+
+/// A qualified default bundle whose *named* scorer is unqualified
+/// (`UnqualifiedTestScorer`) rather than an unnamed extra one. The other
+/// half of decision P4-D7: a dependency the default bundle actually uses
+/// still blocks startup.
+struct AssemblerWithAnUnqualifiedNamedScorer;
+
+impl IngestPipelineRuntimeAssembler for AssemblerWithAnUnqualifiedNamedScorer {
+    fn assemble(
+        &self,
+        context: pipeline_runtime::IngestPipelineRuntimeContext,
+    ) -> anyhow::Result<Arc<PipelineService>> {
+        pipeline_service_with_unqualified_named_scorer(
+            context.backend,
+            context.artifact_store,
+            Some(context.object_store_name),
+        )
+    }
+}
+
+/// Decision P4-D7: an unqualified scorer the default bundle does not name
+/// must not block startup -- only the dependency the default bundle
+/// actually names is checked.
+#[tokio::test]
+async fn an_unqualified_scorer_the_default_bundle_does_not_name_does_not_block_startup() {
+    let dir = tempfile::tempdir().unwrap();
+    let (connections, configured_store) = pipeline_runtime_fail_closed_fixture(&dir).await;
+
+    let service = assemble_ingest_pipeline_runtime(
+        Some(&QualifiedAssemblerWithAnUnnamedUnqualifiedScorer),
+        Some(&connections),
+        Some(&configured_store),
+        false,
+        PipelineLeaseConfig::default(),
+        true,
+        false,
+        None,
+        TEST_NEAR_CONFIRMATION_INTERVAL,
+        TEST_NEAR_PAYOUT_CONTROLS,
+        &PipelineNoveltyUtilityChecks::default(),
+        TEST_MAIN_GATE,
+    )
+    .expect("an unqualified scorer the default bundle does not name does not block startup")
+    .expect("an assembler was given, so a service is returned");
+    assert!(pipeline_runtime_is_production_qualified(&service));
+}
+
+/// Decision P4-D7: an unqualified settlement adapter for an instrument the
+/// default bundle does not pin must not block startup either.
+#[tokio::test]
+async fn an_unqualified_adapter_for_an_instrument_the_bundle_does_not_pin_does_not_block_startup() {
+    let dir = tempfile::tempdir().unwrap();
+    let (connections, configured_store) = pipeline_runtime_fail_closed_fixture(&dir).await;
+
+    let service = assemble_ingest_pipeline_runtime(
+        Some(&QualifiedAssemblerWithAnUnpinnedUnqualifiedSettlementAdapter),
+        Some(&connections),
+        Some(&configured_store),
+        false,
+        PipelineLeaseConfig::default(),
+        true,
+        false,
+        None,
+        TEST_NEAR_CONFIRMATION_INTERVAL,
+        TEST_NEAR_PAYOUT_CONTROLS,
+        &PipelineNoveltyUtilityChecks::default(),
+        TEST_MAIN_GATE,
+    )
+    .expect("an unpinned unqualified settlement adapter does not block startup")
+    .expect("an assembler was given, so a service is returned");
+    assert!(pipeline_runtime_is_production_qualified(&service));
+}
+
+/// The other half of decision P4-D7: a scorer the default bundle *does*
+/// name still blocks startup when it is not production-qualified, exactly
+/// like the old, unscoped check did.
+#[tokio::test]
+async fn an_unqualified_scorer_the_default_bundle_names_blocks_startup() {
+    let dir = tempfile::tempdir().unwrap();
+    let (connections, configured_store) = pipeline_runtime_fail_closed_fixture(&dir).await;
+
+    let error = assemble_ingest_pipeline_runtime(
+        Some(&AssemblerWithAnUnqualifiedNamedScorer),
+        Some(&connections),
+        Some(&configured_store),
+        false,
+        PipelineLeaseConfig::default(),
+        true,
+        false,
+        None,
+        TEST_NEAR_CONFIRMATION_INTERVAL,
+        TEST_NEAR_PAYOUT_CONTROLS,
+        &PipelineNoveltyUtilityChecks::default(),
+        TEST_MAIN_GATE,
+    )
+    .err()
+    .expect("a named unqualified scorer with routed tenants and no opt-in is refused");
+    assert_eq!(
+        error.to_string(),
+        "pipeline_runtime_dependencies_not_production_qualified"
+    );
 }
 
 /// A `TraceCorpusDbConnections` and `ConfiguredTraceArtifactStore` pair over
@@ -11776,6 +12118,8 @@ impl IngestPipelineRuntimeAssembler for PayoutAssembler {
                 )),
                 config,
             )),
+            None,
+            None,
         )
     }
 }
@@ -12050,6 +12394,8 @@ async fn pipeline_runtime_requires_a_qualified_payout_adapter_only_when_payout_i
             true,
             true,
             enabled.then(|| (adapter, payout_test_config(Some(TEST_PAYOUT_NEAR_CONTRACT)))),
+            None,
+            None,
         )
         .expect("build the pipeline service")
     };
@@ -12077,8 +12423,9 @@ async fn pipeline_runtime_requires_a_qualified_payout_adapter_only_when_payout_i
 /// (the integration tests and these tests link it built without
 /// `cfg(test)`), so what keeps one out of production is the qualification
 /// gate. An otherwise fully qualified service fails the gate with any one of
-/// them in place: `IsolatedPipelineIndex` as the index,
-/// `RecordingSettlementAdapter` as a settlement adapter, or
+/// them in place, under that dependency's own blocker and no other:
+/// `IsolatedPipelineIndex` as the index, `RecordingSettlementAdapter` as the
+/// adapter of the instrument the package pins, or
 /// `StaticPipelineAuthorityProvider::test_only` as the authority.
 /// (`RecordingNearAdapter`:
 /// `pipeline_runtime_requires_a_qualified_payout_adapter_only_when_payout_is_enabled`.)
@@ -12116,9 +12463,11 @@ async fn each_pipeline_test_double_fails_the_qualification_gate() {
         let embedder = Arc::new(QualifiedTestEmbedder(
             trace_commons_gate_api::ReferenceEmbedder::new(),
         ));
+        // The package pins the Trace Credit instrument, so its adapter is
+        // one of the bundle's dependencies (decision P4-D7).
         let package = MinimalPolicyBundle::minimal_package(
             &PipelineBundleConfig {
-                instrument_awards: vec![],
+                instrument_awards: vec![qualified_test_trace_credit_award()],
                 include_index: false,
                 variant: None,
             },
@@ -12126,11 +12475,16 @@ async fn each_pipeline_test_double_fails_the_qualification_gate() {
             embedder.as_ref(),
         )
         .unwrap();
-        let instrument_id = InstrumentId::new("qualified_test_instrument").unwrap();
         let adapter: Arc<dyn SettlementAdapter> = if double == Double::SettlementAdapter {
-            RecordingSettlementAdapter::new(instrument_id, "recording_test_only", "none")
+            RecordingSettlementAdapter::new(
+                InstrumentId::trace_credit(),
+                "recording_trace_credit_test_only",
+                "none",
+            )
         } else {
-            Arc::new(QualifiedTestSettlementAdapter { instrument_id })
+            Arc::new(QualifiedTestSettlementAdapter {
+                instrument_id: InstrumentId::trace_credit(),
+            })
         };
         let registry = SettlementAdapterRegistry::new(vec![adapter]).unwrap();
         let caps = PipelineCaps {
@@ -12181,35 +12535,47 @@ async fn each_pipeline_test_double_fails_the_qualification_gate() {
         )
     };
 
-    assert!(
-        pipeline_runtime_is_production_qualified(&build(Double::None)),
-        "with no test double the service is qualified"
-    );
-    // (the double, its own qualification, the gate's answer)
-    let refused = [Double::Index, Double::SettlementAdapter, Double::Authority].map(|double| {
+    // (the double, its blockers, the gate's answer)
+    let answers = [
+        Double::None,
+        Double::Index,
+        Double::SettlementAdapter,
+        Double::Authority,
+    ]
+    .map(|double| {
         let service = build(double);
-        let qualification = service.dependency_qualification();
-        let own = match double {
-            Double::Index => qualification.index_reader || qualification.index_writer,
-            Double::SettlementAdapter => qualification
-                .settlement_adapters
-                .values()
-                .any(|qualified| *qualified),
-            Double::Authority => qualification.authority,
-            Double::None => true,
-        };
+        let blockers = service
+            .bundle_qualification(service.default_package())
+            .expect("the package resolves")
+            .blockers();
         (
             double,
-            own,
+            blockers,
             pipeline_runtime_is_production_qualified(&service),
         )
     });
     assert_eq!(
-        refused,
+        answers,
         [
-            (Double::Index, false, false),
-            (Double::SettlementAdapter, false, false),
-            (Double::Authority, false, false),
+            (Double::None, vec![], true),
+            (
+                Double::Index,
+                vec![
+                    "runtime_index_reader_not_production",
+                    "runtime_index_writer_not_production"
+                ],
+                false
+            ),
+            (
+                Double::SettlementAdapter,
+                vec!["runtime_settlement_not_production"],
+                false
+            ),
+            (
+                Double::Authority,
+                vec!["runtime_authority_not_production"],
+                false
+            ),
         ]
     );
 }
@@ -28395,6 +28761,7 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
         pipeline_runtime_required: false,
         pipeline_worker_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         pipeline_drain_tenant_ids: Arc::new(BTreeSet::new()),
+        pipeline_index_rebuilds: Arc::default(),
         db_contributor_reads: false,
         db_reviewer_reads: false,
         db_reviewer_require_object_refs: false,
@@ -28418,6 +28785,7 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
         community_analytics_publication_basis:
             CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism,
         accept_medium_risk_submissions: false,
+        allow_legacy_segment_resume: false,
         community_tenant_ids: Arc::new(Vec::new()),
         tenant_rollout_gates: TraceTenantRolloutGates::default(),
         max_export_items_per_request: DEFAULT_TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST,
@@ -30803,6 +31171,9 @@ async fn roll_back_and_forward(backend: &Arc<PgBackend>, root: &Path) -> RolledB
         false,
     );
     Arc::make_mut(&mut state).require_db_mirror_writes = true;
+    // The legacy-segment resume is off by default; these tests exercise the
+    // emergency path with `TRACE_COMMONS_ALLOW_LEGACY_SEGMENT_RESUME` set.
+    Arc::make_mut(&mut state).allow_legacy_segment_resume = true;
     let re_posted_submission = submit_low_risk_trace(state.clone())
         .await
         .expect("submission on the new build");
@@ -30965,6 +31336,7 @@ async fn audit_chain_repair_resumes_the_chain_after_a_binary_rollback() {
     assert_eq!(dry_run["legacy_segment_unhashed_db_rows"], 3);
     assert_eq!(dry_run["legacy_segment_file_only_events"], 3);
     assert_eq!(dry_run["legacy_segment_resume_interrupted"], false);
+    assert_eq!(dry_run["legacy_segment_resume_enabled"], true);
     assert!(
         dry_run["legacy_segment_earliest_at"].is_string()
             && dry_run["legacy_segment_latest_at"].is_string(),
@@ -31131,6 +31503,144 @@ async fn audit_chain_repair_resumes_the_chain_after_a_binary_rollback() {
             row.audit_event_id
         );
     }
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+fn audit_chain_file_hashes(root: &Path, tenant_id: &str) -> Vec<Option<String>> {
+    read_audit_events_in_file_order(root, tenant_id)
+        .expect("file log")
+        .into_iter()
+        .map(|event| event.event_hash)
+        .collect()
+}
+
+/// The legacy-segment resume is off unless the operator set
+/// `TRACE_COMMONS_ALLOW_LEGACY_SEGMENT_RESUME` at startup. A request that
+/// asks for it is refused by a fixed label before the repair reads or writes
+/// anything -- here, before it even looks for the DB mirror -- and the file
+/// chain is unchanged.
+#[tokio::test]
+async fn legacy_segment_resume_is_refused_while_the_switch_is_off() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        None,
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+    assert!(
+        !state.allow_legacy_segment_resume,
+        "the switch is off by default"
+    );
+    let reviewer = test_reviewer_auth("tenant-a");
+    for index in 0..3 {
+        append_audit_event(
+            temp.path(),
+            "tenant-a",
+            TraceCommonsAuditEvent::read(&reviewer, "review_queue", index),
+        )
+        .expect("appends");
+    }
+    let chain_before = audit_chain_file_hashes(temp.path(), "tenant-a");
+
+    let (status, refused) = post_audit_chain_repair(
+        state.clone(),
+        serde_json::json!({
+            "dry_run": false,
+            "accept_legacy_segment": true,
+            "purpose": "operator free text rollback"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{refused}");
+    assert!(
+        refused
+            .to_string()
+            .contains("legacy_segment_resume_disabled"),
+        "{refused}"
+    );
+    assert!(
+        !refused.to_string().contains("free text"),
+        "the refusal is label-only: {refused}"
+    );
+    assert_eq!(
+        audit_chain_file_hashes(temp.path(), "tenant-a"),
+        chain_before,
+        "a refused resume leaves the file chain unchanged"
+    );
+}
+
+/// With the switch off, a tenant a rollback left behind a legacy segment is
+/// still diagnosed by the dry run -- the operator can see the state -- but
+/// every non-dry run is refused `legacy_segment_resume_disabled`, with or
+/// without `accept_legacy_segment`, and neither the file nor the DB changes.
+#[tokio::test]
+async fn legacy_segment_resume_switch_off_diagnoses_but_never_writes() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let RolledBackTenant { mut state, .. } = roll_back_and_forward(&backend, temp.path()).await;
+    Arc::make_mut(&mut state).allow_legacy_segment_resume = false;
+    let db_rows = |rows: Vec<StorageTraceAuditEventRecord>| {
+        rows.into_iter()
+            .map(|row| (row.audit_event_id, row.event_hash))
+            .collect::<Vec<_>>()
+    };
+    let file_before = audit_chain_file_hashes(temp.path(), "tenant-a");
+    let db_before = db_rows(
+        backend
+            .list_trace_audit_events("tenant-a")
+            .await
+            .expect("DB rows"),
+    );
+
+    let (status, dry_run) =
+        post_audit_chain_repair(state.clone(), serde_json::json!({"dry_run": true})).await;
+    assert_eq!(status, StatusCode::OK, "{dry_run}");
+    assert_eq!(dry_run["divergence"], "file_ahead_through_legacy_rows");
+    assert_eq!(dry_run["legacy_segment_file_events"], 4);
+    assert_eq!(dry_run["legacy_segment_resume_enabled"], false);
+    assert_eq!(dry_run["chain_resumed"], false);
+
+    for body in [
+        serde_json::json!({"dry_run": false, "accept_legacy_segment": true}),
+        serde_json::json!({"dry_run": false, "accept_legacy_segment": false}),
+        serde_json::json!({"dry_run": false}),
+    ] {
+        let (status, refused) = post_audit_chain_repair(state.clone(), body).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{refused}");
+        assert!(
+            refused
+                .to_string()
+                .contains("legacy_segment_resume_disabled"),
+            "{refused}"
+        );
+        assert_eq!(
+            audit_chain_file_hashes(temp.path(), "tenant-a"),
+            file_before,
+            "a refused resume leaves the file chain unchanged"
+        );
+        assert_eq!(
+            db_rows(
+                backend
+                    .list_trace_audit_events("tenant-a")
+                    .await
+                    .expect("DB rows")
+            ),
+            db_before,
+            "a refused resume leaves the DB chain unchanged"
+        );
+    }
+    // Still locked out: nothing resumed the chain.
+    let (status, _) = submit_low_risk_trace(state.clone())
+        .await
+        .expect_err("the tenant stays locked out while the switch is off");
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
     cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
 }
 
@@ -39925,6 +40435,139 @@ async fn vector_index_worker_route_rejects_reviewer_tokens_before_db_check() {
     .expect_err("reviewer token must not reach vector index worker preconditions");
 
     assert_eq!(error.0, StatusCode::FORBIDDEN);
+}
+
+/// Task 8: `POST /v1/workers/pipeline/index-rebuild` copies
+/// `vector_index_handler`'s authentication shape exactly -- a missing
+/// credential is 401, a credential that is neither admin nor
+/// `TokenRole::VectorWorker` is 403, both before this PostgreSQL-free test
+/// state's absent pipeline runtime is ever consulted. Every error body is a
+/// fixed label, never an echo of the request or a database detail.
+#[tokio::test]
+async fn pipeline_index_rebuild_worker_route_requires_a_credential() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state(temp.path().to_path_buf());
+
+    let error = pipeline_index_rebuild_handler(State(state), HeaderMap::new())
+        .await
+        .expect_err("a missing credential must not reach the pipeline index rebuild");
+    assert_eq!(error.0, StatusCode::UNAUTHORIZED);
+    assert_eq!(error.1.0.error, "missing bearer token");
+}
+
+#[tokio::test]
+async fn pipeline_index_rebuild_worker_route_rejects_a_non_vector_worker_credential() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state(temp.path().to_path_buf());
+
+    let error = pipeline_index_rebuild_handler(State(state), auth_headers("review-token-a"))
+        .await
+        .expect_err("a reviewer token must not reach the pipeline index rebuild");
+    assert_eq!(error.0, StatusCode::FORBIDDEN);
+    assert_eq!(error.1.0.error, "admin or vector worker token required");
+}
+
+/// A valid vector worker credential passes authentication and the role
+/// gate, so the only reason left for this PostgreSQL-free test state to
+/// refuse is the absent pipeline runtime -- the same 404
+/// `pipeline_review_claim_handler` and its siblings answer for the same
+/// reason.
+#[tokio::test]
+async fn pipeline_index_rebuild_worker_route_answers_404_without_a_pipeline_runtime() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state(temp.path().to_path_buf());
+
+    let error = pipeline_index_rebuild_handler(State(state), auth_headers("vector-worker-token-a"))
+        .await
+        .expect_err("no pipeline runtime is injected in this test state");
+    assert_eq!(error.0, StatusCode::NOT_FOUND);
+    assert_eq!(error.1.0.error, "pipeline runtime not configured");
+}
+
+/// Zaki's re-review of #1166, Low: the rebuild route runs one rebuild per
+/// tenant at a time, in a task the shutdown drains. While a tenant's
+/// rebuild runs, a second one for it is refused
+/// (`pipeline_index_rebuild_in_progress`) and another tenant's starts; once
+/// it ends, the tenant can be rebuilt again. `drain` refuses new rebuilds
+/// (`pipeline_index_rebuild_shutting_down`), waits for a running one within
+/// the grace period, and aborts one that outlives it, which frees its
+/// tenant's slot.
+#[tokio::test]
+async fn pipeline_index_rebuilds_run_one_per_tenant_and_drain_at_shutdown() {
+    use pipeline_runtime::{
+        PIPELINE_INDEX_REBUILD_IN_PROGRESS_LABEL, PIPELINE_INDEX_REBUILD_SHUTTING_DOWN_LABEL,
+        PipelineIndexRebuilds,
+    };
+    let rebuilds = Arc::new(PipelineIndexRebuilds::default());
+
+    let (release_a, held_a) = tokio::sync::oneshot::channel::<()>();
+    let first = rebuilds
+        .start("tenant-a", async move {
+            let _ = held_a.await;
+            "a"
+        })
+        .expect("the first rebuild of tenant-a starts");
+    assert_eq!(
+        rebuilds.start("tenant-a", async { "again" }).err(),
+        Some(PIPELINE_INDEX_REBUILD_IN_PROGRESS_LABEL),
+        "a second rebuild of a tenant whose rebuild runs is refused"
+    );
+    let other = rebuilds
+        .start("tenant-b", async { "b" })
+        .expect("another tenant's rebuild starts");
+    assert_eq!(other.await.unwrap(), "b");
+
+    release_a.send(()).unwrap();
+    assert_eq!(first.await.unwrap(), "a");
+    let again = tokio::time::timeout(StdDuration::from_secs(5), async {
+        loop {
+            match rebuilds.start("tenant-a", async { "again" }) {
+                Ok(receiver) => break receiver.await.unwrap(),
+                Err(_) => tokio::task::yield_now().await,
+            }
+        }
+    })
+    .await
+    .expect("the ended rebuild frees its tenant");
+    assert_eq!(again, "again");
+
+    // The shutdown waits for a rebuild that ends within the grace period.
+    let (release_c, held_c) = tokio::sync::oneshot::channel::<()>();
+    let finishing = rebuilds
+        .start("tenant-c", async move {
+            let _ = held_c.await;
+            "c"
+        })
+        .unwrap();
+    let (release_d, held_d) = tokio::sync::oneshot::channel::<()>();
+    let _stuck = rebuilds
+        .start("tenant-d", async move {
+            let _ = held_d.await;
+            "d"
+        })
+        .unwrap();
+    let drain = tokio::spawn({
+        let rebuilds = rebuilds.clone();
+        async move { rebuilds.drain(StdDuration::from_millis(500)).await }
+    });
+    tokio::time::sleep(StdDuration::from_millis(50)).await;
+    assert_eq!(
+        rebuilds.start("tenant-e", async { "e" }).err(),
+        Some(PIPELINE_INDEX_REBUILD_SHUTTING_DOWN_LABEL),
+        "a rebuild requested during the drain is refused"
+    );
+    assert!(!drain.is_finished(), "the drain waits for running rebuilds");
+    release_c.send(()).unwrap();
+    assert_eq!(finishing.await.unwrap(), "c");
+    // tenant-d's rebuild outlives the grace period and is aborted.
+    tokio::time::timeout(StdDuration::from_secs(5), drain)
+        .await
+        .expect("the drain ends at the grace period")
+        .unwrap();
+    assert!(
+        release_d.send(()).is_err(),
+        "the rebuild that outlived the grace period was aborted"
+    );
 }
 
 #[tokio::test]
@@ -96273,6 +96916,22 @@ mod wallet_v2_pg_tests;
 /// to `tests`'s descendants.
 #[path = "pipeline_http_pg_tests.rs"]
 mod pipeline_http_pg_tests;
+
+/// `pipeline.py run` and `pipeline.py package` (P4-D3): the ignored
+/// `pipeline_corpus_run` harness drives a corpus through the shared ingest
+/// app over real HTTP, and the ignored `pipeline_package_write` tool writes a
+/// signed bundle package. Nested here beside `pipeline_http_pg_tests`, whose
+/// `pub(super)` helpers it reuses.
+#[path = "pipeline_corpus_pg_tests.rs"]
+mod pipeline_corpus_pg_tests;
+
+/// `pipeline.py restore-drill`: the ignored `pipeline_restore_seed` leaves
+/// one completed run and one run stopped after a durable Settle selection,
+/// and the ignored `pipeline_restore_resume` proves the restored copy
+/// completes that run once. Nested here beside the two modules above, whose
+/// `pub(super)` helpers it reuses.
+#[path = "pipeline_restore_pg_tests.rs"]
+mod pipeline_restore_pg_tests;
 
 /// The nineteen `validate_*_reason` / `validate_*_purpose` wrappers all reduce
 /// to this, so the trim / reject-empty / reject-over-1024 contract and the two

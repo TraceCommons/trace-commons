@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Generic;
+using System.Text.Json;
 
 namespace TraceCommons.Interop;
 
@@ -37,39 +39,83 @@ public static class WatchCopy
     public const string Section = "Projects";
 
     /// <summary>
-    /// The per-row state for a project that has not been ignored. This is the
-    /// vocabulary Settings already uses for the same mode: two screens setting
-    /// one field must not name it two ways.
+    /// The core's one name for a folder mode, by wire mode: the disclosure
+    /// bundle's <c>folder_mode_labels</c>
+    /// (<c>project_copy::FOLDER_MODE_LABELS</c>). Owner decision, 2026-10-02:
+    /// a mode reads by one name, Ask me, Automatic or Never, on every surface of every
+    /// shell, and this shell types none of the three. <c>ask</c>, this shell's
+    /// spelling of <c>notify_only</c> (<see cref="ProjectManualMode"/>), reads
+    /// as it. Empty for a mode the table does not name, or if the core could
+    /// not produce the bundle, so a row then says nothing rather than
+    /// something typed here.
     /// </summary>
-    public const string AskMeFirst = "Ask me first";
+    public static string ModeLabel(string? mode) =>
+        FolderModeLabelsFromCore.Value.TryGetValue(mode == "ask" ? "notify_only" : mode ?? string.Empty, out string? label)
+            ? label
+            : string.Empty;
 
     /// <summary>
-    /// The state after <c>Ignore</c>. Echoes the button that produced it rather
-    /// than introducing a third name for the mode.
+    /// The per-row state for a project that has not been ignored: the core's
+    /// name for <c>notify_only</c>, the word Settings and the pill use too.
     /// </summary>
-    public const string Ignored = "Ignored";
+    public static string AskMeFirst => ModeLabel("notify_only");
+
+    /// <summary>The state of an ignored project: the core's name for <c>ignore</c>.</summary>
+    public static string Ignored => ModeLabel("ignore");
 
     /// <summary>
-    /// The state of a project that uploads without asking.
+    /// The state of a project that uploads without asking: the core's name for
+    /// <c>auto_upload</c>.
     ///
     /// Onboarding never arms a project, but a contributor who armed one in
     /// Settings and later walks this screen still sees the row, and a consent
     /// surface that leaves the armed state blank is the one row that must not
-    /// go quiet. The words are Settings' own -- that screen reads them from
-    /// here too, so the armed mode has one name.
+    /// go quiet. Settings reads it from here too, so the armed mode has one name.
     /// </summary>
-    public const string Armed = "Contributed without asking";
+    public static string Armed => ModeLabel("auto_upload");
 
     /// <summary>
     /// What the row's button says when an ignored or armed project returns
-    /// to manual review: the action is to start being asked again. Settings' word, shared for the reason
-    /// <see cref="AskMeFirst"/> is shared -- two screens driving one field must
-    /// not name one transition two ways.
+    /// to manual review: the name of the mode it sets, so two screens driving
+    /// one field do not name one transition two ways.
     /// </summary>
-    public const string RestoreAction = "Ask again";
+    public static string RestoreAction => AskMeFirst;
 
-    /// <summary>The button on an ask-first row.</summary>
-    public const string IgnoreAction = "Ignore";
+    /// <summary>The button on an ask-first row: the name of the mode it sets.</summary>
+    public static string IgnoreAction => Ignored;
+
+    private static readonly Lazy<Dictionary<string, string>> FolderModeLabelsFromCore =
+        new(ReadFolderModeLabels);
+
+    private static Dictionary<string, string> ReadFolderModeLabels()
+    {
+        var table = new Dictionary<string, string>(StringComparer.Ordinal);
+        string? json = NativeMethods.TakeOwnedString(NativeMethods.tc_contributor_disclosure_copy_json());
+        if (string.IsNullOrEmpty(json)) return table;
+        try
+        {
+            using JsonDocument doc = JsonDocument.Parse(json);
+            if (doc.RootElement.ValueKind != JsonValueKind.Object
+                || !doc.RootElement.TryGetProperty("folder_mode_labels", out JsonElement labels)
+                || labels.ValueKind != JsonValueKind.Object)
+            {
+                return table;
+            }
+
+            foreach (JsonProperty row in labels.EnumerateObject())
+            {
+                if (row.Value.ValueKind == JsonValueKind.String && row.Value.GetString() is { } word)
+                {
+                    table[row.Name] = word;
+                }
+            }
+        }
+        catch (JsonException)
+        {
+        }
+
+        return table;
+    }
 
     /// <summary>
     /// What is said when the daemon refused the write. Settings' sentence,
@@ -149,7 +195,7 @@ public static class WatchCopy
             "ignore" => Ignored,
 
             // An armed row says that it is armed. Falling through to
-            // "Ask me first" here would tell a contributor the opposite of
+            // the ask-first name here would tell a contributor the opposite of
             // what the daemon will do with their next session, and rendering
             // nothing would leave the one row that most needs a state line
             // without one.

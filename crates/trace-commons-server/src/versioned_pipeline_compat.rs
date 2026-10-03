@@ -265,9 +265,12 @@ impl CompatibilityBundleConfig {
 
     /// Whether a runtime that routes or drains tenants may bind this
     /// configuration: it is production-compatible and valid. The runtime's
-    /// qualification gate reads it (`PipelineDependencyQualification::bundle`),
-    /// so the local reference configuration, whose floors are all zero, never
-    /// binds there.
+    /// qualification gate and `qualify_bundle` read it through the bundle
+    /// qualification's configuration term
+    /// (`versioned_pipeline_bundle::package_configuration_is_qualifiable`,
+    /// `PipelineBundleQualification::configuration_qualifiable`), so the
+    /// local reference configuration, whose floors are all zero, never binds
+    /// there.
     pub fn is_qualifiable(&self) -> bool {
         self.qualification == CompatibilityQualification::ProductionCompatible
             && self.validate().is_ok()

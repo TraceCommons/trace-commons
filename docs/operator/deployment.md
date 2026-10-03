@@ -815,6 +815,39 @@ route:
 GRANT trace_account_admission_runtime TO <ingest runtime login>;
 ```
 
+### V107 and V108: qualification and attempt artifact tables
+
+V107 adds `pipeline_bundle_qualifications`, the immutable record PR 5's
+activation gate reads to decide whether a signed package is production
+qualified. V108 adds `pipeline_attempt_artifacts`, which stages the object
+each phase attempt writes -- Review's approved revision, and Score's index
+command and neighbour set -- before its phase commit, so the attempt sweep
+can delete the ones that never commit. Like V92 to V95, each grants
+`trace_ingest_runtime` what the pipeline code reads and writes there, and
+nothing broader, and each refuses to apply if the group does not exist:
+
+| Table | Grant | Why |
+|---|---|---|
+| `pipeline_bundle_qualifications` | `SELECT, INSERT` | a qualification inserts once per bundle; the worker and API paths read it |
+| `pipeline_attempt_artifacts` | `SELECT, INSERT, DELETE`; `UPDATE` on `state`, `committed_at`, `ciphertext_sha256` | the phase write stages a row (INSERT), the phase commit moves it to `committed` and sets a hash a compatibility Score staged the row without (UPDATE), and the Score commit (for an artifact it did not write) and the attempt sweep delete a `staged` row (DELETE) |
+
+`pipeline_bundle_qualifications` is append-only: a trigger refuses a direct
+`UPDATE` or any `DELETE` that is not a cascade, and a row leaves only when
+its package does, through the foreign key, which runs as the table owner.
+`pipeline_attempt_artifacts`'s guard trigger allows an `UPDATE` only from
+`staged` to `committed`, which may set a missing `ciphertext_sha256` to a
+64-character lowercase hex value but never change one already set; every
+other change to a `committed` row, or to a `staged` row but its commit, is
+refused regardless of grant. A `committed` row must have its hash.
+
+Check before deploying:
+
+```sql
+SELECT has_table_privilege('<ingest runtime login>', 'public.pipeline_bundle_qualifications', 'INSERT');
+SELECT has_table_privilege('<ingest runtime login>', 'public.pipeline_attempt_artifacts', 'INSERT');
+SELECT has_column_privilege('<ingest runtime login>', 'public.pipeline_attempt_artifacts', 'ciphertext_sha256', 'UPDATE');
+```
+
 ### Build and install
 
 The pilot host has no Rust toolchain; binaries are built by Cloud Build and

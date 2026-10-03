@@ -1,6 +1,7 @@
-use std::path::PathBuf;
-
 use tauri::State;
+use trace_commons_contributor::daemon::settings::{
+    validate_routing_port, validate_routing_token_dir,
+};
 
 use crate::{
     ipc::{call_daemon, shared_state},
@@ -19,20 +20,6 @@ pub(crate) async fn discover_routing(
     .await
 }
 
-fn routing_token_dir(token_dir: Option<String>) -> Result<Option<String>, String> {
-    let Some(token_dir) = token_dir else {
-        return Ok(None);
-    };
-    let token_dir = token_dir.trim();
-    if token_dir.is_empty() {
-        return Ok(None);
-    }
-    if !PathBuf::from(token_dir).is_absolute() {
-        return Err("routing-token-dir-must-be-absolute".to_owned());
-    }
-    Ok(Some(token_dir.to_owned()))
-}
-
 #[tauri::command]
 pub(crate) async fn configure_routing(
     state: State<'_, AppState>,
@@ -43,11 +30,9 @@ pub(crate) async fn configure_routing(
     let declaration = if !enabled {
         serde_json::Value::Null
     } else {
-        if port == 0 {
-            return Err("routing-port-invalid".to_owned());
-        }
+        validate_routing_port(port)?;
         let mut value = serde_json::json!({ "mode": "watch", "port": port });
-        if let Some(token_dir) = routing_token_dir(token_dir)? {
+        if let Some(token_dir) = validate_routing_token_dir(token_dir.as_deref())? {
             value["token_dir"] = serde_json::Value::String(token_dir);
         }
         value
@@ -66,10 +51,8 @@ async fn probe_routing_call(
     port: u16,
     token_dir: Option<String>,
 ) -> Result<serde_json::Value, String> {
-    if port == 0 {
-        return Err("routing-port-invalid".to_owned());
-    }
-    let token_dir = routing_token_dir(token_dir)?;
+    validate_routing_port(port)?;
+    let token_dir = validate_routing_token_dir(token_dir.as_deref())?;
     call_daemon(
         shared_state(&state)?,
         method,
@@ -98,22 +81,28 @@ pub(crate) async fn probe_routed_tools(
 
 #[cfg(test)]
 mod tests {
-    use super::routing_token_dir;
+    use super::validate_routing_token_dir;
 
+    /// The port/token-dir validation this file used to implement locally is
+    /// now `trace_commons_contributor::daemon::settings::validate_routing_
+    /// token_dir`/`validate_routing_port`, which `set_settings` itself also
+    /// enforces (see that crate's own tests for the port-zero and
+    /// relative-path cases). This pins that this file reaches the moved
+    /// function under the same import path a caller of this module expects.
     #[test]
     fn routing_token_directory_is_optional_but_never_relative() {
-        assert_eq!(routing_token_dir(None).unwrap(), None);
-        assert_eq!(routing_token_dir(Some("  ".to_owned())).unwrap(), None);
+        assert_eq!(validate_routing_token_dir(None).unwrap(), None);
+        assert_eq!(validate_routing_token_dir(Some("  ")).unwrap(), None);
         let absolute = std::env::temp_dir()
             .join("ironwire")
             .to_string_lossy()
             .into_owned();
         assert_eq!(
-            routing_token_dir(Some(absolute.clone())).unwrap(),
+            validate_routing_token_dir(Some(&absolute)).unwrap(),
             Some(absolute)
         );
         assert_eq!(
-            routing_token_dir(Some(".ironwire".to_owned())).unwrap_err(),
+            validate_routing_token_dir(Some(".ironwire")).unwrap_err(),
             "routing-token-dir-must-be-absolute"
         );
     }

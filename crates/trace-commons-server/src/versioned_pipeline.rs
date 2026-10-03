@@ -25,7 +25,7 @@ use trace_commons_gate_api::pipeline::{
 };
 use trace_commons_gate_api::{
     IdentifiedEmbedder, IdentifiedIndexReader, IdentifiedIndexWriter, IdentifiedPerplexityScorer,
-    IndexWriteError, SettlementError, SettlementReceipt, SettlementRequest,
+    IndexUpsertResult, IndexWriteError, SettlementError, SettlementReceipt, SettlementRequest,
 };
 use trace_commons_protocol::trace_contribution::{
     ConsentScope, ResidualPiiRisk, ResidualRiskCondition, TraceAllowedUse,
@@ -68,6 +68,7 @@ use crate::versioned_pipeline_credit::{
     pipeline_ledger_source_key, pipeline_near_outbox_line_id, pipeline_novelty_utility_reason,
     pipeline_settlement_batch_id, source_list_hash,
 };
+use crate::versioned_pipeline_qualification::package_digests;
 
 /// The lifecycle half of every pipeline operability check, over the
 /// `trace_submissions` row aliased `s` (Zaki review 1, round 2,
@@ -135,6 +136,16 @@ pub const PIPELINE_ATTEMPTS_EXHAUSTED_LABEL: &str = "attempts_exhausted";
 pub const PIPELINE_BUNDLE_MISSING_LABEL: &str = "bundle_package_missing";
 pub const PIPELINE_POLICY_NOT_RUNNABLE_LABEL: &str = "bundle_policy_not_runnable";
 pub const PIPELINE_INDEX_UNAVAILABLE_LABEL: &str = "index_unavailable";
+/// A phase commit, or a receipt's final transaction, found no `staged`
+/// attempt row naming the object it is about to record (or the row names
+/// another object or hash). Only an out-of-band change or a defect gets
+/// there: the commit is refused, and a phase records it as a charged retry
+/// under this label (wave 2, fix round 1; review I2, I3).
+pub const PIPELINE_ATTEMPT_ARTIFACT_MISSING_LABEL: &str = "pipeline_attempt_artifact_missing";
+/// A bundle whose own configuration is not qualifiable
+/// (`PipelineBundleQualification::configuration_qualifiable`).
+pub const PIPELINE_BUNDLE_CONFIGURATION_NOT_QUALIFIABLE_LABEL: &str =
+    "bundle_configuration_not_qualifiable";
 /// Safe label of an object-store call in the run path that failed (an
 /// outage, not a decode or hash mismatch): the uncharged suspension of
 /// ruling FR3 (multi-lens review L2-2).
@@ -359,6 +370,26 @@ const PIPELINE_RECEIPT_OBJECT_TASK_FAILED_LABEL: &str = "receipt_object_task_fai
 /// returned (Zaki review 1, round 2, N-6). Fails closed.
 const PIPELINE_BLOCKING_CALL_FAILED_LABEL: &str = "blocking_call_failed";
 
+/// The artifact store cannot derive an object key before the content
+/// exists (`TraceArtifactStore::serialized_json_object_key`'s default
+/// refusal), which a compatibility Score needs before its tenant lock
+/// (rebase 10, option D). A failed store call like any other
+/// (`artifact_store_call`), so the uncharged suspension of ruling FR3
+/// (rebase 10 review, M2); it keeps its own label, since it names a store
+/// that lacks the capability rather than one that is down.
+const PIPELINE_OBJECT_KEY_UNAVAILABLE_LABEL: &str = "serialized_json_object_key_unavailable";
+/// The key the store prepared a compatibility Score's object under differs
+/// from the key it derived, and the attempt staged, before the tenant lock;
+/// publishing it would leave an object no row names, so nothing is
+/// published. The store's own inconsistency, not a check of the content it
+/// returned, so it is suspended uncharged as a failed store call is
+/// (`artifact_store_call`; rebase 10 review, M2).
+const PIPELINE_ATTEMPT_OBJECT_KEY_MISMATCH_LABEL: &str = "pipeline_attempt_object_key_mismatch";
+/// Store refusals `artifact_store_call` reports under their own label
+/// rather than `artifact_store_unavailable`: each names a capability the
+/// store lacks, which an operator fixes by configuration, not by waiting.
+const ARTIFACT_STORE_CAPABILITY_LABELS: &[&str] = &[PIPELINE_OBJECT_KEY_UNAVAILABLE_LABEL];
+
 /// Runs `call`, a synchronous dependency call (an object store or an index:
 /// file or network I/O), on the blocking pool, so it never parks a runtime
 /// worker thread (Zaki review 1, round 2, N-6). A caller may hold a
@@ -373,18 +404,29 @@ where
         .map_err(|_| anyhow::anyhow!(PIPELINE_BLOCKING_CALL_FAILED_LABEL))?
 }
 
-/// Runs `call`, an object-store call of the run path (Review's source read
-/// and approved write, Score's approved read and object writes), on the
-/// blocking pool, and reports the store's own error by its class. A
-/// transport or availability failure is the uncharged suspension
-/// `artifact_store_unavailable` (multi-lens review L2-2, ruling FR3): an
-/// outage, not the trace's fault. An integrity failure the store reports
-/// (`is_trace_artifact_integrity_error`: the object missing, or not what its
-/// receipt names) is the charged `artifact_integrity_failed`, which the
-/// phase's attempt budget ends (Zaki's approval, ZA-2). The caller's own
-/// checks of what the store returned (a decode, a hash or a revision
-/// mismatch) stay charged, and a lost blocking task keeps
-/// `blocking_call_failed`.
+/// Runs `call`, an object-store call of the run path (Review's source read,
+/// and its approved object's prepare and publish; Score's approved read,
+/// its object keys' derivation before the tenant lock, and each object's
+/// prepare and publish), on the blocking pool, and reports the store's own
+/// error by its class.
+///
+/// This is the pipeline's one rule for its object store (wave 2, merging
+/// PR 3's c8d65fcb with PR 4's 6dace131, and Zaki's approval of #1143,
+/// ZA-2). A failure of the store itself -- a failed call, a capability it
+/// lacks, or a key it does not keep
+/// (`PIPELINE_ATTEMPT_OBJECT_KEY_MISMATCH_LABEL`, raised by the caller as
+/// the same transient `PolicyError`) -- is the uncharged suspension
+/// `artifact_store_unavailable` (multi-lens review L2-2, ruling FR3), or
+/// the store's own label for a refusal in
+/// `ARTIFACT_STORE_CAPABILITY_LABELS`: an outage, not the trace's fault. An
+/// integrity failure the store reports
+/// (`is_trace_artifact_integrity_error`: the object missing, or not what
+/// its receipt names) is the charged `artifact_integrity_failed`, which the
+/// phase's attempt budget ends. The caller's own checks of the content the
+/// store returned (a decode, a hash or a revision mismatch) stay charged,
+/// and a lost blocking task keeps `blocking_call_failed`. The attempt sweep
+/// has no run to charge: a store call of the sweep that fails keeps its row
+/// for the next pass (`PipelineService::sweep_attempt_artifacts`).
 async fn artifact_store_call<T, F>(call: F) -> anyhow::Result<T>
 where
     F: FnOnce() -> anyhow::Result<T> + Send + 'static,
@@ -392,17 +434,31 @@ where
 {
     on_blocking_pool(move || {
         call().map_err(|error| {
+            // ZA-2: an integrity failure the store reports is charged; every
+            // other failure of the store is the uncharged suspension.
             if crate::trace_artifact_store::is_trace_artifact_integrity_error(&error) {
                 anyhow::anyhow!(PIPELINE_ARTIFACT_INTEGRITY_FAILED_LABEL)
             } else {
-                anyhow::Error::from(
-                    PolicyError::transient(PIPELINE_ARTIFACT_STORE_UNAVAILABLE_LABEL)
-                        .expect("static label"),
-                )
+                artifact_store_failure(&error).into()
             }
         })
     })
     .await
+}
+
+/// The uncharged suspension `artifact_store_call` reports for a store
+/// call's `error` that is not an integrity failure: the store's own refusal
+/// when it is one of `ARTIFACT_STORE_CAPABILITY_LABELS`, else
+/// `artifact_store_unavailable`. Nothing else of the store's message
+/// reaches the run.
+fn artifact_store_failure(error: &anyhow::Error) -> PolicyError {
+    let message = error.to_string();
+    let label = ARTIFACT_STORE_CAPABILITY_LABELS
+        .iter()
+        .copied()
+        .find(|label| *label == message)
+        .unwrap_or(PIPELINE_ARTIFACT_STORE_UNAVAILABLE_LABEL);
+    PolicyError::transient(label).expect("static label")
 }
 
 /// The SQL form of `settlement_leg_is_unresolved`, over a row aliased `s`.
@@ -536,9 +592,16 @@ fn is_external_receipt_reuse_error(error: &anyhow::Error) -> bool {
 /// the first worker's own stale write runs, `record_lease_expired`'s
 /// token-only fence finds no row under the first worker's now-superseded
 /// token and changes nothing -- that attempt is silently lost, recorded
-/// neither as `lease_expired` nor as a charge reversed. Lease renewal (PR 4)
-/// is what closes both gaps, by extending a live lease before it expires
-/// rather than discovering the expiry after the fact.
+/// neither as `lease_expired` nor as a charge reversed.
+///
+/// `PipelineLeaseRenewal` closes only the second gap, and only for a live
+/// worker: it extends the lease before it expires, so no other worker can
+/// reclaim a phase that is merely slow. The first gap stays: a crashed
+/// worker still records nothing, and its run is reclaimed as a charged
+/// attempt once its last lease expires. The second gap reopens when a live
+/// worker's lease expires anyway: its phase runs past
+/// `PIPELINE_LEASE_RENEWAL_CAP_FACTOR` phase leases (renewal stops at the
+/// cap), or its renewal does not get to run before the lease expires.
 pub const PIPELINE_LEASE_EXPIRED_LABEL: &str = "lease_expired";
 /// Safe label `PipelineLeaseConfig::new` refuses with when a phase's
 /// configured lease falls outside [1 second, 2 hours].
@@ -548,6 +611,17 @@ const PIPELINE_LEASE_MAX_SECONDS: i64 = 2 * 60 * 60;
 const PIPELINE_LEASE_DEFAULT_REVIEW_SECONDS: i64 = 5 * 60;
 const PIPELINE_LEASE_DEFAULT_SCORE_SECONDS: i64 = 30 * 60;
 const PIPELINE_LEASE_DEFAULT_SETTLE_SECONDS: i64 = 5 * 60;
+/// A lease is renewed at most until this many phase leases after its claim
+/// (`PipelineLeaseRenewal::start`'s `lease_cap`): an honest phase that is
+/// merely slow keeps being renewed, but a phase that never comes back at all
+/// still surrenders its claim within a bounded multiple of its own
+/// configured lease, rather than being renewed forever.
+pub const PIPELINE_LEASE_RENEWAL_CAP_FACTOR: i32 = 4;
+/// How long past the latest moment a phase attempt's lease can still be
+/// live (`PipelineService::attempt_artifact_lease_bound`) its staged
+/// objects wait before the sweep may remove them: time for the commit
+/// itself to land once the phase work is done.
+const PIPELINE_ATTEMPT_ARTIFACT_COMMIT_MARGIN: Duration = Duration::hours(1);
 
 /// Each pipeline phase gets
 /// its own claim-lease length, sized for how long that phase can actually
@@ -557,9 +631,10 @@ const PIPELINE_LEASE_DEFAULT_SETTLE_SECONDS: i64 = 5 * 60;
 /// exceeds a short fixed lease, which used to make `commit_score` and the
 /// following `mark_retry` both fail on a stale lease and burn an attempt
 /// every time. The defaults below give Score six times the headroom Review
-/// and Settle get. Lease renewal mid-phase (extending a lease the phase
-/// still holds) is PR 4 and out of scope here -- this only sizes the one
-/// lease a phase gets when it is claimed.
+/// and Settle get. `PipelineLeaseRenewal` extends a lease the phase still
+/// holds, up to `PIPELINE_LEASE_RENEWAL_CAP_FACTOR` times the length set
+/// here -- this struct only sizes the one lease a phase gets when it is
+/// claimed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PipelineLeaseConfig {
     review: Duration,
@@ -598,6 +673,16 @@ impl PipelineLeaseConfig {
 
     pub fn settle(&self) -> Duration {
         self.settle
+    }
+
+    /// The lease a claim of `phase` gets; Admission never runs as a claim and
+    /// falls back to Review, as the claim SQL's `ELSE` arm does.
+    pub fn for_phase(&self, phase: Phase) -> Duration {
+        match phase {
+            Phase::Score => self.score,
+            Phase::Settle => self.settle,
+            Phase::Admission | Phase::Review => self.review,
+        }
     }
 }
 
@@ -1141,6 +1226,38 @@ enum ReceiptCommit {
     StagingMissing,
 }
 
+/// The run half of index-rebuild eligibility, over `pipeline_runs p`:
+/// complete, included in the index, with a completed index write that no
+/// invalidation has touched since, and a stored command reference and hash
+/// to rebuild from. `PgPipelineStore::list_rebuildable_index_runs` lists by
+/// it and `PgPipelineStore::lock_rebuildable_index_run_on_tx` re-checks it
+/// under the run's lock, so the two cannot drift. The submission half is
+/// `PgPipelineStore::submission_guard_on_tx` itself, read per run under
+/// that lock (final review I1 and M8).
+///
+/// A run's invalidation state is its `pipeline_index_invalidations` row's
+/// state, `none` without a row (PR 3, 62cc2768: `pipeline_runs` keeps no
+/// copy), so "no invalidation has touched it" is "it has no row", whatever
+/// that row's state.
+macro_rules! rebuildable_index_run_predicate {
+    () => {
+        "p.state = 'complete'
+         AND p.index_membership = 'included'
+         AND p.index_write_state = 'complete'
+         AND NOT EXISTS (
+             SELECT 1 FROM pipeline_index_invalidations i
+              WHERE i.tenant_id = p.tenant_id AND i.run_id = p.run_id
+         )
+         AND p.index_command_ref IS NOT NULL
+         AND p.index_command_hash IS NOT NULL"
+    };
+}
+
+/// Cheap to clone: the pool it wraps is already an `Arc`.
+/// `PipelineLeaseRenewal::start` clones one into its own background task,
+/// which takes its own short connection checkout rather than sharing the
+/// caller's.
+#[derive(Clone)]
 pub struct PgPipelineStore {
     backend: Arc<PgBackend>,
 }
@@ -1665,6 +1782,62 @@ impl PgPipelineStore {
         Ok(())
     }
 
+    /// Extends a lease this claim still holds. Never shortens it, never
+    /// extends past `lease_cap`, and changes nothing when the token no longer
+    /// matches or the lease already expired -- the same token-plus-liveness
+    /// fence every other lease-checked write uses, so a lost lease is simply
+    /// never renewed rather than renewed onto a run another worker now holds.
+    /// Called only by `PipelineLeaseRenewal`'s background task, on its own
+    /// connection checkout, never inside another transaction.
+    ///
+    /// Liveness is decided only once the run row is held (wave 2; rebase 10
+    /// review, M7; fix round 1, review M4): the transaction first locks the
+    /// row (`SELECT ... FOR NO KEY UPDATE`, the mode the UPDATE itself takes,
+    /// so it does not also wait on a child row's foreign-key `FOR KEY SHARE`;
+    /// fix round 2), waiting out any holder, and the UPDATE
+    /// that follows compares `lease_expires_at` with `clock_timestamp()`,
+    /// the time it runs, not `NOW()`, the transaction's start. A lease that
+    /// expired while the renewal waited is then not renewed, whether the
+    /// holder updated the row or only locked it (a lock-only holder gives
+    /// no re-check of a waiting UPDATE's `WHERE`, which is why the lock comes
+    /// first). The new expiry still counts from `NOW()`, which can only make
+    /// it earlier. Lock order: the run row only, as every lease-checked
+    /// write takes it.
+    pub async fn renew_lease(
+        &self,
+        tenant_id: &str,
+        run_id: Uuid,
+        lease_token: Uuid,
+        extension: Duration,
+        lease_cap: DateTime<Utc>,
+    ) -> Result<Option<DateTime<Utc>>, DatabaseError> {
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
+        let extension_ms = extension.num_milliseconds();
+        tx.query_opt(
+            "SELECT 1 FROM pipeline_runs
+              WHERE tenant_id = $1 AND run_id = $2 FOR NO KEY UPDATE",
+            &[&tenant_id, &run_id],
+        )
+        .await?;
+        let row = tx
+            .query_opt(
+                "UPDATE pipeline_runs
+                    SET lease_expires_at = GREATEST(
+                            lease_expires_at,
+                            LEAST(NOW() + ($4::bigint * INTERVAL '1 millisecond'), $5)
+                        ),
+                        updated_at = NOW()
+                  WHERE tenant_id = $1 AND run_id = $2 AND state = 'leased'
+                    AND lease_token = $3 AND lease_expires_at > clock_timestamp()
+                  RETURNING lease_expires_at",
+                &[&tenant_id, &run_id, &lease_token, &extension_ms, &lease_cap],
+            )
+            .await?;
+        tx.commit().await?;
+        Ok(row.map(|row| row.get(0)))
+    }
+
     /// Commits the Review outcome together with its approved-content
     /// provenance and the phase transition, in one transaction (decision
     /// D7). On approval: the approved object ref, its `trace_derived_records`
@@ -1852,6 +2025,59 @@ impl PgPipelineStore {
             )
             .await?;
         let updated = pipeline_run_from_row(&row)?;
+        // PR 4: the attempt's staged object -- the approved content, when
+        // this commit approved one -- moves to `committed` in this same
+        // transaction, the one that records it as an object ref of the
+        // submission; from here on the withdrawal, not the attempt sweep,
+        // owns its deletion. A refused commit above already returned without
+        // reaching here, so this never runs for one.
+        //
+        // An approval must move exactly the one `approved` row that names
+        // the object it records (its key, and its hash); a rejection staged
+        // no object and must move none (wave 2, fix round 1; review I3).
+        // Anything else is `pipeline_attempt_artifact_missing`, which rolls
+        // this transaction back; the caller deletes the approved object
+        // (`phase_commit_refused`), as for any refused commit.
+        let moved = match &approved {
+            Some(approved) => {
+                let ciphertext_sha256 = approved
+                    .object_ref
+                    .content_sha256
+                    .strip_prefix("sha256:")
+                    .unwrap_or(&approved.object_ref.content_sha256);
+                tx.execute(
+                    "UPDATE pipeline_attempt_artifacts
+                        SET state = 'committed', committed_at = NOW()
+                      WHERE tenant_id = $1 AND run_id = $2 AND lease_token = $3
+                        AND artifact = 'approved' AND state = 'staged'
+                        AND object_key = $4
+                        AND (ciphertext_sha256 IS NULL OR ciphertext_sha256 = $5)",
+                    &[
+                        &run.tenant_id,
+                        &run.run_id,
+                        &lease_token,
+                        &approved.object_ref.object_key,
+                        &ciphertext_sha256,
+                    ],
+                )
+                .await?
+            }
+            None => {
+                tx.execute(
+                    "UPDATE pipeline_attempt_artifacts
+                        SET state = 'committed', committed_at = NOW()
+                      WHERE tenant_id = $1 AND run_id = $2 AND lease_token = $3
+                        AND state = 'staged'",
+                    &[&run.tenant_id, &run.run_id, &lease_token],
+                )
+                .await?
+            }
+        };
+        if moved != u64::from(approved.is_some()) {
+            return Err(DatabaseError::Constraint(
+                PIPELINE_ATTEMPT_ARTIFACT_MISSING_LABEL.to_string(),
+            ));
+        }
         tx.commit().await?;
         Ok(updated)
     }
@@ -2488,6 +2714,84 @@ impl PgPipelineStore {
             )
             .await?;
         let updated = pipeline_run_from_row(&row)?;
+        // PR 4: the attempt's staged objects -- `index-command` and/or
+        // `score-neighbors`, whichever this commit wrote -- move to
+        // `committed` in this same transaction, the one that records each as
+        // an object ref of the submission (above); from here on the
+        // withdrawal, not the attempt sweep, owns their deletion. A refused
+        // commit above already returned without reaching here.
+        //
+        // Rebase 10, option D: a compatibility Score staged both rows before
+        // its tenant lock, with no hash. The commit sets a written row's
+        // hash from the object ref it records (`object_key#ciphertext_sha256`;
+        // a row staged with its hash keeps it, which V108's guard enforces),
+        // and deletes the row of an artifact this Score did not write, since
+        // no object exists for it. Only a row with no hash is deleted: a row
+        // with a hash was staged just before its object was published.
+        //
+        // Each written artifact must move exactly one row, the one that names
+        // its object: the same key, and either no hash yet or the same hash
+        // (wave 2; rebase 10 review, M4; fix round 1, review I2). An object
+        // no committed row names would be the attempt sweep's to delete
+        // although the run's object ref names it. The lease was found live
+        // above, and the sweep removes a `staged` row only once its
+        // `cleanup_after`, past any lease this attempt can hold, has passed,
+        // so a missing or mismatched row is an out-of-band change or a
+        // defect: `pipeline_attempt_artifact_missing`, the label the Review
+        // commit and the receipt use, which rolls this transaction back; the
+        // caller deletes the attempt's objects (`phase_commit_refused`).
+        for (artifact, stored) in [("index-command", command), ("score-neighbors", neighbor)] {
+            match stored {
+                Some((stored_ref, _, _)) => {
+                    let ciphertext_sha256 = stored_ref
+                        .rsplit_once('#')
+                        .map(|(_, ciphertext_sha256)| ciphertext_sha256)
+                        .ok_or_else(|| {
+                            DatabaseError::Constraint("score_outcome_invalid".to_string())
+                        })?;
+                    let object_key = stored_ref
+                        .rsplit_once('#')
+                        .map(|(object_key, _)| object_key)
+                        .ok_or_else(|| {
+                            DatabaseError::Constraint("score_outcome_invalid".to_string())
+                        })?;
+                    let committed = tx
+                        .execute(
+                            "UPDATE pipeline_attempt_artifacts
+                                SET ciphertext_sha256 = COALESCE(ciphertext_sha256, $5),
+                                    state = 'committed', committed_at = NOW()
+                              WHERE tenant_id = $1 AND run_id = $2 AND lease_token = $3
+                                AND artifact = $4 AND state = 'staged'
+                                AND object_key = $6
+                                AND (ciphertext_sha256 IS NULL OR ciphertext_sha256 = $5)",
+                            &[
+                                &run.tenant_id,
+                                &run.run_id,
+                                &lease_token,
+                                &artifact,
+                                &ciphertext_sha256,
+                                &object_key,
+                            ],
+                        )
+                        .await?;
+                    if committed != 1 {
+                        return Err(DatabaseError::Constraint(
+                            PIPELINE_ATTEMPT_ARTIFACT_MISSING_LABEL.to_string(),
+                        ));
+                    }
+                }
+                None => {
+                    tx.execute(
+                        "DELETE FROM pipeline_attempt_artifacts
+                          WHERE tenant_id = $1 AND run_id = $2 AND lease_token = $3
+                            AND artifact = $4 AND state = 'staged'
+                            AND ciphertext_sha256 IS NULL",
+                        &[&run.tenant_id, &run.run_id, &lease_token, &artifact],
+                    )
+                    .await?;
+                }
+            }
+        }
         tx.commit().await?;
         Ok(updated)
     }
@@ -3961,6 +4265,15 @@ impl PgPipelineStore {
     /// `PIPELINE_SCORE_LOCK_BUSY_RETRY_MILLISECONDS`, not the phase-age
     /// backoff, since the run waited for nothing of its own. Fenced by the
     /// lease like `mark_transient_retry`.
+    ///
+    /// The Score staged its attempt rows before it tried the lock (rebase
+    /// 10, option D; `stage_score_artifacts_before_lock`), with no hash, and
+    /// published nothing, so no object is stored at their keys. The same
+    /// transaction deletes them, so a busy try, which repeats every
+    /// `PIPELINE_SCORE_LOCK_BUSY_RETRY_MILLISECONDS` while another Score of
+    /// the tenant runs, leaves no rows for the attempt sweep. A release the
+    /// lease fence refuses deletes nothing; the sweep removes those rows
+    /// after their `cleanup_after`.
     pub async fn release_score_lock_busy(
         &self,
         run: &PipelineRunRecord,
@@ -3990,6 +4303,13 @@ impl PgPipelineStore {
             .await?
             .ok_or_else(stale_lease_error)?;
         let updated = pipeline_run_from_row(&row)?;
+        tx.execute(
+            "DELETE FROM pipeline_attempt_artifacts
+              WHERE tenant_id = $1 AND run_id = $2 AND lease_token = $3
+                AND state = 'staged' AND ciphertext_sha256 IS NULL",
+            &[&run.tenant_id, &run.run_id, &lease_token],
+        )
+        .await?;
         tx.commit().await?;
         Ok(updated)
     }
@@ -4109,6 +4429,99 @@ impl PgPipelineStore {
             .await?;
         tx.commit().await?;
         rows.iter().map(pipeline_settlement_from_row).collect()
+    }
+
+    /// The runs an index rebuild considers, from their own sealed commands
+    /// (port `ef97a459` lines 618 to 655, adapted): every run that meets
+    /// `rebuildable_index_run_predicate!` -- complete, included in the
+    /// index, with a completed index write that no invalidation has touched
+    /// since, and a stored command reference and hash to rebuild from.
+    /// Ordered by `created_at, run_id` so a rebuild applies commands in the
+    /// same order Settle originally committed them.
+    ///
+    /// A listing only. Whether the run's submission is still operable is not
+    /// decided here: the rebuild reads `submission_guard_on_tx` for each run
+    /// under that run's lock, immediately before it writes the run's
+    /// entries (`lock_rebuildable_index_run_on_tx`), since a withdrawal can
+    /// commit at any point after this read (final review I1). Reading the
+    /// guard itself, rather than a copy of its predicate, keeps the two from
+    /// drifting (M8).
+    pub async fn list_rebuildable_index_runs(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<PipelineRunRecord>, DatabaseError> {
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
+        let rows = tx
+            .query(
+                concat!(
+                    "SELECT p.* FROM pipeline_runs p WHERE p.tenant_id = $1 AND ",
+                    rebuildable_index_run_predicate!(),
+                    " ORDER BY p.created_at, p.run_id"
+                ),
+                &[&tenant_id],
+            )
+            .await?;
+        tx.commit().await?;
+        rows.iter().map(pipeline_run_from_row).collect()
+    }
+
+    /// Locks `run`'s row on the caller's transaction and re-checks, under
+    /// that lock, everything an index rebuild needs before it writes the
+    /// run's entries: the run still meets `rebuildable_index_run_predicate!`
+    /// with the same `index_command_hash` the rebuild listed and loaded, and
+    /// its submission is still operable (`submission_guard_on_tx`, which
+    /// holds the submission row `FOR SHARE`). `false` when either no longer
+    /// holds; the caller writes nothing for the run then.
+    ///
+    /// Lock order: the run row, then the submission row -- the order a
+    /// withdrawal also takes (`withdraw_submission`) and Settle's index
+    /// dispatch holds. Both locks last until the caller's transaction ends,
+    /// so a withdrawal of the submission waits for the rebuild's writes to
+    /// commit, and the invalidation it then queues covers them. The run row
+    /// is locked `FOR SHARE`: two rebuilds of one run may overlap (their
+    /// writes are idempotent), and a withdrawal's `FOR UPDATE` waits for
+    /// both.
+    ///
+    /// Two statements, lock first, read second, as the submission guard
+    /// does: the predicate is read with a snapshot taken after the run lock
+    /// is held, so it sees an invalidation row that a holder of the run lock
+    /// committed while the lock was awaited. One locking statement would
+    /// not: the invalidation lives in its own table (PR 3, 62cc2768), and
+    /// PostgreSQL re-evaluates a locked row's predicate only when the
+    /// holder updated that row, which queuing an invalidation does not.
+    pub async fn lock_rebuildable_index_run_on_tx(
+        tx: &Transaction<'_>,
+        run: &PipelineRunRecord,
+    ) -> Result<bool, DatabaseError> {
+        let Some(command_hash) = run.index_command_hash.as_deref() else {
+            return Ok(false);
+        };
+        let locked = tx
+            .query_opt(
+                "SELECT 1 FROM pipeline_runs
+                  WHERE tenant_id = $1 AND run_id = $2
+                  FOR SHARE",
+                &[&run.tenant_id, &run.run_id],
+            )
+            .await?;
+        if locked.is_none() {
+            return Ok(false);
+        }
+        let rebuildable = tx
+            .query_opt(
+                concat!(
+                    "SELECT 1 FROM pipeline_runs p
+                      WHERE p.tenant_id = $1 AND p.run_id = $2 AND p.index_command_hash = $3 AND ",
+                    rebuildable_index_run_predicate!()
+                ),
+                &[&run.tenant_id, &run.run_id, &command_hash],
+            )
+            .await?;
+        if rebuildable.is_none() {
+            return Ok(false);
+        }
+        Ok(Self::submission_guard_on_tx(tx, run).await?.operable)
     }
 
     /// The payout pass's work list (P3-D11): up to `limit` complete runs of
@@ -4461,6 +4874,105 @@ impl PgPipelineStore {
             ],
         )
         .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Records a pipeline phase attempt's object before it is written (PR 4,
+    /// the same shape as `stage_receipt_artifact`): its own tenant
+    /// transaction, committing before the caller publishes the object the
+    /// row names. Whatever happens after the write -- the rest of the phase
+    /// failing, a refused commit, a lost lease, a process crash -- the
+    /// `staged` row still names the object, and
+    /// `PipelineService::sweep_attempt_artifacts` deletes both once
+    /// `cleanup_after` passes. `commit_review` and `commit_score` move the
+    /// row to `committed` in the same transaction as the phase commit; a
+    /// refused commit rolls that back with everything else, leaving the row
+    /// `staged` for the sweep.
+    ///
+    /// `ON CONFLICT DO NOTHING` on the row's own primary key makes a repeat
+    /// call for the same attempt a no-op -- safe because
+    /// `pipeline_attempt_object_id` is a deterministic function of `(run_id,
+    /// lease_token, artifact)`, so a retry for the same triple always
+    /// prepares the same object key. A caller that ever computed a different
+    /// object key for the same triple would collide instead on `UNIQUE
+    /// (tenant_id, object_key)`, which this `INSERT` does not suppress, and
+    /// surfaces as an ordinary constraint error.
+    pub async fn stage_attempt_artifact(
+        &self,
+        run: &PipelineRunRecord,
+        artifact: PipelineAttemptArtifact,
+        object_key: &str,
+        ciphertext_sha256: &str,
+        cleanup_after: DateTime<Utc>,
+    ) -> Result<(), DatabaseError> {
+        let lease_token = required_lease_token(run)?;
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = Self::tenant_transaction(&mut client, &run.tenant_id).await?;
+        tx.execute(
+            "INSERT INTO pipeline_attempt_artifacts (
+                tenant_id, run_id, lease_token, artifact, object_key,
+                ciphertext_sha256, cleanup_after
+             ) VALUES ($1,$2,$3,$4,$5,$6,$7)
+             ON CONFLICT (tenant_id, run_id, lease_token, artifact) DO NOTHING",
+            &[
+                &run.tenant_id,
+                &run.run_id,
+                &lease_token,
+                &artifact.as_str(),
+                &object_key,
+                &ciphertext_sha256,
+                &cleanup_after,
+            ],
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Stages a compatibility Score attempt's rows before its object
+    /// content exists (rebase 10, option D): one row for each `(artifact,
+    /// object_key)` in `artifacts`, with the key the write will use and
+    /// `ciphertext_sha256` NULL, in one tenant transaction that commits and
+    /// returns its connection to the pool before the Score takes its
+    /// tenant's Score lock. So the Score holds one pooled connection at a
+    /// time while it holds the lock, and every object it later publishes
+    /// already has a committed `staged` row. `commit_score_in` sets each
+    /// written row's hash as it commits it, and deletes the row of an
+    /// artifact the Score did not write; the sweep deletes the object of a
+    /// due row with no hash at its key (`sweep_attempt_artifacts`).
+    ///
+    /// Locks: the foreign key check takes `FOR KEY SHARE` on the run's
+    /// `pipeline_runs` row for this short transaction; it takes no other
+    /// row lock and holds no lock when it ends, before the Score lock is
+    /// requested. `ON CONFLICT DO NOTHING` as `stage_attempt_artifact`.
+    pub async fn stage_unhashed_attempt_artifacts(
+        &self,
+        run: &PipelineRunRecord,
+        artifacts: &[(PipelineAttemptArtifact, String)],
+        cleanup_after: DateTime<Utc>,
+    ) -> Result<(), DatabaseError> {
+        let lease_token = required_lease_token(run)?;
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = Self::tenant_transaction(&mut client, &run.tenant_id).await?;
+        for (artifact, object_key) in artifacts {
+            tx.execute(
+                "INSERT INTO pipeline_attempt_artifacts (
+                    tenant_id, run_id, lease_token, artifact, object_key,
+                    ciphertext_sha256, cleanup_after
+                 ) VALUES ($1,$2,$3,$4,$5,NULL,$6)
+                 ON CONFLICT (tenant_id, run_id, lease_token, artifact) DO NOTHING",
+                &[
+                    &run.tenant_id,
+                    &run.run_id,
+                    &lease_token,
+                    &artifact.as_str(),
+                    object_key,
+                    &cleanup_after,
+                ],
+            )
+            .await?;
+        }
         tx.commit().await?;
         Ok(())
     }
@@ -4970,9 +5482,12 @@ async fn insert_receipt_records(
             ],
         )
         .await?;
+    // The same rule as a phase commit's attempt rows (wave 2, fix round 1;
+    // review I2): no `staged` row naming this object is a refusal under
+    // `pipeline_attempt_artifact_missing`.
     if committed != 1 {
         return Err(DatabaseError::Constraint(
-            "receipt artifact staging record is missing".to_string(),
+            PIPELINE_ATTEMPT_ARTIFACT_MISSING_LABEL.to_string(),
         ));
     }
     Ok(())
@@ -5841,15 +6356,26 @@ pub struct SubmissionGuard {
     pub operable: bool,
 }
 
-/// Whether each held dependency is production-qualified. `scorer` and
-/// `embedder` are true only when every scorer/embedder the service holds is
-/// (decision P4); a bundle can name any one of them by content hash, so a
-/// single unqualified reference dependency disqualifies the whole set.
-/// `authority` and `privacy` follow the same shape (Ruling T2-2): true only
-/// when the held object is `production_qualified()`, false when the service
-/// holds none at all (`submit` already fails closed on that case before any
-/// dependency check runs). `payout` is the same for the NEAR payout adapter:
-/// true only when the service holds one and it is `production_qualified()`.
+/// Whether each held dependency is production-qualified, across *every*
+/// dependency the service holds -- regardless of whether any bundle actually
+/// uses it. `scorer` and `embedder` are true only when every scorer/embedder
+/// the service holds is (decision P4 as first shipped); a bundle can name
+/// any one of them by content hash, so a single unqualified reference
+/// dependency disqualifies the whole set. `authority` and `privacy` follow
+/// the same shape (Ruling T2-2): true only when the held object is
+/// `production_qualified()`, false when the service holds none at all
+/// (`submit` already fails closed on that case before any dependency check
+/// runs). `payout` is the same for the NEAR payout adapter: true only when
+/// the service holds one and it is `production_qualified()`.
+///
+/// Startup does not read this field-by-field check: see
+/// [`PipelineService::bundle_qualification`], which scopes qualification to
+/// the one bundle a runtime actually starts (decision P4-D7), and whose
+/// `configuration_qualifiable` term carries the bundle's configuration
+/// (wave 2; the `bundle` field this struct had is gone). The
+/// `NoveltyUtility` production-gate check in `novelty_utility_withheld_reason`
+/// still reads this method directly -- that check is about every dependency
+/// the service could ever route a compatibility receipt to, not one bundle.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PipelineDependencyQualification {
     pub scorer: bool,
@@ -5860,11 +6386,91 @@ pub struct PipelineDependencyQualification {
     pub authority: bool,
     pub privacy: bool,
     pub payout: bool,
-    /// Whether the default bundle may run for real tenants: a compatibility
-    /// bundle's configuration is qualifiable
-    /// (`CompatibilityBundleConfig::is_qualifiable`; Zaki review 1, round 2,
-    /// finding 11). Any other bundle carries no such configuration.
-    pub bundle: bool,
+}
+
+/// One dependency's identity and production-qualification state, as
+/// [`PipelineService::bundle_qualification`] reports it for a single bundle.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PipelineDependencyCheck {
+    pub identity: String,
+    pub production_qualified: bool,
+}
+
+/// Whether every dependency one bundle package actually uses is
+/// production-qualified (decision P4-D7). Unlike
+/// [`PipelineDependencyQualification`], which reports every dependency the
+/// service holds, this reports only: the scorer and embedder the package
+/// names among the held dependencies (resolved the same way
+/// [`PipelineService::construct`] resolves them); the held index reader and
+/// writer (every bundle uses the one pair the service holds -- a bundle does
+/// not name these independently); one settlement-adapter check per
+/// instrument the package pins (an instrument with no registered adapter
+/// reports identity `settlement_adapter_missing`, unqualified); `authority`
+/// and `privacy` (unconditional -- every bundle needs both); and `payout`,
+/// which is `None` while payout is disabled and otherwise `Some` of the held
+/// NEAR adapter's own qualification, for every package: payout pays the
+/// complete runs of every bundle, so it is service-wide like the index
+/// writer (final review M5). `configuration_qualifiable` is the package's
+/// own configuration term: a compatibility package whose configuration is
+/// not qualifiable (`CompatibilityBundleConfig::is_qualifiable`: the local
+/// reference's all-zero floors, say) is never production-qualified, so
+/// neither startup nor `qualify_bundle` accepts it (wave 2; rebase 9
+/// review, M2). A package of another family carries no such configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PipelineBundleQualification {
+    pub bundle_id: String,
+    pub scorer: PipelineDependencyCheck,
+    pub embedder: PipelineDependencyCheck,
+    pub index_reader: PipelineDependencyCheck,
+    pub index_writer: PipelineDependencyCheck,
+    pub settlement_adapters: BTreeMap<String, PipelineDependencyCheck>,
+    pub authority: bool,
+    pub privacy: bool,
+    pub payout: Option<bool>,
+    pub configuration_qualifiable: bool,
+    pub dependency_digest: String,
+}
+
+impl PipelineBundleQualification {
+    /// The safe labels naming every blocked dependency this qualification
+    /// found; empty exactly when [`Self::is_production_qualified`] is true.
+    pub fn blockers(&self) -> Vec<&'static str> {
+        let mut blockers = Vec::new();
+        for (check, label) in [
+            (&self.scorer, "runtime_scorer_not_production"),
+            (&self.embedder, "runtime_embedder_not_production"),
+            (&self.index_reader, "runtime_index_reader_not_production"),
+            (&self.index_writer, "runtime_index_writer_not_production"),
+        ] {
+            if !check.production_qualified {
+                blockers.push(label);
+            }
+        }
+        if self
+            .settlement_adapters
+            .values()
+            .any(|check| !check.production_qualified)
+        {
+            blockers.push("runtime_settlement_not_production");
+        }
+        if !self.authority {
+            blockers.push("runtime_authority_not_production");
+        }
+        if !self.privacy {
+            blockers.push("runtime_privacy_not_production");
+        }
+        if self.payout == Some(false) {
+            blockers.push("runtime_payout_not_production");
+        }
+        if !self.configuration_qualifiable {
+            blockers.push(PIPELINE_BUNDLE_CONFIGURATION_NOT_QUALIFIABLE_LABEL);
+        }
+        blockers
+    }
+
+    pub fn is_production_qualified(&self) -> bool {
+        self.blockers().is_empty()
+    }
 }
 
 /// The per-tenant and per-principal hourly receipt limits. A limit of `0` is
@@ -5932,6 +6538,39 @@ pub struct PipelineInspection {
     pub run: PipelineRunRecord,
     pub outcomes: Vec<PhaseOutcomeRecord>,
     pub settlements: Vec<PipelineSettlementRecord>,
+}
+
+/// What one pass of [`PipelineService::rebuild_index_from_authoritative_commands`]
+/// did: how many sealed commands it replayed, how many entries it upserted
+/// across all of them, how many of those the writer already held
+/// (`IndexUpsertResult::Unchanged`), how many listed runs it skipped
+/// because, re-checked under their own lock, they were no longer operable
+/// (a withdrawal or an invalidation that committed after the listing), and
+/// a hash of the exact set of command hashes it rebuilt from -- so a caller
+/// can tell two rebuilds apart, or confirm a repeat rebuilt from the same
+/// authoritative set.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PipelineIndexRebuildReport {
+    pub command_count: usize,
+    pub entry_count: usize,
+    pub unchanged_entry_count: usize,
+    pub skipped_run_count: usize,
+    pub command_set_hash: String,
+}
+
+/// What [`PipelineService::rebuild_index_run`] did for one listed run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PipelineIndexRebuildRun {
+    /// The run's sealed command was replayed: its hash, the entries upserted,
+    /// and how many of them the writer already held.
+    Rebuilt {
+        command_hash: String,
+        entry_count: usize,
+        unchanged_entry_count: usize,
+    },
+    /// Re-checked under its lock, the run was no longer operable; nothing was
+    /// written for it.
+    Skipped,
 }
 
 /// Builds a [`PipelineService`]. Scorers and embedders are registered by
@@ -6175,6 +6814,97 @@ impl PipelineServiceBuilder {
     }
 }
 
+/// Truncates to microsecond precision, the resolution a PostgreSQL
+/// `TIMESTAMPTZ` column actually stores (and what `postgres-types` round-trips
+/// on the wire). An in-memory `DateTime<Utc>` built from `Utc::now()` can
+/// carry nanoseconds (notably on Linux); comparing that untruncated value
+/// against one read back from the database can then never observe equality,
+/// even when the two represent the database's own idea of "the same instant."
+/// `PipelineLeaseRenewal::start` truncates `lease_cap` here so a capped
+/// `renew_lease` result compares equal to it and the early exit actually
+/// fires, instead of paying for a few extra no-op renewals until the lease
+/// naturally expires.
+fn truncate_to_microseconds(instant: DateTime<Utc>) -> DateTime<Utc> {
+    DateTime::from_timestamp_micros(instant.timestamp_micros()).unwrap_or(instant)
+}
+
+/// Renews a claim's lease while its phase runs. Stopped when the phase ends,
+/// at the cap, or when the lease is lost. The commit fences
+/// (`ensure_current_lease`, `ensure_live_lease`, every lease-checked `UPDATE`)
+/// stay the only authority: renewal only keeps an honest slow phase from
+/// being reclaimed out from under it before it finishes, never a substitute
+/// for those checks.
+struct PipelineLeaseRenewal {
+    stop: tokio::sync::watch::Sender<bool>,
+    join: tokio::task::JoinHandle<()>,
+}
+
+impl PipelineLeaseRenewal {
+    /// `None` when `run` carries no phase to renew for or no lease token --
+    /// both should be impossible for a just-claimed run, but this is a
+    /// best-effort background helper, not a correctness gate, so it declines
+    /// quietly rather than panicking or failing the claim.
+    fn start(
+        store: PgPipelineStore,
+        run: &PipelineRunRecord,
+        config: PipelineLeaseConfig,
+    ) -> Option<Self> {
+        let phase = run.next_phase?;
+        let lease_token = run.lease_token?;
+        let lease = config.for_phase(phase);
+        let lease_cap =
+            truncate_to_microseconds(Utc::now() + lease * PIPELINE_LEASE_RENEWAL_CAP_FACTOR);
+        let interval = std::cmp::max(lease / 3, Duration::milliseconds(100))
+            .to_std()
+            .ok()?;
+        let tenant_id = run.tenant_id.clone();
+        let run_id = run.run_id;
+        let (stop, mut stopped) = tokio::sync::watch::channel(false);
+        let join = tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = tokio::time::sleep(interval) => {}
+                    _ = stopped.changed() => return,
+                }
+                match store
+                    .renew_lease(&tenant_id, run_id, lease_token, lease, lease_cap)
+                    .await
+                {
+                    Ok(Some(expires_at)) if expires_at < lease_cap => {}
+                    // Either the cap was reached (no point renewing further:
+                    // the phase gives back its claim on its own next
+                    // lease-checked write, same as if this task never ran) or
+                    // the lease is already gone (lost to a reclaim, or the
+                    // phase itself already finished and cleared it) -- either
+                    // way, nothing left for this task to do.
+                    Ok(_) => return,
+                    Err(_) => tracing::warn!(
+                        label = "pipeline_lease_renewal_failed",
+                        "a lease renewal failed; the next interval tries again"
+                    ),
+                }
+            }
+        });
+        Some(Self { stop, join })
+    }
+
+    /// Signals the background task to stop and waits for it to actually
+    /// exit, so no renewal ever races the caller's own next claim of this
+    /// run.
+    async fn stop(self) {
+        let _ = self.stop.send(true);
+        if self.join.await.is_err() {
+            // Label-only: never log the panic payload (or any other
+            // `JoinError` detail) -- a panic message can carry whatever the
+            // panicking code formatted into it.
+            tracing::warn!(
+                label = "pipeline_lease_renewal_task_failed",
+                "the lease renewal background task did not exit cleanly"
+            );
+        }
+    }
+}
+
 pub struct PipelineService {
     backend: Arc<PgBackend>,
     store: PgPipelineStore,
@@ -6204,6 +6934,15 @@ pub struct PipelineService {
 impl PipelineService {
     pub fn bundle_id(&self) -> &str {
         &self.default_package.bundle_id
+    }
+
+    /// The package this service registers as every rollout tenant's active
+    /// bundle (`register_default_bundle`) and the one
+    /// `pipeline_runtime_is_production_qualified` checks at startup: startup
+    /// qualification is scoped to the bundle a runtime actually starts
+    /// (decision P4-D7), not every dependency the service happens to hold.
+    pub fn default_package(&self) -> &BundlePackage {
+        &self.default_package
     }
 
     /// The `trace_object_refs.object_store` label this service records.
@@ -6249,10 +6988,6 @@ impl PipelineService {
                 .payout
                 .as_ref()
                 .is_some_and(|(adapter, _)| adapter.production_qualified()),
-            bundle: crate::versioned_pipeline_bundle::package_compatibility_config(
-                &self.default_package,
-            )
-            .is_none_or(|config| config.is_qualifiable()),
         }
     }
 
@@ -6394,6 +7129,15 @@ impl PipelineService {
     #[doc(hidden)]
     pub fn store(&self) -> &PgPipelineStore {
         &self.store
+    }
+
+    /// The index writer Settle's own index dispatch writes through
+    /// (`PipelineServiceBuilder::new`). Exposed so a caller -- the index
+    /// rebuild worker route -- can rebuild through the exact same writer a
+    /// live run would dispatch to, rather than a second one constructed
+    /// independently.
+    pub fn index_writer(&self) -> Arc<dyn IdentifiedIndexWriter> {
+        self.index_writer.clone()
     }
 
     pub async fn withdraw_submission(
@@ -6653,11 +7397,16 @@ impl PipelineService {
     /// tenant keeps when the default package changes
     /// (`activate_bundle_if_none`). Each gets the checks ingest gives the
     /// default package at assembly: its dependencies resolve (`construct`),
-    /// and a compatibility package holds `main`'s gate configuration
-    /// (`main_gate`), has the pipeline's credit issuer, and, with
-    /// `require_qualifiable`, is qualifiable. The error is the first
-    /// failure's label, the default package check's where they share one;
-    /// ingest refuses to start on it.
+    /// a compatibility package holds `main`'s gate configuration
+    /// (`main_gate`) and has the pipeline's credit issuer, and, with
+    /// `require_qualifiable`, the package passes the default package's
+    /// qualification gate: its own bundle qualification
+    /// (`bundle_qualification`, decision P4-D7), every dependency it names
+    /// and its configuration term. P4-D7 lets the service hold a dependency
+    /// that is not production-qualified while the default package does not
+    /// name it, so a tenant bundle that names one is refused here. The error
+    /// is the first failure's label, the default package check's where they
+    /// share one; ingest refuses to start on it.
     pub async fn check_tenant_bundles(
         &self,
         tenant_id: &str,
@@ -6705,9 +7454,16 @@ impl PipelineService {
             if self.novelty_utility_checks.issuer_principal_ref.is_none() {
                 return Err("pipeline_credit_issuer_principal_missing");
             }
-            if require_qualifiable && !config.is_qualifiable() {
-                return Err("pipeline_runtime_dependencies_not_production_qualified");
-            }
+        }
+        // The default package's gate (`pipeline_runtime_is_production_qualified`
+        // in ingest): the bundle qualification of this package, which also
+        // carries the configuration term (`bundle_configuration_not_qualifiable`).
+        if require_qualifiable
+            && !self
+                .bundle_qualification(package)
+                .is_ok_and(|qualification| qualification.is_production_qualified())
+        {
+            return Err("pipeline_runtime_dependencies_not_production_qualified");
         }
         Ok(())
     }
@@ -6754,18 +7510,26 @@ impl PipelineService {
         Ok(())
     }
 
-    /// Resolve the dependencies the package names and construct its bundle.
-    /// A hash the service does not hold fails closed.
-    fn construct(&self, package: BundlePackage) -> Result<MinimalPolicyBundle, &'static str> {
-        self.construct_with_index_reader(package, self.index_reader.clone())
-    }
-
-    /// `construct`, with `index_reader` as the index the Score policy reads.
-    fn construct_with_index_reader(
+    /// Resolves the scorer and embedder `package` names among the held
+    /// dependencies, by content hash -- the same hash `with_scorer`/
+    /// `with_embedder` index by. A hash the service does not hold, whether
+    /// because it holds none at all or because a same-labeled dependency's
+    /// content changed, fails closed with `bundle_dependency_missing`.
+    /// Shared by `construct_with_index_reader` (which builds the runnable
+    /// bundle from the result, for `construct` and for a compatibility
+    /// Score's serialized read) and `bundle_qualification` (which only
+    /// needs the resolved objects' identity and qualification, never a
+    /// runnable bundle).
+    fn resolve_score_dependencies(
         &self,
-        package: BundlePackage,
-        index_reader: Arc<dyn IdentifiedIndexReader>,
-    ) -> Result<MinimalPolicyBundle, &'static str> {
+        package: &BundlePackage,
+    ) -> Result<
+        (
+            Arc<dyn IdentifiedPerplexityScorer>,
+            Arc<dyn IdentifiedEmbedder>,
+        ),
+        &'static str,
+    > {
         let named = &package.manifest.score.data_artifact_hashes;
         let scorer = named
             .iter()
@@ -6778,12 +7542,110 @@ impl PipelineService {
         let (Some(scorer), Some(embedder)) = (scorer, embedder) else {
             return Err(PIPELINE_DEPENDENCY_MISSING_LABEL);
         };
+        Ok((scorer, embedder))
+    }
+
+    /// Resolve the dependencies the package names and construct its bundle.
+    /// A hash the service does not hold fails closed.
+    fn construct(&self, package: BundlePackage) -> Result<MinimalPolicyBundle, &'static str> {
+        self.construct_with_index_reader(package, self.index_reader.clone())
+    }
+
+    /// `construct`, with `index_reader` as the index the Score policy reads.
+    fn construct_with_index_reader(
+        &self,
+        package: BundlePackage,
+        index_reader: Arc<dyn IdentifiedIndexReader>,
+    ) -> Result<MinimalPolicyBundle, &'static str> {
+        let (scorer, embedder) = self.resolve_score_dependencies(&package)?;
         MinimalPolicyBundle::from_package_with_runtime(package, scorer, embedder, index_reader)
             .map_err(|error| match error.to_string().as_str() {
                 PIPELINE_DEPENDENCY_MISSING_LABEL => PIPELINE_DEPENDENCY_MISSING_LABEL,
                 "bundle_policy_not_runnable" => PIPELINE_POLICY_NOT_RUNNABLE_LABEL,
                 _ => PIPELINE_BUNDLE_INVALID_LABEL,
             })
+    }
+
+    /// Whether every dependency the package `package` actually uses is
+    /// production-qualified (decision P4-D7): the scorer and embedder it
+    /// names, the held index reader and writer, one settlement-adapter check
+    /// per instrument it pins, `authority` and `privacy`, and `payout`
+    /// whenever payout is enabled (service-wide, final review M5).
+    /// `pipeline_runtime_is_production_qualified` calls this with
+    /// `default_package()` at startup, so an unqualified scorer, embedder,
+    /// or settlement adapter the default bundle never touches no longer
+    /// blocks boot.
+    ///
+    /// `Err("bundle_package_invalid")` when `package` itself does not
+    /// validate (`package_digests`); `Err("bundle_dependency_missing")` when
+    /// it names a scorer or embedder hash the service does not hold -- the
+    /// same two failure labels `construct` can return for the same reasons.
+    pub fn bundle_qualification(
+        &self,
+        package: &BundlePackage,
+    ) -> Result<PipelineBundleQualification, &'static str> {
+        let digests = package_digests(package).map_err(|_| PIPELINE_BUNDLE_INVALID_LABEL)?;
+        let (scorer, embedder) = self.resolve_score_dependencies(package)?;
+        let settlement_adapters = package
+            .manifest
+            .instruments
+            .keys()
+            .map(|instrument_id| {
+                let check = match self.settlement_adapters.get(instrument_id) {
+                    Some(adapter) => PipelineDependencyCheck {
+                        identity: adapter.adapter_identity().to_string(),
+                        production_qualified: adapter.production_qualified(),
+                    },
+                    None => PipelineDependencyCheck {
+                        identity: PIPELINE_SETTLEMENT_ADAPTER_MISSING_LABEL.to_string(),
+                        production_qualified: false,
+                    },
+                };
+                (instrument_id.as_str().to_string(), check)
+            })
+            .collect();
+        // Payout is service-wide, like the index writer: `process_payouts`
+        // pays the complete runs of every bundle, including runs bound to
+        // an earlier default package. So an enabled payout's adapter counts
+        // for every package, not only one that pins `trace_credit` (final
+        // review M5, reversing the payout part of P4-D7).
+        let payout = self.payout_enabled().then(|| {
+            self.payout
+                .as_ref()
+                .is_some_and(|(adapter, _)| adapter.production_qualified())
+        });
+        Ok(PipelineBundleQualification {
+            bundle_id: package.bundle_id.clone(),
+            scorer: PipelineDependencyCheck {
+                identity: scorer.dependency_identity().to_string(),
+                production_qualified: scorer.production_qualified(),
+            },
+            embedder: PipelineDependencyCheck {
+                identity: embedder.dependency_identity().to_string(),
+                production_qualified: embedder.production_qualified(),
+            },
+            index_reader: PipelineDependencyCheck {
+                identity: self.index_reader.dependency_identity().to_string(),
+                production_qualified: self.index_reader.production_qualified(),
+            },
+            index_writer: PipelineDependencyCheck {
+                identity: self.index_writer.dependency_identity().to_string(),
+                production_qualified: self.index_writer.production_qualified(),
+            },
+            settlement_adapters,
+            authority: self
+                .authority
+                .as_ref()
+                .is_some_and(|authority| authority.production_qualified()),
+            privacy: self
+                .privacy
+                .as_ref()
+                .is_some_and(|privacy| privacy.production_qualified()),
+            payout,
+            configuration_qualifiable:
+                crate::versioned_pipeline_bundle::package_configuration_is_qualifiable(package),
+            dependency_digest: digests.dependency_digest,
+        })
     }
 
     /// Loads and constructs the bundle a run is bound to, checking the
@@ -7611,6 +8473,310 @@ impl PipelineService {
         Ok(removed)
     }
 
+    /// How long a phase attempt's staged object outlives its own lease
+    /// before the sweep may remove it: `PIPELINE_LEASE_RENEWAL_CAP_FACTOR`
+    /// times `phase`'s configured lease -- the same bound
+    /// `PipelineLeaseRenewal::start` caps a live renewal at, so an attempt
+    /// still legitimately renewing its lease never has its own object swept
+    /// out from under it -- plus one hour of margin for the commit itself to
+    /// land once the phase work is done.
+    fn attempt_artifact_cleanup_after(&self, phase: Phase) -> DateTime<Utc> {
+        self.attempt_artifact_lease_bound(phase) + PIPELINE_ATTEMPT_ARTIFACT_COMMIT_MARGIN
+    }
+
+    /// Now plus `PIPELINE_LEASE_RENEWAL_CAP_FACTOR` times `phase`'s lease:
+    /// no lease claimed before now is still live after it, however often it
+    /// is renewed. A compatibility Score that staged its rows before its
+    /// tenant lock publishes nothing after this bound (rebase 10, option D):
+    /// by then its lease is certainly gone and its commit would be refused,
+    /// and the sweep may remove its rows `PIPELINE_ATTEMPT_ARTIFACT_COMMIT_MARGIN`
+    /// later, so a later publish could leave an object no row names.
+    fn attempt_artifact_lease_bound(&self, phase: Phase) -> DateTime<Utc> {
+        truncate_to_microseconds(
+            Utc::now() + self.lease_config.for_phase(phase) * PIPELINE_LEASE_RENEWAL_CAP_FACTOR,
+        )
+    }
+
+    /// Deletes the objects of pipeline phase attempts that never committed
+    /// (PR 4): each `staged` row whose `cleanup_after` has passed -- an
+    /// attempt that crashed, lost its lease, failed between two of its
+    /// writes, or had its commit refused -- loses its object and then the
+    /// row itself.
+    ///
+    /// Who owns which deletion (controller ruling R2-1): a `staged` row's
+    /// object is named by no object ref, so no withdrawal ever deletes it;
+    /// this sweep owns it. A `committed` row's object is an object ref of
+    /// the submission, recorded by the same phase commit that committed the
+    /// row (Review's approved revision, Score's index command and neighbour
+    /// set), so deleting it belongs to the withdrawal: the withdrawal
+    /// invalidates the ref and queues its payload deletion in the same
+    /// transaction as the tombstone, and `main`'s revocation-propagation
+    /// worker deletes it. This sweep never touches a `committed` row. A
+    /// phase attempt whose commit is refused, for any reason, deletes the
+    /// objects it wrote itself, best effort (Review its approved object,
+    /// Score its index command and neighbour set; PR 3), and so does a Score
+    /// attempt whose second write fails after its first; their `staged`
+    /// rows stay, and this sweep later finds each object absent and drops
+    /// the row, or deletes an object that path failed to delete. The
+    /// objects only this sweep deletes are those of an attempt that stopped
+    /// after writing and before any commit or refusal (a crashed process),
+    /// and those a lost connection kept because the commit may have landed
+    /// when it did not.
+    ///
+    /// One tenant transaction, `FOR UPDATE SKIP LOCKED`, removing up to
+    /// `limit` rows. It reads the due rows oldest first, a page at a time,
+    /// with a keyset cursor on `(cleanup_after, run_id, lease_token,
+    /// artifact)`, so a row it keeps does not stop it: it goes on past kept
+    /// rows to later ones, examining at most
+    /// `PIPELINE_ATTEMPT_SWEEP_EXAMINED_PER_REMOVAL` times `limit` rows in
+    /// one pass (wave 2; follow-up review, m2). The pass holds its pooled
+    /// connection and the locks of the rows it read across every store call
+    /// it makes, up to about two per row examined (fix round 1, review M6).
+    /// For each row with a hash, a store that confirms the object
+    /// absent (`Some(false)`) needs no delete; a store that reports it
+    /// present, or cannot tell (`None`), gets one. A row with no hash (a
+    /// compatibility Score staged it before its tenant lock and never
+    /// committed it; rebase 10, option D) gets
+    /// `delete_artifact_at_object_key` at its key, but only when the store
+    /// derives that same key from the row's artifact, run and lease token
+    /// (rebase 10 review, M1); a row whose key differs is kept, with its
+    /// object, and logs `pipeline_attempt_sweep_key_mismatch`. A delete
+    /// failure (or a presence check or key derivation that itself errors)
+    /// logs `pipeline_attempt_sweep_delete_failed`, with the store's own
+    /// refusal when that is a label (`store_refusal_label`), and keeps the
+    /// row for the next pass; otherwise the row is deleted. A kept row keeps
+    /// its `cleanup_after` (V108's guard moves nothing), so it is examined
+    /// again on each pass. Every store call runs on the blocking pool.
+    /// The run's own `pipeline_runs` row, and its committed objects, are
+    /// never touched here. Returns how many rows it removed.
+    ///
+    /// This pass starts at the oldest due row; see
+    /// [`Self::sweep_attempt_artifacts_from`] for a pass that resumes where
+    /// an earlier one stopped.
+    pub async fn sweep_attempt_artifacts(
+        &self,
+        tenant_id: &str,
+        limit: usize,
+    ) -> anyhow::Result<usize> {
+        Ok(self
+            .sweep_attempt_artifacts_from(tenant_id, limit, None)
+            .await?
+            .removed)
+    }
+
+    /// `sweep_attempt_artifacts`, starting after `resume_after` (the due
+    /// rows before it wait for a later pass) instead of at the oldest due
+    /// row. The pass's `resume_after` is where the next pass resumes: the
+    /// last row it examined when it stopped at its limit or its bound, and
+    /// `None` when it reached the end of the due rows, so the next pass
+    /// starts over at the oldest. The worker carries it from one pass to the
+    /// next for each tenant (wave 2; follow-up review, m2): however many
+    /// rows a tenant's sweep keeps, every due row is examined within a few
+    /// passes, so kept rows never stall the tenant.
+    pub async fn sweep_attempt_artifacts_from(
+        &self,
+        tenant_id: &str,
+        limit: usize,
+        resume_after: Option<AttemptSweepCursor>,
+    ) -> anyhow::Result<AttemptSweepPass> {
+        let examine_bound = limit.saturating_mul(PIPELINE_ATTEMPT_SWEEP_EXAMINED_PER_REMOVAL);
+        let tenant_storage_ref = pipeline_tenant_storage_ref(tenant_id);
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = PgPipelineStore::tenant_transaction(&mut client, tenant_id).await?;
+
+        let mut cursor = resume_after;
+        let mut removed = 0usize;
+        let mut examined = 0usize;
+        let mut reached_the_end = false;
+        'pages: while removed < limit && examined < examine_bound {
+            let page_size = limit.min(examine_bound - examined);
+            let rows = tx
+                .query(
+                    "SELECT run_id, lease_token, artifact, object_key, ciphertext_sha256,
+                            cleanup_after
+                       FROM pipeline_attempt_artifacts
+                      WHERE tenant_id = $1 AND state = 'staged' AND cleanup_after <= NOW()
+                        AND ($3::TIMESTAMPTZ IS NULL
+                             OR (cleanup_after, run_id, lease_token, artifact)
+                                > ($3::TIMESTAMPTZ, $4::UUID, $5::UUID, $6::TEXT))
+                      ORDER BY cleanup_after, run_id, lease_token, artifact
+                      LIMIT $2
+                      FOR UPDATE SKIP LOCKED",
+                    &[
+                        &tenant_id,
+                        &i64::try_from(page_size).unwrap_or(i64::MAX),
+                        &cursor.as_ref().map(|cursor| cursor.cleanup_after),
+                        &cursor.as_ref().map(|cursor| cursor.run_id),
+                        &cursor.as_ref().map(|cursor| cursor.lease_token),
+                        &cursor.as_ref().map(|cursor| cursor.artifact.as_str()),
+                    ],
+                )
+                .await?;
+            let page_was_full = rows.len() == page_size;
+            for row in &rows {
+                if removed >= limit {
+                    break 'pages;
+                }
+                examined += 1;
+                let run_id: Uuid = row.get("run_id");
+                let lease_token: Uuid = row.get("lease_token");
+                let artifact: String = row.get("artifact");
+                let object_key: String = row.get("object_key");
+                let ciphertext_sha256: Option<String> = row.get("ciphertext_sha256");
+                cursor = Some(AttemptSweepCursor {
+                    cleanup_after: row.get("cleanup_after"),
+                    run_id,
+                    lease_token,
+                    artifact: artifact.clone(),
+                });
+                // The column is CHECK-constrained to the three known artifacts,
+                // so this should never fire; if it ever does (a future migration
+                // loosens the constraint, or direct DB tampering), fail this
+                // sweep pass closed -- an error the caller logs and retries next
+                // pass -- rather than panic the worker's supervised task.
+                let attempt_artifact =
+                    PipelineAttemptArtifact::from_db_str(&artifact).ok_or_else(|| {
+                        anyhow::anyhow!("pipeline_attempt_artifact_kind_unrecognized")
+                    })?;
+                let artifact_kind = attempt_artifact.store_kind();
+
+                // The store calls are synchronous, so they run on the blocking
+                // pool while this transaction keeps the rows locked, as every
+                // other object-store call of the pipeline does (PR 3, e2873401,
+                // N-6). A blocking task that did not return counts as a failed
+                // delete: the row stays for the next pass.
+                let store = self.artifact_store.clone();
+                let tenant = tenant_storage_ref.clone();
+                let key = object_key.clone();
+                let outcome = on_blocking_pool(move || {
+                    Ok(match ciphertext_sha256 {
+                        // Rebase 10, option D: a row a compatibility Score staged
+                        // before its tenant lock and never committed has no
+                        // hash. Its object, if the attempt published one, is at
+                        // the key the store derives from the row's own artifact,
+                        // run and lease token (`pipeline_attempt_object_id`), and
+                        // the lease token is the attempt's own, so no other
+                        // object is ever stored there. The sweep derives that key
+                        // again and deletes only when the row names it (rebase
+                        // 10 review, M1): a row whose key names another object is
+                        // kept, and that object is never deleted by key alone.
+                        // `Ok(false)` from the delete is an attempt that
+                        // published nothing.
+                        None => match store.serialized_json_object_key(
+                            tenant.as_str(),
+                            artifact_kind.clone(),
+                            &pipeline_attempt_object_id(
+                                attempt_artifact.as_str(),
+                                run_id,
+                                lease_token,
+                            ),
+                        ) {
+                            Ok(derived) if derived == key => {
+                                match store.delete_artifact_at_object_key(
+                                    tenant.as_str(),
+                                    artifact_kind,
+                                    &key,
+                                ) {
+                                    Ok(_) => AttemptSweepRow::Remove,
+                                    Err(error) => AttemptSweepRow::Keep(
+                                        PIPELINE_ATTEMPT_SWEEP_DELETE_FAILED,
+                                        store_refusal_label(&error),
+                                    ),
+                                }
+                            }
+                            Ok(_) => {
+                                AttemptSweepRow::Keep(PIPELINE_ATTEMPT_SWEEP_KEY_MISMATCH, None)
+                            }
+                            Err(error) => AttemptSweepRow::Keep(
+                                PIPELINE_ATTEMPT_SWEEP_DELETE_FAILED,
+                                store_refusal_label(&error),
+                            ),
+                        },
+                        Some(ciphertext_sha256) => {
+                            let present = store.artifact_present_by_object_key(
+                                tenant.as_str(),
+                                artifact_kind.clone(),
+                                &key,
+                                &ciphertext_sha256,
+                            );
+                            // `Some(false)` -- confirmed absent -- is the only
+                            // answer that skips the delete outright.
+                            // `Some(true)` and `None` ("the store cannot tell",
+                            // the trait's documented default, and what
+                            // `GcsRemoteTraceArtifactProvider` answers today
+                            // since it does not override this method) both
+                            // attempt the delete: a store that cannot report
+                            // presence may still hold the object, and a store
+                            // whose delete errors on an absent object keeps the
+                            // row for the next pass rather than mistaking
+                            // "unknown" for "gone".
+                            let deleted = match present {
+                                Ok(Some(false)) => Ok(()),
+                                Ok(Some(true)) | Ok(None) => {
+                                    let receipt = EncryptedTraceArtifactReceipt {
+                                        tenant_storage_ref: tenant.as_str().to_string(),
+                                        artifact_kind,
+                                        object_key: key,
+                                        ciphertext_sha256,
+                                        encrypted_at: Utc::now(),
+                                    };
+                                    store.delete_artifact(tenant.as_str(), &receipt).map(|_| ())
+                                }
+                                Err(error) => Err(error),
+                            };
+                            match deleted {
+                                Ok(()) => AttemptSweepRow::Remove,
+                                Err(error) => AttemptSweepRow::Keep(
+                                    PIPELINE_ATTEMPT_SWEEP_DELETE_FAILED,
+                                    store_refusal_label(&error),
+                                ),
+                            }
+                        }
+                    })
+                })
+                .await
+                .unwrap_or(AttemptSweepRow::Keep(
+                    PIPELINE_ATTEMPT_SWEEP_DELETE_FAILED,
+                    None,
+                ));
+                if let AttemptSweepRow::Keep(label, store_label) = outcome {
+                    if label == PIPELINE_ATTEMPT_SWEEP_KEY_MISMATCH {
+                        tracing::warn!(
+                            label,
+                            "a pipeline attempt row names an object key other than its own; \
+                         the row and that object are kept"
+                        );
+                    } else {
+                        tracing::warn!(
+                            label,
+                            store_label = store_label.as_deref(),
+                            "a pipeline attempt object could not be deleted; its row is kept \
+                         for the next pass"
+                        );
+                    }
+                    continue;
+                }
+                tx.execute(
+                    "DELETE FROM pipeline_attempt_artifacts
+                  WHERE tenant_id = $1 AND run_id = $2 AND lease_token = $3 AND artifact = $4
+                    AND state = 'staged'",
+                    &[&tenant_id, &run_id, &lease_token, &artifact],
+                )
+                .await?;
+                removed += 1;
+            }
+            if !page_was_full {
+                reached_the_end = true;
+                break;
+            }
+        }
+        tx.commit().await?;
+        Ok(AttemptSweepPass {
+            removed,
+            resume_after: if reached_the_end { None } else { cursor },
+        })
+    }
+
     /// Loads a run's committed outcome for `phase` and decodes its decision.
     async fn committed_decision<T: serde::de::DeserializeOwned>(
         &self,
@@ -7623,6 +8789,23 @@ impl PipelineService {
             .await?
             .ok_or_else(|| anyhow::anyhow!("{phase:?} outcome is missing"))?;
         serde_json::from_value(outcome.decision)
+            .map_err(|_| anyhow::anyhow!("{phase:?} outcome is malformed"))
+    }
+
+    /// Loads a run's committed outcome for `phase` and decodes its evidence.
+    /// Alongside `committed_decision`, which decodes the same outcome's
+    /// decision instead.
+    async fn committed_evidence<T: serde::de::DeserializeOwned>(
+        &self,
+        run: &PipelineRunRecord,
+        phase: Phase,
+    ) -> anyhow::Result<T> {
+        let outcome = self
+            .store
+            .outcome_for_phase(&run.tenant_id, run.run_id, phase)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("{phase:?} outcome is missing"))?;
+        serde_json::from_value(outcome.evidence)
             .map_err(|_| anyhow::anyhow!("{phase:?} outcome is malformed"))
     }
 
@@ -7798,21 +8981,249 @@ impl PipelineService {
         Ok(command)
     }
 
+    /// Rebuilds `writer`'s index for `tenant_id` from the sealed index
+    /// commands Settle already wrote and committed -- no new outcome, no
+    /// evaluation of any policy, and no credit. Meant for after a restore,
+    /// once the pipeline's own rows are back but the vector index is a
+    /// fresh, empty store: replays exactly what Settle already settled,
+    /// through the same command validation (`load_index_command`, keyed
+    /// against each run's own committed Score evidence) and the same key
+    /// derivation Settle's own index dispatch uses
+    /// (`SealedIndexCommand::keyed_entries`), so a rebuilt index matches
+    /// what the pipeline actually settled, bit for bit.
+    ///
+    /// Reads `PgPipelineStore::list_rebuildable_index_runs` for the run
+    /// list -- complete runs, included in the index, with a completed index
+    /// write no invalidation has touched -- in `created_at, run_id` order,
+    /// the same order Settle committed them in, then rebuilds each run with
+    /// `rebuild_index_run`, which re-checks the run and its submission under
+    /// the run's lock and holds both through that run's writes. A run
+    /// withdrawn or invalidated after the listing is skipped
+    /// (`skipped_run_count`), never written (final review I1).
+    ///
+    /// A run whose stored command fails validation (a tampered
+    /// `index_command_hash`, or a mismatched revision, index, or model)
+    /// fails the whole rebuild closed with `index_command_invalid` before
+    /// writing anything from that run; entries an earlier run in the same
+    /// pass already wrote are not rolled back, since a fail-closed rebuild
+    /// is meant to be re-run after the operator resolves the tampered row,
+    /// and every entry write is idempotent (`writer.upsert`'s `Unchanged`
+    /// result) so a re-run never double-counts what an earlier attempt
+    /// already applied.
+    pub async fn rebuild_index_from_authoritative_commands(
+        &self,
+        tenant_id: &str,
+        writer: Arc<dyn IdentifiedIndexWriter>,
+    ) -> anyhow::Result<PipelineIndexRebuildReport> {
+        let runs = self.store.list_rebuildable_index_runs(tenant_id).await?;
+        let mut command_hashes = Vec::with_capacity(runs.len());
+        let mut entry_count = 0usize;
+        let mut unchanged_entry_count = 0usize;
+        let mut skipped_run_count = 0usize;
+        for run in runs {
+            match self.rebuild_index_run(&run, &writer).await? {
+                PipelineIndexRebuildRun::Rebuilt {
+                    command_hash,
+                    entry_count: run_entries,
+                    unchanged_entry_count: run_unchanged,
+                } => {
+                    entry_count += run_entries;
+                    unchanged_entry_count += run_unchanged;
+                    command_hashes.push(command_hash);
+                }
+                PipelineIndexRebuildRun::Skipped => skipped_run_count += 1,
+            }
+        }
+        let command_set_hash = sha256_prefixed(
+            trace_commons_protocol::canonical_json::to_canonical_vec(&serde_json::json!(
+                command_hashes
+            ))?
+            .as_slice(),
+        );
+        Ok(PipelineIndexRebuildReport {
+            command_count: command_hashes.len(),
+            entry_count,
+            unchanged_entry_count,
+            skipped_run_count,
+            command_set_hash,
+        })
+    }
+
+    /// Rebuilds one listed run's entries into `writer`, under the guard
+    /// (final review I1, the shape of Settle's index dispatch under P3-D9):
+    /// one tenant transaction locks the run row, re-checks that the run is
+    /// still rebuildable with the command hash it was listed with and that
+    /// its submission is still operable
+    /// (`PgPipelineStore::lock_rebuildable_index_run_on_tx`), and holds both
+    /// locks through every upsert, then commits. A withdrawal locks the run
+    /// row `FOR UPDATE` first, so it either committed before the re-check
+    /// (the run is `Skipped`) or waits until these writes are done, and the
+    /// invalidation it queues then removes them -- as long as this future is
+    /// not dropped while its writes run (below).
+    ///
+    /// The committed Score evidence and the sealed command are read before
+    /// the transaction opens, so it never holds two pooled connections at
+    /// once. The command's error is raised only once the re-check lets the
+    /// write go ahead: a skipped run does not need its command, which the
+    /// withdrawal's own object deletion may already have removed.
+    ///
+    /// The writes are synchronous index calls, so they run on the blocking
+    /// pool while the transaction keeps both rows locked, as Settle's index
+    /// writes do (PR 3, e2873401, N-6): the rebuild runs inside ingest's
+    /// worker route and never parks a runtime worker the routes share.
+    ///
+    /// A blocking task is not cancelled when the future awaiting it is
+    /// dropped. If this future is dropped while the writes run, the
+    /// transaction rolls back and releases both locks, and the writes go on:
+    /// a withdrawal can then commit, and its invalidation can complete,
+    /// before the last write lands, leaving those entries in the index. The
+    /// rebuild route therefore runs the rebuild in a task of its own, so a
+    /// client disconnect does not drop it (review of the follow-up wave,
+    /// m1), as Settle's index dispatch runs in a task that owns its
+    /// transaction (PR 3, b14d25e9). The route also runs one rebuild per
+    /// tenant at a time and its shutdown waits for running rebuilds with the
+    /// worker's grace period (`PipelineIndexRebuilds` in ingest; Zaki's
+    /// re-review of #1166, Low). The windows that remain are the ones that
+    /// release the locks while a write goes on: a lost database session, a
+    /// rebuild aborted past the shutdown grace period, and the process exit.
+    ///
+    /// The rows are held no longer than a deadline, as Settle's dispatch
+    /// holds its rows (merge review I1; PR 3, 82d276c1): the smaller of
+    /// Settle's configured lease and `PIPELINE_INDEX_DISPATCH_BUDGET_SECONDS`
+    /// from the moment both locks are held. No upsert starts past it. At the
+    /// deadline the transaction rolls back at once, so the rows are free,
+    /// the rebuild waits at most `PIPELINE_INDEX_WRITE_FENCE_MARGIN_SECONDS`
+    /// for the call in flight, and it fails closed as `index_unavailable`
+    /// without writing the later runs. A rerun is safe: every upsert is
+    /// idempotent. So a slow index holds a withdrawal of the run (and the
+    /// session's uploads queued behind it) no longer than the deadline.
+    ///
+    /// What the rebuild does not have is Settle's fence on the withdrawal
+    /// side. A withdrawal of a run still leased queues its invalidation no
+    /// earlier than the lease's end plus the fence margin, but the rebuild
+    /// writes `complete` runs, which hold no lease, so a withdrawal queues
+    /// their invalidation at once. In the windows above, and after a
+    /// deadline that passed with a call in flight, that invalidation could
+    /// complete before the rebuild's last write lands and leave that write's
+    /// entries in the index. Withdrawals come from clients, from `main`'s
+    /// retention maintenance and from the revocation-propagation reconciler,
+    /// so the guarantee is not that none happens: it is that no worker
+    /// processes the tenant's invalidations while the rebuild runs. The
+    /// restore runbook starts every process with both tenant lists unset for
+    /// the rebuild (`backup-restore.md`, step 3), and ingest's rebuild route
+    /// refuses a tenant its own process routes or drains
+    /// (`pipeline_index_rebuild_tenant_active`, merge review M1). A queued
+    /// invalidation then runs only after the rebuild. Closing the window
+    /// without that configuration needs a committed fence that the
+    /// withdrawal's invalidation reads, which is PR 5's.
+    pub async fn rebuild_index_run(
+        &self,
+        run: &PipelineRunRecord,
+        writer: &Arc<dyn IdentifiedIndexWriter>,
+    ) -> anyhow::Result<PipelineIndexRebuildRun> {
+        let command = match self
+            .committed_evidence::<ScoreEvidence>(run, Phase::Score)
+            .await
+        {
+            Ok(evidence) => self.load_index_command(run, &evidence).await,
+            Err(error) => Err(error),
+        };
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = PgPipelineStore::tenant_transaction(&mut client, &run.tenant_id).await?;
+        if !PgPipelineStore::lock_rebuildable_index_run_on_tx(&tx, run).await? {
+            tx.commit().await?;
+            return Ok(PipelineIndexRebuildRun::Skipped);
+        }
+        let command = command?.ok_or_else(|| anyhow::anyhow!("index_command_invalid"))?;
+        let command_hash = run
+            .index_command_hash
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("index_command_invalid"))?;
+        let tenant = pipeline_tenant_storage_ref(&run.tenant_id);
+        let entries = command
+            .keyed_entries(&tenant)
+            .map(|(key, entry)| (key, entry.embedding.clone(), entry.content_hash.clone()))
+            .collect::<Vec<_>>();
+        // Merge review I1, as Settle's dispatch (PR 3, 82d276c1): the rows
+        // are held no longer than the smaller of Settle's lease and the
+        // dispatch budget from now, and no upsert starts past that deadline.
+        let deadline = Utc::now()
+            + self
+                .lease_config
+                .settle()
+                .min(Duration::seconds(PIPELINE_INDEX_DISPATCH_BUDGET_SECONDS));
+        let writer = writer.clone();
+        let mut writes = tokio::task::spawn_blocking(move || {
+            let mut entry_count = 0usize;
+            let mut unchanged_entry_count = 0usize;
+            for (key, embedding, content_hash) in &entries {
+                if Utc::now() >= deadline {
+                    return Err(anyhow::anyhow!(PIPELINE_INDEX_UNAVAILABLE_LABEL));
+                }
+                match writer.upsert(key, embedding, content_hash) {
+                    Ok(IndexUpsertResult::Inserted) => {}
+                    Ok(IndexUpsertResult::Unchanged) => unchanged_entry_count += 1,
+                    Err(error) => return Err(anyhow::anyhow!("index rebuild failed: {error}")),
+                }
+                entry_count += 1;
+            }
+            Ok((entry_count, unchanged_entry_count))
+        });
+        let budget = (deadline - Utc::now()).to_std().unwrap_or_default();
+        let (entry_count, unchanged_entry_count) =
+            match tokio::time::timeout(budget, &mut writes).await {
+                Ok(joined) => {
+                    joined.map_err(|_| anyhow::anyhow!(PIPELINE_BLOCKING_CALL_FAILED_LABEL))??
+                }
+                Err(_) => {
+                    // Past the deadline: roll back at once, so the rows are
+                    // free, then wait (bounded by the fence margin) for the
+                    // call in flight to return, so the rebuild that reports
+                    // the failure has no write still running.
+                    drop(tx);
+                    drop(client);
+                    let margin = std::time::Duration::from_secs(
+                        PIPELINE_INDEX_WRITE_FENCE_MARGIN_SECONDS.unsigned_abs(),
+                    );
+                    let _ = tokio::time::timeout(margin, writes).await;
+                    return Err(anyhow::anyhow!(PIPELINE_INDEX_UNAVAILABLE_LABEL));
+                }
+            };
+        tx.commit().await?;
+        Ok(PipelineIndexRebuildRun::Rebuilt {
+            command_hash,
+            entry_count,
+            unchanged_entry_count,
+        })
+    }
+
     /// Claims the next due run for `tenant_id` and advances it one phase.
     /// The claim itself picks the lease by the claimed row's own
-    /// `next_phase`; see `PgPipelineStore::claim_next`.
+    /// `next_phase`; see `PgPipelineStore::claim_next`. A background task
+    /// renews that lease for as long as the phase actually runs (bounded by
+    /// `PIPELINE_LEASE_RENEWAL_CAP_FACTOR`), so a phase slower than its own
+    /// claim's lease is not mistaken for a crashed worker mid-run; the
+    /// renewal task never runs inside this call's own transactions, and is
+    /// always stopped before this call returns.
     pub async fn process_one(&self, tenant_id: &str) -> anyhow::Result<Option<PipelineRunRecord>> {
         let Some(run) = self.store.claim_next(tenant_id, self.lease_config).await? else {
             return Ok(None);
         };
-        self.process_claimed_run(run).await
+        let renewal = PipelineLeaseRenewal::start(self.store.clone(), &run, self.lease_config);
+        let result = self.process_claimed_run(run).await;
+        if let Some(renewal) = renewal {
+            renewal.stop().await;
+        }
+        result
     }
 
     /// Claims a specific run and advances it one phase. The claim itself
     /// picks the lease by the row's own `next_phase` in SQL -- there is no
     /// separate read of the run before the claim, so a phase commit that
     /// lands concurrently can
-    /// never hand out a lease sized for a phase the row is no longer in.
+    /// never hand out a lease sized for a phase the row is no longer in. As
+    /// with `process_one`, a background task renews that lease for as long
+    /// as the phase runs, stopped before this call returns.
     pub async fn process_run(
         &self,
         tenant_id: &str,
@@ -7825,7 +9236,12 @@ impl PipelineService {
         else {
             return Ok(None);
         };
-        self.process_claimed_run(run).await
+        let renewal = PipelineLeaseRenewal::start(self.store.clone(), &run, self.lease_config);
+        let result = self.process_claimed_run(run).await;
+        if let Some(renewal) = renewal {
+            renewal.stop().await;
+        }
+        result
     }
 
     /// Loads the run's bound bundle and dispatches its current phase,
@@ -7955,7 +9371,11 @@ impl PipelineService {
                 // Ruling FR3: a settlement adapter the service does not hold
                 // is a deployment gap, not the trace's fault -- the same
                 // uncharged suspension as a missing bound dependency. So is
-                // a missing per-instrument cap.
+                // a missing per-instrument cap. (An artifact store that
+                // cannot derive a compatibility Score's object key, or
+                // prepares the object under another key, is a failed store
+                // call: the typed transient `PolicyError` above, from
+                // `artifact_store_call`.)
                 if let Some(gap) = [
                     PIPELINE_SETTLEMENT_ADAPTER_MISSING_LABEL,
                     PIPELINE_SETTLEMENT_CAP_MISSING_LABEL,
@@ -7980,7 +9400,8 @@ impl PipelineService {
                     | "score_outcome_invalid"
                     | "settlement_operation_mismatch"
                     | "review_output_invalid"
-                    | "submission_inoperable" => label.as_str(),
+                    | "submission_inoperable"
+                    | PIPELINE_ATTEMPT_ARTIFACT_MISSING_LABEL => label.as_str(),
                     _ => PIPELINE_OPERATIONAL_ERROR_LABEL,
                 };
                 self.mark_retry_or_record_lease_expired(&run, retry_label)
@@ -8301,15 +9722,17 @@ impl PipelineService {
                             "review_output_invalid"
                         );
                         let object_id = pipeline_attempt_object_id(
-                            "approved",
+                            PipelineAttemptArtifact::Approved.as_str(),
                             run.run_id,
                             required_lease_token(run)?,
                         );
                         let wrapper = encode_pipeline_artifact_bytes(content.bytes())?;
+                        // Prepared, staged (PR 4), then published; both
+                        // object-store calls run on the blocking pool (N-6).
                         let store = self.artifact_store.clone();
                         let tenant = pipeline_tenant_storage_ref(&run.tenant_id);
-                        let receipt = artifact_store_call(move || {
-                            store.put_serialized_json(
+                        let prepared = artifact_store_call(move || {
+                            store.prepare_serialized_json(
                                 tenant.as_str(),
                                 TraceArtifactKind::ContributionEnvelope,
                                 &object_id,
@@ -8317,6 +9740,19 @@ impl PipelineService {
                             )
                         })
                         .await?;
+                        self.store
+                            .stage_attempt_artifact(
+                                run,
+                                PipelineAttemptArtifact::Approved,
+                                &prepared.receipt().object_key,
+                                &prepared.receipt().ciphertext_sha256,
+                                self.attempt_artifact_cleanup_after(Phase::Review),
+                            )
+                            .await?;
+                        let store = self.artifact_store.clone();
+                        let receipt =
+                            artifact_store_call(move || store.publish_serialized_json(&prepared))
+                                .await?;
                         self.inject_crash(PipelineCrashPoint::AfterReviewArtifactStorage)?;
                         written_receipt = Some(receipt.clone());
                         Some(ApprovedRevision {
@@ -8369,9 +9805,10 @@ impl PipelineService {
                         // inoperable refusal the same way.
                         return Err(match error {
                             DatabaseError::Constraint(label)
-                                if label == PIPELINE_SUBMISSION_INOPERABLE_LABEL =>
+                                if label == PIPELINE_SUBMISSION_INOPERABLE_LABEL
+                                    || label == PIPELINE_ATTEMPT_ARTIFACT_MISSING_LABEL =>
                             {
-                                anyhow::anyhow!(PIPELINE_SUBMISSION_INOPERABLE_LABEL)
+                                anyhow::anyhow!(label)
                             }
                             error => error.into(),
                         });
@@ -8417,6 +9854,20 @@ impl PipelineService {
     /// releases its run uncharged (`release_score_lock_busy`), and a lease
     /// that has passed stops the Score before it scores (uncharged, as a
     /// stale lease). Another family's Score (the minimal one) takes no lock.
+    ///
+    /// Rebase 10, option D: a compatibility Score also stages its attempt
+    /// rows (PR 4) before it opens that transaction
+    /// (`stage_score_artifacts_before_lock`): one row for each artifact it
+    /// can write, under the object key the store derives for the attempt's
+    /// lease token before any content exists, with no hash yet, on a short
+    /// transaction of its own that commits and returns its connection
+    /// first. So it still holds one pooled connection at a time, and every
+    /// object it publishes already has a committed `staged` row. That
+    /// transaction takes only the foreign key's `FOR KEY SHARE` on the run
+    /// row and ends before the Score lock is requested, so it adds no
+    /// lock-order pair. A Score that then finds the lock held has published
+    /// nothing, so the transaction that releases its run also deletes those
+    /// rows (`release_score_lock_busy`).
     async fn commit_score_phase(
         &self,
         run: &PipelineRunRecord,
@@ -8429,9 +9880,10 @@ impl PipelineService {
         let reviewed_artifact = self.load_approved_bytes(run).await?;
         if bundle.package.manifest.score.implementation_id != COMPATIBILITY_SCORE_IMPLEMENTATION {
             return self
-                .score_and_commit(run, bundle, revision_id, reviewed_artifact, None)
+                .score_and_commit(run, bundle, revision_id, reviewed_artifact, None, None)
                 .await;
         }
+        let prestaged = self.stage_score_artifacts_before_lock(run).await?;
         let mut client = self.backend.trace_pool().get().await?;
         let lock = PgPipelineStore::tenant_transaction(&mut client, &run.tenant_id).await?;
         // Multi-lens review L3-2: the lock is tried, never waited for. A
@@ -8494,13 +9946,76 @@ impl PipelineService {
         let bundle = self
             .construct_with_index_reader(bundle.package.clone(), reader)
             .map_err(|label| anyhow::anyhow!(label))?;
-        self.score_and_commit(run, &bundle, revision_id, reviewed_artifact, Some(lock))
-            .await
+        self.score_and_commit(
+            run,
+            &bundle,
+            revision_id,
+            reviewed_artifact,
+            Some(lock),
+            Some(&prestaged),
+        )
+        .await
+    }
+
+    /// Stages a compatibility Score attempt's rows before it takes its
+    /// tenant's Score lock (rebase 10, option D): derives the object key of
+    /// each artifact it can write (`index-command`, `score-neighbors`) from
+    /// the run and its lease token (`pipeline_attempt_object_id`) through
+    /// the store, before any content exists, and stages a row with that key
+    /// and no hash (`PgPipelineStore::stage_unhashed_attempt_artifacts`). A
+    /// store that cannot derive a key refuses
+    /// (`serialized_json_object_key_unavailable`), and one whose derivation
+    /// fails otherwise reports `artifact_store_unavailable`: the Score stops
+    /// before it scores, and the run waits in retry without being charged,
+    /// as any failed store call does (`artifact_store_call`, ruling FR3;
+    /// rebase 10 review, M2).
+    async fn stage_score_artifacts_before_lock(
+        &self,
+        run: &PipelineRunRecord,
+    ) -> anyhow::Result<PrestagedScoreArtifacts> {
+        let lease_token = required_lease_token(run)?;
+        let tenant = pipeline_tenant_storage_ref(&run.tenant_id);
+        let run_id = run.run_id;
+        // The derivation is a synchronous store call, so it runs on the
+        // blocking pool, as every other object-store call of a phase does
+        // (PR 3, e2873401, N-6), and its failure is the uncharged
+        // suspension of every failed store call (PR 3, c8d65fcb).
+        let store = self.artifact_store.clone();
+        let object_keys = artifact_store_call(move || {
+            [
+                PipelineAttemptArtifact::IndexCommand,
+                PipelineAttemptArtifact::ScoreNeighbors,
+            ]
+            .into_iter()
+            .map(|artifact| {
+                store
+                    .serialized_json_object_key(
+                        tenant.as_str(),
+                        artifact.store_kind(),
+                        &pipeline_attempt_object_id(artifact.as_str(), run_id, lease_token),
+                    )
+                    .map(|object_key| (artifact, object_key))
+            })
+            .collect::<anyhow::Result<Vec<_>>>()
+        })
+        .await?;
+        let publish_deadline = self.attempt_artifact_lease_bound(Phase::Score);
+        let cleanup_after = publish_deadline + PIPELINE_ATTEMPT_ARTIFACT_COMMIT_MARGIN;
+        self.store
+            .stage_unhashed_attempt_artifacts(run, &object_keys, cleanup_after)
+            .await?;
+        Ok(PrestagedScoreArtifacts {
+            object_keys,
+            publish_deadline,
+        })
     }
 
     /// `commit_score_phase`'s Score and commit over `reviewed_artifact`.
     /// The commit runs on `lock` when the caller holds the tenant's Score
-    /// lock on it, and on a transaction of its own otherwise.
+    /// lock on it, and on a transaction of its own otherwise. `prestaged`
+    /// is the rows a compatibility Score staged before that lock (rebase 10,
+    /// option D); with none, each object's row is staged here, with its
+    /// hash, just before the object is published.
     async fn score_and_commit(
         &self,
         run: &PipelineRunRecord,
@@ -8508,6 +10023,7 @@ impl PipelineService {
         revision_id: Uuid,
         reviewed_artifact: Vec<u8>,
         lock: Option<Transaction<'_>>,
+        prestaged: Option<&PrestagedScoreArtifacts>,
     ) -> anyhow::Result<PipelineRunRecord> {
         let tenant = pipeline_tenant_storage_ref(&run.tenant_id);
         let output = bundle
@@ -8536,6 +10052,7 @@ impl PipelineService {
         // artifact is stored, rather than at the database CHECK.
         ensure_trace_credit_awards_fit_the_ledger(result.decision.awards())?;
         let lease_token = required_lease_token(run)?;
+        let cleanup_after = self.attempt_artifact_cleanup_after(Phase::Score);
         let command_bytes = match &command {
             None => None,
             Some(command) => {
@@ -8547,8 +10064,14 @@ impl PipelineService {
             }
         };
         // Each stored object is `(artifact, stored ref, hash, object ref,
-        // receipt)`. A write that fails deletes the objects stored before it
-        // (best effort), as a refused commit does below.
+        // receipt)`. Each has a committed `staged` row (PR 4) before it is
+        // published: staged here, with its hash, for a Score that takes no
+        // tenant lock, or before the lock, with no hash, for a compatibility
+        // Score (`prestaged`). A write that fails deletes the objects stored
+        // before it (best effort), as a refused commit does below; an
+        // attempt that crashes before its commit leaves every object it
+        // stored named by a `staged` row that `sweep_attempt_artifacts`
+        // removes once `cleanup_after` passes.
         let mut written: Vec<(
             &str,
             String,
@@ -8559,31 +10082,78 @@ impl PipelineService {
         for (artifact, bytes, hash) in [
             command_bytes
                 .as_ref()
-                .map(|(bytes, hash)| ("index-command", bytes, hash.clone())),
-            neighbor
-                .as_ref()
-                .map(|bytes| ("score-neighbors", bytes, sha256_prefixed(bytes))),
+                .map(|(bytes, hash)| (PipelineAttemptArtifact::IndexCommand, bytes, hash.clone())),
+            neighbor.as_ref().map(|bytes| {
+                (
+                    PipelineAttemptArtifact::ScoreNeighbors,
+                    bytes,
+                    sha256_prefixed(bytes),
+                )
+            }),
         ]
         .into_iter()
         .flatten()
         {
-            let put = match encode_pipeline_artifact_bytes(bytes) {
-                Ok(wrapper) => {
-                    let store = self.artifact_store.clone();
-                    let tenant = tenant.clone();
-                    let object_id = pipeline_attempt_object_id(artifact, run.run_id, lease_token);
-                    artifact_store_call(move || {
-                        store.put_serialized_json(
-                            tenant.as_str(),
-                            TraceArtifactKind::VectorPayload,
-                            &object_id,
-                            &wrapper,
-                        )
-                    })
-                    .await
+            // Stage the object's row (PR 4), then publish it. A failure here
+            // deletes the objects this attempt already published, best
+            // effort, as a refused commit does below; their `staged` rows
+            // stay for `sweep_attempt_artifacts`. Both object-store calls
+            // run on the blocking pool (N-6).
+            let put: anyhow::Result<EncryptedTraceArtifactReceipt> = async {
+                let wrapper = encode_pipeline_artifact_bytes(bytes)?;
+                let store = self.artifact_store.clone();
+                let prepare_tenant = tenant.clone();
+                let object_id =
+                    pipeline_attempt_object_id(artifact.as_str(), run.run_id, lease_token);
+                let prepared = artifact_store_call(move || {
+                    store.prepare_serialized_json(
+                        prepare_tenant.as_str(),
+                        TraceArtifactKind::VectorPayload,
+                        &object_id,
+                        &wrapper,
+                    )
+                })
+                .await?;
+                match prestaged {
+                    // Rebase 10, option D: the row was staged before the
+                    // tenant lock, under the key the store derived then. A
+                    // prepared key that differs would publish an object no
+                    // row names, so it fails closed before the publish, as
+                    // the uncharged suspension of a failed store call
+                    // (`artifact_store_call`). Past `publish_deadline` the
+                    // attempt's lease is certainly gone and the sweep may
+                    // soon remove its rows, so it publishes nothing and stops
+                    // as a stale lease.
+                    Some(prestaged) => {
+                        if prestaged.object_key(artifact)
+                            != Some(prepared.receipt().object_key.as_str())
+                        {
+                            return Err(PolicyError::transient(
+                                PIPELINE_ATTEMPT_OBJECT_KEY_MISMATCH_LABEL,
+                            )
+                            .expect("static label")
+                            .into());
+                        }
+                        if Utc::now() >= prestaged.publish_deadline {
+                            return Err(stale_lease_error().into());
+                        }
+                    }
+                    None => {
+                        self.store
+                            .stage_attempt_artifact(
+                                run,
+                                artifact,
+                                &prepared.receipt().object_key,
+                                &prepared.receipt().ciphertext_sha256,
+                                cleanup_after,
+                            )
+                            .await?;
+                    }
                 }
-                Err(error) => Err(error),
-            };
+                let store = self.artifact_store.clone();
+                artifact_store_call(move || store.publish_serialized_json(&prepared)).await
+            }
+            .await;
             let receipt = match put {
                 Ok(receipt) => receipt,
                 Err(error) => {
@@ -8598,13 +10168,13 @@ impl PipelineService {
             };
             let object_ref = score_object_ref(
                 run,
-                artifact,
+                artifact.as_str(),
                 &receipt,
                 bytes.len(),
                 &self.object_store_name,
             );
             written.push((
-                artifact,
+                artifact.as_str(),
                 format!("{}#{}", receipt.object_key, receipt.ciphertext_sha256),
                 hash,
                 object_ref,
@@ -8659,7 +10229,11 @@ impl PipelineService {
                 // whatever refused the commit -- an inoperable submission, a
                 // stale lease, `settlement_adapter_missing`, or anything else
                 // (Zaki review 1, round 2, finding 4). Best effort: a failed
-                // delete never masks the refusal.
+                // delete never masks the refusal. Their `staged` rows (PR 4)
+                // stay, because the commit that would have committed them
+                // rolled back; once `cleanup_after` passes,
+                // `sweep_attempt_artifacts` finds each object absent and drops
+                // its row, or deletes an object whose delete failed here.
                 if phase_commit_refused(&error) {
                     self.delete_attempt_objects(
                         &run.tenant_id,
@@ -8675,7 +10249,8 @@ impl PipelineService {
                 return Err(match error {
                     DatabaseError::Constraint(label)
                         if label == PIPELINE_SETTLEMENT_ADAPTER_MISSING_LABEL
-                            || label == PIPELINE_SUBMISSION_INOPERABLE_LABEL =>
+                            || label == PIPELINE_SUBMISSION_INOPERABLE_LABEL
+                            || label == PIPELINE_ATTEMPT_ARTIFACT_MISSING_LABEL =>
                     {
                         anyhow::anyhow!(label)
                     }
@@ -11117,6 +12692,123 @@ fn decode_pipeline_artifact_bytes(wrapper: &serde_json::Value) -> anyhow::Result
         .map_err(|_| anyhow::anyhow!("pipeline_artifact_wrapper_invalid"))
 }
 
+/// One of the (at most three) objects a pipeline phase attempt writes under
+/// its own lease-token key (`pipeline_attempt_object_id`): Review's
+/// `approved` content, and Score's `index-command` and `score-neighbors`
+/// (PR 4). `as_str` is the exact string the `artifact` column of
+/// `pipeline_attempt_artifacts` stores and `pipeline_attempt_object_id`
+/// embeds in the object id; `from_db_str` is its inverse for a reader that
+/// only has the column's value, and `store_kind` is the `TraceArtifactKind`
+/// its write site stores it under (`ContributionEnvelope` for `approved`,
+/// `VectorPayload` for the two Score artifacts).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PipelineAttemptArtifact {
+    Approved,
+    IndexCommand,
+    ScoreNeighbors,
+}
+
+impl PipelineAttemptArtifact {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Approved => "approved",
+            Self::IndexCommand => "index-command",
+            Self::ScoreNeighbors => "score-neighbors",
+        }
+    }
+
+    fn from_db_str(value: &str) -> Option<Self> {
+        match value {
+            "approved" => Some(Self::Approved),
+            "index-command" => Some(Self::IndexCommand),
+            "score-neighbors" => Some(Self::ScoreNeighbors),
+            _ => None,
+        }
+    }
+
+    fn store_kind(&self) -> TraceArtifactKind {
+        match self {
+            Self::Approved => TraceArtifactKind::ContributionEnvelope,
+            Self::IndexCommand | Self::ScoreNeighbors => TraceArtifactKind::VectorPayload,
+        }
+    }
+}
+
+/// How many due rows one attempt sweep pass examines for each row it may
+/// remove (`PipelineService::sweep_attempt_artifacts`'s `limit`): enough to
+/// go on past rows it keeps, and a bound on one pass's work.
+pub const PIPELINE_ATTEMPT_SWEEP_EXAMINED_PER_REMOVAL: usize = 4;
+
+/// The key of the last due attempt row a sweep pass examined, in the
+/// sweep's order: the keyset cursor its next page, or the next pass
+/// (`PipelineService::sweep_attempt_artifacts_from`), reads after. Opaque
+/// outside this module; it holds no tenant id and is never logged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttemptSweepCursor {
+    cleanup_after: DateTime<Utc>,
+    run_id: Uuid,
+    lease_token: Uuid,
+    artifact: String,
+}
+
+/// What one attempt sweep pass did
+/// (`PipelineService::sweep_attempt_artifacts_from`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttemptSweepPass {
+    /// How many rows it removed.
+    pub removed: usize,
+    /// Where the next pass resumes; `None` to start at the oldest due row.
+    pub resume_after: Option<AttemptSweepCursor>,
+}
+
+/// The sweep could not delete a due attempt row's object (or could not
+/// tell whether it is gone); the row stays for the next pass.
+const PIPELINE_ATTEMPT_SWEEP_DELETE_FAILED: &str = "pipeline_attempt_sweep_delete_failed";
+/// A due attempt row with no hash names an object key other than the one
+/// the store derives from the row's artifact, run and lease token (rebase
+/// 10 review, M1); the row and that object stay.
+const PIPELINE_ATTEMPT_SWEEP_KEY_MISMATCH: &str = "pipeline_attempt_sweep_key_mismatch";
+
+/// What `PipelineService::sweep_attempt_artifacts` does with one due row
+/// once it has handled the row's object.
+enum AttemptSweepRow {
+    /// The object is gone; the row is deleted.
+    Remove,
+    /// The row stays, and the sweep logs this label, with the store's own
+    /// refusal label when it gave one.
+    Keep(&'static str, Option<String>),
+}
+
+/// The store's own refusal, when its text is a label (`^[a-z0-9_]{1,64}$`):
+/// the sweep logs it beside `pipeline_attempt_sweep_delete_failed`, so an
+/// operator can tell `artifact_delete_at_object_key_unavailable`,
+/// `remote_trace_artifact_delete_at_key_unavailable`, and a store's other
+/// refusals apart (review of the follow-up wave, m2). Any other error text
+/// is left out: operational output is label-only.
+fn store_refusal_label(error: &anyhow::Error) -> Option<String> {
+    let text = error.to_string();
+    crate::versioned_pipeline_qualification::is_safe_label(&text).then_some(text)
+}
+
+/// The attempt rows a compatibility Score staged before it took its
+/// tenant's Score lock (rebase 10, option D;
+/// `PipelineService::stage_score_artifacts_before_lock`): each artifact's
+/// object key, and the moment after which the attempt publishes nothing
+/// (`PipelineService::attempt_artifact_lease_bound`).
+struct PrestagedScoreArtifacts {
+    object_keys: Vec<(PipelineAttemptArtifact, String)>,
+    publish_deadline: DateTime<Utc>,
+}
+
+impl PrestagedScoreArtifacts {
+    fn object_key(&self, artifact: PipelineAttemptArtifact) -> Option<&str> {
+        self.object_keys
+            .iter()
+            .find(|(staged, _)| *staged == artifact)
+            .map(|(_, object_key)| object_key.as_str())
+    }
+}
+
 /// The object id a claim stores one of its run's phase artifacts under
 /// (`artifact` is `approved`, `index-command`, or `score-neighbors`).
 ///
@@ -11128,9 +12820,11 @@ fn decode_pipeline_artifact_bytes(wrapper: &serde_json::Value) -> anyhow::Result
 /// matching the stored object. The database refs a commit records stay
 /// deterministic (the approved object ref id is derived from the run id
 /// alone); only the object key moves per claim. A phase attempt that
-/// crashes before its commit leaves its objects unreferenced (not tracked
-/// in PR 2). The receipt's source object is tracked: see
-/// `pipeline_receipt_object_id`.
+/// crashes before its commit, loses its lease, or has its commit refused
+/// leaves its objects named by a `pipeline_attempt_artifacts` `staged` row
+/// (PR 4); `PipelineService::sweep_attempt_artifacts` deletes both once the
+/// row's `cleanup_after` passes. The receipt's source object is tracked
+/// separately: see `pipeline_receipt_object_id`.
 pub fn pipeline_attempt_object_id(artifact: &str, run_id: Uuid, lease_token: Uuid) -> String {
     format!("pipeline-{artifact}-{run_id}-{lease_token}")
 }
@@ -11439,6 +13133,75 @@ pub fn is_pipeline_artifact_wrapper(wrapper: &serde_json::Value) -> bool {
 mod tests {
     use super::*;
 
+    #[test]
+    fn the_sweep_logs_a_store_refusal_only_when_it_is_a_label() {
+        assert_eq!(
+            store_refusal_label(&anyhow::anyhow!(
+                "artifact_delete_at_object_key_unavailable"
+            )),
+            Some("artifact_delete_at_object_key_unavailable".to_string())
+        );
+        assert_eq!(
+            store_refusal_label(&anyhow::anyhow!(
+                "remote_trace_artifact_delete_at_key_unavailable"
+            )),
+            Some("remote_trace_artifact_delete_at_key_unavailable".to_string())
+        );
+        for unsafe_text in [
+            "failed to delete gs://bucket/tenants/abc/object",
+            "Permission denied (os error 13)",
+            "",
+            &"a".repeat(65),
+        ] {
+            assert_eq!(
+                store_refusal_label(&anyhow::anyhow!(unsafe_text.to_string())),
+                None,
+                "{unsafe_text}"
+            );
+        }
+        // A wrapped refusal's outer text is what is tested, never its cause.
+        let wrapped = anyhow::anyhow!("artifact_delete_at_object_key_unavailable")
+            .context("deleting tenant-a's object at a key");
+        assert_eq!(store_refusal_label(&wrapped), None);
+    }
+
+    /// Wave 2 (PR 3's c8d65fcb with PR 4's 6dace131): every failed store
+    /// call of the run path that is not an integrity failure (ZA-2) is one
+    /// transient `PolicyError`, the uncharged suspension. A capability the store lacks keeps its own label; any
+    /// other failure, a safe-looking label included, is
+    /// `artifact_store_unavailable`, and no other store text reaches the run.
+    #[test]
+    fn a_failed_store_call_is_one_uncharged_suspension() {
+        for (message, label) in [
+            (
+                PIPELINE_OBJECT_KEY_UNAVAILABLE_LABEL,
+                PIPELINE_OBJECT_KEY_UNAVAILABLE_LABEL,
+            ),
+            (
+                "object store unavailable",
+                PIPELINE_ARTIFACT_STORE_UNAVAILABLE_LABEL,
+            ),
+            (
+                "artifact_delete_at_object_key_unavailable",
+                PIPELINE_ARTIFACT_STORE_UNAVAILABLE_LABEL,
+            ),
+            (
+                "failed to write gs://bucket/tenants/abc/object",
+                PIPELINE_ARTIFACT_STORE_UNAVAILABLE_LABEL,
+            ),
+        ] {
+            let failure = artifact_store_failure(&anyhow::anyhow!(message.to_string()));
+            assert!(failure.is_transient(), "{message}");
+            assert_eq!(failure.label(), label, "{message}");
+        }
+        let wrapped = anyhow::anyhow!(PIPELINE_OBJECT_KEY_UNAVAILABLE_LABEL)
+            .context("deriving tenant-a's object key");
+        assert_eq!(
+            artifact_store_failure(&wrapped).label(),
+            PIPELINE_ARTIFACT_STORE_UNAVAILABLE_LABEL
+        );
+    }
+
     /// Zaki review 1, item 1: `main`'s revocation-propagation worker checks a
     /// `worker_intermediate` object as a pipeline object only when its ref
     /// is one `score_object_ref` builds. A vector payload ref of `main`'s,
@@ -11465,6 +13228,24 @@ mod tests {
             pipeline_score_object_ref_id(run_id, "approved"),
             Some(run_id)
         ));
+    }
+
+    /// `truncate_to_microseconds` drops any nanosecond remainder (what a
+    /// Linux clock can hand `Utc::now()`, and what a `TIMESTAMPTZ` column
+    /// cannot store) while leaving a value already at microsecond precision
+    /// -- the shape a value read back from PostgreSQL always has -- alone,
+    /// so the two can compare equal.
+    #[test]
+    fn truncate_to_microseconds_drops_the_sub_microsecond_remainder() {
+        let with_nanos = DateTime::from_timestamp(1_700_000_000, 123_456_789).unwrap();
+        let truncated = truncate_to_microseconds(with_nanos);
+        assert_eq!(truncated.timestamp_micros(), 1_700_000_000_123_456);
+        assert_eq!(truncated.timestamp_subsec_nanos(), 123_456_000);
+        assert!(truncated <= with_nanos);
+
+        // Already at microsecond precision (as anything read back from
+        // PostgreSQL is): truncating again changes nothing.
+        assert_eq!(truncate_to_microseconds(truncated), truncated);
     }
 
     /// Ruling F-M5: the payout's own result comes first. A lock release that

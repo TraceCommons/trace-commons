@@ -313,7 +313,7 @@ private struct PublicRunEditor: View {
                     } label: {
                         HStack(alignment: .firstTextBaseline, spacing: TC.Space.s) {
                             Image(systemName: selected ? "circle.inset.filled" : "circle")
-                                .foregroundStyle(selected ? TC.greenText : TC.inkSecondary)
+                                .foregroundStyle(selected ? TC.accentText : TC.inkSecondary)
                                 .accessibilityHidden(true)
                             Text([choice.label, choice.explanation].joined(separator: " · "))
                                 .font(TC.Font_.footnote)
