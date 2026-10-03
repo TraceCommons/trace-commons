@@ -235,6 +235,15 @@ pub const ERR_CORRECTION_NEEDS_ENTRY: &str = "correction-needs-entry-id";
 /// override promises nothing is queued or sent; clearing it lets the
 /// contributor approve again.
 pub const ERR_CONTRIBUTION_OVERRIDE_NEVER: &str = "contribution-override-never";
+/// K2 (#1173): refused because `DaemonShared::dev_dry_run` is set. Returned
+/// by every explicit send-enabling call -- `approve` (including a folder/
+/// project approval), `set_project_mode` arming a project for
+/// `auto_upload`, `set_contribution_override` set to `auto_upload`,
+/// `grant_automatic`, `enroll`, and the witness network preview -- before
+/// anything is approved, armed, granted, enrolled, or sent to a witness.
+/// Nothing clears this mode over the socket: it is set once, from the
+/// process environment, before the daemon starts serving requests.
+pub const ERR_DEV_DRY_RUN: &str = "dev-dry-run";
 /// The label an entry is skipped under when credential detection fired on
 /// the correction the contributor wrote for it.
 ///
@@ -517,6 +526,21 @@ pub struct DaemonShared {
     pub state: Mutex<DaemonState>,
     pub settings: Arc<Mutex<DaemonSettings>>,
     pub health: Mutex<HealthState>,
+    /// K2 (#1173): the developer-only dry-run switch. Set exactly once, from
+    /// `TC_DEV_DRY_RUN` in the process environment, by `start_embedded`
+    /// before this struct's `Arc` is ever cloned -- see
+    /// `daemon::dev_dry_run_enabled`. `DaemonShared::load` always
+    /// initializes it to `false`; nothing past construction ever assigns it
+    /// again.
+    ///
+    /// No method on this type sets it, no IPC handler reads it out of
+    /// `req.params`, and no wire schema in `docs/contributor-daemon-ipc-v1_1.md`
+    /// names it -- that absence is what makes it untoggleable over the
+    /// socket, the same way `quiesced` above is process-lifetime state no
+    /// request can reach. A plain `bool`, not an `AtomicBool`: it is written
+    /// once, before any other thread holds a reference to this struct, and
+    /// read-only for the rest of the process's life.
+    pub dev_dry_run: bool,
     pub paused: AtomicBool,
     /// Uploads are parked for an update swap.
     ///
@@ -801,6 +825,9 @@ impl DaemonShared {
             state: Mutex::new(state),
             settings: Arc::new(Mutex::new(settings)),
             health: Mutex::new(HealthState::default()),
+            // `start_embedded` is the only place this ever becomes `true`,
+            // and only before this `Arc` is shared -- see the field's doc.
+            dev_dry_run: false,
             paused: AtomicBool::new(paused),
             quiesced: AtomicBool::new(false),
             shutdown: AtomicBool::new(false),
@@ -965,8 +992,16 @@ impl DaemonShared {
         let (on, generation, credential, capture_enabled, attestor_key) = {
             let settings = self.settings.lock().expect("settings lock");
             (
+                // K2 (#1173): never host the proxy under a developer dry
+                // run, however `private_inference` reads. Hosting it is
+                // "IronWire changes" in the sense the dry-run guarantee
+                // names: it opens a loopback listener that forwards real
+                // inference traffic to the NEAR AI backend, which is network
+                // the dry run promises never to reach, regardless of what a
+                // contributor's real settings say.
                 !self.private_inference_terminating.load(Ordering::Acquire)
-                    && settings.private_inference,
+                    && settings.private_inference
+                    && !self.dev_dry_run,
                 self.private_inference_generation.load(Ordering::Acquire),
                 // Read here, under the same lock as the switch, so a key
                 // obtained while the daemon runs is picked up on the next
@@ -3414,6 +3449,12 @@ fn grant_automatic_refusal(
 // the contributor chose a non-empty scope list (R7), and the witness
 // configured now is the one the disclosure screen showed.
 fn handle_grant_automatic(shared: &DaemonShared, req: &Request) -> Response {
+    // K2 (#1173): refused before the config is even read, so a developer
+    // pointed at their own real sessions can never grant standing
+    // auto-upload permission by accident.
+    if shared.dev_dry_run {
+        return Response::err(req.id, ERR_BAD_PARAMS, ERR_DEV_DRY_RUN);
+    }
     let Ok(Some(cfg)) = shared.store.load_config() else {
         return Response::err(req.id, ERR_UNAVAILABLE, "arming-terms-unavailable");
     };
@@ -3613,6 +3654,13 @@ fn handle_set_project_mode(shared: &DaemonShared, req: &Request) -> Response {
         Some(Ok(m)) => m,
         _ => return Response::err(req.id, ERR_BAD_PARAMS, "mode-invalid"),
     };
+    // K2 (#1173): arming a project for `auto_upload` is a send path -- it is
+    // what lets a future session leave unattended -- so it is refused before
+    // the project key is even resolved. `notify_only` and `ignore` only ever
+    // restrict, never enable a send, so neither is touched here.
+    if mode == ProjectMode::AutoUpload && shared.dev_dry_run {
+        return Response::err(req.id, ERR_BAD_PARAMS, ERR_DEV_DRY_RUN);
+    }
     // K5: arming is **from now** by default. `auto_upload` arms the project
     // for sessions that appear from here on, and what is already on disk
     // waits for the contributor -- the spec's rule that automatic
@@ -3982,6 +4030,13 @@ fn handle_set_contribution_override(shared: &DaemonShared, req: &Request) -> Res
         Some(Ok(m)) => m,
         _ => return Response::err(req.id, ERR_BAD_PARAMS, "mode-invalid"),
     };
+    // K2 (#1173): the contribution override's `auto_upload` is the whole-
+    // account version of arming, so it is refused on the same terms --
+    // before `confirm` is even checked. `notify_only` and `ignore` stay
+    // allowed: both only ever stop sends.
+    if mode == ProjectMode::AutoUpload && shared.dev_dry_run {
+        return Response::err(req.id, ERR_BAD_PARAMS, ERR_DEV_DRY_RUN);
+    }
     let confirm = match req.params.get("confirm") {
         None | Some(serde_json::Value::Null) => false,
         Some(serde_json::Value::Bool(b)) => *b,
@@ -4577,6 +4632,13 @@ async fn handle_quiesce(shared: &DaemonShared, req: &Request) -> Response {
 /// marker rather than a wrong byte count; only `handle_request_async`
 /// resolves it completely.
 async fn handle_approve(shared: &DaemonShared, req: &Request) -> Response {
+    // K2 (#1173): refused before anything is parsed, approved, or recorded
+    // -- a single entry, `all`, or a whole project/folder alike -- so a
+    // developer pointed at their own real sessions can never approve one by
+    // accident.
+    if shared.dev_dry_run {
+        return Response::err(req.id, ERR_BAD_PARAMS, ERR_DEV_DRY_RUN);
+    }
     let all = req
         .params
         .get("all")
@@ -5303,6 +5365,15 @@ async fn handle_witness_preview_request_inner(
     // that decision with no way to be tested at all.
     #[cfg(test)] recorded: Option<anyhow::Result<super::preview::WitnessPreview>>,
 ) -> Response {
+    // K2 (#1173): a witness preview sends this session's redacted body to a
+    // real witness service for certification -- a genuine network send,
+    // independent of `approve` -- so it is refused before the session is
+    // even looked up. Without this, opening an ordinary review screen on a
+    // developer's own real session would leak content over the network that
+    // `approve` alone cannot prevent.
+    if shared.dev_dry_run {
+        return Response::err(req.id, ERR_BAD_PARAMS, ERR_DEV_DRY_RUN);
+    }
     if req
         .params
         .get("raw_session_confirmed")
@@ -7230,6 +7301,164 @@ mod tests {
             .save_config(&crate::commands::unenrolled_preview_config())
             .unwrap();
         s
+    }
+
+    /// K2 (#1173): every explicit send-enabling IPC method is refused,
+    /// before anything it would otherwise do, while `dev_dry_run` is set.
+    mod dev_dry_run {
+        use super::*;
+
+        #[tokio::test]
+        async fn refuses_approve_a_single_entry_and_all() {
+            let mut s = enrolled_shared();
+            s.dev_dry_run = true;
+            let id = seed_entry(&s, "/tmp/dev-dry-run-approve");
+            for params in [
+                serde_json::json!({"entry_id": id}),
+                serde_json::json!({"all": true}),
+                serde_json::json!({"project_id": "whatever-a-folder-approve-would-send"}),
+            ] {
+                let r = handle_request_async(&s, &req("approve", params)).await;
+                let err = r.error.expect("approve is refused under dev_dry_run");
+                assert_eq!(err.code, ERR_BAD_PARAMS);
+                assert_eq!(err.message, ERR_DEV_DRY_RUN);
+            }
+            // Refused before anything is approved: the seeded entry is
+            // exactly where it started.
+            assert_eq!(
+                s.queue.lock().unwrap().get(id).unwrap().state,
+                super::super::super::queue::QueueState::Pending
+            );
+        }
+
+        #[test]
+        fn refuses_arming_a_project_for_auto_upload_but_not_notify_only_or_ignore() {
+            let mut s = enrolled_shared();
+            s.dev_dry_run = true;
+            seed_entry(&s, "/tmp/dev-dry-run-arm");
+            let r = handle_request(
+                &s,
+                &req(
+                    "set_project_mode",
+                    serde_json::json!({"project_key": "/tmp/dev-dry-run-arm", "mode": "auto_upload"}),
+                ),
+            );
+            let err = r.error.expect("arming is refused under dev_dry_run");
+            assert_eq!(err.code, ERR_BAD_PARAMS);
+            assert_eq!(err.message, ERR_DEV_DRY_RUN);
+            // A mode that only ever restricts a send is not a send path, and
+            // stays allowed -- the guarantee is "nothing can be made to
+            // send", not "nothing can be configured".
+            for mode in ["notify_only", "ignore"] {
+                let r = handle_request(
+                    &s,
+                    &req(
+                        "set_project_mode",
+                        serde_json::json!({"project_key": "/tmp/dev-dry-run-arm", "mode": mode}),
+                    ),
+                );
+                assert!(r.error.is_none(), "{mode}: {:?}", r.error);
+            }
+        }
+
+        #[test]
+        fn refuses_the_auto_contribution_override_but_not_notify_only_or_ignore() {
+            let mut s = enrolled_shared();
+            s.dev_dry_run = true;
+            let r = handle_request(
+                &s,
+                &req(
+                    "set_contribution_override",
+                    serde_json::json!({"mode": "auto_upload", "confirm": true}),
+                ),
+            );
+            let err = r.error.expect("the Auto override is refused under dev_dry_run");
+            assert_eq!(err.code, ERR_BAD_PARAMS);
+            assert_eq!(err.message, ERR_DEV_DRY_RUN);
+            for mode in ["notify_only", "ignore"] {
+                let r = handle_request(
+                    &s,
+                    &req("set_contribution_override", serde_json::json!({"mode": mode})),
+                );
+                assert!(r.error.is_none(), "{mode}: {:?}", r.error);
+            }
+        }
+
+        #[test]
+        fn refuses_grant_automatic() {
+            let mut s = enrolled_shared();
+            s.dev_dry_run = true;
+            let r = handle_request(&s, &req("grant_automatic", serde_json::json!({})));
+            let err = r.error.expect("grant_automatic is refused under dev_dry_run");
+            assert_eq!(err.code, ERR_BAD_PARAMS);
+            assert_eq!(err.message, ERR_DEV_DRY_RUN);
+        }
+
+        #[tokio::test]
+        async fn refuses_the_witness_preview() {
+            let mut s = enrolled_shared();
+            s.dev_dry_run = true;
+            let id = seed_entry(&s, "/tmp/dev-dry-run-witness-preview");
+            let r = handle_request_async(
+                &s,
+                &req(
+                    "witness_preview_request",
+                    serde_json::json!({"entry_id": id, "raw_session_confirmed": true}),
+                ),
+            )
+            .await;
+            let err = r
+                .error
+                .expect("a witness preview is refused under dev_dry_run");
+            assert_eq!(err.code, ERR_BAD_PARAMS);
+            assert_eq!(err.message, ERR_DEV_DRY_RUN);
+        }
+
+        /// IronWire hosting is "nothing reaches the network" too: the exact
+        /// settings and home that `rejected_private_inference_settings_never_reach_reconcile`'s
+        /// sibling tests drive to `Running` elsewhere in this file stay `Off`
+        /// here, because `dev_dry_run` forces `on` to `false` regardless of
+        /// what `private_inference` says.
+        #[tokio::test]
+        async fn never_hosts_ironwire() {
+            let mut s = shared();
+            s.dev_dry_run = true;
+            let home = tempfile::tempdir().unwrap();
+            *s.private_inference.lock().await = Some(
+                super::super::super::private_inference::PrivateInference::with_port(
+                    home.path().to_path_buf(),
+                    0,
+                ),
+            );
+            s.settings.lock().unwrap().private_inference = true;
+            s.reconcile_private_inference().await;
+            assert_eq!(s.private_inference_value()["state"], "off");
+        }
+
+        /// The flag cannot be set, cleared, or discovered over the socket.
+        /// `set_settings` refuses any key `apply_settings_object` does not
+        /// recognize (`ERR_SETTINGS_UNKNOWN_FIELD`), and `dev_dry_run` is not
+        /// one of them -- the refusal itself is the proof that no code path
+        /// reads it out of `req.params`, and the field is unchanged either
+        /// way.
+        #[tokio::test]
+        async fn cannot_be_set_over_ipc() {
+            let mut s = enrolled_shared();
+            s.dev_dry_run = true;
+            let r = handle_request_async(
+                &s,
+                &req("set_settings", serde_json::json!({"dev_dry_run": false})),
+            )
+            .await;
+            let err = r
+                .error
+                .expect("an unrecognized settings key is refused outright");
+            assert_eq!(
+                err.message,
+                super::super::super::settings::ERR_SETTINGS_UNKNOWN_FIELD
+            );
+            assert!(s.dev_dry_run, "no IPC request may clear dev_dry_run");
+        }
     }
 
     #[test]

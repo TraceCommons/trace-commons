@@ -240,6 +240,29 @@ impl EmbeddedDaemon {
     }
 }
 
+/// Whether this process should start the K2 (#1173) developer-only dry-run
+/// mode: a daemon that watches and queues real sessions exactly as usual,
+/// but whose `DaemonShared::dev_dry_run` refuses every path that would
+/// approve, arm, enroll, or send anything over the network. See
+/// `uploader::Uploader::upload_entry`, and the refusals in `ipc.rs` and
+/// `enroll.rs`.
+///
+/// Read exactly once, by `start_embedded`, before `DaemonShared`'s `Arc` is
+/// ever cloned -- not by any IPC handler, and not by anything a shell can
+/// reach after the daemon has started. A later change to this process's
+/// environment has no effect; the only way to change it is to restart the
+/// daemon.
+///
+/// Debug and development use only. The macOS app's release build never
+/// offers a way to set this (see `DaemonDataWiring`), and nothing here is a
+/// substitute for that: an attacker who already controls this process's
+/// environment does not need an env var to exfiltrate data.
+fn dev_dry_run_enabled() -> bool {
+    std::env::var("TC_DEV_DRY_RUN")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
 /// Take the daemon's exclusive lock, build the shared state, and bind and
 /// spawn the socket server -- everything `run` does before it starts the
 /// supervise loop, returned as pieces instead of run to completion.
@@ -311,8 +334,20 @@ pub async fn start_embedded(store: ConfigStore) -> Result<EmbeddedDaemon> {
     // a zero-byte `daemon.lock` from a failed start was read as proof the
     // daemon had started, and produced a confident wrong diagnosis.
     let started = async {
-        let shared =
+        let mut shared =
             Arc::new(tokio::task::spawn_blocking(move || ipc::DaemonShared::load(store)).await??);
+        // K2 (#1173): the one and only place `dev_dry_run` is ever set to
+        // `true`, and the last moment it is possible to: `Arc::get_mut`
+        // succeeds only while this is the sole reference, which is true here
+        // and stops being true the moment `preview_runner` below takes its
+        // first clone. Every call this daemon serves afterward sees whatever
+        // this line decided; nothing downstream can change it, over IPC or
+        // otherwise.
+        if dev_dry_run_enabled() {
+            if let Some(shared_mut) = Arc::get_mut(&mut shared) {
+                shared_mut.dev_dry_run = true;
+            }
+        }
         // Claim this runtime for anything the daemon hosts that outlives one
         // request. This block is `async` and runs on the real daemon runtime
         // in both entry points, which is the whole reason the call belongs
@@ -959,6 +994,7 @@ async fn drain_approved(
                 settings: &settings,
                 state: &mut state,
                 health: &mut health,
+                dev_dry_run: shared.dev_dry_run,
             };
             let result = up.upload_entry(source, &session_ref, &entry, now).await;
             // Copied back on the failure path too: the uploader sets the

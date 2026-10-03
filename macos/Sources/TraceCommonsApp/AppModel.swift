@@ -1054,6 +1054,19 @@ final class AppModel: ObservableObject {
                 self.startup = .running
                 self.subscribe()
                 self.refreshAll()
+                #if DEBUG
+                // K2 (#1173): console-only, so a developer who set
+                // TC_DEV_DRY_RUN=1 can confirm it took before trusting the
+                // screens they are about to click through. The guarantee
+                // itself does not depend on this line running -- it is the
+                // daemon's own refusal, enforced whether or not anyone reads
+                // the console.
+                if DaemonDataWiring.devDryRunActive {
+                    NSLog(
+                        "TraceCommons: TC_DEV_DRY_RUN=1 -- this daemon refuses every send path."
+                    )
+                }
+                #endif
             case .failure(TCDaemon.TCError.rootsNotDeclared):
                 self.startup = .needsRoots
             case .failure(let error):

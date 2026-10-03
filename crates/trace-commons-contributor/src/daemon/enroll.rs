@@ -16,7 +16,7 @@ use chrono::Utc;
 use serde_json::json;
 
 use super::audit::{self, AuditEntry};
-use super::ipc::{DaemonShared, ERR_BAD_PARAMS, ERR_UNAVAILABLE, Request, Response};
+use super::ipc::{DaemonShared, ERR_BAD_PARAMS, ERR_DEV_DRY_RUN, ERR_UNAVAILABLE, Request, Response};
 use crate::commands::{EnrollOutcome, enroll_core};
 use crate::consent::{VALID_SCOPES, validate_scopes};
 
@@ -107,6 +107,12 @@ fn parse_scope_names(params: &serde_json::Value) -> Result<Vec<String>, &'static
 /// `handle_request_async` and `handle_local`, never through the synchronous
 /// `handle_request` -- see the "Sync vs. async dispatch" note on `ipc`.
 pub(super) async fn handle_enroll(shared: &DaemonShared, req: &Request) -> Response {
+    // K2 (#1173): enrollment is a real network call (registering the device
+    // with the issuer), so it is refused before anything in `req.params` is
+    // even read.
+    if shared.dev_dry_run {
+        return Response::err(req.id, ERR_BAD_PARAMS, ERR_DEV_DRY_RUN);
+    }
     let grant = req.params.get("grant").and_then(|v| v.as_str());
     let invite = req.params.get("invite").and_then(|v| v.as_str());
 
@@ -328,6 +334,24 @@ mod tests {
         )
         .await;
         assert_eq!(r.error.unwrap().code, ERR_BAD_PARAMS);
+    }
+
+    /// K2 (#1173): enrollment is a real network call (registering the
+    /// device with the issuer), so it is refused before `grant`/`invite` are
+    /// even read -- an otherwise-valid call refuses identically to a
+    /// malformed one.
+    #[tokio::test]
+    async fn enroll_is_refused_under_dev_dry_run() {
+        let mut s = shared();
+        s.dev_dry_run = true;
+        let r = handle_enroll(&s, &req("enroll", json!({}))).await;
+        let err = r.error.expect("enroll is refused under dev_dry_run");
+        assert_eq!(err.code, ERR_BAD_PARAMS);
+        assert_eq!(err.message, ERR_DEV_DRY_RUN);
+        assert!(
+            s.store.load_config().unwrap().is_none(),
+            "nothing is enrolled"
+        );
     }
 
     #[tokio::test]

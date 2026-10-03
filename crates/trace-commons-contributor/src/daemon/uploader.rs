@@ -56,6 +56,12 @@ use crate::submit::{
 use trace_commons_protocol::admission::AdmissionRefusal;
 use trace_commons_protocol::trace_contribution::TraceContributionEnvelope;
 
+/// The reason label `upload_entry` refuses with when `Uploader::dev_dry_run`
+/// is set. Not mapped by `health_label_for` on purpose: a developer running
+/// against their own real sessions is working as intended, not degraded, so
+/// this never raises a health condition a real contributor would see.
+pub const REASON_DEV_DRY_RUN: &str = "dev-dry-run";
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum UploadDecision {
     Uploaded {
@@ -439,6 +445,17 @@ pub struct Uploader<'a, 'ctx> {
     pub settings: &'a DaemonSettings,
     pub state: &'a mut DaemonState,
     pub health: &'a mut HealthState,
+    /// K2 (#1173): the developer-only dry-run switch, copied in from
+    /// `DaemonShared::dev_dry_run` by the one caller that builds an
+    /// `Uploader` from a running daemon (`drain_approved`). Checked in
+    /// [`Self::upload_entry`] immediately before the one call that puts
+    /// bytes on the wire (`SubmitContext::submit_loaded`) -- the single
+    /// choke point every queued upload passes through, so this is the one
+    /// flag that has to be right. Never read from `req.params`: nothing in
+    /// `ipc.rs` deserializes a field by this name from any request, which is
+    /// what makes it untoggleable over IPC. See `TC_DEV_DRY_RUN` in
+    /// `daemon::mod::dev_dry_run_enabled`.
+    pub dev_dry_run: bool,
 }
 
 impl Uploader<'_, '_> {
@@ -735,6 +752,20 @@ impl Uploader<'_, '_> {
         // apply to a submission this context runs later.
         self.ctx
             .set_upload_provenance(entry.approved_unattended, entry.approved_verdict.clone());
+        // K2 (#1173): the developer dry-run switch. Everything above this
+        // line -- the re-hash, the approval-terms guard, the witness-review
+        // and scrub-check holds -- has already run, so a developer sees
+        // exactly what a real pass would decide. The one thing that never
+        // happens is the network call on the next line: `submit_loaded` is
+        // the sole place this pipeline puts bytes on the wire, so refusing
+        // immediately before it, rather than earlier, is what makes this the
+        // one check that has to be right for "nothing leaves this Mac" to
+        // hold.
+        if self.dev_dry_run {
+            return Ok(UploadDecision::Refused {
+                reason_label: REASON_DEV_DRY_RUN.to_string(),
+            });
+        }
         let outcome = match self.ctx.submit_loaded(transcript).await {
             Ok(o) => o,
             Err(e) => {
@@ -1265,6 +1296,7 @@ mod tests {
             settings: &settings,
             state: &mut state,
             health: &mut health,
+            dev_dry_run: false,
         };
 
         let decision = up
@@ -1365,6 +1397,59 @@ mod tests {
         assert!(health.ok());
     }
 
+    /// K2 (#1173): the exact fixture `upload_proceeds_when_the_hash_still_matches`
+    /// drives all the way to `Uploaded` is refused here instead -- the only
+    /// difference is `Uploader::dev_dry_run`. Every guard above it in
+    /// `upload_entry` (the re-hash, the approval-terms check) still runs, so
+    /// this proves the refusal sits immediately before the one call that
+    /// sends, not in place of the real pipeline.
+    #[tokio::test]
+    async fn upload_refuses_under_dev_dry_run_right_before_the_send() {
+        let session = GrowingSession::new();
+        let (_d, store) = temp_store();
+        let cfg = fixture_cfg(&store);
+        store.save_config(&cfg).unwrap();
+
+        let entry = session.entry_for(&session.current_hash(), &cfg);
+        let opts = dry_run_opts();
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let mut state = DaemonState::new();
+        let mut health = HealthState::default();
+        let settings = settings();
+        let mut up = Uploader {
+            ctx: &mut ctx,
+            store: &store,
+            settings: &settings,
+            state: &mut state,
+            health: &mut health,
+            dev_dry_run: true,
+        };
+        let decision = up
+            .upload_entry(
+                &session.source(),
+                &session.session_ref(),
+                &entry,
+                at("2026-08-08T16:00:00Z"),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            decision,
+            UploadDecision::Refused {
+                reason_label: REASON_DEV_DRY_RUN.to_string(),
+            }
+        );
+        assert_eq!(
+            state.uploads_today, 0,
+            "nothing may be uploaded while dev_dry_run is set"
+        );
+        // Deliberately not mapped to a health label (see REASON_DEV_DRY_RUN's
+        // doc): a developer running their own real sessions is not a
+        // degraded daemon.
+        assert!(health.ok());
+    }
+
     // --- the Scrub check (K4 of #1118) ------------------------------------
 
     /// A one-turn session whose only text is `text`, so a test decides how
@@ -1420,6 +1505,7 @@ mod tests {
             settings: &settings,
             state: &mut state,
             health: &mut health,
+            dev_dry_run: false,
         }
         .upload_entry(
             &session.source(),
@@ -1843,6 +1929,7 @@ mod tests {
             settings: &settings,
             state: &mut state,
             health: &mut health,
+            dev_dry_run: false,
         };
 
         let decision = up
@@ -2022,6 +2109,7 @@ mod tests {
                 settings: &settings,
                 state: &mut state,
                 health: &mut health,
+                dev_dry_run: false,
             };
             let decision = up
                 .upload_entry(
@@ -2325,6 +2413,7 @@ mod tests {
             settings: &settings,
             state: &mut state,
             health: &mut health,
+            dev_dry_run: false,
         };
         let decision = up
             .upload_entry(
@@ -2395,6 +2484,7 @@ mod tests {
             settings: &settings,
             state: &mut state,
             health: &mut health,
+            dev_dry_run: false,
         };
         let sent = up
             .approved_envelope_for(&entry)
@@ -2433,6 +2523,7 @@ mod tests {
             settings: &settings,
             state: &mut state,
             health: &mut health,
+            dev_dry_run: false,
         };
         let sent = up
             .approved_envelope_for(&entry)
@@ -2472,6 +2563,7 @@ mod tests {
             settings: &settings,
             state: &mut state,
             health: &mut health,
+            dev_dry_run: false,
         };
         let sent = up
             .approved_envelope_for(&entry)
@@ -2512,6 +2604,7 @@ mod tests {
             settings: &settings,
             state: &mut state,
             health: &mut health,
+            dev_dry_run: false,
         };
         assert!(up.approved_envelope_for(&entry).is_err());
     }
