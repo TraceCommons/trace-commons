@@ -862,6 +862,13 @@ const SURFACES: &[(&str, &str, &str, &str, &str)] = &[
         "tc_residual_secret_line_text",
     ),
     (
+        "surviving secret in Traces",
+        "TraceCommonsApp/Views/Monitor/TracesStore.swift",
+        "TCCoreCopy.residualSecretLine",
+        "TCBridge/TCCoreCopy.swift",
+        "tc_residual_secret_line_text",
+    ),
+    (
         "scrubbing panel",
         "TraceCommonsApp/Views/PreviewSheet.swift",
         "TCCoreCopy.redactionSummaryJSON",
