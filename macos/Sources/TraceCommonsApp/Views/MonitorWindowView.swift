@@ -127,11 +127,7 @@ struct MonitorWindowView: View {
                 case .home:
                     HomeTabView(
                         store: home, traces: traces,
-                        statusLabel: { status in
-                            model.publicRunCopy.map { copy in
-                                status.map(copy.historyStatusLabel(for:)) ?? copy.contributionStatusUnavailable
-                            }
-                        },
+                        statusLabel: { HomeFormat.historyStatusLabel(copy: model.publicRunCopy, $0) },
                         page: $homePage,
                         // Selecting a row shows the inspector, where its
                         // details are, as a session's Review does.

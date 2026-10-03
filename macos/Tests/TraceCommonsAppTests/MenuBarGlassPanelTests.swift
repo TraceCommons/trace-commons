@@ -100,6 +100,20 @@ final class MenuBarGlassPanelTests: XCTestCase {
         XCTAssertEqual(rows.map(\.at), rows.map(\.at).sorted(by: >))
     }
 
+    /// With no word for a status the row names the project only, never the
+    /// raw wire token.
+    func test_recentActivityNeverShowsTheRawStatusToken() async throws {
+        let store = MenuPanelStore(client: SampleDaemonClient(.normalDay))
+        await store.load()
+        let statuses = Set(store.history.compactMap(\.status))
+        let rows = MenuPanelData.recent(
+            pending: [], history: store.history, calls: [], statusLabel: { _ in nil }, limit: 50)
+        XCTAssertFalse(rows.isEmpty)
+        for row in rows {
+            for status in statuses { XCTAssertFalse(row.text.contains(status), row.text) }
+        }
+    }
+
     /// An outside call carries its proof label unless it was verified; a
     /// routed call is not recent activity.
     func test_anOutsideCallCarriesItsProofLabel() throws {

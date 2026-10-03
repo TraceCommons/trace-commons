@@ -282,7 +282,8 @@ enum MenuPanelData {
             guard let at = row.submittedAt, let status = row.status else { continue }
             rows.append(Recent(
                 id: "history:\(row.submissionId)", kind: .contributed, at: at, tool: row.source.flatMap(tool),
-                text: "\(row.projectLabel ?? "—") · \(statusLabel(status) ?? status)", trailing: nil))
+                text: [row.projectLabel ?? "—", statusLabel(status)].compactMap { $0 }.joined(separator: " · "),
+                trailing: nil))
         }
         for call in calls where call.route == "outside" {
             rows.append(Recent(

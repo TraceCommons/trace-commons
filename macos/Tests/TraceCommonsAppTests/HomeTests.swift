@@ -14,9 +14,7 @@ final class HomeTests: XCTestCase {
     /// never the raw wire token.
     func test_statusWordsComeFromTheCoresOneTable() throws {
         let copy = try XCTUnwrap(PublicRunCopy.decode(fromJSON: TCPublicRun.copyJSON() ?? ""))
-        let label: (String?) -> String? = { status in
-            copy.historyStatusLabel(for: status ?? "")
-        }
+        let label: (String?) -> String? = { HomeFormat.historyStatusLabel(copy: copy, $0) }
         XCTAssertEqual(HomeFormat.statusWord("submitted", label: label), "Waiting to be scored")
         XCTAssertEqual(HomeFormat.statusWord("accepted", label: label), "In the commons")
         XCTAssertEqual(HomeFormat.statusWord("future_state", label: label), "Status unavailable")
@@ -27,8 +25,22 @@ final class HomeTests: XCTestCase {
         XCTAssertNil(HomeFormat.statusWord(nil, label: { _ in nil }))
     }
 
+    /// The one function the window and the menu pass: nil, empty and unknown
+    /// read the unavailable word; no copy reads no word.
+    func test_historyStatusLabelAnswersTheCoresWordsOnly() throws {
+        let copy = try XCTUnwrap(PublicRunCopy.decode(fromJSON: TCPublicRun.copyJSON() ?? ""))
+        XCTAssertEqual(HomeFormat.historyStatusLabel(copy: copy, nil), "Status unavailable")
+        XCTAssertEqual(HomeFormat.historyStatusLabel(copy: copy, ""), "Status unavailable")
+        XCTAssertEqual(HomeFormat.historyStatusLabel(copy: copy, "future_state"), "Status unavailable")
+        XCTAssertEqual(HomeFormat.historyStatusLabel(copy: copy, "processing"), "Waiting to be scored")
+        XCTAssertEqual(HomeFormat.historyStatusLabel(copy: copy, "accepted"), "In the commons")
+        XCTAssertNil(HomeFormat.historyStatusLabel(copy: nil, "accepted"))
+        XCTAssertNil(HomeFormat.historyStatusLabel(copy: nil, nil))
+    }
+
     /// An unknown or missing status is neutral, never a failure tone.
     func test_unknownStatusToneIsNeutral() {
+        XCTAssertEqual(HomeFormat.tone("processing"), .ask)
         XCTAssertEqual(HomeFormat.tone(nil), .neutral)
         XCTAssertEqual(HomeFormat.tone("future_state"), .neutral)
     }
@@ -39,7 +51,7 @@ final class HomeTests: XCTestCase {
                 of: "Tests/TraceCommonsAppTests/HomeTests.swift",
                 with: "Sources/TraceCommonsApp/Views/MonitorWindowView.swift"),
             encoding: .utf8)
-        XCTAssertTrue(src.contains("historyStatusLabel(for:"))
+        XCTAssertTrue(src.contains("HomeFormat.historyStatusLabel(copy:"))
         XCTAssertFalse(src.contains("contributionStatusLabel(for:"))
     }
 
