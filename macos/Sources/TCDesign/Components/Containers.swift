@@ -56,7 +56,8 @@ public struct GlassEyebrowCard<Accessory: View, Content: View>: View {
 
     public var body: some View {
         if let action {
-            Button(action: action) { card }.buttonStyle(.plain)
+            // The card's tier fill darkens while pressed (`GlassPressStyle`).
+            Button(action: action) { card }.buttonStyle(GlassPressStyle())
         } else {
             card
         }
@@ -215,7 +216,7 @@ public struct GlassSectionRule: View {
                 .foregroundStyle(GlassColor.accentText)
                 .fixedSize()
                 .accessibilityAddTraits(.isHeader)
-            Rectangle().fill(Color.white.opacity(0.14)).frame(height: 0.5)
+            Rectangle().fill(GlassColor.ink(0.14)).frame(height: 0.5)
         }
         .padding(.top, GlassTokens.Space.s3)
     }
