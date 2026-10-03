@@ -85,7 +85,7 @@ async fn set_tenant(client: &Client, tenant: &str) {
         .expect("set migration test tenant");
 }
 
-const PIPELINE_TABLES: [&str; 19] = [
+const PIPELINE_TABLES: [&str; 20] = [
     "pipeline_runs",
     "phase_outcomes",
     "pipeline_bundle_packages",
@@ -105,10 +105,11 @@ const PIPELINE_TABLES: [&str; 19] = [
     "pipeline_activation_events",
     "pipeline_receipt_ownership",
     "pipeline_policy_interventions",
+    "pipeline_index_rebuild_fences",
 ];
 
 /// Every privilege the ingest runtime group, `trace_ingest_runtime`, holds on
-/// the pipeline tables once V92 to V95, V105 to V108, and V110 to V112 have run, as
+/// the pipeline tables once V92 to V95, V105 to V108, and V110 to V113 have run, as
 /// `(table, privilege, columns)`; no columns means the whole table. It holds
 /// what the pipeline code reads and writes and nothing broader. The only
 /// other grantee is `trace_gate_driver` (`GATE_DRIVER_PIPELINE_GRANTS`). A
@@ -293,6 +294,13 @@ const RUNTIME_PIPELINE_GRANTS: &[(&str, &str, &[&str])] = &[
         "UPDATE",
         &["bundle_id", "selected_at"],
     ),
+    // V113: a rebuild inserts its fence row, extends it (only
+    // `fenced_until` changes), and deletes it; the invalidation claim reads
+    // the rows.
+    ("pipeline_index_rebuild_fences", "SELECT", &[]),
+    ("pipeline_index_rebuild_fences", "INSERT", &[]),
+    ("pipeline_index_rebuild_fences", "DELETE", &[]),
+    ("pipeline_index_rebuild_fences", "UPDATE", &["fenced_until"]),
 ];
 
 /// What `main`'s gate driver role, `trace_gate_driver`, holds on the pipeline
@@ -366,7 +374,7 @@ async fn pipeline_upgrade_from_v91_installs_forced_rls_storage() {
     // newest one in the list; the pipeline versions themselves must be there.
     let latest = super::MIGRATIONS.iter().map(|(v, _, _)| *v).max();
     assert_eq!(version, latest);
-    for pipeline_version in [92, 93, 94, 95, 105, 106, 107, 108, 110, 111, 112] {
+    for pipeline_version in [92, 93, 94, 95, 105, 106, 107, 108, 110, 111, 112, 113] {
         let recorded: bool = admin
             .query_one(
                 "SELECT EXISTS (SELECT 1 FROM _trace_commons_migrations WHERE version = $1)",
@@ -964,6 +972,49 @@ async fn pipeline_upgrade_from_v91_installs_forced_rls_storage() {
         )
         .await
         .expect("deleting the tenant cascades through its qualifications");
+
+    // V113: one fence row per rebuild. Two rebuilds of one tenant each hold
+    // a row, a second row with one rebuild's fence id is a unique violation,
+    // and the rows go with their tenant.
+    let fence_tenant = "upgrade-v113";
+    admin
+        .batch_execute(&format!(
+            "INSERT INTO trace_tenants (tenant_id) VALUES ('{fence_tenant}')
+                 ON CONFLICT DO NOTHING;
+             INSERT INTO pipeline_index_rebuild_fences (tenant_id, fence_id, fenced_until)
+                 VALUES ('{fence_tenant}', '00000000-0000-0000-0000-000000000001',
+                         clock_timestamp() + INTERVAL '1 minute'),
+                        ('{fence_tenant}', '00000000-0000-0000-0000-000000000002',
+                         clock_timestamp() + INTERVAL '1 minute');"
+        ))
+        .await
+        .expect("two rebuilds of one tenant each hold a fence row");
+    let same_fence = admin
+        .batch_execute(&format!(
+            "INSERT INTO pipeline_index_rebuild_fences (tenant_id, fence_id, fenced_until)
+                 VALUES ('{fence_tenant}', '00000000-0000-0000-0000-000000000001',
+                         clock_timestamp());"
+        ))
+        .await
+        .expect_err("one rebuild has one fence row");
+    assert_eq!(same_fence.code(), Some(&SqlState::UNIQUE_VIOLATION));
+    set_tenant(&admin, fence_tenant).await;
+    admin
+        .execute(
+            "DELETE FROM trace_tenants WHERE tenant_id = $1",
+            &[&fence_tenant],
+        )
+        .await
+        .expect("deleting the tenant cascades through its fences");
+    let fence_rows: i64 = admin
+        .query_one(
+            "SELECT COUNT(*) FROM pipeline_index_rebuild_fences WHERE tenant_id = $1",
+            &[&fence_tenant],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(fence_rows, 0, "deleting the tenant removes its fence rows");
 
     PipelineCheckEmitter::emit_pass_from_env(
         "pipeline_storage_upgrade_rls",

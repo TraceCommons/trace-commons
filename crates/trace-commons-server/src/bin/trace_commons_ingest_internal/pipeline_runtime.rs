@@ -378,17 +378,28 @@ pub(crate) async fn pipeline_readiness_handler(
 /// (Envelope tenant fields are attribution only; auth derives the tenant
 /// that is actually read and written).
 ///
-/// It refuses, with `409` `pipeline_index_rebuild_tenant_active`, a tenant
-/// this process routes or drains (merge review M1). A withdrawal of a
-/// complete run queues its invalidation at once, and it can come from the
-/// client, from `main`'s retention maintenance, or from the
-/// revocation-propagation reconciler, so the route's guarantee is not that
-/// no withdrawal happens: it is that the worker processes none of the
-/// tenant's invalidations while the rebuild writes (the restore runbook's
-/// step 3, `backup-restore.md`). A queued invalidation waits for a later
-/// worker. This holds for this process only: another replica that routes
-/// or drains the tenant still processes its invalidations. Closing that (a
-/// committed rebuild fence that a withdrawal's invalidation reads) is PR 5's.
+/// A withdrawal of a complete run queues its invalidation at once, and it
+/// can come from the client, from `main`'s retention maintenance, or from
+/// the revocation-propagation reconciler, so the guarantee is not that no
+/// withdrawal happens: it is that no worker, in any process, claims one of
+/// the tenant's invalidations while the rebuild writes. The rebuild holds a
+/// committed fence for that (`pipeline_index_rebuild_fences`, V113; PR 5):
+/// before each run's writes it sets the tenant's fence to the run's deadline
+/// plus the write fence margin, and the invalidation claim takes nothing
+/// while a fence of the tenant is unexpired. A queued invalidation thus waits
+/// for the rebuild in every process, another replica's worker included, and
+/// also when the run's locks are released while a write goes on (a lost
+/// database session, an abort past the shutdown grace period, the process
+/// exit): the fence then expires on its own, at most the run deadline plus
+/// the margin (90 seconds at the defaults) after it was last set. A fence
+/// write that fails stops the rebuild with `503`
+/// `index_rebuild_fence_unavailable`.
+///
+/// It still refuses, with `409` `pipeline_index_rebuild_tenant_active`, a
+/// tenant this process routes or drains (merge review M1): a Score of that
+/// tenant must not read a partly rebuilt index. The refusal reaches only
+/// this process, so the restore runbook starts every process with both
+/// tenant lists unset for the rebuild (step 3, `backup-restore.md`).
 ///
 /// A rebuild that completes appends one index maintenance audit row, as the
 /// vector index worker route does (final review M4, ruling FR-7): `main`'s
@@ -410,7 +421,9 @@ pub(crate) async fn pipeline_readiness_handler(
 /// rebuilds with the worker's grace period (`run_pipeline_app`) before it
 /// aborts what is left. An abort past the grace period, the process exit
 /// itself, or a lost database session can still release a run's locks
-/// while a write goes on; see `PipelineService::rebuild_index_run`.
+/// while a write goes on; the rebuild's committed fence then holds the
+/// tenant's invalidations back until that write's time has passed (see
+/// `PipelineService::rebuild_index_run`).
 pub(crate) async fn pipeline_index_rebuild_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -418,10 +431,11 @@ pub(crate) async fn pipeline_index_rebuild_handler(
     let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_vector_operator(&tenant)?;
     require_pipeline_service(state.as_ref())?;
-    // Merge review M1: a rebuild is safe from a withdrawal's removal racing
-    // its writes only while the worker processes no invalidation of the
-    // tenant, so it runs only for a tenant this process neither routes nor
-    // drains (`backup-restore.md`, step 3).
+    // Merge review M1: a Score of a tenant this process routes or drains
+    // would read the partly rebuilt index, so the rebuild runs only for a
+    // tenant on neither list (`backup-restore.md`, step 3). The committed
+    // fence (V113), not this check, holds the tenant's invalidations back
+    // while the rebuild writes.
     if pipeline_worker_tenant_ids(state.as_ref()).contains(&tenant.tenant_id) {
         return Err(api_error(
             StatusCode::CONFLICT,
@@ -445,9 +459,8 @@ pub(crate) async fn pipeline_index_rebuild_handler(
 
 /// Safe label of a rebuild request for a tenant this process routes
 /// (`TRACE_COMMONS_PIPELINE_RECEIPTS_TENANT_IDS`) or drains
-/// (`TRACE_COMMONS_PIPELINE_DRAIN_TENANT_IDS`): its worker processes the
-/// tenant's invalidations, so one could remove a run's entries before the
-/// rebuild's last write lands (merge review M1).
+/// (`TRACE_COMMONS_PIPELINE_DRAIN_TENANT_IDS`): its worker would run the
+/// tenant's Scores against the partly rebuilt index (merge review M1).
 pub(crate) const PIPELINE_INDEX_REBUILD_TENANT_ACTIVE_LABEL: &str =
     "pipeline_index_rebuild_tenant_active";
 /// Safe label of a rebuild request for a tenant whose rebuild is already
@@ -615,22 +628,28 @@ async fn rebuild_index_and_audit(
 /// HTTP shape. `index_command_invalid` -- a sealed command that failed
 /// validation against its run or its own committed Score evidence -- is
 /// surfaced as 409 Conflict, a state of the store rather than a transient
-/// service fault, and `index_unavailable` -- a run's writes that passed
-/// their deadline -- as 503. Everything else falls back to the generic
-/// hash-only internal error.
-fn pipeline_index_rebuild_error(error: anyhow::Error) -> (StatusCode, Json<ApiError>) {
+/// service fault. `index_unavailable` -- a run's writes that passed their
+/// deadline -- and `index_rebuild_fence_unavailable` -- a fence write that
+/// failed before a run's writes (V113) -- are 503. Everything else falls
+/// back to the generic hash-only internal error.
+pub(crate) fn pipeline_index_rebuild_error(error: anyhow::Error) -> (StatusCode, Json<ApiError>) {
+    use trace_commons_server::versioned_pipeline::{
+        PIPELINE_INDEX_REBUILD_FENCE_UNAVAILABLE_LABEL, PIPELINE_INDEX_UNAVAILABLE_LABEL,
+    };
     if error.to_string() == "index_command_invalid" {
         return api_error(StatusCode::CONFLICT, "index_command_invalid");
     }
     // Merge review I1: a run's writes passed their deadline (the index is
-    // slow or down); the rows were freed and a rerun is safe.
-    if error.to_string()
-        == trace_commons_server::versioned_pipeline::PIPELINE_INDEX_UNAVAILABLE_LABEL
-    {
-        return api_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            trace_commons_server::versioned_pipeline::PIPELINE_INDEX_UNAVAILABLE_LABEL,
-        );
+    // slow or down); the rows were freed and a rerun is safe. PR 5: a fence
+    // write that failed stopped the rebuild before the run's first write;
+    // a rerun is safe too.
+    for label in [
+        PIPELINE_INDEX_UNAVAILABLE_LABEL,
+        PIPELINE_INDEX_REBUILD_FENCE_UNAVAILABLE_LABEL,
+    ] {
+        if error.to_string() == label {
+            return api_error(StatusCode::SERVICE_UNAVAILABLE, label);
+        }
     }
     internal_error(error)
 }

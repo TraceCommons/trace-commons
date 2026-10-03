@@ -149,6 +149,11 @@ pub const PIPELINE_POLICY_INTERVENTION_INVALID_LABEL: &str = "policy_interventio
 pub const PIPELINE_POLICY_INTERVENTION_NO_TRANSITION_LABEL: &str =
     "policy_intervention_no_transition";
 pub const PIPELINE_INDEX_UNAVAILABLE_LABEL: &str = "index_unavailable";
+/// An index rebuild whose committed fence (V113,
+/// `PgPipelineStore::set_index_rebuild_fence`) could not be written before a
+/// run's writes: the rebuild stops before that run's first write
+/// (`PipelineService::rebuild_index_run`).
+pub const PIPELINE_INDEX_REBUILD_FENCE_UNAVAILABLE_LABEL: &str = "index_rebuild_fence_unavailable";
 /// A phase commit, or a receipt's final transaction, found no `staged`
 /// attempt row naming the object it is about to record (or the row names
 /// another object or hash). Only an out-of-band change or a defect gets
@@ -3442,6 +3447,77 @@ impl PgPipelineStore {
         Ok(requeued)
     }
 
+    /// Sets, or extends, the index rebuild fence `fence_id` of `tenant_id`
+    /// (`pipeline_index_rebuild_fences`, V113) to end `duration` from now:
+    /// one statement in a tenant transaction of its own, committed before
+    /// this returns. While any fence of the tenant is unexpired, the
+    /// invalidation claim takes none of the tenant's invalidations
+    /// (`claim_due_index_invalidations`). There is one row per rebuild,
+    /// keyed by `fence_id`: a later set of the same fence never moves its
+    /// end earlier (`GREATEST`), and a set never touches another rebuild's
+    /// row. The database computes the end from its own clock
+    /// (`clock_timestamp()` plus `duration`), the clock the claim compares it
+    /// with (`NOW()`), so a skew between the application's clock and the
+    /// database's cannot end a fence early.
+    pub async fn set_index_rebuild_fence(
+        &self,
+        tenant_id: &str,
+        fence_id: Uuid,
+        duration: std::time::Duration,
+    ) -> Result<(), DatabaseError> {
+        let mut client = self.backend.trace_pool().get().await?;
+        Self::set_index_rebuild_fence_on(&mut client, tenant_id, fence_id, duration).await
+    }
+
+    /// `set_index_rebuild_fence` on a connection the caller already holds,
+    /// outside any transaction of its own: the rebuild sets each run's fence
+    /// on the connection that then opens the run's transaction, so it never
+    /// holds two pooled connections at once.
+    async fn set_index_rebuild_fence_on(
+        client: &mut deadpool_postgres::Client,
+        tenant_id: &str,
+        fence_id: Uuid,
+        duration: std::time::Duration,
+    ) -> Result<(), DatabaseError> {
+        let milliseconds = i64::try_from(duration.as_millis()).unwrap_or(i64::MAX);
+        let tx = Self::tenant_transaction(client, tenant_id).await?;
+        tx.execute(
+            "INSERT INTO pipeline_index_rebuild_fences (tenant_id, fence_id, fenced_until)
+             VALUES ($1, $2, clock_timestamp() + ($3::bigint * INTERVAL '1 millisecond'))
+             ON CONFLICT (tenant_id, fence_id) DO UPDATE
+                SET fenced_until = GREATEST(pipeline_index_rebuild_fences.fenced_until,
+                                            EXCLUDED.fenced_until)",
+            &[&tenant_id, &fence_id, &milliseconds],
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Deletes the index rebuild fence `fence_id` of `tenant_id`, and the
+    /// tenant's expired fences, which hold nothing back, so the row a lost
+    /// rebuild leaves does not stay for ever: one statement in a tenant
+    /// transaction of its own. It never deletes another rebuild's unexpired
+    /// fence. A rebuild calls it once no write of its own is still running
+    /// (`PipelineService::rebuild_index_from_authoritative_commands`).
+    pub async fn clear_index_rebuild_fence(
+        &self,
+        tenant_id: &str,
+        fence_id: Uuid,
+    ) -> Result<(), DatabaseError> {
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
+        tx.execute(
+            "DELETE FROM pipeline_index_rebuild_fences
+              WHERE tenant_id = $1
+                AND (fence_id = $2 OR fenced_until <= clock_timestamp())",
+            &[&tenant_id, &fence_id],
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
     /// Claims up to `limit` (clamped to 1..=500) of `tenant_id`'s index
     /// invalidations that are due -- `pending`, not held by a claim's lease
     /// or waiting out a retry's backoff, and with an attempt left, oldest due
@@ -3451,6 +3527,31 @@ impl PgPipelineStore {
     /// `next_attempt_at` to the lease's end. A row another claim has locked
     /// is skipped, and a row it claimed is no longer due, so two claims at
     /// once never get the same row. Only `tenant_id`'s own queue is read.
+    ///
+    /// It claims nothing while the tenant has an unexpired index rebuild
+    /// fence (`pipeline_index_rebuild_fences`, V113;
+    /// `set_index_rebuild_fence`). The fence's `NOT EXISTS` is in the `due`
+    /// CTE, so the fences and the invalidations are read in one statement,
+    /// with one snapshot, and that is enough. An invalidation this claim can
+    /// see was queued by a withdrawal that committed before the claim's
+    /// snapshot. A rebuild commits a run's fence before it locks the run
+    /// (`PipelineService::rebuild_index_run`). If that fence is not visible
+    /// in the snapshot, the withdrawal committed before the fence, so the
+    /// rebuild's own lock of that run sees the queued invalidation and skips
+    /// the run: `lock_rebuildable_index_run_on_tx` takes the run row
+    /// `FOR SHARE` and then, in a second statement whose snapshot is taken
+    /// after that lock and after the fence, reads
+    /// `rebuildable_index_run_predicate!`, whose `NOT EXISTS` on
+    /// `pipeline_index_invalidations` sees the invalidation. If the
+    /// withdrawal committed after the fence, the claim sees the fence. A
+    /// fence holds nothing back once it has expired or been deleted, and
+    /// then no write it covered is running: a row expires at the deadline of
+    /// the last run it covered plus the write fence margin, while a write
+    /// starts only before that deadline and returns within the margin; a
+    /// rebuild deletes its own row only once none of its writes is running,
+    /// and another rebuild's row only once it has expired.
+    /// `NOW()` is the claim transaction's start, no later than the
+    /// statement's snapshot, so a fence is never read as expired early.
     ///
     /// The claim charges no attempt: only `fail_index_invalidation` charges
     /// one, for a failure that waiting cannot heal. An index outage
@@ -3479,6 +3580,10 @@ impl PgPipelineStore {
                     SELECT run_id FROM pipeline_index_invalidations
                      WHERE tenant_id = $1 AND state = 'pending'
                        AND next_attempt_at <= NOW() AND attempt_count < max_attempts
+                       AND NOT EXISTS (
+                           SELECT 1 FROM pipeline_index_rebuild_fences f
+                            WHERE f.tenant_id = $1 AND f.fenced_until > NOW()
+                       )
                      ORDER BY next_attempt_at, run_id
                      LIMIT $2
                      FOR UPDATE SKIP LOCKED
@@ -7003,6 +7108,23 @@ pub enum PipelineIndexRebuildRun {
     Skipped,
 }
 
+/// The error of a rebuilt run whose deadline passed with an index call
+/// still running once the write fence margin had passed too
+/// (`PipelineService::rebuild_index_run`). Its text is `index_unavailable`,
+/// the same as any run past its deadline, so callers and the route see no
+/// difference; `rebuild_index_from_authoritative_commands` reads the type
+/// to leave the rebuild's fence to expire instead of clearing it.
+#[derive(Debug)]
+struct IndexRebuildWriteInFlight;
+
+impl std::fmt::Display for IndexRebuildWriteInFlight {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(PIPELINE_INDEX_UNAVAILABLE_LABEL)
+    }
+}
+
+impl std::error::Error for IndexRebuildWriteInFlight {}
+
 /// Builds a [`PipelineService`]. Scorers and embedders are registered by
 /// content hash (`with_scorer`/`with_embedder`) so `PipelineService::submit`
 /// can resolve whichever one a bound bundle package names, rather than the
@@ -7025,6 +7147,7 @@ pub struct PipelineServiceBuilder {
     payout: Option<(Arc<dyn NearPayoutAdapter>, PipelinePayoutConfig)>,
     novelty_utility_checks: PipelineNoveltyUtilityChecks,
     unqualified_routing: bool,
+    index_rebuild_fence_margin: std::time::Duration,
 }
 
 impl PipelineServiceBuilder {
@@ -7056,6 +7179,9 @@ impl PipelineServiceBuilder {
             payout: None,
             novelty_utility_checks: PipelineNoveltyUtilityChecks::default(),
             unqualified_routing: false,
+            index_rebuild_fence_margin: std::time::Duration::from_secs(
+                PIPELINE_INDEX_WRITE_FENCE_MARGIN_SECONDS.unsigned_abs(),
+            ),
         }
     }
 
@@ -7145,6 +7271,20 @@ impl PipelineServiceBuilder {
     /// they invent without a row.
     pub fn with_unqualified_routing(mut self, allowed: bool) -> Self {
         self.unqualified_routing = allowed;
+        self
+    }
+
+    /// The write fence margin of the index rebuild
+    /// (`PipelineService::rebuild_index_run`): how long a run past its
+    /// deadline waits for the index call in flight, and how far past the
+    /// run's deadline its committed fence reaches. Defaults to
+    /// `PIPELINE_INDEX_WRITE_FENCE_MARGIN_SECONDS`, the margin every index
+    /// writer call must return within. For tests only: a shorter margin lets
+    /// a test see a lost rebuild's fence expire. Settle's own fence keeps the
+    /// constant.
+    #[doc(hidden)]
+    pub fn with_index_rebuild_fence_margin(mut self, margin: std::time::Duration) -> Self {
+        self.index_rebuild_fence_margin = margin;
         self
     }
 
@@ -7250,6 +7390,7 @@ impl PipelineServiceBuilder {
             payout: self.payout,
             novelty_utility_checks: self.novelty_utility_checks,
             unqualified_routing: self.unqualified_routing,
+            index_rebuild_fence_margin: self.index_rebuild_fence_margin,
             follow_ups: std::sync::Mutex::new(BTreeMap::new()),
         };
         service
@@ -7374,6 +7515,9 @@ pub struct PipelineService {
     /// Whether a tenant with no committed routing row may start new runs
     /// (`PipelineServiceBuilder::with_unqualified_routing`).
     unqualified_routing: bool,
+    /// The index rebuild's write fence margin
+    /// (`PipelineServiceBuilder::with_index_rebuild_fence_margin`).
+    index_rebuild_fence_margin: std::time::Duration,
     /// The follow-up steps this service queued work for, per tenant, since
     /// the worker last took them (`take_follow_ups`).
     follow_ups: std::sync::Mutex<BTreeMap<String, PipelineFollowUps>>,
@@ -9568,6 +9712,17 @@ impl PipelineService {
     /// withdrawn or invalidated after the listing is skipped
     /// (`skipped_run_count`), never written (final review I1).
     ///
+    /// The rebuild holds a committed fence of its own (V113): one
+    /// `fence_id`, which `rebuild_index_run` sets again before each run's
+    /// writes. While it is unexpired, no worker in any process claims the
+    /// tenant's invalidations (`PgPipelineStore::claim_due_index_invalidations`).
+    /// When the rebuild returns `Ok`, or an error once every write it started
+    /// has returned, it clears its fence. When a run fails as
+    /// `index_unavailable` with an index call still in flight, the fence is
+    /// left to expire, at that run's deadline plus the write fence margin. A
+    /// clear that fails is logged and changes nothing else: the row expires
+    /// on its own, and the next clear of the tenant deletes it.
+    ///
     /// A run whose stored command fails validation (a tampered
     /// `index_command_hash`, or a mismatched revision, index, or model)
     /// fails the whole rebuild closed with `index_command_invalid` before
@@ -9582,13 +9737,41 @@ impl PipelineService {
         tenant_id: &str,
         writer: Arc<dyn IdentifiedIndexWriter>,
     ) -> anyhow::Result<PipelineIndexRebuildReport> {
+        let fence_id = Uuid::new_v4();
+        let rebuilt = self.rebuild_index_runs(tenant_id, &writer, fence_id).await;
+        let write_in_flight = rebuilt
+            .as_ref()
+            .is_err_and(|error| error.is::<IndexRebuildWriteInFlight>());
+        if !write_in_flight
+            && self
+                .store
+                .clear_index_rebuild_fence(tenant_id, fence_id)
+                .await
+                .is_err()
+        {
+            tracing::warn!(
+                label = "pipeline_index_rebuild_fence_clear_failed",
+                "could not clear an index rebuild's fence; it expires on its own"
+            );
+        }
+        rebuilt
+    }
+
+    /// The runs of `rebuild_index_from_authoritative_commands`, each under
+    /// the fence `fence_id`.
+    async fn rebuild_index_runs(
+        &self,
+        tenant_id: &str,
+        writer: &Arc<dyn IdentifiedIndexWriter>,
+        fence_id: Uuid,
+    ) -> anyhow::Result<PipelineIndexRebuildReport> {
         let runs = self.store.list_rebuildable_index_runs(tenant_id).await?;
         let mut command_hashes = Vec::with_capacity(runs.len());
         let mut entry_count = 0usize;
         let mut unchanged_entry_count = 0usize;
         let mut skipped_run_count = 0usize;
         for run in runs {
-            match self.rebuild_index_run(&run, &writer).await? {
+            match self.rebuild_index_run(&run, writer, fence_id).await? {
                 PipelineIndexRebuildRun::Rebuilt {
                     command_hash,
                     entry_count: run_entries,
@@ -9625,14 +9808,24 @@ impl PipelineService {
     /// locks through every upsert, then commits. A withdrawal locks the run
     /// row `FOR UPDATE` first, so it either committed before the re-check
     /// (the run is `Skipped`) or waits until these writes are done, and the
-    /// invalidation it queues then removes them -- as long as this future is
-    /// not dropped while its writes run (below).
+    /// invalidation it queues then removes them.
+    ///
+    /// Before that transaction opens, the rebuild sets its committed fence
+    /// `fence_id` (`PgPipelineStore::set_index_rebuild_fence`, V113) to the
+    /// run's deadline (below) plus the write fence margin
+    /// (`PIPELINE_INDEX_WRITE_FENCE_MARGIN_SECONDS`), on the connection that
+    /// then opens the transaction. While the fence is unexpired, no worker in
+    /// any process claims the tenant's invalidations
+    /// (`PgPipelineStore::claim_due_index_invalidations`, which says why one
+    /// statement is enough). A fence write that fails stops the rebuild
+    /// before the run's first write, as `index_rebuild_fence_unavailable`.
     ///
     /// The committed Score evidence and the sealed command are read before
-    /// the transaction opens, so it never holds two pooled connections at
-    /// once. The command's error is raised only once the re-check lets the
-    /// write go ahead: a skipped run does not need its command, which the
-    /// withdrawal's own object deletion may already have removed.
+    /// the fence and the transaction, so it never holds two pooled
+    /// connections at once. The command's error is raised only once the
+    /// re-check lets the write go ahead: a skipped run does not need its
+    /// command, which the withdrawal's own object deletion may already have
+    /// removed.
     ///
     /// The writes are synchronous index calls, so they run on the blocking
     /// pool while the transaction keeps both rows locked, as Settle's index
@@ -9641,52 +9834,57 @@ impl PipelineService {
     ///
     /// A blocking task is not cancelled when the future awaiting it is
     /// dropped. If this future is dropped while the writes run, the
-    /// transaction rolls back and releases both locks, and the writes go on:
-    /// a withdrawal can then commit, and its invalidation can complete,
-    /// before the last write lands, leaving those entries in the index. The
-    /// rebuild route therefore runs the rebuild in a task of its own, so a
-    /// client disconnect does not drop it (review of the follow-up wave,
+    /// transaction rolls back and releases both locks, and the writes go on.
+    /// The rebuild route therefore runs the rebuild in a task of its own, so
+    /// a client disconnect does not drop it (review of the follow-up wave,
     /// m1), as Settle's index dispatch runs in a task that owns its
     /// transaction (PR 3, b14d25e9). The route also runs one rebuild per
     /// tenant at a time and its shutdown waits for running rebuilds with the
     /// worker's grace period (`PipelineIndexRebuilds` in ingest; Zaki's
-    /// re-review of #1166, Low). The windows that remain are the ones that
-    /// release the locks while a write goes on: a lost database session, a
-    /// rebuild aborted past the shutdown grace period, and the process exit.
+    /// re-review of #1166, Low). Four cases still release the locks while a
+    /// write goes on: a lost database session, a rebuild aborted past the
+    /// shutdown grace period, the process exit, and a deadline that passes
+    /// with a call in flight. In each, a withdrawal can commit and queue the
+    /// run's invalidation at once, since the run is `complete` and holds no
+    /// lease for Settle's fence to wait out. The committed fence closes
+    /// these cases: no worker, in this process or in another replica,
+    /// claims that invalidation until the fence has expired, and it expires
+    /// only after the last write the deadline let start has returned, as
+    /// long as each index call returns within the margin. Withdrawals come
+    /// from clients, from `main`'s retention maintenance and from the
+    /// revocation-propagation reconciler, so the guarantee is not that none
+    /// happens: it is that none is removed from the index before the
+    /// rebuild's last write lands. A lost rebuild's fence delays the
+    /// tenant's invalidations by at most the run deadline plus the margin
+    /// (90 seconds at the defaults).
     ///
     /// The rows are held no longer than a deadline, as Settle's dispatch
     /// holds its rows (merge review I1; PR 3, 82d276c1): the smaller of
-    /// Settle's configured lease and `PIPELINE_INDEX_DISPATCH_BUDGET_SECONDS`
-    /// from the moment both locks are held. No upsert starts past it. At the
-    /// deadline the transaction rolls back at once, so the rows are free,
-    /// the rebuild waits at most `PIPELINE_INDEX_WRITE_FENCE_MARGIN_SECONDS`
+    /// Settle's configured lease and `PIPELINE_INDEX_DISPATCH_BUDGET_SECONDS`.
+    /// Since PR 5 the deadline starts just before the fence write, not once
+    /// both locks are held: the fence's end, which the database reads from
+    /// its own clock after that, then reaches past the deadline plus the
+    /// margin, and the lock wait counts against the deadline. A run whose
+    /// lock wait outlasts the deadline fails as `index_unavailable` and
+    /// writes nothing; a run never writes later than before. No upsert
+    /// starts past the deadline. At the deadline the transaction rolls back
+    /// at once, so the rows are free, the rebuild waits at most the margin
     /// for the call in flight, and it fails closed as `index_unavailable`
     /// without writing the later runs. A rerun is safe: every upsert is
     /// idempotent. So a slow index holds a withdrawal of the run (and the
     /// session's uploads queued behind it) no longer than the deadline.
     ///
-    /// What the rebuild does not have is Settle's fence on the withdrawal
-    /// side. A withdrawal of a run still leased queues its invalidation no
-    /// earlier than the lease's end plus the fence margin, but the rebuild
-    /// writes `complete` runs, which hold no lease, so a withdrawal queues
-    /// their invalidation at once. In the windows above, and after a
-    /// deadline that passed with a call in flight, that invalidation could
-    /// complete before the rebuild's last write lands and leave that write's
-    /// entries in the index. Withdrawals come from clients, from `main`'s
-    /// retention maintenance and from the revocation-propagation reconciler,
-    /// so the guarantee is not that none happens: it is that no worker
-    /// processes the tenant's invalidations while the rebuild runs. The
-    /// restore runbook starts every process with both tenant lists unset for
-    /// the rebuild (`backup-restore.md`, step 3), and ingest's rebuild route
-    /// refuses a tenant its own process routes or drains
-    /// (`pipeline_index_rebuild_tenant_active`, merge review M1). A queued
-    /// invalidation then runs only after the rebuild. Closing the window
-    /// without that configuration needs a committed fence that the
-    /// withdrawal's invalidation reads, which is PR 5's.
+    /// What stays: ingest's rebuild route refuses a tenant its own process
+    /// routes or drains (`pipeline_index_rebuild_tenant_active`, merge
+    /// review M1), because a Score of that tenant must not read a partly
+    /// rebuilt index. That refusal reaches only its own process, so the
+    /// restore runbook still starts every process with both tenant lists
+    /// unset for the rebuild (`backup-restore.md`, step 3).
     pub async fn rebuild_index_run(
         &self,
         run: &PipelineRunRecord,
         writer: &Arc<dyn IdentifiedIndexWriter>,
+        fence_id: Uuid,
     ) -> anyhow::Result<PipelineIndexRebuildRun> {
         let command = match self
             .committed_evidence::<ScoreEvidence>(run, Phase::Score)
@@ -9696,6 +9894,26 @@ impl PipelineService {
             Err(error) => Err(error),
         };
         let mut client = self.backend.trace_pool().get().await?;
+        // Merge review I1, as Settle's dispatch (PR 3, 82d276c1): the rows
+        // are held no longer than the smaller of Settle's lease and the
+        // dispatch budget, and no upsert starts past that deadline. PR 5:
+        // the deadline starts before the fence write, so the fence's end,
+        // read from the database's clock after this, reaches past the
+        // deadline plus the margin.
+        let run_deadline = self
+            .lease_config
+            .settle()
+            .min(Duration::seconds(PIPELINE_INDEX_DISPATCH_BUDGET_SECONDS));
+        let deadline = Utc::now() + run_deadline;
+        let margin = self.index_rebuild_fence_margin;
+        PgPipelineStore::set_index_rebuild_fence_on(
+            &mut client,
+            &run.tenant_id,
+            fence_id,
+            run_deadline.to_std().unwrap_or_default() + margin,
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!(PIPELINE_INDEX_REBUILD_FENCE_UNAVAILABLE_LABEL))?;
         let tx = PgPipelineStore::tenant_transaction(&mut client, &run.tenant_id).await?;
         if !PgPipelineStore::lock_rebuildable_index_run_on_tx(&tx, run).await? {
             tx.commit().await?;
@@ -9711,14 +9929,6 @@ impl PipelineService {
             .keyed_entries(&tenant)
             .map(|(key, entry)| (key, entry.embedding.clone(), entry.content_hash.clone()))
             .collect::<Vec<_>>();
-        // Merge review I1, as Settle's dispatch (PR 3, 82d276c1): the rows
-        // are held no longer than the smaller of Settle's lease and the
-        // dispatch budget from now, and no upsert starts past that deadline.
-        let deadline = Utc::now()
-            + self
-                .lease_config
-                .settle()
-                .min(Duration::seconds(PIPELINE_INDEX_DISPATCH_BUDGET_SECONDS));
         let writer = writer.clone();
         let mut writes = tokio::task::spawn_blocking(move || {
             let mut entry_count = 0usize;
@@ -9745,14 +9955,14 @@ impl PipelineService {
                 Err(_) => {
                     // Past the deadline: roll back at once, so the rows are
                     // free, then wait (bounded by the fence margin) for the
-                    // call in flight to return, so the rebuild that reports
-                    // the failure has no write still running.
+                    // call in flight to return. A call that has not returned
+                    // by then is reported as such, so the rebuild leaves its
+                    // fence to expire rather than clearing it.
                     drop(tx);
                     drop(client);
-                    let margin = std::time::Duration::from_secs(
-                        PIPELINE_INDEX_WRITE_FENCE_MARGIN_SECONDS.unsigned_abs(),
-                    );
-                    let _ = tokio::time::timeout(margin, writes).await;
+                    if tokio::time::timeout(margin, writes).await.is_err() {
+                        return Err(anyhow::Error::new(IndexRebuildWriteInFlight));
+                    }
                     return Err(anyhow::anyhow!(PIPELINE_INDEX_UNAVAILABLE_LABEL));
                 }
             };

@@ -40356,6 +40356,33 @@ async fn pipeline_index_rebuild_worker_route_answers_404_without_a_pipeline_runt
     assert_eq!(error.1.0.error, "pipeline runtime not configured");
 }
 
+/// PR 5, Task 11: the rebuild's failures map to fixed labels. A run's
+/// writes that passed their deadline (`index_unavailable`) and a fence
+/// write that failed (`index_rebuild_fence_unavailable`) are both `503`, a
+/// service fault a rerun can clear; a tampered command stays `409`.
+#[test]
+fn pipeline_index_rebuild_errors_map_to_fixed_labels() {
+    use pipeline_runtime::pipeline_index_rebuild_error;
+    use trace_commons_server::versioned_pipeline::{
+        PIPELINE_INDEX_REBUILD_FENCE_UNAVAILABLE_LABEL, PIPELINE_INDEX_UNAVAILABLE_LABEL,
+    };
+    for (label, status) in [
+        (
+            PIPELINE_INDEX_UNAVAILABLE_LABEL,
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+        (
+            PIPELINE_INDEX_REBUILD_FENCE_UNAVAILABLE_LABEL,
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+        ("index_command_invalid", StatusCode::CONFLICT),
+    ] {
+        let (mapped, body) = pipeline_index_rebuild_error(anyhow::anyhow!(label));
+        assert_eq!(mapped, status, "{label}");
+        assert_eq!(body.0.error, label);
+    }
+}
+
 /// Zaki's re-review of #1166, Low: the rebuild route runs one rebuild per
 /// tenant at a time, in a task the shutdown drains. While a tenant's
 /// rebuild runs, a second one for it is refused

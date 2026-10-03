@@ -2080,7 +2080,7 @@ mod tests {
     }
 
     /// The tenant-isolation control covers every versioned-pipeline table:
-    /// the list read from `TRACE_COMMONS_RLS_TABLES` is the nineteen tables
+    /// the list read from `TRACE_COMMONS_RLS_TABLES` is the twenty tables
     /// the migrations define.
     #[test]
     fn the_isolation_control_covers_every_pipeline_table() {
@@ -2107,6 +2107,7 @@ mod tests {
                 "pipeline_activation_events",
                 "pipeline_receipt_ownership",
                 "pipeline_policy_interventions",
+                "pipeline_index_rebuild_fences",
             ])
         );
     }

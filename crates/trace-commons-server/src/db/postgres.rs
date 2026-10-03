@@ -266,6 +266,7 @@ pub const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
     "pipeline_activation_events",
     "pipeline_receipt_ownership",
     "pipeline_policy_interventions",
+    "pipeline_index_rebuild_fences",
     "trace_public_runs",
     "trace_reward_operators",
     "trace_reward_programs",
@@ -1713,6 +1714,17 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         112,
         "versioned_pipeline_activation_gate",
         include_str!("../../../../migrations/V112__versioned_pipeline_activation_gate.sql"),
+    ),
+    // V113 (PR 5) adds the committed index rebuild fence: one row per
+    // rebuild, and while a tenant has an unexpired row no worker in any
+    // process claims that tenant's index invalidations. The table is
+    // mutable (a rebuild extends and deletes its row), so it has no
+    // append-only trigger. No cross-tenant claim function, same as
+    // V105/V106/V107/V108/V110/V111/V112.
+    (
+        113,
+        "versioned_pipeline_rebuild_fence",
+        include_str!("../../../../migrations/V113__versioned_pipeline_rebuild_fence.sql"),
     ),
 ];
 
@@ -7074,6 +7086,7 @@ mod tests {
         (110, 4),
         (111, 4),
         (112, 4),
+        (113, 4),
     ];
 
     /// Every `.sql` file in `migrations/`, as `(version, file_stem)`, read at
@@ -7822,6 +7835,7 @@ mod tests {
                 "../../../../migrations/V111__versioned_pipeline_policy_interventions.sql"
             ),
             include_str!("../../../../migrations/V112__versioned_pipeline_activation_gate.sql"),
+            include_str!("../../../../migrations/V113__versioned_pipeline_rebuild_fence.sql"),
             include_str!("../../../../migrations/V71__reward_participant_access.sql"),
             include_str!("../../../../migrations/V18__trace_central_rls_tenant_predicate.sql"),
             include_str!("../../../../migrations/V21__trace_near_credit_account_outbox.sql"),
@@ -7862,6 +7876,7 @@ mod tests {
                 "../../../../migrations/V111__versioned_pipeline_policy_interventions.sql"
             ),
             include_str!("../../../../migrations/V112__versioned_pipeline_activation_gate.sql"),
+            include_str!("../../../../migrations/V113__versioned_pipeline_rebuild_fence.sql"),
             include_str!("../../../../migrations/V71__reward_participant_access.sql"),
             include_str!("../../../../migrations/V6__trace_force_rls.sql"),
             include_str!("../../../../migrations/V11__trace_ranking_worker_runs.sql"),
@@ -8319,6 +8334,68 @@ mod tests {
                 "GRANT UPDATE (bundle_id, selected_at) ON pipeline_active_bundles TO trace_ingest_runtime;"
             ],
             "V112 grants the bundle switch and nothing else"
+        );
+    }
+
+    /// V113 (delivery PR 5) adds the committed index rebuild fence: a
+    /// forced-RLS table with the tenant policy, one row per rebuild (keyed by
+    /// the tenant and the rebuild's fence id), and the runtime's grants on
+    /// V92's terms: read, insert, and delete the rows, and update only
+    /// `fenced_until`. The rows are updated and deleted, so it carries no
+    /// append-only trigger; it holds no `SECURITY DEFINER` function and no
+    /// role attribute change.
+    #[test]
+    fn v113_defines_the_rebuild_fence() {
+        let fence =
+            include_str!("../../../../migrations/V113__versioned_pipeline_rebuild_fence.sql");
+        for required in [
+            "CREATE TABLE pipeline_index_rebuild_fences",
+            "PRIMARY KEY (tenant_id, fence_id)",
+            "REFERENCES trace_tenants(tenant_id) ON DELETE CASCADE",
+            "ALTER TABLE pipeline_index_rebuild_fences ENABLE ROW LEVEL SECURITY;",
+            "RAISE EXCEPTION 'V113: trace_ingest_runtime is missing; V90 creates it';",
+        ] {
+            assert!(fence.contains(required), "V113 is missing `{required}`");
+        }
+        let force = "ALTER TABLE pipeline_index_rebuild_fences FORCE ROW LEVEL SECURITY;";
+        assert_eq!(
+            fence.matches(force).count(),
+            1,
+            "V113 must force RLS on pipeline_index_rebuild_fences exactly once"
+        );
+        let policy =
+            "CREATE POLICY trace_corpus_tenant_isolation ON pipeline_index_rebuild_fences\n";
+        assert_eq!(
+            fence.matches(policy).count(),
+            1,
+            "V113 must create the tenant policy on pipeline_index_rebuild_fences exactly once"
+        );
+        for forbidden in [
+            "SECURITY DEFINER",
+            "BYPASSRLS",
+            "SUPERUSER",
+            "SET search_path",
+            "CREATE TRIGGER",
+            "GRANT UPDATE ON",
+            "GRANT ALL",
+            "PRIMARY KEY (tenant_id)",
+        ] {
+            assert!(
+                !fence.contains(forbidden),
+                "V113 must not contain `{forbidden}`"
+            );
+        }
+        let grants: Vec<&str> = fence
+            .lines()
+            .filter(|line| line.trim_start().starts_with("GRANT "))
+            .collect();
+        assert_eq!(
+            grants,
+            vec![
+                "GRANT SELECT, INSERT, DELETE ON pipeline_index_rebuild_fences TO trace_ingest_runtime;",
+                "GRANT UPDATE (fenced_until) ON pipeline_index_rebuild_fences TO trace_ingest_runtime;",
+            ],
+            "V113 grants what the fence code reads and writes and nothing else"
         );
     }
 

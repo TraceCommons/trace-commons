@@ -29734,6 +29734,1072 @@ async fn an_index_rebuild_past_its_deadline_releases_the_rows() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// PR 5, Task 11: the committed index rebuild fence (V113,
+// `PgPipelineStore::set_index_rebuild_fence` and `clear_index_rebuild_fence`,
+// and the fence predicate of `claim_due_index_invalidations`).
+// ---------------------------------------------------------------------------
+
+/// The rebuild fence margin the fence tests give a rebuilding service
+/// (`PipelineServiceBuilder::with_index_rebuild_fence_margin`): long enough
+/// that each check a test makes while the fence holds runs well inside it,
+/// short enough that the test can wait for the fence to pass.
+const TEST_REBUILD_FENCE_MARGIN: std::time::Duration = std::time::Duration::from_secs(4);
+
+/// A service like `test_service` whose index reader and writer are `index`,
+/// with `lease_config` and, when given, the rebuild fence margin `margin`.
+async fn fence_test_service(
+    backend: Arc<PgBackend>,
+    artifact_store: Arc<dyn TraceArtifactStore>,
+    index: Arc<IsolatedPipelineIndex>,
+    lease_config: PipelineLeaseConfig,
+    margin: Option<std::time::Duration>,
+) -> Arc<PipelineService> {
+    let config = minimal_config(true);
+    let scorer = Arc::new(ReferencePerplexityScorer::new());
+    let embedder = Arc::new(ReferenceEmbedder::new());
+    let package = MinimalPolicyBundle::minimal_package(&config, scorer.as_ref(), embedder.as_ref())
+        .expect("build minimal bundle package");
+    let registry = SettlementAdapterRegistry::new(vec![
+        RecordingSettlementAdapter::new(
+            InstrumentId::new("storage_rebate").unwrap(),
+            "recording_storage_rebate_test_only",
+            "none",
+        ) as Arc<dyn SettlementAdapter>,
+        RecordingSettlementAdapter::new(
+            InstrumentId::trace_credit(),
+            "recording_trace_credit_test_only",
+            "none",
+        ) as Arc<dyn SettlementAdapter>,
+    ])
+    .expect("build settlement adapter registry");
+    let mut builder = PipelineServiceBuilder::new(
+        backend,
+        artifact_store,
+        package,
+        index.clone(),
+        index,
+        registry,
+        uncapped_caps(&["storage_rebate", InstrumentId::trace_credit().as_str()]),
+    )
+    .with_scorer(scorer)
+    .with_embedder(embedder)
+    .with_authority(allow_all_authority())
+    .with_privacy(default_privacy_boundary())
+    .with_unqualified_routing(true)
+    .with_lease_config(lease_config);
+    if let Some(margin) = margin {
+        builder = builder.with_index_rebuild_fence_margin(margin);
+    }
+    Arc::new(builder.build().expect("build pipeline service"))
+}
+
+/// A lease configuration whose Settle lease, and so each rebuilt run's
+/// deadline, is one second (the shortest lease).
+fn one_second_settle_leases() -> PipelineLeaseConfig {
+    PipelineLeaseConfig::new(
+        chrono::Duration::seconds(300),
+        chrono::Duration::seconds(300),
+        chrono::Duration::seconds(1),
+    )
+    .unwrap()
+}
+
+/// One fence row of a tenant, as the owner connection reads it.
+#[derive(Debug, Clone, PartialEq)]
+struct FenceRow {
+    fence_id: uuid::Uuid,
+    fenced_until: chrono::DateTime<chrono::Utc>,
+    /// `fenced_until > clock_timestamp()` when it was read.
+    unexpired: bool,
+    /// `fenced_until` is later than the time it was read plus
+    /// `PIPELINE_INDEX_WRITE_FENCE_MARGIN_SECONDS`, on the database's clock.
+    covers_margin: bool,
+}
+
+/// The fence rows of `tenant`, on `owner` (which reads past RLS), in
+/// `fence_id` order.
+async fn rebuild_fence_rows_on(owner: &tokio_postgres::Client, tenant: &str) -> Vec<FenceRow> {
+    owner
+        .query(
+            "SELECT fence_id, fenced_until, fenced_until > clock_timestamp(),
+                    fenced_until > clock_timestamp() + ($2::bigint * INTERVAL '1 second')
+               FROM pipeline_index_rebuild_fences
+              WHERE tenant_id = $1
+              ORDER BY fence_id",
+            &[&tenant, &PIPELINE_INDEX_WRITE_FENCE_MARGIN_SECONDS],
+        )
+        .await
+        .expect("read the tenant's rebuild fences")
+        .iter()
+        .map(|row| FenceRow {
+            fence_id: row.get(0),
+            fenced_until: row.get(1),
+            unexpired: row.get(2),
+            covers_margin: row.get(3),
+        })
+        .collect()
+}
+
+/// `rebuild_fence_rows_on` on a fresh owner connection.
+async fn rebuild_fence_rows(tenant: &str) -> Vec<FenceRow> {
+    rebuild_fence_rows_on(&owner_client().await, tenant).await
+}
+
+/// Writes a fence of `tenant` whose time passed a second ago, through the
+/// owner connection: the row a lost rebuild leaves once it has expired.
+async fn insert_expired_rebuild_fence(tenant: &str, fence_id: uuid::Uuid) {
+    owner_client()
+        .await
+        .execute(
+            "INSERT INTO pipeline_index_rebuild_fences (tenant_id, fence_id, fenced_until)
+             VALUES ($1, $2, clock_timestamp() - INTERVAL '1 second')",
+            &[&tenant, &fence_id],
+        )
+        .await
+        .expect("write an expired fence");
+}
+
+/// A tenant row for `tenant`, which a fence row references, written through
+/// the owner connection for a tenant that has no submission.
+async fn insert_test_tenant(tenant: &str) {
+    owner_client()
+        .await
+        .execute(
+            "INSERT INTO trace_tenants (tenant_id) VALUES ($1) ON CONFLICT DO NOTHING",
+            &[&tenant],
+        )
+        .await
+        .expect("write a tenant row");
+}
+
+/// A settled, included run of `tenant` under `service`, whose entries are in
+/// the service's index.
+async fn settled_included_run(service: &PipelineService, tenant: &str) -> PipelineRunRecord {
+    let (ready, _) = run_to_settle_ready(service, tenant).await;
+    settle_included(service, tenant, &ready).await
+}
+
+/// Asserts that the run's withdrawal queued its invalidation, `pending` and
+/// due at once, so a claim that takes nothing is held back by the fence
+/// alone.
+async fn assert_invalidation_due(backend: &PgBackend, tenant: &str, run_id: uuid::Uuid) {
+    let (queued, state) = index_invalidation_rows(backend, tenant, run_id).await;
+    assert_eq!(state, "pending", "the withdrawal queued the invalidation");
+    assert!(
+        !queued.is_empty() && queued.iter().all(|(_, _, _, due)| *due),
+        "the invalidation is due at once: {queued:?}"
+    );
+}
+
+/// An index writer double for the fence tests. Before each `upsert` it reads
+/// the tenant's fence rows through the owner connection and records them.
+/// When given another rebuild's fence id, it first clears that fence, once,
+/// as another rebuild of the tenant that ends would, so every read also shows
+/// what that clear left.
+struct FenceRecordingWriter {
+    inner: Arc<IsolatedPipelineIndex>,
+    tenant: String,
+    owner: tokio_postgres::Client,
+    store: PgPipelineStore,
+    runtime: tokio::runtime::Handle,
+    other_fence: std::sync::Mutex<Option<uuid::Uuid>>,
+    reads: std::sync::Mutex<Vec<Vec<FenceRow>>>,
+}
+
+impl FenceRecordingWriter {
+    async fn new(
+        inner: Arc<IsolatedPipelineIndex>,
+        tenant: &str,
+        store: &PgPipelineStore,
+        other_fence: Option<uuid::Uuid>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            inner,
+            tenant: tenant.to_string(),
+            owner: owner_client().await,
+            store: store.clone(),
+            runtime: tokio::runtime::Handle::current(),
+            other_fence: std::sync::Mutex::new(other_fence),
+            reads: std::sync::Mutex::new(Vec::new()),
+        })
+    }
+
+    fn reads(&self) -> Vec<Vec<FenceRow>> {
+        self.reads.lock().unwrap().clone()
+    }
+}
+
+impl VectorIndexWriter for FenceRecordingWriter {
+    fn upsert(
+        &self,
+        key: &IndexEntryKey,
+        embedding: &[f32],
+        content_hash: &str,
+    ) -> Result<IndexUpsertResult, IndexWriteError> {
+        // A rebuild calls `upsert` on the blocking pool, where a runtime
+        // handle may block on a future.
+        let rows = self.runtime.block_on(async {
+            let other = self.other_fence.lock().unwrap().take();
+            if let Some(other) = other {
+                self.store
+                    .clear_index_rebuild_fence(&self.tenant, other)
+                    .await
+                    .expect("another rebuild's clear");
+            }
+            rebuild_fence_rows_on(&self.owner, &self.tenant).await
+        });
+        self.reads.lock().unwrap().push(rows);
+        self.inner.upsert(key, embedding, content_hash)
+    }
+
+    fn invalidate_revision(
+        &self,
+        tenant_storage_ref: &TenantStorageRef,
+        index_id: &str,
+        revision_id: uuid::Uuid,
+    ) -> Result<bool, IndexWriteError> {
+        self.inner
+            .invalidate_revision(tenant_storage_ref, index_id, revision_id)
+    }
+}
+
+impl IdentifiedIndexWriter for FenceRecordingWriter {
+    fn dependency_identity(&self) -> &str {
+        "fence_recording_writer_test_only"
+    }
+}
+
+/// An index writer over a real `IsolatedPipelineIndex` whose second `upsert`
+/// is held (`CallHold`) until the test releases it. It counts the upserts
+/// that returned.
+struct SecondUpsertHoldWriter {
+    inner: Arc<IsolatedPipelineIndex>,
+    hold: CallHold,
+    started: AtomicUsize,
+    returned: AtomicUsize,
+}
+
+impl VectorIndexWriter for SecondUpsertHoldWriter {
+    fn upsert(
+        &self,
+        key: &IndexEntryKey,
+        embedding: &[f32],
+        content_hash: &str,
+    ) -> Result<IndexUpsertResult, IndexWriteError> {
+        if self.started.fetch_add(1, Ordering::SeqCst) == 1 {
+            self.hold.hold_first_call();
+        }
+        let result = self.inner.upsert(key, embedding, content_hash);
+        self.returned.fetch_add(1, Ordering::SeqCst);
+        result
+    }
+
+    fn invalidate_revision(
+        &self,
+        tenant_storage_ref: &TenantStorageRef,
+        index_id: &str,
+        revision_id: uuid::Uuid,
+    ) -> Result<bool, IndexWriteError> {
+        self.inner
+            .invalidate_revision(tenant_storage_ref, index_id, revision_id)
+    }
+}
+
+impl IdentifiedIndexWriter for SecondUpsertHoldWriter {
+    fn dependency_identity(&self) -> &str {
+        "second_upsert_hold_writer_test_only"
+    }
+}
+
+/// Task 11: while a tenant's rebuild fence is unexpired, the invalidation
+/// claim takes none of the tenant's invalidations, so a withdrawal's removal
+/// waits and the entries stay. A later set with a shorter time never
+/// shortens the fence. Once the rebuild clears its fence, the next pass
+/// removes the entries.
+#[tokio::test]
+async fn an_invalidation_is_not_claimed_while_a_rebuild_fence_is_set() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, index, _adapters) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(true),
+        None,
+    )
+    .await;
+    let tenant = format!("rebuild-fence-claim-{}", uuid::Uuid::new_v4());
+    let tenant_ref = pipeline_tenant_storage_ref(&tenant);
+    let settled = settled_included_run(&service, &tenant).await;
+    let live_entries = index.entry_count(&tenant_ref, MINIMAL_INDEX_ID);
+    assert!(live_entries > 0);
+
+    let fence = uuid::Uuid::new_v4();
+    service
+        .store()
+        .set_index_rebuild_fence(&tenant, fence, std::time::Duration::from_secs(60))
+        .await
+        .expect("the fence is set");
+    // The same rebuild sets its fence again with no time left: `GREATEST`
+    // keeps the later end.
+    service
+        .store()
+        .set_index_rebuild_fence(&tenant, fence, std::time::Duration::ZERO)
+        .await
+        .expect("the fence is set again");
+    let rows = rebuild_fence_rows(&tenant).await;
+    assert_eq!(rows.len(), 1, "one row for the one rebuild: {rows:?}");
+    assert!(rows[0].unexpired, "a shorter set never shortens the fence");
+
+    withdraw(&service, &tenant, settled.submission_id).await;
+    assert_invalidation_due(&backend, &tenant, settled.run_id).await;
+    assert_eq!(
+        service
+            .process_index_invalidations(&tenant, 32)
+            .await
+            .unwrap(),
+        0,
+        "no invalidation of the tenant is claimed while its fence is unexpired"
+    );
+    assert_eq!(
+        index.entry_count(&tenant_ref, MINIMAL_INDEX_ID),
+        live_entries,
+        "the entries stay while the fence holds"
+    );
+
+    service
+        .store()
+        .clear_index_rebuild_fence(&tenant, fence)
+        .await
+        .expect("the fence is cleared");
+    assert!(rebuild_fence_rows(&tenant).await.is_empty());
+    assert_eq!(
+        service
+            .process_index_invalidations(&tenant, 32)
+            .await
+            .unwrap(),
+        1,
+        "the invalidation runs once the fence is cleared"
+    );
+    assert_eq!(index.entry_count(&tenant_ref, MINIMAL_INDEX_ID), 0);
+}
+
+/// Task 11: a fence whose time has passed blocks nothing: the invalidation
+/// runs while the row is still there. A clear by any rebuild of the tenant
+/// deletes the tenant's expired rows beside its own, so a lost rebuild's
+/// row does not stay for ever; another tenant's expired row stays.
+#[tokio::test]
+async fn an_expired_fence_does_not_block() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, index, _adapters) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(true),
+        None,
+    )
+    .await;
+    let tenant = format!("rebuild-fence-expired-{}", uuid::Uuid::new_v4());
+    let tenant_ref = pipeline_tenant_storage_ref(&tenant);
+    let settled = settled_included_run(&service, &tenant).await;
+    assert!(index.entry_count(&tenant_ref, MINIMAL_INDEX_ID) > 0);
+
+    let expired = uuid::Uuid::new_v4();
+    insert_expired_rebuild_fence(&tenant, expired).await;
+    withdraw(&service, &tenant, settled.submission_id).await;
+    assert_invalidation_due(&backend, &tenant, settled.run_id).await;
+    assert_eq!(
+        service
+            .process_index_invalidations(&tenant, 32)
+            .await
+            .unwrap(),
+        1,
+        "an expired fence does not hold the invalidation back"
+    );
+    assert_eq!(index.entry_count(&tenant_ref, MINIMAL_INDEX_ID), 0);
+    let rows = rebuild_fence_rows(&tenant).await;
+    assert_eq!(
+        rows.iter().map(|row| row.fence_id).collect::<Vec<_>>(),
+        vec![expired],
+        "the expired row was there when the invalidation ran"
+    );
+    assert!(!rows[0].unexpired);
+
+    let other_tenant = format!("rebuild-fence-expired-other-{}", uuid::Uuid::new_v4());
+    insert_test_tenant(&other_tenant).await;
+    let other_expired = uuid::Uuid::new_v4();
+    insert_expired_rebuild_fence(&other_tenant, other_expired).await;
+    service
+        .store()
+        .clear_index_rebuild_fence(&tenant, uuid::Uuid::new_v4())
+        .await
+        .expect("another rebuild's clear");
+    assert!(
+        rebuild_fence_rows(&tenant).await.is_empty(),
+        "a clear deletes the tenant's expired rows"
+    );
+    assert_eq!(
+        rebuild_fence_rows(&other_tenant)
+            .await
+            .iter()
+            .map(|row| row.fence_id)
+            .collect::<Vec<_>>(),
+        vec![other_expired],
+        "a clear never deletes another tenant's rows"
+    );
+}
+
+/// Task 11: a fence holds back only its own tenant's invalidations. Tenant
+/// A's fence does not stop tenant B's invalidation, B's runtime setting sees
+/// no row of A's, and a clear under B's tenant with A's fence id leaves A's
+/// fence in place.
+#[tokio::test]
+async fn a_fence_is_tenant_scoped() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, index, _adapters) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(true),
+        None,
+    )
+    .await;
+    let tenant_a = format!("rebuild-fence-tenant-a-{}", uuid::Uuid::new_v4());
+    let tenant_b = format!("rebuild-fence-tenant-b-{}", uuid::Uuid::new_v4());
+    let tenant_ref_a = pipeline_tenant_storage_ref(&tenant_a);
+    let tenant_ref_b = pipeline_tenant_storage_ref(&tenant_b);
+    let settled_a = settled_included_run(&service, &tenant_a).await;
+    let settled_b = settled_included_run(&service, &tenant_b).await;
+    let entries_a = index.entry_count(&tenant_ref_a, MINIMAL_INDEX_ID);
+    assert!(entries_a > 0);
+    assert!(index.entry_count(&tenant_ref_b, MINIMAL_INDEX_ID) > 0);
+
+    let fence_a = uuid::Uuid::new_v4();
+    service
+        .store()
+        .set_index_rebuild_fence(&tenant_a, fence_a, std::time::Duration::from_secs(60))
+        .await
+        .expect("tenant A's fence is set");
+    assert_eq!(
+        visible_rows(&backend, &tenant_a, "pipeline_index_rebuild_fences").await,
+        1
+    );
+    assert_eq!(
+        visible_rows(&backend, &tenant_b, "pipeline_index_rebuild_fences").await,
+        0,
+        "tenant B's setting sees none of tenant A's fences"
+    );
+
+    withdraw(&service, &tenant_a, settled_a.submission_id).await;
+    withdraw(&service, &tenant_b, settled_b.submission_id).await;
+    assert_invalidation_due(&backend, &tenant_b, settled_b.run_id).await;
+    assert_eq!(
+        service
+            .process_index_invalidations(&tenant_b, 32)
+            .await
+            .unwrap(),
+        1,
+        "tenant A's fence does not hold tenant B's invalidation back"
+    );
+    assert_eq!(index.entry_count(&tenant_ref_b, MINIMAL_INDEX_ID), 0);
+    assert_eq!(
+        service
+            .process_index_invalidations(&tenant_a, 32)
+            .await
+            .unwrap(),
+        0,
+        "tenant A's own invalidation waits"
+    );
+    assert_eq!(
+        index.entry_count(&tenant_ref_a, MINIMAL_INDEX_ID),
+        entries_a
+    );
+
+    service
+        .store()
+        .clear_index_rebuild_fence(&tenant_b, fence_a)
+        .await
+        .expect("a clear under tenant B");
+    assert_eq!(
+        rebuild_fence_rows(&tenant_a)
+            .await
+            .iter()
+            .map(|row| row.fence_id)
+            .collect::<Vec<_>>(),
+        vec![fence_a],
+        "a clear under tenant B leaves tenant A's fence"
+    );
+    service
+        .store()
+        .clear_index_rebuild_fence(&tenant_a, fence_a)
+        .await
+        .expect("tenant A's fence is cleared");
+    assert_eq!(
+        service
+            .process_index_invalidations(&tenant_a, 32)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(index.entry_count(&tenant_ref_a, MINIMAL_INDEX_ID), 0);
+}
+
+/// Task 11: a rebuild of three runs holds one fence row of its own. At
+/// every upsert the row is there, and it reaches past the time of that upsert
+/// plus `PIPELINE_INDEX_WRITE_FENCE_MARGIN_SECONDS`, so a call that starts
+/// then and returns within the margin returns inside the fence. The rebuild
+/// sets the fence again before each run's writes, so the row's time moves
+/// three times, later each time. Another rebuild's clear, with another fence
+/// id, made before the first upsert, leaves the row. After the rebuild
+/// returns, no row is left.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_rebuild_sets_extends_and_clears_its_fence() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _index, _adapters) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(true),
+        None,
+    )
+    .await;
+    let tenant = format!("rebuild-fence-runs-{}", uuid::Uuid::new_v4());
+    for _ in 0..3 {
+        settled_included_run(&service, &tenant).await;
+    }
+
+    let rebuilt = IsolatedPipelineIndex::new();
+    let writer = FenceRecordingWriter::new(
+        rebuilt.clone(),
+        &tenant,
+        service.store(),
+        Some(uuid::Uuid::new_v4()),
+    )
+    .await;
+    let report = service
+        .rebuild_index_from_authoritative_commands(
+            &tenant,
+            writer.clone() as Arc<dyn IdentifiedIndexWriter>,
+        )
+        .await
+        .expect("the rebuild succeeds");
+    assert_eq!(report.command_count, 3);
+
+    let reads = writer.reads();
+    assert_eq!(reads.len(), report.entry_count, "one read for each upsert");
+    for read in &reads {
+        assert_eq!(
+            read.len(),
+            1,
+            "one fence row, the rebuild's own, at every upsert: {read:?}"
+        );
+        assert!(
+            read[0].covers_margin,
+            "the fence reaches past the upsert plus the margin: {read:?}"
+        );
+    }
+    let fence_ids = reads
+        .iter()
+        .map(|read| read[0].fence_id)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(fence_ids.len(), 1, "one fence id for the whole rebuild");
+    let mut times = reads
+        .iter()
+        .map(|read| read[0].fenced_until)
+        .collect::<Vec<_>>();
+    times.dedup();
+    assert_eq!(
+        times.len(),
+        3,
+        "the fence is set again before each of the three runs' writes: {times:?}"
+    );
+    assert!(
+        times.windows(2).all(|pair| pair[0] < pair[1]),
+        "each set moves the fence later: {times:?}"
+    );
+    assert!(
+        rebuild_fence_rows(&tenant).await.is_empty(),
+        "a rebuild that returns clears its fence"
+    );
+}
+
+/// Task 11, the case a single fence row per tenant would not cover: rebuild
+/// A of a tenant (another replica, still writing) holds an unexpired fence,
+/// and rebuild B of the same tenant sets its own fence beside A's, writes,
+/// and clears its own. A's fence stays, and still holds back the tenant's
+/// invalidation; once A clears it, the invalidation runs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_second_rebuild_clears_only_its_own_fence() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, index, _adapters) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(true),
+        None,
+    )
+    .await;
+    let tenant = format!("rebuild-fence-two-rebuilds-{}", uuid::Uuid::new_v4());
+    let tenant_ref = pipeline_tenant_storage_ref(&tenant);
+    let settled = settled_included_run(&service, &tenant).await;
+    let live_entries = index.entry_count(&tenant_ref, MINIMAL_INDEX_ID);
+    assert!(live_entries > 0);
+
+    let fence_a = uuid::Uuid::new_v4();
+    service
+        .store()
+        .set_index_rebuild_fence(&tenant, fence_a, std::time::Duration::from_secs(60))
+        .await
+        .expect("rebuild A's fence is set");
+
+    let writer =
+        FenceRecordingWriter::new(IsolatedPipelineIndex::new(), &tenant, service.store(), None)
+            .await;
+    let report = service
+        .rebuild_index_from_authoritative_commands(
+            &tenant,
+            writer.clone() as Arc<dyn IdentifiedIndexWriter>,
+        )
+        .await
+        .expect("rebuild B succeeds");
+    assert_eq!(report.command_count, 1);
+    let reads = writer.reads();
+    assert!(!reads.is_empty());
+    for read in &reads {
+        let ids = read.iter().map(|row| row.fence_id).collect::<BTreeSet<_>>();
+        assert_eq!(ids.len(), 2, "A's fence and B's own: {read:?}");
+        assert!(ids.contains(&fence_a), "{read:?}");
+    }
+
+    let rows = rebuild_fence_rows(&tenant).await;
+    assert_eq!(
+        rows.iter().map(|row| row.fence_id).collect::<Vec<_>>(),
+        vec![fence_a],
+        "B's clear deletes B's row and leaves A's"
+    );
+    assert!(rows[0].unexpired);
+
+    withdraw(&service, &tenant, settled.submission_id).await;
+    assert_invalidation_due(&backend, &tenant, settled.run_id).await;
+    assert_eq!(
+        service
+            .process_index_invalidations(&tenant, 32)
+            .await
+            .unwrap(),
+        0,
+        "A's fence still holds the invalidation back"
+    );
+    assert_eq!(
+        index.entry_count(&tenant_ref, MINIMAL_INDEX_ID),
+        live_entries
+    );
+
+    service
+        .store()
+        .clear_index_rebuild_fence(&tenant, fence_a)
+        .await
+        .expect("rebuild A clears its fence");
+    assert_eq!(
+        service
+            .process_index_invalidations(&tenant, 32)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(index.entry_count(&tenant_ref, MINIMAL_INDEX_ID), 0);
+}
+
+/// Task 11: the rebuild whose session is lost. The rebuild's second write is
+/// held. A withdrawal of the run waits for the run lock the rebuild holds;
+/// then the rebuild future is dropped, so its transaction rolls back and the
+/// lock goes, as a lost session lets it go, while the write still runs. The
+/// withdrawal commits and queues the run's invalidation. Another replica's
+/// invalidation pass claims nothing while the fence the rebuild committed is
+/// unexpired, also after the held write lands. Once the fence's time has
+/// passed, the invalidation runs and removes every entry, the late write's
+/// too. The lost rebuild never cleared its fence; its row is left to expire.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_rebuild_that_loses_its_session_cannot_be_overtaken_by_an_invalidation() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let artifacts = artifact_store(&dir);
+    let (service, _index, _adapters) = test_service(
+        backend.clone(),
+        artifacts.clone(),
+        minimal_config(true),
+        None,
+    )
+    .await;
+    let rebuilt = IsolatedPipelineIndex::new();
+    // The rebuilding replica: a one-second run deadline and a short margin,
+    // so its fence passes within the test.
+    let rebuilder = fence_test_service(
+        backend.clone(),
+        artifacts.clone(),
+        IsolatedPipelineIndex::new(),
+        one_second_settle_leases(),
+        Some(TEST_REBUILD_FENCE_MARGIN),
+    )
+    .await;
+    // Another replica, whose invalidation pass removes from the rebuilt index.
+    let replica = fence_test_service(
+        backend.clone(),
+        artifacts,
+        rebuilt.clone(),
+        PipelineLeaseConfig::default(),
+        None,
+    )
+    .await;
+    let tenant = format!("rebuild-fence-lost-session-{}", uuid::Uuid::new_v4());
+    let tenant_ref = pipeline_tenant_storage_ref(&tenant);
+    let (ready, evidence) = run_to_settle_ready(&service, &tenant).await;
+    let settled = settle_included(&service, &tenant, &ready).await;
+    let entry_count = service
+        .load_index_command(&settled, &evidence)
+        .await
+        .unwrap()
+        .expect("Score proposed a command")
+        .keyed_entries(&tenant_ref)
+        .count();
+    assert!(entry_count >= 2, "the command has a second entry to hold");
+
+    let (hold, mut held) = CallHold::new();
+    let writer = Arc::new(SecondUpsertHoldWriter {
+        inner: rebuilt.clone(),
+        hold,
+        started: AtomicUsize::new(0),
+        returned: AtomicUsize::new(0),
+    });
+    let mut rebuild = Box::pin(rebuilder.rebuild_index_from_authoritative_commands(
+        &tenant,
+        writer.clone() as Arc<dyn IdentifiedIndexWriter>,
+    ));
+    tokio::select! {
+        _ = rebuild.as_mut() => panic!("the rebuild returned while its second write was held"),
+        () = held.wait_until_entered() => {}
+    }
+    assert_eq!(
+        rebuilt.entry_count(&tenant_ref, MINIMAL_INDEX_ID),
+        1,
+        "the first write landed"
+    );
+    let rows = rebuild_fence_rows(&tenant).await;
+    assert_eq!(rows.len(), 1, "the rebuild's fence is committed: {rows:?}");
+    assert!(rows[0].unexpired);
+
+    let locker = run_row_locker(&backend, &tenant, settled.run_id).await;
+    let withdrawal = tokio::spawn({
+        let service = service.clone();
+        let tenant = tenant.clone();
+        let submission_id = settled.submission_id;
+        async move {
+            withdraw(&service, &tenant, submission_id).await;
+        }
+    });
+    wait_for_a_waiter_on(&backend, &locker, &withdrawal).await;
+    // The session is lost: the transaction ends and its locks go, and the
+    // second write goes on.
+    drop(rebuild);
+    tokio::time::timeout(HELD_CALL_BOUND, withdrawal)
+        .await
+        .expect("the withdrawal commits once the rebuild's locks are gone")
+        .expect("the withdrawal task did not panic");
+    assert_invalidation_due(&backend, &tenant, settled.run_id).await;
+    assert_eq!(
+        replica
+            .process_index_invalidations(&tenant, 32)
+            .await
+            .unwrap(),
+        0,
+        "another replica claims nothing while the lost rebuild's fence holds"
+    );
+
+    // Past the run's one-second deadline, so the held write is the last one.
+    tokio::time::sleep(std::time::Duration::from_millis(1_200)).await;
+    held.release();
+    let landed = std::time::Instant::now() + HELD_CALL_BOUND;
+    while writer.returned.load(Ordering::SeqCst) < 2 {
+        assert!(
+            std::time::Instant::now() < landed,
+            "the held write returns once released"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert_eq!(
+        rebuilt.entry_count(&tenant_ref, MINIMAL_INDEX_ID),
+        2,
+        "the late write landed, and no write started past the deadline"
+    );
+    assert_eq!(
+        replica
+            .process_index_invalidations(&tenant, 32)
+            .await
+            .unwrap(),
+        0,
+        "the fence still holds after the late write"
+    );
+
+    let fenced_until = rebuild_fence_rows(&tenant).await[0].fenced_until;
+    let passed = std::time::Instant::now() + HELD_CALL_BOUND;
+    while replica
+        .process_index_invalidations(&tenant, 32)
+        .await
+        .unwrap()
+        == 0
+    {
+        assert!(
+            std::time::Instant::now() < passed,
+            "the invalidation runs once the fence's time has passed"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let after: bool = owner_client()
+        .await
+        .query_one("SELECT clock_timestamp() >= $1", &[&fenced_until])
+        .await
+        .unwrap()
+        .get(0);
+    assert!(after, "the invalidation ran only after the fence's time");
+    assert_eq!(
+        rebuilt.entry_count(&tenant_ref, MINIMAL_INDEX_ID),
+        0,
+        "every entry is gone, the late write's too"
+    );
+    let rows = rebuild_fence_rows(&tenant).await;
+    assert_eq!(rows.len(), 1, "the lost rebuild's row is left: {rows:?}");
+    assert!(!rows[0].unexpired, "and it has expired");
+}
+
+/// Task 11 (Finding 1): a rebuilt run's deadline starts before its fence
+/// write, so the fence reaches past every write the deadline lets start, and
+/// the lock wait counts against the deadline. With a one-second deadline
+/// and the run row held, as a withdrawal holds it, for longer than that, the
+/// run fails as `index_unavailable` once it has the lock and writes nothing.
+/// No write started, so the failed rebuild clears its fence.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_rebuild_lock_wait_counts_against_the_run_deadline() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let artifacts = artifact_store(&dir);
+    let (service, _index, _adapters) = test_service(
+        backend.clone(),
+        artifacts.clone(),
+        minimal_config(true),
+        None,
+    )
+    .await;
+    let rebuilder = fence_test_service(
+        backend.clone(),
+        artifacts,
+        IsolatedPipelineIndex::new(),
+        one_second_settle_leases(),
+        None,
+    )
+    .await;
+    let tenant = format!("rebuild-fence-lock-wait-{}", uuid::Uuid::new_v4());
+    let tenant_ref = pipeline_tenant_storage_ref(&tenant);
+    let settled = settled_included_run(&service, &tenant).await;
+
+    // Hold the run row, as a withdrawal does, and queue nothing: the run
+    // stays rebuildable.
+    let mut holder = backend.trace_pool_for_test().get().await.unwrap();
+    let hold = tenant_tx(&mut holder, &tenant).await;
+    hold.query_one(
+        "SELECT 1 FROM pipeline_runs WHERE tenant_id = $1 AND run_id = $2 FOR UPDATE",
+        &[&tenant, &settled.run_id],
+    )
+    .await
+    .unwrap();
+    let locker = run_row_locker(&backend, &tenant, settled.run_id).await;
+
+    let rebuilt = IsolatedPipelineIndex::new();
+    let rebuild = tokio::spawn({
+        let rebuilder = rebuilder.clone();
+        let tenant = tenant.clone();
+        let rebuilt = rebuilt.clone();
+        async move {
+            rebuilder
+                .rebuild_index_from_authoritative_commands(&tenant, rebuilt)
+                .await
+        }
+    });
+    wait_for_a_waiter_on(&backend, &locker, &rebuild).await;
+    assert_eq!(
+        rebuild_fence_rows(&tenant).await.len(),
+        1,
+        "the fence is written before the lock wait"
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(1_500)).await;
+    hold.commit().await.unwrap();
+    drop(holder);
+
+    let error = tokio::time::timeout(HELD_CALL_BOUND, rebuild)
+        .await
+        .expect("the rebuild ends once it has the lock")
+        .expect("the rebuild task did not panic")
+        .expect_err("a run whose deadline passed in the lock wait fails closed");
+    assert_eq!(error.to_string(), PIPELINE_INDEX_UNAVAILABLE_LABEL);
+    assert_eq!(
+        rebuilt.entry_count(&tenant_ref, MINIMAL_INDEX_ID),
+        0,
+        "the run writes nothing"
+    );
+    assert!(
+        rebuild_fence_rows(&tenant).await.is_empty(),
+        "no write started, so the failed rebuild clears its fence"
+    );
+}
+
+/// Task 11: a rebuild whose run passes its deadline with a call that is
+/// still running once the margin has passed too fails as
+/// `index_unavailable`, as any run past its deadline does, but leaves its
+/// fence to expire rather than clearing it: a write of its may still land.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_rebuild_with_a_write_still_in_flight_leaves_its_fence() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let artifacts = artifact_store(&dir);
+    let (service, _index, _adapters) = test_service(
+        backend.clone(),
+        artifacts.clone(),
+        minimal_config(true),
+        None,
+    )
+    .await;
+    let rebuilder = fence_test_service(
+        backend.clone(),
+        artifacts,
+        IsolatedPipelineIndex::new(),
+        one_second_settle_leases(),
+        Some(std::time::Duration::from_secs(1)),
+    )
+    .await;
+    let tenant = format!("rebuild-fence-in-flight-{}", uuid::Uuid::new_v4());
+    let tenant_ref = pipeline_tenant_storage_ref(&tenant);
+    settled_included_run(&service, &tenant).await;
+
+    let rebuilt = IsolatedPipelineIndex::new();
+    let (hold, mut held) = CallHold::new();
+    let writer: Arc<dyn IdentifiedIndexWriter> = Arc::new(BlockingIndexWriter {
+        inner: rebuilt.clone(),
+        hold,
+    });
+    let rebuild = tokio::spawn({
+        let rebuilder = rebuilder.clone();
+        let tenant = tenant.clone();
+        async move {
+            rebuilder
+                .rebuild_index_from_authoritative_commands(&tenant, writer)
+                .await
+        }
+    });
+    held.wait_until_entered().await;
+    // The run's deadline (one second) and then the margin (one second) pass
+    // with the first write still held.
+    let error = tokio::time::timeout(HELD_CALL_BOUND, rebuild)
+        .await
+        .expect("the rebuild gives up on the call in flight after the margin")
+        .expect("the rebuild task did not panic")
+        .expect_err("a run past its deadline fails closed");
+    assert_eq!(error.to_string(), PIPELINE_INDEX_UNAVAILABLE_LABEL);
+    let rows = rebuild_fence_rows(&tenant).await;
+    assert_eq!(
+        rows.len(),
+        1,
+        "the rebuild leaves its fence while a write may still land: {rows:?}"
+    );
+
+    held.release();
+    let landed = std::time::Instant::now() + HELD_CALL_BOUND;
+    while rebuilt.entry_count(&tenant_ref, MINIMAL_INDEX_ID) == 0 {
+        assert!(
+            std::time::Instant::now() < landed,
+            "the held write lands once released"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
+/// Task 11: a fence write that fails stops the rebuild before the run's
+/// first write, with `index_rebuild_fence_unavailable`. The failure is
+/// injected by a test-only trigger, as the owner, scoped to this tenant.
+#[tokio::test]
+async fn a_rebuild_whose_fence_write_fails_writes_nothing() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _index, _adapters) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(true),
+        None,
+    )
+    .await;
+    let tenant = format!("rebuild-fence-write-fails-{}", uuid::Uuid::new_v4());
+    let tenant_ref = pipeline_tenant_storage_ref(&tenant);
+    settled_included_run(&service, &tenant).await;
+
+    let name = format!("t11_fence_fault_{}", uuid::Uuid::new_v4().simple());
+    owner_client()
+        .await
+        .batch_execute(&format!(
+            "CREATE FUNCTION {name}() RETURNS TRIGGER LANGUAGE plpgsql AS $$
+             BEGIN
+                 RAISE EXCEPTION 'injected fence write failure';
+             END;
+             $$;
+             CREATE TRIGGER {name}
+                 BEFORE INSERT OR UPDATE ON pipeline_index_rebuild_fences
+                 FOR EACH ROW
+                 WHEN (NEW.tenant_id = '{tenant}')
+                 EXECUTE FUNCTION {name}();"
+        ))
+        .await
+        .expect("install the fence fault");
+
+    let rebuilt = IsolatedPipelineIndex::new();
+    let result = service
+        .rebuild_index_from_authoritative_commands(&tenant, rebuilt.clone())
+        .await;
+    owner_client()
+        .await
+        .batch_execute(&format!(
+            "DROP TRIGGER {name} ON pipeline_index_rebuild_fences;
+             DROP FUNCTION {name}();"
+        ))
+        .await
+        .expect("remove the fence fault");
+
+    let error = result.expect_err("a rebuild without its fence fails closed");
+    assert_eq!(
+        error.to_string(),
+        PIPELINE_INDEX_REBUILD_FENCE_UNAVAILABLE_LABEL
+    );
+    assert_eq!(
+        rebuilt.entry_count(&tenant_ref, MINIMAL_INDEX_ID),
+        0,
+        "nothing is written without the fence"
+    );
+    assert!(rebuild_fence_rows(&tenant).await.is_empty());
+}
+
 /// Rebase 10 review, M1: the sweep deletes a no-hash row's object only at
 /// the key the store derives from the row's own artifact, run and lease
 /// token (`pipeline_attempt_object_id`). A due no-hash row whose key names
