@@ -144,7 +144,9 @@ enum DebugScreenshot {
     }
 
     /// `TRACE_COMMONS_APPEARANCE` as a colour scheme: `ImageRenderer` has no
-    /// window to inherit one from, so each capture is pinned to it.
+    /// window to inherit one from, so each capture is pinned to it. Unset,
+    /// the captures draw light (`render`): with no window there is no
+    /// system appearance to follow, and capture runs always set it.
     static let forcedColorScheme: ColorScheme? = {
         switch ProcessInfo.processInfo.environment["TRACE_COMMONS_APPEARANCE"] {
         case "dark": .dark

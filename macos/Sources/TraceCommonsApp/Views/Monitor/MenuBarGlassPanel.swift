@@ -55,8 +55,12 @@ struct MenuBarGlassPanel: View {
         .frame(width: Self.width)
         .modifier(PanelSurface(owns: ownsSurface))
         .animation(reduceMotion ? nil : GlassMotion.curve(GlassTokens.Motion.slide), value: sub)
-        // A fresh read on opening; the label follows the event stream.
+        // A fresh read on opening; the label follows the event stream. The
+        // app's own reads (the Private AI pill and Cmd-Shift-M read
+        // `model.daemonSettings`) refresh on opening too, as the legacy menu
+        // did.
         .task { await store.load() }
+        .onAppear { model.refreshAll() }
     }
 
     // MARK: Pills

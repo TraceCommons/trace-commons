@@ -1,3 +1,4 @@
+import TCBridge
 @testable import TCShellCore
 import XCTest
 
@@ -89,4 +90,26 @@ final class MonitorHomeInsightsTests: XCTestCase {
         XCTAssertNil(store.summary)
         XCTAssertNil(store.failures["inference_summary"])
     }
+
+    /// M-3: Insights and Mission drafts are reachable only through their
+    /// cards, which draw only on the core's heading. A core that stops
+    /// sending either title goes red here rather than hiding a screen.
+    func test_theInsightsAndMissionDraftsHeadingsAreTheCores() throws {
+        XCTAssertNotNil(HomeFormat.cardHeading(TCInsights.copy()?["title"]), "Insights would be unreachable")
+        guard case .copy(let copy) = try TCMissionDrafts.call(.init(operation: .init("copy"))) else {
+            return XCTFail("the mission drafts copy call answered something else")
+        }
+        XCTAssertNotNil(HomeFormat.cardHeading(copy["title"]), "Mission drafts would be unreachable")
+    }
+
+    /// M-1: the app's own reads refresh when someone looks, as the legacy
+    /// window and menu did: on the Monitor's always-present container and
+    /// on the menu panel's root.
+    func test_lookingRefreshesTheAppsReads() throws {
+        let window = try MonitorNavigationTests.text("Views/MonitorWindowView.swift")
+        XCTAssertTrue(window.contains("        .glassWindow()\n        .onAppear { model.refreshAll() }\n"))
+        let panel = try MonitorNavigationTests.text("Views/Monitor/MenuBarGlassPanel.swift")
+        XCTAssertTrue(panel.contains("        .task { await store.load() }\n        .onAppear { model.refreshAll() }\n"))
+    }
 }
+

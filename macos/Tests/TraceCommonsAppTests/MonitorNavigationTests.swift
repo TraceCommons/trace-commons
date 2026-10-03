@@ -457,7 +457,11 @@ final class MonitorNavigationTests: XCTestCase {
         // The Monitor consumes the destination on an always-present
         // container, initially too, and lands Inference on its inspector.
         let window = try Self.text("Views/MonitorWindowView.swift")
-        XCTAssertTrue(window.contains(".glassWindow()\n        .onChange(of: navigation.pending, initial: true) {"))
+        XCTAssertTrue(window.contains(".glassWindow()\n        .onAppear { model.refreshAll() }\n"
+            + "        // The app's own reads (settings, the tools, the credential, the\n"
+            + "        // change log) refresh when someone looks, on this always-present\n"
+            + "        // container, as the legacy window did.\n"
+            + "        .onChange(of: navigation.pending, initial: true) {"))
         // From `land`, not the file's first `case .inference:` (the tab's
         // title switch comes first).
         let land = try XCTUnwrap(window.range(of: "static func land("))
