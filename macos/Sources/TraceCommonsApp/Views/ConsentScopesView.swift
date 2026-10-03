@@ -16,7 +16,7 @@ import SwiftUI
 /// here would drift from the protocol the moment the daemon adds or renames a
 /// scope. The one Swift-side literal mapping that does exist,
 /// `ScopeCopy.title(for:options:)`, is copy-only (the short bold label) and
-/// is already shared with `PreviewSheet`/`SettingsView` -- adding a second,
+/// is already shared with `PreviewSheet`/`ConsentSection` -- adding a second,
 /// separate mapping in this file would be exactly the drift this rule warns
 /// against, so it is reused rather than duplicated.
 struct ConsentScopesView: View {

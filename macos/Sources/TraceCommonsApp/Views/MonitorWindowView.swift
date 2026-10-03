@@ -51,31 +51,41 @@ struct MonitorWindowView: View {
     /// Home's page: the overview or History, restored per window.
     @SceneStorage("monitor.homePage") private var homePage: HomeTabView.Page = .overview
 
-    /// The screens' data (C1). Sample data in this debug window until K1
-    /// moves the screens to the live client: `TRACE_COMMONS_SAMPLE` names
-    /// the set (`normalDay` by default).
-    @State private var traces = MonitorWindowView.tracesStore()
+    /// The screens' data, read through the app's live client
+    /// (`AppModel.daemonData`), which the body attaches whenever the daemon
+    /// starts or restarts. Until then each store says the core is down.
+    @State private var traces = TracesStore(client: nil)
     /// The map's Private AI view and the Inference tab (R8).
-    @State private var inference = InferenceStore(client: MonitorWindowView.dataClient())
+    @State private var inference = InferenceStore(client: nil)
     /// Home and History (R9).
-    @State private var home = HomeStore(client: MonitorWindowView.dataClient())
+    @State private var home = HomeStore(client: nil)
 
-    /// The Traces store over the sample set `TRACE_COMMONS_SAMPLE` names. A
-    /// name that is not a set falls back to `normalDay`, and says so: the tab
-    /// marks the data as sample, and an unknown name both in the marker and
-    /// in the log.
-    static func tracesStore() -> TracesStore {
+    /// Sample data, debug builds only, when `TRACE_COMMONS_SAMPLE` names a
+    /// set; nil otherwise, and then the live client is attached below. A
+    /// name that is not a set falls back to `normalDay`, and says so in the
+    /// log and in the Traces tab's sample marker.
+    static func sampleClient() -> (any DaemonDataClient)? {
+        #if DEBUG
         let choice = sampleChoice(ProcessInfo.processInfo.environment["TRACE_COMMONS_SAMPLE"])
-        if choice.unknown {
-            NSLog("TRACE_COMMONS_SAMPLE unrecognised; fallback %@", choice.set.rawValue)
-        }
-        return TracesStore(
-            client: DaemonDataWiring.sample(choice.set), sample: choice.set.rawValue, sampleUnknown: choice.unknown)
+        guard ProcessInfo.processInfo.environment["TRACE_COMMONS_SAMPLE"] != nil else { return nil }
+        if choice.unknown { NSLog("TRACE_COMMONS_SAMPLE unrecognised; fallback %@", choice.set.rawValue) }
+        let set = choice.set
+        return DaemonDataWiring.sample(set)
+        #else
+        return nil
+        #endif
     }
 
-    /// The sample client for the window's other stores, over the same set.
-    static func dataClient() -> any DaemonDataClient {
-        DaemonDataWiring.sample(sampleChoice(ProcessInfo.processInfo.environment["TRACE_COMMONS_SAMPLE"]).set)
+    /// The Traces tab's sample marker for `sampleClient()`'s set: its name,
+    /// and whether `TRACE_COMMONS_SAMPLE` named no set. Nil over the daemon.
+    static func sampleMarker() -> (set: String, unknown: Bool)? {
+        #if DEBUG
+        guard let name = ProcessInfo.processInfo.environment["TRACE_COMMONS_SAMPLE"] else { return nil }
+        let choice = sampleChoice(name)
+        return (choice.set.rawValue, choice.unknown)
+        #else
+        return nil
+        #endif
     }
 
     /// The set a `TRACE_COMMONS_SAMPLE` value names, and whether it named
@@ -141,9 +151,20 @@ struct MonitorWindowView: View {
             }
         }
         .glassWindow()
-        .task { await traces.run() }
-        .task { await inference.run() }
-        .task { await home.run() }
+        // The app's live client, re-attached whenever the daemon restarts;
+        // with none, each store draws the core as down.
+        .task(id: model.liveData.map(ObjectIdentifier.init)) {
+            let client = Self.sampleClient() ?? model.daemonData
+            traces.attach(client)
+            let marker = Self.sampleMarker()
+            traces.markSample(marker?.set, unknown: marker?.unknown ?? false)
+            inference.attach(client)
+            home.attach(client)
+            async let a: () = traces.run()
+            async let b: () = inference.run()
+            async let c: () = home.run()
+            _ = await (a, b, c)
+        }
     }
 
     /// The sentence one tool's row shows (`HarnessSurface.rowSentence`): a
@@ -422,9 +443,8 @@ struct MonitorSettingsWindow: View {
                     ComputeView(model: compute)
                 default:
                     ScrollView {
-                        SettingsContent(navigation: navigation, section: section)
+                        GlassSettingsContent(navigation: navigation, section: section)
                     }
-                    .tcScreen()
                 }
             }
             // A fresh view per section, so the scroll starts at its top.

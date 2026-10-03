@@ -92,10 +92,12 @@ enum DebugScreenshot {
             // are small secondary text in two columns, which is exactly the
             // combination that fails contrast or collapses at width without
             // anyone noticing from a green build.
+            // The log is drawn alone, so it is never the part of a long
+            // stack of sections that falls off the bottom of the image.
             render(
-                SettingsContent().environmentObject(model),
+                GlassSettingsContent(section: .changes).environmentObject(model),
                 to: directory + "/macos-shell-settings.png",
-                size: CGSize(width: 860, height: 1200)
+                size: CGSize(width: 860, height: 620)
             )
             render(
                 WithdrawalConfirmationCapture().environmentObject(model),

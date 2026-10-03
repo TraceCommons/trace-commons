@@ -15,7 +15,7 @@ final class SettingsPointerTests: XCTestCase {
             .deletingLastPathComponent()  // TCShellCoreTests
             .deletingLastPathComponent()  // Tests
             .deletingLastPathComponent()  // macos
-            .appendingPathComponent("Sources/TraceCommonsApp/Views/SettingsView.swift")
+            .appendingPathComponent("Sources/TraceCommonsApp/Views/Settings/PrivateAISection.swift")
         return try String(contentsOf: url, encoding: .utf8)
     }
 

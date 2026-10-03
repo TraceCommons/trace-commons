@@ -34,7 +34,7 @@ import XCTest
 ///   surface saying nothing about a state that still holds.
 /// - `AppModel.summaryErrors[id]`, `credentialAttempt` and
 ///   `harnessExposureRequest` are each cleared on their own completion path.
-/// - `SettingsView.loginItemActionError`, `SettingsView.consentSaveError`,
+/// - `StartupSection.loginItemActionError`, `ConsentSection.saveError`,
 ///   `OnboardingRootsView.failure` and `PreviewSheet.failure` are view-local
 ///   `@State`, cleared at the top of each attempt and gone with the view.
 ///
@@ -61,6 +61,7 @@ final class ActionNoticeDismissTests: XCTestCase {
             "only \(sources.count) sources were scanned; the whole app target is expected")
 
         var sites: [String: Int] = [:]
+        var glassSites = 0
         var failures: [String] = []
         for (path, text) in sources.sorted(by: { $0.key < $1.key }) {
             let lines = text.components(separatedBy: "\n")
@@ -69,9 +70,14 @@ final class ActionNoticeDismissTests: XCTestCase {
                     line.contains("if let") && line.contains("model.\($0)")
                 }) else { continue }
                 sites[property, default: 0] += 1
-                let rendered = lines[(index + 1)...].prefix(3).joined(separator: " ")
+                // A glass notice draws the same message in a `GlassNotice`
+                // whose dismiss button sits a few lines below it; the
+                // clear-the-same-property half applies to it unchanged.
+                let glass = (lines.dropFirst(index + 1).first ?? "").contains("GlassNotice(")
+                let rendered = lines[(index + 1)...].prefix(glass ? 12 : 3).joined(separator: " ")
                 let location = "\(path):\(index + 1) (\(property))"
-                if !rendered.contains("ActionMessageBanner(") {
+                if glass { glassSites += 1 }
+                if !glass && !rendered.contains("ActionMessageBanner(") {
                     failures.append(
                         "\(location) renders without a dismiss control: \(rendered.trimmed)")
                 } else if !rendered.contains("model.\(property) = nil") {
@@ -90,7 +96,21 @@ final class ActionNoticeDismissTests: XCTestCase {
                 sites[property] ?? 0, 0,
                 "no render site was found for \(property) -- this scan proved nothing about it")
         }
+        // The Projects section's glass notice is scanned, not skipped.
+        XCTAssertGreaterThan(glassSites, 0, "no GlassNotice render site was scanned")
         XCTAssertTrue(failures.isEmpty, failures.joined(separator: "\n"))
+    }
+
+    /// The Projects error notice is never undismissable: its button is drawn
+    /// unconditionally, with the core's word or the banner's own.
+    func testTheProjectsErrorNoticeAlwaysHasADismissButton() throws {
+        let sources = try Self.appSources()
+        let text = try XCTUnwrap(sources["Views/Settings/ProjectsSection.swift"])
+        XCTAssertTrue(text.contains("if let error = model.lastActionError {"))
+        XCTAssertTrue(
+            text.contains("Button(Self.dismissLabel ?? ActionMessageBanner.dismissWord) { model.lastActionError = nil }"),
+            "the dismiss button must not depend on the core's word loading")
+        XCTAssertFalse(text.contains("if let label = Self.dismissLabel"))
     }
 
     /// The dismiss closure's own precondition: the notice is externally

@@ -29,6 +29,10 @@ struct ActionMessageBanner: View {
     let text: String
     let onDismiss: () -> Void
 
+    /// The dismiss control's name, reachable so a glass notice that cannot
+    /// reach the core's word still names its control.
+    static let dismissWord = "Dismiss this message"
+
     var body: some View {
         HStack(alignment: .top, spacing: TC.Space.m) {
             Text(text)
@@ -42,7 +46,7 @@ struct ActionMessageBanner: View {
                     .foregroundStyle(TC.inkSecondary)
             }
             .buttonStyle(.plain)
-            .accessibilityLabel("Dismiss this message")
+            .accessibilityLabel(Self.dismissWord)
             .help("Puts this message away. It does not retry anything.")
         }
         .padding(.vertical, TC.Space.m)
