@@ -1,3 +1,4 @@
+import TCBridge
 import TCDesign
 import TCShellCore
 import XCTest
@@ -12,12 +13,37 @@ final class MenuBarGlassPanelTests: XCTestCase {
     /// One mode for every folder reads as that mode; any difference is
     /// Mixed; no folders is unknown.
     func test_theModePillRollsUpTheFolders() {
-        XCTAssertEqual(MenuPanelData.rollup([.ask, .ask]), .ask)
-        XCTAssertEqual(MenuPanelData.rollup([.autoUpload]), .armed)
-        XCTAssertEqual(MenuPanelData.rollup([.ignore, .ignore]), .never)
-        XCTAssertEqual(MenuPanelData.rollup([.ask, .autoUpload]), .mixed)
-        XCTAssertEqual(MenuPanelData.rollup([.ask, .ignore, .autoUpload]), .mixed)
-        XCTAssertEqual(MenuPanelData.rollup([]), .none)
+        XCTAssertEqual(MenuPanelData.rollup("notify_only"), .ask)
+        XCTAssertEqual(MenuPanelData.rollup("auto_upload"), .armed)
+        XCTAssertEqual(MenuPanelData.rollup("ignore"), .never)
+        XCTAssertEqual(MenuPanelData.rollup("mixed"), .mixed)
+        XCTAssertEqual(MenuPanelData.rollup("a-mode-from-a-later-daemon"), .none)
+        XCTAssertEqual(MenuPanelData.rollup(nil), .none)
+    }
+
+    /// The pill reads the daemon's roll-up from `status` (#1208), in the
+    /// core's words, with the partial line only when the status says so.
+    func test_thePillReadsTheCoresContributionMode() async throws {
+        let store = MenuPanelStore(client: SampleDaemonClient(.normalDay))
+        await store.load()
+        let status = try XCTUnwrap(store.status)
+        let copy = try XCTUnwrap(ContributionModeCopy.decode(fromJSON: TCCoreCopy.contributionModeCopyJSON()))
+        let rollup = MenuPanelData.rollup(status.contributionMode)
+        XCTAssertNotEqual(rollup, .none, "the recorded status carries contribution_mode")
+        XCTAssertEqual(MenuPanelData.modeValue(rollup, mode: status.contributionMode, copy: copy),
+                       rollup == .mixed ? copy.mixed : copy.choice(for: status.contributionMode)?.label)
+        XCTAssertEqual(MenuPanelData.modeValue(.none, mode: nil, copy: copy), "—")
+        XCTAssertEqual(MenuPanelData.modeValue(.ask, mode: "notify_only", copy: nil), "—")
+        XCTAssertEqual(MenuPanelData.partialLine("auto_upload", status: status, copy: copy),
+                       status.contributionModePartial == true ? copy.autoPartial : nil)
+        XCTAssertNil(MenuPanelData.partialLine("notify_only", status: status, copy: copy))
+        // The panel never works the roll-up out from the folders.
+        let url = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Sources/TraceCommonsApp/Views/Monitor/MenuBarGlassPanel.swift")
+        let source = try String(contentsOf: url, encoding: .utf8)
+        XCTAssertFalse(source.contains("projects.map(\\.mode)"))
+        XCTAssertTrue(source.contains("store.status?.contributionMode"))
     }
 
     // MARK: Day graph
