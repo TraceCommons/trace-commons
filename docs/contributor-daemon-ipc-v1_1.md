@@ -2298,6 +2298,11 @@ emits no event. A match is a suggestion for this screen; a session counts
 toward a mission only when it is contributed through one of the existing
 paths.
 
+**The disclosure (M4).** `tc_missions_disclosure_copy_json` returns the
+words shown the first time Missions is opened and in Settings
+(`consent_copy::missions_disclosure_copy`): `{title, matching, nothing_sent,
+credit}`. DRAFT, NEEDS APPROVAL.
+
 ### View menu: Group by and Sort by (K15)
 
 The native app's View menu (#1146, #1152) offers Group by and Sort by for
