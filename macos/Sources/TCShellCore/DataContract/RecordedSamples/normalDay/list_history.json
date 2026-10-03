@@ -1,0 +1,109 @@
+{
+  "history": [
+    {
+      "submission_id": "7dba0d2e-df55-51c9-8671-b4b193adafda",
+      "submitted_at": "2026-09-29T09:00:00Z",
+      "project_id": "proj_f521cc304a06c2a9",
+      "project_label": "api",
+      "source": "claude-code",
+      "session_hash": "sha256:k2-history-1",
+      "status": "submitted",
+      "consent_scopes": [
+        "debugging_evaluation"
+      ],
+      "credit_points_pending": 3.5,
+      "credit_points_final": null,
+      "explanations": [],
+      "last_refreshed_at": "2026-09-30T08:00:00Z",
+      "withdrawn_at": null,
+      "revoked_at": null,
+      "approved_unattended": false,
+      "approved_verdict": "worked",
+      "uploaded_bytes": 14048
+    },
+    {
+      "submission_id": "644587ac-f321-57d9-9b27-2c280db3de77",
+      "submitted_at": "2026-09-28T09:00:00Z",
+      "project_id": "proj_ef69f3bb08fc3e8e",
+      "project_label": "infra",
+      "source": "claude-code",
+      "session_hash": "sha256:k2-history-2",
+      "status": "accepted",
+      "consent_scopes": [
+        "debugging_evaluation"
+      ],
+      "credit_points_pending": 0.0,
+      "credit_points_final": 6.0,
+      "explanations": [],
+      "last_refreshed_at": "2026-09-30T08:00:00Z",
+      "withdrawn_at": null,
+      "revoked_at": null,
+      "approved_unattended": true,
+      "approved_verdict": null,
+      "uploaded_bytes": 16096
+    },
+    {
+      "submission_id": "434b44db-62f5-55be-ace0-3d1b3f3bc171",
+      "submitted_at": "2026-09-26T09:00:00Z",
+      "project_id": "proj_9c3104d8d0e56788",
+      "project_label": "web",
+      "source": "claude-code",
+      "session_hash": "sha256:k2-history-3",
+      "status": "quarantined",
+      "consent_scopes": [
+        "debugging_evaluation"
+      ],
+      "credit_points_pending": 2.0,
+      "credit_points_final": null,
+      "explanations": [],
+      "last_refreshed_at": "2026-09-30T08:00:00Z",
+      "withdrawn_at": null,
+      "revoked_at": null,
+      "approved_unattended": false,
+      "approved_verdict": "partly",
+      "uploaded_bytes": 18144
+    },
+    {
+      "submission_id": "ba2ab01a-f1b1-5a1d-aa95-4eb8339646fc",
+      "submitted_at": "2026-09-24T09:00:00Z",
+      "project_id": "proj_f521cc304a06c2a9",
+      "project_label": "api",
+      "source": "claude-code",
+      "session_hash": "sha256:k2-history-4",
+      "status": "withdrawn",
+      "consent_scopes": [
+        "debugging_evaluation"
+      ],
+      "credit_points_pending": 0.0,
+      "credit_points_final": null,
+      "explanations": [],
+      "last_refreshed_at": "2026-09-30T08:00:00Z",
+      "withdrawn_at": "2026-09-25T09:00:00Z",
+      "revoked_at": null,
+      "approved_unattended": false,
+      "approved_verdict": "failed",
+      "uploaded_bytes": 20192
+    },
+    {
+      "submission_id": "0cfe272d-d0b1-5ac8-804e-fc37baea6cf1",
+      "submitted_at": "2026-09-10T09:00:00Z",
+      "project_id": "proj_9c3104d8d0e56788",
+      "project_label": "web",
+      "source": "claude-code",
+      "session_hash": "sha256:k2-history-5",
+      "status": "accepted",
+      "consent_scopes": [
+        "debugging_evaluation"
+      ],
+      "credit_points_pending": 0.0,
+      "credit_points_final": 4.0,
+      "explanations": [],
+      "last_refreshed_at": "2026-09-30T08:00:00Z",
+      "withdrawn_at": null,
+      "revoked_at": null,
+      "approved_unattended": null,
+      "approved_verdict": null,
+      "uploaded_bytes": 22240
+    }
+  ]
+}
