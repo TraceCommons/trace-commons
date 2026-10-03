@@ -67,7 +67,7 @@ use super::pipeline_http_pg_tests::{
     wait_for_run_complete, wait_for_settle_selection,
 };
 use trace_commons_gate_api::SettlementAdapter;
-use trace_commons_gate_api::pipeline::InstrumentId;
+use trace_commons_gate_api::pipeline::{InstrumentId, Phase};
 use trace_commons_server::db::postgres::{TRACE_COMMONS_RLS_TABLES, registered_migrations};
 use trace_commons_server::versioned_pipeline::{PipelineCrashPoint, pipeline_tenant_storage_ref};
 use trace_commons_server::versioned_pipeline_bundle::MINIMAL_INDEX_ID;
@@ -94,6 +94,27 @@ const RESTORE_TOKEN: &str = "token-a";
 /// across tenants and not only for `RESTORE_TENANT`.
 const SECOND_TENANT: &str = "tenant-b";
 const SECOND_TOKEN: &str = "token-b";
+
+/// A third tenant, on no list, that holds only the activation state of
+/// delivery PR 5 (final fix wave G23): a routing row and its event (a
+/// containment), a suspended Score policy and its intervention, a
+/// qualification row, and an index rebuild fence. The seed writes one row of
+/// each (`seed_activation_state`), so the restore is checked over rows in the
+/// five tables and not over empty sets; the resume requires each row
+/// (`require_activation_state`), and the tenant fingerprint covers their
+/// content. It takes no receipt, so it changes nothing the drill measures
+/// for the other two tenants.
+const ACTIVATION_TENANT: &str = "tenant-c";
+
+/// The tables `seed_activation_state` writes one row in, for
+/// `ACTIVATION_TENANT`.
+const ACTIVATION_STATE_TABLES: [&str; 5] = [
+    "pipeline_tenant_routing",
+    "pipeline_activation_events",
+    "pipeline_policy_interventions",
+    "pipeline_bundle_qualifications",
+    "pipeline_index_rebuild_fences",
+];
 
 /// Every row-level security policy in the `public` schema, one line each,
 /// sorted: its table, name, command, permissive or restrictive, its roles'
@@ -1005,13 +1026,128 @@ async fn require_trace_tables_isolated(runtime: &Arc<PgBackend>, stage: &str) ->
     rls.expected_table_count
 }
 
+/// Writes `ACTIVATION_TENANT`'s activation state, as the runtime login,
+/// through the stores an operator's actions go through: the service's
+/// default bundle (so the tenant has policy rows), a containment (the routing
+/// row and its event), a suspension of the bundle's Score policy (the status
+/// row and its intervention), and an index rebuild fence. The qualification
+/// row is inserted directly, with the runtime login's own `INSERT` grant: a
+/// qualification through `qualify_bundle` needs a signed package and a full
+/// set of check results, which this drill does not hold. Its digests are
+/// well formed and name nothing.
+async fn seed_activation_state(runtime: &Arc<PgBackend>, service: &PipelineService) {
+    let actor = format!("principal_sha256:{}", "c5".repeat(32));
+    service
+        .register_default_bundle(ACTIVATION_TENANT)
+        .await
+        .expect("restore_seed_activation_bundle_failed");
+    let bundle_id = service.bundle_id().to_string();
+    routing_store(runtime)
+        .expect("a routing store")
+        .contain(ACTIVATION_TENANT, &actor, "restore_drill_contain")
+        .await
+        .expect("restore_seed_containment_failed");
+    service
+        .intervene_policy(
+            ACTIVATION_TENANT,
+            &bundle_id,
+            Phase::Score,
+            "suspend",
+            &actor,
+            "restore_drill_suspend",
+        )
+        .await
+        .expect("restore_seed_suspension_failed");
+    let digest = sha256_bytes(b"restore-drill-qualification");
+    let mut client = runtime
+        .trace_pool_for_test()
+        .get()
+        .await
+        .expect("restore_seed_qualification_connection_failed");
+    let tx = tenant_tx(&mut client, ACTIVATION_TENANT).await;
+    tx.execute(
+        "INSERT INTO pipeline_bundle_qualifications (
+            tenant_id, bundle_id, package_hash, signing_key_id, signature_hash,
+            corpus_digest, input_digest, configuration_digest, code_revision_hash,
+            runtime_dependency_digest, evidence_hash
+         ) VALUES ($1, $2, $3, 'restore-drill-key', $3, $3, $3, $3, $3, $3, $3)",
+        &[&ACTIVATION_TENANT, &bundle_id, &digest],
+    )
+    .await
+    .expect("restore_seed_qualification_failed");
+    tx.commit()
+        .await
+        .expect("restore_seed_qualification_failed");
+    service
+        .store()
+        .set_index_rebuild_fence(
+            ACTIVATION_TENANT,
+            Uuid::new_v4(),
+            std::time::Duration::from_secs(3600),
+        )
+        .await
+        .expect("restore_seed_fence_failed");
+}
+
+/// `ACTIVATION_TENANT`'s activation state is in the database `runtime`
+/// reaches, read as the runtime login in the tenant's own transaction: one
+/// row in each of `ACTIVATION_STATE_TABLES`, the routing state `contained`,
+/// and the Score policy of its active bundle not runnable. Each failure
+/// names `<stage>_...` and, for a count, the table.
+async fn require_activation_state(runtime: &Arc<PgBackend>, stage: &str) {
+    let mut client = runtime
+        .trace_pool_for_test()
+        .get()
+        .await
+        .unwrap_or_else(|_| panic!("{stage}_activation_state_connection_failed"));
+    let tx = tenant_tx(&mut client, ACTIVATION_TENANT).await;
+    for table in ACTIVATION_STATE_TABLES {
+        // `table` is one of this module's own constant names, never input.
+        let rows: i64 = tx
+            .query_one(
+                &format!(r#"SELECT COUNT(*) FROM public."{table}" WHERE tenant_id = $1"#),
+                &[&ACTIVATION_TENANT],
+            )
+            .await
+            .unwrap_or_else(|_| panic!("{stage}_activation_state_query_failed"))
+            .get(0);
+        assert_eq!(rows, 1, "{stage}_activation_state_row_missing: {table}");
+    }
+    let routing_state: String = tx
+        .query_one(
+            "SELECT routing_state FROM pipeline_tenant_routing WHERE tenant_id = $1",
+            &[&ACTIVATION_TENANT],
+        )
+        .await
+        .unwrap_or_else(|_| panic!("{stage}_activation_state_query_failed"))
+        .get(0);
+    assert_eq!(routing_state, "contained", "{stage}_routing_state_changed");
+    let score_runnable: bool = tx
+        .query_one(
+            "SELECT status.runnable
+               FROM pipeline_active_bundles active
+               JOIN pipeline_bundle_policy_status status
+                 ON status.tenant_id = active.tenant_id
+                AND status.bundle_id = active.bundle_id
+              WHERE active.tenant_id = $1 AND status.phase = 'score'",
+            &[&ACTIVATION_TENANT],
+        )
+        .await
+        .unwrap_or_else(|_| panic!("{stage}_activation_state_query_failed"))
+        .get(0);
+    assert!(!score_runnable, "{stage}_policy_suspension_lost");
+    tx.commit()
+        .await
+        .unwrap_or_else(|_| panic!("{stage}_activation_state_query_failed"));
+}
+
 // ---------------------------------------------------------------------------
 // The two ignored tests.
 // ---------------------------------------------------------------------------
 
 /// `pipeline.py restore-drill`, before the dump: one completed run and one
-/// run stopped after its durable Settle selection, then the seed
-/// fingerprint.
+/// run stopped after its durable Settle selection, the activation state of a
+/// third tenant (`seed_activation_state`), then the seed fingerprint.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "the seed of `pipeline.py restore-drill`: run it through that command"]
 async fn pipeline_restore_seed() {
@@ -1094,6 +1230,14 @@ async fn pipeline_restore_seed() {
     // lease expires now instead of five minutes from now. Not a processor
     // call; a restore taken after a longer outage finds it expired anyway.
     expire_run_lease(&runtime, RESTORE_TENANT, pending_envelope.submission_id).await;
+    // PR 5's activation state, for a tenant of its own (G23), written before
+    // the fingerprints are taken so that they cover it.
+    seed_activation_state(
+        &runtime,
+        &compatibility_service(&runtime, &artifacts, &index, &adapters, None),
+    )
+    .await;
+    require_activation_state(&runtime, "restore_seed").await;
 
     // The seed is the shape the drill needs: one complete run with four
     // outcomes and a credited Trace Credit leg, and one leased run with a
@@ -1226,7 +1370,8 @@ async fn pipeline_restore_seed() {
 }
 
 /// `pipeline.py restore-drill`, after the restore and the artifact copy:
-/// the restored state equals the seed's, and the pending run completes once
+/// the restored state equals the seed's, the third tenant's activation state
+/// included (`require_activation_state`), and the pending run completes once
 /// on it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "the resume of `pipeline.py restore-drill`: run it through that command"]
@@ -1325,6 +1470,10 @@ async fn pipeline_restore_resume() {
         audit_events_verified, seed.audit_event_count,
         "restore_audit_event_count_mismatch"
     );
+    // The activation state of PR 5 came back with the rest (G23): the routing
+    // row and its event, the suspension and its intervention, the
+    // qualification, and the fence, each as the seed wrote it.
+    require_activation_state(&runtime, "restore").await;
     let artifact_fingerprint = artifact_fingerprint(&config.artifact_root);
     assert_eq!(
         artifact_fingerprint, seed.artifact_fingerprint,
