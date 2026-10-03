@@ -193,6 +193,64 @@ final class InferenceParityTests: XCTestCase {
         }
     }
 
+    /// Sign-in keeps every decision the core makes for it, its four writes,
+    /// its poll and its busy gate, and the balance and funding rows it hosts.
+    func test_signInKeepsItsDecisionsAndItsPoll() throws {
+        let source = try Self.text("Views/CredentialSection.swift")
+        for needle in ["CredentialSurface.tone(", "CredentialSurface.action(", "CredentialSurface.stateLine(",
+                       "CredentialSurface.actionExplains(", "CredentialSurface.actionLabel(", "BalanceSurface.actionToDraw(",
+                       "Self.providerOptions(copy)", "copy.credentialWalletNotice", "model.startNearAiCredential(provider:",
+                       "model.cancelNearAiCredential()", "model.forgetNearAiCredential()", "model.migrateNearAiCredential()",
+                       "model.refreshNearAiCredential()", "pollInterval", "model.credentialBusy",
+                       "BalanceRow(copy: copy, credentialAction: action, run: run)", "FundingRow(copy: copy)"] {
+            XCTAssertTrue(source.contains(needle), "CredentialSection.swift lacks \(needle)")
+        }
+        for file in ["Views/CredentialSection.swift", "Views/BalanceRow.swift", "Views/FundingRow.swift", "Views/NearAiJoinView.swift"] {
+            try LegacySymbols.assertClean(file)
+        }
+    }
+
+    /// The card's state is the core's tone on a worded glass label, the
+    /// provider chooser writes the caller's binding and is named on screen,
+    /// and no control is drawn without words.
+    func test_signInDrawsTheToneWithWordsAndNamesTheChooser() throws {
+        let source = try Self.text("Views/CredentialSection.swift")
+        for needle in ["GlassStatusLabel(\n                CredentialSurface.stateLine(status, copy: copy, calls: model.credentialCalls),\n                status: PrivateInferenceIndicator.status(tone))",
+                       "set: { if let value = $0 { selection.wrappedValue = value } }",
+                       "Text(copy.credentialProviderLabel)",
+                       "GlassPicker(\n                        copy.credentialProviderLabel,",
+                       "placeholder: copy.credentialProviderLabel)",
+                       "GlassButtonStyle(prominent && action == .obtain ? .primary : .glass)"] {
+            XCTAssertTrue(source.contains(needle), "CredentialSection.swift lacks \(needle)")
+        }
+        XCTAssertFalse(source.contains("palette("), "the card reads the glass status, not the TC palette")
+        let balance = try Self.text("Views/BalanceRow.swift")
+        for needle in ["GlassStatusLabel(sentence, status: PrivateInferenceIndicator.status(tone))",
+                       "BalanceSurface.showsFigures(status, calls: model.balanceCalls)", "Text(copy.balanceWhat)",
+                       "CredentialSurface.actionLabel(action, copy: copy)", "Button(label) { run(action) }",
+                       ".disabled(model.credentialBusy)"] {
+            XCTAssertTrue(balance.contains(needle), "BalanceRow.swift lacks \(needle)")
+        }
+        XCTAssertFalse(balance.contains("palette("), "the balance reads the glass status, not the TC palette")
+        let funding = try Self.text("Views/FundingRow.swift")
+        for needle in ["Text(status?.view.message ?? copy.fundingUnavailable)", "Text(copy.fundingWhat)",
+                       "Text(status?.destination == nil ? copy.fundingRefresh : copy.fundingManage)",
+                       ".disabled(model.credentialBusy || request != nil)",
+                       ".onReceive(model.$credentialBusy.removeDuplicates().dropFirst())",
+                       ".onReceive(model.$credentialStatus.map(\\.sessionState).removeDuplicates().dropFirst())"] {
+            XCTAssertTrue(funding.contains(needle), "FundingRow.swift lacks \(needle)")
+        }
+    }
+
+    /// The commons field is drawn only under its own word: with the wallet
+    /// copy absent there is no field, and so no Join it could enable.
+    func test_theCommonsFieldIsNeverWordless() throws {
+        let source = try Self.text("Views/NearAiJoinView.swift")
+        XCTAssertTrue(source.contains("if let commonsLabel = model.witnessCopy?.wallet?.commons {\n"
+            + "                        GlassTextField(commonsLabel, text: $commons)"))
+        XCTAssertFalse(source.contains("wallet?.commons ?? \"\""), "an absent word must not draw an unlabelled field")
+    }
+
     /// The window's Inference dot and the card map the tone one way.
     func test_theDotReadsTheIndicator() throws {
         let window = try Self.text("Views/MonitorWindowView.swift")
