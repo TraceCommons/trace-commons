@@ -238,7 +238,10 @@ fn tauri_commands_project_shared_contributor_copy() {
     }
 
     let eligibility_group = rust_function(&daemon, "fn eligibility_group_copy");
-    assert!(eligibility_group.contains("group_control"));
+    // The eligible/withheld arithmetic itself (K6 of #1173) moved into the
+    // core's `group_eligibility`, which already calls `group_control`
+    // internally; Tauri no longer computes `min`/`saturating_sub` itself.
+    assert!(eligibility_group.contains("group_eligibility"));
     assert!(eligibility_group.contains("group_withheld_line"));
 
     let withdrawal = rust_function(&history, "fn withdrawal_confirmation_prompt");

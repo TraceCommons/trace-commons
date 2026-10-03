@@ -136,6 +136,13 @@ old behaviour, because no application has shipped against `v1` yet. See
   withdrawal; it does not move on a later poll that only re-confirms the same
   status. See
   ["Withdrawal dates on revoked rows (K12)"](#withdrawal-dates-on-revoked-rows-k12).
+- **K15 (the native View menu's Group by and Sort by).** No field is added
+  for this. Every Group by and Sort by option the native Traces tab needs
+  is already answerable from `list_pending`'s entry fields, `list_projects`,
+  and `list_history` -- once K11's `list_projects[].tools` (#1192) lands.
+  K9's `title` (#1191) and K10's `would_send_bytes` and `uploaded_bytes`
+  (#1196) have already landed. See ["View menu: Group by and Sort by
+  (K15)"](#view-menu-group-by-and-sort-by-k15).
 
 `crates/trace-commons-contributor/tests/daemon_ipc_contract.rs` is the
 executable half of this document. `hello` reports its own method list and a
@@ -591,8 +598,8 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `withdraw_bulk` | `status` (`submitted` \| `quarantined` \| `accepted`) | `withdrawn: <count>`, `failed: <count>` | performs real network I/O; see "Withdrawal" below |
 | `inference_connection_offers` | — | `offers[]` of `{offer_id, revision, provider_id, disclosure_version, config_digest}` | account session; a read that selects nothing; see "Connecting inference" below |
 | `inference_connection_current` | — | `selection` (or `null`), `installed_on_this_device`, `pending_install`, `revocation_applied` | account session; applies an observed revocation on this device; see "Connecting inference" below |
-| `inference_connection_select` | `offer_id`, `provider_id`, `revision`, `config_digest`, `disclosure_version` (all **required**, exactly as shown); `expected_current_version` (optional); `idempotency_key` (optional UUID) | `selected: true`, `connection_id`, `state_version`, `offer_id`, `revision`, `config_digest`, `disclosure_version`, `receipt_endpoint_offered`, `install_required: true`, `previous_witness_removed` | account session; installs nothing; see "Connecting inference" below |
-| `inference_connection_install` | `connection_id`, `config_digest` (both **required**) | `installed: true`, `connection_id`, `state_version`, `receipt_endpoint_installed` | account session; the separate explicit step that writes the witness on this device; see "Connecting inference" below |
+| `inference_connection_select` | `offer_id`, `provider_id`, `revision`, `config_digest`, `disclosure_version`, `confirmed: true` (all **required**, exactly as shown); `expected_current_version` (optional); `idempotency_key` (optional UUID) | `selected: true`, `connection_id`, `state_version`, `offer_id`, `revision`, `config_digest`, `disclosure_version`, `receipt_endpoint_offered`, `install_required: true`, `previous_witness_removed` | account session; installs nothing; see "Connecting inference" below |
+| `inference_connection_install` | `connection_id`, `config_digest`, `confirmed: true` (all **required**) | `installed: true`, `connection_id`, `state_version`, `receipt_endpoint_installed` | account session; the separate explicit step that writes the witness on this device; see "Connecting inference" below |
 | `inference_connection_disconnect` | `connection_id` (**required**) | `disconnected`, `connection_id`, `state_version` (or `null`), `local_witness_removed`, `server_disconnect` (`revoked` / `not-found` / `pending`), `server_refusal` (label or `null`) | removes the local witness first, with or without an account session; see "Connecting inference" below |
 
 ### `status`
@@ -1968,6 +1975,60 @@ fetches `list_projects` to draw. It is always present (never absent, unlike
 `contributable_count`), because whether a session is undecided-and-Ask-me is
 a question every contributor's queue can answer, invited or not.
 
+### View menu: Group by and Sort by (K15)
+
+The native app's View menu (#1146, #1152) offers Group by and Sort by for
+the Traces tab, alongside the already-built "Show ignored folders". Neither
+needs a new field: every option is answerable from `list_pending`'s entry
+fields (`entry_value`), `list_projects`, and `list_history`, below. One of
+those fields is on an open, not-yet-merged PR -- `list_projects[].tools`
+(K11, #1192); the table names it, so nothing here is duplicated when it
+lands. K9's `title` (#1191) and K10's `would_send_bytes` and
+`uploaded_bytes` (#1196) have landed and are listed as existing.
+
+**Group by**
+
+| Option | What it groups on | Source |
+|---|---|---|
+| Tool (default) | an entry's `source` / `declared_source` | `list_pending`, existing |
+| Tool, for a folder with nothing waiting | the per-tool session counts the project has seen | `list_projects[].tools[].source` (K11, #1192) -- until it lands, such a folder cannot be placed and is listed on its own, exactly as #1183 (R6) documents |
+| Folder / project | `project_id` (grouping key) and `project_label` (display) | both existing, on every entry and every `list_projects` row |
+| None (flat list) | no grouping field; every entry already carries enough to render a row on its own | — |
+
+**Sort by**
+
+| Option | What it sorts on | Source |
+|---|---|---|
+| Name | a session's `title`, falling back to its formatted `started_at` when `title` is `null` (the existing fallback, unchanged) | `title` on every `list_pending` entry (K9, existing; `null` on an entry queued before K9, see ["`title`"](#title)); `started_at` existing |
+| Name, for a folder | `project_label` | existing, on every `list_projects` row (already disambiguated when two projects share a basename) |
+| Date | a session's `started_at`, or `discovered_at` when `started_at` is unknown | both existing, on every `list_pending` entry |
+| Date, for a folder | `last_session_at`, falling back to `added_at` for a configured folder the watcher has not yet observed a session in | both existing, on every `list_projects` row |
+| Size | a session's `would_send_bytes` (what an upload would actually send), falling back to `size_bytes` (the raw file) when no envelope is pinned | `would_send_bytes` on `list_pending` (K10, #1196); `size_bytes` existing |
+| Size, in history | `uploaded_bytes` | `list_history` rows (K10, #1196) |
+| Status | `state` and `reason_label` for a queued session, plus `eligibility` where it is present; `status` for a history row | all existing; `eligibility` is ABSENT whenever the signup flag is off (see ["Contribution eligibility"](#contribution-eligibility)), so a client must not require it -- sort an entry without it as `eligible`, since an invited contributor's whole queue is contributable |
+
+No row carries a folder-level size or count total. A client that wants one
+-- to sort folders themselves by total size, say -- already holds every
+session in that folder from `list_pending` and can sum `size_bytes` or
+`would_send_bytes` itself; `list_projects` already carries the plain count
+(`session_count`, `pending_count`). Nothing here asks the daemon to
+pre-aggregate what the client already has the parts for.
+
+**A stable sort key needs no new field.** Every row already carries a
+daemon-issued, stable, unique id to break ties deterministically: `entry_id`
+on a queue entry, `submission_id` on a history row, `project_id` on a
+project. The underlying lists are themselves returned in a deterministic
+order, so two reads with nothing changed produce the same order even before
+a client's own Group by / Sort by choice is applied: `list_pending` is the
+queue's insertion order, and `list_projects` is every configured project
+(sorted by its policy key) followed by every discovered-but-unconfigured
+one (sorted by its key) -- so a configured `/z/repo` precedes a discovered
+`/a/repo`. Neither order is alphabetical by anything a contributor sees; a
+client that offers a sort sorts for itself.
+
+A project's label on an entry needs no new field either: `project_label` is
+a plain (non-optional) `String` on every `QueueEntry`, never absent.
+
 ### The `outcome` verdict
 
 `approve` accepts an optional `outcome` parameter for the contributor's verdict
@@ -3028,14 +3089,53 @@ when older settings load. Watch reads direct `.json` children exported with
 records version support and routing limits, and the declaration grants neither
 body capture nor remote submission.
 
-`approval_hold_secs` takes a non-negative integer: how long an approval is
+`approval_hold_secs` takes a non-negative integer no greater than 300
+(five minutes): how long an approval is
 held before the uploader will touch it, which sets the duration of the
 contributor's undo; the default is 10, while `0` disables the hold and makes `approve` report
 `hold_until: null` so a client knows to offer no undo. It is read at each
 upload pass, so a change applies to approvals already sitting in the queue,
 and a shortened hold can release an entry a client is still counting down
 for -- treat the `hold_until` from `approve` as authoritative for the
-approval it accompanied, and do not change this setting mid-countdown.
+approval it accompanied, and do not change this setting mid-countdown. A
+value outside `0..=300` is `bad_params` / `settings-invalid-value`.
+
+`quiescence_secs` and `digest_interval_secs` are likewise bounded, not open
+`u64` fields: `quiescence_secs` to `0..=14_400` (zero is meaningful -- a
+session counts as finished the instant it stops growing -- and 14,400
+seconds is four hours, past which "done" never realistically arrives for a
+session still being written) and `digest_interval_secs` to `3_600..=86_400`
+(one hour to one day). Each used to accept any value, with only the Tauri
+shell's own command layer clamping before the call ever reached
+`set_settings`; a raw caller had no such floor. Both are now validated in
+`apply_settings_object` itself, so every caller gets the same bound with the
+same label-only `settings-invalid-value` the other numeric fields already
+use.
+
+Every numeric field's exact bounds -- `quiescence_secs`, `approval_hold_secs`,
+`digest_interval_secs`, `max_uploads_per_day` and `max_bytes_per_day`, all in
+the unit `set_settings` itself stores and validates (seconds or bytes, never
+a shell's own minute/hour/megabyte control granularity) -- are available
+without guessing or hard-coding a second copy: the C ABI's
+`tc_settings_ranges_json` returns them as one JSON object, so a shell can
+draw its controls' bounds from the same numbers this method enforces.
+
+`ironwire`'s `{"mode":"watch","port":P,"token_dir":D}` now validates `P` and
+`D` with the same floor `probe_routing` holds: `port` must be non-zero (`0` is
+the ask-the-kernel sentinel, never a port a proxy actually listens on,
+`bad_params` / `settings-invalid-value` -- more precisely
+`routing-port-invalid`), and `token_dir`, when present and non-empty, must be
+an absolute path (`routing-token-dir-must-be-absolute`); an empty `token_dir`
+is treated as absent. The two differ in two labelled ways a shell should
+know: `probe_routing` refuses port `0` as `port-invalid` (not
+`routing-port-invalid`), and refuses an empty `token_dir` as
+`token-dir-invalid` rather than treating it as absent, because a probe that
+fell through to the environment would answer about a path the caller did
+not ask about. A relative `token_dir` is refused by both, with
+`routing-token-dir-must-be-absolute`. Before this, only the Tauri shell's own command layer
+refused these two shapes -- a raw `set_settings` caller (another shell, or a
+future one) had no such floor and could persist a declaration nothing would
+ever actually route through.
 
 `claude_root` and `codex_root` each take a JSON string (a filesystem path)
 or `null` (clear the override, falling back to the conventional per-user
@@ -4846,7 +4946,12 @@ The flow a shell drives:
 2. The shell shows one offer and the disclosure its `disclosure_version`
    names, and on the contributor's choice calls `inference_connection_select`
    with **exactly** that offer's `offer_id`, `provider_id`, `revision`,
-   `config_digest` and `disclosure_version`. The daemon sends those values
+   `config_digest` and `disclosure_version`, plus `confirmed: true` --
+   refused (`bad_params` / `inference-connection-confirmation-required`)
+   without it, even with an otherwise well-formed offer. (Before this
+   existed, the only place this was ever checked was the Tauri shell's own
+   command layer, which refused locally and never forwarded the choice; a
+   raw caller had no such floor.) The daemon sends those values
    unchanged (`provider_id` is not sent; it is bound into the digest check
    below) and fills in nothing. Pass `expected_current_version` as the `state_version` from
    `inference_connection_current` when replacing an existing selection
@@ -4866,8 +4971,10 @@ The flow a shell drives:
 3. **Selecting installs nothing.** The witness material the server returns is
    held on this device only. The shell then asks the contributor, separately,
    whether to use this witness on this device, and on confirmation calls
-   `inference_connection_install` with the `connection_id` and
-   `config_digest` from the select result. The daemon re-checks the held
+   `inference_connection_install` with the `connection_id`, `config_digest`
+   from the select result, and `confirmed: true` -- refused
+   (`inference-connection-confirmation-required`) without it, same as
+   `inference_connection_select` above. The daemon re-checks the held
    material against its digest (`inference-connection-digest-mismatch`), then
    re-reads the account's selection; if it was disconnected or replaced since,
    the answer is `inference-connection-not-current`, and if its revision was
