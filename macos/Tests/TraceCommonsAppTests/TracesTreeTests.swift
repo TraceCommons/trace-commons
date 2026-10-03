@@ -203,13 +203,20 @@ final class TracesFolderModeTests: XCTestCase {
 final class TracesRowWordsTests: XCTestCase {
     /// A sample entry, held for a second look or carrying `extra` fields.
     private func entry(_ extra: String = "", held: Bool = false) throws -> DaemonData.QueueEntry {
-        var json = SampleDaemonData.entry(
-            1, SampleDaemonData.api, state: held ? "held" : "pending",
-            reason: held ? DaemonData.ReasonLabel.secondLookReviewRequired : nil)
+        // The first pending entry of the K2 recording, set held or given
+        // `extra` fields.
+        let reply = try XCTUnwrap(SampleDaemonData.reply("list_pending", in: .normalDay))
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(reply.utf8)) as? [String: Any])
+        let entries = try XCTUnwrap(object["pending"] as? [[String: Any]])
+        var row = try XCTUnwrap(entries.first)
+        row["state"] = held ? "held" : "pending"
+        row["reason_label"] = held ? DaemonData.ReasonLabel.secondLookReviewRequired : NSNull()
         if !extra.isEmpty {
-            json = json.replacingOccurrences(of: #""attestation":"unknown""#, with: #""attestation":"unknown","# + extra)
+            let more = try XCTUnwrap(JSONSerialization.jsonObject(with: Data("{\(extra)}".utf8)) as? [String: Any])
+            row.merge(more) { _, new in new }
         }
-        return try DaemonDataDecoding.decoder().decode(DaemonData.QueueEntry.self, from: Data(json.utf8))
+        let data = try JSONSerialization.data(withJSONObject: row)
+        return try DaemonDataDecoding.decoder().decode(DaemonData.QueueEntry.self, from: data)
     }
 
     /// The unresolvable bucket is drawn under its shared name, never the
