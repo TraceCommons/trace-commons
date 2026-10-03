@@ -1,4 +1,5 @@
 import SwiftUI
+import TCDesign
 import TCShellCore
 
 /// The indicator every surface on this destination is painted from.
@@ -38,6 +39,18 @@ enum PrivateInferenceIndicator {
         case .clear: return .clear
         case .attention: return .attention
         case .refused: return .refused
+        }
+    }
+
+    /// The same tone onto a glass status, as the window's Inference dot maps
+    /// it (`MonitorWindowView.inferenceDot`): only clear is on; held,
+    /// attention and refused all ask; neutral is off. A glass status is a dot,
+    /// so whoever draws it draws the core's sentence beside it.
+    static func status(_ tone: PrivateInferenceTone) -> GlassStatus {
+        switch tone {
+        case .clear: return .on
+        case .held, .attention, .refused: return .ask
+        case .neutral: return .off
         }
     }
 }
