@@ -223,7 +223,9 @@ struct MenuBarGlassPanel: View {
                             .accessibilityLabel(copy.clear)
                     }
                 }
-                .disabled(!store.canChooseOverride)
+                // No override before onboarding is done (R-43): it is a
+                // grant, and first run is where consent is asked.
+                .disabled(!store.canChooseOverride || model.requiresOnboarding)
                 if let refusal = store.overrideRefusal {
                     Text(refusal)
                         .glassType(GlassTokens.TypeScale.caption)
@@ -348,7 +350,7 @@ struct MenuBarGlassPanel: View {
                 }
             }
             hairline
-            Button(MenuWords.manageRules) { open(.settings(.watchedFolders)) }
+            Button(MenuWords.manageRules) { open(MenuPanelData.manageRules(requiresOnboarding: model.requiresOnboarding)) }
             Button(MenuWords.settings) {
                 NSApp.activate(ignoringOtherApps: true)
                 openSettings()
@@ -365,7 +367,7 @@ struct MenuBarGlassPanel: View {
     }
 
     /// The Monitor (or first run) at a destination; the handler raises it.
-    private func open(_ destination: MonitorDestination) {
+    private func open(_ destination: MonitorDestination?) {
         OpenMonitor.request(destination)
     }
 }

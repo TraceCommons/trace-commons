@@ -529,17 +529,29 @@ struct MonitorSettingsWindow: View {
             .navigationSplitViewColumnWidth(min: 200, ideal: 230, max: 280)
         } detail: {
             Group {
-                switch section {
-                case .compute:
-                    ScrollView {
-                        ComputeView(model: compute)
-                            .padding(GlassTokens.Space.panePadding)
-                            .frame(maxWidth: 560, alignment: .leading)
-                            .frame(maxWidth: .infinity, alignment: .topLeading)
+                // Before onboarding, no write surface outside first run
+                // (R-43): a section that writes what first run asks draws
+                // the Monitor's onboarding notice instead, whose button
+                // opens first run.
+                if model.requiresOnboarding && !section.availableBeforeOnboarding {
+                    GlassNotice(tone: .ask, title: MonitorWords.signedOut) {
+                        Button(OnboardingWelcomeWords.getStarted) { OpenMonitor.request() }
                     }
-                default:
-                    ScrollView {
-                        GlassSettingsContent(section: section)
+                    .padding(GlassTokens.Space.panePadding)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                } else {
+                    switch section {
+                    case .compute:
+                        ScrollView {
+                            ComputeView(model: compute)
+                                .padding(GlassTokens.Space.panePadding)
+                                .frame(maxWidth: 560, alignment: .leading)
+                                .frame(maxWidth: .infinity, alignment: .topLeading)
+                        }
+                    default:
+                        ScrollView {
+                            GlassSettingsContent(section: section)
+                        }
                     }
                 }
             }

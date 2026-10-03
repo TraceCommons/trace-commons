@@ -179,6 +179,12 @@ final class MenuPanelStore {
 
 /// The popover's rules, as pure functions so they are tested.
 enum MenuPanelData {
+    /// Where "Manage rules" goes: the watched folders in Settings, or first
+    /// run while onboarding is required, with no Settings section (R-43).
+    static func manageRules(requiresOnboarding: Bool) -> MonitorDestination? {
+        requiresOnboarding ? nil : .settings(.watchedFolders)
+    }
+
     /// The roll-up of every listed folder's mode, for the mode pill.
     enum ModeRollup: Equatable {
         case ask, armed, never

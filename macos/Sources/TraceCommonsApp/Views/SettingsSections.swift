@@ -22,6 +22,18 @@ enum SettingsSection: String, CaseIterable, Identifiable {
 
     var id: String { rawValue }
 
+    /// Whether the Settings window draws this section while onboarding is
+    /// required (R-43): only the sections that ask nothing first run asks.
+    /// Consent, the public profile, the watched folders, the tools, the
+    /// witness, the projects -- and the pause and change log beside them --
+    /// wait for first run, so no write surface exists outside it.
+    var availableBeforeOnboarding: Bool {
+        switch self {
+        case .connection, .startup, .notifications, .updates, .privateAI, .compute: true
+        case .watching, .consent, .publicProfile, .watchedFolders, .tools, .witness, .projects, .changes: false
+        }
+    }
+
     /// The section's name in the list: the heading the section itself
     /// shows, from the core's copy where the section takes it from there.
     /// Nil while that copy has not loaded; the list then draws the row as a

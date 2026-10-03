@@ -237,7 +237,7 @@ final class MenuBarGlassPanelTests: XCTestCase {
             XCTAssertFalse(source.contains(forbidden), "the popover contains \(forbidden)")
         }
         XCTAssertTrue(source.contains("modeOptions"))
-        XCTAssertTrue(source.contains(".disabled(!store.canChooseOverride)"),
+        XCTAssertTrue(source.contains(".disabled(!store.canChooseOverride || model.requiresOnboarding)"),
                       "the choices are disabled unless the store has positive evidence the core is up")
         XCTAssertTrue(source.contains("store.resolveConfirmation(confirmed:"))
     }
