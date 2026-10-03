@@ -13,6 +13,18 @@ final class MonitorNavigationTests: XCTestCase {
         try String(contentsOf: root.appendingPathComponent(rel), encoding: .utf8)
     }
 
+    /// The screenshot hook pins its own appearance and draws the glass
+    /// screens: no legacy palette, none of the views the cutover deletes.
+    func test_screenshotsForceTheAppearanceWithoutTheLegacyPalette() throws {
+        let hook = try Self.text("DebugScreenshot.swift")
+        XCTAssertTrue(hook.contains("\"TRACE_COMMONS_APPEARANCE\""))
+        XCTAssertTrue(hook.contains(".environment(\\.colorScheme"))
+        XCTAssertNil(hook.range(of: #"\bTC\."#, options: .regularExpression), "the legacy palette is read")
+        for legacy in ["QueueContent(", "CreditRecordView(", "WithdrawalConfirmationCapture(", "MenuBarContent("] {
+            XCTAssertFalse(hook.contains(legacy), "\(legacy) is a legacy view")
+        }
+    }
+
     /// The Monitor's three stores read the app's live client, re-attached
     /// whenever the daemon restarts; sample data is debug-only and opt-in.
     func test_theMonitorUsesTheLiveClient() throws {

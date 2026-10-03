@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import SwiftUI
+import TCDesign
 
 /// Writes PNGs of the shell's real views, driven by the real running daemon,
 /// when `TRACE_COMMONS_SCREENSHOT_DIR` is set.
@@ -13,7 +14,7 @@ import SwiftUI
 /// does not care.
 ///
 /// What it renders is the shipping view hierarchy bound to live daemon data
-/// -- the same `MainWindowView`, `MenuBarGlassPanel` and `PreviewSheet` a person
+/// -- the same Traces tree, `MenuBarGlassPanel` and `PreviewSheet` a person
 /// sees -- not a mock-up. The one accommodation is that `ImageRenderer`
 /// never runs `task`/`onAppear`, so the sheet is handed content that was
 /// loaded first through the ordinary preview path.
@@ -30,15 +31,50 @@ enum DebugScreenshot {
             // Late enough that the watcher has polled, queued, and scrubbed.
             try? await Task.sleep(nanoseconds: 12_000_000_000)
 
-            render(
-                QueueContent(previewing: .constant(nil)).environmentObject(model),
-                to: directory + "/macos-shell-window.png",
-                size: CGSize(width: 860, height: 640)
-            )
             #if DEBUG
-            // The glass menu-bar item over its panel, on a store loaded
-            // first, since the strip's own attaching `task` never runs here.
-            // Debug-only with the panel until T11 (ruling R-35).
+            // The Monitor's screens and the menu-bar item are debug-only
+            // until the cutover (ruling R-35), so their renders are too.
+            // Each store is loaded first, since the window's attaching
+            // `task` never runs under `ImageRenderer`.
+            let traces = TracesStore(client: nil)
+            traces.attach(model.daemonData)
+            await traces.load()
+            render(
+                TracesTreeView(store: traces, selection: .constant(traces.tree.allSessions.first?.entryId ?? ""))
+                    .environmentObject(model),
+                to: directory + "/macos-shell-traces-tree.png",
+                size: CGSize(width: 760, height: 720)
+            )
+            render(
+                SessionInspectorView(store: traces, entry: traces.tree.allSessions.first)
+                    .padding(GlassTokens.Space.cardGap)
+                    .environmentObject(model),
+                to: directory + "/macos-shell-session-inspector.png",
+                size: CGSize(width: 420, height: 720)
+            )
+            let home = HomeStore(client: nil)
+            home.attach(model.daemonData)
+            await home.load()
+            if let row = home.history?.first {
+                render(
+                    HistoryDetailInspector(row: row)
+                        .padding(GlassTokens.Space.cardGap)
+                        .environmentObject(model),
+                    to: directory + "/macos-shell-history-inspector.png",
+                    size: CGSize(width: 420, height: 720)
+                )
+            }
+            let inference = InferenceStore(client: nil)
+            inference.attach(model.daemonData)
+            await inference.load()
+            render(
+                InferenceAccountSection(store: inference)
+                    .padding(GlassTokens.Space.cardGap)
+                    .environmentObject(model),
+                to: directory + "/macos-shell-inference-account.png",
+                size: CGSize(width: 420, height: 720)
+            )
+            // The glass menu-bar item over its panel.
             let menuPanel = MenuPanelStore(client: nil)
             menuPanel.attach(model.daemonData, configDirectory: model.configDirectory)
             await menuPanel.load()
@@ -48,34 +84,34 @@ enum DebugScreenshot {
                 size: CGSize(width: 480, height: 760)
             )
             #endif
-            // Settings is where the local change log lives, and a log is a
-            // surface that can only be checked by looking at it: the rows
-            // are small secondary text in two columns, which is exactly the
-            // combination that fails contrast or collapses at width without
-            // anyone noticing from a green build.
-            // The log is drawn alone, so it is never the part of a long
-            // stack of sections that falls off the bottom of the image.
-            render(
-                GlassSettingsContent(section: .changes).environmentObject(model),
-                to: directory + "/macos-shell-settings.png",
-                size: CGSize(width: 860, height: 620)
-            )
-            render(
-                WithdrawalConfirmationCapture().environmentObject(model),
-                to: directory + "/macos-shell-withdrawal.png",
-                size: CGSize(width: 860, height: 620)
-            )
-            if let rollup = model.rollup {
+            // Every section is drawn alone, so none is the part of a long
+            // stack that falls off the bottom of the image. The change log
+            // keeps its historical file name: a log is a surface that can
+            // only be checked by looking at it, small secondary text in two
+            // columns being what fails contrast or collapses at width.
+            // Compute has no section view of its own.
+            for section in SettingsSection.allCases where section != .compute {
+                let name = section == .changes ? "settings" : "settings-\(section.rawValue)"
                 render(
-                    CreditRecordView(
-                        creditFinal: rollup.creditFinal,
-                        creditPending: rollup.creditPending,
-                        lastRefreshedAt: rollup.lastRefreshedAt
-                    )
-                    .padding(24)
-                    .frame(maxWidth: 620, alignment: .leading),
-                    to: directory + "/macos-shell-credit-record.png",
-                    size: CGSize(width: 660, height: 260)
+                    GlassSettingsContent(section: section).environmentObject(model),
+                    to: directory + "/macos-shell-\(name).png",
+                    size: CGSize(width: 860, height: 620)
+                )
+            }
+            // The withdrawal confirmation per tier, from the core's words.
+            // Plain statuses suffice: the view takes a status, not a record.
+            if let keep = model.publicRunCopy?.keepContribution {
+                render(
+                    VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
+                        ForEach(["quarantined", "accepted", "withdrawn"], id: \.self) { status in
+                            WithdrawalConfirmationView(
+                                status: status, keepLabel: keep, inFlight: false, onKeep: {}, onConfirm: {})
+                        }
+                    }
+                    .padding(GlassTokens.Space.cardGap)
+                    .environmentObject(model),
+                    to: directory + "/macos-shell-withdrawal.png",
+                    size: CGSize(width: 860, height: 620)
                 )
             }
             if let copy = model.witnessCopy?.review {
@@ -108,12 +144,23 @@ enum DebugScreenshot {
         }
     }
 
+    /// `TRACE_COMMONS_APPEARANCE` as a colour scheme: `ImageRenderer` has no
+    /// window to inherit one from, so each capture is pinned to it.
+    static let forcedColorScheme: ColorScheme? = {
+        switch ProcessInfo.processInfo.environment["TRACE_COMMONS_APPEARANCE"] {
+        case "dark": .dark
+        case "light": .light
+        default: nil
+        }
+    }()
+
     @MainActor
     private static func render<V: View>(_ view: V, to path: String, size: CGSize) {
         let renderer = ImageRenderer(
             content: view
                 .frame(width: size.width, height: size.height)
                 .background(Color(nsColor: .windowBackgroundColor))
+                .environment(\.colorScheme, forcedColorScheme ?? .light)
         )
         renderer.scale = 2
         guard let image = renderer.nsImage,
