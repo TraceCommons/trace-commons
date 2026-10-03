@@ -449,7 +449,7 @@ final class TracesQueueStateTests: XCTestCase {
         let live = LiveDaemonClient(transport: GoneTransport())
         let stream = live.events()
         let ended = Task { for await _ in stream {}; return true }
-        live.disconnected()
+        live.finishEvents()
         let finished = await ended.value
         XCTAssertTrue(finished)
     }
@@ -472,7 +472,7 @@ final class TracesQueueStateTests: XCTestCase {
         // Let `run` load and open its stream before the daemon goes.
         while store.phase == .loading { await Task.yield() }
         for _ in 0..<50 { await Task.yield() }
-        live.disconnected()
+        live.finishEvents()
         await running.value
         XCTAssertNil(store.status)
         XCTAssertEqual(store.phase, .failed(.unreachable))
