@@ -23,7 +23,7 @@
 //! loads. A catalogue whose `schema_version` is newer than this build knows
 //! is refused rather than half-read.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -199,6 +199,85 @@ pub const LANGUAGE_MARKERS: &[(&str, &str)] = &[
     ("mix.exs", "elixir"),
 ];
 
+/// One session matching was allowed to read, as the matcher sees it: the
+/// tool it came from and the folder it ran in. Nothing else about it.
+///
+/// Built only by `daemon::mission_matching`, which leaves out every session
+/// from a tool that is switched off or a folder set to Never (M1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionFact {
+    /// The session's tool, as `list_projects`' `tools[].source` names it.
+    pub tool: String,
+    /// The folder's project key. Never leaves this process.
+    pub folder: String,
+}
+
+/// Everything the matcher is given: the readable sessions, and the
+/// languages of the folders they ran in when a mission asks about
+/// languages. Local only: no part of it is sent, stored or logged (M1).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LocalFacts {
+    pub sessions: Vec<SessionFact>,
+    pub folder_languages: BTreeMap<String, BTreeSet<String>>,
+}
+
+impl LocalFacts {
+    /// How many distinct tools matching read sessions from.
+    pub fn tools_read(&self) -> usize {
+        self.sessions
+            .iter()
+            .map(|s| s.tool.as_str())
+            .collect::<BTreeSet<_>>()
+            .len()
+    }
+
+    /// How many distinct folders matching read sessions from.
+    pub fn folders_read(&self) -> usize {
+        self.sessions
+            .iter()
+            .map(|s| s.folder.as_str())
+            .collect::<BTreeSet<_>>()
+            .len()
+    }
+}
+
+/// The ids of the missions in `catalogue` that `facts` fit, in catalogue
+/// order.
+///
+/// Pure: it reads only what it is handed, and has no way to read a policy,
+/// a queue or a file, to change one, or to send anything (M1, M2). A match
+/// is a suggestion for this Mac's screen and nothing more.
+pub fn match_missions(catalogue: &ContributionMissionCatalogue, facts: &LocalFacts) -> Vec<String> {
+    catalogue
+        .missions
+        .iter()
+        .filter(|m| {
+            let need = m.criteria.min_sessions.max(1) as usize;
+            facts
+                .sessions
+                .iter()
+                .filter(|s| session_fits(&m.criteria, s, facts))
+                .take(need)
+                .count()
+                == need
+        })
+        .map(|m| m.mission_id.clone())
+        .collect()
+}
+
+fn session_fits(criteria: &MissionCriteria, session: &SessionFact, facts: &LocalFacts) -> bool {
+    let any = |wanted: &[String], have: &str| wanted.iter().any(|w| w == have);
+    (criteria.tools.is_empty() || any(&criteria.tools, &session.tool))
+        && (criteria.tool_families.is_empty()
+            || crate::source::source_default_family(&session.tool)
+                .is_some_and(|family| any(&criteria.tool_families, family)))
+        && (criteria.languages.is_empty()
+            || facts
+                .folder_languages
+                .get(&session.folder)
+                .is_some_and(|langs| langs.iter().any(|l| any(&criteria.languages, l))))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -285,5 +364,60 @@ mod tests {
             CatalogueError::SchemaUnsupported.label(),
             "catalogue-schema-unsupported"
         );
+    }
+    fn fact(tool: &str, folder: &str) -> SessionFact {
+        SessionFact {
+            tool: tool.to_string(),
+            folder: folder.to_string(),
+        }
+    }
+
+    fn catalogue(missions: serde_json::Value) -> ContributionMissionCatalogue {
+        ContributionMissionCatalogue::from_value(&json!({
+            "schema_version": 1, "missions": missions,
+        }))
+        .unwrap()
+    }
+
+    /// Each criterion restricts only when given, the lists are combined per
+    /// session, and min_sessions counts sessions that fit every one.
+    #[test]
+    fn missions_match_on_tool_family_language_and_count() {
+        let facts = LocalFacts {
+            sessions: vec![
+                fact("claude-code", "/a"),
+                fact("claude-code", "/a"),
+                fact("codex", "/b"),
+            ],
+            folder_languages: BTreeMap::from([
+                ("/a".to_string(), BTreeSet::from(["rust".to_string()])),
+                ("/b".to_string(), BTreeSet::from(["python".to_string()])),
+            ]),
+        };
+        let cat = catalogue(json!([
+            {"mission_id": "any"},
+            {"mission_id": "claude", "criteria": {"tools": ["claude-code"]}},
+            {"mission_id": "openai", "criteria": {"tool_families": ["openai"]}},
+            {"mission_id": "rust-2", "criteria": {"languages": ["rust"], "min_sessions": 2}},
+            {"mission_id": "rust-3", "criteria": {"languages": ["rust"], "min_sessions": 3}},
+            {"mission_id": "codex-rust", "criteria": {"tools": ["codex"], "languages": ["rust"]}},
+            {"mission_id": "gemini", "criteria": {"tools": ["gemini-cli"]}},
+        ]));
+        assert_eq!(
+            match_missions(&cat, &facts),
+            vec!["any", "claude", "openai", "rust-2"]
+        );
+        assert_eq!(facts.tools_read(), 2);
+        assert_eq!(facts.folders_read(), 2);
+    }
+
+    /// Nothing read matches nothing, even a mission asking for no sessions.
+    #[test]
+    fn nothing_read_matches_nothing() {
+        let cat = catalogue(json!([
+            {"mission_id": "any"},
+            {"mission_id": "zero", "criteria": {"min_sessions": 0}},
+        ]));
+        assert!(match_missions(&cat, &LocalFacts::default()).is_empty());
     }
 }
