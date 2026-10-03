@@ -2504,18 +2504,31 @@ automatically from projects discovered from now on.
 { "granted": true, "granted_at": "2026-09-25T12:00:00Z", "on_disk_recorded": false }
 ```
 
-`grant_automatic` takes one required param, `witness_signing_address`: the
-signing address of the witness the contributor was shown on the disclosure
-screen, or `null` when that screen showed none. It returns the grant as
-`automatic_grant` reports it. Nothing is granted when it is refused:
+`grant_automatic` takes two required params:
+
+- `confirmed`: JSON `true`, sent only from the grant screen's button, after
+  the contributor has gone through the scope, path and disclosure screens.
+- `witness_signing_address`: the signing address of the witness the
+  contributor was shown on the disclosure screen, or `null` when that screen
+  showed none.
+
+It returns the grant as `automatic_grant` reports it. Nothing is granted when
+it is refused:
 
 - `arming-terms-unavailable` (`ERR_UNAVAILABLE`): there is no config to record
   terms from.
+- `automatic-grant-confirmation-required` (`bad_params`): `confirmed` is
+  absent, `false`, or not a boolean (`"true"` and `1` are refused). The same
+  label `flow1::grant_precondition` gives a shell, so the daemon holds the
+  confirmation for every IPC caller rather than trusting a shell to have
+  asked.
 - `automatic-grant-scopes-not-chosen` (`bad_params`): the config's
-  `consent_scopes_chosen` is false, so nobody chose the saved scopes (R7). A
-  saved scope list is not a choice: every enrollment saves at least the floor
-  scope, which `validate_scopes` adds, and an invite enrollment saves it with
-  nobody having picked it. Only `set_consent_scopes` records a choice.
+  `consent_scopes_chosen` is false, so nobody chose the saved scopes (R7), or
+  the saved `consent_scopes` list is empty, so there is nothing to grant
+  under. A saved scope list is not a choice: every enrollment saves at least
+  the floor scope, which `validate_scopes` adds, and an invite enrollment
+  saves it with nobody having picked it. Only `set_consent_scopes` records a
+  choice.
 - `automatic-grant-witness-required` (`bad_params`): `witness_signing_address`
   is absent, or neither a string nor `null`.
 - `automatic-grant-witness-changed` (`bad_params`): the witness configured now
@@ -2974,8 +2987,10 @@ ledger -- and make no network call and read no body.
 
 Every value on the wire is a fixed label, a count, a time or a ledger row id,
 with one exception: `model` is free text (see below). No prompt, response,
-body reference, body digest, provider exchange identifier, session id, token
-or URL crosses the socket, and nothing here is logged.
+body reference, body digest, provider exchange identifier, session id, token,
+endpoint or URL crosses the socket, and nothing here is logged. The same holds
+for the `inference_call_added` event (K14), which carries a subset of an
+`inference_calls` row.
 
 #### `tool_destinations`
 
@@ -2983,13 +2998,16 @@ or URL crosses the socket, and nothing here is logged.
 {
   "private_ai": "running",
   "sessions_route": "witness",
+  "window_hours": 24,
+  "unattributed_calls": 2,
   "folders": { "armed": 1, "ask_first": 3, "ignored": 0 },
   "tools": [
     {
       "tool": "claude-code",
       "name": "Claude Code",
       "sessions": { "watch": "watched", "to": ["commons", "witness"] },
-      "model_calls": { "to": "near_ai", "basis": "observed" }
+      "model_calls": { "to": "near_ai", "basis": "observed" },
+      "counts": { "sessions": 4, "inference_calls": 37 }
     }
   ]
 }
@@ -3010,6 +3028,39 @@ does not name; the witness a connected inference offer installs
 (`inference_connection_install`) reaches the map through it. `folders` counts
 the per-repository rules (`auto_upload`, `notify_only`, `ignore`). They are
 per repository across tools, so they say *when* a session goes, not *where*.
+
+`counts` (K14) is the map's per-tool node data over `window_hours`, the same
+24-hour window `inference_calls` uses. Local reads only; nothing new is
+fetched.
+
+- `sessions` counts the sessions this daemon saw in the window, once per
+  session hash: queue entries whose session was last seen written (or, for an
+  entry from before that was recorded, discovered) inside it, and history
+  records submitted inside it. An entry still in the queue and its history
+  record are one session. `null` when the history cache cannot be read; a
+  count from the queue alone would undercount.
+
+  A session counts under the tool it reads as: its declared source when
+  discovery knew one, else the adapter that read it -- the rule
+  `list_projects.tools` and the CLI's session table use. So an imported
+  Antigravity conversation (read by the `trajectory` adapter, declaring
+  `antigravity`) counts as `antigravity`, never as `trajectory`, and never
+  under both. A history record names only the adapter, so it takes its label
+  from the queue entry with the same session hash; one with no queue twin (a
+  CLI `submit`, say) falls back to the adapter. There is no `antigravity`
+  row on this map -- it has no adapter, watch declaration or connection of
+  its own -- so those sessions are not counted on any tool row today.
+- `inference_calls` counts exactly the rows `inference_calls` lists (rows
+  with a ledger id) by the `tool` it names for them, so the map and the
+  Inference tab cannot disagree. `null` when no ledger has answered
+  (`inference_calls.readable: false`), which is not zero.
+- `unattributed_calls` is the window's listed calls whose `tool` is
+  `unknown`. They are counted there and never folded into a tool; `null`
+  under the same condition as `inference_calls`.
+
+A shell that pulses on `inference_call_added` should re-read these counts
+rather than add to them: the event is capped per poll and is a pulse, not a
+ledger.
 
 `model_calls.to` and `basis`:
 
@@ -3071,11 +3122,47 @@ expose an `id` are not listed.
 calls and must not be drawn as an empty table. The window is the ledger's
 own 24 hours.
 
-- `tool` is named only when exactly one tool connected **now** speaks the
-  call's protocol family (the rule `harness_list` applies to `answering`);
-  otherwise `unknown`. It is approximate: a row from before a connection
-  changed can carry the wrong name. `family` is `anthropic`, `openai` or
-  `unknown`.
+- `tool` (K14). IronWire's log rows carry no harness, only the facade that
+  took the call and the endpoint inside it the client called. Each tool this
+  daemon connects is pointed at its own facade and speaks its own API there,
+  so the endpoint names the tool, connected now or not:
+
+  | facade | endpoint | `tool` |
+  |---|---|---|
+  | `anthropic` | `/v1/messages`, `/v1/messages/count_tokens` | `claude-code` |
+  | `openai` | `/v1/responses` (Codex is connected with `wire_api = "responses"`) | `codex` |
+  | any | any other endpoint, e.g. `/v1/chat/completions` | `unknown` |
+
+  An endpoint no connection writes is `unknown` even while a tool of that
+  family is connected: it is not that tool's own wire. A named endpoint is
+  also `unknown` while a *different* connected tool speaks the same family.
+  On a proxy too old to record the endpoint, the fallback is the harness
+  that set the proxy: the one tool connected **now** that speaks the call's
+  family (the rule `harness_list` applies to `answering`), else `unknown`;
+  that fallback is approximate, since a row from before a connection changed
+  can carry the wrong name. A tool pointed at the proxy by hand, speaking the
+  same API at the same facade as a connected one, cannot be told apart in the
+  row and reads as that tool. The endpoint is read for this and never passed
+  through. `family` is `anthropic`, `openai` or `unknown`.
+
+  **Limit: endpoint attribution does not check who set up the proxy.** Any
+  `/anthropic` + `/v1/messages` call reads `claude-code`, and any `/openai`
+  + `/v1/responses` call reads `codex`, whether or not this daemon connected
+  that tool, and whether or not this daemon owns the proxy at all. An agent
+  routed through IronWire's own catalog, or by another program that manages
+  the same proxy, is counted as Claude Code or Codex, and the "different
+  connected tool" check above cannot see it, because only tools this daemon
+  connects are speakers. The label means "called the endpoint Claude Code's
+  connection writes", not "came from Claude Code".
+
+  `/v1/messages/count_tokens` calls are included: they are listed, counted
+  in `tool_destinations.counts.inference_calls` and announced by
+  `inference_call_added` like any other call.
+
+  The "different connected tool speaks the same family" case cannot arise
+  today, since each family has exactly one tool this daemon connects; it is
+  there so a second one in a family turns that family's endpoints
+  `unknown` rather than crediting the first.
 - `model` is **free text, not a fixed label**: the served model as recorded,
   else the requested one, passed through when it is at most 128 characters of
   `[A-Za-z0-9._:/@-]` and names no URL; else `unknown`. It comes from a proxy
@@ -3114,8 +3201,9 @@ routed answer. These are not in the local ledger, and nothing here invents
 them:
 
 - **kind of work** -- no field records it; there is no classifier;
-- **tool** -- the ledger records a facade, so a call is attributable only
-  when one connected tool speaks that family;
+- **tool** -- the ledger records a facade and an endpoint, not a harness,
+  so a call is attributed by the endpoint its tool's connection writes (see
+  `inference_calls.tool`), and is `unknown` otherwise;
 - **billed cost** -- the ledger prices every call; only the day's metered
   total (`harness_list.spend`) is billed spend;
 - **outside calls that bypass the proxy** -- a tool not connected to Private
@@ -5182,6 +5270,27 @@ removed at logout.
 | `digest_due` | batching interval elapsed with pending work | `{pending, text}` |
 | `resync_required` | this client fell behind the event buffer | `{}` |
 | `preview_ready` | a scheduled preview finished and was delivered | the same object `preview_request` returns for a cache hit -- see "Scheduled previews" |
+| `inference_call_added` | the poll tick read a call from IronWire's log that no earlier tick had (K14) | `{id, tool, model, proof}` -- see below |
+
+`inference_call_added` is published where the daemon already reads IronWire's
+`/log`: the poll tick's routing refresh. Nothing is fetched for it and it adds
+no poll of its own, so a call is announced on the first tick after it lands
+(the daemon's poll interval). Its data is label-only and is the same labels
+`inference_calls` puts on that row: `id` (the ledger row id), `tool`,
+`model` (the same free-text rule) and `proof` (IronWire's label, or
+`unrecorded`). No body, URL, endpoint, session id, digest or token.
+
+- Once per call. New is tracked per ledger by the highest row id announced.
+- The first window a ledger reads is the backlog and is not announced; it
+  sets the baseline. A ledger rebuilt for a new endpoint starts over the
+  same way, and so does one whose ids went backwards (a proxy whose own
+  ledger started over). A ledger that started over and climbed past the old
+  highest id within one tick cannot be told from one that only grew: its
+  rows above the old id are announced, and the rest are never announced.
+  Counts on `tool_destinations` are unaffected.
+- Rows without an id (a proxy too old to expose one) are never announced.
+- At most 64 per tick, the newest kept, so a burst cannot push a subscriber
+  into `resync_required`. Re-read `tool_destinations` for exact counts.
 
 `subscribe` sends a full `snapshot` before any delta, so a client never has to
 race `list_pending` against the stream at startup. On `resync_required`, call
