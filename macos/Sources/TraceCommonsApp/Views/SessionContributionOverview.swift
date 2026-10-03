@@ -80,7 +80,7 @@ struct SessionContributionOverview: View {
             VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
                 GlassKeyValueList([
                     .init(copy.processingStatus,
-                          copy.contributionStatusLabel(for: detail.contributionStatus ?? record.status)),
+                          copy.historyStatusLabel(for: detail.contributionStatus ?? record.status)),
                 ])
                 VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
                     Text(copy.permittedUses)
