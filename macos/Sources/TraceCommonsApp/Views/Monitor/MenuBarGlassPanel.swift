@@ -6,12 +6,13 @@ import TCShellCore
 
 /// The menu-bar popover (R13 of #1173), from the "Menu bar item and
 /// popover" handoff: three state pills, a sub-list, the shared/kept legend
-/// and day graph, recent activity, and shortcuts into the app. Debug-only,
-/// in place of the shipping menu, until R15 (`TRACE_COMMONS_GLASS_MENU=1`).
+/// and day graph, recent activity, and shortcuts into the app. The only
+/// menu-bar item since R15; debug-only until T11 strips the Monitor files it
+/// reads (ruling R-35).
 ///
 /// The handoff's rules hold here:
-/// - Nothing is sent from the popover. The writes are the shipping menu's
-///   own (pausing, resuming, turning Private AI off) and the contribution
+/// - Nothing is sent from the popover. The writes are pausing, resuming,
+///   turning Private AI off (`PrivateInferenceTray`) and the contribution
 ///   override.
 /// - Private AI "On" opens the window at its destination; a menu press
 ///   never turns it on.
@@ -25,9 +26,6 @@ struct MenuBarGlassPanel: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.openSettings) private var openSettings
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    /// Unread since openers go through `OpenMonitor`; T11 removes it with
-    /// its callers (the menu-bar scene and `MenuBarPreviewWindow`).
-    let navigation: MainWindowNavigation
     let store: MenuPanelStore
     /// Whether the panel draws its own glass. Inside `MenuBarExtra` the
     /// system window already carries its material, and a second layer of
@@ -233,19 +231,19 @@ struct MenuBarGlassPanel: View {
         }
     }
 
-    /// The shipping menu's pause choices, in its words, or resume.
+    /// The pause choices (`MenuBarWords`), or resume.
     @ViewBuilder
     private var watchOptions: some View {
         if paused {
-            GlassOptionRow(MenuBarContent.resumeLabel, fill: .solid(GlassTokens.Color.blue), checked: false) {
+            GlassOptionRow(MenuBarWords.resume, fill: .solid(GlassTokens.Color.blue), checked: false) {
                 model.resume()
                 sub = nil
             }
         } else {
-            ForEach(Array([MenuBarContent.pauseHourLabel, MenuBarContent.pauseMorningLabel,
-                           MenuBarContent.pauseIndefiniteLabel].enumerated()), id: \.offset) { index, label in
+            ForEach(Array([MenuBarWords.pauseHour, MenuBarWords.pauseMorning,
+                           MenuBarWords.pauseIndefinite].enumerated()), id: \.offset) { index, label in
                 GlassOptionRow(label, fill: .solid(GlassTokens.Color.menuPillOff), checked: false) {
-                    model.pause(until: MenuBarContent.pauseUntil(index))
+                    model.pause(until: MenuBarWords.pauseUntil(index))
                     sub = nil
                 }
             }
@@ -264,7 +262,7 @@ struct MenuBarGlassPanel: View {
             }
             GlassOptionRow(MonitorWords.off, sub: privateAIOn == true ? copy.trayTurnOff : nil,
                            fill: .solid(GlassTokens.Color.menuPillOff), checked: privateAIOn == false) {
-                MenuBarContent.performPrivateInferenceTray(
+                PrivateInferenceTray.perform(
                     on: privateAIOn == true, turnOff: { model.applyPrivateInference(false) },
                     open: { open(.inference) })
                 sub = nil
@@ -482,7 +480,6 @@ enum MenuWords {
 /// on the same store, for reviewing them where the menu bar has no room.
 struct MenuBarPreviewWindow: View {
     @EnvironmentObject private var model: AppModel
-    let navigation: MainWindowNavigation
     let store: MenuPanelStore
 
     var body: some View {
@@ -490,7 +487,7 @@ struct MenuBarPreviewWindow: View {
             MenuBarStripLabel(model: model, store: store)
                 .padding(.horizontal, GlassTokens.Space.s4)
                 .background(Capsule().fill(GlassColor.ink(0.12)))
-            MenuBarGlassPanel(navigation: navigation, store: store, ownsSurface: true)
+            MenuBarGlassPanel(store: store, ownsSurface: true)
         }
         .padding(GlassTokens.Space.s10)
         .background(LinearGradient(colors: [GlassTokens.Color.sceneWarm.color, GlassTokens.Color.sceneBase.color], startPoint: .top, endPoint: .bottom))

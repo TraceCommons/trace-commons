@@ -529,7 +529,7 @@ struct MainWindowCommands: Commands {
     /// This is a menu, and a menu press must not enable answering: the on
     /// direction raises the window at the destination, where
     /// `offer_exposure` is, and writes nothing. It shares
-    /// `MenuBarContent.performPrivateInferenceTray` with the menu-bar row
+    /// `PrivateInferenceTray.perform` with the menu-bar row
     /// rather than restating the rule, because two statements of one rule is
     /// how this shortcut came to disagree with that row in the first place.
     ///
@@ -539,8 +539,8 @@ struct MainWindowCommands: Commands {
     private var toggle: some View {
         if let copy = model.privateInferenceCopy {
             let on = model.daemonSettings?.privateInferenceOn ?? false
-            Button(MenuBarContent.privateInferenceTrayLabel(on: on, copy: copy)) {
-                MenuBarContent.performPrivateInferenceTray(
+            Button(PrivateInferenceTray.label(on: on, copy: copy)) {
+                PrivateInferenceTray.perform(
                     on: on,
                     turnOff: { model.applyPrivateInference(false) },
                     open: { OpenMonitor.request(.inference) })

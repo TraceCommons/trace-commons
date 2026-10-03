@@ -41,42 +41,31 @@ struct TraceCommonsShell: App {
         RecentSearches.purgeLegacyStore()
     }
 
-    /// Whether the glass menu-bar panel (R13) stands in for the shipping
-    /// menu. Debug builds only, on `TRACE_COMMONS_GLASS_MENU=1`; a release
-    /// build always has the shipping menu.
-    private static let glassMenu: Bool = {
-        #if DEBUG
-        ProcessInfo.processInfo.environment["TRACE_COMMONS_GLASS_MENU"] == "1"
-        #else
-        false
-        #endif
-    }()
-
     var body: some Scene {
-        // Exactly one of the two menu-bar items is inserted, so exactly one
-        // `Launcher` (which starts the app's services) runs.
-        MenuBarExtra(isInserted: .constant(!Self.glassMenu)) {
-            MenuBarContent()
+        // The glass strip and panel (R13 of #1173), the only menu-bar item
+        // since R15. Its label is the `Launcher`, which starts the app's
+        // services.
+        MenuBarExtra {
+            #if DEBUG
+            MenuBarGlassPanel(store: menuPanel)
                 .environmentObject(model)
                 .tint(TC.accent)
+            #else
+            // Transitional (ruling R-35): T11 removes this branch with the
+            // `#if DEBUG` on the Monitor files the panel reads. Until then a
+            // release build's item opens nothing.
+            EmptyView()
+            #endif
         } label: {
-            Launcher(model: model, compute: compute, navigation: navigation,
-                     appDelegate: appDelegate, missionDrafts: missionDrafts)
-        }
-
-        #if DEBUG
-        // The glass menu-bar panel (R13 of #1173), in place of the shipping
-        // menu when TRACE_COMMONS_GLASS_MENU=1, until R15.
-        MenuBarExtra(isInserted: .constant(Self.glassMenu)) {
-            MenuBarGlassPanel(navigation: navigation, store: menuPanel)
-                .environmentObject(model)
-                .tint(TC.accent)
-        } label: {
+            #if DEBUG
             Launcher(model: model, compute: compute, navigation: navigation,
                      appDelegate: appDelegate, missionDrafts: missionDrafts, menuPanel: menuPanel)
+            #else
+            Launcher(model: model, compute: compute, navigation: navigation,
+                     appDelegate: appDelegate, missionDrafts: missionDrafts)
+            #endif
         }
         .menuBarExtraStyle(.window)
-        #endif
 
         Window("Trace Commons", id: WindowID.main) {
             MainWindowView(navigation: navigation, missionDrafts: missionDrafts,
@@ -128,7 +117,7 @@ struct TraceCommonsShell: App {
         // review on a menu bar with no room for the item.
         // TRACE_COMMONS_MENU_PREVIEW=1 opens it at launch.
         Window("Menu bar", id: WindowID.menuPreview) {
-            MenuBarPreviewWindow(navigation: navigation, store: menuPanel)
+            MenuBarPreviewWindow(store: menuPanel)
                 .environmentObject(model)
                 .tint(TC.accent)
         }
@@ -188,8 +177,8 @@ private struct Launcher: View {
     let appDelegate: AppDelegate
     let missionDrafts: MissionDraftsModel
     #if DEBUG
-    /// Set for the glass menu-bar item (R13): its strip replaces the mark.
-    var menuPanel: MenuPanelStore?
+    /// The glass menu-bar item's data (R13), drawn as its strip.
+    let menuPanel: MenuPanelStore
     #endif
     @Environment(\.openWindow) private var openWindow
     #if DEBUG
@@ -211,13 +200,16 @@ private struct Launcher: View {
     @ViewBuilder
     private var label: some View {
         #if DEBUG
-        if let menuPanel {
-            MenuBarStripLabel(model: model, store: menuPanel)
-        } else {
-            MenuBarLabel(model: model)
-        }
+        MenuBarStripLabel(model: model, store: menuPanel)
         #else
-        MenuBarLabel(model: model)
+        // Transitional (ruling R-35): T11 removes this branch. The strip with
+        // no data, unavailable: never drawn as healthy, and a view the
+        // launch work above can hang from (an `EmptyView` would not run it).
+        GlassMenuBarStrip(columns: [], condition: .unavailable, badge: nil)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(MenuBarStatus.accessibilityLabel(
+                decisionsOwed: model.decisionsOwed, unhealthy: model.health != nil,
+                paused: model.status.paused, available: model.startup == .running))
         #endif
     }
 

@@ -13,7 +13,7 @@ import SwiftUI
 /// does not care.
 ///
 /// What it renders is the shipping view hierarchy bound to live daemon data
-/// -- the same `MainWindowView`, `MenuBarContent` and `PreviewSheet` a person
+/// -- the same `MainWindowView`, `MenuBarGlassPanel` and `PreviewSheet` a person
 /// sees -- not a mock-up. The one accommodation is that `ImageRenderer`
 /// never runs `task`/`onAppear`, so the sheet is handed content that was
 /// loaded first through the ordinary preview path.
@@ -35,11 +35,19 @@ enum DebugScreenshot {
                 to: directory + "/macos-shell-window.png",
                 size: CGSize(width: 860, height: 640)
             )
+            #if DEBUG
+            // The glass menu-bar item over its panel, on a store loaded
+            // first, since the strip's own attaching `task` never runs here.
+            // Debug-only with the panel until T11 (ruling R-35).
+            let menuPanel = MenuPanelStore(client: nil)
+            menuPanel.attach(model.daemonData, configDirectory: model.configDirectory)
+            await menuPanel.load()
             render(
-                MenuBarPreview(model: model),
+                MenuBarPreviewWindow(store: menuPanel).environmentObject(model),
                 to: directory + "/macos-shell-menu-bar.png",
-                size: CGSize(width: 380, height: 330)
+                size: CGSize(width: 480, height: 760)
             )
+            #endif
             render(
                 ConsentScopesContent(onContinue: { _ in }).environmentObject(model),
                 to: directory + "/macos-shell-consent-scopes.png",
@@ -165,29 +173,5 @@ enum DebugScreenshot {
         }
         try? data.write(to: URL(fileURLWithPath: path))
         NSLog("trace-commons: wrote \(path)")
-    }
-}
-
-/// The menu-bar item and its menu, side by side, so one image shows both the
-/// badge and what the menu says. The menu itself is an AppKit-owned surface
-/// and cannot be rasterized in place.
-private struct MenuBarPreview: View {
-    @ObservedObject var model: AppModel
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 6) {
-                Text("Menu bar:").font(.caption).foregroundStyle(.secondary)
-                MenuBarLabel(model: model)
-            }
-            Divider()
-            VStack(alignment: .leading, spacing: 6) {
-                MenuBarContent()
-                    .environmentObject(model)
-            }
-            .font(.callout)
-        }
-        .padding(16)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 }
