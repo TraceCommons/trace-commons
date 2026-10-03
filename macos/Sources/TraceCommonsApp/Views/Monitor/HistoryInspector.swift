@@ -22,22 +22,53 @@ struct HistoryDetailInspector: View {
         HistorySelection.record(for: row.submissionId, in: model.history)
     }
 
+    // The always-present scroll view reads the detail and the installed
+    // skill for the row, again when its record first resolves or its status
+    // moves, and again when the app comes back to the front, as the session
+    // detail screen does.
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
-                if let record, let copy = model.skillLearningCopy {
-                    skills(record, copy: copy)
+                if let record {
+                    detailState(record)
+                    if let copy = model.skillLearningCopy {
+                        skills(record, copy: copy)
+                    }
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .scrollIndicators(.never)
-        // Read the detail and the installed skill for the row, again when
-        // its record first resolves or its status moves, and again when the
-        // app comes back to the front, as the session detail screen does.
         .task(id: [row.submissionId, record?.status ?? ""]) { load() }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             if let record { model.loadSessionDetail(record) }
+        }
+    }
+
+    /// Reading the detail, or why it could not be read with a way to read it
+    /// again: the session detail screen's own words, never a blank pane.
+    @ViewBuilder
+    private func detailState(_ record: HistoryRecord) -> some View {
+        let id = record.submissionID
+        if model.loadingSessionDetails.contains(id) {
+            if let reading = model.publicRunCopy?.readingRecord {
+                Text(reading)
+                    .glassType(GlassTokens.TypeScale.body)
+                    .foregroundStyle(GlassColor.textSecondary)
+            } else {
+                ProgressView().controlSize(.small)
+            }
+        } else if let message = model.sessionDetailErrors[id] {
+            GlassNotice(tone: .outside) {
+                VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
+                    Text(message).fixedSize(horizontal: false, vertical: true)
+                    if let copy = model.publicRunCopy {
+                        Button(copy.retryRead) { model.loadSessionDetail(record) }
+                            .buttonStyle(GlassButtonStyle(.glass))
+                            .frame(minHeight: 44)
+                    }
+                }
+            }
         }
     }
 

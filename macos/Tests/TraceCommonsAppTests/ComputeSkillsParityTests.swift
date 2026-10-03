@@ -21,12 +21,89 @@ final class ComputeSkillsParityTests: XCTestCase {
                        "snapshot.copy.allowanceDetail", "snapshot.copy.resume", "snapshot.copy.pause",
                        "snapshot.copy.disable", "snapshot.copy.enable", "snapshot.canEnable", "snapshot.canResume",
                        "snapshot.canPause", "snapshot.available", "snapshot.consentGranted", "model.controlsBusy",
-                       "model.quitWasRefused", "copy.quitRefused", "copy.unavailable", "copy.retry", "model.failureLabel",
+                       "model.quitWasRefused", "copy.quitRefused", "copy?.unavailable", "copy?.retry", "model.failureLabel",
                        ".enable(ramAllowanceGiB:", ".perform(.resume)", ".perform(.pause)", ".perform(.disable)",
                        "model.retryOpen()", "ComputeAllowance.parse(", "GlassTextField("] {
             XCTAssertTrue(source.contains(needle), "ComputeView.swift lacks \(needle)")
         }
         XCTAssertNil(source.range(of: #"\bTC\."#, options: .regularExpression))
+    }
+
+    /// Each control is disabled exactly as legacy disabled it, guard for
+    /// guard, each needle running from the button to the line's end.
+    func test_computeDisablesEachControlExactlyAsLegacy() throws {
+        let source = try Self.text("Views/ComputeView.swift")
+        for needle in [
+            "Button(snapshot.copy.resume, action: resume)\n"
+                + "                            .disabled(model.controlsBusy || !snapshot.available || !snapshot.canResume)\n",
+            "Button(snapshot.copy.pause, action: pause)\n"
+                + "                            .disabled(model.controlsBusy || !snapshot.canPause)\n",
+            "Button(snapshot.copy.disable, action: disable)\n"
+                + "                            .disabled(model.controlsBusy)\n",
+            "Button(snapshot.copy.enable, action: enable)\n"
+                + "                            .disabled(model.controlsBusy || !snapshot.available || !snapshot.canEnable\n"
+                + "                                || ComputeAllowance.parse(allowance) == nil)\n",
+        ] {
+            XCTAssertTrue(source.contains(needle), "ComputeView.swift lacks \(needle)")
+        }
+    }
+
+    /// A failure is never a spinner: the core's sentence, else its unknown
+    /// word, with Retry wherever the core gives the word. The spinner is only
+    /// for before an answer.
+    func test_computeFailureIsNeverASpinner() throws {
+        let source = try Self.text("Views/ComputeView.swift")
+        let start = try XCTUnwrap(source.range(of: "} else if model.failureLabel != nil {\n"))
+        let end = try XCTUnwrap(source.range(of: "            } else {\n", range: start.upperBound..<source.endIndex))
+        let branch = String(source[start.upperBound..<end.lowerBound])
+        XCTAssertFalse(branch.contains("SettingsAwaiting"))
+        XCTAssertTrue(branch.contains("if let line = copy?.unavailable ?? Self.unknown {\n"))
+        XCTAssertTrue(branch.contains("if let retry = copy?.retry {\n"))
+        XCTAssertTrue(source.contains(
+            "static let unknown: String? = MonitorScreensCopy.decode(fromJSON: TCCoreCopy.monitorScreensCopyJSON())?.unknown"))
+        // The allowance card always says what it is; a value it lacks is
+        // absent (the core's unknown word), never zero.
+        XCTAssertTrue(source.contains(
+            "} else {\n                            Text(snapshot.copy.allowanceLabel)\n"))
+        XCTAssertTrue(source.contains("} else if let unknown = Self.unknown {\n"))
+    }
+
+    /// Lifecycle modifiers sit on always-present containers, adjacent.
+    func test_lifecycleModifiersSitOnAlwaysPresentContainers() throws {
+        let compute = try Self.text("Views/ComputeView.swift")
+        XCTAssertTrue(compute.contains(
+            "ComputeContent(model: model, allowance: $allowance)\n"
+                + "            .onChange(of: model.snapshot?.ramAllowanceGib, initial: true)"))
+        let inspector = try Self.text("Views/Monitor/HistoryInspector.swift")
+        XCTAssertTrue(inspector.contains("var body: some View {\n        ScrollView {\n"))
+        XCTAssertTrue(inspector.contains(
+            "        .scrollIndicators(.never)\n"
+                + "        .task(id: [row.submissionId, record?.status ?? \"\"]) { load() }\n"
+                + "        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in\n"))
+        let skills = try Self.text("Views/SkillLearningView.swift")
+        XCTAssertTrue(skills.contains("        GlassEyebrowCard(copy.heading) {\n"))
+        XCTAssertTrue(skills.contains(
+            "        .frame(maxWidth: .infinity, alignment: .leading)\n        .onAppear {\n"))
+        XCTAssertTrue(skills.contains(
+            "        .onChange(of: state.phase.candidate?.draft) { _, _ in configureDraft() }\n"
+                + "        .onChange(of: state.failure) { _, _ in dismissedFailure = nil }\n"
+                + "        .onChange(of: state.isWorking) { _, working in if working { dismissedFailure = nil } }\n"))
+    }
+
+    /// The inspector says it is reading the detail, and when the read fails
+    /// it says why and offers to read again, in the session detail's words.
+    func test_theInspectorShowsReadingAndAReadFailure() throws {
+        let inspector = try Self.text("Views/Monitor/HistoryInspector.swift")
+        for needle in [
+            "if model.loadingSessionDetails.contains(id) {\n",
+            "if let reading = model.publicRunCopy?.readingRecord {\n",
+            "ProgressView().controlSize(.small)",
+            "} else if let message = model.sessionDetailErrors[id] {\n            GlassNotice(tone: .outside) {\n",
+            "Button(copy.retryRead) { model.loadSessionDetail(record) }",
+            "                if let record {\n                    detailState(record)\n",
+        ] {
+            XCTAssertTrue(inspector.contains(needle), "HistoryInspector.swift lacks \(needle)")
+        }
     }
 
     /// The inspector finds the legacy record by the row's submission id, and
