@@ -20,6 +20,8 @@ final class LegacyShellRetiredTests: XCTestCase {
         }
         XCTAssertTrue(try MonitorNavigationTests.text("Views/QueueView.swift").contains("enum QueueLegacyWords"))
         XCTAssertTrue(try MonitorNavigationTests.text("Views/HistoryView.swift").contains("enum HistoryLegacyWords"))
+        // R-37: the held sentence is the core's; the Swift one left the shell.
+        XCTAssertFalse(try MonitorNavigationTests.text("Views/HistoryView.swift").contains("enum HistoryCopy"))
         XCTAssertFalse(try MonitorNavigationTests.text("Views/PrivateInferenceView.swift").contains("struct PrivateInferenceContent"))
     }
 

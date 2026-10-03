@@ -266,7 +266,9 @@ final class HistoryParityTests: XCTestCase {
             // said nothing about reads the held sentence.
             "let lines = HeldExplanations.lines(in: [record.explanations])",
             "ForEach(lines, id: \\.self) { Text($0)",
-            "if lines.isEmpty, record.status == \"quarantined\" { Text(HistoryCopy.heldExplanation)",
+            // The core's held sentence (R-37), and no blank line without it.
+            "if lines.isEmpty, record.status == \"quarantined\", !MonitorWords.heldExplanation.isEmpty "
+                + "{ Text(MonitorWords.heldExplanation)",
         ] {
             XCTAssertTrue(flat.contains(needle), "HistoryInspector.swift lacks \(needle)")
         }
