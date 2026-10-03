@@ -208,6 +208,38 @@ final class MonitorNavigationTests: XCTestCase {
         XCTAssertEqual(LaunchRouting.window(requiresOnboarding: false), .monitor)
     }
 
+    /// A quit refusal lands on Compute whatever onboarding says: the
+    /// window follows onboarding, the Settings section does not.
+    func test_aQuitRefusalOpensComputeWhateverOnboardingSays() {
+        for requires in [true, false] {
+            let opening = LaunchRouting.opening(.settings(.compute), requiresOnboarding: requires)
+            XCTAssertEqual(opening.settings, .compute, "requiresOnboarding \(requires)")
+            XCTAssertEqual(opening.window, LaunchRouting.window(requiresOnboarding: requires))
+        }
+        for destination: MonitorDestination? in [nil, .inference, .traces(entryId: nil), .home(.history)] {
+            XCTAssertNil(LaunchRouting.opening(destination, requiresOnboarding: false).settings,
+                         "\(String(describing: destination)) opens Settings")
+        }
+    }
+
+    /// The launcher opens Settings from the opening's section after (outside)
+    /// the window switch, so no window choice can skip it.
+    func test_theLauncherOpensSettingsOutsideTheWindowSwitch() throws {
+        let main = try Self.text("TraceCommonsAppMain.swift")
+        XCTAssertTrue(main.contains("""
+                let opening = LaunchRouting.opening(destination, requiresOnboarding: model.requiresOnboarding)
+                switch opening.window {
+                case .firstRun: openWindow(id: WindowID.firstRun)
+                case .monitor: openWindow(id: WindowID.monitor)
+                }
+                if let section = opening.settings {
+                    navigation.settingsSection = section
+                    openSettings()
+                }
+                #else
+        """), "Settings must open from the opening, outside the window switch")
+    }
+
     /// Each destination lands on its tab; Inference reveals the inspector,
     /// where the Private AI switch and sign-in are; a session's id selects
     /// it and shows its review.
@@ -283,7 +315,7 @@ final class MonitorNavigationTests: XCTestCase {
         XCTAssertTrue(main.contains("Notifier.shared.onReview = { OpenMonitor.request(.traces(entryId: nil)) }"))
         XCTAssertTrue(main.contains("TRACE_COMMONS_SHOW_WINDOW"))
         XCTAssertTrue(main.contains("OpenMonitor.handler = { destination in"))
-        XCTAssertTrue(main.contains("switch LaunchRouting.window(requiresOnboarding: model.requiresOnboarding) {"))
+        XCTAssertTrue(main.contains("LaunchRouting.opening(destination, requiresOnboarding: model.requiresOnboarding)"))
         XCTAssertTrue(main.contains("MonitorWindowView(navigation: navigation)"))
         XCTAssertFalse(main.contains("OpenMainWindow"))
         let panel = try Self.text("Views/Monitor/MenuBarGlassPanel.swift")
