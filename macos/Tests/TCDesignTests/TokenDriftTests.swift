@@ -206,6 +206,14 @@ final class TypeScaleTests: XCTestCase {
             XCTAssertEqual(step.scale, step.textStyle.resolvedSize / step.size, accuracy: 0.0001, "type.\(name)")
             XCTAssertEqual(step.resolvedTracking, step.tracking * step.scale, accuracy: 0.0001, "type.\(name)")
             XCTAssertGreaterThanOrEqual(step.lineSpacing, 0, "type.\(name)")
+            // Derived from the resolved size, not a literal: the stated line
+            // height less 1.2x the size, moved by the same scale.
+            XCTAssertEqual(step.lineSpacing, max(0, (step.lineHeight - step.size * 1.2) * step.scale),
+                           accuracy: 0.0001, "type.\(name)")
+            if step.lineHeight > step.size * 1.2 {
+                XCTAssertEqual(step.lineSpacing / step.scale, step.lineHeight - step.size * 1.2,
+                               accuracy: 0.0001, "type.\(name) leading is not scale-invariant")
+            }
         }
     }
 
