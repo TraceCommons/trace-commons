@@ -10,6 +10,13 @@
       "is_unresolved_bucket": false,
       "session_count": 17,
       "last_session_at": "2026-09-30T09:00:00Z",
+      "tools": [
+        {
+          "source": "claude-code",
+          "session_count": 17,
+          "answers_at": "Anthropic"
+        }
+      ],
       "pending_count": 3,
       "automatic_disclosure": "patterns_only",
       "from_now": true
