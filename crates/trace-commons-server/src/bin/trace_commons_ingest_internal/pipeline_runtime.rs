@@ -642,7 +642,7 @@ pub(crate) const PIPELINE_WORKER_MAX_SWEPT_ATTEMPT_ARTIFACTS_PER_TENANT: usize =
 const PIPELINE_WORKER_MAX_INDEX_INVALIDATIONS_PER_TENANT: usize = 32;
 /// The most parked runs of inoperable submissions one invalidation step
 /// releases for a tenant (Zaki review 3, Z3-L4); the next step takes the
-/// rest.
+/// rest. A step that used the whole limit runs again on the next pass.
 const PIPELINE_WORKER_MAX_PARKED_RELEASES_PER_TENANT: usize = 32;
 
 /// The most lost revocation or withdrawal follow-ups one recovery step
@@ -1003,19 +1003,26 @@ pub(crate) async fn drain_pipeline_tenant(
         // A run parked for review whose submission expired, was purged, or
         // was revoked or withdrawn without the pipeline's follow-up is
         // reached by nothing else (Zaki review 1, round 2, finding 9).
-        if let Err(error) = service
+        match service
             .release_inoperable_parked_runs(
                 &tenant_id,
                 PIPELINE_WORKER_MAX_PARKED_RELEASES_PER_TENANT,
             )
             .await
         {
-            tracing::warn!(
-                error_class = "pipeline_worker_parked_run_release_failed",
-                tenant_storage_ref = %tenant_storage_ref(&tenant_id),
-                error_hash = %safe_display_error_hash(&error),
-                "pipeline worker parked run release failed"
-            );
+            Ok(released) => {
+                if released >= PIPELINE_WORKER_MAX_PARKED_RELEASES_PER_TENANT as u64 {
+                    lock_cadence().run_again(&tenant_id, PipelineFollowUpStep::IndexInvalidations);
+                }
+            }
+            Err(error) => {
+                tracing::warn!(
+                    error_class = "pipeline_worker_parked_run_release_failed",
+                    tenant_storage_ref = %tenant_storage_ref(&tenant_id),
+                    error_hash = %safe_display_error_hash(&error),
+                    "pipeline worker parked run release failed"
+                );
+            }
         }
         match service
             .process_index_invalidations(

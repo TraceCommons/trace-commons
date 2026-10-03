@@ -3011,6 +3011,96 @@ async fn the_worker_drain_recovers_a_revocation_whose_follow_up_was_lost() {
     );
 }
 
+/// Multi-lens review C10: the worker's bounded release of parked runs runs
+/// again on the next pass when it used its whole limit, as the other bounded
+/// steps do. With one parked run more than the limit
+/// (`PIPELINE_WORKER_MAX_PARKED_RELEASES_PER_TENANT`, 32), two passes with no
+/// wait between them release every run of the revoked submissions.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_worker_drain_releases_parked_runs_past_its_bound_on_the_next_pass() {
+    let Some(runtime) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().expect("temp dir");
+    let service = assemble_test_pipeline_service(
+        runtime.clone(),
+        local_artifacts(&dir),
+        IsolatedPipelineIndex::new(),
+        vec![RecordingSettlementAdapter::new(
+            InstrumentId::new("storage_rebate").unwrap(),
+            "recording_storage_rebate_parked_release_test_only",
+            "none",
+        ) as Arc<dyn SettlementAdapter>],
+        None,
+    );
+    let suffix = Uuid::new_v4().simple().to_string();
+    let tenant = format!("tenant-parked-release-{suffix}");
+    let principal = static_token_principal_ref(&format!("token-parked-release-{suffix}"));
+    for _ in 0..33 {
+        let run = quarantined_pipeline_run(&service, &tenant, &principal).await;
+        let parked = service
+            .process_run(&tenant, run.run_id)
+            .await
+            .unwrap()
+            .expect("Review parks the run");
+        assert_eq!(parked.state, PipelineRunState::AwaitingReview);
+    }
+    let parked_runs = || async {
+        let mut client = runtime.trace_pool_for_test().get().await.unwrap();
+        let tx = tenant_tx(&mut client, &tenant).await;
+        let parked: i64 = tx
+            .query_one(
+                "SELECT COUNT(*) FROM pipeline_runs
+                  WHERE tenant_id = $1 AND state = 'awaiting_review'",
+                &[&tenant],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        tx.commit().await.unwrap();
+        parked
+    };
+    let mut client = runtime.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, &tenant).await;
+    tx.execute(
+        "UPDATE trace_submissions SET status = 'revoked', revoked_at = NOW()
+          WHERE tenant_id = $1",
+        &[&tenant],
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    drop(client);
+    assert_eq!(parked_runs().await, 33);
+
+    let state = test_state_with_options(
+        dir.path().to_path_buf(),
+        Some(mains_database().await),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+    let cadence = Arc::new(std::sync::Mutex::new(
+        pipeline_runtime::PipelineFollowUpCadence::default(),
+    ));
+    pipeline_runtime::drain_pipeline_tenant(
+        state.clone(),
+        service.clone(),
+        tenant.clone(),
+        cadence.clone(),
+    )
+    .await;
+    assert_eq!(parked_runs().await, 1, "one pass releases its limit");
+    pipeline_runtime::drain_pipeline_tenant(state, service.clone(), tenant.clone(), cadence).await;
+    assert_eq!(
+        parked_runs().await,
+        0,
+        "the next pass takes the rest with no wait"
+    );
+}
+
 /// The number of `run_id`'s attempt rows for `artifact` in `state`.
 async fn attempt_rows_in_state(
     backend: &Arc<PgBackend>,
