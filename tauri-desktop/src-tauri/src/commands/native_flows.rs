@@ -74,99 +74,14 @@ pub(crate) async fn native_wallet_flow(
     Ok(result)
 }
 
+/// The disclosure bundle, assembled in the contributor core
+/// (`disclosure_copy::contributor_disclosure_copy`): every shared copy table
+/// the onboarding, settings, history and Private AI screens read, and the
+/// runtime state lines with the core's choice of which may read as working.
+/// Tauri chooses and writes nothing.
 #[tauri::command]
 pub(crate) fn contributor_disclosure_copy() -> Value {
-    let witness = trace_commons_contributor::witness_copy::witness_copy();
-    let inference = trace_commons_contributor::private_inference_copy::private_inference_copy();
-    // The contributor core names this hold once, in its shared status table;
-    // History reads that label rather than keeping a second spelling here.
-    let awaiting_pii_backstop = trace_commons_contributor::public_run::public_run_copy()
-        .contribution_status_choices
-        .into_iter()
-        .find(|choice| choice.value == "awaiting_pii_backstop")
-        .map(|choice| choice.label);
-    let source_checks = ["claude", "codex", "gemini", "cline", "opencode"]
-        .into_iter()
-        .filter_map(|key| {
-            trace_commons_contributor::source_copy::SourceTool::from_key(key).map(|tool| {
-                (key.to_owned(), json!({
-                    "watch": trace_commons_contributor::source_copy::source_check_line(tool, "watch"),
-                    "unset": trace_commons_contributor::source_copy::source_check_line(tool, "unset"),
-                    "off": trace_commons_contributor::source_copy::source_check_line(tool, "off"),
-                }))
-            })
-        })
-        .collect::<serde_json::Map<String, Value>>();
-    // Every runtime state's sentence, and whether an indicator may paint it
-    // as working, so a shell renders the core's words for the label the
-    // daemon reports (`private_inference_state.state`) and never its own.
-    let inference_states = {
-        use trace_commons_contributor::private_inference_copy as copy;
-        [
-            copy::LABEL_OFF,
-            copy::LABEL_STOPPING,
-            copy::LABEL_RUNNING,
-            copy::LABEL_RUNNING_NO_BACKENDS,
-            copy::LABEL_RUNNING_ANSWERED_ELSEWHERE,
-            copy::LABEL_RUNNING_DESTINATION_UNKNOWN,
-            copy::LABEL_RUNNING_ELSEWHERE,
-            copy::LABEL_PORT_IN_USE,
-            copy::LABEL_START_FAILED,
-            copy::LABEL_CRASHED,
-        ]
-        .into_iter()
-        .map(|label| {
-            (
-                label.to_owned(),
-                json!({
-                    "line": copy::state_line(label),
-                    "working": copy::state_tone(label).reads_as_working(),
-                }),
-            )
-        })
-        .collect::<serde_json::Map<String, Value>>()
-    };
-    json!({
-        "witness_review": witness.review,
-        "wallet": witness.wallet,
-        "admission": witness.admission,
-        "onboarding": witness.onboarding,
-        "onboarding_shell": trace_commons_contributor::onboarding_copy::onboarding_copy(),
-        "privacy_scan": trace_commons_contributor::privacy_scan_copy::privacy_scan_copy(),
-        "source_settings": trace_commons_contributor::source_copy::source_settings_copy(),
-        "source_check_lines": source_checks,
-        "insights_ui": trace_commons_contributor::insights::service::ui_copy(),
-        "mission_drafts_ui": trace_commons_contributor::mission_draft_service::ui_copy(),
-        "history_ui": {
-            "held_row_body": trace_commons_contributor::history_copy::HELD_ROW_BODY,
-            "status_awaiting_pii_backstop": awaiting_pii_backstop,
-        },
-        "outcome": trace_commons_contributor::outcome_copy::outcome_copy(),
-        "private_inference": {
-            "destination": inference.destination,
-            "subtitle": inference.subtitle,
-            "settings_title": inference.settings_title,
-            "write_unconfirmed": inference.write_unconfirmed,
-            "offer_title": inference.offer_title,
-            "offer_what": inference.offer_what,
-            "offer_exposure": inference.offer_exposure,
-            "offer_no_repoint": inference.offer_no_repoint,
-            "offer_accept": inference.offer_accept,
-            "offer_decline": inference.offer_decline,
-            "offer_asked_once": inference.offer_asked_once,
-            "states": inference_states,
-            "state_unknown": inference.state_unknown,
-            "state_unreported": inference.state_unreported,
-        },
-        "project_automatic_unavailable":
-            trace_commons_contributor::consent_copy::AUTO_PROJECT_DISCLOSURE_UNAVAILABLE,
-        "credential_cost": trace_commons_contributor::private_inference_copy::CREDENTIAL_COST,
-        "credential_wallet_notice": trace_commons_contributor::private_inference_copy::CREDENTIAL_WALLET_NOTICE,
-        "near_ai_enroll_title": inference.near_ai_enroll_title,
-        "near_ai_enroll_what": inference.near_ai_enroll_what,
-        "near_ai_enroll_action": inference.near_ai_enroll_action,
-        "near_ai_enroll_needs_login": inference.near_ai_enroll_needs_login,
-    })
+    trace_commons_contributor::disclosure_copy::contributor_disclosure_copy()
 }
 
 #[tauri::command]
@@ -177,9 +92,10 @@ pub(crate) fn witness_review_copy() -> Value {
 /// The sentences a contributor reads on the Flow 1 grant screens.
 ///
 /// Both the words and the choice between them come from the contributor
-/// core: `automatic_gate::disclosure` picks the disclosure (R1), and
-/// `consent_copy::automatic_grant_copy` carries only the scrub wording that
-/// answer allows.
+/// core: `consent_copy::automatic_contribution_copy` asks
+/// `automatic_gate::disclosure` for the disclosure (R1) and passes it to
+/// `consent_copy::automatic_grant_copy`, which carries only the scrub
+/// wording that answer allows. Tauri chooses nothing.
 ///
 /// `disclosure(cfg)` reads configuration only, so it answers
 /// `PatternsOnly`, and that is the right answer for a screen shown before
@@ -199,8 +115,7 @@ pub(crate) async fn automatic_contribution_copy(
 fn automatic_contribution_value(
     config: Option<&trace_commons_contributor::config::ContributorConfig>,
 ) -> Value {
-    let disclosure = trace_commons_contributor::daemon::automatic_gate::disclosure(config);
-    json!(trace_commons_contributor::consent_copy::automatic_grant_copy(disclosure))
+    json!(trace_commons_contributor::consent_copy::automatic_contribution_copy(config))
 }
 
 /// What an armed project is told about its sessions (K6).
@@ -332,81 +247,12 @@ mod tests {
         }
     }
 
-    /// K6: an armed project's failure line reaches the shell from the core.
+    /// The command returns the core's bundle unchanged.
     #[test]
-    fn the_shared_copy_carries_the_project_disclosure_failure_line() {
+    fn the_shared_copy_is_the_cores_disclosure_bundle() {
         assert_eq!(
-            contributor_disclosure_copy()["project_automatic_unavailable"],
-            trace_commons_contributor::consent_copy::AUTO_PROJECT_DISCLOSURE_UNAVAILABLE
-        );
-    }
-
-    #[test]
-    fn private_ai_copy_carries_the_shared_destination_and_its_surrounding_lines() {
-        use trace_commons_contributor::private_inference_copy::{
-            DESTINATION, SETTINGS_TITLE, SUBTITLE, WRITE_UNCONFIRMED,
-        };
-        let copy = contributor_disclosure_copy();
-        for (key, expected) in [
-            ("destination", DESTINATION),
-            ("subtitle", SUBTITLE),
-            ("settings_title", SETTINGS_TITLE),
-            ("write_unconfirmed", WRITE_UNCONFIRMED),
-        ] {
-            assert_eq!(
-                copy.pointer(&format!("/private_inference/{key}"))
-                    .and_then(Value::as_str),
-                Some(expected),
-                "{key}"
-            );
-        }
-    }
-
-    /// The runtime state the shell shows is the core's sentence for the
-    /// daemon's label, and only the state the core paints as working may be
-    /// drawn as on.
-    #[test]
-    fn private_ai_state_copy_is_the_cores_line_and_tone_for_each_label() {
-        use trace_commons_contributor::private_inference_copy::{
-            LABEL_OFF, LABEL_PORT_IN_USE, LABEL_RUNNING, LABEL_RUNNING_NO_BACKENDS, STATE_UNKNOWN,
-            STATE_UNREPORTED, state_line,
-        };
-        let copy = contributor_disclosure_copy();
-        let states = copy
-            .pointer("/private_inference/states")
-            .and_then(Value::as_object)
-            .expect("state copy is carried");
-        assert_eq!(states.len(), 10);
-        for label in [
-            LABEL_OFF,
-            LABEL_RUNNING,
-            LABEL_RUNNING_NO_BACKENDS,
-            LABEL_PORT_IN_USE,
-        ] {
-            assert_eq!(states[label]["line"], state_line(label), "{label}");
-            assert_eq!(states[label]["working"], label == LABEL_RUNNING, "{label}");
-        }
-        assert!(states.values().all(|state| state["line"] != STATE_UNKNOWN));
-        assert_eq!(copy["private_inference"]["state_unknown"], STATE_UNKNOWN);
-        assert_eq!(
-            copy["private_inference"]["state_unreported"],
-            STATE_UNREPORTED
-        );
-    }
-
-    #[test]
-    fn history_copy_names_the_privacy_backstop_hold_from_the_shared_status_table() {
-        let copy = contributor_disclosure_copy();
-        let shared = trace_commons_contributor::public_run::public_run_copy()
-            .contribution_status_choices
-            .into_iter()
-            .find(|choice| choice.value == "awaiting_pii_backstop")
-            .expect("the shared status table names awaiting_pii_backstop")
-            .label;
-        assert_eq!(
-            copy.pointer("/history_ui/status_awaiting_pii_backstop")
-                .and_then(Value::as_str),
-            Some(shared)
+            contributor_disclosure_copy(),
+            trace_commons_contributor::disclosure_copy::contributor_disclosure_copy()
         );
     }
 

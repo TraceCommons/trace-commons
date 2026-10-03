@@ -320,6 +320,47 @@ fn sha256_prefixed(input: &[u8]) -> String {
     format!("sha256:{}", hex::encode(digest))
 }
 
+/// The `attestation_hash` of a settlement line's NEAR receipt: over the
+/// line's source list and, when the settlement named one, the recorded
+/// issuer approval evidence. `main`'s live settlement and the pipeline's
+/// payout both build it here.
+pub fn trace_credit_settlement_attestation_hash(
+    source_list_hash: &str,
+    issuer_approval_evidence_hash: Option<&str>,
+) -> String {
+    if let Some(approval_hash) = issuer_approval_evidence_hash {
+        sha256_prefixed(
+            format!("trace-credit-attestation:v2:{source_list_hash}:{approval_hash}").as_bytes(),
+        )
+    } else {
+        sha256_prefixed(format!("trace-credit-attestation:v1:{source_list_hash}").as_bytes())
+    }
+}
+
+/// The `issuer_signature_hash` of a settlement line's NEAR receipt: over the
+/// batch, the line's source list and, when the settlement named one, the
+/// recorded issuer approval evidence. `main`'s live settlement and the
+/// pipeline's payout both build it here.
+pub fn trace_credit_settlement_issuer_signature_hash(
+    settlement_batch_id: Uuid,
+    source_list_hash: &str,
+    issuer_approval_evidence_hash: Option<&str>,
+) -> String {
+    if let Some(approval_hash) = issuer_approval_evidence_hash {
+        sha256_prefixed(
+            format!(
+                "trace-credit-settlement:v2:{settlement_batch_id}:{source_list_hash}:{approval_hash}"
+            )
+            .as_bytes(),
+        )
+    } else {
+        sha256_prefixed(
+            format!("trace-credit-settlement:v1:{settlement_batch_id}:{source_list_hash}")
+                .as_bytes(),
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

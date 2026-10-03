@@ -1645,10 +1645,11 @@ struct SettingsContent: View {
         // per row would build as many dialogs as there are projects, and
         // two of them can be presented at once.
         .confirmationDialog(
-            armingCandidate.map { ProjectArmingCopy.confirmationTitle(project: $0.displayLabel) }
-                ?? "",
+            armingCandidate.flatMap(armingCopy)?.question ?? "",
             isPresented: Binding(
-                get: { armingCandidate != nil },
+                // Not presented without the core's words: arming is never
+                // confirmed against a sentence this shell wrote.
+                get: { armingCandidate.flatMap(armingCopy) != nil },
                 // Any dismissal -- the Escape key, a click outside, either
                 // button -- clears the candidate. Leaving it set would show
                 // the sheet again the next time anything else republished
@@ -1663,14 +1664,25 @@ struct SettingsContent: View {
             // than alarmed -- the Linux shell marks it destructive, which
             // this shell deliberately does not follow, because on macOS that
             // role means data is about to be lost and none is.
-            Button(ProjectArmingCopy.confirm) {
+            let copy = armingCopy(project)
+            Button(copy?.confirm ?? "") {
                 model.setProjectMode(project, mode: .autoUpload)
                 armingCandidate = nil
             }
-            Button(ProjectArmingCopy.cancel, role: .cancel) { armingCandidate = nil }
-        } message: { _ in
-            Text(ProjectArmingCopy.confirmationBody)
+            Button(copy?.decline ?? "", role: .cancel) { armingCandidate = nil }
+        } message: { project in
+            Text(armingCopy(project)?.body ?? "")
         }
+    }
+
+    /// The arming confirmation's words for `project`, from the core
+    /// (`tc_arming_offer_copy_json`). No count is in hand here, so the
+    /// offer's evidence line is not rendered.
+    private func armingCopy(_ project: ProjectRow) -> ProjectArmingCopy? {
+        ProjectArmingCopy.decode(fromJSON: TCCoreCopy.armingOfferCopyJSON(
+            project: project.displayLabel,
+            count: 0
+        ))
     }
 
     /// The mode control for one project row.

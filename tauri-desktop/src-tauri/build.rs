@@ -95,6 +95,7 @@ const TAURI_COMMANDS: &[&str] = &[
     "request_notification_permission",
     "set_start_at_login",
     "open_system_settings",
+    "settings_ranges",
     "quit_app",
     "quit_confirmation_copy",
     "cancel_private_ai_credential",
