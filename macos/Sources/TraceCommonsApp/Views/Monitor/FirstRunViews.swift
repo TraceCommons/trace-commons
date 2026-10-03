@@ -17,6 +17,9 @@ import TCShellCore
 /// closes itself as soon as it is not and opens the Monitor, so an
 /// onboarded person never lands in the flow.
 struct FirstRunWindowView: View {
+    /// Where an earlier opener asked the Monitor to go, kept through the
+    /// hand-off (`LaunchRouting.handOff`).
+    let navigation: MainWindowNavigation
     @EnvironmentObject private var model: AppModel
     @Environment(\.dismissWindow) private var dismissWindow
     @State private var entered = false
@@ -70,13 +73,14 @@ struct FirstRunWindowView: View {
         }
         .frame(minWidth: FirstRunProgress.paneWidth + 80, minHeight: 640)
         .onAppear { model.refreshAll() }
-        // Finishing first run hands off to the Monitor on Home. Initially
-        // too: first run opened for someone already onboarded closes and
-        // opens the Monitor instead.
+        // Finishing first run hands off to the Monitor: at the destination
+        // an earlier opener left waiting, on Home otherwise. Initially too:
+        // first run opened for someone already onboarded closes and opens
+        // the Monitor instead.
         .onChange(of: model.requiresOnboarding, initial: true) { _, requires in
             guard !requires else { return }
             dismissWindow(id: WindowID.firstRun)
-            OpenMonitor.request(.home(.overview))
+            OpenMonitor.request(LaunchRouting.handOff(pending: navigation.pending))
         }
     }
 }

@@ -1878,6 +1878,13 @@ final class AppModel: ObservableObject {
 
     // MARK: - Onboarding resume
 
+    /// Whether the core has said enough to know if onboarding is required
+    /// (`LaunchRouting.onboardingKnown`), in one spelling for the launch,
+    /// the Monitor's gates and every request's routing.
+    var onboardingKnown: Bool {
+        LaunchRouting.onboardingKnown(startup: startup, statusAnswered: status.answered, statusFailed: statusReadFailed)
+    }
+
     /// Whether the first run has been finished (Start on the Uses screen)
     /// for the *currently enrolled* device. Keyed off `status.tenantID`
     /// rather than a single global flag: `enroll` alone flips

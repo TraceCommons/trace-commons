@@ -97,7 +97,7 @@ struct TraceCommonsShell: App {
         // onboarding gate, opened by `OpenMonitor` while onboarding is
         // required.
         Window("First run", id: WindowID.firstRun) {
-            FirstRunWindowView()
+            FirstRunWindowView(navigation: navigation)
                 .environmentObject(model)
                 .tint(GlassTokens.Color.purpleSoft.color)
         }
@@ -220,8 +220,7 @@ private struct Launcher: View {
     var body: some View {
         MenuBarStripLabel(model: model, store: menuPanel)
             .task { launch() }
-            .onChange(of: LaunchRouting.onboardingKnown(startup: model.startup, statusAnswered: model.status.answered, statusFailed: model.statusReadFailed),
-                      initial: true) { _, ready in
+            .onChange(of: model.onboardingKnown, initial: true) { _, ready in
                 openAtLaunch(ready)
             }
     }
@@ -250,8 +249,8 @@ private struct Launcher: View {
     @MainActor
     private func launch() {
         missionDrafts.loadCopy()
-        OpenMonitor.handler = { destination in
-            NSApp.activate(ignoringOtherApps: true)
+        OpenMonitor.handler = { destination, activate in
+            if activate { NSApp.activate(ignoringOtherApps: true) }
             open(destination)
         }
         appDelegate.compute = compute
@@ -281,11 +280,12 @@ private struct Launcher: View {
         default: break
         }
 
-        // Used by scripts/run-demo.sh to bring the window up for a
-        // screenshot: the Monitor, or first run while onboarding is
-        // required. The launch opens it anyway once the core has answered,
-        // so this now only matters for the paths that do not -- a login
-        // launch, and `open -g`.
+        // Used by scripts/run-demo.sh to bring the window up, activated, for
+        // a screenshot: the Monitor, or first run while onboarding is
+        // required. The launch's own request (`openAtLaunch`) opens the same
+        // window but activates the app only when onboarding is required, so
+        // a login launch or `open -g` of an onboarded install comes up
+        // without taking focus (R-44); this hook always activates.
         if ProcessInfo.processInfo.environment["TRACE_COMMONS_SHOW_WINDOW"] == "1" {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
                 OpenMonitor.request()
@@ -303,26 +303,30 @@ private struct Launcher: View {
     }
 
     /// The launch's window, once the core has said whether onboarding is
-    /// required (`LaunchRouting.onboardingKnown`), so the choice is never made
+    /// required (`AppModel.onboardingKnown`), so the choice is never made
     /// from the placeholder status. Once, and not over an opener that got
     /// there first: an invite link or a notification's Review has already
     /// opened a window, and its destination waits in `navigation.pending`
-    /// for the Monitor, which a plain request would overwrite.
+    /// for the Monitor, which a plain request would overwrite. Quietly
+    /// unless onboarding is required (R-44): launch behaviour is uniform
+    /// (`AppDelegate`), so an onboarded launch, a login launch among them,
+    /// does not take focus; a fresh install raises first run.
     @MainActor
     private func openAtLaunch(_ ready: Bool) {
         guard ready, !openedAtLaunch else { return }
         openedAtLaunch = true
         guard navigation.pending == nil else { return }
-        OpenMonitor.request()
+        OpenMonitor.request(activate: LaunchRouting.launchActivates(requiresOnboarding: model.requiresOnboarding))
     }
 
     /// One `OpenMonitor` request: first run while onboarding is required,
-    /// the Monitor otherwise, which consumes `navigation.pending`; a
-    /// Settings destination also opens Settings at its section.
+    /// the Monitor otherwise (and before the core has said, which the
+    /// Monitor waits on), which consumes `navigation.pending`; a Settings
+    /// destination also opens Settings at its section.
     @MainActor
     private func open(_ destination: MonitorDestination?) {
         navigation.pending = destination
-        let opening = LaunchRouting.opening(destination, requiresOnboarding: model.requiresOnboarding)
+        let opening = LaunchRouting.opening(destination, requiresOnboarding: model.requiresOnboarding, onboardingKnown: model.onboardingKnown)
         switch opening.window {
         case .firstRun: openWindow(id: WindowID.firstRun)
         case .monitor: openWindow(id: WindowID.monitor)

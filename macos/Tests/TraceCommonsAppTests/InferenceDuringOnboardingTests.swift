@@ -16,7 +16,7 @@ final class InferenceDuringOnboardingTests: XCTestCase {
         let model = AppModel()
         model.setStartupForTesting(.running)
         XCTAssertTrue(model.requiresOnboarding)
-        XCTAssertEqual(LaunchRouting.opening(.inference, requiresOnboarding: model.requiresOnboarding).window, .monitor)
+        XCTAssertEqual(LaunchRouting.opening(.inference, requiresOnboarding: model.requiresOnboarding, onboardingKnown: true).window, .monitor)
         XCTAssertEqual(MonitorWindowView.Tab.shown(requiresOnboarding: model.requiresOnboarding), [.inference])
         let shown = MonitorWindowView.shownTab(.home, requiresOnboarding: model.requiresOnboarding)
         XCTAssertEqual(shown, .inference, "a restored Home is not drawn during onboarding")
@@ -39,15 +39,15 @@ final class InferenceDuringOnboardingTests: XCTestCase {
     @MainActor
     func testHomeAndTracesStillOpenFirstRun() {
         for destination: MonitorDestination? in [nil, .home(.overview), .home(.history), .traces(entryId: nil)] {
-            XCTAssertEqual(LaunchRouting.opening(destination, requiresOnboarding: true).window, .firstRun,
+            XCTAssertEqual(LaunchRouting.opening(destination, requiresOnboarding: true, onboardingKnown: true).window, .firstRun,
                            String(describing: destination))
         }
         // The Tab commands follow the same routing: Cmd-2 reaches Inference.
-        XCTAssertEqual(LaunchRouting.opening(MonitorCommands.destination(.inference), requiresOnboarding: true).window,
+        XCTAssertEqual(LaunchRouting.opening(MonitorCommands.destination(.inference), requiresOnboarding: true, onboardingKnown: true).window,
                        .monitor)
-        XCTAssertEqual(LaunchRouting.opening(MonitorCommands.destination(.home), requiresOnboarding: true).window,
+        XCTAssertEqual(LaunchRouting.opening(MonitorCommands.destination(.home), requiresOnboarding: true, onboardingKnown: true).window,
                        .firstRun)
-        XCTAssertEqual(LaunchRouting.opening(MonitorCommands.destination(.traces), requiresOnboarding: true).window,
+        XCTAssertEqual(LaunchRouting.opening(MonitorCommands.destination(.traces), requiresOnboarding: true, onboardingKnown: true).window,
                        .firstRun)
     }
 

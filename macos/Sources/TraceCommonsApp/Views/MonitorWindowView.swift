@@ -169,7 +169,7 @@ struct MonitorWindowView: View {
                 // it would vanish while the layout still reserved its width.
                 // While onboarding is required only Inference is shown, so
                 // the Private AI inspector is the only one admitted (R-38).
-                if !LaunchRouting.onboardingKnown(startup: model.startup, statusAnswered: model.status.answered, statusFailed: model.statusReadFailed) {
+                if !model.onboardingKnown {
                     Color.clear
                 } else {
                     switch Self.shownTab(tab, requiresOnboarding: model.requiresOnboarding) {
@@ -371,7 +371,7 @@ private struct MonitorMainPane<Content: View>: View {
                 // is its gate. The button opens first run, which is where
                 // every other request goes until then. Before the core says,
                 // the placeholder status is not "signed out".
-                if !LaunchRouting.onboardingKnown(startup: model.startup, statusAnswered: model.status.answered, statusFailed: model.statusReadFailed) {
+                if !model.onboardingKnown {
                     SettingsAwaiting()
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {

@@ -183,14 +183,14 @@ final class MonitorNavigationTests: XCTestCase {
         OpenMonitor.request(.traces(entryId: nil))
         OpenMonitor.request(.settings(.compute))
         XCTAssertTrue(opened.isEmpty)
-        OpenMonitor.handler = { opened.append($0) }
+        OpenMonitor.handler = { destination, _ in opened.append(destination) }
         XCTAssertEqual(opened.count, 1, "a held request replays exactly once")
         XCTAssertEqual(opened.first, .settings(.compute), "the last destination wins")
         OpenMonitor.request(nil)
         XCTAssertEqual(opened.count, 2)
         XCTAssertEqual(opened.last, .some(nil))
         // A handler installed again replays nothing: the hold was spent.
-        OpenMonitor.handler = { opened.append($0) }
+        OpenMonitor.handler = { destination, _ in opened.append(destination) }
         XCTAssertEqual(opened.count, 2, "a held request replays once, not once per handler")
     }
 
@@ -201,9 +201,61 @@ final class MonitorNavigationTests: XCTestCase {
         addTeardownBlock { @MainActor in OpenMonitor.reset() }
         var opened: [MonitorDestination?] = []
         OpenMonitor.request()
-        OpenMonitor.handler = { opened.append($0) }
+        OpenMonitor.handler = { destination, _ in opened.append(destination) }
         XCTAssertEqual(opened.count, 1)
         XCTAssertEqual(opened.first, .some(nil))
+    }
+
+    /// A held request keeps whether it activates: the launch's own request
+    /// replays as quietly as it was made (R-44).
+    func test_aHeldRequestKeepsWhetherItActivates() {
+        OpenMonitor.reset()
+        addTeardownBlock { @MainActor in OpenMonitor.reset() }
+        var activations: [Bool] = []
+        OpenMonitor.request(activate: false)
+        OpenMonitor.handler = { _, activate in activations.append(activate) }
+        XCTAssertEqual(activations, [false])
+        OpenMonitor.request(.inference)
+        XCTAssertEqual(activations, [false, true], "every other opener activates as before")
+    }
+
+    /// The launch's own request activates the app only while onboarding is
+    /// required, so a fresh install raises first run and a login launch
+    /// comes up quietly (R-44, AppDelegate's quiet-launch contract).
+    func test_theLaunchActivatesOnlyForFirstRun() throws {
+        XCTAssertTrue(LaunchRouting.launchActivates(requiresOnboarding: true))
+        XCTAssertFalse(LaunchRouting.launchActivates(requiresOnboarding: false))
+        let main = try Self.text("TraceCommonsAppMain.swift")
+        XCTAssertTrue(main.contains("""
+                OpenMonitor.handler = { destination, activate in
+                    if activate { NSApp.activate(ignoringOtherApps: true) }
+                    open(destination)
+                }
+        """))
+        XCTAssertTrue(main.contains(
+            "OpenMonitor.request(activate: LaunchRouting.launchActivates(requiresOnboarding: model.requiresOnboarding))"))
+        XCTAssertFalse(main.contains("\n        OpenMonitor.request()\n    }"), "the launch's request must say whether it activates")
+    }
+
+    /// Before the core has said whether onboarding is required, a request
+    /// (a cold-start invite link or notification) opens the Monitor, which
+    /// waits on the core and then applies its own gate; it is never routed
+    /// from the placeholder status, which reads as onboarding required.
+    func test_aRequestBeforeTheCoreAnswersOpensTheMonitor() {
+        for destination: MonitorDestination? in [nil, .traces(entryId: nil), .traces(entryId: "entry-7"),
+                                                  .home(.history), .inference, .settings(.compute)] {
+            let opening = LaunchRouting.opening(destination, requiresOnboarding: true, onboardingKnown: false)
+            XCTAssertEqual(opening.window, .monitor, String(describing: destination))
+            XCTAssertEqual(opening.settings, destination?.settingsSection, String(describing: destination))
+        }
+    }
+
+    /// Finishing first run hands off to the destination an earlier opener
+    /// left waiting, and to Home only when none did.
+    func test_theFirstRunHandOffKeepsAPendingDestination() {
+        XCTAssertEqual(LaunchRouting.handOff(pending: .traces(entryId: "entry-7")), .traces(entryId: "entry-7"))
+        XCTAssertEqual(LaunchRouting.handOff(pending: .inference), .inference)
+        XCTAssertEqual(LaunchRouting.handOff(pending: nil), .home(.overview))
     }
 
     /// With no request before it, installing the handler opens nothing.
@@ -211,7 +263,7 @@ final class MonitorNavigationTests: XCTestCase {
         OpenMonitor.reset()
         addTeardownBlock { @MainActor in OpenMonitor.reset() }
         var opened = 0
-        OpenMonitor.handler = { _ in opened += 1 }
+        OpenMonitor.handler = { _, _ in opened += 1 }
         XCTAssertEqual(opened, 0)
     }
 
@@ -231,11 +283,11 @@ final class MonitorNavigationTests: XCTestCase {
             (.settings(.compute), .firstRun),
         ]
         for (destination, window) in table {
-            XCTAssertEqual(LaunchRouting.window(for: destination, requiresOnboarding: true), window,
+            XCTAssertEqual(LaunchRouting.window(for: destination, requiresOnboarding: true, onboardingKnown: true), window,
                            String(describing: destination))
-            XCTAssertEqual(LaunchRouting.opening(destination, requiresOnboarding: true).window, window,
+            XCTAssertEqual(LaunchRouting.opening(destination, requiresOnboarding: true, onboardingKnown: true).window, window,
                            String(describing: destination))
-            XCTAssertEqual(LaunchRouting.window(for: destination, requiresOnboarding: false), .monitor,
+            XCTAssertEqual(LaunchRouting.window(for: destination, requiresOnboarding: false, onboardingKnown: true), .monitor,
                            String(describing: destination))
         }
     }
@@ -255,12 +307,12 @@ final class MonitorNavigationTests: XCTestCase {
     /// window follows onboarding, the Settings section does not.
     func test_aQuitRefusalOpensComputeWhateverOnboardingSays() {
         for requires in [true, false] {
-            let opening = LaunchRouting.opening(.settings(.compute), requiresOnboarding: requires)
+            let opening = LaunchRouting.opening(.settings(.compute), requiresOnboarding: requires, onboardingKnown: true)
             XCTAssertEqual(opening.settings, .compute, "requiresOnboarding \(requires)")
-            XCTAssertEqual(opening.window, LaunchRouting.window(for: .settings(.compute), requiresOnboarding: requires))
+            XCTAssertEqual(opening.window, LaunchRouting.window(for: .settings(.compute), requiresOnboarding: requires, onboardingKnown: true))
         }
         for destination: MonitorDestination? in [nil, .inference, .traces(entryId: nil), .home(.history)] {
-            XCTAssertNil(LaunchRouting.opening(destination, requiresOnboarding: false).settings,
+            XCTAssertNil(LaunchRouting.opening(destination, requiresOnboarding: false, onboardingKnown: true).settings,
                          "\(String(describing: destination)) opens Settings")
         }
     }
@@ -270,7 +322,7 @@ final class MonitorNavigationTests: XCTestCase {
     func test_theLauncherOpensSettingsOutsideTheWindowSwitch() throws {
         let main = try Self.text("TraceCommonsAppMain.swift")
         XCTAssertTrue(main.contains("""
-                let opening = LaunchRouting.opening(destination, requiresOnboarding: model.requiresOnboarding)
+                let opening = LaunchRouting.opening(destination, requiresOnboarding: model.requiresOnboarding, onboardingKnown: model.onboardingKnown)
                 switch opening.window {
                 case .firstRun: openWindow(id: WindowID.firstRun)
                 case .monitor: openWindow(id: WindowID.monitor)
@@ -388,8 +440,8 @@ final class MonitorNavigationTests: XCTestCase {
         let main = try Self.text("TraceCommonsAppMain.swift")
         XCTAssertTrue(main.contains("Notifier.shared.onReview = { OpenMonitor.request(.traces(entryId: nil)) }"))
         XCTAssertTrue(main.contains("TRACE_COMMONS_SHOW_WINDOW"))
-        XCTAssertTrue(main.contains("OpenMonitor.handler = { destination in"))
-        XCTAssertTrue(main.contains("LaunchRouting.opening(destination, requiresOnboarding: model.requiresOnboarding)"))
+        XCTAssertTrue(main.contains("OpenMonitor.handler = { destination, activate in"))
+        XCTAssertTrue(main.contains("LaunchRouting.opening(destination, requiresOnboarding: model.requiresOnboarding, onboardingKnown: model.onboardingKnown)"))
         XCTAssertTrue(main.contains("MonitorWindowView(navigation: navigation, insightsStoreSelection: insightsStoreSelection, missionDrafts: missionDrafts)"))
         XCTAssertFalse(main.contains("OpenMainWindow"))
         let panel = try Self.text("Views/Monitor/MenuBarGlassPanel.swift")
@@ -428,7 +480,7 @@ final class MonitorNavigationTests: XCTestCase {
         let window = try Self.text("Views/MonitorWindowView.swift")
         XCTAssertTrue(window.contains("MonitorWords.signedOut"))
         XCTAssertTrue(window.contains("""
-                        if !LaunchRouting.onboardingKnown(startup: model.startup, statusAnswered: model.status.answered, statusFailed: model.statusReadFailed) {
+                        if !model.onboardingKnown {
                             SettingsAwaiting()
                                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                         } else {
@@ -458,7 +510,7 @@ final class MonitorNavigationTests: XCTestCase {
                         // it would vanish while the layout still reserved its width.
                         // While onboarding is required only Inference is shown, so
                         // the Private AI inspector is the only one admitted (R-38).
-                        if !LaunchRouting.onboardingKnown(startup: model.startup, statusAnswered: model.status.answered, statusFailed: model.statusReadFailed) {
+                        if !model.onboardingKnown {
                             Color.clear
                         } else {
                             switch Self.shownTab(tab, requiresOnboarding: model.requiresOnboarding) {
@@ -469,12 +521,12 @@ final class MonitorNavigationTests: XCTestCase {
     func test_finishingFirstRunOpensTheMonitor() throws {
         let firstRun = try Self.text("Views/Monitor/FirstRunViews.swift")
         XCTAssertTrue(firstRun.contains("dismissWindow(id: WindowID.firstRun)"))
-        XCTAssertTrue(firstRun.contains("OpenMonitor.request(.home(.overview))"))
+        XCTAssertTrue(firstRun.contains("OpenMonitor.request(LaunchRouting.handOff(pending: navigation.pending))"))
         XCTAssertTrue(firstRun.contains("""
                 .onChange(of: model.requiresOnboarding, initial: true) { _, requires in
                     guard !requires else { return }
                     dismissWindow(id: WindowID.firstRun)
-                    OpenMonitor.request(.home(.overview))
+                    OpenMonitor.request(LaunchRouting.handOff(pending: navigation.pending))
                 }
         """), "the hand-off must follow requiresOnboarding turning false, on the always-present container")
     }
@@ -513,7 +565,7 @@ final class MonitorNavigationTests: XCTestCase {
         let model = AppModel()
         XCTAssertFalse(model.statusReadFailed)
         XCTAssertTrue(model.requiresOnboarding, "the placeholder status requires onboarding")
-        XCTAssertEqual(LaunchRouting.opening(nil, requiresOnboarding: model.requiresOnboarding).window, .firstRun)
+        XCTAssertEqual(LaunchRouting.opening(nil, requiresOnboarding: model.requiresOnboarding, onboardingKnown: true).window, .firstRun)
     }
 
     /// The failure is recorded from the `status` read itself, and cleared
@@ -557,8 +609,7 @@ final class MonitorNavigationTests: XCTestCase {
         XCTAssertTrue(main.contains("""
                 MenuBarStripLabel(model: model, store: menuPanel)
                     .task { launch() }
-                    .onChange(of: LaunchRouting.onboardingKnown(startup: model.startup, statusAnswered: model.status.answered, statusFailed: model.statusReadFailed),
-                              initial: true) { _, ready in
+                    .onChange(of: model.onboardingKnown, initial: true) { _, ready in
                         openAtLaunch(ready)
                     }
         """), "the launch request must hang off the always-present label")
@@ -566,7 +617,7 @@ final class MonitorNavigationTests: XCTestCase {
                 guard ready, !openedAtLaunch else { return }
                 openedAtLaunch = true
                 guard navigation.pending == nil else { return }
-                OpenMonitor.request()
+                OpenMonitor.request(activate: LaunchRouting.launchActivates(requiresOnboarding: model.requiresOnboarding))
         """), "the launch must open once, and never over an earlier destination")
     }
 
