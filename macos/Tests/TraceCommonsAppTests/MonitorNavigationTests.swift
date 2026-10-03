@@ -316,7 +316,7 @@ final class MonitorNavigationTests: XCTestCase {
         XCTAssertTrue(main.contains("TRACE_COMMONS_SHOW_WINDOW"))
         XCTAssertTrue(main.contains("OpenMonitor.handler = { destination in"))
         XCTAssertTrue(main.contains("LaunchRouting.opening(destination, requiresOnboarding: model.requiresOnboarding)"))
-        XCTAssertTrue(main.contains("MonitorWindowView(navigation: navigation)"))
+        XCTAssertTrue(main.contains("MonitorWindowView(navigation: navigation, insightsStoreSelection: insightsStoreSelection, missionDrafts: missionDrafts)"))
         XCTAssertFalse(main.contains("OpenMainWindow"))
         let panel = try Self.text("Views/Monitor/MenuBarGlassPanel.swift")
         XCTAssertFalse(panel.contains("MainWindowView.Section"))

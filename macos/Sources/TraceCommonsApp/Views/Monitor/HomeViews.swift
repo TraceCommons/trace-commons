@@ -1,5 +1,6 @@
 #if DEBUG
 import SwiftUI
+import TCBridge
 import TCDesign
 import TCShellCore
 
@@ -23,17 +24,51 @@ struct HomeTabView: View {
     /// The selected History row's submission id; empty for none. The
     /// inspector shows its details.
     @Binding var selection: String
+    /// The hosted Insights and Mission drafts screens' inputs, from
+    /// `TraceCommonsAppMain`.
+    let insightsStoreSelection: InsightsStoreSelection
+    let missionDrafts: MissionDraftsModel
 
     var body: some View {
         switch page {
         case .overview:
             HomeOverview(
                 store: store, traces: traces, statusLabel: statusLabel,
-                openHistory: { page = .history }, openMissions: { page = .missions })
+                insightsHeading: HomeFormat.cardHeading(TCInsights.copy()?["title"]),
+                missionDraftsHeading: HomeFormat.cardHeading(missionDrafts.copy["title"]),
+                openHistory: { page = .history }, openMissions: { page = .missions },
+                openInsights: { page = .insights }, openMissionDrafts: { page = .missionDrafts })
         case .history:
             HistoryPage(store: store, statusLabel: statusLabel, selection: $selection, back: { page = .overview })
         case .missions:
             MissionsPage(store: store, back: { page = .overview })
+        case .insights:
+            HostedPage(heading: HomeFormat.cardHeading(TCInsights.copy()?["title"]), back: { page = .overview }) {
+                InsightsView(storeSelection: insightsStoreSelection)
+            }
+        case .missionDrafts:
+            HostedPage(heading: HomeFormat.cardHeading(missionDrafts.copy["title"]), back: { page = .overview }) {
+                MissionDraftsView(model: missionDrafts)
+            }
+        }
+    }
+}
+
+/// A Home page that hosts a screen built outside the glass shell
+/// (Insights, Mission drafts): the breadcrumb back to Home, then the
+/// screen as it is. Its heading is the core's word; without it the crumb
+/// is not drawn, never replaced with a word of this shell's own.
+private struct HostedPage<Content: View>: View {
+    let heading: String?
+    let back: () -> Void
+    @ViewBuilder let content: () -> Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
+            GlassBreadcrumb(
+                [GlassCrumb(MonitorWindowView.Tab.home.title, action: back)] + (heading.map { [GlassCrumb($0)] } ?? []),
+                backLabel: MonitorWindowView.Tab.home.title, onBack: back)
+            content()
         }
     }
 }
@@ -42,8 +77,14 @@ private struct HomeOverview: View {
     let store: HomeStore
     let traces: TracesStore
     let statusLabel: (String?) -> String?
+    /// The core's headings for the two hosted screens; nil until the
+    /// core's copy has arrived, and then the card is not drawn.
+    let insightsHeading: String?
+    let missionDraftsHeading: String?
     let openHistory: () -> Void
     let openMissions: () -> Void
+    let openInsights: () -> Void
+    let openMissionDrafts: () -> Void
 
     var body: some View {
         ScrollView {
@@ -64,6 +105,12 @@ private struct HomeOverview: View {
                         .glassType(GlassTokens.TypeScale.title)
                         .foregroundStyle(GlassColor.textPrimary)
                 }
+                if let insightsHeading {
+                    hostedCard(insightsHeading, action: openInsights)
+                }
+                if let missionDraftsHeading {
+                    hostedCard(missionDraftsHeading, action: openMissionDrafts)
+                }
                 GlassEyebrowCard(MonitorWords.history, action: openHistory) {
                     Image(systemName: "chevron.right")
                         .glassGlyph(10, weight: .semibold)
@@ -74,6 +121,18 @@ private struct HomeOverview: View {
             }
         }
         .scrollIndicators(.never)
+    }
+
+    /// A way into a hosted screen: the core's heading and a chevron, and
+    /// nothing else (the screen holds its own words).
+    private func hostedCard(_ heading: String, action: @escaping () -> Void) -> some View {
+        GlassEyebrowCard(heading, action: action) {
+            Image(systemName: "chevron.right")
+                .glassGlyph(10, weight: .semibold)
+                .foregroundStyle(GlassColor.textTertiary)
+        } content: {
+            EmptyView()
+        }
     }
 
     /// Paused, or watching N tools, from the core's status and the tree.
@@ -348,6 +407,14 @@ struct HomeSummaryInspector: View {
 
 /// Formatting for Home and History. Pure, so the rules are tested.
 enum HomeFormat {
+    /// A card heading from the core's copy: the word, or nil when the copy
+    /// has not arrived (or the word is empty), so no card is drawn on a
+    /// word of this shell's own.
+    static func cardHeading(_ word: String?) -> String? {
+        guard let word, !word.isEmpty else { return nil }
+        return word
+    }
+
     /// A count, or a dash when the core did not say. Zero is a number.
     static func count(_ value: Int?) -> String {
         value.map(String.init) ?? "—"

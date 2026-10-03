@@ -1,4 +1,5 @@
 import SwiftUI
+import TCDesign
 import TCBridge
 
 struct ComparisonTasksView: View {
@@ -20,8 +21,8 @@ struct ComparisonTasksView: View {
                 Button(text("comparison_task_list")) { model.refresh() }
                 if model.busy { ProgressView().controlSize(.small) }
             }
-            if let notice = model.notice { Text(text(notice)).foregroundStyle(.green) }
-            if let error = model.error { Text(text(error)).foregroundStyle(.red) }
+            if let notice = model.notice { Text(text(notice)).foregroundStyle(GlassColor.textPrimary) }
+            if let error = model.error { Text(text(error)).foregroundStyle(GlassColor.textPrimary) }
             if let detail = model.detail { detailView(detail) } else { listView }
         }
         .disabled(model.busy)

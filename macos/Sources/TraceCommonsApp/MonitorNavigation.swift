@@ -5,6 +5,8 @@ enum HomePage: String {
     case overview
     case history
     case missions
+    case insights
+    case missionDrafts
 }
 
 /// Where an outside caller wants the Monitor to go. Nothing here sends.

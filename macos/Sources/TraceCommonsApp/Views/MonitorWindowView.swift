@@ -42,6 +42,9 @@ struct MonitorWindowView: View {
 
     /// Where an outside opener asked this window to go (`OpenMonitor`).
     let navigation: MainWindowNavigation
+    /// The hosted Insights and Mission drafts screens' inputs (Home pages).
+    let insightsStoreSelection: InsightsStoreSelection
+    let missionDrafts: MissionDraftsModel
 
     @EnvironmentObject private var model: AppModel
     @Environment(\.openSettings) private var openSettings
@@ -139,7 +142,8 @@ struct MonitorWindowView: View {
                         // details are, as a session's Review does.
                         selection: Binding(
                             get: { selectedHistory },
-                            set: { Self.review($0, selection: &selectedHistory, showsInspector: &showsInspector) }))
+                            set: { Self.review($0, selection: &selectedHistory, showsInspector: &showsInspector) }),
+                        insightsStoreSelection: insightsStoreSelection, missionDrafts: missionDrafts)
                 }
             }
         } map: {
