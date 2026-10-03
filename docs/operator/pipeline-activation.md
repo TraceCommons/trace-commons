@@ -97,8 +97,8 @@ ingest login to be a member of `trace_account_admission_runtime`, as
 V95: the pipeline tables", "V105 and V106: review, invalidation, and export
 tables", and "V107 and V108: qualification and attempt artifact tables").
 
-V109 adds no table and changes no grant. It marks the payout of a Trace
-Credit leg seeded by V94-era code `disabled` (see "NEAR payout"), and adds
+V109 adds no table and changes no grant. It marks the payout of a leg
+seeded `pending` by V94-era code `disabled` (see "NEAR payout"), and adds
 four checks: an export snapshot's requester is `principal_sha256:` or
 `exporter_sha256:` and 64 lowercase hex digits, an export item's outcome and
 view schema ids are labels, and an assessment's resolved quarantine reasons
@@ -632,7 +632,8 @@ below). With payout disabled, nothing is submitted to NEAR.
   `disabled`. A leg is paid only when Score marked it payout-eligible
   (`payout_eligible`, V105): a leg seeded by earlier code, whose batch line
   has no account settlement key or hold, is never paid, and V109 marks the
-  payout of such a Trace Credit leg `disabled` where it read `pending`.
+  payout of such a leg, of any instrument, `disabled` where it read
+  `pending`.
 - A leg Settle completed and ledgered is paid even when its run later fails
   for good (attempts exhausted, or a crash before Settle's own commit on its
   last attempt), as a withdrawal does not stop it either. The contributor

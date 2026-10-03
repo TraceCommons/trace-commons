@@ -599,13 +599,15 @@ async fn pipeline_upgrade_from_v91_installs_forced_rls_storage() {
     );
 }
 
-/// Zaki review 3, Z3-M3: a Trace Credit leg the V94-era code seeded with
-/// payout `pending` has no batch line under the account's settlement key, so
-/// the payout never pays it. V109 marks it `disabled` (a payout nothing will
-/// make) instead of leaving it `pending` for good; a leg of another
-/// instrument keeps its state. V109 is applied here as a migrator that owns
-/// the tables and is not a superuser, so the test fails when V109 does not
-/// lift forced row security for its update.
+/// Zaki review 3, Z3-M3: a leg the V94-era code seeded with payout `pending`
+/// has no batch line under the account's settlement key, so the payout never
+/// pays it. V109 marks it `disabled` (a payout nothing will make) instead of
+/// leaving it `pending` for good, for each instrument (multi-lens review C8:
+/// that code seeded `pending` for each instrument on a payout rail, and the
+/// payout reads only payout-eligible Trace Credit legs). A payout-eligible
+/// leg keeps its state. V109 is applied here as a migrator that owns the
+/// tables and is not a superuser, so the test fails when V109 does not lift
+/// forced row security for its update.
 #[tokio::test]
 #[ignore = "requires PostgreSQL 16+ at isolated TRACE_COMMONS_PIPELINE_PG_UPGRADE_TEST_URL"]
 async fn v109_disables_the_payout_of_pending_legs_the_v94_code_seeded() {
@@ -709,6 +711,7 @@ async fn v109_disables_the_payout_of_pending_legs_the_v94_code_seeded() {
     for (instrument, payout_rail, payout_state, operation_ref) in [
         ("trace_credit", "near", "pending", hash("1")),
         ("storage_rebate", "near", "pending", hash("2")),
+        ("eligible_credit", "near", "pending", hash("3")),
     ] {
         admin
             .execute(
@@ -759,6 +762,18 @@ async fn v109_disables_the_payout_of_pending_legs_the_v94_code_seeded() {
         )
         .await
         .expect("give V109's tables to a non-superuser owner");
+    // A leg today's code seeds: `pending` and payout-eligible (V105).
+    assert_eq!(
+        admin
+            .execute(
+                "UPDATE pipeline_run_settlements SET payout_eligible = TRUE
+                  WHERE tenant_id = $1 AND run_id = $2 AND instrument_id = 'eligible_credit'",
+                &[&tenant, &run_id],
+            )
+            .await
+            .unwrap(),
+        1
+    );
     set_tenant(&admin, "").await;
     admin
         .batch_execute("SET ROLE pipeline_upgrade_owner")
@@ -790,7 +805,8 @@ async fn v109_disables_the_payout_of_pending_legs_the_v94_code_seeded() {
     assert_eq!(
         legs,
         vec![
-            ("storage_rebate".to_string(), "pending".to_string(), false),
+            ("eligible_credit".to_string(), "pending".to_string(), true),
+            ("storage_rebate".to_string(), "disabled".to_string(), false),
             ("trace_credit".to_string(), "disabled".to_string(), false),
         ]
     );

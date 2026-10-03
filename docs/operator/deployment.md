@@ -850,8 +850,8 @@ SELECT has_column_privilege('<ingest runtime login>', 'public.pipeline_attempt_a
 
 ### V109: pipeline follow-ups
 
-V109 adds no table and changes no grant. It marks the payout of a Trace
-Credit leg that V94-era code seeded `pending` as `disabled`, adds four
+V109 adds no table and changes no grant. It marks the payout of each leg
+that V94-era code seeded `pending` as `disabled`, adds four
 checks on the export and assessment tables, and indexes two foreign keys on
 their referencing side ([pipeline-activation.md](pipeline-activation.md)
 describes each). For the first of these it lifts forced row security on
