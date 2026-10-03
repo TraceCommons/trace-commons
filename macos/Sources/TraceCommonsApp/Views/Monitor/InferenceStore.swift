@@ -1,6 +1,7 @@
 #if DEBUG
 import Foundation
 import Observation
+import TCBridge
 import TCShellCore
 
 /// The map's Private AI view and the Inference tab's data (R8 of #1173),
@@ -22,6 +23,17 @@ final class InferenceStore {
     /// `tool_destinations`: its per-tool counts (K14) are the core's call
     /// totals for the window, which one page of calls is not.
     private(set) var destinations: DaemonData.ToolDestinations?
+    /// The Private AI switch, as the daemon's settings echo it. Only a read
+    /// or a write the core's rule confirmed is kept here: a write that was
+    /// not confirmed never moves it, so the switch never reads as on before
+    /// the daemon said so.
+    private(set) var privateAI: DaemonData.PrivateAISwitch?
+    /// A switch write is in flight; the switch takes no other.
+    private(set) var privateAIBusy = false
+    /// The core's words for a write that was not confirmed
+    /// (`PrivateInferenceCopy.writeUnconfirmed`); cleared by the next
+    /// confirmed write or by the person.
+    private(set) var privateAIRefusal: String?
     /// The last read that failed, by method; cleared when it next succeeds.
     private(set) var failures: [String: DaemonDataError] = [:]
 
@@ -48,6 +60,11 @@ final class InferenceStore {
         calls = nil
         summary = nil
         destinations = nil
+        privateAI = nil
+        privateAIRefusal = nil
+        // A write to the old client is dropped when it answers, so it must
+        // not hold the new client's switch.
+        privateAIBusy = false
         failures = [:]
     }
 
@@ -78,7 +95,49 @@ final class InferenceStore {
         async let calls: Void = loadCalls()
         async let summary: Void = loadSummary()
         async let destinations: Void = loadDestinations()
-        _ = await (harnesses, calls, summary, destinations)
+        async let privateAI: Void = loadPrivateAI()
+        _ = await (harnesses, calls, summary, destinations, privateAI)
+    }
+
+    private func loadPrivateAI() async {
+        await read("private_ai", { try await $0.privateAI() }) { if let value = $0 { self.privateAI = value } }
+    }
+
+    /// Turns Private AI on or off. The reply is taken only when the core's
+    /// rule confirms it (`TCPrivateInference.writeConfirmed`); otherwise, or
+    /// when the write fails, `unconfirmed` is shown and the switch is read
+    /// again, so it stands where the daemon has it.
+    func setPrivateAI(on: Bool, unconfirmed: String?) async {
+        guard !privateAIBusy else { return }
+        guard let client else {
+            privateAIRefusal = unconfirmed
+            return
+        }
+        let mine = generation
+        privateAIBusy = true
+        let reply = try? await client.setPrivateAI(on: on)
+        guard mine == generation else { return }
+        privateAIBusy = false
+        if let reply, Self.confirmed(reply, requested: on, check: TCPrivateInference.writeConfirmed) {
+            privateAIRefusal = nil
+            privateAI = reply
+        } else {
+            privateAIRefusal = unconfirmed
+            await loadPrivateAI()
+        }
+    }
+
+    /// Puts the refusal away. It does not retry the write.
+    func dismissPrivateAIRefusal() {
+        privateAIRefusal = nil
+    }
+
+    /// Whether a write's reply confirms it, by the core's rule `check`,
+    /// asked (requested, echoed marker, echoed switch).
+    static func confirmed(
+        _ reply: DaemonData.PrivateAISwitch, requested: Bool, check: (Bool?, Bool?, Bool?) -> Bool
+    ) -> Bool {
+        check(requested, reply.offerSeen, reply.on)
     }
 
     private func loadDestinations() async {
