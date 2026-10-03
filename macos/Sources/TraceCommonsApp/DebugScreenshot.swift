@@ -45,17 +45,12 @@ enum DebugScreenshot {
                 to: directory + "/macos-shell-consent-scopes.png",
                 size: CGSize(width: 660, height: 760)
             )
-            // 900 wide, not the 660 the other onboarding screens use. The
-            // welcome hero picks its type size from a `ViewThatFits` ladder,
-            // and only the top rung is wide enough to keep the globe beside
-            // the headline. At 660 the ladder correctly drops the globe --
-            // correct in the app, misleading in a review artifact, because
-            // the shipping window opens at 940 and always gets the globe.
-            // Capture the screen a contributor actually sees.
+            // 660 wide like the other onboarding screens: the glass layout
+            // has no globe ladder, so one width shows the screen as shipped.
             render(
                 OnboardingWelcomeContent(onGetStarted: {}, onWhatGetsRemoved: {}),
                 to: directory + "/macos-shell-onboarding-welcome.png",
-                size: CGSize(width: 900, height: 560)
+                size: CGSize(width: 660, height: 560)
             )
             render(
                 OnboardingProjectsContent(onContinue: {}).environmentObject(model),

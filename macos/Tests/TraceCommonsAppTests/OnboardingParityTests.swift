@@ -14,11 +14,25 @@ final class OnboardingParityTests: XCTestCase {
         try String(contentsOf: GlassSurfaceRulesTests.root.appendingPathComponent(rel), encoding: .utf8)
     }
 
-    static let steps: [Step] = []
+    static let steps: [Step] = [
+        Step(file: "Views/OnboardingWelcomeView.swift",
+             bindings: ["var onGetStarted: () -> Void", "var onWhatGetsRemoved: () -> Void",
+                        "Button(OnboardingWelcomeWords.getStarted, action: onGetStarted)",
+                        "Button(OnboardingWelcomeWords.whatGetsRemoved, action: onWhatGetsRemoved)"],
+             copySources: ["TCOnboardingCopy.load()?.welcomeBody",
+                           "Text(OnboardingWelcomeWords.headline)",
+                           "GlassTag(OnboardingWelcomeWords.promiseLine1, tone: .accent)",
+                           "GlassTag(OnboardingWelcomeWords.promiseLine2, tone: .accent)",
+                           "Text(OnboardingWelcomeWords.lede)",
+                           "Text(OnboardingWelcomeWords.scrubbing)",
+                           "Text(OnboardingWelcomeWords.footer)"],
+             guards: [".buttonStyle(GlassButtonStyle(.primary))", ".buttonStyle(GlassButtonStyle(.link))",
+                      ".keyboardShortcut(.defaultAction)"]),
+    ]
 
     /// Rows the table must hold; each task that adds a step raises it, so a
     /// dropped row fails here instead of passing silently.
-    static let minimumSteps = 0
+    static let minimumSteps = 1
 
     func test_theTableKeepsEveryRowAdded() {
         XCTAssertGreaterThanOrEqual(Self.steps.count, Self.minimumSteps)
