@@ -52,9 +52,10 @@ final class ShellWordingTests: XCTestCase {
 
         // The app model and its non-view surfaces.
         "TraceCommonsApp/AppModel.swift": 8,
-        // Lowered from 20: the label sentences moved to the core (`tc_health_copy_json`);
-        // the 10 left are the budget/witness banners, QueueStateCopy and the on-hold fallback.
-        "TraceCommonsApp/HealthCopy.swift": 10,
+        // Lowered from 20: the label sentences moved to the core (`tc_health_copy_json`).
+        // Lowered from 10 at R15: `QueueStateCopy` (8 sentences, no caller) was
+        // deleted; the 2 left are the on-hold fallback's.
+        "TraceCommonsApp/HealthCopy.swift": 2,
         "TraceCommonsApp/Notifier.swift": 2,
         "TraceCommonsApp/SelfTest.swift": 15,
 
@@ -152,7 +153,7 @@ final class ShellWordingTests: XCTestCase {
 
         // A scan that found nothing would turn this test into a pass over
         // nothing, which is the failure mode the Windows guard names
-        // explicitly. There are 96 Swift sources under macos/Sources today.
+        // explicitly. There are 221 Swift sources under macos/Sources today.
         XCTAssertGreaterThanOrEqual(
             scanned.count, 86,
             "only \(scanned.count) Swift sources were scanned under \(ShellSources.root().path); "
