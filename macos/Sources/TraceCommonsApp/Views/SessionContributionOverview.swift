@@ -232,6 +232,7 @@ struct WithdrawalConfirmationView: View {
                 }
                 ForEach(Array(confirmation.bodies.enumerated()), id: \.offset) { index, body in
                     GlassStatusLabel(body, status: index == confirmation.gravest ? .outside : .off)
+                        .fontWeight(index == confirmation.gravest ? .semibold : nil)
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 if let credit = confirmation.credit {

@@ -72,5 +72,25 @@ final class HistoryParityTests: XCTestCase {
                        "Keep is the cancel action with and without the core's words")
         XCTAssertTrue(GlassSurfaceRulesTests.files.contains("Views/SessionContributionOverview.swift"))
     }
+
+    /// Withdraw first asks: the button only opens the confirmation, the
+    /// confirmation is what withdraws, and nothing else does but Retry. The
+    /// gravest consequence is set in a heavier weight, not only a colour.
+    func test_withdrawAlwaysConfirmsFirst() throws {
+        let source = try Self.text("Views/SessionContributionOverview.swift")
+        let flat = source.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        for needle in [
+            "Button(copy.withdraw) { confirming = true } .buttonStyle(GlassButtonStyle(.glass)) .frame(minHeight: 44)",
+            "} else if confirming { WithdrawalConfirmationView(",
+            "onConfirm: { model.withdraw(record) }",
+            ".buttonStyle(GlassButtonStyle(.primary)) .frame(minHeight: 44) .disabled(inFlight)",
+            "GlassStatusLabel(body, status: index == confirmation.gravest ? .outside : .off) "
+                + ".fontWeight(index == confirmation.gravest ? .semibold : nil)",
+        ] {
+            XCTAssertTrue(flat.contains(needle), "SessionContributionOverview.swift lacks \(needle)")
+        }
+        XCTAssertEqual(source.components(separatedBy: "model.withdraw(record)").count - 1, 2,
+                       "only Retry and the confirmation withdraw")
+    }
 }
 #endif
