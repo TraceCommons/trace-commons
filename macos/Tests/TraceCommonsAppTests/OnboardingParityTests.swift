@@ -271,6 +271,29 @@ final class OnboardingParityTests: XCTestCase {
         XCTAssertTrue(source.contains(".padding(GlassTokens.Space.panePadding) .frame(maxWidth: .infinity, alignment: .leading) .task { await refreshStatus() } .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification))"))
     }
 
+    /// The concept's Sharing, Tools and Rules steps and its setup tiers are
+    /// decision-blocked (D-5, D-6). Until the owner approves them and the
+    /// core exports their framing, no `Step` case by those names exists.
+    /// Reads the declared case names (comment lines never match) and pins
+    /// the case list, so a new step is a deliberate edit here.
+    func test_unapprovedConceptStepsDoNotExist() throws {
+        let navigation = try Self.text("OnboardingNavigation.swift")
+        let start = try XCTUnwrap(navigation.range(of: "enum Step"))
+        var cases: [String] = []
+        for line in navigation[start.upperBound...].split(separator: "\n") {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.contains("func ") { break }
+            guard trimmed.hasPrefix("case ") else { continue }
+            cases += trimmed.dropFirst("case ".count).split(separator: ",").map {
+                String($0.trimmingCharacters(in: .whitespaces).prefix { $0.isLetter || $0.isNumber || $0 == "_" })
+            }
+        }
+        XCTAssertEqual(cases, ["welcome", "roots", "connect", "consent", "privacyScan", "projects", "done"])
+        for name in ["sharing", "tools", "rules", "quickSetup", "customSetup"] {
+            XCTAssertFalse(cases.contains(name), "\(name) was built before its decision")
+        }
+    }
+
     /// No rebuilt step reads the legacy palette.
     func test_noStepReadsTheLegacyPalette() throws {
         for step in Self.steps {
