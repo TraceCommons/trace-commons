@@ -49,10 +49,13 @@ use trace_commons_server::versioned_pipeline_activation::{
     ActivationEvent, ActivationReadiness, ActivationRequest, LegacyDrainReport, RoutingState,
     TenantRouting,
 };
+use trace_commons_server::versioned_pipeline_bundle::PIPELINE_BUNDLE_INVALID_LABEL;
 use trace_commons_server::versioned_pipeline_qualification::{
-    BundleQualificationRecord, PACKAGE_RUNTIME_REVISION_UNKNOWN_LABEL, PipelineCheckAttestation,
-    ProductionAdapterKind, ProductionDependencyProfile, ProductionInfrastructureProfile,
-    PromotionDecision, SignedBundlePackage, TrustedBundleKey, evaluate_promotion, is_safe_label,
+    ACTIVATION_PROMOTION_NOT_READY_LABEL, BundleQualificationRecord,
+    PACKAGE_RUNTIME_REVISION_UNKNOWN_LABEL, PipelineCheckAttestation, ProductionAdapterKind,
+    ProductionDependencyProfile, ProductionInfrastructureProfile, PromotionDecision,
+    QUALIFICATION_PROMOTION_NOT_READY_LABEL, SignedBundlePackage, TrustedBundleKey,
+    evaluate_promotion, is_safe_label,
 };
 
 /// The JSON file of the keys whose signatures make a bundle package trusted:
@@ -92,7 +95,8 @@ pub(crate) const LEGACY_DRAIN_RECORDS_NOT_AUTHORITATIVE_LABEL: &str =
 /// `404`: a process without the database mirror holds no routing store.
 pub(crate) const PIPELINE_ROUTING_STORE_MISSING_LABEL: &str = "pipeline_routing_store_missing";
 /// `404`: the tenant has no stored package of the bundle the request names
-/// (the activation gate's own label for it).
+/// (the activation gate's own label for it). `409` with the same label: the
+/// stored package no longer validates (a tampered package, BND-002).
 const BUNDLE_PACKAGE_MISSING_LABEL: &str = "bundle_package_missing";
 
 /// The most attestations one request may carry: a full qualification set is
@@ -358,14 +362,25 @@ fn legacy_records_authoritative(state: &AppState, tenant_id: &str) -> bool {
         && state.db_reviewer_reads_for_tenant(tenant_id)
 }
 
+/// Whether `label` is a refusal label these routes answer: a safe label
+/// (`^[a-z0-9_]{1,64}$`), or a safe label with one `:<check_id>` suffix whose
+/// check id is a safe label too, the form `evaluate_promotion` gives a
+/// refusal or a blocker about one check (final fix wave K2).
+fn is_refusal_label(label: &str) -> bool {
+    is_safe_label(label)
+        || label
+            .split_once(':')
+            .is_some_and(|(label, check_id)| is_safe_label(label) && is_safe_label(check_id))
+}
+
 /// The one map from a store's or a check's error to an answer, shared by the
-/// nine handlers: a refusal named by a safe label is `409` with that label;
-/// a bundle the tenant has no policy row for is `404`
+/// nine handlers: a refusal named by a refusal label (`is_refusal_label`) is
+/// `409` with that label; a bundle the tenant has no policy row for is `404`
 /// `bundle_package_missing`; anything else is the hash-only internal error.
 /// No answer is built from a request field.
 fn activation_error(error: DatabaseError) -> (StatusCode, Json<ApiError>) {
     match error {
-        DatabaseError::Constraint(label) if is_safe_label(&label) => {
+        DatabaseError::Constraint(label) if is_refusal_label(&label) => {
             api_error(StatusCode::CONFLICT, label)
         }
         DatabaseError::NotFound { .. } => {
@@ -378,6 +393,31 @@ fn activation_error(error: DatabaseError) -> (StatusCode, Json<ApiError>) {
 /// `activation_error` of a check's refusal label.
 fn refusal(label: impl Into<String>) -> (StatusCode, Json<ApiError>) {
     activation_error(DatabaseError::Constraint(label.into()))
+}
+
+/// `activation_error`, and, when the refusal is `not_ready_label` (the
+/// route's refusal of a promotion decision that is not ready), the
+/// decision's blockers in the body's `blockers` (final fix wave K3): labels
+/// only, each one a refusal label (`is_refusal_label`), so an operator sees
+/// which check is missing, failed, or stale without reading the evidence.
+fn promotion_refusal(
+    error: DatabaseError,
+    not_ready_label: &str,
+    promotion: &PromotionDecision,
+) -> (StatusCode, Json<ApiError>) {
+    let not_ready = matches!(&error, DatabaseError::Constraint(label) if label == not_ready_label);
+    let (status, Json(mut body)) = activation_error(error);
+    if not_ready {
+        body.blockers = Some(
+            promotion
+                .safe_blockers
+                .iter()
+                .filter(|blocker| is_refusal_label(blocker))
+                .cloned()
+                .collect(),
+        );
+    }
+    (status, Json(body))
 }
 
 /// The parsed body, or its refusal: `413` `pipeline_request_too_large` above
@@ -583,7 +623,16 @@ async fn gate_inputs<'a>(
         .store()
         .load_bundle(&tenant.tenant_id, &body.bundle_id)
         .await
-        .map_err(activation_error)?
+        .map_err(|error| match error {
+            // A stored package that no longer validates (a tampered package,
+            // BND-002) is refused with the gate's label for it, as the gate
+            // refuses it (`stored_package_or_refusal`), never as an internal
+            // error (final fix wave K4).
+            DatabaseError::Serialization(label) if label == PIPELINE_BUNDLE_INVALID_LABEL => {
+                refusal(BUNDLE_PACKAGE_MISSING_LABEL)
+            }
+            other => activation_error(other),
+        })?
         .ok_or_else(|| api_error(StatusCode::NOT_FOUND, BUNDLE_PACKAGE_MISSING_LABEL))?;
     service
         .check_runnable_package(&package, &state.pipeline_main_gate, true)
@@ -662,7 +711,7 @@ pub(crate) async fn pipeline_qualify_handler(
         route_infrastructure_profile(state.as_ref()),
     )
     .map_err(refusal)?;
-    let record = qualifications
+    let record = match qualifications
         .qualify_bundle_attested(
             &tenant.tenant_id,
             &body.signed_package,
@@ -673,7 +722,32 @@ pub(crate) async fn pipeline_qualify_handler(
             trust.revision,
         )
         .await
-        .map_err(activation_error)?;
+    {
+        Ok(record) => record,
+        Err(DatabaseError::Constraint(label))
+            if label == QUALIFICATION_PROMOTION_NOT_READY_LABEL =>
+        {
+            // The decision the qualification refused, evaluated again over
+            // the same verified results for its blockers (K3).
+            let error = DatabaseError::Constraint(label);
+            return Err(
+                match trust
+                    .check
+                    .verify_all(&body.attestations)
+                    .ok()
+                    .and_then(|verified| evaluate_promotion(&verified.evidence, Utc::now()).ok())
+                {
+                    Some(promotion) => promotion_refusal(
+                        error,
+                        QUALIFICATION_PROMOTION_NOT_READY_LABEL,
+                        &promotion,
+                    ),
+                    None => activation_error(error),
+                },
+            );
+        }
+        Err(error) => return Err(activation_error(error)),
+    };
     log_action(&tenant, "qualify", &record.metadata.evidence_hash);
     Ok(Json(record))
 }
@@ -699,7 +773,13 @@ pub(crate) async fn pipeline_activate_handler(
     let routing = require_activation_store(state.as_ref())?
         .activate_tenant(inputs.request(&tenant, &body), &readiness)
         .await
-        .map_err(activation_error)?;
+        .map_err(|error| {
+            promotion_refusal(
+                error,
+                ACTIVATION_PROMOTION_NOT_READY_LABEL,
+                &inputs.promotion,
+            )
+        })?;
     log_action(&tenant, "activate", &routing.evidence_hash);
     Ok(Json(routing))
 }
@@ -720,7 +800,13 @@ pub(crate) async fn pipeline_rollback_handler(
     let routing = require_activation_store(state.as_ref())?
         .rollback_bundle(inputs.request(&tenant, &body))
         .await
-        .map_err(activation_error)?;
+        .map_err(|error| {
+            promotion_refusal(
+                error,
+                ACTIVATION_PROMOTION_NOT_READY_LABEL,
+                &inputs.promotion,
+            )
+        })?;
     log_action(&tenant, "rollback", &routing.evidence_hash);
     Ok(Json(routing))
 }
@@ -1257,5 +1343,34 @@ mod tests {
             assert!(is_safe_label(label), "{label}");
         }
         assert_eq!(PIPELINE_MAX_ATTESTATIONS, 64);
+    }
+
+    /// Final fix wave (K2): a refusal label with a `:<check_id>` suffix, as
+    /// `evaluate_promotion` gives for one check (`qualification_evidence_invalid:<check_id>`),
+    /// is answered `409` with that label, never `500`; the check id must be a
+    /// safe label too. Any other text is still the internal error.
+    #[test]
+    fn a_refusal_label_with_a_check_id_is_answered_as_a_refusal() {
+        for label in [
+            "qualification_evidence_invalid:pipeline_restore_drill",
+            "qualification_evidence_stale:pipeline_crash_matrix",
+        ] {
+            let (status, Json(body)) =
+                activation_error(DatabaseError::Constraint(label.to_string()));
+            assert_eq!((status, body.error.as_str()), (StatusCode::CONFLICT, label));
+        }
+        let too_long_check_id = format!("qualification_evidence_invalid:{}", "a".repeat(65));
+        for unsafe_label in [
+            "Not A Label",
+            "qualification_evidence_invalid:Pipeline-Check",
+            "qualification_evidence_invalid:",
+            ":pipeline_restore_drill",
+            "qualification_evidence_invalid:pipeline:drill",
+            "qualification_evidence_invalid :pipeline_restore_drill",
+            too_long_check_id.as_str(),
+        ] {
+            let (status, _) = activation_error(DatabaseError::Constraint(unsafe_label.to_string()));
+            assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{unsafe_label}");
+        }
     }
 }

@@ -76598,6 +76598,12 @@ struct ApiError {
     error: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     retry_after_seconds: Option<i64>,
+    /// The blockers of a promotion decision that is not ready, labels only:
+    /// set by the pipeline qualification, activation, and rollback routes
+    /// on their refusal of such a decision (`pipeline_activation`), and
+    /// absent from every other answer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    blockers: Option<Vec<String>>,
 }
 
 fn api_error(status: StatusCode, message: impl Into<String>) -> (StatusCode, Json<ApiError>) {
@@ -76606,6 +76612,7 @@ fn api_error(status: StatusCode, message: impl Into<String>) -> (StatusCode, Jso
         Json(ApiError {
             error: message.into(),
             retry_after_seconds: None,
+            blockers: None,
         }),
     )
 }
@@ -76620,6 +76627,7 @@ fn api_error_with_retry(
         Json(ApiError {
             error: message.into(),
             retry_after_seconds,
+            blockers: None,
         }),
     )
 }

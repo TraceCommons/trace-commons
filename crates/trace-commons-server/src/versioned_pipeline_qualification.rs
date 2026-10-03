@@ -61,12 +61,15 @@ pub const QUALIFICATION_EVIDENCE_PACKAGE_MISSING_LABEL: &str =
 /// carries a package digest; blocks as `<label>:<check_id>`.
 pub const QUALIFICATION_EVIDENCE_PACKAGE_UNEXPECTED_LABEL: &str =
     "qualification_evidence_package_unexpected";
-/// The longest maximum age `PipelineQualificationStore::qualify_bundle`
-/// accepts for a check result: seven days. A signed attestation carries its
-/// maximum age ([`PipelineCheckAttestation::maximum_age_seconds`], under the
-/// signature) and the signer chooses it, so the server bounds it whichever
-/// way a result arrives: `qualify_bundle_attested`, the path a route takes,
-/// and the bare `qualify_bundle` both refuse a larger age.
+/// The longest maximum age the server accepts for a check result: seven
+/// days. A signed attestation carries its maximum age
+/// ([`PipelineCheckAttestation::maximum_age_seconds`], under the signature)
+/// and the signer chooses it, so the server bounds it whichever way a result
+/// arrives: [`CheckResultTrustStore::verify_all`] refuses a larger age, so
+/// every route that takes signed results (the qualification through
+/// `qualify_bundle_attested`, the activation, and the rollback) refuses it,
+/// and the bare `qualify_bundle` refuses it too. Both refuse with
+/// [`QUALIFICATION_EVIDENCE_AGE_ABOVE_CEILING_LABEL`].
 pub const QUALIFICATION_EVIDENCE_AGE_CEILING_SECONDS: u64 = 7 * 24 * 60 * 60;
 pub const QUALIFICATION_EVIDENCE_AGE_ABOVE_CEILING_LABEL: &str =
     "bundle_qualification_evidence_age_above_ceiling";
@@ -85,6 +88,9 @@ pub const PACKAGE_RUNTIME_REVISION_MISMATCH_LABEL: &str = "bundle_runtime_revisi
 pub const PACKAGE_RUNTIME_REVISION_UNKNOWN_LABEL: &str = "bundle_runtime_revision_unknown";
 /// The promotion decision is not ready, or carries a blocker.
 pub const ACTIVATION_PROMOTION_NOT_READY_LABEL: &str = "bundle_activation_promotion_not_ready";
+/// `qualify_bundle`'s refusal of a promotion decision that is not ready.
+pub const QUALIFICATION_PROMOTION_NOT_READY_LABEL: &str =
+    "bundle_qualification_promotion_not_ready";
 /// The promotion decision was evaluated more than
 /// [`ACTIVATION_PROMOTION_MAX_AGE_SECONDS`] ago, or in the future.
 pub const ACTIVATION_PROMOTION_STALE_LABEL: &str = "bundle_activation_promotion_stale";
@@ -949,14 +955,18 @@ impl CheckResultTrustStore {
     /// this store holds (`check_attestation_signer_untrusted`); then that
     /// the hash it records is [`attestation_hash`] and that the key's
     /// signature over that hash verifies
-    /// (`check_attestation_signature_invalid`). A second attestation for
-    /// one check is `check_attestation_invalid`: it would otherwise hide a
-    /// digest from the two this returns.
+    /// (`check_attestation_signature_invalid`); then that its maximum age is
+    /// at most [`QUALIFICATION_EVIDENCE_AGE_CEILING_SECONDS`]
+    /// (`bundle_qualification_evidence_age_above_ceiling`, the label the
+    /// bare [`PipelineQualificationStore::qualify_bundle`] uses for it). The
+    /// signer chooses the age, so this bound holds on every path that
+    /// verifies attestations, the activation and the rollback included; an
+    /// age chrono cannot represent is above it. A second attestation for one
+    /// check is `check_attestation_invalid`: it would otherwise hide a digest
+    /// from the two this returns.
     ///
     /// Nothing here judges whether the results qualify a bundle
-    /// ([`evaluate_promotion`] does, over `evidence`), and the maximum age
-    /// is the signer's: [`PipelineQualificationStore::qualify_bundle`]
-    /// bounds it.
+    /// ([`evaluate_promotion`] does, over `evidence`).
     pub fn verify_all(
         &self,
         attestations: &[PipelineCheckAttestation],
@@ -1014,7 +1024,13 @@ impl CheckResultTrustStore {
             .map_err(|_| CHECK_ATTESTATION_SIGNATURE_INVALID_LABEL.to_string())?;
         UnparsedPublicKey::new(&ED25519, public_key)
             .verify(hash.as_bytes(), &signature_bytes)
-            .map_err(|_| CHECK_ATTESTATION_SIGNATURE_INVALID_LABEL.to_string())
+            .map_err(|_| CHECK_ATTESTATION_SIGNATURE_INVALID_LABEL.to_string())?;
+        // Final fix wave (K1): the signer's maximum age, bounded on every
+        // path that verifies, not only in `qualify_bundle`.
+        if attestation.maximum_age_seconds > QUALIFICATION_EVIDENCE_AGE_CEILING_SECONDS {
+            return Err(QUALIFICATION_EVIDENCE_AGE_ABOVE_CEILING_LABEL.to_string());
+        }
+        Ok(())
     }
 }
 
@@ -1521,8 +1537,10 @@ impl PipelineQualificationStore {
     /// path a route takes. `check_trust` verifies every attestation
     /// ([`CheckResultTrustStore::verify_all`]: `check_attestation_invalid`,
     /// `check_attestation_signer_untrusted`,
-    /// `check_attestation_signature_invalid`), so a result that no trusted
-    /// key signed, or that changed after signing, qualifies nothing. The
+    /// `check_attestation_signature_invalid`, and a maximum age above the
+    /// ceiling, `bundle_qualification_evidence_age_above_ceiling`), so a
+    /// result that no trusted key signed, or that changed after signing,
+    /// qualifies nothing. The
     /// promotion is evaluated over the verified results at the current time
     /// ([`evaluate_promotion`]) for its evidence hash; the metadata is then
     /// built here, never taken from the caller: `corpus_digest` and
@@ -1788,7 +1806,7 @@ fn require_promotion_backs(
     digests: &PipelinePackageDigests,
 ) -> Result<(), &'static str> {
     if !promotion.ready {
-        return Err("bundle_qualification_promotion_not_ready");
+        return Err(QUALIFICATION_PROMOTION_NOT_READY_LABEL);
     }
     if promotion.evidence_hash != metadata.evidence_hash {
         return Err("bundle_qualification_evidence_mismatch");
@@ -2982,6 +3000,43 @@ mod tests {
     /// A passing result for `check_id` that names no package.
     fn attested_result(check_id: &str) -> PipelineCheckResult {
         sample_check(check_id, PipelineCheckStatus::Pass, Utc::now())
+    }
+
+    /// Final fix wave (K1): `verify_all` bounds the signer's maximum age, so
+    /// every path that verifies attestations (the qualification, the
+    /// activation, and the rollback) refuses one above the ceiling, with the
+    /// label the bare `qualify_bundle` uses. An age that chrono cannot
+    /// represent is above the ceiling too. An age at the ceiling verifies.
+    #[test]
+    fn verify_all_refuses_a_maximum_age_above_the_ceiling() {
+        let (pkcs8, store) = check_signer();
+        let signed_with = |maximum_age_seconds: u64| {
+            sign_check_result(
+                sample_check_result(),
+                maximum_age_seconds,
+                None,
+                None,
+                CHECK_KEY_ID,
+                pkcs8.as_ref(),
+            )
+            .expect("the sample result signs")
+        };
+        for maximum_age_seconds in [QUALIFICATION_EVIDENCE_AGE_CEILING_SECONDS + 1, u64::MAX] {
+            assert_eq!(
+                store
+                    .verify_all(&[signed_with(maximum_age_seconds)])
+                    .unwrap_err(),
+                QUALIFICATION_EVIDENCE_AGE_ABOVE_CEILING_LABEL,
+                "{maximum_age_seconds}"
+            );
+        }
+        let at_ceiling = store
+            .verify_all(&[signed_with(QUALIFICATION_EVIDENCE_AGE_CEILING_SECONDS)])
+            .expect("an age at the ceiling verifies");
+        assert_eq!(
+            at_ceiling.evidence[0].maximum_age_seconds,
+            QUALIFICATION_EVIDENCE_AGE_CEILING_SECONDS
+        );
     }
 
     #[test]

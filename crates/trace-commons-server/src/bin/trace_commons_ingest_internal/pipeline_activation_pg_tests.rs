@@ -3151,6 +3151,36 @@ impl RouteFixture {
         key_id: &str,
         pkcs8: &[u8],
     ) -> Vec<trace_commons_server::versioned_pipeline_qualification::PipelineCheckAttestation> {
+        self.attestations_with(package, key_id, pkcs8, 3_600, None)
+    }
+
+    /// `attestations`, each signed by the check key with
+    /// `maximum_age_seconds`, and with the result of `stale_check` (when one
+    /// is named) observed two hours before now, so that it is stale under a
+    /// maximum age of one hour.
+    fn attestations_aged(
+        &self,
+        package: &trace_commons_gate_api::pipeline::BundlePackage,
+        maximum_age_seconds: u64,
+        stale_check: Option<&str>,
+    ) -> Vec<trace_commons_server::versioned_pipeline_qualification::PipelineCheckAttestation> {
+        self.attestations_with(
+            package,
+            ROUTE_CHECK_KEY_ID,
+            &self.check_pkcs8,
+            maximum_age_seconds,
+            stale_check,
+        )
+    }
+
+    fn attestations_with(
+        &self,
+        package: &trace_commons_gate_api::pipeline::BundlePackage,
+        key_id: &str,
+        pkcs8: &[u8],
+        maximum_age_seconds: u64,
+        stale_check: Option<&str>,
+    ) -> Vec<trace_commons_server::versioned_pipeline_qualification::PipelineCheckAttestation> {
         use trace_commons_server::versioned_pipeline_qualification::{
             PROMOTION_PACKAGE_CHECKS, PROMOTION_REQUIRED_CHECKS, PipelineCheckResult,
             PipelineCheckStatus, sign_check_result,
@@ -3176,9 +3206,12 @@ impl RouteFixture {
                     .expect("the check result is written");
                 let bytes = std::fs::read(dir.path().join(format!("{check_id}.result.json")))
                     .expect("the result file");
-                let result: PipelineCheckResult =
+                let mut result: PipelineCheckResult =
                     serde_json::from_slice(&bytes).expect("the written result reads back");
-                sign_check_result(result, 3_600, None, None, key_id, pkcs8)
+                if stale_check == Some(*check_id) {
+                    result.observed_at -= chrono::Duration::hours(2);
+                }
+                sign_check_result(result, maximum_age_seconds, None, None, key_id, pkcs8)
                     .expect("the result signs")
             })
             .collect()
@@ -4960,4 +4993,245 @@ async fn the_routes_take_a_body_of_at_most_one_mebibyte() {
     fixture
         .assert_untouched(&fixture.tenant, "the two large bodies")
         .await;
+}
+
+/// `package` as the tenant stored it, rewritten by `edit` through an owner
+/// connection with the immutability trigger off for the one update (a
+/// tampered package, BND-002), as the runtime suite's
+/// `rewrite_stored_bundle_package` does.
+async fn tamper_stored_package(
+    owner: &PgBackend,
+    tenant: &str,
+    bundle_id: &str,
+    edit: impl FnOnce(&mut serde_json::Value),
+) {
+    let mut client = owner.trace_pool_for_test().get().await.unwrap();
+    let tx = client.transaction().await.unwrap();
+    tx.batch_execute(
+        "ALTER TABLE pipeline_bundle_packages
+             DISABLE TRIGGER pipeline_bundle_packages_reject_update",
+    )
+    .await
+    .expect("disable the immutability trigger");
+    let mut package: serde_json::Value = tx
+        .query_one(
+            "SELECT package FROM pipeline_bundle_packages
+              WHERE tenant_id = $1 AND bundle_id = $2",
+            &[&tenant, &bundle_id],
+        )
+        .await
+        .expect("the stored package")
+        .get(0);
+    edit(&mut package);
+    assert_eq!(
+        tx.execute(
+            "UPDATE pipeline_bundle_packages SET package = $3
+              WHERE tenant_id = $1 AND bundle_id = $2",
+            &[&tenant, &bundle_id, &package],
+        )
+        .await
+        .expect("tamper the stored package"),
+        1
+    );
+    tx.batch_execute(
+        "ALTER TABLE pipeline_bundle_packages
+             ENABLE TRIGGER pipeline_bundle_packages_reject_update",
+    )
+    .await
+    .expect("enable the immutability trigger");
+    tx.commit().await.unwrap();
+}
+
+/// Final fix wave (K1, K2): every route that verifies attestations refuses a
+/// set whose maximum age is above the server's ceiling (seven days) with
+/// `bundle_qualification_evidence_age_above_ceiling`: the qualification, the
+/// activation, and the rollback. An age that chrono cannot represent is
+/// above it too and gets the same refusal, never `500`. Nothing is written.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_evidence_age_above_the_ceiling_is_refused_at_every_route() {
+    use trace_commons_server::versioned_pipeline_qualification::{
+        QUALIFICATION_EVIDENCE_AGE_ABOVE_CEILING_LABEL, QUALIFICATION_EVIDENCE_AGE_CEILING_SECONDS,
+    };
+
+    let Some(fixture) = RouteFixture::new().await else {
+        return;
+    };
+    fixture.qualify(&fixture.a).await;
+    for maximum_age_seconds in [u64::MAX, QUALIFICATION_EVIDENCE_AGE_CEILING_SECONDS + 1] {
+        let attestations = fixture.attestations_aged(&fixture.a, maximum_age_seconds, None);
+        for (path, body) in [
+            (
+                "/v1/admin/pipeline/qualifications",
+                serde_json::json!({
+                    "signed_package": fixture.signed(&fixture.a),
+                    "attestations": attestations,
+                }),
+            ),
+            (
+                "/v1/admin/pipeline/activate",
+                serde_json::json!({
+                    "bundle_id": fixture.a.bundle_id,
+                    "reason_code": "activate_bundle_a",
+                    "attestations": attestations,
+                }),
+            ),
+            (
+                "/v1/admin/pipeline/rollback",
+                serde_json::json!({
+                    "bundle_id": fixture.a.bundle_id,
+                    "reason_code": "roll_back_to_a",
+                    "attestations": attestations,
+                }),
+            ),
+        ] {
+            let (status, refused) = fixture.admin_call("POST", path, Some(body)).await;
+            assert_eq!(
+                (status, refused),
+                (
+                    StatusCode::CONFLICT,
+                    serde_json::json!({ "error": QUALIFICATION_EVIDENCE_AGE_ABOVE_CEILING_LABEL })
+                ),
+                "{path} with a maximum age of {maximum_age_seconds} s"
+            );
+        }
+    }
+    assert_eq!(
+        fixture.store().routing(&fixture.tenant).await.unwrap(),
+        None
+    );
+    assert!(
+        fixture
+            .store()
+            .events(&fixture.tenant, 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+/// Final fix wave (K3): a promotion that is not ready is answered with the
+/// route's own `409` label and, in `blockers`, the decision's blockers
+/// (labels only). One stale result names its check, at the qualification,
+/// the activation, and the rollback. The routing does not change.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_refused_promotion_answers_its_blockers() {
+    let Some(fixture) = RouteFixture::new().await else {
+        return;
+    };
+    fixture.qualify(&fixture.a).await;
+    fixture.qualify(&fixture.b).await;
+    for (package, reason) in [
+        (&fixture.a, "activate_bundle_a"),
+        (&fixture.b, "activate_bundle_b"),
+    ] {
+        let (status, routing) = fixture
+            .admin_call(
+                "POST",
+                "/v1/admin/pipeline/activate",
+                Some(fixture.activate_body(package, reason)),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{routing}");
+    }
+    let events_before = fixture.store().events(&fixture.tenant, 10).await.unwrap();
+    let stale = fixture.attestations_aged(&fixture.a, 3_600, Some("pipeline_crash_matrix"));
+    let blockers = serde_json::json!(["qualification_evidence_stale:pipeline_crash_matrix"]);
+    for (path, body, label) in [
+        (
+            "/v1/admin/pipeline/qualifications",
+            serde_json::json!({
+                "signed_package": fixture.signed(&fixture.a),
+                "attestations": stale,
+            }),
+            "bundle_qualification_promotion_not_ready",
+        ),
+        (
+            "/v1/admin/pipeline/activate",
+            serde_json::json!({
+                "bundle_id": fixture.a.bundle_id,
+                "reason_code": "activate_bundle_a",
+                "attestations": stale,
+            }),
+            "bundle_activation_promotion_not_ready",
+        ),
+        (
+            "/v1/admin/pipeline/rollback",
+            serde_json::json!({
+                "bundle_id": fixture.a.bundle_id,
+                "reason_code": "roll_back_to_a",
+                "attestations": stale,
+            }),
+            "bundle_activation_promotion_not_ready",
+        ),
+    ] {
+        let (status, refused) = fixture.admin_call("POST", path, Some(body)).await;
+        assert_eq!(
+            (status, refused),
+            (
+                StatusCode::CONFLICT,
+                serde_json::json!({ "error": label, "blockers": blockers })
+            ),
+            "{path}"
+        );
+    }
+    assert_eq!(
+        fixture.store().events(&fixture.tenant, 10).await.unwrap(),
+        events_before
+    );
+    let (status, view) = fixture
+        .admin_call("GET", "/v1/admin/pipeline/routing", None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{view}");
+    assert_eq!(view["active_bundle_id"], fixture.b.bundle_id);
+}
+
+/// Final fix wave (K4): a stored package that no longer validates (a
+/// tampered package, BND-002) is refused at the activation and the rollback
+/// with the gate's label for it, `409 bundle_package_missing`, at the first
+/// read of the package, never `500`. Nothing is written.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_altered_stored_package_is_refused_as_missing() {
+    let Some(fixture) = RouteFixture::new().await else {
+        return;
+    };
+    fixture.qualify(&fixture.a).await;
+    tamper_stored_package(
+        &fixture.owner,
+        &fixture.tenant,
+        &fixture.a.bundle_id,
+        |package| package["manifest"]["format_version"] = serde_json::Value::from(1),
+    )
+    .await;
+    for (path, reason) in [
+        ("/v1/admin/pipeline/activate", "activate_bundle_a"),
+        ("/v1/admin/pipeline/rollback", "roll_back_to_a"),
+    ] {
+        let (status, refused) = fixture
+            .admin_call(
+                "POST",
+                path,
+                Some(fixture.activate_body(&fixture.a, reason)),
+            )
+            .await;
+        assert_eq!(
+            (status, refused),
+            (
+                StatusCode::CONFLICT,
+                serde_json::json!({ "error": "bundle_package_missing" })
+            ),
+            "{path}"
+        );
+    }
+    assert_eq!(
+        fixture.store().routing(&fixture.tenant).await.unwrap(),
+        None
+    );
+    assert!(
+        fixture
+            .store()
+            .events(&fixture.tenant, 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }
