@@ -110,9 +110,13 @@ final class TracesParityTests: XCTestCase {
         XCTAssertEqual(ScrubbingCaveat.status(redactionCount: 0), .ask)
         XCTAssertEqual(ScrubbingCaveat.status(redactionCount: 3), .off)
         let caveat = try Self.text("Views/ScrubbingCaveat.swift")
-        for needle in ["ScrubbingCaveat.canonical", "GlassStatusLabel(", ".accessibilityLabel("] {
-            XCTAssertTrue(caveat.contains(needle), "ScrubbingCaveat.swift lacks \(needle)")
+        let atCommitStart = try XCTUnwrap(caveat.range(of: "struct ScrubbingCaveatAtCommit")).lowerBound
+        let atCommit = String(caveat[atCommitStart...])
+        for needle in ["GlassStatusLabel(ScrubbingCaveat.canonical, status: .ask)",
+                       ".accessibilityLabel(\"Before you contribute. \\(ScrubbingCaveat.canonical)\")"] {
+            XCTAssertTrue(atCommit.contains(needle), "ScrubbingCaveatAtCommit lacks \(needle)")
         }
+        XCTAssertTrue(caveat.contains("Text(ScrubbingCaveat.canonical)"), "the note draws the canonical sentence")
         let certificates = try Self.text("Views/CertificateSection.swift")
         for needle in ["TCCertificate.listTitle(evidenceAdmitted:", "TCCertificate.rowLine(evidenceAdmitted:",
                        "certificateListEmpty", "admissionEvidenceOffered == true", "\\.holdsCertificate"] {
