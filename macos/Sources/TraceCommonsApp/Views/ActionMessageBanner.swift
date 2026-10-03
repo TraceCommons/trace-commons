@@ -1,4 +1,6 @@
 import SwiftUI
+import TCBridge
+import TCShellCore
 
 /// Displays one of the model's one-line action messages verbatim with a local
 /// dismiss control. Dismissal does not retry the action or clear the daemon's
@@ -29,6 +31,15 @@ struct ActionMessageBanner: View {
     let text: String
     let onDismiss: () -> Void
 
+    /// The dismiss control's name, reachable so a glass notice that cannot
+    /// reach the core's word still names its control.
+    static let dismissWord = "Dismiss this message"
+
+    /// The core's word for dismissing a notice, for every glass notice that
+    /// can be put away; nil when the core's copy does not decode, and the
+    /// caller falls back to `dismissWord`.
+    static let coreDismissWord = MonitorTracesCopy.decode(fromJSON: TCCoreCopy.monitorTracesCopyJSON())?.dismiss
+
     var body: some View {
         HStack(alignment: .top, spacing: TC.Space.m) {
             Text(text)
@@ -42,7 +53,7 @@ struct ActionMessageBanner: View {
                     .foregroundStyle(TC.inkSecondary)
             }
             .buttonStyle(.plain)
-            .accessibilityLabel("Dismiss this message")
+            .accessibilityLabel(Self.dismissWord)
             .help("Puts this message away. It does not retry anything.")
         }
         .padding(.vertical, TC.Space.m)

@@ -67,7 +67,7 @@ struct QueueContent: View {
                     Text(copy.heading).font(TC.Font_.cardTitle)
                     Text(model.awaitingDecision.isEmpty ? copy.start : copy.review)
                     Text(copy.followUp)
-                    DisclosureGroup("Agent setup") { Text(copy.agentSetup) }
+                    DisclosureGroup(QueueLegacyWords.agentSetup) { Text(copy.agentSetup) }
                 }
                 .font(TC.Font_.caption)
                 .padding(TC.Space.md)
@@ -129,11 +129,8 @@ struct QueueContent: View {
 
             if model.awaitingDecision.isEmpty {
                 CenteredNotice(
-                    title: "Nothing is waiting.",
-                    detail: """
-                    When a session finishes and goes quiet, it shows up here. \
-                    Nothing is sent unless you say so.
-                    """
+                    title: QueueLegacyWords.nothingWaiting,
+                    detail: QueueLegacyWords.nothingWaitingDetail
                 )
                 .frame(minHeight: 220)
             } else {
@@ -898,7 +895,7 @@ struct QueueRow: View {
             // keystroke would open. In this app Return is reserved for the
             // recovery surface -- see `UndoBar` -- and is bound to nothing
             // that moves a transcript.
-            Button("Look inside", action: onLookInside)
+            Button(QueueLegacyWords.lookInside, action: onLookInside)
                 .tcPrimaryAction()
                 .help("Opens the redacted preview before deciding.")
         }
@@ -1003,9 +1000,7 @@ struct UndoBar: View {
                 Spacer(minLength: 0)
             }
             if undo.offerUndo {
-                Text("""
-                Approved sessions will send automatically. You can undo until uploading starts.
-                """)
+                Text(QueueLegacyWords.undoWillSend)
                 .tcType(TC.Font_.footnoteText)
                 .foregroundStyle(TC.inkSecondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -1015,7 +1010,7 @@ struct UndoBar: View {
                     // The one Return binding in this app, and it is on the
                     // safe action: a keystroke made by a hand resting on the
                     // keyboard pulls a transcript BACK.
-                    Button("Undo", action: onUndo)
+                    Button(QueueLegacyWords.undo, action: onUndo)
                         .tcPrimaryAction()
                         .keyboardShortcut(.defaultAction)
                 }
@@ -1023,8 +1018,8 @@ struct UndoBar: View {
                     .tint(.primary)
                     .help(
                         undo.offerUndo
-                            ? "Close this notice. Approved sessions will still send automatically."
-                            : "Close this notice."
+                            ? QueueLegacyWords.closeNoticeStillSends
+                            : QueueLegacyWords.closeNotice
                     )
                 Spacer(minLength: 0)
             }
@@ -1036,9 +1031,7 @@ struct UndoBar: View {
     }
 
     private var approvalAge: String {
-        undo.heldSeconds >= AppModel.Undo.tickCeiling
-            ? "Approved \(AppModel.Undo.tickCeiling)s+ ago"
-            : "Approved \(undo.heldSeconds)s ago"
+        QueueLegacyWords.approvedAgo(undo.heldSeconds)
     }
 }
 
@@ -1070,7 +1063,7 @@ struct NotOfferedDisclosure: View {
                             color: TC.inkSecondary
                         )
                         .rotationEffect(.degrees(expanded ? 90 : 0))
-                        Text("Sessions no longer waiting (\(counts.values.reduce(0, +)))")
+                        Text(QueueLegacyWords.noLongerWaiting(counts.values.reduce(0, +)))
                             .font(TC.Font_.disclosure)
                             .foregroundStyle(TC.inkPrimary)
                     }
@@ -1086,10 +1079,7 @@ struct NotOfferedDisclosure: View {
                                 .font(TC.Font_.meta)
                                 .foregroundStyle(TC.inkSecondary)
                         }
-                        Text("""
-                        This covers sessions that reached the queue. Sessions that were \
-                        never queued at all are not counted here.
-                        """)
+                        Text(QueueLegacyWords.notOfferedScope)
                         .font(TC.Font_.footnote)
                         .foregroundStyle(TC.inkTertiary)
                         .padding(.top, TC.Space.xxs)
@@ -1330,5 +1320,71 @@ struct ArmingOfferCard: View {
             .tcCard()
             .accessibilityElement(children: .contain)
         }
+    }
+}
+
+extension ScrubbingCaveat {
+    /// The legacy queue row's marker; the glass surfaces read `status(redactionCount:)`.
+    static func tone(redactionCount: Int) -> TC.Tone {
+        redactionCount == 0 ? .attention : .neutral
+    }
+}
+
+extension PrivateInferenceIndicator {
+    /// The private-inference tone onto this shell's palette, for the legacy
+    /// queue and the menu bar until Phase 4 deletes both; the glass surfaces
+    /// read `status(_:)`.
+    ///
+    /// A separate bridge from the routing and witness ones for the reason
+    /// spelled out on `WitnessSection.tone`: the three ABI tone ranges
+    /// are disjoint so a cross-wired mapper is wrong for every value.
+    ///
+    /// Every arm answers a distinct `TC.Tone`, and each of those carries its
+    /// own glyph as well as its own colour -- so held, attention, refused
+    /// and anything a later daemon grows stay distinguishable from clear in
+    /// greyscale and to a colour-blind reader, which is the whole point.
+    static func palette(_ tone: PrivateInferenceTone) -> TC.Tone {
+        switch tone {
+        case .neutral: return .neutral
+        case .held: return .held
+        case .clear: return .clear
+        case .attention: return .attention
+        case .refused: return .refused
+        }
+    }
+}
+
+/// The queue's sentences the glass Traces tab draws too, moved here verbatim
+/// so the legacy queue and `TracesOffersBar` read one literal each. The
+/// legacy views go in Phase 4; this table outlives them.
+enum QueueLegacyWords {
+    static let nothingWaiting = "Nothing is waiting."
+    static let nothingWaitingDetail = """
+    When a session finishes and goes quiet, it shows up here. \
+    Nothing is sent unless you say so.
+    """
+    static let undoWillSend = """
+    Approved sessions will send automatically. You can undo until uploading starts.
+    """
+    static let closeNoticeStillSends = "Close this notice. Approved sessions will still send automatically."
+    static let closeNotice = "Close this notice."
+    static let notOfferedScope = """
+    This covers sessions that reached the queue. Sessions that were \
+    never queued at all are not counted here.
+    """
+    static let undo = "Undo"
+    static let lookInside = "Look inside"
+    static let agentSetup = "Agent setup"
+
+    /// Counts up from a real instant and stops at the ceiling: the deadline
+    /// is the daemon's next upload sweep, which nothing here can observe.
+    static func approvedAgo(_ seconds: Int) -> String {
+        seconds >= AppModel.Undo.tickCeiling
+            ? "Approved \(AppModel.Undo.tickCeiling)s+ ago"
+            : "Approved \(seconds)s ago"
+    }
+
+    static func noLongerWaiting(_ count: Int) -> String {
+        "Sessions no longer waiting (\(count))"
     }
 }

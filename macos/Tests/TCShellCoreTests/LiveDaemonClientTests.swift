@@ -127,6 +127,54 @@ final class LiveDaemonClientTests: XCTestCase {
         XCTAssertEqual(transport.calls.map(\.params), [#"{"entry_id":"e9"}"#])
     }
 
+    /// The Private AI switch (Z1.5) over `tc_call`: the read is
+    /// `get_settings`, the write is `set_settings` carrying the switch AND
+    /// the offer marker, so a contributor who found the switch is never put
+    /// the first-run question again. Nothing is confirmed here; the caller
+    /// confirms with the core's rule.
+    func testThePrivateAISwitchReadsAndWritesTheSettings() async throws {
+        let transport = ScriptedTransport { method, _ in
+            switch method {
+            case "get_settings":
+                return #"{"id":0,"result":{"private_inference":false,"private_inference_offer_seen":false,"private_inference_state":{"state":"off","port":null}}}"#
+            case "set_settings":
+                return #"{"id":0,"result":{"private_inference":true,"private_inference_offer_seen":true,"private_inference_state":{"state":"running","port":4100}}}"#
+            default: return nil
+            }
+        }
+        let client = LiveDaemonClient(transport: transport)
+        let read = try await client.privateAI()
+        XCTAssertEqual(read, DaemonData.PrivateAISwitch(
+            on: false, offerSeen: false, state: DaemonData.PrivateInferenceState(state: "off", port: nil)))
+        let written = try await client.setPrivateAI(on: true)
+        XCTAssertEqual(written.on, true)
+        XCTAssertEqual(written.offerSeen, true)
+        XCTAssertEqual(written.state?.state, "running")
+        XCTAssertEqual(transport.calls.map(\.method), ["get_settings", "set_settings"])
+        XCTAssertEqual(transport.calls.map(\.params), [
+            "{}",
+            #"{"private_inference":true,"private_inference_offer_seen":true}"#,
+        ])
+    }
+
+    /// A stopped daemon is unreachable for the switch too; a refusal keeps its label.
+    func testAPrivateAIRefusalKeepsItsLabel() async {
+        let refusing = ScriptedTransport { _, _ in #"{"id":0,"error":{"code":"bad_params","message":"settings-invalid-value"}}"# }
+        do {
+            _ = try await LiveDaemonClient(transport: refusing).setPrivateAI(on: true)
+            XCTFail("a refusal answered")
+        } catch {
+            XCTAssertEqual(error as? DaemonDataError, .daemon(code: "bad_params", message: "settings-invalid-value"))
+        }
+        let stopped = ScriptedTransport { _, _ in #"{"error":{"code":"unavailable","message":"daemon-stopped"}}"# }
+        do {
+            _ = try await LiveDaemonClient(transport: stopped).privateAI()
+            XCTFail("a stopped daemon answered")
+        } catch {
+            XCTAssertEqual(error as? DaemonDataError, .unreachable)
+        }
+    }
+
     func testProvisionalMethodsSendNothing() async {
         let transport = ScriptedTransport.sample(.normalDay)
         let client = LiveDaemonClient(transport: transport)
@@ -134,8 +182,6 @@ final class LiveDaemonClientTests: XCTestCase {
             ("inference_summary", { _ = try await client.inferenceSummary() }),
             ("inference_call_proof", { _ = try await client.inferenceCallProof(callId: 1) }),
             ("model_spend", { _ = try await client.modelSpend() }),
-            ("private_ai", { _ = try await client.privateAI() }),
-            ("set_private_ai", { _ = try await client.setPrivateAI(on: true) }),
             ("mission_catalogue", { _ = try await client.missionCatalogue() }),
             ("invite_lookup", { _ = try await client.lookupInvite(code: "c") }),
             ("passkey_state", { _ = try await client.passkeyState() }),

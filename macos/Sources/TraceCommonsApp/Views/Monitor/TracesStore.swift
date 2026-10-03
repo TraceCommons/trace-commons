@@ -44,7 +44,9 @@ final class TracesStore {
     /// being down.
     private(set) var writeErrors: [String: DaemonDataError] = [:]
 
-    let client: any DaemonDataClient
+    /// The app's live client (`AppModel.daemonData`), attached by the
+    /// window when the daemon starts; nil while it is not running.
+    private(set) var client: (any DaemonDataClient)?
     /// The last folder change whose result differed from what the
     /// confirmation promised, in the core's words
     /// (`tc_project_ignore_reconciled_text`).
@@ -72,16 +74,54 @@ final class TracesStore {
     /// The last contribution, until it is undone or another is made.
     private(set) var lastContributed: Contributed?
 
+    /// A folder's Submit all the core took, while its hold lets it be taken
+    /// back (`cancel` with the project id).
+    struct ContributedFolder: Equatable {
+        let projectId: String
+        let toast: SubmitToast
+    }
+
+    private(set) var lastContributedFolder: ContributedFolder?
+
     /// The sample set drawn, in a debug build over sample data; nil over
     /// the daemon. `sampleUnknown` is a `TRACE_COMMONS_SAMPLE` that named no
     /// set, so the fallback is never silent.
-    let sample: String?
-    let sampleUnknown: Bool
+    private(set) var sample: String?
+    private(set) var sampleUnknown: Bool
 
-    init(client: any DaemonDataClient, sample: String? = nil, sampleUnknown: Bool = false) {
+    init(client: (any DaemonDataClient)?, sample: String? = nil, sampleUnknown: Bool = false) {
         self.client = client
         self.sample = sample
         self.sampleUnknown = sampleUnknown
+    }
+
+    /// Follows a new client (or none). Nothing the old one reported is
+    /// drawn or acted on: the tree empties, the badge and routes read
+    /// unknown, and the tab is loading until the new client answers; a load
+    /// still in flight from the old one is dropped. (A failed read from the
+    /// same client still keeps the last tree.)
+    func attach(_ client: (any DaemonDataClient)?) {
+        self.client = client
+        generation += 1
+        phase = .loading
+        tree = TracesTree(tools: [], unplaced: [])
+        status = nil
+        destinations = nil
+        lastContributedFolder = nil
+        folderNotice = nil
+    }
+
+    /// Marks the data as a sample set in a debug build; nil over the daemon.
+    func markSample(_ sample: String?, unknown: Bool) {
+        self.sample = sample
+        sampleUnknown = unknown
+    }
+
+    /// The attached client, or the core-down error when there is none, so
+    /// every read and write without a daemon fails as an unreachable core.
+    func attached() throws -> any DaemonDataClient {
+        guard let client else { throw DaemonDataError.unreachable }
+        return client
     }
 
     // MARK: The core's words for a row
@@ -125,6 +165,17 @@ final class TracesStore {
     /// the daemon sent none (eligibility does not apply).
     static func eligibility(_ entry: DaemonData.QueueEntry) -> ContributionEligibility? {
         entry.eligibility.map { ContributionEligibility(state: $0, reason: entry.eligibilityReason) }
+    }
+
+    /// Secrets the scan found and left in what would be sent, in the core's
+    /// words (`tc_residual_secret_line_text`), as the queue card said them.
+    /// Counted by detection site, never by secret, and the sites are named.
+    /// Nil before the preview is in, and when nothing survived.
+    static func survivorLine(_ summary: DaemonData.PreviewSummary?) -> String? {
+        guard let redactions = summary?.redactions else { return nil }
+        let total = RedactionLabels.survivorTotal(redactions)
+        guard total > 0 else { return nil }
+        return TCCoreCopy.residualSecretLine(count: total, sites: RedactionLabels.survivors(redactions).map(\.site))
     }
 
     /// The core's sentence for a session that cannot be contributed as it
@@ -182,9 +233,11 @@ final class TracesStore {
 
     /// Loads, then follows the event stream for as long as the calling task
     /// runs. Call it from a view's `.task`: when the view goes, the task is
-    /// cancelled and the stream with it.
+    /// cancelled and the stream with it. With no client the load fails as
+    /// an unreachable core, and there is no stream to follow.
     func run() async {
         await load()
+        guard let client else { return }
         for await event in client.events() {
             if Task.isCancelled { return }
             switch event {
@@ -213,6 +266,7 @@ final class TracesStore {
         generation += 1
         let mine = generation
         do {
+            let client = try attached()
             async let entries = client.listPending(projectId: nil)
             async let projects = client.listProjects()
             // Settings only decide the tool switches. Unreadable settings
@@ -277,6 +331,7 @@ final class TracesStore {
         defer { acting.remove(entryId) }
         actionError = nil
         do {
+            let client = try attached()
             switch action {
             case .contribute:
                 // The core's answer is kept, not thrown away: its toast, and
@@ -284,6 +339,8 @@ final class TracesStore {
                 // `notApproved` and is said as a refusal, never as success.
                 let response = try await client.approve(entryId: entryId)
                 lastContributed = Contributed(entryId: entryId, toast: response.toast)
+                // One undo slot: a single-session contribute ends the folder's undo.
+                lastContributedFolder = nil
                 // A newer decision ends the older Keep's undo.
                 lastKept = nil
             case .undoContribute:
@@ -317,6 +374,9 @@ final class TracesStore {
     struct Safeguard: Equatable {
         let title: String
         let body: String?
+        /// The core's severity for a label line; budget, witness and
+        /// gate-held lines are `.waiting`.
+        let severity: HealthCopy.Severity
     }
 
     /// What the queue's safeguards say right now: a spent daily budget, a
@@ -326,33 +386,36 @@ final class TracesStore {
     /// daemon's one health slot can hide the others.
     var safeguards: [Safeguard] { Self.safeguards(status) }
 
-    static func safeguards(_ status: DaemonData.Status?) -> [Safeguard] {
+    /// `maxQueueEntries` is the daemon's configured queue limit, which only
+    /// the queue-full line counts from (`HealthCopy.core`).
+    static func safeguards(_ status: DaemonData.Status?, maxQueueEntries: Int? = nil) -> [Safeguard] {
         guard let status else { return [] }
         var out: [Safeguard] = []
         var said: Set<String> = []
         if let budget = status.dailyBudget, budget.blocked == true {
             out.append(Safeguard(
                 title: DailyBudgetCopy.title,
-                body: DailyBudgetCopy.detail(blockedEntries: budget.blockedEntries ?? 0, resetsAt: budget.resetsAt)))
+                body: DailyBudgetCopy.detail(blockedEntries: budget.blockedEntries ?? 0, resetsAt: budget.resetsAt),
+                severity: .waiting))
             said.insert("daily-cap-reached")
         }
         if let capacity = status.witnessCapacity, (capacity.waitingSessions ?? 0) > 0,
             let wire = Self.wire(capacity),
             let notice = TCConsentCopy.witnessCapacityNoticeJSON(forCapacity: wire).flatMap(WitnessCapacityNotice.decode(fromJSON:))
         {
-            out.append(Safeguard(title: notice.title, body: notice.body))
+            out.append(Safeguard(title: notice.title, body: notice.body, severity: .waiting))
             said.insert("witness-saturated")
         }
         if let held = status.automaticContributionHeld, (held.heldSessions ?? 0) > 0,
             let wire = Self.wire(held),
             let notice = TCConsentCopy.gateHeldNoticeJSON(forHeld: wire).flatMap(GateHeldNotice.decode(fromJSON:))
         {
-            out.append(Safeguard(title: notice.title, body: notice.body))
+            out.append(Safeguard(title: notice.title, body: notice.body, severity: .waiting))
             said.insert(GateHeld.label)
         }
         if let label = status.health?.lastErrorLabel, !said.contains(label) {
-            let health = HealthCopy.forLabel(label)
-            out.insert(Safeguard(title: health.title, body: health.detail), at: 0)
+            let health = HealthCopy.core(label: label, maxQueueEntries: maxQueueEntries)
+            out.insert(Safeguard(title: health.title, body: health.detail, severity: health.severity), at: 0)
         }
         return out
     }
@@ -386,7 +449,7 @@ final class TracesStore {
         defer { writing.remove(kind.rawValue) }
         writeErrors[kind.rawValue] = nil
         do {
-            _ = try await client.setSource(kind, choice)
+            _ = try await attached().setSource(kind, choice)
         } catch {
             refused(kind.rawValue, error, method: "set_settings")
             return
@@ -405,7 +468,7 @@ final class TracesStore {
         folderNotice = nil
         writeErrors[folder.id] = nil
         do {
-            let result = try await client.setProjectMode(projectId: folder.id, mode: mode, includeBacklog: nil)
+            let result = try await attached().setProjectMode(projectId: folder.id, mode: mode, includeBacklog: nil)
             if mode == .ignore {
                 folderNotice = TCCoreCopy.projectIgnoreReconciled(
                     project: folder.label, promised: promised, purged: result.purged ?? promised)
@@ -414,6 +477,65 @@ final class TracesStore {
             // The picker redraws from the core's answer, so a refused write
             // shows the folder as it still is; the error is kept beside it.
             refused(folder.id, error, method: "set_project_mode")
+            return
+        }
+        await load()
+    }
+
+    // MARK: Submit all
+
+    /// What the folder's group control offers, from the daemon's counts on
+    /// its `list_projects` row and the shared table (`groupSubmit`); never a
+    /// count compared to zero here.
+    func groupOffer(_ folder: TracesTree.FolderNode) -> GroupSubmitOffer {
+        EligibilitySurface.groupSubmit(
+            pendingCount: folder.pendingCount,
+            contributableCount: folder.contributableCount,
+            fallbackPending: folder.sessions.count,
+            calls: Self.eligibilityCalls)
+    }
+
+    /// Whether Submit all may be drawn at all, besides the table's answer:
+    /// the core is attached, and the folder is not one that is never sent.
+    func mayContributeFolder(_ folder: TracesTree.FolderNode) -> Bool {
+        client != nil && folder.mode != .ignore
+    }
+
+    /// Contribute for a whole folder, optionally with one verdict for every
+    /// session ("Submit all as"). The core's toast is kept for its Undo, and
+    /// what it left out as ineligible is said in the core's words.
+    func contributeFolder(_ folder: TracesTree.FolderNode, verdict: ContributorVerdict?) async {
+        guard !writing.contains(folder.id), mayContributeFolder(folder), let client else { return }
+        writing.insert(folder.id)
+        defer { writing.remove(folder.id) }
+        folderNotice = nil
+        writeErrors[folder.id] = nil
+        do {
+            let response = try await client.approveFolder(projectId: folder.id, verdict: verdict)
+            lastContributedFolder = ContributedFolder(projectId: folder.id, toast: response.toast)
+            lastContributed = nil
+            folderNotice = Self.eligibilityCalls
+                .withheldLine(Int64(clamping: response.excludedIneligible ?? 0))
+                .flatMap { $0.isEmpty ? nil : $0 }
+        } catch {
+            refused(folder.id, error, method: "approve")
+            return
+        }
+        await load()
+    }
+
+    /// Takes a folder's Submit all back inside its hold. A refusal is kept
+    /// beside the folder and the contribution stands.
+    func undoFolder(_ projectId: String) async {
+        guard !writing.contains(projectId), let client else { return }
+        writing.insert(projectId)
+        defer { writing.remove(projectId) }
+        writeErrors[projectId] = nil
+        do {
+            _ = try await client.cancelFolder(projectId: projectId)
+            lastContributedFolder = nil
+        } catch {
+            refused(projectId, error, method: "cancel")
             return
         }
         await load()

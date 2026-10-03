@@ -1,3 +1,5 @@
+import TCBridge
+import TCShellCore
 import XCTest
 
 @testable import TraceCommonsApp
@@ -32,7 +34,7 @@ final class QuarantineExplanationTests: XCTestCase {
         let held = (0..<210).map { _ in
             record(["Quarantined for privacy review; credit is pending review."])
         }
-        let shown = HistoryView.contributorFacingExplanations(in: held)
+        let shown = HeldExplanations.lines(in: held.map(\.explanations))
         XCTAssertEqual(
             shown, ["Quarantined for privacy review; credit is pending review."],
             "210 records saying the same thing must print that thing once")
@@ -42,12 +44,12 @@ final class QuarantineExplanationTests: XCTestCase {
     /// It is true and unreadable, and it was printed above the sentence that
     /// says what happened.
     func testOpaqueDigestLinesAreNotShown() {
-        let shown = HistoryView.contributorFacingExplanations(in: [
+        let shown = HeldExplanations.lines(in: [
             record([
                 "Quarantined for privacy review; credit is pending review.",
                 "Attributed to tenant tenant_sha256:8719ab8d740b9882d27c80f473bfe5b1",
             ])
-        ])
+        ].map(\.explanations))
         XCTAssertEqual(shown, ["Quarantined for privacy review; credit is pending review."])
     }
 
@@ -55,11 +57,11 @@ final class QuarantineExplanationTests: XCTestCase {
     /// and digests, not for brevity. Order is first-seen so the earliest
     /// reason reads first.
     func testDistinctReasonsAreAllKeptInFirstSeenOrder() {
-        let shown = HistoryView.contributorFacingExplanations(in: [
+        let shown = HeldExplanations.lines(in: [
             record(["Quarantined for privacy review; credit is pending review."]),
             record(["Held pending an automated privacy backstop verdict; not yet in the corpus."]),
             record(["Quarantined for privacy review; credit is pending review."]),
-        ])
+        ].map(\.explanations))
         XCTAssertEqual(
             shown,
             [
@@ -71,9 +73,9 @@ final class QuarantineExplanationTests: XCTestCase {
     /// A record carrying nothing but a digest contributes nothing, rather
     /// than contributing an empty line.
     func testARecordOfOnlyDigestsContributesNothing() {
-        let shown = HistoryView.contributorFacingExplanations(in: [
+        let shown = HeldExplanations.lines(in: [
             record(["Attributed to tenant tenant_sha256:8719ab8d740b9882d27c80f473bfe5b1"])
-        ])
+        ].map(\.explanations))
         XCTAssertTrue(shown.isEmpty)
     }
 
@@ -92,6 +94,20 @@ final class QuarantineExplanationTests: XCTestCase {
             copy.contains("agent"), "held copy must say what actually inspects a held trace")
         // The denial this section exists to carry, and no promised wait.
         XCTAssertTrue(copy.contains("have not been rejected"))
+        for forbidden in ["48 hours", "business days", "within a week", "usually takes"] {
+            XCTAssertFalse(copy.contains(forbidden), "no turnaround time may be stated")
+        }
+    }
+
+    /// The same rule on the core's sentence, which glass History draws.
+    func testCoreHeldCopyDoesNotClaimAHumanReader() throws {
+        let words = try XCTUnwrap(MonitorScreensCopy.decode(fromJSON: TCCoreCopy.monitorScreensCopyJSON()))
+        let copy = words.heldExplanation.lowercased()
+        for forbidden in ["a person at", "someone at", "our team", "a human", "staff", "the reviewer"] {
+            XCTAssertFalse(copy.contains(forbidden), "held copy must not imply a human reads these: \(forbidden)")
+        }
+        XCTAssertTrue(copy.contains("agent"), "held copy must say what actually inspects a held trace")
+        XCTAssertTrue(copy.contains("not been rejected"))
         for forbidden in ["48 hours", "business days", "within a week", "usually takes"] {
             XCTAssertFalse(copy.contains(forbidden), "no turnaround time may be stated")
         }

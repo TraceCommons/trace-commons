@@ -1,4 +1,5 @@
 import SwiftUI
+import TCDesign
 
 /// Native transport and browser presentation only; Rust owns lifecycle and cadence.
 struct NearAccountConnectView: View {
@@ -14,22 +15,40 @@ struct NearAccountConnectView: View {
     var onEnrolled: () -> Void
     private var busy: Bool { pending || flow?.busy == true }
     var body: some View {
-        Group {
+        VStack(alignment: .leading, spacing: 0) {
             if let copy = model.witnessCopy?.wallet, let flow, flow.state != "Unsupported" {
-                VStack(alignment: .leading, spacing: TC.Space.m) {
-                    Text(copy.heading).font(TC.Font_.cardTitle)
-                    Text(copy.disclosure).font(.callout).foregroundStyle(.secondary)
-                    TextField(copy.commons, text: $commons).textFieldStyle(.roundedBorder).disabled(busy || !flow.canEdit)
-                    Button(copy.check) { run("check") }.disabled(pending || !flow.canCheck)
-                    if flow.canStart {
-                        TextField(copy.account, text: $account).textFieldStyle(.roundedBorder).disabled(busy)
-                        Button(copy.start) { run("start") }.disabled(pending)
+                GlassCard {
+                    VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
+                        Text(copy.heading)
+                            .glassType(GlassTokens.TypeScale.label.weight(.semibold))
+                            .foregroundStyle(GlassColor.textPrimary)
+                        Text(copy.disclosure)
+                            .glassType(GlassTokens.TypeScale.body)
+                            .foregroundStyle(GlassColor.textSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        GlassTextField(copy.commons, text: $commons).disabled(busy || !flow.canEdit)
+                        Button(copy.check) { run("check") }
+                            .buttonStyle(GlassButtonStyle(.glass))
+                            .disabled(pending || !flow.canCheck)
+                        if flow.canStart {
+                            GlassTextField(copy.account, text: $account).disabled(busy)
+                            Button(copy.start) { run("start") }
+                                .buttonStyle(GlassButtonStyle(.primary))
+                                .disabled(pending)
+                        }
+                        if busy { ProgressView().controlSize(.small) }
+                        if transportFailed { NativeFlowNotice(message: copy.failed, glyph: copy.refusedGlyph, tone: copy.refusedTone) }
+                        else if flow.tone == "refused" { NativeFlowNotice(message: flow.message, glyph: flow.glyph, tone: flow.tone) }
+                        else if !flow.message.isEmpty {
+                            Text(flow.message)
+                                .glassType(GlassTokens.TypeScale.body)
+                                .foregroundStyle(GlassColor.textSecondary)
+                        }
+                        if flow.canCancel {
+                            Button(copy.cancel, role: .cancel) { run("cancel") }
+                                .buttonStyle(GlassButtonStyle(.glass))
+                        }
                     }
-                    if busy { ProgressView().controlSize(.small) }
-                    if transportFailed { NativeFlowNotice(message: copy.failed, glyph: copy.refusedGlyph, tone: copy.refusedTone) }
-                    else if flow.tone == "refused" { NativeFlowNotice(message: flow.message, glyph: flow.glyph, tone: flow.tone) }
-                    else if !flow.message.isEmpty { Text(flow.message).font(.callout).foregroundStyle(.secondary) }
-                    if flow.canCancel { Button(copy.cancel, role: .cancel) { run("cancel") } }
                 }
             }
         }

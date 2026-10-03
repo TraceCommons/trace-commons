@@ -10,10 +10,38 @@ import TCShellCore
 /// An unreadable ledger is not an empty one: it draws a dash and the
 /// reason's fixed label, never an empty table. Priced is not billed: no
 /// figure here is money spent. Only `verified` is drawn as proof.
+///
+/// The ledger needs the daemon, so the tab reads its startup first, as the
+/// legacy destination does (`PrivateInferenceActivationView`): the roots
+/// screen when folders are owed, a spinner while starting, the core's down
+/// title over the refusal's sentence.
 struct InferenceTabView: View {
     let store: InferenceStore
+    @EnvironmentObject private var model: AppModel
 
     var body: some View {
+        // The roots screen scrolls itself, so the switch sits outside the
+        // ledger's scroll; the refresh sits on the stack, which is always
+        // drawn.
+        VStack(alignment: .leading, spacing: 0) {
+            switch model.startup {
+            case .needsRoots:
+                OnboardingRootsView(configDirectory: model.configDirectory, onStarted: {})
+            case .starting:
+                SettingsAwaiting().frame(maxWidth: .infinity)
+            case .refused(let sentence):
+                GlassHealthBanner(banner: .init(
+                    title: TracesHealth.coreDownLine?.title ?? TracesHealth.unknownWord ?? "",
+                    detail: sentence, tone: .outside))
+            case .running:
+                ledger
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .onAppear { model.refreshAll() }
+    }
+
+    private var ledger: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
                 // The stack-wide rule (ScreenState): a core that is down or a
@@ -253,12 +281,14 @@ struct InferenceTabView: View {
     }
 }
 
-/// The inspector on the Inference tab: the tools that can send model calls
-/// here, each with the core's sentence for its state.
+/// The inspector on the Inference tab: sign-in, the tools (each with its
+/// connect action and the core's sentence for its state) and the Private AI
+/// switch. Every one of them needs the daemon, so they are drawn only while
+/// it runs; the tab says why when it does not.
 struct PrivateAIInspectorView: View {
     let store: InferenceStore
     let destinationLabel: String?
-    let sentence: (HarnessRow) -> String?
+    @EnvironmentObject private var model: AppModel
 
     var body: some View {
         ScrollView {
@@ -266,34 +296,8 @@ struct PrivateAIInspectorView: View {
                 Text(destinationLabel ?? MonitorWindowView.Tab.inference.title)
                     .glassType(GlassTokens.TypeScale.title)
                     .foregroundStyle(GlassColor.textPrimary)
-                if let failure = store.failures["harness_list"] {
-                    GlassNotice(tone: .outside, title: MonitorWords.table?.line(for: failure) ?? "") { EmptyView() }
-                }
-                if let harnesses = store.harnesses {
-                    ForEach(harnesses.harnesses) { row in
-                        GlassCard {
-                            HStack(alignment: .top, spacing: GlassTokens.Space.s4) {
-                                if let tool = FlowMapScene.glassTool(harness: row.id) {
-                                    GlassToolTile(.tool(tool))
-                                }
-                                VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
-                                    Text(row.name)
-                                        .glassType(GlassTokens.TypeScale.bodyStrong)
-                                        .foregroundStyle(GlassColor.textPrimary)
-                                    if let line = sentence(row) {
-                                        Text(line)
-                                            .glassType(GlassTokens.TypeScale.caption)
-                                            .foregroundStyle(GlassColor.textSecondary)
-                                            .fixedSize(horizontal: false, vertical: true)
-                                    }
-                                }
-                                Spacer(minLength: 0)
-                            }
-                        }
-                        .accessibilityElement(children: .combine)
-                    }
-                } else if store.failures["harness_list"] == nil {
-                    ProgressView().controlSize(.small).frame(maxWidth: .infinity)
+                if case .running = model.startup {
+                    InferenceAccountSection(store: store)
                 }
             }
         }

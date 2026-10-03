@@ -282,16 +282,10 @@ struct FlowMapScene: Equatable {
         }
     }
 
-    /// IronWire's harness ids to the tools that have artwork.
+    /// IronWire's harness ids to the tools that have artwork. The table is
+    /// `HarnessToolArt`, beside the tools list the release window draws.
     static func glassTool(harness id: String) -> GlassTool? {
-        switch id {
-        case "claude", "claude-code": .claudeCode
-        case "codex": .codex
-        case "gemini", "gemini-cli": .geminiCLI
-        case "cline": .cline
-        case "opencode": .openCode
-        default: nil
-        }
+        HarnessToolArt.tool(harness: id)
     }
 
     // MARK: Helpers

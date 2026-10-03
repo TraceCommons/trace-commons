@@ -93,8 +93,9 @@ public protocol DaemonDataClient: Sendable {
     /// of the rest -- `skipped[]` per entry, `excludedHeld` (held for a
     /// person's review) and `excludedIneligible` (cannot be contributed),
     /// neither of which is part of `skipped`. An id the daemon does not
-    /// know is refused with `project-id-unrecognized`.
-    func approveFolder(projectId: String) async throws -> ApproveResponse
+    /// know is refused with `project-id-unrecognized`. A `verdict` is the
+    /// opt-in "Submit all as" answer, sent as `outcome`; `nil` sends none.
+    func approveFolder(projectId: String, verdict: ContributorVerdict?) async throws -> ApproveResponse
     /// `cancel` for one entry: Undo inside the hold window (R7). Only an
     /// entry still `approved` can be cancelled, which the hold guarantees
     /// until it ends; any other is refused with `not-cancelable`. The entry
@@ -148,6 +149,13 @@ public protocol DaemonDataClient: Sendable {
 
     /// `get_settings`.
     func settings() async throws -> DaemonData.Settings
+    /// Z1.5, the Private AI switch: `get_settings`' `private_inference`,
+    /// its offer marker and the listener's state.
+    func privateAI() async throws -> DaemonData.PrivateAISwitch
+    /// Z1.5, `set_settings` with `private_inference` and the offer marker.
+    /// Answers what the daemon echoed; nothing is confirmed here, the caller
+    /// confirms with the core's rule (`TCPrivateInference.writeConfirmed`).
+    func setPrivateAI(on: Bool) async throws -> DaemonData.PrivateAISwitch
     /// `set_settings` with `scrub_check`.
     func setScrubCheck(_ mode: DaemonData.ScrubCheckMode) async throws -> DaemonData.Settings
     /// `set_settings` with `local_notifications`.
@@ -180,10 +188,6 @@ public protocol DaemonDataClient: Sendable {
     func inferenceCallProof(callId: Int64) async throws -> DaemonData.InferenceProofDetail
     /// Z1.3, billed spend per model. PROVISIONAL.
     func modelSpend() async throws -> DaemonData.ModelSpend
-    /// Z1.5, the Private AI switch's state and disclosure. PROVISIONAL.
-    func privateAI() async throws -> DaemonData.PrivateAISwitch
-    /// Z1.5, turning Private AI on or off. PROVISIONAL.
-    func setPrivateAI(on: Bool) async throws -> DaemonData.PrivateAISwitch
     /// Z2.2, the mission catalogue. PROVISIONAL.
     func missionCatalogue() async throws -> DaemonData.MissionCatalogue
     /// Z3.1, invite lookup. PROVISIONAL.
@@ -209,6 +213,11 @@ extension DaemonDataClient {
     /// `approve` for one entry with no verdict.
     public func approve(entryId: String) async throws -> ApproveResponse {
         try await approve(entryId: entryId, verdict: nil, correction: nil)
+    }
+
+    /// `approveFolder` with no verdict.
+    public func approveFolder(projectId: String) async throws -> ApproveResponse {
+        try await approveFolder(projectId: projectId, verdict: nil)
     }
 }
 

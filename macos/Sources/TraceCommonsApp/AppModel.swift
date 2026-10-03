@@ -108,6 +108,12 @@ final class AppModel: ObservableObject {
     /// -- a raw stat and the cap -- never a would-send estimate.
     @Published private(set) var tooLarge: [String: PreviewTooLarge] = [:]
     @Published private(set) var history: [HistoryRecord] = []
+    /// Whether the daemon has answered `list_pending` (or sent a snapshot)
+    /// and `list_history`. Until then `pending` and `history` are
+    /// placeholders, and an empty one is not "none"; a failed read leaves
+    /// them false.
+    @Published private(set) var queueAnswered = false
+    @Published private(set) var historyAnswered = false
     @Published private(set) var rollup: HistoryRollup?
     @Published private(set) var projects: [ProjectRow] = []
     /// The one project the daemon suggests arming, or nil. Refreshed
@@ -945,14 +951,14 @@ final class AppModel: ObservableObject {
         // And the held-folder notice, which names the folders and says why --
         // again only when it is going to be drawn.
         if label == GateHeld.label && gateHeldNotice != nil { return nil }
-        return HealthCopy.forLabel(label)
+        return HealthCopy.core(label: label, maxQueueEntries: daemonSettings?.maxQueueEntries)
     }
 
     /// The notice for armed folders the automatic-contribution gate is
     /// holding, in the Rust's words, when there are any. Independent of
     /// `health` for the reason `witnessCapacityHealth` is. Nil when nothing
     /// is held or the notice cannot be read; the label, if it holds the
-    /// slot, then falls back to `forLabel`'s on-hold line.
+    /// slot, then falls back to the core's on-hold line.
     var gateHeldNotice: GateHeldNotice? {
         guard status.gateHeld.held else { return nil }
         return TCConsentCopy.gateHeldNoticeJSON(forHeld: status.gateHeld.json)
@@ -1258,6 +1264,7 @@ final class AppModel: ObservableObject {
     func refreshHistory() {
         perform("list_history", work: { try $0.listHistory() }) {
             self.publishIfChanged(\.history, $0)
+            self.publishIfChanged(\.historyAnswered, true)
         }
         perform("history_rollup", work: { try $0.historyRollup() }) {
             self.publishIfChanged(\.rollup, $0)
@@ -1928,6 +1935,7 @@ final class AppModel: ObservableObject {
     func applyPendingUpdate(_ entries: [QueueEntry]) {
         let previousIDs = Set(pending.map(\.entryID))
         publishIfChanged(\.pending, entries)
+        publishIfChanged(\.queueAnswered, true)
         let currentIDs = Set(entries.map(\.entryID))
         let vanished = previousIDs.subtracting(currentIDs)
         if !vanished.isEmpty {
@@ -2433,6 +2441,11 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Reads a session's detail. The detail already held stays until the
+    /// daemon answers: replaced when it does, kept beside the error when it
+    /// fails, so a reload (one runs on every app switch) never unmounts the
+    /// public-run editor drawn from it, or the draft typed there. An account
+    /// change still clears it (`clearAccountOwnedContent`).
     func loadSessionDetail(_ record: HistoryRecord) {
         guard let client else { return }
         let id = record.submissionID
@@ -2441,7 +2454,6 @@ final class AppModel: ObservableObject {
         sessionDetailRequestSequence &+= 1
         let requestSequence = sessionDetailRequestSequence
         loadingSessionDetails.insert(id)
-        sessionDetails[id] = nil
         sessionDetailErrors[id] = nil
         Task.detached(priority: .userInitiated) {
             let result = Result { try client.sessionDetail(submissionID: id) }
@@ -2453,7 +2465,6 @@ final class AppModel: ObservableObject {
                     self.reconcileAccountOwnedContent(scope: detail.ownerScopeSHA256)
                     self.sessionDetails[id] = detail
                 case .failure(let error):
-                    self.sessionDetails[id] = nil
                     let label = (error as? DaemonClient.Failure)?.message ?? ""
                     if label == "account-session-required"
                         || label == "session-detail-not-found"

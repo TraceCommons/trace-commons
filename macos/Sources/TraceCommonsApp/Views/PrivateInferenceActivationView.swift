@@ -16,9 +16,8 @@ struct PrivateInferenceActivationView: View {
         case .starting, .refused:
             DaemonStartupNotice(startup: model.startup)
         case .needsRoots:
-            ScrollView {
-                OnboardingRootsView(configDirectory: model.configDirectory, onStarted: {})
-            }
+            // Scrolls inside the view itself; a second ScrollView here nests.
+            OnboardingRootsView(configDirectory: model.configDirectory, onStarted: {})
         case .running:
             PrivateInferenceView()
         }

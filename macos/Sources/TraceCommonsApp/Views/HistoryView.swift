@@ -276,16 +276,7 @@ struct HistoryView: View {
     /// API surface other consumers read, and tenant attribution is real
     /// information there. It is only this screen that has no use for it.
     static func contributorFacingExplanations(in records: [HistoryRecord]) -> [String] {
-        var seen = Set<String>()
-        var out: [String] = []
-        for record in records {
-            for line in record.explanations where !line.contains("sha256:") {
-                if seen.insert(line).inserted {
-                    out.append(line)
-                }
-            }
-        }
-        return out
+        HeldExplanations.lines(in: records.map(\.explanations))
     }
 
     private func quarantine(_ rollup: HistoryRollup) -> some View {
@@ -295,7 +286,7 @@ struct HistoryView: View {
                 Text(Self.heldReviewAssurance)
                 .fontWeight(.semibold)
                 // Never state a turnaround time that cannot be honoured.
-                Text("Typical wait: we don't have a reliable number yet.")
+                Text(HistoryLegacyWords.typicalWait)
                     .foregroundStyle(.secondary)
 
                 // Rendered verbatim: the server's own prose beats a status
@@ -345,7 +336,7 @@ struct HistoryView: View {
         let problems = WithdrawalCopyCheck.failures()
         if !problems.isEmpty {
             VStack(alignment: .leading, spacing: TC.Space.xs) {
-                Text("Do not trust the withdrawal wording on this screen.")
+                Text(HistoryLegacyWords.withdrawalWordingDefect)
                     .font(TC.Font_.cardTitle)
                 ForEach(problems, id: \.self) { problem in
                     Text(problem).font(TC.Font_.footnote)
@@ -799,5 +790,32 @@ private struct CommunitySection: View {
 
     private static func day(_ date: Date) -> String {
         date.formatted(.dateTime.month(.abbreviated).day().year())
+    }
+}
+
+/// History's sentences the glass History draws too, moved here verbatim so
+/// the legacy screen and the glass page read one literal each. The legacy
+/// views go in Phase 4; this table outlives them.
+enum HistoryLegacyWords {
+    static let withdrawalWordingDefect = "Do not trust the withdrawal wording on this screen."
+    static let typicalWait = "Typical wait: we don't have a reliable number yet."
+}
+
+/// The server's explanation lines across every held record, distinct, in
+/// first-seen order, and without the lines that carry an opaque digest
+/// (`HistoryView.contributorFacingExplanations` says why). Outside the
+/// debug-only Monitor files because the legacy screen reads it too.
+enum HeldExplanations {
+    static func lines(in explanations: [[String]]) -> [String] {
+        var seen = Set<String>()
+        var out: [String] = []
+        for record in explanations {
+            for line in record where !line.contains("sha256:") {
+                if seen.insert(line).inserted {
+                    out.append(line)
+                }
+            }
+        }
+        return out
     }
 }

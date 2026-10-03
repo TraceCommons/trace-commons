@@ -45,17 +45,12 @@ enum DebugScreenshot {
                 to: directory + "/macos-shell-consent-scopes.png",
                 size: CGSize(width: 660, height: 760)
             )
-            // 900 wide, not the 660 the other onboarding screens use. The
-            // welcome hero picks its type size from a `ViewThatFits` ladder,
-            // and only the top rung is wide enough to keep the globe beside
-            // the headline. At 660 the ladder correctly drops the globe --
-            // correct in the app, misleading in a review artifact, because
-            // the shipping window opens at 940 and always gets the globe.
-            // Capture the screen a contributor actually sees.
+            // 660 wide like the other onboarding screens: the glass layout
+            // has no globe ladder, so one width shows the screen as shipped.
             render(
                 OnboardingWelcomeContent(onGetStarted: {}, onWhatGetsRemoved: {}),
                 to: directory + "/macos-shell-onboarding-welcome.png",
-                size: CGSize(width: 900, height: 560)
+                size: CGSize(width: 660, height: 560)
             )
             render(
                 OnboardingProjectsContent(onContinue: {}).environmentObject(model),
@@ -92,10 +87,12 @@ enum DebugScreenshot {
             // are small secondary text in two columns, which is exactly the
             // combination that fails contrast or collapses at width without
             // anyone noticing from a green build.
+            // The log is drawn alone, so it is never the part of a long
+            // stack of sections that falls off the bottom of the image.
             render(
-                SettingsContent().environmentObject(model),
+                GlassSettingsContent(section: .changes).environmentObject(model),
                 to: directory + "/macos-shell-settings.png",
-                size: CGSize(width: 860, height: 1200)
+                size: CGSize(width: 860, height: 620)
             )
             render(
                 WithdrawalConfirmationCapture().environmentObject(model),

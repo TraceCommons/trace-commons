@@ -5,6 +5,15 @@ import XCTest
 /// R12 of #1173: the first-run pane's step progress follows the existing
 /// onboarding sequence, and shows only steps the person will take.
 final class FirstRunProgressTests: XCTestCase {
+    /// On a fresh install the folders come before Join, because the daemon
+    /// cannot start without them and Join needs the daemon (D-3). The
+    /// progress bar shows the real order, not the concept's.
+    func test_foldersPrecedeJoinOnAFreshInstall() throws {
+        let progress = try XCTUnwrap(FirstRunProgress(step: .roots, folders: true, scan: false))
+        XCTAssertEqual(progress.labels, [FirstRunWords.folders, FirstRunWords.join, FirstRunWords.uses, FirstRunWords.projects])
+        XCTAssertEqual(progress.current, 0)
+    }
+
     /// Welcome comes before the steps and Done after them: no progress.
     func test_welcomeAndDoneShowNoProgress() {
         XCTAssertNil(FirstRunProgress(step: .welcome, folders: true, scan: true))

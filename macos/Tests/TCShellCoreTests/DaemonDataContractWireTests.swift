@@ -359,6 +359,20 @@ final class DaemonDataContractWireTests: XCTestCase {
         XCTAssertEqual(response.excludedIneligible, 1)
     }
 
+    /// A folder approve carries the verdict only when one was chosen.
+    func testAFolderApproveSendsTheVerdictOnlyWhenChosen() async throws {
+        let transport = FakeTransport { _, _ in
+            #"{"id":0,"result":{"approved":2,"hold_secs":30,"hold_until":null,"flagged":0,"redactions":{},"skipped":[],"excluded_held":0,"excluded_ineligible":1}}"#
+        }
+        let client = LiveDaemonClient(transport: transport)
+        _ = try await client.approveFolder(projectId: "proj_1", verdict: nil)
+        _ = try await client.approveFolder(projectId: "proj_1", verdict: .partly)
+        XCTAssertEqual(transport.calls.map(\.params), [
+            #"{"project_id":"proj_1"}"#,
+            #"{"outcome":"partly","project_id":"proj_1"}"#,
+        ])
+    }
+
     func testSampleFolderApproveLeavesHeldSessionsOut() async throws {
         let client = SampleDaemonClient(.heldSessions)
         let pending = try await client.listPending(projectId: nil)

@@ -50,32 +50,44 @@ struct MonitorWindowView: View {
     @SceneStorage("monitor.selectedSession") private var selectedSession = ""
     /// Home's page: the overview or History, restored per window.
     @SceneStorage("monitor.homePage") private var homePage: HomeTabView.Page = .overview
+    /// The selected History row's submission id; empty for none.
+    @SceneStorage("monitor.selectedHistory") private var selectedHistory = ""
 
-    /// The screens' data (C1). Sample data in this debug window until K1
-    /// moves the screens to the live client: `TRACE_COMMONS_SAMPLE` names
-    /// the set (`normalDay` by default).
-    @State private var traces = MonitorWindowView.tracesStore()
+    /// The screens' data, read through the app's live client
+    /// (`AppModel.daemonData`), which the body attaches whenever the daemon
+    /// starts or restarts. Until then each store says the core is down.
+    @State private var traces = TracesStore(client: nil)
     /// The map's Private AI view and the Inference tab (R8).
-    @State private var inference = InferenceStore(client: MonitorWindowView.dataClient())
+    @State private var inference = InferenceStore(client: nil)
     /// Home and History (R9).
-    @State private var home = HomeStore(client: MonitorWindowView.dataClient())
+    @State private var home = HomeStore(client: nil)
 
-    /// The Traces store over the sample set `TRACE_COMMONS_SAMPLE` names. A
-    /// name that is not a set falls back to `normalDay`, and says so: the tab
-    /// marks the data as sample, and an unknown name both in the marker and
-    /// in the log.
-    static func tracesStore() -> TracesStore {
+    /// Sample data, debug builds only, when `TRACE_COMMONS_SAMPLE` names a
+    /// set; nil otherwise, and then the live client is attached below. A
+    /// name that is not a set falls back to `normalDay`, and says so in the
+    /// log and in the Traces tab's sample marker.
+    static func sampleClient() -> (any DaemonDataClient)? {
+        #if DEBUG
         let choice = sampleChoice(ProcessInfo.processInfo.environment["TRACE_COMMONS_SAMPLE"])
-        if choice.unknown {
-            NSLog("TRACE_COMMONS_SAMPLE unrecognised; fallback %@", choice.set.rawValue)
-        }
-        return TracesStore(
-            client: DaemonDataWiring.sample(choice.set), sample: choice.set.rawValue, sampleUnknown: choice.unknown)
+        guard ProcessInfo.processInfo.environment["TRACE_COMMONS_SAMPLE"] != nil else { return nil }
+        if choice.unknown { NSLog("TRACE_COMMONS_SAMPLE unrecognised; fallback %@", choice.set.rawValue) }
+        let set = choice.set
+        return DaemonDataWiring.sample(set)
+        #else
+        return nil
+        #endif
     }
 
-    /// The sample client for the window's other stores, over the same set.
-    static func dataClient() -> any DaemonDataClient {
-        DaemonDataWiring.sample(sampleChoice(ProcessInfo.processInfo.environment["TRACE_COMMONS_SAMPLE"]).set)
+    /// The Traces tab's sample marker for `sampleClient()`'s set: its name,
+    /// and whether `TRACE_COMMONS_SAMPLE` named no set. Nil over the daemon.
+    static func sampleMarker() -> (set: String, unknown: Bool)? {
+        #if DEBUG
+        guard let name = ProcessInfo.processInfo.environment["TRACE_COMMONS_SAMPLE"] else { return nil }
+        let choice = sampleChoice(name)
+        return (choice.set.rawValue, choice.unknown)
+        #else
+        return nil
+        #endif
     }
 
     /// The set a `TRACE_COMMONS_SAMPLE` value names, and whether it named
@@ -115,8 +127,13 @@ struct MonitorWindowView: View {
                 case .home:
                     HomeTabView(
                         store: home, traces: traces,
-                        statusLabel: { status in model.publicRunCopy?.contributionStatusLabel(for: status) },
-                        page: $homePage)
+                        statusLabel: { HomeFormat.historyStatusLabel(copy: model.publicRunCopy, $0) },
+                        page: $homePage,
+                        // Selecting a row shows the inspector, where its
+                        // details are, as a session's Review does.
+                        selection: Binding(
+                            get: { selectedHistory },
+                            set: { Self.review($0, selection: &selectedHistory, showsInspector: &showsInspector) }))
                 }
             }
         } map: {
@@ -132,18 +149,33 @@ struct MonitorWindowView: View {
                 case .traces:
                     SessionInspectorView(store: traces, entry: selectedEntry)
                 case .inference:
-                    PrivateAIInspectorView(
-                        store: inference, destinationLabel: model.privateInferenceCopy?.destination,
-                        sentence: { Self.rowSentence($0, copy: model.privateInferenceCopy, calls: model.harnessCalls) })
+                    PrivateAIInspectorView(store: inference, destinationLabel: model.privateInferenceCopy?.destination)
                 case .home:
-                    HomeSummaryInspector(store: home)
+                    // History's selected row, while it is still listed; the
+                    // record as a whole otherwise.
+                    if homePage == .history, let row = selectedHistoryRow {
+                        HistoryDetailInspector(row: row)
+                    } else {
+                        HomeSummaryInspector(store: home)
+                    }
                 }
             }
         }
         .glassWindow()
-        .task { await traces.run() }
-        .task { await inference.run() }
-        .task { await home.run() }
+        // The app's live client, re-attached whenever the daemon restarts;
+        // with none, each store draws the core as down.
+        .task(id: model.liveData.map(ObjectIdentifier.init)) {
+            let client = Self.sampleClient() ?? model.daemonData
+            traces.attach(client)
+            let marker = Self.sampleMarker()
+            traces.markSample(marker?.set, unknown: marker?.unknown ?? false)
+            inference.attach(client)
+            home.attach(client)
+            async let a: () = traces.run()
+            async let b: () = inference.run()
+            async let c: () = home.run()
+            _ = await (a, b, c)
+        }
     }
 
     /// The sentence one tool's row shows (`HarnessSurface.rowSentence`): a
@@ -179,9 +211,15 @@ struct MonitorWindowView: View {
         traces.tree.allSessions.first { $0.entryId == selectedSession }
     }
 
+    /// The selected History row, while it is still in the list.
+    private var selectedHistoryRow: DaemonData.HistoryRow? {
+        guard !selectedHistory.isEmpty else { return nil }
+        return home.history?.first { $0.submissionId == selectedHistory }
+    }
+
     /// A session's Review: select it and show the inspector, where its
     /// review is. With the inspector hidden, selecting alone did nothing a
-    /// person could see.
+    /// person could see. Selecting a History row goes the same way.
     static func review(_ entryId: String, selection: inout String, showsInspector: inout Bool) {
         selection = entryId
         showsInspector = true
@@ -204,11 +242,7 @@ struct MonitorWindowView: View {
     /// neither on nor off.
     static func inferenceDot(_ state: PrivateInferenceState?, calls: PrivateInferenceCalls) -> GlassStatus? {
         guard let state, !state.label.isEmpty else { return nil }
-        switch PrivateInferenceSurface.tone(state, calls: calls) {
-        case .clear: return .on
-        case .held, .attention, .refused: return .ask
-        case .neutral: return .off
-        }
+        return PrivateInferenceIndicator.status(PrivateInferenceSurface.tone(state, calls: calls))
     }
 
     /// The dot's text equivalent: the core's sentence for the same state.
@@ -419,12 +453,16 @@ struct MonitorSettingsWindow: View {
             Group {
                 switch section {
                 case .compute:
-                    ComputeView(model: compute)
+                    ScrollView {
+                        ComputeView(model: compute)
+                            .padding(GlassTokens.Space.panePadding)
+                            .frame(maxWidth: 560, alignment: .leading)
+                            .frame(maxWidth: .infinity, alignment: .topLeading)
+                    }
                 default:
                     ScrollView {
-                        SettingsContent(navigation: navigation, section: section)
+                        GlassSettingsContent(navigation: navigation, section: section)
                     }
-                    .tcScreen()
                 }
             }
             // A fresh view per section, so the scroll starts at its top.
