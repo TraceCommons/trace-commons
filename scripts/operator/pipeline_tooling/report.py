@@ -17,6 +17,21 @@ port's declared drills:
   carries (a pass result's blockers are promotion blockers).
 - `status` (`pass`, or `fail` with the safe `failure` label), and
   `evidence_hash`, the SHA-256 of the canonical `{"inputs", "checks"}`.
+- `attested` and `attestation_count`: whether `qualify --signing-key` signed
+  the results (P5-D13), and how many attestation files it left (one for each
+  required check of a pass report). Neither is under `evidence_hash`: the
+  attestations are separate files, signed and verified on their own. A failed
+  report is never attested, and a failed run leaves no attestation file at all
+  (`pipeline.qualify` stages the files and removes them on any failure). The
+  schema stays `v1`. A `v1` report without the two keys validates and reads as
+  unsigned (`report_attestation`: `attested: false`, `attestation_count: 0`);
+  a report that has one of the two must have both. That a report without them
+  validates is not a promise that every report of `main`'s tool does: a FAIL
+  report from `main`'s tool validates; a PASS report from `main`'s tool does
+  not, because its evidence names more than one package (the minimal corpus
+  check and each mechanics check carry a package of their own, and a run names
+  many), which `_require_one_package` refuses: such a result set could never
+  back a promotion.
 
 Not carried from the port: `base_revision_hash` (the code revision hash
 already binds the tree) and the fixed `acceptance_layers` list, which no
@@ -33,7 +48,7 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .checks import REQUIRED_CHECK_IDS, REQUIRED_CORPUS_CHECK_IDS
+from .checks import REQUIRED_CHECK_IDS, REQUIRED_CORPUS_CHECK_IDS, required_specs
 from .environment import ROOT
 from .errors import ToolingError, require
 from .files import atomic_write, sha256_digest
@@ -74,6 +89,8 @@ _REPORT_KEYS = frozenset(
         "evidence_hash",
     }
 )
+# Written by this tool, optional on read (see the module docstring).
+_ATTESTATION_KEYS = frozenset({"attested", "attestation_count"})
 _INPUT_HASHES = ("code_revision_hash", "contract_manifest_digest", "inventory_digest")
 _CORPUS_RUN_HASHES = ("bundle_id", "package_hash", "configuration_digest", "dependency_digest", "report_digest")
 _CORPUS_RUN_KEYS = frozenset({"check_id", "corpus_digests", "fixture_count", *_CORPUS_RUN_HASHES})
@@ -100,7 +117,10 @@ def _iso(when):
 
 
 def corpus_run_input(report):
-    """The `inputs.corpus_runs` entry for one validated corpus report."""
+    """The `inputs.corpus_runs` entry for one validated corpus report. It
+    names the package the run served, so the minimal run's entry carries
+    its test bundle's digests even though that check's result names none
+    (P5-D15)."""
     return {
         "check_id": report["check_id"],
         "bundle_id": report["bundle_id"],
@@ -165,10 +185,11 @@ def _report_blockers(checks):
     return [*SAFE_BLOCKERS, *extra]
 
 
-def build_report(run, checks, inputs, *, failure=None):
+def build_report(run, checks, inputs, *, failure=None, attestation_count=0):
     """The report value. `inputs` holds `code_revision_hash`,
     `contract_manifest_digest`, `inventory_digest` (each `None` when a failed
-    run never reached it), and `corpus_runs`."""
+    run never reached it), and `corpus_runs`. `attestation_count` is how many
+    attestation files the signing step wrote (0 when it did not run)."""
     inputs = {
         "code_revision_hash": inputs.get("code_revision_hash"),
         "contract_manifest_digest": inputs.get("contract_manifest_digest"),
@@ -185,6 +206,8 @@ def build_report(run, checks, inputs, *, failure=None):
         "external_payout_enabled": False,
         "safe_blockers": _report_blockers(checks),
         "run_id": run.run_id,
+        "attested": attestation_count > 0,
+        "attestation_count": attestation_count,
         "inputs": inputs,
         "checks": checks,
         "evidence_hash": sha256_digest(canonical({"inputs": inputs, "checks": checks})),
@@ -204,9 +227,21 @@ def validate_qualification_report(report):
         raise ToolingError("qualification_report_invalid") from error
 
 
+def report_attestation(report):
+    """`(attested, attestation_count)` of a report. A report that has neither
+    key reads as `(False, 0)`: one written before the keys existed, or by
+    `main`'s tool, is unsigned, so that reading is true."""
+    return report.get("attested", False), report.get("attestation_count", 0)
+
+
 def _validate(report):
+    require(isinstance(report, dict), "qualification_report_invalid")
+    present = set(report) & _ATTESTATION_KEYS
+    # Either both attestation keys or neither: one alone is refused.
     require(
-        isinstance(report, dict) and set(report) == _REPORT_KEYS and report["schema"] == REPORT_SCHEMA,
+        present in (set(), _ATTESTATION_KEYS)
+        and set(report) - present == _REPORT_KEYS
+        and report["schema"] == REPORT_SCHEMA,
         "qualification_report_invalid",
     )
     validate_evidence(report)
@@ -225,6 +260,11 @@ def _validate(report):
         "qualification_report_invalid",
     )
     require(_is_label(report["run_id"]), "qualification_report_invalid")
+    attested, count = report_attestation(report)
+    require(
+        type(count) is int and count >= 0 and attested is (count > 0) and (passed or count == 0),
+        "qualification_report_invalid",
+    )
 
     inputs = report["inputs"]
     require(isinstance(inputs, dict) and set(inputs) == {*_INPUT_HASHES, "corpus_runs"}, "qualification_report_invalid")
@@ -280,16 +320,44 @@ def _validate(report):
             and all(status.get(check_id) == "pass" for check_id in REQUIRED_CHECK_IDS),
             "qualification_report_incomplete",
         )
+        _require_one_package(checks)
+        # An attested pass report has one attestation for each check it lists
+        # (a signed run refuses a result file that is not a required check).
+        require(not attested or count == len(checks), "qualification_report_invalid")
 
 
-def write_report(run, results, inputs, *, failure=None, local_dir=None):
+def _require_one_package(checks):
+    """A pass report names exactly one package (P5-D15), the rules of the
+    results themselves (`results.require_current_pass_results`,
+    `results.require_one_package`) applied to the report's `checks`, which
+    `catalog.py` also reads from disk: a check whose spec asks for digests
+    carries all three, any other required check carries none, and the
+    digests present are one set."""
+    specs = required_specs()
+    packages = set()
+    for item in checks:
+        check_id = item["check_id"]
+        digests = tuple(item[key] for key in _CHECK_DIGESTS)
+        spec = specs.get(check_id)
+        if spec is not None and spec.digests_required:
+            require(None not in digests, f"check_result_digest_missing:{check_id}")
+        elif spec is not None:
+            require(digests == (None, None, None), f"pipeline_check_digests_unexpected:{check_id}")
+        if digests != (None, None, None):
+            packages.add(digests)
+    require(len(packages) <= 1, "qualification_evidence_mixed_package")
+
+
+def write_report(run, results, inputs, *, failure=None, local_dir=None, attestation_count=0):
     """Builds and validates the report, writes it to the run directory and
     to `<local_dir>/pipeline-qualification-report.json` (the latest report;
     `local_dir` defaults to `.local/`), and returns the latter path. With a
     `failure` label the report says `status: fail`, and a result whose
-    evidence no longer validates is left out instead of raising."""
+    evidence no longer validates is left out instead of raising.
+    `attestation_count` is how many attestations the run signed (a failed
+    report has none)."""
     checks = check_entries(run, results, strict=failure is None)
-    report = build_report(run, checks, inputs, failure=failure)
+    report = build_report(run, checks, inputs, failure=failure, attestation_count=attestation_count)
     validate_qualification_report(report)
     data = json.dumps(report, indent=2, sort_keys=True, ensure_ascii=False, allow_nan=False).encode() + b"\n"
     atomic_write(run.run_dir / RUN_REPORT_NAME, data)

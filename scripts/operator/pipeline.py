@@ -13,9 +13,11 @@ import argparse
 import dataclasses
 import hashlib
 import json
+import os
 import re
 import secrets
 import shutil
+import stat
 import sys
 from pathlib import Path
 from typing import NamedTuple, Optional
@@ -32,11 +34,13 @@ from pipeline_tooling.checks import (
     RUNTIME_STEPS,
     TEST_CHECKS,
     CheckSpec,
+    corpus_check_spec,
     required_specs,
 )
 from pipeline_tooling.corpus import (
     DEFAULT_CORPUS,
     PIN_SCHEMA,
+    evidence_digests,
     export_hf_corpus,
     load_direct_corpus,
     load_pin,
@@ -46,8 +50,13 @@ from pipeline_tooling.corpus import (
 from pipeline_tooling.environment import ROOT, Environment, Run, child_environment, run_child
 from pipeline_tooling.errors import StepFailed, ToolingError, require
 from pipeline_tooling.files import atomic_write, sha256_digest
-from pipeline_tooling.report import REPORT_NAME, SAFE_BLOCKERS, corpus_run_input, write_report
-from pipeline_tooling.results import load_results, require_current_pass_results, validate_evidence
+from pipeline_tooling.report import REPORT_NAME, RUN_REPORT_NAME, SAFE_BLOCKERS, corpus_run_input, write_report
+from pipeline_tooling.results import (
+    load_results,
+    require_attestations,
+    require_current_pass_results,
+    validate_evidence,
+)
 
 # Where routine outputs go (the latest bounded report of each kind), and the
 # catalog `--archive` writes (P4-D19). One name so the self-tests can move it.
@@ -58,7 +67,30 @@ LOCAL_DIR = ROOT / ".local"
 INGEST_TEST_ARGS = ("-p", "trace-commons-server", "--bin", "trace-commons-ingest")
 CORPUS_HARNESS = "tests::pipeline_corpus_pg_tests::pipeline_corpus_run"
 PACKAGE_WRITER = "tests::pipeline_corpus_pg_tests::pipeline_package_write"
+# `qualify --signing-key` and `keygen` (P5-D13): the signing step and the key
+# writer, two more ignored tests beside the package writer.
+ATTESTATION_WRITER = "tests::pipeline_corpus_pg_tests::pipeline_check_attestations_write"
+KEY_WRITER = "tests::pipeline_corpus_pg_tests::pipeline_signing_key_write"
 BUNDLES = ("minimal", "compatibility")
+
+# The maximum age a signed result carries when `--evidence-max-age-seconds` is
+# not given, and the longest the server accepts
+# (`QUALIFICATION_EVIDENCE_DEFAULT_MAX_AGE_SECONDS` and
+# `QUALIFICATION_EVIDENCE_AGE_CEILING_SECONDS`; a self-test reads both out of
+# the Rust source).
+DEFAULT_EVIDENCE_AGE_SECONDS = 24 * 60 * 60
+EVIDENCE_AGE_CEILING_SECONDS = 7 * 24 * 60 * 60
+
+# The signing step writes into this directory of the run directory; the files
+# move to the results directory only once every later check has passed.
+ATTESTATION_STAGING = "attestations-staging"
+# A failed run that could not remove what it signed: shown beside the original
+# failure label (`<original>.<this label>` in the failure report).
+DISCARD_FAILED_LABEL = "check_attestation_discard_failed"
+
+# Commands that keep nothing: their run directory is removed when they succeed
+# (or fail before they wrote anything).
+EPHEMERAL_COMMANDS = frozenset({"revision", "keygen"})
 
 # `restore-drill`: the two ignored tests around the dump, the restore, and
 # the artifact copy, and the one check the resume emits.
@@ -107,6 +139,8 @@ QUALIFY_CORPUS_RUNS = (
 
 _HASH = re.compile(r"sha256:[a-f0-9]{64}\Z")
 _KEY_ID = re.compile(r"[A-Za-z0-9_.:-]{1,128}\Z")
+# A public key: 32 bytes, 43 characters of unpadded base64url.
+_PUBLIC_KEY = re.compile(r"[A-Za-z0-9_-]{43}\Z")
 _FAILURE_LABEL = re.compile(r"[A-Za-z0-9_.:-]{1,128}\Z")
 
 # A bare `scheme://` anywhere in an argument. `--postgres-admin-url` is the
@@ -209,7 +243,49 @@ def build_parser():
         default=None,
         help="Use this existing PostgreSQL server instead of starting a container.",
     )
+    qualify_parser.add_argument(
+        "--signing-key",
+        dest="signing_key",
+        default=None,
+        help="After a passing run, sign each result with this Ed25519 PKCS#8 DER key (needs --signing-key-id).",
+    )
+    qualify_parser.add_argument(
+        "--signing-key-id",
+        dest="signing_key_id",
+        default=None,
+        help="The id the check trust store holds the signing key's public key under.",
+    )
+    qualify_parser.add_argument(
+        "--evidence-max-age-seconds",
+        dest="evidence_max_age_seconds",
+        type=int,
+        default=DEFAULT_EVIDENCE_AGE_SECONDS,
+        help=(
+            "How long a signed result stays current (default 86400; the server refuses more than 604800). "
+            "Only used with --signing-key."
+        ),
+    )
     qualify_parser.set_defaults(handler=qualify)
+
+    keygen_parser = subparsers.add_parser(
+        "keygen", help="Generate a check-signing key and its trusted key (this trusts it nowhere)"
+    )
+    keygen_parser.add_argument(
+        "--output", required=True, help="Where to write the new Ed25519 PKCS#8 DER key (mode 0600; never overwritten)."
+    )
+    keygen_parser.add_argument("--key-id", dest="key_id", required=True, help="The new key's id.")
+    keygen_parser.add_argument(
+        "--trusted-key-output",
+        dest="trusted_key_output",
+        required=True,
+        help="Where to write the trusted key (key id and public key; never overwritten).",
+    )
+    keygen_parser.set_defaults(handler=keygen)
+
+    revision_parser = subparsers.add_parser(
+        "revision", help="Print the code revision hash of the working tree (the one a qualification run records)"
+    )
+    revision_parser.set_defaults(handler=revision)
 
     return parser
 
@@ -421,15 +497,22 @@ def run_corpus_check(run, environment, corpus_run, *, step=None):
     require(report["failure_count"] == 0, "corpus_report_has_failures")
 
     results = load_results(run)
-    require_current_pass_results(run, results, {check_id: CheckSpec(check_id, digests_required=True)})
+    spec = corpus_check_spec(check_id)
+    require_current_pass_results(run, results, {check_id: spec})
     result = results[check_id]
-    require(
-        (result.package_hash, result.configuration_digest, result.dependency_digest)
-        == (report["package_hash"], report["configuration_digest"], report["dependency_digest"]),
-        "corpus_report_package_mismatch",
-    )
+    # The minimal corpus check names no package (P5-D15), so there is
+    # nothing to compare; its report keeps the digests of the bundle it served.
+    if spec.digests_required:
+        require(
+            (result.package_hash, result.configuration_digest, result.dependency_digest)
+            == (report["package_hash"], report["configuration_digest"], report["dependency_digest"]),
+            "corpus_report_package_mismatch",
+        )
     evidence = _read_json(run.results_dir / f"{check_id}.evidence.json", "corpus_evidence_malformed")
     validate_evidence(evidence)
+    # The corpus loaded and the requests posted (P5-D14): recomputed from the
+    # report, so an attestation never signs a value the report does not back.
+    corpus_digest, input_digest = evidence_digests(report)
     require(
         evidence
         == {
@@ -439,6 +522,8 @@ def run_corpus_check(run, environment, corpus_run, *, step=None):
             "changed_content_refused": report["changed_content_refused_count"],
             "tenant_isolation": True,
             "report_hash": sha256_digest(report_bytes),
+            "corpus_digest": corpus_digest,
+            "input_digest": input_digest,
         },
         "corpus_evidence_mismatch",
     )
@@ -491,6 +576,44 @@ def run_package(args, run):
     )
     require(key_output.is_file(), "package_trusted_key_missing")
     print(f"PipelinePackageOK: bundle={bundle_id} package={package_hash}")
+
+
+def keygen(args, run):
+    """Generates a check-signing key and its trusted key by starting the
+    ignored test `pipeline_signing_key_write`. It refuses an existing output
+    before anything starts; the key is written with mode 0600. It prints the
+    key id and no path: the paths go to the test's environment only."""
+    require(_KEY_ID.fullmatch(args.key_id) is not None, "signing_key_id_invalid")
+    output = Path(args.output).resolve()
+    trusted_output = Path(args.trusted_key_output).resolve()
+    require(output != trusted_output, "keygen_outputs_must_differ")
+    require(not (os.path.lexists(output) or os.path.lexists(trusted_output)), "signing_key_output_exists")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    trusted_output.parent.mkdir(parents=True, exist_ok=True)
+    extra = {
+        "TRACE_COMMONS_PIPELINE_CHECK_KEYGEN_OUTPUT": str(output),
+        "TRACE_COMMONS_PIPELINE_CHECK_KEYGEN_KEY_ID": args.key_id,
+        "TRACE_COMMONS_PIPELINE_CHECK_KEYGEN_TRUSTED_KEY_OUTPUT": str(trusted_output),
+    }
+    cargo_test(run, "keygen", INGEST_TEST_ARGS, KEY_WRITER, child_environment(extra), exact=True, ignored=True)
+
+    require(output.is_file() and stat.S_IMODE(output.stat().st_mode) & 0o077 == 0, "signing_key_mode_invalid")
+    trusted = _read_json(trusted_output, "trusted_key_invalid")
+    require(
+        isinstance(trusted, dict)
+        and set(trusted) == {"key_id", "public_key_base64url"}
+        and trusted["key_id"] == args.key_id
+        and isinstance(trusted["public_key_base64url"], str)
+        and _PUBLIC_KEY.fullmatch(trusted["public_key_base64url"]) is not None,
+        "trusted_key_invalid",
+    )
+    print(f"PipelineKeygenOK: key_id={args.key_id}")
+
+
+def revision(args, run):
+    """Prints the code revision hash of the working tree: the value `run`
+    holds for a command that credits evidence to it (`Run.create`)."""
+    print(run.code_revision_hash)
 
 
 def _artifact_files(root):
@@ -766,6 +889,134 @@ def _shown(path):
     return path.relative_to(ROOT) if path.is_relative_to(ROOT) else path.name
 
 
+class Signing(NamedTuple):
+    """`qualify --signing-key`: the key file (resolved), the id its public key
+    is trusted under, and the maximum age each signed result carries."""
+
+    key_path: Path
+    key_id: str
+    maximum_age_seconds: int
+
+
+def signing_options(args):
+    """The signing options of `qualify`, or `None` without `--signing-key`.
+    Every flag is checked before any step runs. The two key flags go
+    together (`signing_key_incomplete`); the maximum age is at least one
+    second and at most the server's ceiling (`evidence_max_age_invalid`,
+    `evidence_max_age_above_ceiling`); the key file must exist
+    (`signing_key_unreadable`). The key path appears in no label."""
+    require((args.signing_key is None) == (args.signing_key_id is None), "signing_key_incomplete")
+    require(args.evidence_max_age_seconds >= 1, "evidence_max_age_invalid")
+    require(args.evidence_max_age_seconds <= EVIDENCE_AGE_CEILING_SECONDS, "evidence_max_age_above_ceiling")
+    if args.signing_key is None:
+        return None
+    require(_KEY_ID.fullmatch(args.signing_key_id) is not None, "signing_key_id_invalid")
+    key_path = Path(args.signing_key).resolve()
+    require(key_path.is_file() and os.access(key_path, os.R_OK), "signing_key_unreadable")
+    return Signing(key_path, args.signing_key_id, args.evidence_max_age_seconds)
+
+
+def _staging_dir(run):
+    return run.run_dir / ATTESTATION_STAGING
+
+
+def _attestations_remain(run):
+    """Whether the staging directory, or any attestation file, is in the run
+    directory."""
+    return os.path.lexists(_staging_dir(run)) or any(run.run_dir.rglob("*.attestation.json"))
+
+
+def discard_attestations(run):
+    """Removes the staging directory and every attestation file of the run's
+    results directory: the two places this tool writes them. Called before a
+    failed run writes its report, so that a failed run leaves no attestation
+    file anywhere in its directory (the server accepts an attestation set
+    for the revision it names). Best effort, file by file: one that cannot be
+    removed does not stop the others, nor replace the failure. Then it looks
+    again, and returns whether nothing is left: a removal that failed without
+    a sign would leave a valid attestation behind a report that says there is
+    none."""
+    shutil.rmtree(_staging_dir(run), ignore_errors=True)
+    for path in run.results_dir.glob("*.attestation.json"):
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
+    return not _attestations_remain(run)
+
+
+def _fail_closed(run, inputs, label):
+    """The start of every failure path of `qualify`, before it re-raises.
+    It removes what the run signed, then both copies of this run's report (an
+    attested pass report is written before the files are published and the
+    archive is made, so a step that fails after it must not leave it behind,
+    even when the failed report cannot be written), then writes the failed
+    report. If anything signed could not be removed, the terminal gets a line
+    `PipelineFailure: check_attestation_discard_failed` and the failure
+    report carries `<label>.check_attestation_discard_failed`: the original
+    label is still shown, by the caller's re-raise and in the report."""
+    clean = discard_attestations(run)
+    for path in (LOCAL_DIR / REPORT_NAME, run.run_dir / RUN_REPORT_NAME):
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
+    if not clean:
+        print(f"PipelineFailure: {DISCARD_FAILED_LABEL}", file=sys.stderr)
+        label = f"{label}.{DISCARD_FAILED_LABEL}"
+    _write_failed_report(run, inputs, label)
+
+
+def attest_results(run, accepted, signing):
+    """The signing step: starts the ignored test
+    `pipeline_check_attestations_write`, which signs the result file of each
+    accepted check (`accepted`: check id to the `CheckResult` that
+    `require_current_pass_results` accepted; the test refuses any other result
+    file and any accepted check without one) into the staging directory and
+    verifies what it wrote, then checks the files it left against the accepted
+    results. Runs only for a result set that passed
+    `require_current_pass_results`. The files stay in the staging directory
+    (`publish_attestations` moves them once every later check has passed). The
+    key path goes to the test's environment and nowhere else (the test's own
+    output goes to the step's log). Returns the number of attestations."""
+    staging = _staging_dir(run)
+    discard_attestations(run)
+    staging.mkdir(mode=0o700)
+    extra = {
+        "TRACE_COMMONS_PIPELINE_CHECK_RESULT_DIR": str(run.results_dir),
+        "TRACE_COMMONS_PIPELINE_CHECK_ATTESTATION_DIR": str(staging),
+        "TRACE_COMMONS_PIPELINE_CHECK_IDS": ",".join(sorted(accepted)),
+        "TRACE_COMMONS_PIPELINE_CHECK_SIGNING_KEY_PATH": str(signing.key_path),
+        "TRACE_COMMONS_PIPELINE_CHECK_SIGNING_KEY_ID": signing.key_id,
+        "TRACE_COMMONS_PIPELINE_CHECK_MAX_AGE_SECONDS": str(signing.maximum_age_seconds),
+    }
+    cargo_test(
+        run, "check_attestations", INGEST_TEST_ARGS, ATTESTATION_WRITER, child_environment(extra), exact=True, ignored=True
+    )
+    return require_attestations(run, accepted, signing.key_id, signing.maximum_age_seconds, staging)
+
+
+def _publish_file(source, destination):
+    os.replace(source, destination)
+
+
+def publish_attestations(run, accepted):
+    """Moves the staged attestation files to their final names, beside the
+    results they sign, and removes the staging directory. The last step of a
+    run before it archives anything: it runs only after every check that
+    follows the signing step has passed. A file that cannot be moved is
+    `check_attestation_publish_failed`; the caller then removes what was
+    already moved."""
+    staging = _staging_dir(run)
+    try:
+        for check_id in sorted(accepted):
+            name = f"{check_id}.attestation.json"
+            _publish_file(staging / name, run.results_dir / name)
+        staging.rmdir()
+    except OSError as error:
+        raise ToolingError("check_attestation_publish_failed") from error
+
+
 def qualify(args, run):
     """Runs every required check (binding checks by exit status, then each
     database check, corpus run, and the restore drill in its own scenario of
@@ -777,7 +1028,24 @@ def qualify(args, run):
     `status: fail` and the safe label, then raises: a tooling failure under
     its own label, an interrupt (Ctrl-C) as `qualify_interrupted`, anything
     else as `qualify_internal_error`. Only a report that itself cannot be
-    written is left out."""
+    written is left out.
+
+    With `--signing-key` (P5-D13), a run whose every required check passed
+    then signs each required result (`attest_results`): the attestation files,
+    `<check_id>.attestation.json`, are what the server's
+    `qualify_bundle_attested` reads, and they name this run's code revision.
+    The tree is checked before the signing step and again after it, and the
+    files are signed into a staging directory and moved to their final names
+    (`publish_attestations`) only once the report is written, so a run that
+    fails after signing started removes the staging directory and every
+    attestation file before it writes its failed report (`_fail_closed`): a
+    failed run leaves none, as its report says (`attested: false`), or, when
+    a removal fails, says `check_attestation_discard_failed` beside the
+    original label. It also removes this run's own pass report first, so a
+    failed run cannot leave that behind when its failed report cannot be
+    written. The report of a pass counts them. Flags that are wrong are
+    refused before anything runs."""
+    signing = signing_options(args)
     inputs = {
         "code_revision_hash": run.code_revision_hash,
         "contract_manifest_digest": None,
@@ -785,26 +1053,39 @@ def qualify(args, run):
         "corpus_runs": [],
     }
     catalog_path = None
+    attested = 0
     (LOCAL_DIR / REPORT_NAME).unlink(missing_ok=True)
     try:
         results = _run_required_checks(args, run, inputs)
-        # Before the report: a tree edited during the run writes a failed
-        # report under `code_revision_changed`, never a pass.
+        accepted = {check_id: results[check_id] for check_id in required_specs()}
+        if signing is not None:
+            # After `require_current_pass_results` (the end of
+            # `_run_required_checks`). A tree edited during the checks is
+            # refused before anything is signed.
+            run.require_code_revision_unchanged()
+            attested = attest_results(run, accepted, signing)
+        # Before the report: a tree edited during the run (while the results
+        # were signed too) writes a failed report under `code_revision_changed`,
+        # never a pass.
         run.require_code_revision_unchanged()
-        report_path = write_report(run, results, inputs, local_dir=LOCAL_DIR)
+        report_path = write_report(run, results, inputs, local_dir=LOCAL_DIR, attestation_count=attested)
+        if signing is not None:
+            publish_attestations(run, accepted)
         if args.archive:
             catalog_path = LOCAL_DIR / CATALOG_NAME
             update_catalog(catalog_path, report_path, records=corpus_records(run))
     except ToolingError as error:
-        _write_failed_report(run, inputs, str(error))
+        _fail_closed(run, inputs, str(error))
         raise
     except KeyboardInterrupt:
-        _write_failed_report(run, inputs, "qualify_interrupted")
+        _fail_closed(run, inputs, "qualify_interrupted")
         raise
     except Exception:
-        _write_failed_report(run, inputs, "qualify_internal_error")
+        _fail_closed(run, inputs, "qualify_internal_error")
         raise
     line = f"PipelineQualificationOK: report={_shown(report_path)} checks={len(results)}"
+    if attested:
+        line += f" attested={attested}"
     if catalog_path is not None:
         line += f" catalog={_shown(catalog_path)}"
     print(line)
@@ -835,6 +1116,10 @@ def main(argv=None):
         primary_label = str(error)
     except KeyboardInterrupt:
         primary = 130
+    if getattr(args, "command", None) in EPHEMERAL_COMMANDS and (primary == 0 or not any(run.run_dir.rglob("*.log"))):
+        # `revision` and `keygen` keep nothing: no empty run directory is left
+        # behind. A failed step keeps its log, and the failure line names it.
+        shutil.rmtree(run.run_dir, ignore_errors=True)
     cleanup = 1 if run.cleanup_failed else 0
     # `qualify` raises `cleanup_failed` itself (its report must say so);
     # the line is printed once.
