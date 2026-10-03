@@ -231,6 +231,10 @@ pub const ERR_CORRECTION_TOO_LONG: &str = "correction-too-long";
 /// and every one of them would carry it into the corpus as the
 /// contributor's own words.
 pub const ERR_CORRECTION_NEEDS_ENTRY: &str = "correction-needs-entry-id";
+/// `approve` while a "Never" contribution override is in force (#1208). The
+/// override promises nothing is queued or sent; clearing it lets the
+/// contributor approve again.
+pub const ERR_CONTRIBUTION_OVERRIDE_NEVER: &str = "contribution-override-never";
 /// The label an entry is skipped under when credential detection fired on
 /// the correction the contributor wrote for it.
 ///
@@ -4545,6 +4549,17 @@ async fn handle_approve(shared: &DaemonShared, req: &Request) -> Response {
         if all || req.params.get("project_id").is_some() {
             return Response::err(req.id, ERR_BAD_PARAMS, ERR_CORRECTION_NEEDS_ENTRY);
         }
+    }
+    // A "Never" contribution override promises that nothing is queued or
+    // sent (#1208), so nothing is approved while it is in force: refused,
+    // before anything is approved or recorded, with a fixed label.
+    if shared
+        .policy
+        .lock()
+        .expect("policy lock")
+        .holds_every_send()
+    {
+        return Response::err(req.id, ERR_BAD_PARAMS, ERR_CONTRIBUTION_OVERRIDE_NEVER);
     }
     // Read before the queue lock is taken, so the settings lock is
     // never held under it.
@@ -15090,6 +15105,45 @@ mod tests {
             ProjectMode::NotifyOnly
         );
         assert_eq!(s.decisions_owed_value(), 1);
+    }
+
+    /// #1208: "Nothing is queued or sent" holds for the contributor's own
+    /// approvals too, so `approve` is refused while "Never" is in force --
+    /// with a fixed label, approving and recording nothing -- and works
+    /// again once the override clears.
+    #[tokio::test]
+    async fn approve_is_refused_while_a_never_override_is_in_force() {
+        let s = enrolled_shared();
+        let id = seed_entry(&s, "/tmp/override-never-approve");
+        let r = set_override(&s, serde_json::json!({"mode": "ignore"}));
+        assert!(r.error.is_none(), "{:?}", r.error);
+        let audit_before = audit::load(&s.store).unwrap().len();
+        for params in [
+            serde_json::json!({"entry_id": id}),
+            serde_json::json!({"all": true}),
+        ] {
+            let r = handle_request_async(&s, &req("approve", params)).await;
+            let err = r.error.expect("refused under Never");
+            assert_eq!(err.code, ERR_BAD_PARAMS);
+            assert_eq!(err.message, ERR_CONTRIBUTION_OVERRIDE_NEVER);
+        }
+        assert_eq!(
+            s.queue.lock().unwrap().get(id).unwrap().state,
+            super::super::queue::QueueState::Pending
+        );
+        assert_eq!(audit::load(&s.store).unwrap().len(), audit_before);
+
+        handle_request(
+            &s,
+            &req("clear_contribution_override", serde_json::json!({})),
+        );
+        let r =
+            handle_request_async(&s, &req("approve", serde_json::json!({"entry_id": id}))).await;
+        assert_ne!(
+            r.error.map(|e| e.message),
+            Some(ERR_CONTRIBUTION_OVERRIDE_NEVER.to_string()),
+            "approve works again once it clears"
+        );
     }
 
     /// An override that cannot be saved is rolled back, so nothing changed

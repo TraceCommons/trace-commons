@@ -257,13 +257,17 @@ pub const CONTRIBUTION_OVERRIDE_ASK_CONFIRM: &str = "Ask me everywhere";
 /// **DRAFT, NEEDS APPROVAL.** The "Never" override's confirmation.
 pub const CONTRIBUTION_OVERRIDE_NEVER_TITLE: &str = "Stop contributing from every folder?";
 /// **DRAFT, NEEDS APPROVAL.** Held to `set_contribution_override` `ignore`:
-/// nothing is queued or sent, nothing waiting is refused, and a session
-/// finished meanwhile is offered once the override clears, by that folder's
-/// own setting -- so a folder set to contribute automatically sends it.
+/// nothing is queued or sent -- `drain_approved` holds even what the
+/// contributor approved, and `approve` is refused
+/// (`contribution-override-never`) -- nothing waiting is refused, a held
+/// approval goes once the override clears, and a session finished meanwhile
+/// is offered then by that folder's own setting -- so a folder set to
+/// contribute automatically sends it.
 pub const CONTRIBUTION_OVERRIDE_NEVER_BODY: &str = "Nothing is queued or sent from any folder \
-     until you turn this off.\n\nTurning this off puts each folder back on its own setting. \
-     Sessions you finish in the meantime are then treated by that setting, so a folder set to \
-     contribute automatically sends them without asking.";
+     until you turn this off, including sessions you already approved.\n\nTurning this off \
+     puts each folder back on its own setting, and sessions you approved are sent. Sessions you \
+     finish in the meantime are then treated by that setting, so a folder set to contribute \
+     automatically sends them without asking.";
 /// **DRAFT, NEEDS APPROVAL.**
 pub const CONTRIBUTION_OVERRIDE_NEVER_CONFIRM: &str = "Stop everywhere";
 
