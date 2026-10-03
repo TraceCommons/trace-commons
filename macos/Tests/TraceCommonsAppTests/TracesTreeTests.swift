@@ -48,7 +48,9 @@ final class TracesTreeTests: XCTestCase {
         let tree = try await tree(.normalDay)
         XCTAssertNil(tree.tools.first { $0.kind == .opencode }, "opencode is unset with nothing waiting")
         XCTAssertNil(tree.tools.first { $0.kind == .cline }, "cline is unset with nothing waiting")
-        XCTAssertEqual(tree.tools.first { $0.kind == .geminiCli }?.mode, .off)
+        // The K2 recording leaves Gemini CLI unset: it is never drawn off.
+        XCTAssertNotEqual(tree.tools.first { $0.kind == .geminiCli }?.mode, .off)
+        XCTAssertFalse(tree.tools.contains { $0.mode == .off }, "nothing in normalDay is set off")
         XCTAssertEqual(TracesTree.SourceMode("unset"), .unset)
         XCTAssertEqual(TracesTree.SourceMode(nil), .unset)
 
