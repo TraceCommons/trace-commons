@@ -24436,6 +24436,14 @@ const AUDIT_CHAIN_REPAIR_AUDIT_KIND: &str =
 /// tombstone rows it wrote from file tombstones. Hash-only.
 const TOMBSTONE_REPAIR_AUDIT_KIND: &str = "tombstone_repair";
 
+/// The file audit event recording one change through the pipeline admin
+/// routes (`pipeline_activation`): a qualification, an activation, a
+/// rollback, a containment, a deactivation, or a policy suspension or
+/// resumption. Its DB row is a `PolicyUpdate` row with `Maintenance`
+/// metadata whose surface is this kind and whose one count is the action's
+/// label. Hash-only and label-only: no bundle, reason, or record id.
+const PIPELINE_ACTIVATION_AUDIT_KIND: &str = "pipeline_activation";
+
 fn trace_maintenance_audit_kind(kind: &str) -> bool {
     matches!(
         kind,
@@ -24444,6 +24452,7 @@ fn trace_maintenance_audit_kind(kind: &str) -> bool {
             | RETENTION_PURGED_ARTIFACT_INVALIDATION_AUDIT_KIND
             | AUDIT_CHAIN_REPAIR_AUDIT_KIND
             | TOMBSTONE_REPAIR_AUDIT_KIND
+            | PIPELINE_ACTIVATION_AUDIT_KIND
             | "maintenance"
             | "near_credit_outbox_submit"
             | "near_credit_outbox_confirm"
@@ -74287,7 +74296,7 @@ fn audit_backfill_storage_projection(
             StorageTraceAuditAction::BenchmarkConvert
         }
         "process_evaluation" => StorageTraceAuditAction::ProcessEvaluate,
-        "tenant_policy_update" | "tenant_access_grant_update" => {
+        "tenant_policy_update" | "tenant_access_grant_update" | PIPELINE_ACTIVATION_AUDIT_KIND => {
             StorageTraceAuditAction::PolicyUpdate
         }
         "export_job_recovery" => StorageTraceAuditAction::ExportJobRecovery,
@@ -74397,6 +74406,7 @@ fn audit_backfill_storage_projection(
         | RETENTION_PURGED_ARTIFACT_INVALIDATION_AUDIT_KIND
         | AUDIT_CHAIN_REPAIR_AUDIT_KIND
         | TOMBSTONE_REPAIR_AUDIT_KIND
+        | PIPELINE_ACTIVATION_AUDIT_KIND
         | "vector_index" => {
             trace_maintenance_audit_metadata_from_reason(&event.kind, event.reason.as_deref())
                 .unwrap_or(StorageTraceAuditSafeMetadata::Empty)
@@ -80627,6 +80637,34 @@ impl TraceCommonsAuditEvent {
             export_count: None,
             export_id: Some(record.export_job_id),
             decision_inputs_hash: Some(reason_hash.to_string()),
+            previous_event_hash: None,
+            event_hash: None,
+        }
+    }
+
+    /// One change through a pipeline admin route (`pipeline_activation`):
+    /// the action's label as the purpose (hashed) and as the one count. The
+    /// event names no submission, bundle, reason, or record id.
+    fn pipeline_activation(auth: &TenantAuth, action_label: &str) -> Self {
+        let purpose_hash = sha256_prefixed(action_label);
+        let action_counts = BTreeMap::from([(action_label.to_string(), 1)]);
+        Self {
+            event_id: Uuid::new_v4(),
+            tenant_id: auth.tenant_id.clone(),
+            submission_id: Uuid::nil(),
+            kind: PIPELINE_ACTIVATION_AUDIT_KIND.to_string(),
+            created_at: Utc::now(),
+            status: None,
+            actor_role: Some(auth.role),
+            actor_principal_ref: Some(auth.principal_ref.clone()),
+            reason: Some(trace_maintenance_audit_reason(
+                Some(&purpose_hash),
+                false,
+                &action_counts,
+            )),
+            export_count: None,
+            export_id: None,
+            decision_inputs_hash: None,
             previous_event_hash: None,
             event_hash: None,
         }

@@ -6790,3 +6790,461 @@ async fn the_start_check_warns_for_each_pipeline_tenant_not_qualified() {
     expected.sort();
     assert_eq!(incomplete, expected);
 }
+
+// ---------------------------------------------------------------------------
+// Review round 1, point 8 (amendment A12, owner answer O4): each write route
+// appends one row to `main`'s audit log after its change committed.
+// ---------------------------------------------------------------------------
+
+impl RouteFixture {
+    /// The action labels of the tenant's `pipeline_activation` audit events,
+    /// from the file audit log (`read_all_audit_events`), oldest first: the
+    /// one count of each event's reason.
+    fn activation_audits(&self, tenant: &str) -> Vec<String> {
+        read_all_audit_events(self.dir.path(), tenant)
+            .expect("the audit log reads")
+            .into_iter()
+            .filter(|event| event.kind == PIPELINE_ACTIVATION_AUDIT_KIND)
+            .map(|event| {
+                let counts =
+                    trace_maintenance_audit_action_counts_from_reason(event.reason.as_deref());
+                assert_eq!(
+                    counts.values().copied().collect::<Vec<_>>(),
+                    vec![1],
+                    "one count of one: {:?}",
+                    event.reason
+                );
+                counts.into_keys().next().expect("one action label")
+            })
+            .collect()
+    }
+
+    /// The tenant's audit rows in the database, oldest first.
+    async fn audit_rows(&self, tenant: &str) -> Vec<StorageTraceAuditEventRecord> {
+        self.state
+            .db_mirror
+            .as_ref()
+            .expect("the fixture's state has a database")
+            .list_trace_audit_events(tenant)
+            .await
+            .expect("the audit rows read")
+    }
+
+    /// The tenant's file audit log and its database rows are one verified
+    /// chain: the check that `main`'s audit chain drill runs
+    /// (`verify_audit_chain`), and the canonical projection of every row.
+    async fn assert_audit_chain_verifies(&self, tenant: &str, context: &str) {
+        let report = verify_audit_chain(self.state.as_ref(), tenant)
+            .await
+            .expect("the audit chain verifies");
+        assert!(report.verified, "{context}: {:?}", report.failures);
+        let mirror = report.db_mirror.expect("the database chain is verified");
+        assert!(mirror.verified, "{context}: {:?}", mirror.failures);
+        let projection =
+            collect_db_audit_canonical_projection_failures(&self.audit_rows(tenant).await)
+                .into_iter()
+                .map(|failure| failure.first_failure)
+                .collect::<Vec<_>>();
+        assert!(projection.is_empty(), "{context}: {projection:?}");
+    }
+
+    /// `POST policy-interventions` of `action` on A's Score policy.
+    async fn intervene(&self, action: &str) -> (StatusCode, serde_json::Value) {
+        self.admin_call(
+            "POST",
+            "/v1/admin/pipeline/policy-interventions",
+            Some(serde_json::json!({
+                "bundle_id": self.a.bundle_id,
+                "phase": "score",
+                "action": action,
+                "reason_code": format!("{action}_score_for_audit"),
+            })),
+        )
+        .await
+    }
+}
+
+/// Each of the six write routes appends one `pipeline_activation` audit row
+/// with its action label after its change (seven labels: a suspension and a
+/// resumption are both policy interventions), and a refused request appends
+/// none. Each row is a `PolicyUpdate` row with `Maintenance` metadata that
+/// names the surface and the label, equal to what the audit backfill projects
+/// from the file event; it names the actor and holds no bundle, reason, or
+/// record id; and the file log and the database rows verify as one chain.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn each_write_route_appends_one_audit_row_with_its_action_label() {
+    let Some(fixture) = RouteFixture::new().await else {
+        return;
+    };
+    let tenant = fixture.tenant.as_str();
+    let mut expected: Vec<&str> = Vec::new();
+    assert!(fixture.activation_audits(tenant).is_empty());
+
+    // Refused before anything is recorded: none.
+    let (status, refused) = fixture
+        .call(
+            &fixture.state,
+            "POST",
+            CONTAIN,
+            Some(&fixture.contributor),
+            Some(serde_json::json!({ "reason_code": "contain_as_contributor" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{refused}");
+    let (status, refused) = fixture
+        .admin_call(
+            "POST",
+            "/v1/admin/pipeline/qualifications",
+            Some(serde_json::json!({
+                "signed_package": fixture.signed(&fixture.a),
+                "attestations":
+                    fixture.attestations_aged(&fixture.a, 3_600, Some("pipeline_crash_matrix")),
+            })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{refused}");
+    assert_eq!(fixture.activation_audits(tenant), expected, "refused calls");
+
+    // The six routes, seven labels.
+    fixture.qualify(&fixture.a).await;
+    expected.push("pipeline_qualify");
+    assert_eq!(fixture.activation_audits(tenant), expected);
+    fixture.qualify(&fixture.b).await;
+    expected.push("pipeline_qualify");
+    for (package, reason) in [
+        (&fixture.a, "activate_bundle_a"),
+        (&fixture.b, "activate_bundle_b"),
+    ] {
+        fixture
+            .change_routing(ACTIVATE, fixture.activate_body(package, reason).await)
+            .await;
+        expected.push("pipeline_activate");
+        assert_eq!(fixture.activation_audits(tenant), expected);
+    }
+
+    // A refused activation (a record id that is no longer in force) and a
+    // refused intervention (`terminate` is not supported): none.
+    fixture
+        .assert_change_refused(
+            ACTIVATE,
+            fixture.activate_body_expecting(
+                &fixture.a,
+                "activate_prepared_earlier",
+                &serde_json::json!("none"),
+            ),
+            StatusCode::CONFLICT,
+            "pipeline_routing_state_changed",
+            "an activation prepared before the first one",
+        )
+        .await;
+    let (status, refused) = fixture.intervene("terminate").await;
+    assert_eq!(status, StatusCode::CONFLICT, "{refused}");
+    assert_eq!(fixture.activation_audits(tenant), expected, "refused calls");
+
+    fixture
+        .change_routing(
+            ROLLBACK,
+            fixture.activate_body(&fixture.a, "roll_back_to_a").await,
+        )
+        .await;
+    expected.push("pipeline_rollback");
+    assert_eq!(fixture.activation_audits(tenant), expected);
+    for (action, label) in [
+        ("suspend", "pipeline_policy_suspend"),
+        ("resume", "pipeline_policy_resume"),
+    ] {
+        let (status, record) = fixture.intervene(action).await;
+        assert_eq!(status, StatusCode::OK, "{record}");
+        expected.push(label);
+        assert_eq!(fixture.activation_audits(tenant), expected);
+    }
+    let contained = fixture
+        .change_routing(
+            CONTAIN,
+            serde_json::json!({ "reason_code": "contain_for_incident" }),
+        )
+        .await;
+    expected.push("pipeline_contain");
+    assert_eq!(fixture.activation_audits(tenant), expected);
+
+    // A deactivation of a contained tenant with no expectation: none.
+    fixture
+        .assert_change_refused(
+            DEACTIVATE,
+            serde_json::json!({ "reason_code": "deactivate_to_legacy" }),
+            StatusCode::CONFLICT,
+            "pipeline_routing_expectation_required",
+            "a contained tenant",
+        )
+        .await;
+    assert_eq!(fixture.activation_audits(tenant), expected, "refused calls");
+    fixture
+        .change_routing(
+            DEACTIVATE,
+            serde_json::json!({
+                "reason_code": "deactivate_to_legacy",
+                "expected_record_id": contained["activation_record_id"],
+            }),
+        )
+        .await;
+    expected.push("pipeline_deactivate");
+    assert_eq!(fixture.activation_audits(tenant), expected);
+    assert_eq!(
+        expected.iter().copied().collect::<BTreeSet<_>>().len(),
+        7,
+        "seven action labels"
+    );
+
+    // The rows. Each file event has one database row; the row is what the
+    // backfill projects from the event; nothing in either is a raw value.
+    let file_events = read_all_audit_events(fixture.dir.path(), tenant)
+        .expect("the audit log reads")
+        .into_iter()
+        .filter(|event| event.kind == PIPELINE_ACTIVATION_AUDIT_KIND)
+        .collect::<Vec<_>>();
+    let rows = fixture.audit_rows(tenant).await;
+    let principal = static_token_principal_ref(&fixture.admin);
+    for (event, label) in file_events.iter().zip(&expected) {
+        let row = rows
+            .iter()
+            .find(|row| row.audit_event_id == event.event_id)
+            .unwrap_or_else(|| panic!("{label}: the event has a database row"));
+        let live = StorageTraceAuditSafeMetadata::Maintenance {
+            surface: Some("pipeline_activation".to_string()),
+            purpose_hash: Some(sha256_prefixed(label)),
+            dry_run: false,
+            action_counts: BTreeMap::from([(label.to_string(), 1)]),
+        };
+        assert_eq!(
+            (row.action, &row.metadata),
+            (StorageTraceAuditAction::PolicyUpdate, &live),
+            "{label}"
+        );
+        assert_eq!(
+            audit_backfill_storage_projection(event),
+            (row.action, row.metadata.clone()),
+            "{label}: the backfill projection is the live row"
+        );
+        assert_eq!(row.actor_principal_ref, principal, "{label}");
+        assert_eq!(row.actor_role, "admin", "{label}");
+        assert_eq!(
+            (row.submission_id, row.object_ref_id, row.export_manifest_id),
+            (None, None, None),
+            "{label}"
+        );
+        assert_eq!(
+            event.reason.as_deref(),
+            Some(
+                format!(
+                    "purpose_hash={};dry_run=false;{label}=1",
+                    sha256_prefixed(label)
+                )
+                .as_str()
+            ),
+            "{label}"
+        );
+        assert_eq!(row.reason, event.reason, "{label}");
+        // The row read back from the database is the file event.
+        let read_back = trace_commons_audit_event_from_storage(tenant, row.clone())
+            .expect("the row projects to an event");
+        assert_eq!(read_back.kind, "pipeline_activation", "{label}");
+        assert_eq!(read_back.reason, event.reason, "{label}");
+        let text = format!(
+            "{} {:?} {:?}",
+            serde_json::to_string(event).unwrap(),
+            row.reason,
+            row.canonical_event_json
+        );
+        for raw in [
+            fixture.a.bundle_id.as_str(),
+            fixture.b.bundle_id.as_str(),
+            fixture.admin.as_str(),
+            "contain_for_incident",
+            "deactivate_to_legacy",
+            "activate_bundle",
+            "roll_back_to_a",
+            "score_for_audit",
+            contained["activation_record_id"].as_str().unwrap(),
+        ] {
+            assert!(!text.contains(raw), "{label}: the row holds {raw}");
+        }
+    }
+    assert_eq!(file_events.len(), expected.len());
+    fixture
+        .assert_audit_chain_verifies(tenant, "after the seven actions")
+        .await;
+    assert!(
+        fixture.activation_audits(&fixture.other_tenant).is_empty(),
+        "the bystander's audit log has no row of the tenant's actions"
+    );
+}
+
+/// `contain` and `deactivate` append their audit row on a process with no
+/// runtime (amendment A4), and on a process whose database mirror is best
+/// effort (`require_db_mirror_writes` off): the row is in the file log and in
+/// the database, and the chain verifies.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_process_with_no_runtime_appends_the_audit_row_of_a_contain_and_a_deactivate() {
+    let Some(fixture) = RouteFixture::new().await else {
+        return;
+    };
+    let tenant = fixture.tenant.as_str();
+    fixture.qualify_and_activate_a().await;
+    let before = fixture.activation_audits(tenant);
+    assert_eq!(before, ["pipeline_qualify", "pipeline_activate"]);
+
+    let no_runtime = fixture.no_runtime();
+    let best_effort = {
+        let mut state = fixture.no_runtime();
+        Arc::make_mut(&mut state).require_db_mirror_writes = false;
+        state
+    };
+    let mut expected = before;
+    for (state, what) in [(&no_runtime, "no runtime"), (&best_effort, "best effort")] {
+        let (status, contained) = fixture
+            .call(
+                state,
+                "POST",
+                CONTAIN,
+                Some(&fixture.admin),
+                Some(serde_json::json!({ "reason_code": "contain_for_incident" })),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{what}: {contained}");
+        expected.push("pipeline_contain".to_string());
+        assert_eq!(fixture.activation_audits(tenant), expected, "{what}");
+        let (status, routing) = fixture
+            .call(
+                state,
+                "POST",
+                DEACTIVATE,
+                Some(&fixture.admin),
+                Some(serde_json::json!({
+                    "reason_code": "deactivate_to_legacy",
+                    "expected_record_id": contained["activation_record_id"],
+                })),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{what}: {routing}");
+        expected.push("pipeline_deactivate".to_string());
+        assert_eq!(fixture.activation_audits(tenant), expected, "{what}");
+        let rows = fixture.audit_rows(tenant).await;
+        assert_eq!(
+            rows.iter()
+                .filter(|row| matches!(
+                    &row.metadata,
+                    StorageTraceAuditSafeMetadata::Maintenance { surface: Some(surface), .. }
+                        if surface == "pipeline_activation"
+                ))
+                .count(),
+            expected.len(),
+            "{what}: each event has its database row"
+        );
+        fixture.assert_audit_chain_verifies(tenant, what).await;
+    }
+}
+
+/// Owner answer O4: a change that committed and whose audit append failed
+/// answers `500 pipeline_change_committed_audit_failed`, and the change is in
+/// place. The failure here is `main`'s injected one: the database row of the
+/// audit event commits and the file append after it fails, so the database is
+/// one event ahead and each later audited request of the tenant is refused
+/// until `POST /v1/admin/audit-chain-repair` restores the line. The routing
+/// row shows the containment throughout; an upload is refused as contained;
+/// a repeated `contain` commits a second event and answers the label again
+/// (its audit row is refused as stale, so that event never gets one); after
+/// the repair, `GET routing` answers, the audit log holds the row of the
+/// first containment, and a new change appends its row again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_audit_append_after_a_committed_change_answers_its_label() {
+    let Some(fixture) = RouteFixture::new().await else {
+        return;
+    };
+    let tenant = fixture.tenant.as_str();
+    let activated = fixture.qualify_and_activate_a().await;
+    let audits_before = fixture.activation_audits(tenant);
+    let events_before = fixture.store().events(tenant, 10).await.unwrap().len();
+    let contain = || {
+        fixture.admin_call(
+            "POST",
+            CONTAIN,
+            Some(serde_json::json!({ "reason_code": "contain_for_incident" })),
+        )
+    };
+    let committed_audit_failed = (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        serde_json::json!({ "error": "pipeline_change_committed_audit_failed" }),
+    );
+
+    fail_next_audit_file_append(fixture.dir.path(), tenant);
+    assert_eq!(contain().await, committed_audit_failed);
+
+    // The change is in place: the row, its event, and the upload refusal.
+    let routing = fixture
+        .store()
+        .routing(tenant)
+        .await
+        .expect("the routing reads")
+        .expect("the tenant has a routing row");
+    assert_eq!(routing.routing_state, RoutingState::Contained);
+    assert_ne!(serde_json::json!(routing.activation_record_id), activated);
+    assert_eq!(
+        fixture.store().events(tenant, 10).await.unwrap().len(),
+        events_before + 1
+    );
+    let (status, refused, _) = fixture
+        .upload(&fixture.state, "contained_audit_failed")
+        .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{refused}");
+    assert_eq!(refused["error"], "pipeline_receipt_intake_contained");
+    assert_eq!(
+        fixture.activation_audits(tenant),
+        audits_before,
+        "the file log has no row of the containment"
+    );
+
+    // The tenant's audit chain is stale until the repair: the read route's
+    // own audit row is refused, and a repeated `contain` commits a second
+    // event and answers the label again. So: do not repeat the request.
+    let (status, view) = fixture
+        .admin_call("GET", "/v1/admin/pipeline/routing", None)
+        .await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{view}");
+    assert_eq!(contain().await, committed_audit_failed);
+    assert_eq!(
+        fixture.store().events(tenant, 10).await.unwrap().len(),
+        events_before + 2,
+        "a repeated contain appends a second event"
+    );
+
+    // The repair restores the one line that the database is ahead by; the
+    // routing read then answers, and a containment's audit row appends.
+    let (status, repaired) = fixture
+        .admin_call(
+            "POST",
+            "/v1/admin/audit-chain-repair",
+            Some(serde_json::json!({ "dry_run": false, "purpose": "pr5 audit append test" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{repaired}");
+    assert_eq!(repaired["file_events_restored"], 1, "{repaired}");
+    let (status, view) = fixture
+        .admin_call("GET", "/v1/admin/pipeline/routing", None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{view}");
+    assert_eq!(view["routing_state"], "contained");
+    let mut expected = audits_before;
+    expected.push("pipeline_contain".to_string());
+    assert_eq!(
+        fixture.activation_audits(tenant),
+        expected,
+        "the repair restored the row of the first containment"
+    );
+    let (status, contained) = contain().await;
+    assert_eq!(status, StatusCode::OK, "{contained}");
+    expected.push("pipeline_contain".to_string());
+    assert_eq!(fixture.activation_audits(tenant), expected);
+    fixture
+        .assert_audit_chain_verifies(tenant, "after the repair")
+        .await;
+}

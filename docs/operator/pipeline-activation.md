@@ -478,8 +478,10 @@ resulting state, the previous and the resulting bundle, the actor's
 `principal_ref`, the reason, an evidence hash, and the time. For a tenant that
 had no row, the previous state is `unselected` in the table and null in the
 route's answer. The rows are immutable: a trigger refuses `UPDATE` and a direct
-`DELETE`. They are the audit record of a routing change, and an action adds no
-row to `main`'s audit log.
+`DELETE`. They are the record of a routing change: the bundle, the reason, and
+the evidence hash are there. Each action also adds one row to `main`'s audit
+log, which names the actor, the time, and the action only (see "The audit row
+of an action" below).
 
 The evidence hash of an `activate` or a `rollback` names the change. It is the
 hash of the canonical JSON of the evidence that the change used and the bundle
@@ -502,6 +504,41 @@ tenant's storage reference, an action label, and the evidence hash. Each `GET`
 route appends one control-plane read audit row (the surfaces `pipeline_routing`,
 `pipeline_policy_interventions`, and `pipeline_legacy_drain`). A refused read
 appends none. A reason that is not a label is `409` `activation_actor_invalid`.
+
+The audit row of an action. Each of the six write routes (`qualifications`,
+`activate`, `rollback`, `contain`, `deactivate`, and `policy-interventions`)
+appends one row to `main`'s audit log after its change committed. A refused
+request appends none. The row is an event of the kind `pipeline_activation`
+in the tenant's audit file, and a `policy_update` row in the database whose
+metadata has the surface `pipeline_activation`. It holds the actor's
+`principal_ref`, the time, and one action label with the count 1:
+`pipeline_qualify`, `pipeline_activate`, `pipeline_rollback`,
+`pipeline_contain`, `pipeline_deactivate`, `pipeline_policy_suspend`, or
+`pipeline_policy_resume`. Its purpose hash is the hash of that label. It holds
+no bundle, no reason, and no record id: read those from the routing events, the
+qualification, or the interventions. A repeated `qualifications` request that
+answers the existing row appends a row too. `contain` and `deactivate` append
+their row on a process with no runtime.
+
+The row is appended after the change, not in its transaction. If the change
+committed and the append failed, the answer is `500`
+`pipeline_change_committed_audit_failed`, and the log has one error line
+(`pipeline admin action committed and its audit row was not appended`) with
+the tenant's storage reference, the action label, the evidence hash, and the
+hash of the error. The change is in place. Do not send the request again: a
+second `contain` or `deactivate` appends a second event, and a second
+`activate` or `rollback` answers `409` `pipeline_routing_state_changed`. Read
+the routing (`GET /v1/admin/pipeline/routing`) to see the state and the record
+id in force. If that read answers `500` too, the tenant's audit chain cannot
+take a row: each audited request of the tenant fails until the chain is
+repaired. Do the repair in
+[audit-trail-forensics.md](audit-trail-forensics.md) (`POST
+/v1/admin/audit-chain-repair`), and then read the routing. A change that
+committed while the chain could not take a row gets no audit row later, unless
+the repair restores it from the database. Its record is its routing event (or
+its qualification or intervention row) and the error line in the log. The
+uploads of the tenant follow the routing row at all times: a containment that
+answered this label stops intake.
 
 The ingest login's grants would let a direct statement write
 `pipeline_tenant_routing` and append events (V110) and update the active bundle

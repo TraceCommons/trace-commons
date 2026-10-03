@@ -50,6 +50,14 @@
 //! and `require_pipeline_product`, before the revision or a trust store is
 //! read). None of those texts holds a request field either.
 //!
+//! Each of the six write routes appends one row to `main`'s audit log after
+//! its store call committed (review round 1, point 8): an event of the kind
+//! `pipeline_activation` whose one count is the action's label
+//! (`record_action`). The row is appended after the change, never inside its
+//! transaction, so a failed append does not undo the change: the route then
+//! answers `500` `pipeline_change_committed_audit_failed`. A refused request
+//! appends no row.
+//!
 //! Four of the nine routes need the routing store and no runtime: `GET
 //! routing`, `GET legacy-drain`, `POST contain`, and `POST deactivate`
 //! (review round 1, amendment A4). A process with no runtime refuses the
@@ -120,6 +128,11 @@ pub(crate) const PIPELINE_ROUTING_STORE_MISSING_LABEL: &str = "pipeline_routing_
 /// `409`: an activation or a rollback of a tenant that this process does not
 /// list on its receipts list (`TRACE_COMMONS_PIPELINE_RECEIPTS_TENANT_IDS`).
 pub(crate) const PIPELINE_TENANT_NOT_IN_SCOPE_LABEL: &str = "pipeline_tenant_not_in_scope";
+/// `500`: the change of a write route committed, and the append of its row to
+/// `main`'s audit log failed (owner answer O4). The change is in place: the
+/// operator reads the routing and does not repeat the request.
+pub(crate) const PIPELINE_CHANGE_COMMITTED_AUDIT_FAILED_LABEL: &str =
+    "pipeline_change_committed_audit_failed";
 /// `404`: the tenant has no stored package of the bundle the request names
 /// (the activation gate's own label for it). `409` with the same label: the
 /// stored package no longer validates (a tampered package, BND-002).
@@ -687,16 +700,91 @@ fn trust_and_revision(state: &AppState) -> ApiResult<TrustAndRevision<'_>> {
     })
 }
 
-/// Logs one successful action: the tenant's storage reference, the action
-/// label, and the evidence hash of what it recorded. Never the package, a
-/// token, or the tenant id.
-fn log_action(tenant: &TenantAuth, action: &'static str, evidence_hash: &str) {
+/// The label of `action` (the log line's label) in its audit row:
+/// `pipeline_qualify`, `pipeline_activate`, `pipeline_rollback`,
+/// `pipeline_contain`, `pipeline_deactivate`, `pipeline_policy_suspend`,
+/// `pipeline_policy_resume`.
+fn audit_action_label(action: &str) -> String {
+    format!("pipeline_{action}")
+}
+
+/// Records one successful action, after its store call committed: one row in
+/// `main`'s audit log, then one log line.
+///
+/// The audit row is a control-plane row of the kind `pipeline_activation`
+/// (`TraceCommonsAuditEvent::pipeline_activation`): the actor, the time, and
+/// the action's label, as the purpose (hashed) and as the one count. It holds
+/// no bundle, reason, or record id; the change's own record is its row in
+/// `pipeline_activation_events`, `pipeline_bundle_qualifications`, or
+/// `pipeline_policy_interventions`. It needs no runtime.
+///
+/// The log line: the tenant's storage reference, the action label, and the
+/// evidence hash of what the change recorded. Never the package, a token, or
+/// the tenant id.
+///
+/// A failed append answers `committed_change_audit_failure`: the change is in
+/// place and the request is not to be repeated.
+async fn record_action(
+    state: &AppState,
+    tenant: &TenantAuth,
+    action: &'static str,
+    evidence_hash: &str,
+) -> ApiResult<()> {
+    let action_label = audit_action_label(action);
+    let appended = append_audit_event_with_db_mirror(
+        state,
+        tenant,
+        TraceCommonsAuditEvent::pipeline_activation(tenant, &action_label),
+        StorageTraceAuditAction::PolicyUpdate,
+        StorageTraceAuditSafeMetadata::Maintenance {
+            surface: Some(PIPELINE_ACTIVATION_AUDIT_KIND.to_string()),
+            purpose_hash: Some(sha256_prefixed(&action_label)),
+            dry_run: false,
+            action_counts: BTreeMap::from([(action_label, 1)]),
+        },
+    )
+    .await;
+    if let Err(error) = appended {
+        return Err(committed_change_audit_failure(
+            tenant,
+            action,
+            evidence_hash,
+            &error,
+        ));
+    }
     tracing::info!(
         tenant_storage_ref = %tenant_storage_ref(&tenant.tenant_id),
         action,
         evidence_hash,
         "pipeline admin action recorded"
     );
+    Ok(())
+}
+
+/// The answer of a write route whose change committed and whose audit append
+/// failed (owner answer O4): `500` `pipeline_change_committed_audit_failed`,
+/// and one error line with the tenant's storage reference, the action label,
+/// the change's evidence hash, and the hash of the error. The label says that
+/// the change is in place, so that an operator reads the routing and does not
+/// send the request again (a second `contain` would append a second event,
+/// and a second `activate` would answer `pipeline_routing_state_changed`).
+fn committed_change_audit_failure(
+    tenant: &TenantAuth,
+    action: &'static str,
+    evidence_hash: &str,
+    error: &anyhow::Error,
+) -> (StatusCode, Json<ApiError>) {
+    tracing::error!(
+        tenant_storage_ref = %tenant_storage_ref(&tenant.tenant_id),
+        action,
+        evidence_hash,
+        error_hash = %safe_display_error_hash(error),
+        "pipeline admin action committed and its audit row was not appended"
+    );
+    api_error(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        PIPELINE_CHANGE_COMMITTED_AUDIT_FAILED_LABEL,
+    )
 }
 
 /// `POST /v1/admin/pipeline/qualifications`.
@@ -1041,7 +1129,13 @@ pub(crate) async fn pipeline_qualify_handler(
         }
         Err(error) => return Err(activation_error(error)),
     };
-    log_action(&tenant, "qualify", &record.metadata.evidence_hash);
+    record_action(
+        state.as_ref(),
+        &tenant,
+        "qualify",
+        &record.metadata.evidence_hash,
+    )
+    .await?;
     Ok(Json(record))
 }
 
@@ -1073,7 +1167,7 @@ pub(crate) async fn pipeline_activate_handler(
                 &inputs.promotion,
             )
         })?;
-    log_action(&tenant, "activate", &routing.evidence_hash);
+    record_action(state.as_ref(), &tenant, "activate", &routing.evidence_hash).await?;
     Ok(Json(routing))
 }
 
@@ -1102,13 +1196,14 @@ pub(crate) async fn pipeline_rollback_handler(
                 &inputs.promotion,
             )
         })?;
-    log_action(&tenant, "rollback", &routing.evidence_hash);
+    record_action(state.as_ref(), &tenant, "rollback", &routing.evidence_hash).await?;
     Ok(Json(routing))
 }
 
 /// `POST /v1/admin/pipeline/contain`: stops the tenant's new receipts. Needs
 /// the routing store, not a runtime: a process with no runtime refuses a
-/// contained tenant's uploads too, and can contain one.
+/// contained tenant's uploads too, and can contain one. The audit row of the
+/// change needs no runtime either.
 pub(crate) async fn pipeline_contain_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -1126,7 +1221,7 @@ pub(crate) async fn pipeline_contain_handler(
         )
         .await
         .map_err(activation_error)?;
-    log_action(&tenant, "contain", &routing.evidence_hash);
+    record_action(state.as_ref(), &tenant, "contain", &routing.evidence_hash).await?;
     Ok(Json(routing))
 }
 
@@ -1151,7 +1246,13 @@ pub(crate) async fn pipeline_deactivate_handler(
         )
         .await
         .map_err(activation_error)?;
-    log_action(&tenant, "deactivate", &routing.evidence_hash);
+    record_action(
+        state.as_ref(),
+        &tenant,
+        "deactivate",
+        &routing.evidence_hash,
+    )
+    .await?;
     Ok(Json(routing))
 }
 
@@ -1185,7 +1286,7 @@ pub(crate) async fn pipeline_policy_intervention_handler(
         PolicyOperationalStatus::Runnable => "policy_resume",
         PolicyOperationalStatus::Terminated => "policy_terminate",
     };
-    log_action(&tenant, action, &record.evidence_hash);
+    record_action(state.as_ref(), &tenant, action, &record.evidence_hash).await?;
     Ok(Json(record))
 }
 
@@ -1661,6 +1762,8 @@ mod tests {
             PIPELINE_QUALIFICATION_START_CHECK_INCOMPLETE_LABEL,
             BUNDLE_PACKAGE_MISSING_LABEL,
             PACKAGE_RUNTIME_REVISION_UNKNOWN_LABEL,
+            PIPELINE_CHANGE_COMMITTED_AUDIT_FAILED_LABEL,
+            PIPELINE_ACTIVATION_AUDIT_KIND,
             ROUTING_READ_SURFACE,
             POLICY_INTERVENTIONS_READ_SURFACE,
             LEGACY_DRAIN_READ_SURFACE,
@@ -1679,6 +1782,144 @@ mod tests {
             assert!(is_safe_label(label), "{label}");
         }
         assert_eq!(PIPELINE_MAX_ATTESTATIONS, 64);
+    }
+
+    /// Review round 1, point 8: the seven action labels of the audit rows
+    /// are the log line's labels with the prefix `pipeline_`, and each is a
+    /// safe label.
+    #[test]
+    fn the_audit_action_labels_are_the_seven_safe_labels() {
+        let labels = [
+            "qualify",
+            "activate",
+            "rollback",
+            "contain",
+            "deactivate",
+            "policy_suspend",
+            "policy_resume",
+        ]
+        .map(audit_action_label);
+        assert_eq!(
+            labels,
+            [
+                "pipeline_qualify",
+                "pipeline_activate",
+                "pipeline_rollback",
+                "pipeline_contain",
+                "pipeline_deactivate",
+                "pipeline_policy_suspend",
+                "pipeline_policy_resume",
+            ]
+        );
+        for label in &labels {
+            assert!(is_safe_label(label), "{label}");
+        }
+    }
+
+    /// The tenant admin that the audit tests of this module act as.
+    fn audit_test_admin() -> TenantAuth {
+        TenantAuth {
+            tenant_id: "tenant-audit-failure".to_string(),
+            role: TokenRole::Admin,
+            principal_ref: static_token_principal_ref("admin-token-audit-failure"),
+            legacy_principal_ref: None,
+            expires_at: None,
+            auth_method: TraceAuthMethod::StaticToken,
+            signed_claim_issuer: None,
+            signed_claim_audiences: BTreeSet::new(),
+            signed_claim_subject: None,
+            allowed_consent_scopes: BTreeSet::new(),
+            allowed_uses: BTreeSet::new(),
+        }
+    }
+
+    /// Review round 1, point 8 (design (f)): the audit event of an action is
+    /// of the kind `pipeline_activation`, a maintenance kind; it names no
+    /// submission; the row that `record_action` mirrors it as is the row
+    /// that the audit backfill projects from the event (`PolicyUpdate`, and
+    /// `Maintenance` metadata whose surface is the kind); the mirror's
+    /// metadata check accepts that row and refuses another label's; and the
+    /// row reads back as its kind.
+    #[test]
+    fn the_audit_event_of_an_action_projects_to_its_live_row() {
+        let tenant = audit_test_admin();
+        for action in ["qualify", "contain", "policy_suspend"] {
+            let label = audit_action_label(action);
+            let event = TraceCommonsAuditEvent::pipeline_activation(&tenant, &label);
+            assert_eq!(event.kind, PIPELINE_ACTIVATION_AUDIT_KIND);
+            assert!(trace_maintenance_audit_kind(&event.kind));
+            assert_eq!(event.submission_id, Uuid::nil());
+            assert_eq!(
+                event.actor_principal_ref.as_deref(),
+                Some(tenant.principal_ref.as_str())
+            );
+            assert_eq!(
+                event.reason,
+                Some(format!(
+                    "purpose_hash={};dry_run=false;{label}=1",
+                    sha256_prefixed(&label)
+                ))
+            );
+            let live = StorageTraceAuditSafeMetadata::Maintenance {
+                surface: Some("pipeline_activation".to_string()),
+                purpose_hash: Some(sha256_prefixed(&label)),
+                dry_run: false,
+                action_counts: BTreeMap::from([(label.clone(), 1)]),
+            };
+            assert_eq!(
+                audit_backfill_storage_projection(&event),
+                (StorageTraceAuditAction::PolicyUpdate, live.clone()),
+                "{label}"
+            );
+            assert_eq!(
+                normalize_audit_event_metadata(
+                    &event,
+                    StorageTraceAuditAction::PolicyUpdate,
+                    live.clone()
+                )
+                .expect("the mirror accepts the row"),
+                live
+            );
+            let other = StorageTraceAuditSafeMetadata::Maintenance {
+                surface: Some("pipeline_activation".to_string()),
+                purpose_hash: Some(sha256_prefixed("pipeline_other")),
+                dry_run: false,
+                action_counts: BTreeMap::from([("pipeline_other".to_string(), 1)]),
+            };
+            assert!(
+                normalize_audit_event_metadata(
+                    &event,
+                    StorageTraceAuditAction::PolicyUpdate,
+                    other
+                )
+                .is_err(),
+                "{label}: a row of another label is refused"
+            );
+            assert_eq!(
+                storage_audit_event_kind(StorageTraceAuditAction::PolicyUpdate, &live),
+                "pipeline_activation"
+            );
+        }
+    }
+
+    /// Owner answer O4: a change that committed and whose audit append
+    /// failed answers `500` with the label that says so, and the answer holds
+    /// nothing of the error.
+    #[test]
+    fn a_failed_audit_append_after_a_committed_change_answers_its_label() {
+        let tenant = audit_test_admin();
+        let error = anyhow::anyhow!("audit log at /var/secret/path is not writable");
+        let (status, Json(body)) = committed_change_audit_failure(
+            &tenant,
+            "contain",
+            "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            &error,
+        );
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            serde_json::to_value(&body).unwrap(),
+            serde_json::json!({ "error": "pipeline_change_committed_audit_failed" })
+        );
     }
 
     /// Final fix wave (K2): a refusal label with a `:<check_id>` suffix, as

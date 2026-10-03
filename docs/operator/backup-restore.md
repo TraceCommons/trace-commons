@@ -220,6 +220,18 @@ answers `404` there. Do these steps in this order:
      shows that an action happened, for which tenant, and when. It does not
      show the bundle of an activation or a rollback, or the bundle and the
      phase of a policy action.
+   - `main`'s audit file. Each successful admin action appends one event of
+     the kind `pipeline_activation` to the tenant's audit file
+     (`tenants/<key>/audit/events.jsonl` under the ingest root), which a
+     database restore does not reach. The event holds the actor's
+     `principal_ref`, the time, and an action label (`pipeline_qualify`,
+     `pipeline_activate`, `pipeline_rollback`, `pipeline_contain`,
+     `pipeline_deactivate`, `pipeline_policy_suspend`,
+     `pipeline_policy_resume`). Like the log line, it does not show the bundle
+     or the phase. An action that answered `500`
+     `pipeline_change_committed_audit_failed` can have no event there: the
+     log has an error line for it. The audit rows in the database are lost
+     with the other rows; the file is the copy to read.
    - Your own record. The code keeps no other record of an admin action
      outside the database. Keep a record of each admin action (the route, the
      body, and the time) in a place that a database restore does not reach.
