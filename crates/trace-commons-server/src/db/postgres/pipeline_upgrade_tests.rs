@@ -308,9 +308,19 @@ async fn pipeline_table_grants(client: &Client) -> Vec<(String, String, String, 
     grants
 }
 
+/// Multi-lens review C13: the tests of this module each apply every
+/// migration, in a database of their own on one server. The migrations hold
+/// `ALTER ROLE` statements, roles are shared by the whole server, and two
+/// such statements on one role at the same time fail (`tuple concurrently
+/// updated`); the migration lock is per database and does not order them.
+/// Each test holds this lock from its first line, so they run one after the
+/// other however the test binary is started.
+static UPGRADE_CLUSTER_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 #[tokio::test]
 #[ignore = "requires PostgreSQL 16+ at isolated TRACE_COMMONS_PIPELINE_PG_UPGRADE_TEST_URL"]
 async fn pipeline_upgrade_from_v91_installs_forced_rls_storage() {
+    let _serial = UPGRADE_CLUSTER_LOCK.lock().await;
     let url = isolated_upgrade_database_url();
     let (mut admin, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
         .await
@@ -593,12 +603,15 @@ async fn pipeline_upgrade_from_v91_installs_forced_rls_storage() {
 /// payout `pending` has no batch line under the account's settlement key, so
 /// the payout never pays it. V109 marks it `disabled` (a payout nothing will
 /// make) instead of leaving it `pending` for good; a leg of another
-/// instrument keeps its state.
+/// instrument keeps its state. V109 is applied here as a migrator that owns
+/// the tables and is not a superuser, so the test fails when V109 does not
+/// lift forced row security for its update.
 #[tokio::test]
 #[ignore = "requires PostgreSQL 16+ at isolated TRACE_COMMONS_PIPELINE_PG_UPGRADE_TEST_URL"]
 async fn v109_disables_the_payout_of_pending_legs_the_v94_code_seeded() {
+    let _serial = UPGRADE_CLUSTER_LOCK.lock().await;
     // A database of its own beside the isolated one, so this upgrade starts
-    // from nothing whatever else ran on that one.
+    // from nothing whatever else ran on that one. It is dropped at the end.
     let base = isolated_upgrade_database_url();
     let (prefix, base_name) = base.rsplit_once('/').expect("a database name");
     let (base_name, query) = base_name
@@ -623,7 +636,8 @@ async fn v109_disables_the_payout_of_pending_legs_the_v94_code_seeded() {
     let (mut admin, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
         .await
         .expect("connect upgrade admin");
-    tokio::spawn(async move { connection.await.expect("upgrade connection") });
+    let admin_connection =
+        tokio::spawn(async move { connection.await.expect("upgrade connection") });
     apply_real_migrations_through(&mut admin, 104).await;
 
     let tenant = "upgrade-v94-legs";
@@ -715,6 +729,50 @@ async fn v109_disables_the_payout_of_pending_legs_the_v94_code_seeded() {
             .unwrap();
     }
 
+    // Multi-lens review C16: V109 is applied as a migrator that owns the
+    // tables and is not a superuser, with no tenant set. Row security does
+    // not apply to a superuser, so as the URL's role the update would reach
+    // the legs with or without V109's lift of forced row security. V105 to
+    // V108 are applied first, as the admin; the five tables V109 changes
+    // are then given to the owner role.
+    for (version, migration, sql) in MIGRATIONS
+        .iter()
+        .filter(|(version, _, _)| (105..=108).contains(version))
+    {
+        apply_and_record_migration(&mut admin, *version, migration, sql)
+            .await
+            .unwrap_or_else(|error| panic!("apply real V{version} ({migration}): {error}"));
+    }
+    admin
+        .batch_execute(
+            "DO $$ BEGIN
+                IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'pipeline_upgrade_owner')
+                THEN CREATE ROLE pipeline_upgrade_owner NOLOGIN NOSUPERUSER NOBYPASSRLS; END IF;
+             END $$;
+             GRANT USAGE, CREATE ON SCHEMA public TO pipeline_upgrade_owner;
+             GRANT INSERT ON _trace_commons_migrations TO pipeline_upgrade_owner;
+             ALTER TABLE pipeline_run_settlements OWNER TO pipeline_upgrade_owner;
+             ALTER TABLE pipeline_export_snapshots OWNER TO pipeline_upgrade_owner;
+             ALTER TABLE pipeline_export_snapshot_items OWNER TO pipeline_upgrade_owner;
+             ALTER TABLE pipeline_review_assessments OWNER TO pipeline_upgrade_owner;
+             ALTER TABLE pipeline_index_invalidations OWNER TO pipeline_upgrade_owner;",
+        )
+        .await
+        .expect("give V109's tables to a non-superuser owner");
+    set_tenant(&admin, "").await;
+    admin
+        .batch_execute("SET ROLE pipeline_upgrade_owner")
+        .await
+        .unwrap();
+    let (version, migration, sql) = MIGRATIONS
+        .iter()
+        .find(|(version, _, _)| *version == 109)
+        .expect("V109 is in the list");
+    apply_and_record_migration(&mut admin, *version, migration, sql)
+        .await
+        .expect("apply V109 as the non-superuser owner");
+    admin.batch_execute("RESET ROLE").await.unwrap();
+
     let migrator = PgBackend::new(&database_config(url.clone())).await.unwrap();
     migrator.run_migrations().await.expect("upgrade to current");
     set_tenant(&admin, tenant).await;
@@ -745,4 +803,14 @@ async fn v109_disables_the_payout_of_pending_legs_the_v94_code_seeded() {
         .unwrap()
         .get(0);
     assert!(forced, "V109 forces row security again after its update");
+
+    // Multi-lens review C13: no run leaves this test's database on the
+    // server. Its own connections are closed first.
+    drop(migrator);
+    drop(admin);
+    admin_connection.await.expect("the admin connection closes");
+    setup
+        .batch_execute(&format!("DROP DATABASE {name} WITH (FORCE)"))
+        .await
+        .expect("drop the test's own database");
 }
