@@ -5598,6 +5598,112 @@ pub extern "C" fn tc_privacy_scan_copy_json() -> *mut c_char {
     })
 }
 
+/// The "keychain" block of the private-AI credential status
+/// (`DaemonSettings::keychain_status_json`): what the credential store at
+/// `config_dir` currently holds, as labels and booleans only -- never the
+/// inference key, never the session's refresh token. See the module's own
+/// doc for the fields.
+///
+/// MAY PROMPT FOR OS STORAGE, the same as the daemon's own load: call this
+/// off a shell's blocking worker, never its UI thread.
+///
+/// A NULL or non-UTF-8 `config_dir` returns NULL -- a caller error, not a
+/// business state. An unreadable `config_dir`, or a settings document that
+/// cannot be loaded, instead answers
+/// [`trace_commons_contributor::daemon::settings::keychain_status_unavailable_json`]:
+/// the daemon's own `near_ai_credential_status` IPC answer already names a
+/// storage failure it can detect, with the action that goes with it, so
+/// this failure mode is never surfaced as an error a shell cannot show a
+/// button for.
+///
+/// Returns an owned JSON string; free it with [`tc_string_free`]. NULL only
+/// for a NULL/non-UTF-8 `config_dir`, and on a caught panic.
+///
+/// # Safety
+/// `config_dir`, if non-null, must point to a valid, NUL-terminated C
+/// string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_private_ai_keychain_status_json(
+    config_dir: *const c_char,
+) -> *mut c_char {
+    guarded_string_no_err(|| {
+        let Some(dir) = (unsafe { borrow_optional_str(config_dir) }) else {
+            return Ok(std::ptr::null_mut());
+        };
+        let value = match ConfigStore::open(std::path::PathBuf::from(dir)) {
+            Ok(store) => match DaemonSettings::load_with_cloud_credentials(&store) {
+                Ok(settings) => settings.keychain_status_json(),
+                Err(_) => {
+                    trace_commons_contributor::daemon::settings::keychain_status_unavailable_json()
+                }
+            },
+            Err(_) => {
+                trace_commons_contributor::daemon::settings::keychain_status_unavailable_json()
+            }
+        };
+        Ok(to_owned_cstring(&value.to_string()))
+    })
+}
+
+/// Parse one deep link or launch argument
+/// (`deep_link::parse_deep_link`): a JSON object naming exactly one action --
+/// `{"kind":"enroll","invite":...}`, `{"kind":"public_run","slug":...,
+/// "url":...}`, `{"kind":"credential","provider":...}`, or
+/// `{"kind":"navigate","path":"/waiting"}`. This is PARSING ONLY: it never
+/// opens a browser, never stores a pending link, and never acts -- the
+/// caller decides what the action means.
+///
+/// Returns NULL and sets `*err` (owned; free with [`tc_string_free`]) to
+/// `deep-link-invalid` for a link this build does not recognise, including
+/// a malformed one and a NULL or non-UTF-8 `url`. Unknown and malformed are
+/// refused identically, so a caller cannot branch on "why".
+///
+/// # Safety
+/// `url`, if non-null, must point to a valid, NUL-terminated C string.
+/// `err`, if non-null, must point to writable `*mut c_char` storage.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_parse_deep_link_json(
+    url: *const c_char,
+    err: *mut *mut c_char,
+) -> *mut c_char {
+    guarded_string(err, || {
+        let Some(url) = (unsafe { borrow_optional_str(url) }) else {
+            return Ok(witness_fail(
+                trace_commons_contributor::deep_link::DEEP_LINK_INVALID,
+                err,
+            ));
+        };
+        match trace_commons_contributor::deep_link::parse_deep_link(url) {
+            Ok(action) => Ok(to_owned_cstring(&serde_json::to_string(&action)?)),
+            Err(label) => Ok(witness_fail(label, err)),
+        }
+    })
+}
+
+/// Whether `url` is one of the fixed external destinations the app may hand
+/// to the OS to open (`external_url::is_allowed`): the near.ai credits
+/// dashboard, a tracecommons.ai public run, the CI fixture commit on
+/// GitHub, and a loopback OAuth callback. The list is exactly Tauri's
+/// `open_external_url` allowlist, unchanged, and every shell opens only
+/// these.
+///
+/// Returns `1` for allowed, `0` for refused -- including a NULL or
+/// non-UTF-8 `url`, and on a caught panic. Refusal is the safe sentinel.
+///
+/// # Safety
+/// `url`, if non-null, must point to a valid, NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_external_url_is_allowed(url: *const c_char) -> i32 {
+    guarded_scalar_no_err(0, || {
+        let Some(url) = (unsafe { borrow_optional_str(url) }) else {
+            return Ok(0);
+        };
+        Ok(i32::from(
+            trace_commons_contributor::external_url::is_allowed(url),
+        ))
+    })
+}
+
 /// Can this process reach the Cloud credential store?
 ///
 /// Exists so a release pipeline can ask a *signed bundle* the question, which

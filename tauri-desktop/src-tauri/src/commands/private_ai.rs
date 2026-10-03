@@ -77,31 +77,13 @@ pub(crate) async fn private_ai_credential_status(
     // `storage_unentitled`, `storage_unavailable`), with the action that goes
     // with it. Failing the whole call here threw that answer away, so the
     // contributor saw an error instead of the button that fixes it.
-    let Ok(settings) = loaded else {
-        value["keychain"] = serde_json::json!({
-            "state": "unavailable",
-            "inference_present": false,
-            "session_present": false,
-            "migration": "none",
-        });
-        return Ok(value);
+    // The "keychain" block's assembly lives in the core (K7, #1173), so
+    // every shell -- this one and macOS over the C ABI -- shows the
+    // identical fields the identical way.
+    value["keychain"] = match loaded {
+        Ok(settings) => settings.keychain_status_json(),
+        Err(_) => trace_commons_contributor::daemon::settings::keychain_status_unavailable_json(),
     };
-    let mut keychain = serde_json::json!({
-        "state": if settings.cloud_storage_unavailable { "unavailable" } else if settings.cloud_credentials.is_some() { "present" } else { "empty" },
-        "inference_present": settings.near_ai_inference.is_some(),
-        "session_present": settings.near_ai_session.is_some(),
-        "migration": if settings.cloud_credentials.is_some() { "native-v1" } else { "none" },
-    });
-    if let Some(inference) = settings.near_ai_inference.as_ref() {
-        keychain["key_prefix"] = serde_json::Value::String(inference.key_prefix.clone());
-        keychain["minted_at"] = serde_json::Value::String(inference.minted_at.to_rfc3339());
-    }
-    if let Some(session) = settings.near_ai_session.as_ref()
-        && let Some(expires_at) = session.refresh_token_expires_at
-    {
-        keychain["session_expires_at"] = serde_json::Value::String(expires_at.to_rfc3339());
-    }
-    value["keychain"] = keychain;
     Ok(value)
 }
 
