@@ -354,7 +354,7 @@ final class TracesParityTests: XCTestCase {
             "model.outcomeCounts", "TCOutcome.line(label:", "QueueLegacyWords.noLongerWaiting(",
             "QueueLegacyWords.notOfferedScope", "model.lastActionError = nil", "model.lastActionNotice = nil",
             "model.witnessCopy?.onboarding", "QueueLegacyWords.agentSetup", "QueueLegacyWords.undo)",
-            "ActionMessageBanner.dismissWord",
+            "ActionNoticeWords.dismissWord",
         ] {
             XCTAssertTrue(offers.contains(needle), "TracesOffers.swift lacks \(needle)")
         }
@@ -381,7 +381,7 @@ final class TracesParityTests: XCTestCase {
         XCTAssertFalse(offers.contains("?? \"\""), "a control would be wordless without the core")
         // One dismiss accessor everywhere a glass notice is put away.
         XCTAssertTrue(offers.contains(
-            "private var dismissWord: String { ActionMessageBanner.coreDismissWord ?? ActionMessageBanner.dismissWord }"))
+            "private var dismissWord: String { ActionNoticeWords.coreDismissWord ?? ActionNoticeWords.dismissWord }"))
         XCTAssertFalse(offers.contains("words?.dismiss"))
         // An unread list is not an empty one: the certificate list and the
         // first-contribution note wait for the daemon's answer, and draw
@@ -400,16 +400,12 @@ final class TracesParityTests: XCTestCase {
         try LegacySymbols.assertClean("Views/Monitor/TracesOffers.swift")
         XCTAssertTrue(GlassSurfaceRulesTests.files.contains("Views/Monitor/TracesOffers.swift"))
 
-        // The legacy queue reads the same table, one literal per sentence.
+        // The legacy queue is gone (R15); its file holds the table alone,
+        // one literal per sentence.
         let queue = try Self.text("Views/QueueView.swift")
-        for needle in [
-            "Text(QueueLegacyWords.undoWillSend)", "QueueLegacyWords.closeNoticeStillSends",
-            "QueueLegacyWords.approvedAgo(undo.heldSeconds)", "Text(QueueLegacyWords.noLongerWaiting(",
-            "Text(QueueLegacyWords.notOfferedScope)", "title: QueueLegacyWords.nothingWaiting,",
-            "detail: QueueLegacyWords.nothingWaitingDetail", "Button(QueueLegacyWords.lookInside,",
-            "DisclosureGroup(QueueLegacyWords.agentSetup)", "Button(QueueLegacyWords.undo,",
-        ] {
-            XCTAssertTrue(queue.contains(needle), "QueueView.swift lacks \(needle)")
+        XCTAssertTrue(queue.contains("enum QueueLegacyWords"))
+        for sentence in ["Nothing is waiting.", "Close this notice.\"", "\"Undo\"", "\"Look inside\"", "\"Agent setup\""] {
+            XCTAssertEqual(queue.components(separatedBy: sentence).count - 1, 1, "\(sentence) is held once, in the table")
         }
     }
 

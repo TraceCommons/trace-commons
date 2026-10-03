@@ -10,8 +10,8 @@ import TCShellCore
 /// its own pane and step progress (`FirstRunFrame`), so this view draws
 /// only the scene and sizes the pane.
 ///
-/// It is gated as the main window gates its own first run
-/// (`OnboardingNavigation.hostsFirstRun`, with this window's own `entered`):
+/// It is the onboarding gate (R15), through
+/// `OnboardingNavigation.hostsFirstRun` with this window's own `entered`:
 /// the core's startup notice while the daemon is starting or was refused
 /// at launch, the coordinator while onboarding is required, and the window
 /// closes itself as soon as it is not and opens the Monitor, so an
@@ -49,8 +49,23 @@ struct FirstRunWindowView: View {
                 .frame(width: FirstRunProgress.paneWidth)
                 .padding(.vertical, GlassTokens.Space.windowPadding * 3)
             } else if model.requiresOnboarding {
-                DaemonStartupNotice(startup: model.startup)
-                    .frame(width: FirstRunProgress.paneWidth)
+                // The legacy startup notice left with the legacy window
+                // (R15); this says the startup as the Inference tab does: a
+                // spinner while starting, the core's down title over the
+                // refusal's sentence.
+                Group {
+                    switch model.startup {
+                    case .starting:
+                        SettingsAwaiting()
+                    case .refused(let sentence):
+                        GlassHealthBanner(banner: .init(
+                            title: TracesHealth.coreDownLine?.title ?? TracesHealth.unknownWord ?? "",
+                            detail: sentence, tone: .outside))
+                    case .needsRoots, .running:
+                        EmptyView()
+                    }
+                }
+                .frame(width: FirstRunProgress.paneWidth)
             }
         }
         .frame(minWidth: FirstRunProgress.paneWidth + 80, minHeight: 640)

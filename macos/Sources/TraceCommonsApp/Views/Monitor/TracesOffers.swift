@@ -16,7 +16,7 @@ struct TracesOffersBar: View {
 
     /// The core's Dismiss, or the word the legacy banner already says: the
     /// one accessor every glass notice reads.
-    private var dismissWord: String { ActionMessageBanner.coreDismissWord ?? ActionMessageBanner.dismissWord }
+    private var dismissWord: String { ActionNoticeWords.coreDismissWord ?? ActionNoticeWords.dismissWord }
 
     var body: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
@@ -72,7 +72,7 @@ struct TracesOffersBar: View {
 
     /// The submit toast and, when something was approved, its Undo. No
     /// timer removes it: the deadline is the daemon's next upload sweep,
-    /// which nothing here can observe (`UndoBar`).
+    /// which nothing here can observe.
     private func approvalUndo(_ undo: AppModel.Undo) -> some View {
         GlassNotice(tone: .ask, title: undo.toastLine) {
             if undo.offerUndo {

@@ -14,30 +14,30 @@ final class UnknownContributionStatusTests: XCTestCase {
         try XCTUnwrap(PublicRunCopy.decode(fromJSON: TCPublicRun.copyJSON() ?? ""))
     }
 
-    func testLegacyHistoryLabelsAnUnknownStatusFromTheCore() throws {
+    func testHistoryLabelsAnUnknownStatusFromTheCore() throws {
         let copy = try sharedCopy()
         for status in ["future_state", "", "pending"] {
             XCTAssertEqual(
-                HistoryRow.statusSentence(for: status, copy: copy), "Status unavailable", status)
+                HomeFormat.historyStatusLabel(copy: copy, status), "Status unavailable", status)
             // And it is terminal: no Withdraw beside it.
             XCTAssertFalse(ContributionStatusPresentation.offersWithdraw(status), status)
         }
     }
 
-    func testLegacyHistoryKeepsItsKnownLabels() throws {
+    func testHistoryKeepsItsKnownLabels() throws {
         let copy = try sharedCopy()
-        XCTAssertEqual(HistoryRow.statusSentence(for: "accepted", copy: copy), "In the commons")
+        XCTAssertEqual(HomeFormat.historyStatusLabel(copy: copy, "accepted"), "In the commons")
         XCTAssertEqual(
-            HistoryRow.statusSentence(for: "submitted", copy: copy), "Waiting to be scored")
+            HomeFormat.historyStatusLabel(copy: copy, "submitted"), "Waiting to be scored")
         XCTAssertEqual(
-            HistoryRow.statusSentence(for: "quarantined", copy: copy), "Held for privacy review")
+            HomeFormat.historyStatusLabel(copy: copy, "quarantined"), "Held for privacy review")
         XCTAssertEqual(
-            HistoryRow.statusSentence(for: "withdrawn", copy: copy), "Withdrawn by you")
+            HomeFormat.historyStatusLabel(copy: copy, "withdrawn"), "Withdrawn by you")
     }
 
     /// These read "Status unavailable" before the core had a table -- a
     /// rejected row beside a Withdraw button among them.
-    func testLegacyHistoryLabelsTheStatusesItHadNoWordFor() throws {
+    func testHistoryLabelsTheStatusesItHadNoWordFor() throws {
         let copy = try sharedCopy()
         let expected = [
             "received": "Received",
@@ -49,7 +49,7 @@ final class UnknownContributionStatusTests: XCTestCase {
             "purged": "Purged",
         ]
         for (status, label) in expected {
-            XCTAssertEqual(HistoryRow.statusSentence(for: status, copy: copy), label, status)
+            XCTAssertEqual(HomeFormat.historyStatusLabel(copy: copy, status), label, status)
         }
     }
 
@@ -74,9 +74,9 @@ final class UnknownContributionStatusTests: XCTestCase {
         }
     }
 
-    func testLegacyHistoryShowsNoTagRatherThanATypedOneWithoutTheCore() {
-        XCTAssertNil(HistoryRow.statusSentence(for: "future_state", copy: nil))
-        XCTAssertNil(HistoryRow.statusSentence(for: "accepted", copy: nil))
+    func testHistoryShowsNoTagRatherThanATypedOneWithoutTheCore() {
+        XCTAssertNil(HomeFormat.historyStatusLabel(copy: nil, "future_state"))
+        XCTAssertNil(HomeFormat.historyStatusLabel(copy: nil, "accepted"))
     }
 
     func testAnUnknownStatusOffersNoWithdraw() {

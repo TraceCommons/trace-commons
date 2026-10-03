@@ -82,51 +82,37 @@ final class AttestationRowTests: XCTestCase {
 
     // MARK: - What the card draws
 
-    /// The row draws the mark, its tone and its reason, and it gets all
-    /// three from `AttestationSurface`.
-    func testTheQueueRowDrawsTheMarkThroughTheSharedSurface() throws {
-        let source = try Self.source("TraceCommonsApp/Views/QueueView.swift")
-        XCTAssertTrue(
-            source.contains("struct QueueRow"),
-            "QueueView no longer holds QueueRow; this scan has to be repointed")
-        for call in [
-            "AttestationSurface.markLine(", "AttestationSurface.tone(",
-            "AttestationSurface.reasonLine(",
-        ] {
-            XCTAssertTrue(source.contains(call), "the row never calls \(call)")
+    /// The session inspector draws the mark and its reason, and gets both
+    /// from `AttestationSurface` through the store, off the entry it is
+    /// drawing. (The legacy queue row, which also drew a tone, left with the
+    /// legacy shell, R15; the inspector states it in words alone.)
+    func testTheInspectorDrawsTheMarkThroughTheSharedSurface() throws {
+        let store = try Self.source("TraceCommonsApp/Views/Monitor/TracesStore.swift")
+        let start = try XCTUnwrap(store.range(of: "func attestationValue(_ entry: DaemonData.QueueEntry) -> String? {"))
+        let end = try XCTUnwrap(store.range(of: "\n    }\n", range: start.upperBound ..< store.endIndex))
+        let body = store[start.lowerBound ..< end.upperBound]
+        for call in ["AttestationSurface.markLine(", "AttestationSurface.reasonLine(", "Self.attestationCalls",
+                     "mark: entry.attestation ?? \"\"", "entry.attestationReason"] {
+            XCTAssertTrue(body.contains(call), "attestationValue never reads \(call)")
         }
+        let inspector = try Self.source("TraceCommonsApp/Views/Monitor/TracesViews.swift")
         XCTAssertTrue(
-            source.contains("entry.attestationMark"),
-            "the row must read the mark off the entry it is drawing")
-        XCTAssertTrue(
-            source.contains("attestationCalls"),
-            "the row must be handed the attestation tables")
+            inspector.contains("attestation: store.attestationValue(entry)"),
+            "the inspector must draw the mark of the entry it is showing")
     }
 
-    /// The mark is drawn OUTSIDE the eligibility line's `if let`.
+    /// The mark is its own row, never nested under the eligibility row.
     ///
-    /// This is the presence rule made structural: a mark nested under
-    /// `if let eligibilityLine` would be invisible to exactly the
-    /// contributors the feature is for. The scan checks the reason line is
-    /// gated on its own optional and the mark line is not gated on
-    /// eligibility at all.
+    /// This is the presence rule made structural: a mark gated on the
+    /// eligibility line would be invisible to exactly the contributors the
+    /// feature is for. The two rows are siblings, each gated on its own
+    /// optional.
     func testTheMarkIsNotNestedUnderTheEligibilityLine() throws {
-        let source = try Self.source("TraceCommonsApp/Views/QueueView.swift")
-        let lines = source.components(separatedBy: "\n")
-        let markIndex = try XCTUnwrap(
-            lines.firstIndex { $0.contains("if let attestationLine") },
-            "the mark's own line is not drawn from an `if let attestationLine`")
-        let eligibilityIndex = try XCTUnwrap(
-            lines.firstIndex { $0.contains("if let eligibilityLine") },
-            "the eligibility precedent has moved; repoint this scan")
-        let markIndent = lines[markIndex].prefix { $0 == " " }.count
-        let eligibilityIndent = lines[eligibilityIndex].prefix { $0 == " " }.count
-        XCTAssertEqual(
-            markIndent, eligibilityIndent,
-            "the mark and the eligibility line must be siblings, not nested one in the other")
-        XCTAssertTrue(
-            source.contains("if let attestationReasonLine"),
-            "the reason must be drawn only when the key was present")
+        let source = try Self.source("TraceCommonsApp/Views/Monitor/TracesViews.swift")
+        XCTAssertTrue(source.contains("""
+                    if let eligibility { rows.append(.init(words.eligibility, eligibility)) }
+                    if let attestation { rows.append(.init(words.attestation, attestation)) }
+            """), "the mark and the eligibility line must be sibling rows, each on its own optional")
     }
 
     /// The mark offers nothing to press.

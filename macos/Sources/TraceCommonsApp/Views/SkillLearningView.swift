@@ -42,7 +42,7 @@ struct SkillLearningView: View {
                             Text(message)
                                 .fixedSize(horizontal: false, vertical: true)
                                 .frame(maxWidth: .infinity, alignment: .leading)
-                            Button(ActionMessageBanner.coreDismissWord ?? ActionMessageBanner.dismissWord) { dismissedFailure = message }
+                            Button(ActionNoticeWords.coreDismissWord ?? ActionNoticeWords.dismissWord) { dismissedFailure = message }
                                 .buttonStyle(GlassButtonStyle(.glass))
                                 .frame(minHeight: 44)
                         }

@@ -334,9 +334,6 @@ private struct Launcher: View {
 }
 
 enum WindowID {
-    /// The legacy window's id, read only by the legacy window's own
-    /// commands, which no scene installs any more. Deleted with it.
-    static let main = "trace-commons-main"
     /// The glass monitor window (R5), the main window since R15.
     static let monitor = "trace-commons-monitor"
     /// The glass first-run pane (R12), the onboarding gate.

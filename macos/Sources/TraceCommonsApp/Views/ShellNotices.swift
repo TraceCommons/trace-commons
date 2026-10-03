@@ -46,7 +46,7 @@ struct ShellNotices: View {
             // by the time it can be read.
             if let notice = model.firstRunNotice {
                 GlassNotice(tone: .ask, title: notice) {
-                    Button(ActionMessageBanner.coreDismissWord ?? ActionMessageBanner.dismissWord) {
+                    Button(ActionNoticeWords.coreDismissWord ?? ActionNoticeWords.dismissWord) {
                         model.firstRunNotice = nil
                     }
                     .buttonStyle(GlassButtonStyle(.glass))

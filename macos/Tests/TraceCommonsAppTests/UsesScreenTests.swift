@@ -421,7 +421,8 @@ final class UsesScreenTests: XCTestCase {
         let body = notices[shellNotices.lowerBound...]
         XCTAssertTrue(body.contains("if let notice = model.firstRunNotice"))
         XCTAssertTrue(body.contains("model.firstRunNotice = nil"))
-        let window = try Self.appSource("Views/MainWindowView.swift")
+        // The Monitor, which the first-run window hands off to, draws them.
+        let window = try Self.appSource("Views/MonitorWindowView.swift")
         XCTAssertTrue(window.contains("ShellNotices()"))
     }
 

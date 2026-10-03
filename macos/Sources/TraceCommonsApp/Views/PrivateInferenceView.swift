@@ -35,68 +35,8 @@ enum PrivateInferenceIndicator {
     }
 }
 
-/// Answering model calls on this computer: a destination of its own rather
-/// than a card near the bottom of Settings.
-///
-/// Renders nothing at all if the words did not arrive, for the reason
-/// `AppModel.privateInferenceCopy` gives: a screen missing the sentence
-/// about what turning the switch on exposes is worse than no screen.
-struct PrivateInferenceView: View {
-    var body: some View {
-        ScrollView {
-            PrivateInferenceContent()
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-    }
-}
-
-/// The screen's content, split out of its `ScrollView` for the same reason
-/// `QueueContent` is: `ImageRenderer` renders a
-/// `ScrollView` as blank, so the screenshot hook can only rasterize what
-/// lives outside one.
-struct PrivateInferenceContent: View {
-    @EnvironmentObject private var model: AppModel
-
-    /// The same narrow prose column Settings uses. This screen is three
-    /// paragraphs and a switch; the full window width would set them at a
-    /// measure nobody reads.
-    private static let proseColumn: CGFloat = 640
-
-    var body: some View {
-        if let copy = model.privateInferenceCopy {
-            content(copy)
-        }
-    }
-
-    private func content(_ copy: PrivateInferenceCopy) -> some View {
-        VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
-            // Sign-in comes first so setup starts with the account needed
-            // to connect tools. The section shows account controls once signed in.
-            GlassCard { CredentialSection(copy: copy, prominent: true) }
-            GlassCard { HarnessListSection(copy: copy) }
-            // The switch, below the list and unchanged: a kill switch, which
-            // is what it always was. A switch the daemon has not reported
-            // (`privateInference == nil`) is nil here, and the card draws it
-            // off and disabled.
-            PrivateAISwitchCard(
-                copy: copy,
-                isOn: model.daemonSettings?.privateInference,
-                state: model.privateInferenceState,
-                calls: model.privateInferenceCalls,
-                busy: model.privateInferenceBusy,
-                refusal: model.lastActionError,
-                onSet: model.applyPrivateInference,
-                onDismiss: { model.lastActionError = nil })
-        }
-        .padding(GlassTokens.Space.s10)
-        .frame(maxWidth: Self.proseColumn, alignment: .leading)
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-}
-
 /// The Private AI switch, with the core's sentence on what turning it on
-/// exposes beside it, drawn by the legacy destination on `AppModel` and by
-/// the glass Inference tab on `InferenceStore`.
+/// exposes beside it, drawn by the glass Inference tab on `InferenceStore`.
 ///
 /// The switch says what was asked for; the state line says what happened,
 /// and it is drawn from the core's tone -- never from `isOn`, which stays on
@@ -163,7 +103,7 @@ struct PrivateAISwitchCard: View {
             }
             if let refusal {
                 GlassNotice(tone: .outside, title: refusal) {
-                    Button(ActionMessageBanner.coreDismissWord ?? ActionMessageBanner.dismissWord, action: onDismiss)
+                    Button(ActionNoticeWords.coreDismissWord ?? ActionNoticeWords.dismissWord, action: onDismiss)
                         .buttonStyle(GlassButtonStyle(.glass))
                 }
             }

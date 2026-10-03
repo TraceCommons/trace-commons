@@ -59,12 +59,16 @@ final class ShellWordingTests: XCTestCase {
         "TraceCommonsApp/SelfTest.swift": 14,
 
         // The SwiftUI views, which carry their own labels and help text.
-        "TraceCommonsApp/Views/ActionMessageBanner.swift": 2,
-        "TraceCommonsApp/Views/BrandMark.swift": 1,
-        "TraceCommonsApp/Views/CreditRecordView.swift": 9,
+        // R15 deleted ActionMessageBanner.swift (2: its dismiss word moved to
+        // SettingsView.swift; its help line left with the banner, the glass
+        // notices dismiss with `MonitorTracesCopy.dismiss`), BrandMark.swift
+        // (1), CreditRecordView.swift (9: the Home credit card carries the
+        // credit record in the core's words) and MainWindowView.swift (14:
+        // the Monitor's words are the core's `MonitorScreensCopy`).
         // Lowered from 26: an unrecognised status reads the core's label.
-        "TraceCommonsApp/Views/HistoryView.swift": 21,
-        "TraceCommonsApp/Views/MainWindowView.swift": 14,
+        // Lowered from 21 at R15: the screen left; what glass still reads is
+        // `HistoryCopy.heldExplanation` (3) and `HistoryLegacyWords` (2).
+        "TraceCommonsApp/Views/HistoryView.swift": 5,
         // Lowered from 11: the AppKit menu left the shell with the glass menu
         // bar (R15); the three pause choices stay in `MenuBarWords` (D-12).
         "TraceCommonsApp/Views/MenuBarView.swift": 3,
@@ -73,10 +77,17 @@ final class ShellWordingTests: XCTestCase {
         // Back to 3: the withheld line briefly lived here and is now
         // `tc_contribution_withheld_line`, assembled in the Rust and shared
         // with the other two shells. Do not raise this again for it.
-        "TraceCommonsApp/Views/QueueFolderRow.swift": 3,
-        "TraceCommonsApp/Views/QueueView.swift": 25,
+        // Lowered from 3 at R15: the row's Open help left with the row (the
+        // glass folder row expands in place).
+        "TraceCommonsApp/Views/QueueFolderRow.swift": 2,
+        // Lowered from 25 at R15: the queue screen left; `QueueLegacyWords`
+        // is what the glass Traces tab still reads.
+        "TraceCommonsApp/Views/QueueView.swift": 7,
         "TraceCommonsApp/Views/ScrubbingCaveat.swift": 4,
-        "TraceCommonsApp/Views/SettingsView.swift": 39,
+        // 39 + 1 at R15: `ActionNoticeWords.dismissWord` moved here, verbatim,
+        // from the deleted ActionMessageBanner.swift. A move, not a new
+        // sentence: that file's entry went down by it.
+        "TraceCommonsApp/Views/SettingsView.swift": 40,
         "TraceCommonsApp/Views/WithdrawalCopy.swift": 48,
     ]
 

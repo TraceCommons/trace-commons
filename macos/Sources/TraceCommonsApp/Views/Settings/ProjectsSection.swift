@@ -40,7 +40,7 @@ struct ProjectsSection: View {
                             .frame(maxWidth: .infinity, alignment: .leading)
                         // An error is never undismissable: without the
                         // core's word the banner's own word names it.
-                        Button(ActionMessageBanner.coreDismissWord ?? ActionMessageBanner.dismissWord) { model.lastActionError = nil }
+                        Button(ActionNoticeWords.coreDismissWord ?? ActionNoticeWords.dismissWord) { model.lastActionError = nil }
                             .buttonStyle(GlassButtonStyle(.glass))
                     }
                 }

@@ -1,7 +1,8 @@
 import Observation
 
-/// Window selection is independent of watcher startup and trace onboarding.
-/// Owning it above the window also preserves selection when the window closes.
+/// The services gate and the destination an `OpenMonitor` request left for
+/// the Monitor or Settings. Owned above the windows, so a request survives
+/// the window it is for being closed.
 @Observable @MainActor
 final class MainWindowNavigation {
     /// Where an `OpenMonitor` request asked the Monitor to go, until the
@@ -11,11 +12,6 @@ final class MainWindowNavigation {
     /// selects it. `@SceneStorage` is per scene and cannot be written from
     /// outside, so the request is parked here.
     var settingsSection: SettingsSection?
-
-    /// The legacy main window's sidebar. A remnant until R15: T11 deletes
-    /// it, `displaysInsights`, `displaysCompute` and `legacySection(for:)`
-    /// with `MainWindowView` (ruling R-33).
-    var section: MainWindowView.Section = .insights
     private(set) var servicesActivated = false
     /// Starts services once. D-11: no section defers them any more; the
     /// Monitor starts them on appear, and launch starts them here. Insights
@@ -41,22 +37,5 @@ final class MainWindowNavigation {
         guard !servicesActivated, let serviceStart else { return }
         servicesActivated = true
         serviceStart()
-    }
-
-    var displaysInsights: Bool { section == .insights }
-    var displaysCompute: Bool { section == .compute }
-
-    /// The legacy window's section for a destination, for a release build
-    /// until R15 (T11 deletes this): nil leaves the window where it was.
-    static func legacySection(for destination: MonitorDestination?) -> MainWindowView.Section? {
-        switch destination {
-        case nil: nil
-        case .traces: .queue
-        case .home(.history): .history
-        case .home: nil
-        case .inference: .privateInference
-        case .settings(.compute): .compute
-        case .settings: .settings
-        }
     }
 }
