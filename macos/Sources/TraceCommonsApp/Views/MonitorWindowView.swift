@@ -48,6 +48,8 @@ struct MonitorWindowView: View {
     @SceneStorage("monitor.showsInspector") private var showsInspector = true
     /// The selected session's entry id; empty for none.
     @SceneStorage("monitor.selectedSession") private var selectedSession = ""
+    /// Home's page: the overview or History, restored per window.
+    @SceneStorage("monitor.homePage") private var homePage: HomeTabView.Page = .overview
 
     /// The screens' data (C1). Sample data in this debug window until K1
     /// moves the screens to the live client: `TRACE_COMMONS_SAMPLE` names
@@ -55,6 +57,8 @@ struct MonitorWindowView: View {
     @State private var traces = MonitorWindowView.tracesStore()
     /// The map's Private AI view and the Inference tab (R8).
     @State private var inference = InferenceStore(client: MonitorWindowView.dataClient())
+    /// Home and History (R9).
+    @State private var home = HomeStore(client: MonitorWindowView.dataClient())
 
     /// The Traces store over the sample set `TRACE_COMMONS_SAMPLE` names. A
     /// name that is not a set falls back to `normalDay`, and says so: the tab
@@ -108,7 +112,11 @@ struct MonitorWindowView: View {
                         Self.review(entryId, selection: &selectedSession, showsInspector: &showsInspector)
                     }
                 case .inference: InferenceTabView(store: inference)
-                case .home: Spacer(minLength: 0)
+                case .home:
+                    HomeTabView(
+                        store: home, traces: traces,
+                        statusLabel: { status in model.publicRunCopy?.contributionStatusLabel(for: status) },
+                        page: $homePage)
                 }
             }
         } map: {
@@ -128,13 +136,14 @@ struct MonitorWindowView: View {
                         store: inference, destinationLabel: model.privateInferenceCopy?.destination,
                         sentence: { Self.rowSentence($0, copy: model.privateInferenceCopy, calls: model.harnessCalls) })
                 case .home:
-                    Color.clear
+                    HomeSummaryInspector(store: home)
                 }
             }
         }
         .glassWindow()
         .task { await traces.run() }
         .task { await inference.run() }
+        .task { await home.run() }
     }
 
     /// The sentence one tool's row shows (`HarnessSurface.rowSentence`): a
@@ -291,7 +300,10 @@ private struct MonitorMapPane: View {
     @EnvironmentObject private var model: AppModel
 
     var body: some View {
-        GlassPane(padding: 0) {
+        // The map is content, not chrome: an opaque pane, so the selector,
+        // zoom and node cards floating on it are its only glass (Apple: no
+        // glass on glass; R14).
+        GlassPane(padding: 0, isContent: true) {
             ZStack(alignment: .topTrailing) {
                 RadialGradient(
                     colors: [GlassTokens.Color.mapFieldInner.color, GlassTokens.Color.mapFieldOuter.color],
@@ -373,15 +385,52 @@ private struct MonitorMapPane: View {
     }
 }
 
-/// The Settings window (D8): the existing settings, in a macOS Settings
-/// window opened with ⌘,. Its theming may later move to the glass system to
-/// match the monitor window (#1173).
+/// The Settings window (D8; R11 of #1173): the section list and, beside
+/// it, the selected section alone, each scrolling on its own (spec,
+/// "Settings navigation"). The sections are the existing settings, with
+/// their behaviour and the core's copy unchanged; the list only chooses
+/// which one is drawn. The selection is restored, and opening or closing
+/// this window leaves the monitor window as it was.
 struct MonitorSettingsWindow: View {
     let navigation: MainWindowNavigation
 
+    @EnvironmentObject private var model: AppModel
+    @Environment(ComputeModel.self) private var compute
+    @SceneStorage("settings.section") private var section: SettingsSection = .connection
+
     var body: some View {
-        SettingsView(navigation: navigation)
-            .frame(minWidth: 620, minHeight: 520)
+        NavigationSplitView {
+            // One list with arrow-key selection, not a button per row.
+            List(selection: Binding(get: { section }, set: { if let value = $0 { section = value } })) {
+                ForEach(SettingsSection.allCases) { item in
+                    // A section whose copy has not loaded is a disabled
+                    // placeholder, never a missing row.
+                    let row = SettingsSection.ListRow.row(title: item.title(model: model, compute: compute.snapshot?.title))
+                    Label(row.text, systemImage: item.symbol)
+                        .lineLimit(2)
+                        .foregroundStyle(row.enabled ? .primary : .secondary)
+                        .accessibilityLabel(row.enabled ? row.text : MonitorWords.unknown)
+                        .selectionDisabled(!row.enabled)
+                        .tag(item)
+                }
+            }
+            .navigationSplitViewColumnWidth(min: 200, ideal: 230, max: 280)
+        } detail: {
+            Group {
+                switch section {
+                case .compute:
+                    ComputeView(model: compute)
+                default:
+                    ScrollView {
+                        SettingsContent(navigation: navigation, section: section)
+                    }
+                    .tcScreen()
+                }
+            }
+            // A fresh view per section, so the scroll starts at its top.
+            .id(section)
+        }
+        .frame(minWidth: 760, minHeight: 520)
     }
 }
 #endif

@@ -4,11 +4,13 @@ import XCTest
 
 @testable import TCDesign
 
-/// R3, D4: glass on every supported macOS, and none under Reduce
-/// Transparency.
+/// R3, D4: glass on every supported macOS for the navigation layer, and
+/// the opaque base for the content layer (R14: Reduce Transparency is the
+/// system's to apply to native glass, not ours).
 final class GlassMaterialTests: XCTestCase {
-    func test_reduceTransparencyAlwaysGetsTheOpaqueBase() {
-        XCTAssertEqual(GlassMaterial.current(reduceTransparency: true), .opaque)
+    /// The map's pane is content: never Liquid Glass.
+    func test_aContentPaneGetsTheOpaqueBase() {
+        XCTAssertEqual(GlassMaterial.current(content: true), .opaque)
     }
 
     func test_eachMacOSGetsItsMaterial() {
@@ -18,7 +20,7 @@ final class GlassMaterialTests: XCTestCase {
         } else {
             expected = .vibrancy
         }
-        XCTAssertEqual(GlassMaterial.current(reduceTransparency: false), expected)
+        XCTAssertEqual(GlassMaterial.current(), expected)
     }
 
     /// Liquid Glass draws its own rim; a pane on it must not draw a second.
@@ -32,7 +34,7 @@ final class GlassMaterialTests: XCTestCase {
         }
     }
 
-    /// The Reduce Transparency base is solid.
+    /// The content-layer base is solid.
     func test_theOpaqueBaseIsSolid() {
         XCTAssertEqual(GlassTokens.Color.paneOpaque.alpha, 1)
     }
@@ -61,6 +63,21 @@ final class GlassMaterialTests: XCTestCase {
         XCTAssertEqual(fill?.alphaComponent, 1)
         XCTAssertEqual(fill?.redComponent ?? -1, opaque?.redComponent ?? -2, accuracy: 0.002)
         XCTAssertEqual(fill?.blueComponent ?? -1, opaque?.blueComponent ?? -2, accuracy: 0.002)
+    }
+
+    /// The opaque backdrop follows the appearance: the light pane base
+    /// under the light appearance and the dark one under the dark, never
+    /// one baked-in value (#1206 review).
+    @MainActor
+    func test_theOpaqueBackdropFollowsTheAppearance() throws {
+        let view = GlassBackdrop.makeView(.opaque, cornerRadius: 16)
+        let base = GlassTokens.Color.paneOpaque
+        for (name, expected) in [(NSAppearance.Name.aqua, base.light), (.darkAqua, base.dark)] {
+            view.appearance = try XCTUnwrap(NSAppearance(named: name))
+            let fill = view.layer?.backgroundColor.flatMap { NSColor(cgColor: $0)?.usingColorSpace(.sRGB) }
+            XCTAssertEqual(fill?.redComponent ?? -1, expected.red, accuracy: 0.002, "\(name)")
+            XCTAssertEqual(fill?.blueComponent ?? -1, expected.blue, accuracy: 0.002, "\(name)")
+        }
     }
 
     private static func descendants(of view: NSView) -> [NSView] {
