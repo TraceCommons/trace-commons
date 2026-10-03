@@ -295,6 +295,24 @@ tc_handle*  tc_daemon_start(const char* config_dir, char** err);
  */
 tc_handle*  tc_daemon_start_with_settings(const char* config_dir, const char* settings_json, char** err);
 
+/* Every numeric setting's valid range, in the unit set_settings itself
+ * stores and validates -- seconds or bytes, never the minutes, hours or
+ * megabytes a shell's own control is scaled in. A shell draws its
+ * slider/stepper bounds from this rather than hard-coding a second copy of
+ * the numbers daemon::settings::apply_settings_object enforces.
+ *
+ * {"quiescence_secs":{"min":0,"max":14400},
+ *  "approval_hold_secs":{"min":0,"max":300},
+ *  "digest_interval_secs":{"min":3600,"max":86400},
+ *  "max_uploads_per_day":{"min":1,"max":1000},
+ *  "max_bytes_per_day":{"min":1,"max":5368709120}}
+ *
+ * Reads nothing and writes nothing; the same object for every caller on
+ * this build. Returns an owned string; free it with tc_string_free. NULL
+ * only on a caught panic.
+ */
+char*       tc_settings_ranges_json(void);
+
 /* Attach to a daemon ALREADY RUNNING in another process, over its socket.
  *
  * This is the answer to tc_daemon_start reporting "already-running". That
@@ -1098,6 +1116,32 @@ int32_t     tc_contribution_group_control(int64_t pending, int64_t contributable
  * panic.
  */
 char*       tc_contribution_withheld_line(int64_t withheld);
+
+/* How many of pending are actually eligible, clamped to pending.
+ *
+ * Before this existed, a caller that wanted both the eligible count and
+ * tc_contribution_withheld_line's sentence had to derive withheld itself --
+ * pending minus contributable -- which is the exact arithmetic this call and
+ * tc_contribution_group_withheld_count now do once, in the core, instead of
+ * in each shell's own language.
+ *
+ * Same pending/contributable convention as tc_contribution_group_control:
+ * contributable is a list_projects row's contributable_count, or any
+ * NEGATIVE value for an ABSENT one -- never zero, which means the question
+ * applies and nothing qualifies.
+ *
+ * pending is read as 0 on a negative value, which no honest caller produces;
+ * a negative contributable is read as absent, per the convention above.
+ */
+int64_t     tc_contribution_group_eligible_count(int64_t pending, int64_t contributable);
+
+/* pending minus tc_contribution_group_eligible_count's answer, never
+ * negative. The exact value tc_contribution_withheld_line expects.
+ *
+ * Same pending/contributable convention as
+ * tc_contribution_group_eligible_count.
+ */
+int64_t     tc_contribution_group_withheld_count(int64_t pending, int64_t contributable);
 
 /* K9 (#1118): the toast after a submit -- "Sent. N left to decide - upload
  * limit X of Y", the WYSIWYG design's Flow 2/3 example.

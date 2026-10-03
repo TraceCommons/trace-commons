@@ -751,6 +751,32 @@ pub unsafe extern "C" fn tc_daemon_attach(
     })
 }
 
+/// Every numeric setting's valid range, in the unit `set_settings` itself
+/// stores and validates -- seconds or bytes, never the minutes, hours or
+/// megabytes a shell's own control is scaled in. A shell draws its
+/// slider/stepper bounds from this rather than hard-coding a second copy of
+/// the numbers `daemon::settings::apply_settings_object` enforces, which is
+/// exactly the drift this call exists to prevent.
+///
+/// ```json
+/// {"quiescence_secs":{"min":0,"max":14400},
+///  "approval_hold_secs":{"min":0,"max":300},
+///  "digest_interval_secs":{"min":3600,"max":86400},
+///  "max_uploads_per_day":{"min":1,"max":1000},
+///  "max_bytes_per_day":{"min":1,"max":5368709120}}
+/// ```
+///
+/// Reads nothing and writes nothing; the same object for every caller on
+/// this build. Returns an owned string; free it with [`tc_string_free`].
+/// NULL only on a caught panic.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_settings_ranges_json() -> *mut c_char {
+    guarded_string_no_err(|| {
+        let ranges = trace_commons_contributor::daemon::settings::settings_ranges();
+        Ok(to_owned_cstring(&serde_json::to_string(&ranges)?))
+    })
+}
+
 /// Fixed labels `tc_daemon_start_with_settings` can report via `*err` /
 /// `tc_last_error` for a failure specific to `settings_json`, distinct from
 /// `ERR_DAEMON_START_FAILED` (which stays opaque for the reason stated on
@@ -4165,6 +4191,59 @@ pub extern "C" fn tc_contribution_withheld_line(withheld: i64) -> *mut c_char {
     })
 }
 
+/// How many of `pending` are actually eligible, clamped to `pending`.
+///
+/// Before this existed, a caller that wanted both the eligible count and
+/// [`tc_contribution_withheld_line`]'s sentence had to derive `withheld`
+/// itself -- `pending` minus `contributable` -- which is the exact
+/// arithmetic this call and [`tc_contribution_group_withheld_count`] now do
+/// once, in the core, instead of in each shell's own language.
+///
+/// Same `pending`/`contributable` convention as
+/// [`tc_contribution_group_control`]: `contributable` is a `list_projects`
+/// row's `contributable_count`, or any NEGATIVE value for an ABSENT one --
+/// never zero, which means the question applies and nothing qualifies.
+///
+/// `pending` is read as 0 on a negative value, which no honest caller
+/// produces; a negative `contributable` is read as absent, per the
+/// convention above.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_contribution_group_eligible_count(pending: i64, contributable: i64) -> i64 {
+    guard(|| {
+        let pending = u64::try_from(pending).unwrap_or(0);
+        let contributable = u64::try_from(contributable).ok();
+        Ok(
+            trace_commons_contributor::private_inference_copy::group_eligibility(
+                pending,
+                contributable,
+            )
+            .eligible_count as i64,
+        )
+    })
+    .unwrap_or(0)
+}
+
+/// `pending` minus [`tc_contribution_group_eligible_count`]'s answer, never
+/// negative. The exact value [`tc_contribution_withheld_line`] expects.
+///
+/// Same `pending`/`contributable` convention as
+/// [`tc_contribution_group_eligible_count`].
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_contribution_group_withheld_count(pending: i64, contributable: i64) -> i64 {
+    guard(|| {
+        let pending = u64::try_from(pending).unwrap_or(0);
+        let contributable = u64::try_from(contributable).ok();
+        Ok(
+            trace_commons_contributor::private_inference_copy::group_eligibility(
+                pending,
+                contributable,
+            )
+            .withheld_count as i64,
+        )
+    })
+    .unwrap_or(0)
+}
+
 /// K9 (#1118): the toast after a submit -- "Sent. N left to decide - upload
 /// limit X of Y", the WYSIWYG design's Flow 2/3 example.
 ///
@@ -4652,10 +4731,6 @@ pub const TC_WITNESS_STATE_UNREADABLE: i32 = -2;
 const ERR_WITNESS_NOT_ENROLLED: &str = "witness-not-enrolled";
 const ERR_WITNESS_CONFIG_UNREADABLE: &str = "witness-config-unreadable";
 const ERR_WITNESS_CONFIG_WRITE_FAILED: &str = "witness-config-write-failed";
-const ERR_WITNESS_URL_INVALID: &str = "witness-url-invalid";
-const ERR_WITNESS_SIGNING_ADDRESS_INVALID: &str = "witness-signing-address-invalid";
-const ERR_WITNESS_PIN_REQUIRED: &str = "witness-pin-required";
-const ERR_WITNESS_PIN_MALFORMED: &str = "witness-pin-malformed";
 const ERR_WITNESS_PINS_INVALID_JSON: &str = "witness-pins-invalid-json";
 
 /// Open the store at `config_dir` and load the contributor config.
@@ -4809,24 +4884,6 @@ pub unsafe extern "C" fn tc_witness_status_json(
     })
 }
 
-/// Whether a string is shaped like a witness base URL.
-///
-/// Deliberately shallow: a scheme and a host. The real check is the
-/// contributor's host allowlist, applied at submission time before any
-/// request is made, and duplicating a URL parser here would create a second,
-/// weaker opinion about what is reachable.
-fn witness_url_usable(url: &str) -> bool {
-    let url = url.trim();
-    let Some(rest) = url
-        .strip_prefix("https://")
-        .or_else(|| url.strip_prefix("http://"))
-    else {
-        return false;
-    };
-    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
-    !host.is_empty() && !host.contains(char::is_whitespace)
-}
-
 /// Configure a witness. Returns 0 on success, -1 on failure with `*err` set
 /// (owned; free with [`tc_string_free`]).
 ///
@@ -4875,17 +4932,29 @@ pub unsafe extern "C" fn tc_witness_configure(
             }
         };
 
+        // Two C strings that are just text, read through `borrow_str` and
+        // handed on. Only the JSON array needs parsing here -- the rest of
+        // the validation (the URL's shape, the signing address, the pin
+        // list) is `WitnessSettings::configure`, the same function Tauri's
+        // `configure_witness` calls, so there is one implementation rather
+        // than a second copy of these checks per shell.
         let url = match unsafe { borrow_str(url) } {
-            Ok(url) if witness_url_usable(url) => url.trim().to_string(),
-            _ => {
-                witness_fail(ERR_WITNESS_URL_INVALID, err);
+            Ok(url) => url,
+            Err(_) => {
+                witness_fail(
+                    trace_commons_contributor::config::ERR_WITNESS_URL_INVALID,
+                    err,
+                );
                 return Ok(-1);
             }
         };
         let signing_address = match unsafe { borrow_str(signing_address) } {
-            Ok(address) if !address.trim().is_empty() => address.trim().to_string(),
-            _ => {
-                witness_fail(ERR_WITNESS_SIGNING_ADDRESS_INVALID, err);
+            Ok(address) => address,
+            Err(_) => {
+                witness_fail(
+                    trace_commons_contributor::config::ERR_WITNESS_SIGNING_ADDRESS_INVALID,
+                    err,
+                );
                 return Ok(-1);
             }
         };
@@ -4893,39 +4962,26 @@ pub unsafe extern "C" fn tc_witness_configure(
             .ok()
             .and_then(|text| serde_json::from_str::<Vec<String>>(text).ok())
         {
-            Some(entries) => entries
-                .into_iter()
-                .map(|entry| entry.trim().to_string())
-                .filter(|entry| !entry.is_empty())
-                .collect(),
+            Some(entries) => entries,
             None => {
                 witness_fail(ERR_WITNESS_PINS_INVALID_JSON, err);
                 return Ok(-1);
             }
         };
 
-        if measurements.is_empty() {
-            witness_fail(ERR_WITNESS_PIN_REQUIRED, err);
-            return Ok(-1);
-        }
-
-        let settings = trace_commons_contributor::config::WitnessSettings {
-            admission_evidence: cfg.witness.as_ref().is_some_and(|w| w.admission_evidence),
+        let admission_evidence = cfg.witness.as_ref().is_some_and(|w| w.admission_evidence);
+        let settings = match trace_commons_contributor::config::WitnessSettings::configure(
+            admission_evidence,
             url,
             signing_address,
-            expected_measurements: measurements,
-        };
-        // Parsed BEFORE it is saved. Writing a pin this build cannot read
-        // would leave a client refusing every submission, with the mistake
-        // recorded on disk and reported later as a config problem rather
-        // than now as a rejected input.
-        match settings.trust() {
-            Ok(trust) if trust.is_pinned() => {}
-            _ => {
-                witness_fail(ERR_WITNESS_PIN_MALFORMED, err);
+            measurements,
+        ) {
+            Ok(settings) => settings,
+            Err(label) => {
+                witness_fail(label, err);
                 return Ok(-1);
             }
-        }
+        };
 
         // Recorded as entered in Settings, for the disclosure screens (K11).
         cfg.set_witness(

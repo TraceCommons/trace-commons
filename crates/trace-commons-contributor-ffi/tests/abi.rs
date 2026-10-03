@@ -3950,6 +3950,45 @@ fn the_withheld_line_crosses_and_says_nothing_at_zero() {
     assert!(!line(4).is_empty());
 }
 
+/// `tc_contribution_group_eligible_count` and
+/// `_group_withheld_count` are the arithmetic a caller used to derive by
+/// hand from `pending` and `contributable` -- clamped to `pending`, and the
+/// non-negative remainder -- matching exactly what the core's own
+/// `group_eligibility` computes, and what `tc_contribution_withheld_line`
+/// expects as its `withheld` argument.
+#[test]
+fn the_group_eligible_and_withheld_counts_cross_and_clamp() {
+    use trace_commons_contributor::private_inference_copy::group_eligibility;
+    use trace_commons_contributor_ffi::{
+        tc_contribution_group_eligible_count, tc_contribution_group_withheld_count,
+    };
+
+    for (pending, contributable) in [(7i64, Some(3u64)), (7, None), (7, Some(0)), (3, Some(9))] {
+        let expected = group_eligibility(pending as u64, contributable);
+        assert_eq!(
+            tc_contribution_group_eligible_count(pending, contributable.map_or(-1, |c| c as i64)),
+            expected.eligible_count as i64,
+            "eligible_count for pending={pending} contributable={contributable:?}"
+        );
+        assert_eq!(
+            tc_contribution_group_withheld_count(pending, contributable.map_or(-1, |c| c as i64)),
+            expected.withheld_count as i64,
+            "withheld_count for pending={pending} contributable={contributable:?}"
+        );
+    }
+
+    // `contributable` above `pending` is clamped, not a negative withheld
+    // count -- the same trap `tc_contribution_withheld_line` guards against
+    // by clamping a negative input to zero.
+    assert_eq!(tc_contribution_group_eligible_count(3, 9), 3);
+    assert_eq!(tc_contribution_group_withheld_count(3, 9), 0);
+
+    // A negative `pending` is nobody's honest answer; read as 0, matching
+    // every other scalar in this file's negative-input convention.
+    assert_eq!(tc_contribution_group_eligible_count(-1, 5), 0);
+    assert_eq!(tc_contribution_group_withheld_count(-1, 5), 0);
+}
+
 /// The contribution control numbering shares no number with a credential
 /// action or a tone. Both blocks have a "nothing" member, and one collision
 /// draws a sign-in button on a queue row.
@@ -5198,6 +5237,37 @@ fn the_inference_connection_and_privacy_scan_copy_cross_the_abi() {
     let scan = json_owned(tc_privacy_scan_copy_json());
     assert_eq!(scan, serde_json::to_value(privacy_scan_copy()).unwrap());
     assert_eq!(scan["disclosure"], DISCLOSURE);
+}
+
+#[test]
+fn the_settings_ranges_cross_the_abi_and_match_what_set_settings_enforces() {
+    use trace_commons_contributor::daemon::settings::{self, DaemonSettings, settings_ranges};
+    use trace_commons_contributor_ffi::tc_settings_ranges_json;
+
+    let ranges = json_owned(tc_settings_ranges_json());
+    assert_eq!(ranges, serde_json::to_value(settings_ranges()).unwrap());
+
+    // The exported ceiling is not a number this test invented separately: a
+    // value one past it is the exact value `apply_settings_object` refuses,
+    // and a value at it is the exact value accepted. A drift between the
+    // exported range and the enforced one would show up here as one of
+    // these two assertions failing, not as a silently wrong control bound.
+    let max_uploads = ranges["max_uploads_per_day"]["max"].as_u64().unwrap();
+    let mut s = DaemonSettings::default();
+    assert_eq!(
+        settings::apply_settings_object(
+            &mut s,
+            &serde_json::json!({ "max_uploads_per_day": max_uploads + 1 }),
+        ),
+        Err(settings::ERR_SETTINGS_INVALID_VALUE)
+    );
+    assert_eq!(
+        settings::apply_settings_object(
+            &mut s,
+            &serde_json::json!({ "max_uploads_per_day": max_uploads }),
+        ),
+        Ok(true)
+    );
 }
 
 #[test]
