@@ -252,7 +252,7 @@ struct SettingsContent: View {
     private func startupToggle(isOn: Binding<Bool>) -> some View {
         Toggle("Start Trace Commons when you log in", isOn: isOn)
             .toggleStyle(.switch)
-            .tint(TC.green)
+            .tint(TC.accent)
             .font(TC.Font_.body)
     }
 
@@ -965,7 +965,7 @@ struct SettingsContent: View {
                     }
                 ))
                 .toggleStyle(.switch)
-                .tint(TC.green)
+                .tint(TC.accent)
                 .font(TC.Font_.body)
 
                 routingState(copy: copy)
@@ -1823,7 +1823,7 @@ struct SettingsContent: View {
             Image(systemName: value ? "checkmark.circle.fill" : "circle")
                 .font(.system(size: 12))
                 .symbolRenderingMode(value ? .palette : .monochrome)
-                .foregroundStyle(value ? TC.onAccent : Color.secondary, TC.green)
+                .foregroundStyle(value ? TC.onAccent : Color.secondary, TC.accent)
             Text(title).font(TC.Font_.body)
         }
         .accessibilityElement(children: .combine)

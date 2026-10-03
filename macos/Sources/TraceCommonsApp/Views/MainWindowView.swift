@@ -364,8 +364,8 @@ struct MainWindowView: View {
     private static func navGlyphColor(shield: QueueShieldState, selected: Bool) -> Color {
         switch shield {
         case .attention: return TC.goldText
-        case .waiting: return TC.greenText
-        case .clear: return selected ? TC.greenText : TC.inkSecondary
+        case .waiting: return TC.accentText
+        case .clear: return selected ? TC.accentText : TC.inkSecondary
         }
     }
 

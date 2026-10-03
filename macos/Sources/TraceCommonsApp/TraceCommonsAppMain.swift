@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import TCDesign
 import TCShellCore
 
 /// The macOS contributor shell.
@@ -38,7 +39,7 @@ struct TraceCommonsShell: App {
         MenuBarExtra {
             MenuBarContent(navigation: navigation)
                 .environmentObject(model)
-                .tint(TC.green)
+                .tint(TC.accent)
         } label: {
             Launcher(model: model, compute: compute, navigation: navigation,
                      appDelegate: appDelegate, missionDrafts: missionDrafts)
@@ -50,15 +51,15 @@ struct TraceCommonsShell: App {
                 .environmentObject(model)
                 .environment(compute)
                 .frame(minWidth: 760, minHeight: 520)
-                // The community site's primary is green, not the platform
-                // blue. Overriding the user's chosen accent colour is a real
-                // departure from macOS convention and it is made on purpose:
-                // this app and `community/public` are one product, the
-                // accent is the single strongest cue that they are, and the
-                // green carries a meaning here (good standing) that the
-                // system blue does not. Everything else about the controls
-                // -- shape, focus ring, keyboard behaviour -- stays stock.
-                .tint(TC.green)
+                // The brand purple (D3), not the platform blue. Overriding the
+                // user's chosen accent colour is a real departure from macOS
+                // convention and it is made on purpose: the accent is the
+                // single strongest cue that this app is the Trace product.
+                // It tints fills (prominent buttons, checked boxes), so it is
+                // the purple that carries white at 6.9:1 in both schemes.
+                // Everything else about the controls -- shape, focus ring,
+                // keyboard behaviour -- stays stock.
+                .tint(TC.accent)
         }
         .defaultSize(width: 940, height: 660)
         // Cmd-1..7 for the seven destinations, and Cmd-Shift-M for the one
@@ -67,9 +68,54 @@ struct TraceCommonsShell: App {
         .commands {
             MainWindowCommands(model: model, compute: compute, navigation: navigation,
                                missionDrafts: missionDrafts)
+            #if DEBUG
+            MonitorWindowCommands()
+            #endif
+        }
+
+        #if DEBUG
+        // The glass monitor window and the Settings window (R5 of #1173),
+        // in debug builds until the screens they frame match the design.
+        // TRACE_COMMONS_MONITOR=1 opens the monitor at launch.
+        Window("Monitor", id: WindowID.monitor) {
+            MonitorWindowView()
+                .environmentObject(model)
+                .environment(compute)
+                .tint(TC.accent)
+        }
+        .windowStyle(.hiddenTitleBar)
+        .defaultSize(width: GlassThreePane<EmptyView, EmptyView, EmptyView>.defaultWidth,
+                     height: GlassTokens.Size.windowHeight)
+        .windowResizability(.contentMinSize)
+
+        Settings {
+            MonitorSettingsWindow(navigation: navigation)
+                .environmentObject(model)
+                .environment(compute)
+                .tint(TC.accent)
+        }
+        #endif
+    }
+}
+
+#if DEBUG
+/// Window ▸ Monitor, to open the glass monitor window in a debug build.
+private struct MonitorWindowCommands: Commands {
+    var body: some Commands {
+        CommandGroup(after: .windowList) {
+            OpenMonitorButton()
         }
     }
 }
+
+private struct OpenMonitorButton: View {
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        Button("Monitor") { openWindow(id: WindowID.monitor) }
+    }
+}
+#endif
 
 /// The menu-bar label, plus the one-time launch work. It lives in a view
 /// rather than in `App` so it can reach `openWindow`, which the notification
@@ -146,6 +192,13 @@ private struct Launcher: View {
                 OpenMainWindow.request()
             }
         }
+        #if DEBUG
+        if ProcessInfo.processInfo.environment["TRACE_COMMONS_MONITOR"] == "1" {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                openWindow(id: WindowID.monitor)
+            }
+        }
+        #endif
         DebugScreenshot.scheduleIfRequested(model: model)
         SelfTest.runIfRequested(model: model)
     }
@@ -153,6 +206,8 @@ private struct Launcher: View {
 
 enum WindowID {
     static let main = "trace-commons-main"
+    /// The glass monitor window (R5), debug builds only for now.
+    static let monitor = "trace-commons-monitor"
 }
 
 /// Opening the window from outside a SwiftUI view (a notification action, a

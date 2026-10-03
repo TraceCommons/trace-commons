@@ -1,0 +1,244 @@
+{
+  "$comment": "Trace Commons glass design tokens: the one source for the native macOS app (and, later, any other shell). Dark only (D2), purple brand (D3), SF Pro and SF Mono (R2): every type step is a macOS text style, so it follows the system text size, and its size is that style's size at the default setting (number was 28 in #1146; largeTitle is 26). Seeded from #1146's tauri-desktop/frontend/src/design-system/tokens at 09a26c0d. Edit here, then run scripts/design-tokens/generate.py; a Swift test fails if the generated file drifts.",
+  "version": 1,
+  "color": {
+    "purple": { "hex": "#6d14f3", "note": "Brand purple from the Trace logo; the one action." },
+    "purpleSoft": { "hex": "#8a3dff", "note": "Fills and the shared data series." },
+    "purpleText": { "hex": "#c9b3ff", "note": "Accent text and tertiary links." },
+    "blue": { "hex": "#3a7bd5", "note": "Toggles on, the kept data series, selection." },
+    "textPrimary": { "hex": "#f2f2f4" },
+    "textSecondary": { "hex": "#c9c9d0" },
+    "textTertiary": { "hex": "#b4b4bc", "note": "Raised from #a9a9b0 for 4.5:1 on glass." },
+    "textOnAccent": { "hex": "#ffffff" },
+    "textOnStatus": { "hex": "#0c0c0e" },
+    "statusOn": { "hex": "#3ddc84", "note": "Watching, share automatically, automatic, always on. Glyph and label only." },
+    "statusAsk": { "hex": "#f5c142", "note": "Ask me, worth a second look." },
+    "statusOff": { "hex": "#a9a9b0", "note": "Never, not used. Never for text." },
+    "statusOutside": { "hex": "#ff6b6b", "note": "Leaves for an outside model, no proof." },
+    "dataShared": { "hex": "#8a3dff" },
+    "dataKept": { "hex": "#3a7bd5" },
+    "dataInference": { "hex": "#a78bfa" },
+    "sceneBase": { "hex": "#0f1219" },
+    "sceneWarm": { "hex": "#1d2430" },
+    "paneBase": { "hex": "#161a22", "alpha": 0.96, "note": "The neutral dark a pane's glass sits on where there is no native material." },
+    "paneOpaque": { "hex": "#1c1e24", "note": "A pane under Reduce Transparency: solid, no material (spec)." },
+    "glassVeil": { "hex": "#0c0e14", "alpha": 0.28, "note": "Over native glass, the thin dark veil kept for text contrast." },
+    "wellFill": { "hex": "#000000", "alpha": 0.22 },
+    "controlHover": { "hex": "#ffffff", "alpha": 0.16 },
+    "controlSelected": { "hex": "#ffffff", "alpha": 0.16 },
+    "toggleOn": { "hex": "#3a7bd5" },
+    "toggleOff": { "hex": "#ffffff", "alpha": 0.18 },
+    "toggleOnSettings": { "hex": "#8a3dff" },
+    "watchOn": { "hex": "#3ddc84" },
+    "hairline": { "hex": "#ffffff", "alpha": 0.07, "note": "Rows inside a list only; never around a container." },
+    "popoverFill": { "hex": "#22242a", "alpha": 0.78 },
+    "menuFill": { "hex": "#22242a", "alpha": 0.72 },
+    "menuHover": { "hex": "#3a7bd5", "alpha": 0.85 },
+    "menuSeparator": { "hex": "#ffffff", "alpha": 0.14 },
+    "nodeCardFill": { "hex": "#14161c", "alpha": 0.72 },
+    "scrim": { "hex": "#000000", "alpha": 0.4 },
+    "selection": { "hex": "#3a7bd5" },
+    "mapIdle": { "hex": "#ffffff", "alpha": 0.35 },
+    "mapNodeOff": { "hex": "#5d5d63" },
+    "mapFieldInner": { "hex": "#1e2a3a" },
+    "mapFieldOuter": { "hex": "#131a24" },
+    "consentFill": { "hex": "#000000", "alpha": 0.25 },
+    "fieldFill": { "hex": "#000000", "alpha": 0.25 },
+    "tintOn": { "hex": "#3ddc84", "alpha": 0.18 },
+    "tintAsk": { "hex": "#f5c142", "alpha": 0.18 },
+    "tintOutside": { "hex": "#ff6b6b", "alpha": 0.18 },
+    "tintAccent": { "hex": "#8a3dff", "alpha": 0.22 },
+    "tintNeutral": { "hex": "#ffffff", "alpha": 0.1 },
+    "toolClaude": { "hex": "#e08a6a" },
+    "toolCodex": { "hex": "#e6e6ec" },
+    "toolAntigravity": { "hex": "#6d9cff" },
+    "toolOpenCode": { "hex": "#4fd39a" },
+    "toolTheia": { "hex": "#9d93ff" },
+    "tileFolder": { "hex": "#2a2a2c" },
+    "tileFolderInk": { "hex": "#8be28b" }
+  },
+  "gradient": {
+    "paneFill": { "angle": 160, "stops": [
+      { "hex": "#ffffff", "alpha": 0.1, "at": 0 },
+      { "hex": "#ffffff", "alpha": 0.05, "at": 0.4 },
+      { "hex": "#ffffff", "alpha": 0.03, "at": 1 }
+    ] },
+    "cardFill": { "angle": 180, "stops": [
+      { "hex": "#ffffff", "alpha": 0.085, "at": 0 },
+      { "hex": "#ffffff", "alpha": 0.045, "at": 1 }
+    ] },
+    "cardFillQuiet": { "angle": 180, "stops": [
+      { "hex": "#ffffff", "alpha": 0.075, "at": 0 },
+      { "hex": "#ffffff", "alpha": 0.04, "at": 1 }
+    ] },
+    "controlFill": { "angle": 180, "stops": [
+      { "hex": "#ffffff", "alpha": 0.14, "at": 0 },
+      { "hex": "#ffffff", "alpha": 0.07, "at": 1 }
+    ] },
+    "ctaFill": { "angle": 180, "stops": [
+      { "hex": "#8a3dff", "alpha": 0.72, "at": 0 },
+      { "hex": "#6d14f3", "alpha": 0.62, "at": 1 }
+    ] },
+    "ctaSecondaryFill": { "angle": 180, "stops": [
+      { "hex": "#4a0ea6", "alpha": 0.6, "at": 0 },
+      { "hex": "#320878", "alpha": 0.55, "at": 1 }
+    ] },
+    "checkboxOnFill": { "angle": 180, "stops": [
+      { "hex": "#8a3dff", "alpha": 0.8, "at": 0 },
+      { "hex": "#6d14f3", "alpha": 0.7, "at": 1 }
+    ] }
+  },
+  "shadow": {
+    "paneEdge": [
+      { "y": 1, "hex": "#ffffff", "alpha": 0.3, "inset": true },
+      { "x": 1, "hex": "#ffffff", "alpha": 0.12, "inset": true },
+      { "y": -1, "hex": "#000000", "alpha": 0.2, "inset": true },
+      { "y": 12, "blur": 36, "hex": "#000000", "alpha": 0.3 }
+    ],
+    "cardEdge": [
+      { "y": 1, "hex": "#ffffff", "alpha": 0.2, "inset": true },
+      { "y": -1, "hex": "#000000", "alpha": 0.12, "inset": true }
+    ],
+    "cardEdgeQuiet": [
+      { "y": 1, "hex": "#ffffff", "alpha": 0.18, "inset": true },
+      { "y": -1, "hex": "#000000", "alpha": 0.1, "inset": true }
+    ],
+    "wellEdge": [
+      { "y": 1, "blur": 2, "hex": "#000000", "alpha": 0.25, "inset": true }
+    ],
+    "controlEdge": [
+      { "y": 1, "hex": "#ffffff", "alpha": 0.32, "inset": true },
+      { "y": -1, "hex": "#000000", "alpha": 0.18, "inset": true },
+      { "y": 1, "blur": 2, "hex": "#000000", "alpha": 0.18 }
+    ],
+    "controlSelectedEdge": [
+      { "y": 1, "hex": "#ffffff", "alpha": 0.3, "inset": true },
+      { "y": -1, "hex": "#000000", "alpha": 0.2, "inset": true },
+      { "y": 1, "blur": 2, "hex": "#000000", "alpha": 0.25 }
+    ],
+    "ctaEdge": [
+      { "y": 1, "hex": "#ffffff", "alpha": 0.5, "inset": true },
+      { "y": -2, "hex": "#000000", "alpha": 0.2, "inset": true },
+      { "y": 4, "blur": 12, "hex": "#6d14f3", "alpha": 0.3 }
+    ],
+    "ctaSecondaryEdge": [
+      { "y": 1, "hex": "#ffffff", "alpha": 0.28, "inset": true },
+      { "y": -1, "hex": "#000000", "alpha": 0.2, "inset": true }
+    ],
+    "checkboxEdge": [
+      { "y": 1, "hex": "#ffffff", "alpha": 0.35, "inset": true },
+      { "y": -1, "hex": "#000000", "alpha": 0.25, "inset": true }
+    ],
+    "popoverEdge": [
+      { "y": 1, "hex": "#ffffff", "alpha": 0.28, "inset": true },
+      { "y": 24, "blur": 60, "hex": "#000000", "alpha": 0.5 }
+    ],
+    "menuEdge": [
+      { "y": 1, "hex": "#ffffff", "alpha": 0.25, "inset": true },
+      { "y": 16, "blur": 40, "hex": "#000000", "alpha": 0.45 }
+    ],
+    "nodeCardEdge": [
+      { "y": 1, "hex": "#ffffff", "alpha": 0.22, "inset": true },
+      { "y": 16, "blur": 40, "hex": "#000000", "alpha": 0.45 }
+    ],
+    "modal": [
+      { "y": 24, "blur": 60, "hex": "#000000", "alpha": 0.5 }
+    ],
+    "mapEdge": [
+      { "y": 1, "hex": "#ffffff", "alpha": 0.12, "inset": true },
+      { "y": 10, "blur": 30, "hex": "#000000", "alpha": 0.28 }
+    ],
+    "consentEdge": [
+      { "y": 1, "hex": "#ffffff", "alpha": 0.1, "inset": true }
+    ]
+  },
+  "radius": {
+    "pane": 16,
+    "card": 14,
+    "cardQuiet": 12,
+    "control": 8,
+    "tile": 6,
+    "checkbox": 5,
+    "pill": 999
+  },
+  "space": {
+    "s1": 2,
+    "s2": 4,
+    "s3": 6,
+    "s4": 8,
+    "s5": 10,
+    "s6": 12,
+    "s7": 14,
+    "s8": 16,
+    "s9": 20,
+    "s10": 24,
+    "paneGap": 10,
+    "windowPadding": 10,
+    "windowControlsInset": 30,
+    "windowControlsWidth": 78,
+    "panePadding": 12,
+    "cardPaddingVertical": 12,
+    "cardPaddingHorizontal": 14,
+    "cardGap": 10,
+    "inlineGap": 6
+  },
+  "size": {
+    "control": 26,
+    "controlLarge": 28,
+    "cta": 34,
+    "submitPill": 24,
+    "toggleWidth": 40,
+    "toggleHeight": 24,
+    "watchSwitchWidth": 38,
+    "watchSwitchHeight": 22,
+    "checkbox": 15,
+    "dot": 7,
+    "dotLarge": 8,
+    "tab": 26,
+    "segmentedTrack": 30,
+    "glyph": 16,
+    "toolTile": 22,
+    "toolTileLarge": 30,
+    "toolLogo": 15,
+    "toolLogoLarge": 20,
+    "listRow": 40,
+    "paneLeftWidth": 400,
+    "mapWidth": 600,
+    "inspectorWidth": 300,
+    "windowWidth": 1320,
+    "windowHeight": 760,
+    "paneLeftMinWidth": 320,
+    "paneLeftWindowShare": 0.34,
+    "mapBreakpoint": 1100,
+    "inspectorBreakpoint": 900,
+    "windowMinWidth": 760,
+    "windowMinHeight": 560,
+    "nodeCardWidth": 260
+  },
+  "opacity": {
+    "disabled": 0.45,
+    "rowOff": 0.6
+  },
+  "type": {
+    "micro": { "textStyle": "caption2", "size": 10, "weight": "bold", "lineHeight": 13 },
+    "eyebrow": { "textStyle": "caption2", "size": 10, "weight": "semibold", "lineHeight": 14, "tracking": 0.8, "uppercase": true },
+    "caption": { "textStyle": "subheadline", "size": 11, "weight": "regular", "lineHeight": 16 },
+    "label": { "textStyle": "callout", "size": 12, "weight": "medium", "lineHeight": 16 },
+    "body": { "textStyle": "body", "size": 13, "weight": "regular", "lineHeight": 18 },
+    "bodyStrong": { "textStyle": "body", "size": 13, "weight": "semibold", "lineHeight": 18 },
+    "title": { "textStyle": "title3", "size": 15, "weight": "semibold", "lineHeight": 20 },
+    "heading": { "textStyle": "title2", "size": 17, "weight": "semibold", "lineHeight": 22 },
+    "display": { "textStyle": "title", "size": 22, "weight": "bold", "lineHeight": 28, "tracking": -0.22 },
+    "number": { "textStyle": "largeTitle", "size": 26, "weight": "bold", "lineHeight": 34, "tabular": true },
+    "mono": { "textStyle": "subheadline", "size": 11, "weight": "regular", "lineHeight": 16, "design": "monospaced" }
+  },
+  "motion": {
+    "fast": 0.15,
+    "standard": 0.22,
+    "slow": 0.3,
+    "easeX1": 0.2,
+    "easeY1": 0.8,
+    "easeX2": 0.2,
+    "easeY2": 1
+  }
+}
