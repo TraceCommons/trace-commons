@@ -27,7 +27,8 @@
       "holds_certificate": false,
       "attestation": "unknown",
       "scrub": "not-yet-scrubbed",
-      "second_look": []
+      "second_look": [],
+      "second_look_lines": []
     },
     {
       "entry_id": "513d9eb1-dd1f-5bf7-9623-8fd21a94155e",
@@ -56,7 +57,8 @@
       "holds_certificate": false,
       "attestation": "unknown",
       "scrub": "not-yet-scrubbed",
-      "second_look": []
+      "second_look": [],
+      "second_look_lines": []
     },
     {
       "entry_id": "596d86a8-33e2-543d-a3b2-59ed7f7b6f7b",
@@ -85,7 +87,8 @@
       "holds_certificate": false,
       "attestation": "unknown",
       "scrub": "not-yet-scrubbed",
-      "second_look": []
+      "second_look": [],
+      "second_look_lines": []
     },
     {
       "entry_id": "b6ecb6a3-bf1e-51fd-8b13-e12cf0ed33fb",
@@ -119,6 +122,9 @@
       "unsure_spans": 1,
       "second_look": [
         "looks-unsure"
+      ],
+      "second_look_lines": [
+        "Something here looks like an email, phone number or key that was not matched; that is why this one waits."
       ]
     },
     {
@@ -148,7 +154,8 @@
       "holds_certificate": false,
       "attestation": "unknown",
       "scrub": "not-yet-scrubbed",
-      "second_look": []
+      "second_look": [],
+      "second_look_lines": []
     },
     {
       "entry_id": "54b8aba7-2cc5-5448-9ec4-b0f91a1950ea",
@@ -177,7 +184,8 @@
       "holds_certificate": false,
       "attestation": "unknown",
       "scrub": "not-yet-scrubbed",
-      "second_look": []
+      "second_look": [],
+      "second_look_lines": []
     },
     {
       "entry_id": "04346205-6485-5a06-929b-5a2bd4f978a2",
@@ -206,7 +214,8 @@
       "holds_certificate": false,
       "attestation": "unknown",
       "scrub": "not-yet-scrubbed",
-      "second_look": []
+      "second_look": [],
+      "second_look_lines": []
     },
     {
       "entry_id": "787100d8-275e-5ca7-898a-8ea0dc0d43e1",
@@ -240,6 +249,9 @@
       "unsure_spans": 2,
       "second_look": [
         "looks-unsure"
+      ],
+      "second_look_lines": [
+        "Something here looks like an email, phone number or key that was not matched; that is why this one waits."
       ]
     },
     {
@@ -269,7 +281,8 @@
       "holds_certificate": false,
       "attestation": "unknown",
       "scrub": "not-yet-scrubbed",
-      "second_look": []
+      "second_look": [],
+      "second_look_lines": []
     },
     {
       "entry_id": "b2dc162f-b637-5002-b249-976cd96ad356",
@@ -298,7 +311,8 @@
       "holds_certificate": false,
       "attestation": "unknown",
       "scrub": "not-yet-scrubbed",
-      "second_look": []
+      "second_look": [],
+      "second_look_lines": []
     },
     {
       "entry_id": "0e06b45f-31f0-552e-8a61-0ed10b18c140",
@@ -327,7 +341,8 @@
       "holds_certificate": false,
       "attestation": "unknown",
       "scrub": "not-yet-scrubbed",
-      "second_look": []
+      "second_look": [],
+      "second_look_lines": []
     },
     {
       "entry_id": "94bb091a-3154-5ec0-ad34-d1a72b05b49a",
@@ -359,7 +374,8 @@
       "marks": 12,
       "content_marks": 6,
       "unsure_spans": 0,
-      "second_look": []
+      "second_look": [],
+      "second_look_lines": []
     },
     {
       "entry_id": "f9ccdd7a-4995-52af-97b2-9a24cb5dfa20",
@@ -388,7 +404,8 @@
       "holds_certificate": false,
       "attestation": "unknown",
       "scrub": "not-yet-scrubbed",
-      "second_look": []
+      "second_look": [],
+      "second_look_lines": []
     },
     {
       "entry_id": "0ad48294-3718-58ec-a1ba-f11bd2305143",
@@ -417,7 +434,8 @@
       "holds_certificate": false,
       "attestation": "unknown",
       "scrub": "not-yet-scrubbed",
-      "second_look": []
+      "second_look": [],
+      "second_look_lines": []
     }
   ]
 }
