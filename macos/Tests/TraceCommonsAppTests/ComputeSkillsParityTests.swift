@@ -91,18 +91,20 @@ final class ComputeSkillsParityTests: XCTestCase {
     }
 
     /// The inspector says it is reading the detail, and when the read fails
-    /// it says why and offers to read again, in the session detail's words.
+    /// it says why and offers to read again: the session detail it draws
+    /// carries both, in its own words (B13 composes it rather than drawing a
+    /// second copy).
     func test_theInspectorShowsReadingAndAReadFailure() throws {
         let inspector = try Self.text("Views/Monitor/HistoryInspector.swift")
+        XCTAssertTrue(inspector.contains("SessionDetailView(record: record)\n"))
+        let detail = try Self.text("Views/SessionDetailView.swift")
         for needle in [
-            "if model.loadingSessionDetails.contains(id) {\n",
-            "if let reading = model.publicRunCopy?.readingRecord {\n",
-            "ProgressView().controlSize(.small)",
-            "} else if let message = model.sessionDetailErrors[id] {\n            GlassNotice(tone: .outside) {\n",
-            "Button(copy.retryRead) { model.loadSessionDetail(record) }",
-            "                if let record {\n                    detailState(record)\n",
+            "} else if model.loadingSessionDetails.contains(record.submissionID) {\n            Text(copy.readingRecord)\n",
+            "} else if let message = model.sessionDetailErrors[record.submissionID] {\n"
+                + "            GlassNotice(tone: .outside, title: message) {\n"
+                + "                Button(copy.retryRead) { model.loadSessionDetail(record) }\n",
         ] {
-            XCTAssertTrue(inspector.contains(needle), "HistoryInspector.swift lacks \(needle)")
+            XCTAssertTrue(detail.contains(needle), "SessionDetailView.swift lacks \(needle)")
         }
     }
 
@@ -179,11 +181,12 @@ final class ComputeSkillsParityTests: XCTestCase {
         XCTAssertTrue(legacy.contains("SkillLearningGate.offersLearning(detail, recordStatus: record.status,"))
         XCTAssertTrue(legacy.contains("SkillLearningGate.showsInstalledSurface(detail,"))
         XCTAssertFalse(legacy.contains("detail.taskSuccess != nil"))
+        // The inspector draws the session detail, so it asks the gate
+        // through it and never re-derives the rule beside it.
         let inspector = try Self.text("Views/Monitor/HistoryInspector.swift")
-        XCTAssertTrue(inspector.contains("SkillLearningGate.offersLearning(detail, recordStatus: record.status,"))
-        XCTAssertTrue(inspector.contains("SkillLearningGate.showsInstalledSurface(detail,"))
+        XCTAssertTrue(inspector.contains("SessionDetailView(record: record)\n"))
+        XCTAssertFalse(inspector.contains("SkillLearningGate."))
         XCTAssertTrue(inspector.contains("model.loadSessionDetail(record)"))
-        XCTAssertTrue(inspector.contains("let detail = model.sessionDetails[id]"))
         let window = try Self.text("Views/MonitorWindowView.swift")
         XCTAssertTrue(window.contains(
             "set: { Self.review($0, selection: &selectedHistory, showsInspector: &showsInspector) }"))
@@ -191,8 +194,10 @@ final class ComputeSkillsParityTests: XCTestCase {
 
     func test_skillsLivesInTheHistoryInspector() throws {
         let inspector = try Self.text("Views/Monitor/HistoryInspector.swift")
-        XCTAssertTrue(inspector.contains("SkillLearningView(record: record, copy: copy)"))
-        XCTAssertTrue(inspector.contains("model.skillLearningCopy"))
+        XCTAssertTrue(inspector.contains("SessionDetailView(record: record"))
+        let detail = try Self.text("Views/SessionDetailView.swift")
+        XCTAssertTrue(detail.contains("SkillLearningView(record: record, copy: skillCopy)"))
+        XCTAssertTrue(detail.contains("model.skillLearningCopy"))
         // A new row is a new panel: the draft and the install status are per
         // record, and the inspector pane outlives a change of selection.
         XCTAssertTrue(inspector.contains(".id(record.submissionID)"))
