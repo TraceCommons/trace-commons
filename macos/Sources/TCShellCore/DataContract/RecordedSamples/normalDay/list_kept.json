@@ -27,7 +27,8 @@
       "holds_certificate": false,
       "attestation": "unknown",
       "scrub": "not-yet-scrubbed",
-      "second_look": []
+      "second_look": [],
+      "second_look_lines": []
     }
   ]
 }

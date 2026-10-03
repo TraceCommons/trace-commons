@@ -7,11 +7,7 @@
   ],
   "paused": false,
   "queue_depth": 3,
-  "automatic_contribution_held": {
-    "held_sessions": 0,
-    "reasons": [],
-    "projects": []
-  },
+  "contribution_mode_partial": false,
   "next_digest_at": null,
   "health": {
     "last_error_label": null,
@@ -49,5 +45,12 @@
     "notice": null
   },
   "arming_rewordings": [],
+  "automatic_contribution_held": {
+    "held_sessions": 0,
+    "reasons": [],
+    "projects": []
+  },
+  "contribution_override": null,
+  "contribution_mode": "notify_only",
   "_sample": "absent on purpose: older daemon"
 }
