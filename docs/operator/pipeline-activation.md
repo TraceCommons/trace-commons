@@ -204,9 +204,9 @@ quota counts an upload that a routing change, a legacy claim, or a suspension
 refused at commit. A receipt that is refused earlier is not counted.
 
 To send a tenant back to the legacy path, deactivate it first
-(`POST /v1/admin/pipeline/deactivate`, with the state that you read from `GET
-/v1/admin/pipeline/routing` as `expected_state`): its row says `legacy`, and
-its new uploads take the legacy path at once. Then move it from the receipts list to
+(`POST /v1/admin/pipeline/deactivate`, with the `activation_record_id` that you
+read from `GET /v1/admin/pipeline/routing` as `expected_record_id`): its row
+says `legacy`, and its new uploads take the legacy path at once. Then move it from the receipts list to
 the drain list and restart ingest. Do not remove a tenant from the receipts
 list while its row says `pipeline`: every new upload of the tenant is then
 refused with `503` `pipeline_tenant_not_served`, and none goes to the legacy
@@ -313,13 +313,13 @@ lowercase hex digits. A malformed one is `422` `pipeline_request_invalid` on
 | Route | Body | Answer |
 |---|---|---|
 | `POST /v1/admin/pipeline/qualifications` | `{signed_package, attestations}` | the qualification record: `bundle_id`, `package_hash`, `signing_key_id`, `signature_hash`, `metadata` (six digests), `qualified_at` |
-| `POST /v1/admin/pipeline/activate` | `{bundle_id, reason_code, attestations, expected_state?}` | the routing row |
-| `POST /v1/admin/pipeline/rollback` | `{bundle_id, reason_code, attestations, expected_state?}` | the routing row |
-| `POST /v1/admin/pipeline/contain` | `{reason_code, expected_state?}` | the routing row |
-| `POST /v1/admin/pipeline/deactivate` | `{reason_code, expected_state?}` | the routing row |
+| `POST /v1/admin/pipeline/activate` | `{bundle_id, reason_code, attestations, expected_record_id}` | the routing row |
+| `POST /v1/admin/pipeline/rollback` | `{bundle_id, reason_code, attestations, expected_record_id}` | the routing row |
+| `POST /v1/admin/pipeline/contain` | `{reason_code, expected_record_id?, expected_state?}` | the routing row |
+| `POST /v1/admin/pipeline/deactivate` | `{reason_code, expected_record_id?, expected_state?}`; an expectation is required for a contained tenant | the routing row |
 | `POST /v1/admin/pipeline/policy-interventions` | `{bundle_id, phase, action, reason_code}` | the intervention record ("Suspend a policy") |
 | `GET /v1/admin/pipeline/policy-interventions?bundle_id=...` | none | `{interventions: [...]}`, oldest first |
-| `GET /v1/admin/pipeline/routing` | none | `{routing_state, active_bundle_id, events}`: `routing_state` is null for a tenant with no row, and `events` are the newest 100, newest first, read in one snapshot |
+| `GET /v1/admin/pipeline/routing` | none | `{routing_state, activation_record_id, active_bundle_id, events}`: `routing_state` and `activation_record_id` are null for a tenant with no row, `activation_record_id` is the record id of the routing row in force, and `events` are the newest 100, newest first, read in one snapshot |
 | `GET /v1/admin/pipeline/legacy-drain` | none | the drain report ("Legacy drain report") |
 
 The routing row has the fields `routing_state`, `activation_record_id`,
@@ -328,22 +328,40 @@ The routing row has the fields `routing_state`, `activation_record_id`,
 [pipeline-qualification.md](pipeline-qualification.md), "Signed check
 results"): at most 64 in one request (`413` `pipeline_evidence_too_large`).
 
-`expected_state` is optional on the four routes that change routing. It is the
-routing state that you read from `GET /v1/admin/pipeline/routing` before the
-request: `legacy`, `pipeline`, `contained`, or `none` for a tenant with no row
-(`routing_state: null`). Any other value is `422` `pipeline_request_invalid`.
-A `null` is such a value: do not copy the `null` of the routing view into the
-body. For a tenant with no row, send `"none"`. Only a body without the field
-has no expectation.
-With the field, the change is a compare-and-set. The store compares the value
-with the state that it reads under the tenant's routing lock. If the state is
-another one, the answer is `409` `pipeline_routing_state_changed`, and nothing
-is written: no routing row, no bundle change, no event. Read the routing again
-and decide again. Without the field, the change applies to whatever state the
-tenant has. Send the field on every planned change. It stops an action that you
-prepared before another operator's `contain` from opening the tenant's uploads
-again after that `contain` returned. A `contain` in an emergency needs no
-field.
+The expectation of a routing change. Each routing change gives the routing row
+a new record id (`activation_record_id`, which is also the `event_id` of the
+change's event). Read it from `GET /v1/admin/pipeline/routing` (the field
+`activation_record_id`), or from the answer of your last change, which is the
+routing row. A change that names the id is a compare-and-set. The store
+compares the id with the row that it reads under the tenant's routing lock,
+before the readiness and the gate. If another change came first, the answer is
+`409` `pipeline_routing_state_changed`, and nothing is written: no routing row,
+no bundle change, no event. Read the routing again and decide again.
+
+- `activate` and `rollback` need `expected_record_id`: the id that you read,
+  or the string `"none"` for a tenant with no row (`activation_record_id:
+  null` in the routing view). A body without the field is `422`
+  `pipeline_request_invalid`, and so is a `null` or any other value: do not
+  copy the `null` of the routing view into the body. These two routes do not
+  take `expected_state`: a body that sends it is `422`
+  `pipeline_request_invalid` (an unknown field). So a request that you
+  prepared before another operator's `contain` cannot open the tenant's
+  uploads again after that `contain` returned. The id is compared, not the
+  state: a request that you prepared while the tenant was contained is also
+  refused after the tenant was opened and contained again, and a rollback is
+  refused after another operator's rollback.
+- `contain` needs no expectation: an emergency stop must not need a read
+  first. It takes `expected_record_id` (an id, or `"none"`), `expected_state`
+  (`legacy`, `pipeline`, `contained`, or `none` for a tenant with no row), or
+  both. When both are sent, both must hold. A value that does not parse, a
+  `null` too, is `422` `pipeline_request_invalid`.
+- `deactivate` takes the same two optional fields. For a tenant whose row says
+  `contained`, it needs one of them: `expected_record_id`, or
+  `"expected_state": "contained"`. Without one the answer is `409`
+  `pipeline_routing_expectation_required`, and nothing is written. So a
+  `deactivate` that you prepared for a `pipeline` tenant cannot send a tenant
+  that was contained in the meantime back to the legacy path. For a `pipeline`
+  tenant the expectation is optional. Send it on every planned change.
 
 Every route except the two read routes `routing` and `legacy-drain` needs a
 pipeline runtime in the build (`404` `pipeline runtime not configured`
@@ -384,7 +402,9 @@ What each action does:
   answered.
 - `deactivate` returns a tenant that has a row to the legacy path: the row
   says `legacy`. It changes no bundle. A tenant with no row, or whose row
-  already says `legacy`, is `409` `activation_state_invalid`.
+  already says `legacy`, is `409` `activation_state_invalid`. A contained
+  tenant needs an expectation in the body (`409`
+  `pipeline_routing_expectation_required` without one, see above).
 
 Every action writes one row to `pipeline_activation_events`, in the same
 transaction as the routing row. The row's `activation_record_id` is the event's
@@ -423,7 +443,7 @@ The ingest login's grants would let a direct statement write
 (V112). The database enforces the record of such a write (V110): the routing
 row must name an event of its tenant, each change of the row must name a new
 event, and at the commit that event must have the row's state and the row's
-generation (`routing_generation`, a counter that a trigger sets). An event
+generation (`routing_generation`, a counter that a trigger raises on each update). An event
 matches one version of the row and cannot be named again. So every change of
 the routing row, a direct one too, appends one matching event. The database
 does not enforce the gate: a direct write can append an event and a matching
@@ -604,10 +624,10 @@ writes nothing.
    last one is the answer for any bundle that is not production qualified: a
    development dependency, or a configuration that is not qualifiable. The
    dependency profile is built next.
-6. The routing lock and the expected state. One transaction does this step and
-   the two after it. It waits for the tenant's routing lock, for at most
+6. The routing lock and the expected record. One transaction does this step
+   and the two after it. It waits for the tenant's routing lock, for at most
    5 seconds (`503` `pipeline_routing_busy`). It then compares
-   `expected_state`, when the body has one, with the tenant's state (`409`
+   `expected_record_id` with the record id of the tenant's routing row (`409`
    `pipeline_routing_state_changed`). A rollback then checks the tenant's state
    and the bundle (`activation_state_invalid`,
    `earlier_qualified_bundle_required`).
@@ -707,8 +727,10 @@ terms true after an activation:
    `qualifications` on a process of the new build that takes no client traffic.
 2. If you cannot do that, contain the tenant before the deploy
    (`POST /v1/admin/pipeline/contain`, with `"expected_state": "pipeline"`).
-   Open it again with `activate` (`"expected_state": "contained"`) after the
-   bundle is qualified on the revision that runs.
+   Open it again with `activate` after the bundle is qualified on the revision
+   that runs. That `activate` names the record id of the containment as
+   `expected_record_id`: the `activation_record_id` in the answer of the
+   `contain`, or in `GET /v1/admin/pipeline/routing`.
 3. After a restart with other settings, read `GET /v1/admin/config-status` on
    every replica and compare it with the replica that answered the activation.
 
@@ -731,10 +753,10 @@ Rollback and containment.
 - After a deploy, a rollback needs the earlier bundle qualified on the deployed
   revision, which takes a full qualification run on that revision. So
   `contain` is the emergency stop, and rollback is the controlled path back:
-  contain a tenant when you doubt it (in an emergency, with no
-  `expected_state`), and roll back once the earlier bundle is qualified on the
-  revision that runs (with `"expected_state": "contained"`, the state that you
-  read).
+  contain a tenant when you doubt it (in an emergency, with no expectation),
+  and roll back once the earlier bundle is qualified on the revision that runs
+  (with the `activation_record_id` that you read from `GET
+  /v1/admin/pipeline/routing` as `expected_record_id`).
 - A rollback changes the bundle and keeps the routing state. From `pipeline`
   the row stays `pipeline`. From `contained` the row stays `contained`: the
   earlier bundle is selected and the tenant's uploads stay stopped. A rollback
@@ -754,13 +776,16 @@ Rollback and containment.
 
 The order of a first rollout:
 
-Before each change of routing in this procedure, read the tenant's state
-(`GET /v1/admin/pipeline/routing`, the field `routing_state`). Then send that
-state as `expected_state` in the body of the change: `legacy`, `pipeline`,
-`contained`, or `none` when the field is null. If the answer is `409`
-`pipeline_routing_state_changed`, another change came first: read the routing
-again before you decide. If the answer is `503` `pipeline_routing_busy`, send
-the request again.
+Before each change of routing in this procedure, read the tenant's routing
+(`GET /v1/admin/pipeline/routing`, the fields `routing_state` and
+`activation_record_id`). Then send that record id as `expected_record_id` in
+the body of the change, or `"none"` when the field is null. `activate` and
+`rollback` are refused without it (`422` `pipeline_request_invalid`). The
+answer of each change is the new routing row: its `activation_record_id` is
+the id to send with your next change, if no other operator made a change in
+between. If the answer is `409` `pipeline_routing_state_changed`, another
+change came first: read the routing again before you decide. If the answer is
+`503` `pipeline_routing_busy`, send the request again.
 
 1. Build `trace-commons-ingest` with the revision of the tree, with a pipeline
    runtime assembly. Set both trust store variables. List the tenant on
@@ -771,22 +796,25 @@ the request again.
 2. Qualify. Produce a full set of signed results on the revision that
    runs, and `POST` it with the signed package to `qualifications`.
 3. Activate one tenant: `POST` a fresh set to `activate`, with
-   `"expected_state": "none"` for a tenant that has no row yet. A request
+   `"expected_record_id": "none"` for a tenant that has no row yet. A request
    activates one tenant, the credential's. Activate another tenant with its own
    credential, after the first one has run clean.
 4. Watch the tenant. Read `GET /v1/admin/pipeline/operational-summary` (work by
    state, `retryable_error_count`, `terminal_error_count`,
    `suspended_policy_count`, the index and invalidation counts, the NEAR outbox
    by state) and `GET /v1/admin/pipeline/routing` (the events).
-5. Contain on doubt: `POST` `contain`, with `"expected_state": "pipeline"` when
-   you have time to read the state first. In an emergency, send `contain`
-   without the field: it then works from any state. New uploads are refused
-   with `503`, and the worker keeps processing what the tenant already has.
-6. Roll back or deactivate, each with the `expected_state` that you read.
+5. Contain on doubt: `POST` `contain`, with the `expected_record_id` that you
+   read when you have time to read the routing first. In an emergency, send
+   `contain` with no expectation: it then works from any state. New uploads
+   are refused with `503`, and the worker keeps processing what the tenant
+   already has.
+6. Roll back or deactivate, each with the `expected_record_id` that you read.
    `rollback` selects an earlier qualified bundle for later runs and keeps the
    routing state: a contained tenant stays contained. To open it again,
-   `activate` the bundle that is now active (`"expected_state": "contained"`).
-   `deactivate` returns the tenant to the legacy path. Then move it to the
+   `activate` the bundle that is now active, with the record id that the
+   rollback answered. `deactivate` returns the tenant to the legacy path. A
+   `deactivate` of a contained tenant with no expectation is refused (`409`
+   `pipeline_routing_expectation_required`). Then move it to the
    drain list as "Scope lists and the routing row" says.
 
 A fix-forward is an activation of a new bundle (steps 2 and 3 for that bundle).
@@ -1843,8 +1871,9 @@ leave its old bundle first, since startup refuses the new configuration
 while a tenant can still run the old one. For each such tenant:
 
 1. Under the old configuration, deactivate the tenant
-   (`POST /v1/admin/pipeline/deactivate`, with the state that you read from
-   `GET /v1/admin/pipeline/routing` as `expected_state`), move it from the
+   (`POST /v1/admin/pipeline/deactivate`, with the `activation_record_id` that
+   you read from `GET /v1/admin/pipeline/routing` as `expected_record_id`),
+   move it from the
    receipts list to the drain list, and wait until the operational summary
    shows no run of it in flight. Deactivating first matters: a tenant whose row says `pipeline`
    and that is only moved off the receipts list is refused with `503`
@@ -1874,8 +1903,9 @@ while a tenant can still run the old one. For each such tenant:
    tenant's routing row still says `legacy`, so its uploads stay on the legacy
    path. Qualify the new bundle on the new build's revision and activate the
    tenant again (`POST /v1/admin/pipeline/qualifications`, then `POST
-   /v1/admin/pipeline/activate` with `"expected_state": "legacy"`, the state
-   that step 1 left and that `GET /v1/admin/pipeline/routing` shows).
+   /v1/admin/pipeline/activate` with `expected_record_id` set to the
+   `activation_record_id` that the deactivation of step 1 answered and that
+   `GET /v1/admin/pipeline/routing` shows).
 
 A tenant left on the drain list for good keeps no active bundle and runs no
 new receipt, so step 3 may leave it on the drain list.

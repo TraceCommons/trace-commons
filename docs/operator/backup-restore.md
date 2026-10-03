@@ -176,7 +176,7 @@ answers `404` there. Do these steps in this order:
    (`GET /v1/admin/pipeline/routing`, with the tenant's admin credential; it needs
    only the routing store). Repeat a lost containment first
    (`POST /v1/admin/pipeline/contain`, which needs a runtime and works in this
-   configuration; it needs no `expected_state`).
+   configuration; it needs no expectation in its body).
 
    Check each tenant's policy suspensions too, also before step 5. Step 5
    resumes Settle, credit, and the NEAR payout dispatch for every listed
@@ -229,16 +229,28 @@ answers `404` there. Do these steps in this order:
 
    1. In this step, contain the tenant (`POST /v1/admin/pipeline/contain`).
       Step 5 then takes none of its new uploads, on either path.
-   2. After step 5, repeat the change. For a lost rollback, send `rollback`
-      for the earlier bundle. The tenant stays contained. Then send `activate`
-      for that bundle, which is now the active one, to open the tenant again.
-      For a lost activation, send `activate` for the bundle again. That
-      activation opens the tenant.
+   2. After step 5, repeat the change. Each `rollback` and each `activate`
+      needs `expected_record_id` in its body: the `activation_record_id` of
+      the tenant's routing row, which `GET /v1/admin/pipeline/routing` shows
+      and which the answer of your last change also carries (the containment
+      of step 1 here). Without it the answer is `422`
+      `pipeline_request_invalid`; with an id that is no longer in force it is
+      `409` `pipeline_routing_state_changed`. For a lost rollback, send
+      `rollback` for the earlier bundle, with the record id of the
+      containment. The tenant stays contained. Then send `activate` for that
+      bundle, which is now the active one, with the record id that the
+      rollback answered, to open the tenant again. For a lost activation,
+      send `activate` for the bundle again, with the record id of the
+      containment. That activation opens the tenant.
 
    A qualification that was recorded after the backup is lost too, and the
    gate needs it: record it again (`POST /v1/admin/pipeline/qualifications`,
    which works in this step) before the `rollback` or the `activate`. A lost
-   `deactivate` can be repeated in this step.
+   `deactivate` can be repeated in this step. Send it with the
+   `activation_record_id` that `GET /v1/admin/pipeline/routing` shows as
+   `expected_record_id`. For a tenant that you contained in this step, the
+   `deactivate` is refused without an expectation (`409`
+   `pipeline_routing_expectation_required`).
 4. For each tenant, call `POST /v1/workers/pipeline/index-rebuild` with that
    tenant's vector worker bearer token or an admin token -- the same gate
    as `main`'s vector index worker route (see
