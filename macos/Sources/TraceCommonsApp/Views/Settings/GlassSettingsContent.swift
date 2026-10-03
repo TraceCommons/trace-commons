@@ -35,12 +35,6 @@ struct GlassSettingsContent: View {
 // Stubs: each later task replaces its stub with the real section file and
 // deletes the stub here. Until then the legacy body draws the section.
 
-struct PrivateAISection: View {
-    var navigation: MainWindowNavigation?
-
-    var body: some View { SettingsContent(navigation: navigation, section: .privateAI) }
-}
-
 struct ProjectsSection: View {
     var body: some View { SettingsContent(section: .projects) }
 }

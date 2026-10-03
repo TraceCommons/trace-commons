@@ -117,6 +117,15 @@ final class SettingsParityTests: XCTestCase {
                 confirmations: ["GlassSourceRow.chooseFolder()"],
                 accessibility: ["GlassToggleStyle(.settings)", ".accessibilityLabel(copy.portTitle)",
                                 ".accessibilityLabel(copy.folderTitle)", ".accessibilityElement(children: .combine)"]),
+        Section(glass: "Views/Settings/PrivateAISection.swift",
+                bindings: ["model.privateInferenceCopy", "navigation?.section = .privateInference",
+                           "model.routeDisclosureState", "model.routeDisclosureUnreadableCopy", "model.refreshRouteDisclosure()"],
+                copySources: ["copy.settingsTitle", "copy.settingsMoved", "copy.destination",
+                              "copy.route", "copy.localFilter", "witness.heading", "witness.addressLabel", "witness.signingLabel",
+                              "witness.measurementsLabel", "witness.check", "witness.classifier", "witness.origin",
+                              "copy.attestedBodies", "copy.receipts", "facts.url", "facts.signingAddress", "facts.pinnedMeasurements"],
+                confirmations: [],
+                accessibility: [".accessibilityElement(children: .combine)"]),
         Section(glass: "Views/Settings/WitnessSection.swift",
                 bindings: ["model.witnessCopy", "= model.witnessState\n", "model.witnessStateCode", "model.witnessStatus?.refusal",
                            "model.witnessStatus?.pinnedMeasurementLine", "model.witnessLabel", "model.witnessBusy", "model.witnessCalls",
@@ -219,6 +228,29 @@ final class SettingsParityTests: XCTestCase {
         XCTAssertEqual(WitnessSection.tone(.held), .ask)
         XCTAssertEqual(WitnessSection.tone(.clear), .on)
         XCTAssertEqual(WitnessSection.tone(.neutral), .off)
+    }
+
+    /// The refresh hangs on the section's outer container, which always has
+    /// a child (the disclosure card), and is not repeated; the three views
+    /// stay standalone structs; the destination is read, never typed; and
+    /// loading is a spinner, not a shown route.
+    func test_privateAISectionShape() throws {
+        let source = try Self.text("Views/Settings/PrivateAISection.swift")
+        XCTAssertTrue(source.contains("        }\n        .onAppear { model.refreshRouteDisclosure() }\n"),
+                      "refresh is not adjacent to the outer container's closing brace")
+        XCTAssertEqual(source.components(separatedBy: "model.refreshRouteDisclosure()").count - 1, 1)
+        XCTAssertEqual(source.components(separatedBy: ".onAppear").count - 1, 1)
+        for name in ["struct PrivateAISection: View", "struct RouteDisclosureGlassBody: View",
+                     "struct RouteDisclosureUnreadableGlassLine: View"] {
+            XCTAssertEqual(source.components(separatedBy: name).count - 1, 1, "\(name) is not declared exactly once")
+        }
+        XCTAssertTrue(source.contains("Button(copy.destination)"))
+        XCTAssertTrue(source.contains(".buttonStyle(GlassButtonStyle(.link))"))
+        XCTAssertTrue(source.contains("GlassStatusLabel(line ?? fallback ?? \"\", status: .ask)"),
+                      "unreadable is not drawn with a glyph and words")
+        XCTAssertTrue(source.contains("ProgressView().controlSize(.small)"))
+        XCTAssertFalse(source.lowercased().contains("private inference"))
+        XCTAssertFalse(source.contains("MonitorWords"))
     }
 
     func test_theGlassContentDrawsEverySection() throws {
