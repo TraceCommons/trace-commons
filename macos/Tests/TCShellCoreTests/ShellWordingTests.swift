@@ -153,9 +153,11 @@ final class ShellWordingTests: XCTestCase {
 
         // A scan that found nothing would turn this test into a pass over
         // nothing, which is the failure mode the Windows guard names
-        // explicitly. There are 221 Swift sources under macos/Sources today.
+        // explicitly. There are 220 Swift sources under macos/Sources today;
+        // the floor sits just under that, so a scan that loses part of the
+        // tree fails rather than passing over less of it.
         XCTAssertGreaterThanOrEqual(
-            scanned.count, 86,
+            scanned.count, 215,
             "only \(scanned.count) Swift sources were scanned under \(ShellSources.root().path); "
                 + "the whole tree is expected")
 

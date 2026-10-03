@@ -187,6 +187,10 @@ struct MonitorWindowView: View {
             }
         }
         .glassWindow()
+        .onAppear { model.refreshAll() }
+        // The app's own reads (settings, the tools, the credential, the
+        // change log) refresh when someone looks, on this always-present
+        // container, as the legacy window did.
         .onChange(of: navigation.pending, initial: true) { _, destination in
             // An outside opener's destination, consumed once; initially
             // too, for a request that opened this window.
