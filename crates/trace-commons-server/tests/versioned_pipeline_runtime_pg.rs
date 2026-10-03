@@ -22760,6 +22760,193 @@ async fn a_score_commit_refused_for_a_stale_lease_leaves_no_object() {
     );
 }
 
+/// An artifact store whose `put_serialized_json` fails, as an outage does,
+/// for every object id that starts with `failing_object_id_prefix` while
+/// `failing` is set. Every other call goes to `inner`.
+struct FailingWriteStore {
+    inner: Arc<dyn TraceArtifactStore>,
+    failing_object_id_prefix: &'static str,
+    failing: AtomicBool,
+}
+
+impl TraceArtifactStore for FailingWriteStore {
+    fn put_serialized_json(
+        &self,
+        tenant_storage_ref: &str,
+        artifact_kind: TraceArtifactKind,
+        object_id: &str,
+        serialized_json: &[u8],
+    ) -> anyhow::Result<EncryptedTraceArtifactReceipt> {
+        anyhow::ensure!(
+            !(self.failing.load(Ordering::SeqCst)
+                && object_id.starts_with(self.failing_object_id_prefix)),
+            "object store unavailable"
+        );
+        self.inner.put_serialized_json(
+            tenant_storage_ref,
+            artifact_kind,
+            object_id,
+            serialized_json,
+        )
+    }
+
+    fn prepare_serialized_json(
+        &self,
+        tenant_storage_ref: &str,
+        artifact_kind: TraceArtifactKind,
+        object_id: &str,
+        serialized_json: &[u8],
+    ) -> anyhow::Result<PreparedSerializedJsonArtifact> {
+        self.inner.prepare_serialized_json(
+            tenant_storage_ref,
+            artifact_kind,
+            object_id,
+            serialized_json,
+        )
+    }
+
+    fn publish_serialized_json(
+        &self,
+        prepared: &PreparedSerializedJsonArtifact,
+    ) -> anyhow::Result<EncryptedTraceArtifactReceipt> {
+        self.inner.publish_serialized_json(prepared)
+    }
+
+    fn read_artifact(
+        &self,
+        expected_tenant_storage_ref: &str,
+        receipt: &EncryptedTraceArtifactReceipt,
+    ) -> anyhow::Result<EncryptedTraceArtifact> {
+        self.inner
+            .read_artifact(expected_tenant_storage_ref, receipt)
+    }
+
+    fn read_json(
+        &self,
+        expected_tenant_storage_ref: &str,
+        receipt: &EncryptedTraceArtifactReceipt,
+    ) -> anyhow::Result<serde_json::Value> {
+        self.inner.read_json(expected_tenant_storage_ref, receipt)
+    }
+
+    fn read_json_by_object_key(
+        &self,
+        expected_tenant_storage_ref: &str,
+        expected_artifact_kind: TraceArtifactKind,
+        object_key: &str,
+        expected_ciphertext_sha256: &str,
+    ) -> anyhow::Result<serde_json::Value> {
+        self.inner.read_json_by_object_key(
+            expected_tenant_storage_ref,
+            expected_artifact_kind,
+            object_key,
+            expected_ciphertext_sha256,
+        )
+    }
+
+    fn delete_artifact(
+        &self,
+        expected_tenant_storage_ref: &str,
+        receipt: &EncryptedTraceArtifactReceipt,
+    ) -> anyhow::Result<bool> {
+        self.inner
+            .delete_artifact(expected_tenant_storage_ref, receipt)
+    }
+}
+
+/// Finding 4, the last case of df1550dd: a Score whose second object write
+/// fails deletes the object it wrote before it. A compatibility Score
+/// writes its index command and then its neighbour set; with the neighbour
+/// set's write failing, the index command it had stored goes, so no object
+/// is left under the attempt's lease key, which no object ref names. The
+/// failed write is the uncharged outage, and the retry writes both objects
+/// and commits.
+#[tokio::test]
+async fn a_failed_score_write_deletes_the_object_written_before_it() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(FailingWriteStore {
+        inner: artifact_store(&dir),
+        failing_object_id_prefix: "pipeline-score-neighbors-",
+        failing: AtomicBool::new(true),
+    });
+    let service = compatibility_test_service_on(
+        backend.clone(),
+        store.clone(),
+        near_duplicate_config(),
+        None,
+        allow_all_authority(),
+        issuing_checks(),
+        IsolatedPipelineIndex::new(),
+    )
+    .await;
+    let tenant = format!("score-write-fails-{}", uuid::Uuid::new_v4());
+    let env = model_training_envelope(uuid::Uuid::new_v4()).await;
+    let run_id = receive_envelope(
+        &service,
+        &tenant,
+        "principal_sha256:score-write-fails",
+        &env,
+    )
+    .await;
+    let reviewed = service
+        .process_run(&tenant, run_id)
+        .await
+        .unwrap()
+        .expect("Review commits");
+    assert_eq!(reviewed.next_phase, Some(Phase::Score));
+    assert_eq!(
+        count_files_under(dir.path()),
+        2,
+        "the source envelope and the approved object"
+    );
+
+    let failed = service
+        .process_run(&tenant, run_id)
+        .await
+        .unwrap()
+        .expect("the failed Score attempt is recorded");
+    assert_eq!(
+        (
+            failed.state,
+            failed.last_error_label.as_deref(),
+            failed.next_phase,
+            failed.index_command_ref.as_deref(),
+        ),
+        (
+            PipelineRunState::Retry,
+            Some(PIPELINE_ARTIFACT_STORE_UNAVAILABLE_LABEL),
+            Some(Phase::Score),
+            None,
+        )
+    );
+    assert_eq!(
+        count_files_under(dir.path()),
+        2,
+        "the index command written before the failed write is deleted"
+    );
+
+    store.failing.store(false, Ordering::SeqCst);
+    force_due(&backend, &tenant, run_id).await;
+    let scored = service
+        .process_run(&tenant, run_id)
+        .await
+        .unwrap()
+        .expect("the retry commits Score");
+    assert_eq!(scored.next_phase, Some(Phase::Settle));
+    assert!(
+        scored.index_command_ref.is_some() && scored.score_neighbor_ref.is_some(),
+        "the Score wrote both objects, so the failed attempt had written its first"
+    );
+    assert_eq!(
+        count_files_under(dir.path()),
+        4,
+        "only the retry's own Score objects"
+    );
+}
+
 /// Finding 6: the contributor status reads a Review rejection's reason from
 /// `ReviewDecision`'s serialized shape (`{"kind": "rejected", "reason": ..}`).
 /// Two runs Admission quarantined (`privacy_review_required`): the one a
