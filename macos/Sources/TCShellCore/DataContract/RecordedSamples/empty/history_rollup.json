@@ -1,0 +1,28 @@
+{
+  "week": {
+    "submitted": 0,
+    "accepted": 0,
+    "quarantined": 0,
+    "withdrawn": 0,
+    "other": 0
+  },
+  "month": {
+    "submitted": 0,
+    "accepted": 0,
+    "quarantined": 0,
+    "withdrawn": 0,
+    "other": 0
+  },
+  "all_time": {
+    "submitted": 0,
+    "accepted": 0,
+    "quarantined": 0,
+    "withdrawn": 0,
+    "other": 0
+  },
+  "credit_pending": 0.0,
+  "credit_final": 0.0,
+  "quarantined": 0,
+  "taken_back": 0,
+  "last_refreshed_at": null
+}
