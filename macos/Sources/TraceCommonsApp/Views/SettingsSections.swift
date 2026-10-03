@@ -22,8 +22,9 @@ enum SettingsSection: String, CaseIterable, Identifiable {
 
     /// The section's name in the list: the heading the section itself
     /// shows, from the core's copy where the section takes it from there.
-    /// Nil while that copy has not loaded, and the list then skips the row
-    /// rather than inventing a name.
+    /// Nil while that copy has not loaded; the list then draws the row as a
+    /// disabled placeholder (`ListRow`) rather than inventing a name or
+    /// hiding the section.
     @MainActor
     func title(model: AppModel, compute: String?) -> String? {
         switch self {
@@ -39,6 +40,20 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         case .projects: SettingsWords.projects
         case .changes: SettingsContent.auditHeading
         case .compute: compute ?? SettingsWords.compute
+        }
+    }
+
+    /// What the list draws for a section: its title, or, while the copy
+    /// that names it has not loaded, a disabled placeholder. A row never
+    /// vanishes: a section whose copy never loads must still be visible,
+    /// and a restored selection must still point at a row.
+    struct ListRow: Equatable {
+        let text: String
+        let enabled: Bool
+
+        static func row(title: String?) -> ListRow {
+            guard let title, !title.isEmpty else { return ListRow(text: "—", enabled: false) }
+            return ListRow(text: title, enabled: true)
         }
     }
 

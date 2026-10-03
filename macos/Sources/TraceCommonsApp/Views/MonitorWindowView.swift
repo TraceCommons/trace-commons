@@ -400,11 +400,15 @@ struct MonitorSettingsWindow: View {
             // One list with arrow-key selection, not a button per row.
             List(selection: Binding(get: { section }, set: { if let value = $0 { section = value } })) {
                 ForEach(SettingsSection.allCases) { item in
-                    if let title = item.title(model: model, compute: compute.snapshot?.title) {
-                        Label(title, systemImage: item.symbol)
-                            .lineLimit(2)
-                            .tag(item)
-                    }
+                    // A section whose copy has not loaded is a disabled
+                    // placeholder, never a missing row.
+                    let row = SettingsSection.ListRow.row(title: item.title(model: model, compute: compute.snapshot?.title))
+                    Label(row.text, systemImage: item.symbol)
+                        .lineLimit(2)
+                        .foregroundStyle(row.enabled ? .primary : .secondary)
+                        .accessibilityLabel(row.enabled ? row.text : MonitorWords.unknown)
+                        .selectionDisabled(!row.enabled)
+                        .tag(item)
                 }
             }
             .navigationSplitViewColumnWidth(min: 200, ideal: 230, max: 280)
