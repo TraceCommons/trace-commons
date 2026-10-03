@@ -47,11 +47,30 @@ struct InferenceTabView: View {
         destinations: DaemonData.ToolDestinations?
     ) -> some View {
         let totals = Self.totals(page, summary: summary, destinations: destinations)
-        return HStack(spacing: GlassTokens.Space.s3) {
-            GlassLegendCell(MonitorWords.calls, value: totals.calls.map(String.init) ?? "—", status: .shared)
-            GlassLegendCell(InferenceWords.proof(.verified), value: totals.verified.map(String.init) ?? "—", status: .on)
-            GlassLegendCell(MonitorWords.priced, value: totals.priced, status: .kept)
+        return VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
+            // What window the counts cover, as the core reported it.
+            Text(Self.windowLine(page, destinations: destinations))
+                .glassType(GlassTokens.TypeScale.caption)
+                .foregroundStyle(GlassColor.textTertiary)
+            HStack(spacing: GlassTokens.Space.s3) {
+                GlassLegendCell(MonitorWords.calls, value: totals.calls.map(String.init) ?? "—", status: .shared)
+                GlassLegendCell(InferenceWords.proof(.verified), value: totals.verified.map(String.init) ?? "—", status: .on)
+                GlassLegendCell(MonitorWords.priced, value: totals.priced, status: .kept)
+            }
         }
+    }
+
+    /// The hours the tab's counts cover: the calls page's `window_hours`,
+    /// else `tool_destinations`' (K14 keeps them the same window). Nil when
+    /// neither reported one.
+    static func windowHours(_ page: DaemonData.InferenceCallPage, destinations: DaemonData.ToolDestinations?) -> Int? {
+        page.windowHours ?? destinations?.windowHours
+    }
+
+    /// The window line, in the core's words, or a dash when no window was
+    /// reported (or the core's words have not loaded).
+    static func windowLine(_ page: DaemonData.InferenceCallPage, destinations: DaemonData.ToolDestinations?) -> String {
+        MonitorWords.table?.windowLine(hours: windowHours(page, destinations: destinations)) ?? "—"
     }
 
     /// The tab's totals. The call count is the core's: `tool_destinations`'
