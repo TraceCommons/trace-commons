@@ -1,12 +1,8 @@
 import { useState } from "react";
-import { Button } from "@/components/ui/button";
-import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { useInferenceConnectionCopy } from "../../../lib/tauri/use-contributor-copy";
 import { useOnboardingInference } from "../hooks/use-onboarding-inference";
 import type { OnboardingStepProps } from "./onboarding-step-types";
-
-const backClass =
-  "rounded-[7px] border border-border bg-background px-[11px] py-2 text-[11px] font-bold text-foreground hover:border-primary hover:text-primary";
+import { GlassButton, Radio, RadioGroup } from "@/design-system";
 
 // Connecting inference (K12): optional, and one route to a witness. Every
 // sentence is the core's (`consent_copy::inference_connection_copy`, and an
@@ -26,24 +22,23 @@ export function OnboardingInferenceStep({
   const working = busy || inference.busy;
   const view = inference.view;
   const skip = (
-    <Button
+    <GlassButton
       type="button"
-      variant="outline"
       onClick={onboarding.finishInference}
       disabled={working}
     >
       {view.kind === "installed" || view.kind === "none" ? "Continue" : "Skip"}
-    </Button>
+    </GlassButton>
   );
   return (
-    <section className="rounded-2xl border border-border bg-card/80 mb-4 p-[26px]">
-      <span className="mb-3 block font-mono text-[10px] font-extrabold leading-none tracking-[.16em] text-primary">
+    <section className="tc-card mb-2.5">
+      <span className="mb-1.5 block tc-eyebrow">
         CONNECT INFERENCE (OPTIONAL)
       </span>
       <h2 id="onboarding-inference-heading">Connect inference?</h2>
       {!copy ? (
         <p
-          className={`m-0 text-[12px] ${copyQuery.isError ? "text-destructive" : "text-muted-foreground"}`}
+          className={`m-0 text-[12px] ${copyQuery.isError ? "text-tc-outside" : "text-tc-secondary"}`}
           role={copyQuery.isError ? "alert" : "status"}
         >
           {copyQuery.isError
@@ -58,14 +53,14 @@ export function OnboardingInferenceStep({
             <>
               <p className="m-0">{copy.sign_in}</p>
               {inference.signInFailed && (
-                <p className="m-0 text-destructive" role="alert">
+                <p className="m-0 text-tc-outside" role="alert">
                   {copy.sign_in_failed}
                 </p>
               )}
             </>
           )}
           {view.kind === "loading" && inference.failed && (
-            <p className="m-0 text-destructive" role="alert">
+            <p className="m-0 text-tc-outside" role="alert">
               {copy.load_failed}
             </p>
           )}
@@ -80,16 +75,16 @@ export function OnboardingInferenceStep({
               )}
               <RadioGroup
                 aria-labelledby="onboarding-inference-heading"
-                className="gap-px border-t border-border"
+                className="gap-px border-t border-tc-hairline"
                 value={chosen ?? ""}
-                onValueChange={(value) => setChosen(value as string)}
+                onChange={(value) => setChosen(value as string)}
               >
                 {view.offers.map((offer) => (
                   <label
                     key={offer.offer_id}
-                    className="flex items-start gap-2.5 border-b border-border py-2.5 font-normal text-foreground"
+                    className="flex items-start gap-2.5 border-b border-tc-hairline py-2.5 font-normal text-[var(--tc-text-primary)]"
                   >
-                    <RadioGroupItem value={offer.offer_id} disabled={working} />
+                    <Radio value={offer.offer_id} disabled={working} />
                     <span>
                       <strong>{offer.provider_id}</strong>
                       <small className="block">{offer.disclosure}</small>
@@ -98,7 +93,7 @@ export function OnboardingInferenceStep({
                 ))}
               </RadioGroup>
               {inference.selectFailed && (
-                <p className="m-0 text-destructive" role="alert">
+                <p className="m-0 text-tc-outside" role="alert">
                   {copy.select_failed}
                 </p>
               )}
@@ -111,7 +106,7 @@ export function OnboardingInferenceStep({
               )}
               <p className="m-0 font-bold">{copy.install}</p>
               {inference.installFailed && (
-                <p className="m-0 text-destructive" role="alert">
+                <p className="m-0 text-tc-outside" role="alert">
                   {copy.install_failed}
                 </p>
               )}
@@ -122,7 +117,7 @@ export function OnboardingInferenceStep({
               <p className="m-0" role="status">
                 {copy.installed}
               </p>
-              <p className="m-0 text-muted-foreground">{copy.disconnect}</p>
+              <p className="m-0 text-tc-secondary">{copy.disconnect}</p>
             </>
           )}
           {inference.disconnectPending && (
@@ -133,48 +128,43 @@ export function OnboardingInferenceStep({
         </div>
       )}
       <div className="mt-6 flex flex-wrap gap-2.5">
-        <Button
-          className={backClass}
+        <GlassButton
           type="button"
           onClick={onboarding.back}
           disabled={working}
         >
           Back
-        </Button>
+        </GlassButton>
         {skip}
         {copy && view.kind === "sign_in" && (
-          <Button
+          <GlassButton
             type="button"
-            variant="outline"
             onClick={inference.signIn}
             disabled={working}
           >
             Sign in
-          </Button>
+          </GlassButton>
         )}
         {copy && inference.signInUrl && (
-          <Button
+          <GlassButton
             type="button"
-            variant="outline"
             onClick={inference.openSignInUrl}
           >
             Open sign-in page
-          </Button>
+          </GlassButton>
         )}
         {copy && view.kind === "loading" && inference.failed && (
-          <Button
+          <GlassButton
             type="button"
-            variant="outline"
             onClick={inference.retry}
             disabled={working}
           >
             Try again
-          </Button>
+          </GlassButton>
         )}
         {copy && view.kind === "choose" && (
-          <Button
+          <GlassButton
             type="button"
-            variant="outline"
             onClick={() => {
               const offer = view.offers.find((o) => o.offer_id === chosen);
               if (offer) inference.select(offer, view.expectedVersion);
@@ -182,27 +172,25 @@ export function OnboardingInferenceStep({
             disabled={working || chosen === null}
           >
             Connect
-          </Button>
+          </GlassButton>
         )}
         {copy && view.kind === "install" && (
-          <Button
+          <GlassButton
             type="button"
-            variant="outline"
             onClick={() => inference.install(view.target)}
             disabled={working}
           >
             Use this witness on this device
-          </Button>
+          </GlassButton>
         )}
         {copy && view.kind === "installed" && (
-          <Button
+          <GlassButton
             type="button"
-            variant="outline"
             onClick={() => inference.disconnect(view.connectionId)}
             disabled={working}
           >
             Disconnect
-          </Button>
+          </GlassButton>
         )}
       </div>
     </section>

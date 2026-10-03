@@ -30,14 +30,13 @@ export function PrivateAiPage() {
       ? (snapshot.private_inference_state as Record<string, unknown>)
       : null;
   return (
-    <div className="mx-auto max-w-[1080px] px-4 pb-12 pt-8 sm:px-8 sm:pb-16 sm:pt-10 lg:px-16 lg:pt-14">
+    <div className="tc-page">
       <PageHeader
-        eyebrow="PRIVATE / ANSWERS"
         title="Private AI"
         description={disclosure.data?.private_inference.subtitle ?? ""}
-        phase="PHASE 4"
+        titleHidden
       />
-      <div className="mb-4 grid grid-cols-3 gap-3 max-[860px]:grid-cols-1">
+      <div className="grid grid-cols-2 gap-1.5">
         <StatCard
           label="Inference access"
           value={
@@ -45,23 +44,11 @@ export function PrivateAiPage() {
             privateAi.credential?.state ??
             text(snapshot, "near_ai_inference_configured", "Unknown")
           }
-          detail="Credential presence only; never display secrets"
-          tone="gold"
         />
-        <StatCard
-          label="Runtime"
-          value={text(runtime, "state", "Unknown")}
-          detail={text(runtime, "reason", "Daemon status unavailable")}
-          tone="blue"
-        />
-        <StatCard
-          label="Contribution"
-          value="Separate"
-          detail="Private AI does not publish traces"
-        />
+        <StatCard label="Runtime" value={text(runtime, "state", "Unknown")} />
       </div>
       {settings.state === "error" && (
-        <p className="-mt-[18px] mb-[18px] rounded-[9px] border border-destructive/30 bg-destructive/10 px-3.5 py-3 text-[12px] text-destructive">
+        <p className="tc-alert">
           Private AI status unavailable. Start Tauri and refresh.
         </p>
       )}

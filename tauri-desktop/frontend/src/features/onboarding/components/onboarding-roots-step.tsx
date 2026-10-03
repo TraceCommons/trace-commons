@@ -1,8 +1,8 @@
-import { Button } from "@/components/ui/button";
 import { useContributorDisclosureCopy } from "../../../lib/tauri/use-contributor-copy";
 import { SourceRootsPanel } from "../../settings/public";
 import { missingRequiredRoots } from "../roots-readiness";
 import type { OnboardingStepProps } from "./onboarding-step-types";
+import { ButtonPrimary, GlassButton } from "@/design-system";
 
 export function OnboardingRootsStep({
   onboarding,
@@ -37,34 +37,32 @@ export function OnboardingRootsStep({
         onSave={(source, mode, path) => roots.save(source, mode, path)}
       />
       {settings.state === "ready" && !rootsAnswered && shell && (
-        <p className="mt-4 mb-0 text-[12px] text-muted-foreground">
+        <p className="mt-4 mb-0 text-[12px] text-tc-secondary">
           {shell.roots_required}
         </p>
       )}
       {starting && shell && (
-        <p className="mt-4 mb-0 text-[12px] text-muted-foreground" role="status">
+        <p className="mt-4 mb-0 text-[12px] text-tc-secondary" role="status">
           {shell.watcher_starting}
         </p>
       )}
       {!starting && startError && (
         <p
-          className="mt-4 mb-0 rounded-[9px] border border-destructive/30 bg-destructive/10 px-3.5 py-3 text-[12px] text-destructive"
+          className="tc-card tc-card--quiet mt-4 mb-0 border-tc-outside/30 text-[12px] text-tc-outside"
           role="alert"
         >
           {startError}
         </p>
       )}
-      <div className="mt-6 flex gap-2.5">
-        <Button
-          className="rounded-[7px] border border-border bg-background px-[11px] py-2 text-[11px] font-bold text-foreground hover:border-primary hover:text-primary"
+      <div className="mt-3 flex flex-wrap gap-2">
+        <GlassButton
           type="button"
           onClick={onboarding.back}
           disabled={busy || roots.busy || starting}
         >
           Back
-        </Button>
-        <Button
-          className="rounded-lg border-0 bg-primary px-3.5 py-2.5 text-[12px] font-bold text-primary-foreground hover:bg-primary/80"
+        </GlassButton>
+        <ButtonPrimary size="sm"
           type="button"
           onClick={() => void onboarding.continueRoots(snapshot)}
           disabled={
@@ -77,7 +75,7 @@ export function OnboardingRootsStep({
           }
         >
           {starting && shell ? shell.watcher_starting : "Continue"}
-        </Button>
+        </ButtonPrimary>
       </div>
     </>
   );

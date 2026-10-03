@@ -1,10 +1,5 @@
 import { useId } from "react";
 import type { UseFormReturn } from "react-hook-form";
-import { Button } from "@/components/ui/button";
-import { Checkbox } from "@/components/ui/checkbox";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { NativeSelect } from "@/components/ui/native-select";
 import { FormFieldError } from "../../../components/form-field-error";
 import type {
   ComparisonContext,
@@ -13,6 +8,7 @@ import type {
 import type { ComparisonTaskFormValues } from "../forms";
 import type { EpisodeListEntry } from "../workflows";
 import type { SelectionField } from "./comparison-task-types";
+import { Checkbox, GlassButton, Input, Select, TertiaryLink } from "@/design-system";
 
 export function ComparisonTaskDetail({
   detail,
@@ -45,22 +41,21 @@ export function ComparisonTaskDetail({
 
   return (
     <div className="mt-4 p-[26px]">
-      <div className="flex items-start justify-between gap-[18px]">
+      <div className="flex items-start justify-between gap-3">
         <div>
-          <span className="mb-3 block font-mono text-[10px] font-extrabold leading-none tracking-[.16em] text-primary">
+          <span className="mb-1.5 block tc-eyebrow">
             TASK DETAIL
           </span>
           <h3>{detail.task.id}</h3>
         </div>
-        <Button
-          className="border-0 bg-transparent p-0 text-[11px] font-bold text-primary"
+        <TertiaryLink
           type="button"
           onClick={onClose}
         >
           Back to tasks
-        </Button>
+        </TertiaryLink>
       </div>
-      <div className="my-5 flex flex-wrap gap-x-[26px] gap-y-2 text-[11px] text-muted-foreground">
+      <div className="my-2.5 flex flex-wrap gap-x-4 gap-y-1.5 tc-caption tc-text-tertiary">
         <span>
           <b>Material</b>
           {detail.task.material_digest}
@@ -74,7 +69,7 @@ export function ComparisonTaskDetail({
           {new Date(detail.resolved_at).toLocaleString()}
         </span>
       </div>
-      <p className="m-0 text-[11px] leading-[1.55] text-muted-foreground">
+      <p className="m-0 tc-caption tc-text-tertiary">
         {detail.stale_reasons.length
           ? `Review required: ${detail.stale_reasons.join(", ")}`
           : "No stale reason reported."}{" "}
@@ -82,37 +77,36 @@ export function ComparisonTaskDetail({
           ? `Overlaps ${detail.overlapping_task_ids.length} other tasks.`
           : ""}
       </p>
-      <div className="my-[18px] grid gap-px border-t border-border">
+      <div className="my-3 grid gap-px">
         {episodes.map((entry, index) => {
           const episodeId = `${idPrefix}-episode-${index}`;
           return (
             <div
-              className="flex items-start gap-2.5 border-b border-border py-2.5"
+              className="flex items-start gap-2.5 border-b border-tc-hairline py-2.5"
               key={entry.episode.id}
             >
               <Checkbox
                 id={episodeId}
                 checked={editSelection.value.includes(entry.episode.id)}
-                onCheckedChange={() =>
+                onChange={() =>
                   onToggle(editSelection, entry.episode.id)
                 }
                 disabled={busy}
               />
-              <Label
-                className="text-[12px] font-normal text-foreground"
+              <label
+                className="text-[12px] font-normal text-[var(--tc-text-primary)]"
                 htmlFor={episodeId}
               >
                 <span>
                   <strong>{entry.episode.members.length} snapshots</strong>
                   <small>{entry.episode.id}</small>
                 </span>
-              </Label>
+              </label>
             </div>
           );
         })}
       </div>
-      <Button
-        className="rounded-[7px] border border-border bg-background px-[11px] py-2 text-[11px] font-bold text-foreground hover:border-primary hover:text-primary"
+      <GlassButton
         type="button"
         onClick={() =>
           void form.handleSubmit(async (values) => {
@@ -123,10 +117,10 @@ export function ComparisonTaskDetail({
         disabled={busy || editSelection.value.length === 0}
       >
         Replace frozen episodes
-      </Button>
+      </GlassButton>
       <div className="mt-[22px] grid grid-cols-2 gap-4">
         <div className="grid gap-1">
-          <Label htmlFor={`${idPrefix}-project-id`}>Project UUID</Label>
+          <label className="flex items-center gap-2 tc-label" htmlFor={`${idPrefix}-project-id`}>Project UUID</label>
           <Input
             id={`${idPrefix}-project-id`}
             {...form.register("projectId")}
@@ -144,7 +138,7 @@ export function ComparisonTaskDetail({
           />
         </div>
         <div className="grid gap-1">
-          <Label htmlFor={`${idPrefix}-task-date`}>Task date</Label>
+          <label className="flex items-center gap-2 tc-label" htmlFor={`${idPrefix}-task-date`}>Task date</label>
           <Input
             id={`${idPrefix}-task-date`}
             type="date"
@@ -163,7 +157,7 @@ export function ComparisonTaskDetail({
           />
         </div>
         <div className="grid gap-1">
-          <Label htmlFor={`${idPrefix}-language`}>Language</Label>
+          <label className="flex items-center gap-2 tc-label" htmlFor={`${idPrefix}-language`}>Language</label>
           <Input
             id={`${idPrefix}-language`}
             {...form.register("language")}
@@ -172,7 +166,7 @@ export function ComparisonTaskDetail({
           />
         </div>
         <div className="grid gap-1">
-          <Label htmlFor={`${idPrefix}-harness-id`}>Harness ID</Label>
+          <label className="flex items-center gap-2 tc-label" htmlFor={`${idPrefix}-harness-id`}>Harness ID</label>
           <Input
             id={`${idPrefix}-harness-id`}
             {...form.register("harnessId")}
@@ -180,7 +174,7 @@ export function ComparisonTaskDetail({
           />
         </div>
         <div className="grid gap-1">
-          <Label htmlFor={`${idPrefix}-harness-version`}>Harness version</Label>
+          <label className="flex items-center gap-2 tc-label" htmlFor={`${idPrefix}-harness-version`}>Harness version</label>
           <Input
             id={`${idPrefix}-harness-version`}
             {...form.register("harnessVersion")}
@@ -188,7 +182,7 @@ export function ComparisonTaskDetail({
           />
         </div>
         <div className="grid gap-1">
-          <Label htmlFor={`${idPrefix}-tool-policy-id`}>Tool policy ID</Label>
+          <label className="flex items-center gap-2 tc-label" htmlFor={`${idPrefix}-tool-policy-id`}>Tool policy ID</label>
           <Input
             id={`${idPrefix}-tool-policy-id`}
             {...form.register("toolPolicyId")}
@@ -196,9 +190,9 @@ export function ComparisonTaskDetail({
           />
         </div>
         <div className="grid gap-1">
-          <Label htmlFor={`${idPrefix}-tool-policy-version`}>
+          <label className="flex items-center gap-2 tc-label" htmlFor={`${idPrefix}-tool-policy-version`}>
             Tool policy version
-          </Label>
+          </label>
           <Input
             id={`${idPrefix}-tool-policy-version`}
             {...form.register("toolPolicyVersion")}
@@ -206,9 +200,9 @@ export function ComparisonTaskDetail({
           />
         </div>
         <div className="grid gap-1">
-          <Label htmlFor={`${idPrefix}-prompt-digest`}>
+          <label className="flex items-center gap-2 tc-label" htmlFor={`${idPrefix}-prompt-digest`}>
             Prompt template digest
-          </Label>
+          </label>
           <Input
             id={`${idPrefix}-prompt-digest`}
             {...form.register("promptDigest")}
@@ -227,8 +221,8 @@ export function ComparisonTaskDetail({
           />
         </div>
         <div className="grid gap-1">
-          <Label htmlFor={`${idPrefix}-reasoning`}>Reasoning effort</Label>
-          <NativeSelect
+          <label className="flex items-center gap-2 tc-label" htmlFor={`${idPrefix}-reasoning`}>Reasoning effort</label>
+          <Select
             id={`${idPrefix}-reasoning`}
             {...form.register("reasoning")}
             disabled={busy}
@@ -240,11 +234,10 @@ export function ComparisonTaskDetail({
             <option value="medium">Medium</option>
             <option value="high">High</option>
             <option value="xhigh">Xhigh</option>
-          </NativeSelect>
+          </Select>
         </div>
       </div>
-      <Button
-        className="rounded-[7px] border border-border bg-background px-[11px] py-2 text-[11px] font-bold text-foreground hover:border-primary hover:text-primary"
+      <GlassButton
         type="button"
         onClick={() =>
           void form.handleSubmit(async (values) => {
@@ -254,15 +247,15 @@ export function ComparisonTaskDetail({
         disabled={busy || !form.formState.isValid}
       >
         Save task context
-      </Button>
+      </GlassButton>
       <FormFieldError
         id="task-form-error"
         message={form.formState.errors.root?.message}
       />
       <div className="my-3 flex gap-3">
         <div className="grid gap-1">
-          <Label htmlFor={`${idPrefix}-outcome`}>Outcome</Label>
-          <NativeSelect
+          <label className="flex items-center gap-2 tc-label" htmlFor={`${idPrefix}-outcome`}>Outcome</label>
+          <Select
             id={`${idPrefix}-outcome`}
             {...form.register("outcome")}
             disabled={busy}
@@ -272,10 +265,9 @@ export function ComparisonTaskDetail({
             <option value="partial">Partial</option>
             <option value="rejected">Rejected</option>
             <option value="unknown">Unknown</option>
-          </NativeSelect>
+          </Select>
         </div>
-        <Button
-          className="rounded-[7px] border border-border bg-background px-[11px] py-2 text-[11px] font-bold text-foreground hover:border-primary hover:text-primary"
+        <GlassButton
           type="button"
           onClick={() =>
             void form.handleSubmit(async (values) => {
@@ -285,9 +277,8 @@ export function ComparisonTaskDetail({
           disabled={busy || !form.formState.isValid}
         >
           Save outcome
-        </Button>
-        <Button
-          className="rounded-[7px] border border-border bg-background px-[11px] py-2 text-[11px] font-bold text-foreground hover:border-primary hover:text-primary"
+        </GlassButton>
+        <GlassButton
           type="button"
           onClick={async () => {
             if (await onClearOutcome())
@@ -296,17 +287,16 @@ export function ComparisonTaskDetail({
           disabled={busy || !detail.task.outcome}
         >
           Clear outcome
-        </Button>
-        <Button
-          className="rounded-[7px] border border-border bg-background px-[11px] py-2 text-[11px] font-bold text-foreground hover:border-primary hover:text-primary"
+        </GlassButton>
+        <GlassButton
           type="button"
           onClick={() => void onReconfirm()}
           disabled={busy}
         >
           Reconfirm current material
-        </Button>
+        </GlassButton>
       </div>
-      <p className="m-0 text-[11px] leading-[1.55] text-muted-foreground">
+      <p className="m-0 tc-caption tc-text-tertiary">
         Checkout provenance is unavailable in this desktop app. Reconfirmation
         binds current material digest; it does not verify model identity or task
         independence.

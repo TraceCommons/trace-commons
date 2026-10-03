@@ -174,6 +174,14 @@ export type ContributorDisclosureCopy = {
     offer_accept: string;
     offer_decline: string;
     offer_asked_once: string;
+    /**
+     * The core's sentence for each runtime state label, and whether an
+     * indicator may paint that state as working. Look a label up with
+     * `privateAiStateCopy`, never by comparing sentences.
+     */
+    states: Record<string, { line: string; working: boolean }>;
+    state_unknown: string;
+    state_unreported: string;
   };
   credential_cost: string;
   credential_wallet_notice: string;
@@ -380,6 +388,22 @@ export async function getContributorDisclosureCopy(): Promise<ContributorDisclos
       offer_accept: string(privateInference, "offer_accept"),
       offer_decline: string(privateInference, "offer_decline"),
       offer_asked_once: string(privateInference, "offer_asked_once"),
+      states: Object.fromEntries(
+        Object.entries(
+          record(privateInference.states, "Private AI state copy"),
+        ).map(([label, raw]) => {
+          const state = record(raw, "Private AI state");
+          if (typeof state.working !== "boolean") {
+            throw new Error("Invalid Private AI state tone");
+          }
+          return [
+            label,
+            { line: string(state, "line"), working: state.working },
+          ];
+        }),
+      ),
+      state_unknown: string(privateInference, "state_unknown"),
+      state_unreported: string(privateInference, "state_unreported"),
     },
     credential_cost: string(value, "credential_cost"),
     project_automatic_unavailable: string(value, "project_automatic_unavailable"),
@@ -725,4 +749,26 @@ export async function getWithdrawalConfirmationPrompt(): Promise<string> {
     throw new Error("Invalid withdrawal confirmation copy");
   }
   return value;
+}
+
+/**
+ * The core's sentence for the runtime state the daemon reports
+ * (`private_inference_state`), as `private_inference_copy::state_line`
+ * chooses it: no report is unreported, and a label the core has no words for
+ * is unknown -- never painted as working.
+ */
+export function privateAiStateCopy(
+  copy: ContributorDisclosureCopy["private_inference"],
+  runtime: unknown,
+): { line: string; working: boolean } {
+  const label =
+    typeof runtime === "object" &&
+    runtime !== null &&
+    typeof (runtime as Record<string, unknown>).state === "string"
+      ? ((runtime as Record<string, unknown>).state as string)
+      : "";
+  if (label === "") return { line: copy.state_unreported, working: false };
+  return Object.hasOwn(copy.states, label)
+    ? copy.states[label]
+    : { line: copy.state_unknown, working: false };
 }

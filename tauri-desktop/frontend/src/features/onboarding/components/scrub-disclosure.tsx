@@ -1,7 +1,5 @@
 import { ResponsiveOverlay } from "../../../components/responsive-overlay";
-import { Alert, AlertDescription } from "../../../components/ui/alert";
-import { Button } from "../../../components/ui/button";
-import { Skeleton } from "../../../components/ui/skeleton";
+import { ButtonPrimary, GlassButton, Skeleton } from "@/design-system";
 
 type ScrubDisclosureProps = {
   open: boolean;
@@ -29,19 +27,19 @@ export function ScrubDisclosure({
       title="What gets removed?"
       description="Local scrubbing checks named secret categories before contribution. Detector patterns stay private."
       footer={
-        <Button type="button" onClick={onClose} className="w-full sm:w-auto">
+        <ButtonPrimary size="sm" onClick={onClose}>
           Close
-        </Button>
+        </ButtonPrimary>
       }
     >
       <div className="grid gap-4 pb-4">
-        <p className="text-sm text-muted-foreground">
+        <p className="text-sm text-tc-secondary">
           Before anything leaves this machine, local scrubbing looks for these
           named secret categories. Names are shown; detector patterns stay
           private.
         </p>
         {state === "loading" && (
-          <div className="grid gap-2" aria-label="Reading detector list">
+          <div className="grid gap-2" role="status" aria-label="Reading detector list">
             <Skeleton className="h-4 w-2/3" />
             <Skeleton className="h-4 w-1/2" />
             <Skeleton className="h-4 w-3/4" />
@@ -49,22 +47,22 @@ export function ScrubDisclosure({
         )}
         {state === "error" && (
           <>
-            <Alert variant="destructive">
-              <AlertDescription>{error}</AlertDescription>
-            </Alert>
-            <Button type="button" variant="outline" onClick={onRetry}>
+            <p className="tc-alert m-0" role="alert">
+              {error}
+            </p>
+            <GlassButton className="justify-self-start" onClick={onRetry}>
               Retry
-            </Button>
+            </GlassButton>
           </>
         )}
         {state === "ready" && (
-          <ul className="m-0 grid gap-2 rounded-lg border bg-muted/40 p-4 font-mono text-xs capitalize">
+          <ul className="tc-card tc-card--quiet m-0 grid gap-2 font-mono text-xs capitalize">
             {names.map((name) => (
               <li key={name}>{name.replaceAll("_", " ")}</li>
             ))}
           </ul>
         )}
-        <p className="text-sm text-muted-foreground">
+        <p className="text-sm text-tc-secondary">
           Scrubbing is good and it is not perfect. That is why you review each
           session before contributing it.
         </p>

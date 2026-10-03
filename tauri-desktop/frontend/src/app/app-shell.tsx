@@ -1,9 +1,8 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { useCallback } from "react";
 import { useLocation } from "react-router-dom";
-import { AppNavbar } from "../components/app-navbar";
-import { SidebarInset, SidebarProvider } from "../components/ui/sidebar";
 import { useOnboardingCompletion } from "../features/onboarding/public";
+import { TracesWorkspaceProvider } from "../features/waiting/public";
 import { privateAiKeys } from "../features/private-ai/public";
 import { usePublicProfile } from "../features/profile/public";
 import { useCoreStatus } from "../lib/tauri/use-core-status";
@@ -13,6 +12,7 @@ import { GrantVoidNotices } from "./grant-void-notices";
 import { useAccountQueryLifecycle } from "./hooks/use-account-query-lifecycle";
 import { useDaemonQueryEvents } from "./hooks/use-daemon-query-events";
 import { useDesktopEvents } from "./hooks/use-desktop-events";
+import { useNativeGlass } from "./hooks/use-native-glass";
 import { LegacyMigrationNotice } from "./legacy-migration-notice";
 import { QuitConfirmation } from "./quit-confirmation";
 import { ArmingRewordingNotices, GateHeldNotice } from "./switch-on-notices";
@@ -34,6 +34,7 @@ export function AppShell() {
   const tenantId = core.data?.daemon.tenant_id ?? null;
   const onboarding = useOnboardingCompletion(tenantId);
   const desktop = useDesktopEvents(refreshPrivateAiCredential);
+  useNativeGlass();
   const errors = [
     desktop.error,
     daemonEventError
@@ -45,50 +46,39 @@ export function AppShell() {
       (core.data?.daemon.logged_in === true && !onboarding.isComplete)) &&
     route !== null;
 
-  return (
-    <SidebarProvider>
-      <AppNavbar
-        decisionsOwed={
-          core.state === "ready"
-            ? (core.data?.daemon.decisions_owed ?? null)
-            : null
-        }
-        profile={publicProfile.data}
-        profileState={publicProfile.state}
+  const notices = (
+    <>
+      {errors.map((error) => (
+        <p key={error} className="tc-alert m-0" role="alert">
+          {error}
+        </p>
+      ))}
+      <DaemonStartupNotice startup={core.data?.startup} />
+      <GrantVoidNotices grantVoids={core.data?.daemon.grant_voids} />
+      <LegacyMigrationNotice
+        status={core.data?.daemon.legacy_invite_migration}
       />
-      <SidebarInset>
-        <main className="min-w-0 flex-1">
-          {errors.map((error) => (
-            <p
-              key={error}
-              className="mx-6 mt-4 rounded-lg border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive"
-              role="alert"
-            >
-              {error}
-            </p>
-          ))}
-          <DaemonStartupNotice startup={core.data?.startup} />
-          <GrantVoidNotices grantVoids={core.data?.daemon.grant_voids} />
-          <LegacyMigrationNotice
-            status={core.data?.daemon.legacy_invite_migration}
-          />
-          <ArmingRewordingNotices
-            rewordings={core.data?.daemon.arming_rewordings}
-          />
-          <GateHeldNotice held={core.data?.daemon.automatic_contribution_held} />
-          <AppRoutes
-            requiresOnboarding={requiresOnboarding}
-            core={core}
-            publicProfile={publicProfile}
-            initialInvite={desktop.initialInvite}
-            onOnboardingComplete={onboarding.complete}
-          />
-        </main>
-      </SidebarInset>
+      <ArmingRewordingNotices
+        rewordings={core.data?.daemon.arming_rewordings}
+      />
+      <GateHeldNotice held={core.data?.daemon.automatic_contribution_held} />
+    </>
+  );
+
+  return (
+    <TracesWorkspaceProvider key={core.scope}>
+      <AppRoutes
+        requiresOnboarding={requiresOnboarding}
+        core={core}
+        publicProfile={publicProfile}
+        initialInvite={desktop.initialInvite}
+        onOnboardingComplete={onboarding.complete}
+        notices={notices}
+      />
       <QuitConfirmation
         open={desktop.quitRequested}
         onOpenChange={desktop.setQuitRequested}
       />
-    </SidebarProvider>
+    </TracesWorkspaceProvider>
   );
 }

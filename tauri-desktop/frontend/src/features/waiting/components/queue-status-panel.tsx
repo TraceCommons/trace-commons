@@ -102,14 +102,14 @@ export function QueueStatusPanel({
   )
     return null;
   return (
-    <section className="mb-4 grid gap-4 rounded-[14px] border border-border bg-white/[.68] p-[22px]">
+    <section className="tc-card mb-4 grid gap-4">
       <div>
-        <span className="mb-3 block font-mono text-[10px] font-extrabold leading-none tracking-[.16em] text-primary">
+        <span className="mb-1.5 block tc-eyebrow">
           RUNTIME
         </span>
         <h2>Contribution safeguards</h2>
       </div>
-      <div className="grid grid-cols-3 gap-px border-y border-border">
+      <div className="grid grid-cols-3 gap-px border-y border-tc-hairline">
         {health.last_error_label === NEAR_AI_NOTICE_LABEL && (
           <NearAiNoticeRecovery
             label={health.last_error_label}
@@ -120,7 +120,7 @@ export function QueueStatusPanel({
           <WitnessCapacityNotice capacity={capacity.capacity} />
         )}
         {capacity.kind === "unreadable" && (
-          <div className="text-destructive">
+          <div className="text-tc-outside">
             <span role="alert">
               Some approved sessions may be waiting and have not been sent,
               but this build could not read how many or why.
@@ -131,7 +131,7 @@ export function QueueStatusPanel({
           health.last_error_label !== NEAR_AI_NOTICE_LABEL &&
           !saturatedShownByNotice &&
           !heldShownByNotice && (
-          <div className="text-destructive">
+          <div className="text-tc-outside">
             <strong>Daemon needs attention</strong>
             <span>
               Processing reported a recoverable issue. Refresh after checking

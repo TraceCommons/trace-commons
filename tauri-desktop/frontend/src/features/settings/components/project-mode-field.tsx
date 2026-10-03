@@ -1,13 +1,12 @@
 import { useEffect, useState } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
-import { Button } from "@/components/ui/button";
-import { NativeSelect } from "@/components/ui/native-select";
 import { ProjectAutoUploadDisclosure } from "../../../components/project-auto-upload-disclosure";
 import { ResponsiveOverlay } from "../../../components/responsive-overlay";
 import { useContributorDisclosureCopy } from "../../../lib/tauri/use-contributor-copy";
 import type { Project, ProjectMode } from "../api/projects-api";
 import { type ProjectModeFormValues, projectModeFormSchema } from "../forms";
 import { useController, useForm } from "react-hook-form";
+import { ButtonPrimary, GlassButton, Select } from "@/design-system";
 
 type Confirmation = "auto_upload" | "ignore" | null;
 
@@ -70,7 +69,7 @@ export function ProjectModeField({
 
   return (
     <>
-      <NativeSelect
+      <Select
         ref={mode.field.ref}
         name={mode.field.name}
         value={mode.field.value}
@@ -83,7 +82,7 @@ export function ProjectModeField({
           <option value="auto_upload">{label("auto_upload")}</option>
         )}
         <option value="ignore">{label("ignore")}</option>
-      </NativeSelect>
+      </Select>
       <ResponsiveOverlay
         open={confirmation === "auto_upload"}
         onOpenChange={(open) => {
@@ -93,16 +92,16 @@ export function ProjectModeField({
         description="Confirm project-wide automatic contribution."
         footer={
           <div className="flex justify-end gap-2">
-            <Button type="button" variant="outline" onClick={cancel} disabled={disabled}>
+            <GlassButton type="button" onClick={cancel} disabled={disabled}>
               Keep asking first
-            </Button>
-            <Button
+            </GlassButton>
+            <ButtonPrimary size="sm"
               type="button"
               onClick={() => confirm("auto_upload")}
               disabled={disabled}
             >
               Enable for this project
-            </Button>
+            </ButtonPrimary>
           </div>
         }
       >
@@ -117,21 +116,20 @@ export function ProjectModeField({
         description="Review the sessions this setting will remove from the queue."
         footer={
           <div className="flex justify-end gap-2">
-            <Button type="button" variant="outline" onClick={cancel} disabled={disabled}>
+            <GlassButton type="button" onClick={cancel} disabled={disabled}>
               Keep project
-            </Button>
-            <Button
+            </GlassButton>
+            <GlassButton className="tc-text-outside"
               type="button"
-              variant="destructive"
               onClick={() => confirm("ignore")}
               disabled={disabled}
             >
               Ignore project
-            </Button>
+            </GlassButton>
           </div>
         }
       >
-        <p className="text-[12px] leading-[1.55] text-muted-foreground">
+        <p className="text-[12px] leading-[1.55] text-tc-secondary">
           {project.pending_count === undefined
             ? "Pending sessions"
             : `${project.pending_count} pending session${project.pending_count === 1 ? "" : "s"}`}{" "}

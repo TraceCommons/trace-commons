@@ -81,16 +81,19 @@ export function useWaitingReview(onApproved?: (scope: UndoScope) => void) {
     setCorrection("");
   };
 
-  const dismiss = async () => {
-    if (!selectedId) return;
+  /** True once the session is dismissed; on failure the error is kept. */
+  const dismiss = async (): Promise<boolean> => {
+    if (!selectedId) return false;
     setActionError(null);
     try {
       await dismissMutation.mutateAsync(selectedId);
       setSelectedId(null);
       setVerdict(null);
       setCorrection("");
+      return true;
     } catch {
       setActionError("Could not dismiss session.");
+      return false;
     }
   };
 

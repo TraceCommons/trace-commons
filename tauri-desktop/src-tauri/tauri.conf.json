@@ -15,14 +15,20 @@
     }
   },
   "app": {
+    "macOSPrivateApi": true,
     "windows": [
       {
         "title": "Trace Commons",
-        "width": 980,
-        "height": 720,
+        "width": 1320,
+        "height": 760,
         "minWidth": 760,
         "minHeight": 560,
-        "resizable": true
+        "resizable": true,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
+        "trafficLightPosition": { "x": 18, "y": 24 },
+        "transparent": true,
+        "shadow": false
       }
     ],
     "security": {

@@ -1,9 +1,8 @@
-import { Button } from "@/components/ui/button";
-import { Switch } from "@/components/ui/switch";
 import type { ReactNode } from "react";
 import { openSystemSettings } from "../../../lib/tauri/platform-api";
 import type { CapabilityState } from "../../../lib/tauri/platform-api";
 import { usePlatformCapabilities } from "../hooks/use-platform-capabilities";
+import { GlassButton, TertiaryLink, Toggle } from "@/design-system";
 
 function stateLabel(state: CapabilityState) {
   return state.replaceAll("_", " ");
@@ -21,13 +20,13 @@ function CapabilityRow({
   action?: ReactNode;
 }) {
   return (
-    <div className="flex items-center justify-between gap-4 border-b border-border py-3 last:border-b-0">
+    <div className="flex items-center justify-between gap-4 border-b border-tc-hairline py-3 last:border-b-0">
       <div className="min-w-0">
         <strong className="block">{label}</strong>
-        <span className="block text-xs text-muted-foreground">{detail}</span>
+        <span className="block text-xs text-tc-secondary">{detail}</span>
       </div>
       <div className="flex shrink-0 items-center gap-3">
-        <span className="rounded-full bg-muted px-2.5 py-1 font-mono text-[10px] font-bold uppercase tracking-[.08em] text-muted-foreground">
+        <span className="tc-card font-mono text-[10px] font-bold uppercase tracking-[.08em] text-tc-secondary">
           {stateLabel(state)}
         </span>
         {action}
@@ -44,57 +43,56 @@ export function PlatformPanel() {
   const canToggleLogin =
     loginState === "not_registered" || loginState === "enabled";
   return (
-    <section className="rounded-2xl border border-border bg-card/80 p-[26px]">
-      <div className="flex items-start justify-between gap-[18px]">
+    <section className="tc-card">
+      <div className="flex items-start justify-between gap-3">
         <div>
-          <span className="mb-3 block font-mono text-[10px] font-extrabold leading-none tracking-[.16em] text-primary">
+          <span className="mb-1.5 block tc-eyebrow">
             DESKTOP
           </span>
           <h2>System integrations</h2>
         </div>
-        <Button
-          className="border-0 bg-transparent p-0 text-[11px] font-bold text-primary"
+        <TertiaryLink
           type="button"
           onClick={() => void platform.refetch()}
           disabled={platform.isFetching || platform.busy}
         >
           Refresh
-        </Button>
+        </TertiaryLink>
       </div>
-      <p className="m-0 text-[11px] leading-[1.55] text-muted-foreground">
+      <p className="m-0 tc-caption tc-text-tertiary">
         Native permissions and startup state stay in Rust. Credentials and
         notification bodies never enter this UI state.
       </p>
       {platform.error && (
-        <p className="mt-4 rounded-[9px] border border-destructive/30 bg-destructive/10 px-3.5 py-3 text-[12px] text-destructive">
+        <p className="tc-card tc-card--quiet mt-4 border-tc-outside/30 text-[12px] text-tc-outside">
           {platform.error}
         </p>
       )}
       {data && (
-        <div className="mt-5 border-t border-border">
+        <div className="mt-5 border-t border-tc-hairline">
           <CapabilityRow
             label="Start at login"
             detail={`${data.os} · ${data.package.name} ${data.package.version}`}
             state={loginState}
             action={
               canToggleLogin ? (
-                <Switch
-                  aria-label="Start Trace Commons at login"
+                <Toggle
+                  settings
+                  label="Start Trace Commons at login"
                   checked={loginState === "enabled"}
                   disabled={platform.busy}
-                  onCheckedChange={(checked) =>
+                  onChange={(checked) =>
                     void platform.setStartAtLogin(checked)
                   }
                 />
               ) : loginState === "requires_approval" ? (
-                <Button
+                <GlassButton
                   type="button"
-                  variant="outline"
                   onClick={() => void openSystemSettings("login_items")}
                   disabled={loginState !== "requires_approval"}
                 >
                   System settings
-                </Button>
+                </GlassButton>
               ) : null
             }
           />
@@ -104,22 +102,20 @@ export function PlatformPanel() {
             state={notificationState}
             action={
               notificationState === "requires_approval" ? (
-                <Button
+                <GlassButton
                   type="button"
-                  variant="outline"
                   onClick={() => void platform.requestNotifications()}
                   disabled={platform.busy}
                 >
                   Allow
-                </Button>
+                </GlassButton>
               ) : notificationState === "denied" ? (
-                <Button
+                <GlassButton
                   type="button"
-                  variant="outline"
                   onClick={() => void openSystemSettings("notifications")}
                 >
                   System settings
-                </Button>
+                </GlassButton>
               ) : null
             }
           />

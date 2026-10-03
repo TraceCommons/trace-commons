@@ -1,6 +1,6 @@
-import { Button } from "@/components/ui/button";
 import type { BehaviorSetting } from "../api/behavior-api";
 import { BehaviorSettingRow } from "./behavior-setting-row";
+import { TertiaryLink } from "@/design-system";
 
 function numberValue(
   settings: Record<string, unknown>,
@@ -26,33 +26,32 @@ export function BehaviorSettingsPanel({
   onSave: (setting: BehaviorSetting, value: number) => Promise<unknown>;
 }) {
   return (
-    <section className="rounded-2xl border border-border bg-card/80 p-[26px]">
-      <div className="flex items-start justify-between gap-[18px]">
+    <section className="tc-card">
+      <div className="flex items-start justify-between gap-3">
         <div>
-          <span className="mb-3 block font-mono text-[10px] font-extrabold leading-none tracking-[.16em] text-primary">
+          <span className="mb-1.5 block tc-eyebrow">
             BEHAVIOR
           </span>
           <h2>How contribution behaves</h2>
         </div>
-        <Button
-          className="border-0 bg-transparent p-0 text-[11px] font-bold text-primary"
+        <TertiaryLink
           type="button"
           onClick={() => void onRefresh()}
           disabled={busy !== null}
         >
           Refresh
-        </Button>
+        </TertiaryLink>
       </div>
-      <p className="m-0 text-[11px] leading-[1.55] text-muted-foreground">
+      <p className="m-0 tc-caption tc-text-tertiary">
         These controls change local timing and hard upload limits. They do not
         change consent or project policy.
       </p>
       {error && (
-        <p className="-mt-[18px] mb-[18px] rounded-[9px] border border-destructive/30 bg-destructive/10 px-3.5 py-3 text-[12px] text-destructive">
+        <p className="tc-alert">
           {error}
         </p>
       )}
-      <div className="mt-5 grid gap-px border-t border-border">
+      <div className="mt-3 grid gap-px">
         <BehaviorSettingRow
           label="Finished-session quiet period"
           detail="Time without new events before a session enters Waiting."
@@ -89,7 +88,7 @@ export function BehaviorSettingsPanel({
           onSave={onSave}
         />
       </div>
-      <div className="mt-5 grid gap-px border-t border-border">
+      <div className="mt-3 grid gap-px">
         <BehaviorSettingRow
           label="Daily upload count"
           detail="Hard maximum accepted by daemon."

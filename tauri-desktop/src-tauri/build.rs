@@ -2,6 +2,7 @@
 use std::{env, path::PathBuf, process::Command};
 
 const TAURI_COMMANDS: &[&str] = &[
+    "set_glass_regions",
     "core_status",
     "queue_outcome_line",
     "residual_secret_line",

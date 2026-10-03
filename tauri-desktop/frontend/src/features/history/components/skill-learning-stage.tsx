@@ -1,10 +1,10 @@
-import { Button } from "@/components/ui/button";
 import { useExternalUrl } from "../../../lib/tauri/use-platform-actions";
 import type { useSkillLearning } from "../hooks/use-skill-learning";
 import { SkillCandidateForm } from "./skill-candidate-form";
 import { SkillEvaluationResults } from "./skill-evaluation-results";
 import { SkillInstallPreview } from "./skill-install-preview";
 import { SkillReviewPreview } from "./skill-review-preview";
+import { ButtonPrimary } from "@/design-system";
 
 type SkillLearning = ReturnType<typeof useSkillLearning>;
 
@@ -14,15 +14,14 @@ export function SkillLearningStage({ skill }: { skill: SkillLearning }) {
   switch (skill.stage) {
     case "idle":
       return (
-        <div className="mt-6 flex gap-2.5">
-          <Button
-            className="rounded-lg border-0 bg-primary px-3.5 py-2.5 text-[12px] font-bold text-primary-foreground hover:bg-primary/80"
+        <div className="mt-3 flex flex-wrap gap-2">
+          <ButtonPrimary size="sm"
             type="button"
             onClick={() => void skill.learn()}
             disabled={busy}
           >
             Learn from session
-          </Button>
+          </ButtonPrimary>
         </div>
       );
     case "candidate":

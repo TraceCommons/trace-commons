@@ -1,11 +1,10 @@
-import { Button } from "@/components/ui/button";
-import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useForm } from "react-hook-form";
 import { FormFieldError } from "../../../components/form-field-error";
 import { useContributorDisclosureCopy } from "../../../lib/tauri/use-contributor-copy";
 import { type PrivacyFormValues, privacyFormSchema } from "../forms";
 import type { OnboardingStepProps } from "./onboarding-step-types";
+import { ButtonPrimary, GlassButton, Radio, RadioGroup } from "@/design-system";
 
 export function OnboardingPrivacyStep({
   onboarding,
@@ -20,8 +19,8 @@ export function OnboardingPrivacyStep({
   const privacyChoice = form.watch("privacyChoice");
   const choiceError = form.formState.errors.privacyChoice?.message;
   return (
-    <section className="rounded-2xl border border-border bg-card/80 mb-4 p-[26px]">
-      <span className="mb-3 block font-mono text-[10px] font-extrabold leading-none tracking-[.16em] text-primary">
+    <section className="tc-card mb-2.5">
+      <span className="mb-1.5 block tc-eyebrow">
         OPTIONAL THIRD-PARTY SCAN
       </span>
       <h2>{copy?.title ?? "Choose the boundary"}</h2>
@@ -32,7 +31,7 @@ export function OnboardingPrivacyStep({
           <p>{copy.disclosure}</p>
         </>
       ) : (
-        <p className="text-destructive" role="alert">
+        <p className="text-tc-outside" role="alert">
           {disclosure.isError
             ? "Privacy scan disclosure unavailable. Continue is disabled."
             : "Loading privacy scan disclosure…"}
@@ -45,17 +44,17 @@ export function OnboardingPrivacyStep({
         )}
       >
         <RadioGroup
-          className="my-[18px] gap-px border-t border-border"
+          className="my-[18px] gap-px border-t border-tc-hairline"
           value={privacyChoice}
-          onValueChange={(value) =>
+          onChange={(value) =>
             form.setValue("privacyChoice", value as PrivacyFormValues["privacyChoice"], {
               shouldDirty: true,
               shouldValidate: true,
             })
           }
         >
-          <label className="flex items-start gap-2.5 border-b border-border py-2.5 text-[12px] font-normal text-foreground">
-            <RadioGroupItem
+          <label className="flex items-start gap-2.5 tc-hairline-bottom py-2 tc-label font-normal">
+            <Radio
               value="local"
               disabled={busy}
               aria-invalid={Boolean(choiceError)}
@@ -67,8 +66,8 @@ export function OnboardingPrivacyStep({
               <strong>{copy?.local_only}</strong>
             </span>
           </label>
-          <label className="flex items-start gap-2.5 border-b border-border py-2.5 text-[12px] font-normal text-foreground">
-            <RadioGroupItem
+          <label className="flex items-start gap-2.5 tc-hairline-bottom py-2 tc-label font-normal">
+            <Radio
               value="scan"
               disabled={busy}
               aria-invalid={Boolean(choiceError)}
@@ -82,22 +81,20 @@ export function OnboardingPrivacyStep({
           </label>
         </RadioGroup>
         <FormFieldError id="privacy-choice-error" message={choiceError} />
-        <div className="mt-6 flex gap-2.5">
-          <Button
-            className="rounded-[7px] border border-border bg-background px-[11px] py-2 text-[11px] font-bold text-foreground hover:border-primary hover:text-primary"
+        <div className="mt-3 flex flex-wrap gap-2">
+          <GlassButton
             type="button"
             onClick={onboarding.back}
             disabled={busy}
           >
             Back
-          </Button>
-          <Button
-            className="rounded-lg border-0 bg-primary px-3.5 py-2.5 text-[12px] font-bold text-primary-foreground hover:bg-primary/80"
+          </GlassButton>
+          <ButtonPrimary size="sm"
             type="submit"
             disabled={busy || !copy}
           >
             Continue
-          </Button>
+          </ButtonPrimary>
         </div>
       </form>
     </section>

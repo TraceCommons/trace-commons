@@ -13,6 +13,25 @@ unsafe extern "C" {
     fn tc_macos_post_digest(body: *const std::ffi::c_char) -> i32;
     fn tc_macos_login_item_status() -> i32;
     fn tc_macos_set_login_item(enabled: i32) -> i32;
+    fn tc_macos_set_glass_regions(
+        ns_window: *mut std::ffi::c_void,
+        rects: *const f64,
+        count: i32,
+    ) -> i32;
+}
+
+/// Place one native glass view under each region of `window`, in order.
+/// `rects` holds five values per region: x, y, width, height, radius, in
+/// points from the webview's top-left. Must run on the main thread.
+#[cfg(target_os = "macos")]
+pub(crate) fn set_glass_regions(ns_window: *mut std::ffi::c_void, rects: &[f64]) -> bool {
+    let Ok(count) = i32::try_from(rects.len() / 5) else {
+        return false;
+    };
+    // SAFETY: `ns_window` is the live NSWindow of the main webview window,
+    // read on the main thread; `rects` outlives the call and holds `count`
+    // groups of five values.
+    unsafe { tc_macos_set_glass_regions(ns_window, rects.as_ptr(), count) == 1 }
 }
 
 #[cfg(target_os = "windows")]
