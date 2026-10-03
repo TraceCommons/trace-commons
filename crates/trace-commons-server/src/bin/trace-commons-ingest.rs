@@ -1708,9 +1708,11 @@ struct AppState {
     /// records and an activation requires, and the revision a new upload of
     /// a `pipeline` tenant needs a qualification of its active bundle on
     /// (`decide_upload_route`). `None` in a build without it, and then every
-    /// qualification, every activation, and every such upload is refused
-    /// with `bundle_runtime_revision_unknown`. A revision that is set is a
-    /// `sha256:` digest: startup refuses any other value
+    /// qualification and every activation is refused with
+    /// `bundle_runtime_revision_unknown`, and so is every such upload on a
+    /// process with a runtime that is not started for unqualified routing
+    /// (tests only; that process reads no qualification). A revision that is
+    /// set is a `sha256:` digest: startup refuses any other value
     /// (`pipeline_activation::deployed_code_revision`).
     pipeline_code_revision_hash: Option<String>,
     /// `main`'s gate configuration as ingest parsed it at start
@@ -4074,7 +4076,9 @@ impl AppState {
             pipeline_activation::deployed_code_revision(DEPLOYED_CODE_REVISION_HASH)?;
         // Review round 1, point 3: a new upload of a `pipeline` tenant needs
         // a qualification of its active bundle on this revision. Say at the
-        // start which listed tenants have none; this only logs.
+        // start which listed tenants have none; this only logs, and all
+        // its reads together have one time limit, so it holds the start for
+        // that limit at most.
         if !pipeline_allow_test_dependencies {
             if let Some(activation) = pipeline_activation.as_deref() {
                 pipeline_activation::warn_pipeline_tenants_not_qualified(
@@ -14506,7 +14510,9 @@ async fn pipeline_owned_submission_receipt(
 /// A read that fails: a process with no runtime answers as `main` answers its
 /// failed run read (`internal_error`); a process with a runtime answers `503
 /// pipeline_routing_unavailable`, as `decide_upload_route` answers a routing
-/// row that it cannot read. Neither goes on to the legacy path.
+/// row that it cannot read. Neither goes on to the legacy path. The second
+/// answer is a change from `main` for a process with a runtime and a tenant
+/// on neither pipeline list: `main` answered `500` there, from its run read.
 ///
 /// With a runtime that may replay the tenant's receipts, or with no routing
 /// store, this is `pipeline_owned_submission_receipt` and no routing read:

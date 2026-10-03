@@ -10159,6 +10159,38 @@ async fn a_failed_read_on_a_process_with_no_runtime_answers_as_main_does() {
     );
 }
 
+/// A process with a runtime and a tenant on neither pipeline list makes the
+/// same combined read, and answers a failed one as it answers every routing
+/// row that it cannot read: `503 pipeline_routing_unavailable`, with no
+/// legacy record and no run (review of the fix wave, C5). `main` answered
+/// `500` here, from the run read. Only the process with no runtime keeps
+/// `main`'s answer (the test above).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_read_for_an_unlisted_tenant_on_a_process_with_a_runtime_is_unavailable() {
+    let Some(fixture) = RoutingFixture::new().await else {
+        return;
+    };
+    let tenant = fixture.tenant.as_str();
+    for unqualified_routing in [true, false] {
+        let mut down = fixture.replica(false, unqualified_routing).await;
+        assert!(down.pipeline_service.is_some(), "the process has a runtime");
+        Arc::make_mut(&mut down).pipeline_activation =
+            routing_store(&pg_backend_without_a_database().await);
+        let envelope = routing_envelope("unlisted_read_failed").await;
+        let (status, refused) = route_trace(
+            &down,
+            &fixture.token,
+            &serde_json::to_vec(&envelope).unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{refused}");
+        assert_eq!(refused["error"], "pipeline_routing_unavailable");
+        let id = envelope.submission_id;
+        assert_eq!(fixture.runs(tenant, id).await, 0);
+        assert!(!fixture.legacy_record_exists(tenant, id).await);
+    }
+}
+
 /// Review round 1, point 4a: a remediation of a legacy quarantine record
 /// reads the routing row first. For a contained tenant it is refused with the
 /// containment label, on a process with a runtime and on one with none, and
