@@ -445,6 +445,11 @@ extension DaemonData {
         /// The label `tool_destinations.private_ai` repeats (`running`, ...).
         public let state: String
         public let port: Int?
+
+        public init(state: String, port: Int?) {
+            self.state = state
+            self.port = port
+        }
     }
 
     public struct WitnessCapacity: Codable, Equatable, Sendable {
@@ -634,6 +639,10 @@ extension DaemonData {
         public let maxUploadsPerDay: Int?
         public let maxBytesPerDay: Int?
         public let privateInference: Bool?
+        /// Whether the first-run Private AI question has been answered.
+        public let privateInferenceOfferSeen: Bool?
+        /// The listener's own report; never assumed running.
+        public let privateInferenceState: PrivateInferenceState?
         /// `unset`, `off` or `watch` per tool. `unset` is never drawn as off.
         public let claudeSourceMode: String?
         public let codexSourceMode: String?
@@ -656,6 +665,8 @@ extension DaemonData {
             case maxUploadsPerDay = "max_uploads_per_day"
             case maxBytesPerDay = "max_bytes_per_day"
             case privateInference = "private_inference"
+            case privateInferenceOfferSeen = "private_inference_offer_seen"
+            case privateInferenceState = "private_inference_state"
             case claudeSourceMode = "claude_source_mode"
             case codexSourceMode = "codex_source_mode"
             case geminiSourceMode = "gemini_source_mode"
@@ -1263,14 +1274,28 @@ extension DaemonData {
         }
     }
 
-    /// Z1.5: the Private AI on/off switch, with its disclosure from the core.
-    // PROVISIONAL: shape owned by Zaki's C3
+    /// Z1.5: the Private AI on/off switch, as the daemon's settings echo it.
+    /// The disclosure words are the core's (`PrivateInferenceCopy.offerExposure`),
+    /// read through the bridge in the app target, not carried here.
     public struct PrivateAISwitch: Codable, Equatable, Sendable {
         /// `nil` when the daemon cannot say.
         public let on: Bool?
-        /// The `private_inference_state.state` label.
-        public let state: String?
-        public let disclosure: String?
+        /// Whether the first-run question has been answered; a write sets it.
+        public let offerSeen: Bool?
+        /// The listener's own report (`state`, `port`).
+        public let state: PrivateInferenceState?
+
+        public init(on: Bool?, offerSeen: Bool?, state: PrivateInferenceState?) {
+            self.on = on
+            self.offerSeen = offerSeen
+            self.state = state
+        }
+
+        public init(settings: Settings) {
+            self.init(
+                on: settings.privateInference, offerSeen: settings.privateInferenceOfferSeen,
+                state: settings.privateInferenceState)
+        }
     }
 
     /// Z2.2: the mission catalogue, the same request for every contributor.
