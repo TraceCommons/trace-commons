@@ -51,10 +51,12 @@ struct NearAiJoinView: View {
                         .glassType(GlassTokens.TypeScale.body)
                         .foregroundStyle(GlassColor.textSecondary)
                         .fixedSize(horizontal: false, vertical: true)
-                    // The field is drawn only under its own word. Without
-                    // the wallet copy there is no field, so `commons` stays
-                    // empty and Join below stays disabled.
-                    if let commonsLabel = model.witnessCopy?.wallet?.commons {
+                    // The field is drawn only under its own word, and Join
+                    // only beside the field. Without the wallet copy there
+                    // is neither: no control that could never enable, and
+                    // no value sent from a field nobody can see.
+                    let commonsLabel = model.witnessCopy?.wallet?.commons
+                    if let commonsLabel {
                         GlassTextField(commonsLabel, text: $commons)
                             .disabled(pending)
                     }
@@ -64,9 +66,11 @@ struct NearAiJoinView: View {
                             .glassType(GlassTokens.TypeScale.body)
                             .foregroundStyle(GlassColor.textSecondary)
                     } else if signedIn {
-                        Button(copy.nearAiEnrollAction) { join() }
-                            .buttonStyle(GlassButtonStyle(.primary))
-                            .disabled(pending || commons.trimmingCharacters(in: .whitespaces).isEmpty)
+                        if commonsLabel != nil {
+                            Button(copy.nearAiEnrollAction) { join() }
+                                .buttonStyle(GlassButtonStyle(.primary))
+                                .disabled(pending || commons.trimmingCharacters(in: .whitespaces).isEmpty)
+                        }
                     } else {
                         Text(copy.nearAiEnrollNeedsLogin)
                             .glassType(GlassTokens.TypeScale.body)

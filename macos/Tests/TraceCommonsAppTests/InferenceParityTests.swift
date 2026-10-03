@@ -220,9 +220,20 @@ final class InferenceParityTests: XCTestCase {
                        "Text(copy.credentialProviderLabel)",
                        "GlassPicker(\n                        copy.credentialProviderLabel,",
                        "placeholder: copy.credentialProviderLabel)",
-                       "GlassButtonStyle(prominent && action == .obtain ? .primary : .glass)"] {
+                       "Text(copy.credentialProviderLabel)\n"
+                           + "                        .glassType(GlassTokens.TypeScale.label)\n"
+                           + "                        .foregroundStyle(GlassColor.textSecondary)\n"
+                           + "                        .accessibilityHidden(true)",
+                       ".buttonStyle(GlassButtonStyle(prominent && action == .obtain ? .primary : .glass))\n"
+                           + "                .disabled(model.credentialBusy)",
+                       // The poll sits on the card's always-present stack,
+                       // never on a branch that may not be drawn.
+                       "            }\n        }\n        .task(id: action) {\n",
+                       "while action == .cancel, !Task.isCancelled {",
+                       "try? await Task.sleep(for: Self.pollInterval)"] {
             XCTAssertTrue(source.contains(needle), "CredentialSection.swift lacks \(needle)")
         }
+        XCTAssertEqual(source.components(separatedBy: ".task(").count - 1, 1, "the card has exactly one poll")
         XCTAssertFalse(source.contains("palette("), "the card reads the glass status, not the TC palette")
         let balance = try Self.text("Views/BalanceRow.swift")
         for needle in ["GlassStatusLabel(sentence, status: PrivateInferenceIndicator.status(tone))",
@@ -242,12 +253,19 @@ final class InferenceParityTests: XCTestCase {
         }
     }
 
-    /// The commons field is drawn only under its own word: with the wallet
-    /// copy absent there is no field, and so no Join it could enable.
+    /// The commons field is drawn only under its own word, and Join only
+    /// beside that field: with the wallet copy absent there is neither, so
+    /// no dead control and no value sent from a field nobody can see.
     func test_theCommonsFieldIsNeverWordless() throws {
         let source = try Self.text("Views/NearAiJoinView.swift")
-        XCTAssertTrue(source.contains("if let commonsLabel = model.witnessCopy?.wallet?.commons {\n"
+        XCTAssertTrue(source.contains("let commonsLabel = model.witnessCopy?.wallet?.commons\n"))
+        XCTAssertTrue(source.contains("if let commonsLabel {\n"
             + "                        GlassTextField(commonsLabel, text: $commons)"))
+        XCTAssertTrue(source.contains("} else if signedIn {\n"
+            + "                        if commonsLabel != nil {\n"
+            + "                            Button(copy.nearAiEnrollAction) { join() }"))
+        XCTAssertEqual(source.components(separatedBy: "wallet?.commons").count - 1, 1,
+                       "the field and Join read one word")
         XCTAssertFalse(source.contains("wallet?.commons ?? \"\""), "an absent word must not draw an unlabelled field")
     }
 
