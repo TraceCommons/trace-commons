@@ -176,7 +176,43 @@ answers `404` there. Do these steps in this order:
    (`GET /v1/admin/pipeline/routing`, with the tenant's admin credential; it needs
    only the routing store). Repeat a lost containment first
    (`POST /v1/admin/pipeline/contain`, which needs a runtime and works in this
-   configuration). Then repeat any other lost change that you still want.
+   configuration; it needs no `expected_state`).
+
+   Check each tenant's policy suspensions too, also before step 5. Step 5
+   resumes Settle, credit, and the NEAR payout dispatch for every listed
+   tenant. A policy that was suspended after the backup is runnable again in
+   the restored database, and step 5 then scores, settles, and pays under it.
+   For each tenant, read `suspended_policy_count` (`GET
+   /v1/admin/pipeline/operational-summary`) and the interventions of each of
+   its bundles (`GET /v1/admin/pipeline/policy-interventions?bundle_id=...`).
+   `GET /v1/admin/pipeline/routing` names the active bundle, and its events
+   name the earlier ones. Repeat each lost suspension
+   (`POST /v1/admin/pipeline/policy-interventions` with the action `suspend`,
+   which works in this configuration). Repeat a lost suspension of a Settle
+   policy first. A `resume` made after the backup is lost too: the policy is
+   suspended again, and its runs wait until you resume it again.
+
+   The restored database cannot show a change that it lost. A containment or a
+   suspension made after the backup is gone from the row, from the events, and
+   from the interventions, so the restored state reads like a tenant that was
+   never contained or suspended. Find the lost changes in a record outside the
+   database:
+
+   - The ingest log. Each successful admin action logs one line, `pipeline
+     admin action recorded`, with the tenant's storage reference
+     (`tenant_sha256:...`), an action label (`qualify`, `activate`, `rollback`,
+     `contain`, `deactivate`, `policy_suspend`, `policy_resume`), and an
+     evidence hash. Read the lines from the time of the backup onward. A line
+     shows that an action happened, for which tenant, and when. It does not
+     show the bundle of an activation or a rollback, or the bundle and the
+     phase of a policy action.
+   - Your own record. The code keeps no other record of an admin action
+     outside the database. Keep a record of each admin action (the route, the
+     body, and the time) in a place that a database restore does not reach.
+
+   If you cannot tell whether a tenant was contained, or one of its policies
+   was suspended, after the backup, contain the tenant until you know. Then
+   repeat any other lost change that you still want.
 4. For each tenant, call `POST /v1/workers/pipeline/index-rebuild` with that
    tenant's vector worker bearer token or an admin token -- the same gate
    as `main`'s vector index worker route (see

@@ -139,7 +139,10 @@ on top of that, and a run on a loaded machine can take much longer.
 
 One local restore drill, standalone (`qualify` runs the same steps as its
 last scenario). In order: seed a pipeline database and encrypted artifact
-directory with a pending run, plus one completed run for a second tenant;
+directory with a pending run, plus one completed run for a second tenant,
+plus the activation state of a third tenant (a routing row and its event from
+a containment, a suspended Score policy and its intervention, a qualification
+row, and an index rebuild fence);
 dump the seed database with `pg_dump`; create a sibling database in the
 same cluster and restore into it with `pg_restore`; copy the artifact
 directory and compare every file byte for byte; check the restored
@@ -161,6 +164,7 @@ resume's protected log:
 | Every tenant's `main` audit chain verifies (`main`'s own verifier). Checked before the fingerprint below, which covers the audit rows too, so a changed audit row reports here | `restore_audit_chain_broken` |
 | Every tenant's rows in those tables (count and row hash per table and tenant, read by the owner) equal the seed's | `restore_tenant_fingerprint_mismatch` |
 | The audit chains hold the seed's hashed events | `restore_audit_event_count_mismatch` |
+| The third tenant's activation state came back: one row in each of `pipeline_tenant_routing`, `pipeline_activation_events`, `pipeline_policy_interventions`, `pipeline_bundle_qualifications`, and `pipeline_index_rebuild_fences`, the routing state `contained`, and the Score policy still suspended. The tenant fingerprint above covers the content of these rows | `restore_activation_state_row_missing`, `restore_routing_state_changed`, `restore_policy_suspension_lost` |
 
 On success it prints a second line with this evidence (the table count,
 the policy set's hash and size, the RLS flag set's hash and table count,
@@ -283,12 +287,16 @@ hash). Three consequences:
   `pipeline_http_corpus_minimal`, which serves a test bundle. The report's
   `inputs.corpus_runs` still lists the minimal bundle's digests beside the
   candidate's, for the record: they are the corpus run's own, not a result's.
-- A refused decision does not name its blockers to a route's caller. A
-  qualification answers `bundle_qualification_promotion_not_ready`, and an
-  activation or a rollback answers `bundle_activation_promotion_not_ready`.
-  Check the set against the list above: each of the 22 ids once, each `pass`,
-  each inside its maximum age, one revision, the package named by the four
-  candidate checks only, and no safe blocker.
+- A refused decision names its blockers to a route's caller. A qualification
+  answers `409` `bundle_qualification_promotion_not_ready`, and an activation or
+  a rollback answers `409` `bundle_activation_promotion_not_ready`. The body has
+  a second field, `blockers`: the decision's blockers as labels, each
+  `<label>:<check_id>` for one check (for example
+  `qualification_evidence_stale:pipeline_crash_matrix`), or a label alone for
+  the whole set (`qualification_evidence_mixed_revision`). A ready decision
+  needs each of the 22 ids once, each `pass`, each inside its maximum age, one
+  revision, the package named by the four candidate checks only, and no safe
+  blocker.
 
 ## Signed check results
 
@@ -310,8 +318,9 @@ passed.
   is under the signature, so the signer chooses it. The default is 86400 (one
   day) and the most is 604800 (seven days); a value outside 1 to 604800 is
   refused (`evidence_max_age_invalid`, `evidence_max_age_above_ceiling`). The
-  qualification route refuses an age above seven days. Activation and rollback
-  do not apply that ceiling, so use the default or a shorter age.
+  server refuses an age of more than seven days too, on every route that
+  verifies signed results (the qualification, the activation, and the
+  rollback): `409` `bundle_qualification_evidence_age_above_ceiling`.
 - `pipeline.py keygen --output PATH --key-id ID --trusted-key-output PATH`
   makes the key pair. It writes the private key (mode 0600; it never overwrites
   a file) and the trusted key, one JSON object `{"key_id", "public_key_base64url"}`.
@@ -322,12 +331,17 @@ passed.
 - A holder of the check-signing key can vouch for any result. The key must not be
   held by anyone who holds the tenant's admin credential. Nothing in the server
   enforces this. Who holds it is decided when the deployment is promoted. This
-  repository's CI runs `qualify` unsigned.
+  repository's CI signs its `qualify` run with a key that the job makes with
+  `keygen` and discards. No trust store holds that key.
 - `pipeline.py revision` prints the code revision hash of the working tree: the
   `code_revision_hash` that every result of a run carries, and the value to give
   the build as `TRACE_COMMONS_BUILD_CODE_REVISION_HASH`. It hashes the path and
-  content of every file that git tracks or does not ignore, except the top-level
-  `.local`, `.vscode`, and `target` directories, so any edit changes it.
+  content of every file that git tracks, and of every untracked file that the
+  repository's own `.gitignore` files do not ignore, except the top-level
+  `.local`, `.vscode`, and `target` directories, so any edit changes it. A
+  host's `.git/info/exclude` and a user's global excludes file do not change
+  it. Compute the revision, qualify, and build on the same clean checkout: a
+  stray untracked file changes the revision.
 
 An attestation is one file, `<check_id>.attestation.json`, next to the result it
 signs. It holds the schema `trace_commons.pipeline_check_attestation.v1`, the

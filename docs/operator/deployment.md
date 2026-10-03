@@ -899,18 +899,69 @@ V111 adds a check that requires `runnable` to equal `operational_status =
 'runnable'`, and every existing row gets the status `runnable`. V93 gave the
 runtime no `UPDATE` on the table and nothing wrote `runnable`, so a row has
 `runnable` false only if someone set it by hand. A row like that makes V111 fail
-to apply. Check before you apply it:
+to apply. Check before you apply it.
+
+The table forces row-level security, also for its owner. A count by the
+migrator with no tenant set sees no row and answers 0, whatever the table
+holds. So do the count in one of these two ways. As a superuser, or as a role
+with `BYPASSRLS`:
 
 ```sql
 SELECT COUNT(*) FROM pipeline_bundle_policy_status WHERE NOT runnable;
 ```
 
-The count must be 0. Apply V110 to V113 as the migrator before you install the
-binary, as for every migration above ("First: does this build carry a migration
-the database does not have?"). An older binary ignores them. It also reads no
-routing row, so while a tenant has one, an older replica serves the tenant on the
-legacy path (see "Scope lists and the routing row" in
-[pipeline-activation.md](pipeline-activation.md)).
+Or as the migrator, one time for each tenant that has a pipeline bundle (each
+tenant that is, or was, on a pipeline list):
+
+```sql
+BEGIN;
+SELECT set_config('trace_commons.trace_tenant_id', '<tenant id>', true);
+SELECT COUNT(*) FROM pipeline_bundle_policy_status WHERE NOT runnable;
+COMMIT;
+```
+
+Each count must be 0. V111 itself reads every row when it adds the check, so it
+fails on a row that the plain count did not show. Apply V110 to V113 as the
+migrator before you install the binary, as for every migration above ("First:
+does this build carry a migration the database does not have?").
+
+**Binary rollback to an older build.** An older binary ignores these
+migrations. What it does with a tenant that has a routing row depends on the
+build:
+
+- A build with no pipeline runtime (the repository binary) reads no routing
+  row. It serves every tenant on the legacy path, a tenant whose row says
+  `pipeline` or `contained` included.
+- A build that has a pipeline runtime and is from before these migrations'
+  code also reads no routing row. It routes by its receipts list alone. Every
+  new upload of a tenant on its receipts list goes to the pipeline: a tenant
+  whose row says `contained` or `legacy`, and a listed tenant with no row, too.
+  Its receipt transaction checks no routing and writes no ownership row. It
+  also has no policy guard at a phase commit and none at the payout dispatch.
+  A suspended policy still stops a receipt and the start of a phase, because
+  that build reads `runnable` there. It does not stop a phase that already
+  runs, and it does not stop a payout dispatch under a suspended Settle
+  policy.
+
+Before you install a build of the second kind, do these steps:
+
+1. Read each listed tenant's routing (`GET /v1/admin/pipeline/routing`) and
+   suspended policies (`suspended_policy_count` in `GET
+   /v1/admin/pipeline/operational-summary`) on the current build.
+2. In the older build's configuration, keep on the receipts list only the
+   tenants whose row says `pipeline`. Move every other tenant (contained,
+   `legacy`, or with no row) to the drain list, or off both lists. A `contain`
+   or a `deactivate` does not protect a tenant on that build: only the lists
+   do.
+3. Do not rely on a suspension: on that build it does not hold for a phase
+   that already runs or for a payout. For a tenant with a suspended Settle
+   policy, keep the tenant off both lists (its pipeline work then waits), or
+   set the NEAR settlement mode of the older build to `disabled`
+   (`TRACE_COMMONS_NEAR_SETTLEMENT_MODE`; this stops every NEAR payout of the
+   process, `main`'s too). Keep that until a build with the guards runs again.
+
+See also "Run one build and one configuration" in "Scope lists and the routing
+row" of [pipeline-activation.md](pipeline-activation.md).
 
 The drain report (`GET /v1/admin/pipeline/legacy-drain`) reads 16 tables through
 the ingest login. Two are pipeline tables that V92 and V110 grant
@@ -934,9 +985,15 @@ earlier build read:
 
 A variable that is set to a file that cannot be read, or whose file is not valid,
 refuses the start (`pipeline_trust_store_invalid`), and so does a key that is in
-both files (`pipeline_trust_store_overlap`). With a variable unset, or no
-revision in the build, the routes refuse (`503` `pipeline_trust_store_missing`,
-`409` `bundle_runtime_revision_unknown`). The details are in
+both files (`pipeline_trust_store_overlap`). A trust store variable that is set
+to the empty string counts as unset. A build revision that is set and is not
+`sha256:` and 64 lowercase hex digits, the empty value included, refuses the
+start (`pipeline_code_revision_invalid`). With a trust store variable unset, or
+no revision in the build, the routes refuse (`503`
+`pipeline_trust_store_missing`, `409` `bundle_runtime_revision_unknown`). `GET
+/v1/admin/config-status` reports the three as booleans
+(`pipeline_package_trust_store_loaded`, `pipeline_check_trust_store_loaded`,
+`pipeline_code_revision_configured`). The details are in
 [pipeline-activation.md](pipeline-activation.md), "What the process needs".
 
 Check before deploying:
