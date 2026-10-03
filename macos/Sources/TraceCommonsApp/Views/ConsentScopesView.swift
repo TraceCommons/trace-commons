@@ -189,9 +189,6 @@ enum UsesStep {
     static func continueLabel(alwaysOn: Int, selected: Int) -> String {
         ConsentScopesWords.continueWith(alwaysOn + selected)
     }
-
-    /// First entry ticks nothing optional.
-    static func startsUnticked(_ initial: Set<String>) -> Bool { initial.isEmpty }
 }
 
 /// This screen's sentences, moved here unchanged from the view body.

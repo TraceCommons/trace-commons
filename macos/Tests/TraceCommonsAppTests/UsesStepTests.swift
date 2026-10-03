@@ -2,9 +2,19 @@ import XCTest
 @testable import TraceCommonsApp
 
 final class UsesStepTests: XCTestCase {
-    func test_nothingOptionalStartsTicked() {
-        XCTAssertTrue(UsesStep.startsUnticked([]))
-        XCTAssertFalse(UsesStep.startsUnticked(["benchmark_only"]))
+    /// Nothing optional starts ticked: the only seed of `selected` is the
+    /// caller's `initialSelection`, no other default or assignment fills it,
+    /// and a fresh run in the coordinator passes an empty one.
+    func test_nothingOptionalStartsTicked() throws {
+        let source = try OnboardingParityTests.text("Views/ConsentScopesView.swift")
+        XCTAssertEqual(source.components(separatedBy: "_selected = State(initialValue: initialSelection)").count - 1, 1)
+        XCTAssertEqual(source.components(separatedBy: "@State private var selected: Set<String>\n").count - 1, 1)
+        XCTAssertEqual(source.components(separatedBy: " selected = ").count - 1, 0)
+        XCTAssertEqual(source.components(separatedBy: "selected.insert(").count - 1, 1)
+        XCTAssertEqual(source.components(separatedBy: "var initialSelection: Set<String> = []\n").count - 1, 1)
+        let coordinator = try OnboardingParityTests.text("Views/OnboardingCoordinatorView.swift")
+        XCTAssertTrue(coordinator.contains("@State private var selectedScopes: Set<String> = []\n"))
+        XCTAssertTrue(coordinator.contains("ConsentScopesView(onContinue: advanceFromConsent, initialSelection: selectedScopes)"))
     }
 
     /// The count includes the always-on permission the upload carries.
@@ -32,5 +42,6 @@ final class UsesStepTests: XCTestCase {
     func test_theStepScrollsOnce() throws {
         let source = try OnboardingParityTests.text("Views/ConsentScopesView.swift")
         XCTAssertEqual(source.components(separatedBy: "ScrollView {").count - 1, 1)
+        XCTAssertTrue(source.contains("ScrollView {\n            ConsentScopesContent("))
     }
 }
