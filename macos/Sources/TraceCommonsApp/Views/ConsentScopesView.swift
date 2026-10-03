@@ -1,4 +1,5 @@
 import SwiftUI
+import TCDesign
 
 /// "How may your traces be used?" -- the onboarding consent-scope screen.
 ///
@@ -28,6 +29,8 @@ struct ConsentScopesView: View {
     /// navigation. Empty on first entry, matching the previous behavior.
     var initialSelection: Set<String> = []
 
+    /// The one scroll for this step, in the wrapper as on the other steps,
+    /// so every host scrolls exactly once.
     var body: some View {
         ScrollView {
             ConsentScopesContent(onContinue: onContinue, initialSelection: initialSelection)
@@ -57,25 +60,33 @@ struct ConsentScopesContent: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: TC.Space.xl) {
+        VStack(alignment: .leading, spacing: GlassTokens.Space.s6) {
             header
+            // Until the daemon has listed the scopes there is nothing to
+            // choose and nothing to apply; the wait is drawn, never an
+            // empty list read as "no permissions".
+            if model.consentScopes.isEmpty {
+                SettingsAwaiting()
+            }
             groups
-            Text("To pull a trace back later, use History → Withdraw.")
-                .font(TC.Font_.meta)
-                .foregroundStyle(.secondary)
+            Text(ConsentScopesWords.withdrawLater)
+                .glassType(GlassTokens.TypeScale.caption)
+                .foregroundStyle(GlassColor.textSecondary)
             continueButton
         }
-        .padding(TC.Space.xxl)
-        .tcColumn(TC.Measure.prose)
-        .tcScreen()
+        .padding(GlassTokens.Space.panePadding)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var header: some View {
-        VStack(alignment: .leading, spacing: TC.Space.xs) {
-            Text("How may your traces be used?").font(TC.Font_.sectionTitle)
-            Text("You can change this later. It applies to traces you send from now on.")
-                .font(TC.Font_.meta)
-                .foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
+            Text(ConsentScopesWords.heading)
+                .glassType(GlassTokens.TypeScale.heading)
+                .foregroundStyle(GlassColor.textPrimary)
+            Text(ConsentScopesWords.changeLater)
+                .glassType(GlassTokens.TypeScale.body)
+                .foregroundStyle(GlassColor.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
@@ -93,85 +104,106 @@ struct ConsentScopesContent: View {
         let optional = model.consentScopes.filter { !$0.alwaysOn && $0.grantsDataUse }
         let credit = model.consentScopes.filter { !$0.alwaysOn && !$0.grantsDataUse }
 
-        return VStack(alignment: .leading, spacing: TC.Space.xl) {
+        return VStack(alignment: .leading, spacing: GlassTokens.Space.s6) {
             if !alwaysOn.isEmpty {
-                VStack(alignment: .leading, spacing: TC.Space.m) {
-                    TCSectionHeader(title: "Always included")
-                    ForEach(alwaysOn) { scope in
-                        scopeRow(scope, checked: true, alwaysOn: true)
-                    }
-                }
+                GlassEyebrowCard(ConsentScopesWords.alwaysIncluded) { rows(alwaysOn) }
             }
             if !optional.isEmpty {
-                VStack(alignment: .leading, spacing: TC.Space.m) {
-                    TCSectionHeader(title: "Optional — each one lets your traces do more")
-                    ForEach(optional) { scope in
-                        scopeRow(scope, checked: selected.contains(scope.name), alwaysOn: false)
-                    }
-                }
+                GlassEyebrowCard(ConsentScopesWords.optionalEachOne) { rows(optional) }
             }
             if !credit.isEmpty {
-                VStack(alignment: .leading, spacing: TC.Space.m) {
-                    TCSectionHeader(title: "Credit")
-                    ForEach(credit) { scope in
-                        scopeRow(scope, checked: selected.contains(scope.name), alwaysOn: false)
-                    }
-                }
+                GlassEyebrowCard(ConsentScopesWords.credit) { rows(credit) }
             }
         }
     }
 
-    private func scopeRow(_ scope: ConsentScope, checked: Bool, alwaysOn: Bool) -> some View {
-        Button {
-            // RULE 2: always-on rows are not interactive -- there is
-            // nothing to toggle, they are included by definition.
-            guard !alwaysOn else { return }
-            if selected.contains(scope.name) {
-                selected.remove(scope.name)
-            } else {
-                selected.insert(scope.name)
+    private func rows(_ scopes: [ConsentScope]) -> some View {
+        VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
+            ForEach(scopes) { scope in
+                scopeRow(scope)
             }
-        } label: {
-            HStack(alignment: .top, spacing: TC.Space.m) {
-                // A filled mark in the brand green when granted, an empty
-                // box when not: the shape changes as well as the colour, so
-                // "granted" is never carried by hue alone.
-                TCReadGateCheckbox(checked: checked)
-                VStack(alignment: .leading, spacing: TC.Space.xxs) {
-                    HStack(spacing: TC.Space.s) {
-                        Text(ScopeCopy.title(for: scope.name, options: model.consentScopes))
-                            .font(TC.Font_.cardTitle)
-                        if alwaysOn {
-                            TCTag(text: "always on", tone: .clear, symbol: "lock")
-                        }
-                    }
-                    Text(scope.description)
-                        .font(TC.Font_.body)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                Spacer(minLength: 0)
-            }
-            .padding(TC.Space.m)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .tcCard()
-            .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
-        .disabled(alwaysOn)
-        .accessibilityAddTraits(checked ? [.isSelected] : [])
+    }
+
+    @ViewBuilder
+    private func scopeRow(_ scope: ConsentScope) -> some View {
+        // RULE 2: always-on rows are locked on -- there is nothing to
+        // toggle, they are included by definition. The rest follow the
+        // local ticks, which start empty.
+        if scope.alwaysOn {
+            scopeToggle(scope, isOn: .constant(true))
+        } else {
+            scopeToggle(
+                scope,
+                isOn: Binding(
+                    get: { ConsentScopeRows.isOn(scope: scope, granted: selected, unavailable: false) },
+                    set: { granted in
+                        if granted {
+                            selected.insert(scope.name)
+                        } else {
+                            selected.remove(scope.name)
+                        }
+                    }))
+        }
+    }
+
+    private func scopeToggle(_ scope: ConsentScope, isOn: Binding<Bool>) -> some View {
+        Toggle(isOn: isOn) {
+            VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
+                HStack(spacing: GlassTokens.Space.s2) {
+                    Text(ScopeCopy.title(for: scope.name, options: model.consentScopes))
+                        .glassType(GlassTokens.TypeScale.bodyStrong)
+                    if scope.alwaysOn {
+                        GlassTag(ConsentScopesWords.alwaysOn)
+                    }
+                }
+                Text(scope.description)
+                    .glassType(GlassTokens.TypeScale.caption)
+                    .foregroundStyle(GlassColor.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .toggleStyle(GlassCheckboxStyle())
+        .disabled(scope.alwaysOn)
+        .accessibilityElement(children: .combine)
     }
 
     private var continueButton: some View {
-        // The always-on scope(s) plus whatever optional/credit boxes are
-        // ticked, counted live -- not just the optional count, because the
-        // always-on permission is still a permission this upload carries.
-        let alwaysOnCount = model.consentScopes.filter(\.alwaysOn).count
-        let total = alwaysOnCount + selected.count
-        return Button("Continue with \(total) \(total == 1 ? "permission" : "permissions")") {
+        Button(
+            UsesStep.continueLabel(
+                alwaysOn: model.consentScopes.filter(\.alwaysOn).count, selected: selected.count)
+        ) {
             onContinue(selected)
         }
-        .tcPrimaryAction()
+        .buttonStyle(GlassButtonStyle(.primary))
         .keyboardShortcut(.defaultAction)
+        .disabled(model.consentScopes.isEmpty)
+    }
+}
+
+/// Pure rules for this step, kept apart from the view so they are testable.
+enum UsesStep {
+    /// The always-on scope(s) plus whatever optional or credit boxes are
+    /// ticked, counted live -- not just the optional count, because the
+    /// always-on permission is still a permission this upload carries.
+    static func continueLabel(alwaysOn: Int, selected: Int) -> String {
+        ConsentScopesWords.continueWith(alwaysOn + selected)
+    }
+
+    /// First entry ticks nothing optional.
+    static func startsUnticked(_ initial: Set<String>) -> Bool { initial.isEmpty }
+}
+
+/// This screen's sentences, moved here unchanged from the view body.
+enum ConsentScopesWords {
+    static let heading = "How may your traces be used?"
+    static let changeLater = "You can change this later. It applies to traces you send from now on."
+    static let alwaysIncluded = "Always included"
+    static let optionalEachOne = "Optional — each one lets your traces do more"
+    static let credit = "Credit"
+    static let withdrawLater = "To pull a trace back later, use History → Withdraw."
+    static let alwaysOn = "always on"
+    static func continueWith(_ total: Int) -> String {
+        "Continue with \(total) \(total == 1 ? "permission" : "permissions")"
     }
 }
