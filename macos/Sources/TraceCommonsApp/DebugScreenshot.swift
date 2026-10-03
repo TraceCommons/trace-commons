@@ -93,7 +93,12 @@ enum DebugScreenshot {
             // combination that fails contrast or collapses at width without
             // anyone noticing from a green build.
             render(
-                SettingsContent().environmentObject(model),
+                VStack(alignment: .leading, spacing: 0) {
+                    ForEach(SettingsSection.allCases.filter { $0 != .compute }) {
+                        GlassSettingsContent(section: $0)
+                    }
+                }
+                .environmentObject(model),
                 to: directory + "/macos-shell-settings.png",
                 size: CGSize(width: 860, height: 1200)
             )

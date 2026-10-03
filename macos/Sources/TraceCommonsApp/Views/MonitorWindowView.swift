@@ -443,9 +443,8 @@ struct MonitorSettingsWindow: View {
                     ComputeView(model: compute)
                 default:
                     ScrollView {
-                        SettingsContent(navigation: navigation, section: section)
+                        GlassSettingsContent(navigation: navigation, section: section)
                     }
-                    .tcScreen()
                 }
             }
             // A fresh view per section, so the scroll starts at its top.

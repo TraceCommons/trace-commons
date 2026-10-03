@@ -193,7 +193,14 @@ struct MainWindowView: View {
         switch section {
         case .queue: QueueView()
         case .history: HistoryView()
-        case .settings: SettingsView(navigation: navigation)
+        case .settings:
+            // Every section in the list's order, until Phase 4 retires this
+            // window; Compute is a destination of its own here.
+            ScrollView {
+                ForEach(SettingsSection.allCases.filter { $0 != .compute }) {
+                    GlassSettingsContent(navigation: navigation, section: $0)
+                }
+            }
         case .compute: EmptyView()
         case .privateInference: EmptyView()
         case .insights: EmptyView()

@@ -311,4 +311,45 @@ final class SettingsParityTests: XCTestCase {
             XCTAssertTrue(source.contains("case .\(section.rawValue):"), "GlassSettingsContent lacks .\(section.rawValue)")
         }
     }
+
+    /// Every section draws its own loading or unavailable state when the
+    /// daemon has not answered, rather than nothing and rather than a
+    /// control that reads as working. The marker is the branch on the
+    /// optional the section reads first.
+    func test_everySectionHasAnUnavailableBranch() throws {
+        let guards: [String: String] = [
+            "Views/Settings/ConnectionSection.swift": "if let settings = model.daemonSettings",
+            "Views/Settings/WatchingSection.swift": "if let settings = model.daemonSettings",
+            // The branch is a `let`, not an `if`: every row reads it.
+            "Views/Settings/ConsentSection.swift": "let unavailable = !model.status.loggedIn",
+            "Views/Settings/WatchedFoldersSection.swift": "copy.unavailable",
+            "Views/Settings/ToolsSection.swift": "if let copy = model.routingCopy",
+            "Views/Settings/WitnessSection.swift": "if let copy = model.witnessCopy",
+            "Views/Settings/PrivateAISection.swift": "case .loading:",
+            "Views/Settings/ProjectsSection.swift": "model.projects.isEmpty",
+            "Views/Settings/StartupSection.swift": "if let status = notificationStatus",
+        ]
+        for (file, marker) in guards {
+            XCTAssertTrue(try Self.text(file).contains(marker), "\(file) has no unavailable branch (\(marker))")
+        }
+    }
+
+    /// The roster date is the profile card's accessory. Left unlabelled, the
+    /// first trailing closure binds to `GlassEyebrowCard`'s `action:`, which
+    /// makes the whole card a button and builds the tag without drawing it.
+    func test_rosterDateIsTheProfileCardsAccessory() throws {
+        let source = try Self.text("Views/Settings/PublicProfileSection.swift")
+        XCTAssertTrue(source.contains("GlassEyebrowCard(PublicProfileCopy.heading, accessory: {"))
+        XCTAssertFalse(source.contains("} content: {"))
+    }
+
+    /// The window draws the glass content and nothing else.
+    func test_theWindowDrawsGlassContent() throws {
+        let window = try Self.text("Views/MonitorWindowView.swift")
+        XCTAssertTrue(window.contains("GlassSettingsContent(navigation: navigation, section: section)"))
+        // The glass view's name ends in the legacy one's, so the legacy call
+        // is looked for with the glass calls taken out.
+        XCTAssertFalse(window.replacingOccurrences(of: "GlassSettingsContent(", with: "").contains("SettingsContent("))
+        XCTAssertFalse(window.contains(".tcScreen()"))
+    }
 }

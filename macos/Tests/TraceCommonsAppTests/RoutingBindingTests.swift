@@ -4,7 +4,8 @@ import XCTest
 
 @testable import TraceCommonsApp
 
-/// How `SettingsView`'s routing card is wired to the surface underneath it.
+/// How the glass Tools section's routing card (`ToolsSection`) is wired to
+/// the surface underneath it.
 ///
 /// `RoutingSurfaceTests` proves the mapping, `RoutingSurfaceExportTests`
 /// proves the words, and `RoutingCallTests` proves the bytes. None of the
@@ -37,27 +38,60 @@ private let routingCalls = RoutingCalls(
 )
 
 private enum RoutingCard {
-    /// `.../macos/Tests/TraceCommonsAppTests/RoutingBindingTests.swift`
+    /// `.../macos/Sources/TraceCommonsApp/Views/Settings/ToolsSection.swift`
     static let viewPath = URL(fileURLWithPath: #filePath)
         .deletingLastPathComponent()  // TraceCommonsAppTests
         .deletingLastPathComponent()  // Tests
         .deletingLastPathComponent()  // macos
-        .appendingPathComponent("Sources/TraceCommonsApp/Views/SettingsView.swift")
+        .appendingPathComponent("Sources/TraceCommonsApp/Views/Settings/ToolsSection.swift")
 
-    /// The `routing` computed property's body, braces matched.
+    /// The section's always-present container: the payload guard and the
+    /// refresh on appear.
+    static func container(file: StaticString = #filePath, line: UInt = #line) -> String? {
+        declaration("var body: some View {", file: file, line: line)
+    }
+
+    /// The whole card: the container, the card itself and its override, in
+    /// that order, braces matched. The glass section splits what the legacy
+    /// `routing` property held across these three declarations.
     static func body(file: StaticString = #filePath, line: UInt = #line) -> String? {
-        declaration("private var routing: some View {", file: file, line: line)
+        guard
+            let container = container(file: file, line: line),
+            let card = declaration(
+                "private func card(_ copy: RoutingCopy, form: RoutingForm) -> some View {",
+                file: file, line: line),
+            let override = overrideBody(file: file, line: line)
+        else { return nil }
+        return container + card + override
     }
 
-    /// The `routingState(copy:)` helper's body.
+    /// The port and folder, one declaration gated as a whole.
+    static func overrideBody(file: StaticString = #filePath, line: UInt = #line) -> String? {
+        declaration(
+            "private func override(_ copy: RoutingCopy, form: RoutingForm) -> some View {",
+            file: file, line: line)
+    }
+
+    /// The `routingState(_:)` helper's body.
     static func stateBody(file: StaticString = #filePath, line: UInt = #line) -> String? {
-        declaration("private func routingState(copy: RoutingCopy) -> some View {", file: file, line: line)
+        declaration("private func routingState(_ copy: RoutingCopy) -> some View {", file: file, line: line)
     }
 
-    /// The `RoutingTone` -> `TC.Tone` bridge.
+    /// The `RoutingTone` -> `GlassTag.Tone` bridge the rows are painted with.
     static func toneBridge(file: StaticString = #filePath, line: UInt = #line) -> String? {
-        declaration("private func tone(_ tone: RoutingTone) -> TC.Tone {", file: file, line: line)
+        declaration("static func tone(_ tone: RoutingTone) -> GlassTag.Tone {", file: file, line: line)
     }
+
+    /// The `RoutingTone` -> `GlassStatus` bridge the status line is painted with.
+    static func statusBridge(file: StaticString = #filePath, line: UInt = #line) -> String? {
+        declaration("static func status(_ tone: RoutingTone) -> GlassStatus {", file: file, line: line)
+    }
+
+    /// `.../macos/Sources/TraceCommonsApp/Views/Settings/GlassSourceRow.swift`,
+    /// which holds the one folder panel this card opens.
+    static let panelPath = viewPath
+        .deletingLastPathComponent()
+        .appendingPathComponent("GlassSourceRow.swift")
 
     /// The source between `signature` and the brace that closes it.
     ///
@@ -74,8 +108,8 @@ private enum RoutingCard {
     /// bindings are in the view; what it asks the daemon for when it appears
     /// is in the model, and that is a different file to read.
     static let modelPath = viewPath
-        .deletingLastPathComponent()  // Views
-        .appendingPathComponent("../AppModel.swift")
+        .deletingLastPathComponent()  // Settings
+        .appendingPathComponent("../../AppModel.swift")
         .standardizedFileURL
 
     /// As above, over any of this app's sources.
@@ -246,17 +280,17 @@ final class RoutingBindingTests: XCTestCase {
         // panel is what a person can answer and a path string is not.
         for (label, control) in [
             ("copy.portTitle", "TextField("),
-            ("copy.folderTitle", "Button(copy.chooseFolder)"),
+            ("copy.folderTitle", "GlassFolderButton(copy.chooseFolder)"),
         ] {
             let group = try XCTUnwrap(
-                RoutingCard.region(of: body, from: "TCFieldLabel(\(label))", to: ".disabled(")
+                RoutingCard.region(of: body, from: "Text(\(label))", to: ".disabled(")
             )
             XCTAssertTrue(
                 group.contains(control),
                 "the group gated after \(label) holds no \(control): \(group)"
             )
             let argument = try XCTUnwrap(
-                RoutingCard.disabledArgument(after: "TCFieldLabel(\(label))", in: body)
+                RoutingCard.disabledArgument(after: "Text(\(label))", in: body)
             )
             XCTAssertEqual(
                 argument, "!form.on",
@@ -267,8 +301,12 @@ final class RoutingBindingTests: XCTestCase {
         // And the chooser is a chooser: directories only, nothing created,
         // one answer. Every other affordance on that panel is a way to give
         // an answer that cannot be right.
+        XCTAssertTrue(
+            body.contains("if let path = GlassSourceRow.chooseFolder() {"),
+            "the folder chooser does not open the one shared panel"
+        )
         let panel = try XCTUnwrap(
-            RoutingCard.declaration("private func chooseIronWireFolder() -> String? {")
+            RoutingCard.declaration("static func chooseFolder() -> String? {", in: RoutingCard.panelPath)
         )
         XCTAssertTrue(panel.contains("panel.canChooseDirectories = true"), panel)
         XCTAssertTrue(panel.contains("panel.canChooseFiles = false"), panel)
@@ -276,7 +314,7 @@ final class RoutingBindingTests: XCTestCase {
         XCTAssertTrue(panel.contains("panel.canCreateDirectories = false"), panel)
 
         let applyArgument = try XCTUnwrap(
-            RoutingCard.region(of: body, from: "buttonStyle(.bordered)\n", to: "\n")
+            RoutingCard.region(of: body, from: "buttonStyle(GlassButtonStyle(.glass))\n", to: "\n")
         )
         XCTAssertEqual(
             applyArgument.trimmingCharacters(in: .whitespaces),
@@ -338,16 +376,21 @@ final class RoutingBindingTests: XCTestCase {
         XCTAssertTrue(lookAgain.contains("model.discoverRouting()"), lookAgain)
         XCTAssertFalse(lookAgain.contains("applyIronWire"), lookAgain)
 
-        for label in ["copy.portTitle", "copy.folderTitle"] {
+        // Each field's own region, and the edit each one holds in the draft:
+        // the port through the range rule, the folder as the chosen path.
+        for (label, end, draft) in [
+            ("copy.portTitle", "Text(copy.folderTitle)", "routingDraft = RoutingPortInput.accept("),
+            ("copy.folderTitle", ".disabled(", "routingDraft = next"),
+        ] {
             let group = try XCTUnwrap(
-                RoutingCard.region(of: body, from: "TCFieldLabel(\(label))", to: ".disabled(")
+                RoutingCard.region(of: body, from: "Text(\(label))", to: end)
             )
             XCTAssertFalse(
                 group.contains("applyIronWire"),
                 "the \(label) field writes the declaration as it is typed in"
             )
             XCTAssertTrue(
-                group.contains("routingDraft = next"),
+                group.contains(draft),
                 "the \(label) field does not hold its edit in the draft: \(group)"
             )
         }
@@ -462,7 +505,7 @@ final class RoutingBindingTests: XCTestCase {
 
         let body = try XCTUnwrap(RoutingCard.body())
         let disclosure = try XCTUnwrap(
-            RoutingCard.region(of: body, from: "DisclosureGroup(", to: "TCFieldLabel(copy.portTitle)")
+            RoutingCard.region(of: body, from: "GlassExpander(", to: "override(copy, form: form)")
         )
         XCTAssertTrue(disclosure.contains("copy.overrideTitle"), disclosure)
         XCTAssertTrue(
@@ -592,14 +635,14 @@ final class RoutingBindingTests: XCTestCase {
 
         XCTAssertTrue(
             body.contains(
-                "let stateTone = tone("
+                "status: Self.status("
                     + "RoutingSurface.tone(forState: state, calls: model.routingCalls))"
             ),
             "the status line's tone is not the surface's, from the daemon's state: \(body)"
         )
         XCTAssertTrue(
-            body.contains("foregroundStyle(stateTone.textColor)"),
-            "the status sentence is not painted with that tone: \(body)"
+            body.contains("GlassStatusLabel(\n                RoutingSurface.stateLine(state,"),
+            "the status sentence is not drawn on the label that tone paints: \(body)"
         )
         // Not recovered from the rendered sentence, the way the row's tone
         // once was from the rendered word.
@@ -632,15 +675,26 @@ final class RoutingBindingTests: XCTestCase {
         let card = try XCTUnwrap(RoutingCard.body())
         let state = try XCTUnwrap(RoutingCard.stateBody())
         let bridge = try XCTUnwrap(RoutingCard.toneBridge())
+        let statusBridge = try XCTUnwrap(RoutingCard.statusBridge())
 
+        // Glass has no "held" tone: the row carries held as the accent tag,
+        // and the status dot as off. Neither is a fault colour.
         XCTAssertEqual(RoutingSurface.tone(forState: "awaiting_rows", calls: routingCalls), .held)
         XCTAssertTrue(
-            bridge.contains("case .held: return .held"),
+            bridge.contains("case .held: return .accent"),
             "the tone bridge no longer carries held through: \(bridge)"
         )
         XCTAssertTrue(
-            bridge.contains("case .attention: return .attention"),
+            statusBridge.contains("case .held, .neutral: return .off"),
+            "the status bridge no longer carries held as calm: \(statusBridge)"
+        )
+        XCTAssertTrue(
+            bridge.contains("case .attention: return .ask"),
             "the tone bridge drops the state that asks for something: \(bridge)"
+        )
+        XCTAssertTrue(
+            statusBridge.contains("case .attention: return .ask"),
+            "the status bridge drops the state that asks for something: \(statusBridge)"
         )
 
         // The state asking for something is the only one that may be
@@ -657,7 +711,7 @@ final class RoutingBindingTests: XCTestCase {
 
         // The refusal tones stay unreachable everywhere, including through
         // the bridge.
-        for alarming in [".refused", "TC.red"] {
+        for alarming in [".failed", ".outside"] {
             XCTAssertFalse(
                 card.contains(alarming),
                 "the routing card paints something \(alarming)"
@@ -670,13 +724,17 @@ final class RoutingBindingTests: XCTestCase {
                 bridge.contains(alarming),
                 "the routing tone bridge can produce \(alarming)"
             )
+            XCTAssertFalse(
+                statusBridge.contains(alarming),
+                "the routing status bridge can produce \(alarming)"
+            )
         }
 
         // And neither the card nor the status line picks a tone for itself.
-        // `.attention` is reachable only by carrying the shared answer
-        // through the bridge; a colour or a case named here would be this
-        // shell deciding how a state reads.
-        for chosen in [".attention", "TC.gold"] {
+        // `.ask` is reachable only by carrying the shared answer through the
+        // bridge; a colour or a case named here would be this shell deciding
+        // how a state reads.
+        for chosen in [".ask", "GlassColor.status", "GlassTokens.Color.status"] {
             XCTAssertFalse(card.contains(chosen), "the routing card names \(chosen)")
             XCTAssertFalse(state.contains(chosen), "the routing status line names \(chosen)")
         }
@@ -792,14 +850,26 @@ final class RoutingBindingTests: XCTestCase {
 
     /// The card renders nothing at all when the shared payload did not
     /// arrive, rather than falling back to wording of its own.
+    ///
+    /// The glass container keeps an `else` so the refresh on appear hangs on
+    /// something present either way; that branch draws an empty, hidden
+    /// frame and no words.
     func testTheCardRendersNothingWithoutTheSharedPayload() throws {
-        let body = try XCTUnwrap(RoutingCard.body())
+        let container = try XCTUnwrap(RoutingCard.container())
         XCTAssertTrue(
-            body.trimmingCharacters(in: .whitespacesAndNewlines)
-                .hasPrefix("if let copy = model.routingCopy {"),
-            "the card is no longer guarded on the payload: \(body.prefix(200))"
+            container.contains("if let copy = model.routingCopy {\n                card(copy,"),
+            "the card is no longer guarded on the payload: \(container.prefix(400))"
         )
-        XCTAssertFalse(body.contains("else {"), "the card has a fallback for a missing payload")
+        let fallback = try XCTUnwrap(
+            RoutingCard.region(of: container, from: "} else {", to: ".onAppear {")
+        )
+        XCTAssertTrue(
+            fallback.contains("Color.clear.frame(width: 0, height: 0).accessibilityHidden(true)"),
+            "the missing-payload branch draws something: \(fallback)"
+        )
+        for drawn in ["Text(", "Label(", "Button(", "Glass"] {
+            XCTAssertFalse(fallback.contains(drawn), "the card has a fallback for a missing payload: \(drawn)")
+        }
     }
 }
 

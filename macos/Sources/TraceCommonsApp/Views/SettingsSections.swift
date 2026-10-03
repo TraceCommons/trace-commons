@@ -3,7 +3,7 @@ import TCShellCore
 
 /// The Settings window's sections (spec, "Settings navigation"; R11 of
 /// #1173), in the order #1146's settings modal lists them, plus Compute.
-/// Each names the part of `SettingsContent` it shows.
+/// Each names the section `GlassSettingsContent` draws for it.
 enum SettingsSection: String, CaseIterable, Identifiable {
     case connection
     case startup
@@ -121,7 +121,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
 }
 
 /// The single words the section list shows for sections whose heading is
-/// a single word in `SettingsContent` too.
+/// a single word on the section itself too.
 enum SettingsWords {
     static let connection = "Connection"
     static let startup = "Startup"

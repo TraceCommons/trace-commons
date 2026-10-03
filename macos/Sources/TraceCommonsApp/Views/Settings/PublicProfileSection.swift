@@ -104,11 +104,13 @@ struct PublicProfileSection: View {
 
     /// On the roster, editable.
     private func profilePanel(_ profile: DaemonClient.PublicProfile, handle: String) -> some View {
-        GlassEyebrowCard(PublicProfileCopy.heading) {
+        // `accessory:` is named: an unlabelled first closure would bind to
+        // `action:` and make the whole card a button.
+        GlassEyebrowCard(PublicProfileCopy.heading, accessory: {
             if let since = profile.publicSince {
                 GlassTag(PublicProfileCopy.onRosterSince(Self.rosterDate.string(from: since)), tone: .accent)
             }
-        } content: {
+        }) {
             VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
                 GlassTextField(PublicProfileCopy.handleLabel, text: $handleDraft)
                 GlassBioEditor(label: PublicProfileCopy.bioLabel, text: $bioDraft)

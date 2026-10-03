@@ -1,10 +1,12 @@
 import TCBridge
+import TCDesign
 import TCShellCore
 import XCTest
 
 @testable import TraceCommonsApp
 
-/// How `SettingsView`'s witness card is wired to the surface underneath it.
+/// How the glass witness section (`WitnessSection`) is wired to the surface
+/// underneath it.
 ///
 /// `WitnessSurfaceTests` proves the mapping and `WitnessExportTests` proves
 /// the words. Neither can see the layer between them and a contributor:
@@ -22,12 +24,12 @@ import XCTest
 /// a failure to fix rather than a test that quietly stops asserting.
 
 private enum WitnessCard {
-    /// `.../macos/Sources/TraceCommonsApp/Views/SettingsView.swift`
+    /// `.../macos/Sources/TraceCommonsApp/Views/Settings/WitnessSection.swift`
     static let viewPath = URL(fileURLWithPath: #filePath)
         .deletingLastPathComponent()  // TraceCommonsAppTests
         .deletingLastPathComponent()  // Tests
         .deletingLastPathComponent()  // macos
-        .appendingPathComponent("Sources/TraceCommonsApp/Views/SettingsView.swift")
+        .appendingPathComponent("Sources/TraceCommonsApp/Views/Settings/WitnessSection.swift")
 
     static let modelPath = URL(fileURLWithPath: #filePath)
         .deletingLastPathComponent()
@@ -35,25 +37,55 @@ private enum WitnessCard {
         .deletingLastPathComponent()
         .appendingPathComponent("Sources/TraceCommonsApp/AppModel.swift")
 
+    /// The section's always-present container: the payload guard and the
+    /// refresh on appear.
+    static func container(file: StaticString = #filePath, line: UInt = #line) -> String? {
+        declaration("var body: some View {", in: viewPath, file: file, line: line)
+    }
+
+    /// The container and the card it draws, in that order. The glass
+    /// section splits what the legacy `witness` property held across these
+    /// two declarations.
     static func body(file: StaticString = #filePath, line: UInt = #line) -> String? {
-        declaration("private var witness: some View {", in: viewPath, file: file, line: line)
+        guard
+            let container = container(file: file, line: line),
+            let card = declaration(
+                "private func card(_ copy: WitnessCopy) -> some View {",
+                in: viewPath, file: file, line: line)
+        else { return nil }
+        return container + card
+    }
+
+    /// The inference-evidence and token-contribution cards, which the card
+    /// draws below itself.
+    static func evidenceBodies(file: StaticString = #filePath, line: UInt = #line) -> [String]? {
+        guard
+            let inference = declaration(
+                "private func inferenceEvidence(_ copy: WitnessCopy) -> some View {",
+                in: viewPath, file: file, line: line),
+            let token = declaration(
+                "private func tokenContribution(_ copy: WitnessCopy) -> some View {",
+                in: viewPath, file: file, line: line)
+        else { return nil }
+        return [inference, token]
     }
 
     static func stateBody(file: StaticString = #filePath, line: UInt = #line) -> String? {
         declaration(
-            "private func witnessState(_ code: Int32) -> some View {",
+            "private func stateBlock(_ code: Int32) -> some View {",
             in: viewPath, file: file, line: line)
     }
 
     static func fieldsBody(file: StaticString = #filePath, line: UInt = #line) -> String? {
         declaration(
-            "private func witnessFields(copy: WitnessCopy) -> some View {",
+            "private func fields(_ copy: WitnessCopy) -> some View {",
             in: viewPath, file: file, line: line)
     }
 
+    /// The `WitnessTone` -> `GlassStatus` bridge.
     static func toneBridge(file: StaticString = #filePath, line: UInt = #line) -> String? {
         declaration(
-            "private func witnessTone(_ tone: WitnessTone) -> TC.Tone {",
+            "static func tone(_ tone: WitnessTone) -> GlassStatus {",
             in: viewPath, file: file, line: line)
     }
 
@@ -162,20 +194,24 @@ final class WitnessBindingTests: XCTestCase {
 
     // MARK: - The tone bridge
 
-    /// A refusal is `.refused` and never `.attention`. Attention is caution
-    /// rather than alarm -- the tone of a setup that is degraded but still
-    /// working -- and a refusing witness is sending nothing at all.
+    /// A refusal is `.outside` and never `.ask`. Ask is caution rather than
+    /// alarm -- the tone of a setup that is degraded but still working -- and
+    /// a refusing witness is sending nothing at all.
     func testTheRefusedToneMapsToRefusedAndNeverToAttention() throws {
         let bridge = try XCTUnwrap(WitnessCard.toneBridge())
         XCTAssertTrue(
-            bridge.contains("case .refused: return .refused"),
-            "the refused tone no longer maps to TC.Tone.refused: \(bridge)")
+            bridge.contains("case .refused: return .outside"),
+            "the refused tone no longer maps to GlassStatus.outside: \(bridge)")
         XCTAssertFalse(
-            bridge.contains("case .refused: return .attention"),
+            bridge.contains("case .refused: return .ask"),
             "a witness refusal is painted as caution: \(bridge)")
         XCTAssertFalse(
-            bridge.contains("case .refused: return .neutral"),
+            bridge.contains("case .refused: return .off"),
             "a witness refusal is painted as nothing to say: \(bridge)")
+        XCTAssertEqual(WitnessSection.tone(.refused), .outside)
+        for calmer: WitnessTone in [.neutral, .held, .clear, .attention] {
+            XCTAssertNotEqual(WitnessSection.tone(calmer), .outside, "\(calmer) reads as a refusal")
+        }
     }
 
     /// Every case is spelled out. A `default` arm here is what would make a
@@ -183,8 +219,19 @@ final class WitnessBindingTests: XCTestCase {
     func testTheToneBridgeHasNoDefaultArm() throws {
         let bridge = try XCTUnwrap(WitnessCard.toneBridge())
         XCTAssertFalse(bridge.contains("default"), "the witness tone bridge fell back: \(bridge)")
+        // An arm may name two cases (`case .attention, .held:`), so each case
+        // is looked for on a `case` line rather than as `case .x:` exactly.
+        let arms = bridge.split(separator: "\n")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { $0.hasPrefix("case ") }
         for arm in ["neutral", "held", "clear", "attention", "refused"] {
-            XCTAssertTrue(bridge.contains("case .\(arm):"), "no arm for \(arm)")
+            XCTAssertTrue(
+                arms.contains { line in
+                    line.prefix { $0 != ":" }.split(separator: ",")
+                        .contains { $0.trimmingCharacters(in: .whitespaces)
+                            .replacingOccurrences(of: "case ", with: "") == ".\(arm)" }
+                },
+                "no arm for \(arm)")
         }
     }
 
@@ -240,7 +287,7 @@ final class WitnessBindingTests: XCTestCase {
     /// the one case that matters most.
     func testTheToneIsComputedOutsideTheSentencesConditional() throws {
         let state = try XCTUnwrap(WitnessCard.stateBody())
-        let toneIndex = try XCTUnwrap(state.range(of: "let stateTone = witnessTone("))
+        let toneIndex = try XCTUnwrap(state.range(of: "let stateTone = Self.tone("))
         let lineIndex = try XCTUnwrap(state.range(of: "if let line = WitnessSurface.stateLine("))
         XCTAssertLessThan(
             toneIndex.lowerBound, lineIndex.lowerBound,
@@ -294,12 +341,12 @@ final class WitnessBindingTests: XCTestCase {
     func testEachFieldIsBoundToItsOwnProperty() throws {
         let fields = try XCTUnwrap(WitnessCard.fieldsBody())
         for (label, property) in [
-            ("copy.urlTitle", "next.url = value"),
-            ("copy.signingAddressTitle", "next.signingAddress = value"),
-            ("copy.measurementsTitle", "next.measurements = value"),
+            ("GlassTextField(copy.urlTitle", "next.url = value"),
+            ("GlassTextField(copy.signingAddressTitle", "next.signingAddress = value"),
+            ("Text(copy.measurementsTitle)", "next.measurements = value"),
         ] {
             let anchor = try XCTUnwrap(
-                fields.range(of: "TCFieldLabel(\(label))"), "no field labelled \(label)")
+                fields.range(of: label), "no field labelled \(label)")
             let rest = String(fields[anchor.upperBound...])
             let setter = try XCTUnwrap(
                 rest.range(of: "next."), "nothing after \(label) writes anything")
@@ -402,7 +449,7 @@ final class WitnessBindingTests: XCTestCase {
             try XCTUnwrap(WitnessCard.body()),
             try XCTUnwrap(WitnessCard.stateBody()),
             try XCTUnwrap(WitnessCard.fieldsBody()),
-        ] {
+        ] + (try XCTUnwrap(WitnessCard.evidenceBodies())) {
             for literal in WitnessCard.stringLiterals(in: source) {
                 XCTAssertFalse(
                     literal.contains(where: \.isLetter),
@@ -419,7 +466,7 @@ final class WitnessBindingTests: XCTestCase {
             try XCTUnwrap(WitnessCard.body()),
             try XCTUnwrap(WitnessCard.stateBody()),
             try XCTUnwrap(WitnessCard.fieldsBody()),
-        ]
+        ] + (try XCTUnwrap(WitnessCard.evidenceBodies()))
         for source in sources {
             for literal in WitnessCard.stringLiterals(in: source) {
                 let lowered = literal.lowercased()
@@ -432,16 +479,30 @@ final class WitnessBindingTests: XCTestCase {
 
     /// The card renders nothing at all when the shared payload did not
     /// arrive, rather than falling back to wording of its own.
+    ///
+    /// The glass container keeps an `else` so the refresh on appear hangs on
+    /// something present either way; that branch draws an empty, hidden
+    /// frame and no words.
     func testTheCardRendersNothingWithoutTheSharedPayload() throws {
-        let declaration = try XCTUnwrap(
-            WitnessCard.declaration(
-                "private var witness: some View {", in: WitnessCard.viewPath))
+        let container = try XCTUnwrap(WitnessCard.container())
         XCTAssertTrue(
-            declaration.contains("if let copy = model.witnessCopy"),
+            container.contains("if let copy = model.witnessCopy {\n                card(copy)"),
             "the card is no longer conditional on the shared payload")
-        XCTAssertFalse(
-            declaration.contains("} else {"),
-            "the card has a fallback branch, which can only be wording of its own")
+        guard
+            let start = container.range(of: "} else {"),
+            let end = container.range(of: ".onAppear {", range: start.upperBound..<container.endIndex)
+        else {
+            return XCTFail("the container no longer has its unavailable branch: \(container)")
+        }
+        let fallback = String(container[start.upperBound..<end.lowerBound])
+        XCTAssertTrue(
+            fallback.contains("Color.clear.frame(width: 0, height: 0).accessibilityHidden(true)"),
+            "the missing-payload branch draws something: \(fallback)")
+        for drawn in ["Text(", "Label(", "Button(", "Glass"] {
+            XCTAssertFalse(
+                fallback.contains(drawn),
+                "the card has a fallback branch, which can only be wording of its own: \(drawn)")
+        }
     }
 
     /// Nothing on this card sends anybody to start anything again: a changed
