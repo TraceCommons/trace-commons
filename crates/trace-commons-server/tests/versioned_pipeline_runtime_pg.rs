@@ -14281,6 +14281,12 @@ async fn a_missing_cap_waits_uncharged_and_an_amount_over_the_cap_stays_charged(
         run.attempt_count + 1,
         "an amount over a configured cap stays a charged failure"
     );
+    // Multi-lens review C5: only `artifact_integrity_failed` waits an hour.
+    // Every other charged label keeps the short backoff.
+    assert!(
+        blocked.next_attempt_at - chrono::Utc::now() < chrono::Duration::seconds(1),
+        "a charged retry under another label is due again at once"
+    );
     let rows = settlement_rows(&backend, &tenant, run.run_id).await;
     assert_eq!(leg_state(&rows, "storage_rebate"), "failed");
     assert_eq!(
