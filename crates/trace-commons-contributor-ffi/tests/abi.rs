@@ -5457,8 +5457,11 @@ fn the_keychain_status_crosses_the_abi_with_no_secret_material() {
     use trace_commons_contributor_ffi::tc_private_ai_keychain_status_json;
 
     let dir = tempfile::tempdir().unwrap();
-    let value =
-        json_owned(unsafe { tc_private_ai_keychain_status_json(cstr(dir.path()).as_ptr()) });
+    let mut err = std::ptr::null_mut();
+    let value = json_owned(unsafe {
+        tc_private_ai_keychain_status_json(cstr(dir.path()).as_ptr(), &mut err)
+    });
+    assert!(err.is_null(), "no error on success");
     assert_eq!(
         value,
         serde_json::to_value(DaemonSettings::default().keychain_status_json()).unwrap()
@@ -5468,15 +5471,30 @@ fn the_keychain_status_crosses_the_abi_with_no_secret_material() {
     assert_eq!(value["session_present"], false);
 
     // A NULL/non-UTF-8 config_dir is a caller error, not a business state.
-    assert!(unsafe { tc_private_ai_keychain_status_json(std::ptr::null()) }.is_null());
+    assert!(
+        unsafe { tc_private_ai_keychain_status_json(std::ptr::null(), std::ptr::null_mut()) }
+            .is_null()
+    );
+
+    // A config_dir that cannot be opened fails the whole call, as Tauri's
+    // private_ai_status does: NULL, with credential-storage-unavailable.
+    let not_a_dir = dir.path().join("a-file");
+    std::fs::write(&not_a_dir, "x").unwrap();
+    let blocked = not_a_dir.join("state");
+    let mut err = std::ptr::null_mut();
+    assert!(
+        unsafe { tc_private_ai_keychain_status_json(cstr(&blocked).as_ptr(), &mut err) }.is_null()
+    );
+    assert_eq!(take_err(err), "credential-storage-unavailable");
 
     // A settings document this process cannot parse answers the
     // "unavailable" fallback rather than NULL: the daemon's own IPC answer
     // already names the storage failure, so this must read as "nothing
     // here", not as an error with no button.
     std::fs::write(dir.path().join("daemon-settings.json"), "not json").unwrap();
-    let unavailable =
-        json_owned(unsafe { tc_private_ai_keychain_status_json(cstr(dir.path()).as_ptr()) });
+    let unavailable = json_owned(unsafe {
+        tc_private_ai_keychain_status_json(cstr(dir.path()).as_ptr(), std::ptr::null_mut())
+    });
     assert_eq!(
         unavailable,
         serde_json::to_value(keychain_status_unavailable_json()).unwrap()
