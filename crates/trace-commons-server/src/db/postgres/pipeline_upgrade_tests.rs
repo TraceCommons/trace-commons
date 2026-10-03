@@ -253,8 +253,8 @@ const RUNTIME_PIPELINE_GRANTS: &[(&str, &str, &[&str])] = &[
     ),
     // V110: the routing row is read by every upload and written by an
     // operator action (every column but the key and `routing_generation`,
-    // which the row trigger sets, so it needs no grant); the event and
-    // ownership tables are append-only, no UPDATE or DELETE.
+    // which the row trigger sets on an update, so it needs no grant); the
+    // event and ownership tables are append-only, no UPDATE or DELETE.
     ("pipeline_tenant_routing", "SELECT", &[]),
     ("pipeline_tenant_routing", "INSERT", &[]),
     (
@@ -736,7 +736,7 @@ async fn pipeline_upgrade_from_v91_installs_forced_rls_storage() {
     // is let through by the triggers' `pg_trigger_depth() > 1` rule, and the
     // routing row's deferred key to its event holds when both rows go). The
     // routing row and its event share one id, and the event has the
-    // generation that the row trigger gives an inserted row (1): without
+    // generation that an inserted row gets when it names none (1): without
     // that event the batch does not commit.
     let owner_tenant = "upgrade-v110";
     let owner_hash = format!("sha256:{}", "c".repeat(64));

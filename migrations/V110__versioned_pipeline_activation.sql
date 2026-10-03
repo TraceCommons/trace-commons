@@ -40,7 +40,8 @@ CREATE TABLE pipeline_activation_events (
 -- `activation_record_id` is the event's id. The key is deferred, because a
 -- routing change writes the row first and its event after it, in one
 -- transaction. `routing_generation` counts the versions of the row; the row
--- trigger below sets it, a writer does not.
+-- trigger below sets it on every update, and an insert may supply it (a
+-- restore of the row, see the trigger).
 CREATE TABLE pipeline_tenant_routing (
     tenant_id TEXT NOT NULL REFERENCES trace_tenants(tenant_id) ON DELETE CASCADE,
     routing_state TEXT NOT NULL CHECK (
@@ -100,21 +101,30 @@ BEGIN
 END;
 $$;
 
--- Sets the generation of each version of the routing row: 1 on an insert, the
--- old value plus 1 on an update. It assigns the value and checks none: an
+-- Sets the generation of each version of the routing row. An update gets the
+-- old value plus 1, whatever the statement names. An insert keeps the value
+-- it supplies when that is 1 or more, and gets 1 otherwise (the column
+-- default is 1, so an insert that names no generation gets 1). A data-only
+-- restore loads a row with the generation it had, beside its events; the
+-- commit check below still refuses a row whose generation its event does not
+-- have. A tenant has one routing row and the runtime has no DELETE on it, so
+-- an insert happens one time for a tenant. The function refuses no insert: an
 -- upsert of an existing row fires it for the proposed insert and then for the
--- update, so a check of an insert's value would refuse every upsert. Because
--- the trigger assigns, the runtime needs no UPDATE grant on the column. An
--- update that keeps `activation_record_id` is refused: every change of the
--- row names a new event. The function reads only OLD and NEW, so no other row
--- and no clock can make it refuse a change.
+-- update, so a check of an insert's value would refuse every upsert, and the
+-- proposed row's value is discarded there. Because the trigger assigns on an
+-- update, the runtime needs no UPDATE grant on the column. An update that
+-- keeps `activation_record_id` is refused: every change of the row names a
+-- new event. The function reads only OLD and NEW, so no other row and no
+-- clock can make it refuse a change.
 CREATE FUNCTION assign_pipeline_routing_generation()
 RETURNS TRIGGER
 LANGUAGE plpgsql
 AS $$
 BEGIN
     IF TG_OP = 'INSERT' THEN
-        NEW.routing_generation := 1;
+        IF NEW.routing_generation IS NULL OR NEW.routing_generation < 1 THEN
+            NEW.routing_generation := 1;
+        END IF;
     ELSE
         IF NEW.activation_record_id = OLD.activation_record_id THEN
             RAISE EXCEPTION 'pipeline routing change needs a new activation event';
@@ -209,7 +219,7 @@ END $$;
 
 -- pipeline_tenant_routing: each upload reads it; an operator action writes
 -- it through an admin route (insert, or update of every column but the key
--- and routing_generation, which the row trigger sets).
+-- and routing_generation, which the row trigger sets on an update).
 GRANT SELECT, INSERT ON pipeline_tenant_routing TO trace_ingest_runtime;
 GRANT UPDATE (routing_state, activation_record_id, actor_principal_ref,
               reason_code, evidence_hash, recorded_at)

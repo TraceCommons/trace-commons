@@ -33668,6 +33668,177 @@ async fn check_routing_change(
     );
 }
 
+/// Inserts `tenant_id`'s routing row inside `tx` with a direct statement that
+/// supplies the generation: `state`, the event `event_id`, and `generation`.
+async fn insert_routing_row_with_generation(
+    tx: &tokio_postgres::Transaction<'_>,
+    tenant_id: &str,
+    state: &str,
+    event_id: uuid::Uuid,
+    generation: Option<i64>,
+) -> Result<u64, tokio_postgres::Error> {
+    tx.execute(
+        "INSERT INTO pipeline_tenant_routing (
+            tenant_id, routing_state, activation_record_id,
+            actor_principal_ref, reason_code, evidence_hash, routing_generation
+         ) VALUES ($1, $2, $3, $4, 'test_routing_state', $5, COALESCE($6::BIGINT, 0))",
+        &[
+            &tenant_id,
+            &state,
+            &event_id,
+            &routing_actor(),
+            &sha256_prefixed(b"test-routing-state"),
+            &generation,
+        ],
+    )
+    .await
+}
+
+/// A data-only restore loads a routing row with the generation it had
+/// (`pg_restore --data-only`, `COPY`): the row trigger keeps a supplied
+/// generation of 1 or more on an insert, so a row at generation 3 that is
+/// deleted and inserted again with generation 3 commits beside its three
+/// events. The commit check still binds the row: an inserted row whose
+/// generation no event of its id and state has is refused, a higher one and a
+/// lower one alike. A supplied generation below 1 becomes 1. An upsert of a
+/// row that exists gets the old generation plus 1, whatever generation the
+/// proposed row and the `SET` list name.
+#[tokio::test]
+async fn a_routing_row_inserted_with_its_generation_commits_only_beside_its_event() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let store = PipelineActivationStore::new(backend.clone());
+    let tenant = routing_tenant("restore-generation");
+    let actor = routing_actor();
+    for reason in ["contain_one", "contain_two", "contain_three"] {
+        store.contain(&tenant, &actor, reason).await.unwrap();
+    }
+    let stored = store.routing(&tenant).await.unwrap().expect("the row");
+    assert_eq!(routing_generations(&tenant).await, (3, 3));
+    assert_eq!(store.events(&tenant, 10).await.unwrap().len(), 3);
+
+    // A generation that no event of the row's id has: 7 (above every event)
+    // and 2 (an earlier event has it, with another id).
+    let mut owner = owner_client().await;
+    for wrong in [7_i64, 2] {
+        let tx = owner_tenant_tx(&mut owner, &tenant).await;
+        assert_eq!(
+            tx.execute(
+                "DELETE FROM pipeline_tenant_routing WHERE tenant_id = $1",
+                &[&tenant],
+            )
+            .await
+            .expect("the owner deletes the routing row"),
+            1
+        );
+        insert_routing_row_with_generation(
+            &tx,
+            &tenant,
+            "contained",
+            stored.activation_record_id,
+            Some(wrong),
+        )
+        .await
+        .expect("the insert is accepted; the check runs at the commit");
+        let refused = tx
+            .commit()
+            .await
+            .expect_err("a row whose generation no event has must not commit");
+        assert_eq!(
+            database_message(&refused),
+            Some(ROUTING_EVENT_MISMATCH),
+            "generation {wrong}: {refused}"
+        );
+        assert_eq!(
+            store.routing(&tenant).await.unwrap(),
+            Some(stored.clone()),
+            "generation {wrong}: the row is as it was"
+        );
+    }
+
+    // The row's own generation: the restore case.
+    let tx = owner_tenant_tx(&mut owner, &tenant).await;
+    tx.execute(
+        "DELETE FROM pipeline_tenant_routing WHERE tenant_id = $1",
+        &[&tenant],
+    )
+    .await
+    .unwrap();
+    insert_routing_row_with_generation(
+        &tx,
+        &tenant,
+        "contained",
+        stored.activation_record_id,
+        Some(3),
+    )
+    .await
+    .unwrap();
+    tx.commit()
+        .await
+        .expect("a row inserted with its own generation commits beside its event");
+    assert_eq!(routing_generations(&tenant).await, (3, 3));
+    let restored = store.routing(&tenant).await.unwrap().expect("the row");
+    assert_eq!(restored.activation_record_id, stored.activation_record_id);
+    assert_eq!(restored.routing_state, RoutingState::Contained);
+
+    // An upsert of the row that exists: the proposed row says 99 and so does
+    // the SET list; the update arm of the trigger gives the old value plus 1.
+    let next = uuid::Uuid::new_v4();
+    let tx = owner_tenant_tx(&mut owner, &tenant).await;
+    insert_routing_event(&tx, &tenant, next, "legacy", 4, 0)
+        .await
+        .unwrap();
+    let upserted: i64 = tx
+        .query_one(
+            "INSERT INTO pipeline_tenant_routing (
+                tenant_id, routing_state, activation_record_id,
+                actor_principal_ref, reason_code, evidence_hash, routing_generation
+             ) VALUES ($1, 'legacy', $2, $3, 'test_routing_state', $4, 99)
+             ON CONFLICT (tenant_id) DO UPDATE
+             SET routing_state = EXCLUDED.routing_state,
+                 activation_record_id = EXCLUDED.activation_record_id,
+                 routing_generation = EXCLUDED.routing_generation
+             RETURNING routing_generation",
+            &[
+                &tenant,
+                &next,
+                &routing_actor(),
+                &sha256_prefixed(b"test-routing-state"),
+            ],
+        )
+        .await
+        .expect("the upsert is accepted")
+        .get(0);
+    assert_eq!(upserted, 4, "an upsert never takes the proposed generation");
+    tx.commit()
+        .await
+        .expect("the upserted row commits beside its event of generation 4");
+    assert_eq!(routing_generations(&tenant).await, (4, 4));
+
+    // A supplied generation below 1, on a tenant with no row, becomes 1.
+    let fresh = routing_tenant("restore-generation-zero");
+    let first = uuid::Uuid::new_v4();
+    let tx = owner_tenant_tx(&mut owner, &fresh).await;
+    tx.execute(
+        "INSERT INTO trace_tenants (tenant_id) VALUES ($1)
+         ON CONFLICT (tenant_id) DO NOTHING",
+        &[&fresh],
+    )
+    .await
+    .unwrap();
+    insert_routing_event(&tx, &fresh, first, "contained", 1, 0)
+        .await
+        .unwrap();
+    insert_routing_row_with_generation(&tx, &fresh, "contained", first, None)
+        .await
+        .unwrap();
+    tx.commit()
+        .await
+        .expect("a generation below 1 is stored as 1 and matches the first event");
+    assert_eq!(routing_generations(&fresh).await, (1, 1));
+}
+
 #[tokio::test]
 async fn a_legacy_claim_is_permanent_and_idempotent() {
     let Some(backend) = runtime_backend(4).await else {

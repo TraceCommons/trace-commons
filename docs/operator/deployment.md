@@ -869,7 +869,7 @@ grants are these:
 
 | Table | Grant | Why |
 |---|---|---|
-| `pipeline_tenant_routing` | `SELECT, INSERT`; `UPDATE` on `routing_state`, `activation_record_id`, `actor_principal_ref`, `reason_code`, `evidence_hash`, `recorded_at` | each new upload reads the row; an activation, a rollback, a containment, or a deactivation inserts it or updates every column but the key and `routing_generation`, which a trigger sets |
+| `pipeline_tenant_routing` | `SELECT, INSERT`; `UPDATE` on `routing_state`, `activation_record_id`, `actor_principal_ref`, `reason_code`, `evidence_hash`, `recorded_at` | each new upload reads the row; an activation, a rollback, a containment, or a deactivation inserts it or updates every column but the key and `routing_generation`, which a trigger sets on each update |
 | `pipeline_activation_events` | `SELECT, INSERT` | each routing change appends its event; `GET /v1/admin/pipeline/routing` reads them |
 | `pipeline_receipt_ownership` | `SELECT, INSERT` | the legacy path claims a submission id, and the pipeline's receipt commits its own row |
 | `pipeline_bundle_policy_status` | `UPDATE (runnable, operational_status, error_label, updated_at)`, added to V93's `SELECT, INSERT` | a policy intervention updates the row, and each phase commit locks it `FOR SHARE`, which needs `UPDATE` on a column |
@@ -898,9 +898,12 @@ too. V110 binds the routing row to its event:
 - `activation_record_id` is a foreign key to the event's `event_id`, for the
   same tenant. A row that names no event does not commit.
 - A row trigger (`pipeline_tenant_routing_assign_generation`) sets
-  `routing_generation`: 1 on an insert, and the old value plus 1 on each
-  update. A statement cannot choose the value, and the ingest login has no
-  `UPDATE` grant on the column. The same trigger refuses an update that keeps
+  `routing_generation`. Each update gets the old value plus 1: an update
+  cannot choose the value, and the ingest login has no `UPDATE` grant on the
+  column. An insert keeps the value that it supplies when that is 1 or more,
+  and gets 1 otherwise. A tenant has one routing row and the ingest login
+  cannot delete it, so an insert happens one time for a tenant; the commit
+  check below applies to it too. The same trigger refuses an update that keeps
   `activation_record_id` (`pipeline routing change needs a new activation
   event`).
 - A constraint trigger (`pipeline_tenant_routing_event_match`) runs at the
@@ -935,11 +938,13 @@ again.
 
 A restore must bring `pipeline_tenant_routing` and `pipeline_activation_events`
 back from one snapshot, as a `pg_dump` and `pg_restore` of the whole database
-does (the triggers are created after the rows). Do not load the rows of
-`pipeline_tenant_routing` into a migrated database with `INSERT` or `COPY`
-(`pg_restore --data-only`): the row trigger sets each inserted row's
-generation to 1, and the commit then refuses a row whose event has a higher
-generation.
+does (the triggers are created after the rows). A data-only restore into a
+migrated database (`pg_restore --data-only`, `INSERT`, or `COPY`) also works
+when the events are restored with the rows: an inserted row keeps the
+generation that it had, and the commit accepts it when its event is there.
+Load the events before the routing rows, or load both in one transaction. A
+routing row that is loaded without its event, or with another generation than
+its event has, does not commit.
 
 V111 adds a check that requires `runnable` to equal `operational_status =
 'runnable'`, and every existing row gets the status `runnable`. V93 gave the
