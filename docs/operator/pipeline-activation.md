@@ -855,7 +855,10 @@ log only on each pass, the tenant's database audit chain is past that event:
 run the audit-chain drill and follow
 [audit-trail-forensics.md](audit-trail-forensics.md); the audit-chain repair
 route restores file lines from database rows and does not add the missing
-database row.
+database row. Such a leg keeps its place in each pass, which takes the
+tenant's 32 oldest unmarked legs: 32 refused legs of one tenant stop its
+later `CreditMutate` events. This can occur only with a database mirror that
+is not required.
 
 A credit hold on the contributor does not stop this event, as it does not on
 `main`: holds gate settlement batches and payouts only.

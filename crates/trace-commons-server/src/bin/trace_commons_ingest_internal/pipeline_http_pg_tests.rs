@@ -9203,7 +9203,8 @@ async fn a_pipeline_credit_event_carries_its_witness_label_and_mains_audit_event
             32
         )
         .await
-        .unwrap(),
+        .unwrap()
+        .audited,
         0
     );
     assert_eq!(audit_rows().await.len(), 1, "a second pass appends nothing");
@@ -9260,6 +9261,7 @@ async fn a_credit_audit_event_already_in_the_file_log_is_not_appended_again() {
         )
         .await
         .unwrap()
+        .audited
     };
     assert_eq!(append().await, 1);
     // The crash: the event is in the file log, and the leg is not marked.
@@ -9396,7 +9398,7 @@ async fn a_credit_audit_append_with_a_required_mirror_does_not_read_the_file_log
     )
     .await
     .expect("the damaged line is not read");
-    assert_eq!(appended, 1);
+    assert_eq!(appended.audited, 1);
     assert!(credit_leg_is_audited(&owner, &tenant, run.run_id).await);
     assert_eq!(
         credit_mutate_audit_rows(&owner, &tenant, run.submission_id).await,
@@ -9454,7 +9456,7 @@ async fn a_credit_audit_pass_skips_a_file_line_that_does_not_parse() {
         )
         .await
     };
-    assert_eq!(append().await.unwrap(), 1);
+    assert_eq!(append().await.unwrap().audited, 1);
     // The crash, as in the test above, and a damaged line before the event.
     let mut client = owner.trace_pool_for_test().get().await.unwrap();
     let tx = tenant_tx(&mut client, &tenant).await;
@@ -9472,7 +9474,7 @@ async fn a_credit_audit_pass_skips_a_file_line_that_does_not_parse() {
     std::fs::write(&path, format!("{{\"damaged\n{body}")).unwrap();
 
     assert_eq!(
-        append().await.expect("the damaged line is skipped"),
+        append().await.expect("the damaged line is skipped").audited,
         1,
         "the next pass finds the leg again"
     );
@@ -9517,6 +9519,9 @@ impl AuditMirrorFault {
         Self { name }
     }
 
+    /// `DROP TRIGGER` takes a weak table lock and then ACCESS EXCLUSIVE, so
+    /// two tests that drop their fault at the same time can each wait for
+    /// the other (SQLSTATE 40P01). This takes ACCESS EXCLUSIVE first.
     async fn remove(self, owner: &PgBackend) {
         let name = self.name;
         owner
@@ -9525,8 +9530,11 @@ impl AuditMirrorFault {
             .await
             .unwrap()
             .batch_execute(&format!(
-                "DROP TRIGGER {name} ON trace_audit_events;
-                 DROP FUNCTION {name}();"
+                "BEGIN;
+                 LOCK TABLE trace_audit_events IN ACCESS EXCLUSIVE MODE;
+                 DROP TRIGGER {name} ON trace_audit_events;
+                 DROP FUNCTION {name}();
+                 COMMIT;"
             ))
             .await
             .expect("remove the audit mirror fault");
@@ -9603,7 +9611,7 @@ async fn a_file_only_credit_audit_event_is_not_marked_until_its_mirror_is_writte
         "a leg with no database audit row is not marked"
     );
 
-    assert_eq!(append().await.expect("the mirror works again"), 1);
+    assert_eq!(append().await.expect("the mirror works again").audited, 1);
     assert!(credit_leg_is_audited(&owner, &tenant, run.run_id).await);
     assert_eq!(
         credit_mutate_audit_rows(&owner, &tenant, run.submission_id).await,
@@ -9675,11 +9683,27 @@ async fn a_credit_audit_event_the_database_refuses_does_not_stop_the_later_ones(
         .expect("append one of main's audit events");
     let later = completed_pipeline_run(&service, &tenant, &principal).await;
 
-    let second = append().await;
+    let second = append().await.expect("the later event is appended");
     assert_eq!(
-        second.expect("the later event is appended"),
-        1,
-        "the pass counts the leg it marked"
+        second,
+        pipeline_runtime::PipelineCreditAuditPass {
+            audited: 1,
+            failed: 1
+        },
+        "the pass counts the leg it marked and the one that failed"
+    );
+    // Closing item N1: the refused leg keeps its place in the next batch,
+    // so a pass that took a whole batch and marked a leg runs again; one
+    // that did not fill its batch waits for the step's clock.
+    assert!(second.used_its_limit(2));
+    assert!(!second.used_its_limit(3));
+    assert!(
+        !pipeline_runtime::PipelineCreditAuditPass {
+            audited: 0,
+            failed: 2
+        }
+        .used_its_limit(2),
+        "a batch of failed legs alone does not run again at once"
     );
     assert!(credit_leg_is_audited(&owner, &tenant, later.run_id).await);
     assert_eq!(

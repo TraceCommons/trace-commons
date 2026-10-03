@@ -1055,8 +1055,8 @@ pub(crate) async fn drain_pipeline_tenant(
         )
         .await
         {
-            Ok(appended) => {
-                if appended >= PIPELINE_WORKER_MAX_CREDIT_AUDITS_PER_TENANT {
+            Ok(pass) => {
+                if pass.used_its_limit(PIPELINE_WORKER_MAX_CREDIT_AUDITS_PER_TENANT) {
                     lock_cadence().run_again(&tenant_id, PipelineFollowUpStep::CreditAudits);
                 }
             }
@@ -1139,22 +1139,21 @@ pub(crate) async fn drain_pipeline_tenant(
 /// Multi-lens review C9 (e): an event that cannot be appended, mirrored or
 /// verified does not stop the events after it. Its leg stays unmarked, so
 /// the next pass tries it again, and the failure is logged by label, with a
-/// hash of the event id. Returns how many legs it marked, or the first
-/// error when it marked none and one failed.
+/// hash of the event id. Returns how many legs it marked and how many
+/// failed, or the first error when it marked none and one failed.
 pub(crate) async fn append_pipeline_credit_audit_events(
     state: &AppState,
     service: &PipelineService,
     tenant_id: &str,
     limit: usize,
-) -> anyhow::Result<usize> {
+) -> anyhow::Result<PipelineCreditAuditPass> {
     let items = service
         .store()
         .list_unaudited_credit_events(tenant_id, limit)
         .await?;
-    // The pass's one read of the file log, made for the first item that
-    // needs it.
-    let mut file_events: Option<BTreeMap<Uuid, TraceCommonsAuditEvent>> = None;
+    let mut file_events = CreditAuditFileEvents::NotRead;
     let mut audited = 0;
+    let mut failed = 0;
     let mut first_error = None;
     for item in &items {
         match append_pipeline_credit_audit_event(
@@ -1176,14 +1175,45 @@ pub(crate) async fn append_pipeline_credit_audit_events(
                     error_hash = %safe_display_error_hash(&error),
                     "pipeline worker credit audit event failed"
                 );
+                failed += 1;
                 first_error.get_or_insert(error);
             }
         }
     }
     match first_error {
         Some(error) if audited == 0 => Err(error),
-        _ => Ok(audited),
+        _ => Ok(PipelineCreditAuditPass { audited, failed }),
     }
+}
+
+/// What one pass of `append_pipeline_credit_audit_events` did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PipelineCreditAuditPass {
+    /// Legs whose event is in the audit log and that are now marked.
+    pub(crate) audited: usize,
+    /// Legs whose event failed; they stay unmarked for the next pass.
+    pub(crate) failed: usize,
+}
+
+impl PipelineCreditAuditPass {
+    /// Whether the pass took a whole batch of `limit` legs and marked one,
+    /// so more may wait behind it and the step runs again on the next pass.
+    /// A failed leg keeps its place in the next batch (the list is oldest
+    /// first), so it counts toward the batch and not toward progress: a
+    /// batch of failed legs alone waits for the step's clock.
+    pub(crate) fn used_its_limit(&self, limit: usize) -> bool {
+        self.audited > 0 && self.audited + self.failed >= limit
+    }
+}
+
+/// The one read of the tenant's file audit log a pass of
+/// `append_pipeline_credit_audit_events` makes, for the first item that
+/// needs it. A read that failed is kept for the pass too: each later item
+/// that needs the file fails without a new read.
+enum CreditAuditFileEvents {
+    NotRead,
+    Read(BTreeMap<Uuid, TraceCommonsAuditEvent>),
+    Unreadable,
 }
 
 /// One item of `append_pipeline_credit_audit_events`: appends, or mirrors,
@@ -1197,7 +1227,7 @@ async fn append_pipeline_credit_audit_event(
     tenant_id: &str,
     items: &[trace_commons_server::versioned_pipeline::PipelineCreditAuditItem],
     item: &trace_commons_server::versioned_pipeline::PipelineCreditAuditItem,
-    file_events: &mut Option<BTreeMap<Uuid, TraceCommonsAuditEvent>>,
+    file_events: &mut CreditAuditFileEvents,
 ) -> anyhow::Result<()> {
     // Zaki review 3, Z3-L6: the append is idempotent. The event's id is
     // the credit event's, so an event a crashed pass already appended --
@@ -1221,12 +1251,17 @@ async fn append_pipeline_credit_audit_event(
     let in_file = if in_database || state.require_db_mirror_writes {
         None
     } else {
-        if file_events.is_none() {
-            *file_events = Some(credit_audit_events_in_file(state, tenant_id, items).await?);
+        if matches!(file_events, CreditAuditFileEvents::NotRead) {
+            // `Unreadable` stays when the read below fails.
+            *file_events = CreditAuditFileEvents::Unreadable;
+            *file_events = CreditAuditFileEvents::Read(
+                credit_audit_events_in_file(state, tenant_id, items).await?,
+            );
         }
-        file_events
-            .as_mut()
-            .and_then(|events| events.remove(&item.credit_event_id))
+        match file_events {
+            CreditAuditFileEvents::Read(events) => events.remove(&item.credit_event_id),
+            _ => anyhow::bail!("pipeline_credit_audit_file_log_unreadable"),
+        }
     };
     if !in_database {
         let points = item
