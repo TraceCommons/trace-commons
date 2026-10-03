@@ -22,6 +22,10 @@ final class HomeStore {
     private(set) var rollup: DaemonData.HistoryRollup?
     /// The commons' own credit figures. Its `unknown` halves are nil, never zero.
     private(set) var credit: DaemonData.CommonsCreditSummary?
+    /// The mission catalogue (R10): one list for the whole commons, the same
+    /// request for every contributor (#1174 M1). PROVISIONAL (Zaki's C3): the
+    /// live client throws `notAvailableYet`, which is not a failure to show.
+    private(set) var missions: DaemonData.MissionCatalogue?
     /// The last read that failed, by method; cleared when it next succeeds.
     private(set) var failures: [String: DaemonDataError] = [:]
 
@@ -55,8 +59,9 @@ final class HomeStore {
         async let history: Void = loadHistory()
         async let rollup: Void = loadRollup()
         async let credit: Void = loadCredit()
+        async let missions: Void = loadMissions()
         async let destinations: Void = loadDestinations()
-        _ = await (status, history, rollup, credit, destinations)
+        _ = await (status, history, rollup, credit, missions, destinations)
     }
 
     private func loadStatus() async {
@@ -79,6 +84,10 @@ final class HomeStore {
 
     private func loadCredit() async {
         if let value = await read("commons_credit_summary", { try await $0.commonsCreditSummary() }) { credit = value }
+    }
+
+    private func loadMissions() async {
+        if let value = await read("mission_catalogue", { try await $0.missionCatalogue() }) { missions = value }
     }
 
     /// Newest first; a row with no date sorts last rather than first.

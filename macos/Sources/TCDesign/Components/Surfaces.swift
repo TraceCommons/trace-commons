@@ -4,12 +4,19 @@ import SwiftUI
 /// between them; there is no window chrome around them.
 public struct GlassPane<Content: View>: View {
     private let padding: CGFloat?
+    private let isContent: Bool
     private let content: Content
 
     /// `padding` defaults to the pane padding; pass 0 for edge-to-edge
-    /// content such as the Traces tree.
-    public init(padding: CGFloat? = GlassTokens.Space.panePadding, @ViewBuilder content: () -> Content) {
+    /// content such as the Traces tree. `isContent` puts the pane in the
+    /// content layer (the map): the opaque base, never Liquid Glass, so the
+    /// glass controls floating on it are not glass on glass.
+    public init(
+        padding: CGFloat? = GlassTokens.Space.panePadding, isContent: Bool = false,
+        @ViewBuilder content: () -> Content
+    ) {
         self.padding = padding
+        self.isContent = isContent
         self.content = content()
     }
 
@@ -18,6 +25,7 @@ public struct GlassPane<Content: View>: View {
             .padding(padding ?? 0)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .glassTier(.pane)
+            .environment(\.glassPaneIsContent, isContent)
     }
 }
 
@@ -124,7 +132,8 @@ public struct GlassMenuItem: View {
                 Spacer(minLength: 0)
             }
             .glassType(GlassTokens.TypeScale.body)
-            .foregroundStyle(isEnabled ? GlassColor.textPrimary : GlassColor.textTertiary)
+            // On the hover fill, the menu selection's text: white in light.
+            .foregroundStyle(isEnabled ? (hovering ? GlassTokens.Color.menuHoverText.color : GlassColor.textPrimary) : GlassColor.textTertiary)
             .padding(.horizontal, GlassTokens.Space.s5)
             .padding(.vertical, GlassTokens.Space.s2)
             .background(
@@ -150,5 +159,40 @@ public struct GlassMenuSeparator: View {
             .padding(.horizontal, GlassTokens.Space.s4)
             .padding(.vertical, GlassTokens.Space.s2)
             .accessibilityHidden(true)
+    }
+}
+
+/// A row in a menu-like panel whose rows are ordinary buttons (the
+/// menu-bar panel): full width, the menu hover fill, and the pressed fill
+/// 8% darker. The button's own label is drawn; this style authors no words.
+public struct GlassMenuRowStyle: ButtonStyle {
+    public init() {}
+
+    public func makeBody(configuration: Configuration) -> some View {
+        GlassMenuRowBody(configuration: configuration)
+    }
+}
+
+private struct GlassMenuRowBody: View {
+    let configuration: ButtonStyleConfiguration
+    @State private var hovering = false
+    @Environment(\.isEnabled) private var isEnabled
+
+    var body: some View {
+        configuration.label
+            .glassType(GlassTokens.TypeScale.body)
+            .foregroundStyle(hovering && isEnabled ? Color.white : (isEnabled ? GlassColor.textPrimary : GlassColor.textTertiary))
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, GlassTokens.Space.s4)
+            .padding(.vertical, GlassTokens.Space.s2)
+            // The macOS menu selection: blue, with white text.
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(hovering && isEnabled ? GlassTokens.Color.menuSelection.color : .clear)
+                    .glassPressedFill()
+            )
+            .environment(\.glassPressed, configuration.isPressed && isEnabled)
+            .contentShape(Rectangle())
+            .onHover { hovering = $0 }
     }
 }

@@ -76,7 +76,7 @@ private struct GlassButtonBody: View {
         case let .submit(done):
             configuration.label
                 .glassType(GlassTokens.TypeScale.caption.weight(.bold))
-                .foregroundStyle(done ? GlassTokens.Color.statusOn.color : GlassColor.textPrimary)
+                .foregroundStyle(done ? GlassTokens.Color.statusOnText.color : GlassColor.textPrimary)
                 .padding(.horizontal, 10)
                 .frame(minHeight: GlassTokens.Size.submitPill)
                 .glassSurface(.control)
@@ -247,7 +247,7 @@ public struct GlassKebab: View {
                 .frame(width: 22, height: 24)
                 .background(
                     RoundedRectangle(cornerRadius: 6, style: .continuous)
-                        .fill(open ? Color.white.opacity(0.14) : .clear)
+                        .fill(open ? GlassColor.ink(0.14) : .clear)
                 )
                 .glassPressedFill()
                 .contentShape(Rectangle())

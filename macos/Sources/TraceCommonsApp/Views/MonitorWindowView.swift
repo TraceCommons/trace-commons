@@ -300,7 +300,10 @@ private struct MonitorMapPane: View {
     @EnvironmentObject private var model: AppModel
 
     var body: some View {
-        GlassPane(padding: 0) {
+        // The map is content, not chrome: an opaque pane, so the selector,
+        // zoom and node cards floating on it are its only glass (Apple: no
+        // glass on glass; R14).
+        GlassPane(padding: 0, isContent: true) {
             ZStack(alignment: .topTrailing) {
                 RadialGradient(
                     colors: [GlassTokens.Color.mapFieldInner.color, GlassTokens.Color.mapFieldOuter.color],
@@ -382,15 +385,52 @@ private struct MonitorMapPane: View {
     }
 }
 
-/// The Settings window (D8): the existing settings, in a macOS Settings
-/// window opened with ⌘,. Its theming may later move to the glass system to
-/// match the monitor window (#1173).
+/// The Settings window (D8; R11 of #1173): the section list and, beside
+/// it, the selected section alone, each scrolling on its own (spec,
+/// "Settings navigation"). The sections are the existing settings, with
+/// their behaviour and the core's copy unchanged; the list only chooses
+/// which one is drawn. The selection is restored, and opening or closing
+/// this window leaves the monitor window as it was.
 struct MonitorSettingsWindow: View {
     let navigation: MainWindowNavigation
 
+    @EnvironmentObject private var model: AppModel
+    @Environment(ComputeModel.self) private var compute
+    @SceneStorage("settings.section") private var section: SettingsSection = .connection
+
     var body: some View {
-        SettingsView(navigation: navigation)
-            .frame(minWidth: 620, minHeight: 520)
+        NavigationSplitView {
+            // One list with arrow-key selection, not a button per row.
+            List(selection: Binding(get: { section }, set: { if let value = $0 { section = value } })) {
+                ForEach(SettingsSection.allCases) { item in
+                    // A section whose copy has not loaded is a disabled
+                    // placeholder, never a missing row.
+                    let row = SettingsSection.ListRow.row(title: item.title(model: model, compute: compute.snapshot?.title))
+                    Label(row.text, systemImage: item.symbol)
+                        .lineLimit(2)
+                        .foregroundStyle(row.enabled ? .primary : .secondary)
+                        .accessibilityLabel(row.enabled ? row.text : MonitorWords.unknown)
+                        .selectionDisabled(!row.enabled)
+                        .tag(item)
+                }
+            }
+            .navigationSplitViewColumnWidth(min: 200, ideal: 230, max: 280)
+        } detail: {
+            Group {
+                switch section {
+                case .compute:
+                    ComputeView(model: compute)
+                default:
+                    ScrollView {
+                        SettingsContent(navigation: navigation, section: section)
+                    }
+                    .tcScreen()
+                }
+            }
+            // A fresh view per section, so the scroll starts at its top.
+            .id(section)
+        }
+        .frame(minWidth: 760, minHeight: 520)
     }
 }
 #endif

@@ -14,6 +14,7 @@ struct HomeTabView: View {
     enum Page: String {
         case overview
         case history
+        case missions
     }
 
     let store: HomeStore
@@ -25,9 +26,13 @@ struct HomeTabView: View {
     var body: some View {
         switch page {
         case .overview:
-            HomeOverview(store: store, traces: traces, statusLabel: statusLabel, openHistory: { page = .history })
+            HomeOverview(
+                store: store, traces: traces, statusLabel: statusLabel,
+                openHistory: { page = .history }, openMissions: { page = .missions })
         case .history:
             HistoryPage(store: store, statusLabel: statusLabel, back: { page = .overview })
+        case .missions:
+            MissionsPage(store: store, back: { page = .overview })
         }
     }
 }
@@ -37,6 +42,7 @@ private struct HomeOverview: View {
     let traces: TracesStore
     let statusLabel: (String) -> String?
     let openHistory: () -> Void
+    let openMissions: () -> Void
 
     var body: some View {
         ScrollView {
@@ -45,6 +51,17 @@ private struct HomeOverview: View {
                 HStack(spacing: GlassTokens.Space.s3) {
                     GlassLegendCell(MonitorWords.waiting, value: HomeFormat.count(store.status?.decisionsOwed), status: .ask)
                     GlassLegendCell(MonitorWords.contributed, value: HomeFormat.count(store.rollup?.allTime?.accepted), status: .shared)
+                }
+                GlassEyebrowCard(MonitorWords.missions, action: openMissions) {
+                    Image(systemName: "chevron.right")
+                        .glassGlyph(10, weight: .semibold)
+                        .foregroundStyle(GlassColor.textTertiary)
+                } content: {
+                    // The catalogue's size only: nothing here says a mission
+                    // was matched or chosen for this person (#1174 M1).
+                    Text(MissionFormat.count(store.missions))
+                        .glassType(GlassTokens.TypeScale.title)
+                        .foregroundStyle(GlassColor.textPrimary)
                 }
                 GlassEyebrowCard(MonitorWords.history, action: openHistory) {
                     Image(systemName: "chevron.right")
