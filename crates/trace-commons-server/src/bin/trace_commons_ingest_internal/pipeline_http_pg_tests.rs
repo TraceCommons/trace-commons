@@ -2016,8 +2016,11 @@ async fn mains_database() -> Arc<dyn Database> {
 }
 
 /// One tenant with two contributor tokens (an owner and another account), an
-/// `AppState` whose account side runs on the migration owner, and a pipeline
-/// service on the runtime role, injected into the state.
+/// `AppState` whose database is the suite's runtime login (`mains_database`:
+/// `NOBYPASSRLS`, the pilot ingest login's groups only), and a pipeline
+/// service on the runtime role, injected into the state. `owner` is the
+/// migration owner's backend, for fixture writes and reads that are not the
+/// ingest runtime's.
 struct WithdrawalFixture {
     state: Arc<AppState>,
     service: Arc<PipelineService>,
