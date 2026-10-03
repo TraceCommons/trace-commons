@@ -142,9 +142,11 @@ struct OnboardingCoordinatorView: View {
 
     private func backBar(to previous: Step) -> some View {
         HStack {
-            GlassBreadcrumb([GlassCrumb(OnboardingCoordinatorWords.back)],
-                            backLabel: OnboardingCoordinatorWords.backToPreviousStep,
-                            onBack: { navigation.enter(previous) })
+            Button { navigation.enter(previous) } label: {
+                Label(OnboardingCoordinatorWords.back, systemImage: "chevron.left")
+            }
+            .buttonStyle(GlassButtonStyle(.link))
+            .accessibilityLabel(OnboardingCoordinatorWords.backToPreviousStep)
             Spacer()
         }
         .padding(.horizontal, GlassTokens.Space.panePadding)

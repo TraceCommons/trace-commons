@@ -35,7 +35,7 @@ import XCTest
 /// - `AppModel.summaryErrors[id]`, `credentialAttempt` and
 ///   `harnessExposureRequest` are each cleared on their own completion path.
 /// - `StartupSection.loginItemActionError`, `ConsentSection.saveError`,
-///   `OnboardingRootsView.failure` and `PreviewSheet.failure` are view-local
+///   `OnboardingRootsContent.failure` and `PreviewSheet.failure` are view-local
 ///   `@State`, cleared at the top of each attempt and gone with the view.
 ///
 /// What made the notice different is that only two actions ever assign it and

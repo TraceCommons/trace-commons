@@ -84,8 +84,10 @@ struct OnboardingConnectContent: View {
                 // the other; this one is first because it is the shorter road
                 // for a contributor who already has the NEAR AI account the
                 // receipts come from anyway.
+                Divider()
                 NearAiJoinView(onEnrolled: onEnrolled)
                     .disabled(isEnrolling)
+                Divider()
                 NearAccountConnectView(onBusyChanged: { nearBusy = $0 }, onEnrolled: onEnrolled)
                     .disabled(isEnrolling)
             }
@@ -121,6 +123,7 @@ struct OnboardingConnectContent: View {
             Text(OnboardingConnectWords.heading)
                 .glassType(GlassTokens.TypeScale.heading)
                 .foregroundStyle(GlassColor.textPrimary)
+                .accessibilityAddTraits(.isHeader)
             Text(OnboardingConnectWords.pasteTheLink)
                 .glassType(GlassTokens.TypeScale.body)
                 .foregroundStyle(GlassColor.textSecondary)

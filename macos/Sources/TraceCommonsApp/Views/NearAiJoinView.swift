@@ -43,46 +43,46 @@ struct NearAiJoinView: View {
     var body: some View {
         if let copy = model.privateInferenceCopy {
             GlassCard {
-              VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
-                Text(copy.nearAiEnrollTitle)
-                    .glassType(GlassTokens.TypeScale.label.weight(.semibold))
-                    .foregroundStyle(GlassColor.textPrimary)
-                Text(copy.nearAiEnrollWhat)
-                    .glassType(GlassTokens.TypeScale.body)
-                    .foregroundStyle(GlassColor.textSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                GlassTextField(model.witnessCopy?.wallet?.commons ?? "", text: $commons)
-                    .disabled(pending)
+                VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
+                    Text(copy.nearAiEnrollTitle)
+                        .glassType(GlassTokens.TypeScale.label.weight(.semibold))
+                        .foregroundStyle(GlassColor.textPrimary)
+                    Text(copy.nearAiEnrollWhat)
+                        .glassType(GlassTokens.TypeScale.body)
+                        .foregroundStyle(GlassColor.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    GlassTextField(model.witnessCopy?.wallet?.commons ?? "", text: $commons)
+                        .disabled(pending)
 
-                if joined {
-                    Text(copy.nearAiEnrollDone)
-                        .glassType(GlassTokens.TypeScale.body)
-                        .foregroundStyle(GlassColor.textSecondary)
-                } else if signedIn {
-                    Button(copy.nearAiEnrollAction) { join() }
-                        .buttonStyle(GlassButtonStyle(.primary))
-                        .disabled(pending || commons.trimmingCharacters(in: .whitespaces).isEmpty)
-                } else {
-                    Text(copy.nearAiEnrollNeedsLogin)
-                        .glassType(GlassTokens.TypeScale.body)
-                        .foregroundStyle(GlassColor.textSecondary)
-                    CredentialSection(copy: copy, requiresSession: true)
-                }
+                    if joined {
+                        Text(copy.nearAiEnrollDone)
+                            .glassType(GlassTokens.TypeScale.body)
+                            .foregroundStyle(GlassColor.textSecondary)
+                    } else if signedIn {
+                        Button(copy.nearAiEnrollAction) { join() }
+                            .buttonStyle(GlassButtonStyle(.primary))
+                            .disabled(pending || commons.trimmingCharacters(in: .whitespaces).isEmpty)
+                    } else {
+                        Text(copy.nearAiEnrollNeedsLogin)
+                            .glassType(GlassTokens.TypeScale.body)
+                            .foregroundStyle(GlassColor.textSecondary)
+                        CredentialSection(copy: copy, requiresSession: true)
+                    }
 
-                if pending {
-                    ProgressView().controlSize(.small)
-                    Text(copy.nearAiEnrollWorking)
-                        .glassType(GlassTokens.TypeScale.body)
-                        .foregroundStyle(GlassColor.textSecondary)
+                    if pending {
+                        ProgressView().controlSize(.small)
+                        Text(copy.nearAiEnrollWorking)
+                            .glassType(GlassTokens.TypeScale.body)
+                            .foregroundStyle(GlassColor.textSecondary)
+                    }
+                    if let refusal, let line = TCNearAiEnroll.line(label: refusal) {
+                        NativeFlowNotice(
+                            message: line,
+                            glyph: model.witnessCopy?.wallet?.refusedGlyph ?? "",
+                            tone: TCNearAiEnroll.tone(label: refusal)
+                                == TC_PRIVATE_INFERENCE_TONE_REFUSED ? "refused" : "neutral")
+                    }
                 }
-                if let refusal, let line = TCNearAiEnroll.line(label: refusal) {
-                    NativeFlowNotice(
-                        message: line,
-                        glyph: model.witnessCopy?.wallet?.refusedGlyph ?? "",
-                        tone: TCNearAiEnroll.tone(label: refusal)
-                            == TC_PRIVATE_INFERENCE_TONE_REFUSED ? "refused" : "neutral")
-                }
-              }
             }
         }
     }

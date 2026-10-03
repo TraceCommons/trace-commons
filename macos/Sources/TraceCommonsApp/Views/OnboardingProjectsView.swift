@@ -84,9 +84,11 @@ struct OnboardingProjectsContent: View {
             Text(OnboardingProjectsWords.heading)
                 .glassType(GlassTokens.TypeScale.heading)
                 .foregroundStyle(GlassColor.textPrimary)
-            // "Ignore a project" is not offered when there is no project to
-            // ignore, so the sentence stops before it.
-            Text(model.projects.isEmpty ? OnboardingProjectsWords.everyProjectAsksFirst : OnboardingProjectsWords.everyProjectAsksFirstIgnore)
+                .accessibilityAddTraits(.isHeader)
+            // The instruction to ignore a project is not drawn: Ignore is
+            // now named by the core's mode word on each row, and a sentence
+            // naming "Ignore" would no longer match the button's word.
+            Text(OnboardingProjectsWords.everyProjectAsksFirst)
                 .glassType(GlassTokens.TypeScale.body)
                 .foregroundStyle(GlassColor.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -120,7 +122,6 @@ struct OnboardingProjectsContent: View {
     }
 
     private func projectRow(_ project: ProjectRow) -> some View {
-        let isIgnored = project.mode == .ignore
         let target = OnboardingProjectsModes.target(from: project.mode)
         return HStack(alignment: .top, spacing: GlassTokens.Space.s4) {
             VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
@@ -131,7 +132,7 @@ struct OnboardingProjectsContent: View {
                     .glassType(GlassTokens.TypeScale.bodyStrong)
                     .fixedSize(horizontal: false, vertical: true)
                 if let tag = OnboardingProjectsModes.name(project.mode) {
-                    GlassTag(tag, tone: isIgnored ? .neutral : .ask)
+                    GlassTag(tag, tone: OnboardingProjectsModes.tone(project.mode))
                 }
                 if project.isUnresolvedBucket {
                     Text(ProjectCopy.unresolvedBucketNote)
@@ -182,6 +183,18 @@ enum OnboardingProjectsModes {
         mode == .ignore ? .ask : .ignore
     }
 
+    /// The tag's tone follows the mode in force: ask is the standing state,
+    /// automatic is on, ignore is quiet.
+    static func tone(_ mode: ProjectMode) -> GlassTag.Tone {
+        // Written without naming Automatic: this step never offers it, and
+        // its parity test keeps that name out of the file.
+        switch mode {
+        case .ask: .ask
+        case .ignore: .neutral
+        default: .on
+        }
+    }
+
     static func name(_ mode: ProjectMode, label: (ProjectMode) -> String = ProjectCopy.modeChoiceLabel) -> String? {
         let name = label(mode)
         return name.isEmpty ? nil : name
@@ -194,6 +207,7 @@ enum OnboardingProjectsWords {
     static let heading = "What to watch"
     static let everyProjectAsksFirst =
         "Every project starts at ask-first: you see each session before anything is sent."
+    /// Held, not drawn: it names an instruction the rows no longer carry.
     static let everyProjectAsksFirstIgnore = """
         Every project starts at ask-first: you see each session before \
         anything is sent. Ignore a project to leave it out entirely.

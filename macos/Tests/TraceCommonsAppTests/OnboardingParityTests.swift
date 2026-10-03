@@ -76,11 +76,11 @@ final class OnboardingParityTests: XCTestCase {
                         "if project.isUnresolvedBucket {", "ProjectErrorNotice()",
                         "Button(OnboardingProjectsWords.continueButton)"],
              copySources: ["Text(ProjectCopy.unresolvedBucketNote)", "Text(OnboardingProjectsWords.heading)",
-                           "Text(model.projects.isEmpty ? OnboardingProjectsWords.everyProjectAsksFirst : OnboardingProjectsWords.everyProjectAsksFirstIgnore)",
+                           "Text(OnboardingProjectsWords.everyProjectAsksFirst)",
                            "Text(OnboardingProjectsWords.noProjectsYet)",
                            "GlassEyebrowCard(OnboardingProjectsWords.projects)",
                            "label: (ProjectMode) -> String = ProjectCopy.modeChoiceLabel) -> String? {",
-                           "GlassTag(tag, tone: isIgnored ? .neutral : .ask)"],
+                           "GlassTag(tag, tone: OnboardingProjectsModes.tone(project.mode))"],
              guards: ["if let tag = OnboardingProjectsModes.name(project.mode) {",
                       "if let move = OnboardingProjectsModes.name(target) {",
                       "Button(move) {",
@@ -104,8 +104,8 @@ final class OnboardingParityTests: XCTestCase {
              bindings: ["OnboardingNavigation(step: startAt)", "navigation.beginConsentSave(", "navigation.finishConsentSave(",
                         "model.setConsentScopes(scopes)", "navigation.enrolled(visit: visit)",
                         "OnboardingDoneView(onFinish: onComplete)", "WhatGetsRemovedSheet()",
-                        "GlassBreadcrumb([GlassCrumb(OnboardingCoordinatorWords.back)]"],
-             copySources: ["GlassCrumb(OnboardingCoordinatorWords.back)", "backLabel: OnboardingCoordinatorWords.backToPreviousStep,", "Text(OnboardingCoordinatorWords.settingsLoading)",
+                        "Button { navigation.enter(previous) } label: {"],
+             copySources: ["Label(OnboardingCoordinatorWords.back, systemImage: \"chevron.left\")", ".accessibilityLabel(OnboardingCoordinatorWords.backToPreviousStep)", "Text(OnboardingCoordinatorWords.settingsLoading)",
                            "Text(OnboardingCoordinatorWords.couldNotSave)",
                            "Text(OnboardingCoordinatorWords.scanNoLongerAvailable)",
                            "Text(OnboardingCoordinatorWords.scanNotIncluded)"],
@@ -203,6 +203,17 @@ final class OnboardingParityTests: XCTestCase {
         XCTAssertEqual(OnboardingProjectsModes.target(from: .autoUpload), .ignore)
     }
 
+    /// The stale "Ignore a project..." instruction is never drawn, and the tag
+    /// tone follows the mode.
+    func test_projectsHeaderNeverDrawsTheIgnoreInstructionAndTagToneFollowsMode() throws {
+        let source = try Self.text("Views/OnboardingProjectsView.swift")
+        XCTAssertFalse(source.contains("Text(OnboardingProjectsWords.everyProjectAsksFirstIgnore)"))
+        XCTAssertFalse(source.contains("model.projects.isEmpty ? OnboardingProjectsWords"))
+        XCTAssertEqual(OnboardingProjectsModes.tone(.ask), .ask)
+        XCTAssertEqual(OnboardingProjectsModes.tone(.autoUpload), .on)
+        XCTAssertEqual(OnboardingProjectsModes.tone(.ignore), .neutral)
+    }
+
     /// A mode the core's table does not name has no name here, so neither
     /// its tag nor the toggle that moves to it is drawn: no control is
     /// wordless.
@@ -292,6 +303,38 @@ final class OnboardingParityTests: XCTestCase {
         for name in ["sharing", "tools", "rules", "quickSetup", "customSetup"] {
             XCTAssertFalse(cases.contains(name), "\(name) was built before its decision")
         }
+    }
+
+    /// What VoiceOver reads for Welcome's headline block is the headline and
+    /// the two promise tags, in order.
+    func test_welcomeSpokenLineIsTheHeadlineAndPromiseTags() {
+        XCTAssertEqual(OnboardingWelcomeWords.spoken,
+                       [OnboardingWelcomeWords.headline, OnboardingWelcomeWords.promiseLine1,
+                        OnboardingWelcomeWords.promiseLine2].joined(separator: " "))
+    }
+
+    /// Every step's heading is a VoiceOver header, and Back is one labelled
+    /// button, not a breadcrumb.
+    func test_stepHeadingsAreHeadersAndBackIsOneButton() throws {
+        for (file, anchor) in [("Views/OnboardingConnectView.swift", "Text(OnboardingConnectWords.heading)"),
+                               ("Views/OnboardingRootsView.swift", "Text(OnboardingRootsWords.heading)"),
+                               ("Views/ConsentScopesView.swift", "Text(ConsentScopesWords.heading)"),
+                               ("Views/OnboardingProjectsView.swift", "Text(OnboardingProjectsWords.heading)"),
+                               ("Views/OnboardingPrivacyScanView.swift", "Text(verbatim: copy.title)"),
+                               ("Views/OnboardingWelcomeView.swift", ".accessibilityLabel(OnboardingWelcomeWords.spoken)")] {
+            let source = try Self.text(file)
+            let range = try XCTUnwrap(source.range(of: anchor), "\(file) lost \(anchor)")
+            XCTAssertTrue(source[range.upperBound...].prefix(260).contains(".accessibilityAddTraits(.isHeader)"), "\(file) heading is not a header")
+        }
+        XCTAssertFalse(try Self.text("Views/OnboardingCoordinatorView.swift").contains("GlassBreadcrumb"))
+    }
+
+    /// No control is wordless: the notification offer and the denied link
+    /// need the core's words before they draw.
+    func test_doneNotificationOfferIsGatedOnTheCoreCopy() throws {
+        let source = try Self.text("Views/OnboardingDoneView.swift")
+        XCTAssertTrue(source.contains("if notificationStatus == .denied && Notifier.copy != nil {"))
+        XCTAssertTrue(source.contains("notificationStatus == .notDetermined && Notifier.copy != nil {"))
     }
 
     /// No rebuilt step reads the legacy palette.

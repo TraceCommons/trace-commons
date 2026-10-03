@@ -94,6 +94,7 @@ struct OnboardingPrivacyScanContent: View {
         Text(verbatim: copy.title)
             .glassType(GlassTokens.TypeScale.heading)
             .foregroundStyle(GlassColor.textPrimary)
+            .accessibilityAddTraits(.isHeader)
     }
 
     // `Text(verbatim:)`: the core's sentences are plain text, and the

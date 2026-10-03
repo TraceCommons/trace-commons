@@ -83,6 +83,7 @@ struct ConsentScopesContent: View {
             Text(ConsentScopesWords.heading)
                 .glassType(GlassTokens.TypeScale.heading)
                 .foregroundStyle(GlassColor.textPrimary)
+                .accessibilityAddTraits(.isHeader)
             Text(ConsentScopesWords.changeLater)
                 .glassType(GlassTokens.TypeScale.body)
                 .foregroundStyle(GlassColor.textSecondary)

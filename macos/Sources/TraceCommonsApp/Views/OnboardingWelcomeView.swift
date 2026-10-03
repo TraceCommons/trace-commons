@@ -91,6 +91,7 @@ struct OnboardingWelcomeContent: View {
         }
         .accessibilityElement(children: .combine)
         .accessibilityLabel(OnboardingWelcomeWords.spoken)
+        .accessibilityAddTraits(.isHeader)
     }
 }
 

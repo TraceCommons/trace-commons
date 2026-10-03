@@ -97,7 +97,7 @@ struct OnboardingDoneContent: View {
     /// status is never read as a state.
     @ViewBuilder
     private var notificationOffer: some View {
-        if notificationStatus == .denied {
+        if notificationStatus == .denied && Notifier.copy != nil {
             VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
                 caption(Notifier.copy?.notificationDenied ?? "")
                 Link(Notifier.copy?.systemSettings ?? "", destination: Notifier.systemSettingsURL)
@@ -106,7 +106,7 @@ struct OnboardingDoneContent: View {
             }
         } else if Notifier.canPostDigest(notificationStatus) {
             caption(Notifier.copy?.notificationAllowed ?? "")
-        } else if !notificationOfferDismissed && notificationStatus == .notDetermined {
+        } else if !notificationOfferDismissed && notificationStatus == .notDetermined && Notifier.copy != nil {
             GlassCard {
                 VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
                     Text(Notifier.copy?.notificationOffer ?? "")

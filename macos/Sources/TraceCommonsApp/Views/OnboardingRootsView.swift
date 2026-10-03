@@ -111,6 +111,7 @@ struct OnboardingRootsContent: View {
         Text(OnboardingRootsWords.heading)
             .glassType(GlassTokens.TypeScale.heading)
             .foregroundStyle(GlassColor.textPrimary)
+            .accessibilityAddTraits(.isHeader)
     }
 
     private var explanation: some View {
