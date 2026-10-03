@@ -49,6 +49,27 @@ final class MonitorHomeInsightsTests: XCTestCase {
         }
     }
 
+    /// Error lines in the hosted screens draw in the status text token and
+    /// success notices in the on token, never a system colour.
+    func test_hostedErrorsUseTheStatusTextTokens() throws {
+        let errorSites: [(String, Int)] = [
+            ("Views/InsightsView.swift", 2), ("Views/InsightCardsView.swift", 1),
+            ("Views/InsightsEpisodesView.swift", 1), ("Views/ComparisonTasksView.swift", 1),
+            ("Views/ComparisonSpecificationsView.swift", 1), ("Views/MissionDraftsView.swift", 1),
+        ]
+        for (path, count) in errorSites {
+            let source = try MonitorNavigationTests.text(path)
+            XCTAssertEqual(source.components(separatedBy: ".foregroundStyle(GlassTokens.Color.statusOutsideText.color)").count - 1,
+                           count, path)
+            XCTAssertFalse(source.contains(".foregroundStyle(GlassColor.textPrimary)"), path)
+        }
+        for path in ["Views/InsightsEpisodesView.swift", "Views/ComparisonTasksView.swift",
+                     "Views/ComparisonSpecificationsView.swift"] {
+            let source = try MonitorNavigationTests.text(path)
+            XCTAssertEqual(source.components(separatedBy: ".foregroundStyle(GlassTokens.Color.statusOnText.color)").count - 1, 1, path)
+        }
+    }
+
     /// D-9: the live client answers notAvailableYet for the mission
     /// catalogue; the page draws the absent dash, never zero, never a
     /// failure line.

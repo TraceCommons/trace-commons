@@ -16,8 +16,8 @@ struct InsightsEpisodesView: View {
                 if model.episodeBusy { ProgressView().controlSize(.small) }
             }
             Text(model.text("episode_scope")).font(.callout).foregroundStyle(.secondary)
-            if let notice = model.episodeNotice { Text(notice).foregroundStyle(GlassColor.textPrimary) }
-            if let error = model.episodeError { Text(error).foregroundStyle(GlassColor.textPrimary) }
+            if let notice = model.episodeNotice { Text(notice).foregroundStyle(GlassTokens.Color.statusOnText.color) }
+            if let error = model.episodeError { Text(error).foregroundStyle(GlassTokens.Color.statusOutsideText.color) }
 
             if let detail = model.episodeDetail {
                 detailView(detail)

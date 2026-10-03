@@ -23,7 +23,7 @@ struct MissionDraftsView: View {
                     ProgressView(model.text("working"))
                         .controlSize(.small)
                 }
-                if let error = model.error { Text(error).foregroundStyle(GlassColor.textPrimary) }
+                if let error = model.error { Text(error).foregroundStyle(GlassTokens.Color.statusOutsideText.color) }
                 if let notice = model.notice { Text(notice).foregroundStyle(.secondary) }
                 Text(model.text("review_notice"))
                     .font(.callout)

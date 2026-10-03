@@ -21,8 +21,8 @@ struct ComparisonTasksView: View {
                 Button(text("comparison_task_list")) { model.refresh() }
                 if model.busy { ProgressView().controlSize(.small) }
             }
-            if let notice = model.notice { Text(text(notice)).foregroundStyle(GlassColor.textPrimary) }
-            if let error = model.error { Text(text(error)).foregroundStyle(GlassColor.textPrimary) }
+            if let notice = model.notice { Text(text(notice)).foregroundStyle(GlassTokens.Color.statusOnText.color) }
+            if let error = model.error { Text(text(error)).foregroundStyle(GlassTokens.Color.statusOutsideText.color) }
             if let detail = model.detail { detailView(detail) } else { listView }
         }
         .disabled(model.busy)
