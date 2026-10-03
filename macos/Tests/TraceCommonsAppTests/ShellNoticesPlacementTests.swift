@@ -57,8 +57,10 @@ final class ShellNoticesPlacementTests: XCTestCase {
             for button in card.buttons {
                 XCTAssertEqual(body.components(separatedBy: button).count - 1, 1, "\(card.name) lacks \(button)")
             }
-            XCTAssertEqual(body.components(separatedBy: "Button(").count - 1, card.buttons.count,
-                           "\(card.name) draws a button this test does not pin")
+            // Both call forms: `Button(` and the trailing-closure `Button {`.
+            let drawn = body.components(separatedBy: "Button(").count - 1
+                + body.components(separatedBy: "Button {").count - 1
+            XCTAssertEqual(drawn, card.buttons.count, "\(card.name) draws a button this test does not pin")
         }
     }
 

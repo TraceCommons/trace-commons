@@ -25,6 +25,8 @@ struct MenuBarGlassPanel: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.openSettings) private var openSettings
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    /// Unread since openers go through `OpenMonitor`; T11 removes it with
+    /// its callers (the menu-bar scene and `MenuBarPreviewWindow`).
     let navigation: MainWindowNavigation
     let store: MenuPanelStore
     /// Whether the panel draws its own glass. Inside `MenuBarExtra` the

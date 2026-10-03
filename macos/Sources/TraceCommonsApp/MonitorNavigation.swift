@@ -73,4 +73,16 @@ enum LaunchRouting {
     static func window(requiresOnboarding: Bool) -> Window {
         requiresOnboarding ? .firstRun : .monitor
     }
+
+    /// What one request opens: its window, and the Settings section it
+    /// also opens. The section does not depend on onboarding, so a quit
+    /// refusal lands on Compute while first run is still showing.
+    struct Opening: Equatable {
+        let window: Window
+        let settings: SettingsSection?
+    }
+
+    static func opening(_ destination: MonitorDestination?, requiresOnboarding: Bool) -> Opening {
+        Opening(window: window(requiresOnboarding: requiresOnboarding), settings: destination?.settingsSection)
+    }
 }

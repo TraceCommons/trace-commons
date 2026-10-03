@@ -306,11 +306,12 @@ private struct Launcher: View {
     private func open(_ destination: MonitorDestination?) {
         #if DEBUG
         navigation.pending = destination
-        switch LaunchRouting.window(requiresOnboarding: model.requiresOnboarding) {
+        let opening = LaunchRouting.opening(destination, requiresOnboarding: model.requiresOnboarding)
+        switch opening.window {
         case .firstRun: openWindow(id: WindowID.firstRun)
         case .monitor: openWindow(id: WindowID.monitor)
         }
-        if let section = destination?.settingsSection {
+        if let section = opening.settings {
             navigation.settingsSection = section
             openSettings()
         }
