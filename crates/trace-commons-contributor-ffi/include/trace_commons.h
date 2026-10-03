@@ -2406,6 +2406,14 @@ char*       tc_contribution_override_confirm_json(const char* mode, const char* 
  */
 char*       tc_contribution_override_refusal_text(const char* label);
 
+/* The Missions disclosure (M4, #1173; consent_copy::
+ * missions_disclosure_copy): {title, matching, nothing_sent, credit}.
+ * Matching happens on this Mac; nothing is sent because of a mission; a
+ * mission's credit is projected until the commons records it, then pending.
+ * DRAFT, NEEDS APPROVAL. NULL only on a caught panic.
+ */
+char*       tc_missions_disclosure_copy_json(void);
+
 /* The legacy invite migration offer (consent_copy::legacy_migration_offer),
  * as LegacyMigrationOfferCopy's fields. NULL only on a caught panic.
  */

@@ -982,6 +982,60 @@ pub fn legacy_migration_offer() -> LegacyMigrationOfferCopy {
 }
 
 // ---------------------------------------------------------------------------
+// Missions: the disclosure (M4)
+// ---------------------------------------------------------------------------
+//
+// The consent design's "Missions" section, M4: the first time Missions is
+// opened, and in Settings, the core's copy says that matching happens on
+// this Mac, that nothing is sent because of a mission, and that a mission's
+// credit is projected until the commons records it, then pending until it
+// settles. Every constant here is DRAFT, NEEDS APPROVAL, as M4 requires
+// until it is approved. Where the spec gives the words they are used as
+// given; the sentences it does not give are new and called out below.
+// Matching itself is `daemon::mission_matching` (K16).
+
+/// **DRAFT, NEEDS APPROVAL.** New: the spec gives no heading.
+pub const MISSIONS_DISCLOSURE_TITLE: &str = "How missions work";
+
+/// **DRAFT, NEEDS APPROVAL.** The first sentence is the spec's (M1, M4);
+/// the second is new.
+pub const MISSIONS_DISCLOSURE_MATCHING: &str =
+    "Matching happens on this Mac. What it looks at to find missions for you stays here.";
+
+/// **DRAFT, NEEDS APPROVAL.** The first sentence is the spec's (M2, M4);
+/// the second is new, and says the same as M2's "a session counts toward a
+/// mission only when it is contributed through one of the existing paths".
+pub const MISSIONS_DISCLOSURE_NOTHING_SENT: &str = "Nothing is sent because of a mission. A session counts toward one only when you contribute it, the same way as any other.";
+
+/// **DRAFT, NEEDS APPROVAL.** The spec's words (M3, M4).
+pub const MISSIONS_DISCLOSURE_CREDIT: &str =
+    "A mission's credit is projected until the commons records it, then pending until it settles.";
+
+/// The Missions disclosure, as a shell renders it (M4).
+#[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
+pub struct MissionsDisclosureCopy {
+    pub title: &'static str,
+    /// Matching happens on this Mac.
+    pub matching: &'static str,
+    /// Nothing is sent because of a mission.
+    pub nothing_sent: &'static str,
+    /// Credit is projected, then pending.
+    pub credit: &'static str,
+}
+
+/// The Missions disclosure (M4): shown the first time Missions is opened,
+/// and in Settings. Across the ABI, `tc_missions_disclosure_copy_json`.
+#[must_use]
+pub fn missions_disclosure_copy() -> MissionsDisclosureCopy {
+    MissionsDisclosureCopy {
+        title: MISSIONS_DISCLOSURE_TITLE,
+        matching: MISSIONS_DISCLOSURE_MATCHING,
+        nothing_sent: MISSIONS_DISCLOSURE_NOTHING_SENT,
+        credit: MISSIONS_DISCLOSURE_CREDIT,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Switch-on notices: the old-wording notice (K5) and the held-folder notice
 // ---------------------------------------------------------------------------
 //
@@ -2229,6 +2283,24 @@ pub fn session_notification_copy() -> SessionNotificationCopy {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// M4: the Missions disclosure says the three things, in the spec's
+    /// words where it gives them, and never calls credit earned.
+    #[test]
+    fn the_missions_disclosure_says_the_three_things() {
+        let copy = missions_disclosure_copy();
+        assert!(copy.matching.starts_with("Matching happens on this Mac."));
+        assert!(
+            copy.nothing_sent
+                .starts_with("Nothing is sent because of a mission.")
+        );
+        assert_eq!(
+            copy.credit,
+            "A mission's credit is projected until the commons records it, then pending until it settles."
+        );
+        let all = [copy.title, copy.matching, copy.nothing_sent, copy.credit].join(" ");
+        assert!(!all.to_lowercase().contains("earn"), "{all}");
+    }
 
     #[test]
     fn the_leaves_this_mac_line_is_assembled_from_labels() {
