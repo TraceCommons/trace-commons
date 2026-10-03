@@ -62,7 +62,7 @@ public struct GlassChip: View {
     }
 
     public var body: some View {
-        let ink = status?.color ?? GlassColor.textSecondary
+        let ink = status?.textColor ?? GlassColor.textSecondary
         HStack(spacing: 5) {
             if let status { GlassStatusDot(status, size: 6) }
             Text(title)
@@ -93,9 +93,10 @@ public struct GlassTag: View {
     public var body: some View {
         let (fill, ink): (GlassRGBA, Color) = switch tone {
         case .neutral: (GlassTokens.Color.tintNeutral, GlassColor.textSecondary)
-        case .on: (GlassTokens.Color.tintOn, GlassTokens.Color.statusOn.color)
-        case .ask: (GlassTokens.Color.tintAsk, GlassTokens.Color.statusAsk.color)
-        case .outside, .failed: (GlassTokens.Color.tintOutside, GlassTokens.Color.statusOutside.color)
+        // Text: the text-safe status colours (4.5:1 in light).
+        case .on: (GlassTokens.Color.tintOn, GlassTokens.Color.statusOnText.color)
+        case .ask: (GlassTokens.Color.tintAsk, GlassTokens.Color.statusAskText.color)
+        case .outside, .failed: (GlassTokens.Color.tintOutside, GlassTokens.Color.statusOutsideText.color)
         case .accent: (GlassTokens.Color.tintAccent, GlassColor.accentText)
         }
         Text(title)
@@ -143,7 +144,7 @@ public struct GlassBadge: View {
             .padding(.horizontal, 5)
             .frame(minWidth: subtle ? nil : 16, minHeight: subtle ? 14 : 16)
             .background(
-                Capsule().fill(subtle ? GlassColor.ink(0.16) : GlassTokens.Color.statusOutside.color)
+                Capsule().fill(subtle ? GlassColor.ink(0.16) : GlassTokens.Color.badgeFill.color)
             )
             .accessibilityLabel(label ?? Self.text(for: count))
     }

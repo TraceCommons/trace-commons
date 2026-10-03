@@ -40,6 +40,20 @@ public enum GlassStatus: Sendable, Equatable {
     }
 
     public var color: Color { rgba.color }
+
+    /// The colour for this status drawn as text. On, ask and outside have
+    /// text-safe variants that reach 4.5:1 in light (their glyph colours
+    /// are tested only at the 3:1 non-text floor); dark is the same value.
+    public var textRGBA: GlassRGBA {
+        switch self {
+        case .on: GlassTokens.Color.statusOnText
+        case .ask: GlassTokens.Color.statusAskText
+        case .outside: GlassTokens.Color.statusOutsideText
+        case .off, .shared, .kept, .inference: rgba
+        }
+    }
+
+    public var textColor: Color { textRGBA.color }
 }
 
 // MARK: - Type

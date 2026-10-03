@@ -74,10 +74,7 @@ struct GlassBackdrop: NSViewRepresentable {
     }
 
     private static func opaque(_ cornerRadius: CGFloat) -> NSView {
-        let view = NSView()
-        view.wantsLayer = true
-        let base = GlassTokens.Color.paneOpaque
-        view.layer?.backgroundColor = CGColor(srgbRed: base.red, green: base.green, blue: base.blue, alpha: base.alpha)
+        let view = OpaquePaneView()
         view.layer?.cornerRadius = cornerRadius
         view.layer?.cornerCurve = .continuous
         view.layer?.masksToBounds = true
@@ -203,5 +200,42 @@ public extension View {
     /// Host this view in a floating glass window (see `GlassThreePane`).
     func glassWindow() -> some View {
         background(GlassWindowConfigurator().frame(width: 0, height: 0))
+    }
+}
+
+/// The opaque pane base as a layer-backed view that follows the
+/// appearance. A layer's `CGColor` does not resolve per appearance, so the
+/// fill is set again whenever the view's effective appearance changes;
+/// baking in one value drew the dark base under the light appearance.
+final class OpaquePaneView: NSView {
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        applyFill()
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        wantsLayer = true
+        applyFill()
+    }
+
+    override var wantsUpdateLayer: Bool { true }
+
+    override func updateLayer() {
+        applyFill()
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        applyFill()
+    }
+
+    private func applyFill() {
+        var fill: CGColor?
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            fill = GlassTokens.Color.paneOpaque.dynamicNSColor.usingColorSpace(.sRGB)?.cgColor
+        }
+        layer?.backgroundColor = fill
     }
 }

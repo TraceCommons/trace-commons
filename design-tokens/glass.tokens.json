@@ -8,17 +8,21 @@
     "blue": { "hex": "#3a7bd5", "note": "Toggles on, the kept data series, selection.", "light": { "hex": "#2f6bc4" } },
     "textPrimary": { "hex": "#f2f2f4", "light": { "hex": "#1d1d1f" } },
     "textSecondary": { "hex": "#c9c9d0", "light": { "hex": "#48484f" } },
-    "textTertiary": { "hex": "#b4b4bc", "note": "Raised from #a9a9b0 for 4.5:1 on glass.", "light": { "hex": "#6a6a71" } },
+    "textTertiary": { "hex": "#b4b4bc", "note": "Raised from #a9a9b0 for 4.5:1 on glass. Light: 4.8:1 or more on every light ground it is drawn on (the scene, a well, the map field); #6a6a71 was 4.12 on mapFieldOuter.", "light": { "hex": "#5c5c63" } },
     "textSecondaryHighContrast": { "hex": "#e6e6ec", "note": "textSecondary under Increase Contrast.", "light": { "hex": "#2a2a2e" } },
     "textTertiaryHighContrast": { "hex": "#d6d6dc", "note": "textTertiary under Increase Contrast.", "light": { "hex": "#3c3c42" } },
-    "hairlineHighContrast": { "hex": "#ffffff", "alpha": 0.4, "note": "hairline under Increase Contrast.", "light": { "hex": "#000000", "alpha": 0.4 } },
-    "edgeHighContrast": { "hex": "#f2f2f4", "alpha": 0.4, "note": "A painted surface's edge under Increase Contrast: a solid 1pt stroke at 40% text colour (spec, Appearance).", "light": { "hex": "#1d1d1f", "alpha": 0.4 } },
+    "hairlineHighContrast": { "hex": "#ffffff", "alpha": 0.4, "note": "hairline under Increase Contrast. Light: 3:1 or more on every light ground (0.4 was 2.82).", "light": { "hex": "#000000", "alpha": 0.45 } },
+    "edgeHighContrast": { "hex": "#f2f2f4", "alpha": 0.4, "note": "A painted surface's edge under Increase Contrast: a solid 1pt stroke at 40% text colour (spec, Appearance). Light: 55%, for 3:1 or more on every light ground (40% was 2.44).", "light": { "hex": "#1d1d1f", "alpha": 0.55 } },
     "textOnAccent": { "hex": "#ffffff" },
     "textOnStatus": { "hex": "#0c0c0e" },
     "statusOn": { "hex": "#3ddc84", "note": "Watching, share automatically, automatic, always on. Glyph and label only.", "light": { "hex": "#1a8f4c" } },
     "statusAsk": { "hex": "#f5c142", "note": "Ask me, worth a second look.", "light": { "hex": "#a8690f" } },
     "statusOff": { "hex": "#a9a9b0", "note": "Never, not used. Never for text.", "light": { "hex": "#8a8a90" } },
     "statusOutside": { "hex": "#ff6b6b", "note": "Leaves for an outside model, no proof.", "light": { "hex": "#d0342c" } },
+    "statusOnText": { "hex": "#3ddc84", "note": "statusOn as text (a pill label, the submit-done label): 4.5:1 or more on every light ground and on its own tint. Dark is statusOn.", "light": { "hex": "#11613a" } },
+    "statusAskText": { "hex": "#f5c142", "note": "statusAsk as text: 4.5:1 or more on every light ground and on its own tint. Dark is statusAsk.", "light": { "hex": "#7a4a06" } },
+    "statusOutsideText": { "hex": "#ff6b6b", "note": "statusOutside as text: 4.5:1 or more on every light ground and on its own tint. Dark is statusOutside.", "light": { "hex": "#a3221c" } },
+    "badgeFill": { "hex": "#ff6b6b", "note": "The decisions-owed badge behind textOnStatus. Dark is statusOutside; light is lighter so the dark count clears 4.5:1 (4.86), and the fill 3:1 on the pane.", "light": { "hex": "#e04a42" } },
     "dataShared": { "hex": "#8a3dff", "light": { "hex": "#7a2cf5" } },
     "dataKept": { "hex": "#3a7bd5", "light": { "hex": "#2f6bc4" } },
     "dataInference": { "hex": "#a78bfa", "light": { "hex": "#7d5ce0" } },
@@ -37,7 +41,9 @@
     "hairline": { "hex": "#ffffff", "alpha": 0.07, "note": "Rows inside a list only; never around a container.", "light": { "hex": "#000000", "alpha": 0.08 } },
     "popoverFill": { "hex": "#22242a", "alpha": 0.78, "light": { "hex": "#f7f7f9", "alpha": 0.84 } },
     "menuFill": { "hex": "#22242a", "alpha": 0.72, "light": { "hex": "#f7f7f9", "alpha": 0.8 } },
-    "menuHover": { "hex": "#3a7bd5", "alpha": 0.85, "light": { "hex": "#2f6bc4", "alpha": 0.9 } },
+    "menuHover": { "hex": "#3a7bd5", "alpha": 0.85, "note": "Light: deep enough for menuHoverText at 4.5:1 (4.91).", "light": { "hex": "#2a62b5", "alpha": 0.9 } },
+    "menuHoverText": { "hex": "#f2f2f4", "note": "A menu item's text on menuHover: textPrimary in dark, white in light, as the macOS menu selection.", "light": { "hex": "#ffffff" } },
+    "menuSelection": { "hex": "#3a7bd5", "note": "The menu-row hover behind white text. Dark is blue; light is deeper so white clears 4.5:1 (5.98; blue's light value was 4.37 under it).", "light": { "hex": "#2a62b5" } },
     "menuModeAsk": { "hex": "#f0a030", "note": "Menu-bar mode circle: ask me." },
     "menuModeArmed": { "hex": "#34c759", "note": "Menu-bar mode circle and Private AI on option: contribute automatically." },
     "menuModeNever": { "hex": "#ff453a", "note": "Menu-bar mode circle: never; also the menu-bar badge." },
@@ -96,16 +102,16 @@
       { "hex": "#ffffff", "alpha": 0.07, "at": 1, "light": { "hex": "#ffffff", "alpha": 0.72 } }
     ] },
     "ctaFill": { "angle": 180, "stops": [
-      { "hex": "#8a3dff", "alpha": 0.72, "at": 0 },
-      { "hex": "#6d14f3", "alpha": 0.62, "at": 1 }
+      { "hex": "#8a3dff", "alpha": 0.72, "at": 0, "light": { "hex": "#7a2cf5" } },
+      { "hex": "#6d14f3", "alpha": 0.62, "at": 1, "light": { "hex": "#6d14f3" } }
     ] },
     "ctaSecondaryFill": { "angle": 180, "stops": [
-      { "hex": "#4a0ea6", "alpha": 0.6, "at": 0 },
-      { "hex": "#320878", "alpha": 0.55, "at": 1 }
+      { "hex": "#4a0ea6", "alpha": 0.6, "at": 0, "light": { "hex": "#5a12c9" } },
+      { "hex": "#320878", "alpha": 0.55, "at": 1, "light": { "hex": "#4a0ea6" } }
     ] },
     "checkboxOnFill": { "angle": 180, "stops": [
-      { "hex": "#8a3dff", "alpha": 0.8, "at": 0 },
-      { "hex": "#6d14f3", "alpha": 0.7, "at": 1 }
+      { "hex": "#8a3dff", "alpha": 0.8, "at": 0, "light": { "hex": "#7a2cf5" } },
+      { "hex": "#6d14f3", "alpha": 0.7, "at": 1, "light": { "hex": "#6d14f3" } }
     ] }
   },
   "shadow": {

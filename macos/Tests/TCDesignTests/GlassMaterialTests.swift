@@ -65,6 +65,21 @@ final class GlassMaterialTests: XCTestCase {
         XCTAssertEqual(fill?.blueComponent ?? -1, opaque?.blueComponent ?? -2, accuracy: 0.002)
     }
 
+    /// The opaque backdrop follows the appearance: the light pane base
+    /// under the light appearance and the dark one under the dark, never
+    /// one baked-in value (#1206 review).
+    @MainActor
+    func test_theOpaqueBackdropFollowsTheAppearance() throws {
+        let view = GlassBackdrop.makeView(.opaque, cornerRadius: 16)
+        let base = GlassTokens.Color.paneOpaque
+        for (name, expected) in [(NSAppearance.Name.aqua, base.light), (.darkAqua, base.dark)] {
+            view.appearance = try XCTUnwrap(NSAppearance(named: name))
+            let fill = view.layer?.backgroundColor.flatMap { NSColor(cgColor: $0)?.usingColorSpace(.sRGB) }
+            XCTAssertEqual(fill?.redComponent ?? -1, expected.red, accuracy: 0.002, "\(name)")
+            XCTAssertEqual(fill?.blueComponent ?? -1, expected.blue, accuracy: 0.002, "\(name)")
+        }
+    }
+
     private static func descendants(of view: NSView) -> [NSView] {
         view.subviews + view.subviews.flatMap { descendants(of: $0) }
     }

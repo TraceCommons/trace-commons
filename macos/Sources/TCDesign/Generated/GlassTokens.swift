@@ -20,16 +20,16 @@ public enum GlassTokens {
         public static let blue: GlassRGBA = GlassRGBA(0x3A7BD5, alpha: 1, light: GlassRGBA(0x2F6BC4, alpha: 1))
         public static let textPrimary: GlassRGBA = GlassRGBA(0xF2F2F4, alpha: 1, light: GlassRGBA(0x1D1D1F, alpha: 1))
         public static let textSecondary: GlassRGBA = GlassRGBA(0xC9C9D0, alpha: 1, light: GlassRGBA(0x48484F, alpha: 1))
-        /// Raised from #a9a9b0 for 4.5:1 on glass.
-        public static let textTertiary: GlassRGBA = GlassRGBA(0xB4B4BC, alpha: 1, light: GlassRGBA(0x6A6A71, alpha: 1))
+        /// Raised from #a9a9b0 for 4.5:1 on glass. Light: 4.8:1 or more on every light ground it is drawn on (the scene, a well, the map field); #6a6a71 was 4.12 on mapFieldOuter.
+        public static let textTertiary: GlassRGBA = GlassRGBA(0xB4B4BC, alpha: 1, light: GlassRGBA(0x5C5C63, alpha: 1))
         /// textSecondary under Increase Contrast.
         public static let textSecondaryHighContrast: GlassRGBA = GlassRGBA(0xE6E6EC, alpha: 1, light: GlassRGBA(0x2A2A2E, alpha: 1))
         /// textTertiary under Increase Contrast.
         public static let textTertiaryHighContrast: GlassRGBA = GlassRGBA(0xD6D6DC, alpha: 1, light: GlassRGBA(0x3C3C42, alpha: 1))
-        /// hairline under Increase Contrast.
-        public static let hairlineHighContrast: GlassRGBA = GlassRGBA(0xFFFFFF, alpha: 0.4, light: GlassRGBA(0x000000, alpha: 0.4))
-        /// A painted surface's edge under Increase Contrast: a solid 1pt stroke at 40% text colour (spec, Appearance).
-        public static let edgeHighContrast: GlassRGBA = GlassRGBA(0xF2F2F4, alpha: 0.4, light: GlassRGBA(0x1D1D1F, alpha: 0.4))
+        /// hairline under Increase Contrast. Light: 3:1 or more on every light ground (0.4 was 2.82).
+        public static let hairlineHighContrast: GlassRGBA = GlassRGBA(0xFFFFFF, alpha: 0.4, light: GlassRGBA(0x000000, alpha: 0.45))
+        /// A painted surface's edge under Increase Contrast: a solid 1pt stroke at 40% text colour (spec, Appearance). Light: 55%, for 3:1 or more on every light ground (40% was 2.44).
+        public static let edgeHighContrast: GlassRGBA = GlassRGBA(0xF2F2F4, alpha: 0.4, light: GlassRGBA(0x1D1D1F, alpha: 0.55))
         public static let textOnAccent: GlassRGBA = GlassRGBA(0xFFFFFF, alpha: 1)
         public static let textOnStatus: GlassRGBA = GlassRGBA(0x0C0C0E, alpha: 1)
         /// Watching, share automatically, automatic, always on. Glyph and label only.
@@ -40,6 +40,14 @@ public enum GlassTokens {
         public static let statusOff: GlassRGBA = GlassRGBA(0xA9A9B0, alpha: 1, light: GlassRGBA(0x8A8A90, alpha: 1))
         /// Leaves for an outside model, no proof.
         public static let statusOutside: GlassRGBA = GlassRGBA(0xFF6B6B, alpha: 1, light: GlassRGBA(0xD0342C, alpha: 1))
+        /// statusOn as text (a pill label, the submit-done label): 4.5:1 or more on every light ground and on its own tint. Dark is statusOn.
+        public static let statusOnText: GlassRGBA = GlassRGBA(0x3DDC84, alpha: 1, light: GlassRGBA(0x11613A, alpha: 1))
+        /// statusAsk as text: 4.5:1 or more on every light ground and on its own tint. Dark is statusAsk.
+        public static let statusAskText: GlassRGBA = GlassRGBA(0xF5C142, alpha: 1, light: GlassRGBA(0x7A4A06, alpha: 1))
+        /// statusOutside as text: 4.5:1 or more on every light ground and on its own tint. Dark is statusOutside.
+        public static let statusOutsideText: GlassRGBA = GlassRGBA(0xFF6B6B, alpha: 1, light: GlassRGBA(0xA3221C, alpha: 1))
+        /// The decisions-owed badge behind textOnStatus. Dark is statusOutside; light is lighter so the dark count clears 4.5:1 (4.86), and the fill 3:1 on the pane.
+        public static let badgeFill: GlassRGBA = GlassRGBA(0xFF6B6B, alpha: 1, light: GlassRGBA(0xE04A42, alpha: 1))
         public static let dataShared: GlassRGBA = GlassRGBA(0x8A3DFF, alpha: 1, light: GlassRGBA(0x7A2CF5, alpha: 1))
         public static let dataKept: GlassRGBA = GlassRGBA(0x3A7BD5, alpha: 1, light: GlassRGBA(0x2F6BC4, alpha: 1))
         public static let dataInference: GlassRGBA = GlassRGBA(0xA78BFA, alpha: 1, light: GlassRGBA(0x7D5CE0, alpha: 1))
@@ -62,7 +70,12 @@ public enum GlassTokens {
         public static let hairline: GlassRGBA = GlassRGBA(0xFFFFFF, alpha: 0.07, light: GlassRGBA(0x000000, alpha: 0.08))
         public static let popoverFill: GlassRGBA = GlassRGBA(0x22242A, alpha: 0.78, light: GlassRGBA(0xF7F7F9, alpha: 0.84))
         public static let menuFill: GlassRGBA = GlassRGBA(0x22242A, alpha: 0.72, light: GlassRGBA(0xF7F7F9, alpha: 0.8))
-        public static let menuHover: GlassRGBA = GlassRGBA(0x3A7BD5, alpha: 0.85, light: GlassRGBA(0x2F6BC4, alpha: 0.9))
+        /// Light: deep enough for menuHoverText at 4.5:1 (4.91).
+        public static let menuHover: GlassRGBA = GlassRGBA(0x3A7BD5, alpha: 0.85, light: GlassRGBA(0x2A62B5, alpha: 0.9))
+        /// A menu item's text on menuHover: textPrimary in dark, white in light, as the macOS menu selection.
+        public static let menuHoverText: GlassRGBA = GlassRGBA(0xF2F2F4, alpha: 1, light: GlassRGBA(0xFFFFFF, alpha: 1))
+        /// The menu-row hover behind white text. Dark is blue; light is deeper so white clears 4.5:1 (5.98; blue's light value was 4.37 under it).
+        public static let menuSelection: GlassRGBA = GlassRGBA(0x3A7BD5, alpha: 1, light: GlassRGBA(0x2A62B5, alpha: 1))
         /// Menu-bar mode circle: ask me.
         public static let menuModeAsk: GlassRGBA = GlassRGBA(0xF0A030, alpha: 1)
         /// Menu-bar mode circle and Private AI on option: contribute automatically.
@@ -130,6 +143,10 @@ public enum GlassTokens {
             "statusAsk": statusAsk,
             "statusOff": statusOff,
             "statusOutside": statusOutside,
+            "statusOnText": statusOnText,
+            "statusAskText": statusAskText,
+            "statusOutsideText": statusOutsideText,
+            "badgeFill": badgeFill,
             "dataShared": dataShared,
             "dataKept": dataKept,
             "dataInference": dataInference,
@@ -149,6 +166,8 @@ public enum GlassTokens {
             "popoverFill": popoverFill,
             "menuFill": menuFill,
             "menuHover": menuHover,
+            "menuHoverText": menuHoverText,
+            "menuSelection": menuSelection,
             "menuModeAsk": menuModeAsk,
             "menuModeArmed": menuModeArmed,
             "menuModeNever": menuModeNever,
@@ -195,9 +214,9 @@ public enum GlassTokens {
         public static let cardFill: GlassGradient = GlassGradient(angle: 180, stops: [GlassStop(0xFFFFFF, alpha: 0.085, at: 0, light: GlassRGBA(0xFFFFFF, alpha: 0.72)), GlassStop(0xFFFFFF, alpha: 0.045, at: 1, light: GlassRGBA(0xFFFFFF, alpha: 0.52))])
         public static let cardFillQuiet: GlassGradient = GlassGradient(angle: 180, stops: [GlassStop(0xFFFFFF, alpha: 0.075, at: 0, light: GlassRGBA(0xFFFFFF, alpha: 0.6)), GlassStop(0xFFFFFF, alpha: 0.04, at: 1, light: GlassRGBA(0xFFFFFF, alpha: 0.42))])
         public static let controlFill: GlassGradient = GlassGradient(angle: 180, stops: [GlassStop(0xFFFFFF, alpha: 0.14, at: 0, light: GlassRGBA(0xFFFFFF, alpha: 0.92)), GlassStop(0xFFFFFF, alpha: 0.07, at: 1, light: GlassRGBA(0xFFFFFF, alpha: 0.72))])
-        public static let ctaFill: GlassGradient = GlassGradient(angle: 180, stops: [GlassStop(0x8A3DFF, alpha: 0.72, at: 0), GlassStop(0x6D14F3, alpha: 0.62, at: 1)])
-        public static let ctaSecondaryFill: GlassGradient = GlassGradient(angle: 180, stops: [GlassStop(0x4A0EA6, alpha: 0.6, at: 0), GlassStop(0x320878, alpha: 0.55, at: 1)])
-        public static let checkboxOnFill: GlassGradient = GlassGradient(angle: 180, stops: [GlassStop(0x8A3DFF, alpha: 0.8, at: 0), GlassStop(0x6D14F3, alpha: 0.7, at: 1)])
+        public static let ctaFill: GlassGradient = GlassGradient(angle: 180, stops: [GlassStop(0x8A3DFF, alpha: 0.72, at: 0, light: GlassRGBA(0x7A2CF5, alpha: 1)), GlassStop(0x6D14F3, alpha: 0.62, at: 1, light: GlassRGBA(0x6D14F3, alpha: 1))])
+        public static let ctaSecondaryFill: GlassGradient = GlassGradient(angle: 180, stops: [GlassStop(0x4A0EA6, alpha: 0.6, at: 0, light: GlassRGBA(0x5A12C9, alpha: 1)), GlassStop(0x320878, alpha: 0.55, at: 1, light: GlassRGBA(0x4A0EA6, alpha: 1))])
+        public static let checkboxOnFill: GlassGradient = GlassGradient(angle: 180, stops: [GlassStop(0x8A3DFF, alpha: 0.8, at: 0, light: GlassRGBA(0x7A2CF5, alpha: 1)), GlassStop(0x6D14F3, alpha: 0.7, at: 1, light: GlassRGBA(0x6D14F3, alpha: 1))])
 
         /// Every gradient token by its JSON name.
         public static let all: [String: GlassGradient] = [

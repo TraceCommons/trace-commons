@@ -132,7 +132,8 @@ public struct GlassMenuItem: View {
                 Spacer(minLength: 0)
             }
             .glassType(GlassTokens.TypeScale.body)
-            .foregroundStyle(isEnabled ? GlassColor.textPrimary : GlassColor.textTertiary)
+            // On the hover fill, the menu selection's text: white in light.
+            .foregroundStyle(isEnabled ? (hovering ? GlassTokens.Color.menuHoverText.color : GlassColor.textPrimary) : GlassColor.textTertiary)
             .padding(.horizontal, GlassTokens.Space.s5)
             .padding(.vertical, GlassTokens.Space.s2)
             .background(
@@ -187,7 +188,7 @@ private struct GlassMenuRowBody: View {
             // The macOS menu selection: blue, with white text.
             .background(
                 RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .fill(hovering && isEnabled ? GlassTokens.Color.blue.color : .clear)
+                    .fill(hovering && isEnabled ? GlassTokens.Color.menuSelection.color : .clear)
                     .glassPressedFill()
             )
             .environment(\.glassPressed, configuration.isPressed && isEnabled)
