@@ -5444,8 +5444,7 @@ pub unsafe extern "C" fn tc_arming_offer_copy_json(
 /// `project_copy::contribution_mode_copy`): a JSON object `{title, mixed,
 /// choices, override_active, clear}`, `choices` being `[{mode, label,
 /// line}]` for Ask me, Auto contribute and Never, in that order. `mode` is
-/// what `set_contribution_override` takes. DRAFT, NEEDS APPROVAL, every
-/// sentence.
+/// what `set_contribution_override` takes.
 ///
 /// Returns an owned JSON string; free it with [`tc_string_free`]. NULL only
 /// on a caught panic.
@@ -5733,35 +5732,36 @@ pub extern "C" fn tc_privacy_scan_copy_json() -> *mut c_char {
 /// off a shell's blocking worker, never its UI thread.
 ///
 /// A NULL or non-UTF-8 `config_dir` returns NULL -- a caller error, not a
-/// business state. An unreadable `config_dir`, or a settings document that
-/// cannot be loaded, instead answers
-/// [`trace_commons_contributor::daemon::settings::keychain_status_unavailable_json`]:
-/// the daemon's own `near_ai_credential_status` IPC answer already names a
-/// storage failure it can detect, with the action that goes with it, so
-/// this failure mode is never surfaced as an error a shell cannot show a
-/// button for.
+/// business state. A `config_dir` that cannot be opened fails the whole
+/// call: NULL, with `*err` set to `credential-storage-unavailable`, the same
+/// refusal Tauri's `private_ai_status` gives (owner decision, 2026-10-02).
+/// A settings document that opens but cannot be loaded still answers
+/// [`trace_commons_contributor::daemon::settings::keychain_status_unavailable_json`],
+/// as Tauri does: the daemon's own `near_ai_credential_status` answer names
+/// that storage failure with the action that fixes it.
 ///
-/// Returns an owned JSON string; free it with [`tc_string_free`]. NULL only
-/// for a NULL/non-UTF-8 `config_dir`, and on a caught panic.
+/// Returns an owned JSON string; free it with [`tc_string_free`]. On
+/// failure returns NULL and, when `err` is non-null, sets `*err` to an
+/// owned label (free it with [`tc_string_free`]); `*err` is `panic` on a
+/// caught panic.
 ///
 /// # Safety
 /// `config_dir`, if non-null, must point to a valid, NUL-terminated C
-/// string.
+/// string. `err` must be NULL or point to a writable `char*`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tc_private_ai_keychain_status_json(
     config_dir: *const c_char,
+    err: *mut *mut c_char,
 ) -> *mut c_char {
-    guarded_string_no_err(|| {
+    guarded_string(err, || {
         let Some(dir) = (unsafe { borrow_optional_str(config_dir) }) else {
             return Ok(std::ptr::null_mut());
         };
-        let value = match ConfigStore::open(std::path::PathBuf::from(dir)) {
-            Ok(store) => match DaemonSettings::load_with_cloud_credentials(&store) {
-                Ok(settings) => settings.keychain_status_json(),
-                Err(_) => {
-                    trace_commons_contributor::daemon::settings::keychain_status_unavailable_json()
-                }
-            },
+        let Ok(store) = ConfigStore::open(std::path::PathBuf::from(dir)) else {
+            return Ok(witness_fail("credential-storage-unavailable", err));
+        };
+        let value = match DaemonSettings::load_with_cloud_credentials(&store) {
+            Ok(settings) => settings.keychain_status_json(),
             Err(_) => {
                 trace_commons_contributor::daemon::settings::keychain_status_unavailable_json()
             }
@@ -6149,9 +6149,8 @@ pub unsafe extern "C" fn tc_health_copy_json(
     })
 }
 
-/// The explanatory line under a `second_look` reason (R6/R7, #1173;
-/// **DRAFT, NEEDS APPROVAL** -- `preview_copy::second_look_line` is itself
-/// unapproved): why one scrubbed session waits for a person instead of
+/// The explanatory line under a `second_look` reason (R6/R7, #1173):
+/// why one scrubbed session waits for a person instead of
 /// moving on its own.
 ///
 /// `reason` is one of `preview_copy`'s fixed `second_look` labels
