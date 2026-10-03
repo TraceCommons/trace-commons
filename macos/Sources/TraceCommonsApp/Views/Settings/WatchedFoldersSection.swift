@@ -28,7 +28,11 @@ struct WatchedFoldersSection: View {
                         if saveFailed {
                             GlassNotice(tone: .outside) { Text(copy.saveFailed) }
                         }
-                        if model.daemonSettings != nil {
+                        if model.daemonSettings == nil {
+                            Text(copy.unavailable)
+                                .glassType(GlassTokens.TypeScale.body)
+                                .foregroundStyle(GlassColor.textSecondary)
+                        } else {
                             ForEach(SourceKind.allCases, id: \.self) { kind in
                                 GlassSourceRow(
                                     kind: kind,
@@ -39,10 +43,6 @@ struct WatchedFoldersSection: View {
                                     onChoose: { save(kind, .watch(path: $0)) },
                                     onDecline: { save(kind, .off) })
                             }
-                        } else {
-                            Text(copy.unavailable)
-                                .glassType(GlassTokens.TypeScale.body)
-                                .foregroundStyle(GlassColor.textSecondary)
                         }
                         if saveFailed || model.daemonSettings == nil {
                             Button(copy.retry) { model.refreshSettings() }

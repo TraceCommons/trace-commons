@@ -24,7 +24,7 @@ enum PrivateInferenceIndicator {
     /// The private-inference tone onto this shell's palette.
     ///
     /// A separate bridge from the routing and witness ones for the reason
-    /// spelled out on `SettingsView.witnessTone`: the three ABI tone ranges
+    /// spelled out on `WitnessSection.tone`: the three ABI tone ranges
     /// are disjoint so a cross-wired mapper is wrong for every value.
     ///
     /// Every arm answers a distinct `TC.Tone`, and each of those carries its
@@ -58,7 +58,7 @@ struct PrivateInferenceView: View {
 }
 
 /// The screen's content, split out of its `ScrollView` for the same reason
-/// `SettingsContent` and `QueueContent` are: `ImageRenderer` renders a
+/// `QueueContent` is: `ImageRenderer` renders a
 /// `ScrollView` as blank, so the screenshot hook can only rasterize what
 /// lives outside one.
 struct PrivateInferenceContent: View {

@@ -166,7 +166,9 @@ struct WitnessSection: View {
                 prose(copy.inferenceCaptureNote)
                 prose(copy.inferenceScopeNote)
                 // Absent is absent: no sentence and a disabled Enable.
-                if let enabled = model.daemonSettings?.ironwireAttestedBodies {
+                if model.daemonSettings == nil {
+                    SettingsAwaiting()
+                } else if let enabled = model.daemonSettings?.ironwireAttestedBodies {
                     GlassStatusLabel(
                         enabled ? copy.inferenceEnabled : copy.inferenceDisabled,
                         status: enabled ? .on : .off)
@@ -180,7 +182,7 @@ struct WitnessSection: View {
                         Task { await model.setInferenceEvidence(false) }
                     }
                     .buttonStyle(GlassButtonStyle(.glass))
-                    .disabled(model.inferenceEvidenceBusy)
+                    .disabled(model.inferenceEvidenceBusy || model.daemonSettings?.ironwireAttestedBodies == nil)
                 }
                 if model.inferenceEvidenceSaveFailed {
                     GlassNotice(tone: .outside) { Text(copy.inferenceSaveFailed) }
@@ -203,7 +205,9 @@ struct WitnessSection: View {
                 prose(copy.tokenDisclosure ?? "")
                 prose(copy.tokenCaptureNote ?? "")
                 prose(copy.tokenScopeNote ?? "")
-                if let enabled = model.daemonSettings?.tokenDistributionsContribution {
+                if model.daemonSettings == nil {
+                    SettingsAwaiting()
+                } else if let enabled = model.daemonSettings?.tokenDistributionsContribution {
                     GlassStatusLabel(
                         enabled ? (copy.tokenEnabled ?? "") : (copy.tokenDisabled ?? ""),
                         status: enabled ? .on : .off)
@@ -217,7 +221,7 @@ struct WitnessSection: View {
                         Task { await model.setTokenContribution(false) }
                     }
                     .buttonStyle(GlassButtonStyle(.glass))
-                    .disabled(model.tokenContributionBusy)
+                    .disabled(model.tokenContributionBusy || model.daemonSettings?.tokenDistributionsContribution == nil)
                 }
                 if let storage = model.daemonSettings?.tokenStorage {
                     storageBlock(storage)

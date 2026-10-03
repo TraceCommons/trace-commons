@@ -312,25 +312,80 @@ final class SettingsParityTests: XCTestCase {
         }
     }
 
-    /// Every section draws its own loading or unavailable state when the
-    /// daemon has not answered, rather than nothing and rather than a
-    /// control that reads as working. The marker is the branch on the
-    /// optional the section reads first.
+    /// Sections that read nothing from the daemon: the login item, the
+    /// system's notification permission and the update feed are all local.
+    static let localOnlySections: Set<SettingsSection> = [.startup, .notifications, .updates]
+
+    /// Each daemon-reading section's branch for "the daemon has not answered",
+    /// and what that branch draws. Every branch is the absent case written
+    /// first, so the text up to its closing brace is exactly what it draws.
+    static let daemonAbsentBranches: [SettingsSection: (file: String, branches: [(marker: String, draws: String)])] = [
+        .connection: ("ConnectionSection", [
+            ("if !model.status.answered {", "SettingsAwaiting()"),
+            ("if model.daemonSettings == nil {", "SettingsAwaiting()"),
+        ]),
+        .watching: ("WatchingSection", [("if model.daemonSettings == nil {", "SettingsAwaiting()")]),
+        .consent: ("ConsentSection", [("if !model.status.answered {", "SettingsAwaiting()")]),
+        .publicProfile: ("PublicProfileSection", [("} else if !model.status.answered {", "SettingsAwaiting()")]),
+        .watchedFolders: ("WatchedFoldersSection", [("if model.daemonSettings == nil {", "Text(copy.unavailable)")]),
+        .tools: ("ToolsSection", [("if model.daemonSettings == nil {", "SettingsAwaiting()")]),
+        .witness: ("WitnessSection", [("if model.daemonSettings == nil {", "SettingsAwaiting()")]),
+        .privateAI: ("PrivateAISection", [("case .loading:", "ProgressView()")]),
+        .projects: ("ProjectsSection", [("if !model.status.answered {", "SettingsAwaiting()")]),
+        .changes: ("ChangesSection", [("if !model.status.answered {", "SettingsAwaiting()")]),
+    ]
+
+    /// Every section that reads the daemon draws its own loading or
+    /// unavailable state before the daemon answers, rather than nothing,
+    /// rather than an answer read from a default, and rather than a control
+    /// that reads as working (Review Focus 1). A branch that draws only a
+    /// hidden `Color.clear` does not count.
     func test_everySectionHasAnUnavailableBranch() throws {
-        let guards: [String: String] = [
-            "Views/Settings/ConnectionSection.swift": "if let settings = model.daemonSettings",
-            "Views/Settings/WatchingSection.swift": "if let settings = model.daemonSettings",
-            // The branch is a `let`, not an `if`: every row reads it.
-            "Views/Settings/ConsentSection.swift": "let unavailable = !model.status.loggedIn",
-            "Views/Settings/WatchedFoldersSection.swift": "copy.unavailable",
-            "Views/Settings/ToolsSection.swift": "if let copy = model.routingCopy",
-            "Views/Settings/WitnessSection.swift": "if let copy = model.witnessCopy",
-            "Views/Settings/PrivateAISection.swift": "case .loading:",
-            "Views/Settings/ProjectsSection.swift": "model.projects.isEmpty",
-            "Views/Settings/StartupSection.swift": "if let status = notificationStatus",
-        ]
-        for (file, marker) in guards {
-            XCTAssertTrue(try Self.text(file).contains(marker), "\(file) has no unavailable branch (\(marker))")
+        for section in SettingsSection.allCases where section != .compute {
+            if Self.localOnlySections.contains(section) {
+                XCTAssertNil(Self.daemonAbsentBranches[section], "\(section) is both local-only and daemon-read")
+                continue
+            }
+            let entry = try XCTUnwrap(Self.daemonAbsentBranches[section], "\(section) has no daemon-absent branch recorded")
+            let source = try Self.text("Views/Settings/\(entry.file).swift")
+            for (marker, draws) in entry.branches {
+                guard let start = source.range(of: marker) else {
+                    XCTFail("\(entry.file) has no daemon-absent branch `\(marker)`")
+                    continue
+                }
+                let rest = source[start.upperBound...]
+                let end = rest.firstIndex(of: "}") ?? rest.endIndex
+                let branch = String(rest[..<end])
+                XCTAssertTrue(branch.contains(draws), "\(entry.file)'s `\(marker)` branch draws no \(draws): \(branch)")
+                XCTAssertFalse(
+                    branch.contains("Color.clear") && !branch.contains(draws),
+                    "\(entry.file)'s `\(marker)` branch draws only a hidden frame")
+            }
+        }
+        // The shared state is the system's own progress indicator (R-20).
+        let awaiting = try Self.text("Views/Settings/SettingsStateRow.swift")
+        XCTAssertTrue(awaiting.contains("struct SettingsAwaiting: View"))
+        XCTAssertTrue(awaiting.contains("ProgressView()"))
+        // `.unknown` is the placeholder held until the first answer; a real
+        // status always carries a schema version.
+        XCTAssertFalse(DaemonStatus.unknown.answered)
+    }
+
+    /// The answers read from a default are drawn only after the branch above:
+    /// "Not connected", "No projects seen yet." and "Nothing has been changed."
+    /// would otherwise state a value nothing reported.
+    func test_defaultReadAnswersFollowTheAbsentBranch() throws {
+        for (file, answer) in [
+            ("ConnectionSection", "SettingsLegacyWords.notConnected"),
+            ("ConnectionSection", "SettingsLegacyWords.queuedNothingSent"),
+            ("ProjectsSection", "SettingsLegacyWords.noProjectsYet"),
+            ("ChangesSection", "SettingsLegacyWords.nothingChanged"),
+            ("PublicProfileSection", "optInCard\n"),
+        ] {
+            let source = try Self.text("Views/Settings/\(file).swift")
+            let branch = try XCTUnwrap(source.range(of: "!model.status.answered {"), "\(file) has no absent branch")
+            let drawn = try XCTUnwrap(source.range(of: answer), "\(file) no longer draws \(answer)")
+            XCTAssertLessThan(branch.lowerBound, drawn.lowerBound, "\(file) draws \(answer) before the daemon answers")
         }
     }
 

@@ -318,7 +318,7 @@ final class RoutingBindingTests: XCTestCase {
         )
         XCTAssertEqual(
             applyArgument.trimmingCharacters(in: .whitespaces),
-            ".disabled(!form.on || model.routingChecking)",
+            ".disabled(!form.on || model.routingChecking || model.daemonSettings == nil)",
             "the Apply button is gated on `\(applyArgument)`"
         )
     }
@@ -429,6 +429,32 @@ final class RoutingBindingTests: XCTestCase {
             RoutingForm(on: false, port: 9001, tokenDir: "/Users/x/ironwire")
         )
         XCTAssertTrue(off["ironwire"] is NSNull, "off did not spell null: \(off)")
+    }
+
+    /// Before the daemon answers, nothing on this card reads as working.
+    ///
+    /// `routingCopy` is the core's static copy and is present from launch,
+    /// and with no settings `routingForm` reads off -- so without these gates
+    /// the switch would draw as a working "off" and flipping it would write
+    /// `set_settings`. The switch, Connect and Apply wait for the answer, and
+    /// the loading state stands where the status line would be.
+    func testNothingOnTheCardIsLiveBeforeTheDaemonAnswers() throws {
+        let body = try XCTUnwrap(RoutingCard.body())
+        for (control, expected) in [
+            ("Toggle(copy.toggle", "model.daemonSettings == nil"),
+            ("Button(copy.connect)", "model.routingChecking || model.daemonSettings == nil"),
+        ] {
+            let argument = try XCTUnwrap(RoutingCard.disabledArgument(after: control, in: body))
+            XCTAssertEqual(argument, expected, "\(control) is gated on `\(argument)`")
+        }
+        XCTAssertTrue(
+            body.contains(
+                "if model.daemonSettings == nil {\n                    SettingsAwaiting()\n"
+                    + "                } else {\n                    routingState(copy)\n                }"),
+            "the status line is drawn before the daemon answers: \(body)")
+        XCTAssertEqual(
+            RoutingCard.occurrences(of: "routingState(copy)", in: body), 1,
+            "the status line is drawn outside the answered branch")
     }
 
     // MARK: - What the machine already knows

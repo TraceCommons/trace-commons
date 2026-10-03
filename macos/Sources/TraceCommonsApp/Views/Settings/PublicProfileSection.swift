@@ -59,6 +59,9 @@ struct PublicProfileSection: View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
             if let profile = model.publicProfile, let handle = profile.handle {
                 profilePanel(profile, handle: handle)
+            } else if !model.status.answered {
+                // The opt-in panel would read as "not on the roster".
+                GlassEyebrowCard(PublicProfileCopy.heading) { SettingsAwaiting() }
             } else {
                 optInCard
             }

@@ -46,6 +46,11 @@ struct ConsentSection: View {
         GlassEyebrowCard(SettingsLegacyWords.consentHeading) {
             VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
                 caption(SettingsLegacyWords.appliesFromNow)
+                // Until the daemon answers, the rows below are disabled and
+                // read off (R-15); this says they are waiting, not refused.
+                if !model.status.answered {
+                    SettingsAwaiting()
+                }
                 group(SettingsLegacyWords.alwaysIncluded, alwaysOn, granted: granted)
                 group(SettingsLegacyWords.optionalEachOne, optional, granted: granted)
                 group(SettingsLegacyWords.credit, credit, granted: granted)

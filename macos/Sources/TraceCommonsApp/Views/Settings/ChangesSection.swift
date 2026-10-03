@@ -8,7 +8,11 @@ struct ChangesSection: View {
     var body: some View {
         GlassEyebrowCard(SettingsLegacyWords.auditHeading) {
             VStack(alignment: .leading, spacing: 0) {
-                if model.audit.isEmpty {
+                // The log defaults to empty; before the daemon answers,
+                // "nothing changed" would be a count nothing reported.
+                if !model.status.answered {
+                    SettingsAwaiting()
+                } else if model.audit.isEmpty {
                     Text(SettingsLegacyWords.nothingChanged)
                         .glassType(GlassTokens.TypeScale.caption)
                         .foregroundStyle(GlassColor.textSecondary)

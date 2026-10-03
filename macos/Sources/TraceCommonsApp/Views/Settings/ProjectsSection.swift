@@ -48,7 +48,11 @@ struct ProjectsSection: View {
             }
             GlassEyebrowCard(SettingsWords.projects) {
                 VStack(alignment: .leading, spacing: 0) {
-                    if model.projects.isEmpty {
+                    // The list defaults to empty; before the daemon answers,
+                    // "none yet" would be a count nothing reported.
+                    if !model.status.answered {
+                        SettingsAwaiting()
+                    } else if model.projects.isEmpty {
                         Text(SettingsLegacyWords.noProjectsYet)
                             .glassType(GlassTokens.TypeScale.caption)
                             .foregroundStyle(GlassColor.textSecondary)

@@ -7,7 +7,9 @@ struct WatchingSection: View {
     var body: some View {
         GlassEyebrowCard(SettingsWords.watching) {
             VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
-                if let settings = model.daemonSettings {
+                if model.daemonSettings == nil {
+                    SettingsAwaiting()
+                } else if let settings = model.daemonSettings {
                     line(SettingsLegacyWords.sessionFinishedAfter(settings.quiescenceSecs))
                     line(SettingsLegacyWords.atMostOneNotification(settings.digestIntervalSecs / 3600))
                     line(SettingsLegacyWords.undecidedDropped(settings.queueTtlDays))

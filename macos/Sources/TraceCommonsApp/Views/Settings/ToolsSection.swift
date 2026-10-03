@@ -88,8 +88,15 @@ struct ToolsSection: View {
                     }
                 ))
                 .toggleStyle(GlassToggleStyle(.settings))
+                // With no settings the form reads off by default; a switch
+                // drawn from that would read as a working "off".
+                .disabled(model.daemonSettings == nil)
 
-                routingState(copy)
+                if model.daemonSettings == nil {
+                    SettingsAwaiting()
+                } else {
+                    routingState(copy)
+                }
 
                 Text(RoutingSurface.discoveryLine(
                     model.routingDiscovery, copy: copy, calls: model.routingCalls))
@@ -107,7 +114,7 @@ struct ToolsSection: View {
                             model.applyIronWire(next)
                         }
                         .buttonStyle(GlassButtonStyle(.primary))
-                        .disabled(model.routingChecking)
+                        .disabled(model.routingChecking || model.daemonSettings == nil)
                     }
                     Button(copy.lookAgain) { model.discoverRouting() }
                         .buttonStyle(GlassButtonStyle(.link))
@@ -128,7 +135,7 @@ struct ToolsSection: View {
                     model.applyIronWire(form)
                 }
                 .buttonStyle(GlassButtonStyle(.glass))
-                .disabled(!form.on || model.routingChecking)
+                .disabled(!form.on || model.routingChecking || model.daemonSettings == nil)
 
                 if let probeLine = model.routingProbeLine {
                     Text(probeLine)

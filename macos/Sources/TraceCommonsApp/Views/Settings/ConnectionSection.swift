@@ -8,7 +8,11 @@ struct ConnectionSection: View {
     var body: some View {
         GlassEyebrowCard(SettingsWords.connection) {
             VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
-                if model.status.loggedIn {
+                // Before the first answer the status is a placeholder, and
+                // "Not connected" would be an answer nothing gave.
+                if !model.status.answered {
+                    SettingsAwaiting()
+                } else if model.status.loggedIn {
                     GlassStatusLabel(SettingsLegacyWords.connected, status: .on)
                 } else {
                     GlassStatusLabel(SettingsLegacyWords.notConnected, status: .ask)
@@ -16,7 +20,10 @@ struct ConnectionSection: View {
                         .glassType(GlassTokens.TypeScale.caption)
                         .foregroundStyle(GlassColor.textSecondary)
                 }
-                if let settings = model.daemonSettings {
+                if model.daemonSettings == nil {
+                    // One indicator for the card while neither has answered.
+                    if model.status.answered { SettingsAwaiting() }
+                } else if let settings = model.daemonSettings {
                     sourceLine(TCSourceChecks.claude, settings.routingSourceModes.claude)
                     sourceLine(TCSourceChecks.codex, settings.routingSourceModes.codex)
                     sourceLine(TCSourceChecks.gemini, settings.routingSourceModes.gemini)
