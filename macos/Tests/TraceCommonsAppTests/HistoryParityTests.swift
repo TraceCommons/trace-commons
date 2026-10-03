@@ -103,7 +103,7 @@ final class HistoryParityTests: XCTestCase {
             "model.loadSessionDetail(record)", "NSApplication.didBecomeActiveNotification",
             "model.ensureLocalInstalledSkillStatus(for: record)",
             "SessionContributionOverview(record: record, detail: detail, copy: copy)",
-            "SessionWithdrawalAction(record: record, currentStatus: currentStatus, copy: copy)",
+            Self.withdrawCall,
             "SkillLearningView(record: record, copy: skillCopy)",
             "SkillLearningGate.offersLearning(detail, recordStatus: record.status, withdrawalCompleted: withdrawalCompleted)",
             "Text(copy.publicationAfterAcceptance)",
@@ -242,34 +242,44 @@ final class HistoryParityTests: XCTestCase {
         let flat = inspector.split(whereSeparator: \.isWhitespace).joined(separator: " ")
         for needle in [
             "HistorySelection.record(for: row.submissionId, in: model.history)",
-            "if let record { SessionDetailView(record: record) .id(record.submissionID) }",
-            "if let tag = HomeFormat.statusWord(row.status, label: { HomeFormat.historyStatusLabel(copy: model.publicRunCopy, $0) }) "
-                + "{ GlassTag(tag, tone: HomeFormat.tone(row.status))",
+            "if let record { explanations(record) SessionDetailView(record: record) .id(record.submissionID) }",
+            // The resolved record's status when there is one, the word its
+            // Withdraw outcome agrees with; the list row's otherwise.
+            "let status = record?.status ?? row.status",
+            "if let tag = HomeFormat.statusWord(status, label: { HomeFormat.historyStatusLabel(copy: model.publicRunCopy, $0) }) "
+                + "{ GlassTag(tag, tone: HomeFormat.tone(status))",
+            // The folder and day only while no record resolves: the session
+            // detail's own heading carries them otherwise.
+            "if record == nil { Text(row.projectLabel ?? \"—\")",
             "Text(HomeFormat.meta(row, compact: false))",
             "let failures = WithdrawalCopyCheck.failures()",
             "if !failures.isEmpty { GlassNotice(tone: .outside, title: HistoryLegacyWords.withdrawalWordingDefect) "
                 + "{ VStack(alignment: .leading, spacing: GlassTokens.Space.s2) { ForEach(failures, id: \\.self) { Text($0)",
+            // The record's own reasons, digest-free; a held record the server
+            // said nothing about reads the held sentence.
+            "let lines = HeldExplanations.lines(in: [record.explanations])",
+            "ForEach(lines, id: \\.self) { Text($0)",
+            "if lines.isEmpty, record.status == \"quarantined\" { Text(HistoryCopy.heldExplanation)",
         ] {
             XCTAssertTrue(flat.contains(needle), "HistoryInspector.swift lacks \(needle)")
         }
-        // One Withdraw, one Skills panel, one reading state: the session
-        // detail's, never a second copy drawn beside it.
+        // One Withdraw, one Skills panel, one reading state, one reload on
+        // activation: the session detail's, never a second copy beside it.
         for absent in ["SessionWithdrawalAction(", "SkillLearningView(", "SkillLearningGate.", "readingRecord",
-                       "sessionDetailErrors"] {
+                       "sessionDetailErrors", "didBecomeActiveNotification"] {
             XCTAssertFalse(inspector.contains(absent), "HistoryInspector.swift draws its own \(absent)")
         }
-        let detail = try Self.text("Views/SessionDetailView.swift")
-        XCTAssertTrue(detail.contains("let currentStatus = detail.contributionStatus ?? record.status\n"),
-                      "Withdraw goes through the resolved record's status, never the list row's optional one")
-        XCTAssertTrue(detail.contains("SessionWithdrawalAction(record: record, currentStatus: currentStatus, copy: copy)\n"))
 
         let home = try Self.text("Views/Monitor/HomeViews.swift")
         let homeFlat = home.split(whereSeparator: \.isWhitespace).joined(separator: " ")
         for needle in [
-            "if (store.rollup?.quarantined ?? 0) > 0 { GlassNotice(tone: .ask, title: MonitorWords.heldForReview) {",
-            "Text(MonitorWords.heldExplanation)", "Text(HistoryLegacyWords.typicalWait)",
-            "ForEach(HeldExplanations.lines(in: (store.history ?? []).filter { $0.status == \"quarantined\" } "
-                + ".map { $0.explanations ?? [] }), id: \\.self)",
+            // Never an empty title or sentence: only with the core's words.
+            "if (store.rollup?.quarantined ?? 0) > 0, let words = MonitorWords.table { "
+                + "GlassNotice(tone: .ask, title: words.heldForReview) {",
+            "Text(words.heldExplanation)", "Text(HistoryLegacyWords.typicalWait)",
+            // Every record the app holds, not the list's capped page.
+            "ForEach(HeldExplanations.lines(in: model.history.filter { $0.status == \"quarantined\" }.map(\\.explanations)), "
+                + "id: \\.self)",
             "Text(WithdrawalCopy.noBulkAction)",
             // The daemon's view on every visit, on the always-present container.
             ".scrollIndicators(.never) } .onAppear { model.refreshHistory() }",
@@ -286,6 +296,26 @@ final class HistoryParityTests: XCTestCase {
                          "Do not trust the withdrawal wording on this screen."] {
             XCTAssertEqual(legacy.components(separatedBy: sentence).count - 1, 1, "\(sentence) is held once, in the table")
         }
+    }
+
+    static let withdrawCall = "SessionWithdrawalAction(record: record, "
+        + "currentStatus: Self.withdrawalStatus(record, detail: model.sessionDetails[record.submissionID]), copy: copy)"
+
+    /// Withdraw stands on the app's own record, as the legacy row did: one
+    /// call, after the detail's states rather than inside the read detail,
+    /// so reading or a failed read never hides it or its outcome.
+    func test_withdrawDoesNotWaitForTheDetailRead() throws {
+        let source = try Self.text("Views/SessionDetailView.swift")
+        let flat = source.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        XCTAssertEqual(source.components(separatedBy: "SessionWithdrawalAction(").count - 1, 1)
+        XCTAssertTrue(flat.contains(
+            "GlassNotice(tone: .outside, title: message) { Button(copy.retryRead) { model.loadSessionDetail(record) } "
+                + ".buttonStyle(GlassButtonStyle(.glass)) .frame(minHeight: 44) } } \(Self.withdrawCall) "
+                + "localInstalledSkillSurface(copy)"),
+            "Withdraw sits after the detail's reading/failed/read states, outside them")
+        XCTAssertTrue(source.contains(
+            "static func withdrawalStatus(_ record: HistoryRecord, detail: SessionDetail?) -> String {\n"
+                + "        detail?.contributionStatus ?? record.status\n"))
     }
 }
 #endif

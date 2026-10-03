@@ -449,6 +449,38 @@ final class SessionPublicationTests: XCTestCase {
         XCTAssertNil(model.sessionDetails[record.submissionID])
     }
 
+    /// A failed detail read leaves Withdraw standing on the record's own
+    /// status, as the legacy row offered it; an unknown status still offers
+    /// none.
+    @MainActor
+    func testAFailedDetailReadStillOffersWithdrawOnTheRecordStatus() async throws {
+        let model = AppModel()
+        model.setClientForTesting(client)
+        daemon.setFailure("history_detail")
+        let received = HistoryRecord(
+            submissionID: record.submissionID, submittedAt: record.submittedAt, projectID: record.projectID,
+            projectLabel: record.projectLabel, source: record.source, status: "received",
+            consentScopes: record.consentScopes, creditPointsPending: 0, creditPointsFinal: nil,
+            explanations: [], lastRefreshedAt: nil)
+        model.loadSessionDetail(received)
+        try await waitUntil {
+            !model.loadingSessionDetails.contains(received.submissionID)
+                && model.sessionDetailErrors[received.submissionID] != nil
+        }
+        let detail = model.sessionDetails[received.submissionID]
+        XCTAssertNil(detail)
+        let status = SessionDetailView.withdrawalStatus(received, detail: detail)
+        XCTAssertEqual(status, "received")
+        XCTAssertTrue(ContributionStatusPresentation.offersWithdraw(status))
+
+        let unknown = HistoryRecord(
+            submissionID: received.submissionID, submittedAt: received.submittedAt, projectID: received.projectID,
+            projectLabel: received.projectLabel, source: received.source, status: "a-status-from-the-future",
+            consentScopes: [], creditPointsPending: 0, creditPointsFinal: nil, explanations: [], lastRefreshedAt: nil)
+        XCTAssertFalse(ContributionStatusPresentation.offersWithdraw(
+            SessionDetailView.withdrawalStatus(unknown, detail: detail)))
+    }
+
     @MainActor
     func testAccountChangeClearsSessionAndSkillCaches() async throws {
         let model = AppModel()

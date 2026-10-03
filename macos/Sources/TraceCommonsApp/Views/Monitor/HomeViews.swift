@@ -195,16 +195,18 @@ private struct HistoryPage: View {
 
     /// Held for review, never as rejected: the core's sentence, no promised
     /// wait, the server's distinct reasons without digests, and why there is
-    /// no bulk action. Only when the rollup counts something held.
+    /// no bulk action. Only when the rollup counts something held and the
+    /// core's words are there (never an empty title). The reasons span every
+    /// record the app holds, not the list's capped page.
     @ViewBuilder
     private var held: some View {
-        if (store.rollup?.quarantined ?? 0) > 0 {
-            GlassNotice(tone: .ask, title: MonitorWords.heldForReview) {
+        if (store.rollup?.quarantined ?? 0) > 0, let words = MonitorWords.table {
+            GlassNotice(tone: .ask, title: words.heldForReview) {
                 VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
-                    Text(MonitorWords.heldExplanation)
+                    Text(words.heldExplanation)
                     Text(HistoryLegacyWords.typicalWait)
-                    ForEach(HeldExplanations.lines(in: (store.history ?? []).filter { $0.status == "quarantined" }
-                        .map { $0.explanations ?? [] }), id: \.self) { line in
+                    ForEach(HeldExplanations.lines(in: model.history.filter { $0.status == "quarantined" }.map(\.explanations)),
+                            id: \.self) { line in
                         Text(line)
                     }
                     Text(WithdrawalCopy.noBulkAction)

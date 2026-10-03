@@ -1,5 +1,4 @@
 #if DEBUG
-import AppKit
 import SwiftUI
 import TCDesign
 import TCShellCore
@@ -14,7 +13,9 @@ import TCShellCore
 /// contribution (`AppModel.history`). A row the record does not hold yet
 /// draws its status alone: no Withdraw, no editor, no Skills (fail closed).
 /// Withdraw asks the detail's status, else the record's, never the list
-/// row's optional one.
+/// row's optional one, and does not wait for the detail read. Without the
+/// core's public-run copy (static, not a daemon answer) the session detail
+/// draws nothing, and nothing is offered.
 struct HistoryDetailInspector: View {
     let row: DaemonData.HistoryRow
     @EnvironmentObject private var model: AppModel
@@ -25,8 +26,8 @@ struct HistoryDetailInspector: View {
 
     // The always-present scroll view reads the detail and the installed
     // skill for the row, again when its record first resolves or its status
-    // moves, and again when the app comes back to the front, as the session
-    // detail screen does.
+    // moves. The session detail reads it again when the app comes back to
+    // the front.
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
@@ -36,6 +37,7 @@ struct HistoryDetailInspector: View {
                 // confirmation and Skills panel are the record's, and the
                 // pane outlives the selection.
                 if let record {
+                    explanations(record)
                     SessionDetailView(record: record)
                         .id(record.submissionID)
                 }
@@ -44,24 +46,28 @@ struct HistoryDetailInspector: View {
         }
         .scrollIndicators(.never)
         .task(id: [row.submissionId, record?.status ?? ""]) { load() }
-        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
-            if let record { model.loadSessionDetail(record) }
-        }
     }
 
-    /// The row's folder, day and tool, and its status from the core's one
-    /// table, the same word its list row shows. An unknown status reads the
-    /// core's unavailable word; with no core copy there is no tag at all.
+    /// The row's status from the core's one table, the same word its list
+    /// row shows. An unknown status reads the core's unavailable word; with
+    /// no core copy there is no tag at all. The folder and day only while no
+    /// record resolves: the session detail's heading carries them otherwise.
     private var summary: some View {
-        VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
-            Text(row.projectLabel ?? "—")
-                .glassType(GlassTokens.TypeScale.label.weight(.semibold))
-                .foregroundStyle(GlassColor.textPrimary)
-            Text(HomeFormat.meta(row, compact: false))
-                .glassType(GlassTokens.TypeScale.caption)
-                .foregroundStyle(GlassColor.textTertiary)
-            if let tag = HomeFormat.statusWord(row.status, label: { HomeFormat.historyStatusLabel(copy: model.publicRunCopy, $0) }) {
-                GlassTag(tag, tone: HomeFormat.tone(row.status))
+        // The resolved record's status when there is one: `model.withdraw`
+        // refreshes the record, so the tag agrees with the Withdraw outcome
+        // below it rather than waiting for the list's next poll.
+        let status = record?.status ?? row.status
+        return VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
+            if record == nil {
+                Text(row.projectLabel ?? "—")
+                    .glassType(GlassTokens.TypeScale.label.weight(.semibold))
+                    .foregroundStyle(GlassColor.textPrimary)
+                Text(HomeFormat.meta(row, compact: false))
+                    .glassType(GlassTokens.TypeScale.caption)
+                    .foregroundStyle(GlassColor.textTertiary)
+            }
+            if let tag = HomeFormat.statusWord(status, label: { HomeFormat.historyStatusLabel(copy: model.publicRunCopy, $0) }) {
+                GlassTag(tag, tone: HomeFormat.tone(status))
                     .fixedSize()
             }
         }
@@ -82,6 +88,23 @@ struct HistoryDetailInspector: View {
                 }
             }
         }
+    }
+
+    /// The server's own reasons for this record, of any status (why it was
+    /// rejected, why it is held), without opaque digests. A held record the
+    /// server said nothing about reads the held sentence instead, as the
+    /// legacy row does.
+    @ViewBuilder
+    private func explanations(_ record: HistoryRecord) -> some View {
+        let lines = HeldExplanations.lines(in: [record.explanations])
+        VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
+            ForEach(lines, id: \.self) { Text($0).fixedSize(horizontal: false, vertical: true) }
+            if lines.isEmpty, record.status == "quarantined" {
+                Text(HistoryCopy.heldExplanation).fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .glassType(GlassTokens.TypeScale.caption)
+        .foregroundStyle(GlassColor.textSecondary)
     }
 
     private func load() {
