@@ -65,7 +65,9 @@ final class ShellWordingTests: XCTestCase {
         // Lowered from 26: an unrecognised status reads the core's label.
         "TraceCommonsApp/Views/HistoryView.swift": 21,
         "TraceCommonsApp/Views/MainWindowView.swift": 14,
-        "TraceCommonsApp/Views/MenuBarView.swift": 11,
+        // Lowered from 11: the AppKit menu left the shell with the glass menu
+        // bar (R15); the three pause choices stay in `MenuBarWords` (D-12).
+        "TraceCommonsApp/Views/MenuBarView.swift": 3,
         "TraceCommonsApp/Views/PreviewSheet.swift": 38,
         "TraceCommonsApp/Views/PublicProfileCopy.swift": 46,
         // Back to 3: the withheld line briefly lived here and is now

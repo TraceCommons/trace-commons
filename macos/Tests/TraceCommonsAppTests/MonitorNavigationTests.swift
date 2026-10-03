@@ -299,6 +299,48 @@ final class MonitorNavigationTests: XCTestCase {
         XCTAssertNil(MainWindowNavigation.legacySection(for: nil))
     }
 
+    /// The glass strip and panel are the only menu-bar item; the AppKit
+    /// menu, its label and the env flag that chose between them are gone,
+    /// and the pause words are all `MenuBarView.swift` keeps (D-12).
+    func test_theGlassMenuBarIsTheOnlyMenuBarItem() throws {
+        let main = try Self.text("TraceCommonsAppMain.swift")
+        XCTAssertFalse(main.contains("TRACE_COMMONS_GLASS_MENU"))
+        XCTAssertFalse(main.contains("MenuBarContent("))
+        XCTAssertFalse(main.contains("MenuBarLabel("))
+        // The one item takes no arguments: no `isInserted:` to swap it out.
+        XCTAssertEqual(main.components(separatedBy: "MenuBarExtra {").count - 1, 1, "exactly one menu-bar item")
+        XCTAssertFalse(main.contains("MenuBarExtra("))
+        XCTAssertTrue(main.contains(".menuBarExtraStyle(.window)"))
+        XCTAssertTrue(main.contains("MenuBarGlassPanel(store: menuPanel)"))
+        XCTAssertTrue(main.contains("MenuBarStripLabel(model: model, store: menuPanel)"))
+        // Ruling R-35: the panel's Monitor dependencies are debug-only until
+        // T11 strips them, so a release build draws an empty item until then.
+        XCTAssertTrue(main.contains("#else\n            // Transitional (ruling R-35): T11 removes this branch"))
+        let menu = try Self.text("Views/MenuBarView.swift")
+        XCTAssertFalse(menu.contains("struct MenuBarContent"))
+        XCTAssertFalse(menu.contains("struct MenuBarLabel"))
+        XCTAssertFalse(menu.contains("struct MenuBarGlyph"))
+        XCTAssertFalse(menu.contains("enum Format"))
+        XCTAssertTrue(menu.contains("enum MenuBarWords"))
+        let panel = try Self.text("Views/Monitor/MenuBarGlassPanel.swift")
+        XCTAssertFalse(panel.contains("MenuBarContent."))
+        XCTAssertFalse(panel.contains("let navigation: MainWindowNavigation"), "the panel opens through OpenMonitor")
+        XCTAssertTrue(panel.contains("PrivateInferenceTray.perform("))
+        XCTAssertTrue(panel.contains("MenuBarWords.pauseUntil(index)"))
+    }
+
+    /// The tray may turn Private AI off and may not turn it on: off writes
+    /// and opens the destination, on only opens it.
+    func test_theTrayTurnsItOffAndOpensToTurnOn() {
+        var turnedOff = 0, opened = 0
+        PrivateInferenceTray.perform(on: false, turnOff: { turnedOff += 1 }, open: { opened += 1 })
+        XCTAssertEqual(turnedOff, 0)
+        XCTAssertEqual(opened, 1)
+        PrivateInferenceTray.perform(on: true, turnOff: { turnedOff += 1 }, open: { opened += 1 })
+        XCTAssertEqual(turnedOff, 1)
+        XCTAssertEqual(opened, 2)
+    }
+
     /// Every outside opener goes through OpenMonitor; nothing names the
     /// deleted main window's opener. (`WindowID.main` itself leaves
     /// TraceCommonsAppMain.swift with the legacy window in T11, ruling R-33.)
@@ -327,9 +369,7 @@ final class MonitorNavigationTests: XCTestCase {
             XCTAssertTrue(panel.contains(needle), "the menu panel never opens \(needle)")
         }
         let menu = try Self.text("Views/MenuBarView.swift")
-        XCTAssertFalse(menu.contains("openWindow(id: WindowID.main)"), "the shipping menu opens the Monitor by destination")
-        XCTAssertTrue(menu.contains("OpenMonitor.request(.inference)"))
-        XCTAssertTrue(menu.contains("OpenMonitor.request(.traces(entryId: nil))"))
+        XCTAssertFalse(menu.contains("openWindow(id: WindowID.main)"), "the menu bar opens the Monitor by destination")
         let pointer = try Self.text("Views/Settings/PrivateAISection.swift")
         XCTAssertTrue(pointer.contains("Button(copy.destination) {\n                            OpenMonitor.request(.inference)\n"))
         // The Monitor consumes the destination on an always-present
