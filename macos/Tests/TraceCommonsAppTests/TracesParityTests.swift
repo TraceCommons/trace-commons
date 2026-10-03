@@ -337,9 +337,11 @@ final class TracesParityTests: XCTestCase {
 
         let offers = try Self.text("Views/Monitor/TracesOffers.swift")
         for needle in [
-            "model.undo", "model.undoApproval()", "model.dismissUndo()", ".keyboardShortcut(.defaultAction)",
+            "if let undo = model.undo {", "approvalUndo(undo)", "{ model.undoApproval() }", "{ model.dismissUndo() }",
             "QueueLegacyWords.undoWillSend", "QueueLegacyWords.closeNoticeStillSends", "QueueLegacyWords.closeNotice)",
-            "QueueLegacyWords.approvedAgo(", "store.lastContributed", "store.lastKept", ".undoContribute", ".undoKeep",
+            "QueueLegacyWords.approvedAgo(undo.heldSeconds)", "if let contributed = store.lastContributed,",
+            "if let kept = store.lastKept,",
+            "store.perform(.undoContribute, on: contributed.entryId)", "store.perform(.undoKeep, on: kept)",
             "model.showsPrivateInferenceOffer", "model.answerPrivateInferenceOffer(accepted: true)",
             "model.answerPrivateInferenceOffer(accepted: false)", "model.privateInferenceBusy",
             "copy.offerWhat", "copy.offerExposure", "copy.offerNoRepoint", "copy.offerAskedOnce",
@@ -352,6 +354,24 @@ final class TracesParityTests: XCTestCase {
         ] {
             XCTAssertTrue(offers.contains(needle), "TracesOffers.swift lacks \(needle)")
         }
+        // Both undos are drawn by the bar's body, not merely defined.
+        let barBody = try XCTUnwrap(offers.range(of: "    var body: some View {"))
+        let firstHelper = try XCTUnwrap(offers.range(of: "    private func approvalUndo("))
+        let body = offers[barBody.upperBound..<firstHelper.lowerBound]
+        XCTAssertTrue(body.contains("approvalUndo(undo)\n"), "the approval undo is not drawn")
+        XCTAssertTrue(body.contains("            storeUndo\n"), "the store's undos are not drawn")
+        // Return is bound to Undo itself: no other button between the two.
+        let undoButton = try XCTUnwrap(offers.range(
+            of: "Button(store.words?.undoContribute ?? QueueLegacyWords.undo) { model.undoApproval() }"))
+        let shortcut = try XCTUnwrap(offers.range(
+            of: ".keyboardShortcut(.defaultAction)", range: undoButton.upperBound..<offers.endIndex))
+        XCTAssertFalse(offers[undoButton.upperBound..<shortcut.lowerBound].contains("Button("))
+        XCTAssertEqual(offers.components(separatedBy: ".keyboardShortcut(.defaultAction)").count, 2)
+        // The arming card draws nothing without the core's words.
+        let armingCard = try XCTUnwrap(offers.range(of: "private struct ArmingOfferGlassCard"))
+        let armingBody = try XCTUnwrap(offers.range(
+            of: "    var body: some View {\n", range: armingCard.upperBound..<offers.endIndex))
+        XCTAssertTrue(offers[armingBody.upperBound...].hasPrefix("        if let copy {\n"))
         // No control without words: an absent core word falls back to an
         // existing one, never to an empty title.
         XCTAssertFalse(offers.contains("?? \"\""), "a control would be wordless without the core")
