@@ -254,20 +254,27 @@ final class SessionPublicationTests: XCTestCase {
         XCTAssertFalse(ContributionStatusPresentation.isTerminal(nil))
     }
 
-    /// `isTerminal` is a denylist of the four closed statuses, not an
-    /// allowlist of the ones this build currently shows: an unrecognized
-    /// status this app has never seen -- a wider future status enum, or a
-    /// label from a newer daemon -- still offers Withdraw, through the core's
-    /// own generic prompt (`WithdrawalCopy.Stage.unknown`,
-    /// `testAnUnknownStatusIsConfirmedWithTheCorePrompt`). This is a
-    /// deliberate difference from the Tauri frontend's `canWithdrawStatus`,
-    /// which is an allowlist and answers `false` for a status it does not
-    /// name (including "unknown" itself): that shell fails closed on the
-    /// unexpected, this one fails open, because it already has a safe,
-    /// core-sourced confirmation to show rather than a withdraw it cannot
-    /// word at all.
-    func testAnUnrecognizedContributionStateIsNotTreatedAsTerminal() {
-        XCTAssertFalse(ContributionStatusPresentation.isTerminal("a-status-from-the-future"))
+    /// Fail closed, as the Tauri frontend's `canWithdrawStatus` does (an
+    /// allowlist that answers `false` for a status it does not name): an
+    /// unrecognized status -- a wider future status enum, or a label from a
+    /// newer daemon -- is treated as terminal, so Withdraw is not offered on
+    /// it. The owner's decision on #1212's review, 2026-10-02; macOS used to
+    /// fail open here.
+    func testAnUnrecognizedContributionStateIsTreatedAsTerminalAndOffersNoWithdraw() throws {
+        for status in ["a-status-from-the-future", "unknown", "", "Accepted"] {
+            XCTAssertTrue(ContributionStatusPresentation.isTerminal(status), status)
+            XCTAssertFalse(ContributionStatusPresentation.offersWithdraw(status), status)
+        }
+        // Every status the core names is either open or closed, so none of
+        // them falls to the unrecognized case.
+        let copy = try XCTUnwrap(PublicRunCopy.decode(fromJSON: try XCTUnwrap(TCPublicRun.copyJSON())))
+        XCTAssertEqual(copy.contributionStatusChoices.count, 10)
+        for choice in copy.contributionStatusChoices {
+            let open = ["submitted", "received", "accepted", "quarantined",
+                        "awaiting_pii_backstop", "rejected"].contains(choice.value)
+            XCTAssertEqual(
+                ContributionStatusPresentation.offersWithdraw(choice.value), open, choice.value)
+        }
     }
 
     func testEditorUsesTheSharedRustValidatorAndNormalizedDraft() throws {
