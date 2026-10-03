@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import {
   acknowledgeWitnessDisclosure,
@@ -9,6 +10,7 @@ import {
   grantBlockers,
   initialFlow1Progress,
   initialScopeSelection,
+  previousStep,
   requestGrant,
   scopeChoice,
   withdrawAndConfirm,
@@ -244,4 +246,79 @@ test("Back from connecting inference returns to the step before it", () => {
   assert.equal(goBack(undecided, "inference", false).step, "consent");
   assert.equal(goBack(complete, "projects", false).step, "inference");
   assert.equal(goBack(complete, "projects", true).step, "inference");
+});
+
+// The table the core runs too (`flow1.rs`,
+// `the_shared_flow1_table_is_what_the_core_does`). A change to the step
+// order, Back, or the grant blockers here or in the core fails one of the
+// two against it.
+const table = JSON.parse(
+  readFileSync(
+    new URL(
+      "../../../../../crates/trace-commons-contributor/src/flow1_table.json",
+      import.meta.url,
+    ),
+    "utf8",
+  ),
+);
+
+// The core's progress keys, as flow1.ts names them. A key the row leaves
+// out keeps flow1.ts's initial value, as a missing field reads as not done
+// in the core.
+function fromCore(progress) {
+  const names = {
+    connected: "connected",
+    scopes_saved: "scopesSaved",
+    path: "path",
+    scrub_disclosure_seen: "scrubDisclosureSeen",
+    witness_disclosure_seen: "witnessDisclosureSeen",
+    witness_shown: "witnessShown",
+  };
+  const converted = { ...initialFlow1Progress };
+  for (const [key, value] of Object.entries(progress)) {
+    assert.ok(key in names, `unknown progress key ${key}`);
+    converted[names[key]] = value;
+  }
+  return converted;
+}
+
+test("the shared Flow 1 table is what flow1.ts does", () => {
+  assert.deepEqual(grantBlockers(initialFlow1Progress), table.blockers);
+  for (const row of table.back) {
+    assert.equal(
+      previousStep(row.from, row.privacy_included, row.path, row.scopes_chosen),
+      row.to,
+      JSON.stringify(row),
+    );
+    // goBack takes the same step, and unreads both disclosures.
+    const progress = {
+      ...initialFlow1Progress,
+      path: row.path,
+      scopesSaved: row.scopes_chosen ? ["debugging_evaluation"] : null,
+      scrubDisclosureSeen: true,
+      witnessDisclosureSeen: true,
+      witnessShown: "0xabc",
+    };
+    const back = goBack(progress, row.from, row.privacy_included);
+    assert.equal(back.step, row.to, JSON.stringify(row));
+    assert.equal(back.progress.scrubDisclosureSeen, false);
+    assert.equal(back.progress.witnessDisclosureSeen, false);
+    assert.equal(back.progress.witnessShown, null);
+  }
+  for (const step of table.steps) {
+    assert.ok(
+      table.back.some((row) => row.from === step),
+      `no Back row from ${step}`,
+    );
+  }
+  for (const row of table.after_inference) {
+    assert.equal(afterInference(row.path), row.to, JSON.stringify(row));
+  }
+  for (const row of table.grant_blockers) {
+    assert.deepEqual(
+      grantBlockers(fromCore(row.progress)),
+      row.blockers,
+      JSON.stringify(row),
+    );
+  }
 });

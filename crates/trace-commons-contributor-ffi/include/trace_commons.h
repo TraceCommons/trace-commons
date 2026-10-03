@@ -2381,6 +2381,23 @@ char*       tc_project_ignore_reconciled_text(const char* project_label, int64_t
  */
 char*       tc_arming_offer_copy_json(const char* project_label, uint32_t count);
 
+/* The menu-bar Contribution mode pill (#1173, project_copy::
+ * contribution_mode_copy): {title, mixed, choices, override_active, clear},
+ * choices being [{mode, label, line}] for Ask me, Auto contribute and Never.
+ * DRAFT, NEEDS APPROVAL. NULL only on a caught panic.
+ */
+char*       tc_contribution_mode_copy_json(void);
+
+/* The confirmation for one contribution override (#1173, project_copy::
+ * contribution_override_confirm_copy): {mode, title, body, confirm, cancel,
+ * arming}. mode is "notify_only", "auto_upload" or "ignore". arming is the
+ * arming disclosure for auto_upload, read for the configuration in
+ * config_dir, and null otherwise; config_dir may be NULL for the other two.
+ * NULL for an unknown or unreadable mode, for auto_upload with an unreadable
+ * config_dir or configuration, and on a caught panic.
+ */
+char*       tc_contribution_override_confirm_json(const char* mode, const char* config_dir);
+
 /* The legacy invite migration offer (consent_copy::legacy_migration_offer),
  * as LegacyMigrationOfferCopy's fields. NULL only on a caught panic.
  */
@@ -2424,6 +2441,79 @@ char*       tc_withdrawal_confirmation_prompt_text(void);
  */
 char*       tc_privacy_scan_copy_json(void);
 
+/* ------------------------------------------------------------------------
+ * K5 (#1173): the disclosure bundle and the Flow 1 decisions, which were
+ * taken in the Tauri shell and are now core functions. Each export is the
+ * C ABI route to one of them; none chooses or writes anything itself.
+ * Every returned char* is owned; free it with tc_string_free.
+ * ------------------------------------------------------------------------ */
+
+/* The disclosure bundle (disclosure_copy::contributor_disclosure_copy): the
+ * object Tauri's contributor_disclosure_copy command returns.
+ * private_inference.states maps each runtime state label to {line,
+ * working}; a label not in it is private_inference.state_unknown, an absent
+ * one private_inference.state_unreported, neither working. NULL only on a
+ * caught panic.
+ */
+char*       tc_contributor_disclosure_copy_json(void);
+
+/* The check before asking for the Flow 1 grant (flow1::grant_precondition)
+ * for the configuration in config_dir. confirmed is the grant screen's
+ * button: 1 pressed, anything else not. The EMPTY STRING when the grant may
+ * be asked for, otherwise the refusal label:
+ * automatic-grant-confirmation-required, automatic-grant-not-enrolled,
+ * automatic-grant-scope-required or contributor-config-unreadable. NULL for
+ * an unreadable config_dir and on a caught panic.
+ */
+char*       tc_grant_precondition_text(int32_t confirmed, const char* config_dir);
+
+/* Whether the scope picker may continue (flow1::scope_choice):
+ * {can_continue, missing_required}. options_json is consent_options' answer
+ * ({"scopes": [...]} or its array); selected_json a JSON array of the names
+ * ticked. NULL for an unreadable argument and on a caught panic.
+ */
+char*       tc_scope_choice_json(const char* options_json, const char* selected_json);
+
+/* Where the Flow 1 onboarding starts (flow1::start): {step, progress,
+ * privacy_included}. regrant 1 is the re-grant, from the scope picker with
+ * nothing carried over; anything else a first run. NULL only on a caught
+ * panic.
+ */
+char*       tc_flow1_start_json(int32_t regrant);
+
+/* The Flow 1 onboarding's next state (flow1::apply): state_json as last
+ * returned, event_json {"event": <name>, ...}. The step order, Back, and
+ * which events leave the disclosures unread are the core's. Set
+ * progress.connected from the daemon's status before each call. NULL for an
+ * unreadable argument, an unknown event, an event the step on screen does
+ * not offer (Back from the welcome or once done included) and on a caught
+ * panic; a NULL leaves the state the shell holds as it was.
+ */
+char*       tc_flow1_apply_json(const char* state_json, const char* event_json);
+
+/* The steps still standing before the grant (flow1::grant_blockers): a JSON
+ * array of connect, scope, path, scrub_disclosure, witness_disclosure, in
+ * that order; empty when none. A missing progress field reads as not done.
+ * NULL for an unreadable progress_json and on a caught panic.
+ */
+char*       tc_flow1_grant_blockers_json(const char* progress_json);
+
+/* Whether the grant may be asked for now (flow1::grant_request): {ready,
+ * blockers, witness_signing_address}. ready exactly when blockers is empty;
+ * only then is witness_signing_address the witness the disclosure screen
+ * showed (null for none). NULL for an unreadable progress_json and on a
+ * caught panic.
+ */
+char*       tc_flow1_grant_request_json(const char* progress_json);
+
+/* tc_grant_void_notice's object plus regrant and regrant_action, for a shell
+ * that can give the Flow 1 grant (consent_copy::
+ * void_notice_for_wire_with_regrant): present on the automatic grant's
+ * notice, null on a project's. NULL for an unreadable argument, one that is
+ * not an object, and on a caught panic.
+ */
+char*       tc_grant_void_notice_regrant_json(const char* void_json);
+
 /* The "keychain" block of the private-AI credential status
  * (DaemonSettings::keychain_status_json): what the credential store at
  * config_dir holds, as labels and booleans only -- never the inference key,
@@ -2450,6 +2540,28 @@ char*       tc_parse_deep_link_json(const char* url, char** err);
  * non-UTF-8 url, and on a caught panic.
  */
 int32_t     tc_external_url_is_allowed(const char* url);
+
+/* The health banner's words (R6/R7, #1173): health_copy::core_down_copy when
+ * reachable is 0, or health_copy::health_copy_for_label for label when the
+ * daemon answered. reachable is the caller's own liveness fact and is never
+ * derived here. When reachable is non-zero, a NULL or empty label means a
+ * reachable daemon reported nothing wrong, and this returns NULL: there is no
+ * banner to draw; any other label, including one that is not UTF-8, gets a
+ * banner. max_queue_entries is the configured queue limit for queue-full's
+ * count; 0 or negative when unknown. {title, detail, action, action_kind,
+ * severity}. NULL for nothing to show and on a caught panic.
+ */
+char*       tc_health_copy_json(int32_t reachable, const char* label,
+                                int64_t max_queue_entries);
+
+/* The explanatory line under a second_look reason (R6/R7, #1173; DRAFT,
+ * NEEDS APPROVAL -- preview_copy::second_look_line is itself unapproved):
+ * why one scrubbed session waits for a person instead of moving on its own.
+ * reason is one of the fixed second_look labels (nothing-matched,
+ * looks-unsure, trimmed-to-fit). NULL for a NULL, non-UTF-8 or unrecognised
+ * reason, and on a caught panic.
+ */
+char*       tc_second_look_line_text(const char* reason);
 
 /*
  * Can this process reach the Cloud credential store?
