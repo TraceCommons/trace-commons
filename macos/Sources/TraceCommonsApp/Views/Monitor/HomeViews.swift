@@ -20,7 +20,7 @@ struct HomeTabView: View {
     let store: HomeStore
     let traces: TracesStore
     /// The core's label for a history status, when its copy has loaded.
-    let statusLabel: (String) -> String?
+    let statusLabel: (String?) -> String?
     @Binding var page: Page
     /// The selected History row's submission id; empty for none. The
     /// inspector shows its details.
@@ -43,7 +43,7 @@ struct HomeTabView: View {
 private struct HomeOverview: View {
     let store: HomeStore
     let traces: TracesStore
-    let statusLabel: (String) -> String?
+    let statusLabel: (String?) -> String?
     let openHistory: () -> Void
     let openMissions: () -> Void
 
@@ -144,7 +144,7 @@ private struct HomeOverview: View {
 /// shipping window until C1 carries the withdrawal call.
 private struct HistoryPage: View {
     let store: HomeStore
-    let statusLabel: (String) -> String?
+    let statusLabel: (String?) -> String?
     @Binding var selection: String
     let back: () -> Void
 
@@ -207,7 +207,7 @@ private struct HistoryPage: View {
 /// how it was approved and its credit.
 struct HistoryRowView: View {
     let row: DaemonData.HistoryRow
-    let statusLabel: (String) -> String?
+    let statusLabel: (String?) -> String?
     let compact: Bool
 
     var body: some View {
@@ -236,9 +236,8 @@ struct HistoryRowView: View {
                     .glassType(GlassTokens.TypeScale.caption)
                     .foregroundStyle(GlassColor.textSecondary)
             }
-            if let status = row.status,
-               let tag = HomeFormat.statusWord(status, table: MonitorWords.table, fallback: statusLabel) {
-                GlassTag(tag, tone: HomeFormat.tone(status))
+            if let tag = HomeFormat.statusWord(row.status, label: statusLabel) {
+                GlassTag(tag, tone: HomeFormat.tone(row.status))
                     .fixedSize()
             }
         }
@@ -423,23 +422,17 @@ enum HomeFormat {
         row.creditPointsFinal.map(points)
     }
 
-    /// A row's status tag. A submission is said in History's own words
-    /// (waiting to be scored), not the shared status label, which reads
-    /// "Submitted" as though it were done. Every other status takes the
-    /// shared label, which for a status the core does not name is "Status
-    /// unavailable". With no core copy decoded there is no tag at all --
-    /// never the raw wire token, which is not a word a contributor was
-    /// meant to read.
-    static func statusWord(
-        _ status: String, table: MonitorScreensCopy?, fallback: (String) -> String?
-    ) -> String? {
-        if status == "submitted", let word = table?.historySubmitted { return word }
-        return fallback(status)
+    /// A row's status tag, from the core's one status table. A missing or
+    /// empty status reads the core's unavailable word too. With no core copy
+    /// decoded there is no tag at all -- never the raw wire token, which is
+    /// not a word a contributor was meant to read.
+    static func statusWord(_ status: String?, label: (String?) -> String?) -> String? {
+        label(status.flatMap { $0.isEmpty ? nil : $0 })
     }
 
     /// Accepted reads as done; held for review and submitted as waiting;
     /// withdrawn as neutral. Held is never drawn as rejected.
-    static func tone(_ status: String) -> GlassTag.Tone {
+    static func tone(_ status: String?) -> GlassTag.Tone {
         switch status {
         case "accepted": .on
         case "submitted", "quarantined": .ask
