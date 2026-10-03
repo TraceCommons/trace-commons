@@ -19,6 +19,9 @@ final class InferenceStore {
     /// The per-model summary. PROVISIONAL (Zaki's C3): the live client
     /// throws `notAvailableYet`, and the tab then shows the calls alone.
     private(set) var summary: DaemonData.InferenceSummary?
+    /// `tool_destinations`: its per-tool counts (K14) are the core's call
+    /// totals for the window, which one page of calls is not.
+    private(set) var destinations: DaemonData.ToolDestinations?
     /// The last read that failed, by method; cleared when it next succeeds.
     private(set) var failures: [String: DaemonDataError] = [:]
 
@@ -40,7 +43,9 @@ final class InferenceStore {
             if Task.isCancelled { break }
             switch event {
             case .inferenceCallAdded:
-                await loadCalls()
+                async let calls: Void = loadCalls()
+                async let destinations: Void = loadDestinations()
+                _ = await (calls, destinations)
             case .snapshot, .statusChanged, .resyncRequired:
                 await load()
             case .queueChanged, .digestDue, .previewReady, .unknown:
@@ -53,7 +58,12 @@ final class InferenceStore {
         async let harnesses: Void = loadHarnesses()
         async let calls: Void = loadCalls()
         async let summary: Void = loadSummary()
-        _ = await (harnesses, calls, summary)
+        async let destinations: Void = loadDestinations()
+        _ = await (harnesses, calls, summary, destinations)
+    }
+
+    private func loadDestinations() async {
+        destinations = await read("tool_destinations", { try await $0.toolDestinations() })
     }
 
     private func loadHarnesses() async {
