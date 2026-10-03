@@ -116,14 +116,22 @@ struct PrivateAISwitchCard: View {
 
     @State private var isOpen = false
 
+    /// The state line and its dot, from the listener's report alone. It
+    /// takes no switch: what was asked for never says what happened.
+    static func stateLabel(
+        state: PrivateInferenceState, copy: PrivateInferenceCopy, calls: PrivateInferenceCalls
+    ) -> (line: String, status: GlassStatus) {
+        (PrivateInferenceSurface.stateLine(state, copy: copy, calls: calls),
+         PrivateInferenceIndicator.status(PrivateInferenceSurface.tone(state, calls: calls)))
+    }
+
     var body: some View {
-        let stateLine = PrivateInferenceSurface.stateLine(state, copy: copy, calls: calls)
-        let status = PrivateInferenceIndicator.status(PrivateInferenceSurface.tone(state, calls: calls))
+        let label = Self.stateLabel(state: state, copy: copy, calls: calls)
         VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
             GlassCard {
                 VStack(alignment: .leading, spacing: GlassTokens.Space.s6) {
                     GlassExpander(copy.settingsTitle, isOpen: $isOpen)
-                    GlassStatusLabel(stateLine, status: status)
+                    GlassStatusLabel(label.line, status: label.status)
                         .fixedSize(horizontal: false, vertical: true)
                     if isOpen {
                         Text(copy.offerWhat)

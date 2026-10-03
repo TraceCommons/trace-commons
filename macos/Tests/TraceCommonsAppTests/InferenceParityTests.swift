@@ -1,4 +1,5 @@
 #if DEBUG
+import TCBridge
 import TCDesign
 import TCShellCore
 import XCTest
@@ -84,6 +85,8 @@ final class InferenceParityTests: XCTestCase {
         for needle in ["copy.offerWhat", "copy.offerExposure", "copy.settingsToggle", "copy.settingsAppliesAtOnce",
                        "PrivateInferenceSurface.stateLine(", "PrivateInferenceSurface.tone(", "PrivateInferenceSurface.servingLine(",
                        "isOn ?? false", "busy || isOn == nil", "GlassToggleStyle(.settings)",
+                       "let label = Self.stateLabel(state: state, copy: copy, calls: calls)",
+                       "GlassStatusLabel(label.line, status: label.status)",
                        "CredentialSection(copy: copy, prominent: true)", "HarnessListSection(copy: copy)",
                        "GlassExpander(copy.settingsTitle, isOpen:",
                        "GlassNotice(tone: .outside, title: refusal)",
@@ -91,6 +94,8 @@ final class InferenceParityTests: XCTestCase {
             XCTAssertTrue(source.contains(needle), "PrivateInferenceView.swift lacks \(needle)")
         }
         XCTAssertFalse(source.contains("privateInferenceOn ? .on"), "the state must come from the tone, not the switch")
+        XCTAssertEqual(source.components(separatedBy: "GlassStatusLabel(").count - 1, 1,
+                       "the card's one state label is the only status drawn")
         XCTAssertFalse(source.contains("static func palette("), "the TC palette moved to QueueView.swift")
         XCTAssertFalse(source.contains("ActionMessageBanner(text:"), "the refusal is the card's, not a legacy banner")
         XCTAssertEqual(PrivateInferenceIndicator.status(.clear), .on)
@@ -111,9 +116,78 @@ final class InferenceParityTests: XCTestCase {
         }
     }
 
+    /// The core's own copy and calls, as `AppModel` wires them.
+    private static let coreCalls = PrivateInferenceCalls(
+        stateLine: { TCPrivateInference.stateLine(state: $0) },
+        stateTone: { TCPrivateInference.stateTone(state: $0) },
+        servingLine: { TCPrivateInference.servingLine(port: $0) },
+        shouldOffer: { TCPrivateInference.shouldOffer(answered: $0, on: $1) },
+        quitNeedsNotice: { TCPrivateInference.quitNeedsNotice(on: $0, state: $1) })
+
+    /// The state label reads the listener's report alone: a refusal asks,
+    /// an unreported state is never on, and a line the core could not give
+    /// falls back to its unknown sentence.
+    func test_theStateLabelReadsTheReportNeverTheSwitch() throws {
+        let copy = try XCTUnwrap(PrivateInferenceCopy.decode(fromJSON: TCPrivateInference.copyJSON() ?? ""))
+        let refused = PrivateAISwitchCard.stateLabel(
+            state: PrivateInferenceState(label: "port_in_use", port: nil), copy: copy, calls: Self.coreCalls)
+        XCTAssertEqual(refused.status, .ask)
+        XCTAssertEqual(refused.line, TCPrivateInference.stateLine(state: "port_in_use"))
+        let unreported = PrivateAISwitchCard.stateLabel(
+            state: PrivateInferenceState(label: "", port: nil), copy: copy, calls: Self.coreCalls)
+        XCTAssertNotEqual(unreported.status, .on)
+        XCTAssertFalse(unreported.line.isEmpty)
+        let silent = PrivateInferenceCalls(
+            stateLine: { _ in nil }, stateTone: { _ in 0 }, servingLine: { _ in nil },
+            shouldOffer: { _, _ in false }, quitNeedsNotice: { _, _ in false })
+        let unknown = PrivateAISwitchCard.stateLabel(
+            state: PrivateInferenceState(label: "", port: nil), copy: copy, calls: silent)
+        XCTAssertEqual(unknown.line, copy.stateUnknown)
+        XCTAssertNotEqual(unknown.status, .on)
+    }
+
+    /// A reply the daemon gave but the core's rule refused is not taken:
+    /// the refusal shows and the switch is what the re-read says.
+    func test_aReplyTheRuleRefusesIsNotTaken() async throws {
+        let client = SampleDaemonClient(.normalDay)
+        let store = InferenceStore(client: client)
+        await store.load()
+        let before = try XCTUnwrap(store.privateAI)
+        let asked = !(before.on ?? false)
+        await store.setPrivateAI(on: asked, unconfirmed: "refused") { _, _, _ in false }
+        XCTAssertEqual(store.privateAIRefusal, "refused")
+        XCTAssertFalse(store.privateAIBusy)
+        let reread = try await client.privateAI()
+        XCTAssertEqual(store.privateAI, reread)
+        XCTAssertNil(store.failures["set_private_ai"])
+    }
+
+    /// A write that threw is recorded by method.
+    func test_aThrownWriteIsRecorded() async {
+        let store = InferenceStore(client: SampleDaemonClient(.coreDown))
+        await store.setPrivateAI(on: true, unconfirmed: "refused")
+        XCTAssertEqual(store.failures["set_private_ai"], .unreachable)
+    }
+
+    /// A read that started before a confirmed write never undoes it.
+    func test_aReadOlderThanAWriteDoesNotLand() async {
+        let store = InferenceStore(client: SampleDaemonClient(.normalDay))
+        let stale = DaemonData.PrivateAISwitch(on: true, offerSeen: true, state: nil)
+        let startedAt = store.beginPrivateAIRead()
+        await store.setPrivateAI(on: false, unconfirmed: "refused")
+        XCTAssertEqual(store.privateAI?.on, false)
+        store.landPrivateAIRead(stale, startedAt: startedAt)
+        XCTAssertEqual(store.privateAI?.on, false, "a read from before the write drew over it")
+        store.landPrivateAIRead(stale, startedAt: store.beginPrivateAIRead())
+        XCTAssertEqual(store.privateAI?.on, true, "a read after the write lands")
+        store.landPrivateAIRead(nil, startedAt: store.beginPrivateAIRead())
+        XCTAssertEqual(store.privateAI?.on, true, "a failed read keeps the last value")
+    }
+
     func test_theStoreWritesThroughTheDataContract() throws {
         let store = try Self.text("Views/Monitor/InferenceStore.swift")
-        for needle in ["$0.privateAI()", "client.setPrivateAI(on: on)", "check: TCPrivateInference.writeConfirmed)",
+        for needle in ["$0.privateAI()", "client.setPrivateAI(on: on)", "check: (Bool?, Bool?, Bool?) -> Bool = TCPrivateInference.writeConfirmed",
+                       "Self.confirmed(reply, requested: on, check: check)",
                        "privateAIRefusal = unconfirmed", "async let privateAI: Void = loadPrivateAI()"] {
             XCTAssertTrue(store.contains(needle), "InferenceStore.swift lacks \(needle)")
         }
