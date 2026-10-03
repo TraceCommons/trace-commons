@@ -349,6 +349,8 @@ final class MonitorNavigationTests: XCTestCase {
     /// While onboarding is required the Monitor draws the notices and the
     /// signed-out notice, whose button routes to first run, in place of the
     /// tabs; the inspector, where the write controls are, draws nothing.
+    /// Before the core has said whether onboarding is required, the
+    /// placeholder status is not read as "signed out": the pane waits.
     func test_theMonitorNeverShowsTabsWhileOnboardingIsRequired() throws {
         let window = try Self.text("Views/MonitorWindowView.swift")
         XCTAssertTrue(window.contains("if model.requiresOnboarding {"), "the Monitor must gate on requiresOnboarding")
@@ -357,26 +359,33 @@ final class MonitorNavigationTests: XCTestCase {
                         ShellNotices()
                         // No tab before onboarding is done: its screens act on
                         // consent that has not been given. The button opens first
-                        // run, which is where every request goes until then.
-                        if model.requiresOnboarding {
+                        // run, which is where every request goes until then. Before
+                        // the core says, the placeholder status is not "signed out".
+                        if !LaunchRouting.onboardingKnown(startup: model.startup, statusAnswered: model.status.answered) {
+                            SettingsAwaiting()
+                                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        } else if model.requiresOnboarding {
                             GlassNotice(tone: .ask, title: MonitorWords.signedOut) {
                                 Button(MonitorWindowView.openFirstRun) { OpenMonitor.request() }
                             }
                             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
                         } else {
                             GlassSegmentedTabs(
-        """), "the tabs must be the gate's else branch, under the notices")
-        XCTAssertEqual(window.components(separatedBy: "GlassSegmentedTabs(\n").count - 1, 1,
-                       "a second tab strip would escape the gate")
+        """), "the tabs must be the gate's last branch, under the notices")
+        let pane = try XCTUnwrap(window.range(of: "private struct MonitorMainPane"))
+        let map = try XCTUnwrap(window.range(of: "private struct MonitorMapPane"))
+        XCTAssertEqual(window[pane.lowerBound ..< map.lowerBound].components(separatedBy: "GlassSegmentedTabs(").count - 1, 1,
+                       "a second tab strip in the main pane would escape the gate")
         XCTAssertTrue(window.contains("""
                     GlassPane {
                         // An empty branch would leave the pane nothing to draw, and
                         // it would vanish while the layout still reserved its width.
-                        if model.requiresOnboarding {
+                        if !LaunchRouting.onboardingKnown(startup: model.startup, statusAnswered: model.status.answered)
+                            || model.requiresOnboarding {
                             Color.clear
                         } else {
                             switch tab {
-        """), "the inspector's write controls must not show while onboarding is required")
+        """), "the inspector's write controls must not show until onboarding is known to be done")
     }
 
     /// Finishing first run closes it and opens the Monitor on Home.
@@ -405,26 +414,27 @@ final class MonitorNavigationTests: XCTestCase {
         """), "the pane is bounded by the window, less the scene's margin")
     }
 
-    /// The launch opens a window only once the core has said enough to
-    /// choose: never from the placeholder status of a running daemon. A
+    /// Whether onboarding is required is known only once the core has said
+    /// enough: never from the placeholder status of a running daemon. A
     /// daemon that needs its folders, or refused, has no status to wait for.
-    func test_theLaunchWaitsForTheCoreToAnswer() {
-        XCTAssertFalse(LaunchRouting.launchOpens(startup: .starting, statusAnswered: false))
-        XCTAssertFalse(LaunchRouting.launchOpens(startup: .starting, statusAnswered: true))
-        XCTAssertFalse(LaunchRouting.launchOpens(startup: .running, statusAnswered: false))
-        XCTAssertTrue(LaunchRouting.launchOpens(startup: .running, statusAnswered: true))
-        XCTAssertTrue(LaunchRouting.launchOpens(startup: .needsRoots, statusAnswered: false))
-        XCTAssertTrue(LaunchRouting.launchOpens(startup: .refused("no"), statusAnswered: false))
+    func test_onboardingIsKnownOnlyOnceTheCoreAnswers() {
+        XCTAssertFalse(LaunchRouting.onboardingKnown(startup: .starting, statusAnswered: false))
+        XCTAssertFalse(LaunchRouting.onboardingKnown(startup: .starting, statusAnswered: true))
+        XCTAssertFalse(LaunchRouting.onboardingKnown(startup: .running, statusAnswered: false))
+        XCTAssertTrue(LaunchRouting.onboardingKnown(startup: .running, statusAnswered: true))
+        XCTAssertTrue(LaunchRouting.onboardingKnown(startup: .needsRoots, statusAnswered: false))
+        XCTAssertTrue(LaunchRouting.onboardingKnown(startup: .refused("no"), statusAnswered: false))
     }
 
-    /// The placeholder status is not an answer; the first reply is.
+    /// The placeholder status is not an answer; the first reply is. (The
+    /// input `onboardingKnown` is given by the launch and the Monitor.)
     func test_statusIsAnsweredOnlyByAReply() {
         let model = AppModel()
-        XCTAssertFalse(model.statusAnswered)
+        XCTAssertFalse(model.status.answered)
         model.setStatusForTesting(DaemonStatus(
             schemaVersion: "1.1", loggedIn: false, tenantID: nil, consentScopes: [], paused: false,
             queueDepth: 0, nextDigestAt: nil, health: DaemonHealth(lastErrorLabel: nil, since: nil)))
-        XCTAssertTrue(model.statusAnswered)
+        XCTAssertTrue(model.status.answered)
     }
 
     /// The launch request is made once, from the always-present label, and
@@ -435,7 +445,7 @@ final class MonitorNavigationTests: XCTestCase {
         XCTAssertTrue(main.contains("""
                 label
                     .task { launch() }
-                    .onChange(of: LaunchRouting.launchOpens(startup: model.startup, statusAnswered: model.statusAnswered),
+                    .onChange(of: LaunchRouting.onboardingKnown(startup: model.startup, statusAnswered: model.status.answered),
                               initial: true) { _, ready in
                         openAtLaunch(ready)
                     }
