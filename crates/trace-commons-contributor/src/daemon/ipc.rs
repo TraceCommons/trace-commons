@@ -7372,13 +7372,18 @@ mod tests {
                     serde_json::json!({"mode": "auto_upload", "confirm": true}),
                 ),
             );
-            let err = r.error.expect("the Auto override is refused under dev_dry_run");
+            let err = r
+                .error
+                .expect("the Auto override is refused under dev_dry_run");
             assert_eq!(err.code, ERR_BAD_PARAMS);
             assert_eq!(err.message, ERR_DEV_DRY_RUN);
             for mode in ["notify_only", "ignore"] {
                 let r = handle_request(
                     &s,
-                    &req("set_contribution_override", serde_json::json!({"mode": mode})),
+                    &req(
+                        "set_contribution_override",
+                        serde_json::json!({"mode": mode}),
+                    ),
                 );
                 assert!(r.error.is_none(), "{mode}: {:?}", r.error);
             }
@@ -7389,7 +7394,9 @@ mod tests {
             let mut s = enrolled_shared();
             s.dev_dry_run = true;
             let r = handle_request(&s, &req("grant_automatic", serde_json::json!({})));
-            let err = r.error.expect("grant_automatic is refused under dev_dry_run");
+            let err = r
+                .error
+                .expect("grant_automatic is refused under dev_dry_run");
             assert_eq!(err.code, ERR_BAD_PARAMS);
             assert_eq!(err.message, ERR_DEV_DRY_RUN);
         }

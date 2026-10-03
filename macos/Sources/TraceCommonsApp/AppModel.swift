@@ -1060,11 +1060,11 @@ final class AppModel: ObservableObject {
                 // screens they are about to click through. The guarantee
                 // itself does not depend on this line running -- it is the
                 // daemon's own refusal, enforced whether or not anyone reads
-                // the console.
+                // the console. A label, not a sentence (`ShellWordingTests`):
+                // the words a contributor could ever be shown about this
+                // mode live in `macos/SAMPLE_DATA.md`, not in app code.
                 if DaemonDataWiring.devDryRunActive {
-                    NSLog(
-                        "TraceCommons: TC_DEV_DRY_RUN=1 -- this daemon refuses every send path."
-                    )
+                    NSLog("TraceCommons: TC_DEV_DRY_RUN=1")
                 }
                 #endif
             case .failure(TCDaemon.TCError.rootsNotDeclared):

@@ -16,7 +16,9 @@ use chrono::Utc;
 use serde_json::json;
 
 use super::audit::{self, AuditEntry};
-use super::ipc::{DaemonShared, ERR_BAD_PARAMS, ERR_DEV_DRY_RUN, ERR_UNAVAILABLE, Request, Response};
+use super::ipc::{
+    DaemonShared, ERR_BAD_PARAMS, ERR_DEV_DRY_RUN, ERR_UNAVAILABLE, Request, Response,
+};
 use crate::commands::{EnrollOutcome, enroll_core};
 use crate::consent::{VALID_SCOPES, validate_scopes};
 
