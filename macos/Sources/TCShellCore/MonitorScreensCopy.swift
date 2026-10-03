@@ -61,6 +61,12 @@ public struct MonitorScreensCopy: Decodable, Equatable, Sendable {
     public let quit: String
     public let coreUnreachable: String
     public let requestFailed: String
+    public let heldForReview: String
+    public let heldExplanation: String
+    public let creditNotCurrency: String
+    public let historyShownOf: String
+    public let historyShown: String
+    public let signedOut: String
 
     enum CodingKeys: String, CodingKey {
         case computer
@@ -115,6 +121,12 @@ public struct MonitorScreensCopy: Decodable, Equatable, Sendable {
         case quit
         case coreUnreachable = "core_unreachable"
         case requestFailed = "request_failed"
+        case heldForReview = "held_for_review"
+        case heldExplanation = "held_explanation"
+        case creditNotCurrency = "credit_not_currency"
+        case historyShownOf = "history_shown_of"
+        case historyShown = "history_shown"
+        case signedOut = "signed_out"
     }
 
     /// The payload fields this shell decodes, by wire name.
@@ -171,6 +183,12 @@ public struct MonitorScreensCopy: Decodable, Equatable, Sendable {
         "quit",
         "core_unreachable",
         "request_failed",
+        "held_for_review",
+        "held_explanation",
+        "credit_not_currency",
+        "history_shown_of",
+        "history_shown",
+        "signed_out",
     ]
 
     /// Decode the payload, or nil if it will not parse or a field is empty.
@@ -180,13 +198,20 @@ public struct MonitorScreensCopy: Decodable, Equatable, Sendable {
         else {
             return nil
         }
-        let words = [copy.computer, copy.commons, copy.waiting, copy.folders, copy.watched, copy.off, copy.on, copy.connected, copy.reduce, copy.enlarge, copy.calls, copy.models, copy.priced, copy.unknown, copy.proofVerified, copy.proofGatewayOnly, copy.proofUnattested, copy.proofPending, copy.proofUnavailable, copy.proofFailed, copy.proofOutside, copy.proofUnrecorded, copy.history, copy.contributed, copy.watching, copy.paused, copy.summary, copy.week, copy.month, copy.total, copy.held, copy.withdrawn, copy.credit, copy.creditFinal, copy.pending, copy.community, copy.rank, copy.window, copy.approved, copy.unrecorded, copy.missions, copy.contributionMode, copy.mixed, copy.shared, copy.kept, copy.recentActivity, copy.flagged, copy.manageRules, copy.settings, copy.quit, copy.coreUnreachable, copy.requestFailed]
+        let words = [copy.computer, copy.commons, copy.waiting, copy.folders, copy.watched, copy.off, copy.on, copy.connected, copy.reduce, copy.enlarge, copy.calls, copy.models, copy.priced, copy.unknown, copy.proofVerified, copy.proofGatewayOnly, copy.proofUnattested, copy.proofPending, copy.proofUnavailable, copy.proofFailed, copy.proofOutside, copy.proofUnrecorded, copy.history, copy.contributed, copy.watching, copy.paused, copy.summary, copy.week, copy.month, copy.total, copy.held, copy.withdrawn, copy.credit, copy.creditFinal, copy.pending, copy.community, copy.rank, copy.window, copy.approved, copy.unrecorded, copy.missions, copy.contributionMode, copy.mixed, copy.shared, copy.kept, copy.recentActivity, copy.flagged, copy.manageRules, copy.settings, copy.quit, copy.coreUnreachable, copy.requestFailed, copy.heldForReview, copy.heldExplanation, copy.creditNotCurrency, copy.historyShownOf, copy.historyShown, copy.signedOut]
         return words.contains(where: \.isEmpty) ? nil : copy
     }
 
     /// What a screen says for a failed read: the core's line for a core that
     /// does not answer, or for a request that failed. Never the error's own
     /// fixed label, which is for logs.
+    public func historyCap(shown: Int, total: Int?) -> String {
+        guard let total else { return historyShown.replacingOccurrences(of: "{shown}", with: String(shown)) }
+        return historyShownOf
+            .replacingOccurrences(of: "{shown}", with: String(shown))
+            .replacingOccurrences(of: "{total}", with: String(total))
+    }
+
     public func line(for error: DaemonDataError) -> String {
         if case .unreachable = error { return coreUnreachable }
         return requestFailed

@@ -319,6 +319,25 @@ pub struct MonitorScreensCopy {
     pub core_unreachable: &'static str,
     /// A request failed; see [`MONITOR_REQUEST_FAILED`].
     pub request_failed: &'static str,
+    /// Held for privacy review, in full: the inspector's label for the
+    /// held count. Never rejected.
+    pub held_for_review: &'static str,
+    /// What held for privacy review means, beside the held count: the
+    /// shipping History's sentence, moved here.
+    pub held_explanation: &'static str,
+    /// Beside every credit figure, pending included: credit is a record,
+    /// not currency. The shipping credit view's sentence, moved here.
+    pub credit_not_currency: &'static str,
+    /// DRAFT, NEEDS APPROVAL. History reads a page of rows; when the page
+    /// is full, how many of the total it shows. `{shown}` and `{total}`
+    /// are replaced with numbers.
+    pub history_shown_of: &'static str,
+    /// DRAFT, NEEDS APPROVAL. As `history_shown_of`, when the total is
+    /// not known. `{shown}` is replaced with a number.
+    pub history_shown: &'static str,
+    /// DRAFT, NEEDS APPROVAL. Home's watching row when the core says
+    /// the contributor is not signed in: nothing is contributed.
+    pub signed_out: &'static str,
 }
 
 /// The one table of the monitor screens' words. See [`MonitorScreensCopy`].
@@ -377,6 +396,12 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
         quit: "Quit…",
         core_unreachable: MONITOR_CORE_UNREACHABLE,
         request_failed: MONITOR_REQUEST_FAILED,
+        held_for_review: "Held for privacy review",
+        held_explanation: "Automated checks saw something that might be personal and couldn't decide on their own. It has not been rejected, and it has not been shared with anyone but the reviewer.",
+        credit_not_currency: "A credit is a signed record that a contribution was accepted. It is not currency.",
+        history_shown_of: "Showing the newest {shown} of {total}",
+        history_shown: "Showing the newest {shown}",
+        signed_out: "Not signed in",
     }
 }
 
@@ -396,6 +421,13 @@ mod tests {
         assert_eq!(copy.request_failed, traces.request_failed);
         // Not recorded is never said as approved.
         assert_ne!(copy.unrecorded, copy.approved);
+        // History's cap lines carry their numbers' places.
+        assert!(
+            copy.history_shown_of.contains("{shown}") && copy.history_shown_of.contains("{total}")
+        );
+        assert!(copy.history_shown.contains("{shown}") && !copy.history_shown.contains("{total}"));
+        // Held is said in full, and never as rejected.
+        assert!(copy.held_explanation.contains("not been rejected"));
     }
 
     #[test]
