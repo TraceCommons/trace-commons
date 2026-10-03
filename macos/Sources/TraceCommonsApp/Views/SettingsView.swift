@@ -222,11 +222,11 @@ struct SettingsContent: View {
         VStack(alignment: .leading, spacing: TC.Space.sm) {
             TCSectionHeader(title: "Connection")
             if model.status.loggedIn {
-                TCTag(text: "Connected", tone: .clear, symbol: "link")
+                TCTag(text: SettingsLegacyWords.connected, tone: .clear, symbol: "link")
             } else {
                 VStack(alignment: .leading, spacing: TC.Space.xs) {
-                    TCTag(text: "Not connected", tone: .attention, symbol: "link.badge.plus")
-                    Text("Sessions are being queued, but nothing can be sent.")
+                    TCTag(text: SettingsLegacyWords.notConnected, tone: .attention, symbol: "link.badge.plus")
+                    Text(SettingsLegacyWords.queuedNothingSent)
                         .font(TC.Font_.meta)
                         .foregroundStyle(.secondary)
                 }
@@ -245,7 +245,7 @@ struct SettingsContent: View {
                 sourceCheckRow(TCSourceChecks.codex, settings.routingSourceModes.codex)
                 sourceCheckRow(TCSourceChecks.gemini, settings.routingSourceModes.gemini)
                 sourceCheckRow(TCSourceChecks.cline, settings.routingSourceModes.cline)
-                checkRow("Extra privacy scan configured", settings.nearAIConfigured)
+                checkRow(SettingsLegacyWords.extraScanConfigured, settings.nearAIConfigured)
             }
         }
     }
@@ -856,16 +856,16 @@ struct SettingsContent: View {
         VStack(alignment: .leading, spacing: TC.Space.sm) {
             TCSectionHeader(title: "Watching")
             if let settings = model.daemonSettings {
-                Text("A session counts as finished after \(settings.quiescenceSecs) seconds of quiet.")
+                Text(SettingsLegacyWords.sessionFinishedAfter(settings.quiescenceSecs))
                     .font(TC.Font_.body)
-                Text("At most one notification every \(settings.digestIntervalSecs / 3600) hours, and none when nothing is waiting.")
+                Text(SettingsLegacyWords.atMostOneNotification(settings.digestIntervalSecs / 3600))
                     .font(TC.Font_.body)
-                Text("Undecided sessions are dropped after \(settings.queueTtlDays) days. Dropped means never sent.")
+                Text(SettingsLegacyWords.undecidedDropped(settings.queueTtlDays))
                     .font(TC.Font_.body)
-                checkRow("Notifications rendered by this app", !settings.localNotifications)
+                checkRow(SettingsLegacyWords.notificationsRenderedHere, !settings.localNotifications)
             }
             if model.status.paused {
-                Text("Paused. Nothing is being queued or sent.").font(TC.Font_.body)
+                Text(SettingsLegacyWords.pausedNothingSent).font(TC.Font_.body)
             }
         }
     }
@@ -1790,7 +1790,7 @@ struct SettingsContent: View {
         VStack(alignment: .leading, spacing: TC.Space.sm) {
             TCSectionHeader(title: Self.auditHeading)
             if model.audit.isEmpty {
-                Text("Nothing has been changed.")
+                Text(SettingsLegacyWords.nothingChanged)
                     .font(TC.Font_.meta)
                     .foregroundStyle(.secondary)
             }
@@ -1833,7 +1833,7 @@ struct SettingsContent: View {
     /// `audit_sentence`, verbatim, including its catch-all: an action this
     /// build does not know still gets a row, because a change that happened
     /// and is not listed is exactly what this log exists to prevent.
-    private static func auditSentence(_ action: String, project: String?) -> String {
+    static func auditSentence(_ action: String, project: String?) -> String {
         let sentence: String
         switch action {
         case "armed-auto-upload": sentence = "Automatic contributing turned on for"
@@ -2138,3 +2138,32 @@ private struct GoPublicDialog: View {
     }
 }
 
+
+// MARK: - Words the glass sections read
+
+/// Every sentence this file authors, in one place, so the glass sections
+/// can read them without authoring any of their own. The ratchet
+/// (`ShellWordingTests`) keys on this file's path: these sentences stay here
+/// until the core exports them, and then this table shrinks.
+enum SettingsLegacyWords {
+    static let connected = "Connected"
+    static let notConnected = "Not connected"
+    static let queuedNothingSent = "Sessions are being queued, but nothing can be sent."
+    static let extraScanConfigured = "Extra privacy scan configured"
+    static func sessionFinishedAfter(_ secs: Int) -> String {
+        "A session counts as finished after \(secs) seconds of quiet."
+    }
+    static func atMostOneNotification(_ hours: Int) -> String {
+        "At most one notification every \(hours) hours, and none when nothing is waiting."
+    }
+    static func undecidedDropped(_ days: Int) -> String {
+        "Undecided sessions are dropped after \(days) days. Dropped means never sent."
+    }
+    static let notificationsRenderedHere = "Notifications rendered by this app"
+    static let pausedNothingSent = "Paused. Nothing is being queued or sent."
+    static let auditHeading = SettingsContent.auditHeading
+    static let nothingChanged = "Nothing has been changed."
+    static func auditSentence(_ action: String, project: String?) -> String {
+        SettingsContent.auditSentence(action, project: project)
+    }
+}
