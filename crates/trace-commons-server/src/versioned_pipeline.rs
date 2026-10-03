@@ -145,6 +145,17 @@ pub const PIPELINE_POLICY_INTERVENTION_NOT_SUPPORTED_LABEL: &str =
 /// An unknown action, or an actor or reason that fails the operator-action
 /// rule (`validate_actor`).
 pub const PIPELINE_POLICY_INTERVENTION_INVALID_LABEL: &str = "policy_intervention_invalid";
+/// An intervention that waited `PIPELINE_ADMIN_LOCK_TIMEOUT` for its policy
+/// row and did not get it (a phase commit, a payout, or another intervention
+/// holds it): nothing is written, and the operator repeats the request.
+pub const PIPELINE_POLICY_INTERVENTION_BUSY_LABEL: &str = "policy_intervention_busy";
+/// How long an operator's action waits for a lock (final fix wave G15): a
+/// routing change (`PipelineActivationStore`) for the tenant's routing lock
+/// and the rows it locks after it, and a policy intervention for its policy
+/// row. Set with `SET LOCAL lock_timeout` in the action's own transaction,
+/// so it bounds no other transaction: a receipt and a phase commit keep no
+/// lock timeout, and never fail because an operator's action waits.
+pub(crate) const PIPELINE_ADMIN_LOCK_TIMEOUT_SQL: &str = "SET LOCAL lock_timeout = '5s'";
 /// A `suspend` of a policy that is not runnable, or a `resume` of one that is.
 pub const PIPELINE_POLICY_INTERVENTION_NO_TRANSITION_LABEL: &str =
     "policy_intervention_no_transition";
@@ -1633,7 +1644,10 @@ impl PgPipelineStore {
     /// row, and the policy row through every upsert to the commit of
     /// `index_write_state`, at most the earlier of the Settle lease's end and
     /// `PIPELINE_INDEX_DISPATCH_BUDGET_SECONDS` (30 seconds): past that the
-    /// dispatch stops writing and rolls back.
+    /// dispatch stops writing and rolls back. The intervention itself waits
+    /// at most 5 seconds for the row (`PIPELINE_ADMIN_LOCK_TIMEOUT_SQL`), then
+    /// fails with `policy_intervention_busy` and writes nothing: the operator
+    /// repeats it (an index dispatch can hold the row for longer than that).
     ///
     /// Only `suspend` of a runnable policy and `resume` of a suspended one
     /// are transitions. `terminate` is `policy_intervention_not_supported`;
@@ -1686,6 +1700,9 @@ impl PgPipelineStore {
         };
         let mut client = self.backend.trace_pool().get().await?;
         let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
+        // The wait for the policy row is bounded (G15); a wait that runs out
+        // is `policy_intervention_busy`, and nothing is written.
+        tx.batch_execute(PIPELINE_ADMIN_LOCK_TIMEOUT_SQL).await?;
         let row = tx
             .query_opt(
                 "SELECT operational_status
@@ -1694,7 +1711,10 @@ impl PgPipelineStore {
                   FOR UPDATE",
                 &[&tenant_id, &bundle_id, &phase_as_db(Some(phase))],
             )
-            .await?
+            .await
+            .map_err(|error| {
+                lock_timeout_as(error.into(), PIPELINE_POLICY_INTERVENTION_BUSY_LABEL)
+            })?
             .ok_or_else(|| DatabaseError::NotFound {
                 entity: "pipeline_bundle_policy".to_string(),
                 id: format!("{bundle_id}:{}", phase_as_db(Some(phase))),
@@ -6105,6 +6125,20 @@ pub(crate) async fn lock_runnable_policy(
         )
         .await?
         .is_some_and(|row| row.get::<_, bool>("runnable")))
+}
+
+/// `error` as the refusal `label` when it is a lock wait that ran out its
+/// `lock_timeout` (`lock_not_available`, SQLSTATE 55P03); any other error as
+/// it is. For an operator's action that set `PIPELINE_ADMIN_LOCK_TIMEOUT_SQL`.
+pub(crate) fn lock_timeout_as(error: DatabaseError, label: &str) -> DatabaseError {
+    match error {
+        DatabaseError::Postgres(error)
+            if error.code() == Some(&tokio_postgres::error::SqlState::LOCK_NOT_AVAILABLE) =>
+        {
+            DatabaseError::Constraint(label.to_string())
+        }
+        other => other,
+    }
 }
 
 /// The one Review-phase submission-operability predicate: neither pre-review

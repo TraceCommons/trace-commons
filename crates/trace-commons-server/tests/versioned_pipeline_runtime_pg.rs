@@ -34785,6 +34785,159 @@ async fn the_routing_fence_holds_under_a_repeatable_read_default() {
     assert_eq!(count_runs(&backend, &tenant).await, 0, "no run");
 }
 
+/// Final fix wave (G15): an admin operation waits at most `lock_timeout`
+/// (5 s) for a lock, then fails with its busy label and writes nothing,
+/// while a receipt has no timeout. A receipt's commit transaction holds the
+/// tenant's routing lock shared and waits for its Admission policy row, which
+/// an operator's transaction holds `FOR UPDATE`. `contain` waits for the
+/// routing lock and fails with `pipeline_routing_busy`; a suspension of that
+/// policy waits for the row and fails with `policy_intervention_busy`. Both
+/// wait at least the 5 s. Once the row is free the receipt, which waited
+/// longer than both, completes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_admin_operation_behind_a_held_lock_fails_busy_and_the_receipt_completes() {
+    let Some(backend) = runtime_backend(6).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let activation = PipelineActivationStore::new(backend.clone());
+    let tenant = routing_tenant("admin-busy");
+    write_routing_as_operator(&tenant, "pipeline").await;
+    service.register_default_bundle(&tenant).await.unwrap();
+    let bundle_id = service.bundle_id().to_string();
+
+    let mut holder = owner_client().await;
+    let held = owner_tenant_tx(&mut holder, &tenant).await;
+    held.execute(
+        "SELECT 1 FROM pipeline_bundle_policy_status
+          WHERE tenant_id = $1 AND bundle_id = $2 AND phase = 'admission'
+          FOR UPDATE",
+        &[&tenant, &bundle_id],
+    )
+    .await
+    .expect("hold the Admission policy row");
+
+    let env = envelope(uuid::Uuid::new_v4()).await;
+    let raw = serde_json::to_vec(&env).unwrap();
+    let key = env.submission_id.to_string();
+    let receipt_task = tokio::spawn({
+        let service = service.clone();
+        let tenant = tenant.clone();
+        let env = env.clone();
+        async move {
+            service
+                .submit(receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+                .await
+        }
+    });
+    // The receipt's commit transaction waits for the policy row `FOR SHARE`,
+    // which it takes after the routing lock (shared): once the session that
+    // holds this tenant's routing lock shared waits on that statement, the
+    // receipt holds the routing lock.
+    let observer = owner_client().await;
+    let lock_key = format!("pipeline-routing:{tenant}");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let waiting: bool = observer
+            .query_one(
+                "SELECT EXISTS (
+                     SELECT 1 FROM pg_stat_activity a
+                       JOIN pg_locks l ON l.pid = a.pid
+                      WHERE a.datname = current_database()
+                        AND a.wait_event_type = 'Lock'
+                        AND a.query LIKE '%pipeline_bundle_policy_status%FOR SHARE%'
+                        AND l.locktype = 'advisory' AND l.mode = 'ShareLock'
+                        AND l.granted AND l.objsubid = 1
+                        AND ((l.classid::bigint << 32) | l.objid::bigint)
+                            = hashtextextended($1, 2)
+                 )",
+                &[&lock_key],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        if waiting {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the receipt's commit transaction waits for the policy row"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+
+    let started = std::time::Instant::now();
+    let refused = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        activation.contain(&tenant, &routing_actor(), "contain_while_busy"),
+    )
+    .await
+    .expect("containment does not wait for ever");
+    assert!(
+        matches!(refused, Err(DatabaseError::Constraint(ref label)) if label == "pipeline_routing_busy"),
+        "unexpected containment result: {refused:?}"
+    );
+    assert!(
+        started.elapsed() >= std::time::Duration::from_millis(4_900),
+        "containment waited the lock timeout: {:?}",
+        started.elapsed()
+    );
+    assert_eq!(
+        activation
+            .routing(&tenant)
+            .await
+            .unwrap()
+            .map(|row| row.routing_state),
+        Some(RoutingState::Pipeline),
+        "the busy containment wrote nothing"
+    );
+    assert!(activation.events(&tenant, 10).await.unwrap().is_empty());
+
+    let started = std::time::Instant::now();
+    let refused = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        PgPipelineStore::new(backend.clone()).intervene_policy(
+            &tenant,
+            &bundle_id,
+            Phase::Admission,
+            "suspend",
+            &routing_actor(),
+            "suspend_while_busy",
+        ),
+    )
+    .await
+    .expect("the intervention does not wait for ever");
+    assert!(
+        matches!(refused, Err(DatabaseError::Constraint(ref label)) if label == "policy_intervention_busy"),
+        "unexpected intervention result: {refused:?}"
+    );
+    assert!(
+        started.elapsed() >= std::time::Duration::from_millis(4_900),
+        "the intervention waited the lock timeout: {:?}",
+        started.elapsed()
+    );
+
+    held.rollback().await.unwrap();
+    drop(holder);
+    let result = tokio::time::timeout(std::time::Duration::from_secs(10), receipt_task)
+        .await
+        .expect("the receipt finishes once the policy row is free")
+        .expect("the receipt task does not panic")
+        .expect("the receipt that held the lock completes");
+    assert!(
+        matches!(result, PipelineReceiptResult::Created(_)),
+        "unexpected result: {result:?}"
+    );
+    assert_eq!(count_runs(&backend, &tenant).await, 1);
+}
+
 /// The legacy path's claim of a submission id never takes one that a
 /// pipeline run owns, whether or not the run has an ownership row. (a) A
 /// receipt through the service writes the run and its `pipeline` ownership

@@ -43,11 +43,12 @@ use super::*;
 use axum::extract::rejection::QueryRejection;
 use trace_commons_gate_api::pipeline::Phase;
 use trace_commons_server::versioned_pipeline::{
-    PipelinePolicyInterventionRecord, PolicyOperationalStatus, is_bundle_id,
+    PIPELINE_POLICY_INTERVENTION_BUSY_LABEL, PipelinePolicyInterventionRecord,
+    PolicyOperationalStatus, is_bundle_id,
 };
 use trace_commons_server::versioned_pipeline_activation::{
-    ActivationEvent, ActivationReadiness, ActivationRequest, LegacyDrainReport, RoutingState,
-    TenantRouting,
+    ActivationEvent, ActivationReadiness, ActivationRequest, LEGACY_DRAIN_REPORT_TIMEOUT_LABEL,
+    LegacyDrainReport, PIPELINE_ROUTING_BUSY_LABEL, RoutingState, TenantRouting,
 };
 use trace_commons_server::versioned_pipeline_bundle::PIPELINE_BUNDLE_INVALID_LABEL;
 use trace_commons_server::versioned_pipeline_qualification::{
@@ -382,13 +383,28 @@ fn is_refusal_label(label: &str) -> bool {
             .is_some_and(|(label, check_id)| is_safe_label(label) && is_safe_label(check_id))
 }
 
+/// The refusal labels that are `503`, not `409`: a condition that passes by
+/// itself, which the operator waits out and then repeats the request.
+const RETRYABLE_REFUSAL_LABELS: &[&str] = &[
+    // An admin operation that waited its lock timeout (5 s) behind a receipt,
+    // a phase commit, or another admin operation (final fix wave G15).
+    PIPELINE_ROUTING_BUSY_LABEL,
+    PIPELINE_POLICY_INTERVENTION_BUSY_LABEL,
+    // A drain report statement past its statement timeout (30 s, G27).
+    LEGACY_DRAIN_REPORT_TIMEOUT_LABEL,
+];
+
 /// The one map from a store's or a check's error to an answer, shared by the
 /// nine handlers: a refusal named by a refusal label (`is_refusal_label`) is
-/// `409` with that label; a bundle the tenant has no policy row for is `404`
-/// `bundle_package_missing`; anything else is the hash-only internal error.
-/// No answer is built from a request field.
+/// `409` with that label, or `503` for the labels of
+/// `RETRYABLE_REFUSAL_LABELS`; a bundle the tenant has no policy row for is
+/// `404` `bundle_package_missing`; anything else is the hash-only internal
+/// error. No answer is built from a request field.
 fn activation_error(error: DatabaseError) -> (StatusCode, Json<ApiError>) {
     match error {
+        DatabaseError::Constraint(label) if RETRYABLE_REFUSAL_LABELS.contains(&label.as_str()) => {
+            api_error(StatusCode::SERVICE_UNAVAILABLE, label)
+        }
         DatabaseError::Constraint(label) if is_refusal_label(&label) => {
             api_error(StatusCode::CONFLICT, label)
         }
@@ -1385,6 +1401,9 @@ mod tests {
             LEGACY_DRAIN_RECORDS_NOT_AUTHORITATIVE_LABEL,
             PIPELINE_ROUTING_STORE_MISSING_LABEL,
             PIPELINE_TENANT_NOT_IN_SCOPE_LABEL,
+            PIPELINE_ROUTING_BUSY_LABEL,
+            PIPELINE_POLICY_INTERVENTION_BUSY_LABEL,
+            LEGACY_DRAIN_REPORT_TIMEOUT_LABEL,
             BUNDLE_PACKAGE_MISSING_LABEL,
             PACKAGE_RUNTIME_REVISION_UNKNOWN_LABEL,
             ROUTING_READ_SURFACE,
@@ -1434,6 +1453,37 @@ mod tests {
             let (status, _) = activation_error(DatabaseError::Constraint(unsafe_label.to_string()));
             assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{unsafe_label}");
         }
+    }
+
+    /// Final fix wave (G15): an admin operation that waited out its lock
+    /// timeout is `503` with its busy label, a condition an operator retries,
+    /// not a `409` refusal.
+    #[test]
+    fn a_busy_admin_lock_is_service_unavailable() {
+        for label in ["pipeline_routing_busy", "policy_intervention_busy"] {
+            let (status, Json(body)) =
+                activation_error(DatabaseError::Constraint(label.to_string()));
+            assert_eq!(
+                (status, body.error.as_str()),
+                (StatusCode::SERVICE_UNAVAILABLE, label)
+            );
+        }
+    }
+
+    /// Final fix wave (G27): a drain report that ran past its statement
+    /// timeout is `503 legacy_drain_report_timeout`.
+    #[test]
+    fn a_drain_report_past_its_statement_timeout_is_service_unavailable() {
+        let (status, Json(body)) = activation_error(DatabaseError::Constraint(
+            "legacy_drain_report_timeout".to_string(),
+        ));
+        assert_eq!(
+            (status, body.error.as_str()),
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "legacy_drain_report_timeout"
+            )
+        );
     }
 
     /// Final fix wave (G9): config-status reports whether this process routes

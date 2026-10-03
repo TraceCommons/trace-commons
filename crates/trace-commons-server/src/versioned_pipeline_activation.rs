@@ -22,7 +22,8 @@ use uuid::Uuid;
 use crate::db::postgres::PgBackend;
 use crate::error::DatabaseError;
 use crate::versioned_pipeline::{
-    PIPELINE_ROUTING_LOCK_SEED, pipeline_routing_lock, sha256_prefixed, validate_actor,
+    PIPELINE_ADMIN_LOCK_TIMEOUT_SQL, PIPELINE_ROUTING_LOCK_SEED, lock_timeout_as,
+    pipeline_routing_lock, sha256_prefixed, validate_actor,
 };
 use crate::versioned_pipeline_product::PipelineOperationalSummary;
 use crate::versioned_pipeline_qualification::{
@@ -36,6 +37,19 @@ pub const ACTIVATION_ACTOR_INVALID_LABEL: &str = "activation_actor_invalid";
 pub const ACTIVATION_STATE_INVALID_LABEL: &str = "activation_state_invalid";
 pub const ACTIVATION_READINESS_FAILED_LABEL: &str = "activation_readiness_failed";
 pub const EARLIER_QUALIFIED_BUNDLE_REQUIRED_LABEL: &str = "earlier_qualified_bundle_required";
+/// A routing change (`activate`, `rollback`, `contain`, `deactivate`) that
+/// waited its lock timeout (5 s, `PIPELINE_ADMIN_LOCK_TIMEOUT_SQL`) for the
+/// tenant's routing lock, or for a row it locks after it, and did not get
+/// it: nothing is written, and the operator repeats the request.
+pub const PIPELINE_ROUTING_BUSY_LABEL: &str = "pipeline_routing_busy";
+/// A statement of the legacy drain report that ran longer than
+/// `LEGACY_DRAIN_STATEMENT_TIMEOUT_SQL` allows: no report is answered.
+pub const LEGACY_DRAIN_REPORT_TIMEOUT_LABEL: &str = "legacy_drain_report_timeout";
+/// The statement timeout of the drain report's transaction: 30 seconds for
+/// each of its statements (final fix wave G27). The report's cost grows with
+/// the tenant's history (a count visits every submission or batch of the
+/// tenant), on a pooled connection that other tenants share.
+const LEGACY_DRAIN_STATEMENT_TIMEOUT_SQL: &str = "SET LOCAL statement_timeout = '30s'";
 pub const ACTIVATION_MAX_ERROR_COUNT: u64 = 0;
 pub const ACTIVATION_MAX_WORK_AGE_SECONDS: u64 = 300;
 
@@ -793,7 +807,18 @@ fn bundle_selection_evidence_hash(
 /// lock, a quota lock, or a session row. A policy intervention takes only its
 /// policy row (`FOR UPDATE`). So no two of these wait for each other in
 /// opposite orders.
+///
+/// The wait is bounded (final fix wave G15): this sets
+/// `PIPELINE_ADMIN_LOCK_TIMEOUT_SQL` for the rest of `tx`, so the routing
+/// lock, and each row a routing change locks after it, is waited for at most
+/// 5 seconds. A wait that runs out fails the statement with
+/// `lock_not_available`, which each routing change answers as
+/// `pipeline_routing_busy` (`routing_busy`). A queued exclusive request holds
+/// back every later receipt of the tenant, each on a pooled connection, so an
+/// operator's action must not queue without a bound. A receipt sets no
+/// timeout: it never fails because a routing change waits.
 async fn lock_routing(tx: &Transaction<'_>, tenant_id: &str) -> Result<(), DatabaseError> {
+    tx.batch_execute(PIPELINE_ADMIN_LOCK_TIMEOUT_SQL).await?;
     tx.execute(
         "SELECT pg_advisory_xact_lock(hashtextextended($1, $2))",
         &[
@@ -803,6 +828,11 @@ async fn lock_routing(tx: &Transaction<'_>, tenant_id: &str) -> Result<(), Datab
     )
     .await?;
     Ok(())
+}
+
+/// A routing change's lock wait that ran out, as `pipeline_routing_busy`.
+fn routing_busy(error: DatabaseError) -> DatabaseError {
+    lock_timeout_as(error, PIPELINE_ROUTING_BUSY_LABEL)
 }
 
 /// The tenant's routing state in `tx`; `None` for a tenant with no row. A
@@ -821,10 +851,11 @@ async fn routing_state_in(
 }
 
 /// Writes the routing row and its event in the caller's transaction. The
-/// caller holds the routing lock (`lock_routing`) and has read whatever it
-/// checks before it writes, so the previous state read here is the state the
-/// caller checked. The row has no bundle column; the two bundle ids belong to
-/// the event only.
+/// caller holds the routing lock (`lock_routing`) and passes `previous`, the
+/// state it read under that lock (`routing_state_in`; `None` for a tenant
+/// with no row), so the event's previous state is the state the caller
+/// checked and the row is not read a second time. The row has no bundle
+/// column; the two bundle ids belong to the event only.
 ///
 /// The row's and the event's `recorded_at` are the database clock at the
 /// write (`clock_timestamp()`), not the transaction's start. The lock orders
@@ -835,6 +866,7 @@ async fn routing_state_in(
 pub(crate) async fn write_routing_in(
     tx: &Transaction<'_>,
     tenant_id: &str,
+    previous: Option<RoutingState>,
     resulting: RoutingState,
     action: ActivationAction,
     previous_bundle_id: Option<&str>,
@@ -849,16 +881,7 @@ pub(crate) async fn write_routing_in(
         &[&tenant_id],
     )
     .await?;
-    let previous_state = match tx
-        .query_opt(
-            "SELECT routing_state FROM pipeline_tenant_routing WHERE tenant_id = $1",
-            &[&tenant_id],
-        )
-        .await?
-    {
-        Some(row) => RoutingState::from_db(row.get::<_, String>("routing_state").as_str())?.as_db(),
-        None => "unselected",
-    };
+    let previous_state = previous.map_or("unselected", RoutingState::as_db);
     let activation_record_id = Uuid::new_v4();
     let row = tx
         .query_one(
@@ -1241,14 +1264,29 @@ impl PipelineActivationStore {
         )?;
         let mut client = self.backend.trace_pool().get().await?;
         let tx = Self::tenant_transaction(&mut client, request.tenant_id).await?;
-        lock_routing(&tx, request.tenant_id).await?;
-        // Any state may be activated; the read only refuses a row it cannot
-        // decode, before the gate.
-        routing_state_in(&tx, request.tenant_id).await?;
+        let routing = Self::activate_in(&tx, request, readiness)
+            .await
+            .map_err(routing_busy)?;
+        tx.commit().await?;
+        Ok(routing)
+    }
+
+    /// `activate_tenant` inside its transaction, from the routing lock to the
+    /// routing row and the event. A lock wait that runs out returns the
+    /// database's error, which the caller answers as `pipeline_routing_busy`.
+    async fn activate_in(
+        tx: &Transaction<'_>,
+        request: ActivationRequest<'_>,
+        readiness: &ActivationReadiness,
+    ) -> Result<TenantRouting, DatabaseError> {
+        lock_routing(tx, request.tenant_id).await?;
+        // Any state may be activated; the read refuses a row it cannot
+        // decode, before the gate, and gives the event its previous state.
+        let current = routing_state_in(tx, request.tenant_id).await?;
         let now = Utc::now();
         evaluate_activation_readiness(readiness, now).map_err(DatabaseError::Constraint)?;
         let previous_bundle_id = PipelineQualificationStore::activate_qualified_bundle_in(
-            &tx,
+            tx,
             request.tenant_id,
             request.bundle_id,
             request.promotion,
@@ -1259,9 +1297,10 @@ impl PipelineActivationStore {
         .await?;
         let evidence_hash =
             bundle_selection_evidence_hash(Some(readiness), request.promotion, request.bundle_id)?;
-        let routing = write_routing_in(
-            &tx,
+        write_routing_in(
+            tx,
             request.tenant_id,
+            current,
             RoutingState::Pipeline,
             ActivationAction::Activate,
             previous_bundle_id.as_deref(),
@@ -1270,9 +1309,7 @@ impl PipelineActivationStore {
             request.reason_code,
             &evidence_hash,
         )
-        .await?;
-        tx.commit().await?;
-        Ok(routing)
+        .await
     }
 
     /// Routes a `pipeline` or `contained` tenant's new receipts to the
@@ -1297,12 +1334,25 @@ impl PipelineActivationStore {
             request.reason_code,
             ACTIVATION_ACTOR_INVALID_LABEL,
         )?;
-        let tenant_id = request.tenant_id;
         let mut client = self.backend.trace_pool().get().await?;
-        let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
-        lock_routing(&tx, tenant_id).await?;
+        let tx = Self::tenant_transaction(&mut client, request.tenant_id).await?;
+        let routing = Self::rollback_in(&tx, request)
+            .await
+            .map_err(routing_busy)?;
+        tx.commit().await?;
+        Ok(routing)
+    }
+
+    /// `rollback_bundle` inside its transaction, as `activate_in`.
+    async fn rollback_in(
+        tx: &Transaction<'_>,
+        request: ActivationRequest<'_>,
+    ) -> Result<TenantRouting, DatabaseError> {
+        let tenant_id = request.tenant_id;
+        lock_routing(tx, tenant_id).await?;
+        let current = routing_state_in(tx, tenant_id).await?;
         if !matches!(
-            routing_state_in(&tx, tenant_id).await?,
+            current,
             Some(RoutingState::Pipeline | RoutingState::Contained)
         ) {
             return Err(DatabaseError::Constraint(
@@ -1335,7 +1385,7 @@ impl PipelineActivationStore {
             ));
         }
         let previous_bundle_id = PipelineQualificationStore::activate_qualified_bundle_in(
-            &tx,
+            tx,
             tenant_id,
             request.bundle_id,
             request.promotion,
@@ -1346,9 +1396,10 @@ impl PipelineActivationStore {
         .await?;
         let evidence_hash =
             bundle_selection_evidence_hash(None, request.promotion, request.bundle_id)?;
-        let routing = write_routing_in(
-            &tx,
+        write_routing_in(
+            tx,
             tenant_id,
+            current,
             RoutingState::Pipeline,
             ActivationAction::Rollback,
             previous_bundle_id.as_deref(),
@@ -1357,9 +1408,7 @@ impl PipelineActivationStore {
             request.reason_code,
             &evidence_hash,
         )
-        .await?;
-        tx.commit().await?;
-        Ok(routing)
+        .await
     }
 
     /// What the legacy path still owes `tenant_id`, as ten counts in `pending`
@@ -1533,6 +1582,14 @@ impl PipelineActivationStore {
     /// statement for each count that the mode takes (ten with the gate driver
     /// on: the two gate statements; nine with it off: the absent statement
     /// instead of them) and no row lock.
+    ///
+    /// Cost and its bound (final fix wave G27). Each count visits every
+    /// submission, batch, or outbox row of the tenant, so the report's cost
+    /// grows with the tenant's whole history, on a pooled connection. The
+    /// transaction sets `statement_timeout` to 30 seconds
+    /// (`LEGACY_DRAIN_STATEMENT_TIMEOUT_SQL`): a statement that runs longer
+    /// is cancelled, and the report fails with `legacy_drain_report_timeout`
+    /// and answers nothing, never a partial report.
     pub async fn legacy_drain_report(
         &self,
         tenant_id: &str,
@@ -1542,6 +1599,15 @@ impl PipelineActivationStore {
         let gate_driver_enabled = gate_driver_max_attempts.is_some();
         let mut client = self.backend.trace_pool().get().await?;
         let tx = Self::read_only_tenant_transaction(&mut client, tenant_id).await?;
+        tx.batch_execute(LEGACY_DRAIN_STATEMENT_TIMEOUT_SQL).await?;
+        // A statement cancelled by the timeout (`query_canceled`, 57014).
+        let timed_out = |error: tokio_postgres::Error| {
+            if error.code() == Some(&tokio_postgres::error::SqlState::QUERY_CANCELED) {
+                DatabaseError::Constraint(LEGACY_DRAIN_REPORT_TIMEOUT_LABEL.to_string())
+            } else {
+                DatabaseError::from(error)
+            }
+        };
         let mut pending = BTreeMap::new();
         let mut not_blocking = BTreeMap::new();
         for count in &LEGACY_DRAIN_COUNTS {
@@ -1566,7 +1632,11 @@ impl PipelineActivationStore {
                         &[&tenant_id, &held_retention_policy_ids]
                     }
                 };
-                let counted: i64 = tx.query_one(count.sql, params).await?.get(0);
+                let counted: i64 = tx
+                    .query_one(count.sql, params)
+                    .await
+                    .map_err(timed_out)?
+                    .get(0);
                 u64::try_from(counted).map_err(|_| {
                     DatabaseError::Serialization("legacy_drain_count_invalid".to_string())
                 })?
@@ -1585,7 +1655,8 @@ impl PipelineActivationStore {
                 "SELECT routing_state FROM pipeline_tenant_routing WHERE tenant_id = $1",
                 &[&tenant_id],
             )
-            .await?
+            .await
+            .map_err(timed_out)?
             .map(|row| RoutingState::from_db(row.get::<_, String>("routing_state").as_str()))
             .transpose()?;
         tx.commit().await?;
@@ -1641,7 +1712,31 @@ impl PipelineActivationStore {
     ) -> Result<TenantRouting, DatabaseError> {
         let mut client = self.backend.trace_pool().get().await?;
         let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
-        lock_routing(&tx, tenant_id).await?;
+        let routing = Self::change_routing_in(
+            &tx,
+            tenant_id,
+            actor_principal_ref,
+            reason_code,
+            action,
+            resulting,
+        )
+        .await
+        .map_err(routing_busy)?;
+        tx.commit().await?;
+        Ok(routing)
+    }
+
+    /// `change_routing` inside its transaction, as `activate_in`.
+    async fn change_routing_in(
+        tx: &Transaction<'_>,
+        tenant_id: &str,
+        actor_principal_ref: &str,
+        reason_code: &str,
+        action: ActivationAction,
+        resulting: RoutingState,
+    ) -> Result<TenantRouting, DatabaseError> {
+        lock_routing(tx, tenant_id).await?;
+        let current = routing_state_in(tx, tenant_id).await?;
         let active_bundle_id: Option<String> = tx
             .query_opt(
                 "SELECT bundle_id FROM pipeline_active_bundles WHERE tenant_id = $1",
@@ -1649,20 +1744,12 @@ impl PipelineActivationStore {
             )
             .await?
             .map(|row| row.get("bundle_id"));
-        if action == ActivationAction::Deactivate {
-            let current = tx
-                .query_opt(
-                    "SELECT routing_state FROM pipeline_tenant_routing WHERE tenant_id = $1",
-                    &[&tenant_id],
-                )
-                .await?
-                .map(|row| RoutingState::from_db(row.get::<_, String>("routing_state").as_str()))
-                .transpose()?;
-            if matches!(current, None | Some(RoutingState::Legacy)) {
-                return Err(DatabaseError::Constraint(
-                    ACTIVATION_STATE_INVALID_LABEL.to_string(),
-                ));
-            }
+        if action == ActivationAction::Deactivate
+            && matches!(current, None | Some(RoutingState::Legacy))
+        {
+            return Err(DatabaseError::Constraint(
+                ACTIVATION_STATE_INVALID_LABEL.to_string(),
+            ));
         }
         let evidence_hash = sha256_prefixed(
             format!(
@@ -1671,9 +1758,10 @@ impl PipelineActivationStore {
             )
             .as_bytes(),
         );
-        let routing = write_routing_in(
-            &tx,
+        write_routing_in(
+            tx,
             tenant_id,
+            current,
             resulting,
             action,
             active_bundle_id.as_deref(),
@@ -1682,9 +1770,7 @@ impl PipelineActivationStore {
             reason_code,
             &evidence_hash,
         )
-        .await?;
-        tx.commit().await?;
-        Ok(routing)
+        .await
     }
 }
 
