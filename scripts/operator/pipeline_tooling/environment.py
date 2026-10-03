@@ -132,9 +132,27 @@ def _code_revision_hash():
     """Ports the tree hash from `ef97a459:scripts/operator/run-pipeline-
     qualification.sh` lines 70-88: every tracked-or-untracked, non-ignored
     file's path and content, in sorted path order, excluding the top-level
-    `.local`, `.vscode`, and `target` directories."""
+    `.local`, `.vscode`, and `target` directories.
+
+    "Non-ignored" means not ignored by the repository's own `.gitignore`
+    files, and nothing else: `--exclude-per-directory=.gitignore` in place of
+    `--exclude-standard`, which also applies the host's `.git/info/exclude`
+    and the user's global excludes file (`core.excludesFile`, emptied here as
+    well). The server compares the revision a release was built with to the
+    revision of the run that qualified it, so one checkout must give one
+    revision on every host, and a file that only a host's own exclude list
+    hides is part of the tree."""
     listing = subprocess.run(
-        ["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"],
+        [
+            "git",
+            "-c",
+            "core.excludesFile=",
+            "ls-files",
+            "--cached",
+            "--others",
+            "--exclude-per-directory=.gitignore",
+            "-z",
+        ],
         check=True,
         capture_output=True,
         cwd=ROOT,

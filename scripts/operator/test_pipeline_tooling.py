@@ -18,6 +18,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import tempfile
 import unittest
 import uuid
@@ -4250,6 +4251,61 @@ class CodeRevisionChangedTests(_QualifyCase):
         self._fresh_run()
         self.assertEqual(self._drill(), 0, self.stderr.getvalue())
         self.assertEqual(self.tree_hash_calls, 2)
+
+
+
+class CodeRevisionExcludeTests(unittest.TestCase):
+    """Final fix wave (G22): the code revision hashes the tracked files and
+    the untracked files that the repository's own `.gitignore` files do not
+    ignore. A host's `.git/info/exclude` and a user's global excludes file
+    hide nothing, so one checkout gives one revision on every host. These
+    tests run the real `git` in a temporary repository."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="revision-excludes-"))
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.repo = self.tmp / "repo"
+        self.repo.mkdir()
+        global_ignore = self.tmp / "global-ignore"
+        global_ignore.write_text("globally_ignored.txt\n")
+        global_config = self.tmp / "gitconfig"
+        global_config.write_text(f"[core]\n\texcludesFile = {global_ignore}\n")
+        env = mock.patch.dict(
+            os.environ,
+            {"GIT_CONFIG_GLOBAL": str(global_config), "GIT_CONFIG_NOSYSTEM": "1"},
+        )
+        env.start()
+        self.addCleanup(env.stop)
+        self._git("init", "-q")
+        (self.repo / ".gitignore").write_text("ignored.txt\n")
+        (self.repo / "tracked.txt").write_text("tracked\n")
+        self._git("add", ".gitignore", "tracked.txt")
+        info = self.repo / ".git" / "info"
+        info.mkdir(exist_ok=True)
+        (info / "exclude").write_text("locally_excluded.txt\n")
+        root = mock.patch.object(environment, "ROOT", self.repo)
+        root.start()
+        self.addCleanup(root.stop)
+
+    def _git(self, *args):
+        subprocess.run(["git", *args], cwd=self.repo, check=True, capture_output=True)
+
+    def _revision_after_writing(self, name, content):
+        (self.repo / name).write_text(content)
+        return environment._code_revision_hash()
+
+    def test_local_and_global_excludes_hide_no_file(self):
+        for name in ("locally_excluded.txt", "globally_ignored.txt"):
+            first = self._revision_after_writing(name, "one\n")
+            second = self._revision_after_writing(name, "two\n")
+            self.assertNotEqual(first, second, name)
+
+    def test_the_repository_gitignore_still_applies(self):
+        first = self._revision_after_writing("ignored.txt", "one\n")
+        second = self._revision_after_writing("ignored.txt", "two\n")
+        self.assertEqual(first, second)
+        third = self._revision_after_writing("untracked.txt", "new\n")
+        self.assertNotEqual(second, third)
 
 
 if __name__ == "__main__":
