@@ -64,23 +64,41 @@ public static class HistoryCopy
 
     public const string QuarantineHeading = "Held for privacy review";
 
-    public const string QuarantineBody =
-        "A person at Trace Commons reads these before they enter the commons. It happens when "
-        + "automated checks see something that might be personal or sensitive and can't decide "
-        + "on its own.\n\nThese have not been rejected, and they have not been shared with "
-        + "anyone but the reviewer. They are sitting still.\n\nTypical wait: we don't have a "
-        + "reliable number yet.";
+    /// <summary>
+    /// The section paragraph under <see cref="QuarantineHeading"/>: the core's
+    /// held explanation (<see cref="HeldRowBody"/>), then two sentences only
+    /// this shell has.
+    /// </summary>
+    /// <remarks>
+    /// COPY BYPASS (Batch B part 2): "They are sitting still." and the
+    /// typical-wait line have no core equivalent yet, so they are still typed
+    /// here. They go when the core owns the section paragraph.
+    /// </remarks>
+    public static string QuarantineBody =>
+        HeldRowBody
+        + "\n\nThey are sitting still.\n\nTypical wait: we don't have a reliable number yet.";
 
     /// <summary>
     /// The row-level explanation on a held record, used only when the server
-    /// sent no explanation of its own. It says the same three things
-    /// <see cref="QuarantineBody"/> says -- automated, not rejected, not
-    /// shared -- at row length rather than at section length.
+    /// sent no explanation of its own: the core's
+    /// <c>history_copy::HELD_ROW_BODY</c> (the canonical wording, by owner
+    /// ruling), read from the disclosure bundle's
+    /// <c>history_ui.held_row_body</c>. Empty only if the core could not
+    /// produce the bundle.
     /// </summary>
-    public const string HeldRowBody =
-        "Automated checks saw something that might be personal and couldn't decide on their "
-        + "own. It has not been rejected, and it has not been shared with anyone but the "
-        + "reviewer.";
+    public static string HeldRowBody => HeldRowBodyFromCore.Value;
+
+    private static readonly Lazy<string> HeldRowBodyFromCore = new(ReadHeldRowBody);
+
+    private static string ReadHeldRowBody()
+    {
+        using JsonDocument? doc = ReadHistoryUi(out JsonElement history);
+        return doc is not null
+            && history.TryGetProperty("held_row_body", out JsonElement body)
+            && body.ValueKind == JsonValueKind.String
+            ? body.GetString() ?? string.Empty
+            : string.Empty;
+    }
 
     public const string CreditSection = "Credit";
 

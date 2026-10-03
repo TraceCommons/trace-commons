@@ -2077,20 +2077,24 @@ public sealed class ProjectSettingViewModel : INotifyPropertyChanged
 
     public string Mode => _mode;
 
+    /// <summary>
+    /// The row's mode by the core's one name (<see cref="WatchCopy.ModeLabel"/>),
+    /// the words onboarding, the pill and every other shell use.
+    /// </summary>
     public string StateText => _mode switch
     {
-        "ignore" => "Never offered",
+        "ignore" => WatchCopy.Ignored,
 
         // Unreachable for the unresolvable bucket, and deliberately guarded
         // rather than trusted: the daemon refuses auto_upload for it in two
         // places, so if this row ever reported that mode the honest reading is
-        // that something is wrong, not that it was armed. Saying "Contributed
-        // without asking" there would be the one claim this row must never
+        // that something is wrong, not that it was armed. Calling it armed
+        // there would be the one claim this row must never
         // make.
         "auto_upload" when !UnresolvedBucketCopy.MayOfferAutoUpload(IsUnresolvedBucket)
-            => "Asks you first",
+            => WatchCopy.AskMeFirst,
         "auto_upload" => WatchCopy.Armed,
-        _ => "Asks you first",
+        _ => WatchCopy.AskMeFirst,
     };
 
     /// <summary>
