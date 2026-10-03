@@ -1702,7 +1702,9 @@ struct AppState {
     /// (`DEPLOYED_CODE_REVISION_HASH`, P5-D17): the revision a qualification
     /// records and an activation requires. `None` in a build without it, and
     /// then every qualification and activation is refused with
-    /// `bundle_runtime_revision_unknown`.
+    /// `bundle_runtime_revision_unknown`. A revision that is set is a
+    /// `sha256:` digest: startup refuses any other value
+    /// (`pipeline_activation::deployed_code_revision`).
     pipeline_code_revision_hash: Option<String>,
     /// `main`'s gate configuration as ingest parsed it at start
     /// (`pipeline_main_gate_config_from_env`). The activation routes check a
@@ -4050,8 +4052,13 @@ impl AppState {
         // Task 10: the two trust stores the qualification and activation
         // routes verify against. A set variable whose file does not hold a
         // valid key list, or a check key that is also a package key, refuses
-        // the start.
+        // the start; an empty variable is unset.
         let pipeline_trust_stores = pipeline_activation::pipeline_trust_stores_from_env()?;
+        // The build's code revision, which those routes compare with a
+        // qualification's: one that is set and is not a `sha256:` digest
+        // refuses the start.
+        let pipeline_code_revision_hash =
+            pipeline_activation::deployed_code_revision(DEPLOYED_CODE_REVISION_HASH)?;
         let pipeline_worker_ready = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let near_credit_submitter_config = trace_near_credit_submitter_from_env()?;
         let near_credit_submitter_timeout_ms = near_credit_submitter_config
@@ -4554,7 +4561,7 @@ impl AppState {
             pipeline_qualification,
             pipeline_package_trust: pipeline_trust_stores.package,
             pipeline_check_trust: pipeline_trust_stores.check,
-            pipeline_code_revision_hash: DEPLOYED_CODE_REVISION_HASH.map(str::to_string),
+            pipeline_code_revision_hash,
             pipeline_main_gate,
             // `cfg(test)` because the field is; `None` unconditionally, so no
             // configuration reaches it.
@@ -12764,6 +12771,17 @@ struct TraceCommonsConfigStatusResponse {
     /// to the pipeline (`TRACE_COMMONS_PIPELINE_ALLOW_TEST_DEPENDENCIES`): a
     /// setting for a process started for tests.
     pipeline_unqualified_routing_allowed: bool,
+    /// Whether this binary holds a build code revision
+    /// (`TRACE_COMMONS_BUILD_CODE_REVISION_HASH`); the pipeline
+    /// qualification, activation, and rollback routes need one. Never the
+    /// revision itself.
+    pipeline_code_revision_configured: bool,
+    /// Whether each trust store of those routes was loaded at start
+    /// (`TRACE_COMMONS_PIPELINE_PACKAGE_TRUSTED_KEYS_PATH`,
+    /// `TRACE_COMMONS_PIPELINE_CHECK_TRUSTED_KEYS_PATH`). Never a path, a
+    /// key id, or a key.
+    pipeline_package_trust_store_loaded: bool,
+    pipeline_check_trust_store_loaded: bool,
     signed_token_auth_enabled: bool,
     signed_token_key_count: usize,
     signed_token_eddsa_key_count: usize,
@@ -13032,6 +13050,9 @@ fn trace_commons_config_status_response(state: &AppState) -> TraceCommonsConfigS
             .as_deref()
             .is_some_and(pipeline_runtime_is_production_qualified),
         pipeline_unqualified_routing_allowed: state.pipeline_unqualified_routing,
+        pipeline_code_revision_configured: state.pipeline_code_revision_hash.is_some(),
+        pipeline_package_trust_store_loaded: state.pipeline_package_trust.is_some(),
+        pipeline_check_trust_store_loaded: state.pipeline_check_trust.is_some(),
         signed_token_auth_enabled: state.signed_token_verifier.is_some(),
         signed_token_key_count: signed_token_verifier
             .as_ref()

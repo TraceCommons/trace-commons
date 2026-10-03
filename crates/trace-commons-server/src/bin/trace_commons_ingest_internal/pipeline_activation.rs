@@ -31,12 +31,23 @@
 //! Before the store call a route also runs the startup checks of a tenant
 //! bundle on the bundle it selects (`PipelineService::check_runnable_package`:
 //! `main`'s gate configuration and the pipeline credit issuer), because the
-//! gate holds no service. A qualification goes through
-//! `qualify_bundle_attested` only, never the bare `qualify_bundle`.
+//! gate holds no service. It also refuses a tenant that this process does not
+//! list on its receipts list, and a bundle whose qualification records a
+//! signing key that the package trust store no longer holds (`gate_inputs`).
+//! A qualification goes through `qualify_bundle_attested` only, never the
+//! bare `qualify_bundle`.
 //!
 //! Answers and log lines hold labels, counts, states, times, and hashes. A
-//! refusal is a safe label (`^[a-z0-9_]{1,64}$`) built from no request
-//! field; a log line names the tenant by `tenant_storage_ref` only.
+//! refusal of these routes' own checks is a safe label
+//! (`^[a-z0-9_]{1,64}$`, with a `:<check_id>` suffix for a refusal about one
+//! check) built from no request field; a log line names the tenant by
+//! `tenant_storage_ref` only. The checks these routes share with `main`'s
+//! routes answer as `main`'s routes do, with `main`'s fixed texts, which are
+//! not labels: a missing or unknown credential and `require_admin`
+//! (`403 admin token required`), and a process with no pipeline runtime
+//! (`404 pipeline runtime not configured`, from `require_pipeline_service`
+//! and `require_pipeline_product`, before the revision or a trust store is
+//! read). None of those texts holds a request field either.
 
 use super::*;
 
@@ -61,8 +72,8 @@ use trace_commons_server::versioned_pipeline_qualification::{
 
 /// The JSON file of the keys whose signatures make a bundle package trusted:
 /// an array of `TrustedBundleKey` (`{"key_id", "public_key_base64url"}`),
-/// the format `pipeline.py keygen` writes. Unset: no package is trusted, and
-/// the qualification and activation routes refuse with
+/// the format `pipeline.py keygen` writes. Unset or empty: no package is
+/// trusted, and the qualification and activation routes refuse with
 /// `pipeline_trust_store_missing`.
 pub(crate) const TRACE_COMMONS_PIPELINE_PACKAGE_TRUSTED_KEYS_PATH: &str =
     "TRACE_COMMONS_PIPELINE_PACKAGE_TRUSTED_KEYS_PATH";
@@ -170,11 +181,14 @@ pub(crate) fn read_trusted_keys(
 }
 
 /// `read_trusted_keys` of the file `variable` names: `None` when the variable
-/// is unset. A refusal names the variable, never its value.
+/// is unset, or set to the empty string or to blanks (final fix wave G25:
+/// `optional_trimmed_env`, as every other optional setting is read, so an
+/// empty variable refuses no start). A refusal names the variable, never its
+/// value.
 pub(crate) fn read_trusted_keys_from_env(
-    variable: &str,
+    variable: &'static str,
 ) -> anyhow::Result<Option<Vec<TrustedBundleKey>>> {
-    let path = std::env::var_os(variable).map(PathBuf::from);
+    let path = optional_trimmed_env(variable)?.map(PathBuf::from);
     read_trusted_keys(path.as_deref()).with_context(|| variable.to_string())
 }
 
@@ -243,6 +257,37 @@ pub(crate) fn pipeline_trust_stores_from_env() -> anyhow::Result<PipelineTrustSt
         read_trusted_keys_from_env(TRACE_COMMONS_PIPELINE_PACKAGE_TRUSTED_KEYS_PATH)?,
         read_trusted_keys_from_env(TRACE_COMMONS_PIPELINE_CHECK_TRUSTED_KEYS_PATH)?,
     )
+}
+
+/// The start is refused: the build revision is set and is not a `sha256:`
+/// digest.
+pub(crate) const PIPELINE_CODE_REVISION_INVALID_LABEL: &str = "pipeline_code_revision_invalid";
+
+/// The deployed code revision the routes read, from `value`
+/// (`DEPLOYED_CODE_REVISION_HASH`, the build's
+/// `TRACE_COMMONS_BUILD_CODE_REVISION_HASH`), checked once at start (final
+/// fix wave G17). `None` for a binary built without the variable: the routes
+/// then refuse with `bundle_runtime_revision_unknown`. A revision that is set
+/// must be `sha256:` and 64 lowercase hex digits, the form `pipeline.py
+/// revision` prints and the gate compares; anything else, the empty value of
+/// a variable set to nothing included, refuses the start with
+/// `pipeline_code_revision_invalid` (the label alone, never the value). A
+/// malformed revision would otherwise start cleanly and first show as a
+/// refusal after a full signed qualification.
+pub(crate) fn deployed_code_revision(value: Option<&str>) -> anyhow::Result<Option<String>> {
+    let is_digest = |revision: &str| {
+        revision.strip_prefix("sha256:").is_some_and(|hex| {
+            hex.len() == 64
+                && hex
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
+    };
+    match value {
+        None => Ok(None),
+        Some(revision) if is_digest(revision) => Ok(Some(revision.to_string())),
+        Some(_) => Err(anyhow::anyhow!(PIPELINE_CODE_REVISION_INVALID_LABEL)),
+    }
 }
 
 /// The infrastructure this process runs around a bundle (P5-D21), from the
@@ -1395,6 +1440,7 @@ mod tests {
             PIPELINE_TRUST_STORE_INVALID_LABEL,
             PIPELINE_TRUST_STORE_OVERLAP_LABEL,
             PIPELINE_TRUST_STORE_MISSING_LABEL,
+            PIPELINE_CODE_REVISION_INVALID_LABEL,
             PIPELINE_EVIDENCE_TOO_LARGE_LABEL,
             PIPELINE_REQUEST_INVALID_LABEL,
             PIPELINE_REQUEST_TOO_LARGE_LABEL,
@@ -1484,6 +1530,98 @@ mod tests {
                 "legacy_drain_report_timeout"
             )
         );
+    }
+
+    /// Final fix wave (G25): a trust store variable set to the empty string,
+    /// or to blanks, is unset, as `optional_trimmed_env` reads every other
+    /// optional setting: it refuses no start, also in a binary that holds no
+    /// pipeline runtime.
+    #[test]
+    fn an_empty_trust_store_variable_is_unset() {
+        const VARIABLE: &str = "TRACE_COMMONS_PIPELINE_TEST_EMPTY_TRUSTED_KEYS_PATH";
+        for value in ["", "   "] {
+            // SAFETY: a variable no other test reads; set and removed here.
+            unsafe { std::env::set_var(VARIABLE, value) };
+            let read = read_trusted_keys_from_env(VARIABLE);
+            // SAFETY: as above.
+            unsafe { std::env::remove_var(VARIABLE) };
+            assert_eq!(
+                read.unwrap_or_else(|error| panic!("{value:?} refused the start: {error}")),
+                None,
+                "{value:?}"
+            );
+        }
+    }
+
+    /// Final fix wave (G17): a build revision that is set must be a `sha256:`
+    /// digest of 64 lowercase hex digits, or the start is refused with
+    /// `pipeline_code_revision_invalid` (the label only, never the value). An
+    /// unset revision is `None`, and the routes refuse with
+    /// `bundle_runtime_revision_unknown`.
+    #[test]
+    fn a_build_revision_that_is_set_must_be_a_digest() {
+        let digest = format!("sha256:{}", "a1".repeat(32));
+        assert_eq!(deployed_code_revision(None).unwrap(), None);
+        assert_eq!(
+            deployed_code_revision(Some(&digest)).unwrap(),
+            Some(digest.clone())
+        );
+        let upper = digest.to_uppercase();
+        let short = &digest[..digest.len() - 1];
+        let padded = format!(" {digest}");
+        for malformed in ["", "  ", "not-a-revision", upper.as_str(), short, &padded] {
+            let refused = deployed_code_revision(Some(malformed))
+                .err()
+                .unwrap_or_else(|| panic!("{malformed:?} is refused"));
+            assert_eq!(refused.to_string(), "pipeline_code_revision_invalid");
+            if !malformed.trim().is_empty() {
+                assert!(
+                    !format!("{refused:#}").contains(malformed.trim()),
+                    "the refusal never holds the value"
+                );
+            }
+        }
+    }
+
+    /// Final fix wave (G17): config-status reports the start inputs of the
+    /// qualification and activation routes as booleans: whether the build
+    /// revision is set and whether each trust store is loaded, never the
+    /// revision, a key id, or a key.
+    #[tokio::test]
+    async fn config_status_reports_the_revision_and_the_trust_stores() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = crate::tests::test_state(dir.path().to_path_buf());
+        let fields = [
+            "pipeline_code_revision_configured",
+            "pipeline_package_trust_store_loaded",
+            "pipeline_check_trust_store_loaded",
+        ];
+        let off = serde_json::to_value(trace_commons_config_status_response(&base)).unwrap();
+        for field in fields {
+            assert_eq!(off[field], serde_json::json!(false), "{field}");
+        }
+        let revision = format!("sha256:{}", "b2".repeat(32));
+        let mut on = (*base).clone();
+        on.pipeline_code_revision_hash = Some(revision.clone());
+        on.pipeline_package_trust = Some(Arc::new(
+            BundlePackageTrustStore::new([key("status_package_key", 7)]).unwrap(),
+        ));
+        on.pipeline_check_trust = Some(Arc::new(
+            CheckResultTrustStore::new([key("status_check_key", 8)]).unwrap(),
+        ));
+        let on = serde_json::to_value(trace_commons_config_status_response(&on)).unwrap();
+        for field in fields {
+            assert_eq!(on[field], serde_json::json!(true), "{field}");
+        }
+        let text = on.to_string();
+        for secret in [
+            revision.as_str(),
+            "status_package_key",
+            "status_check_key",
+            &key("status_package_key", 7).public_key_base64url,
+        ] {
+            assert!(!text.contains(secret), "config-status holds no {secret}");
+        }
     }
 
     /// Final fix wave (G9): config-status reports whether this process routes
