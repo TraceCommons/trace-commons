@@ -127,7 +127,10 @@ So each submission id has one owner for good:
   attempt failed before it wrote a record. A later upload of it goes to the
   legacy path while the row says `pipeline` or `legacy`. A tenant that is
   contained, or not served by the process, refuses it with `503`, as it
-  refuses every new upload: the refusal comes before the owner is read.
+  refuses every new upload: the refusal comes before the owner is read. For
+  the same reason, a tenant whose row says `pipeline` refuses it with `503`
+  `bundle_policy_not_runnable` while the Admission policy of its active bundle
+  is suspended: the policy is read before the owner too.
 - An id that a pipeline run owns is never taken by the legacy path. The
   pipeline's library refuses a second idempotency key for it with `submission
   identity is already bound to another receipt`. Ingest uses the submission id
@@ -184,8 +187,8 @@ true`. In that process, `routing_state: null` in `GET
 /v1/admin/pipeline/routing` does not mean the legacy path for a listed tenant.
 
 The cost. With a runtime, each new upload reads the routing row once, in a
-short transaction of its own with two queries by primary key: the routing row,
-and the Admission policy of the tenant's active bundle. Each new upload that
+short transaction of its own with one query by primary key: the routing row
+together with the Admission policy of the tenant's active bundle. Each new upload that
 takes the legacy path of a tenant in scope, or with a row, adds the claim: four
 statements in one transaction (the run check, the tenant upsert, the
 ownership insert, and the owner read). A new upload of a tenant on neither
@@ -329,6 +332,9 @@ results"): at most 64 in one request (`413` `pipeline_evidence_too_large`).
 routing state that you read from `GET /v1/admin/pipeline/routing` before the
 request: `legacy`, `pipeline`, `contained`, or `none` for a tenant with no row
 (`routing_state: null`). Any other value is `422` `pipeline_request_invalid`.
+A `null` is such a value: do not copy the `null` of the routing view into the
+body. For a tenant with no row, send `"none"`. Only a body without the field
+has no expectation.
 With the field, the change is a compare-and-set. The store compares the value
 with the state that it reads under the tenant's routing lock. If the state is
 another one, the answer is `409` `pipeline_routing_state_changed`, and nothing
@@ -451,6 +457,17 @@ one key, distinct key ids, and each a 32-byte Ed25519 public key.
   trust store no longer holds: `409` `bundle_package_signer_untrusted`. So to
   stop a package key, remove it from the file and restart every process. The
   check is by key id: do not use the id of a removed key again for another key.
+
+  A removed key closes `activate` and `rollback` for every bundle that the key
+  signed, on the revision that runs. Such a bundle cannot be qualified again on
+  that revision with another key. A qualification row is append-only, and it
+  names the key that signed the package: a second `qualifications` call for the
+  same bundle and revision with a package that another key signed is `409`
+  `bundle_qualification_identity_conflict`. So plan a key rotation. The two
+  routes stay closed for those bundles until you put the key back in the file
+  (and restart), or you qualify the bundle, signed by the new key, on a new
+  code revision and deploy that revision. Until then `contain` and `deactivate`
+  still work.
 - The check-signing key must not be held by anyone who holds the tenant's admin
   credential. Nothing in the server enforces this: the server cannot tell who
   holds a key. Who holds it is decided when the deployment is promoted. This
@@ -471,8 +488,9 @@ Qualify and build from the same clean tree.
 
 A binary built without the variable has no revision: `qualifications`,
 `activate`, and `rollback` answer `409` `bundle_runtime_revision_unknown`. A
-binary built with a value that is not such a digest, the empty value included,
-refuses to start: `pipeline_code_revision_invalid`. `GET
+variable that is set to the empty string, or to blanks, counts as unset, as an
+empty trust store variable does. A binary built with any other value that is
+not such a digest refuses to start: `pipeline_code_revision_invalid`. `GET
 /v1/admin/config-status` shows whether the binary has a revision
 (`pipeline_code_revision_configured`).
 
@@ -1846,7 +1864,8 @@ while a tenant can still run the old one. For each such tenant:
    tenant's routing row still says `legacy`, so its uploads stay on the legacy
    path. Qualify the new bundle on the new build's revision and activate the
    tenant again (`POST /v1/admin/pipeline/qualifications`, then `POST
-   /v1/admin/pipeline/activate`).
+   /v1/admin/pipeline/activate` with `"expected_state": "legacy"`, the state
+   that step 1 left and that `GET /v1/admin/pipeline/routing` shows).
 
 A tenant left on the drain list for good keeps no active bundle and runs no
 new receipt, so step 3 may leave it on the drain list.

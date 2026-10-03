@@ -64,3 +64,13 @@ node_modules/
 
 # pipeline tooling evidence, logs, and database dumps
 /.local/
+
+# Files of a developer's own machine and tools, which a host's
+# `.git/info/exclude` or a global excludes file often hides. They are listed
+# here because the pipeline's code revision (`pipeline.py revision`) reads the
+# repository's own ignore rules only: an untracked file that only a local
+# exclude hides enters the revision on that host. No tracked file lives
+# under `.claude/` or `.cargo/`.
+.DS_Store
+.claude/
+.cargo/

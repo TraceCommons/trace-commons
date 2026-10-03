@@ -953,6 +953,12 @@ Before you install a build of the second kind, do these steps:
    `legacy`, or with no row) to the drain list, or off both lists. A `contain`
    or a `deactivate` does not protect a tenant on that build: only the lists
    do.
+
+   On that build, a tenant that is off the receipts list uploads on the legacy
+   path. This includes a contained tenant. That build does not read the row, so
+   nothing there holds the tenant's intake: its uploads are neither refused
+   nor sent to the pipeline, and the legacy path takes them. If a contained
+   tenant's uploads must stay stopped, do not install that build.
 3. Do not rely on a suspension: on that build it does not hold for a phase
    that already runs or for a payout. For a tenant with a suspended Settle
    policy, keep the tenant off both lists (its pipeline work then waits), or
@@ -986,9 +992,9 @@ earlier build read:
 A variable that is set to a file that cannot be read, or whose file is not valid,
 refuses the start (`pipeline_trust_store_invalid`), and so does a key that is in
 both files (`pipeline_trust_store_overlap`). A trust store variable that is set
-to the empty string counts as unset. A build revision that is set and is not
-`sha256:` and 64 lowercase hex digits, the empty value included, refuses the
-start (`pipeline_code_revision_invalid`). With a trust store variable unset, or
+to the empty string counts as unset, and so does a build revision that is set
+to the empty string. Any other build revision that is not `sha256:` and 64
+lowercase hex digits refuses the start (`pipeline_code_revision_invalid`). With a trust store variable unset, or
 no revision in the build, the routes refuse (`503`
 `pipeline_trust_store_missing`, `409` `bundle_runtime_revision_unknown`). `GET
 /v1/admin/config-status` reports the three as booleans

@@ -211,8 +211,34 @@ answers `404` there. Do these steps in this order:
      body, and the time) in a place that a database restore does not reach.
 
    If you cannot tell whether a tenant was contained, or one of its policies
-   was suspended, after the backup, contain the tenant until you know. Then
-   repeat any other lost change that you still want.
+   was suspended, after the backup, contain the tenant until you know.
+
+   Only four changes work in this step: `contain`, `deactivate`, and the
+   `suspend` and `resume` of a policy. `activate` and `rollback` do not. Both
+   scope lists are unset here, and these two routes refuse a tenant that is not
+   on the receipts list of the process (`409` `pipeline_tenant_not_in_scope`).
+
+   So an activation or a rollback that was made after the backup cannot be
+   repeated before step 5. The restored database selects the bundle from the
+   time of the backup. After a lost rollback, that is the bundle that you
+   rolled back from, and its row says `pipeline`: step 5 returns the tenant's
+   uploads to it. After a lost activation of a newer bundle, it is the bundle
+   that you replaced. After a lost first activation, the tenant has no row, or
+   its row says `legacy`, and step 5 sends its uploads to the legacy path. For
+   each such tenant, do this:
+
+   1. In this step, contain the tenant (`POST /v1/admin/pipeline/contain`).
+      Step 5 then takes none of its new uploads, on either path.
+   2. After step 5, repeat the change. For a lost rollback, send `rollback`
+      for the earlier bundle. The tenant stays contained. Then send `activate`
+      for that bundle, which is now the active one, to open the tenant again.
+      For a lost activation, send `activate` for the bundle again. That
+      activation opens the tenant.
+
+   A qualification that was recorded after the backup is lost too, and the
+   gate needs it: record it again (`POST /v1/admin/pipeline/qualifications`,
+   which works in this step) before the `rollback` or the `activate`. A lost
+   `deactivate` can be repeated in this step.
 4. For each tenant, call `POST /v1/workers/pipeline/index-rebuild` with that
    tenant's vector worker bearer token or an admin token -- the same gate
    as `main`'s vector index worker route (see
