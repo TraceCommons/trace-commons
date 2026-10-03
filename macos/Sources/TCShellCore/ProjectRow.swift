@@ -87,6 +87,10 @@ public struct ProjectRow: Decodable, Identifiable, Equatable, Sendable {
     /// On an armed row only: `true` when armed from now, so the backlog
     /// waits. Absent (nil) on rows that are not armed.
     public let fromNow: Bool?
+    /// The folder's own mode, which a contribution override (#1173) never
+    /// writes: what clearing the override returns `mode` to. `nil` from a
+    /// daemon predating the override.
+    public let folderMode: ProjectMode?
 
     public var id: String { projectId }
 
@@ -102,7 +106,8 @@ public struct ProjectRow: Decodable, Identifiable, Equatable, Sendable {
         contributableCount: Int? = nil,
         sessionCount: Int? = nil,
         lastSessionAt: Date? = nil,
-        fromNow: Bool? = nil
+        fromNow: Bool? = nil,
+        folderMode: ProjectMode? = nil
     ) {
         self.projectId = projectId
         self.projectLabel = projectLabel
@@ -116,6 +121,7 @@ public struct ProjectRow: Decodable, Identifiable, Equatable, Sendable {
         self.sessionCount = sessionCount
         self.lastSessionAt = lastSessionAt
         self.fromNow = fromNow
+        self.folderMode = folderMode
     }
 
     public enum CodingKeys: String, CodingKey {
@@ -131,6 +137,7 @@ public struct ProjectRow: Decodable, Identifiable, Equatable, Sendable {
         case sessionCount = "session_count"
         case lastSessionAt = "last_session_at"
         case fromNow = "from_now"
+        case folderMode = "folder_mode"
     }
 
     public init(from decoder: any Decoder) throws {
@@ -158,6 +165,7 @@ public struct ProjectRow: Decodable, Identifiable, Equatable, Sendable {
         sessionCount = try c.decodeIfPresent(Int.self, forKey: .sessionCount)
         lastSessionAt = try c.decodeIfPresent(Date.self, forKey: .lastSessionAt)
         fromNow = try c.decodeIfPresent(Bool.self, forKey: .fromNow)
+        folderMode = try c.decodeIfPresent(ProjectMode.self, forKey: .folderMode)
     }
 
     /// Whether this project could ever be armed to contribute without asking.
