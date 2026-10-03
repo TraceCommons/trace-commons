@@ -698,8 +698,8 @@ struct PreviewSheet: View {
     private var correctionField: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
             Text(CorrectionCopy.question)
-                .glassType(GlassTokens.TypeScale.eyebrow)
-                .foregroundStyle(GlassColor.textTertiary)
+                .glassType(GlassTokens.TypeScale.caption)
+                .foregroundStyle(GlassColor.textSecondary)
             // A plain editor on the field fill: `GlassTextField` has no seam
             // for the character cap below.
             TextEditor(text: $correction)
@@ -735,8 +735,8 @@ struct PreviewSheet: View {
     private var verdictQuestion: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
             Text(VerdictCopy.question)
-                .glassType(GlassTokens.TypeScale.eyebrow)
-                .foregroundStyle(GlassColor.textTertiary)
+                .glassType(GlassTokens.TypeScale.caption)
+                .foregroundStyle(GlassColor.textSecondary)
             HStack(spacing: GlassTokens.Space.s2) {
                 ForEach(ContributorVerdict.allCases, id: \.rawValue) { option in
                     verdictOption(option)

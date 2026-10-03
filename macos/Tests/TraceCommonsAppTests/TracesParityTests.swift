@@ -177,6 +177,10 @@ final class TracesParityTests: XCTestCase {
             "Button(copy.cancel, role: .cancel) { dismiss() }",
             "Button(copy.confirm) { dismiss(); onConfirm() }",
             ".accessibilityIdentifier(\"transcript-copy-all\")",
+            // The two questions are sentences, not field labels: never the
+            // uppercased eyebrow.
+            "Text(VerdictCopy.question)\n                .glassType(GlassTokens.TypeScale.caption)",
+            "Text(CorrectionCopy.question)\n                .glassType(GlassTokens.TypeScale.caption)",
         ] {
             XCTAssertTrue(sheet.contains(needle), "PreviewSheet.swift lacks \(needle)")
         }
