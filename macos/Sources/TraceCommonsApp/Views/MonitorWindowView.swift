@@ -128,7 +128,12 @@ struct MonitorWindowView: View {
                     HomeTabView(
                         store: home, traces: traces,
                         statusLabel: { status in model.publicRunCopy?.contributionStatusLabel(for: status) },
-                        page: $homePage, selection: $selectedHistory)
+                        page: $homePage,
+                        // Selecting a row shows the inspector, where its
+                        // details are, as a session's Review does.
+                        selection: Binding(
+                            get: { selectedHistory },
+                            set: { Self.review($0, selection: &selectedHistory, showsInspector: &showsInspector) }))
                 }
             }
         } map: {
@@ -216,7 +221,7 @@ struct MonitorWindowView: View {
 
     /// A session's Review: select it and show the inspector, where its
     /// review is. With the inspector hidden, selecting alone did nothing a
-    /// person could see.
+    /// person could see. Selecting a History row goes the same way.
     static func review(_ entryId: String, selection: inout String, showsInspector: inout Bool) {
         selection = entryId
         showsInspector = true

@@ -85,20 +85,12 @@ struct SessionDetailView: View {
     private func localInstalledSkillSurface(_ copy: PublicRunCopy) -> some View {
         let state = model.skillLearningState(for: record.submissionID)
         let detail = model.sessionDetails[record.submissionID]
-        let regularSurfaceIsVisible = detail?.accepted == true
-            && detail?.humanCorrection != nil
-            && !withdrawalCompleted
-            && !ContributionStatusPresentation.isTerminal(detail?.contributionStatus)
-        if !regularSurfaceIsVisible {
+        if SkillLearningGate.showsInstalledSurface(detail, withdrawalCompleted: withdrawalCompleted) {
             if state.installedSkill != nil {
                 if let skillCopy = model.skillLearningCopy {
                     SkillLearningView(record: record, copy: skillCopy)
                 }
-            } else if case .idle = state.phase,
-                      state.failure != nil,
-                      ContributionStatusPresentation.isTerminal(record.status)
-                        || detail?.accepted == false
-            {
+            } else if SkillLearningGate.offersInstallStatusRetry(state, detail: detail, recordStatus: record.status) {
                 VStack(alignment: .leading, spacing: TC.Space.s) {
                     if let message = state.failure {
                         Text(message)
@@ -122,16 +114,14 @@ struct SessionDetailView: View {
     @ViewBuilder
     private func detailContent(_ detail: SessionDetail, copy: PublicRunCopy) -> some View {
         let currentStatus = detail.contributionStatus ?? record.status
-        let contributionIsWithdrawn = withdrawalCompleted
-            || ContributionStatusPresentation.isTerminal(currentStatus)
-        let contributionIsActive = detail.accepted == true
-            && detail.taskSuccess != nil
-            && !contributionIsWithdrawn
+        let contributionIsWithdrawn = SkillLearningGate.contributionIsWithdrawn(
+            detail, recordStatus: record.status, withdrawalCompleted: withdrawalCompleted)
+        let contributionIsActive = SkillLearningGate.contributionIsActive(
+            detail, recordStatus: record.status, withdrawalCompleted: withdrawalCompleted)
 
         SessionContributionOverview(record: record, detail: detail, copy: copy)
 
-        if contributionIsActive,
-           detail.humanCorrection != nil,
+        if SkillLearningGate.offersLearning(detail, recordStatus: record.status, withdrawalCompleted: withdrawalCompleted),
            let skillCopy = model.skillLearningCopy {
             SkillLearningView(record: record, copy: skillCopy)
         }
@@ -148,11 +138,8 @@ struct SessionDetailView: View {
     }
 
     private var withdrawalCompleted: Bool {
-        if ContributionStatusPresentation.isTerminal(record.status) { return true }
-        if case .some(.withdrawn) = model.withdrawals[record.submissionID] {
-            return true
-        }
-        return false
+        SkillLearningGate.withdrawalCompleted(
+            recordStatus: record.status, withdrawal: model.withdrawals[record.submissionID])
     }
 
 }

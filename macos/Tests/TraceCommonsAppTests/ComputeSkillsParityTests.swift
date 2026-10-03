@@ -41,6 +41,77 @@ final class ComputeSkillsParityTests: XCTestCase {
         XCTAssertNil(HistorySelection.record(for: "", in: [record]))
     }
 
+    private func detail(
+        status: String? = "accepted", taskSuccess: String? = "success", correction: String? = "Use the fixture."
+    ) throws -> SessionDetail {
+        var object: [String: Any] = [
+            "evidence": [], "contributed_version": "1", "consent_policy_version": "1",
+            "redaction_pipeline_version": "1", "publication_version": 0,
+        ]
+        if let status { object["contribution_status"] = status }
+        if let taskSuccess { object["task_success"] = taskSuccess }
+        if let correction { object["human_correction"] = correction }
+        return try JSONDecoder().decode(SessionDetail.self, from: JSONSerialization.data(withJSONObject: object))
+    }
+
+    /// The legacy session detail's rule, carried into the inspector (R-29):
+    /// learning only on an accepted, outcome-known, open, corrected
+    /// contribution, and nothing before the detail answers.
+    func test_learningIsOfferedOnlyOnAnActiveCorrectedContribution() throws {
+        func offers(_ detail: SessionDetail?, record: String = "accepted",
+                    withdrawal: AppModel.WithdrawalResult? = nil) -> Bool {
+            let done = SkillLearningGate.withdrawalCompleted(recordStatus: record, withdrawal: withdrawal)
+            return SkillLearningGate.offersLearning(detail, recordStatus: record, withdrawalCompleted: done)
+        }
+        XCTAssertTrue(offers(try detail()))
+        XCTAssertFalse(offers(nil), "no detail yet offers nothing")
+        XCTAssertFalse(offers(try detail(correction: nil)))
+        XCTAssertFalse(offers(try detail(taskSuccess: nil)))
+        XCTAssertFalse(offers(try detail(status: "rejected"), record: "rejected"))
+        XCTAssertFalse(offers(try detail(status: nil)))
+        XCTAssertFalse(offers(try detail(status: "withdrawn")))
+        XCTAssertFalse(offers(try detail(), record: "withdrawn"))
+        XCTAssertFalse(offers(try detail(), withdrawal: .withdrawn(nil)))
+        // An unknown status reads "Status unavailable" and is terminal.
+        XCTAssertFalse(offers(try detail(), record: "status-from-a-newer-daemon"))
+        XCTAssertFalse(offers(try detail(status: "status-from-a-newer-daemon")))
+    }
+
+    /// An installed skill (its rollback) shows whenever the regular flow is
+    /// not on screen, including before the detail answers.
+    func test_theInstalledSurfaceShowsOutsideTheLearningRule() throws {
+        XCTAssertTrue(SkillLearningGate.showsInstalledSurface(nil, withdrawalCompleted: false))
+        XCTAssertTrue(SkillLearningGate.showsInstalledSurface(try detail(), withdrawalCompleted: true))
+        XCTAssertTrue(SkillLearningGate.showsInstalledSurface(try detail(status: "revoked"), withdrawalCompleted: false))
+        XCTAssertFalse(SkillLearningGate.showsInstalledSurface(try detail(), withdrawalCompleted: false))
+
+        var failed = SkillLearningSessionState()
+        failed.workflowFailure = "read failed"
+        XCTAssertTrue(SkillLearningGate.offersInstallStatusRetry(failed, detail: nil, recordStatus: "withdrawn"))
+        XCTAssertTrue(SkillLearningGate.offersInstallStatusRetry(failed, detail: try detail(status: "rejected"),
+                                                                 recordStatus: "rejected"))
+        XCTAssertFalse(SkillLearningGate.offersInstallStatusRetry(failed, detail: try detail(), recordStatus: "accepted"))
+        XCTAssertFalse(SkillLearningGate.offersInstallStatusRetry(SkillLearningSessionState(), detail: nil,
+                                                                  recordStatus: "withdrawn"))
+    }
+
+    /// One rule, moved: the session detail screen and the inspector both
+    /// ask the gate, and the inspector reads the detail before drawing.
+    func test_bothSurfacesAskTheSameGate() throws {
+        let legacy = try Self.text("Views/SessionDetailView.swift")
+        XCTAssertTrue(legacy.contains("SkillLearningGate.offersLearning(detail, recordStatus: record.status,"))
+        XCTAssertTrue(legacy.contains("SkillLearningGate.showsInstalledSurface(detail,"))
+        XCTAssertFalse(legacy.contains("detail.taskSuccess != nil"))
+        let inspector = try Self.text("Views/Monitor/HistoryInspector.swift")
+        XCTAssertTrue(inspector.contains("SkillLearningGate.offersLearning(detail, recordStatus: record.status,"))
+        XCTAssertTrue(inspector.contains("SkillLearningGate.showsInstalledSurface(detail,"))
+        XCTAssertTrue(inspector.contains("model.loadSessionDetail(record)"))
+        XCTAssertTrue(inspector.contains("let detail = model.sessionDetails[id]"))
+        let window = try Self.text("Views/MonitorWindowView.swift")
+        XCTAssertTrue(window.contains(
+            "set: { Self.review($0, selection: &selectedHistory, showsInspector: &showsInspector) }"))
+    }
+
     func test_skillsLivesInTheHistoryInspector() throws {
         let inspector = try Self.text("Views/Monitor/HistoryInspector.swift")
         XCTAssertTrue(inspector.contains("SkillLearningView(record: record, copy: copy)"))
