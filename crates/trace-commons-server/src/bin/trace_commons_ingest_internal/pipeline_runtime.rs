@@ -119,7 +119,9 @@ pub trait IngestPipelineRuntimeAssembler: Send + Sync {
 /// `unqualified_routing_allowed` (`TRACE_COMMONS_PIPELINE_ALLOW_TEST_DEPENDENCIES`
 /// in a real boot, where it is the same value as `allow_test_dependencies`) is
 /// handed to the assembly too, and the service must hold it
-/// (`pipeline_runtime_unqualified_routing_mismatch`).
+/// (`pipeline_runtime_unqualified_routing_mismatch`). Like the test opt-in, it
+/// never combines with `production_required`
+/// (`pipeline_unqualified_routing_not_allowed_when_required`).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn assemble_ingest_pipeline_runtime(
     assembler: Option<&dyn IngestPipelineRuntimeAssembler>,
@@ -139,6 +141,14 @@ pub(crate) fn assemble_ingest_pipeline_runtime(
     anyhow::ensure!(
         !(allow_test_dependencies && production_required),
         "pipeline_test_dependencies_not_allowed_when_required"
+    );
+    // P5-D5: routing a tenant with no routing row is for a process started
+    // for tests, never for one that requires a production runtime. A boot
+    // passes the same value as `allow_test_dependencies`, so the check above
+    // already refuses it there; this one holds for any caller.
+    anyhow::ensure!(
+        !(unqualified_routing_allowed && production_required),
+        "pipeline_unqualified_routing_not_allowed_when_required"
     );
     let Some(assembler) = assembler else {
         anyhow::ensure!(

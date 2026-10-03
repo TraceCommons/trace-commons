@@ -283,6 +283,10 @@ use trace_commons_server::versioned_pipeline_product::{
     PipelineProcessingStatus, PipelineProductStore, PipelineReconciliationRows,
     is_pipeline_export_manifest_purpose_code, pipeline_export_manifest_purpose_code,
 };
+use trace_commons_server::versioned_pipeline_qualification::{
+    BundlePackageTrustStore, CheckResultTrustStore, DEPLOYED_CODE_REVISION_HASH,
+    PipelineQualificationStore,
+};
 use uuid::Uuid;
 
 const DEFAULT_BIND: &str = "127.0.0.1:3907";
@@ -1679,6 +1683,41 @@ struct AppState {
     /// legacy path claims a submission id through it before its first write
     /// (`decide_upload_route`, `route_pipeline_receipt`).
     pipeline_activation: Option<Arc<PipelineActivationStore>>,
+    /// The tenants' bundle qualifications, on the same PostgreSQL backend as
+    /// `pipeline_activation` and present exactly when it is. Written only by
+    /// `POST /v1/admin/pipeline/qualifications`, through
+    /// `qualify_bundle_attested` (`pipeline_activation`).
+    pipeline_qualification: Option<Arc<PipelineQualificationStore>>,
+    /// The keys whose signatures make a bundle package trusted, from the JSON
+    /// file `TRACE_COMMONS_PIPELINE_PACKAGE_TRUSTED_KEYS_PATH` names; `None`
+    /// when the variable is unset, and then the qualification and activation
+    /// routes refuse with `pipeline_trust_store_missing`.
+    pipeline_package_trust: Option<Arc<BundlePackageTrustStore>>,
+    /// The keys whose signatures make a check result count, from
+    /// `TRACE_COMMONS_PIPELINE_CHECK_TRUSTED_KEYS_PATH`; `None` when unset.
+    /// Startup refuses a check key that is also a package key
+    /// (`pipeline_trust_store_overlap`).
+    pipeline_check_trust: Option<Arc<CheckResultTrustStore>>,
+    /// The code revision this binary was built from
+    /// (`DEPLOYED_CODE_REVISION_HASH`, P5-D17): the revision a qualification
+    /// records and an activation requires. `None` in a build without it, and
+    /// then every qualification and activation is refused with
+    /// `bundle_runtime_revision_unknown`.
+    pipeline_code_revision_hash: Option<String>,
+    /// `main`'s gate configuration as ingest parsed it at start
+    /// (`pipeline_main_gate_config_from_env`). The activation routes check a
+    /// bundle activated after start against it (`check_runnable_package`),
+    /// as startup checks every tenant bundle it knows.
+    pipeline_main_gate: MainGateConfig,
+    /// Test builds only: the infrastructure profile the activation routes use
+    /// in place of `infrastructure_profile_from_state`. A test deployment has
+    /// development storage and static tokens, so without it no test could
+    /// pass the gate through a route. The field does not exist in a shipped
+    /// binary.
+    #[cfg(test)]
+    pipeline_infrastructure_override: Option<
+        trace_commons_server::versioned_pipeline_qualification::ProductionInfrastructureProfile,
+    >,
     /// Whether a tenant with no routing row on the receipts list is routed
     /// to the pipeline: `TRACE_COMMONS_PIPELINE_ALLOW_TEST_DEPENDENCIES`,
     /// the setting of a process started for tests. The injected service
@@ -4003,6 +4042,16 @@ impl AppState {
         let pipeline_activation = db_connections.as_ref().map(|connections| {
             Arc::new(PipelineActivationStore::new(connections.postgres.clone()))
         });
+        let pipeline_qualification = db_connections.as_ref().map(|connections| {
+            Arc::new(PipelineQualificationStore::new(
+                connections.postgres.clone(),
+            ))
+        });
+        // Task 10: the two trust stores the qualification and activation
+        // routes verify against. A set variable whose file does not hold a
+        // valid key list, or a check key that is also a package key, refuses
+        // the start.
+        let pipeline_trust_stores = pipeline_activation::pipeline_trust_stores_from_env()?;
         let pipeline_worker_ready = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let near_credit_submitter_config = trace_near_credit_submitter_from_env()?;
         let near_credit_submitter_timeout_ms = near_credit_submitter_config
@@ -4502,6 +4551,15 @@ impl AppState {
             pipeline_product,
             pipeline_store,
             pipeline_activation,
+            pipeline_qualification,
+            pipeline_package_trust: pipeline_trust_stores.package,
+            pipeline_check_trust: pipeline_trust_stores.check,
+            pipeline_code_revision_hash: DEPLOYED_CODE_REVISION_HASH.map(str::to_string),
+            pipeline_main_gate,
+            // `cfg(test)` because the field is; `None` unconditionally, so no
+            // configuration reaches it.
+            #[cfg(test)]
+            pipeline_infrastructure_override: None,
             pipeline_unqualified_routing: pipeline_allow_test_dependencies,
             pipeline_runtime_required,
             pipeline_worker_ready,
@@ -8350,6 +8408,35 @@ fn app(state: Arc<AppState>) -> Router {
         .route(
             "/v1/admin/pipeline/operational-summary",
             get(pipeline_operational_summary_handler),
+        )
+        // PR 5 (P5-D11): qualification, routing, and policy interventions,
+        // each behind an admin credential, for the credential's tenant only
+        // (`pipeline_activation`).
+        .route("/v1/admin/pipeline/routing", get(pipeline_routing_handler))
+        .route(
+            "/v1/admin/pipeline/qualifications",
+            post(pipeline_qualify_handler),
+        )
+        .route(
+            "/v1/admin/pipeline/activate",
+            post(pipeline_activate_handler),
+        )
+        .route(
+            "/v1/admin/pipeline/rollback",
+            post(pipeline_rollback_handler),
+        )
+        .route("/v1/admin/pipeline/contain", post(pipeline_contain_handler))
+        .route(
+            "/v1/admin/pipeline/deactivate",
+            post(pipeline_deactivate_handler),
+        )
+        .route(
+            "/v1/admin/pipeline/policy-interventions",
+            get(pipeline_policy_interventions_handler).post(pipeline_policy_intervention_handler),
+        )
+        .route(
+            "/v1/admin/pipeline/legacy-drain",
+            get(pipeline_legacy_drain_handler),
         )
         .route(
             "/v1/admin/pipeline/runs/{run_id}/forensic",
@@ -20013,6 +20100,15 @@ use pipeline_runtime::{
     IngestPipelineRuntimeAssembler, assemble_ingest_pipeline_runtime,
     pipeline_index_rebuild_handler, pipeline_readiness_handler,
     pipeline_runtime_is_production_qualified, run_pipeline_app,
+};
+
+#[path = "trace_commons_ingest_internal/pipeline_activation.rs"]
+mod pipeline_activation;
+use pipeline_activation::{
+    pipeline_activate_handler, pipeline_contain_handler, pipeline_deactivate_handler,
+    pipeline_legacy_drain_handler, pipeline_policy_intervention_handler,
+    pipeline_policy_interventions_handler, pipeline_qualify_handler, pipeline_rollback_handler,
+    pipeline_routing_handler,
 };
 
 /// Complete the native half of a browser redeem: mint the one-time code and

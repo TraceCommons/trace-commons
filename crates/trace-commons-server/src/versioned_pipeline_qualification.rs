@@ -158,7 +158,10 @@ pub const PROMOTION_PACKAGE_CHECKS: &[&str] = &[
     "pipeline_restore_drill",
 ];
 
-pub(crate) fn is_safe_label(value: &str) -> bool {
+/// Whether `value` is a safe label, `^[a-z0-9_]{1,64}$`: the only text an
+/// operational answer, log line, or stored refusal may carry. Public so that
+/// ingest's admin routes answer a store's refusal only when it is one.
+pub fn is_safe_label(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 64
         && value
@@ -1024,9 +1027,10 @@ pub enum ProductionAdapterKind {
 
 /// The infrastructure a runtime holds outside the bundle's own scorer,
 /// embedder, index, settlement, authority, and privacy dependencies
-/// ([`PipelineBundleQualification`] already reports those). An operator
-/// assembles this by hand from what it actually deployed; nothing in this
-/// tree can derive it from a running service.
+/// ([`PipelineBundleQualification`] already reports those). Ingest's admin
+/// routes derive it from the configuration the process started with
+/// (`infrastructure_profile_from_state`, P5-D21); nothing here reads a
+/// request.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProductionInfrastructureProfile {
     pub authoritative_metadata: ProductionAdapterKind,
@@ -1366,7 +1370,9 @@ impl PipelineQualificationStore {
     /// `main`'s gate configuration (`pipeline_runtime_main_gate_config_mismatch`)
     /// and the pipeline credit issuer (`pipeline_credit_issuer_principal_missing`)
     /// are startup checks of every bundle a routed or drained tenant may run,
-    /// not terms of this record, and PR 5's activation must keep them.
+    /// not terms of this record. The activation and rollback routes keep both
+    /// for the bundle they select: they run `PipelineService::check_runnable_package`
+    /// on it before the store's gate (`activate_tenant`, `rollback_bundle`).
     #[allow(clippy::too_many_arguments)]
     pub async fn qualify_bundle(
         &self,

@@ -1,0 +1,1203 @@
+// Copyright (C) 2026 K&Z Partners LLC
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+//! The admin routes an operator uses to qualify a bundle and to move a
+//! tenant between the legacy path and the versioned pipeline (PR 5, P5-D11),
+//! and the infrastructure profile the qualification and the activation gate
+//! read (P5-D21).
+//!
+//! Every route starts with `authenticate_with_tenant_access_grant` and
+//! `require_admin`, and takes its tenant and its actor from the credential
+//! alone: `TenantAuth::tenant_id` and `TenantAuth::principal_ref`. A request
+//! body names only a bundle, a reason, signed check results, or (for a
+//! qualification) the signed package; each body refuses any other field
+//! (`deny_unknown_fields`), so a body that names a tenant is refused before
+//! anything is read.
+//!
+//! The activation gate (`PipelineActivationStore::activate_tenant` and
+//! `rollback_bundle`) trusts four values from its caller. These routes are
+//! its only caller, and each of the four comes from the server's state,
+//! never from the request:
+//!
+//! - the `PromotionDecision`: `evaluate_promotion` at the time of the call,
+//!   over the results `CheckResultTrustStore::verify_all` verified against
+//!   the check trust store (`TRACE_COMMONS_PIPELINE_CHECK_TRUSTED_KEYS_PATH`);
+//! - the `ActivationReadiness`: from the tenant's operational summary, read
+//!   just before the call (activation only; a rollback reads none);
+//! - the infrastructure profile: `infrastructure_profile_from_state`;
+//! - the runtime code revision: the state's `pipeline_code_revision_hash`,
+//!   which is `DEPLOYED_CODE_REVISION_HASH`.
+//!
+//! Before the store call a route also runs the startup checks of a tenant
+//! bundle on the bundle it selects (`PipelineService::check_runnable_package`:
+//! `main`'s gate configuration and the pipeline credit issuer), because the
+//! gate holds no service. A qualification goes through
+//! `qualify_bundle_attested` only, never the bare `qualify_bundle`.
+//!
+//! Answers and log lines hold labels, counts, states, times, and hashes. A
+//! refusal is a safe label (`^[a-z0-9_]{1,64}$`) built from no request
+//! field; a log line names the tenant by `tenant_storage_ref` only.
+
+use super::*;
+
+use axum::extract::rejection::QueryRejection;
+use trace_commons_gate_api::pipeline::Phase;
+use trace_commons_server::versioned_pipeline::{
+    PipelinePolicyInterventionRecord, PolicyOperationalStatus,
+};
+use trace_commons_server::versioned_pipeline_activation::{
+    ActivationEvent, ActivationReadiness, ActivationRequest, LegacyDrainReport, RoutingState,
+    TenantRouting,
+};
+use trace_commons_server::versioned_pipeline_qualification::{
+    BundleQualificationRecord, PACKAGE_RUNTIME_REVISION_UNKNOWN_LABEL, PipelineCheckAttestation,
+    ProductionAdapterKind, ProductionDependencyProfile, ProductionInfrastructureProfile,
+    PromotionDecision, SignedBundlePackage, TrustedBundleKey, evaluate_promotion, is_safe_label,
+};
+
+/// The JSON file of the keys whose signatures make a bundle package trusted:
+/// an array of `TrustedBundleKey` (`{"key_id", "public_key_base64url"}`),
+/// the format `pipeline.py keygen` writes. Unset: no package is trusted, and
+/// the qualification and activation routes refuse with
+/// `pipeline_trust_store_missing`.
+pub(crate) const TRACE_COMMONS_PIPELINE_PACKAGE_TRUSTED_KEYS_PATH: &str =
+    "TRACE_COMMONS_PIPELINE_PACKAGE_TRUSTED_KEYS_PATH";
+/// The JSON file of the keys whose signatures make a check result count, in
+/// the same format. No key may also be a package key
+/// (`pipeline_trust_store_overlap`).
+pub(crate) const TRACE_COMMONS_PIPELINE_CHECK_TRUSTED_KEYS_PATH: &str =
+    "TRACE_COMMONS_PIPELINE_CHECK_TRUSTED_KEYS_PATH";
+
+/// A trust store variable is set and its file is not a non-empty JSON array
+/// of valid trusted keys with distinct ids: the start is refused.
+pub(crate) const PIPELINE_TRUST_STORE_INVALID_LABEL: &str = "pipeline_trust_store_invalid";
+/// A check key is also a package key (the same public key bytes, or the same
+/// key id): the start is refused.
+pub(crate) const PIPELINE_TRUST_STORE_OVERLAP_LABEL: &str = "pipeline_trust_store_overlap";
+/// `503`: a qualification, activation, or rollback in a process without both
+/// trust stores.
+pub(crate) const PIPELINE_TRUST_STORE_MISSING_LABEL: &str = "pipeline_trust_store_missing";
+/// `413`: more than `PIPELINE_MAX_ATTESTATIONS` attestations in one request.
+pub(crate) const PIPELINE_EVIDENCE_TOO_LARGE_LABEL: &str = "pipeline_evidence_too_large";
+/// A request body or query that does not parse as the route's shape (an
+/// unknown field included); the status is the parser's.
+pub(crate) const PIPELINE_REQUEST_INVALID_LABEL: &str = "pipeline_request_invalid";
+/// `413`: a request body above the ingest body limit (`MAX_INGEST_BODY_BYTES`).
+pub(crate) const PIPELINE_REQUEST_TOO_LARGE_LABEL: &str = "pipeline_request_too_large";
+/// `409`: the drain report is asked for while the tenant's legacy records in
+/// the database are not authoritative (`legacy_records_authoritative`).
+pub(crate) const LEGACY_DRAIN_RECORDS_NOT_AUTHORITATIVE_LABEL: &str =
+    "legacy_drain_records_not_authoritative";
+/// `404`: a process without the database mirror holds no routing store.
+pub(crate) const PIPELINE_ROUTING_STORE_MISSING_LABEL: &str = "pipeline_routing_store_missing";
+/// `404`: the tenant has no stored package of the bundle the request names
+/// (the activation gate's own label for it).
+const BUNDLE_PACKAGE_MISSING_LABEL: &str = "bundle_package_missing";
+
+/// The most attestations one request may carry: a full qualification set is
+/// one for each of the 19 required checks.
+pub(crate) const PIPELINE_MAX_ATTESTATIONS: usize = 64;
+/// The most routing events `GET /v1/admin/pipeline/routing` answers, newest
+/// first.
+pub(crate) const PIPELINE_ROUTING_EVENT_LIMIT: usize = 100;
+
+/// The provider label of the one artifact store that counts as production.
+const GCS_PROVIDER_LABEL: &str = "gcs";
+/// The provider label `GET /v1/admin/config-status` reports for a configured
+/// store without a typed label (`trace_commons_config_status_response`).
+const LOCAL_ENCRYPTED_PROVIDER_LABEL: &str = "local_encrypted";
+/// The key wrapper kind of the one key wrapper that counts as production: the
+/// Cloud KMS wrapper `build_selected_kek_wrapper_*` builds for
+/// `TRACE_COMMONS_KEK_PROVIDER=gcp_cloud_kms`.
+const GCP_CLOUD_KMS_WRAPPER_KIND: &str = "gcp_cloud_kms";
+
+/// The two trust stores a process holds, each `None` when its variable is
+/// unset.
+pub(crate) struct PipelineTrustStores {
+    pub(crate) package: Option<Arc<BundlePackageTrustStore>>,
+    pub(crate) check: Option<Arc<CheckResultTrustStore>>,
+}
+
+/// The trusted keys in the JSON file at `path`; `None` when no path is given.
+/// The file must be a non-empty JSON array of `TrustedBundleKey` with
+/// distinct key ids; anything else, and a file that cannot be read, is
+/// `pipeline_trust_store_invalid`. The error is the label alone: it never
+/// names the path.
+pub(crate) fn read_trusted_keys(
+    path: Option<&Path>,
+) -> anyhow::Result<Option<Vec<TrustedBundleKey>>> {
+    let Some(path) = path else {
+        return Ok(None);
+    };
+    let invalid = || anyhow::anyhow!(PIPELINE_TRUST_STORE_INVALID_LABEL);
+    let bytes = std::fs::read(path).map_err(|_| invalid())?;
+    let keys: Vec<TrustedBundleKey> = serde_json::from_slice(&bytes).map_err(|_| invalid())?;
+    let mut key_ids = BTreeSet::new();
+    if keys.is_empty() || !keys.iter().all(|key| key_ids.insert(key.key_id.as_str())) {
+        return Err(invalid());
+    }
+    Ok(Some(keys))
+}
+
+/// `read_trusted_keys` of the file `variable` names: `None` when the variable
+/// is unset. A refusal names the variable, never its value.
+pub(crate) fn read_trusted_keys_from_env(
+    variable: &str,
+) -> anyhow::Result<Option<Vec<TrustedBundleKey>>> {
+    let path = std::env::var_os(variable).map(PathBuf::from);
+    read_trusted_keys(path.as_deref()).with_context(|| variable.to_string())
+}
+
+/// Builds the two trust stores from their keys: a key that a store refuses
+/// (an id that is not an identifier, bytes that are not a 32-byte Ed25519
+/// public key) is `pipeline_trust_store_invalid`, and a check key that is
+/// also a package key is `pipeline_trust_store_overlap`. A key trusted to
+/// sign packages is never trusted to vouch for check results, nor the
+/// reverse (P5-D13; Task 8 review): the key files have one format and no
+/// purpose marker, so a configuration mistake could put one key in both.
+pub(crate) fn pipeline_trust_stores(
+    package_keys: Option<Vec<TrustedBundleKey>>,
+    check_keys: Option<Vec<TrustedBundleKey>>,
+) -> anyhow::Result<PipelineTrustStores> {
+    let invalid = |_| anyhow::anyhow!(PIPELINE_TRUST_STORE_INVALID_LABEL);
+    let package = package_keys
+        .clone()
+        .map(BundlePackageTrustStore::new)
+        .transpose()
+        .map_err(invalid)?;
+    let check = check_keys
+        .clone()
+        .map(CheckResultTrustStore::new)
+        .transpose()
+        .map_err(invalid)?;
+    if let (Some(package_keys), Some(check_keys)) = (&package_keys, &check_keys) {
+        anyhow::ensure!(
+            !trusted_keys_overlap(package_keys, check_keys),
+            PIPELINE_TRUST_STORE_OVERLAP_LABEL
+        );
+    }
+    Ok(PipelineTrustStores {
+        package: package.map(Arc::new),
+        check: check.map(Arc::new),
+    })
+}
+
+/// Whether a check key is also a package key: its public key bytes are a
+/// package key's (under any id), or its id is a package key's. Run after
+/// both stores accepted their keys, so every key decodes.
+fn trusted_keys_overlap(package: &[TrustedBundleKey], check: &[TrustedBundleKey]) -> bool {
+    let public_key = |key: &TrustedBundleKey| {
+        base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(&key.public_key_base64url)
+            .ok()
+    };
+    let package_ids = package
+        .iter()
+        .map(|key| key.key_id.as_str())
+        .collect::<BTreeSet<_>>();
+    let package_public_keys = package
+        .iter()
+        .filter_map(public_key)
+        .collect::<BTreeSet<_>>();
+    check.iter().any(|key| {
+        package_ids.contains(key.key_id.as_str())
+            || public_key(key).is_some_and(|bytes| package_public_keys.contains(&bytes))
+    })
+}
+
+/// The two trust stores of this process, from
+/// `TRACE_COMMONS_PIPELINE_PACKAGE_TRUSTED_KEYS_PATH` and
+/// `TRACE_COMMONS_PIPELINE_CHECK_TRUSTED_KEYS_PATH`, read once at start.
+pub(crate) fn pipeline_trust_stores_from_env() -> anyhow::Result<PipelineTrustStores> {
+    pipeline_trust_stores(
+        read_trusted_keys_from_env(TRACE_COMMONS_PIPELINE_PACKAGE_TRUSTED_KEYS_PATH)?,
+        read_trusted_keys_from_env(TRACE_COMMONS_PIPELINE_CHECK_TRUSTED_KEYS_PATH)?,
+    )
+}
+
+/// The infrastructure this process runs around a bundle (P5-D21), from the
+/// fields `GET /v1/admin/config-status` reports. Nothing here reads a
+/// request. Fail closed: only the production value of each row counts as
+/// production, and an unknown value is not production.
+///
+/// - `authoritative_metadata`: `Production` with the database mirror and its
+///   writes required, `Development` with a best-effort mirror, else `Missing`;
+///   `best_effort_database_mirror` is the second case.
+/// - `artifact_store`: by the configured store's provider label, as
+///   config-status reports it (a store with no typed label is
+///   `local_encrypted`): `gcs` is `Production`, any other label
+///   (`file_system`, `local_encrypted`) `Development`, and no store, or a
+///   store whose object IO is off (a remote provider this build does not
+///   compile), `Missing`.
+/// - `plaintext_fallback`: the configured store allows plaintext
+///   compatibility, or no store is configured (the plain file store).
+/// - `key_wrapper`: by the configured store's key wrapper kind:
+///   `gcp_cloud_kms` is `Production`, any other wrapper (a local master key,
+///   the dstack stub) `Development`, none `Missing`.
+/// - `authentication`: `Production` with a signed-token verifier and managed
+///   EdDSA tokens required, `Development` with a verifier alone, else
+///   `Missing`.
+/// - `static_bearer_authentication`: any static token is configured.
+/// - `hs256_bridge_authentication`: the verifier holds more keys than EdDSA
+///   keys (the two counts config-status reports); a verifier whose lock is
+///   poisoned counts as holding one.
+/// - `unversioned_policy_dependencies`: `false`; the qualification fails
+///   closed on a dependency without a content hash
+///   (`bundle_dependency_missing`).
+/// - `live_external_payout_enabled`: the pipeline runtime's payout is on.
+pub(crate) fn infrastructure_profile_from_state(
+    state: &AppState,
+) -> ProductionInfrastructureProfile {
+    let store = state.artifact_store.as_ref();
+    let verifier = state.signed_token_verifier.as_ref();
+    ProductionInfrastructureProfile {
+        authoritative_metadata: match (state.db_mirror.is_some(), state.require_db_mirror_writes) {
+            (true, true) => ProductionAdapterKind::Production,
+            (true, false) => ProductionAdapterKind::Development,
+            (false, _) => ProductionAdapterKind::Missing,
+        },
+        best_effort_database_mirror: state.db_mirror.is_some() && !state.require_db_mirror_writes,
+        artifact_store: match store {
+            Some(store) if store.object_io_enabled() => {
+                if store
+                    .provider_label()
+                    .unwrap_or(LOCAL_ENCRYPTED_PROVIDER_LABEL)
+                    == GCS_PROVIDER_LABEL
+                {
+                    ProductionAdapterKind::Production
+                } else {
+                    ProductionAdapterKind::Development
+                }
+            }
+            _ => ProductionAdapterKind::Missing,
+        },
+        plaintext_fallback: store
+            .is_none_or(ConfiguredTraceArtifactStore::plaintext_compatibility_allowed),
+        key_wrapper: match store.and_then(ConfiguredTraceArtifactStore::kek_status) {
+            Some(status) if status.kind == GCP_CLOUD_KMS_WRAPPER_KIND => {
+                ProductionAdapterKind::Production
+            }
+            Some(_) => ProductionAdapterKind::Development,
+            None => ProductionAdapterKind::Missing,
+        },
+        authentication: match (
+            verifier.is_some(),
+            state.require_managed_eddsa_signed_tokens,
+        ) {
+            (true, true) => ProductionAdapterKind::Production,
+            (true, false) => ProductionAdapterKind::Development,
+            (false, _) => ProductionAdapterKind::Missing,
+        },
+        static_bearer_authentication: !state.tokens.is_empty(),
+        hs256_bridge_authentication: verifier.is_some_and(|verifier| {
+            verifier.read().map_or(true, |verifier| {
+                verifier.configured_key_count() > verifier.configured_eddsa_key_count()
+            })
+        }),
+        unversioned_policy_dependencies: false,
+        live_external_payout_enabled: state
+            .pipeline_service
+            .as_ref()
+            .is_some_and(|service| service.payout_enabled()),
+    }
+}
+
+/// The profile the routes give the qualification and the gate:
+/// `infrastructure_profile_from_state`, or, in a test build only, the test
+/// state's override.
+fn route_infrastructure_profile(state: &AppState) -> ProductionInfrastructureProfile {
+    #[cfg(test)]
+    if let Some(profile) = &state.pipeline_infrastructure_override {
+        return profile.clone();
+    }
+    infrastructure_profile_from_state(state)
+}
+
+/// The gate driver's attempt ceiling when this process runs the in-process
+/// gate driver (`TRACE_COMMONS_PERPLEXITY_DRIVER_ENABLED`; its
+/// `max_attempts`), else `None`: the mode of the drain report.
+fn gate_driver_max_attempts(state: &AppState) -> Option<i32> {
+    state
+        .perplexity_score_driver
+        .as_ref()
+        .map(|driver| driver.knobs.max_attempts)
+}
+
+/// The drain report's precondition (`legacy_drain_report`): the tenant's
+/// legacy records in the database are authoritative. (1) The legacy path's
+/// database writes are required, so a failed write fails the legacy
+/// operation: the predicate `enforce_db_mirror_write_result` applies
+/// (`TRACE_COMMONS_REQUIRE_DB_MIRROR_WRITES`, or account admission on). (2)
+/// The tenant's review, credit, settlement, and NEAR outbox reads come from
+/// the database (`db_reviewer_reads_for_tenant`), so the legacy workers act on
+/// the rows the report counts.
+fn legacy_records_authoritative(state: &AppState, tenant_id: &str) -> bool {
+    (state.require_db_mirror_writes || state.account_admission.is_some())
+        && state.db_reviewer_reads_for_tenant(tenant_id)
+}
+
+/// The one map from a store's or a check's error to an answer, shared by the
+/// nine handlers: a refusal named by a safe label is `409` with that label;
+/// a bundle the tenant has no policy row for is `404`
+/// `bundle_package_missing`; anything else is the hash-only internal error.
+/// No answer is built from a request field.
+fn activation_error(error: DatabaseError) -> (StatusCode, Json<ApiError>) {
+    match error {
+        DatabaseError::Constraint(label) if is_safe_label(&label) => {
+            api_error(StatusCode::CONFLICT, label)
+        }
+        DatabaseError::NotFound { .. } => {
+            api_error(StatusCode::NOT_FOUND, BUNDLE_PACKAGE_MISSING_LABEL)
+        }
+        other => internal_error(other),
+    }
+}
+
+/// `activation_error` of a check's refusal label.
+fn refusal(label: impl Into<String>) -> (StatusCode, Json<ApiError>) {
+    activation_error(DatabaseError::Constraint(label.into()))
+}
+
+/// The parsed body, or its refusal: `413` `pipeline_request_too_large` above
+/// the body limit, else the parser's status with `pipeline_request_invalid`.
+/// The parser's own text, which can quote the request, is never answered.
+fn request_body<T>(body: Result<Json<T>, JsonRejection>) -> ApiResult<T> {
+    body.map(|Json(body)| body)
+        .map_err(|rejection| request_refusal(rejection.status()))
+}
+
+/// `request_body` for a query string.
+fn request_query<T>(query: Result<Query<T>, QueryRejection>) -> ApiResult<T> {
+    query
+        .map(|Query(query)| query)
+        .map_err(|rejection| request_refusal(rejection.status()))
+}
+
+fn request_refusal(status: StatusCode) -> (StatusCode, Json<ApiError>) {
+    if status == StatusCode::PAYLOAD_TOO_LARGE {
+        api_error(status, PIPELINE_REQUEST_TOO_LARGE_LABEL)
+    } else {
+        api_error(status, PIPELINE_REQUEST_INVALID_LABEL)
+    }
+}
+
+/// `413` `pipeline_evidence_too_large` above `PIPELINE_MAX_ATTESTATIONS`.
+fn bound_attestations(attestations: &[PipelineCheckAttestation]) -> ApiResult<()> {
+    if attestations.len() > PIPELINE_MAX_ATTESTATIONS {
+        return Err(api_error(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            PIPELINE_EVIDENCE_TOO_LARGE_LABEL,
+        ));
+    }
+    Ok(())
+}
+
+fn require_activation_store(state: &AppState) -> ApiResult<&PipelineActivationStore> {
+    state
+        .pipeline_activation
+        .as_deref()
+        .ok_or_else(|| api_error(StatusCode::NOT_FOUND, PIPELINE_ROUTING_STORE_MISSING_LABEL))
+}
+
+/// The two trust stores and the deployed revision, each from the state:
+/// `503` `pipeline_trust_store_missing` without both stores, `409`
+/// `bundle_runtime_revision_unknown` without the revision.
+struct TrustAndRevision<'a> {
+    package: &'a BundlePackageTrustStore,
+    check: &'a CheckResultTrustStore,
+    revision: &'a str,
+}
+
+fn trust_and_revision(state: &AppState) -> ApiResult<TrustAndRevision<'_>> {
+    let (Some(package), Some(check)) = (
+        state.pipeline_package_trust.as_deref(),
+        state.pipeline_check_trust.as_deref(),
+    ) else {
+        return Err(api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            PIPELINE_TRUST_STORE_MISSING_LABEL,
+        ));
+    };
+    let revision = state
+        .pipeline_code_revision_hash
+        .as_deref()
+        .ok_or_else(|| api_error(StatusCode::CONFLICT, PACKAGE_RUNTIME_REVISION_UNKNOWN_LABEL))?;
+    Ok(TrustAndRevision {
+        package,
+        check,
+        revision,
+    })
+}
+
+/// Logs one successful action: the tenant's storage reference, the action
+/// label, and the evidence hash of what it recorded. Never the package, a
+/// token, or the tenant id.
+fn log_action(tenant: &TenantAuth, action: &'static str, evidence_hash: &str) {
+    tracing::info!(
+        tenant_storage_ref = %tenant_storage_ref(&tenant.tenant_id),
+        action,
+        evidence_hash,
+        "pipeline admin action recorded"
+    );
+}
+
+/// `POST /v1/admin/pipeline/qualifications`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct QualifyBody {
+    signed_package: SignedBundlePackage,
+    attestations: Vec<PipelineCheckAttestation>,
+}
+
+/// `POST /v1/admin/pipeline/activate` and `POST /v1/admin/pipeline/rollback`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ActivateBody {
+    bundle_id: String,
+    reason_code: String,
+    attestations: Vec<PipelineCheckAttestation>,
+}
+
+/// `POST /v1/admin/pipeline/contain` and `POST /v1/admin/pipeline/deactivate`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ReasonBody {
+    reason_code: String,
+}
+
+/// `POST /v1/admin/pipeline/policy-interventions`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct InterventionBody {
+    bundle_id: String,
+    phase: Phase,
+    action: String,
+    reason_code: String,
+}
+
+/// `GET /v1/admin/pipeline/policy-interventions?bundle_id=...`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct InterventionQuery {
+    bundle_id: String,
+}
+
+/// `GET /v1/admin/pipeline/routing`: the tenant's routing state (`None` with
+/// no routing row), its active bundle, and its newest routing events.
+#[derive(Debug, Serialize)]
+pub(crate) struct PipelineRoutingView {
+    routing_state: Option<RoutingState>,
+    active_bundle_id: Option<String>,
+    events: Vec<ActivationEvent>,
+}
+
+/// `GET /v1/admin/pipeline/policy-interventions`: oldest first.
+#[derive(Debug, Serialize)]
+pub(crate) struct PipelinePolicyInterventions {
+    interventions: Vec<PipelinePolicyInterventionRecord>,
+}
+
+/// The gate's inputs that a route supplies, each from the server's state.
+struct GateInputs<'a> {
+    promotion: PromotionDecision,
+    dependencies: ProductionDependencyProfile,
+    revision: &'a str,
+}
+
+impl GateInputs<'_> {
+    fn request<'r>(
+        &'r self,
+        tenant: &'r TenantAuth,
+        body: &'r ActivateBody,
+    ) -> ActivationRequest<'r> {
+        ActivationRequest {
+            tenant_id: &tenant.tenant_id,
+            bundle_id: &body.bundle_id,
+            actor_principal_ref: &tenant.principal_ref,
+            reason_code: &body.reason_code,
+            promotion: &self.promotion,
+            runtime_code_revision_hash: self.revision,
+            dependencies: &self.dependencies,
+        }
+    }
+}
+
+/// The activation and the rollback, in order, up to the store call: the two
+/// trust stores and the revision; the attestations verified against the
+/// check store; the promotion evaluated over them now (an `Err` is refused
+/// here, a decision that is not ready by the gate); the tenant's stored
+/// package (`404` when none); the startup checks of a tenant bundle on it;
+/// and its dependency profile with this process's infrastructure. Nothing in
+/// it comes from the request but the bundle id and the attestations.
+async fn gate_inputs<'a>(
+    state: &'a AppState,
+    service: &PipelineService,
+    tenant: &TenantAuth,
+    body: &ActivateBody,
+) -> ApiResult<GateInputs<'a>> {
+    bound_attestations(&body.attestations)?;
+    let trust = trust_and_revision(state)?;
+    let verified = trust
+        .check
+        .verify_all(&body.attestations)
+        .map_err(refusal)?;
+    let promotion = evaluate_promotion(&verified.evidence, Utc::now()).map_err(refusal)?;
+    let package = service
+        .store()
+        .load_bundle(&tenant.tenant_id, &body.bundle_id)
+        .await
+        .map_err(activation_error)?
+        .ok_or_else(|| api_error(StatusCode::NOT_FOUND, BUNDLE_PACKAGE_MISSING_LABEL))?;
+    service
+        .check_runnable_package(&package, &state.pipeline_main_gate, true)
+        .map_err(refusal)?;
+    let dependencies = ProductionDependencyProfile::for_bundle(
+        service,
+        &package,
+        route_infrastructure_profile(state),
+    )
+    .map_err(refusal)?;
+    Ok(GateInputs {
+        promotion,
+        dependencies,
+        revision: trust.revision,
+    })
+}
+
+/// `GET /v1/admin/pipeline/routing`. Needs the routing store, not a runtime.
+pub(crate) async fn pipeline_routing_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> ApiResult<Json<PipelineRoutingView>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_admin(&tenant)?;
+    let store = require_activation_store(state.as_ref())?;
+    let packages = state
+        .pipeline_store
+        .as_deref()
+        .ok_or_else(|| api_error(StatusCode::NOT_FOUND, PIPELINE_ROUTING_STORE_MISSING_LABEL))?;
+    let routing = store
+        .routing(&tenant.tenant_id)
+        .await
+        .map_err(activation_error)?;
+    let active_bundle_id = packages
+        .active_bundle_id(&tenant.tenant_id)
+        .await
+        .map_err(activation_error)?;
+    let events = store
+        .events(&tenant.tenant_id, PIPELINE_ROUTING_EVENT_LIMIT)
+        .await
+        .map_err(activation_error)?;
+    Ok(Json(PipelineRoutingView {
+        routing_state: routing.map(|routing| routing.routing_state),
+        active_bundle_id,
+        events,
+    }))
+}
+
+/// `POST /v1/admin/pipeline/qualifications`: records a qualification of the
+/// signed package for the tenant on this process's code revision, through
+/// `qualify_bundle_attested` only. It verifies the package against the
+/// package trust store and the attestations against the check trust store,
+/// and builds the qualification's metadata itself.
+pub(crate) async fn pipeline_qualify_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Result<Json<QualifyBody>, JsonRejection>,
+) -> ApiResult<Json<BundleQualificationRecord>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_admin(&tenant)?;
+    let service = require_pipeline_service(state.as_ref())?;
+    let body = request_body(body)?;
+    bound_attestations(&body.attestations)?;
+    let trust = trust_and_revision(state.as_ref())?;
+    let qualifications = state
+        .pipeline_qualification
+        .as_deref()
+        .ok_or_else(|| api_error(StatusCode::NOT_FOUND, PIPELINE_ROUTING_STORE_MISSING_LABEL))?;
+    let dependencies = ProductionDependencyProfile::for_bundle(
+        service,
+        &body.signed_package.package,
+        route_infrastructure_profile(state.as_ref()),
+    )
+    .map_err(refusal)?;
+    let record = qualifications
+        .qualify_bundle_attested(
+            &tenant.tenant_id,
+            &body.signed_package,
+            trust.package,
+            trust.check,
+            &dependencies,
+            &body.attestations,
+            trust.revision,
+        )
+        .await
+        .map_err(activation_error)?;
+    log_action(&tenant, "qualify", &record.metadata.evidence_hash);
+    Ok(Json(record))
+}
+
+/// `POST /v1/admin/pipeline/activate`: routes the tenant's new receipts to
+/// the pipeline with the bundle, when the tenant's readiness passes and every
+/// term of the qualified activation gate holds.
+pub(crate) async fn pipeline_activate_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Result<Json<ActivateBody>, JsonRejection>,
+) -> ApiResult<Json<TenantRouting>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_admin(&tenant)?;
+    let service = require_pipeline_service(state.as_ref())?;
+    let body = request_body(body)?;
+    let inputs = gate_inputs(state.as_ref(), service, &tenant, &body).await?;
+    let summary = require_pipeline_product(state.as_ref())?
+        .operational_summary(&tenant.tenant_id)
+        .await
+        .map_err(activation_error)?;
+    let readiness = ActivationReadiness::from_operational_summary(&summary);
+    let routing = require_activation_store(state.as_ref())?
+        .activate_tenant(inputs.request(&tenant, &body), &readiness)
+        .await
+        .map_err(activation_error)?;
+    log_action(&tenant, "activate", &routing.evidence_hash);
+    Ok(Json(routing))
+}
+
+/// `POST /v1/admin/pipeline/rollback`: routes a `pipeline` or `contained`
+/// tenant's new receipts to the pipeline with a bundle it selected before.
+/// The same inputs as the activation, without the readiness.
+pub(crate) async fn pipeline_rollback_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Result<Json<ActivateBody>, JsonRejection>,
+) -> ApiResult<Json<TenantRouting>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_admin(&tenant)?;
+    let service = require_pipeline_service(state.as_ref())?;
+    let body = request_body(body)?;
+    let inputs = gate_inputs(state.as_ref(), service, &tenant, &body).await?;
+    let routing = require_activation_store(state.as_ref())?
+        .rollback_bundle(inputs.request(&tenant, &body))
+        .await
+        .map_err(activation_error)?;
+    log_action(&tenant, "rollback", &routing.evidence_hash);
+    Ok(Json(routing))
+}
+
+/// `POST /v1/admin/pipeline/contain`: stops the tenant's new receipts.
+pub(crate) async fn pipeline_contain_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Result<Json<ReasonBody>, JsonRejection>,
+) -> ApiResult<Json<TenantRouting>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_admin(&tenant)?;
+    require_pipeline_service(state.as_ref())?;
+    let body = request_body(body)?;
+    let routing = require_activation_store(state.as_ref())?
+        .contain(&tenant.tenant_id, &tenant.principal_ref, &body.reason_code)
+        .await
+        .map_err(activation_error)?;
+    log_action(&tenant, "contain", &routing.evidence_hash);
+    Ok(Json(routing))
+}
+
+/// `POST /v1/admin/pipeline/deactivate`: returns the tenant to the legacy
+/// path.
+pub(crate) async fn pipeline_deactivate_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Result<Json<ReasonBody>, JsonRejection>,
+) -> ApiResult<Json<TenantRouting>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_admin(&tenant)?;
+    require_pipeline_service(state.as_ref())?;
+    let body = request_body(body)?;
+    let routing = require_activation_store(state.as_ref())?
+        .deactivate(&tenant.tenant_id, &tenant.principal_ref, &body.reason_code)
+        .await
+        .map_err(activation_error)?;
+    log_action(&tenant, "deactivate", &routing.evidence_hash);
+    Ok(Json(routing))
+}
+
+/// `POST /v1/admin/pipeline/policy-interventions`: suspends or resumes one
+/// policy of one of the tenant's bundles (`terminate` is
+/// `policy_intervention_not_supported`).
+pub(crate) async fn pipeline_policy_intervention_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Result<Json<InterventionBody>, JsonRejection>,
+) -> ApiResult<Json<PipelinePolicyInterventionRecord>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_admin(&tenant)?;
+    let service = require_pipeline_service(state.as_ref())?;
+    let body = request_body(body)?;
+    let record = service
+        .store()
+        .intervene_policy(
+            &tenant.tenant_id,
+            &body.bundle_id,
+            body.phase,
+            &body.action,
+            &tenant.principal_ref,
+            &body.reason_code,
+        )
+        .await
+        .map_err(activation_error)?;
+    // The label comes from the recorded transition, not from the request.
+    let action = match record.resulting_status {
+        PolicyOperationalStatus::Suspended => "policy_suspend",
+        PolicyOperationalStatus::Runnable => "policy_resume",
+        PolicyOperationalStatus::Terminated => "policy_terminate",
+    };
+    log_action(&tenant, action, &record.evidence_hash);
+    Ok(Json(record))
+}
+
+/// `GET /v1/admin/pipeline/policy-interventions?bundle_id=...`: the
+/// interventions on one of the tenant's bundles, oldest first.
+pub(crate) async fn pipeline_policy_interventions_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    query: Result<Query<InterventionQuery>, QueryRejection>,
+) -> ApiResult<Json<PipelinePolicyInterventions>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_admin(&tenant)?;
+    let service = require_pipeline_service(state.as_ref())?;
+    let query = request_query(query)?;
+    let interventions = service
+        .store()
+        .list_policy_interventions(&tenant.tenant_id, &query.bundle_id)
+        .await
+        .map_err(activation_error)?;
+    Ok(Json(PipelinePolicyInterventions { interventions }))
+}
+
+/// `GET /v1/admin/pipeline/legacy-drain`: what the legacy path still owes
+/// the tenant (`legacy_drain_report`), in the mode of this process's gate
+/// driver and with its legal-hold retention policies. Refused with `409`
+/// `legacy_drain_records_not_authoritative` unless the tenant's legacy
+/// records in the database are authoritative. Needs the routing store, not a
+/// runtime.
+pub(crate) async fn pipeline_legacy_drain_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> ApiResult<Json<LegacyDrainReport>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_admin(&tenant)?;
+    let store = require_activation_store(state.as_ref())?;
+    if !legacy_records_authoritative(state.as_ref(), &tenant.tenant_id) {
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            LEGACY_DRAIN_RECORDS_NOT_AUTHORITATIVE_LABEL,
+        ));
+    }
+    let held_retention_policy_ids = state
+        .legal_hold_retention_policy_ids
+        .iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    let report = store
+        .legacy_drain_report(
+            &tenant.tenant_id,
+            gate_driver_max_attempts(state.as_ref()),
+            &held_retention_policy_ids,
+        )
+        .await
+        .map_err(activation_error)?;
+    Ok(Json(report))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use trace_commons_server::versioned_pipeline_qualification::ProductionAdapterKind;
+
+    /// A trusted key with `key_id` and the 32 public key bytes `seed`
+    /// repeated: the shape the loader reads, not a real key pair.
+    fn key(key_id: &str, seed: u8) -> TrustedBundleKey {
+        TrustedBundleKey {
+            key_id: key_id.to_string(),
+            public_key_base64url: base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .encode([seed; 32]),
+        }
+    }
+
+    fn written(dir: &tempfile::TempDir, name: &str, contents: &[u8]) -> PathBuf {
+        let path = dir.path().join(name);
+        std::fs::write(&path, contents).expect("write the trust store file");
+        path
+    }
+
+    /// A verifier with an HS256 secret when `hs256` and one EdDSA key; the
+    /// key is only counted here, never parsed.
+    fn verifier(hs256: bool) -> SharedTraceCommonsSignedTokenVerifier {
+        shared_signed_token_verifier(TraceCommonsSignedTokenVerifier {
+            default_secret: hs256.then(|| SecretString::from("hs256-bridge-secret".to_string())),
+            keyed_secrets: BTreeMap::new(),
+            default_eddsa_public_key: Some(TraceCommonsSignedEddsaPublicKey {
+                pem: "eddsa-public-key-counted-only".to_string(),
+                not_before: None,
+                not_after: None,
+            }),
+            keyed_eddsa_public_keys: BTreeMap::new(),
+            managed_eddsa_key_ids: BTreeSet::new(),
+            managed_eddsa_keyset_last_refreshed_at: None,
+            managed_eddsa_keyset_last_refresh_failed_at: None,
+            issuer: None,
+            audience: None,
+            revoked_jtis: BTreeSet::new(),
+            max_ttl_seconds: None,
+            require_jti: false,
+        })
+    }
+
+    fn kek(kind: &str) -> KekWrapperStatus {
+        KekWrapperStatus {
+            kind: kind.to_string(),
+            key_ref_hash: "sha256:kek-ref".to_string(),
+            is_production_trust_boundary: kind != "local_master_key",
+        }
+    }
+
+    /// One case for each row of the brief's table, each changing one field
+    /// of a state whose every row reads its production value.
+    #[tokio::test]
+    async fn the_infrastructure_profile_follows_the_configuration() {
+        use ProductionAdapterKind::{Development, Missing, Production};
+
+        let dir = tempfile::tempdir().unwrap();
+        let unpaid = crate::tests::qualified_test_service_with_payout(&dir, false).await;
+        let paid = crate::tests::qualified_test_service_with_payout(&dir, true).await;
+        assert!(!unpaid.payout_enabled() && paid.payout_enabled());
+        let unused_port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let backend: Arc<dyn Database> = Arc::new(
+            PgBackend::new(&DatabaseConfig::from_postgres_url(
+                &format!("postgres://nobody@127.0.0.1:{unused_port}/none"),
+                1,
+            ))
+            .await
+            .unwrap(),
+        );
+        let local_store = || {
+            let crypto = SecretsCrypto::new(SecretString::from(
+                trace_commons_server::secrets::keychain::generate_master_key_hex(),
+            ))
+            .expect("test crypto");
+            ConfiguredTraceArtifactStore::legacy(Arc::new(LocalEncryptedTraceArtifactStore::new(
+                dir.path(),
+                crypto,
+            )))
+        };
+        let gcs = ConfiguredTraceArtifactStore {
+            provider_label: Some("gcs"),
+            plaintext_compatibility_allowed: false,
+            kek_status: Some(kek("gcp_cloud_kms")),
+            ..local_store()
+        };
+        let mut production_state = (*crate::tests::test_state(dir.path().to_path_buf())).clone();
+        production_state.db_mirror = Some(backend);
+        production_state.require_db_mirror_writes = true;
+        production_state.artifact_store = Some(gcs.clone());
+        production_state.signed_token_verifier = Some(verifier(false));
+        production_state.require_managed_eddsa_signed_tokens = true;
+        production_state.tokens = Arc::new(BTreeMap::new());
+        production_state.pipeline_service = Some(unpaid);
+        let production = ProductionInfrastructureProfile {
+            authoritative_metadata: Production,
+            artifact_store: Production,
+            key_wrapper: Production,
+            authentication: Production,
+            plaintext_fallback: false,
+            best_effort_database_mirror: false,
+            static_bearer_authentication: false,
+            hs256_bridge_authentication: false,
+            unversioned_policy_dependencies: false,
+            live_external_payout_enabled: false,
+        };
+        assert_eq!(
+            infrastructure_profile_from_state(&production_state),
+            production
+        );
+        let with = |change: &dyn Fn(&mut AppState)| {
+            let mut state = production_state.clone();
+            change(&mut state);
+            infrastructure_profile_from_state(&state)
+        };
+        let store = |change: &dyn Fn(&mut ConfiguredTraceArtifactStore)| {
+            let mut store = gcs.clone();
+            change(&mut store);
+            move |state: &mut AppState| state.artifact_store = Some(store.clone())
+        };
+        let cases: Vec<(
+            &str,
+            ProductionInfrastructureProfile,
+            ProductionInfrastructureProfile,
+        )> = vec![
+            (
+                "authoritative_metadata: a database mirror whose writes are best effort",
+                with(&|state| state.require_db_mirror_writes = false),
+                ProductionInfrastructureProfile {
+                    authoritative_metadata: Development,
+                    best_effort_database_mirror: true,
+                    ..production.clone()
+                },
+            ),
+            (
+                "authoritative_metadata: no database mirror",
+                with(&|state| state.db_mirror = None),
+                ProductionInfrastructureProfile {
+                    authoritative_metadata: Missing,
+                    ..production.clone()
+                },
+            ),
+            (
+                "artifact_store: a file-system store",
+                with(&store(&|store| store.provider_label = Some("file_system"))),
+                ProductionInfrastructureProfile {
+                    artifact_store: Development,
+                    ..production.clone()
+                },
+            ),
+            (
+                "artifact_store: the local encrypted store (no typed label)",
+                with(&store(&|store| store.provider_label = None)),
+                ProductionInfrastructureProfile {
+                    artifact_store: Development,
+                    ..production.clone()
+                },
+            ),
+            (
+                "artifact_store: a remote store compiled out (object IO disabled)",
+                with(&store(&|store| store.object_io_enabled = false)),
+                ProductionInfrastructureProfile {
+                    artifact_store: Missing,
+                    ..production.clone()
+                },
+            ),
+            (
+                "artifact_store: no artifact store (the plain file store)",
+                with(&|state| state.artifact_store = None),
+                ProductionInfrastructureProfile {
+                    artifact_store: Missing,
+                    key_wrapper: Missing,
+                    plaintext_fallback: true,
+                    ..production.clone()
+                },
+            ),
+            (
+                "plaintext_fallback: a store that allows plaintext compatibility",
+                with(&store(&|store| {
+                    store.plaintext_compatibility_allowed = true
+                })),
+                ProductionInfrastructureProfile {
+                    plaintext_fallback: true,
+                    ..production.clone()
+                },
+            ),
+            (
+                "key_wrapper: a local master key",
+                with(&store(&|store| {
+                    store.kek_status = Some(kek("local_master_key"))
+                })),
+                ProductionInfrastructureProfile {
+                    key_wrapper: Development,
+                    ..production.clone()
+                },
+            ),
+            (
+                "key_wrapper: the dstack stub",
+                with(&store(&|store| store.kek_status = Some(kek("dstack_kek")))),
+                ProductionInfrastructureProfile {
+                    key_wrapper: Development,
+                    ..production.clone()
+                },
+            ),
+            (
+                "key_wrapper: no key wrapper",
+                with(&store(&|store| store.kek_status = None)),
+                ProductionInfrastructureProfile {
+                    key_wrapper: Missing,
+                    ..production.clone()
+                },
+            ),
+            (
+                "authentication: a verifier without the managed EdDSA requirement",
+                with(&|state| state.require_managed_eddsa_signed_tokens = false),
+                ProductionInfrastructureProfile {
+                    authentication: Development,
+                    ..production.clone()
+                },
+            ),
+            (
+                "authentication: no signed-token verifier",
+                with(&|state| state.signed_token_verifier = None),
+                ProductionInfrastructureProfile {
+                    authentication: Missing,
+                    ..production.clone()
+                },
+            ),
+            (
+                "static_bearer_authentication: a static token",
+                with(&|state| {
+                    let mut tokens = BTreeMap::new();
+                    insert_token(&mut tokens, "tenant-a", "token-a", TokenRole::Admin);
+                    state.tokens = Arc::new(tokens);
+                }),
+                ProductionInfrastructureProfile {
+                    static_bearer_authentication: true,
+                    ..production.clone()
+                },
+            ),
+            (
+                "hs256_bridge_authentication: an HS256 secret beside the EdDSA key",
+                with(&|state| state.signed_token_verifier = Some(verifier(true))),
+                ProductionInfrastructureProfile {
+                    hs256_bridge_authentication: true,
+                    ..production.clone()
+                },
+            ),
+            (
+                "live_external_payout_enabled: a runtime whose payout is enabled",
+                with(&|state| state.pipeline_service = Some(paid.clone())),
+                ProductionInfrastructureProfile {
+                    live_external_payout_enabled: true,
+                    ..production.clone()
+                },
+            ),
+            (
+                "live_external_payout_enabled: no runtime",
+                with(&|state| state.pipeline_service = None),
+                production.clone(),
+            ),
+        ];
+        for (case, actual, expected) in cases {
+            assert_eq!(actual, expected, "{case}");
+        }
+    }
+
+    /// The loader reads a JSON array of `TrustedBundleKey`; an empty array, a
+    /// file that is not JSON, a duplicate key id, a key that is not 32 bytes,
+    /// and a file that cannot be read fail with `pipeline_trust_store_invalid`
+    /// (the label only, never the path); an unset variable gives `None`.
+    #[test]
+    fn a_trust_store_file_is_a_list_of_trusted_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let keys = vec![key("release_key_1", 1), key("release_key_2", 2)];
+        let path = written(&dir, "keys.json", &serde_json::to_vec(&keys).unwrap());
+        assert_eq!(
+            read_trusted_keys(Some(path.as_path())).unwrap(),
+            Some(keys.clone())
+        );
+        let stores = pipeline_trust_stores(Some(keys.clone()), None).unwrap();
+        assert!(stores.package.is_some() && stores.check.is_none());
+        let stores = pipeline_trust_stores(None, Some(keys)).unwrap();
+        assert!(stores.package.is_none() && stores.check.is_some());
+
+        assert_eq!(read_trusted_keys(None).unwrap(), None);
+        assert_eq!(
+            read_trusted_keys_from_env("TRACE_COMMONS_PIPELINE_TEST_UNSET_TRUSTED_KEYS_PATH")
+                .unwrap(),
+            None,
+            "an unset variable"
+        );
+        let stores = pipeline_trust_stores(None, None).unwrap();
+        assert!(stores.package.is_none() && stores.check.is_none());
+
+        let duplicate =
+            serde_json::to_vec(&[key("release_key_1", 1), key("release_key_1", 3)]).unwrap();
+        let short = serde_json::json!([{
+            "key_id": "release_key_1",
+            "public_key_base64url": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([1u8; 31]),
+        }]);
+        for (case, contents) in [
+            ("an empty array", b"[]".to_vec()),
+            ("a file that is not JSON", b"not json".to_vec()),
+            ("an object, not an array", b"{}".to_vec()),
+            ("a duplicate key id", duplicate),
+            (
+                "a key that is not 32 bytes",
+                serde_json::to_vec(&short).unwrap(),
+            ),
+        ] {
+            let path = written(&dir, "invalid.json", &contents);
+            let refused = read_trusted_keys(Some(path.as_path()))
+                .and_then(|keys| pipeline_trust_stores(keys, None).map(|_| ()))
+                .err()
+                .unwrap_or_else(|| panic!("{case} is refused"));
+            assert_eq!(
+                refused.to_string(),
+                PIPELINE_TRUST_STORE_INVALID_LABEL,
+                "{case}"
+            );
+        }
+        let missing = dir.path().join("missing.json");
+        let refused =
+            read_trusted_keys(Some(missing.as_path())).expect_err("a missing file is refused");
+        assert_eq!(refused.to_string(), PIPELINE_TRUST_STORE_INVALID_LABEL);
+        assert!(!format!("{refused:#}").contains("missing.json"), "no path");
+    }
+
+    /// The two stores never share a key: a check key whose public key bytes
+    /// are a package key's (under any id), or whose id is a package key's,
+    /// refuses the start with `pipeline_trust_store_overlap`.
+    #[test]
+    fn a_check_key_that_is_also_a_package_key_refuses_the_start() {
+        let package = vec![key("package_key", 1), key("package_key_2", 2)];
+        for (case, check) in [
+            ("the same key under another id", vec![key("check_key", 2)]),
+            (
+                "another key under a package key's id",
+                vec![key("package_key", 3)],
+            ),
+        ] {
+            let refused = pipeline_trust_stores(Some(package.clone()), Some(check))
+                .err()
+                .unwrap_or_else(|| panic!("{case} is refused"));
+            assert_eq!(
+                refused.to_string(),
+                PIPELINE_TRUST_STORE_OVERLAP_LABEL,
+                "{case}"
+            );
+        }
+        let stores = pipeline_trust_stores(Some(package), Some(vec![key("check_key", 4)]))
+            .expect("two separate key sets");
+        assert!(stores.package.is_some() && stores.check.is_some());
+    }
+
+    /// Every label this module answers or logs is a safe label: each refusal,
+    /// the start refusals, the runtime assembly's new refusal, and the action
+    /// labels of the log lines.
+    #[test]
+    fn the_route_labels_are_safe_labels() {
+        for label in [
+            PIPELINE_TRUST_STORE_INVALID_LABEL,
+            PIPELINE_TRUST_STORE_OVERLAP_LABEL,
+            PIPELINE_TRUST_STORE_MISSING_LABEL,
+            PIPELINE_EVIDENCE_TOO_LARGE_LABEL,
+            PIPELINE_REQUEST_INVALID_LABEL,
+            PIPELINE_REQUEST_TOO_LARGE_LABEL,
+            LEGACY_DRAIN_RECORDS_NOT_AUTHORITATIVE_LABEL,
+            PIPELINE_ROUTING_STORE_MISSING_LABEL,
+            BUNDLE_PACKAGE_MISSING_LABEL,
+            PACKAGE_RUNTIME_REVISION_UNKNOWN_LABEL,
+            "pipeline_unqualified_routing_not_allowed_when_required",
+            "qualify",
+            "activate",
+            "rollback",
+            "contain",
+            "deactivate",
+            "policy_suspend",
+            "policy_resume",
+            "policy_terminate",
+        ] {
+            assert!(is_safe_label(label), "{label}");
+        }
+        assert_eq!(PIPELINE_MAX_ATTESTATIONS, 64);
+    }
+}

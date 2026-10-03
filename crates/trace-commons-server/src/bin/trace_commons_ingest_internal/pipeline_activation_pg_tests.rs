@@ -10,6 +10,11 @@
 //! before and after, so a count that reads zero while the legacy path still
 //! owes work fails here.
 //!
+//! The second half of the file (Task 10) drives the admin routes an operator
+//! uses (`pipeline_activation`): qualification, activation, rollback,
+//! containment, deactivation, the routing view, policy interventions, and the
+//! drain report, with a production-qualified runtime and both trust stores.
+//!
 //! A report is read in one of two modes of the gate driver: `report` for a
 //! deployment that runs it (`Some(ceiling)`, today's behaviour) and
 //! `report_driver_off` for one that does not (`None`: a missing gate decision
@@ -29,7 +34,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use super::pipeline_http_pg_tests::{
-    PassThroughPipelinePrivacyBoundary, account_owner_backend,
+    PassThroughPipelinePrivacyBoundary, TEST_PIPELINE_CREDIT_ISSUER, account_owner_backend,
     assemble_compatibility_pipeline_service_with, mains_database, pipeline_http_database_url,
     route_request, route_trace, runtime_backend, tenant_tx, write_routing_as_operator,
 };
@@ -39,6 +44,8 @@ use trace_commons_gate_api::pipeline::InstrumentId;
 use trace_commons_server::versioned_pipeline_activation::{
     LegacyDrainReport, PipelineActivationStore, RoutingState,
 };
+use trace_commons_server::versioned_pipeline_bundle::MinimalPolicyBundle;
+use trace_commons_server::versioned_pipeline_compat::CompatibilityBundleConfig;
 use trace_commons_server::versioned_pipeline_credit::RecordingSettlementAdapter;
 use trace_commons_server::versioned_pipeline_index::IsolatedPipelineIndex;
 use trace_commons_server::versioned_pipeline_qualification::{PipelineCheckEmitter, evidence_hash};
@@ -2017,6 +2024,33 @@ async fn a_missing_gate_decision_blocks_the_drain_only_when_the_gate_driver_runs
         "the same counts in the same mode hash the same"
     );
 
+    // (3b) Task 10: `GET legacy-drain` reads the mode and the ceiling from
+    // this process's own gate driver configuration: off by default, on with
+    // the driver's `max_attempts`, which moves X between the two labels.
+    let with_driver = |max_attempts: Option<i32>| {
+        let mut state = fixture.state.clone();
+        Arc::make_mut(&mut state).perplexity_score_driver = max_attempts.map(gate_driver_config);
+        state
+    };
+    let routed_off = routed_drain_report(&with_driver(None), &fixture.admin).await;
+    assert!(!routed_off.gate_driver_enabled);
+    assert_eq!(routed_off.evidence_hash, off.evidence_hash);
+    let routed_on =
+        routed_drain_report(&with_driver(Some(GATE_MAX_ATTEMPTS)), &fixture.admin).await;
+    assert_eq!(routed_on.evidence_hash, on.evidence_hash);
+    assert_counts(
+        &routed_on,
+        &[("gate_decision_pending", 1), ("gate_decision_exhausted", 1)],
+        "the route, the process's driver at the ceiling of X's attempts",
+    );
+    let routed_higher =
+        routed_drain_report(&with_driver(Some(GATE_MAX_ATTEMPTS + 1)), &fixture.admin).await;
+    assert_counts(
+        &routed_higher,
+        &[("gate_decision_pending", 2)],
+        "the route, the process's driver with a higher ceiling",
+    );
+
     // (4) A quarantined legacy submission waits for a reviewer. With the gate
     // driver off the report is not drained because of it, and the absent
     // count does not hide it.
@@ -2726,4 +2760,1823 @@ async fn an_incomplete_withdrawal_is_counted_until_the_legacy_worker_completes_i
             .await,
         0
     );
+    // Task 10: `GET legacy-drain` passes this process's legal-hold list, as
+    // the withdrawal worker gets it.
+    for (state, owed, what) in [
+        (&fixture.state, 1, "no legal hold"),
+        (&held_state, 0, "the legal hold of the process"),
+    ] {
+        assert_eq!(
+            routed_drain_report(state, &fixture.admin).await.pending["withdrawal_completion_pending"],
+            owed,
+            "the route, {what}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The admin routes (PR 5, Task 10, P5-D11): qualification, activation,
+// rollback, containment, deactivation, the routing view, policy
+// interventions, and the legacy drain, each behind an admin credential and
+// for the credential's tenant only. Every input of the gate and of the
+// qualification comes from the server's state; a request names a bundle, a
+// reason, and signed check results, nothing else.
+// ---------------------------------------------------------------------------
+
+/// The gate configuration the route tests start ingest with, and the one their
+/// production-compatible packages hold: the floors of the runtime suite's
+/// `production_compatible_config`.
+const ROUTE_MAIN_GATE: MainGateConfig = MainGateConfig {
+    perplexity_floor_micros: Some(1_000),
+    tail_fraction_floor_micros: Some(1_000),
+    novelty_floor_micros: Some(1_000),
+    embed_insert_novelty_micros: 50_000,
+    top_k: 8,
+    chunk_target_tokens: 2048,
+    chunk_max_tokens: 3072,
+    chunk_cap: 16,
+    chunk_min_tokens: 64,
+    novelty_utility_microcredits: 0,
+};
+
+/// The index ids of A (the assembly's default package) and B. The index id is
+/// outside `main`'s gate configuration, so B holds `ROUTE_MAIN_GATE` too and is
+/// another bundle with A's dependencies (the runtime suite's `two_qualified_bundles`).
+const ROUTE_INDEX_A: &str = "qualified_production_index.v1";
+const ROUTE_INDEX_B: &str = "qualified_production_index_b.v1";
+const ROUTE_PACKAGE_KEY_ID: &str = "route-package-release-key";
+const ROUTE_CHECK_KEY_ID: &str = "route-check-attestation-key";
+
+/// The configuration of a production-compatible package with `index_id`.
+fn route_config(index_id: &str) -> CompatibilityBundleConfig {
+    CompatibilityBundleConfig::production_compatible(
+        "qualified_production_perplexity.v1".to_string(),
+        "qualified_production_projection.v1".to_string(),
+        index_id.to_string(),
+        &ROUTE_MAIN_GATE,
+    )
+    .expect("a production-compatible configuration")
+}
+
+/// The package of `route_config(index_id)`, naming the qualified test scorer
+/// and embedder that `qualified_compatibility_pipeline_service` holds.
+fn route_package(index_id: &str) -> trace_commons_gate_api::pipeline::BundlePackage {
+    MinimalPolicyBundle::compatibility_package(
+        &route_config(index_id),
+        &QualifiedTestScorer(trace_commons_gate_api::ReferencePerplexityScorer::new()),
+        &QualifiedTestEmbedder(trace_commons_gate_api::ReferenceEmbedder::new()),
+    )
+    .expect("the package builds")
+}
+
+/// The runtime suite's `qualified_production_service`, through the seam a
+/// boot uses: a compatibility service whose every dependency reports itself
+/// production-qualified (`qualified_compatibility_pipeline_service`), with
+/// A as its default package.
+struct QualifiedRouteAssembler;
+
+impl IngestPipelineRuntimeAssembler for QualifiedRouteAssembler {
+    fn assemble(
+        &self,
+        context: pipeline_runtime::IngestPipelineRuntimeContext,
+    ) -> anyhow::Result<Arc<PipelineService>> {
+        qualified_compatibility_pipeline_service(
+            context.backend,
+            context.artifact_store,
+            &route_config(ROUTE_INDEX_A),
+            Some(context.object_store_name),
+            context.novelty_utility_checks,
+            context.unqualified_routing_allowed,
+        )
+    }
+}
+
+/// `QualifiedRouteAssembler`'s service, assembled as a boot assembles one:
+/// unqualified routing off (production routing), and the pipeline's credit
+/// issuer `issuer`. A service without an issuer processes no tenant (the
+/// assembly refuses a compatibility runtime that does, with no issuer).
+fn assemble_route_service(
+    backend: Arc<PgBackend>,
+    configured_store: &ConfiguredTraceArtifactStore,
+    issuer: Option<&str>,
+) -> Arc<PipelineService> {
+    let connections = TraceCorpusDbConnections {
+        database: backend.clone() as Arc<dyn Database>,
+        postgres: backend,
+    };
+    assemble_ingest_pipeline_runtime(
+        Some(&QualifiedRouteAssembler),
+        Some(&connections),
+        Some(configured_store),
+        false,
+        PipelineLeaseConfig::default(),
+        issuer.is_some(),
+        false,
+        false,
+        None,
+        TEST_NEAR_CONFIRMATION_INTERVAL,
+        TEST_NEAR_PAYOUT_CONTROLS,
+        &PipelineNoveltyUtilityChecks {
+            issuer_principal_ref: issuer.map(str::to_string),
+            ..PipelineNoveltyUtilityChecks::default()
+        },
+        ROUTE_MAIN_GATE,
+    )
+    .expect("assemble the qualified runtime")
+    .expect("an assembler was given, so a service is returned")
+}
+
+/// Every adapter kind production and no risky flag: the profile the test
+/// state's override holds, so that the gate's infrastructure term passes.
+fn all_production_infrastructure()
+-> trace_commons_server::versioned_pipeline_qualification::ProductionInfrastructureProfile {
+    use trace_commons_server::versioned_pipeline_qualification::{
+        ProductionAdapterKind, ProductionInfrastructureProfile,
+    };
+    ProductionInfrastructureProfile {
+        authoritative_metadata: ProductionAdapterKind::Production,
+        artifact_store: ProductionAdapterKind::Production,
+        key_wrapper: ProductionAdapterKind::Production,
+        authentication: ProductionAdapterKind::Production,
+        plaintext_fallback: false,
+        best_effort_database_mirror: false,
+        static_bearer_authentication: false,
+        hs256_bridge_authentication: false,
+        unversioned_policy_dependencies: false,
+        live_external_payout_enabled: false,
+    }
+}
+
+/// The in-process gate driver's configuration with `max_attempts`, as
+/// `parse_perplexity_score_driver_config_from_env` builds it when
+/// `TRACE_COMMONS_PERPLEXITY_DRIVER_ENABLED` is on.
+fn gate_driver_config(max_attempts: i32) -> PerplexityScoreDriverConfig {
+    PerplexityScoreDriverConfig {
+        interval: StdDuration::from_secs(60),
+        batch_size: 10,
+        knobs: PerplexityDriverKnobs {
+            skip_duplicates: true,
+            skip_duplicate_threshold_micros: 0,
+            max_attempts,
+        },
+        backoff_base_seconds: 0,
+    }
+}
+
+/// `GET /v1/admin/pipeline/legacy-drain` through `state` with `token`, which
+/// must answer a report.
+async fn routed_drain_report(state: &Arc<AppState>, token: &str) -> LegacyDrainReport {
+    let (status, body) = route_request(
+        state.clone(),
+        "GET",
+        "/v1/admin/pipeline/legacy-drain",
+        auth_headers(token),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    serde_json::from_value(body).expect("the route answers a drain report")
+}
+
+/// The fields an event of the routing view may carry, and no other.
+const ROUTING_EVENT_FIELDS: [&str; 10] = [
+    "event_id",
+    "action",
+    "previous_state",
+    "resulting_state",
+    "previous_bundle_id",
+    "resulting_bundle_id",
+    "actor_principal_ref",
+    "reason_code",
+    "evidence_hash",
+    "recorded_at",
+];
+
+/// One tenant (with an admin and a contributor) and a bystander tenant (with
+/// an admin), over one database and one artifact store, served by a plain
+/// router (no worker). The state holds a production-qualified runtime, both
+/// trust stores, a test code revision, `ROUTE_MAIN_GATE`, the two tenants on
+/// the receipts list with unqualified routing off, and the test-only
+/// infrastructure override (every kind production): what a production
+/// deployment would hold. A, the runtime's default package, and B are signed
+/// by the package key; check results are signed by the check key, which is
+/// another key. `bodies` keeps every answer body of `call`.
+struct RouteFixture {
+    runtime: Arc<PgBackend>,
+    owner: Arc<PgBackend>,
+    state: Arc<AppState>,
+    configured_store: ConfiguredTraceArtifactStore,
+    tenant: String,
+    admin: String,
+    contributor: String,
+    other_tenant: String,
+    other_admin: String,
+    revision: String,
+    a: trace_commons_gate_api::pipeline::BundlePackage,
+    b: trace_commons_gate_api::pipeline::BundlePackage,
+    package_pkcs8: Vec<u8>,
+    check_pkcs8: Vec<u8>,
+    bodies: std::sync::Mutex<Vec<String>>,
+    _dir: tempfile::TempDir,
+}
+
+impl RouteFixture {
+    async fn new() -> Option<Self> {
+        use trace_commons_server::versioned_pipeline_qualification::trusted_key_for_pkcs8;
+
+        let runtime = runtime_backend(6).await?;
+        let owner = account_owner_backend()
+            .await
+            .expect("the same variable runtime_backend read is set");
+        let suffix = Uuid::new_v4().simple().to_string();
+        let tenant = format!("tenant-routes-{suffix}");
+        let other_tenant = format!("tenant-routes-bystander-{suffix}");
+        let admin = format!("token-routes-admin-{suffix}");
+        let contributor = format!("token-routes-contributor-{suffix}");
+        let other_admin = format!("token-routes-bystander-admin-{suffix}");
+        let dir = tempfile::tempdir().expect("temp dir");
+        let artifacts = test_artifact_store(dir.path());
+        let configured_store = ConfiguredTraceArtifactStore::legacy(artifacts.clone());
+        let service = assemble_route_service(
+            runtime.clone(),
+            &configured_store,
+            Some(TEST_PIPELINE_CREDIT_ISSUER),
+        );
+        let a = service.default_package().clone();
+        assert_eq!(
+            a.bundle_id,
+            route_package(ROUTE_INDEX_A).bundle_id,
+            "A is the package the assembly built"
+        );
+        let b = route_package(ROUTE_INDEX_B);
+        assert_ne!(a.bundle_id, b.bundle_id, "B is another bundle");
+        let key = || {
+            ring::signature::Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new())
+                .expect("a key pair")
+                .as_ref()
+                .to_vec()
+        };
+        let package_pkcs8 = key();
+        let check_pkcs8 = key();
+        let revision = sha256_prefixed("pr5-admin-routes-revision");
+        let mut tokens = BTreeMap::new();
+        insert_token(&mut tokens, &tenant, &admin, TokenRole::Admin);
+        insert_token(&mut tokens, &tenant, &contributor, TokenRole::Contributor);
+        insert_token(&mut tokens, &other_tenant, &other_admin, TokenRole::Admin);
+        let mut state = test_state_with_options(
+            dir.path().to_path_buf(),
+            Some(mains_database().await),
+            Some(artifacts),
+            false,
+            false,
+            false,
+            false,
+        );
+        let state_mut = Arc::make_mut(&mut state);
+        state_mut.tokens = Arc::new(tokens);
+        state_mut.require_db_mirror_writes = true;
+        state_mut.pipeline_service = Some(service);
+        state_mut.pipeline_product = Some(Arc::new(PipelineProductStore::new(runtime.clone())));
+        state_mut.pipeline_store = Some(Arc::new(PgPipelineStore::new(runtime.clone())));
+        state_mut.pipeline_activation = routing_store(&runtime);
+        state_mut.pipeline_qualification =
+            Some(Arc::new(PipelineQualificationStore::new(runtime.clone())));
+        state_mut.pipeline_package_trust = Some(Arc::new(
+            BundlePackageTrustStore::new([trusted_key_for_pkcs8(
+                ROUTE_PACKAGE_KEY_ID,
+                &package_pkcs8,
+            )
+            .expect("the key")])
+            .expect("the package trust store"),
+        ));
+        state_mut.pipeline_check_trust = Some(Arc::new(
+            CheckResultTrustStore::new([
+                trusted_key_for_pkcs8(ROUTE_CHECK_KEY_ID, &check_pkcs8).expect("the key")
+            ])
+            .expect("the check trust store"),
+        ));
+        state_mut.pipeline_code_revision_hash = Some(revision.clone());
+        state_mut.pipeline_main_gate = ROUTE_MAIN_GATE;
+        state_mut.pipeline_unqualified_routing = false;
+        state_mut.pipeline_infrastructure_override = Some(all_production_infrastructure());
+        state_mut.tenant_rollout_gates = TraceTenantRolloutGates::for_feature(
+            TraceTenantRolloutFeature::PipelineReceipts,
+            &[tenant.as_str(), other_tenant.as_str()],
+        );
+        Some(Self {
+            runtime,
+            owner,
+            state,
+            configured_store,
+            tenant,
+            admin,
+            contributor,
+            other_tenant,
+            other_admin,
+            revision,
+            a,
+            b,
+            package_pkcs8,
+            check_pkcs8,
+            bodies: std::sync::Mutex::new(Vec::new()),
+            _dir: dir,
+        })
+    }
+
+    /// The fixture's state with `change` applied, as a second process would
+    /// hold it.
+    fn with(&self, change: impl FnOnce(&mut AppState)) -> Arc<AppState> {
+        let mut state = self.state.clone();
+        change(Arc::make_mut(&mut state));
+        state
+    }
+
+    /// `method path` through a plain router over `state`, with `token` as the
+    /// bearer when one is given and `body` as JSON. The answer body is kept.
+    async fn call(
+        &self,
+        state: &Arc<AppState>,
+        method: &str,
+        path: &str,
+        token: Option<&str>,
+        body: Option<serde_json::Value>,
+    ) -> (StatusCode, serde_json::Value) {
+        let headers = token.map(auth_headers).unwrap_or_default();
+        let (status, answer) = route_request(state.clone(), method, path, headers, body).await;
+        self.bodies
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(answer.to_string());
+        (status, answer)
+    }
+
+    /// `call` through the fixture's state with the tenant's admin credential.
+    async fn admin_call(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<serde_json::Value>,
+    ) -> (StatusCode, serde_json::Value) {
+        self.call(&self.state, method, path, Some(&self.admin), body)
+            .await
+    }
+
+    /// `package`, signed by the package key.
+    fn signed(
+        &self,
+        package: &trace_commons_gate_api::pipeline::BundlePackage,
+    ) -> trace_commons_server::versioned_pipeline_qualification::SignedBundlePackage {
+        trace_commons_server::versioned_pipeline_qualification::sign_bundle_package(
+            package.clone(),
+            ROUTE_PACKAGE_KEY_ID,
+            &self.package_pkcs8,
+        )
+        .expect("the package signs")
+    }
+
+    /// A full set of passing check results for `package` on the fixture's
+    /// revision, each signed by the check key: the four package checks name
+    /// `package`, every other check names none (P5-D15).
+    fn attestations(
+        &self,
+        package: &trace_commons_gate_api::pipeline::BundlePackage,
+    ) -> Vec<trace_commons_server::versioned_pipeline_qualification::PipelineCheckAttestation> {
+        self.attestations_signed_by(package, ROUTE_CHECK_KEY_ID, &self.check_pkcs8)
+    }
+
+    /// `attestations`, each signed by the key `pkcs8` under `key_id`.
+    fn attestations_signed_by(
+        &self,
+        package: &trace_commons_gate_api::pipeline::BundlePackage,
+        key_id: &str,
+        pkcs8: &[u8],
+    ) -> Vec<trace_commons_server::versioned_pipeline_qualification::PipelineCheckAttestation> {
+        use trace_commons_server::versioned_pipeline_qualification::{
+            PROMOTION_PACKAGE_CHECKS, PROMOTION_REQUIRED_CHECKS, PipelineCheckResult,
+            PipelineCheckStatus, sign_check_result,
+        };
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let emitter =
+            PipelineCheckEmitter::new(dir.path().to_path_buf(), "admin_routes", &self.revision)
+                .expect("the emitter's run id and revision are valid");
+        PROMOTION_REQUIRED_CHECKS
+            .iter()
+            .map(|check_id| {
+                emitter
+                    .emit(
+                        check_id,
+                        PipelineCheckStatus::Pass,
+                        PROMOTION_PACKAGE_CHECKS
+                            .contains(check_id)
+                            .then_some(package),
+                        &[],
+                        serde_json::json!({ "check": check_id }),
+                    )
+                    .expect("the check result is written");
+                let bytes = std::fs::read(dir.path().join(format!("{check_id}.result.json")))
+                    .expect("the result file");
+                let result: PipelineCheckResult =
+                    serde_json::from_slice(&bytes).expect("the written result reads back");
+                sign_check_result(result, 3_600, None, None, key_id, pkcs8)
+                    .expect("the result signs")
+            })
+            .collect()
+    }
+
+    /// The body of `POST qualifications` for `package`.
+    fn qualify_body(
+        &self,
+        package: &trace_commons_gate_api::pipeline::BundlePackage,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "signed_package": self.signed(package),
+            "attestations": self.attestations(package),
+        })
+    }
+
+    /// The body of `POST activate` (and `rollback`) for `package`.
+    fn activate_body(
+        &self,
+        package: &trace_commons_gate_api::pipeline::BundlePackage,
+        reason_code: &str,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "bundle_id": package.bundle_id,
+            "reason_code": reason_code,
+            "attestations": self.attestations(package),
+        })
+    }
+
+    /// The nine routes, each with a body it accepts, and whether it needs a
+    /// pipeline runtime (`GET routing` and `GET legacy-drain` need only the
+    /// routing store).
+    fn routes(&self) -> Vec<(&'static str, String, Option<serde_json::Value>, bool)> {
+        vec![
+            ("GET", "/v1/admin/pipeline/routing".to_string(), None, false),
+            (
+                "POST",
+                "/v1/admin/pipeline/qualifications".to_string(),
+                Some(self.qualify_body(&self.a)),
+                true,
+            ),
+            (
+                "POST",
+                "/v1/admin/pipeline/activate".to_string(),
+                Some(self.activate_body(&self.a, "activate_bundle_a")),
+                true,
+            ),
+            (
+                "POST",
+                "/v1/admin/pipeline/rollback".to_string(),
+                Some(self.activate_body(&self.a, "roll_back_to_a")),
+                true,
+            ),
+            (
+                "POST",
+                "/v1/admin/pipeline/contain".to_string(),
+                Some(serde_json::json!({ "reason_code": "contain_for_incident" })),
+                true,
+            ),
+            (
+                "POST",
+                "/v1/admin/pipeline/deactivate".to_string(),
+                Some(serde_json::json!({ "reason_code": "deactivate_to_legacy" })),
+                true,
+            ),
+            (
+                "POST",
+                "/v1/admin/pipeline/policy-interventions".to_string(),
+                Some(serde_json::json!({
+                    "bundle_id": self.a.bundle_id,
+                    "phase": "score",
+                    "action": "suspend",
+                    "reason_code": "suspend_score",
+                })),
+                true,
+            ),
+            (
+                "GET",
+                format!(
+                    "/v1/admin/pipeline/policy-interventions?bundle_id={}",
+                    self.a.bundle_id
+                ),
+                None,
+                true,
+            ),
+            (
+                "GET",
+                "/v1/admin/pipeline/legacy-drain".to_string(),
+                None,
+                false,
+            ),
+        ]
+    }
+
+    /// `POST /v1/traces` of a fresh clean envelope by the contributor through
+    /// a plain router over `state`.
+    async fn upload(
+        &self,
+        state: &Arc<AppState>,
+        tag: &str,
+    ) -> (StatusCode, serde_json::Value, Uuid) {
+        let envelope = clean_envelope(&format!("admin_routes_{tag}")).await;
+        let (status, body) = route_trace(
+            state,
+            &self.contributor,
+            &serde_json::to_vec(&envelope).unwrap(),
+        )
+        .await;
+        (status, body, envelope.submission_id)
+    }
+
+    fn store(&self) -> PipelineActivationStore {
+        PipelineActivationStore::new(self.runtime.clone())
+    }
+
+    /// The qualification of `package` for `tenant` on the fixture's revision.
+    async fn qualification(
+        &self,
+        tenant: &str,
+        package: &trace_commons_gate_api::pipeline::BundlePackage,
+    ) -> Option<trace_commons_server::versioned_pipeline_qualification::BundleQualificationRecord>
+    {
+        PipelineQualificationStore::new(self.runtime.clone())
+            .qualification(tenant, &package.bundle_id, &self.revision)
+            .await
+            .expect("the qualification reads")
+    }
+
+    /// `tenant` has no routing row, no event, and no qualification of A or B.
+    async fn assert_untouched(&self, tenant: &str, context: &str) {
+        assert_eq!(
+            self.store()
+                .routing(tenant)
+                .await
+                .expect("the routing reads"),
+            None,
+            "{context}: no routing row"
+        );
+        assert!(
+            self.store()
+                .events(tenant, 10)
+                .await
+                .expect("the events read")
+                .is_empty(),
+            "{context}: no event"
+        );
+        for package in [&self.a, &self.b] {
+            assert_eq!(
+                self.qualification(tenant, package).await,
+                None,
+                "{context}: no qualification"
+            );
+        }
+    }
+
+    /// Qualifies `package` for the tenant through the route.
+    async fn qualify(&self, package: &trace_commons_gate_api::pipeline::BundlePackage) {
+        let (status, record) = self
+            .admin_call(
+                "POST",
+                "/v1/admin/pipeline/qualifications",
+                Some(self.qualify_body(package)),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{record}");
+    }
+
+    /// The brief's flow: qualify A and B (two rows on the state's revision),
+    /// activate A (an upload is `processing`), activate B, roll back to A,
+    /// contain (an upload is `503`), deactivate (an upload gets a legacy
+    /// receipt), and read the routing view: `legacy`, A active, and the five
+    /// events newest first, each with only the allowed fields.
+    async fn qualify_activate_roll_back_contain_and_deactivate(&self) {
+        let tenant = self.tenant.as_str();
+        for package in [&self.a, &self.b] {
+            let (status, record) = self
+                .admin_call(
+                    "POST",
+                    "/v1/admin/pipeline/qualifications",
+                    Some(self.qualify_body(package)),
+                )
+                .await;
+            assert_eq!(status, StatusCode::OK, "{record}");
+            assert_eq!(record["bundle_id"], package.bundle_id);
+            assert_eq!(record["metadata"]["code_revision_hash"], self.revision);
+            let stored = self
+                .qualification(tenant, package)
+                .await
+                .expect("the qualification row");
+            assert_eq!(stored.metadata.code_revision_hash, self.revision);
+        }
+
+        let (status, routing) = self
+            .admin_call(
+                "POST",
+                "/v1/admin/pipeline/activate",
+                Some(self.activate_body(&self.a, "activate_bundle_a")),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{routing}");
+        assert_eq!(routing["routing_state"], "pipeline");
+        let (status, receipt, _) = self.upload(&self.state, "activated").await;
+        assert_eq!(status, StatusCode::OK, "{receipt}");
+        assert_eq!(receipt["status"], "processing", "{receipt}");
+
+        let (status, routing) = self
+            .admin_call(
+                "POST",
+                "/v1/admin/pipeline/activate",
+                Some(self.activate_body(&self.b, "activate_bundle_b")),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{routing}");
+        assert_eq!(routing["routing_state"], "pipeline");
+
+        let (status, routing) = self
+            .admin_call(
+                "POST",
+                "/v1/admin/pipeline/rollback",
+                Some(self.activate_body(&self.a, "roll_back_to_a")),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{routing}");
+        assert_eq!(routing["routing_state"], "pipeline");
+
+        let (status, routing) = self
+            .admin_call(
+                "POST",
+                "/v1/admin/pipeline/contain",
+                Some(serde_json::json!({ "reason_code": "contain_for_incident" })),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{routing}");
+        assert_eq!(routing["routing_state"], "contained");
+        let (status, refused, _) = self.upload(&self.state, "contained").await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{refused}");
+        assert_eq!(refused["error"], "pipeline_receipt_intake_contained");
+
+        let (status, routing) = self
+            .admin_call(
+                "POST",
+                "/v1/admin/pipeline/deactivate",
+                Some(serde_json::json!({ "reason_code": "deactivate_to_legacy" })),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{routing}");
+        assert_eq!(routing["routing_state"], "legacy");
+        let (status, receipt, legacy_id) = self.upload(&self.state, "deactivated").await;
+        assert_eq!(status, StatusCode::OK, "{receipt}");
+        assert_ne!(
+            receipt["status"], "processing",
+            "a legacy receipt: {receipt}"
+        );
+        assert_eq!(
+            self.store()
+                .ownership(tenant, legacy_id)
+                .await
+                .expect("the ownership reads")
+                .map(|row| row.owner),
+            Some(trace_commons_server::versioned_pipeline_activation::ReceiptOwner::Legacy)
+        );
+
+        let (status, view) = self
+            .admin_call("GET", "/v1/admin/pipeline/routing", None)
+            .await;
+        assert_eq!(status, StatusCode::OK, "{view}");
+        assert_eq!(
+            view.as_object()
+                .expect("an object")
+                .keys()
+                .map(String::as_str)
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from(["routing_state", "active_bundle_id", "events"]),
+            "{view}"
+        );
+        assert_eq!(view["routing_state"], "legacy");
+        assert_eq!(view["active_bundle_id"], self.a.bundle_id);
+        let events = view["events"].as_array().expect("the events");
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event["action"].as_str().expect("an action"))
+                .collect::<Vec<_>>(),
+            vec!["deactivate", "contain", "rollback", "activate", "activate"],
+            "five events, newest first"
+        );
+        assert_eq!(events[2]["resulting_bundle_id"], self.a.bundle_id);
+        assert_eq!(events[3]["resulting_bundle_id"], self.b.bundle_id);
+        assert_eq!(events[4]["resulting_bundle_id"], self.a.bundle_id);
+        for event in events {
+            assert_eq!(
+                event
+                    .as_object()
+                    .expect("an event object")
+                    .keys()
+                    .map(String::as_str)
+                    .collect::<BTreeSet<_>>(),
+                BTreeSet::from(ROUTING_EVENT_FIELDS),
+                "{event}"
+            );
+        }
+    }
+
+    /// One call of each refusal the routes have, for a test that reads every
+    /// answer and log line: no credential, a contributor credential, no
+    /// runtime, a missing trust store, a missing revision, a body with a
+    /// tenant field, too many attestations, a body above the ingest limit, a
+    /// bundle the tenant does not have, `terminate`, the drain precondition,
+    /// the drain report, and the bystander's own containment.
+    async fn refuse_every_way(&self) {
+        let activate = Some(self.activate_body(&self.a, "activate_bundle_a"));
+        let cases: Vec<(
+            Arc<AppState>,
+            &str,
+            &str,
+            Option<&str>,
+            Option<serde_json::Value>,
+        )> = vec![
+            (
+                self.state.clone(),
+                "POST",
+                "/v1/admin/pipeline/activate",
+                None,
+                activate.clone(),
+            ),
+            (
+                self.state.clone(),
+                "POST",
+                "/v1/admin/pipeline/activate",
+                Some(self.contributor.as_str()),
+                activate.clone(),
+            ),
+            (
+                self.with(|state| {
+                    state.pipeline_service = None;
+                    state.pipeline_product = None;
+                }),
+                "POST",
+                "/v1/admin/pipeline/activate",
+                Some(self.admin.as_str()),
+                activate.clone(),
+            ),
+            (
+                self.with(|state| state.pipeline_check_trust = None),
+                "POST",
+                "/v1/admin/pipeline/activate",
+                Some(self.admin.as_str()),
+                activate.clone(),
+            ),
+            (
+                self.with(|state| state.pipeline_code_revision_hash = None),
+                "POST",
+                "/v1/admin/pipeline/qualifications",
+                Some(self.admin.as_str()),
+                Some(self.qualify_body(&self.a)),
+            ),
+            (
+                self.state.clone(),
+                "POST",
+                "/v1/admin/pipeline/contain",
+                Some(self.admin.as_str()),
+                Some(serde_json::json!({
+                    "reason_code": "contain_for_incident",
+                    "tenant_id": self.other_tenant,
+                })),
+            ),
+            (
+                self.state.clone(),
+                "POST",
+                "/v1/admin/pipeline/activate",
+                Some(self.admin.as_str()),
+                Some(serde_json::json!({
+                    "bundle_id": self.a.bundle_id,
+                    "reason_code": "activate_bundle_a",
+                    "attestations": vec![self.attestations(&self.a)[0].clone(); 65],
+                })),
+            ),
+            (
+                self.state.clone(),
+                "POST",
+                "/v1/admin/pipeline/activate",
+                Some(self.admin.as_str()),
+                Some(serde_json::json!({
+                    "bundle_id": format!("sha256:{}", "0".repeat(64)),
+                    "reason_code": "activate_unknown_bundle",
+                    "attestations": self.attestations(&self.a),
+                })),
+            ),
+            (
+                self.state.clone(),
+                "POST",
+                "/v1/admin/pipeline/policy-interventions",
+                Some(self.admin.as_str()),
+                Some(serde_json::json!({
+                    "bundle_id": self.a.bundle_id,
+                    "phase": "score",
+                    "action": "terminate",
+                    "reason_code": "terminate_score",
+                })),
+            ),
+            (
+                self.state.clone(),
+                "GET",
+                "/v1/admin/pipeline/legacy-drain",
+                Some(self.admin.as_str()),
+                None,
+            ),
+            (
+                self.with(|state| state.db_reviewer_reads = true),
+                "GET",
+                "/v1/admin/pipeline/legacy-drain",
+                Some(self.admin.as_str()),
+                None,
+            ),
+            (
+                self.state.clone(),
+                "POST",
+                "/v1/admin/pipeline/contain",
+                Some(self.other_admin.as_str()),
+                Some(serde_json::json!({ "reason_code": "contain_bystander" })),
+            ),
+        ];
+        for (state, method, path, token, body) in cases {
+            let (status, _) = self.call(&state, method, path, token, body).await;
+            assert_ne!(
+                status,
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "{method} {path}: a refusal has a label"
+            );
+        }
+        let oversized = serde_json::json!({
+            "reason_code": "x".repeat(MAX_INGEST_BODY_BYTES),
+        });
+        let (status, refused) = self
+            .call(
+                &self.state,
+                "POST",
+                "/v1/admin/pipeline/contain",
+                Some(&self.admin),
+                Some(oversized),
+            )
+            .await;
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{refused}");
+    }
+}
+
+/// Each route answers a request without a credential as the operational
+/// summary does, answers `403 admin token required` to a contributor, and
+/// (but for the routing view and the drain report, which need only the
+/// routing store) `404` in a process with no pipeline runtime.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_admin_routes_require_an_admin_and_a_runtime() {
+    let Some(fixture) = RouteFixture::new().await else {
+        return;
+    };
+    let reference = fixture
+        .call(
+            &fixture.state,
+            "GET",
+            "/v1/admin/pipeline/operational-summary",
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(reference.0, StatusCode::UNAUTHORIZED, "{}", reference.1);
+    let routes = fixture.routes();
+    for (method, path, body, _) in &routes {
+        assert_eq!(
+            fixture
+                .call(&fixture.state, method, path, None, body.clone())
+                .await,
+            reference,
+            "{method} {path} without a credential"
+        );
+        assert_eq!(
+            fixture
+                .call(
+                    &fixture.state,
+                    method,
+                    path,
+                    Some(&fixture.contributor),
+                    body.clone()
+                )
+                .await,
+            (
+                StatusCode::FORBIDDEN,
+                serde_json::json!({ "error": "admin token required" })
+            ),
+            "{method} {path} with a contributor credential"
+        );
+    }
+    let no_runtime = fixture.with(|state| {
+        state.pipeline_service = None;
+        state.pipeline_product = None;
+        state.db_reviewer_reads = true;
+    });
+    for (method, path, body, needs_runtime) in &routes {
+        let (status, answer) = fixture
+            .call(
+                &no_runtime,
+                method,
+                path,
+                Some(&fixture.admin),
+                body.clone(),
+            )
+            .await;
+        if *needs_runtime {
+            assert_eq!(
+                (status, answer),
+                (
+                    StatusCode::NOT_FOUND,
+                    serde_json::json!({ "error": "pipeline runtime not configured" })
+                ),
+                "{method} {path} with no runtime"
+            );
+        } else {
+            assert_eq!(status, StatusCode::OK, "{method} {path}: {answer}");
+        }
+    }
+    fixture
+        .assert_untouched(&fixture.tenant, "the refused calls")
+        .await;
+}
+
+/// With the real profile of a test deployment (a local artifact store, static
+/// tokens), a valid signed package with valid signed results is refused at
+/// the qualification with the first blocker, and writes nothing; a bundle that
+/// a production profile qualified is refused at the activation the same way.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_test_deployment_cannot_qualify_or_activate_through_the_route() {
+    let Some(fixture) = RouteFixture::new().await else {
+        return;
+    };
+    let real = fixture.with(|state| state.pipeline_infrastructure_override = None);
+    let profile = pipeline_activation::infrastructure_profile_from_state(&real);
+    assert!(profile.static_bearer_authentication, "{profile:?}");
+    assert_ne!(
+        profile.artifact_store,
+        trace_commons_server::versioned_pipeline_qualification::ProductionAdapterKind::Production,
+        "{profile:?}"
+    );
+
+    let (status, refused) = fixture
+        .call(
+            &real,
+            "POST",
+            "/v1/admin/pipeline/qualifications",
+            Some(&fixture.admin),
+            Some(fixture.qualify_body(&fixture.a)),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{refused}");
+    assert_eq!(refused["error"], "artifact_store_not_production");
+    fixture
+        .assert_untouched(&fixture.tenant, "a refused qualification")
+        .await;
+
+    fixture.qualify(&fixture.a).await;
+    let (status, refused) = fixture
+        .call(
+            &real,
+            "POST",
+            "/v1/admin/pipeline/activate",
+            Some(&fixture.admin),
+            Some(fixture.activate_body(&fixture.a, "activate_bundle_a")),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{refused}");
+    assert_eq!(refused["error"], "artifact_store_not_production");
+    assert_eq!(
+        fixture.store().routing(&fixture.tenant).await.unwrap(),
+        None
+    );
+    assert!(
+        fixture
+            .store()
+            .events(&fixture.tenant, 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+/// The brief's flow through the routes alone: qualify, activate, an upload to
+/// the pipeline, activate another bundle, roll back, contain, deactivate, and
+/// the routing view.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_routes_qualify_activate_roll_back_contain_and_deactivate() {
+    let Some(fixture) = RouteFixture::new().await else {
+        return;
+    };
+    fixture
+        .qualify_activate_roll_back_contain_and_deactivate()
+        .await;
+}
+
+/// No trust store or no deployed revision: the qualification, the activation,
+/// and the rollback are refused before anything is read or written; so are
+/// more than 64 attestations and a body above the ingest limit.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_routes_refuse_without_a_trust_store_or_a_revision() {
+    let Some(fixture) = RouteFixture::new().await else {
+        return;
+    };
+    let calls = [
+        (
+            "/v1/admin/pipeline/qualifications",
+            fixture.qualify_body(&fixture.a),
+        ),
+        (
+            "/v1/admin/pipeline/activate",
+            fixture.activate_body(&fixture.a, "activate_bundle_a"),
+        ),
+        (
+            "/v1/admin/pipeline/rollback",
+            fixture.activate_body(&fixture.a, "roll_back_to_a"),
+        ),
+    ];
+    for (what, state) in [
+        (
+            "no check trust store",
+            fixture.with(|state| state.pipeline_check_trust = None),
+        ),
+        (
+            "no package trust store",
+            fixture.with(|state| state.pipeline_package_trust = None),
+        ),
+    ] {
+        for (path, body) in &calls {
+            let (status, refused) = fixture
+                .call(
+                    &state,
+                    "POST",
+                    path,
+                    Some(&fixture.admin),
+                    Some(body.clone()),
+                )
+                .await;
+            assert_eq!(
+                (status, refused),
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    serde_json::json!({ "error": "pipeline_trust_store_missing" })
+                ),
+                "{what}: {path}"
+            );
+        }
+    }
+    let no_revision = fixture.with(|state| state.pipeline_code_revision_hash = None);
+    for (path, body) in &calls {
+        let (status, refused) = fixture
+            .call(
+                &no_revision,
+                "POST",
+                path,
+                Some(&fixture.admin),
+                Some(body.clone()),
+            )
+            .await;
+        assert_eq!(
+            (status, refused),
+            (
+                StatusCode::CONFLICT,
+                serde_json::json!({ "error": "bundle_runtime_revision_unknown" })
+            ),
+            "no revision: {path}"
+        );
+    }
+    let attestation = fixture.attestations(&fixture.a)[0].clone();
+    for (path, body) in [
+        (
+            "/v1/admin/pipeline/qualifications",
+            serde_json::json!({
+                "signed_package": fixture.signed(&fixture.a),
+                "attestations": vec![attestation.clone(); 65],
+            }),
+        ),
+        (
+            "/v1/admin/pipeline/activate",
+            serde_json::json!({
+                "bundle_id": fixture.a.bundle_id,
+                "reason_code": "activate_bundle_a",
+                "attestations": vec![attestation.clone(); 65],
+            }),
+        ),
+    ] {
+        let (status, refused) = fixture.admin_call("POST", path, Some(body)).await;
+        assert_eq!(
+            (status, refused),
+            (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                serde_json::json!({ "error": "pipeline_evidence_too_large" })
+            ),
+            "65 attestations: {path}"
+        );
+    }
+    let (status, refused) = fixture
+        .admin_call(
+            "POST",
+            "/v1/admin/pipeline/qualifications",
+            Some(serde_json::json!({
+                "signed_package": fixture.signed(&fixture.a),
+                "attestations": ["x".repeat(MAX_INGEST_BODY_BYTES)],
+            })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{refused}");
+    fixture
+        .assert_untouched(&fixture.tenant, "the refused calls")
+        .await;
+}
+
+/// An activation through the route keeps the startup checks of a tenant
+/// bundle (`check_runnable_package`): a qualified bundle whose compatibility
+/// configuration is not `main`'s gate configuration, and a service with no
+/// pipeline credit issuer, are refused with the startup labels.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_activation_through_the_route_keeps_the_startup_checks() {
+    let Some(fixture) = RouteFixture::new().await else {
+        return;
+    };
+    fixture.qualify(&fixture.a).await;
+    let other_gate = fixture.with(|state| {
+        state.pipeline_main_gate = MainGateConfig {
+            perplexity_floor_micros: Some(2_000),
+            ..ROUTE_MAIN_GATE
+        }
+    });
+    let no_issuer = fixture.with(|state| {
+        state.pipeline_service = Some(assemble_route_service(
+            fixture.runtime.clone(),
+            &fixture.configured_store,
+            None,
+        ))
+    });
+    for (state, label) in [
+        (&other_gate, "pipeline_runtime_main_gate_config_mismatch"),
+        (&no_issuer, "pipeline_credit_issuer_principal_missing"),
+    ] {
+        let (status, refused) = fixture
+            .call(
+                state,
+                "POST",
+                "/v1/admin/pipeline/activate",
+                Some(&fixture.admin),
+                Some(fixture.activate_body(&fixture.a, "activate_bundle_a")),
+            )
+            .await;
+        assert_eq!(
+            (status, refused),
+            (StatusCode::CONFLICT, serde_json::json!({ "error": label }))
+        );
+        assert_eq!(
+            fixture.store().routing(&fixture.tenant).await.unwrap(),
+            None,
+            "{label}: no routing row"
+        );
+    }
+    let (status, routing) = fixture
+        .admin_call(
+            "POST",
+            "/v1/admin/pipeline/activate",
+            Some(fixture.activate_body(&fixture.a, "activate_bundle_a")),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{routing}");
+    assert_eq!(routing["routing_state"], "pipeline");
+}
+
+/// A route acts on the credential's tenant only: the bystander's admin
+/// contains its own tenant and leaves the tenant's routing as it was, and a
+/// body that names a tenant is refused (`deny_unknown_fields`) before anything
+/// is read.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_route_never_acts_on_another_tenant() {
+    let Some(fixture) = RouteFixture::new().await else {
+        return;
+    };
+    let tenant = fixture.tenant.as_str();
+    let other = fixture.other_tenant.as_str();
+    fixture.qualify(&fixture.a).await;
+    let (status, routing) = fixture
+        .admin_call(
+            "POST",
+            "/v1/admin/pipeline/activate",
+            Some(fixture.activate_body(&fixture.a, "activate_bundle_a")),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{routing}");
+    let before = fixture.store().routing(tenant).await.unwrap();
+    let events_before = fixture.store().events(tenant, 10).await.unwrap();
+
+    let (status, contained) = fixture
+        .call(
+            &fixture.state,
+            "POST",
+            "/v1/admin/pipeline/contain",
+            Some(&fixture.other_admin),
+            Some(serde_json::json!({ "reason_code": "contain_bystander" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{contained}");
+    assert_eq!(contained["routing_state"], "contained");
+    assert_eq!(fixture.store().routing(tenant).await.unwrap(), before);
+    assert_eq!(
+        fixture.store().events(tenant, 10).await.unwrap(),
+        events_before
+    );
+    assert_eq!(
+        fixture
+            .store()
+            .routing(other)
+            .await
+            .unwrap()
+            .map(|row| row.routing_state),
+        Some(RoutingState::Contained)
+    );
+
+    for (path, body) in [
+        (
+            "/v1/admin/pipeline/contain",
+            serde_json::json!({ "reason_code": "contain_named_tenant", "tenant_id": tenant }),
+        ),
+        (
+            "/v1/admin/pipeline/deactivate",
+            serde_json::json!({ "reason_code": "deactivate_named_tenant", "tenant_id": tenant }),
+        ),
+        (
+            "/v1/admin/pipeline/activate",
+            serde_json::json!({
+                "bundle_id": fixture.a.bundle_id,
+                "reason_code": "activate_named_tenant",
+                "attestations": fixture.attestations(&fixture.a),
+                "tenant_id": tenant,
+            }),
+        ),
+    ] {
+        let (status, refused) = fixture
+            .call(
+                &fixture.state,
+                "POST",
+                path,
+                Some(&fixture.other_admin),
+                Some(body),
+            )
+            .await;
+        assert_eq!(
+            (status, refused),
+            (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                serde_json::json!({ "error": "pipeline_request_invalid" })
+            ),
+            "{path} with a tenant field"
+        );
+    }
+    assert_eq!(fixture.store().routing(tenant).await.unwrap(), before);
+    assert_eq!(
+        fixture.store().events(tenant, 10).await.unwrap(),
+        events_before
+    );
+    assert_eq!(
+        fixture.store().events(other, 10).await.unwrap().len(),
+        1,
+        "the bystander's one containment"
+    );
+
+    let (status, view) = fixture
+        .call(
+            &fixture.state,
+            "GET",
+            "/v1/admin/pipeline/routing",
+            Some(&fixture.other_admin),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{view}");
+    assert_eq!(view["routing_state"], "contained");
+    assert_eq!(view["active_bundle_id"], serde_json::Value::Null);
+    assert_eq!(view["events"].as_array().map(Vec::len), Some(1));
+}
+
+/// `suspend` and `resume` of the Score policy, the list of both, and
+/// `terminate`, which PR 5 refuses; a bundle the tenant does not have is `404`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_policy_routes_suspend_resume_and_list() {
+    let Some(fixture) = RouteFixture::new().await else {
+        return;
+    };
+    fixture.qualify(&fixture.a).await;
+    let intervene = |action: &str, bundle_id: &str| {
+        serde_json::json!({
+            "bundle_id": bundle_id,
+            "phase": "score",
+            "action": action,
+            "reason_code": format!("{action}_score_for_test"),
+        })
+    };
+    for (action, resulting) in [("suspend", "suspended"), ("resume", "runnable")] {
+        let (status, record) = fixture
+            .admin_call(
+                "POST",
+                "/v1/admin/pipeline/policy-interventions",
+                Some(intervene(action, &fixture.a.bundle_id)),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{record}");
+        assert_eq!(record["action"], action);
+        assert_eq!(record["phase"], "score");
+        assert_eq!(record["bundle_id"], fixture.a.bundle_id);
+        assert_eq!(record["resulting_status"], resulting);
+    }
+    let list_path = format!(
+        "/v1/admin/pipeline/policy-interventions?bundle_id={}",
+        fixture.a.bundle_id
+    );
+    let (status, listed) = fixture.admin_call("GET", &list_path, None).await;
+    assert_eq!(status, StatusCode::OK, "{listed}");
+    assert_eq!(
+        listed["interventions"]
+            .as_array()
+            .expect("the interventions")
+            .iter()
+            .map(|record| record["action"].as_str().expect("an action"))
+            .collect::<Vec<_>>(),
+        vec!["suspend", "resume"]
+    );
+
+    let (status, refused) = fixture
+        .admin_call(
+            "POST",
+            "/v1/admin/pipeline/policy-interventions",
+            Some(intervene("terminate", &fixture.a.bundle_id)),
+        )
+        .await;
+    assert_eq!(
+        (status, refused),
+        (
+            StatusCode::CONFLICT,
+            serde_json::json!({ "error": "policy_intervention_not_supported" })
+        )
+    );
+    let (status, refused) = fixture
+        .admin_call(
+            "POST",
+            "/v1/admin/pipeline/policy-interventions",
+            Some(intervene("suspend", &fixture.b.bundle_id)),
+        )
+        .await;
+    assert_eq!(
+        (status, refused),
+        (
+            StatusCode::NOT_FOUND,
+            serde_json::json!({ "error": "bundle_package_missing" })
+        ),
+        "B is not the tenant's bundle"
+    );
+    let (status, listed) = fixture.admin_call("GET", &list_path, None).await;
+    assert_eq!(status, StatusCode::OK, "{listed}");
+    assert_eq!(listed["interventions"].as_array().map(Vec::len), Some(2));
+}
+
+/// `GET legacy-drain` is the store's report for the tenant, in the mode of
+/// this process's gate driver: labels, counts, a state, a time, and a hash.
+/// It is refused unless the tenant's legacy records in the database are
+/// authoritative (database writes required and database reviewer reads).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_legacy_drain_route_returns_the_report() {
+    let Some(fixture) = RouteFixture::new().await else {
+        return;
+    };
+    let tenant = fixture.tenant.as_str();
+    for (what, driver, ceiling) in [
+        ("the gate driver off", None, None),
+        ("the gate driver on", Some(gate_driver_config(7)), Some(7)),
+    ] {
+        let state = fixture.with(|state| {
+            state.db_reviewer_reads = true;
+            state.perplexity_score_driver = driver;
+        });
+        let (status, body) = fixture
+            .call(
+                &state,
+                "GET",
+                "/v1/admin/pipeline/legacy-drain",
+                Some(&fixture.admin),
+                None,
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{what}: {body}");
+        let object = body.as_object().expect("an object");
+        assert_eq!(
+            object.keys().map(String::as_str).collect::<BTreeSet<_>>(),
+            BTreeSet::from([
+                "generated_at",
+                "routing_state",
+                "gate_driver_enabled",
+                "pending",
+                "not_blocking",
+                "drained",
+                "evidence_hash",
+            ]),
+            "{what}"
+        );
+        for map in ["pending", "not_blocking"] {
+            for (label, count) in object[map].as_object().expect("a map") {
+                assert!(
+                    label
+                        .bytes()
+                        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_'),
+                    "{what}: {label}"
+                );
+                assert!(count.is_u64(), "{what}: {label} is a count");
+            }
+        }
+        assert!(object["routing_state"].is_null(), "{what}: no routing row");
+        assert!(object["drained"].is_boolean());
+        let routed: LegacyDrainReport =
+            serde_json::from_value(body).expect("the route answers a drain report");
+        let expected = fixture
+            .store()
+            .legacy_drain_report(tenant, ceiling, &[])
+            .await
+            .expect("the store's report");
+        assert_eq!(
+            LegacyDrainReport {
+                generated_at: expected.generated_at,
+                ..routed
+            },
+            expected,
+            "{what}"
+        );
+        assert_eq!(expected.gate_driver_enabled, ceiling.is_some(), "{what}");
+    }
+
+    for (what, state) in [
+        (
+            "best-effort database writes",
+            fixture.with(|state| {
+                state.db_reviewer_reads = true;
+                state.require_db_mirror_writes = false;
+            }),
+        ),
+        ("reviewer reads from the file store", fixture.state.clone()),
+    ] {
+        let (status, refused) = fixture
+            .call(
+                &state,
+                "GET",
+                "/v1/admin/pipeline/legacy-drain",
+                Some(&fixture.admin),
+                None,
+            )
+            .await;
+        assert_eq!(
+            (status, refused),
+            (
+                StatusCode::CONFLICT,
+                serde_json::json!({ "error": "legacy_drain_records_not_authoritative" })
+            ),
+            "{what}"
+        );
+    }
+}
+
+/// Every log line written on this thread while it lives: a scoped default
+/// subscriber (`tracing::subscriber::set_default`) at every level. The route
+/// calls of a test run on the test's own thread (the router is called in
+/// place, not spawned), so their lines are all here.
+struct CapturedLogs {
+    sink: Arc<std::sync::Mutex<Vec<u8>>>,
+    _guard: tracing::subscriber::DefaultGuard,
+}
+
+struct CapturedLogWriter(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for CapturedLogWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl CapturedLogs {
+    fn start() -> Self {
+        let sink = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let writer = sink.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::TRACE)
+            .with_writer(move || CapturedLogWriter(writer.clone()))
+            .finish();
+        Self {
+            sink,
+            _guard: tracing::subscriber::set_default(subscriber),
+        }
+    }
+
+    fn lines(&self) -> Vec<String> {
+        String::from_utf8_lossy(
+            &self
+                .sink
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
+        .lines()
+        .map(str::to_string)
+        .collect()
+    }
+}
+
+/// Every answer of the routes in the flow and in each refusal, and every log
+/// line written meanwhile, holds no credential and no tenant id; the log lines
+/// of the successful actions are among them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn no_route_response_or_log_line_holds_a_token_or_a_tenant_id() {
+    let Some(fixture) = RouteFixture::new().await else {
+        return;
+    };
+    let logs = CapturedLogs::start();
+    fixture
+        .qualify_activate_roll_back_contain_and_deactivate()
+        .await;
+    fixture.refuse_every_way().await;
+    let lines = logs.lines();
+    drop(logs);
+    let bodies = fixture
+        .bodies
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    let actions = lines
+        .iter()
+        .filter(|line| line.contains("pipeline admin action recorded"))
+        .count();
+    assert!(
+        actions >= 8,
+        "the qualifications, activations, rollback, containments, and deactivation \
+         are logged ({actions} lines)"
+    );
+    assert!(bodies.len() >= 20, "{} answers", bodies.len());
+    for (what, secret) in [
+        ("the admin token", fixture.admin.as_str()),
+        ("the contributor token", fixture.contributor.as_str()),
+        ("the bystander's admin token", fixture.other_admin.as_str()),
+        ("the tenant id", fixture.tenant.as_str()),
+        ("the bystander's tenant id", fixture.other_tenant.as_str()),
+    ] {
+        for (index, body) in bodies.iter().enumerate() {
+            assert!(!body.contains(secret), "answer {index} holds {what}");
+        }
+        for (index, line) in lines.iter().enumerate() {
+            assert!(!line.contains(secret), "log line {index} holds {what}");
+        }
+    }
+}
+
+/// The qualification and the activation take only results that a key of the
+/// check trust store signed, unchanged since: results signed by the package
+/// key (a key the check store does not hold) and a result changed after
+/// signing are refused with the check store's labels, and a package signed by
+/// the check key with the package store's. Nothing is written.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_routes_take_only_results_a_check_key_signed() {
+    use trace_commons_server::versioned_pipeline_qualification::{
+        CHECK_ATTESTATION_SIGNATURE_INVALID_LABEL, CHECK_ATTESTATION_SIGNER_UNTRUSTED_LABEL,
+        PACKAGE_SIGNER_UNTRUSTED_LABEL, sign_bundle_package,
+    };
+
+    let Some(fixture) = RouteFixture::new().await else {
+        return;
+    };
+    let by_package_key =
+        fixture.attestations_signed_by(&fixture.a, ROUTE_PACKAGE_KEY_ID, &fixture.package_pkcs8);
+    let mut changed = fixture.attestations(&fixture.a);
+    changed[0].maximum_age_seconds += 1;
+    let signed_by_check_key =
+        sign_bundle_package(fixture.a.clone(), ROUTE_CHECK_KEY_ID, &fixture.check_pkcs8)
+            .expect("the package signs");
+    for (what, body, label) in [
+        (
+            "results signed by the package key",
+            serde_json::json!({
+                "signed_package": fixture.signed(&fixture.a),
+                "attestations": by_package_key,
+            }),
+            CHECK_ATTESTATION_SIGNER_UNTRUSTED_LABEL,
+        ),
+        (
+            "a result changed after signing",
+            serde_json::json!({
+                "signed_package": fixture.signed(&fixture.a),
+                "attestations": changed,
+            }),
+            CHECK_ATTESTATION_SIGNATURE_INVALID_LABEL,
+        ),
+        (
+            "a package signed by the check key",
+            serde_json::json!({
+                "signed_package": signed_by_check_key,
+                "attestations": fixture.attestations(&fixture.a),
+            }),
+            PACKAGE_SIGNER_UNTRUSTED_LABEL,
+        ),
+    ] {
+        let (status, refused) = fixture
+            .admin_call("POST", "/v1/admin/pipeline/qualifications", Some(body))
+            .await;
+        assert_eq!(
+            (status, refused),
+            (StatusCode::CONFLICT, serde_json::json!({ "error": label })),
+            "{what}"
+        );
+    }
+    fixture
+        .assert_untouched(&fixture.tenant, "refused qualifications")
+        .await;
+
+    fixture.qualify(&fixture.a).await;
+    let (status, refused) = fixture
+        .admin_call(
+            "POST",
+            "/v1/admin/pipeline/activate",
+            Some(serde_json::json!({
+                "bundle_id": fixture.a.bundle_id,
+                "reason_code": "activate_bundle_a",
+                "attestations": by_package_key,
+            })),
+        )
+        .await;
+    assert_eq!(
+        (status, refused),
+        (
+            StatusCode::CONFLICT,
+            serde_json::json!({ "error": CHECK_ATTESTATION_SIGNER_UNTRUSTED_LABEL })
+        )
+    );
+    assert_eq!(
+        fixture.store().routing(&fixture.tenant).await.unwrap(),
+        None
+    );
+}
+
+/// A request cannot supply an input of the gate or of the qualification: a
+/// body with a field for the revision, the promotion, the readiness, the
+/// dependencies, the infrastructure, the tenant, or the actor is refused
+/// (`deny_unknown_fields`), even where the state lacks the value. Nothing is
+/// written.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_request_cannot_supply_a_gate_input() {
+    let Some(fixture) = RouteFixture::new().await else {
+        return;
+    };
+    let no_revision = fixture.with(|state| state.pipeline_code_revision_hash = None);
+    let fields = [
+        ("code_revision_hash", serde_json::json!(fixture.revision)),
+        (
+            "runtime_code_revision_hash",
+            serde_json::json!(fixture.revision),
+        ),
+        ("promotion", serde_json::json!({ "ready": true })),
+        ("readiness", serde_json::json!({ "readiness_ok": true })),
+        ("dependencies", serde_json::json!({})),
+        ("infrastructure", serde_json::json!({})),
+        ("metadata", serde_json::json!({})),
+        ("tenant_id", serde_json::json!(fixture.other_tenant)),
+        (
+            "actor_principal_ref",
+            serde_json::json!("principal_sha256:00"),
+        ),
+    ];
+    for state in [&fixture.state, &no_revision] {
+        for (path, body) in [
+            (
+                "/v1/admin/pipeline/qualifications",
+                fixture.qualify_body(&fixture.a),
+            ),
+            (
+                "/v1/admin/pipeline/activate",
+                fixture.activate_body(&fixture.a, "activate_bundle_a"),
+            ),
+            (
+                "/v1/admin/pipeline/rollback",
+                fixture.activate_body(&fixture.a, "roll_back_to_a"),
+            ),
+        ] {
+            for (field, value) in &fields {
+                let mut body = body.clone();
+                body[*field] = value.clone();
+                let (status, refused) = fixture
+                    .call(state, "POST", path, Some(&fixture.admin), Some(body))
+                    .await;
+                assert_eq!(
+                    (status, refused),
+                    (
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        serde_json::json!({ "error": "pipeline_request_invalid" })
+                    ),
+                    "{path} with {field}"
+                );
+            }
+        }
+    }
+    fixture
+        .assert_untouched(&fixture.tenant, "bodies with a gate input")
+        .await;
+}
+
+/// An activation through the route reads the tenant's readiness from its
+/// operational summary, and a rollback reads none: with a pipeline run of
+/// the tenant waiting longer than `ACTIVATION_MAX_WORK_AGE_SECONDS`, the
+/// activation is refused with `activation_readiness_failed` and changes
+/// nothing, and the rollback to the same bundle succeeds.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_activation_through_the_route_reads_the_tenants_readiness() {
+    let Some(fixture) = RouteFixture::new().await else {
+        return;
+    };
+    let tenant = fixture.tenant.as_str();
+    fixture.qualify(&fixture.a).await;
+    fixture.qualify(&fixture.b).await;
+    for (package, reason) in [
+        (&fixture.a, "activate_bundle_a"),
+        (&fixture.b, "activate_bundle_b"),
+    ] {
+        let (status, routing) = fixture
+            .admin_call(
+                "POST",
+                "/v1/admin/pipeline/activate",
+                Some(fixture.activate_body(package, reason)),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{routing}");
+    }
+    let (status, receipt, submission_id) = fixture.upload(&fixture.state, "waiting").await;
+    assert_eq!(status, StatusCode::OK, "{receipt}");
+    assert_eq!(receipt["status"], "processing");
+    let mut client = fixture.owner.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, tenant).await;
+    assert_eq!(
+        tx.execute(
+            "UPDATE pipeline_runs SET phase_started_at = NOW() - INTERVAL '1 hour'
+              WHERE tenant_id = $1 AND submission_id = $2",
+            &[&tenant, &submission_id],
+        )
+        .await
+        .expect("age the waiting run"),
+        1
+    );
+    tx.commit().await.unwrap();
+    drop(client);
+
+    let before = fixture.store().routing(tenant).await.unwrap();
+    let events_before = fixture.store().events(tenant, 10).await.unwrap();
+    let (status, refused) = fixture
+        .admin_call(
+            "POST",
+            "/v1/admin/pipeline/activate",
+            Some(fixture.activate_body(&fixture.a, "activate_bundle_a")),
+        )
+        .await;
+    assert_eq!(
+        (status, refused),
+        (
+            StatusCode::CONFLICT,
+            serde_json::json!({
+                "error": trace_commons_server::versioned_pipeline_activation::ACTIVATION_READINESS_FAILED_LABEL
+            })
+        )
+    );
+    assert_eq!(fixture.store().routing(tenant).await.unwrap(), before);
+    assert_eq!(
+        fixture.store().events(tenant, 10).await.unwrap(),
+        events_before
+    );
+
+    let (status, routing) = fixture
+        .admin_call(
+            "POST",
+            "/v1/admin/pipeline/rollback",
+            Some(fixture.activate_body(&fixture.a, "roll_back_to_a")),
+        )
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a rollback reads no readiness: {routing}"
+    );
+    assert_eq!(routing["routing_state"], "pipeline");
+    let (status, view) = fixture
+        .admin_call("GET", "/v1/admin/pipeline/routing", None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{view}");
+    assert_eq!(view["active_bundle_id"], fixture.a.bundle_id);
 }

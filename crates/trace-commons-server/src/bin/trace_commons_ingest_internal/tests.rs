@@ -266,7 +266,9 @@ async fn source_offer_is_served_without_credentials() {
     assert_eq!(value["build_version"], env!("CARGO_PKG_VERSION"));
 }
 
-fn test_state(root: PathBuf) -> Arc<AppState> {
+/// `pub(super)`: the unit tests of `pipeline_activation`, a sibling of this
+/// module, build their state from it.
+pub(super) fn test_state(root: PathBuf) -> Arc<AppState> {
     test_state_with_options(root, None, None, false, false, false, false)
 }
 
@@ -6121,6 +6123,12 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         pipeline_product: None,
         pipeline_store: None,
         pipeline_activation: None,
+        pipeline_qualification: None,
+        pipeline_package_trust: None,
+        pipeline_check_trust: None,
+        pipeline_code_revision_hash: None,
+        pipeline_main_gate: TEST_MAIN_GATE,
+        pipeline_infrastructure_override: None,
         // The test assemblers build their services with this flag set
         // (`unqualified_routing_allowed`); a test of production routing
         // builds its state and its service with it off.
@@ -11995,6 +12003,42 @@ async fn pipeline_runtime_refuses_the_test_opt_in_together_with_required() {
     );
 }
 
+/// PR 5 (Task 2's deferred item, done in Task 10): unqualified routing, the
+/// setting of a process started for tests, never combines with
+/// `TRACE_COMMONS_PIPELINE_RUNTIME_REQUIRED` either, whatever the test opt-in
+/// says and before any assembler runs.
+#[tokio::test]
+async fn pipeline_runtime_refuses_unqualified_routing_together_with_required() {
+    let dir = tempfile::tempdir().unwrap();
+    let (connections, configured_store) = pipeline_runtime_fail_closed_fixture(&dir).await;
+    for assembler in [
+        None,
+        Some(&QualifiedAssembler as &dyn IngestPipelineRuntimeAssembler),
+    ] {
+        let error = assemble_ingest_pipeline_runtime(
+            assembler,
+            Some(&connections),
+            Some(&configured_store),
+            true,
+            PipelineLeaseConfig::default(),
+            false,
+            false,
+            true,
+            None,
+            TEST_NEAR_CONFIRMATION_INTERVAL,
+            TEST_NEAR_PAYOUT_CONTROLS,
+            &PipelineNoveltyUtilityChecks::default(),
+            TEST_MAIN_GATE,
+        )
+        .err()
+        .expect("unqualified routing never combines with the required flag");
+        assert_eq!(
+            error.to_string(),
+            "pipeline_unqualified_routing_not_allowed_when_required"
+        );
+    }
+}
+
 /// A qualified runtime with routed tenants and no
 /// opt-in -- starts. The fail-closed check must not block a genuinely
 /// production-qualified dependency.
@@ -12119,6 +12163,36 @@ impl trace_commons_server::versioned_pipeline_credit::NearPayoutAdapter
     ) -> Option<trace_commons_server::versioned_pipeline_credit::NearConfirmationEvidence> {
         self.0.confirmation(idempotency_key)
     }
+}
+
+/// A qualified pipeline service over a backend that never connects, with its
+/// payout enabled on `TEST_PAYOUT_NEAR_CONTRACT` when `payout` is true. For
+/// the unit tests of `pipeline_activation` (a sibling of this module), which
+/// read only what the service reports of itself (`payout_enabled`).
+pub(super) async fn qualified_test_service_with_payout(
+    dir: &tempfile::TempDir,
+    payout: bool,
+) -> Arc<PipelineService> {
+    qualified_pipeline_service(
+        pg_backend_without_a_database().await,
+        test_artifact_store(dir.path()),
+        None,
+        true,
+        true,
+        payout.then(|| {
+            (
+                Arc::new(QualifiedTestNearAdapter(
+                    trace_commons_server::versioned_pipeline_credit::RecordingNearAdapter::authenticated(),
+                ))
+                    as Arc<dyn trace_commons_server::versioned_pipeline_credit::NearPayoutAdapter>,
+                payout_test_config(Some(TEST_PAYOUT_NEAR_CONTRACT)),
+            )
+        }),
+        None,
+        None,
+        false,
+    )
+    .expect("the qualified service builds")
 }
 
 /// The NEAR credit contract the payout tests configure.
@@ -28689,6 +28763,12 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
         pipeline_product: None,
         pipeline_store: None,
         pipeline_activation: None,
+        pipeline_qualification: None,
+        pipeline_package_trust: None,
+        pipeline_check_trust: None,
+        pipeline_code_revision_hash: None,
+        pipeline_main_gate: TEST_MAIN_GATE,
+        pipeline_infrastructure_override: None,
         // The test assemblers build their services with this flag set
         // (`unqualified_routing_allowed`); a test of production routing
         // builds its state and its service with it off.
