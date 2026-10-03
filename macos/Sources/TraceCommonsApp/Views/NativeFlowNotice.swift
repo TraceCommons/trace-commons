@@ -1,17 +1,20 @@
 import SwiftUI
+import TCDesign
 
 /// The core supplies the sentence and glyph; the shell maps its semantic tone.
+///
+/// Refused is the outside tone and anything else asks. The sentence is the
+/// notice's title, so the status dot and the words are one element and the
+/// state is never colour alone; the core's glyph is not drawn because that
+/// dot already marks the tone.
 struct NativeFlowNotice: View {
     let message: String
     let glyph: String
     let tone: String
+
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: TC.Space.s) {
-            if !glyph.isEmpty { Text(glyph) }
-            Text(message).fixedSize(horizontal: false, vertical: true)
+        GlassNotice(tone: tone == "refused" ? .outside : .ask, title: message) {
+            EmptyView()
         }
-        .font(TC.Font_.meta)
-        .foregroundStyle(tone == "refused" ? TC.Tone.refused.textColor : TC.Tone.neutral.textColor)
-        .accessibilityElement(children: .combine)
     }
 }

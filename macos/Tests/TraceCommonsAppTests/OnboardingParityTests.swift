@@ -36,11 +36,19 @@ final class OnboardingParityTests: XCTestCase {
                            "Text(OnboardingRootsWords.answerForBoth)", "Text(OnboardingRootsWords.optionalRows)",
                            "failure = OnboardingRootsWords.answerBeforeContinuing"],
              guards: [".disabled(!roots.isComplete || model.isStartingDaemon)"]),
+        Step(file: "Views/OnboardingConnectView.swift",
+             bindings: ["InviteLink.parse(", "PendingInvite.shared", "pendingInvite.take()", "model.enroll(invite:",
+                        "model.status.loggedIn", "NearAiJoinView(onEnrolled:", "NearAccountConnectView(onBusyChanged:"],
+             copySources: ["OnboardingConnectWords.deadInvite", "OnboardingConnectWords.heading",
+                           "OnboardingConnectWords.pasteTheLink", "OnboardingConnectWords.alreadyConnected",
+                           "OnboardingConnectWords.inviteIsFor(", "OnboardingConnectWords.connectingTo(",
+                           "OnboardingConnectWords.join("],
+             guards: [".onChange(of: pendingInvite.value)", "case .deadInvite:"]),
     ]
 
     /// Rows the table must hold; each task that adds a step raises it, so a
     /// dropped row fails here instead of passing silently.
-    static let minimumSteps = 2
+    static let minimumSteps = 3
 
     func test_theTableKeepsEveryRowAdded() {
         XCTAssertGreaterThanOrEqual(Self.steps.count, Self.minimumSteps)

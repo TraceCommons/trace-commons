@@ -1,6 +1,7 @@
 import CTraceCommons
 import SwiftUI
 import TCBridge
+import TCDesign
 import TCShellCore
 
 /// Joining a commons with the NEAR AI login a contributor already has.
@@ -41,26 +42,38 @@ struct NearAiJoinView: View {
 
     var body: some View {
         if let copy = model.privateInferenceCopy {
-            VStack(alignment: .leading, spacing: TC.Space.m) {
-                Text(copy.nearAiEnrollTitle).font(TC.Font_.cardTitle)
-                Text(copy.nearAiEnrollWhat).font(.callout).foregroundStyle(.secondary)
-                TextField(model.witnessCopy?.wallet?.commons ?? "", text: $commons)
-                .textFieldStyle(.roundedBorder)
-                .disabled(pending)
+            GlassCard {
+              VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
+                Text(copy.nearAiEnrollTitle)
+                    .glassType(GlassTokens.TypeScale.label.weight(.semibold))
+                    .foregroundStyle(GlassColor.textPrimary)
+                Text(copy.nearAiEnrollWhat)
+                    .glassType(GlassTokens.TypeScale.body)
+                    .foregroundStyle(GlassColor.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                GlassTextField(model.witnessCopy?.wallet?.commons ?? "", text: $commons)
+                    .disabled(pending)
 
                 if joined {
-                    Text(copy.nearAiEnrollDone).font(.callout).foregroundStyle(.secondary)
+                    Text(copy.nearAiEnrollDone)
+                        .glassType(GlassTokens.TypeScale.body)
+                        .foregroundStyle(GlassColor.textSecondary)
                 } else if signedIn {
                     Button(copy.nearAiEnrollAction) { join() }
+                        .buttonStyle(GlassButtonStyle(.primary))
                         .disabled(pending || commons.trimmingCharacters(in: .whitespaces).isEmpty)
                 } else {
-                    Text(copy.nearAiEnrollNeedsLogin).font(.callout).foregroundStyle(.secondary)
+                    Text(copy.nearAiEnrollNeedsLogin)
+                        .glassType(GlassTokens.TypeScale.body)
+                        .foregroundStyle(GlassColor.textSecondary)
                     CredentialSection(copy: copy, requiresSession: true)
                 }
 
                 if pending {
                     ProgressView().controlSize(.small)
-                    Text(copy.nearAiEnrollWorking).font(.callout).foregroundStyle(.secondary)
+                    Text(copy.nearAiEnrollWorking)
+                        .glassType(GlassTokens.TypeScale.body)
+                        .foregroundStyle(GlassColor.textSecondary)
                 }
                 if let refusal, let line = TCNearAiEnroll.line(label: refusal) {
                     NativeFlowNotice(
@@ -69,6 +82,7 @@ struct NearAiJoinView: View {
                         tone: TCNearAiEnroll.tone(label: refusal)
                             == TC_PRIVATE_INFERENCE_TONE_REFUSED ? "refused" : "neutral")
                 }
+              }
             }
         }
     }
