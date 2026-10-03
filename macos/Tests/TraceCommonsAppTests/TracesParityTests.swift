@@ -181,6 +181,19 @@ final class TracesParityTests: XCTestCase {
             // uppercased eyebrow.
             "Text(VerdictCopy.question)\n                .glassType(GlassTokens.TypeScale.caption)",
             "Text(CorrectionCopy.question)\n                .glassType(GlassTokens.TypeScale.caption)",
+            // The one irreversible control: primary, disarmed by the gate,
+            // its tooltip the gate's own, and nothing after it.
+            "Button(\"Contribute\") {\n                    contribute()\n                }\n"
+                + "                .buttonStyle(GlassButtonStyle(.primary))\n"
+                + "                .disabled(!canContribute)\n"
+                + "                .help(gateHelp)\n            }\n",
+            // A notice with no title is drawn without one, never as a bare dot.
+            "GlassNotice(tone: .ask, title: title?.isEmpty == false ? title : nil) {",
+            // The witness consent: Escape cancels, and the pane fills the sheet.
+            "Button(copy.cancel, role: .cancel) { dismiss() }\n"
+                + "                    .buttonStyle(GlassButtonStyle(.glass))\n"
+                + "                    .keyboardShortcut(.cancelAction)\n",
+            "}\n            Spacer(minLength: 0)\n            HStack {",
         ] {
             XCTAssertTrue(sheet.contains(needle), "PreviewSheet.swift lacks \(needle)")
         }

@@ -339,7 +339,7 @@ struct PreviewSheet: View {
                     // A busy witness judged nothing: not a refusal. The
                     // daemon's busy sentence, and when to try again.
                     SheetNotice(
-                        title: model.witnessCopy?.review?.heading ?? "",
+                        title: model.witnessCopy?.review?.heading,
                         detail: [witnessRefusal ?? failure, retry].joined(separator: "\n")
                     )
                 } else {
@@ -908,12 +908,13 @@ private struct CaptureSafeScroll<Content: View>: View {
 /// A state the content area holds instead of the tabs: working, loading, a
 /// failure, a transcript not ready. The title carries the ask dot and its
 /// words; the detail sits under it. Centred in the space the tabs would use.
+/// With no title words there is no title, and so no dot without words.
 private struct SheetNotice: View {
-    let title: String
+    let title: String?
     let detail: String
 
     var body: some View {
-        GlassNotice(tone: .ask, title: title) {
+        GlassNotice(tone: .ask, title: title?.isEmpty == false ? title : nil) {
             Text(detail)
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -1656,10 +1657,12 @@ struct WitnessReviewConsent: View {
                 disclosure
                 ScrollView { disclosure }
             }
+            Spacer(minLength: 0)
             HStack {
                 Spacer()
                 Button(copy.cancel, role: .cancel) { dismiss() }
                     .buttonStyle(GlassButtonStyle(.glass))
+                    .keyboardShortcut(.cancelAction)
                 Button(copy.confirm) { dismiss(); onConfirm() }
                     .buttonStyle(GlassButtonStyle(.primary))
             }
