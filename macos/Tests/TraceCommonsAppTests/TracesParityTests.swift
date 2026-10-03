@@ -103,5 +103,21 @@ final class TracesParityTests: XCTestCase {
         let spinner = try XCTUnwrap(body.range(of: "ProgressView()"))
         XCTAssertLessThan(banners.lowerBound, spinner.lowerBound, "the banners precede the spinner and the tree")
     }
+
+    func test_theCaveatAndTheCertificatesAreOnGlass() throws {
+        try LegacySymbols.assertClean("Views/ScrubbingCaveat.swift")
+        try LegacySymbols.assertClean("Views/CertificateSection.swift")
+        XCTAssertEqual(ScrubbingCaveat.status(redactionCount: 0), .ask)
+        XCTAssertEqual(ScrubbingCaveat.status(redactionCount: 3), .off)
+        let caveat = try Self.text("Views/ScrubbingCaveat.swift")
+        for needle in ["ScrubbingCaveat.canonical", "GlassStatusLabel(", ".accessibilityLabel("] {
+            XCTAssertTrue(caveat.contains(needle), "ScrubbingCaveat.swift lacks \(needle)")
+        }
+        let certificates = try Self.text("Views/CertificateSection.swift")
+        for needle in ["TCCertificate.listTitle(evidenceAdmitted:", "TCCertificate.rowLine(evidenceAdmitted:",
+                       "certificateListEmpty", "admissionEvidenceOffered == true", "\\.holdsCertificate"] {
+            XCTAssertTrue(certificates.contains(needle), "CertificateSection.swift lacks \(needle)")
+        }
+    }
 }
 #endif

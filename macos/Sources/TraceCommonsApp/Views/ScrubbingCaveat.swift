@@ -1,4 +1,5 @@
 import SwiftUI
+import TCDesign
 
 /// How the limits of automatic scrubbing are told to a contributor.
 ///
@@ -70,9 +71,10 @@ enum ScrubbingCaveat {
     }
 
     /// A card where scrubbing found nothing is the one worth slowing down
-    /// on, so it is the one case that gets a visible marker.
-    static func tone(redactionCount: Int) -> TC.Tone {
-        redactionCount == 0 ? .attention : .neutral
+    /// on, so it is the one case that gets a visible marker. The marker is a
+    /// status dot beside the row line's words, never a colour alone.
+    static func status(redactionCount: Int) -> GlassStatus {
+        redactionCount == 0 ? .ask : .off
     }
 }
 
@@ -80,14 +82,14 @@ enum ScrubbingCaveat {
 /// the mechanism rather than to any single session.
 struct ScrubbingCaveatNote: View {
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: TC.Space.s) {
+        HStack(alignment: .firstTextBaseline, spacing: GlassTokens.Space.s3) {
             Image(systemName: "info.circle")
-                .imageScale(.small)
-                .foregroundStyle(.tertiary)
+                .glassGlyph(11)
+                .foregroundStyle(GlassColor.textTertiary)
                 .accessibilityHidden(true)
             Text(ScrubbingCaveat.canonical)
-                .font(TC.Font_.caption)
-                .foregroundStyle(TC.inkSecondary)
+                .glassType(GlassTokens.TypeScale.caption)
+                .foregroundStyle(GlassColor.textSecondary)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -95,21 +97,12 @@ struct ScrubbingCaveatNote: View {
 
 /// The canonical sentence at the point of no return, sitting against the
 /// Contribute button rather than somewhere a person has already scrolled
-/// past. Weighted to be read: a rule above it, and the amber this app
-/// otherwise spends sparingly.
+/// past. Weighted to be read: the ask status dot leads it.
 struct ScrubbingCaveatAtCommit: View {
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: TC.Space.s) {
-            Image(systemName: TC.Tone.attention.symbol)
-                .imageScale(.small)
-                .foregroundStyle(TC.Tone.attention.color)
-                .accessibilityHidden(true)
-            Text(ScrubbingCaveat.canonical)
-                .font(TC.Font_.caption)
-                .foregroundStyle(TC.inkSecondary)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        .accessibilityElement(children: .combine)
+        GlassStatusLabel(ScrubbingCaveat.canonical, status: .ask)
+            .fixedSize(horizontal: false, vertical: true)
+            .accessibilityElement(children: .combine)
         .accessibilityLabel("Before you contribute. \(ScrubbingCaveat.canonical)")
     }
 }
