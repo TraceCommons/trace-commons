@@ -1,6 +1,8 @@
 {
   "private_ai": "off",
   "sessions_route": "local",
+  "window_hours": 24,
+  "unattributed_calls": null,
   "folders": {
     "armed": 2,
     "ask_first": 0,
@@ -19,6 +21,10 @@
       "model_calls": {
         "to": "anthropic",
         "basis": "tool_default"
+      },
+      "counts": {
+        "sessions": 0,
+        "inference_calls": null
       }
     },
     {
@@ -33,6 +39,10 @@
       "model_calls": {
         "to": "openai",
         "basis": "tool_default"
+      },
+      "counts": {
+        "sessions": 0,
+        "inference_calls": null
       }
     },
     {
@@ -45,6 +55,10 @@
       "model_calls": {
         "to": "google",
         "basis": "tool_default"
+      },
+      "counts": {
+        "sessions": 0,
+        "inference_calls": null
       }
     },
     {
@@ -57,6 +71,10 @@
       "model_calls": {
         "to": "unknown",
         "basis": "tool_default"
+      },
+      "counts": {
+        "sessions": 0,
+        "inference_calls": null
       }
     },
     {
@@ -69,6 +87,10 @@
       "model_calls": {
         "to": "unknown",
         "basis": "tool_default"
+      },
+      "counts": {
+        "sessions": 0,
+        "inference_calls": null
       }
     }
   ]

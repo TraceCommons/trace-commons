@@ -340,6 +340,23 @@ final class FlowMapSceneTests: XCTestCase {
         XCTAssertEqual(dashed.priced, "—")
     }
 
+    /// The call count is the core's (K14): every tool's counts plus the
+    /// unattributed calls, unknown when any part is, and it wins over one
+    /// page of calls.
+    func test_theCallCountIsTheCoresToolCounts() throws {
+        let decoder = DaemonDataDecoding.decoder()
+        let destinations = try decoder.decode(DaemonData.ToolDestinations.self, from: Data(
+            #"{"private_ai":"off","sessions_route":"local","folders":null,"window_hours":24,"unattributed_calls":2,"tools":[{"tool":"claude-code","counts":{"sessions":4,"inference_calls":120}},{"tool":"codex","counts":{"sessions":1,"inference_calls":30}}]}"#.utf8))
+        XCTAssertEqual(InferenceTabView.callCount(destinations), 152)
+        let partial = try decoder.decode(DaemonData.InferenceCallPage.self, from: Data(
+            #"{"readable":true,"window_hours":24,"calls":[],"next_cursor":"c2"}"#.utf8))
+        XCTAssertEqual(InferenceTabView.totals(partial, summary: nil, destinations: destinations).calls, 152)
+        let unread = try decoder.decode(DaemonData.ToolDestinations.self, from: Data(
+            #"{"private_ai":"off","sessions_route":"local","folders":null,"window_hours":24,"unattributed_calls":null,"tools":[{"tool":"codex","counts":{"sessions":1,"inference_calls":30}}]}"#.utf8))
+        XCTAssertNil(InferenceTabView.callCount(unread))
+        XCTAssertNil(InferenceTabView.totals(partial, summary: nil, destinations: unread).calls)
+    }
+
     /// The Inference tab's state on a core that is down: nothing read is
     /// drawn as a count, and the failure is recorded.
     func test_aCoreDownInferenceStoreDrawsNoCounts() async {
