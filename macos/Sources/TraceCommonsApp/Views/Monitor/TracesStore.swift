@@ -74,6 +74,15 @@ final class TracesStore {
     /// The last contribution, until it is undone or another is made.
     private(set) var lastContributed: Contributed?
 
+    /// A folder's Submit all the core took, while its hold lets it be taken
+    /// back (`cancel` with the project id).
+    struct ContributedFolder: Equatable {
+        let projectId: String
+        let toast: SubmitToast
+    }
+
+    private(set) var lastContributedFolder: ContributedFolder?
+
     /// The sample set drawn, in a debug build over sample data; nil over
     /// the daemon. `sampleUnknown` is a `TRACE_COMMONS_SAMPLE` that named no
     /// set, so the fallback is never silent.
@@ -98,6 +107,7 @@ final class TracesStore {
         tree = TracesTree(tools: [], unplaced: [])
         status = nil
         destinations = nil
+        lastContributedFolder = nil
     }
 
     /// Marks the data as a sample set in a debug build; nil over the daemon.
@@ -451,6 +461,65 @@ final class TracesStore {
             // The picker redraws from the core's answer, so a refused write
             // shows the folder as it still is; the error is kept beside it.
             refused(folder.id, error, method: "set_project_mode")
+            return
+        }
+        await load()
+    }
+
+    // MARK: Submit all
+
+    /// What the folder's group control offers, from the daemon's counts on
+    /// its `list_projects` row and the shared table (`groupSubmit`); never a
+    /// count compared to zero here.
+    func groupOffer(_ folder: TracesTree.FolderNode) -> GroupSubmitOffer {
+        EligibilitySurface.groupSubmit(
+            pendingCount: folder.pendingCount,
+            contributableCount: folder.contributableCount,
+            fallbackPending: folder.sessions.count,
+            calls: Self.eligibilityCalls)
+    }
+
+    /// Whether Submit all may be drawn at all, besides the table's answer:
+    /// the core is attached, and the folder is not one that is never sent.
+    func mayContributeFolder(_ folder: TracesTree.FolderNode) -> Bool {
+        client != nil && folder.mode != .ignore
+    }
+
+    /// Contribute for a whole folder, optionally with one verdict for every
+    /// session ("Submit all as"). The core's toast is kept for its Undo, and
+    /// what it left out as ineligible is said in the core's words.
+    func contributeFolder(_ folder: TracesTree.FolderNode, verdict: ContributorVerdict?) async {
+        guard !writing.contains(folder.id), mayContributeFolder(folder), let client else { return }
+        writing.insert(folder.id)
+        defer { writing.remove(folder.id) }
+        folderNotice = nil
+        writeErrors[folder.id] = nil
+        do {
+            let response = try await client.approveFolder(projectId: folder.id, verdict: verdict)
+            lastContributedFolder = ContributedFolder(projectId: folder.id, toast: response.toast)
+            lastContributed = nil
+            folderNotice = Self.eligibilityCalls
+                .withheldLine(Int64(clamping: response.excludedIneligible ?? 0))
+                .flatMap { $0.isEmpty ? nil : $0 }
+        } catch {
+            refused(folder.id, error, method: "approve")
+            return
+        }
+        await load()
+    }
+
+    /// Takes a folder's Submit all back inside its hold. A refusal is kept
+    /// beside the folder and the contribution stands.
+    func undoFolder(_ projectId: String) async {
+        guard !writing.contains(projectId), let client else { return }
+        writing.insert(projectId)
+        defer { writing.remove(projectId) }
+        writeErrors[projectId] = nil
+        do {
+            _ = try await client.cancelFolder(projectId: projectId)
+            lastContributedFolder = nil
+        } catch {
+            refused(projectId, error, method: "cancel")
             return
         }
         await load()

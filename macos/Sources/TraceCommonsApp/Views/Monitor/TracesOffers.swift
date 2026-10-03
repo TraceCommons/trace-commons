@@ -105,6 +105,16 @@ struct TracesOffersBar: View {
             }
             TracesRefusal(store: store, entryId: contributed.entryId)
         }
+        if let folder = store.lastContributedFolder, let words = store.words {
+            GlassNotice(tone: .ask, title: folder.toast.line) {
+                if folder.toast.offerUndo {
+                    Button(words.undoContribute) { Task { await store.undoFolder(folder.projectId) } }
+                        .buttonStyle(GlassButtonStyle(.glass))
+                        .disabled(store.writing.contains(folder.projectId))
+                }
+            }
+            // A refused undo is said beside the folder (`folderNotes`).
+        }
         if let kept = store.lastKept, let words = store.words {
             Button(words.undoKeep) { Task { await store.perform(.undoKeep, on: kept) } }
                 .buttonStyle(GlassButtonStyle(.glass))

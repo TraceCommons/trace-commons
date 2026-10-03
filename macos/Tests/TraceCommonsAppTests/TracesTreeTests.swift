@@ -543,3 +543,58 @@ func recordedEntry(_ fields: [String: Any] = [:]) throws -> DaemonData.QueueEntr
     let data = try JSONSerialization.data(withJSONObject: row)
     return try DaemonDataDecoding.decoder().decode(DaemonData.QueueEntry.self, from: data)
 }
+
+/// Submit all and Submit all as on a folder row (B9), against the sample core.
+@MainActor
+final class TracesFolderSubmitTests: XCTestCase {
+    private func loaded() async throws -> (TracesStore, TracesTree.FolderNode) {
+        let store = TracesStore(client: SampleDaemonClient(.normalDay))
+        await store.load()
+        let folder = try XCTUnwrap(
+            (store.tree.tools.flatMap(\.folders) + store.tree.unplaced).first { !$0.sessions.isEmpty })
+        return (store, folder)
+    }
+
+    func test_aFolderCarriesTheCoresCountsFromItsProjectRow() async throws {
+        let client = SampleDaemonClient(.normalDay)
+        let projects = try await client.listProjects().projects
+        let tree = TracesTree.build(
+            entries: try await client.listPending(projectId: nil), projects: projects, settings: nil,
+            scansWhenUnset: [])
+        for folder in tree.tools.flatMap(\.folders) + tree.unplaced {
+            let row = projects.first { $0.projectId == folder.id }
+            XCTAssertEqual(folder.pendingCount, row?.pendingCount, folder.id)
+            XCTAssertEqual(folder.contributableCount, row?.contributableCount, folder.id)
+        }
+    }
+
+    func test_contributingAFolderKeepsTheCoresToastAndUndoClearsIt() async throws {
+        let (store, folder) = try await loaded()
+        await store.contributeFolder(folder, verdict: .worked)
+        let contributed = try XCTUnwrap(store.lastContributedFolder)
+        XCTAssertEqual(contributed.projectId, folder.id)
+        XCTAssertFalse(contributed.toast.line.isEmpty)
+        XCTAssertNil(store.lastContributed, "a newer decision ends the single-session undo")
+        await store.undoFolder(folder.id)
+        XCTAssertNil(store.lastContributedFolder)
+    }
+
+    func test_aFolderRefusalIsKeptBesideTheFolder() async throws {
+        let (store, _) = try await loaded()
+        let ghost = TracesTree.FolderNode(id: "proj_does_not_exist", label: "ghost", mode: nil, sessions: [])
+        await store.contributeFolder(ghost, verdict: nil)
+        XCTAssertEqual(store.writeErrors[ghost.id], .daemon(code: "bad_params", message: "project-id-unrecognized"))
+        XCTAssertNil(store.lastContributedFolder)
+    }
+
+    func test_noFolderIsSubmittedWithoutAClientOrForAnIgnoredOne() async throws {
+        let (store, folder) = try await loaded()
+        XCTAssertTrue(store.mayContributeFolder(folder))
+        let ignored = TracesTree.FolderNode(id: folder.id, label: folder.label, mode: .ignore, sessions: folder.sessions)
+        XCTAssertFalse(store.mayContributeFolder(ignored))
+        store.attach(nil)
+        XCTAssertFalse(store.mayContributeFolder(folder))
+        await store.contributeFolder(folder, verdict: nil)
+        XCTAssertNil(store.lastContributedFolder)
+    }
+}

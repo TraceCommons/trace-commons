@@ -124,13 +124,9 @@ struct QueueFolderRow: View {
                 // Whether it may be pressed is the shared table's answer,
                 // never a comparison of the count to zero here.
                 if offer.offersContribute {
-                    Button("Submit all (\(offer.count))", action: onSubmitAll)
+                    Button(QueueFolderWords.submitAll(offer.count), action: onSubmitAll)
                         .tint(.primary)
-                        .help("""
-                        Submits every session in \(group.label) that can be sent. Each is \
-                        scrubbed the same way a single Submit would be, and flagged \
-                        sessions are included, not held back.
-                        """)
+                        .help(QueueFolderWords.submitAllHelp(group.label))
                 // Beside `Submit all`, never in front of it: answering the
                 // outcome question for a whole folder is a choice a
                 // contributor opts into, and the common path must not grow a
@@ -194,5 +190,18 @@ struct QueueFolderRow: View {
         } message: { copy in
             Text(copy.body)
         }
+    }
+}
+
+/// The folder row's sentences the glass Traces row also draws, held once.
+enum QueueFolderWords {
+    static func submitAll(_ count: Int) -> String { "Submit all (\(count))" }
+
+    static func submitAllHelp(_ label: String) -> String {
+        """
+        Submits every session in \(label) that can be sent. Each is \
+        scrubbed the same way a single Submit would be, and flagged \
+        sessions are included, not held back.
+        """
     }
 }
