@@ -24,7 +24,7 @@ struct InferenceTabView: View {
                 }
                 if let page = store.calls {
                     if page.readable {
-                        totals(page, summary: store.summary)
+                        totals(page, summary: store.summary, destinations: store.destinations)
                         if let summary = store.summary, summary.readable, !summary.models.isEmpty {
                             models(summary)
                         }
@@ -42,8 +42,11 @@ struct InferenceTabView: View {
 
     // MARK: Totals
 
-    private func totals(_ page: DaemonData.InferenceCallPage, summary: DaemonData.InferenceSummary?) -> some View {
-        let totals = Self.totals(page, summary: summary)
+    private func totals(
+        _ page: DaemonData.InferenceCallPage, summary: DaemonData.InferenceSummary?,
+        destinations: DaemonData.ToolDestinations?
+    ) -> some View {
+        let totals = Self.totals(page, summary: summary, destinations: destinations)
         return HStack(spacing: GlassTokens.Space.s3) {
             GlassLegendCell(MonitorWords.calls, value: totals.calls.map(String.init) ?? "—", status: .shared)
             GlassLegendCell(InferenceWords.proof(.verified), value: totals.verified.map(String.init) ?? "—", status: .on)
@@ -51,12 +54,31 @@ struct InferenceTabView: View {
         }
     }
 
-    /// The tab's totals. The core's per-model summary when it answered:
-    /// its counts cover the whole window. Otherwise the page's own calls,
-    /// but only when the page is the whole window (no next cursor): one
-    /// page of a longer ledger is never shown as the total. Unknown is a
+    /// The tab's totals. The call count is the core's: `tool_destinations`'
+    /// per-tool counts plus its unattributed calls (K14), over the same
+    /// window as the calls page. Otherwise, and for verified and priced, the
+    /// core's per-model summary when it answered. Otherwise the page's own
+    /// calls, but only when the page is the whole window (no next cursor):
+    /// one page of a longer ledger is never shown as the total. Unknown is a
     /// dash.
     static func totals(
+        _ page: DaemonData.InferenceCallPage, summary: DaemonData.InferenceSummary?,
+        destinations: DaemonData.ToolDestinations? = nil
+    ) -> (calls: Int?, verified: Int?, priced: String) {
+        let fallback = pageTotals(page, summary: summary)
+        guard let destinations else { return fallback }
+        return (callCount(destinations), fallback.verified, fallback.priced)
+    }
+
+    /// The core's call count for the window: every tool's
+    /// `counts.inference_calls` plus `unattributed_calls`. Unknown when any
+    /// part is.
+    static func callCount(_ destinations: DaemonData.ToolDestinations) -> Int? {
+        let parts = destinations.tools.map { $0.counts?.inferenceCalls } + [destinations.unattributedCalls]
+        return parts.contains(nil) ? nil : parts.compactMap { $0 }.reduce(0, +)
+    }
+
+    private static func pageTotals(
         _ page: DaemonData.InferenceCallPage, summary: DaemonData.InferenceSummary?
     ) -> (calls: Int?, verified: Int?, priced: String) {
         if let summary, summary.readable {
