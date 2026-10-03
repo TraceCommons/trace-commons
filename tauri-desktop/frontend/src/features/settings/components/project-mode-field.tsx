@@ -76,7 +76,7 @@ export function ProjectModeField({
         value={mode.field.value}
         onBlur={mode.field.onBlur}
         onChange={(event) => change(event.target.value as ProjectMode)}
-        disabled={disabled || confirmation !== null}
+        disabled={disabled || confirmation !== null || !shared.data}
       >
         <option value="notify_only">{label("notify_only")}</option>
         {allowAutoUpload && !project.is_unresolved_bucket && (
