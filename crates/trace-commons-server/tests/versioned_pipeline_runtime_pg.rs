@@ -39248,7 +39248,7 @@ async fn a_rollback_needs_no_readiness_and_an_activation_does() {
     );
     assert_ne!(
         event.evidence_hash, readiness.evidence_hash,
-        "a rollback records the promotion's hash, not a readiness hash"
+        "a rollback records the hash of the promotion and the bundle, not a readiness hash"
     );
     assert_eq!(
         PgPipelineStore::new(backend.clone())

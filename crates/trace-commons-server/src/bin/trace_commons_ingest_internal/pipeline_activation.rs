@@ -260,21 +260,22 @@ pub(crate) fn pipeline_trust_stores_from_env() -> anyhow::Result<PipelineTrustSt
     )
 }
 
-/// The start is refused: the build revision is set and is not a `sha256:`
-/// digest.
+/// The start is refused: the build revision is set to a value that is not
+/// empty and is not a `sha256:` digest.
 pub(crate) const PIPELINE_CODE_REVISION_INVALID_LABEL: &str = "pipeline_code_revision_invalid";
 
 /// The deployed code revision the routes read, from `value`
 /// (`DEPLOYED_CODE_REVISION_HASH`, the build's
 /// `TRACE_COMMONS_BUILD_CODE_REVISION_HASH`), checked once at start (final
-/// fix wave G17). `None` for a binary built without the variable: the routes
-/// then refuse with `bundle_runtime_revision_unknown`. A revision that is set
-/// must be `sha256:` and 64 lowercase hex digits, the form `pipeline.py
-/// revision` prints and the gate compares; anything else, the empty value of
-/// a variable set to nothing included, refuses the start with
-/// `pipeline_code_revision_invalid` (the label alone, never the value). A
-/// malformed revision would otherwise start cleanly and first show as a
-/// refusal after a full signed qualification.
+/// fix wave G17). `None` for a binary built without the variable, or with the
+/// variable set to the empty string or to blanks (unset, as an empty trust
+/// store variable is; `option_env!` gives `Some("")` for it): the routes then
+/// refuse with `bundle_runtime_revision_unknown`, and config-status reports
+/// no revision. Any other value must be `sha256:` and 64 lowercase hex
+/// digits, the form `pipeline.py revision` prints and the gate compares, or
+/// it refuses the start with `pipeline_code_revision_invalid` (the label
+/// alone, never the value). A malformed revision would otherwise start
+/// cleanly and first show as a refusal after a full signed qualification.
 pub(crate) fn deployed_code_revision(value: Option<&str>) -> anyhow::Result<Option<String>> {
     let is_digest = |revision: &str| {
         revision.strip_prefix("sha256:").is_some_and(|hex| {
@@ -286,6 +287,7 @@ pub(crate) fn deployed_code_revision(value: Option<&str>) -> anyhow::Result<Opti
     };
     match value {
         None => Ok(None),
+        Some(revision) if revision.trim().is_empty() => Ok(None),
         Some(revision) if is_digest(revision) => Ok(Some(revision.to_string())),
         Some(_) => Err(anyhow::anyhow!(PIPELINE_CODE_REVISION_INVALID_LABEL)),
     }
@@ -604,14 +606,36 @@ pub(crate) struct QualifyBody {
 /// pipeline_routing_state_changed` when the state under the routing lock is
 /// another; without it, the change behaves as before. The handler passes it
 /// to the store and reads no routing state itself. Any other value is `422
-/// pipeline_request_invalid`, as every body that does not parse.
+/// pipeline_request_invalid`, as every body that does not parse. An explicit
+/// `null` is such a value (`present_expected_state`): only an absent field
+/// means "no expectation".
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ActivateBody {
     bundle_id: String,
     reason_code: String,
     attestations: Vec<PipelineCheckAttestation>,
+    #[serde(default, deserialize_with = "present_expected_state")]
     expected_state: Option<ExpectedRouting>,
+}
+
+/// An `expected_state` field that is present in a body: one of
+/// `ExpectedRouting`'s four values. `null` is none of them: it is refused as
+/// a value that does not parse, where a plain `Option` field would read it as
+/// an absent one. The routing view shows `routing_state: null` for a tenant
+/// with no row, and a body that copies that value must not become a change
+/// with no expectation: the value for "no row" is `none`. The refusal is a
+/// data error of the parser, so the route answers it as it answers any other
+/// unknown value (`422` `pipeline_request_invalid`); its text is never
+/// answered.
+fn present_expected_state<'de, D>(deserializer: D) -> Result<Option<ExpectedRouting>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error as _;
+    Option::<ExpectedRouting>::deserialize(deserializer)?
+        .map(Some)
+        .ok_or_else(|| D::Error::custom("expected_state_null"))
 }
 
 /// `POST /v1/admin/pipeline/contain` and `POST /v1/admin/pipeline/deactivate`,
@@ -621,6 +645,7 @@ pub(crate) struct ActivateBody {
 #[serde(deny_unknown_fields)]
 pub(crate) struct ReasonBody {
     reason_code: String,
+    #[serde(default, deserialize_with = "present_expected_state")]
     expected_state: Option<ExpectedRouting>,
 }
 
@@ -1584,8 +1609,9 @@ mod tests {
     /// Final fix wave (G17): a build revision that is set must be a `sha256:`
     /// digest of 64 lowercase hex digits, or the start is refused with
     /// `pipeline_code_revision_invalid` (the label only, never the value). An
-    /// unset revision is `None`, and the routes refuse with
-    /// `bundle_runtime_revision_unknown`.
+    /// unset revision is `None`, and so is one set to the empty string or to
+    /// blanks, as an empty trust store variable is unset: the routes then
+    /// refuse with `bundle_runtime_revision_unknown`.
     #[test]
     fn a_build_revision_that_is_set_must_be_a_digest() {
         let digest = format!("sha256:{}", "a1".repeat(32));
@@ -1594,20 +1620,26 @@ mod tests {
             deployed_code_revision(Some(&digest)).unwrap(),
             Some(digest.clone())
         );
+        for unset in ["", "  ", "\t\n"] {
+            assert_eq!(
+                deployed_code_revision(Some(unset))
+                    .unwrap_or_else(|error| panic!("{unset:?} refused the start: {error}")),
+                None,
+                "{unset:?} is unset"
+            );
+        }
         let upper = digest.to_uppercase();
         let short = &digest[..digest.len() - 1];
         let padded = format!(" {digest}");
-        for malformed in ["", "  ", "not-a-revision", upper.as_str(), short, &padded] {
+        for malformed in ["not-a-revision", upper.as_str(), short, &padded] {
             let refused = deployed_code_revision(Some(malformed))
                 .err()
                 .unwrap_or_else(|| panic!("{malformed:?} is refused"));
             assert_eq!(refused.to_string(), "pipeline_code_revision_invalid");
-            if !malformed.trim().is_empty() {
-                assert!(
-                    !format!("{refused:#}").contains(malformed.trim()),
-                    "the refusal never holds the value"
-                );
-            }
+            assert!(
+                !format!("{refused:#}").contains(malformed.trim()),
+                "the refusal never holds the value"
+            );
         }
     }
 

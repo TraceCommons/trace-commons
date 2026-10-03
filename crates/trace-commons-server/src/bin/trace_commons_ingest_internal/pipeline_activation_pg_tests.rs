@@ -5473,7 +5473,10 @@ async fn a_rollback_of_a_contained_tenant_keeps_it_contained() {
 /// changes nothing (the routing row, the active bundle, the events); the
 /// matching state proceeds. Without the field a change behaves as before
 /// (`contain` in an emergency). Any other value is `422
-/// pipeline_request_invalid`.
+/// pipeline_request_invalid`, and so is an explicit `null`: the routing view
+/// shows `routing_state: null` for a tenant with no row, and a body that
+/// copies it must not read as "no expectation" (the value for that is
+/// `none`).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_routing_change_with_an_expected_state_is_refused_when_the_state_changed() {
     let Some(fixture) = RouteFixture::new().await else {
@@ -5482,8 +5485,8 @@ async fn a_routing_change_with_an_expected_state_is_refused_when_the_state_chang
     let tenant = fixture.tenant.as_str();
     fixture.qualify(&fixture.a).await;
     fixture.qualify(&fixture.b).await;
-    let with_expected = |mut body: serde_json::Value, expected: &str| {
-        body["expected_state"] = serde_json::json!(expected);
+    let with_expected = |mut body: serde_json::Value, expected: serde_json::Value| {
+        body["expected_state"] = expected;
         body
     };
     let contain = serde_json::json!({ "reason_code": "contain_for_incident" });
@@ -5528,7 +5531,11 @@ async fn a_routing_change_with_an_expected_state_is_refused_when_the_state_chang
     for (path, body, stale, current, resulting) in steps {
         let before = fixture.store().routing_view(tenant, 100).await.unwrap();
         let (status, refused) = fixture
-            .admin_call("POST", path, Some(with_expected(body.clone(), stale)))
+            .admin_call(
+                "POST",
+                path,
+                Some(with_expected(body.clone(), serde_json::json!(stale))),
+            )
             .await;
         assert_eq!(
             (status, refused),
@@ -5544,7 +5551,11 @@ async fn a_routing_change_with_an_expected_state_is_refused_when_the_state_chang
             "{path} expecting {stale}: the routing row, the active bundle, and the events"
         );
         let (status, routing) = fixture
-            .admin_call("POST", path, Some(with_expected(body, current)))
+            .admin_call(
+                "POST",
+                path,
+                Some(with_expected(body, serde_json::json!(current))),
+            )
             .await;
         assert_eq!(
             status,
@@ -5572,20 +5583,26 @@ async fn a_routing_change_with_an_expected_state_is_refused_when_the_state_chang
         ("/v1/admin/pipeline/deactivate", deactivate),
     ] {
         let before = fixture.store().routing_view(tenant, 100).await.unwrap();
-        let (status, refused) = fixture
-            .admin_call("POST", path, Some(with_expected(body, "paused")))
-            .await;
-        assert_eq!(
-            (status, refused),
-            (
-                StatusCode::UNPROCESSABLE_ENTITY,
-                serde_json::json!({ "error": "pipeline_request_invalid" })
-            ),
-            "{path} with an unknown expected state"
-        );
-        assert_eq!(
-            fixture.store().routing_view(tenant, 100).await.unwrap(),
-            before
-        );
+        for unparsed in [serde_json::json!("paused"), serde_json::Value::Null] {
+            let (status, refused) = fixture
+                .admin_call(
+                    "POST",
+                    path,
+                    Some(with_expected(body.clone(), unparsed.clone())),
+                )
+                .await;
+            assert_eq!(
+                (status, refused),
+                (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    serde_json::json!({ "error": "pipeline_request_invalid" })
+                ),
+                "{path} with the expected state {unparsed}"
+            );
+            assert_eq!(
+                fixture.store().routing_view(tenant, 100).await.unwrap(),
+                before
+            );
+        }
     }
 }
