@@ -20,7 +20,7 @@ public struct GlassStatusDot: View {
             .frame(width: size, height: size)
             .overlay {
                 if halo {
-                    Circle().stroke(Color.white.opacity(0.08), lineWidth: 2).padding(-1)
+                    Circle().stroke(GlassColor.ink(0.08), lineWidth: 2).padding(-1)
                 }
                 if ring {
                     Circle().stroke(status.color.opacity(0.25), lineWidth: 3).padding(-1.5)
@@ -62,7 +62,7 @@ public struct GlassChip: View {
     }
 
     public var body: some View {
-        let ink = status?.color ?? GlassColor.textSecondary
+        let ink = status?.textColor ?? GlassColor.textSecondary
         HStack(spacing: 5) {
             if let status { GlassStatusDot(status, size: 6) }
             Text(title)
@@ -93,9 +93,10 @@ public struct GlassTag: View {
     public var body: some View {
         let (fill, ink): (GlassRGBA, Color) = switch tone {
         case .neutral: (GlassTokens.Color.tintNeutral, GlassColor.textSecondary)
-        case .on: (GlassTokens.Color.tintOn, GlassTokens.Color.statusOn.color)
-        case .ask: (GlassTokens.Color.tintAsk, GlassTokens.Color.statusAsk.color)
-        case .outside, .failed: (GlassTokens.Color.tintOutside, GlassTokens.Color.statusOutside.color)
+        // Text: the text-safe status colours (4.5:1 in light).
+        case .on: (GlassTokens.Color.tintOn, GlassTokens.Color.statusOnText.color)
+        case .ask: (GlassTokens.Color.tintAsk, GlassTokens.Color.statusAskText.color)
+        case .outside, .failed: (GlassTokens.Color.tintOutside, GlassTokens.Color.statusOutsideText.color)
         case .accent: (GlassTokens.Color.tintAccent, GlassColor.accentText)
         }
         Text(title)
@@ -143,7 +144,7 @@ public struct GlassBadge: View {
             .padding(.horizontal, 5)
             .frame(minWidth: subtle ? nil : 16, minHeight: subtle ? 14 : 16)
             .background(
-                Capsule().fill(subtle ? Color.white.opacity(0.16) : GlassTokens.Color.statusOutside.color)
+                Capsule().fill(subtle ? GlassColor.ink(0.16) : GlassTokens.Color.badgeFill.color)
             )
             .accessibilityLabel(label ?? Self.text(for: count))
     }
@@ -231,7 +232,7 @@ public struct GlassToolTile: View {
                     }
                 }
                     .frame(width: side, height: side)
-                    .background(RoundedRectangle(cornerRadius: GlassTokens.Radius.tile, style: .continuous).fill(Color.white.opacity(0.1)))
+                    .background(RoundedRectangle(cornerRadius: GlassTokens.Radius.tile, style: .continuous).fill(GlassColor.ink(0.1)))
             case .folder:
                 Image(systemName: "folder.fill")
                     .glassGlyph(large ? 12 : 10, weight: .semibold)
@@ -291,11 +292,11 @@ public struct GlassBarGraph: View {
                 VStack(spacing: GlassTokens.Space.s2) {
                     ZStack {
                         RoundedRectangle(cornerRadius: thin ? 3 : GlassTokens.Radius.control, style: .continuous)
-                            .fill(Color.white.opacity(hovered == bucket.id ? 0.18 : 0.08))
+                            .fill(GlassColor.ink(hovered == bucket.id ? 0.18 : 0.08))
                         VStack(spacing: 0) {
                             Spacer(minLength: 0)
                             bar(bucket.up, of: maximum, color: GlassTokens.Color.dataShared.color, top: true)
-                            Rectangle().fill(Color.white.opacity(0.18)).frame(height: 1)
+                            Rectangle().fill(GlassColor.ink(0.18)).frame(height: 1)
                             bar(bucket.down, of: maximum, color: GlassTokens.Color.dataKept.color, top: false)
                             Spacer(minLength: 0)
                         }

@@ -95,8 +95,14 @@ struct OnboardingCoordinatorView: View {
     /// flow is one decision per screen.
     @State private var showingWhatGetsRemoved = false
 
-    init(startAt: Step = .welcome, onComplete: @escaping () -> Void) {
+    /// Told the step each time it changes, and once on appearing: the glass
+    /// first-run pane (R12 of #1173) draws its step progress from it. The
+    /// sequencing stays here.
+    var onStep: ((Step) -> Void)?
+
+    init(startAt: Step = .welcome, onStep: ((Step) -> Void)? = nil, onComplete: @escaping () -> Void) {
         self.startAt = startAt
+        self.onStep = onStep
         self.onComplete = onComplete
         _navigation = State(initialValue: OnboardingNavigation(step: startAt))
     }
@@ -109,6 +115,7 @@ struct OnboardingCoordinatorView: View {
             content
         }
         .disabled(navigation.consentSaveInProgress)
+        .onChange(of: navigation.step, initial: true) { _, step in onStep?(step) }
         .sheet(isPresented: $showingWhatGetsRemoved) {
             WhatGetsRemovedSheet()
         }

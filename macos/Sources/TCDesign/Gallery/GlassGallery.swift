@@ -42,7 +42,6 @@ public struct GlassGallery: View {
         }
         .frame(minWidth: 900, minHeight: 700)
         .background(scene ? GlassTokens.Color.sceneBase.color : .clear)
-        .preferredColorScheme(.dark)
     }
 
     private var sections: some View {
