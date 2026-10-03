@@ -923,18 +923,10 @@ fn format_size(bytes: u64) -> String {
     }
 }
 
-/// What to call this session's origin in a table: what it declares itself
-/// to be when discovery knows, and otherwise the adapter that found it.
-///
-/// See `SessionRef::declared_source` for why the two differ at all.
-fn displayed_source(r: &SessionRef) -> &str {
-    r.declared_source.as_deref().unwrap_or(r.source)
-}
-
 fn session_row(idx: usize, r: &SessionRef) -> Vec<String> {
     vec![
         (idx + 1).to_string(),
-        displayed_source(r).to_string(),
+        r.displayed_source().to_string(),
         r.project.clone().unwrap_or_else(|| "-".to_string()),
         format_age(r.started_at),
         format_size(r.size_bytes),
