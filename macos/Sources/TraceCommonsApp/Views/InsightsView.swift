@@ -76,7 +76,7 @@ struct InsightsView: View {
                         Button(model.text("refresh")) { model.refresh() }
                         if model.busy { ProgressView().controlSize(.small) }
                     }.disabled(model.busy)
-                    if let error = model.error { Text(error).foregroundStyle(GlassColor.textPrimary) }
+                    if let error = model.error { Text(error).foregroundStyle(GlassTokens.Color.statusOutsideText.color) }
                     if !model.invalidatedEpisodeIDs.isEmpty {
                         VStack(alignment: .leading, spacing: 6) {
                             Text(model.text("episode_invalidated_notice"))
@@ -90,7 +90,7 @@ struct InsightsView: View {
                     if model.loadingSummary {
                         ProgressView(model.text("summary_title"))
                     } else if let summaryError = model.summaryError {
-                        Text(summaryError).foregroundStyle(GlassColor.textPrimary)
+                        Text(summaryError).foregroundStyle(GlassTokens.Color.statusOutsideText.color)
                     } else if let summary = model.summary {
                         InsightsSummaryView(summary: summary, copy: model.copy, openSnapshot: model.explain)
                             .disabled(model.busy)
