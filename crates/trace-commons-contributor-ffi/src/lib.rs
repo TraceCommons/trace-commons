@@ -5970,6 +5970,88 @@ pub unsafe extern "C" fn tc_grant_void_notice_regrant_json(
     })
 }
 
+/// The health banner's words (R6/R7, #1173): `health_copy::core_down_copy`
+/// when `reachable` is 0, or `health_copy::health_copy_for_label` for
+/// `label` when the daemon answered.
+///
+/// `reachable` is the caller's own liveness fact -- whether its IPC call to
+/// the daemon answered at all -- and is never derived here; this export has
+/// no way to probe a daemon on its own. When `reachable` is non-zero, a NULL
+/// or empty `label` means a reachable daemon reported nothing wrong, and this
+/// returns NULL: there is no banner to draw. A non-empty `label` this build
+/// does not know -- including one that is not UTF-8 -- still gets the
+/// on-hold banner, never NULL (which a shell reads as healthy) and never
+/// raw-label text.
+///
+/// `max_queue_entries` is the daemon's configured queue limit
+/// (`get_settings.max_queue_entries`), used only for `queue-full`'s count; 0
+/// or negative means the caller does not know it, and the sentence then
+/// names no number.
+///
+/// Returns an owned JSON string of `{title, detail, action, action_kind,
+/// severity}`; free it with [`tc_string_free`]. NULL for nothing to show,
+/// and on a caught panic.
+///
+/// # Safety
+/// `label`, if non-null, must point to a valid, NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_health_copy_json(
+    reachable: i32,
+    label: *const c_char,
+    max_queue_entries: i64,
+) -> *mut c_char {
+    use trace_commons_contributor::health_copy;
+    guarded_string_no_err(|| {
+        if reachable == 0 {
+            let copy = health_copy::core_down_copy();
+            return Ok(to_owned_cstring(&serde_json::to_string(&copy)?));
+        }
+        if label.is_null() {
+            return Ok(std::ptr::null_mut());
+        }
+        let bytes = unsafe { CStr::from_ptr(label) }.to_bytes();
+        if bytes.is_empty() {
+            return Ok(std::ptr::null_mut());
+        }
+        let max = u64::try_from(max_queue_entries).ok().filter(|max| *max > 0);
+        let copy = match std::str::from_utf8(bytes) {
+            Ok(label) => health_copy::health_copy_for_label(label, max),
+            // A condition is being reported; this build just cannot read
+            // its name.
+            Err(_) => health_copy::on_hold_copy(),
+        };
+        Ok(to_owned_cstring(&serde_json::to_string(&copy)?))
+    })
+}
+
+/// The explanatory line under a `second_look` reason (R6/R7, #1173;
+/// **DRAFT, NEEDS APPROVAL** -- `preview_copy::second_look_line` is itself
+/// unapproved): why one scrubbed session waits for a person instead of
+/// moving on its own.
+///
+/// `reason` is one of `preview_copy`'s fixed `second_look` labels
+/// (`nothing-matched`, `looks-unsure`, `trimmed-to-fit`). A NULL, non-UTF-8
+/// or unrecognised `reason` returns NULL: this build has no sentence for it,
+/// and a shell must not invent one or show the raw label.
+///
+/// Returns an owned string; free it with [`tc_string_free`]. NULL for an
+/// unrecognised reason, and on a caught panic.
+///
+/// # Safety
+/// `reason`, if non-null, must point to a valid, NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_second_look_line_text(reason: *const c_char) -> *mut c_char {
+    guarded_string_no_err(|| {
+        let Some(reason) = (unsafe { borrow_optional_str(reason) }) else {
+            return Ok(std::ptr::null_mut());
+        };
+        match trace_commons_contributor::preview_copy::second_look_line(reason) {
+            Some(line) => Ok(to_owned_cstring(line)),
+            None => Ok(std::ptr::null_mut()),
+        }
+    })
+}
+
 /// Can this process reach the Cloud credential store?
 ///
 /// Exists so a release pipeline can ask a *signed bundle* the question, which

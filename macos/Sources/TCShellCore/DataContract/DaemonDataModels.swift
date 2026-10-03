@@ -188,6 +188,9 @@ extension DaemonData {
         /// Fixed reasons: `nothing-matched`, `looks-unsure`, `trimmed-to-fit`.
         /// Empty is an all-clear only when `scrub` is `scrubbed`.
         public let secondLook: [String]?
+        /// The sentence for each `secondLook` reason, index for index (R6/R7;
+        /// DRAFT wording). Never shorter than `secondLook`.
+        public let secondLookLines: [String]?
 
         public var id: String { entryId }
 
@@ -225,6 +228,7 @@ extension DaemonData {
             case contentMarks = "content_marks"
             case unsureSpans = "unsure_spans"
             case secondLook = "second_look"
+            case secondLookLines = "second_look_lines"
         }
 
         public var queueState: QueueStateLabel? { QueueStateLabel(rawValue: state) }
@@ -521,6 +525,9 @@ extension DaemonData {
         /// how many spans `preview_unsure_spans` would report.
         public let unsureSpans: Int?
         public let secondLook: [String]?
+        /// The sentence for each `secondLook` reason, index for index (R6/R7;
+        /// DRAFT wording).
+        public let secondLookLines: [String]?
 
         public enum CodingKeys: String, CodingKey, CaseIterable {
             case entry, title, redactions, enrolled, scrub, marks
@@ -540,6 +547,7 @@ extension DaemonData {
             case contentMarks = "content_marks"
             case unsureSpans = "unsure_spans"
             case secondLook = "second_look"
+            case secondLookLines = "second_look_lines"
         }
     }
 

@@ -5266,6 +5266,10 @@ fn preview_card_fields(summary: &super::preview::PreviewCardSummary) -> serde_js
         "event_count": summary.event_count,
         "opening_prompt": summary.opening_prompt,
         "redactions": summary.redactions,
+        // Distinct values removed per label (R7, #1173): a card needs this
+        // the same way the full summary does, to say "185 local path (12
+        // distinct)" rather than just a total. Counts only, never content.
+        "redactions_distinct": summary.redactions_distinct,
         "pii_labels_present": summary.pii_labels_present,
         "consent_scopes": summary.consent_scopes,
         "residual_risk": summary.residual_risk,
@@ -7660,6 +7664,42 @@ mod tests {
             method: method.to_string(),
             params,
         }
+    }
+
+    /// The card shape (R7, #1173) carries `redactions_distinct` the same way
+    /// the full summary does: `preview` for a non-certificate entry,
+    /// `preview_request`'s cache hit, and `preview_ready` all share
+    /// `preview_card_value`, so one assertion here covers all three.
+    #[test]
+    fn preview_card_value_carries_redactions_distinct() {
+        let mut redactions = std::collections::BTreeMap::new();
+        redactions.insert("local_path".to_string(), 185);
+        let mut redactions_distinct = std::collections::BTreeMap::new();
+        redactions_distinct.insert("local_path".to_string(), 12);
+        let summary = super::super::preview::PreviewCardSummary {
+            would_send_bytes: 100,
+            raw_session_bytes: 200,
+            event_count: 3,
+            opening_prompt: "hello".to_string(),
+            title: None,
+            redactions,
+            redactions_distinct: redactions_distinct.clone(),
+            pii_labels_present: Vec::new(),
+            consent_scopes: Vec::new(),
+            residual_risk: "none".to_string(),
+            input_fingerprint: "fp".to_string(),
+            enrolled: true,
+            subagent_count: 0,
+            subagents_dropped: 0,
+            scrub_counts: super::super::second_look::ScrubCounts::default(),
+        };
+        let value = preview_card_value(&summary);
+        assert_eq!(
+            value["redactions_distinct"],
+            serde_json::to_value(&redactions_distinct).unwrap(),
+            "the card summary must carry redactions_distinct, a count only, \
+             the same way the full summary does"
+        );
     }
 
     use crate::daemon::test_support::at;

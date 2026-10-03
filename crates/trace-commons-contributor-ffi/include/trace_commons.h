@@ -2524,6 +2524,28 @@ char*       tc_parse_deep_link_json(const char* url, char** err);
  */
 int32_t     tc_external_url_is_allowed(const char* url);
 
+/* The health banner's words (R6/R7, #1173): health_copy::core_down_copy when
+ * reachable is 0, or health_copy::health_copy_for_label for label when the
+ * daemon answered. reachable is the caller's own liveness fact and is never
+ * derived here. When reachable is non-zero, a NULL or empty label means a
+ * reachable daemon reported nothing wrong, and this returns NULL: there is no
+ * banner to draw; any other label, including one that is not UTF-8, gets a
+ * banner. max_queue_entries is the configured queue limit for queue-full's
+ * count; 0 or negative when unknown. {title, detail, action, action_kind,
+ * severity}. NULL for nothing to show and on a caught panic.
+ */
+char*       tc_health_copy_json(int32_t reachable, const char* label,
+                                int64_t max_queue_entries);
+
+/* The explanatory line under a second_look reason (R6/R7, #1173; DRAFT,
+ * NEEDS APPROVAL -- preview_copy::second_look_line is itself unapproved):
+ * why one scrubbed session waits for a person instead of moving on its own.
+ * reason is one of the fixed second_look labels (nothing-matched,
+ * looks-unsure, trimmed-to-fit). NULL for a NULL, non-UTF-8 or unrecognised
+ * reason, and on a caught panic.
+ */
+char*       tc_second_look_line_text(const char* reason);
+
 /*
  * Can this process reach the Cloud credential store?
  *

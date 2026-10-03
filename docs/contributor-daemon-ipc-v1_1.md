@@ -647,6 +647,48 @@ invite identity" below.
 wrong. It is one of the labels in "Health precedence" below, or `null` when
 healthy.
 
+The banner's words -- a title, a sentence stating what is held and the data
+consequence, and an action label where there is a real recovery step -- are
+`health_copy::health_copy_for_label`, across the C ABI as `tc_health_copy_json`
+(R6/R7, #1173). Pass `reachable: 0` instead of a label when the daemon
+cannot be reached at all; that returns the separate core-down sentence
+(`health_copy::core_down_copy`, **DRAFT, NEEDS APPROVAL** -- no shell has
+shown a contributor-facing sentence for a fully unreachable daemon before).
+`reachable` is never derived from this call: it is the caller's own
+liveness fact, from whatever probe or IPC failure told it the daemon is
+down. A reachable daemon with `last_error_label: null` has nothing to show
+and should not call this at all; passed anyway with an empty label it
+answers `NULL`, not a banner. A non-empty label that is not UTF-8 gets the
+on-hold banner, never `NULL`.
+
+The C signature is `tc_health_copy_json(reachable, label,
+max_queue_entries)`: pass `get_settings.max_queue_entries` so `queue-full`
+says how many are waiting, or `0` when unknown and the sentence names no
+number. The JSON is `{title, detail, action, action_kind, severity}`:
+
+- `severity` is `actionable` (the contributor can act on it) or `waiting`
+  (it clears on its own) -- Swift `HealthCopy.Severity`'s two banner kinds.
+  It cannot be derived from `action`: an unsupported OpenCode export is
+  actionable with no button.
+- `action_kind` is a stable kind for the button, present exactly when
+  `action` is: `reconnect`, `privacy_scan_notice` or `review_queue` (Swift's
+  `reviewsQueue`). Switch on it, never on the button's words.
+- `opencode-export-version-unsupported` is answered with the source settings'
+  own version sentence (`source_copy`), not the generic banner.
+
+The core-down detail (draft) says the queue is safe and that sessions from
+while the daemon was down are picked up when it is running again: the queue
+is persisted, and the daemon's first poll after it starts is a full pass over
+every watched source.
+
+Moved into the core from
+`macos/Sources/TraceCommonsApp/HealthCopy.swift`, which has shipped this
+table since before this export existed; Windows
+(`windows/src/TraceCommons.Interop/HealthCopy.cs`) independently wrote the
+same sentences by hand. Neither shell has been switched over to the export
+yet -- that is follow-up work, not part of this change -- so the two Swift
+and C# tables still carry their own copies for now.
+
 `next_digest_at` depends on `digest_schedule` (see `set_settings`). Under
 `interval` it is `null` until a first digest has fired, then that digest's
 time plus `digest_interval_secs` -- unchanged from before `digest_schedule`
@@ -1077,6 +1119,16 @@ direction, only that `would_send_bytes` is the number that governs consent.
 in the response ever contains the actual matched text, only counts and
 category labels.
 
+`redactions_distinct` (R7, #1173) is distinct values removed per label,
+beside the occurrence counts in `redactions`: a client renders "185 local
+path (12 distinct)" rather than just the total. It was previously only on
+the full summary (a certificate entry's `preview`, and `tc_preview_summary_json`
+across the C ABI); it is now on the card shape too -- `preview` for every
+other entry, `preview_request`'s cache hit, and the `preview_ready` event --
+since the review screen needs it on a card exactly as much as on the full
+sheet. A count only, like every other field here: no value removed is ever
+named.
+
 **`preview` does not require an enrollment.** It performs no network I/O and
 needs neither the daemon's file lock nor its running loop, so an app can
 show a contributor what would be sent *before* they decide to enrol -- which
@@ -1122,6 +1174,17 @@ in additive fields on every queue entry (`list_pending`, `snapshot`, the
 | `content_marks` | **only when `scrubbed`** | `marks` without the path family (`local_path`). |
 | `unsure_spans` | **only when `scrubbed`** | how many spans `preview_unsure_spans` would report for that build's body. |
 | `second_look` | always, possibly empty | fixed reasons, in this order: `nothing-matched`, `looks-unsure`, `trimmed-to-fit` |
+| `second_look_lines` | always, possibly empty (R6/R7, #1173; **DRAFT, NEEDS APPROVAL**) | `second_look`'s reasons, in the same order, each already turned into the sentence a person reads for it (`preview_copy::second_look_line`) |
+
+`second_look_lines` exists so a card or the review sheet can render the
+explanation without separately asking `tc_second_look_line_text` for each
+reason; it is the same table, inlined. It is exactly as long as
+`second_look` and lines up with it index for index -- never reordered,
+never deduplicated, and never shorter: a reason this build has no sentence
+for gets a generic fallback line rather than being dropped. **DRAFT, NEEDS APPROVAL** because the sentences it
+quotes (`preview_copy::second_look_line`) are themselves unapproved spec
+wording; a client that renders it should expect the words, not the
+presence or absence of the field, to still change.
 
 The reasons:
 
