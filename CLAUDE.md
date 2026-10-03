@@ -19,7 +19,9 @@ shells -- macOS (`macos/`, Swift), Windows (`windows/`, C#), Linux GTK
 **Native SwiftUI (`macos/`) is the main client on macOS** (#1173 D1): no new
 Tauri work on macOS, and the Tauri app is retired there once the native
 screens match. Windows and Linux stay on Tauri, frozen, until macOS ships
-(#1173 D13, a default for now).
+(#1173 D13, a default for now). Native macOS is also the lead client and the
+parity target: GTK, Windows and Tauri match its terminology, states, flows
+and affordances, and Tauri drift is low priority.
 
 There is **no Ironclaw path dependency**. Do not look for one. Do not propose
 adding one.

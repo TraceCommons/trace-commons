@@ -47,6 +47,14 @@ struct SettingsView: View {
 struct SettingsContent: View {
     /// See `SettingsView.navigation`.
     var navigation: MainWindowNavigation?
+    /// One section alone, for the Settings window's section list (R11 of
+    /// #1173); nil draws every section in order, as the main window does.
+    var section: SettingsSection?
+
+    /// Section headings the section list shows too. Held once here so the
+    /// list and the section say the same words.
+    static let consentHeading = "How may your traces be used?"
+    static let auditHeading = "What has been changed on this machine"
 
     @EnvironmentObject private var model: AppModel
     @ObservedObject private var updates = UpdateController.shared
@@ -130,20 +138,9 @@ struct SettingsContent: View {
         // Spec §5.4 gap: 18 between sections (`TC.Space.lg`), not the
         // 28 this screen used before.
         VStack(alignment: .leading, spacing: TC.Space.lg) {
-            connection
-            loginItem
-            notifications
-            updatesSection
-            consent
-            publicProfile
-            watching
-            watchedFolders
-            routing
-            privateInference
-            RouteDisclosureSection()
-            witness
-            projects
-            audit
+            ForEach(Self.parts(for: section), id: \.self) { part in
+                view(for: part)
+            }
         }
         .padding(.top, TC.Space.Content.top)
         .padding(.horizontal, TC.Space.Content.horizontal)
@@ -167,6 +164,55 @@ struct SettingsContent: View {
             // button that matters.
             GoPublicDialog(onDismiss: { showingGoPublic = false })
                 .environmentObject(model)
+        }
+    }
+
+    /// The blocks this screen draws, in the main window's order.
+    enum Part: CaseIterable, Hashable {
+        case connection, loginItem, notifications, updates, consent, publicProfile, watching
+        case watchedFolders, routing, privateInference, routeDisclosure, witness, projects, audit
+    }
+
+    /// Which blocks a section draws: every block, in order, for nil (the
+    /// main window); a section's own blocks for the Settings window's list.
+    /// Compute is its own view and draws none here.
+    static func parts(for section: SettingsSection?) -> [Part] {
+        guard let section else { return Part.allCases }
+        switch section {
+        case .connection: return [.connection]
+        case .startup: return [.loginItem]
+        case .notifications: return [.notifications]
+        case .updates: return [.updates]
+        case .consent: return [.consent]
+        case .publicProfile: return [.publicProfile]
+        case .watching: return [.watching]
+        case .watchedFolders: return [.watchedFolders]
+        case .tools: return [.routing]
+        case .privateAI: return [.privateInference, .routeDisclosure]
+        case .witness: return [.witness]
+        case .projects: return [.projects]
+        case .changes: return [.audit]
+        case .compute: return []
+        }
+    }
+
+    @ViewBuilder
+    private func view(for part: Part) -> some View {
+        switch part {
+        case .connection: connection
+        case .loginItem: loginItem
+        case .notifications: notifications
+        case .updates: updatesSection
+        case .consent: consent
+        case .publicProfile: publicProfile
+        case .watching: watching
+        case .watchedFolders: watchedFolders
+        case .routing: routing
+        case .privateInference: privateInference
+        case .routeDisclosure: RouteDisclosureSection()
+        case .witness: witness
+        case .projects: projects
+        case .audit: audit
         }
     }
 
@@ -252,7 +298,7 @@ struct SettingsContent: View {
     private func startupToggle(isOn: Binding<Bool>) -> some View {
         Toggle("Start Trace Commons when you log in", isOn: isOn)
             .toggleStyle(.switch)
-            .tint(TC.green)
+            .tint(TC.accent)
             .font(TC.Font_.body)
     }
 
@@ -297,6 +343,7 @@ struct SettingsContent: View {
                     checkRow(Notifier.copy?.notificationDenied ?? "", false)
                     Link(Notifier.copy?.systemSettings ?? "", destination: Notifier.systemSettingsURL)
                         .font(TC.Font_.body)
+                        .tint(TC.accentText)
                 case .notDetermined:
                     checkRow(Notifier.copy?.notificationNotAsked ?? "", false)
                     Button(Notifier.copy?.notificationAllow ?? "") {
@@ -313,6 +360,7 @@ struct SettingsContent: View {
                 @unknown default:
                     Text(Notifier.copy?.notificationUnknown ?? "")
                     Link(Notifier.copy?.systemSettings ?? "", destination: Notifier.systemSettingsURL)
+                        .tint(TC.accentText)
                 }
             }
         }
@@ -329,7 +377,7 @@ struct SettingsContent: View {
     /// manager over the same file.
     private var updatesSection: some View {
         VStack(alignment: .leading, spacing: TC.Space.m) {
-            TCSectionHeader(title: "Updates")
+            TCSectionHeader(title: SettingsWords.updates)
 
             HStack(spacing: TC.Space.s) {
                 TCFieldLabel("Version")
@@ -441,7 +489,7 @@ struct SettingsContent: View {
 
     private var consent: some View {
         VStack(alignment: .leading, spacing: TC.Space.sm) {
-            TCSectionHeader(title: "How may your traces be used?")
+            TCSectionHeader(title: Self.consentHeading)
             Text("Applies to traces you send from now on.")
                 .font(TC.Font_.meta)
                 .foregroundStyle(.secondary)
@@ -965,7 +1013,7 @@ struct SettingsContent: View {
                     }
                 ))
                 .toggleStyle(.switch)
-                .tint(TC.green)
+                .tint(TC.accent)
                 .font(TC.Font_.body)
 
                 routingState(copy: copy)
@@ -1003,6 +1051,7 @@ struct SettingsContent: View {
                     // way to say so.
                     Button(copy.lookAgain) { model.discoverRouting() }
                         .buttonStyle(.borderless)
+                        .tint(TC.accentText)
                 }
 
                 // The port and folder are the override, and they are live
@@ -1079,6 +1128,7 @@ struct SettingsContent: View {
                             }
                         }
                         .buttonStyle(.borderless)
+                        .tint(TC.accentText)
                         .accessibilityLabel(copy.folderTitle)
                         // The chosen folder, shown so the answer is
                         // visible. Empty until one is chosen, which is the
@@ -1268,6 +1318,7 @@ struct SettingsContent: View {
                 if let state, WitnessSurface.offersClear(state) {
                     Button(copy.clear) { model.clearWitness() }
                         .buttonStyle(.borderless)
+                        .tint(TC.accentText)
                         .disabled(model.witnessBusy)
                     Text(copy.clearNote)
                         .font(TC.Font_.meta)
@@ -1737,7 +1788,7 @@ struct SettingsContent: View {
     /// decides anything on the strength of what is listed here.
     private var audit: some View {
         VStack(alignment: .leading, spacing: TC.Space.sm) {
-            TCSectionHeader(title: "What has been changed on this machine")
+            TCSectionHeader(title: Self.auditHeading)
             if model.audit.isEmpty {
                 Text("Nothing has been changed.")
                     .font(TC.Font_.meta)
@@ -1823,7 +1874,7 @@ struct SettingsContent: View {
             Image(systemName: value ? "checkmark.circle.fill" : "circle")
                 .font(.system(size: 12))
                 .symbolRenderingMode(value ? .palette : .monochrome)
-                .foregroundStyle(value ? TC.onAccent : Color.secondary, TC.green)
+                .foregroundStyle(value ? TC.onAccent : Color.secondary, TC.accent)
             Text(title).font(TC.Font_.body)
         }
         .accessibilityElement(children: .combine)

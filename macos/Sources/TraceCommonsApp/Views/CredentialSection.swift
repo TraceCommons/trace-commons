@@ -152,7 +152,7 @@ struct CredentialSection: View {
                 Button(label) { run(action) }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.large)
-                    .tint(TC.green)
+                    .tint(TC.accent)
                     .disabled(model.credentialBusy)
             } else {
                 Button(label) { run(action) }

@@ -87,6 +87,20 @@ public struct ProjectRow: Decodable, Identifiable, Equatable, Sendable {
     /// On an armed row only: `true` when armed from now, so the backlog
     /// waits. Absent (nil) on rows that are not armed.
     public let fromNow: Bool?
+    /// On an armed row only: which disclosure is true for this folder's
+    /// automatic sessions, as the daemon chose it (`patterns_only` or
+    /// `model_scrubbed`). Absent on rows that are not armed. A shell words
+    /// it through the core (`tc_automatic_grant_copy_json`) and never picks.
+    public let automaticDisclosure: String?
+    /// The folder's own mode, which a contribution override (#1173) never
+    /// writes: what clearing the override returns `mode` to. `nil` from a
+    /// daemon predating the override.
+    public let folderMode: ProjectMode?
+    /// Which tools this project's sessions came from, one row per tool,
+    /// ordered by `source` (K11). Empty when nothing is known yet, and from
+    /// a daemon predating the field. Can undercount `sessionCount`: never
+    /// assert the two sum.
+    public let tools: [ProjectTool]
 
     public var id: String { projectId }
 
@@ -102,7 +116,10 @@ public struct ProjectRow: Decodable, Identifiable, Equatable, Sendable {
         contributableCount: Int? = nil,
         sessionCount: Int? = nil,
         lastSessionAt: Date? = nil,
-        fromNow: Bool? = nil
+        fromNow: Bool? = nil,
+        automaticDisclosure: String? = nil,
+        folderMode: ProjectMode? = nil,
+        tools: [ProjectTool] = []
     ) {
         self.projectId = projectId
         self.projectLabel = projectLabel
@@ -116,6 +133,9 @@ public struct ProjectRow: Decodable, Identifiable, Equatable, Sendable {
         self.sessionCount = sessionCount
         self.lastSessionAt = lastSessionAt
         self.fromNow = fromNow
+        self.automaticDisclosure = automaticDisclosure
+        self.folderMode = folderMode
+        self.tools = tools
     }
 
     public enum CodingKeys: String, CodingKey {
@@ -131,6 +151,9 @@ public struct ProjectRow: Decodable, Identifiable, Equatable, Sendable {
         case sessionCount = "session_count"
         case lastSessionAt = "last_session_at"
         case fromNow = "from_now"
+        case automaticDisclosure = "automatic_disclosure"
+        case folderMode = "folder_mode"
+        case tools
     }
 
     public init(from decoder: any Decoder) throws {
@@ -158,6 +181,9 @@ public struct ProjectRow: Decodable, Identifiable, Equatable, Sendable {
         sessionCount = try c.decodeIfPresent(Int.self, forKey: .sessionCount)
         lastSessionAt = try c.decodeIfPresent(Date.self, forKey: .lastSessionAt)
         fromNow = try c.decodeIfPresent(Bool.self, forKey: .fromNow)
+        automaticDisclosure = try c.decodeIfPresent(String.self, forKey: .automaticDisclosure)
+        folderMode = try c.decodeIfPresent(ProjectMode.self, forKey: .folderMode)
+        tools = try c.decodeIfPresent([ProjectTool].self, forKey: .tools) ?? []
     }
 
     /// Whether this project could ever be armed to contribute without asking.
@@ -208,6 +234,31 @@ public struct ProjectRow: Decodable, Identifiable, Equatable, Sendable {
     }
 }
 
+/// One `list_projects` `tools[]` row (K11): a tool this project's sessions
+/// came from and how many.
+public struct ProjectTool: Decodable, Equatable, Sendable {
+    /// The tool the sessions read as: the declared source when a staged
+    /// import named one (e.g. `antigravity`), else the adapter. For a staged
+    /// import this is self-declared and unverified.
+    public let source: String
+    public let sessionCount: Int
+    /// The fixed vendor word, e.g. `Anthropic`, or `nil` for a tool with no
+    /// fixed default.
+    public let answersAt: String?
+
+    public init(source: String, sessionCount: Int, answersAt: String? = nil) {
+        self.source = source
+        self.sessionCount = sessionCount
+        self.answersAt = answersAt
+    }
+
+    public enum CodingKeys: String, CodingKey {
+        case source
+        case sessionCount = "session_count"
+        case answersAt = "answers_at"
+    }
+}
+
 /// Words shared by every macOS surface that lists projects.
 ///
 /// Onboarding screen 5 and Settings show the same row and must say the same
@@ -218,21 +269,10 @@ public struct ProjectRow: Decodable, Identifiable, Equatable, Sendable {
 public enum ProjectCopy {
     public static let unresolvedBucketLabel = "Sessions with no project"
 
-    /// The label for one option in a mode picker.
-    ///
-    /// These are *actions* -- what selecting this does -- and are not the
-    /// state sentences Settings prints beside a row to say what the mode
-    /// currently is ("Contributed without asking"). Both exist and they are
-    /// not interchangeable: a picker of state sentences reads as a report,
-    /// and a row labelled with an action reads as a button that has not been
-    /// pressed. The words are the Linux shell's `mode_choices`.
-    public static func modeChoiceLabel(_ mode: ProjectMode) -> String {
-        switch mode {
-        case .ask: return "Ask me first"
-        case .autoUpload: return "Contribute automatically"
-        case .ignore: return "Never offer this one"
-        }
-    }
+    // A mode's name is not here. It is the core's
+    // (`project_copy::FOLDER_MODE_LABELS`), read through the pill's table:
+    // `ContributionModeCopy.label(for:)`, and `ProjectCopy.modeChoiceLabel(_:)`
+    // in `TraceCommonsApp/ProjectModeWords.swift`, which reaches the dylib.
 
 
     /// A statement of what the daemon does, not an apology. Nothing in it is

@@ -57,6 +57,65 @@ final class LiveDaemonClientTests: XCTestCase {
         }
     }
 
+    /// The pill's override writes (#1208): `confirm` goes only with Auto
+    /// contribute, only as `true`; Ask me and Never carry the mode alone;
+    /// clear carries nothing. Each reply decodes as the daemon sends it.
+    func testTheContributionOverrideSendsConfirmOnlyForAutoContribute() async throws {
+        let transport = ScriptedTransport { method, _ in
+            switch method {
+            case "set_contribution_override":
+                return #"{"id":0,"result":{"changed":true,"contribution_override":{"mode":"ignore","since":"2026-10-02T09:00:00Z"},"returned":2}}"#
+            case "clear_contribution_override":
+                return #"{"id":0,"result":{"cleared":true,"returned":1}}"#
+            default: return nil
+            }
+        }
+        let client = LiveDaemonClient(transport: transport)
+        let set = try await client.setContributionOverride(mode: .ignore, confirm: false)
+        XCTAssertEqual(set.changed, true)
+        XCTAssertEqual(set.returned, 2)
+        XCTAssertEqual(set.contributionOverride?.mode, "ignore")
+        XCTAssertNotNil(set.contributionOverride?.since)
+        _ = try await client.setContributionOverride(mode: .ask, confirm: true)
+        _ = try await client.setContributionOverride(mode: .autoUpload, confirm: true)
+        _ = try await client.setContributionOverride(mode: .autoUpload, confirm: false)
+        let cleared = try await client.clearContributionOverride()
+        XCTAssertEqual(cleared, DaemonData.ContributionOverrideClearResult(cleared: true, returned: 1))
+        XCTAssertEqual(transport.calls.map(\.method), [
+            "set_contribution_override", "set_contribution_override", "set_contribution_override",
+            "set_contribution_override", "clear_contribution_override",
+        ])
+        XCTAssertEqual(transport.calls.map(\.params), [
+            #"{"mode":"ignore"}"#,
+            #"{"mode":"notify_only"}"#,
+            #"{"confirm":true,"mode":"auto_upload"}"#,
+            // Unconfirmed: nothing claims a confirmation, and the daemon
+            // refuses it as `confirm-required`.
+            #"{"mode":"auto_upload"}"#,
+            "{}",
+        ])
+    }
+
+    /// A refusal keeps its label; a stopped daemon is unreachable.
+    func testAContributionOverrideRefusalKeepsItsLabel() async {
+        let refusing = ScriptedTransport { _, _ in
+            #"{"id":0,"error":{"code":"unavailable","message":"arming-terms-unavailable"}}"#
+        }
+        do {
+            _ = try await LiveDaemonClient(transport: refusing).setContributionOverride(mode: .autoUpload, confirm: true)
+            XCTFail("a refusal answered")
+        } catch {
+            XCTAssertEqual(error as? DaemonDataError, .daemon(code: "unavailable", message: "arming-terms-unavailable"))
+        }
+        let stopped = ScriptedTransport { _, _ in #"{"error":{"code":"unavailable","message":"daemon-stopped"}}"# }
+        do {
+            _ = try await LiveDaemonClient(transport: stopped).clearContributionOverride()
+            XCTFail("a stopped daemon answered")
+        } catch {
+            XCTAssertEqual(error as? DaemonDataError, .unreachable)
+        }
+    }
+
     func testPreviewSendsTheEntryAndDecodesTheSummary() async throws {
         let transport = ScriptedTransport { method, _ in
             method == "preview"

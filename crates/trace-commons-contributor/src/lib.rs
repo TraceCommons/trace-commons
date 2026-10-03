@@ -21,6 +21,7 @@ pub mod envelope;
 pub mod external_url;
 pub mod flow1;
 pub mod harness_state;
+pub mod health_copy;
 pub mod history_copy;
 pub mod identity;
 pub mod inference_connection;

@@ -2381,6 +2381,31 @@ char*       tc_project_ignore_reconciled_text(const char* project_label, int64_t
  */
 char*       tc_arming_offer_copy_json(const char* project_label, uint32_t count);
 
+/* The menu-bar Contribution mode pill (#1173, project_copy::
+ * contribution_mode_copy): {title, mixed, choices, override_active, clear},
+ * choices being [{mode, label, line}] for Ask me, Automatic and Never.
+ * NULL only on a caught panic.
+ */
+char*       tc_contribution_mode_copy_json(void);
+
+/* The confirmation for one contribution override (#1173, project_copy::
+ * contribution_override_confirm_copy): {mode, title, body, confirm, cancel,
+ * arming}. mode is "notify_only", "auto_upload" or "ignore". arming is the
+ * arming disclosure for auto_upload, read for the configuration in
+ * config_dir, and null otherwise; config_dir may be NULL for the other two.
+ * NULL for an unknown or unreadable mode, for auto_upload with an unreadable
+ * config_dir or configuration, and on a caught panic.
+ */
+char*       tc_contribution_override_confirm_json(const char* mode, const char* config_dir);
+
+/* The sentence for a refused set_contribution_override or
+ * clear_contribution_override (#1173, project_copy::
+ * contribution_override_refusal_line), from the IPC error's label. An
+ * unknown, NULL or non-UTF-8 label gets the core's fallback sentence. NULL
+ * only on a caught panic.
+ */
+char*       tc_contribution_override_refusal_text(const char* label);
+
 /* The legacy invite migration offer (consent_copy::legacy_migration_offer),
  * as LegacyMigrationOfferCopy's fields. NULL only on a caught panic.
  */
@@ -2391,6 +2416,32 @@ char*       tc_legacy_migration_offer_json(void);
  * non-UTF-8 label gets the core's fallback. NULL only on a caught panic.
  */
 char*       tc_legacy_migration_refusal_text(const char* label);
+
+/* The glass monitor's Traces words (preview_copy::monitor_traces_copy):
+ * the inspector's row labels, the review's actions, and the lines for a core
+ * that does not answer. NULL only on a caught panic.
+ */
+char*       tc_monitor_traces_copy_json(void);
+
+/* The glass monitor's other screens' words
+ * (preview_copy::monitor_screens_copy): the map, Inference, Home, History,
+ * Missions and the menu-bar popover. NULL only on a caught panic.
+ */
+char*       tc_monitor_screens_copy_json(void);
+
+/* The grant screens' words for one disclosure the daemon chose and named
+ * (consent_copy::automatic_grant_copy_named): an armed folder's list_projects
+ * row carries automatic_disclosure ("patterns_only" or "model_scrubbed"),
+ * and this words that answer. NULL for a NULL or unknown name, and on a
+ * caught panic.
+ */
+char*       tc_automatic_grant_copy_json(const char* disclosure);
+
+/* The Traces badge's text equivalent (preview_copy::decisions_owed_text).
+ * A negative decisions_owed is an unknown count, never zero. The EMPTY
+ * STRING for zero. NULL only on a caught panic.
+ */
+char*       tc_decisions_owed_text(int64_t decisions_owed);
 
 /* The connecting-inference step's sentences (K12,
  * consent_copy::inference_connection_copy). NULL only on a caught panic.
@@ -2501,11 +2552,13 @@ char*       tc_grant_void_notice_regrant_json(const char* void_json);
  * (DaemonSettings::keychain_status_json): what the credential store at
  * config_dir holds, as labels and booleans only -- never the inference key,
  * never the session's refresh token. MAY PROMPT FOR OS STORAGE; call off a
- * blocking worker. NULL for a NULL or non-UTF-8 config_dir, and on a caught
- * panic; an unreadable config_dir or an unloadable settings document answers
- * the unavailable fallback instead of NULL.
+ * blocking worker. NULL for a NULL or non-UTF-8 config_dir. A config_dir
+ * that cannot be opened fails the call: NULL with *err set to
+ * credential-storage-unavailable, as Tauri does. A settings document that
+ * opens but cannot be loaded answers the unavailable fallback. *err is owned;
+ * free it with tc_string_free. On a caught panic, NULL and *err = "panic".
  */
-char*       tc_private_ai_keychain_status_json(const char* config_dir);
+char*       tc_private_ai_keychain_status_json(const char* config_dir, char** err);
 
 /* Parse one deep link or launch argument (deep_link::parse_deep_link): a
  * JSON object naming exactly one action -- enroll, public_run, credential,
@@ -2523,6 +2576,27 @@ char*       tc_parse_deep_link_json(const char* url, char** err);
  * non-UTF-8 url, and on a caught panic.
  */
 int32_t     tc_external_url_is_allowed(const char* url);
+
+/* The health banner's words (R6/R7, #1173): health_copy::core_down_copy when
+ * reachable is 0, or health_copy::health_copy_for_label for label when the
+ * daemon answered. reachable is the caller's own liveness fact and is never
+ * derived here. When reachable is non-zero, a NULL or empty label means a
+ * reachable daemon reported nothing wrong, and this returns NULL: there is no
+ * banner to draw; any other label, including one that is not UTF-8, gets a
+ * banner. max_queue_entries is the configured queue limit for queue-full's
+ * count; 0 or negative when unknown. {title, detail, action, action_kind,
+ * severity}. NULL for nothing to show and on a caught panic.
+ */
+char*       tc_health_copy_json(int32_t reachable, const char* label,
+                                int64_t max_queue_entries);
+
+/* The explanatory line under a second_look reason (R6/R7, #1173):
+ * why one scrubbed session waits for a person instead of moving on its own.
+ * reason is one of the fixed second_look labels (nothing-matched,
+ * looks-unsure, trimmed-to-fit). NULL for a NULL, non-UTF-8 or unrecognised
+ * reason, and on a caught panic.
+ */
+char*       tc_second_look_line_text(const char* reason);
 
 /*
  * Can this process reach the Cloud credential store?

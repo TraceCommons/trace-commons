@@ -14,7 +14,9 @@ import Foundation
 /// ```
 ///
 /// Writes (`keep`, `approve`, settings) answer with the daemon's reply
-/// shape and change nothing: the sets are fixtures, not a simulator.
+/// shape and change nothing: the sets are fixtures, not a simulator. The
+/// one exception is the contribution override, which `status` reflects
+/// until it is cleared, so the menu-bar pill can be driven end to end.
 /// `emit(_:)` pushes an event to every open `events()` stream, so a preview
 /// can show a live update.
 public final class SampleDaemonClient: DaemonDataClient, @unchecked Sendable {
@@ -45,10 +47,54 @@ public final class SampleDaemonClient: DaemonDataClient, @unchecked Sendable {
         self.set = set
     }
 
+    /// The contribution override in force, as the daemon keeps it: the one
+    /// piece of state a sample set holds, so the pill can be driven end to
+    /// end (`set_contribution_override` / `clear_contribution_override`).
+    private var contributionOverride: (mode: ProjectMode, since: String)?
+
+    /// Every override write this client answered, as `method params`, in
+    /// order, refusals included. Tests read it to prove what was (and was
+    /// not) sent.
+    public var overrideCalls: [String] { lock.withLock { recordedOverrideCalls } }
+    private var recordedOverrideCalls: [String] = []
+
     /// The raw JSON this set answers `method` with: the IPC `result`
-    /// object, or `nil` for a set where the core is down.
+    /// object, or `nil` for a set where the core is down. `status` carries
+    /// the override in force, as the daemon's `status_value` does.
     public func json(for method: String) -> String? {
-        set == .coreDown ? nil : SampleDaemonData.reply(method, in: set)
+        guard set != .coreDown, let reply = SampleDaemonData.reply(method, in: set) else { return nil }
+        guard method == "status" else { return reply }
+        lock.lock()
+        let active = contributionOverride
+        lock.unlock()
+        guard let active else { return reply }
+        return statusWithOverride(reply, mode: active.mode, since: active.since)
+    }
+
+    /// The recorded `status` with the override's three fields, as the
+    /// daemon sets them: `contribution_override: {mode, since}`, the roll-up
+    /// is the override's mode, and partial is true only for Automatic
+    /// beside a folder set to Never. (The daemon also counts the unresolved
+    /// bucket; no sample set queues a session there.)
+    private func statusWithOverride(_ status: String, mode: ProjectMode, since: String) -> String {
+        guard var object = (try? JSONSerialization.jsonObject(with: Data(status.utf8))) as? [String: Any] else {
+            return status
+        }
+        object["contribution_override"] = ["mode": mode.rawValue, "since": since]
+        object["contribution_mode"] = mode.rawValue
+        object["contribution_mode_partial"] = mode == .autoUpload && hasNeverFolder()
+        guard let data = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]) else {
+            return status
+        }
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    private func hasNeverFolder() -> Bool {
+        guard let json = SampleDaemonData.reply("list_projects", in: set),
+            let object = (try? JSONSerialization.jsonObject(with: Data(json.utf8))) as? [String: Any],
+            let rows = object["projects"] as? [[String: Any]]
+        else { return false }
+        return rows.contains { (($0["folder_mode"] ?? $0["mode"]) as? String) == ProjectMode.ignore.rawValue }
     }
 
     private func serve<T: Decodable>(_ method: String, as type: T.Type) throws -> T {
@@ -205,6 +251,55 @@ public final class SampleDaemonClient: DaemonDataClient, @unchecked Sendable {
         -> DaemonData.ProjectModeResult
     {
         try serve("set_project_mode", as: DaemonData.ProjectModeResult.self)
+    }
+
+    /// Answers as `handle_set_contribution_override` does, in its order:
+    /// Automatic without `confirm` is `bad_params` /
+    /// `confirm-required`; without grant terms -- a set that is not
+    /// enrolled (`status.logged_in` false: `empty`, whose store has no
+    /// contributor configuration) -- it is `unavailable` /
+    /// `arming-terms-unavailable`, and nothing changes; the override already
+    /// in force answers `changed: false`. Nothing is ever returned to
+    /// waiting, since no sample entry was approved unattended.
+    public func setContributionOverride(mode: ProjectMode, confirm: Bool) async throws
+        -> DaemonData.ContributionOverrideResult
+    {
+        guard set != .coreDown else { throw DaemonDataError.unreachable }
+        record("set_contribution_override \(mode.rawValue)\(mode == .autoUpload && confirm ? " confirm" : "")")
+        guard mode != .autoUpload || confirm else {
+            throw DaemonDataError.daemon(code: "bad_params", message: "confirm-required")
+        }
+        if mode == .autoUpload, try serve("status", as: DaemonData.Status.self).loggedIn != true {
+            throw DaemonDataError.daemon(code: "unavailable", message: "arming-terms-unavailable")
+        }
+        let (changed, since) = lock.withLock {
+            let changed = contributionOverride?.mode != mode
+            if changed {
+                contributionOverride = (mode, ISO8601DateFormatter().string(from: Date()))
+            }
+            return (changed, contributionOverride?.since)
+        }
+        let value = #"{"mode":"\#(mode.rawValue)","since":"\#(since ?? "")"}"#
+        let current = try decode(value, method: "set_contribution_override", as: DaemonData.ContributionOverride.self)
+        if changed { emit(.statusChanged) }
+        return DaemonData.ContributionOverrideResult(changed: changed, contributionOverride: current, returned: 0)
+    }
+
+    /// Answers as `handle_clear_contribution_override` does: the recorded
+    /// status comes back exactly, and `cleared: false` when none was in force.
+    public func clearContributionOverride() async throws -> DaemonData.ContributionOverrideClearResult {
+        guard set != .coreDown else { throw DaemonDataError.unreachable }
+        record("clear_contribution_override")
+        let cleared = lock.withLock {
+            defer { contributionOverride = nil }
+            return contributionOverride != nil
+        }
+        if cleared { emit(.statusChanged) }
+        return DaemonData.ContributionOverrideClearResult(cleared: cleared, returned: 0)
+    }
+
+    private func record(_ call: String) {
+        lock.withLock { recordedOverrideCalls.append(call) }
     }
 
     public func harnessList() async throws -> HarnessList {

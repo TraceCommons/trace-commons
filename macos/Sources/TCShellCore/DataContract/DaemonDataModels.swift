@@ -188,6 +188,9 @@ extension DaemonData {
         /// Fixed reasons: `nothing-matched`, `looks-unsure`, `trimmed-to-fit`.
         /// Empty is an all-clear only when `scrub` is `scrubbed`.
         public let secondLook: [String]?
+        /// The sentence for each `secondLook` reason, index for index (R6/R7;
+        /// DRAFT wording). Never shorter than `secondLook`.
+        public let secondLookLines: [String]?
 
         public var id: String { entryId }
 
@@ -225,6 +228,7 @@ extension DaemonData {
             case contentMarks = "content_marks"
             case unsureSpans = "unsure_spans"
             case secondLook = "second_look"
+            case secondLookLines = "second_look_lines"
         }
 
         public var queueState: QueueStateLabel? { QueueStateLabel(rawValue: state) }
@@ -317,6 +321,16 @@ extension DaemonData {
         /// Whether moving a legacy invite identity is offered, and the
         /// notice after it moved. `nil` when the daemon did not say.
         public let legacyInviteMigration: LegacyInviteMigration?
+        /// The menu-bar pill's global override (#1173): `nil` when none is in
+        /// force, or from a daemon predating it.
+        public let contributionOverride: ContributionOverride?
+        /// The pill's roll-up: `notify_only`, `auto_upload`, `ignore` or
+        /// `mixed`. Computed by the daemon; a shell never derives it.
+        public let contributionMode: String?
+        /// `true` when `contributionMode` is `auto_upload` but a Never folder
+        /// or the unidentified bucket does not upload (#1208): draw the core's
+        /// `auto_partial` line under the label.
+        public let contributionModePartial: Bool?
 
         public enum CodingKeys: String, CodingKey, CaseIterable {
             case schemaVersion = "schema_version"
@@ -336,7 +350,16 @@ extension DaemonData {
             case automaticContributionHeld = "automatic_contribution_held"
             case grantVoids = "grant_voids"
             case legacyInviteMigration = "legacy_invite_migration"
+            case contributionOverride = "contribution_override"
+            case contributionMode = "contribution_mode"
+            case contributionModePartial = "contribution_mode_partial"
         }
+    }
+
+    /// `status.contribution_override` while one is in force.
+    public struct ContributionOverride: Codable, Equatable, Sendable {
+        public let mode: String?
+        public let since: Date?
     }
 
     /// `status.legacy_invite_migration` (`legacy_migration::status_value`).
@@ -521,6 +544,9 @@ extension DaemonData {
         /// how many spans `preview_unsure_spans` would report.
         public let unsureSpans: Int?
         public let secondLook: [String]?
+        /// The sentence for each `secondLook` reason, index for index (R6/R7;
+        /// DRAFT wording).
+        public let secondLookLines: [String]?
 
         public enum CodingKeys: String, CodingKey, CaseIterable {
             case entry, title, redactions, enrolled, scrub, marks
@@ -540,6 +566,7 @@ extension DaemonData {
             case contentMarks = "content_marks"
             case unsureSpans = "unsure_spans"
             case secondLook = "second_look"
+            case secondLookLines = "second_look_lines"
         }
     }
 
@@ -684,10 +711,50 @@ extension DaemonData {
         public let purged: Int?
         public let retracted: Int?
         public let fromNow: Bool?
+        /// The contribution override's mode when it still decides this
+        /// folder, so the change is saved but not yet in effect (#1208).
+        /// `nil` when the folder now resolves to what was set.
+        public let overriddenBy: String?
 
         public enum CodingKeys: String, CodingKey {
             case ok, purged, retracted
             case fromNow = "from_now"
+            case overriddenBy = "overridden_by"
+        }
+    }
+
+    /// `set_contribution_override` (#1173, #1208).
+    public struct ContributionOverrideResult: Codable, Equatable, Sendable {
+        /// `false` when that override was already in force: nothing was
+        /// recorded, and an Automatic override kept its hold.
+        public let changed: Bool
+        /// The override now in force, `{mode, since}`.
+        public let contributionOverride: ContributionOverride?
+        /// Unattended approvals not yet sent that went back to waiting.
+        public let returned: Int
+
+        public init(changed: Bool, contributionOverride: ContributionOverride?, returned: Int) {
+            self.changed = changed
+            self.contributionOverride = contributionOverride
+            self.returned = returned
+        }
+
+        public enum CodingKeys: String, CodingKey {
+            case changed, returned
+            case contributionOverride = "contribution_override"
+        }
+    }
+
+    /// `clear_contribution_override`.
+    public struct ContributionOverrideClearResult: Codable, Equatable, Sendable {
+        /// `false` when no override was in force.
+        public let cleared: Bool
+        /// Unattended approvals not yet sent that went back to waiting.
+        public let returned: Int
+
+        public init(cleared: Bool, returned: Int) {
+            self.cleared = cleared
+            self.returned = returned
         }
     }
 }
@@ -946,11 +1013,19 @@ extension DaemonData {
         public let sessionsRoute: String?
         public let folders: FolderCounts?
         public let tools: [ToolDestination]
+        /// The window `counts` cover, in hours (K14): the same 24 hours
+        /// `inference_calls` uses.
+        public let windowHours: Int?
+        /// The window's listed calls no tool can be named for (K14). `nil`
+        /// when no ledger answered -- not zero.
+        public let unattributedCalls: Int?
 
         public enum CodingKeys: String, CodingKey {
             case folders, tools
             case privateAi = "private_ai"
             case sessionsRoute = "sessions_route"
+            case windowHours = "window_hours"
+            case unattributedCalls = "unattributed_calls"
         }
     }
 
@@ -970,12 +1045,28 @@ extension DaemonData {
         public let name: String?
         public let sessions: SessionRoute?
         public let modelCalls: ModelCallRoute?
+        /// The map's per-tool node counts over `windowHours` (K14).
+        public let counts: ToolCounts?
 
         public var id: String { tool }
 
         public enum CodingKeys: String, CodingKey {
-            case tool, name, sessions
+            case tool, name, sessions, counts
             case modelCalls = "model_calls"
+        }
+    }
+
+    /// One tool's counts for the window. `nil` is "could not be read",
+    /// never zero.
+    public struct ToolCounts: Codable, Equatable, Sendable {
+        /// Sessions, once per session hash, under the tool each reads as.
+        public let sessions: Int?
+        /// Exactly the `inference_calls` rows naming this tool.
+        public let inferenceCalls: Int?
+
+        public enum CodingKeys: String, CodingKey {
+            case sessions
+            case inferenceCalls = "inference_calls"
         }
     }
 

@@ -3373,6 +3373,7 @@ fn the_public_run_payload_and_error_tables_cross_whole_and_finished() {
             "feedback_choices" => Some(3),
             "evidence_kind_choices" => Some(9),
             "contribution_status_choices" => Some(10),
+            "history_status_labels" => Some(11),
             "permitted_use_choices" => Some(6),
             "reuse_permissions" => Some(2),
             _ => None,
@@ -5195,6 +5196,100 @@ fn the_arming_offer_copy_crosses_the_abi() {
 }
 
 #[test]
+fn the_contribution_mode_copy_crosses_the_abi() {
+    use trace_commons_contributor::project_copy::{
+        CONTRIBUTION_MODE_NEVER_LINE, contribution_mode_copy,
+    };
+    use trace_commons_contributor_ffi::tc_contribution_mode_copy_json;
+    let value = json_owned(tc_contribution_mode_copy_json());
+    assert_eq!(
+        value,
+        serde_json::to_value(contribution_mode_copy()).unwrap()
+    );
+    assert_eq!(value["choices"][2]["mode"], "ignore");
+    assert_eq!(value["choices"][2]["line"], CONTRIBUTION_MODE_NEVER_LINE);
+}
+
+#[test]
+fn the_contribution_override_confirmation_crosses_the_abi() {
+    use trace_commons_contributor::daemon::policy::ProjectMode;
+    use trace_commons_contributor::project_copy::contribution_override_confirm_copy;
+    use trace_commons_contributor_ffi::tc_contribution_override_confirm_json;
+    let dir = tempfile::tempdir().unwrap();
+    for (wire, mode) in [
+        ("notify_only", ProjectMode::NotifyOnly),
+        ("ignore", ProjectMode::Ignore),
+    ] {
+        let wire = cstr_str(wire);
+        let value = json_owned(unsafe {
+            tc_contribution_override_confirm_json(wire.as_ptr(), std::ptr::null())
+        });
+        assert_eq!(
+            value,
+            serde_json::to_value(contribution_override_confirm_copy(mode, None)).unwrap()
+        );
+        assert!(value["arming"].is_null());
+    }
+    let auto = cstr_str("auto_upload");
+    let value = json_owned(unsafe {
+        tc_contribution_override_confirm_json(auto.as_ptr(), cstr(dir.path()).as_ptr())
+    });
+    assert_eq!(
+        value,
+        serde_json::to_value(contribution_override_confirm_copy(
+            ProjectMode::AutoUpload,
+            None
+        ))
+        .unwrap()
+    );
+    assert_eq!(value["arming"]["disclosure"], "patterns_only");
+    // The arming disclosure is never guessed: no directory, or one whose
+    // configuration cannot be read, answers NULL.
+    assert!(
+        unsafe { tc_contribution_override_confirm_json(auto.as_ptr(), std::ptr::null()) }.is_null()
+    );
+    std::fs::write(dir.path().join("contributor.json"), "not json").unwrap();
+    assert!(
+        unsafe { tc_contribution_override_confirm_json(auto.as_ptr(), cstr(dir.path()).as_ptr()) }
+            .is_null()
+    );
+    let unknown = cstr_str("always");
+    assert!(
+        unsafe { tc_contribution_override_confirm_json(unknown.as_ptr(), std::ptr::null()) }
+            .is_null()
+    );
+    assert!(
+        unsafe { tc_contribution_override_confirm_json(std::ptr::null(), std::ptr::null()) }
+            .is_null()
+    );
+}
+
+#[test]
+fn the_contribution_override_refusal_line_crosses_the_abi() {
+    use trace_commons_contributor::project_copy::{
+        CONTRIBUTION_OVERRIDE_REFUSED, CONTRIBUTION_OVERRIDE_REFUSED_NO_TERMS,
+    };
+    use trace_commons_contributor_ffi::tc_contribution_override_refusal_text;
+    let line = |label: Option<&str>| {
+        let owned = label.map(cstr_str);
+        take_owned(unsafe {
+            tc_contribution_override_refusal_text(
+                owned.as_ref().map_or(std::ptr::null(), |c| c.as_ptr()),
+            )
+        })
+    };
+    assert_eq!(
+        line(Some("arming-terms-unavailable")),
+        CONTRIBUTION_OVERRIDE_REFUSED_NO_TERMS
+    );
+    assert_eq!(
+        line(Some("policy-write-failed")),
+        CONTRIBUTION_OVERRIDE_REFUSED
+    );
+    assert_eq!(line(None), CONTRIBUTION_OVERRIDE_REFUSED);
+}
+
+#[test]
 fn the_legacy_migration_offer_and_refusal_cross_the_abi() {
     use trace_commons_contributor::consent_copy::{
         legacy_migration_offer, legacy_migration_refusal_line,
@@ -5221,6 +5316,36 @@ fn the_legacy_migration_offer_and_refusal_cross_the_abi() {
         take_owned(unsafe { tc_legacy_migration_refusal_text(std::ptr::null()) }),
         legacy_migration_refusal_line("")
     );
+}
+
+#[test]
+fn the_monitor_traces_copy_crosses_the_abi() {
+    use trace_commons_contributor::preview_copy::{decisions_owed_text, monitor_traces_copy};
+    use trace_commons_contributor_ffi::{tc_decisions_owed_text, tc_monitor_traces_copy_json};
+    assert_eq!(
+        json_owned(tc_monitor_traces_copy_json()),
+        serde_json::to_value(monitor_traces_copy()).unwrap()
+    );
+    let text = |count: i64| take_owned(tc_decisions_owed_text(count));
+    assert_eq!(text(-1), decisions_owed_text(None));
+    assert_eq!(text(0), "");
+    assert_eq!(text(3), decisions_owed_text(Some(3)));
+}
+
+#[test]
+fn a_named_automatic_disclosure_crosses_the_abi() {
+    use trace_commons_contributor::consent_copy::automatic_grant_copy_named;
+    use trace_commons_contributor_ffi::tc_automatic_grant_copy_json;
+    for name in ["patterns_only", "model_scrubbed"] {
+        let c = std::ffi::CString::new(name).unwrap();
+        assert_eq!(
+            json_owned(unsafe { tc_automatic_grant_copy_json(c.as_ptr()) }),
+            serde_json::to_value(automatic_grant_copy_named(name).unwrap()).unwrap()
+        );
+    }
+    let unknown = std::ffi::CString::new("scrubbed").unwrap();
+    assert!(unsafe { tc_automatic_grant_copy_json(unknown.as_ptr()) }.is_null());
+    assert!(unsafe { tc_automatic_grant_copy_json(std::ptr::null()) }.is_null());
 }
 
 #[test]
@@ -5271,6 +5396,96 @@ fn the_settings_ranges_cross_the_abi_and_match_what_set_settings_enforces() {
 }
 
 #[test]
+fn the_health_copy_crosses_the_abi_core_down_and_per_label() {
+    use trace_commons_contributor::daemon::health::{LABEL_NOT_LOGGED_IN, LABEL_QUEUE_FULL};
+    use trace_commons_contributor::health_copy::{
+        core_down_copy, health_copy_for_label, on_hold_copy,
+    };
+    use trace_commons_contributor_ffi::tc_health_copy_json;
+
+    // Unreachable: the core-down sentence, whatever label is passed (even
+    // one that would otherwise answer), because `reachable` governs.
+    let label = cstr_str(LABEL_NOT_LOGGED_IN);
+    assert_eq!(
+        json_owned(unsafe { tc_health_copy_json(0, label.as_ptr(), 500) }),
+        serde_json::to_value(core_down_copy()).unwrap()
+    );
+    assert_eq!(
+        json_owned(unsafe { tc_health_copy_json(0, std::ptr::null(), 0) }),
+        serde_json::to_value(core_down_copy()).unwrap()
+    );
+
+    // Reachable with a known label: the per-label table, with its severity
+    // and action kind.
+    let banner = json_owned(unsafe { tc_health_copy_json(1, label.as_ptr(), 500) });
+    assert_eq!(
+        banner,
+        serde_json::to_value(health_copy_for_label(LABEL_NOT_LOGGED_IN, Some(500))).unwrap()
+    );
+    assert_eq!(banner["severity"], "actionable");
+    assert_eq!(banner["action_kind"], "reconnect");
+
+    // The queue limit crosses: a configured limit is the number shown, and
+    // 0 (unknown) names none.
+    let full = cstr_str(LABEL_QUEUE_FULL);
+    let banner = json_owned(unsafe { tc_health_copy_json(1, full.as_ptr(), 2000) });
+    assert!(
+        banner["detail"].as_str().unwrap().contains("2,000"),
+        "{banner}"
+    );
+    let banner = json_owned(unsafe { tc_health_copy_json(1, full.as_ptr(), 0) });
+    assert_eq!(
+        banner,
+        serde_json::to_value(health_copy_for_label(LABEL_QUEUE_FULL, None)).unwrap()
+    );
+
+    // Reachable with an unrecognised label still gets a banner, never raw
+    // label text.
+    let unknown = cstr_str("a-future-label");
+    let banner = json_owned(unsafe { tc_health_copy_json(1, unknown.as_ptr(), 500) });
+    assert_eq!(banner, serde_json::to_value(on_hold_copy()).unwrap());
+    assert_eq!(banner["title"], "Contributions are on hold.");
+
+    // A label that is not UTF-8 is still a reported condition: the on-hold
+    // banner, never NULL, which a shell would read as healthy.
+    let not_utf8 = std::ffi::CString::new(vec![0xff_u8, 0xfe, b'x']).unwrap();
+    assert_eq!(
+        json_owned(unsafe { tc_health_copy_json(1, not_utf8.as_ptr(), 500) }),
+        serde_json::to_value(on_hold_copy()).unwrap()
+    );
+
+    // Reachable with no label (NULL or empty): nothing is wrong, so there is
+    // no banner to draw.
+    assert!(unsafe { tc_health_copy_json(1, std::ptr::null(), 500) }.is_null());
+    let empty = cstr_str("");
+    assert!(unsafe { tc_health_copy_json(1, empty.as_ptr(), 500) }.is_null());
+}
+
+#[test]
+fn the_second_look_line_crosses_the_abi() {
+    use trace_commons_contributor::daemon::second_look::{
+        REASON_LOOKS_UNSURE, REASON_NOTHING_MATCHED, REASON_TRIMMED_TO_FIT,
+    };
+    use trace_commons_contributor::preview_copy::second_look_line;
+    use trace_commons_contributor_ffi::tc_second_look_line_text;
+
+    for reason in [
+        REASON_NOTHING_MATCHED,
+        REASON_LOOKS_UNSURE,
+        REASON_TRIMMED_TO_FIT,
+    ] {
+        let c = cstr_str(reason);
+        assert_eq!(
+            take_owned(unsafe { tc_second_look_line_text(c.as_ptr()) }),
+            second_look_line(reason).unwrap()
+        );
+    }
+    let unknown = cstr_str("not-a-real-reason");
+    assert!(unsafe { tc_second_look_line_text(unknown.as_ptr()) }.is_null());
+    assert!(unsafe { tc_second_look_line_text(std::ptr::null()) }.is_null());
+}
+
+#[test]
 fn the_automatic_contribution_copy_crosses_the_abi_patterns_only() {
     use trace_commons_contributor::consent_copy::automatic_contribution_copy;
     use trace_commons_contributor_ffi::tc_automatic_contribution_copy_json;
@@ -5298,8 +5513,11 @@ fn the_keychain_status_crosses_the_abi_with_no_secret_material() {
     use trace_commons_contributor_ffi::tc_private_ai_keychain_status_json;
 
     let dir = tempfile::tempdir().unwrap();
-    let value =
-        json_owned(unsafe { tc_private_ai_keychain_status_json(cstr(dir.path()).as_ptr()) });
+    let mut err = std::ptr::null_mut();
+    let value = json_owned(unsafe {
+        tc_private_ai_keychain_status_json(cstr(dir.path()).as_ptr(), &mut err)
+    });
+    assert!(err.is_null(), "no error on success");
     assert_eq!(
         value,
         serde_json::to_value(DaemonSettings::default().keychain_status_json()).unwrap()
@@ -5309,15 +5527,30 @@ fn the_keychain_status_crosses_the_abi_with_no_secret_material() {
     assert_eq!(value["session_present"], false);
 
     // A NULL/non-UTF-8 config_dir is a caller error, not a business state.
-    assert!(unsafe { tc_private_ai_keychain_status_json(std::ptr::null()) }.is_null());
+    assert!(
+        unsafe { tc_private_ai_keychain_status_json(std::ptr::null(), std::ptr::null_mut()) }
+            .is_null()
+    );
+
+    // A config_dir that cannot be opened fails the whole call, as Tauri's
+    // private_ai_status does: NULL, with credential-storage-unavailable.
+    let not_a_dir = dir.path().join("a-file");
+    std::fs::write(&not_a_dir, "x").unwrap();
+    let blocked = not_a_dir.join("state");
+    let mut err = std::ptr::null_mut();
+    assert!(
+        unsafe { tc_private_ai_keychain_status_json(cstr(&blocked).as_ptr(), &mut err) }.is_null()
+    );
+    assert_eq!(take_err(err), "credential-storage-unavailable");
 
     // A settings document this process cannot parse answers the
     // "unavailable" fallback rather than NULL: the daemon's own IPC answer
     // already names the storage failure, so this must read as "nothing
     // here", not as an error with no button.
     std::fs::write(dir.path().join("daemon-settings.json"), "not json").unwrap();
-    let unavailable =
-        json_owned(unsafe { tc_private_ai_keychain_status_json(cstr(dir.path()).as_ptr()) });
+    let unavailable = json_owned(unsafe {
+        tc_private_ai_keychain_status_json(cstr(dir.path()).as_ptr(), std::ptr::null_mut())
+    });
     assert_eq!(
         unavailable,
         serde_json::to_value(keychain_status_unavailable_json()).unwrap()
@@ -5441,6 +5674,16 @@ fn the_withdrawal_confirmation_prompt_crosses_the_abi() {
     let prompt = take_owned(tc_withdrawal_confirmation_prompt_text());
     assert_eq!(prompt, confirmation_prompt_unknown());
     assert!(prompt.contains("cannot be recalled"));
+}
+
+#[test]
+fn the_monitor_screens_copy_crosses_the_abi() {
+    use trace_commons_contributor::preview_copy::monitor_screens_copy;
+    use trace_commons_contributor_ffi::tc_monitor_screens_copy_json;
+    assert_eq!(
+        json_owned(tc_monitor_screens_copy_json()),
+        serde_json::to_value(monitor_screens_copy()).unwrap()
+    );
 }
 
 // ---------------------------------------------------------------------------

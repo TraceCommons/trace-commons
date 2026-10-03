@@ -158,6 +158,18 @@ public final class LiveDaemonClient: DaemonDataClient, @unchecked Sendable {
         return try await call("set_project_mode", params: params, as: DaemonData.ProjectModeResult.self)
     }
 
+    public func setContributionOverride(mode: ProjectMode, confirm: Bool) async throws
+        -> DaemonData.ContributionOverrideResult
+    {
+        var params: [String: Any] = ["mode": mode.rawValue]
+        if mode == .autoUpload, confirm { params["confirm"] = true }
+        return try await call("set_contribution_override", params: params, as: DaemonData.ContributionOverrideResult.self)
+    }
+
+    public func clearContributionOverride() async throws -> DaemonData.ContributionOverrideClearResult {
+        try await call("clear_contribution_override", as: DaemonData.ContributionOverrideClearResult.self)
+    }
+
     public func harnessList() async throws -> HarnessList {
         try await call("harness_list", as: HarnessList.self)
     }

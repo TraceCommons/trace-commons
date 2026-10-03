@@ -48,7 +48,7 @@ struct OnboardingDoneContent: View {
             HStack(spacing: TC.Space.s) {
                 Image(systemName: TC.Tone.clear.symbol)
                     .font(.system(size: 18))
-                    .foregroundStyle(TC.green)
+                    .foregroundStyle(TC.statusOn)
                     .accessibilityHidden(true)
                 Text("You're set up. Nothing has been sent.")
                     .font(TC.Font_.sectionTitle)
@@ -86,6 +86,7 @@ struct OnboardingDoneContent: View {
             Text(Notifier.copy?.notificationDenied ?? "")
                 .font(.callout).foregroundStyle(.secondary)
             Link(Notifier.copy?.systemSettings ?? "", destination: Notifier.systemSettingsURL)
+                .tint(TC.accentText)
         } else if Notifier.canPostDigest(notificationStatus) {
             Text(Notifier.copy?.notificationAllowed ?? "")
                 .font(.callout).foregroundStyle(.secondary)

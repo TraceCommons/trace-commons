@@ -122,7 +122,7 @@ struct OnboardingPrivacyScanContent: View {
             HStack(spacing: TC.Space.m) {
                 Image(systemName: choice == value ? "largecircle.fill.circle" : "circle")
                     .font(.system(size: 15))
-                    .foregroundStyle(choice == value ? AnyShapeStyle(TC.green) : AnyShapeStyle(.tertiary))
+                    .foregroundStyle(choice == value ? AnyShapeStyle(TC.accentText) : AnyShapeStyle(.tertiary))
                 Text(title).font(TC.Font_.body.weight(choice == value ? .semibold : .regular))
                 Spacer(minLength: 0)
             }

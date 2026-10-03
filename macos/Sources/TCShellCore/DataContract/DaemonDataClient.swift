@@ -119,6 +119,21 @@ public protocol DaemonDataClient: Sendable {
     /// `set_project_mode`. `includeBacklog` only with `.autoUpload`.
     func setProjectMode(projectId: String, mode: ProjectMode, includeBacklog: Bool?) async throws
         -> DaemonData.ProjectModeResult
+    /// `set_contribution_override`: the menu-bar pill's global override
+    /// (#1173, #1208). Per-folder modes are never written.
+    ///
+    /// `confirm` is sent only with `.autoUpload`, and only as `true`: it says
+    /// the contributor confirmed the core's confirmation, which carries the
+    /// arming disclosure. Automatic without it is refused
+    /// (`bad_params` / `confirm-required`), and is refused without grant
+    /// terms in force (`unavailable` / `arming-terms-unavailable`) before
+    /// anything is recorded. Ask me and Never take no confirmation on the
+    /// wire. Read `status` afterwards; the pill never shows a local guess.
+    func setContributionOverride(mode: ProjectMode, confirm: Bool) async throws
+        -> DaemonData.ContributionOverrideResult
+    /// `clear_contribution_override`: every folder back on its own mode.
+    /// `cleared == false` is "none was in force", not an error.
+    func clearContributionOverride() async throws -> DaemonData.ContributionOverrideClearResult
     /// `harness_list`.
     func harnessList() async throws -> HarnessList
     /// `set_settings` with `<tool>_source`: the tool switch (R6). `.off` is
