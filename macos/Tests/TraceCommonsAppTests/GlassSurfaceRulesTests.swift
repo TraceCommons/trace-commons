@@ -30,6 +30,7 @@ final class GlassSurfaceRulesTests: XCTestCase {
         "Views/OnboardingRootsView.swift",
         "Views/OnboardingConnectView.swift",
         "Views/ConsentScopesView.swift",
+        "Views/OnboardingPrivacyScanView.swift",
         "Views/NearAccountConnectView.swift",
         "Views/AdmissionPreparationView.swift",
         "Views/NativeFlowNotice.swift",

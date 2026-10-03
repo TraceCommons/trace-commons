@@ -1,5 +1,6 @@
 import SwiftUI
 import TCBridge
+import TCDesign
 import TCShellCore
 
 /// Onboarding screen 4, "Extra privacy scan" -- shown only when the operator
@@ -77,76 +78,72 @@ struct OnboardingPrivacyScanContent: View {
     private let copy = PrivacyScanCopy.decode(fromJSON: TCCoreCopy.privacyScanCopyJSON())
 
     var body: some View {
-        VStack(alignment: .leading, spacing: TC.Space.xl) {
+        VStack(alignment: .leading, spacing: GlassTokens.Space.s6) {
             if let copy {
                 header(copy)
                 explanation(copy)
-                choices(copy)
+                picker(copy)
                 continueButton
             }
         }
-        .padding(TC.Space.xxl)
-        .tcColumn(TC.Measure.prose)
-        .tcScreen()
+        .padding(GlassTokens.Space.panePadding)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private func header(_ copy: PrivacyScanCopy) -> some View {
-        Text(copy.title).font(TC.Font_.sectionTitle)
+        Text(copy.title)
+            .glassType(GlassTokens.TypeScale.heading)
+            .foregroundStyle(GlassColor.textPrimary)
     }
 
     // `Text(verbatim:)`: the core's sentences are plain text, and the
     // `LocalizedStringKey` initialiser would read any `*` in them as
     // Markdown.
     private func explanation(_ copy: PrivacyScanCopy) -> some View {
-        VStack(alignment: .leading, spacing: TC.Space.m) {
+        VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
             Text(verbatim: copy.localAlways)
-                .font(.body)
             Text(verbatim: copy.offer)
-                .font(.body)
             Text(verbatim: copy.disclosure)
-                .font(.body)
         }
+        .glassType(GlassTokens.TypeScale.body)
+        .foregroundStyle(GlassColor.textPrimary)
+        .fixedSize(horizontal: false, vertical: true)
     }
 
-    private func choices(_ copy: PrivacyScanCopy) -> some View {
-        VStack(alignment: .leading, spacing: TC.Space.s) {
-            choiceRow(.localOnly, title: copy.localOnly)
-            choiceRow(.localPlusScan, title: copy.withNear)
-        }
-    }
-
-    private func choiceRow(_ value: Choice, title: String) -> some View {
-        Button {
-            choice = value
-        } label: {
-            HStack(spacing: TC.Space.m) {
-                Image(systemName: choice == value ? "largecircle.fill.circle" : "circle")
-                    .font(.system(size: 15))
-                    .foregroundStyle(choice == value ? AnyShapeStyle(TC.accentText) : AnyShapeStyle(.tertiary))
-                Text(title).font(TC.Font_.body.weight(choice == value ? .semibold : .regular))
-                Spacer(minLength: 0)
-            }
-            .padding(TC.Space.m)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .tcCard()
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .accessibilityAddTraits(choice == value ? [.isSelected] : [])
+    /// The two answers, local only first. The binding never writes nil, so
+    /// the screen always holds one of them.
+    private func picker(_ copy: PrivacyScanCopy) -> some View {
+        GlassPicker(copy.title,
+                    selection: Binding<Choice?>(
+                        get: { choice },
+                        set: { if let picked = $0 { choice = picked } }),
+                    options: [
+                        GlassPickerOption(copy.localOnly, value: Choice.localOnly, dot: .off),
+                        GlassPickerOption(copy.withNear, value: Choice.localPlusScan, dot: .ask),
+                    ],
+                    placeholder: copy.title)
     }
 
     private var continueButton: some View {
-        Button("Continue") {
-            if choice == .localPlusScan {
-                // Must happen the moment the scan is chosen -- see the type
-                // comment above for why skipping this call leaves the
-                // daemon refusing the filter with no recovery path for a
-                // GUI-only contributor.
-                model.acknowledgeNearAINotice()
+        HStack(spacing: GlassTokens.Space.s4) {
+            Spacer(minLength: 0)
+            Button(OnboardingPrivacyScanWords.continueButton) {
+                if choice == .localPlusScan {
+                    // Must happen the moment the scan is chosen -- see the
+                    // type comment above for why skipping this call leaves
+                    // the daemon refusing the filter with no recovery path
+                    // for a GUI-only contributor.
+                    model.acknowledgeNearAINotice()
+                }
+                onContinue()
             }
-            onContinue()
+            .buttonStyle(GlassButtonStyle(.primary))
+            .keyboardShortcut(.defaultAction)
         }
-                .tcPrimaryAction()
-        .keyboardShortcut(.defaultAction)
     }
+}
+
+/// This screen's one label; every other word is the core's.
+enum OnboardingPrivacyScanWords {
+    static let continueButton = "Continue"
 }

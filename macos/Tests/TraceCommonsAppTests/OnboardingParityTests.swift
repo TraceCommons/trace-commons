@@ -58,11 +58,19 @@ final class OnboardingParityTests: XCTestCase {
                            "Text(ConsentScopesWords.withdrawLater)", "ConsentScopesWords.continueWith(alwaysOn + selected)"],
              guards: [".toggleStyle(GlassCheckboxStyle())", ".keyboardShortcut(.defaultAction)",
                       ".disabled(scope.alwaysOn)", "isOn: .constant(true))", ".disabled(model.consentScopes.isEmpty)"]),
+        Step(file: "Views/OnboardingPrivacyScanView.swift",
+             bindings: ["model.daemonSettings?.nearAIConfigured == true", "model.acknowledgeNearAINotice()",
+                        "if choice == .localPlusScan", "Button(OnboardingPrivacyScanWords.continueButton)"],
+             copySources: ["TCCoreCopy.privacyScanCopyJSON()", "Text(copy.title)", "Text(verbatim: copy.localAlways)",
+                           "Text(verbatim: copy.offer)", "Text(verbatim: copy.disclosure)",
+                           "GlassPickerOption(copy.localOnly,", "GlassPickerOption(copy.withNear,"],
+             guards: ["if let copy {", "GlassPicker(copy.title,", ".buttonStyle(GlassButtonStyle(.primary))",
+                      ".keyboardShortcut(.defaultAction)", "set: { if let picked = $0 { choice = picked } }"]),
     ]
 
     /// Rows the table must hold; each task that adds a step raises it, so a
     /// dropped row fails here instead of passing silently.
-    static let minimumSteps = 4
+    static let minimumSteps = 5
 
     func test_theTableKeepsEveryRowAdded() {
         XCTAssertGreaterThanOrEqual(Self.steps.count, Self.minimumSteps)
