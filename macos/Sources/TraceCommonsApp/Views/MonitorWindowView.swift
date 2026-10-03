@@ -1,5 +1,6 @@
 #if DEBUG
 import SwiftUI
+import TCBridge
 import TCDesign
 import TCShellCore
 
@@ -45,6 +46,45 @@ struct MonitorWindowView: View {
     /// without touching this, so widening the window brings it back.
     @SceneStorage("monitor.showsMap") private var showsMap = true
     @SceneStorage("monitor.showsInspector") private var showsInspector = true
+    /// The selected session's entry id; empty for none.
+    @SceneStorage("monitor.selectedSession") private var selectedSession = ""
+    /// Home's page: the overview or History, restored per window.
+    @SceneStorage("monitor.homePage") private var homePage: HomeTabView.Page = .overview
+
+    /// The screens' data (C1). Sample data in this debug window until K1
+    /// moves the screens to the live client: `TRACE_COMMONS_SAMPLE` names
+    /// the set (`normalDay` by default).
+    @State private var traces = MonitorWindowView.tracesStore()
+    /// The map's Private AI view and the Inference tab (R8).
+    @State private var inference = InferenceStore(client: MonitorWindowView.dataClient())
+    /// Home and History (R9).
+    @State private var home = HomeStore(client: MonitorWindowView.dataClient())
+
+    /// The Traces store over the sample set `TRACE_COMMONS_SAMPLE` names. A
+    /// name that is not a set falls back to `normalDay`, and says so: the tab
+    /// marks the data as sample, and an unknown name both in the marker and
+    /// in the log.
+    static func tracesStore() -> TracesStore {
+        let choice = sampleChoice(ProcessInfo.processInfo.environment["TRACE_COMMONS_SAMPLE"])
+        if choice.unknown {
+            NSLog("TRACE_COMMONS_SAMPLE unrecognised; fallback %@", choice.set.rawValue)
+        }
+        return TracesStore(
+            client: DaemonDataWiring.sample(choice.set), sample: choice.set.rawValue, sampleUnknown: choice.unknown)
+    }
+
+    /// The sample client for the window's other stores, over the same set.
+    static func dataClient() -> any DaemonDataClient {
+        DaemonDataWiring.sample(sampleChoice(ProcessInfo.processInfo.environment["TRACE_COMMONS_SAMPLE"]).set)
+    }
+
+    /// The set a `TRACE_COMMONS_SAMPLE` value names, and whether it named
+    /// none (unset or empty is the default, not unknown).
+    static func sampleChoice(_ name: String?) -> (set: SampleDaemonClient.SampleSet, unknown: Bool) {
+        guard let name, !name.isEmpty else { return (.normalDay, false) }
+        guard let set = SampleDaemonClient.SampleSet(rawValue: name) else { return (.normalDay, true) }
+        return (set, false)
+    }
     /// False until this window has seeded the two preferences from its
     /// width (map from 1100pt, inspector from 900pt). After that the
     /// window restores whatever the person chose.
@@ -59,16 +99,92 @@ struct MonitorWindowView: View {
                 inferenceDescription: Self.inferenceDotDescription(
                     model.daemonSettings?.privateInferenceState?.surfaceState,
                     calls: model.privateInferenceCalls),
+                tracesBadge: tracesBadge,
+                tracesDot: traces.shield == .attention ? .ask : nil,
+                tracesDescription: Self.tracesDescription(
+                    traces.decisionsOwed, shield: traces.shield, secondLook: traces.words?.secondLookWaiting),
                 showsMap: $showsMap, showsInspector: $showsInspector,
-                onSettings: { openSettings() })
+                onSettings: { openSettings() }
+            ) {
+                switch tab {
+                case .traces:
+                    TracesTreeView(store: traces, selection: $selectedSession) { entryId in
+                        Self.review(entryId, selection: &selectedSession, showsInspector: &showsInspector)
+                    }
+                case .inference: InferenceTabView(store: inference)
+                case .home:
+                    HomeTabView(
+                        store: home, traces: traces,
+                        statusLabel: { status in model.publicRunCopy?.contributionStatusLabel(for: status) },
+                        page: $homePage)
+                }
+            }
         } map: {
-            MonitorMapPane(mapTab: $mapTab, privateAILabel: model.privateInferenceCopy?.destination)
+            MonitorMapPane(
+                mapTab: $mapTab, privateAILabel: model.privateInferenceCopy?.destination,
+                traces: traces, inference: inference,
+                sentence: { Self.rowSentence($0, copy: model.privateInferenceCopy, calls: model.harnessCalls) })
         } inspector: {
             GlassPane {
-                Color.clear
+                // An empty branch would leave the pane nothing to draw, and
+                // it would vanish while the layout still reserved its width.
+                switch tab {
+                case .traces:
+                    SessionInspectorView(store: traces, entry: selectedEntry)
+                case .inference:
+                    PrivateAIInspectorView(
+                        store: inference, destinationLabel: model.privateInferenceCopy?.destination,
+                        sentence: { Self.rowSentence($0, copy: model.privateInferenceCopy, calls: model.harnessCalls) })
+                case .home:
+                    HomeSummaryInspector(store: home)
+                }
             }
         }
         .glassWindow()
+        .task { await traces.run() }
+        .task { await inference.run() }
+        .task { await home.run() }
+    }
+
+    /// The sentence one tool's row shows (`HarnessSurface.rowSentence`): a
+    /// tool that is not on this Mac gets the missing-tool sentence, never
+    /// the not-connected one. Without the core's Private AI copy a missing
+    /// tool says nothing rather than the wrong sentence.
+    static func rowSentence(_ row: HarnessRow, copy: PrivateInferenceCopy?, calls: HarnessCalls) -> String? {
+        guard let copy else { return row.installed ? HarnessSurface.stateSentence(row, calls: calls) : nil }
+        return HarnessSurface.rowSentence(row, copy: copy, calls: calls)
+    }
+
+    /// The Traces badge (R7): decisions owed, a dash when the core did not
+    /// say, nothing at zero. Never queue depth.
+    private var tracesBadge: GlassBadgeValue? {
+        traces.decisionsOwed.map(GlassBadgeValue.count) ?? .unknown
+    }
+
+    /// The Traces badge's text equivalent, from the core: "unavailable" for
+    /// an unknown count, never zero; nil at zero, where there is no badge.
+    /// When something waiting is worth a second look, the core's words for
+    /// that follow, as the badge's amber dot shows it.
+    static func tracesDescription(
+        _ decisionsOwed: Int?, shield: QueueShieldState = .clear, secondLook: String? = nil
+    ) -> String? {
+        let count = TCCoreCopy.decisionsOwedText(decisionsOwed).flatMap { $0.isEmpty ? nil : $0 }
+        let flagged = shield == .attention ? secondLook : nil
+        let parts = [count, flagged].compactMap { $0 }
+        return parts.isEmpty ? nil : parts.joined(separator: ", ")
+    }
+
+    /// The selected session, while it is still in the tree.
+    private var selectedEntry: DaemonData.QueueEntry? {
+        traces.tree.allSessions.first { $0.entryId == selectedSession }
+    }
+
+    /// A session's Review: select it and show the inspector, where its
+    /// review is. With the inspector hidden, selecting alone did nothing a
+    /// person could see.
+    static func review(_ entryId: String, selection: inout String, showsInspector: inout Bool) {
+        selection = entryId
+        showsInspector = true
     }
 
     /// The first time this window lays out, open the panes its width suits.
@@ -106,18 +222,23 @@ struct MonitorWindowView: View {
 /// toolbar capsule (map and inspector toggles) and the round Settings
 /// button on the top row, then the tabs. The tabs' screens are R6 (Traces),
 /// R8 (Inference) and R9 (Home).
-private struct MonitorMainPane: View {
+private struct MonitorMainPane<Content: View>: View {
     @Binding var tab: MonitorWindowView.Tab
     let inferenceDot: GlassStatus?
     let inferenceDescription: String?
+    let tracesBadge: GlassBadgeValue?
+    /// Amber when something waiting is worth a second look.
+    let tracesDot: GlassStatus?
+    let tracesDescription: String?
     @Binding var showsMap: Bool
     @Binding var showsInspector: Bool
     let onSettings: () -> Void
+    @ViewBuilder let content: () -> Content
     /// The window is too narrow for the map: the toggle shows it hidden and
     /// cannot show it, and widening the window brings back the preference.
     @Environment(\.glassMapCompacted) private var mapCompacted
     /// Half the unified title bar's 52pt height.
-    static let lightsCentre: CGFloat = 26
+    static var lightsCentre: CGFloat { 26 }
 
     var body: some View {
         GlassPane {
@@ -151,33 +272,106 @@ private struct MonitorMainPane: View {
                     String(localized: "Monitor", comment: "Monitor tabs name"),
                     selection: $tab,
                     segments: MonitorWindowView.Tab.allCases.map { item in
-                        GlassSegment(item.title, value: item,
-                                     dot: item == .inference ? inferenceDot : nil,
-                                     accessibilityValue: item == .inference ? inferenceDescription : nil)
+                        GlassSegment(
+                            item.title, value: item,
+                            badgeValue: item == .traces ? tracesBadge : nil,
+                            dot: item == .inference ? inferenceDot : item == .traces ? tracesDot : nil,
+                            accessibilityValue: item == .inference
+                                ? inferenceDescription : item == .traces ? tracesDescription : nil)
                     })
-                Spacer(minLength: 0)
+                content()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             }
         }
     }
 }
 
-/// The map: the field, with its tabs floating on it. The map itself is R8.
+/// The map (R8): the field, the flow map drawn on it, and the view
+/// selector floating at its upper trailing edge (spec, "Flow map"). The
+/// selector changes the map's view only, never the main tab, consent or
+/// routing, and keeps its choice while the map is hidden.
 private struct MonitorMapPane: View {
     @Binding var mapTab: MonitorWindowView.MapTab
     let privateAILabel: String?
+    let traces: TracesStore
+    let inference: InferenceStore
+    /// The core's sentence for a tool's Private AI state.
+    let sentence: (HarnessRow) -> String?
+    @EnvironmentObject private var model: AppModel
 
     var body: some View {
-        GlassPane(padding: 0) {
-            ZStack(alignment: .topLeading) {
+        // The map is content, not chrome: an opaque pane, so the selector,
+        // zoom and node cards floating on it are its only glass (Apple: no
+        // glass on glass; R14).
+        GlassPane(padding: 0, isContent: true) {
+            ZStack(alignment: .topTrailing) {
                 RadialGradient(
                     colors: [GlassTokens.Color.mapFieldInner.color, GlassTokens.Color.mapFieldOuter.color],
                     center: .center, startRadius: 20, endRadius: 520)
+                map
                 GlassFloatingGroup {
                     GlassSegmentedTabs(String(localized: "Map", comment: "Map view selector name"), selection: $mapTab, segments: segments, floating: true)
                         .padding(GlassTokens.Space.panePadding)
                 }
+                stateLine
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
             }
         }
+    }
+
+    @ViewBuilder
+    private var map: some View {
+        switch shownTab {
+        case .traces:
+            FlowMapView(
+                scene: .traces(traces.tree, gate: .init(state: tracesState, status: traces.status, destinations: traces.destinations)), legend: [.autoUpload, .ask, .ignore], zoomable: true,
+                accessibilityName: MonitorWindowView.Tab.traces.title, state: tracesState)
+        case .privateAI:
+            if let harnesses = inference.harnesses, let privateAILabel {
+                FlowMapView(
+                    scene: .privateAI(
+                        harnesses, destinationLabel: privateAILabel,
+                        privateAI: traces.destinations?.privateAi ?? traces.status?.privateInferenceState?.state,
+                        sentence: sentence,
+                        state: { HarnessSurface.state($0, calls: model.harnessCalls) }),
+                    legend: [], zoomable: false, accessibilityName: privateAILabel)
+            } else {
+                Color.clear
+            }
+        }
+    }
+
+    /// The Traces map's state (the stack-wide ScreenState rule): core down
+    /// over the last tree, loading before the first, paused or unknown when
+    /// the core's status says so or says nothing.
+    private var tracesState: ScreenState {
+        var failure: DaemonDataError?
+        if case .failed(let error) = traces.phase { failure = error }
+        return ScreenState.resolve(
+            failure: failure, loaded: traces.phase != .loading,
+            paused: traces.status?.paused, known: traces.status != nil)
+    }
+
+    /// The core's line when the map's state is not current, else nothing.
+    @ViewBuilder
+    private var stateLine: some View {
+        if case .failed(let error) = traces.phase, shownTab == .traces {
+            GlassFloatingGroup {
+                Text(MonitorWords.table?.line(for: error) ?? "")
+                    .glassType(GlassTokens.TypeScale.label)
+                    .foregroundStyle(GlassColor.textPrimary)
+                    .padding(.horizontal, GlassTokens.Space.s6)
+                    .padding(.vertical, GlassTokens.Space.s3)
+                    .glassSurface(.nodeCard)
+            }
+            .padding(GlassTokens.Space.panePadding)
+        }
+    }
+
+    /// The Private AI view needs the core's name for it; until the core
+    /// has said it, the map stays on Traces without changing the choice.
+    private var shownTab: MonitorWindowView.MapTab {
+        privateAILabel == nil ? .traces : mapTab
     }
 
     /// Traces, and the Private AI tab once the Rust core has said what it is
@@ -191,15 +385,52 @@ private struct MonitorMapPane: View {
     }
 }
 
-/// The Settings window (D8): the existing settings, in a macOS Settings
-/// window opened with ⌘,. Its theming may later move to the glass system to
-/// match the monitor window (#1173).
+/// The Settings window (D8; R11 of #1173): the section list and, beside
+/// it, the selected section alone, each scrolling on its own (spec,
+/// "Settings navigation"). The sections are the existing settings, with
+/// their behaviour and the core's copy unchanged; the list only chooses
+/// which one is drawn. The selection is restored, and opening or closing
+/// this window leaves the monitor window as it was.
 struct MonitorSettingsWindow: View {
     let navigation: MainWindowNavigation
 
+    @EnvironmentObject private var model: AppModel
+    @Environment(ComputeModel.self) private var compute
+    @SceneStorage("settings.section") private var section: SettingsSection = .connection
+
     var body: some View {
-        SettingsView(navigation: navigation)
-            .frame(minWidth: 620, minHeight: 520)
+        NavigationSplitView {
+            // One list with arrow-key selection, not a button per row.
+            List(selection: Binding(get: { section }, set: { if let value = $0 { section = value } })) {
+                ForEach(SettingsSection.allCases) { item in
+                    // A section whose copy has not loaded is a disabled
+                    // placeholder, never a missing row.
+                    let row = SettingsSection.ListRow.row(title: item.title(model: model, compute: compute.snapshot?.title))
+                    Label(row.text, systemImage: item.symbol)
+                        .lineLimit(2)
+                        .foregroundStyle(row.enabled ? .primary : .secondary)
+                        .accessibilityLabel(row.enabled ? row.text : MonitorWords.unknown)
+                        .selectionDisabled(!row.enabled)
+                        .tag(item)
+                }
+            }
+            .navigationSplitViewColumnWidth(min: 200, ideal: 230, max: 280)
+        } detail: {
+            Group {
+                switch section {
+                case .compute:
+                    ComputeView(model: compute)
+                default:
+                    ScrollView {
+                        SettingsContent(navigation: navigation, section: section)
+                    }
+                    .tcScreen()
+                }
+            }
+            // A fresh view per section, so the scroll starts at its top.
+            .id(section)
+        }
+        .frame(minWidth: 760, minHeight: 520)
     }
 }
 #endif

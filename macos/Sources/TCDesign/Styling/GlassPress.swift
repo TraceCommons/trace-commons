@@ -45,6 +45,8 @@ private struct GlassPressBody: View {
     var body: some View {
         configuration.label
             .environment(\.glassPressed, configuration.isPressed && isEnabled)
+            // A control that cannot be used says so, as the glass buttons do.
+            .opacity(isEnabled ? 1 : GlassTokens.Opacity.disabled)
     }
 }
 

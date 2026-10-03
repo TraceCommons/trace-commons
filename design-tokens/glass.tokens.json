@@ -1,156 +1,181 @@
 {
-  "$comment": "Trace Commons glass design tokens: the one source for the native macOS app (and, later, any other shell). Dark only (D2), purple brand (D3), SF Pro and SF Mono (R2): every type step is a macOS text style, so it follows the system text size, and its size is that style's size at the default setting (number was 28 in #1146; largeTitle is 26). Seeded from #1146's tauri-desktop/frontend/src/design-system/tokens at 09a26c0d. Edit here, then run scripts/design-tokens/generate.py; a Swift test fails if the generated file drifts.",
+  "$comment": "Trace Commons glass design tokens: the one source for the native macOS app (and, later, any other shell). Light and dark: every colour has a dark value and, where it differs, a light one, and follows the person's system appearance (D2 revised), purple brand (D3), SF Pro and SF Mono (R2): every type step is a macOS text style, so it follows the system text size, and its size is that style's size at the default setting (number was 28 in #1146; largeTitle is 26). Seeded from #1146's tauri-desktop/frontend/src/design-system/tokens at 09a26c0d. Edit here, then run scripts/design-tokens/generate.py; a Swift test fails if the generated file drifts.",
   "version": 1,
   "color": {
     "purple": { "hex": "#6d14f3", "note": "Brand purple from the Trace logo; the one action." },
-    "purpleSoft": { "hex": "#8a3dff", "note": "Fills and the shared data series." },
-    "purpleText": { "hex": "#c9b3ff", "note": "Accent text and tertiary links." },
-    "blue": { "hex": "#3a7bd5", "note": "Toggles on, the kept data series, selection." },
-    "textPrimary": { "hex": "#f2f2f4" },
-    "textSecondary": { "hex": "#c9c9d0" },
-    "textTertiary": { "hex": "#b4b4bc", "note": "Raised from #a9a9b0 for 4.5:1 on glass." },
+    "purpleSoft": { "hex": "#8a3dff", "note": "Fills and the shared data series.", "light": { "hex": "#7a2cf5" } },
+    "purpleText": { "hex": "#c9b3ff", "note": "Accent text and tertiary links.", "light": { "hex": "#5b10cc" } },
+    "blue": { "hex": "#3a7bd5", "note": "Toggles on, the kept data series, selection.", "light": { "hex": "#2f6bc4" } },
+    "textPrimary": { "hex": "#f2f2f4", "light": { "hex": "#1d1d1f" } },
+    "textSecondary": { "hex": "#c9c9d0", "light": { "hex": "#48484f" } },
+    "textTertiary": { "hex": "#b4b4bc", "note": "Raised from #a9a9b0 for 4.5:1 on glass. Light: 4.8:1 or more on every light ground it is drawn on (the scene, a well, the map field); #6a6a71 was 4.12 on mapFieldOuter.", "light": { "hex": "#5c5c63" } },
+    "textSecondaryHighContrast": { "hex": "#e6e6ec", "note": "textSecondary under Increase Contrast.", "light": { "hex": "#2a2a2e" } },
+    "textTertiaryHighContrast": { "hex": "#d6d6dc", "note": "textTertiary under Increase Contrast.", "light": { "hex": "#3c3c42" } },
+    "hairlineHighContrast": { "hex": "#ffffff", "alpha": 0.4, "note": "hairline under Increase Contrast. Light: 3:1 or more on every light ground (0.4 was 2.82).", "light": { "hex": "#000000", "alpha": 0.45 } },
+    "edgeHighContrast": { "hex": "#f2f2f4", "alpha": 0.4, "note": "A painted surface's edge under Increase Contrast: a solid 1pt stroke at 40% text colour (spec, Appearance). Light: 55%, for 3:1 or more on every light ground (40% was 2.44).", "light": { "hex": "#1d1d1f", "alpha": 0.55 } },
     "textOnAccent": { "hex": "#ffffff" },
     "textOnStatus": { "hex": "#0c0c0e" },
-    "statusOn": { "hex": "#3ddc84", "note": "Watching, share automatically, automatic, always on. Glyph and label only." },
-    "statusAsk": { "hex": "#f5c142", "note": "Ask me, worth a second look." },
-    "statusOff": { "hex": "#a9a9b0", "note": "Never, not used. Never for text." },
-    "statusOutside": { "hex": "#ff6b6b", "note": "Leaves for an outside model, no proof." },
-    "dataShared": { "hex": "#8a3dff" },
-    "dataKept": { "hex": "#3a7bd5" },
-    "dataInference": { "hex": "#a78bfa" },
-    "sceneBase": { "hex": "#0f1219" },
-    "sceneWarm": { "hex": "#1d2430" },
-    "paneBase": { "hex": "#161a22", "alpha": 0.96, "note": "The neutral dark a pane's glass sits on where there is no native material." },
-    "paneOpaque": { "hex": "#1c1e24", "note": "A pane under Reduce Transparency: solid, no material (spec)." },
-    "glassVeil": { "hex": "#0c0e14", "alpha": 0.28, "note": "Over native glass, the thin dark veil kept for text contrast." },
-    "wellFill": { "hex": "#000000", "alpha": 0.22 },
-    "controlHover": { "hex": "#ffffff", "alpha": 0.16 },
-    "controlSelected": { "hex": "#ffffff", "alpha": 0.16 },
-    "toggleOn": { "hex": "#3a7bd5" },
-    "toggleOff": { "hex": "#ffffff", "alpha": 0.18 },
-    "toggleOnSettings": { "hex": "#8a3dff" },
-    "watchOn": { "hex": "#3ddc84" },
-    "hairline": { "hex": "#ffffff", "alpha": 0.07, "note": "Rows inside a list only; never around a container." },
-    "popoverFill": { "hex": "#22242a", "alpha": 0.78 },
-    "menuFill": { "hex": "#22242a", "alpha": 0.72 },
-    "menuHover": { "hex": "#3a7bd5", "alpha": 0.85 },
-    "menuSeparator": { "hex": "#ffffff", "alpha": 0.14 },
-    "nodeCardFill": { "hex": "#14161c", "alpha": 0.72 },
-    "scrim": { "hex": "#000000", "alpha": 0.4 },
-    "selection": { "hex": "#2f6ac0", "note": "Darker than blue so white row text clears 4.5:1 (5.3:1); white on #3a7bd5 was 4.22:1." },
-    "mapIdle": { "hex": "#ffffff", "alpha": 0.35 },
-    "mapNodeOff": { "hex": "#5d5d63" },
-    "mapHub": { "hex": "#8e8e96", "note": "The map's centre node." },
-    "mapFieldInner": { "hex": "#1e2a3a" },
-    "mapFieldOuter": { "hex": "#131a24" },
-    "consentFill": { "hex": "#000000", "alpha": 0.25 },
-    "fieldFill": { "hex": "#000000", "alpha": 0.25 },
-    "tintOn": { "hex": "#3ddc84", "alpha": 0.18 },
-    "tintAsk": { "hex": "#f5c142", "alpha": 0.18 },
-    "tintOutside": { "hex": "#ff6b6b", "alpha": 0.18 },
-    "tintAccent": { "hex": "#8a3dff", "alpha": 0.22 },
-    "tintNeutral": { "hex": "#ffffff", "alpha": 0.1 },
-    "toolClaude": { "hex": "#e08a6a" },
-    "toolCodex": { "hex": "#e6e6ec" },
-    "toolAntigravity": { "hex": "#6d9cff" },
-    "toolOpenCode": { "hex": "#4fd39a" },
-    "toolTheia": { "hex": "#9d93ff" },
-    "tileFolder": { "hex": "#2a2a2c" },
-    "tileFolderInk": { "hex": "#8be28b" }
+    "statusOn": { "hex": "#3ddc84", "note": "Watching, share automatically, automatic, always on. Glyph and label only.", "light": { "hex": "#1a8f4c" } },
+    "statusAsk": { "hex": "#f5c142", "note": "Ask me, worth a second look.", "light": { "hex": "#a8690f" } },
+    "statusOff": { "hex": "#a9a9b0", "note": "Never, not used. Never for text.", "light": { "hex": "#8a8a90" } },
+    "statusOutside": { "hex": "#ff6b6b", "note": "Leaves for an outside model, no proof.", "light": { "hex": "#d0342c" } },
+    "statusOnText": { "hex": "#3ddc84", "note": "statusOn as text (a pill label, the submit-done label): 4.5:1 or more on every light ground and on its own tint. Dark is statusOn.", "light": { "hex": "#11613a" } },
+    "statusAskText": { "hex": "#f5c142", "note": "statusAsk as text: 4.5:1 or more on every light ground and on its own tint. Dark is statusAsk.", "light": { "hex": "#7a4a06" } },
+    "statusOutsideText": { "hex": "#ff6b6b", "note": "statusOutside as text: 4.5:1 or more on every light ground and on its own tint. Dark is statusOutside.", "light": { "hex": "#a3221c" } },
+    "badgeFill": { "hex": "#ff6b6b", "note": "The decisions-owed badge behind textOnStatus. Dark is statusOutside; light is lighter so the dark count clears 4.5:1 (4.86), and the fill 3:1 on the pane.", "light": { "hex": "#e04a42" } },
+    "dataShared": { "hex": "#8a3dff", "light": { "hex": "#7a2cf5" } },
+    "dataKept": { "hex": "#3a7bd5", "light": { "hex": "#2f6bc4" } },
+    "dataInference": { "hex": "#a78bfa", "light": { "hex": "#7d5ce0" } },
+    "sceneBase": { "hex": "#0f1219", "light": { "hex": "#e6eaf1" } },
+    "sceneWarm": { "hex": "#1d2430", "light": { "hex": "#f6f7fa" } },
+    "paneBase": { "hex": "#161a22", "alpha": 0.96, "note": "The neutral dark a pane's glass sits on where there is no native material.", "light": { "hex": "#f4f5f8", "alpha": 0.96 } },
+    "paneOpaque": { "hex": "#1c1e24", "note": "A pane under Reduce Transparency: solid, no material (spec).", "light": { "hex": "#f2f3f6" } },
+    "glassVeil": { "hex": "#0c0e14", "alpha": 0.28, "note": "Over native glass, the thin dark veil kept for text contrast.", "light": { "hex": "#ffffff", "alpha": 0.3 } },
+    "wellFill": { "hex": "#000000", "alpha": 0.22, "light": { "hex": "#000000", "alpha": 0.06 } },
+    "controlHover": { "hex": "#ffffff", "alpha": 0.16, "light": { "hex": "#000000", "alpha": 0.08 } },
+    "controlSelected": { "hex": "#ffffff", "alpha": 0.16, "light": { "hex": "#ffffff" } },
+    "toggleOn": { "hex": "#3a7bd5", "light": { "hex": "#2f6bc4" } },
+    "toggleOff": { "hex": "#ffffff", "alpha": 0.18, "light": { "hex": "#000000", "alpha": 0.16 } },
+    "toggleOnSettings": { "hex": "#8a3dff", "light": { "hex": "#7a2cf5" } },
+    "watchOn": { "hex": "#3ddc84", "light": { "hex": "#28b463" } },
+    "hairline": { "hex": "#ffffff", "alpha": 0.07, "note": "Rows inside a list only; never around a container.", "light": { "hex": "#000000", "alpha": 0.08 } },
+    "popoverFill": { "hex": "#22242a", "alpha": 0.78, "light": { "hex": "#f7f7f9", "alpha": 0.84 } },
+    "menuFill": { "hex": "#22242a", "alpha": 0.72, "light": { "hex": "#f7f7f9", "alpha": 0.8 } },
+    "menuHover": { "hex": "#3a7bd5", "alpha": 0.85, "note": "Light: deep enough for menuHoverText at 4.5:1 (4.91).", "light": { "hex": "#2a62b5", "alpha": 0.9 } },
+    "menuHoverText": { "hex": "#f2f2f4", "note": "A menu item's text on menuHover: textPrimary in dark, white in light, as the macOS menu selection.", "light": { "hex": "#ffffff" } },
+    "menuSelection": { "hex": "#2f6ac0", "note": "The menu-row hover behind white text. Dark is the selection colour, so white clears 4.5:1 (5.3; white on blue #3a7bd5 was 4.22); light is deeper so white clears 4.5:1 (5.98; blue's light value was 4.37 under it).", "light": { "hex": "#2a62b5" } },
+    "menuModeAsk": { "hex": "#f0a030", "note": "Menu-bar mode circle: ask me." },
+    "menuModeArmed": { "hex": "#34c759", "note": "Menu-bar mode circle and Private AI on option: contribute automatically." },
+    "menuModeNever": { "hex": "#ff453a", "note": "Menu-bar mode circle: never; also the menu-bar badge." },
+    "menuPillOff": { "hex": "#5a5a5f", "note": "Menu-bar pill circle when paused or off.", "light": { "hex": "#aeaeb2" } },
+    "menuBarsPaused": { "hex": "#555555", "note": "Graph and strip bars while watching is paused.", "light": { "hex": "#b4b4b8" } },
+    "menuBadgeEdge": { "hex": "#1e3222", "alpha": 0.9, "note": "The badge's cut-out edge against the menu bar.", "light": { "hex": "#f2f2f4", "alpha": 0.9 } },
+    "menuChipShared": { "hex": "#c86bfa", "alpha": 0.35, "light": { "hex": "#7a2cf5", "alpha": 0.18 } },
+    "menuChipKept": { "hex": "#3aa0ff", "alpha": 0.35, "light": { "hex": "#2f6bc4", "alpha": 0.18 } },
+    "menuNoProof": { "hex": "#ff8a8a", "light": { "hex": "#c62828" } },
+    "menuSeparator": { "hex": "#ffffff", "alpha": 0.14, "light": { "hex": "#000000", "alpha": 0.1 } },
+    "nodeCardFill": { "hex": "#14161c", "alpha": 0.72, "light": { "hex": "#ffffff", "alpha": 0.84 } },
+    "scrim": { "hex": "#000000", "alpha": 0.4, "light": { "hex": "#000000", "alpha": 0.25 } },
+    "selection": { "hex": "#2f6ac0", "note": "Darker than blue so white row text clears 4.5:1 (5.3:1); white on #3a7bd5 was 4.22:1.", "light": { "hex": "#2f6bc4" } },
+    "mapIdle": { "hex": "#ffffff", "alpha": 0.35, "light": { "hex": "#000000", "alpha": 0.3 } },
+    "mapNodeOff": { "hex": "#5d5d63", "light": { "hex": "#a1a1a6" } },
+    "mapHub": { "hex": "#8e8e96", "note": "The map's centre node.", "light": { "hex": "#8a8a92" } },
+    "mapFieldInner": { "hex": "#1e2a3a", "light": { "hex": "#eef2f8" } },
+    "mapFieldOuter": { "hex": "#131a24", "light": { "hex": "#dbe2ec" } },
+    "mapRuleAutoFill": { "hex": "#12321f", "light": { "hex": "#d7f1e2" } },
+    "mapRuleAskFill": { "hex": "#2b2412", "light": { "hex": "#f6ead0" } },
+    "mapRuleIgnoreFill": { "hex": "#3a3a3e", "light": { "hex": "#e4e4e7" } },
+    "mapRuleUnsetFill": { "hex": "#2a2a2c", "light": { "hex": "#ededf0" } },
+    "mapCredentialOn": { "hex": "#2c7a5b", "light": { "hex": "#27a06b" } },
+    "consentFill": { "hex": "#000000", "alpha": 0.25, "light": { "hex": "#000000", "alpha": 0.04 } },
+    "fieldFill": { "hex": "#000000", "alpha": 0.25, "light": { "hex": "#000000", "alpha": 0.05 } },
+    "tintOn": { "hex": "#3ddc84", "alpha": 0.18, "light": { "hex": "#1a8f4c", "alpha": 0.14 } },
+    "tintAsk": { "hex": "#f5c142", "alpha": 0.18, "light": { "hex": "#a8690f", "alpha": 0.14 } },
+    "tintOutside": { "hex": "#ff6b6b", "alpha": 0.18, "light": { "hex": "#d0342c", "alpha": 0.12 } },
+    "tintAccent": { "hex": "#8a3dff", "alpha": 0.22, "light": { "hex": "#7a2cf5", "alpha": 0.14 } },
+    "tintNeutral": { "hex": "#ffffff", "alpha": 0.1, "light": { "hex": "#000000", "alpha": 0.06 } },
+    "toolClaude": { "hex": "#e08a6a", "light": { "hex": "#c2603e" } },
+    "toolCodex": { "hex": "#e6e6ec", "light": { "hex": "#3a3a3c" } },
+    "toolAntigravity": { "hex": "#6d9cff", "light": { "hex": "#3a68d8" } },
+    "toolOpenCode": { "hex": "#4fd39a", "light": { "hex": "#1d9467" } },
+    "toolTheia": { "hex": "#9d93ff", "light": { "hex": "#6152e0" } },
+    "tileFolder": { "hex": "#2a2a2c", "light": { "hex": "#e6e6ea" } },
+    "tileFolderInk": { "hex": "#8be28b", "light": { "hex": "#2c8a37" } },
+    "ink": { "hex": "#ffffff", "note": "Overlay strokes and fills over a surface: white on dark, black on light. Used at an alpha.", "light": { "hex": "#000000" } }
   },
   "gradient": {
     "paneFill": { "angle": 160, "stops": [
-      { "hex": "#ffffff", "alpha": 0.1, "at": 0 },
-      { "hex": "#ffffff", "alpha": 0.05, "at": 0.4 },
-      { "hex": "#ffffff", "alpha": 0.03, "at": 1 }
+      { "hex": "#ffffff", "alpha": 0.1, "at": 0, "light": { "hex": "#ffffff", "alpha": 0.55 } },
+      { "hex": "#ffffff", "alpha": 0.05, "at": 0.4, "light": { "hex": "#ffffff", "alpha": 0.35 } },
+      { "hex": "#ffffff", "alpha": 0.03, "at": 1, "light": { "hex": "#ffffff", "alpha": 0.25 } }
     ] },
     "cardFill": { "angle": 180, "stops": [
-      { "hex": "#ffffff", "alpha": 0.085, "at": 0 },
-      { "hex": "#ffffff", "alpha": 0.045, "at": 1 }
+      { "hex": "#ffffff", "alpha": 0.085, "at": 0, "light": { "hex": "#ffffff", "alpha": 0.72 } },
+      { "hex": "#ffffff", "alpha": 0.045, "at": 1, "light": { "hex": "#ffffff", "alpha": 0.52 } }
     ] },
     "cardFillQuiet": { "angle": 180, "stops": [
-      { "hex": "#ffffff", "alpha": 0.075, "at": 0 },
-      { "hex": "#ffffff", "alpha": 0.04, "at": 1 }
+      { "hex": "#ffffff", "alpha": 0.075, "at": 0, "light": { "hex": "#ffffff", "alpha": 0.6 } },
+      { "hex": "#ffffff", "alpha": 0.04, "at": 1, "light": { "hex": "#ffffff", "alpha": 0.42 } }
     ] },
     "controlFill": { "angle": 180, "stops": [
-      { "hex": "#ffffff", "alpha": 0.14, "at": 0 },
-      { "hex": "#ffffff", "alpha": 0.07, "at": 1 }
+      { "hex": "#ffffff", "alpha": 0.14, "at": 0, "light": { "hex": "#ffffff", "alpha": 0.92 } },
+      { "hex": "#ffffff", "alpha": 0.07, "at": 1, "light": { "hex": "#ffffff", "alpha": 0.72 } }
     ] },
     "ctaFill": { "angle": 180, "stops": [
-      { "hex": "#8a3dff", "alpha": 0.72, "at": 0 },
-      { "hex": "#6d14f3", "alpha": 0.62, "at": 1 }
+      { "hex": "#8a3dff", "alpha": 0.72, "at": 0, "light": { "hex": "#7a2cf5" } },
+      { "hex": "#6d14f3", "alpha": 0.62, "at": 1, "light": { "hex": "#6d14f3" } }
     ] },
     "ctaSecondaryFill": { "angle": 180, "stops": [
-      { "hex": "#4a0ea6", "alpha": 0.6, "at": 0 },
-      { "hex": "#320878", "alpha": 0.55, "at": 1 }
+      { "hex": "#4a0ea6", "alpha": 0.6, "at": 0, "light": { "hex": "#5a12c9" } },
+      { "hex": "#320878", "alpha": 0.55, "at": 1, "light": { "hex": "#4a0ea6" } }
     ] },
     "checkboxOnFill": { "angle": 180, "stops": [
-      { "hex": "#8a3dff", "alpha": 0.8, "at": 0 },
-      { "hex": "#6d14f3", "alpha": 0.7, "at": 1 }
+      { "hex": "#8a3dff", "alpha": 0.8, "at": 0, "light": { "hex": "#7a2cf5" } },
+      { "hex": "#6d14f3", "alpha": 0.7, "at": 1, "light": { "hex": "#6d14f3" } }
     ] }
   },
   "shadow": {
     "paneEdge": [
-      { "y": 1, "hex": "#ffffff", "alpha": 0.3, "inset": true },
-      { "x": 1, "hex": "#ffffff", "alpha": 0.12, "inset": true },
-      { "y": -1, "hex": "#000000", "alpha": 0.2, "inset": true },
-      { "y": 12, "blur": 36, "hex": "#000000", "alpha": 0.3 }
+      { "y": 1, "hex": "#ffffff", "alpha": 0.3, "inset": true, "light": { "hex": "#ffffff", "alpha": 0.6 } },
+      { "x": 1, "hex": "#ffffff", "alpha": 0.12, "inset": true, "light": { "hex": "#ffffff", "alpha": 0.24 } },
+      { "y": -1, "hex": "#000000", "alpha": 0.2, "inset": true, "light": { "hex": "#000000", "alpha": 0.09 } },
+      { "y": 12, "blur": 36, "hex": "#000000", "alpha": 0.3, "light": { "hex": "#000000", "alpha": 0.135 } }
     ],
     "cardEdge": [
-      { "y": 1, "hex": "#ffffff", "alpha": 0.2, "inset": true },
-      { "y": -1, "hex": "#000000", "alpha": 0.12, "inset": true }
+      { "y": 1, "hex": "#ffffff", "alpha": 0.2, "inset": true, "light": { "hex": "#ffffff", "alpha": 0.4 } },
+      { "y": -1, "hex": "#000000", "alpha": 0.12, "inset": true, "light": { "hex": "#000000", "alpha": 0.054 } }
     ],
     "cardEdgeQuiet": [
-      { "y": 1, "hex": "#ffffff", "alpha": 0.18, "inset": true },
-      { "y": -1, "hex": "#000000", "alpha": 0.1, "inset": true }
+      { "y": 1, "hex": "#ffffff", "alpha": 0.18, "inset": true, "light": { "hex": "#ffffff", "alpha": 0.36 } },
+      { "y": -1, "hex": "#000000", "alpha": 0.1, "inset": true, "light": { "hex": "#000000", "alpha": 0.045 } }
     ],
     "wellEdge": [
-      { "y": 1, "blur": 2, "hex": "#000000", "alpha": 0.25, "inset": true }
+      { "y": 1, "blur": 2, "hex": "#000000", "alpha": 0.25, "inset": true, "light": { "hex": "#000000", "alpha": 0.113 } }
     ],
     "controlEdge": [
-      { "y": 1, "hex": "#ffffff", "alpha": 0.32, "inset": true },
-      { "y": -1, "hex": "#000000", "alpha": 0.18, "inset": true },
-      { "y": 1, "blur": 2, "hex": "#000000", "alpha": 0.18 }
+      { "y": 1, "hex": "#ffffff", "alpha": 0.32, "inset": true, "light": { "hex": "#ffffff", "alpha": 0.64 } },
+      { "y": -1, "hex": "#000000", "alpha": 0.18, "inset": true, "light": { "hex": "#000000", "alpha": 0.081 } },
+      { "y": 1, "blur": 2, "hex": "#000000", "alpha": 0.18, "light": { "hex": "#000000", "alpha": 0.081 } }
     ],
     "controlSelectedEdge": [
-      { "y": 1, "hex": "#ffffff", "alpha": 0.3, "inset": true },
-      { "y": -1, "hex": "#000000", "alpha": 0.2, "inset": true },
-      { "y": 1, "blur": 2, "hex": "#000000", "alpha": 0.25 }
+      { "y": 1, "hex": "#ffffff", "alpha": 0.3, "inset": true, "light": { "hex": "#ffffff", "alpha": 0.6 } },
+      { "y": -1, "hex": "#000000", "alpha": 0.2, "inset": true, "light": { "hex": "#000000", "alpha": 0.09 } },
+      { "y": 1, "blur": 2, "hex": "#000000", "alpha": 0.25, "light": { "hex": "#000000", "alpha": 0.113 } }
     ],
     "ctaEdge": [
-      { "y": 1, "hex": "#ffffff", "alpha": 0.5, "inset": true },
-      { "y": -2, "hex": "#000000", "alpha": 0.2, "inset": true },
+      { "y": 1, "hex": "#ffffff", "alpha": 0.5, "inset": true, "light": { "hex": "#ffffff", "alpha": 1 } },
+      { "y": -2, "hex": "#000000", "alpha": 0.2, "inset": true, "light": { "hex": "#000000", "alpha": 0.09 } },
       { "y": 4, "blur": 12, "hex": "#6d14f3", "alpha": 0.3 }
     ],
     "ctaSecondaryEdge": [
-      { "y": 1, "hex": "#ffffff", "alpha": 0.28, "inset": true },
-      { "y": -1, "hex": "#000000", "alpha": 0.2, "inset": true }
+      { "y": 1, "hex": "#ffffff", "alpha": 0.28, "inset": true, "light": { "hex": "#ffffff", "alpha": 0.56 } },
+      { "y": -1, "hex": "#000000", "alpha": 0.2, "inset": true, "light": { "hex": "#000000", "alpha": 0.09 } }
     ],
     "checkboxEdge": [
-      { "y": 1, "hex": "#ffffff", "alpha": 0.35, "inset": true },
-      { "y": -1, "hex": "#000000", "alpha": 0.25, "inset": true }
+      { "y": 1, "hex": "#ffffff", "alpha": 0.35, "inset": true, "light": { "hex": "#ffffff", "alpha": 0.7 } },
+      { "y": -1, "hex": "#000000", "alpha": 0.25, "inset": true, "light": { "hex": "#000000", "alpha": 0.113 } }
     ],
     "popoverEdge": [
-      { "y": 1, "hex": "#ffffff", "alpha": 0.28, "inset": true },
-      { "y": 24, "blur": 60, "hex": "#000000", "alpha": 0.5 }
+      { "y": 1, "hex": "#ffffff", "alpha": 0.28, "inset": true, "light": { "hex": "#ffffff", "alpha": 0.56 } },
+      { "y": 24, "blur": 60, "hex": "#000000", "alpha": 0.5, "light": { "hex": "#000000", "alpha": 0.225 } }
     ],
     "menuEdge": [
-      { "y": 1, "hex": "#ffffff", "alpha": 0.25, "inset": true },
-      { "y": 16, "blur": 40, "hex": "#000000", "alpha": 0.45 }
+      { "y": 1, "hex": "#ffffff", "alpha": 0.25, "inset": true, "light": { "hex": "#ffffff", "alpha": 0.5 } },
+      { "y": 16, "blur": 40, "hex": "#000000", "alpha": 0.45, "light": { "hex": "#000000", "alpha": 0.203 } }
     ],
     "nodeCardEdge": [
-      { "y": 1, "hex": "#ffffff", "alpha": 0.22, "inset": true },
-      { "y": 16, "blur": 40, "hex": "#000000", "alpha": 0.45 }
+      { "y": 1, "hex": "#ffffff", "alpha": 0.22, "inset": true, "light": { "hex": "#ffffff", "alpha": 0.44 } },
+      { "y": 16, "blur": 40, "hex": "#000000", "alpha": 0.45, "light": { "hex": "#000000", "alpha": 0.203 } }
     ],
     "modal": [
-      { "y": 24, "blur": 60, "hex": "#000000", "alpha": 0.5 }
+      { "y": 24, "blur": 60, "hex": "#000000", "alpha": 0.5, "light": { "hex": "#000000", "alpha": 0.225 } }
     ],
     "mapEdge": [
-      { "y": 1, "hex": "#ffffff", "alpha": 0.12, "inset": true },
-      { "y": 10, "blur": 30, "hex": "#000000", "alpha": 0.28 }
+      { "y": 1, "hex": "#ffffff", "alpha": 0.12, "inset": true, "light": { "hex": "#ffffff", "alpha": 0.24 } },
+      { "y": 10, "blur": 30, "hex": "#000000", "alpha": 0.28, "light": { "hex": "#000000", "alpha": 0.126 } }
     ],
     "consentEdge": [
-      { "y": 1, "hex": "#ffffff", "alpha": 0.1, "inset": true }
+      { "y": 1, "hex": "#ffffff", "alpha": 0.1, "inset": true, "light": { "hex": "#ffffff", "alpha": 0.2 } }
     ]
   },
   "radius": {
@@ -160,7 +185,9 @@
     "control": 8,
     "tile": 6,
     "checkbox": 5,
-    "pill": 999
+    "pill": 999,
+    "menuPanel": 18,
+    "menuStatePill": 22
   },
   "space": {
     "s1": 2,
@@ -237,6 +264,8 @@
     "fast": 0.15,
     "standard": 0.22,
     "slow": 0.3,
+    "reveal": 0.18,
+    "slide": 0.25,
     "easeX1": 0.2,
     "easeY1": 0.8,
     "easeX2": 0.2,
