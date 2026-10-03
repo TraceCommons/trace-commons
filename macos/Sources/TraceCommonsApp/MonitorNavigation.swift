@@ -85,4 +85,17 @@ enum LaunchRouting {
     static func opening(_ destination: MonitorDestination?, requiresOnboarding: Bool) -> Opening {
         Opening(window: window(requiresOnboarding: requiresOnboarding), settings: destination?.settingsSection)
     }
+
+    /// Whether the launch may open its window yet: once the core's startup
+    /// is known and, over a running daemon, once its status has answered,
+    /// so first run or the Monitor is never chosen from the placeholder
+    /// status. A daemon that needs its folders, or refused, has no status
+    /// to wait for, and onboarding is required either way.
+    static func launchOpens(startup: AppModel.Startup, statusAnswered: Bool) -> Bool {
+        switch startup {
+        case .starting: false
+        case .running: statusAnswered
+        case .needsRoots, .refused: true
+        }
+    }
 }

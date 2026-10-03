@@ -15,8 +15,8 @@ import TCShellCore
 /// (`OnboardingNavigation.hostsFirstRun`, with this window's own `entered`):
 /// the core's startup notice while the daemon is starting or was refused
 /// at launch, the coordinator while onboarding is required, and the window
-/// closes itself as soon as it is not, so an onboarded person never lands
-/// in the flow.
+/// closes itself as soon as it is not and opens the Monitor, so an
+/// onboarded person never lands in the flow.
 struct FirstRunWindowView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.dismissWindow) private var dismissWindow
@@ -43,6 +43,10 @@ struct FirstRunWindowView: View {
                     OnboardingCoordinatorView(onComplete: {})
                         .onAppear { entered = true }
                 }
+                // Bounded by the window, not grown to the step: each step
+                // scrolls in its own ScrollView, which a pane sized to its
+                // step would let run past the window's bottom edge (a Uses
+                // step with many scopes), out of reach.
                 .frame(width: FirstRunProgress.paneWidth)
                 .padding(.vertical, GlassTokens.Space.windowPadding * 3)
             } else if model.requiresOnboarding {
@@ -52,8 +56,13 @@ struct FirstRunWindowView: View {
         }
         .frame(minWidth: FirstRunProgress.paneWidth + 80, minHeight: 640)
         .onAppear { model.refreshAll() }
+        // Finishing first run hands off to the Monitor on Home. Initially
+        // too: first run opened for someone already onboarded closes and
+        // opens the Monitor instead.
         .onChange(of: model.requiresOnboarding, initial: true) { _, requires in
-            if !requires { dismissWindow(id: WindowID.firstRun) }
+            guard !requires else { return }
+            dismissWindow(id: WindowID.firstRun)
+            OpenMonitor.request(.home(.overview))
         }
     }
 }

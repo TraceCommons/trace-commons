@@ -346,6 +346,108 @@ final class MonitorNavigationTests: XCTestCase {
                       "Settings already open must still move to the asked-for section")
     }
 
+    /// While onboarding is required the Monitor draws the notices and the
+    /// signed-out notice, whose button routes to first run, in place of the
+    /// tabs; the inspector, where the write controls are, draws nothing.
+    func test_theMonitorNeverShowsTabsWhileOnboardingIsRequired() throws {
+        let window = try Self.text("Views/MonitorWindowView.swift")
+        XCTAssertTrue(window.contains("if model.requiresOnboarding {"), "the Monitor must gate on requiresOnboarding")
+        XCTAssertTrue(window.contains("MonitorWords.signedOut"))
+        XCTAssertTrue(window.contains("""
+                        ShellNotices()
+                        // No tab before onboarding is done: its screens act on
+                        // consent that has not been given. The button opens first
+                        // run, which is where every request goes until then.
+                        if model.requiresOnboarding {
+                            GlassNotice(tone: .ask, title: MonitorWords.signedOut) {
+                                Button(MonitorWindowView.openFirstRun) { OpenMonitor.request() }
+                            }
+                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                        } else {
+                            GlassSegmentedTabs(
+        """), "the tabs must be the gate's else branch, under the notices")
+        XCTAssertEqual(window.components(separatedBy: "GlassSegmentedTabs(\n").count - 1, 1,
+                       "a second tab strip would escape the gate")
+        XCTAssertTrue(window.contains("""
+                    GlassPane {
+                        // An empty branch would leave the pane nothing to draw, and
+                        // it would vanish while the layout still reserved its width.
+                        if model.requiresOnboarding {
+                            Color.clear
+                        } else {
+                            switch tab {
+        """), "the inspector's write controls must not show while onboarding is required")
+    }
+
+    /// Finishing first run closes it and opens the Monitor on Home.
+    func test_finishingFirstRunOpensTheMonitor() throws {
+        let firstRun = try Self.text("Views/Monitor/FirstRunViews.swift")
+        XCTAssertTrue(firstRun.contains("dismissWindow(id: WindowID.firstRun)"))
+        XCTAssertTrue(firstRun.contains("OpenMonitor.request(.home(.overview))"))
+        XCTAssertTrue(firstRun.contains("""
+                .onChange(of: model.requiresOnboarding, initial: true) { _, requires in
+                    guard !requires else { return }
+                    dismissWindow(id: WindowID.firstRun)
+                    OpenMonitor.request(.home(.overview))
+                }
+        """), "the hand-off must follow requiresOnboarding turning false, on the always-present container")
+    }
+
+    /// A tall step (Uses with many scopes) scrolls inside the first-run
+    /// window: the pane takes the window's height rather than its step's,
+    /// so the step's own ScrollView has a bound to scroll within.
+    func test_aTallFirstRunStepScrollsInsideTheWindow() throws {
+        let firstRun = try Self.text("Views/Monitor/FirstRunViews.swift")
+        XCTAssertFalse(firstRun.contains("fixedSize("), "a vertical fixedSize grows the pane past the window")
+        XCTAssertTrue(firstRun.contains("""
+                        .frame(width: FirstRunProgress.paneWidth)
+                        .padding(.vertical, GlassTokens.Space.windowPadding * 3)
+        """), "the pane is bounded by the window, less the scene's margin")
+    }
+
+    /// The launch opens a window only once the core has said enough to
+    /// choose: never from the placeholder status of a running daemon. A
+    /// daemon that needs its folders, or refused, has no status to wait for.
+    func test_theLaunchWaitsForTheCoreToAnswer() {
+        XCTAssertFalse(LaunchRouting.launchOpens(startup: .starting, statusAnswered: false))
+        XCTAssertFalse(LaunchRouting.launchOpens(startup: .starting, statusAnswered: true))
+        XCTAssertFalse(LaunchRouting.launchOpens(startup: .running, statusAnswered: false))
+        XCTAssertTrue(LaunchRouting.launchOpens(startup: .running, statusAnswered: true))
+        XCTAssertTrue(LaunchRouting.launchOpens(startup: .needsRoots, statusAnswered: false))
+        XCTAssertTrue(LaunchRouting.launchOpens(startup: .refused("no"), statusAnswered: false))
+    }
+
+    /// The placeholder status is not an answer; the first reply is.
+    func test_statusIsAnsweredOnlyByAReply() {
+        let model = AppModel()
+        XCTAssertFalse(model.statusAnswered)
+        model.setStatusForTesting(DaemonStatus(
+            schemaVersion: "1.1", loggedIn: false, tenantID: nil, consentScopes: [], paused: false,
+            queueDepth: 0, nextDigestAt: nil, health: DaemonHealth(lastErrorLabel: nil, since: nil)))
+        XCTAssertTrue(model.statusAnswered)
+    }
+
+    /// The launch request is made once, from the always-present label, and
+    /// never over a destination an earlier opener (an invite link, a
+    /// notification) already asked for.
+    func test_theLaunchOpensOnceWithoutOverridingAnEarlierRequest() throws {
+        let main = try Self.text("TraceCommonsAppMain.swift")
+        XCTAssertTrue(main.contains("""
+                label
+                    .task { launch() }
+                    .onChange(of: LaunchRouting.launchOpens(startup: model.startup, statusAnswered: model.statusAnswered),
+                              initial: true) { _, ready in
+                        openAtLaunch(ready)
+                    }
+        """), "the launch request must hang off the always-present label")
+        XCTAssertTrue(main.contains("""
+                guard ready, !openedAtLaunch else { return }
+                openedAtLaunch = true
+                guard navigation.pending == nil else { return }
+                OpenMonitor.request()
+        """), "the launch must open once, and never over an earlier destination")
+    }
+
     /// D-11: services no longer wait for the main window to leave Insights;
     /// the first request starts them, once.
     func test_servicesStartOnTheFirstRequestWhateverTheSection() {

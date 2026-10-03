@@ -93,8 +93,15 @@ final class AppModel: ObservableObject {
     /// An invite link arrived before the config directory was known, so the
     /// watch-only marker it takes back is cleared once it is.
     private var inviteAwaitsConfigDirectory = false
+    /// Whether the daemon has answered `status` (or sent a snapshot). Until
+    /// then `status` is the placeholder, and its `loggedIn: false` is not an
+    /// answer; a failed read leaves this false.
+    @Published private(set) var statusAnswered = false
     @Published private(set) var status: DaemonStatus = .unknown {
         didSet {
+            // Every write is a daemon reply: `publishIfChanged` never writes
+            // the placeholder back, and a reply carries its schema version.
+            if !statusAnswered { statusAnswered = true }
             // Worded across the ABI once per notice the daemon sends, not on
             // every re-render of the card.
             if status.legacyInviteMigration != oldValue.legacyInviteMigration {

@@ -14,6 +14,9 @@ import TCShellCore
 /// Every label here is a single word or comes from the Rust core
 /// (`ShellWordingTests`).
 struct MonitorWindowView: View {
+    /// The gate's button, which opens first run: the core's first-run
+    /// Continue. With no table the word is empty, never a Swift fallback.
+    static let openFirstRun = TCCoreCopy.firstRunCopyJSON().flatMap(FirstRunCopy.decode)?.frame.continueButton ?? ""
     enum Tab: String, CaseIterable, Identifiable {
         case home = "Home"
         case inference = "Inference"
@@ -148,18 +151,22 @@ struct MonitorWindowView: View {
             GlassPane {
                 // An empty branch would leave the pane nothing to draw, and
                 // it would vanish while the layout still reserved its width.
-                switch tab {
-                case .traces:
-                    SessionInspectorView(store: traces, entry: selectedEntry)
-                case .inference:
-                    PrivateAIInspectorView(store: inference, destinationLabel: model.privateInferenceCopy?.destination)
-                case .home:
-                    // History's selected row, while it is still listed; the
-                    // record as a whole otherwise.
-                    if homePage == .history, let row = selectedHistoryRow {
-                        HistoryDetailInspector(row: row)
-                    } else {
-                        HomeSummaryInspector(store: home)
+                if model.requiresOnboarding {
+                    Color.clear
+                } else {
+                    switch tab {
+                    case .traces:
+                        SessionInspectorView(store: traces, entry: selectedEntry)
+                    case .inference:
+                        PrivateAIInspectorView(store: inference, destinationLabel: model.privateInferenceCopy?.destination)
+                    case .home:
+                        // History's selected row, while it is still listed; the
+                        // record as a whole otherwise.
+                        if homePage == .history, let row = selectedHistoryRow {
+                            HistoryDetailInspector(row: row)
+                        } else {
+                            HomeSummaryInspector(store: home)
+                        }
                     }
                 }
             }
@@ -304,6 +311,7 @@ private struct MonitorMainPane<Content: View>: View {
     /// The window is too narrow for the map: the toggle shows it hidden and
     /// cannot show it, and widening the window brings back the preference.
     @Environment(\.glassMapCompacted) private var mapCompacted
+    @EnvironmentObject private var model: AppModel
     /// Half the unified title bar's 52pt height.
     static var lightsCentre: CGFloat { 26 }
 
@@ -335,19 +343,29 @@ private struct MonitorMainPane<Content: View>: View {
                 // hold during monitor use is told whatever the map and the
                 // inspector are doing.
                 ShellNotices()
-                GlassSegmentedTabs(
-                    String(localized: "Monitor", comment: "Monitor tabs name"),
-                    selection: $tab,
-                    segments: MonitorWindowView.Tab.allCases.map { item in
-                        GlassSegment(
-                            item.title, value: item,
-                            badgeValue: item == .traces ? tracesBadge : nil,
-                            dot: item == .inference ? inferenceDot : item == .traces ? tracesDot : nil,
-                            accessibilityValue: item == .inference
-                                ? inferenceDescription : item == .traces ? tracesDescription : nil)
-                    })
-                content()
+                // No tab before onboarding is done: its screens act on
+                // consent that has not been given. The button opens first
+                // run, which is where every request goes until then.
+                if model.requiresOnboarding {
+                    GlassNotice(tone: .ask, title: MonitorWords.signedOut) {
+                        Button(MonitorWindowView.openFirstRun) { OpenMonitor.request() }
+                    }
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                } else {
+                    GlassSegmentedTabs(
+                        String(localized: "Monitor", comment: "Monitor tabs name"),
+                        selection: $tab,
+                        segments: MonitorWindowView.Tab.allCases.map { item in
+                            GlassSegment(
+                                item.title, value: item,
+                                badgeValue: item == .traces ? tracesBadge : nil,
+                                dot: item == .inference ? inferenceDot : item == .traces ? tracesDot : nil,
+                                accessibilityValue: item == .inference
+                                    ? inferenceDescription : item == .traces ? tracesDescription : nil)
+                        })
+                    content()
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                }
             }
         }
     }
