@@ -17,6 +17,7 @@ final class GlassSurfaceRulesTests: XCTestCase {
         "Views/Settings/StartupSection.swift",
         "Views/Settings/WatchingSection.swift",
         "Views/Settings/ConsentSection.swift",
+        "Views/Settings/PublicProfileSection.swift",
         "Views/Settings/ChangesSection.swift",
         "Views/Settings/SettingsStateRow.swift",
     ]

@@ -647,7 +647,7 @@ struct SettingsContent: View {
         let problems = PublicProfileCopyCheck.failures()
         if !problems.isEmpty {
             VStack(alignment: .leading, spacing: TC.Space.xs) {
-                Text("Do not trust the public-profile wording on this screen.")
+                Text(SettingsLegacyWords.doNotTrustProfileWording)
                     .font(TC.Font_.cardTitle)
                 ForEach(problems, id: \.self) { problem in
                     Text(problem).font(TC.Font_.footnote)
@@ -2027,21 +2027,12 @@ private struct GoPublicDialog: View {
         HStack(alignment: .top, spacing: 0) {
             column(
                 title: PublicProfileCopy.publishedHeading,
-                lines: [
-                    "Your handle — real handles only, no pseudonyms.",
-                    "Aggregate counts: accepted, novelty credit, accept rate.",
-                    "The date you went public.",
-                    "Your bio, if you write one."
-                ]
+                lines: SettingsLegacyWords.publishedLines
             )
             Rectangle().fill(CommunityBrand.ink).frame(width: CommunityBrand.Metric.rule)
             column(
                 title: PublicProfileCopy.neverHeading,
-                lines: [
-                    "Your traces or anything in them.",
-                    "Per-trace data of any kind.",
-                    "Anything about sessions you didn't send."
-                ]
+                lines: SettingsLegacyWords.neverLines
             )
         }
         .fixedSize(horizontal: false, vertical: true)
@@ -2183,6 +2174,18 @@ enum SettingsLegacyWords {
     static let credit = "Credit"
     static let alwaysOn = "always on"
     static let nothingPreselected = "Nothing here is pre-selected on your behalf."
+    static let publishedLines = [
+        "Your handle — real handles only, no pseudonyms.",
+        "Aggregate counts: accepted, novelty credit, accept rate.",
+        "The date you went public.",
+        "Your bio, if you write one."
+    ]
+    static let neverLines = [
+        "Your traces or anything in them.",
+        "Per-trace data of any kind.",
+        "Anything about sessions you didn't send."
+    ]
+    static let doNotTrustProfileWording = "Do not trust the public-profile wording on this screen."
     static let auditHeading = SettingsContent.auditHeading
     static let nothingChanged = "Nothing has been changed."
     static func auditSentence(_ action: String, project: String?) -> String {

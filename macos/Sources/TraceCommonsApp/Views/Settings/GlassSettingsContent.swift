@@ -35,10 +35,6 @@ struct GlassSettingsContent: View {
 // Stubs: each later task replaces its stub with the real section file and
 // deletes the stub here. Until then the legacy body draws the section.
 
-struct PublicProfileSection: View {
-    var body: some View { SettingsContent(section: .publicProfile) }
-}
-
 struct WatchedFoldersSection: View {
     var body: some View { SettingsContent(section: .watchedFolders) }
 }
