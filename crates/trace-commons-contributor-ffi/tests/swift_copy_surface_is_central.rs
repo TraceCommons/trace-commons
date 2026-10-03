@@ -37,8 +37,11 @@ fn swift_root() -> PathBuf {
 
 fn read(rel: &str) -> String {
     let path = swift_root().join(rel);
+    // Normalised to LF: the Windows runner checks sources out with CRLF,
+    // and the checks below search for "\n"-delimited text.
     std::fs::read_to_string(&path)
         .unwrap_or_else(|error| panic!("{} is unreadable: {error}", path.display()))
+        .replace("\r\n", "\n")
 }
 
 fn visit_swift(dir: &Path, found: &mut Vec<PathBuf>) {
