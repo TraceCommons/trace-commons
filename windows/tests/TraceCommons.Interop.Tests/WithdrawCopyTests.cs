@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Text.Json;
 using TraceCommons.Interop;
 using Xunit;
@@ -300,10 +301,32 @@ public sealed class WithdrawCopyTests
         Assert.False(WithdrawCopy.OffersWithdrawal("accepted", null));
         Assert.False(WithdrawCopy.OffersWithdrawal("accepted", "   "));
 
-        foreach (string status in new[] { "submitted", "quarantined", "accepted", "something-new" })
+        // macOS's allowlist (ContributionStatusPresentation.openValues).
+        foreach (string status in new[]
+                 {
+                     "submitted", "received", "accepted", "quarantined",
+                     "awaiting_pii_backstop", "rejected",
+                 })
         {
-            Assert.True(WithdrawCopy.OffersWithdrawal(status, "sub-1"));
+            Assert.True(WithdrawCopy.OffersWithdrawal(status, "sub-1"), status);
         }
+
+        // No status reported yet is not terminal, as on macOS.
+        Assert.True(WithdrawCopy.OffersWithdrawal(null, "sub-1"));
+    }
+
+    [Theory]
+    [InlineData("withdrawn")]
+    [InlineData("revoked")]
+    [InlineData("purged")]
+    [InlineData("expired")]
+    [InlineData("something-new")]
+    [InlineData("")]
+    public void AClosedOrUnrecognisedStatusIsNotOfferedWithdrawal(string status)
+    {
+        // Fails closed, as macOS does: a status from a newer daemon is
+        // treated as terminal, so Withdraw is not offered on it.
+        Assert.False(WithdrawCopy.OffersWithdrawal(status, "sub-1"));
     }
 
     [Fact]
@@ -413,13 +436,40 @@ public sealed class HistoryCopyTests
     [Theory]
     [InlineData("accepted", "In the commons")]
     [InlineData("submitted", "Waiting to be scored")]
-    [InlineData("a-status-from-the-future", "Waiting to be scored")]
     [InlineData(null, "Waiting to be scored")]
-    public void AnUnknownStatusDegradesToWaitingRatherThanToAFailure(
-        string? status,
-        string expected)
+    public void AKnownStatusReadsAsItsOwnWord(string? status, string expected)
     {
         Assert.Equal(expected, HistoryCopy.StatusWord(status));
+    }
+
+    [Theory]
+    [InlineData("a-status-from-the-future")]
+    [InlineData("revoked")]
+    [InlineData("")]
+    public void AnUnknownStatusReadsAsTheCoresStatusUnavailable(string status)
+    {
+        // Never "Waiting to be scored": that renders an absent signal as a
+        // healthy in-flight state.
+        string? fromCore = HistoryStatusCopyFromCore();
+        Assert.Equal("Status unavailable", fromCore);
+        Assert.Equal(fromCore, HistoryCopy.StatusWord(status));
+    }
+
+    [Fact]
+    public void TheUnavailableLabelIsReadFromTheCoreNotTypedHere()
+    {
+        string source = File.ReadAllText(Path.Combine(
+            AppContext.BaseDirectory, "shell-source", "TraceCommons.Interop", "HistoryCopy.cs.txt"));
+        Assert.DoesNotContain("\"Status unavailable\"", source, StringComparison.Ordinal);
+    }
+
+    /// <summary>The disclosure bundle's <c>history_ui.status_unavailable</c>, read raw.</summary>
+    private static string? HistoryStatusCopyFromCore()
+    {
+        string? json = NativeMethods.TakeOwnedString(NativeMethods.tc_contributor_disclosure_copy_json());
+        Assert.NotNull(json);
+        using var doc = JsonDocument.Parse(json!);
+        return doc.RootElement.GetProperty("history_ui").GetProperty("status_unavailable").GetString();
     }
 
     [Fact]

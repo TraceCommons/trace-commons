@@ -61,7 +61,8 @@ final class ShellWordingTests: XCTestCase {
         "TraceCommonsApp/Views/BrandMark.swift": 1,
         "TraceCommonsApp/Views/ConsentScopesView.swift": 7,
         "TraceCommonsApp/Views/CreditRecordView.swift": 9,
-        "TraceCommonsApp/Views/HistoryView.swift": 26,
+        // Lowered from 26: an unrecognised status reads the core's label.
+        "TraceCommonsApp/Views/HistoryView.swift": 25,
         "TraceCommonsApp/Views/MainWindowView.swift": 14,
         "TraceCommonsApp/Views/MenuBarView.swift": 11,
         "TraceCommonsApp/Views/OnboardingConnectView.swift": 7,

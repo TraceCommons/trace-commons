@@ -1,4 +1,5 @@
 using System;
+using System.Text.Json;
 
 namespace TraceCommons.Interop;
 
@@ -31,7 +32,7 @@ public static class HistoryCopy
     /// <c>daemon::history::mark_withdrawn</c> writes it, once a withdrawal
     /// has been confirmed. Matched as ordinal strings rather than parsed into
     /// an enum, because a status this build has never heard of must degrade to
-    /// "waiting to be scored" rather than fail.
+    /// the core's <see cref="StatusUnavailable"/> label rather than fail.
     /// </remarks>
     public const string StatusSubmitted = "submitted";
 
@@ -149,13 +150,52 @@ public static class HistoryCopy
     /// and the chips use, so a badge on a record and a card at the top of the
     /// screen cannot say different things about one state.
     /// </summary>
+    /// <remarks>
+    /// No status reported yet (<c>null</c>) reads as waiting, as macOS treats
+    /// it as open. Any other status this build has no word for reads as
+    /// <see cref="StatusUnavailable"/>, never as "Waiting to be scored":
+    /// that would render an absent signal as a healthy in-flight state.
+    /// </remarks>
     public static string StatusWord(string? status) => status switch
     {
+        null => WaitingToBeScored,
+        StatusSubmitted => WaitingToBeScored,
         StatusAccepted => InTheCommons,
         StatusQuarantined => QuarantineHeading,
         StatusWithdrawn => WithdrawnByYou,
-        _ => WaitingToBeScored,
+        _ => StatusUnavailable,
     };
+
+    private static readonly Lazy<string> StatusUnavailableFromCore = new(ReadStatusUnavailable);
+
+    /// <summary>
+    /// The label on a status this build does not recognise: the core's
+    /// <c>history_copy::STATUS_UNAVAILABLE</c>, read from the disclosure
+    /// bundle's <c>history_ui.status_unavailable</c>
+    /// (<c>tc_contributor_disclosure_copy_json</c>). The same words every
+    /// other shell shows. Empty, so the chip says nothing rather than
+    /// something untrue, only if the core could not produce the bundle.
+    /// </summary>
+    public static string StatusUnavailable => StatusUnavailableFromCore.Value;
+
+    private static string ReadStatusUnavailable()
+    {
+        string? json = NativeMethods.TakeOwnedString(NativeMethods.tc_contributor_disclosure_copy_json());
+        if (string.IsNullOrEmpty(json)) return string.Empty;
+        try
+        {
+            using JsonDocument doc = JsonDocument.Parse(json);
+            return doc.RootElement.TryGetProperty("history_ui", out JsonElement history)
+                && history.TryGetProperty("status_unavailable", out JsonElement label)
+                && label.ValueKind == JsonValueKind.String
+                ? label.GetString() ?? string.Empty
+                : string.Empty;
+        }
+        catch (JsonException)
+        {
+            return string.Empty;
+        }
+    }
 
     /// <summary>
     /// The record's own figures, or null when there is no figure to state.
