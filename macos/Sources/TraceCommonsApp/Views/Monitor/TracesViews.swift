@@ -79,15 +79,28 @@ struct TracesTreeView: View {
             ForEach(TracesHealth.banners(
                 phase: store.phase, status: store.status, words: store.words, coreDown: TracesHealth.coreDownLine)
             ) { GlassHealthBanner(banner: $0) }
+            // Undo and the consent offers, here rather than in the
+            // inspector, so they are on screen with the inspector hidden.
+            TracesOffersBar(store: store)
             if store.phase == .loading && isEmpty {
                 ProgressView().controlSize(.small).frame(maxWidth: .infinity)
             } else if isEmpty && store.phase == .loaded {
-                Image(systemName: "tray")
-                    .glassGlyph(22)
-                    .foregroundStyle(GlassColor.textTertiary)
-                    .frame(maxWidth: .infinity)
-                    .padding(.top, GlassTokens.Space.s10)
-                    .accessibilityLabel(MonitorWindowView.Tab.traces.title)
+                VStack(spacing: GlassTokens.Space.s2) {
+                    Image(systemName: "tray")
+                        .glassGlyph(22)
+                        .foregroundStyle(GlassColor.textTertiary)
+                        .accessibilityLabel(MonitorWindowView.Tab.traces.title)
+                    Text(QueueLegacyWords.nothingWaiting)
+                        .glassType(GlassTokens.TypeScale.bodyStrong)
+                        .foregroundStyle(GlassColor.textPrimary)
+                    Text(QueueLegacyWords.nothingWaitingDetail)
+                        .glassType(GlassTokens.TypeScale.caption)
+                        .foregroundStyle(GlassColor.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: .infinity)
+                .padding(.top, GlassTokens.Space.s10)
             } else {
                 ScrollViewReader { proxy in
                     ScrollView {
@@ -476,10 +489,6 @@ struct SessionInspectorView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
-            // Above the selection, never inside it: selecting another
-            // session must not hide an Undo that can still take something
-            // back, and an Undo that failed is said here, beside it.
-            pendingUndo
             if let entry {
                 ScrollView {
                     VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
@@ -522,38 +531,6 @@ struct SessionInspectorView: View {
             } else {
                 Spacer(minLength: 0)
             }
-        }
-    }
-
-    /// The contribution and the keep that can still be taken back, each
-    /// with the core's words and any refusal of its undo.
-    @ViewBuilder
-    private var pendingUndo: some View {
-        if let contributed = store.lastContributed, let words {
-            GlassNotice(tone: .ask, title: contributed.toast.line) {
-                if contributed.toast.offerUndo {
-                    Button(words.undoContribute) {
-                        Task { await store.perform(.undoContribute, on: contributed.entryId) }
-                    }
-                    .buttonStyle(GlassButtonStyle(.glass))
-                    .disabled(store.acting.contains(contributed.entryId))
-                }
-            }
-            refusal(for: contributed.entryId)
-        }
-        if let kept = store.lastKept, let words {
-            Button(words.undoKeep) { Task { await store.perform(.undoKeep, on: kept) } }
-                .buttonStyle(GlassButtonStyle(.glass))
-                .disabled(store.acting.contains(kept))
-            refusal(for: kept)
-        }
-    }
-
-    /// The core's words for a refused action on `entryId`, if there is one.
-    @ViewBuilder
-    private func refusal(for entryId: String) -> some View {
-        if let refused = store.actionError, refused.entryId == entryId, let line = store.message(for: refused.error) {
-            GlassNotice(tone: .outside, title: line) { EmptyView() }
         }
     }
 
@@ -628,7 +605,7 @@ struct SessionInspectorView: View {
                 .foregroundStyle(GlassColor.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
-        refusal(for: entry.entryId)
+        TracesRefusal(store: store, entryId: entry.entryId)
         if let words {
             HStack(spacing: GlassTokens.Space.s4) {
                 Button(words.dismiss) { act(.dismiss, entry) }

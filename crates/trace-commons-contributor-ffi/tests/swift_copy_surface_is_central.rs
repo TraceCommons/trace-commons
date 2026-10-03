@@ -890,6 +890,13 @@ const SURFACES: &[(&str, &str, &str, &str, &str)] = &[
         "tc_arming_offer_copy_json",
     ),
     (
+        "arming offer in Traces",
+        "TraceCommonsApp/Views/Monitor/TracesOffers.swift",
+        "TCCoreCopy.armingOfferCopyJSON",
+        "TCBridge/TCCoreCopy.swift",
+        "tc_arming_offer_copy_json",
+    ),
+    (
         "arming confirmation",
         "TraceCommonsApp/Views/Settings/ProjectsSection.swift",
         "TCCoreCopy.armingOfferCopyJSON",
