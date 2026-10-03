@@ -81,6 +81,14 @@ struct FlowMapView: View {
             case .dashed:
                 context.stroke(path, with: .color(GlassColor.ink((strong ? 0.45 : 0.18) * arc.dim)),
                                style: StrokeStyle(lineWidth: width, dash: [5 * fit.scale, 5 * fit.scale]))
+            case .shared:
+                // Lit but still: calls in this family arrived, not
+                // attributable to this tool.
+                context.stroke(path, with: .color(GlassTokens.Color.statusOn.color.opacity(0.35 * arc.dim)), lineWidth: width)
+            case .unknown:
+                // The core could not say: dotted, never solid.
+                context.stroke(path, with: .color(.white.opacity(0.18 * arc.dim)),
+                               style: StrokeStyle(lineWidth: width, lineCap: .round, dash: [0.5 * fit.scale, 4 * fit.scale]))
             case .flowing where !state.isHealthy:
                 // Paused, unknown or stale: still, and dashed, not live.
                 context.stroke(path, with: .color(GlassColor.ink((strong ? 0.45 : 0.25) * arc.dim)),
@@ -137,9 +145,15 @@ struct FlowMapView: View {
         case .harness(let tool, _):
             layer.fill(disc, with: .color(GlassColor.ink(0.12)))
             if let tool { mark(tool, centre: centre, side: 16 * fit.scale, in: &layer) }
-        case .destination(let answering):
-            layer.fill(disc, with: .color(answering ? GlassTokens.Color.mapCredentialOn.color : GlassTokens.Color.mapNodeOff.color))
-            if answering { ring(disc, radius: radius, centre: centre, in: &layer, colour: GlassTokens.Color.statusOn.color.opacity(0.35)) }
+        case .destination(let lamp):
+            let lit = lamp == .answering || lamp == .running
+            layer.fill(disc, with: .color(lit ? GlassTokens.Color.mapCredentialOn.color : GlassTokens.Color.mapNodeOff.color))
+            if lamp == .answering { ring(disc, radius: radius, centre: centre, in: &layer, colour: GlassTokens.Color.statusOn.color.opacity(0.35)) }
+            if lamp == .unknown {
+                // Unknown is not off: a dotted rim says the core did not say.
+                layer.stroke(disc, with: .color(.white.opacity(0.5)),
+                             style: StrokeStyle(lineWidth: 1.5 * fit.scale, lineCap: .round, dash: [0.5 * fit.scale, 4 * fit.scale]))
+            }
             // A key, not a shield: the node is the credential, and no
             // protection is claimed for it (#1146).
             layer.draw(Text(Image(systemName: "key.fill")).font(.system(size: 14 * fit.scale)).foregroundStyle(GlassColor.textPrimary), at: centre)

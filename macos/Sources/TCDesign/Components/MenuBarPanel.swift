@@ -296,14 +296,55 @@ public struct GlassDayGraph: View {
 /// heights halved), with a badge counting decisions owed over its
 /// bottom-right corner. Hidden badge at zero or unknown; grey while paused.
 public struct GlassMenuBarStrip: View {
+    /// What the strip can say about the data behind it. A strip never
+    /// draws a dead or unknown core as healthy.
+    public enum Condition: Equatable, Sendable {
+        /// Current data, watching.
+        case live
+        /// Current data, watching paused: grey bars.
+        case paused
+        /// The core reports trouble, or its decision count is unknown: the
+        /// bars as recorded, with the attention mark.
+        case attention
+        /// The core is down or not running, or the strip's data could not
+        /// be read: no bars are drawn from it, no badge, and the attention
+        /// mark.
+        case unavailable
+    }
+
     private let columns: [GlassDayColumn]
-    private let paused: Bool
+    private let condition: Condition
     private let badge: Int?
 
-    public init(columns: [GlassDayColumn], paused: Bool, badge: Int?) {
+    public init(columns: [GlassDayColumn], condition: Condition, badge: Int?) {
         self.columns = Array(columns.suffix(7))
-        self.paused = paused
+        self.condition = condition
         self.badge = badge
+    }
+
+    /// Each column's up and down bar heights. Unavailable is flat: data
+    /// that could not be read is never drawn as activity.
+    static func bars(_ columns: [GlassDayColumn], condition: Condition) -> [(up: CGFloat, down: CGFloat)] {
+        guard condition != .unavailable else { return columns.map { _ in (2, 2) } }
+        let maximum = columns.map { Swift.max($0.up, $0.down) }.max() ?? 0
+        return columns.map { (height($0.up, max: maximum), height($0.down, max: maximum)) }
+    }
+
+    /// The badge drawn, if any: none when unavailable, since an unknown
+    /// count is never a number.
+    static func shownBadge(_ badge: Int?, condition: Condition) -> Int? {
+        guard condition != .unavailable, let badge, badge > 0 else { return nil }
+        return badge
+    }
+
+    /// Whether the attention mark is drawn.
+    static func showsAttention(_ condition: Condition) -> Bool {
+        condition == .attention || condition == .unavailable
+    }
+
+    /// Whether the bars are drawn grey.
+    static func grey(_ condition: Condition) -> Bool {
+        condition == .paused || condition == .unavailable
     }
 
     /// A strip bar: 2pt at least, 9pt at most, for a column's count.
@@ -313,16 +354,17 @@ public struct GlassMenuBarStrip: View {
     }
 
     public var body: some View {
-        let maximum = columns.map { Swift.max($0.up, $0.down) }.max() ?? 0
+        let bars = Self.bars(columns, condition: condition)
+        let grey = Self.grey(condition)
         HStack(spacing: 2) {
-            ForEach(columns) { column in
+            ForEach(Array(columns.enumerated()), id: \.element.id) { index, _ in
                 VStack(spacing: 0) {
                     RoundedRectangle(cornerRadius: 1)
-                        .fill(paused ? GlassTokens.Color.menuBarsPaused.color : GlassTokens.Color.dataShared.color)
-                        .frame(width: 2.5, height: Self.height(column.up, max: maximum))
+                        .fill(grey ? GlassTokens.Color.menuBarsPaused.color : GlassTokens.Color.dataShared.color)
+                        .frame(width: 2.5, height: bars[index].up)
                     RoundedRectangle(cornerRadius: 1)
-                        .fill(paused ? GlassTokens.Color.menuBarsPaused.color : GlassTokens.Color.dataKept.color)
-                        .frame(width: 2.5, height: Self.height(column.down, max: maximum))
+                        .fill(grey ? GlassTokens.Color.menuBarsPaused.color : GlassTokens.Color.dataKept.color)
+                        .frame(width: 2.5, height: bars[index].down)
                 }
                 .frame(height: 18, alignment: .center)
             }
@@ -330,11 +372,20 @@ public struct GlassMenuBarStrip: View {
         .padding(.horizontal, 4)
         .frame(height: 22)
         .overlay(alignment: .bottomTrailing) {
-            if let badge, badge > 0 {
+            if let badge = Self.shownBadge(badge, condition: condition) {
                 Text("\(badge)")
                     .glassGlyph(10, weight: .bold)
                     .foregroundStyle(Color.white)
                     .padding(.horizontal, 4)
+                    .frame(minWidth: 16, minHeight: 16)
+                    .background(Capsule().fill(GlassTokens.Color.menuModeNever.color))
+                    .overlay(Capsule().stroke(GlassTokens.Color.menuBadgeEdge.color, lineWidth: 1.5))
+                    .offset(x: 6, y: 2)
+            } else if Self.showsAttention(condition) {
+                // The shipping mark's attention state, in the badge's place.
+                Text("!")
+                    .glassGlyph(10, weight: .bold)
+                    .foregroundStyle(Color.white)
                     .frame(minWidth: 16, minHeight: 16)
                     .background(Capsule().fill(GlassTokens.Color.menuModeNever.color))
                     .overlay(Capsule().stroke(GlassTokens.Color.menuBadgeEdge.color, lineWidth: 1.5))

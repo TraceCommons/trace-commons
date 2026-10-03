@@ -78,7 +78,9 @@ public struct GlassChip: View {
 
 /// A tinted verdict pill (Contributed, Under review, Taken back, Drafts).
 public struct GlassTag: View {
-    public enum Tone: Sendable, Equatable { case neutral, on, ask, outside, accent }
+    /// `failed` is a check that failed: the outside tint, outlined, so it
+    /// is never the same pill as `outside` and never colour only.
+    public enum Tone: Sendable, Equatable { case neutral, on, ask, outside, failed, accent }
 
     private let title: String
     private let tone: Tone
@@ -93,7 +95,7 @@ public struct GlassTag: View {
         case .neutral: (GlassTokens.Color.tintNeutral, GlassColor.textSecondary)
         case .on: (GlassTokens.Color.tintOn, GlassTokens.Color.statusOn.color)
         case .ask: (GlassTokens.Color.tintAsk, GlassTokens.Color.statusAsk.color)
-        case .outside: (GlassTokens.Color.tintOutside, GlassTokens.Color.statusOutside.color)
+        case .outside, .failed: (GlassTokens.Color.tintOutside, GlassTokens.Color.statusOutside.color)
         case .accent: (GlassTokens.Color.tintAccent, GlassColor.accentText)
         }
         Text(title)
@@ -102,6 +104,7 @@ public struct GlassTag: View {
             .padding(.vertical, 3)
             .padding(.horizontal, 8)
             .background(Capsule().fill(fill.color))
+            .overlay(Capsule().strokeBorder(ink, lineWidth: tone == .failed ? 1 : 0))
     }
 }
 

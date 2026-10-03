@@ -72,9 +72,64 @@ final class MenuBarGlassPanelTests: XCTestCase {
             pending: store.pending, history: store.history, calls: store.calls, statusLabel: { _ in nil })
         XCTAssertLessThanOrEqual(rows.count, 3)
         XCTAssertEqual(rows.map(\.at), rows.map(\.at).sorted(by: >))
-        for row in rows where row.kind == .call {
-            XCTAssertNotNil(row.trailing)
+    }
+
+    /// An outside call carries its proof label unless it was verified; a
+    /// routed call is not recent activity.
+    func test_anOutsideCallCarriesItsProofLabel() throws {
+        let decode = { (json: String) in
+            try DaemonDataDecoding.decoder().decode(DaemonData.InferenceCall.self, from: Data(json.utf8))
         }
+        let unproven = try decode(#"{"id":1,"at":"2026-09-30T09:00:00Z","tool":"codex","family":"openai","model":"m","route":"outside","cost":null,"proof":"unattested"}"#)
+        let verified = try decode(#"{"id":2,"at":"2026-09-30T08:00:00Z","tool":"codex","family":"openai","model":"m","route":"outside","cost":null,"proof":"verified"}"#)
+        let routed = try decode(#"{"id":3,"at":"2026-09-30T10:00:00Z","tool":"codex","family":"openai","model":"m","route":"routed","cost":null,"proof":"unattested"}"#)
+        let rows = MenuPanelData.recent(pending: [], history: [], calls: [unproven, verified, routed], statusLabel: { _ in nil })
+        XCTAssertEqual(rows.map(\.id), ["call:1", "call:2"])
+        XCTAssertEqual(rows.first?.trailing, InferenceWords.proof(.unattested))
+        XCTAssertNil(rows.last?.trailing)
+    }
+
+    // MARK: Live data and the strip
+
+    /// With no client, after a failed read, or once the event stream ends,
+    /// the store's data is stale; a full read clears it.
+    func test_theStoreMarksItsDataStale() async {
+        let none = MenuPanelStore(client: nil)
+        await none.load()
+        XCTAssertTrue(none.stale)
+
+        let store = MenuPanelStore(client: SampleDaemonClient(.normalDay))
+        XCTAssertTrue(store.stale, "nothing read yet")
+        await store.load()
+        XCTAssertFalse(store.stale)
+        store.attach(SampleDaemonClient(.coreDown))
+        XCTAssertTrue(store.stale)
+        await store.load()
+        XCTAssertTrue(store.stale, "a failed read is stale, never the last values as current")
+    }
+
+    /// The strip is never live unless the daemon runs, the data is current
+    /// and the core is healthy with a known count.
+    func test_theStripIsDownWhenTheCoreIs() {
+        XCTAssertEqual(MenuPanelStatus.condition(decisionsOwed: 2, unhealthy: false, paused: false, available: false, stale: false), .unavailable)
+        XCTAssertEqual(MenuPanelStatus.condition(decisionsOwed: 2, unhealthy: false, paused: false, available: true, stale: true), .unavailable)
+        XCTAssertEqual(MenuPanelStatus.condition(decisionsOwed: 2, unhealthy: true, paused: false, available: true, stale: false), .attention)
+        XCTAssertEqual(MenuPanelStatus.condition(decisionsOwed: nil, unhealthy: false, paused: false, available: true, stale: false), .attention)
+        XCTAssertEqual(MenuPanelStatus.condition(decisionsOwed: 0, unhealthy: false, paused: true, available: true, stale: false), .paused)
+        XCTAssertEqual(MenuPanelStatus.condition(decisionsOwed: 0, unhealthy: false, paused: false, available: true, stale: false), .live)
+    }
+
+    /// The popover's store is the app's live client, never sample data,
+    /// outside tests and previews.
+    func test_thePanelUsesTheLiveClient() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Sources/TraceCommonsApp")
+        let main = try String(contentsOf: root.appendingPathComponent("TraceCommonsAppMain.swift"), encoding: .utf8)
+        XCTAssertTrue(main.contains("MenuPanelStore(client: nil)"))
+        XCTAssertFalse(main.contains("MenuPanelStore(client: MonitorWindowView.dataClient())"))
+        let panel = try String(contentsOf: root.appendingPathComponent("Views/Monitor/MenuBarGlassPanel.swift"), encoding: .utf8)
+        XCTAssertTrue(panel.contains("store.attach(model.daemonData)"))
     }
 
     // MARK: Badge

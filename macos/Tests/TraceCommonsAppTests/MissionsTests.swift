@@ -25,7 +25,7 @@ final class MissionsTests: XCTestCase {
         XCTAssertEqual(MissionFormat.count(nil), "—")
     }
 
-    /// M3: a credit range is pending credit, shown with the commons'
+    /// M3: a credit range is projected credit, shown with the commons'
     /// condition; a mission with no range shows a dash.
     func test_creditIsPendingAndCarriesItsCondition() throws {
         let catalogue = try catalogue(#"""
@@ -38,6 +38,20 @@ final class MissionsTests: XCTestCase {
         XCTAssertEqual(MissionFormat.credit(catalogue.missions[0], in: catalogue), "5–20 points")
         XCTAssertEqual(MissionFormat.credit(catalogue.missions[1], in: catalogue), "3 points")
         XCTAssertEqual(MissionFormat.credit(catalogue.missions[2], in: catalogue), "—")
+        XCTAssertTrue(MissionFormat.showsProjected(catalogue))
+    }
+
+    /// Mission credit is labelled projected, never pending: Pending is
+    /// submitted credit still being scored, and a mission is apart from the
+    /// reward ledger. The core says projected credit is not yet earned.
+    func test_missionCreditIsProjectedNeverPending() throws {
+        let words = try XCTUnwrap(MonitorWords.table)
+        XCTAssertFalse(words.projected.isEmpty)
+        XCTAssertNotEqual(words.projected, words.pending)
+        XCTAssertFalse(words.projectedNote.isEmpty)
+        let source = try String(contentsOf: Self.source("Views/Monitor/MissionsViews.swift"), encoding: .utf8)
+        XCTAssertFalse(source.contains("MonitorWords.pending"), "a mission's credit is never labelled Pending")
+        XCTAssertTrue(source.contains("MonitorWords.projected"))
     }
 
     /// M3: with no statement of what the credit waits on, no range is shown
@@ -49,6 +63,7 @@ final class MissionsTests: XCTestCase {
         """#)
         XCTAssertNil(MissionFormat.condition(catalogue))
         XCTAssertEqual(MissionFormat.credit(catalogue.missions[0], in: catalogue), "—")
+        XCTAssertFalse(MissionFormat.showsProjected(catalogue))
     }
 
     /// M2: the Missions page has no action of its own. Nothing on it can

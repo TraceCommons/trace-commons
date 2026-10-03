@@ -24,6 +24,10 @@ final class TracesStore {
     /// The last `status` read; nil when it has not been read or failed. The
     /// badge is its `decisions_owed`, never `queue_depth`.
     private(set) var status: DaemonData.Status?
+    /// The last `tool_destinations` read: the core's verdict on where each
+    /// tool's sessions go. Nil when unread or unreadable, and then the map
+    /// draws no session flow at all.
+    private(set) var destinations: DaemonData.ToolDestinations?
     /// A review action (R7) in flight, by entry id.
     private(set) var acting: Set<String> = []
     /// The session last kept on this Mac, while its undo is offered.
@@ -201,6 +205,7 @@ final class TracesStore {
     func lost() {
         generation += 1
         status = nil
+        destinations = nil
         phase = .failed(.unreachable)
     }
 
@@ -214,19 +219,23 @@ final class TracesStore {
             // are unknown: no switch, never off, and the row says so.
             async let settings = try? client.settings()
             async let status = try? client.status()
+            async let destinations = try? client.toolDestinations()
             let built = TracesTree.build(
                 entries: try await entries, projects: try await projects.projects, settings: await settings,
                 scansWhenUnset: Self.scansWhenUnset)
             let read = await status
+            let routes = await destinations
             guard mine == generation else { return }
             tree = built
             self.status = read
+            self.destinations = routes
             phase = .loaded
         } catch {
             // An older failure never overwrites a newer read either.
             guard mine == generation else { return }
             phase = .failed(error as? DaemonDataError ?? .undecodable(method: "list_pending"))
             status = nil
+            destinations = nil
         }
     }
 

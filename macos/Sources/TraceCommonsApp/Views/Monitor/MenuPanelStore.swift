@@ -8,6 +8,12 @@ import TCShellCore
 /// `DaemonDataClient` like the other glass screens. The popover's actions
 /// (pause, resume, Private AI off) stay on `AppModel`, which the shipping
 /// menu already uses for them.
+///
+/// The client is the app's live one (`AppModel.daemonData`), attached by
+/// the menu-bar label when the daemon starts and detached when it stops;
+/// sample data reaches this store only from tests. With no client, or after
+/// any read fails, the data is `stale` and drawn as unavailable rather than
+/// as the last values.
 @MainActor
 @Observable
 final class MenuPanelStore {
@@ -16,15 +22,27 @@ final class MenuPanelStore {
     private(set) var kept: [DaemonData.QueueEntry] = []
     private(set) var history: [DaemonData.HistoryRow] = []
     private(set) var calls: [DaemonData.InferenceCall] = []
+    /// True until a load has read everything, and again whenever a read
+    /// fails, there is no client, or the client's event stream ends: what
+    /// is held is no longer current.
+    private(set) var stale = true
 
-    let client: any DaemonDataClient
+    private(set) var client: (any DaemonDataClient)?
 
-    init(client: any DaemonDataClient) {
+    init(client: (any DaemonDataClient)?) {
         self.client = client
+    }
+
+    /// Follows a new client (or none): the old data is stale until the
+    /// new one has been read.
+    func attach(_ client: (any DaemonDataClient)?) {
+        self.client = client
+        stale = true
     }
 
     func run() async {
         await load()
+        guard let client else { return }
         for await event in client.events() {
             if Task.isCancelled { break }
             switch event {
@@ -34,15 +52,35 @@ final class MenuPanelStore {
                 break
             }
         }
+        // The stream ended: the daemon went away.
+        if !Task.isCancelled { stale = true }
     }
 
-    /// Each read stands alone; a failed one keeps what was there.
+    /// Reads everything. A failed read marks the data stale rather than
+    /// keeping the last value as if it were current; a method the daemon
+    /// does not have yet is not a failure.
     func load() async {
-        if let value = try? await client.listProjects() { projects = value.projects }
-        if let value = try? await client.listPending(projectId: nil) { pending = value }
-        if let value = try? await client.listKept() { kept = value }
-        if let value = try? await client.listHistory(limit: HomeStore.historyLimit) { history = value }
-        if let value = try? await client.inferenceCalls(limit: 20, cursor: nil), value.readable { calls = value.calls }
+        guard let client else {
+            stale = true
+            return
+        }
+        var failed = false
+        func read<T>(_ call: () async throws -> T) async -> T? {
+            do { return try await call() } catch DaemonDataError.notAvailableYet {
+                return nil
+            } catch {
+                failed = true
+                return nil
+            }
+        }
+        if let value = await read({ try await client.listProjects() }) { projects = value.projects }
+        if let value = await read({ try await client.listPending(projectId: nil) }) { pending = value }
+        if let value = await read({ try await client.listKept() }) { kept = value }
+        if let value = await read({ try await client.listHistory(limit: HomeStore.historyLimit) }) { history = value }
+        if let value = await read({ try await client.inferenceCalls(limit: 20, cursor: nil) }) {
+            calls = value.readable ? value.calls : []
+        }
+        stale = failed
     }
 
     /// The graph's columns: contributed (shared) and kept, per day.

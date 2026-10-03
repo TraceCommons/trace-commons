@@ -123,7 +123,7 @@ struct MonitorWindowView: View {
             MonitorMapPane(
                 mapTab: $mapTab, privateAILabel: model.privateInferenceCopy?.destination,
                 traces: traces, inference: inference,
-                sentence: { HarnessSurface.stateSentence($0, calls: model.harnessCalls) })
+                sentence: { Self.rowSentence($0, copy: model.privateInferenceCopy, calls: model.harnessCalls) })
         } inspector: {
             GlassPane {
                 // An empty branch would leave the pane nothing to draw, and
@@ -134,7 +134,7 @@ struct MonitorWindowView: View {
                 case .inference:
                     PrivateAIInspectorView(
                         store: inference, destinationLabel: model.privateInferenceCopy?.destination,
-                        sentence: { HarnessSurface.stateSentence($0, calls: model.harnessCalls) })
+                        sentence: { Self.rowSentence($0, copy: model.privateInferenceCopy, calls: model.harnessCalls) })
                 case .home:
                     HomeSummaryInspector(store: home)
                 }
@@ -144,6 +144,15 @@ struct MonitorWindowView: View {
         .task { await traces.run() }
         .task { await inference.run() }
         .task { await home.run() }
+    }
+
+    /// The sentence one tool's row shows (`HarnessSurface.rowSentence`): a
+    /// tool that is not on this Mac gets the missing-tool sentence, never
+    /// the not-connected one. Without the core's Private AI copy a missing
+    /// tool says nothing rather than the wrong sentence.
+    static func rowSentence(_ row: HarnessRow, copy: PrivateInferenceCopy?, calls: HarnessCalls) -> String? {
+        guard let copy else { return row.installed ? HarnessSurface.stateSentence(row, calls: calls) : nil }
+        return HarnessSurface.rowSentence(row, copy: copy, calls: calls)
     }
 
     /// The Traces badge (R7): decisions owed, a dash when the core did not
@@ -315,14 +324,16 @@ private struct MonitorMapPane: View {
         switch shownTab {
         case .traces:
             FlowMapView(
-                scene: .traces(traces.tree), legend: [.autoUpload, .ask, .ignore], zoomable: true,
+                scene: .traces(traces.tree, gate: .init(state: tracesState, status: traces.status, destinations: traces.destinations)), legend: [.autoUpload, .ask, .ignore], zoomable: true,
                 accessibilityName: MonitorWindowView.Tab.traces.title, state: tracesState)
         case .privateAI:
             if let harnesses = inference.harnesses, let privateAILabel {
                 FlowMapView(
                     scene: .privateAI(
-                        harnesses, destinationLabel: privateAILabel, sentence: sentence,
-                        answering: { HarnessSurface.state($0, calls: model.harnessCalls) == .answering }),
+                        harnesses, destinationLabel: privateAILabel,
+                        privateAI: traces.destinations?.privateAi ?? traces.status?.privateInferenceState?.state,
+                        sentence: sentence,
+                        state: { HarnessSurface.state($0, calls: model.harnessCalls) }),
                     legend: [], zoomable: false, accessibilityName: privateAILabel)
             } else {
                 Color.clear
@@ -392,11 +403,15 @@ struct MonitorSettingsWindow: View {
             // One list with arrow-key selection, not a button per row.
             List(selection: Binding(get: { section }, set: { if let value = $0 { section = value } })) {
                 ForEach(SettingsSection.allCases) { item in
-                    if let title = item.title(model: model, compute: compute.snapshot?.title) {
-                        Label(title, systemImage: item.symbol)
-                            .lineLimit(2)
-                            .tag(item)
-                    }
+                    // A section whose copy has not loaded is a disabled
+                    // placeholder, never a missing row.
+                    let row = SettingsSection.ListRow.row(title: item.title(model: model, compute: compute.snapshot?.title))
+                    Label(row.text, systemImage: item.symbol)
+                        .lineLimit(2)
+                        .foregroundStyle(row.enabled ? .primary : .secondary)
+                        .accessibilityLabel(row.enabled ? row.text : MonitorWords.unknown)
+                        .selectionDisabled(!row.enabled)
+                        .tag(item)
                 }
             }
             .navigationSplitViewColumnWidth(min: 200, ideal: 230, max: 280)
