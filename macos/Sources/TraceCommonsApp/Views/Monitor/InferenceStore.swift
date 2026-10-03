@@ -31,6 +31,9 @@ final class InferenceStore {
     /// The app's live client (`AppModel.daemonData`), attached by the
     /// window when the daemon starts; nil while it is not running.
     private(set) var client: (any DaemonDataClient)?
+    /// Bumped by each attach; a read that started against an older client
+    /// is dropped when it answers, so it never writes over the new one.
+    private var generation = 0
 
     init(client: (any DaemonDataClient)?) {
         self.client = client
@@ -40,6 +43,7 @@ final class InferenceStore {
     /// drawn as current, so the tab is loading until the new one is read.
     func attach(_ client: (any DaemonDataClient)?) {
         self.client = client
+        generation += 1
         harnesses = nil
         calls = nil
         summary = nil
@@ -78,47 +82,54 @@ final class InferenceStore {
     }
 
     private func loadDestinations() async {
-        destinations = await read("tool_destinations", { try await $0.toolDestinations() })
+        await read("tool_destinations", { try await $0.toolDestinations() }) { self.destinations = $0 }
     }
 
     private func loadHarnesses() async {
-        if let value = await read("harness_list", { try await $0.harnessList() }) { harnesses = value }
+        await read("harness_list", { try await $0.harnessList() }) { if let value = $0 { self.harnesses = value } }
     }
 
     func loadCalls() async {
-        if let value = await read("inference_calls", { try await $0.inferenceCalls(limit: Self.pageSize, cursor: nil) }) {
-            calls = value
+        await read("inference_calls", { try await $0.inferenceCalls(limit: Self.pageSize, cursor: nil) }) {
+            if let value = $0 { self.calls = value }
         }
     }
 
     private func loadSummary() async {
-        if let value = await read("inference_summary", { try await $0.inferenceSummary() }) { summary = value }
+        await read("inference_summary", { try await $0.inferenceSummary() }) { if let value = $0 { self.summary = value } }
     }
 
-    /// One read, recording its failure by method. A provisional method the
+    /// One read, recording its failure by method, then `apply` with its
+    /// value (nil when it failed or is not there). A provisional method the
     /// live client does not have yet is not a failure to show: it is simply
-    /// not there.
+    /// not there. A read answered after another client was attached
+    /// changes nothing.
     private func read<T: Sendable>(
-        _ method: String, _ call: @Sendable (any DaemonDataClient) async throws -> T
-    ) async -> T? {
+        _ method: String, _ call: @Sendable (any DaemonDataClient) async throws -> T, apply: (T?) -> Void
+    ) async {
         guard let client else {
             failures[method] = .unreachable
-            return nil
+            apply(nil)
+            return
         }
+        let mine = generation
+        let result: Result<T, DaemonDataError>
         do {
-            let value = try await call(client)
-            failures[method] = nil
-            return value
-        } catch let error as DaemonDataError {
-            if case .notAvailableYet = error {
-                failures[method] = nil
-            } else {
-                failures[method] = error
-            }
-            return nil
+            result = .success(try await call(client))
         } catch {
-            failures[method] = .undecodable(method: method)
-            return nil
+            result = .failure(error as? DaemonDataError ?? .undecodable(method: method))
+        }
+        guard mine == generation else { return }
+        switch result {
+        case .success(let value):
+            failures[method] = nil
+            apply(value)
+        case .failure(.notAvailableYet):
+            failures[method] = nil
+            apply(nil)
+        case .failure(let error):
+            failures[method] = error
+            apply(nil)
         }
     }
 }

@@ -86,14 +86,16 @@ final class TracesStore {
         self.sampleUnknown = sampleUnknown
     }
 
-    /// Follows a new client (or none). The tree stays as the last one
-    /// reported, but loading, and the badge and routes read unknown until
-    /// the new client answers; a load still in flight from the old one is
-    /// dropped.
+    /// Follows a new client (or none). Nothing the old one reported is
+    /// drawn or acted on: the tree empties, the badge and routes read
+    /// unknown, and the tab is loading until the new client answers; a load
+    /// still in flight from the old one is dropped. (A failed read from the
+    /// same client still keeps the last tree.)
     func attach(_ client: (any DaemonDataClient)?) {
         self.client = client
         generation += 1
         phase = .loading
+        tree = TracesTree(tools: [], unplaced: [])
         status = nil
         destinations = nil
     }

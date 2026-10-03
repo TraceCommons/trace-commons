@@ -22,10 +22,15 @@ final class MonitorNavigationTests: XCTestCase {
             XCTAssertTrue(window.contains("\(store).attach(client)"), "\(store) is never attached to the live client")
         }
         XCTAssertTrue(window.contains(".task(id: model.liveData.map(ObjectIdentifier.init))"))
+        // The function's body: from its signature to the `#endif` that
+        // closes its debug-only branch.
         let sample = try XCTUnwrap(window.range(of: "static func sampleClient()"))
-        let body = window[sample.lowerBound...].prefix(600)
+        let end = try XCTUnwrap(window.range(of: "#endif", range: sample.upperBound ..< window.endIndex))
+        let body = window[sample.lowerBound ..< end.upperBound]
+        XCTAssertFalse(body.dropFirst().contains("static func"), "the scan ran past sampleClient()")
         XCTAssertTrue(body.contains("#if DEBUG"), "sample data must be debug-only")
         XCTAssertTrue(body.contains("TRACE_COMMONS_SAMPLE"))
+        XCTAssertTrue(body.contains("#else\n        return nil"), "a release build has no sample client")
     }
 
     // MARK: No client: the core is down, never empty and healthy
@@ -61,9 +66,12 @@ final class MonitorNavigationTests: XCTestCase {
         await traces.load()
         XCTAssertEqual(traces.phase, .loaded)
         XCTAssertNotNil(traces.decisionsOwed)
+        XCTAssertFalse(traces.tree.allSessions.isEmpty)
         traces.attach(SampleDaemonClient(.busyQueue))
         XCTAssertEqual(traces.phase, .loading)
         XCTAssertNil(traces.decisionsOwed, "the old daemon's count is not drawn as the new one's")
+        XCTAssertTrue(traces.tree.tools.isEmpty, "the old daemon's folders are not drawn or acted on")
+        XCTAssertTrue(traces.tree.allSessions.isEmpty)
 
         let home = HomeStore(client: SampleDaemonClient(.coreDown))
         await home.load()
@@ -81,6 +89,46 @@ final class MonitorNavigationTests: XCTestCase {
         XCTAssertTrue(inference.failures.isEmpty)
         await inference.run()
         XCTAssertEqual(inference.failures["inference_calls"], .unreachable)
+    }
+
+    // MARK: A read the old client answers after attach is dropped
+
+    /// A daemon restart while Home is reading: the old client's answers
+    /// arrive after the new one was attached, and must not be drawn as its.
+    func test_theHomeStoreDropsAReadTheOldClientAnswersAfterAttach() async {
+        // Five of Home's six reads reach the daemon; missions is provisional.
+        let entered = expectation(description: "every read reached the old daemon")
+        entered.expectedFulfillmentCount = 5
+        let gate = GatedTransport(.normalDay, entered: entered)
+        let store = HomeStore(client: LiveDaemonClient(transport: gate))
+        let loading = Task { await store.load() }
+        await fulfillment(of: [entered], timeout: 10)
+        store.attach(nil)
+        gate.open()
+        await loading.value
+        XCTAssertNil(store.status, "the old daemon's status is drawn after a restart")
+        XCTAssertNil(store.destinations)
+        XCTAssertNil(store.history)
+        XCTAssertNil(store.rollup)
+        XCTAssertNil(store.credit)
+        XCTAssertTrue(store.failures.isEmpty, "an old read's outcome is recorded against the new client")
+    }
+
+    func test_theInferenceStoreDropsAReadTheOldClientAnswersAfterAttach() async {
+        // Three of its four reads reach the daemon; the summary is provisional.
+        let entered = expectation(description: "every read reached the old daemon")
+        entered.expectedFulfillmentCount = 3
+        let gate = GatedTransport(.normalDay, entered: entered)
+        let store = InferenceStore(client: LiveDaemonClient(transport: gate))
+        let loading = Task { await store.load() }
+        await fulfillment(of: [entered], timeout: 10)
+        store.attach(nil)
+        gate.open()
+        await loading.value
+        XCTAssertNil(store.calls, "the old daemon's calls are drawn after a restart")
+        XCTAssertNil(store.harnesses)
+        XCTAssertNil(store.destinations)
+        XCTAssertTrue(store.failures.isEmpty, "an old read's outcome is recorded against the new client")
     }
 
     // MARK: The live client's provisional methods (notAvailableYet)
@@ -124,5 +172,32 @@ private final class SampleTransport: DaemonTransport, @unchecked Sendable {
     func call(_ method: String, params paramsJSON: String) -> String {
         SampleDaemonData.reply(method, in: set).map { #"{"id":0,"result":\#($0)}"# }
             ?? #"{"id":0,"error":{"code":"bad_params","message":"unknown-method"}}"#
+    }
+}
+
+/// A `SampleTransport` whose every call blocks (on the live client's work
+/// queue, not the main actor) until `open()`, so a test can attach a new
+/// client while the old one's reads are still outstanding.
+private final class GatedTransport: DaemonTransport, @unchecked Sendable {
+    private let inner: SampleTransport
+    private let entered: XCTestExpectation
+    private let gate = DispatchSemaphore(value: 0)
+
+    init(_ set: SampleDaemonClient.SampleSet, entered: XCTestExpectation) {
+        inner = SampleTransport(set)
+        self.entered = entered
+    }
+
+    /// Lets every waiting call, and every later one, through.
+    func open() {
+        gate.signal()
+    }
+
+    func call(_ method: String, params paramsJSON: String) -> String {
+        entered.fulfill()
+        gate.wait()
+        // Pass the opening on to the next waiting call.
+        gate.signal()
+        return inner.call(method, params: paramsJSON)
     }
 }

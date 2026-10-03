@@ -35,6 +35,9 @@ final class HomeStore {
     /// The app's live client (`AppModel.daemonData`), attached by the
     /// window when the daemon starts; nil while it is not running.
     private(set) var client: (any DaemonDataClient)?
+    /// Bumped by each attach; a read that started against an older client
+    /// is dropped when it answers, so it never writes over the new one.
+    private var generation = 0
 
     init(client: (any DaemonDataClient)?) {
         self.client = client
@@ -44,6 +47,7 @@ final class HomeStore {
     /// drawn as current, so Home is loading until the new one is read.
     func attach(_ client: (any DaemonDataClient)?) {
         self.client = client
+        generation += 1
         status = nil
         destinations = nil
         history = nil
@@ -82,29 +86,33 @@ final class HomeStore {
     }
 
     private func loadStatus() async {
-        status = await read("status", { try await $0.status() })
+        await read("status", { try await $0.status() }) { self.status = $0 }
     }
 
     private func loadDestinations() async {
-        destinations = await read("tool_destinations", { try await $0.toolDestinations() })
+        await read("tool_destinations", { try await $0.toolDestinations() }) { self.destinations = $0 }
     }
 
     private func loadHistory() async {
-        if let value = await read("list_history", { try await $0.listHistory(limit: Self.historyLimit) }) {
-            history = Self.newestFirst(value)
+        await read("list_history", { try await $0.listHistory(limit: Self.historyLimit) }) {
+            if let value = $0 { self.history = Self.newestFirst(value) }
         }
     }
 
     private func loadRollup() async {
-        if let value = await read("history_rollup", { try await $0.historyRollup() }) { rollup = value }
+        await read("history_rollup", { try await $0.historyRollup() }) { if let value = $0 { self.rollup = value } }
     }
 
     private func loadCredit() async {
-        if let value = await read("commons_credit_summary", { try await $0.commonsCreditSummary() }) { credit = value }
+        await read("commons_credit_summary", { try await $0.commonsCreditSummary() }) {
+            if let value = $0 { self.credit = value }
+        }
     }
 
     private func loadMissions() async {
-        if let value = await read("mission_catalogue", { try await $0.missionCatalogue() }) { missions = value }
+        await read("mission_catalogue", { try await $0.missionCatalogue() }) {
+            if let value = $0 { self.missions = value }
+        }
     }
 
     /// Newest first; a row with no date sorts last rather than first.
@@ -112,27 +120,35 @@ final class HomeStore {
         rows.sorted { ($0.submittedAt ?? .distantPast) > ($1.submittedAt ?? .distantPast) }
     }
 
+    /// One read, recording its failure by method, then `apply` with its
+    /// value (nil when it failed or is not there). A read answered after
+    /// another client was attached changes nothing.
     private func read<T: Sendable>(
-        _ method: String, _ call: @Sendable (any DaemonDataClient) async throws -> T
-    ) async -> T? {
+        _ method: String, _ call: @Sendable (any DaemonDataClient) async throws -> T, apply: (T?) -> Void
+    ) async {
         guard let client else {
             failures[method] = .unreachable
-            return nil
+            apply(nil)
+            return
         }
+        let mine = generation
+        let result: Result<T, DaemonDataError>
         do {
-            let value = try await call(client)
-            failures[method] = nil
-            return value
-        } catch let error as DaemonDataError {
-            if case .notAvailableYet = error {
-                failures[method] = nil
-            } else {
-                failures[method] = error
-            }
-            return nil
+            result = .success(try await call(client))
         } catch {
-            failures[method] = .undecodable(method: method)
-            return nil
+            result = .failure(error as? DaemonDataError ?? .undecodable(method: method))
+        }
+        guard mine == generation else { return }
+        switch result {
+        case .success(let value):
+            failures[method] = nil
+            apply(value)
+        case .failure(.notAvailableYet):
+            failures[method] = nil
+            apply(nil)
+        case .failure(let error):
+            failures[method] = error
+            apply(nil)
         }
     }
 }
