@@ -35,7 +35,8 @@ enum TracesHealth {
         fromJSON: TCCoreCopy.healthCopyJSON(reachable: false, label: nil, maxQueueEntries: nil))
 
     static func banners(
-        phase: TracesStore.Phase, status: DaemonData.Status?, words: MonitorTracesCopy?, coreDown: HealthLineCopy?
+        phase: TracesStore.Phase, status: DaemonData.Status?, words: MonitorTracesCopy?, coreDown: HealthLineCopy?,
+        maxQueueEntries: Int? = nil
     ) -> [Banner] {
         func failed(_ title: String?, _ detail: String? = nil) -> [Banner] {
             if let title, !title.isEmpty { return [Banner(title: title, detail: detail, tone: .outside)] }
@@ -56,7 +57,7 @@ enum TracesHealth {
         default:
             // A waiting line is still not healthy, so it is `.ask`; `.off`
             // would read as "off". A safeguard line with no title is dropped.
-            return TracesStore.safeguards(status)
+            return TracesStore.safeguards(status, maxQueueEntries: maxQueueEntries)
                 .filter { !$0.title.isEmpty }
                 .enumerated()
                 .map { Banner(title: $1.title, detail: $1.body, tone: .ask, index: $0) }
@@ -71,7 +72,8 @@ struct GlassHealthBanner: View {
     let banner: TracesHealth.Banner
 
     var body: some View {
-        GlassNotice(tone: banner.tone, title: banner.title) {
+        // An empty title is no title: never a status dot with no words.
+        GlassNotice(tone: banner.tone, title: banner.title.isEmpty ? nil : banner.title) {
             if let detail = banner.detail { Text(detail) }
         }
         .accessibilityElement(children: .combine)

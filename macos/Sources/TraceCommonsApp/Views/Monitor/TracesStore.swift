@@ -386,7 +386,9 @@ final class TracesStore {
     /// daemon's one health slot can hide the others.
     var safeguards: [Safeguard] { Self.safeguards(status) }
 
-    static func safeguards(_ status: DaemonData.Status?) -> [Safeguard] {
+    /// `maxQueueEntries` is the daemon's configured queue limit, which only
+    /// the queue-full line counts from (`HealthCopy.core`).
+    static func safeguards(_ status: DaemonData.Status?, maxQueueEntries: Int? = nil) -> [Safeguard] {
         guard let status else { return [] }
         var out: [Safeguard] = []
         var said: Set<String> = []
@@ -412,7 +414,7 @@ final class TracesStore {
             said.insert(GateHeld.label)
         }
         if let label = status.health?.lastErrorLabel, !said.contains(label) {
-            let health = HealthCopy.core(label: label, maxQueueEntries: nil)
+            let health = HealthCopy.core(label: label, maxQueueEntries: maxQueueEntries)
             out.insert(Safeguard(title: health.title, body: health.detail, severity: health.severity), at: 0)
         }
         return out

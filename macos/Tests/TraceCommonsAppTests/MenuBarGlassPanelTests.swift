@@ -114,6 +114,18 @@ final class MenuBarGlassPanelTests: XCTestCase {
         }
     }
 
+    /// A row with no status is still recent activity, read with the shared
+    /// status table's unknown word, as the History list reads it.
+    func test_aRowWithNoStatusReadsStatusUnavailable() throws {
+        let copy = try XCTUnwrap(PublicRunCopy.decode(fromJSON: TCPublicRun.copyJSON() ?? ""))
+        let row = try DaemonDataDecoding.decoder().decode(DaemonData.HistoryRow.self, from: Data(
+            #"{"submission_id":"a","submitted_at":"2026-09-30T09:00:00Z","project_label":"repo","status":null}"#.utf8))
+        let rows = MenuPanelData.recent(
+            pending: [], history: [row], calls: [],
+            statusLabel: { HomeFormat.historyStatusLabel(copy: copy, $0) })
+        XCTAssertEqual(rows.map(\.text), ["repo · \(copy.contributionStatusUnavailable)"])
+    }
+
     /// An outside call carries its proof label unless it was verified; a
     /// routed call is not recent activity.
     func test_anOutsideCallCarriesItsProofLabel() throws {

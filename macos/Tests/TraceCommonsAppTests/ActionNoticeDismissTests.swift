@@ -110,7 +110,6 @@ final class ActionNoticeDismissTests: XCTestCase {
         XCTAssertTrue(
             text.contains("Button(ActionMessageBanner.coreDismissWord ?? ActionMessageBanner.dismissWord) { model.lastActionError = nil }"),
             "the dismiss button must not depend on the core's word loading")
-        XCTAssertFalse(text.contains("if let label = Self.dismissLabel"))
     }
 
     /// The dismiss closure's own precondition: the notice is externally

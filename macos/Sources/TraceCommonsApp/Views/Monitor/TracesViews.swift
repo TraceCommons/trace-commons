@@ -12,6 +12,9 @@ import TCShellCore
 /// carries (`ShellWordingTests`).
 struct TracesTreeView: View {
     let store: TracesStore
+    /// Only for the queue's configured limit, which the queue-full banner
+    /// names (the store's data contract does not carry it).
+    @EnvironmentObject private var model: AppModel
     @Binding var selection: String
     /// A session's Review pill: select it and show the inspector its review
     /// lives in, so Review is never a press that does nothing visible.
@@ -79,7 +82,8 @@ struct TracesTreeView: View {
             // The last good tree stays below a failed refresh. An unread
             // status is never drawn as healthy.
             ForEach(TracesHealth.banners(
-                phase: store.phase, status: store.status, words: store.words, coreDown: TracesHealth.coreDownLine)
+                phase: store.phase, status: store.status, words: store.words, coreDown: TracesHealth.coreDownLine,
+                maxQueueEntries: model.daemonSettings?.maxQueueEntries)
             ) { GlassHealthBanner(banner: $0) }
             // Undo and the consent offers, here rather than in the
             // inspector, so they are on screen with the inspector hidden.

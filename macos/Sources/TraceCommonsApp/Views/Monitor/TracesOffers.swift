@@ -15,8 +15,9 @@ struct TracesOffersBar: View {
     @EnvironmentObject private var model: AppModel
     let store: TracesStore
 
-    /// The core's Dismiss, or the word the legacy banner already says.
-    private var dismissWord: String { store.words?.dismiss ?? ActionMessageBanner.dismissWord }
+    /// The core's Dismiss, or the word the legacy banner already says: the
+    /// one accessor every glass notice reads.
+    private var dismissWord: String { ActionMessageBanner.coreDismissWord ?? ActionMessageBanner.dismissWord }
 
     var body: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
