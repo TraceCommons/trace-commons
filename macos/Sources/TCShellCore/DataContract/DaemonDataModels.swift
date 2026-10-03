@@ -722,6 +722,41 @@ extension DaemonData {
             case overriddenBy = "overridden_by"
         }
     }
+
+    /// `set_contribution_override` (#1173, #1208).
+    public struct ContributionOverrideResult: Codable, Equatable, Sendable {
+        /// `false` when that override was already in force: nothing was
+        /// recorded, and an Auto contribute override kept its hold.
+        public let changed: Bool
+        /// The override now in force, `{mode, since}`.
+        public let contributionOverride: ContributionOverride?
+        /// Unattended approvals not yet sent that went back to waiting.
+        public let returned: Int
+
+        public init(changed: Bool, contributionOverride: ContributionOverride?, returned: Int) {
+            self.changed = changed
+            self.contributionOverride = contributionOverride
+            self.returned = returned
+        }
+
+        public enum CodingKeys: String, CodingKey {
+            case changed, returned
+            case contributionOverride = "contribution_override"
+        }
+    }
+
+    /// `clear_contribution_override`.
+    public struct ContributionOverrideClearResult: Codable, Equatable, Sendable {
+        /// `false` when no override was in force.
+        public let cleared: Bool
+        /// Unattended approvals not yet sent that went back to waiting.
+        public let returned: Int
+
+        public init(cleared: Bool, returned: Int) {
+            self.cleared = cleared
+            self.returned = returned
+        }
+    }
 }
 
 // MARK: - Queue actions

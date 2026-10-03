@@ -37,6 +37,8 @@ final class DaemonDataContractTests: XCTestCase {
                 try await client.dismiss(entryId: "e")
                 _ = try await client.listProjects()
                 _ = try await client.setProjectMode(projectId: "p", mode: .autoUpload, includeBacklog: nil)
+                _ = try await client.setContributionOverride(mode: .ask, confirm: false)
+                _ = try await client.clearContributionOverride()
                 _ = try await client.harnessList()
                 _ = try await client.settings()
                 _ = try await client.setScrubCheck(.manual)
@@ -224,6 +226,8 @@ final class DaemonDataContractTests: XCTestCase {
             ("dismiss", { try await client.dismiss(entryId: "e") }),
             ("listProjects", { _ = try await client.listProjects() }),
             ("setProjectMode", { _ = try await client.setProjectMode(projectId: "p", mode: .ask, includeBacklog: nil) }),
+            ("setContributionOverride", { _ = try await client.setContributionOverride(mode: .ignore, confirm: false) }),
+            ("clearContributionOverride", { _ = try await client.clearContributionOverride() }),
             ("harnessList", { _ = try await client.harnessList() }),
             ("settings", { _ = try await client.settings() }),
             ("setScrubCheck", { _ = try await client.setScrubCheck(.automatic) }),

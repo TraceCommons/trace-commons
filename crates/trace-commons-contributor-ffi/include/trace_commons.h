@@ -2398,6 +2398,14 @@ char*       tc_contribution_mode_copy_json(void);
  */
 char*       tc_contribution_override_confirm_json(const char* mode, const char* config_dir);
 
+/* The sentence for a refused set_contribution_override or
+ * clear_contribution_override (#1173, project_copy::
+ * contribution_override_refusal_line), from the IPC error's label. An
+ * unknown, NULL or non-UTF-8 label gets the core's fallback sentence. NULL
+ * only on a caught panic.
+ */
+char*       tc_contribution_override_refusal_text(const char* label);
+
 /* The legacy invite migration offer (consent_copy::legacy_migration_offer),
  * as LegacyMigrationOfferCopy's fields. NULL only on a caught panic.
  */

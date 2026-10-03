@@ -5510,6 +5510,29 @@ pub unsafe extern "C" fn tc_contribution_override_confirm_json(
     })
 }
 
+/// The sentence for a refused `set_contribution_override` or
+/// `clear_contribution_override` (#1173,
+/// `project_copy::contribution_override_refusal_line`), from the IPC error's
+/// label. A label this build does not know, and a NULL or non-UTF-8 one, get
+/// the core's own fallback sentence, so no shell words a refusal itself.
+///
+/// Returns an owned string; free it with [`tc_string_free`]. NULL only on a
+/// caught panic.
+///
+/// # Safety
+/// `label`, if non-null, must point to a valid, NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_contribution_override_refusal_text(
+    label: *const c_char,
+) -> *mut c_char {
+    guarded_string_no_err(|| {
+        let label = unsafe { borrow_optional_str(label) }.unwrap_or("");
+        Ok(to_owned_cstring(
+            trace_commons_contributor::project_copy::contribution_override_refusal_line(label),
+        ))
+    })
+}
+
 /// The offer to move a legacy invite identity to a NEAR AI account
 /// (`consent_copy::legacy_migration_offer`), as a JSON object of
 /// `LegacyMigrationOfferCopy`'s fields. Shown only while

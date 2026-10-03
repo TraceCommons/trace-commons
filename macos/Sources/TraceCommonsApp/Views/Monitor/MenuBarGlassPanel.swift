@@ -10,14 +10,16 @@ import TCShellCore
 /// in place of the shipping menu, until R15 (`TRACE_COMMONS_GLASS_MENU=1`).
 ///
 /// The handoff's rules hold here:
-/// - Nothing is sent from the popover. The only write is the shipping
-///   menu's own: pausing, resuming, and turning Private AI off.
+/// - Nothing is sent from the popover. The writes are the shipping menu's
+///   own (pausing, resuming, turning Private AI off) and the contribution
+///   override.
 /// - Private AI "On" opens the window at its destination; a menu press
 ///   never turns it on.
-/// - The mode pill reflects the folders' modes rolled up (one mode, or
-///   Mixed). Its overrides are shown and do nothing yet: applying one to
-///   every folder needs the core's override and confirmation (Kristi's
-///   lane), and arming never happens from a menu press.
+/// - The mode pill shows the daemon's roll-up (`status.contribution_mode`:
+///   one mode, or Mixed). Its choices set a global contribution override
+///   (#1208), each only after the core's confirmation for it; Auto
+///   contribute's carries the arming disclosure, so arming never happens
+///   from a single menu press.
 /// - No projected credit, and the badge is decisions owed.
 struct MenuBarGlassPanel: View {
     @EnvironmentObject private var model: AppModel
@@ -172,31 +174,53 @@ struct MenuBarGlassPanel: View {
     }
 
     /// The overrides, in the core's words, with the core's roll-up checked,
-    /// its partial line under Auto contribute, and its override line while
-    /// one is in force. Disabled: setting an override needs its
-    /// confirmation (`tc_contribution_override_confirm_json`, with the
-    /// arming disclosure for Auto contribute) and a client write the data
-    /// contract does not carry yet, and arming is never done from a menu
-    /// press.
+    /// its partial line under Auto contribute, and its override line and
+    /// clear action while one is in force. Choosing one shows that
+    /// override's core confirmation in place of the choices; only its
+    /// confirm button writes. While the core is down, loading or stale the
+    /// choices are disabled (`MenuPanelStore.canChooseOverride`).
     @ViewBuilder
     private var modeOptions: some View {
         if let copy = Self.modeCopy {
-            if store.status?.contributionOverride != nil {
-                Text(copy.overrideActive)
-                    .glassType(GlassTokens.TypeScale.caption)
-                    .foregroundStyle(GlassColor.textTertiary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            Group {
-                ForEach(copy.choices, id: \.mode) { choice in
-                    GlassOptionRow(
-                        choice.label,
-                        sub: MenuPanelData.partialLine(choice.mode, status: store.status, copy: copy) ?? choice.line,
-                        fill: .solid(Self.modeFill(choice.mode)),
-                        checked: MenuPanelData.rollup(choice.mode) == rollup) {}
+            if let confirming = store.confirming {
+                OverrideConfirmation(copy: confirming) { confirmed in
+                    Task { await store.resolveConfirmation(confirmed: confirmed) }
+                }
+            } else {
+                if store.status?.contributionOverride != nil {
+                    Text(copy.overrideActive)
+                        .glassType(GlassTokens.TypeScale.caption)
+                        .foregroundStyle(GlassColor.textTertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Group {
+                    ForEach(copy.choices, id: \.mode) { choice in
+                        let sub = MenuPanelData.partialLine(choice.mode, status: store.status, copy: copy) ?? choice.line
+                        GlassOptionRow(
+                            choice.label,
+                            sub: sub,
+                            fill: .solid(Self.modeFill(choice.mode)),
+                            checked: MenuPanelData.rollup(choice.mode) == rollup) {
+                                store.choose(choice.mode)
+                            }
+                            .accessibilityLabel(choice.label)
+                            .accessibilityHint(sub)
+                    }
+                    if store.status?.contributionOverride != nil {
+                        Button(copy.clear) { Task { await store.clearOverride() } }
+                            .buttonStyle(GlassButtonStyle(.link, small: true))
+                            .accessibilityLabel(copy.clear)
+                    }
+                }
+                .disabled(!store.canChooseOverride)
+                if let refusal = store.overrideRefusal {
+                    Text(refusal)
+                        .glassType(GlassTokens.TypeScale.caption)
+                        .foregroundStyle(GlassColor.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .accessibilityAddTraits(.isStaticText)
                 }
             }
-            .disabled(true)
         }
     }
 
@@ -336,6 +360,47 @@ struct MenuBarGlassPanel: View {
     }
 }
 
+/// One contribution override's confirmation, inline in the pill's sub-list
+/// (a sheet or alert inside `MenuBarExtra` is unreliable): the core's title,
+/// body and, for Auto contribute, its arming disclosure, then cancel and
+/// confirm. VoiceOver focus moves to the title when it appears.
+private struct OverrideConfirmation: View {
+    let copy: ContributionOverrideConfirmCopy
+    let resolve: (Bool) -> Void
+    @AccessibilityFocusState private var titleFocused: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
+            Text(copy.title)
+                .glassType(GlassTokens.TypeScale.body.weight(.semibold))
+                .foregroundStyle(GlassColor.textPrimary)
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityAddTraits(.isHeader)
+                .accessibilityFocused($titleFocused)
+            ForEach(Array(copy.paragraphs.enumerated()), id: \.offset) { _, paragraph in
+                Text(paragraph)
+                    .glassType(GlassTokens.TypeScale.caption)
+                    .foregroundStyle(GlassColor.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            HStack(spacing: GlassTokens.Space.s3) {
+                Spacer(minLength: 0)
+                Button(copy.cancel) { resolve(false) }
+                    .buttonStyle(GlassButtonStyle(.glass, small: true))
+                    .keyboardShortcut(.cancelAction)
+                    .accessibilityLabel(copy.cancel)
+                Button(copy.confirm) { resolve(true) }
+                    .buttonStyle(GlassButtonStyle(.primary, small: true))
+                    .accessibilityLabel(copy.confirm)
+            }
+        }
+        .padding(GlassTokens.Space.s2)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(copy.title)
+        .onAppear { titleFocused = true }
+    }
+}
+
 /// The popover's own glass, only where nothing else provides a material.
 private struct PanelSurface: ViewModifier {
     let owns: Bool
@@ -369,7 +434,7 @@ struct MenuBarStripLabel: View {
             // The label is always alive, so it owns the subscription: the
             // app's live client, re-attached whenever the daemon restarts.
             .task(id: model.liveData.map(ObjectIdentifier.init)) {
-                store.attach(model.daemonData)
+                store.attach(model.daemonData, configDirectory: model.configDirectory)
                 await store.run()
             }
     }

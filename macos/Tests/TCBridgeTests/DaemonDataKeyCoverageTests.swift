@@ -320,6 +320,65 @@ final class DaemonDataKeyCoverageTests: XCTestCase {
         }
     }
 
+    /// #1208 against the real daemon on a temp store: Ask me and Never set
+    /// the override and `status` says so, clear restores it, every key of
+    /// each reply (and of `status` while an override is in force) is
+    /// declared, and Auto contribute on a store that is not enrolled is
+    /// refused with the real label -- the fail-closed path.
+    func testTheContributionOverrideAgainstTheRealDaemon() async throws {
+        let daemon = try startDaemonWithOneSession()
+        let client = LiveDaemonClient(transport: Pipe(daemon))
+        _ = try waitForPending(daemon)
+        let before = try await client.status()
+        XCTAssertNil(before.contributionOverride)
+
+        // Unconfirmed Auto contribute is refused before anything else.
+        do {
+            _ = try await client.setContributionOverride(mode: .autoUpload, confirm: false)
+            XCTFail("an unconfirmed Auto contribute answered")
+        } catch {
+            XCTAssertEqual(error as? DaemonDataError, .daemon(code: "bad_params", message: "confirm-required"))
+        }
+        // Confirmed, it is still refused here: no grant terms in force.
+        do {
+            _ = try await client.setContributionOverride(mode: .autoUpload, confirm: true)
+            XCTFail("Auto contribute without grant terms answered")
+        } catch {
+            XCTAssertEqual(error as? DaemonDataError, .daemon(code: "unavailable", message: "arming-terms-unavailable"))
+        }
+        let afterRefusal = try await client.status()
+        XCTAssertNil(afterRefusal.contributionOverride, "a refusal changed nothing")
+
+        let ask = try await client.setContributionOverride(mode: .ask, confirm: false)
+        XCTAssertTrue(ask.changed)
+        XCTAssertEqual(ask.contributionOverride?.mode, "notify_only")
+        let underAsk = try await client.status()
+        XCTAssertEqual(underAsk.contributionMode, "notify_only")
+
+        assertDeclared(
+            DaemonData.ContributionOverrideResult.self,
+            try result(daemon, "set_contribution_override", ["mode": "ignore"]),
+            method: "set_contribution_override")
+        let never = try await client.status()
+        XCTAssertEqual(never.contributionMode, "ignore")
+        XCTAssertEqual(never.contributionOverride?.mode, "ignore")
+        XCTAssertNotNil(never.contributionOverride?.since)
+        assertDeclared(DaemonData.Status.self, try result(daemon, "status"), method: "status")
+        let again = try await client.setContributionOverride(mode: .ignore, confirm: false)
+        XCTAssertFalse(again.changed)
+
+        let cleared = try await client.clearContributionOverride()
+        XCTAssertTrue(cleared.cleared)
+        let after = try await client.status()
+        XCTAssertNil(after.contributionOverride)
+        XCTAssertEqual(after.contributionMode, before.contributionMode)
+        assertDeclared(
+            DaemonData.ContributionOverrideClearResult.self, try result(daemon, "clear_contribution_override"),
+            method: "clear_contribution_override")
+        XCTAssertGreaterThan(checked["status"] ?? 0, 3)
+        XCTAssertGreaterThanOrEqual(checked["set_contribution_override"] ?? 0, 3)
+    }
+
     /// R6 against the real daemon: the tool switch writes the declaration
     /// and reads back its mode, and a folder approve answers for the group.
     func testTheToolSwitchAndFolderApproveAgainstTheRealDaemon() async throws {

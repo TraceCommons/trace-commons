@@ -130,6 +130,26 @@ public enum TCCoreCopy {
         take(tc_contribution_mode_copy_json())
     }
 
+    /// `tc_contribution_override_confirm_json`: one override's confirmation
+    /// (`mode` as `set_contribution_override` takes it). For `auto_upload` it
+    /// carries the arming disclosure for the configuration in `configDir`,
+    /// and is nil without a readable one. Decoded by
+    /// `TCShellCore.ContributionOverrideConfirmCopy`.
+    public static func contributionOverrideConfirmJSON(mode: String, configDir: String?) -> String? {
+        mode.withCString { modePointer in
+            guard let configDir else {
+                return take(tc_contribution_override_confirm_json(modePointer, nil))
+            }
+            return take(configDir.withCString { tc_contribution_override_confirm_json(modePointer, $0) })
+        }
+    }
+
+    /// `tc_contribution_override_refusal_text`: the sentence for a refused
+    /// override write, from the IPC error's label.
+    public static func contributionOverrideRefusalLine(label: String) -> String? {
+        take(label.withCString { tc_contribution_override_refusal_text($0) })
+    }
+
     /// `tc_monitor_screens_copy_json`: the monitor's other screens' words.
     /// Decoded by `TCShellCore.MonitorScreensCopy`.
     public static func monitorScreensCopyJSON() -> String? {

@@ -399,10 +399,64 @@ pub fn contribution_override_confirm_copy(
     }
 }
 
+/// **DRAFT, NEEDS APPROVAL.** A refused Auto contribute override with no
+/// grant terms in force (`arming-terms-unavailable`: no contributor
+/// configuration on this Mac yet, or one that cannot be read). Nothing was
+/// recorded and no folder changed.
+pub const CONTRIBUTION_OVERRIDE_REFUSED_NO_TERMS: &str = "Auto contribute can't be turned on \
+     until this Mac is set up to contribute. Nothing changed.";
+
+/// **DRAFT, NEEDS APPROVAL.** Every other refused or failed override write:
+/// a policy or audit write that failed (nothing changed), a queue write that
+/// failed after the override took effect, or a core that did not answer.
+/// It claims neither outcome, because the shell re-reads `status` after
+/// every write and the pill then shows the setting actually in force.
+pub const CONTRIBUTION_OVERRIDE_REFUSED: &str = "That setting couldn't be saved. The pill shows \
+     the setting in force.";
+
+/// What a refused `set_contribution_override` or
+/// `clear_contribution_override` says, by the daemon's error label, so no
+/// shell words a refusal itself. A label this build does not know gets
+/// [`CONTRIBUTION_OVERRIDE_REFUSED`].
+#[must_use]
+pub fn contribution_override_refusal_line(label: &str) -> &'static str {
+    match label {
+        "arming-terms-unavailable" => CONTRIBUTION_OVERRIDE_REFUSED_NO_TERMS,
+        _ => CONTRIBUTION_OVERRIDE_REFUSED,
+    }
+}
+
 #[cfg(test)]
 mod contribution_override_copy_tests {
     use super::*;
     use crate::daemon::policy::ProjectMode;
+
+    /// The fail-closed refusal says why and that nothing changed; every
+    /// other label gets the line that claims no outcome.
+    #[test]
+    fn each_override_refusal_has_a_line() {
+        assert_eq!(
+            contribution_override_refusal_line("arming-terms-unavailable"),
+            CONTRIBUTION_OVERRIDE_REFUSED_NO_TERMS
+        );
+        for label in [
+            "policy-write-failed",
+            "audit-write-failed",
+            "queue-write-failed",
+            "confirm-required",
+            "",
+            "a-label-from-a-later-daemon",
+        ] {
+            assert_eq!(
+                contribution_override_refusal_line(label),
+                CONTRIBUTION_OVERRIDE_REFUSED,
+                "{label}"
+            );
+        }
+        // `queue-write-failed` follows an override that took effect, so the
+        // fallback must not say nothing changed.
+        assert!(!CONTRIBUTION_OVERRIDE_REFUSED.contains("Nothing changed"));
+    }
 
     #[test]
     fn the_pill_offers_the_three_overrides_with_the_handoff_lines() {

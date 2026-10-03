@@ -412,9 +412,8 @@ fn pinned_sentences() -> Vec<(&'static str, String)> {
             .map(counted)
             .collect(),
     );
-    // The menu-bar Contribution mode pill and its override confirmations
-    // (#1173): not built in macOS yet, pinned so it arrives with the core's
-    // words.
+    // The menu-bar Contribution mode pill, its override confirmations and
+    // their refusal lines (#1173).
     add(
         "project_copy::contribution_mode_copy",
         table(json!(project_copy::contribution_mode_copy())),
@@ -433,6 +432,15 @@ fn pinned_sentences() -> Vec<(&'static str, String)> {
             )))
         })
         .collect(),
+    );
+    add(
+        "project_copy::CONTRIBUTION_OVERRIDE_REFUSED*",
+        [
+            project_copy::CONTRIBUTION_OVERRIDE_REFUSED,
+            project_copy::CONTRIBUTION_OVERRIDE_REFUSED_NO_TERMS,
+        ]
+        .map(str::to_owned)
+        .to_vec(),
     );
     add(
         "project_copy::ignore_project_copy",
@@ -733,6 +741,27 @@ const SURFACES: &[(&str, &str, &str, &str, &str)] = &[
         "TCCoreCopy.projectIgnoreReconciled",
         "TCBridge/TCCoreCopy.swift",
         "tc_project_ignore_reconciled_text",
+    ),
+    (
+        "contribution mode pill",
+        "TraceCommonsApp/Views/Monitor/MenuBarGlassPanel.swift",
+        "TCCoreCopy.contributionModeCopyJSON",
+        "TCBridge/TCCoreCopy.swift",
+        "tc_contribution_mode_copy_json",
+    ),
+    (
+        "contribution override confirmation",
+        "TraceCommonsApp/Views/Monitor/MenuPanelStore.swift",
+        "TCCoreCopy.contributionOverrideConfirmJSON",
+        "TCBridge/TCCoreCopy.swift",
+        "tc_contribution_override_confirm_json",
+    ),
+    (
+        "contribution override refusal",
+        "TraceCommonsApp/Views/Monitor/MenuPanelStore.swift",
+        "TCCoreCopy.contributionOverrideRefusalLine",
+        "TCBridge/TCCoreCopy.swift",
+        "tc_contribution_override_refusal_text",
     ),
     (
         "arming offer",
