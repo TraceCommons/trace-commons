@@ -91,7 +91,7 @@ final class OnboardingParityTests: XCTestCase {
              bindings: ["LoginItemManager.currentState", "LoginItemManager.register()", "Notifier.shared.authorizationStatus()",
                         "Notifier.shared.requestAuthorization()", "Button(OnboardingDoneWords.done, action: onFinish)"],
              copySources: ["Notifier.copy?.doneBody", "Notifier.copy?.notificationOffer", "Notifier.copy?.notNow",
-                           "Notifier.copy?.notificationAllow", "Notifier.copy?.notificationAllowed",
+                           "Notifier.copy?.notificationAllow ??", "Notifier.copy?.notificationAllowed",
                            "Notifier.copy?.notificationDenied", "Notifier.copy?.systemSettings", "Notifier.purpose",
                            "OnboardingDoneWords.setUpNothingSent", "OnboardingDoneWords.startAtLoginQuestion",
                            "OnboardingDoneWords.needsToBeRunning", "OnboardingDoneWords.willStartNextLogin",
@@ -199,14 +199,23 @@ final class OnboardingParityTests: XCTestCase {
         XCTAssertFalse(source.contains("markOnboardingComplete"), "Done completes onboarding itself")
         XCTAssertEqual(source.components(separatedBy: "Button(OnboardingDoneWords.done, action: onFinish)").count - 1, 1)
         XCTAssertFalse(source.contains("onFinish()"), "Done calls onFinish from somewhere other than its button")
-        XCTAssertEqual(source.components(separatedBy: "Notifier.shared.requestAuthorization()").count - 1, 1)
-        XCTAssertEqual(source.components(separatedBy: "Button(Notifier.copy?.notificationAllow ?? \"\")").count - 1, 1)
         let flat = source.split(whereSeparator: \.isWhitespace).joined(separator: " ")
         let purpose = try XCTUnwrap(flat.range(of: "Text(Notifier.purpose)"))
-        let allow = try XCTUnwrap(flat.range(of: "Button(Notifier.copy?.notificationAllow"))
+        let open = "Button(Notifier.copy?.notificationAllow ?? \"\") {"
+        XCTAssertEqual(flat.components(separatedBy: open).count - 1, 1)
+        let allow = try XCTUnwrap(flat.range(of: open))
         XCTAssertLessThan(purpose.lowerBound, allow.lowerBound, "the ask must sit under the purpose sentence")
-        let ask = try XCTUnwrap(flat.range(of: "Notifier.shared.requestAuthorization()"))
-        XCTAssertGreaterThan(ask.lowerBound, allow.lowerBound, "the request left the allow button")
+        let close = try XCTUnwrap(flat.range(of: ".buttonStyle(GlassButtonStyle(.primary))", range: allow.upperBound..<flat.endIndex))
+        let span = String(flat[allow.upperBound..<close.lowerBound])
+        // The helper is called exactly once, from inside the Allow button's closure.
+        XCTAssertEqual(span.components(separatedBy: "requestAuthorization()").count - 1, 1, "the Allow button must call the helper")
+        let outside = flat.replacingCharacters(in: allow.lowerBound..<close.lowerBound, with: "")
+        let defined = outside.components(separatedBy: "private func requestAuthorization()").count - 1
+        XCTAssertEqual(defined, 1)
+        // Outside the span the name appears only as the helper's definition and the one system call.
+        XCTAssertEqual(outside.components(separatedBy: "requestAuthorization()").count - 1, 2,
+                       "requestAuthorization() is called from somewhere other than the Allow button")
+        XCTAssertEqual(flat.components(separatedBy: "Notifier.shared.requestAuthorization()").count - 1, 1)
     }
 
     /// Content structs hold no ScrollView; the wrapper scrolls once.
@@ -220,8 +229,7 @@ final class OnboardingParityTests: XCTestCase {
     func test_doneRefreshesHangOnTheAlwaysPresentContainer() throws {
         let source = try Self.text("Views/OnboardingDoneView.swift")
             .split(whereSeparator: \.isWhitespace).joined(separator: " ")
-        XCTAssertTrue(source.contains(".padding(GlassTokens.Space.panePadding) .frame(maxWidth: .infinity, alignment: .leading) .task { await refreshStatus() }"))
-        XCTAssertTrue(source.contains(".onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification))"))
+        XCTAssertTrue(source.contains(".padding(GlassTokens.Space.panePadding) .frame(maxWidth: .infinity, alignment: .leading) .task { await refreshStatus() } .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification))"))
     }
 
     /// No rebuilt step reads the legacy palette.
