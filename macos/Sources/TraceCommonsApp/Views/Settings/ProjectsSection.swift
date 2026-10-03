@@ -33,16 +33,16 @@ struct ProjectsSection: View {
         // The container is always present, so the dialog is attached
         // whether or not any project is drawn.
         VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
-            if model.lastActionError != nil {
+            if let error = model.lastActionError {
                 GlassNotice(tone: .outside) {
                     HStack(alignment: .top, spacing: GlassTokens.Space.s3) {
-                        Text(model.lastActionError ?? "")
+                        Text(error)
                             .fixedSize(horizontal: false, vertical: true)
                             .frame(maxWidth: .infinity, alignment: .leading)
-                        if let label = Self.dismissLabel {
-                            Button(label) { model.lastActionError = nil }
-                                .buttonStyle(GlassButtonStyle(.glass))
-                        }
+                        // An error is never undismissable: without the
+                        // core's word the banner's own word names it.
+                        Button(Self.dismissLabel ?? ActionMessageBanner.dismissWord) { model.lastActionError = nil }
+                            .buttonStyle(GlassButtonStyle(.glass))
                     }
                 }
             }

@@ -14,6 +14,8 @@ final class SettingsParityTests: XCTestCase {
         let copySources: [String]
         let confirmations: [String]
         let accessibility: [String]
+        /// Needles the glass file must not contain.
+        var forbidden: [String] = []
     }
 
     static let root = URL(fileURLWithPath: #filePath)
@@ -81,7 +83,8 @@ final class SettingsParityTests: XCTestCase {
                               "ProjectCopy.unresolvedBucketNote", "TCCoreCopy.contributionModeCopyJSON()",
                               "SettingsLegacyWords.noProjectsYet"],
                 confirmations: [".confirmationDialog(", "presenting: armingCandidate"],
-                accessibility: ["GlassPicker("]),
+                accessibility: ["GlassPicker("],
+                forbidden: ["ProjectCopy.modeChoiceLabel"]),
         Section(glass: "Views/Settings/ChangesSection.swift",
                 bindings: ["model.audit", "model.refreshAudit()"],
                 copySources: ["SettingsLegacyWords.auditHeading", "SettingsLegacyWords.nothingChanged",
@@ -178,6 +181,9 @@ final class SettingsParityTests: XCTestCase {
             let source = try Self.text(section.glass)
             for needle in section.bindings + section.copySources + section.confirmations + section.accessibility {
                 XCTAssertTrue(source.contains(needle), "\(section.glass) lacks \(needle)")
+            }
+            for needle in section.forbidden {
+                XCTAssertFalse(source.contains(needle), "\(section.glass) must not use \(needle)")
             }
         }
     }

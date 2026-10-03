@@ -23,6 +23,7 @@ final class GlassSurfaceRulesTests: XCTestCase {
         "Views/Settings/GlassSourceRow.swift",
         "Views/Settings/WatchedFoldersSection.swift",
         "Views/Settings/PrivateAISection.swift",
+        "Views/Settings/ProjectsSection.swift",
     ]
 
     static func text(_ rel: String) throws -> String {
