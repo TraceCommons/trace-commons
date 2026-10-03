@@ -7,8 +7,7 @@ import TCShellCore
 /// because each row is one declaration. What a row shows is the MODE the
 /// daemon reports, which is all `get_settings` says. With no daemon answer
 /// the section draws the core's unavailable sentence and no row, so no
-/// control reads as working. The folder panel is `GlassSourceRow.chooseFolder()`,
-/// opened by the row's own button.
+/// control reads as working.
 struct WatchedFoldersSection: View {
     @EnvironmentObject private var model: AppModel
     @State private var candidates: [SourceCandidate] = []

@@ -100,7 +100,12 @@ final class SettingsParityTests: XCTestCase {
                            "SourceCandidate.decodeList(", "model.setSourceRoot(", "model.refreshSettings()",
                            "routingSourceModes", "opencodeSourceMode", "GlassSourceRow("],
                 copySources: ["copy.heading", "copy.explanation", "copy.saveFailed", "copy.unavailable", "copy.retry"],
-                confirmations: ["GlassSourceRow.chooseFolder()"],
+                confirmations: [],
+                accessibility: []),
+        Section(glass: "Views/Settings/GlassSourceRow.swift",
+                bindings: ["SourceRowState.answer(", "static func chooseFolder()"],
+                copySources: ["copy.watchCandidate", "tool.decline", "tool.chooseFolder"],
+                confirmations: ["NSOpenPanel"],
                 accessibility: []),
     ]
 

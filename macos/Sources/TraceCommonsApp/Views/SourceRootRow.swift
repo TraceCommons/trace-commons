@@ -105,14 +105,6 @@ struct SourceRootRow: View {
         }
     }
 
-    /// The folder panel. Nil when dismissed.
-    static func chooseFolder() -> String? {
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.allowsMultipleSelection = false
-        panel.canCreateDirectories = false
-        guard panel.runModal() == .OK, let url = panel.url else { return nil }
-        return url.path
-    }
+    /// The folder panel lives once, in `GlassSourceRow`.
+    static func chooseFolder() -> String? { GlassSourceRow.chooseFolder() }
 }

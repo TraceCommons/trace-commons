@@ -89,15 +89,15 @@ struct GlassSourceRow: View {
                             .foregroundStyle(GlassColor.textSecondary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
+                    if let line = answer.line {
+                        Text(line).glassType(GlassTokens.TypeScale.body)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                     if let path = answer.candidatePath ?? answer.selectedPath {
                         Text(path)
                             .glassType(GlassTokens.TypeScale.mono)
                             .foregroundStyle(GlassColor.textSecondary)
                             .lineLimit(1).truncationMode(.head)
-                    }
-                    if let line = answer.line {
-                        Text(line).glassType(GlassTokens.TypeScale.body)
-                            .fixedSize(horizontal: false, vertical: true)
                     }
                     if let evidence = answer.evidence {
                         Text(evidence).glassType(GlassTokens.TypeScale.body)

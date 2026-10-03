@@ -45,13 +45,16 @@ final class GlassSourceRowTests: XCTestCase {
     }
 
     /// The row keeps the legacy initialiser so the Folders step and Settings
-    /// share it unchanged.
-    func test_theRowKeepsTheLegacySignature() throws {
-        let source = try String(
-            contentsOf: GlassSurfaceRulesTests.root.appendingPathComponent("Views/Settings/GlassSourceRow.swift"),
-            encoding: .utf8)
-        for label in ["kind:", "candidate:", "choice:", "reportedMode:", "onWatchCandidate:", "onChoose:", "onDecline:"] {
-            XCTAssertTrue(source.contains(label), "GlassSourceRow lacks \(label)")
-        }
+    /// share it unchanged: a signature change fails to compile here.
+    func test_theRowKeepsTheLegacySignature() {
+        let withMode = GlassSourceRow(
+            kind: .codex, candidate: nil, choice: .undecided, reportedMode: "unset",
+            onWatchCandidate: { _ in }, onChoose: { _ in }, onDecline: {})
+        let withoutMode = GlassSourceRow(
+            kind: .codex, candidate: nil, choice: .undecided,
+            onWatchCandidate: { _ in }, onChoose: { _ in }, onDecline: {})
+        XCTAssertEqual(withMode.kind, withoutMode.kind)
+        XCTAssertEqual(withMode.reportedMode, "unset")
+        XCTAssertNil(withoutMode.reportedMode)
     }
 }
