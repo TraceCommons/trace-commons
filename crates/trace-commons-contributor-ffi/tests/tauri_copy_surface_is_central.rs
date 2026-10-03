@@ -191,6 +191,13 @@ fn tauri_commands_project_shared_contributor_copy() {
     let grant = rust_function(&consent, "fn grant_automatic");
     assert!(grant.contains("grant_precondition(confirmed"));
     assert!(grant.contains("witness_signing_address"));
+    // The daemon refuses without `confirmed: true`, so the shell forwards
+    // the confirmation it was given rather than dropping or forging it.
+    // String literals are blanked, so this matches the forwarded value.
+    assert!(
+        grant.contains(": confirmed,"),
+        "Tauri must pass the grant screen's confirmation on to the daemon"
+    );
     // K5 (#1173) moved the precondition into the core (`flow1::
     // grant_precondition`) so the C ABI reaches it too: Tauri and the FFI
     // ask it, and only the core reads `consent_scopes_chosen`.

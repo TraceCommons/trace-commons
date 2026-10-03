@@ -245,6 +245,11 @@ pub(crate) async fn automatic_grant(
 /// scope, path and disclosure steps. `witness_signing_address` is the
 /// witness the disclosure screen showed, `None` for none; the daemon refuses
 /// the grant when the witness configured now is a different one.
+///
+/// `confirmed` is passed on to the daemon as given, never set here: the
+/// daemon refuses a grant without `confirmed: true`
+/// (`automatic-grant-confirmation-required`), so the precondition above is
+/// a first line and the daemon is the one every caller meets.
 #[tauri::command]
 pub(crate) async fn grant_automatic(
     state: State<'_, AppState>,
@@ -255,7 +260,10 @@ pub(crate) async fn grant_automatic(
     call_daemon(
         shared_state(&state)?,
         "grant_automatic",
-        serde_json::json!({ "witness_signing_address": witness_signing_address }),
+        serde_json::json!({
+            "confirmed": confirmed,
+            "witness_signing_address": witness_signing_address,
+        }),
     )
     .await
 }

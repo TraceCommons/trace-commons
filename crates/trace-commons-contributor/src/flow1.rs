@@ -23,11 +23,14 @@
 //! # A first line only
 //!
 //! None of this replaces the daemon's own refusals: `grant_automatic`
-//! refuses without a recorded scope choice
-//! (`automatic-grant-scopes-not-chosen`) and when the witness configured is
-//! not the one the disclosure screen showed
+//! refuses unless the request carries `confirmed: true`
+//! (`automatic-grant-confirmation-required`, the label
+//! [`grant_precondition`] uses), without a recorded choice of a non-empty
+//! scope list (`automatic-grant-scopes-not-chosen`), and when the witness
+//! configured is not the one the disclosure screen showed
 //! (`automatic-grant-witness-changed`). These checks keep a shell from
-//! asking before the contributor has seen what they are agreeing to.
+//! asking before the contributor has seen what they are agreeing to; a shell
+//! sends `confirmed: true` only from the grant screen's button.
 
 use serde::{Deserialize, Serialize};
 

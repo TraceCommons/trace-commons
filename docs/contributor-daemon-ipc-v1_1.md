@@ -2394,18 +2394,31 @@ automatically from projects discovered from now on.
 { "granted": true, "granted_at": "2026-09-25T12:00:00Z", "on_disk_recorded": false }
 ```
 
-`grant_automatic` takes one required param, `witness_signing_address`: the
-signing address of the witness the contributor was shown on the disclosure
-screen, or `null` when that screen showed none. It returns the grant as
-`automatic_grant` reports it. Nothing is granted when it is refused:
+`grant_automatic` takes two required params:
+
+- `confirmed`: JSON `true`, sent only from the grant screen's button, after
+  the contributor has gone through the scope, path and disclosure screens.
+- `witness_signing_address`: the signing address of the witness the
+  contributor was shown on the disclosure screen, or `null` when that screen
+  showed none.
+
+It returns the grant as `automatic_grant` reports it. Nothing is granted when
+it is refused:
 
 - `arming-terms-unavailable` (`ERR_UNAVAILABLE`): there is no config to record
   terms from.
+- `automatic-grant-confirmation-required` (`bad_params`): `confirmed` is
+  absent, `false`, or not a boolean (`"true"` and `1` are refused). The same
+  label `flow1::grant_precondition` gives a shell, so the daemon holds the
+  confirmation for every IPC caller rather than trusting a shell to have
+  asked.
 - `automatic-grant-scopes-not-chosen` (`bad_params`): the config's
-  `consent_scopes_chosen` is false, so nobody chose the saved scopes (R7). A
-  saved scope list is not a choice: every enrollment saves at least the floor
-  scope, which `validate_scopes` adds, and an invite enrollment saves it with
-  nobody having picked it. Only `set_consent_scopes` records a choice.
+  `consent_scopes_chosen` is false, so nobody chose the saved scopes (R7), or
+  the saved `consent_scopes` list is empty, so there is nothing to grant
+  under. A saved scope list is not a choice: every enrollment saves at least
+  the floor scope, which `validate_scopes` adds, and an invite enrollment
+  saves it with nobody having picked it. Only `set_consent_scopes` records a
+  choice.
 - `automatic-grant-witness-required` (`bad_params`): `witness_signing_address`
   is absent, or neither a string nor `null`.
 - `automatic-grant-witness-changed` (`bad_params`): the witness configured now

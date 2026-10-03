@@ -5578,7 +5578,9 @@ pub extern "C" fn tc_contributor_disclosure_copy_json() -> *mut c_char {
 /// `automatic-grant-not-enrolled`, `automatic-grant-scope-required` (no
 /// scope chosen through the picker; a saved floor scope is not a choice), or
 /// `contributor-config-unreadable`. The daemon's `grant_automatic` still
-/// refuses on its own; this is the first line.
+/// refuses on its own -- without `confirmed: true` in the request, without a
+/// chosen non-empty scope list, and on a changed witness; this is the first
+/// line.
 ///
 /// Returns an owned string; free it with [`tc_string_free`]. NULL for a NULL
 /// or non-UTF-8 `config_dir`, and on a caught panic.
