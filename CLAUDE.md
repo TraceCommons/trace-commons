@@ -168,7 +168,9 @@ receives them times out of the queue instead of merging.
   tests reached PostgreSQL.
 - `pipeline qualification and restore` — runs `python3
   scripts/operator/pipeline.py qualify` against its own digest-pinned
-  PostgreSQL container (no `services:` block). Not a required status check
+  PostgreSQL container (no `services:` block), signed with a throwaway check
+  key that the job makes with `pipeline.py keygen` under the runner's temp
+  directory (trusted nowhere, never uploaded). Not a required status check
   (owner decision P4-D17): it runs on every PR and in the merge queue, but
   blocks nothing until the owner promotes it. See
   `docs/operator/pipeline-qualification.md`.

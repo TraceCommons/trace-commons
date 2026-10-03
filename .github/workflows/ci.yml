@@ -695,6 +695,15 @@ jobs:
     # pull request and in the merge queue, and it blocks nothing until the
     # owner promotes it. `pipeline.py` starts its own digest-pinned
     # PostgreSQL container, so this job has no `services:` block.
+    #
+    # The run is signed with a throwaway check key that the job makes
+    # itself (`pipeline.py keygen`, then `qualify --signing-key`), so that the
+    # key writer and the signing step, which an unsigned run never reaches,
+    # run on every pull request. The key is trusted nowhere: no trust store
+    # holds its public key, and it is gone with the runner. It is written
+    # under the runner's temp directory, outside the checkout (so the code
+    # revision does not see it) and outside the paths the failure step
+    # uploads.
     name: pipeline qualification and restore
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -716,8 +725,17 @@ jobs:
           python-version: '3.12'
       - name: pipeline tooling self-tests
         run: python3 scripts/operator/test_pipeline_tooling.py
+      - name: pipeline check key (throwaway)
+        run: |
+          python3 scripts/operator/pipeline.py keygen \
+            --output "${RUNNER_TEMP}/pipeline-ci-check-key/ci_check_key.der" \
+            --key-id ci_check_key \
+            --trusted-key-output "${RUNNER_TEMP}/pipeline-ci-check-key/ci_check_key.trusted.json"
       - name: pipeline qualify
-        run: python3 scripts/operator/pipeline.py qualify
+        run: |
+          python3 scripts/operator/pipeline.py qualify \
+            --signing-key "${RUNNER_TEMP}/pipeline-ci-check-key/ci_check_key.der" \
+            --signing-key-id ci_check_key
       # A failed run prints only its label and a log path on this runner.
       # Keep the run directories `pipeline.py` writes (`Run.create`:
       # `.local/pipeline/runs/<run id>/`) -- the protected step logs, results,
