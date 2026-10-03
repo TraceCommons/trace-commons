@@ -105,12 +105,11 @@ final class OnboardingParityTests: XCTestCase {
                         "model.setConsentScopes(scopes)", "navigation.enrolled(visit: visit)",
                         "OnboardingDoneView(onFinish: onComplete)", "WhatGetsRemovedSheet()",
                         "GlassBreadcrumb([GlassCrumb(OnboardingCoordinatorWords.back)]"],
-             copySources: ["OnboardingCoordinatorWords.back,", "Text(OnboardingCoordinatorWords.settingsLoading)",
+             copySources: ["GlassCrumb(OnboardingCoordinatorWords.back)", "backLabel: OnboardingCoordinatorWords.backToPreviousStep,", "Text(OnboardingCoordinatorWords.settingsLoading)",
                            "Text(OnboardingCoordinatorWords.couldNotSave)",
                            "Text(OnboardingCoordinatorWords.scanNoLongerAvailable)",
                            "Text(OnboardingCoordinatorWords.scanNotIncluded)"],
              guards: [".disabled(navigation.consentSaveInProgress)", "case .failed:", "consentSaveFailed = true",
-                      "GlassNotice(tone: .ask)", "GlassNotice(tone: .outside)",
                       "Button(OnboardingPrivacyScanWords.continueButton)", ".buttonStyle(GlassButtonStyle(.glass))"]),
         Step(file: "Views/WhatGetsRemovedSheet.swift",
              bindings: ["TCScrubInfo.detectorNamesJSON()", "ScrubDetectors.labels(fromJSON:"],
@@ -145,6 +144,27 @@ final class OnboardingParityTests: XCTestCase {
         XCTAssertEqual(roots.components(separatedBy: "ScrollView {").count - 1, 1)
         let host = try Self.text("Views/PrivateInferenceActivationView.swift")
         XCTAssertFalse(host.contains("ScrollView {"), "the activation host nests a second ScrollView")
+    }
+
+    /// Each coordinator notice keeps its tone: the text sits directly under
+    /// its `GlassNotice(tone:)`, so swapping a tone breaks the pin.
+    func test_coordinatorNoticesKeepTheirTones() throws {
+        let source = try Self.text("Views/OnboardingCoordinatorView.swift")
+            .split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        let pairs = [("ask", "settingsLoading"), ("outside", "couldNotSave"),
+                     ("outside", "scanNoLongerAvailable"), ("ask", "scanNotIncluded")]
+        for (tone, word) in pairs {
+            XCTAssertTrue(source.contains("GlassNotice(tone: .\(tone)) { Text(OnboardingCoordinatorWords.\(word))"),
+                          "\(word) lost its .\(tone) tone")
+        }
+    }
+
+    /// The coordinator and the sheet are not scroll containers: each step's
+    /// wrapper owns the one ScrollView, and a second here would nest.
+    func test_coordinatorAndSheetHoldNoScrollView() throws {
+        for file in ["Views/OnboardingCoordinatorView.swift", "Views/WhatGetsRemovedSheet.swift"] {
+            XCTAssertFalse(try Self.text(file).contains("ScrollView"), "\(file) holds a ScrollView")
+        }
     }
 
     /// The Scan step acknowledges the third-party notice only when the scan

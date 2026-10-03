@@ -143,7 +143,7 @@ struct OnboardingCoordinatorView: View {
     private func backBar(to previous: Step) -> some View {
         HStack {
             GlassBreadcrumb([GlassCrumb(OnboardingCoordinatorWords.back)],
-                            backLabel: OnboardingCoordinatorWords.back,
+                            backLabel: OnboardingCoordinatorWords.backToPreviousStep,
                             onBack: { navigation.enter(previous) })
             Spacer()
         }
@@ -266,6 +266,7 @@ struct OnboardingCoordinatorView: View {
 /// This screen's sentences, held verbatim from the legacy screen.
 enum OnboardingCoordinatorWords {
     static let back = "Back"
+    static let backToPreviousStep = "Back to the previous step"
     static let settingsLoading = "Watcher settings are still loading. Try Continue again once they are available."
     static let couldNotSave = """
         Couldn't save your choices -- the watcher may not be running. \

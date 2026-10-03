@@ -66,7 +66,7 @@ final class ShellWordingTests: XCTestCase {
         "TraceCommonsApp/Views/MainWindowView.swift": 14,
         "TraceCommonsApp/Views/MenuBarView.swift": 11,
         "TraceCommonsApp/Views/OnboardingConnectView.swift": 7,
-        "TraceCommonsApp/Views/OnboardingCoordinatorView.swift": 4,
+        "TraceCommonsApp/Views/OnboardingCoordinatorView.swift": 5,
         "TraceCommonsApp/Views/OnboardingDoneView.swift": 8,
         "TraceCommonsApp/Views/OnboardingProjectsView.swift": 4,
         "TraceCommonsApp/Views/OnboardingRootsView.swift": 5,
