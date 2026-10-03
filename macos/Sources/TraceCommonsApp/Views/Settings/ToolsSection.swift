@@ -36,6 +36,8 @@ struct ToolsSection: View {
             if let copy = model.routingCopy {
                 card(copy, form: routingDraft ?? model.routingForm)
             } else {
+                // The unavailable branch; test_refreshIsOnAnAlwaysPresentContainer pins that
+                // `.onAppear` follows this container's closing brace directly.
                 Color.clear.frame(width: 0, height: 0).accessibilityHidden(true)
             }
         }

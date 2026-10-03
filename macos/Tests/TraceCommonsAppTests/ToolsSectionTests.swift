@@ -42,22 +42,34 @@ final class ToolsSectionTests: XCTestCase {
         let container = try XCTUnwrap(body.range(of: "VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {"))
         let gate = try XCTUnwrap(body.range(of: "if let copy = model.routingCopy {"))
         let unavailable = try XCTUnwrap(body.range(of: "} else {"), "no unavailable branch")
+        let anchor = try XCTUnwrap(body.range(of: "Color.clear.frame(width: 0, height: 0).accessibilityHidden(true)"))
         let refresh = try XCTUnwrap(body.range(of: ".onAppear {"))
         XCTAssertLessThan(container.lowerBound, gate.lowerBound)
         XCTAssertLessThan(gate.lowerBound, unavailable.lowerBound)
-        XCTAssertLessThan(unavailable.lowerBound, refresh.lowerBound, "the refresh is chained after the container")
+        XCTAssertLessThan(unavailable.lowerBound, anchor.lowerBound)
         XCTAssertEqual(body.components(separatedBy: ".onAppear {").count - 1, 1)
-        let tail = String(body[refresh.lowerBound...])
-        XCTAssertTrue(tail.contains("model.discoverRouting()"))
-        XCTAssertTrue(tail.contains("model.refreshRoutedTools()"))
+        // Between the else branch's last view and the modifier there is
+        // only the branch's and the container's closing braces.
+        let between = body[anchor.upperBound..<refresh.lowerBound].filter { !$0.isWhitespace }
+        XCTAssertEqual(String(between), "}}", "the refresh is not adjacent to the outer container's close")
+        // The closure holds no nested braces, so its end is the first one.
+        let afterOpen = body[refresh.upperBound...]
+        let close = try XCTUnwrap(afterOpen.firstIndex(of: "}"))
+        let closure = String(afterOpen[..<close])
+        XCTAssertTrue(closure.contains("model.discoverRouting()"))
+        XCTAssertTrue(closure.contains("model.refreshRoutedTools()"))
     }
 
-    /// The card authors no sentence: no literal Text or Button title.
+    /// The card authors no sentence: no literal first argument to any
+    /// constructor that draws text.
     func test_theCardAuthorsNoSentence() throws {
         let body = try source()
+        let literal = try NSRegularExpression(
+            pattern: #"\b(Text|Button|Toggle|GlassTag|GlassStatusLabel|GlassFolderButton|GlassExpander|TextField)\(\s*""#)
         for line in body.split(separator: "\n") where !line.trimmingCharacters(in: .whitespaces).hasPrefix("//") {
-            XCTAssertFalse(line.contains("Text(\""), "literal Text in: \(line)")
-            XCTAssertFalse(line.contains("Button(\""), "literal Button in: \(line)")
+            let text = String(line)
+            let hit = literal.firstMatch(in: text, range: NSRange(text.startIndex..., in: text))
+            XCTAssertNil(hit, "literal first argument in: \(line)")
         }
     }
 
