@@ -1729,6 +1729,21 @@ impl DaemonShared {
             .iter()
             .map(|notice| {
                 let key = notice.project_key.as_str();
+                // The "Auto contribute" override's rewording (#1208) names no
+                // folder: its key is not a path, so no id or label is derived
+                // from it, and the shared copy words it as unplaced.
+                if key == super::policy::OVERRIDE_ARMING_KEY {
+                    return serde_json::json!({
+                        "id": notice.id,
+                        "kind": "contribution_override",
+                        "reworded_at": notice.reworded_at,
+                        "project_id": serde_json::Value::Null,
+                        "project_label": serde_json::Value::Null,
+                        "was": notice.was,
+                        "now": notice.now,
+                        "scrub_check_defaulted": notice.scrub_check_defaulted,
+                    });
+                }
                 serde_json::json!({
                     "id": notice.id,
                     "reworded_at": notice.reworded_at,
@@ -1808,6 +1823,16 @@ impl DaemonShared {
             .grant_voids
             .iter()
             .map(|notice| match notice.project_key.as_deref() {
+                // The "Auto contribute" override (#1208): no project, and not
+                // the Flow 1 grant either.
+                None if notice.contribution_override => serde_json::json!({
+                    "id": notice.id,
+                    "kind": "contribution_override",
+                    "voided_at": notice.voided_at,
+                    "project_id": serde_json::Value::Null,
+                    "project_label": serde_json::Value::Null,
+                    "reasons": notice.reasons,
+                }),
                 Some(key) => serde_json::json!({
                     "id": notice.id,
                     "kind": "project",
@@ -3827,7 +3852,7 @@ fn contribution_mode_value(policy: &ProjectPolicy, queue: &super::queue::Queue) 
 /// longer resolves to `AutoUpload`. Never refused, so clearing the override
 /// restores them. Call with the policy lock held and the queue lock taken
 /// after it.
-fn return_unattended_the_override_stops(
+pub(crate) fn return_unattended_the_override_stops(
     policy: &ProjectPolicy,
     queue: &mut super::queue::Queue,
 ) -> usize {
@@ -3848,12 +3873,16 @@ fn return_unattended_the_override_stops(
 /// `policy::ContributionOverride` for what each mode does; per-folder modes
 /// are never written, so `clear_contribution_override` restores them.
 ///
-/// `auto_upload` arms every folder not already armed, so it is held to the
-/// arming paths' rules: refused without `confirm: true` (the shell showed
-/// the confirmation, `consent_copy::contribution_override_copy`), recorded in
-/// the audit **before** it takes effect, and from now -- nothing already on
-/// disk is sent unattended. A stopping override (`notify_only`, `ignore`) is
-/// never refused for want of an audit row, and is recorded after.
+/// `auto_upload` arms every folder not already armed, and is a grant (owner
+/// decision on #1208), so it is held to the arming paths' rules: refused
+/// without `confirm: true` (the shell showed the confirmation,
+/// `consent_copy::contribution_override_copy`), refused with
+/// `arming-terms-unavailable` without `GrantTerms` in force, recorded with
+/// those terms and its words' claim so an R6 widening voids it and a K5
+/// rewording is told, recorded in the audit **before** it takes effect, and
+/// from now -- nothing already on disk is sent unattended. A stopping
+/// override (`notify_only`, `ignore`) is never refused for want of an audit
+/// row, and is recorded after.
 fn handle_set_contribution_override(shared: &DaemonShared, req: &Request) -> Response {
     let mode: ProjectMode = match req
         .params
@@ -3872,10 +3901,39 @@ fn handle_set_contribution_override(shared: &DaemonShared, req: &Request) -> Res
     if mode == ProjectMode::AutoUpload && !confirm {
         return Response::err(req.id, ERR_BAD_PARAMS, "confirm-required");
     }
-    // The same mode again is not a change: nothing is recorded, and an
-    // `auto_upload` override keeps the hold it had.
-    {
-        let policy = shared.policy.lock().expect("policy lock");
+    // An `auto_upload` override is a grant (owner decision on #1208), held
+    // to what `set_project_mode` holds an arming to: the terms in force and
+    // the claim its words made are read before the policy lock is taken, so
+    // this adds no lock ordering, and without terms -- no config yet, or one
+    // that could not be read -- it is refused, fail closed, rather than
+    // leaving the next sweep to adopt whatever config then exists.
+    let grant = if mode == ProjectMode::AutoUpload {
+        let Some(terms) = super::grant_terms::GrantTerms::in_force(shared) else {
+            return Response::err(req.id, ERR_UNAVAILABLE, "arming-terms-unavailable");
+        };
+        let cfg = shared.store.load_config().ok().flatten();
+        let claim = super::arming_wording::project_arming_claim(super::automatic_gate::disclosure(
+            cfg.as_ref(),
+        ));
+        Some((terms, claim))
+    } else {
+        None
+    };
+    let audit_entry = AuditEntry {
+        at: Utc::now(),
+        action: "contribution-override-set".to_string(),
+        project_label: None,
+        detail: Some(mode_label(mode).to_string()),
+    };
+    let queue_touched;
+    let outcome: Result<usize, &'static str> = {
+        // One policy lock from the "same mode" check through the change, so
+        // two identical sets cannot both pass the check and both write an
+        // audit row. Held across the audit append: a rare contributor action,
+        // and `audit::append` takes no lock of its own.
+        let mut policy = shared.policy.lock().expect("policy lock");
+        // The same mode again is not a change: nothing is recorded, and an
+        // `auto_upload` override keeps the hold and the terms it had.
         if policy
             .contribution_override
             .as_ref()
@@ -3890,30 +3948,27 @@ fn handle_set_contribution_override(shared: &DaemonShared, req: &Request) -> Res
                 }),
             );
         }
-    }
-    let audit_entry = AuditEntry {
-        at: Utc::now(),
-        action: "contribution-override-set".to_string(),
-        project_label: None,
-        detail: Some(mode_label(mode).to_string()),
-    };
-    // Arming: recorded first, refused if it cannot be, as `set_project_mode`
-    // and `grant_automatic` do.
-    if mode == ProjectMode::AutoUpload && audit::append(&shared.store, &audit_entry).is_err() {
-        return Response::err(req.id, ERR_UNAVAILABLE, "audit-write-failed");
-    }
-    let queue_touched;
-    let outcome: Result<usize, &'static str> = {
-        let mut policy = shared.policy.lock().expect("policy lock");
-        let previous = policy.contribution_override.clone();
-        let previous_record = policy.sessions_on_disk_at_arming.clone();
-        policy.set_contribution_override(mode, Utc::now());
+        // Arming: recorded first, refused if it cannot be, as
+        // `set_project_mode` and `grant_automatic` do.
+        if mode == ProjectMode::AutoUpload && audit::append(&shared.store, &audit_entry).is_err() {
+            return Response::err(req.id, ERR_UNAVAILABLE, "audit-write-failed");
+        }
+        let previous = policy.clone();
+        if let Err(e) = policy.set_contribution_override(mode, Utc::now(), grant) {
+            // Unreachable while `grant` is filled above for `auto_upload`;
+            // kept so the policy's own refusal is never swallowed.
+            return Response::err(req.id, ERR_UNAVAILABLE, &one_line_label(&e.to_string()));
+        }
         if policy.save(&shared.store).is_err() {
             // Rolled back, so nothing changed and there is nothing to
             // announce.
-            policy.contribution_override = previous;
-            policy.sessions_on_disk_at_arming = previous_record;
+            *policy = previous;
             return Response::err(req.id, ERR_UNAVAILABLE, "policy-write-failed");
+        }
+        // A stopping override is never refused for want of an audit row, and
+        // is recorded after it takes effect, still under the lock.
+        if mode != ProjectMode::AutoUpload {
+            let _ = audit::append(&shared.store, &audit_entry);
         }
         let mut queue = shared.queue.lock().expect("queue lock");
         let returned = return_unattended_the_override_stops(&policy, &mut queue);
@@ -3926,9 +3981,6 @@ fn handle_set_contribution_override(shared: &DaemonShared, req: &Request) -> Res
             Ok(returned)
         }
     };
-    if mode != ProjectMode::AutoUpload {
-        let _ = audit::append(&shared.store, &audit_entry);
-    }
     // The override itself is on `status`, so `status_changed` always
     // follows, carrying any `decisions_owed` change with it.
     shared.publish(EVENT_STATUS_CHANGED, serde_json::json!({}));
@@ -14910,6 +14962,43 @@ mod tests {
         );
         assert_eq!(again.result.unwrap()["changed"], false);
         assert_eq!(audit::load(&s.store).unwrap().len(), 1);
+    }
+
+    /// #1208, owner decision: "Auto contribute" is a grant, so it fails
+    /// closed without terms, exactly as `set_project_mode` arming does: the
+    /// same label, nothing recorded, nothing changed. With terms it records
+    /// them, and the claim its words made.
+    #[test]
+    fn an_auto_override_without_terms_is_refused_and_records_its_terms_when_given() {
+        let s = enrolled_shared();
+        let cfg = s.store.load_config().unwrap().unwrap();
+        std::fs::remove_file(s.store.dir().join("contributor.json")).unwrap();
+        let r = set_override(
+            &s,
+            serde_json::json!({"mode": "auto_upload", "confirm": true}),
+        );
+        let err = r.error.expect("refused without terms");
+        assert_eq!(err.code, ERR_UNAVAILABLE);
+        assert_eq!(err.message, "arming-terms-unavailable");
+        assert!(s.policy.lock().unwrap().contribution_override.is_none());
+        assert!(
+            audit::load(&s.store).unwrap().is_empty(),
+            "nothing recorded"
+        );
+
+        s.store.save_config(&cfg).unwrap();
+        let r = set_override(
+            &s,
+            serde_json::json!({"mode": "auto_upload", "confirm": true}),
+        );
+        assert!(r.error.is_none(), "{:?}", r.error);
+        let policy = s.policy.lock().unwrap();
+        let o = policy.contribution_override.as_ref().unwrap();
+        assert_eq!(
+            o.granted_under,
+            super::super::grant_terms::GrantTerms::in_force(&s)
+        );
+        assert!(o.claim.is_some());
     }
 
     /// "Ask me" puts what went unattended back to waiting, and says so on

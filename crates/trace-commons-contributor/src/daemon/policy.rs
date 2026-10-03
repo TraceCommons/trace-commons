@@ -160,14 +160,26 @@ pub struct GrantSweep {
     pub automatic_grant_voided: Option<Vec<&'static str>>,
     /// Armed projects that had no recorded terms and now do.
     pub baselined: usize,
+    /// Why an "Auto contribute" contribution override was voided, if it was.
+    /// The override is cleared: every folder is back on its own mode.
+    pub contribution_override_voided: Option<Vec<&'static str>>,
 }
 
 impl GrantSweep {
     /// Whether the policy changed and must be saved.
     pub fn changed(&self) -> bool {
-        !self.voided.is_empty() || self.baselined > 0 || self.automatic_grant_voided.is_some()
+        !self.voided.is_empty()
+            || self.baselined > 0
+            || self.automatic_grant_voided.is_some()
+            || self.contribution_override_voided.is_some()
     }
 }
+
+/// The reason label an "Auto contribute" override is voided with when it
+/// has no recorded terms to compare. Only a policy file written by an
+/// unreleased build can hold one; it is voided rather than baselined (as a
+/// legacy armed folder is) because there is no shipped state to protect.
+pub const OVERRIDE_TERMS_UNRECORDED: &str = "terms-unrecorded";
 
 /// One grant voided by a sweep, and why. Labels only.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -196,10 +208,16 @@ pub struct GrantVoidNotice {
     /// notices it showed and never one that arrived after it drew.
     pub id: u64,
     pub voided_at: DateTime<Utc>,
-    /// The project voided, or `None` for the Flow 1 grant itself.
+    /// The project voided, or `None` for the Flow 1 grant itself or for the
+    /// contribution override (see `contribution_override`).
     pub project_key: Option<String>,
     /// Fixed reason labels, as `grant_terms::widening_from` gives them.
     pub reasons: Vec<String>,
+    /// The "Auto contribute" contribution override was voided (#1173), not a
+    /// project or the Flow 1 grant. `project_key` is `None`.
+    /// `#[serde(default)]` so an older policy file still loads.
+    #[serde(default)]
+    pub contribution_override: bool,
 }
 
 /// K5: an armed folder whose arming words claimed more than the words it
@@ -343,7 +361,10 @@ pub const OVERRIDE_ARMING_KEY: &str = "contribution-override";
 ///
 /// - `Ignore` ("Never"): every folder resolves to `Ignore`. Nothing is
 ///   queued or sent from any folder. Waiting entries are left waiting rather
-///   than refused, so clearing the override restores them.
+///   than refused, so clearing the override restores them. Entries the
+///   contributor already approved are held, not sent, and `approve` is
+///   refused ([`ProjectPolicy::holds_every_send`]); clearing the override
+///   releases them as they were.
 /// - `NotifyOnly` ("Ask me"): every folder resolves to `NotifyOnly`, except
 ///   a folder set to `Ignore`, which stays `Ignore`. Nothing goes unattended.
 /// - `AutoUpload` ("Auto contribute"): every folder resolves to
@@ -357,10 +378,14 @@ pub const OVERRIDE_ARMING_KEY: &str = "contribution-override";
 ///   grant's, its own arming from now). Every other gate still applies: the
 ///   Scrub check (K4), review holds, `automatic_gate`.
 ///
-/// The override is **not a grant**. It records no `GrantTerms`, creates no
-/// `automatic_grant`, and is not swept by `sweep_grants` (R6): whether a
-/// widening of the terms should void it is a consent-spec question that is
-/// not decided here.
+/// **An `AutoUpload` override is a grant** (owner decision on #1208), held to
+/// everything a per-folder arming is: it cannot be set without the
+/// `GrantTerms` in force (`arming-terms-unavailable`), it records those
+/// terms (`granted_under`) and the claim its words made (`claim`), and
+/// [`ProjectPolicy::sweep_grants`] voids it when the terms widen (R6) --
+/// clearing it, so every folder is back on its own mode, with a void notice.
+/// K5 rewordings reach it through [`ProjectPolicy::sweep_override_claim`].
+/// It creates no `automatic_grant` (the Flow 1 grant is a separate record).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContributionOverride {
     pub mode: ProjectMode,
@@ -369,6 +394,16 @@ pub struct ContributionOverride {
     /// any other mode.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub arming: Option<ArmedFromNow>,
+    /// The terms an `AutoUpload` override was granted under, as
+    /// [`ProjectEntry::armed_under`] is for a folder. `None` for any other
+    /// mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub granted_under: Option<super::grant_terms::GrantTerms>,
+    /// What the words an `AutoUpload` override was set under claimed, as
+    /// [`ProjectPolicy::arming_claims`] records for a folder. `None` for any
+    /// other mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claim: Option<super::arming_wording::ArmingClaim>,
 }
 
 /// K5: a project armed **from now**: "Share automatically" in Customize, where
@@ -494,14 +529,34 @@ impl ProjectPolicy {
     /// already in force changes nothing, so a shell re-sending it neither
     /// moves `since` nor releases an `AutoUpload` override's held backlog.
     /// Returns whether anything changed. See [`ContributionOverride`].
-    pub fn set_contribution_override(&mut self, mode: ProjectMode, now: DateTime<Utc>) -> bool {
+    ///
+    /// `grant` is the terms in force and the claim the confirmation's words
+    /// made. An `AutoUpload` override is a grant, so without them it is
+    /// refused with `arming-terms-unavailable` and nothing changes; any
+    /// other mode ignores them. Setting an override answers any outstanding
+    /// notice that the override had been voided.
+    pub fn set_contribution_override(
+        &mut self,
+        mode: ProjectMode,
+        now: DateTime<Utc>,
+        grant: Option<(
+            super::grant_terms::GrantTerms,
+            super::arming_wording::ArmingClaim,
+        )>,
+    ) -> Result<bool> {
+        let grant = match (mode, grant) {
+            (ProjectMode::AutoUpload, None) => bail!("arming-terms-unavailable"),
+            (ProjectMode::AutoUpload, Some(grant)) => Some(grant),
+            _ => None,
+        };
         if self
             .contribution_override
             .as_ref()
             .is_some_and(|o| o.mode == mode)
         {
-            return false;
+            return Ok(false);
         }
+        let (granted_under, claim) = grant.unzip();
         self.contribution_override = Some(ContributionOverride {
             mode,
             since: now,
@@ -509,9 +564,24 @@ impl ProjectPolicy {
                 armed_at: now,
                 recorded_sources: BTreeMap::new(),
             }),
+            granted_under,
+            claim,
         });
+        self.grant_voids.retain(|n| !n.contribution_override);
+        self.arming_rewordings
+            .retain(|n| n.project_key != OVERRIDE_ARMING_KEY);
         self.prune_arming_record();
-        true
+        Ok(true)
+    }
+
+    /// Whether every send is held: a "Never" contribution override is in
+    /// force. Nothing leaves while it is, not even an entry the contributor
+    /// approved, and `approve` is refused, so "Nothing is queued or sent"
+    /// is true. Clearing the override releases what was held as it was.
+    pub fn holds_every_send(&self) -> bool {
+        self.contribution_override
+            .as_ref()
+            .is_some_and(|o| o.mode == ProjectMode::Ignore)
     }
 
     /// Clear the contribution override. Every folder is back on its own
@@ -520,6 +590,10 @@ impl ProjectPolicy {
     pub fn clear_contribution_override(&mut self) -> bool {
         let cleared = self.contribution_override.take().is_some();
         if cleared {
+            // No longer armed, so a notice about what its arming now means
+            // no longer applies.
+            self.arming_rewordings
+                .retain(|n| n.project_key != OVERRIDE_ARMING_KEY);
             self.prune_arming_record();
         }
         cleared
@@ -824,8 +898,11 @@ impl ProjectPolicy {
     /// a source has been recorded, and then nothing from that source's
     /// recording pass.
     pub fn grant_automatic(&mut self, now: DateTime<Utc>, terms: super::grant_terms::GrantTerms) {
-        // Giving the grant again answers a notice that it had stopped.
-        self.grant_voids.retain(|n| n.project_key.is_some());
+        // Giving the grant again answers a notice that it had stopped, and
+        // only that one: a project's, or the contribution override's, is
+        // about something else.
+        self.grant_voids
+            .retain(|n| n.project_key.is_some() || n.contribution_override);
         self.automatic_grant = Some(AutomaticGrant {
             granted_at: now,
             granted_under: terms,
@@ -1207,6 +1284,26 @@ impl ProjectPolicy {
                 sweep.automatic_grant_voided = Some(reasons);
             }
         }
+        // An "Auto contribute" override is a grant too (#1208): a widening
+        // clears it, so no folder resolves to `AutoUpload` because of it,
+        // and the pill falls back to the folders' own modes. One with no
+        // recorded terms is voided rather than baselined -- see
+        // `OVERRIDE_TERMS_UNRECORDED`.
+        if let Some(o) = &self.contribution_override
+            && o.mode == ProjectMode::AutoUpload
+        {
+            let reasons = match &o.granted_under {
+                Some(granted) => current.widening_from(granted),
+                None => vec![OVERRIDE_TERMS_UNRECORDED],
+            };
+            if !reasons.is_empty() {
+                self.contribution_override = None;
+                self.arming_rewordings
+                    .retain(|n| n.project_key != OVERRIDE_ARMING_KEY);
+                self.prune_arming_record();
+                sweep.contribution_override_voided = Some(reasons);
+            }
+        }
         // Recorded with the void, in the same save, so a void is never
         // written without the notice that tells the contributor about it.
         for (key, reasons) in voided_keys {
@@ -1220,7 +1317,52 @@ impl ProjectPolicy {
         if let Some(reasons) = sweep.automatic_grant_voided.clone() {
             self.push_grant_void(None, &reasons, now);
         }
+        if let Some(reasons) = sweep.contribution_override_voided.clone() {
+            self.push_void(None, true, &reasons, now);
+        }
         sweep
+    }
+
+    /// K5 for the "Auto contribute" contribution override: leave a notice
+    /// when the words in force (`in_force`, what the arming offer would say
+    /// now) no longer claim what the override was set under. It stays on;
+    /// the recorded claim moves to the one in force in the same save, so a
+    /// rewording is announced once. The notice is keyed by
+    /// [`OVERRIDE_ARMING_KEY`]. Returns whether one was left.
+    pub fn sweep_override_claim(
+        &mut self,
+        in_force: super::arming_wording::ArmingClaim,
+        now: DateTime<Utc>,
+    ) -> bool {
+        let Some(o) = self.contribution_override.as_mut() else {
+            return false;
+        };
+        if o.mode != ProjectMode::AutoUpload {
+            return false;
+        }
+        // Its confirmation says sessions "will be scrubbed", as the arming
+        // offer does, so an override set before claims were recorded claimed
+        // that.
+        let was = o
+            .claim
+            .unwrap_or(super::arming_wording::ArmingClaim::ModelScrubbed);
+        if !was.narrowed_to(in_force) {
+            return false;
+        }
+        o.claim = Some(in_force);
+        self.arming_rewordings
+            .retain(|n| n.project_key != OVERRIDE_ARMING_KEY || n.scrub_check_defaulted);
+        let id = self.next_arming_reword_id;
+        self.next_arming_reword_id = id.saturating_add(1);
+        self.arming_rewordings.push(ArmingRewordNotice {
+            id,
+            reworded_at: now,
+            project_key: OVERRIDE_ARMING_KEY.to_string(),
+            was,
+            now: in_force,
+            scrub_check_defaulted: false,
+        });
+        true
     }
 
     /// Record what the words `project_key` was just armed under claim. Only
@@ -1345,7 +1487,22 @@ impl ProjectPolicy {
         reasons: &[&'static str],
         now: DateTime<Utc>,
     ) {
-        self.grant_voids.retain(|n| n.project_key != project_key);
+        self.push_void(project_key, false, reasons, now);
+    }
+
+    /// [`Self::push_grant_void`], for a project, the Flow 1 grant, or (with
+    /// `contribution_override`) the override. Replaces only a notice about
+    /// the same grant.
+    fn push_void(
+        &mut self,
+        project_key: Option<String>,
+        contribution_override: bool,
+        reasons: &[&'static str],
+        now: DateTime<Utc>,
+    ) {
+        self.grant_voids.retain(|n| {
+            n.project_key != project_key || n.contribution_override != contribution_override
+        });
         let id = self.next_grant_void_id;
         self.next_grant_void_id = id.saturating_add(1);
         self.grant_voids.push(GrantVoidNotice {
@@ -1353,6 +1510,7 @@ impl ProjectPolicy {
             voided_at: now,
             project_key,
             reasons: reasons.iter().map(|r| (*r).to_string()).collect(),
+            contribution_override,
         });
     }
 
@@ -3025,7 +3183,7 @@ mod tests {
             ProjectMode::NotifyOnly,
             ProjectMode::Ignore,
         ] {
-            assert!(p.set_contribution_override(mode, t("2026-10-02T00:00:00Z")));
+            assert!(override_to(&mut p, mode, t("2026-10-02T00:00:00Z")));
             assert_eq!(p.projects, entries, "{mode:?} wrote a folder's entry");
             assert!(p.clear_contribution_override());
             assert_eq!(modes(&p), before, "{mode:?}");
@@ -3039,12 +3197,12 @@ mod tests {
     fn ask_and_never_overrides_stop_every_unattended_send() {
         use ProjectMode::*;
         let mut p = one_folder_per_mode();
-        p.set_contribution_override(NotifyOnly, t("2026-10-02T00:00:00Z"));
+        override_to(&mut p, NotifyOnly, t("2026-10-02T00:00:00Z"));
         assert_eq!(
             modes(&p),
             vec![NotifyOnly, NotifyOnly, Ignore, NotifyOnly, NotifyOnly]
         );
-        p.set_contribution_override(Ignore, t("2026-10-02T00:00:00Z"));
+        override_to(&mut p, Ignore, t("2026-10-02T00:00:00Z"));
         assert_eq!(modes(&p), vec![Ignore; 5]);
         assert_eq!(p.folder_mode("/w/auto"), AutoUpload);
     }
@@ -3056,7 +3214,7 @@ mod tests {
     fn an_auto_override_leaves_never_folders_and_the_unknown_bucket_alone() {
         use ProjectMode::*;
         let mut p = one_folder_per_mode();
-        p.set_contribution_override(AutoUpload, t("2026-10-02T00:00:00Z"));
+        override_to(&mut p, AutoUpload, t("2026-10-02T00:00:00Z"));
         assert_eq!(
             modes(&p),
             vec![AutoUpload, AutoUpload, Ignore, AutoUpload, NotifyOnly]
@@ -3071,7 +3229,7 @@ mod tests {
     fn an_auto_override_never_sends_an_existing_backlog() {
         let mut p = one_folder_per_mode();
         let at = t("2026-10-02T00:00:00Z");
-        p.set_contribution_override(ProjectMode::AutoUpload, at);
+        override_to(&mut p, ProjectMode::AutoUpload, at);
         for folder in ["/w/ask", "/w/unseen"] {
             assert!(
                 p.waits_for_a_person(folder, "/s/pre.jsonl", SRC),
@@ -3111,7 +3269,11 @@ mod tests {
         assert!(p.waits_for_a_person("/w/ask", "/s/resumed.jsonl", SRC));
 
         // Re-sending the same override keeps the hold it had.
-        assert!(!p.set_contribution_override(ProjectMode::AutoUpload, t("2026-10-03T00:00:00Z")));
+        assert!(!override_to(
+            &mut p,
+            ProjectMode::AutoUpload,
+            t("2026-10-03T00:00:00Z")
+        ));
         assert!(p.waits_for_a_person("/w/ask", "/s/pre.jsonl", SRC));
         assert!(!p.waits_for_a_person("/w/ask", "/s/new.jsonl", SRC));
 
@@ -3130,7 +3292,7 @@ mod tests {
             .unwrap();
         p.contributed
             .insert("/w/ask".to_string(), ARMING_SUGGESTION_THRESHOLD);
-        p.set_contribution_override(ProjectMode::AutoUpload, t("2026-10-02T00:00:00Z"));
+        override_to(&mut p, ProjectMode::AutoUpload, t("2026-10-02T00:00:00Z"));
         assert!(p.arming_suggestion(t("2026-10-02T00:00:00Z")).is_some());
     }
 
@@ -3148,7 +3310,11 @@ mod tests {
         assert_eq!(modes(&p), modes(&one_folder_per_mode()));
 
         let mut armed = one_folder_per_mode();
-        armed.set_contribution_override(ProjectMode::AutoUpload, t("2026-10-02T00:00:00Z"));
+        override_to(
+            &mut armed,
+            ProjectMode::AutoUpload,
+            t("2026-10-02T00:00:00Z"),
+        );
         let back: ProjectPolicy =
             serde_json::from_value(serde_json::to_value(&armed).unwrap()).unwrap();
         assert_eq!(back, armed, "the override round-trips");
@@ -3174,9 +3340,171 @@ mod tests {
         );
         p.set_mode("/w/b", Ignore, at).unwrap();
         assert_eq!(p.contribution_mode([]), None);
-        p.set_contribution_override(NotifyOnly, at);
+        override_to(&mut p, NotifyOnly, at);
         assert_eq!(p.contribution_mode([]), Some(NotifyOnly));
         p.clear_contribution_override();
         assert_eq!(p.contribution_mode([]), None);
+    }
+
+    /// Set the override as `set_contribution_override` does: an `AutoUpload`
+    /// override under the terms `grant_terms_with` gives for the default
+    /// destination, and the arming claim every shell's arming offer makes.
+    fn override_to(p: &mut ProjectPolicy, mode: ProjectMode, at: DateTime<Utc>) -> bool {
+        let grant = (mode == ProjectMode::AutoUpload).then(|| {
+            (
+                grant_terms_with("https://ingest.invalid"),
+                super::super::arming_wording::ArmingClaim::ModelScrubbed,
+            )
+        });
+        p.set_contribution_override(mode, at, grant).unwrap()
+    }
+
+    /// Owner decision on #1208: an "Auto contribute" override is a grant,
+    /// so it fails closed exactly as per-folder arming does. Without terms
+    /// to be a grant of, it is refused and nothing changes.
+    #[test]
+    fn an_auto_override_without_terms_is_refused() {
+        let mut p = one_folder_per_mode();
+        let before = p.clone();
+        let err = p
+            .set_contribution_override(ProjectMode::AutoUpload, t("2026-10-02T00:00:00Z"), None)
+            .expect_err("no terms, no grant");
+        assert_eq!(err.to_string(), "arming-terms-unavailable");
+        assert_eq!(p, before, "a refusal changes nothing");
+        // A stopping override needs no terms: it grants nothing.
+        assert!(
+            p.set_contribution_override(ProjectMode::NotifyOnly, t("2026-10-02T00:00:00Z"), None)
+                .unwrap()
+        );
+    }
+
+    /// R6 reaches the override: widened terms clear it, every folder is
+    /// back on its own mode -- so none resolves to `AutoUpload` because of
+    /// the override -- and the contributor is told, as for a folder.
+    #[test]
+    fn widening_the_terms_voids_an_auto_override() {
+        let mut p = one_folder_per_mode();
+        let at = t("2026-10-02T00:00:00Z");
+        assert!(p.record_grant_terms("/w/auto", grant_terms_with("https://ingest.invalid")));
+        override_to(&mut p, ProjectMode::AutoUpload, at);
+        assert_eq!(p.resolve("/w/ask"), ProjectMode::AutoUpload);
+
+        let sweep = p.sweep_grants(&grant_terms_with("https://elsewhere.invalid"), at);
+        assert!(sweep.changed(), "the void is saved");
+        assert_eq!(
+            sweep.contribution_override_voided,
+            Some(vec!["destination-changed"])
+        );
+        assert!(
+            p.contribution_override.is_none(),
+            "the pill is back to the roll-up"
+        );
+        for folder in ["/w/ask", "/w/unseen"] {
+            assert_ne!(p.resolve(folder), ProjectMode::AutoUpload, "{folder}");
+            assert_eq!(p.armed_from_now_at(folder), None, "{folder}");
+        }
+        assert!(p.armings_from_now().is_empty());
+        // The folder armed by its own mode voids as it always did.
+        assert_eq!(p.resolve("/w/auto"), ProjectMode::NotifyOnly);
+        let override_voids: Vec<&GrantVoidNotice> = p
+            .grant_voids
+            .iter()
+            .filter(|n| n.contribution_override)
+            .collect();
+        assert_eq!(override_voids.len(), 1, "{:?}", p.grant_voids);
+        assert_eq!(override_voids[0].project_key, None);
+        assert_eq!(override_voids[0].reasons, vec!["destination-changed"]);
+        // And the folder's own void notice is a separate one.
+        assert!(
+            p.grant_voids
+                .iter()
+                .any(|n| n.project_key.as_deref() == Some("/w/auto"))
+        );
+    }
+
+    /// Unchanged terms leave the override exactly as it was.
+    #[test]
+    fn an_auto_override_survives_a_sweep_under_unchanged_terms() {
+        let mut p = one_folder_per_mode();
+        let at = t("2026-10-02T00:00:00Z");
+        override_to(&mut p, ProjectMode::AutoUpload, at);
+        let before = p.contribution_override.clone();
+        let sweep = p.sweep_grants(&grant_terms_with("https://ingest.invalid"), at);
+        assert_eq!(sweep.contribution_override_voided, None);
+        assert_eq!(p.contribution_override, before);
+        assert_eq!(p.resolve("/w/ask"), ProjectMode::AutoUpload);
+        assert!(p.grant_voids.iter().all(|n| !n.contribution_override));
+    }
+
+    /// An override recorded with no terms (a policy file written before
+    /// they were recorded) is voided rather than baselined: no such file
+    /// ever shipped, so there is no legacy to protect, and failing closed
+    /// asks the contributor again.
+    #[test]
+    fn an_auto_override_with_no_recorded_terms_is_voided() {
+        let mut p = one_folder_per_mode();
+        let at = t("2026-10-02T00:00:00Z");
+        override_to(&mut p, ProjectMode::AutoUpload, at);
+        p.contribution_override.as_mut().unwrap().granted_under = None;
+        let sweep = p.sweep_grants(&grant_terms_with("https://ingest.invalid"), at);
+        assert_eq!(
+            sweep.contribution_override_voided,
+            Some(vec![OVERRIDE_TERMS_UNRECORDED])
+        );
+        assert!(p.contribution_override.is_none());
+    }
+
+    /// The override's void notice and the Flow 1 grant's are told apart:
+    /// neither evicts the other, giving the grant again answers only its
+    /// own, and setting the override again answers only the override's.
+    #[test]
+    fn the_override_void_notice_is_its_own() {
+        let mut p = ProjectPolicy::new();
+        let at = t("2026-10-02T00:00:00Z");
+        p.grant_automatic(at, grant_terms_with("https://ingest.invalid"));
+        override_to(&mut p, ProjectMode::AutoUpload, at);
+        p.sweep_grants(&grant_terms_with("https://elsewhere.invalid"), at);
+        assert_eq!(p.grant_voids.len(), 2, "{:?}", p.grant_voids);
+        p.grant_automatic(at, grant_terms_with("https://elsewhere.invalid"));
+        assert_eq!(p.grant_voids.len(), 1);
+        assert!(p.grant_voids[0].contribution_override);
+        p.set_contribution_override(
+            ProjectMode::AutoUpload,
+            at,
+            Some((
+                grant_terms_with("https://elsewhere.invalid"),
+                super::super::arming_wording::ArmingClaim::ModelScrubbed,
+            )),
+        )
+        .unwrap();
+        assert!(p.grant_voids.is_empty(), "setting it again answers it");
+    }
+
+    /// K5 reaches the override too: armed under words that claimed a model
+    /// scrubs, it is told once when the words in force narrow, and stays on.
+    #[test]
+    fn an_auto_override_is_told_when_its_words_narrow() {
+        use super::super::arming_wording::ArmingClaim;
+        let mut p = ProjectPolicy::new();
+        let at = t("2026-10-02T00:00:00Z");
+        override_to(&mut p, ProjectMode::AutoUpload, at);
+        assert!(!p.sweep_override_claim(ArmingClaim::ModelScrubbed, at));
+        assert!(p.arming_rewordings.is_empty());
+        assert!(p.sweep_override_claim(ArmingClaim::PatternsOnly, at));
+        assert_eq!(p.arming_rewordings.len(), 1);
+        assert_eq!(p.arming_rewordings[0].project_key, OVERRIDE_ARMING_KEY);
+        assert_eq!(p.arming_rewordings[0].was, ArmingClaim::ModelScrubbed);
+        assert!(
+            !p.sweep_override_claim(ArmingClaim::PatternsOnly, at),
+            "told once"
+        );
+        assert_eq!(
+            p.contribution_override.as_ref().map(|o| o.mode),
+            Some(ProjectMode::AutoUpload),
+            "a rewording leaves it on"
+        );
+        // Clearing it answers the notice.
+        p.clear_contribution_override();
+        assert!(p.arming_rewordings.is_empty());
     }
 }

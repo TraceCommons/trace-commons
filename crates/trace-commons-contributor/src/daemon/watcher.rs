@@ -649,15 +649,48 @@ fn sweep_grants(shared: &DaemonShared, ctx: &PassContext) {
         return;
     };
     let now = ctx.now;
-    let sweep = {
+    let (sweep, returned) = {
         let mut policy = shared.policy.lock().expect("policy lock");
         let sweep = policy.sweep_grants(current, now);
         // Fixed labels, never the error: its context can carry a path.
         if sweep.changed() && policy.save(&shared.store).is_err() {
             tracing::warn!("could not persist the grant sweep");
         }
-        sweep
+        // A voided "Auto contribute" override leaves folders that ask: what
+        // it approved unattended there and has not sent goes back to waiting
+        // now, as clearing the override does, rather than showing approved
+        // until the send-time check catches it. Queue after policy, as
+        // everywhere.
+        let returned = if sweep.contribution_override_voided.is_some() {
+            let mut queue = shared.queue.lock().expect("queue lock");
+            let returned = super::ipc::return_unattended_the_override_stops(&policy, &mut queue);
+            if returned > 0 && queue.save(&shared.store).is_err() {
+                tracing::warn!("could not persist the override void's returned approvals");
+            }
+            returned
+        } else {
+            0
+        };
+        (sweep, returned)
     };
+    if let Some(reasons) = &sweep.contribution_override_voided {
+        let entry = super::audit::AuditEntry {
+            at: now,
+            action: "contribution-override-voided".to_string(),
+            project_label: None,
+            detail: Some(reasons.join(",")),
+        };
+        if super::audit::append(&shared.store, &entry).is_err() {
+            tracing::warn!("could not record a voided contribution override");
+        }
+        tracing::info!(
+            reasons = ?reasons,
+            "the auto-contribute override was voided; every folder is back on its own setting"
+        );
+    }
+    if returned > 0 {
+        shared.publish(EVENT_QUEUE_CHANGED, serde_json::json!({}));
+    }
     for voided in &sweep.voided {
         let entry = super::audit::AuditEntry {
             at: now,
@@ -688,7 +721,10 @@ fn sweep_grants(shared: &DaemonShared, ctx: &PassContext) {
             "the automatic-contribution grant was voided; new projects ask first"
         );
     }
-    if !sweep.voided.is_empty() || sweep.automatic_grant_voided.is_some() {
+    if !sweep.voided.is_empty()
+        || sweep.automatic_grant_voided.is_some()
+        || sweep.contribution_override_voided.is_some()
+    {
         shared.publish(super::ipc::EVENT_STATUS_CHANGED, serde_json::json!({}));
     }
 }
@@ -727,11 +763,33 @@ fn sweep_arming_wording(shared: &DaemonShared, ctx: &PassContext) {
             },
             ctx.now,
         );
-        if !reworded.is_empty() && policy.save(&shared.store).is_err() {
+        // The "Auto contribute" override is armed by its own words (#1208):
+        // judged against what the arming offer says now, as a folder that
+        // has sent nothing yet is (`claim_in_force` for a key with no entry).
+        let override_in_force =
+            super::arming_wording::claim_in_force(&policy, super::policy::OVERRIDE_ARMING_KEY);
+        let override_reworded = policy.sweep_override_claim(override_in_force, ctx.now);
+        if (!reworded.is_empty() || override_reworded) && policy.save(&shared.store).is_err() {
             tracing::warn!("could not persist an arming rewording");
         }
-        reworded
+        (reworded, override_reworded)
     };
+    let (reworded, override_reworded) = reworded;
+    if override_reworded {
+        let entry = super::audit::AuditEntry {
+            at: ctx.now,
+            action: "arming-reworded".to_string(),
+            project_label: None,
+            detail: Some("patterns-only".to_string()),
+        };
+        if super::audit::append(&shared.store, &entry).is_err() {
+            tracing::warn!("could not record an arming rewording");
+        }
+        tracing::info!(
+            "the auto-contribute override's wording no longer claims a model scrubs; the contributor is told"
+        );
+        shared.publish(super::ipc::EVENT_STATUS_CHANGED, serde_json::json!({}));
+    }
     for label in &reworded {
         let entry = super::audit::AuditEntry {
             at: ctx.now,
@@ -2947,6 +3005,92 @@ mod tests {
         assert_eq!(voids[0]["reasons"], serde_json::json!(["scopes-widened"]));
         let persisted = crate::daemon::policy::ProjectPolicy::load(&f.shared.store).unwrap();
         assert_eq!(persisted.grant_voids.len(), 1, "saved with the void");
+    }
+
+    /// #1208, owner decision: an "Auto contribute" override is a grant, so
+    /// R6 reaches it through the watcher. Set over the socket under one set
+    /// of scopes, then widened: the override is cleared, the folder it armed
+    /// no longer approves a new session on the contributor's behalf, and the
+    /// void is on `status`, in the audit (label-only) and announced.
+    #[tokio::test]
+    async fn widening_the_terms_voids_an_auto_override_through_the_watcher() {
+        let f = WatcherFixture::new();
+        f.shared
+            .store
+            .save_config(&grant_test_cfg(&["debugging_evaluation"]))
+            .unwrap();
+        let resp = super::super::ipc::handle_request(
+            &f.shared,
+            &super::super::ipc::Request {
+                id: 1,
+                method: "set_contribution_override".to_string(),
+                params: serde_json::json!({"mode": "auto_upload", "confirm": true}),
+            },
+        );
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+        // A pass records what is on disk at the override (nothing), so a
+        // session that appears after it goes unattended.
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+        f.write_session_started(
+            "proj",
+            "11111111-1111-1111-1111-111111111111",
+            0,
+            &Utc::now().to_rfc3339(),
+        );
+        let first = f.settle(at("2030-01-02T00:00:00Z")).await;
+        assert!(
+            f.shared
+                .policy
+                .lock()
+                .unwrap()
+                .contribution_override
+                .is_some()
+        );
+        assert_eq!(first.auto_ready, 1, "the override armed it: {first:?}");
+
+        f.shared
+            .store
+            .save_config(&grant_test_cfg(&["debugging_evaluation", "model_training"]))
+            .unwrap();
+        let mut rx = f.shared.events.subscribe();
+        f.write_session_started(
+            "proj",
+            "22222222-2222-2222-2222-222222222222",
+            0,
+            &Utc::now().to_rfc3339(),
+        );
+        let second = f.settle(at("2030-01-03T00:00:00Z")).await;
+
+        assert_eq!(second.auto_ready, 0, "{second:?}");
+        let key = project_key_for(Some(&abs("Users/testuser/code/proj")));
+        {
+            let policy = f.shared.policy.lock().unwrap();
+            assert!(policy.contribution_override.is_none(), "cleared");
+            assert_ne!(policy.resolve(&key), ProjectMode::AutoUpload);
+        }
+        let audit = crate::daemon::audit::load(&f.shared.store).unwrap();
+        let voided = audit
+            .iter()
+            .find(|e| e.action == "contribution-override-voided")
+            .expect("the void is recorded");
+        assert_eq!(voided.detail.as_deref(), Some("scopes-widened"));
+        assert_eq!(voided.project_label, None, "label-only, no folder");
+        let status = f.shared.status_value();
+        assert!(status["contribution_override"].is_null());
+        let voids = status["grant_voids"].as_array().expect("grant_voids");
+        assert_eq!(voids.len(), 1, "{voids:?}");
+        assert_eq!(voids[0]["kind"], "contribution_override");
+        assert!(voids[0]["project_id"].is_null());
+        let mut events = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            events.push(event.event);
+        }
+        assert!(
+            events
+                .iter()
+                .any(|e| e == super::super::ipc::EVENT_STATUS_CHANGED),
+            "{events:?}"
+        );
     }
 
     /// Arm and baseline a project under `cfg`, apply `widen`, run a pass,
