@@ -1422,6 +1422,8 @@ mod tests {
             withdrawn_at: None,
             approved_unattended: None,
             approved_verdict: None,
+            revoked_at: None,
+            uploaded_bytes: None,
         }
     }
 
@@ -1708,23 +1710,7 @@ mod tests {
                 )
                 .unwrap();
         }
-        let record = |hash: &str, at: DateTime<Utc>| super::super::history::HistoryRecord {
-            submission_id: uuid::Uuid::new_v4(),
-            submitted_at: at,
-            project_id: "p".to_string(),
-            project_label: "p".to_string(),
-            source: "codex".to_string(),
-            session_hash: hash.to_string(),
-            status: "accepted".to_string(),
-            consent_scopes: vec![],
-            credit_points_pending: 0.0,
-            credit_points_final: None,
-            explanations: vec![],
-            last_refreshed_at: None,
-            withdrawn_at: None,
-            approved_unattended: None,
-            approved_verdict: None,
-        };
+        let record = |hash: &str, at: DateTime<Utc>| history_record("codex", hash, at);
         super::super::history::HistoryCache::save(
             &s.store,
             &[
