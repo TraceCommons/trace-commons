@@ -136,9 +136,18 @@ extension DaemonData {
         public let declaredSource: String?
         public let projectId: String
         public let projectLabel: String
+        /// The session's title (K9): the first line of its opening prompt,
+        /// through the deterministic redaction pass only. On the queue only:
+        /// receipts and history rows never carry it. `nil` for an entry
+        /// queued before titles existed, or a task with no description.
+        public let title: String?
         public let projectPath: String?
         public let sessionPath: String?
         public let sizeBytes: Int?
+        /// The pinned preview's measured envelope size (K10), or `nil` when
+        /// nothing is pinned. Measured before scope stamping, so it can be a
+        /// few bytes short of what an upload sends.
+        public let wouldSendBytes: Int?
         public let discoveredAt: Date?
         /// `pending`, `approved`, `uploading`, `uploaded`, `refused`,
         /// `failed`, `expired`, `superseded`. See `queueState`.
@@ -149,10 +158,6 @@ extension DaemonData {
         public let submissionId: String?
         public let subagentCount: Int?
         public let subagentsDropped: Int?
-        /// The session's title, worked out when it was queued from its
-        /// opening prompt after the deterministic redaction pass (K9).
-        /// Absent for an entry queued before the daemon recorded one.
-        public let title: String?
 
         // when the session ran and how many prompts it had. All nil for
         // an entry queued before the daemon recorded them.
@@ -193,16 +198,17 @@ extension DaemonData {
             case declaredSource = "declared_source"
             case projectId = "project_id"
             case projectLabel = "project_label"
+            case title
             case projectPath = "project_path"
             case sessionPath = "session_path"
             case sizeBytes = "size_bytes"
+            case wouldSendBytes = "would_send_bytes"
             case discoveredAt = "discovered_at"
             case state
             case reasonLabel = "reason_label"
             case attempts
             case retryAfter = "retry_after"
             case submissionId = "submission_id"
-            case title
             case subagentCount = "subagent_count"
             case subagentsDropped = "subagents_dropped"
             case startedAt = "started_at"
@@ -786,6 +792,11 @@ extension DaemonData {
         public let explanations: [String]?
         public let lastRefreshedAt: Date?
         public let withdrawnAt: Date?
+        /// When a web withdrawal was first seen (K12). `nil` when not revoked,
+        /// revoked before the field existed, or withdrawn from this device.
+        public let revokedAt: Date?
+        /// The bytes this submission actually sent (K10), or `nil`.
+        public let uploadedBytes: Int?
         /// Provenance: `true` armed, `false` a person, `nil` NOT RECORDED.
         public let approvedUnattended: Bool?
         /// `worked` / `partly` / `failed`, or `nil` when none was given.
@@ -804,6 +815,8 @@ extension DaemonData {
             case creditPointsFinal = "credit_points_final"
             case lastRefreshedAt = "last_refreshed_at"
             case withdrawnAt = "withdrawn_at"
+            case revokedAt = "revoked_at"
+            case uploadedBytes = "uploaded_bytes"
             case approvedUnattended = "approved_unattended"
             case approvedVerdict = "approved_verdict"
         }
