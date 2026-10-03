@@ -706,6 +706,25 @@ pub struct Receipt {
     /// `#[serde(default)]` for the same reason as `approved_unattended`.
     #[serde(default)]
     pub approved_verdict: Option<String>,
+    /// The serialized size, in bytes, of the redacted envelope this receipt's
+    /// submission actually sent (K10) -- the witness's own
+    /// `envelope_bytes.len()` when a witnessed response carried the upload,
+    /// or `envelope::envelope_size` on the final, grant-stamped envelope
+    /// otherwise. Recorded once, at upload time, in `submit_loaded`: the
+    /// figure does not exist any earlier, because redaction and scope
+    /// stamping both still have to run.
+    ///
+    /// Not the raw session's size on disk (`QueueEntry::size_bytes`) and not
+    /// the estimate a preview showed before upload
+    /// (`QueueEntry::would_send_bytes`) -- this is the one number that
+    /// describes bytes that actually left the machine.
+    ///
+    /// `None` when the figure could not be measured (an unreadable envelope),
+    /// or when this receipt predates the field.
+    ///
+    /// `#[serde(default)]` for the same reason as `approved_unattended`.
+    #[serde(default)]
+    pub uploaded_bytes: Option<u64>,
 }
 
 /// The state directory's name under whichever per-user base the platform uses.
@@ -1614,6 +1633,7 @@ mod tests {
             status: "accepted".into(),
             approved_unattended: None,
             approved_verdict: None,
+            uploaded_bytes: None,
         };
         store.append_receipt(&r).unwrap();
         // Simulate a corrupt line.
@@ -1650,6 +1670,28 @@ mod tests {
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].approved_unattended, None);
         assert_eq!(loaded[0].approved_verdict, None);
+    }
+
+    /// K10: a receipts line written before `uploaded_bytes` existed must
+    /// still load.
+    #[test]
+    fn a_receipt_line_written_before_uploaded_bytes_existed_still_loads() {
+        let (_d, store) = store();
+        let old_line = serde_json::json!({
+            "submission_id": uuid::Uuid::new_v4(),
+            "session_hash": "sha256:aa",
+            "source": "claude-code",
+            "submitted_at": chrono::Utc::now(),
+            "status": "accepted",
+        });
+        std::fs::write(
+            store_path(&store, "receipts.jsonl"),
+            format!("{}\n", serde_json::to_string(&old_line).unwrap()),
+        )
+        .unwrap();
+        let loaded = store.load_receipts().unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].uploaded_bytes, None);
     }
 
     #[test]

@@ -1368,6 +1368,9 @@ fn visit_session(
         // is no shown artifact to pin to. The input fingerprint is
         // the guard that applies to them.
         previewed_envelope_digest: None,
+        // Same reason as `previewed_envelope_digest` immediately above:
+        // nothing was previewed, so there is no measured size to report.
+        would_send_bytes: None,
         // No post-approval hold on a standing opt-in: it is a
         // decision taken in advance, separately audited, with no
         // click to take back and no client counting down for it.
@@ -1376,6 +1379,9 @@ fn visit_session(
         subagent_count: transcript.subagent_count,
         subagents_dropped: transcript.subagents_dropped,
         shape: Some(super::queue::SessionShape::of(&transcript)),
+        // K9: built from the same raw transcript, at the same moment, for
+        // the same reason -- see `queue::title_of`.
+        title: super::queue::title_of(&transcript),
         // The observation this entry is made of, so the next poll
         // can recognize it without reading the group again. See
         // `QueueEntry::observed_modified_at`.
@@ -3860,7 +3866,12 @@ mod tests {
         crate::daemon::approved_envelope::save(&f.shared.store, entry_id, &envelope).unwrap();
         {
             let mut queue = f.shared.queue.lock().unwrap();
-            assert!(queue.record_previewed_envelope(entry_id, &summary.envelope_digest, None));
+            assert!(queue.record_previewed_envelope(
+                entry_id,
+                &summary.envelope_digest,
+                None,
+                Some(summary.would_send_bytes as u64)
+            ));
         }
         assert!(
             crate::daemon::approved_envelope::load(&f.shared.store, entry_id)

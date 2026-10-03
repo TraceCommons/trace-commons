@@ -1086,16 +1086,24 @@ async fn drain_approved(
                 reason_label,
                 pin,
                 attested_inference,
+                would_send_bytes,
             } => {
                 // Held with the witness's certified bytes pinned. Nothing
                 // re-approves it: the reason is one of
                 // `REASONS_NEEDING_A_PERSON`.
-                q.hold_with_witness_pin(entry.entry_id, &reason_label, &pin, attested_inference);
+                q.hold_with_witness_pin(
+                    entry.entry_id,
+                    &reason_label,
+                    &pin,
+                    attested_inference,
+                    would_send_bytes,
+                );
             }
             uploader::UploadDecision::HeldForSecondLook {
                 reason_label,
                 reasons,
                 pin,
+                would_send_bytes,
             } => {
                 // The Scrub check (K4 of #1118). Under Automatic the reason
                 // is one of `REASONS_NEEDING_A_PERSON`, so nothing
@@ -1112,6 +1120,7 @@ async fn drain_approved(
                     &reason_label,
                     pin.as_ref()
                         .map(|(digest, counts)| (digest.as_str(), *counts)),
+                    would_send_bytes,
                     now,
                 );
             }
