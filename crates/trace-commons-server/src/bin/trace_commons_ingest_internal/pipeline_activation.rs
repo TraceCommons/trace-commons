@@ -58,8 +58,9 @@ use trace_commons_server::versioned_pipeline::{
     PolicyOperationalStatus, is_bundle_id,
 };
 use trace_commons_server::versioned_pipeline_activation::{
-    ActivationEvent, ActivationReadiness, ActivationRequest, LEGACY_DRAIN_REPORT_TIMEOUT_LABEL,
-    LegacyDrainReport, PIPELINE_ROUTING_BUSY_LABEL, RoutingState, TenantRouting,
+    ActivationEvent, ActivationReadiness, ActivationRequest, ExpectedRouting,
+    LEGACY_DRAIN_REPORT_TIMEOUT_LABEL, LegacyDrainReport, PIPELINE_ROUTING_BUSY_LABEL,
+    RoutingState, TenantRouting,
 };
 use trace_commons_server::versioned_pipeline_bundle::PIPELINE_BUNDLE_INVALID_LABEL;
 use trace_commons_server::versioned_pipeline_qualification::{
@@ -595,19 +596,32 @@ pub(crate) struct QualifyBody {
 }
 
 /// `POST /v1/admin/pipeline/activate` and `POST /v1/admin/pipeline/rollback`.
+///
+/// `expected_state` is optional (final fix wave A23): the routing state the
+/// operator read from `GET /v1/admin/pipeline/routing` before the request
+/// (`legacy`, `pipeline`, `contained`, or `none` for a tenant with no routing
+/// row). With it, the store refuses the change with `409
+/// pipeline_routing_state_changed` when the state under the routing lock is
+/// another; without it, the change behaves as before. The handler passes it
+/// to the store and reads no routing state itself. Any other value is `422
+/// pipeline_request_invalid`, as every body that does not parse.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ActivateBody {
     bundle_id: String,
     reason_code: String,
     attestations: Vec<PipelineCheckAttestation>,
+    expected_state: Option<ExpectedRouting>,
 }
 
-/// `POST /v1/admin/pipeline/contain` and `POST /v1/admin/pipeline/deactivate`.
+/// `POST /v1/admin/pipeline/contain` and `POST /v1/admin/pipeline/deactivate`,
+/// with the optional `expected_state` of `ActivateBody`. A `contain` in an
+/// emergency needs none.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ReasonBody {
     reason_code: String,
+    expected_state: Option<ExpectedRouting>,
 }
 
 /// `POST /v1/admin/pipeline/policy-interventions`.
@@ -663,6 +677,7 @@ impl GateInputs<'_> {
             promotion: &self.promotion,
             runtime_code_revision_hash: self.revision,
             dependencies: &self.dependencies,
+            expected_state: body.expected_state,
         }
     }
 }
@@ -928,7 +943,12 @@ pub(crate) async fn pipeline_contain_handler(
     require_pipeline_service(state.as_ref())?;
     let body = request_body(body)?;
     let routing = require_activation_store(state.as_ref())?
-        .contain(&tenant.tenant_id, &tenant.principal_ref, &body.reason_code)
+        .contain_expecting(
+            &tenant.tenant_id,
+            &tenant.principal_ref,
+            &body.reason_code,
+            body.expected_state,
+        )
         .await
         .map_err(activation_error)?;
     log_action(&tenant, "contain", &routing.evidence_hash);
@@ -947,7 +967,12 @@ pub(crate) async fn pipeline_deactivate_handler(
     require_pipeline_service(state.as_ref())?;
     let body = request_body(body)?;
     let routing = require_activation_store(state.as_ref())?
-        .deactivate(&tenant.tenant_id, &tenant.principal_ref, &body.reason_code)
+        .deactivate_expecting(
+            &tenant.tenant_id,
+            &tenant.principal_ref,
+            &body.reason_code,
+            body.expected_state,
+        )
         .await
         .map_err(activation_error)?;
     log_action(&tenant, "deactivate", &routing.evidence_hash);
@@ -1452,6 +1477,7 @@ mod tests {
             PIPELINE_ROUTING_BUSY_LABEL,
             PIPELINE_POLICY_INTERVENTION_BUSY_LABEL,
             LEGACY_DRAIN_REPORT_TIMEOUT_LABEL,
+            "pipeline_routing_state_changed",
             BUNDLE_PACKAGE_MISSING_LABEL,
             PACKAGE_RUNTIME_REVISION_UNKNOWN_LABEL,
             ROUTING_READ_SURFACE,

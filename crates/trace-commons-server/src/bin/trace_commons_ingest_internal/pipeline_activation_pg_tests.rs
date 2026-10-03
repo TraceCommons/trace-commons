@@ -5464,3 +5464,128 @@ async fn a_rollback_of_a_contained_tenant_keeps_it_contained() {
     assert_eq!(status, StatusCode::OK, "{receipt}");
     assert_eq!(receipt["status"], "processing");
 }
+
+/// Final fix wave (A23, the final review's G35): `activate`, `rollback`,
+/// `contain`, and `deactivate` take an optional `expected_state` (`legacy`,
+/// `pipeline`, `contained`, or `none` for a tenant with no routing row). The
+/// store compares it with the state it reads under the exclusive routing
+/// lock: a different state is `409 pipeline_routing_state_changed` and
+/// changes nothing (the routing row, the active bundle, the events); the
+/// matching state proceeds. Without the field a change behaves as before
+/// (`contain` in an emergency). Any other value is `422
+/// pipeline_request_invalid`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_routing_change_with_an_expected_state_is_refused_when_the_state_changed() {
+    let Some(fixture) = RouteFixture::new().await else {
+        return;
+    };
+    let tenant = fixture.tenant.as_str();
+    fixture.qualify(&fixture.a).await;
+    fixture.qualify(&fixture.b).await;
+    let with_expected = |mut body: serde_json::Value, expected: &str| {
+        body["expected_state"] = serde_json::json!(expected);
+        body
+    };
+    let contain = serde_json::json!({ "reason_code": "contain_for_incident" });
+    let deactivate = serde_json::json!({ "reason_code": "deactivate_to_legacy" });
+    let steps = [
+        (
+            "/v1/admin/pipeline/activate",
+            fixture.activate_body(&fixture.a, "activate_bundle_a"),
+            "pipeline",
+            "none",
+            "pipeline",
+        ),
+        (
+            "/v1/admin/pipeline/activate",
+            fixture.activate_body(&fixture.b, "activate_bundle_b"),
+            "contained",
+            "pipeline",
+            "pipeline",
+        ),
+        (
+            "/v1/admin/pipeline/rollback",
+            fixture.activate_body(&fixture.a, "roll_back_to_a"),
+            "legacy",
+            "pipeline",
+            "pipeline",
+        ),
+        (
+            "/v1/admin/pipeline/contain",
+            contain.clone(),
+            "none",
+            "pipeline",
+            "contained",
+        ),
+        (
+            "/v1/admin/pipeline/deactivate",
+            deactivate.clone(),
+            "pipeline",
+            "contained",
+            "legacy",
+        ),
+    ];
+    for (path, body, stale, current, resulting) in steps {
+        let before = fixture.store().routing_view(tenant, 100).await.unwrap();
+        let (status, refused) = fixture
+            .admin_call("POST", path, Some(with_expected(body.clone(), stale)))
+            .await;
+        assert_eq!(
+            (status, refused),
+            (
+                StatusCode::CONFLICT,
+                serde_json::json!({ "error": "pipeline_routing_state_changed" })
+            ),
+            "{path} expecting {stale}"
+        );
+        assert_eq!(
+            fixture.store().routing_view(tenant, 100).await.unwrap(),
+            before,
+            "{path} expecting {stale}: the routing row, the active bundle, and the events"
+        );
+        let (status, routing) = fixture
+            .admin_call("POST", path, Some(with_expected(body, current)))
+            .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{path} expecting {current}: {routing}"
+        );
+        assert_eq!(routing["routing_state"], resulting, "{path}");
+    }
+    // Without the field, as before: an emergency containment.
+    let (status, routing) = fixture
+        .admin_call("POST", "/v1/admin/pipeline/contain", Some(contain.clone()))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{routing}");
+    assert_eq!(routing["routing_state"], "contained");
+    for (path, body) in [
+        (
+            "/v1/admin/pipeline/activate",
+            fixture.activate_body(&fixture.a, "activate_bundle_a"),
+        ),
+        (
+            "/v1/admin/pipeline/rollback",
+            fixture.activate_body(&fixture.b, "roll_back_to_b"),
+        ),
+        ("/v1/admin/pipeline/contain", contain),
+        ("/v1/admin/pipeline/deactivate", deactivate),
+    ] {
+        let before = fixture.store().routing_view(tenant, 100).await.unwrap();
+        let (status, refused) = fixture
+            .admin_call("POST", path, Some(with_expected(body, "paused")))
+            .await;
+        assert_eq!(
+            (status, refused),
+            (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                serde_json::json!({ "error": "pipeline_request_invalid" })
+            ),
+            "{path} with an unknown expected state"
+        );
+        assert_eq!(
+            fixture.store().routing_view(tenant, 100).await.unwrap(),
+            before
+        );
+    }
+}

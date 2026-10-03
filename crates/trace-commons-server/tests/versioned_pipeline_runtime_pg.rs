@@ -37931,6 +37931,7 @@ fn gate_request<'a>(
         promotion,
         runtime_code_revision_hash: revision,
         dependencies: profile,
+        expected_state: None,
     }
 }
 

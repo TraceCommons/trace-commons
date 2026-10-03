@@ -37,6 +37,10 @@ pub const ACTIVATION_ACTOR_INVALID_LABEL: &str = "activation_actor_invalid";
 pub const ACTIVATION_STATE_INVALID_LABEL: &str = "activation_state_invalid";
 pub const ACTIVATION_READINESS_FAILED_LABEL: &str = "activation_readiness_failed";
 pub const EARLIER_QUALIFIED_BUNDLE_REQUIRED_LABEL: &str = "earlier_qualified_bundle_required";
+/// A routing change that names the state its caller expected
+/// (`ExpectedRouting`) and found another under the routing lock: nothing is
+/// written.
+pub const PIPELINE_ROUTING_STATE_CHANGED_LABEL: &str = "pipeline_routing_state_changed";
 /// A routing change (`activate`, `rollback`, `contain`, `deactivate`) that
 /// waited its lock timeout (5 s, `PIPELINE_ADMIN_LOCK_TIMEOUT_SQL`) for the
 /// tenant's routing lock, or for a row it locks after it, and did not get
@@ -89,6 +93,50 @@ impl RoutingState {
                 "pipeline_routing_state_invalid".to_string(),
             )),
         }
+    }
+}
+
+/// The routing a caller read before it asked for a routing change (final fix
+/// wave A23, the final review's G35): one of the three states, or `none` for
+/// a tenant with no routing row. A change that carries one is a
+/// compare-and-set: the store compares it with the state it reads under the
+/// exclusive routing lock and refuses with `pipeline_routing_state_changed`
+/// when they differ, so an action prepared before another operator's
+/// `contain` cannot reopen intake after that `contain` returned. A change
+/// that carries none behaves as before, whatever the state is.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ExpectedRouting {
+    Legacy,
+    Pipeline,
+    Contained,
+    /// The tenant has no routing row.
+    #[serde(rename = "none")]
+    NoRow,
+}
+
+impl ExpectedRouting {
+    fn is(self, current: Option<RoutingState>) -> bool {
+        match self {
+            Self::Legacy => current == Some(RoutingState::Legacy),
+            Self::Pipeline => current == Some(RoutingState::Pipeline),
+            Self::Contained => current == Some(RoutingState::Contained),
+            Self::NoRow => current.is_none(),
+        }
+    }
+}
+
+/// Refuses with `pipeline_routing_state_changed` when the caller expected a
+/// state and `current`, read under the exclusive routing lock, is another.
+fn require_expected_routing(
+    expected: Option<ExpectedRouting>,
+    current: Option<RoutingState>,
+) -> Result<(), DatabaseError> {
+    match expected {
+        Some(expected) if !expected.is(current) => Err(DatabaseError::Constraint(
+            PIPELINE_ROUTING_STATE_CHANGED_LABEL.to_string(),
+        )),
+        _ => Ok(()),
     }
 }
 
@@ -756,7 +804,10 @@ pub fn evaluate_activation_readiness(
 /// bundle's verified check results, evaluated just before the call;
 /// `runtime_code_revision_hash` is the revision the deployed code was built
 /// from (`DEPLOYED_CODE_REVISION_HASH`); `dependencies` is the bundle's
-/// profile on the running service.
+/// profile on the running service. `expected_state` is the routing the
+/// caller read before the request, when it names one (`ExpectedRouting`):
+/// the change is then refused with `pipeline_routing_state_changed` unless
+/// the state under the routing lock is that one.
 #[derive(Debug, Clone, Copy)]
 pub struct ActivationRequest<'a> {
     pub tenant_id: &'a str,
@@ -766,6 +817,7 @@ pub struct ActivationRequest<'a> {
     pub promotion: &'a PromotionDecision,
     pub runtime_code_revision_hash: &'a str,
     pub dependencies: &'a ProductionDependencyProfile,
+    pub expected_state: Option<ExpectedRouting>,
 }
 
 /// The evidence hash that a routing change which selects a bundle records, in
@@ -1192,12 +1244,27 @@ impl PipelineActivationStore {
 
     /// Stops the tenant's new receipts. Contained is the state of a tenant
     /// whose intake is held, for a first rollout or an incident; it changes
-    /// no bundle and no receipt that already has an owner.
+    /// no bundle and no receipt that already has an owner. From any state,
+    /// with no expected state: `contain_expecting` with `None`.
     pub async fn contain(
         &self,
         tenant_id: &str,
         actor_principal_ref: &str,
         reason_code: &str,
+    ) -> Result<TenantRouting, DatabaseError> {
+        self.contain_expecting(tenant_id, actor_principal_ref, reason_code, None)
+            .await
+    }
+
+    /// `contain`, refused with `pipeline_routing_state_changed` when
+    /// `expected` names a routing that is not the one the tenant has under
+    /// the routing lock (`ExpectedRouting`).
+    pub async fn contain_expecting(
+        &self,
+        tenant_id: &str,
+        actor_principal_ref: &str,
+        reason_code: &str,
+        expected: Option<ExpectedRouting>,
     ) -> Result<TenantRouting, DatabaseError> {
         validate_actor(
             actor_principal_ref,
@@ -1210,17 +1277,35 @@ impl PipelineActivationStore {
             reason_code,
             ActivationAction::Contain,
             RoutingState::Contained,
+            expected,
         )
         .await
     }
 
     /// Returns a tenant that has a routing row to the legacy path. A tenant
     /// that has no row, or is already `Legacy`, has nothing to deactivate.
+    /// With no expected state: `deactivate_expecting` with `None`.
     pub async fn deactivate(
         &self,
         tenant_id: &str,
         actor_principal_ref: &str,
         reason_code: &str,
+    ) -> Result<TenantRouting, DatabaseError> {
+        self.deactivate_expecting(tenant_id, actor_principal_ref, reason_code, None)
+            .await
+    }
+
+    /// `deactivate`, refused with `pipeline_routing_state_changed` when
+    /// `expected` names a routing that is not the one the tenant has under
+    /// the routing lock (`ExpectedRouting`). That comparison comes first: a
+    /// state the caller did not expect is reported as changed, not as
+    /// `activation_state_invalid`.
+    pub async fn deactivate_expecting(
+        &self,
+        tenant_id: &str,
+        actor_principal_ref: &str,
+        reason_code: &str,
+        expected: Option<ExpectedRouting>,
     ) -> Result<TenantRouting, DatabaseError> {
         validate_actor(
             actor_principal_ref,
@@ -1233,6 +1318,7 @@ impl PipelineActivationStore {
             reason_code,
             ActivationAction::Deactivate,
             RoutingState::Legacy,
+            expected,
         )
         .await
     }
@@ -1251,7 +1337,10 @@ impl PipelineActivationStore {
     /// the activation: the canonical hash of the readiness hash, the
     /// promotion hash, and the bundle (`bundle_selection_evidence_hash`). A
     /// refusal writes nothing. An actor or a reason that is not a label is
-    /// `activation_actor_invalid`, before any read.
+    /// `activation_actor_invalid`, before any read. With
+    /// `request.expected_state`, a routing state under the lock that is not
+    /// the expected one is `pipeline_routing_state_changed`, before the
+    /// readiness and the gate.
     pub async fn activate_tenant(
         &self,
         request: ActivationRequest<'_>,
@@ -1283,6 +1372,7 @@ impl PipelineActivationStore {
         // Any state may be activated; the read refuses a row it cannot
         // decode, before the gate, and gives the event its previous state.
         let current = routing_state_in(tx, request.tenant_id).await?;
+        require_expected_routing(request.expected_state, current)?;
         let now = Utc::now();
         evaluate_activation_readiness(readiness, now).map_err(DatabaseError::Constraint)?;
         let previous_bundle_id = PipelineQualificationStore::activate_qualified_bundle_in(
@@ -1332,7 +1422,9 @@ impl PipelineActivationStore {
     /// as `activate_tenant`; the event is `rollback`, and its evidence hash
     /// is the canonical hash of the promotion hash and the bundle (the rule
     /// of `bundle_selection_evidence_hash`, with no readiness). A refusal
-    /// writes nothing.
+    /// writes nothing. With `request.expected_state`, a routing state under
+    /// the lock that is not the expected one is
+    /// `pipeline_routing_state_changed`, before any other check.
     pub async fn rollback_bundle(
         &self,
         request: ActivationRequest<'_>,
@@ -1359,6 +1451,7 @@ impl PipelineActivationStore {
         let tenant_id = request.tenant_id;
         lock_routing(tx, tenant_id).await?;
         let current = routing_state_in(tx, tenant_id).await?;
+        require_expected_routing(request.expected_state, current)?;
         if !matches!(
             current,
             Some(RoutingState::Pipeline | RoutingState::Contained)
@@ -1723,6 +1816,7 @@ impl PipelineActivationStore {
         reason_code: &str,
         action: ActivationAction,
         resulting: RoutingState,
+        expected: Option<ExpectedRouting>,
     ) -> Result<TenantRouting, DatabaseError> {
         let mut client = self.backend.trace_pool().get().await?;
         let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
@@ -1733,6 +1827,7 @@ impl PipelineActivationStore {
             reason_code,
             action,
             resulting,
+            expected,
         )
         .await
         .map_err(routing_busy)?;
@@ -1748,9 +1843,11 @@ impl PipelineActivationStore {
         reason_code: &str,
         action: ActivationAction,
         resulting: RoutingState,
+        expected: Option<ExpectedRouting>,
     ) -> Result<TenantRouting, DatabaseError> {
         lock_routing(tx, tenant_id).await?;
         let current = routing_state_in(tx, tenant_id).await?;
+        require_expected_routing(expected, current)?;
         let active_bundle_id: Option<String> = tx
             .query_opt(
                 "SELECT bundle_id FROM pipeline_active_bundles WHERE tenant_id = $1",
