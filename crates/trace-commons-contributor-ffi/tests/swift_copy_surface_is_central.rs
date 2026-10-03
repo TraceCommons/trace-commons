@@ -751,14 +751,14 @@ const SURFACES: &[(&str, &str, &str, &str, &str)] = &[
     ),
     (
         "grant void notice",
-        "TraceCommonsApp/Views/MainWindowView.swift",
+        "TraceCommonsApp/Views/ShellNotices.swift",
         "TCConsentCopy.voidNoticeJSON",
         "TCBridge/TCConsentCopy.swift",
         "tc_grant_void_notice",
     ),
     (
         "arming rewording notice",
-        "TraceCommonsApp/Views/MainWindowView.swift",
+        "TraceCommonsApp/Views/ShellNotices.swift",
         "TCConsentCopy.armingRewordedNoticeJSON",
         "TCBridge/TCConsentCopy.swift",
         "tc_arming_reworded_notice",

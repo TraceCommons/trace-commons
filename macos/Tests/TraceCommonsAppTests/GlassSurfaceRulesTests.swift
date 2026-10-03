@@ -42,6 +42,7 @@ final class GlassSurfaceRulesTests: XCTestCase {
         "Views/SkillLearningView.swift",
         "Views/Monitor/HistoryInspector.swift",
         "Views/Monitor/TracesHealth.swift",
+        "Views/ShellNotices.swift",
         "Views/Monitor/TracesViews.swift",
         "Views/ScrubbingCaveat.swift",
         "Views/CertificateSection.swift",

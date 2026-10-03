@@ -50,6 +50,10 @@ struct FirstRunWindowView: View {
                                 .padding(.horizontal, GlassTokens.Space.s10)
                                 .frame(maxWidth: .infinity)
                         }
+                        // A void or a gate hold can arrive while someone is
+                        // still setting up, and is told here too.
+                        ShellNotices()
+                            .padding(.horizontal, GlassTokens.Space.s6)
                         OnboardingCoordinatorView(
                             startAt: model.status.loggedIn ? .consent : .welcome,
                             onStep: { step = $0 },
