@@ -37,7 +37,7 @@
     "toggleOn": { "hex": "#3a7bd5", "light": { "hex": "#2f6bc4" } },
     "toggleOff": { "hex": "#ffffff", "alpha": 0.18, "light": { "hex": "#000000", "alpha": 0.16 } },
     "toggleOnSettings": { "hex": "#8a3dff", "light": { "hex": "#7a2cf5" } },
-    "watchOn": { "hex": "#3ddc84", "light": { "hex": "#28b463" } },
+    "watchOn": { "hex": "#3ddc84", "note": "The watch switch's track when on. Light takes statusOn's light value (watching): 3:1 or more on every light ground (3.01 on a well over the scene) with the dark knob at 4.7:1; #28b463 was 1.96 to 2.59 (R-42).", "light": { "hex": "#1a8f4c" } },
     "hairline": { "hex": "#ffffff", "alpha": 0.07, "note": "Rows inside a list only; never around a container.", "light": { "hex": "#000000", "alpha": 0.08 } },
     "popoverFill": { "hex": "#22242a", "alpha": 0.78, "light": { "hex": "#f7f7f9", "alpha": 0.84 } },
     "menuFill": { "hex": "#22242a", "alpha": 0.72, "light": { "hex": "#f7f7f9", "alpha": 0.8 } },
@@ -101,17 +101,17 @@
       { "hex": "#ffffff", "alpha": 0.14, "at": 0, "light": { "hex": "#ffffff", "alpha": 0.92 } },
       { "hex": "#ffffff", "alpha": 0.07, "at": 1, "light": { "hex": "#ffffff", "alpha": 0.72 } }
     ] },
-    "ctaFill": { "angle": 180, "stops": [
-      { "hex": "#8a3dff", "alpha": 0.72, "at": 0, "light": { "hex": "#7a2cf5" } },
-      { "hex": "#6d14f3", "alpha": 0.62, "at": 1, "light": { "hex": "#6d14f3" } }
+    "ctaFill": { "angle": 180, "note": "Dark is purpleSoft, solid, at both stops: the fill under white text (5:1) that also clears 3:1 on every dark ground a button sits on (3.33 or more). The translucent #8a3dff/#6d14f3 stops were 1.58 to 2.47 (R-42).", "stops": [
+      { "hex": "#8a3dff", "at": 0, "light": { "hex": "#7a2cf5" } },
+      { "hex": "#8a3dff", "at": 1, "light": { "hex": "#6d14f3" } }
     ] },
     "ctaSecondaryFill": { "angle": 180, "stops": [
       { "hex": "#4a0ea6", "alpha": 0.6, "at": 0, "light": { "hex": "#5a12c9" } },
       { "hex": "#320878", "alpha": 0.55, "at": 1, "light": { "hex": "#4a0ea6" } }
     ] },
-    "checkboxOnFill": { "angle": 180, "stops": [
-      { "hex": "#8a3dff", "alpha": 0.8, "at": 0, "light": { "hex": "#7a2cf5" } },
-      { "hex": "#6d14f3", "alpha": 0.7, "at": 1, "light": { "hex": "#6d14f3" } }
+    "checkboxOnFill": { "angle": 180, "note": "Dark is purpleSoft, solid, as ctaFill: white check at 5:1, the box 3.33:1 or more on every dark ground. The translucent stops were 1.72 to 2.79 (R-42).", "stops": [
+      { "hex": "#8a3dff", "at": 0, "light": { "hex": "#7a2cf5" } },
+      { "hex": "#8a3dff", "at": 1, "light": { "hex": "#6d14f3" } }
     ] }
   },
   "shadow": {
