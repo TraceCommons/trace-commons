@@ -4559,9 +4559,26 @@ rather than at the next `history_poll_secs` boundary. Those rows carry
 `last_refreshed_at: null`, because nothing has been read back for them yet.
 
 The bucket also counts `processing`, the status the versioned pipeline's
-receipt carries for the same state. A `list_history` row keeps the raw
-`processing` until a refresh replaces it with the server's status. Render
-and offer it exactly as `submitted`: same words, same withdrawal stage.
+receipt carries: uploaded, no verdict **reported** yet. That is not the same
+as no verdict. Admission runs inside the upload request, so a trace it
+quarantined or rejected gets the same `processing` receipt, and receipts are
+never rewritten. Render and offer a `processing` row exactly as `submitted`:
+same words, same withdrawal stage.
+
+A `list_history` row keeps the raw `processing` until a status read-back
+reports something for that submission. A server with the pipeline's product
+layer (#1143) reads a pipeline submission back in `main`'s vocabulary:
+`quarantined` or `rejected` when Admission decided so, and `accepted` for an
+admitted trace, before Review has decided it. On such a server the first
+read-back after the upload replaces `processing`. An older server leaves a
+submission whose stored status is still `received` out of the read-back
+altogether, so there an admitted trace's row stays `processing` until Review
+promotes it, and only a quarantined or rejected one changes sooner.
+
+The CLI's submit short-circuit and its picker's SUBMITTED marker read a
+`processing` receipt through that read-back: once the history cache holds
+`rejected` for the submission, the session is no longer already submitted,
+and `quarantined` is reported as `quarantined`.
 
 The daemon then asks the server for verdicts about ninety seconds after an
 upload pass, rather than waiting out the full `history_poll_secs` interval
