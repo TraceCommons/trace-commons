@@ -12760,6 +12760,10 @@ struct TraceCommonsConfigStatusResponse {
     pipeline_runtime_configured: bool,
     pipeline_runtime_required: bool,
     pipeline_runtime_production_qualified: bool,
+    /// Whether this process routes a listed tenant that has no routing row
+    /// to the pipeline (`TRACE_COMMONS_PIPELINE_ALLOW_TEST_DEPENDENCIES`): a
+    /// setting for a process started for tests.
+    pipeline_unqualified_routing_allowed: bool,
     signed_token_auth_enabled: bool,
     signed_token_key_count: usize,
     signed_token_eddsa_key_count: usize,
@@ -13027,6 +13031,7 @@ fn trace_commons_config_status_response(state: &AppState) -> TraceCommonsConfigS
             .pipeline_service
             .as_deref()
             .is_some_and(pipeline_runtime_is_production_qualified),
+        pipeline_unqualified_routing_allowed: state.pipeline_unqualified_routing,
         signed_token_auth_enabled: state.signed_token_verifier.is_some(),
         signed_token_key_count: signed_token_verifier
             .as_ref()

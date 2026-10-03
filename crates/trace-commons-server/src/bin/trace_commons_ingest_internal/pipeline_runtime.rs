@@ -121,7 +121,14 @@ pub trait IngestPipelineRuntimeAssembler: Send + Sync {
 /// handed to the assembly too, and the service must hold it
 /// (`pipeline_runtime_unqualified_routing_mismatch`). Like the test opt-in, it
 /// never combines with `production_required`
-/// (`pipeline_unqualified_routing_not_allowed_when_required`).
+/// (`pipeline_unqualified_routing_not_allowed_when_required`). It never
+/// combines with a production-qualified runtime either, whatever
+/// `production_required` says (`pipeline_unqualified_routing_with_production_runtime`,
+/// final fix wave G9): a process whose dependencies are the production ones
+/// would otherwise route every listed tenant that has no routing row to the
+/// pipeline, with no qualification and no event. A runtime that starts with
+/// it logs one warning (`pipeline_unqualified_routing_allowed`), and
+/// `GET /v1/admin/config-status` reports it.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn assemble_ingest_pipeline_runtime(
     assembler: Option<&dyn IngestPipelineRuntimeAssembler>,
@@ -195,6 +202,16 @@ pub(crate) fn assemble_ingest_pipeline_runtime(
         service.unqualified_routing() == unqualified_routing_allowed,
         "pipeline_runtime_unqualified_routing_mismatch"
     );
+    // Final fix wave (G9): unqualified routing is a setting for a process
+    // started for tests. A runtime whose dependencies are production-qualified
+    // is not one, whether or not `production_required` is set.
+    anyhow::ensure!(
+        !(unqualified_routing_allowed && pipeline_runtime_is_production_qualified(&service)),
+        "pipeline_unqualified_routing_with_production_runtime"
+    );
+    if unqualified_routing_allowed {
+        tracing::warn!("pipeline_unqualified_routing_allowed");
+    }
     // Ruling T10-4: an enabled payout pays through the NEAR credit contract
     // `main` is configured with, never one the assembly picked itself, and
     // not at all when `main` has none.

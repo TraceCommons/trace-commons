@@ -1391,6 +1391,8 @@ mod tests {
             POLICY_INTERVENTIONS_READ_SURFACE,
             LEGACY_DRAIN_READ_SURFACE,
             "pipeline_unqualified_routing_not_allowed_when_required",
+            "pipeline_unqualified_routing_with_production_runtime",
+            "pipeline_unqualified_routing_allowed",
             "qualify",
             "activate",
             "rollback",
@@ -1431,6 +1433,25 @@ mod tests {
         ] {
             let (status, _) = activation_error(DatabaseError::Constraint(unsafe_label.to_string()));
             assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{unsafe_label}");
+        }
+    }
+
+    /// Final fix wave (G9): config-status reports whether this process routes
+    /// a listed tenant with no routing row to the pipeline (unqualified
+    /// routing, a setting for tests).
+    #[tokio::test]
+    async fn config_status_reports_unqualified_routing() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = crate::tests::test_state(dir.path().to_path_buf());
+        for allowed in [false, true] {
+            let mut state = (*base).clone();
+            state.pipeline_unqualified_routing = allowed;
+            let status =
+                serde_json::to_value(trace_commons_config_status_response(&state)).unwrap();
+            assert_eq!(
+                status["pipeline_unqualified_routing_allowed"],
+                serde_json::json!(allowed)
+            );
         }
     }
 }

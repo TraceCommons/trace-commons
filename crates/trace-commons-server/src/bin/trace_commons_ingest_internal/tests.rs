@@ -12039,6 +12039,67 @@ async fn pipeline_runtime_refuses_unqualified_routing_together_with_required() {
     }
 }
 
+/// Final fix wave (G9): unqualified routing, the setting of a process started
+/// for tests, never combines with a runtime whose dependencies are
+/// production-qualified (`pipeline_runtime_is_production_qualified`), with or
+/// without routed tenants and the test opt-in: a production-like process
+/// refuses to start rather than route a tenant with no routing row. A runtime
+/// of test doubles with the opt-in still starts with it.
+#[tokio::test]
+async fn pipeline_runtime_refuses_unqualified_routing_with_a_qualified_runtime() {
+    let dir = tempfile::tempdir().unwrap();
+    let (connections, configured_store) = pipeline_runtime_fail_closed_fixture(&dir).await;
+    for (tenants_processed, allow_test_dependencies) in
+        [(true, true), (false, true), (false, false)]
+    {
+        let error = assemble_ingest_pipeline_runtime(
+            Some(&QualifiedAssembler),
+            Some(&connections),
+            Some(&configured_store),
+            false,
+            PipelineLeaseConfig::default(),
+            tenants_processed,
+            allow_test_dependencies,
+            true,
+            None,
+            TEST_NEAR_CONFIRMATION_INTERVAL,
+            TEST_NEAR_PAYOUT_CONTROLS,
+            &PipelineNoveltyUtilityChecks::default(),
+            TEST_MAIN_GATE,
+        )
+        .err()
+        .unwrap_or_else(|| {
+            panic!(
+                "a qualified runtime with unqualified routing is refused \
+                 (tenants {tenants_processed}, opt-in {allow_test_dependencies})"
+            )
+        });
+        assert_eq!(
+            error.to_string(),
+            "pipeline_unqualified_routing_with_production_runtime"
+        );
+    }
+    let service = assemble_ingest_pipeline_runtime(
+        Some(&UnqualifiedAssembler),
+        Some(&connections),
+        Some(&configured_store),
+        false,
+        PipelineLeaseConfig::default(),
+        true,
+        true,
+        true,
+        None,
+        TEST_NEAR_CONFIRMATION_INTERVAL,
+        TEST_NEAR_PAYOUT_CONTROLS,
+        &PipelineNoveltyUtilityChecks::default(),
+        TEST_MAIN_GATE,
+    )
+    .expect("a runtime of test doubles with the opt-in starts")
+    .expect("an assembler was given, so a service is returned");
+    assert!(!pipeline_runtime_is_production_qualified(&service));
+    assert!(service.unqualified_routing());
+}
+
 /// A qualified runtime with routed tenants and no
 /// opt-in -- starts. The fail-closed check must not block a genuinely
 /// production-qualified dependency.
