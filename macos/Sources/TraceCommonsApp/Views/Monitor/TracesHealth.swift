@@ -1,4 +1,3 @@
-#if DEBUG
 import SwiftUI
 import TCBridge
 import TCDesign
@@ -79,4 +78,3 @@ struct GlassHealthBanner: View {
         .accessibilityElement(children: .combine)
     }
 }
-#endif

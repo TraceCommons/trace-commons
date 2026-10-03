@@ -1,4 +1,3 @@
-#if DEBUG
 import SwiftUI
 import TCBridge
 import TCDesign
@@ -507,8 +506,6 @@ enum MenuWords {
     static var settings: String { MonitorWords.table?.settings ?? "" }
     static var quit: String { MonitorWords.table?.quit ?? "" }
 }
-#endif
-
 #if DEBUG
 /// The menu-bar item and the popover under it, in a window: the same views
 /// on the same store, for reviewing them where the menu bar has no room.

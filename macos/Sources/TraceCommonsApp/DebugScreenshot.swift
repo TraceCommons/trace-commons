@@ -31,11 +31,8 @@ enum DebugScreenshot {
             // Late enough that the watcher has polled, queued, and scrubbed.
             try? await Task.sleep(nanoseconds: 12_000_000_000)
 
-            #if DEBUG
-            // The Monitor's screens and the menu-bar item are debug-only
-            // until the cutover (ruling R-35), so their renders are too.
-            // Each store is loaded first, since the window's attaching
-            // `task` never runs under `ImageRenderer`.
+            // The Monitor's screens. Each store is loaded first, since the
+            // window's attaching `task` never runs under `ImageRenderer`.
             let traces = TracesStore(client: nil)
             traces.attach(model.daemonData)
             await traces.load()
@@ -74,7 +71,9 @@ enum DebugScreenshot {
                 to: directory + "/macos-shell-inference-account.png",
                 size: CGSize(width: 420, height: 720)
             )
-            // The glass menu-bar item over its panel.
+            #if DEBUG
+            // The glass menu-bar item over its panel, in the preview window,
+            // which is debug-only (D-18).
             let menuPanel = MenuPanelStore(client: nil)
             menuPanel.attach(model.daemonData, configDirectory: model.configDirectory)
             await menuPanel.load()

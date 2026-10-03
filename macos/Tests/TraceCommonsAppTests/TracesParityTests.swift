@@ -1,4 +1,3 @@
-#if DEBUG
 import XCTest
 import TCBridge
 import TCDesign
@@ -541,4 +540,3 @@ final class TracesParityTests: XCTestCase {
             .contains("TCCoreCopy.residualSecretLine(count: total,"))
     }
 }
-#endif

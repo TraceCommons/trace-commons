@@ -1,4 +1,3 @@
-#if DEBUG
 import Foundation
 import Observation
 import TCBridge
@@ -300,4 +299,3 @@ enum MenuPanelData {
         SourceKind(rawValue: source).map(TracesTreeView.glassTool)
     }
 }
-#endif

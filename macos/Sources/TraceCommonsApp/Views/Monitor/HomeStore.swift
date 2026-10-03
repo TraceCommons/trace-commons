@@ -1,4 +1,3 @@
-#if DEBUG
 import Foundation
 import Observation
 import TCShellCore
@@ -152,4 +151,3 @@ final class HomeStore {
         }
     }
 }
-#endif

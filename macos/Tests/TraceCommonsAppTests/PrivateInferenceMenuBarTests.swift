@@ -86,15 +86,29 @@ final class PrivateInferenceMenuBarTests: XCTestCase {
     }
 
     /// The toggle's shortcut is in-app only and collides with none of the
-    /// five destination shortcuts.
+    /// three tab shortcuts, which are Cmd-1..3 in the tab strip's order.
     @MainActor
     func testTheToggleShortcutDoesNotCollideWithADestination() {
-        let destinations = MainWindowView.Section.allCases.compactMap(\.shortcut)
-        XCTAssertEqual(MainWindowCommands.toggleModifiers, [.command, .shift])
-        XCTAssertEqual(MainWindowCommands.destinationModifiers, [.command])
+        let tabs = MonitorWindowView.Tab.allCases.map(MonitorCommands.shortcut)
+        XCTAssertEqual(tabs, ["1", "2", "3"])
+        XCTAssertEqual(MonitorCommands.toggleModifiers, [.command, .shift])
+        XCTAssertEqual(MonitorCommands.tabModifiers, [.command])
         XCTAssertFalse(
-            destinations.contains(MainWindowCommands.toggleKey),
+            tabs.contains(MonitorCommands.toggleKey),
             "the toggle shares a key with a destination")
+    }
+
+    /// Each tab's item opens through `OpenMonitor` at its own tab, so while
+    /// onboarding is required it opens first run instead.
+    @MainActor
+    func testEachTabCommandOpensItsTab() throws {
+        XCTAssertEqual(MonitorCommands.destination(.home), .home(.overview))
+        XCTAssertEqual(MonitorCommands.destination(.inference), .inference)
+        XCTAssertEqual(MonitorCommands.destination(.traces), .traces(entryId: nil))
+        let main = try MonitorNavigationTests.text("TraceCommonsAppMain.swift")
+        XCTAssertTrue(main.contains("Button(tab.title) { OpenMonitor.request(Self.destination(tab)) }"))
+        XCTAssertTrue(main.contains(".commands {\n            MonitorCommands(model: model)\n        }"))
+        XCTAssertFalse(main.contains("MainWindowCommands"))
     }
 }
 

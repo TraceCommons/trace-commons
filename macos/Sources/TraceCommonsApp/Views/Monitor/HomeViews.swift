@@ -1,4 +1,3 @@
-#if DEBUG
 import SwiftUI
 import TCBridge
 import TCDesign
@@ -570,4 +569,3 @@ extension MonitorWords {
     static var approved: String { table?.approved ?? "" }
     static var unrecorded: String { table?.unrecorded ?? "" }
 }
-#endif

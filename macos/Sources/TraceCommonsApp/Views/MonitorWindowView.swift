@@ -1,4 +1,3 @@
-#if DEBUG
 import SwiftUI
 import TCBridge
 import TCDesign
@@ -9,10 +8,8 @@ import TCShellCore
 /// the map and the inspector hide independently (and the map below 1100pt),
 /// and the tab and both preferences are restored per window.
 ///
-/// Debug builds only, until the screens it frames (R6 onward) match the
-/// design. The shipping window stays `MainWindowView` until then (R15).
-/// Every label here is a single word or comes from the Rust core
-/// (`ShellWordingTests`).
+/// The main window since R15. Every label here is a single word or comes
+/// from the Rust core (`ShellWordingTests`).
 struct MonitorWindowView: View {
     /// The gate's button, which opens first run: the core's first-run
     /// Continue. With no table the word is empty, never a Swift fallback.
@@ -99,13 +96,16 @@ struct MonitorWindowView: View {
         #endif
     }
 
+    #if DEBUG
     /// The set a `TRACE_COMMONS_SAMPLE` value names, and whether it named
-    /// none (unset or empty is the default, not unknown).
+    /// none (unset or empty is the default, not unknown). Debug builds
+    /// only, with the sample sets.
     static func sampleChoice(_ name: String?) -> (set: SampleDaemonClient.SampleSet, unknown: Bool) {
         guard let name, !name.isEmpty else { return (.normalDay, false) }
         guard let set = SampleDaemonClient.SampleSet(rawValue: name) else { return (.normalDay, true) }
         return (set, false)
     }
+    #endif
     /// False until this window has seeded the two preferences from its
     /// width (map from 1100pt, inspector from 900pt). After that the
     /// window restores whatever the person chose.
@@ -155,7 +155,7 @@ struct MonitorWindowView: View {
             GlassPane {
                 // An empty branch would leave the pane nothing to draw, and
                 // it would vanish while the layout still reserved its width.
-                if !LaunchRouting.onboardingKnown(startup: model.startup, statusAnswered: model.status.answered)
+                if !LaunchRouting.onboardingKnown(startup: model.startup, statusAnswered: model.status.answered, statusFailed: model.statusReadFailed)
                     || model.requiresOnboarding {
                     Color.clear
                 } else {
@@ -334,7 +334,10 @@ private struct MonitorMainPane<Content: View>: View {
                             showsInspector.toggle()
                         }
                     }
+                    // No consent surface before onboarding: Settings writes
+                    // what first run is there to ask.
                     GlassRoundButton(String(localized: "Settings", comment: "Settings button"), systemImage: "gearshape", small: true, action: onSettings)
+                        .disabled(model.requiresOnboarding)
                 }
                 // Clearance for the real traffic lights, not an origin.
                 .padding(.leading, GlassTokens.Space.windowControlsWidth - GlassTokens.Space.panePadding)
@@ -352,7 +355,7 @@ private struct MonitorMainPane<Content: View>: View {
                 // consent that has not been given. The button opens first
                 // run, which is where every request goes until then. Before
                 // the core says, the placeholder status is not "signed out".
-                if !LaunchRouting.onboardingKnown(startup: model.startup, statusAnswered: model.status.answered) {
+                if !LaunchRouting.onboardingKnown(startup: model.startup, statusAnswered: model.status.answered, statusFailed: model.statusReadFailed) {
                     SettingsAwaiting()
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else if model.requiresOnboarding {
@@ -538,4 +541,3 @@ struct MonitorSettingsWindow: View {
         }
     }
 }
-#endif

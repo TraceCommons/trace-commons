@@ -1,4 +1,3 @@
-#if DEBUG
 import XCTest
 import TCBridge
 import TCShellCore
@@ -325,4 +324,3 @@ final class HistoryParityTests: XCTestCase {
                 + "        detail?.contributionStatus ?? record.status\n"))
     }
 }
-#endif

@@ -1,4 +1,3 @@
-#if DEBUG
 import SwiftUI
 import TCDesign
 import TCShellCore
@@ -72,4 +71,3 @@ enum FirstRunProgress {
     /// Wide enough for Ron's screens.
     static let paneWidth: CGFloat = 700
 }
-#endif
