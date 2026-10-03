@@ -48,11 +48,17 @@ struct MonitorWindowView: View {
     @SceneStorage("monitor.showsInspector") private var showsInspector = true
     /// The selected session's entry id; empty for none.
     @SceneStorage("monitor.selectedSession") private var selectedSession = ""
+    /// Home's page: the overview or History, restored per window.
+    @SceneStorage("monitor.homePage") private var homePage: HomeTabView.Page = .overview
 
     /// The screens' data (C1). Sample data in this debug window until K1
     /// moves the screens to the live client: `TRACE_COMMONS_SAMPLE` names
     /// the set (`normalDay` by default).
     @State private var traces = MonitorWindowView.tracesStore()
+    /// The map's Private AI view and the Inference tab (R8).
+    @State private var inference = InferenceStore(client: MonitorWindowView.dataClient())
+    /// Home and History (R9).
+    @State private var home = HomeStore(client: MonitorWindowView.dataClient())
 
     /// The Traces store over the sample set `TRACE_COMMONS_SAMPLE` names. A
     /// name that is not a set falls back to `normalDay`, and says so: the tab
@@ -65,6 +71,11 @@ struct MonitorWindowView: View {
         }
         return TracesStore(
             client: DaemonDataWiring.sample(choice.set), sample: choice.set.rawValue, sampleUnknown: choice.unknown)
+    }
+
+    /// The sample client for the window's other stores, over the same set.
+    static func dataClient() -> any DaemonDataClient {
+        DaemonDataWiring.sample(sampleChoice(ProcessInfo.processInfo.environment["TRACE_COMMONS_SAMPLE"]).set)
     }
 
     /// The set a `TRACE_COMMONS_SAMPLE` value names, and whether it named
@@ -100,24 +111,48 @@ struct MonitorWindowView: View {
                     TracesTreeView(store: traces, selection: $selectedSession) { entryId in
                         Self.review(entryId, selection: &selectedSession, showsInspector: &showsInspector)
                     }
-                case .home, .inference: Spacer(minLength: 0)
+                case .inference: InferenceTabView(store: inference)
+                case .home:
+                    HomeTabView(
+                        store: home, traces: traces,
+                        statusLabel: { status in model.publicRunCopy?.contributionStatusLabel(for: status) },
+                        page: $homePage)
                 }
             }
         } map: {
-            MonitorMapPane(mapTab: $mapTab, privateAILabel: model.privateInferenceCopy?.destination)
+            MonitorMapPane(
+                mapTab: $mapTab, privateAILabel: model.privateInferenceCopy?.destination,
+                traces: traces, inference: inference,
+                sentence: { Self.rowSentence($0, copy: model.privateInferenceCopy, calls: model.harnessCalls) })
         } inspector: {
             GlassPane {
                 // An empty branch would leave the pane nothing to draw, and
                 // it would vanish while the layout still reserved its width.
-                if tab == .traces {
+                switch tab {
+                case .traces:
                     SessionInspectorView(store: traces, entry: selectedEntry)
-                } else {
-                    Color.clear
+                case .inference:
+                    PrivateAIInspectorView(
+                        store: inference, destinationLabel: model.privateInferenceCopy?.destination,
+                        sentence: { Self.rowSentence($0, copy: model.privateInferenceCopy, calls: model.harnessCalls) })
+                case .home:
+                    HomeSummaryInspector(store: home)
                 }
             }
         }
         .glassWindow()
         .task { await traces.run() }
+        .task { await inference.run() }
+        .task { await home.run() }
+    }
+
+    /// The sentence one tool's row shows (`HarnessSurface.rowSentence`): a
+    /// tool that is not on this Mac gets the missing-tool sentence, never
+    /// the not-connected one. Without the core's Private AI copy a missing
+    /// tool says nothing rather than the wrong sentence.
+    static func rowSentence(_ row: HarnessRow, copy: PrivateInferenceCopy?, calls: HarnessCalls) -> String? {
+        guard let copy else { return row.installed ? HarnessSurface.stateSentence(row, calls: calls) : nil }
+        return HarnessSurface.rowSentence(row, copy: copy, calls: calls)
     }
 
     /// The Traces badge (R7): decisions owed, a dash when the core did not
@@ -251,23 +286,92 @@ private struct MonitorMainPane<Content: View>: View {
     }
 }
 
-/// The map: the field, with its tabs floating on it. The map itself is R8.
+/// The map (R8): the field, the flow map drawn on it, and the view
+/// selector floating at its upper trailing edge (spec, "Flow map"). The
+/// selector changes the map's view only, never the main tab, consent or
+/// routing, and keeps its choice while the map is hidden.
 private struct MonitorMapPane: View {
     @Binding var mapTab: MonitorWindowView.MapTab
     let privateAILabel: String?
+    let traces: TracesStore
+    let inference: InferenceStore
+    /// The core's sentence for a tool's Private AI state.
+    let sentence: (HarnessRow) -> String?
+    @EnvironmentObject private var model: AppModel
 
     var body: some View {
-        GlassPane(padding: 0) {
-            ZStack(alignment: .topLeading) {
+        // The map is content, not chrome: an opaque pane, so the selector,
+        // zoom and node cards floating on it are its only glass (Apple: no
+        // glass on glass; R14).
+        GlassPane(padding: 0, isContent: true) {
+            ZStack(alignment: .topTrailing) {
                 RadialGradient(
                     colors: [GlassTokens.Color.mapFieldInner.color, GlassTokens.Color.mapFieldOuter.color],
                     center: .center, startRadius: 20, endRadius: 520)
+                map
                 GlassFloatingGroup {
                     GlassSegmentedTabs(String(localized: "Map", comment: "Map view selector name"), selection: $mapTab, segments: segments, floating: true)
                         .padding(GlassTokens.Space.panePadding)
                 }
+                stateLine
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
             }
         }
+    }
+
+    @ViewBuilder
+    private var map: some View {
+        switch shownTab {
+        case .traces:
+            FlowMapView(
+                scene: .traces(traces.tree, gate: .init(state: tracesState, status: traces.status, destinations: traces.destinations)), legend: [.autoUpload, .ask, .ignore], zoomable: true,
+                accessibilityName: MonitorWindowView.Tab.traces.title, state: tracesState)
+        case .privateAI:
+            if let harnesses = inference.harnesses, let privateAILabel {
+                FlowMapView(
+                    scene: .privateAI(
+                        harnesses, destinationLabel: privateAILabel,
+                        privateAI: traces.destinations?.privateAi ?? traces.status?.privateInferenceState?.state,
+                        sentence: sentence,
+                        state: { HarnessSurface.state($0, calls: model.harnessCalls) }),
+                    legend: [], zoomable: false, accessibilityName: privateAILabel)
+            } else {
+                Color.clear
+            }
+        }
+    }
+
+    /// The Traces map's state (the stack-wide ScreenState rule): core down
+    /// over the last tree, loading before the first, paused or unknown when
+    /// the core's status says so or says nothing.
+    private var tracesState: ScreenState {
+        var failure: DaemonDataError?
+        if case .failed(let error) = traces.phase { failure = error }
+        return ScreenState.resolve(
+            failure: failure, loaded: traces.phase != .loading,
+            paused: traces.status?.paused, known: traces.status != nil)
+    }
+
+    /// The core's line when the map's state is not current, else nothing.
+    @ViewBuilder
+    private var stateLine: some View {
+        if case .failed(let error) = traces.phase, shownTab == .traces {
+            GlassFloatingGroup {
+                Text(MonitorWords.table?.line(for: error) ?? "")
+                    .glassType(GlassTokens.TypeScale.label)
+                    .foregroundStyle(GlassColor.textPrimary)
+                    .padding(.horizontal, GlassTokens.Space.s6)
+                    .padding(.vertical, GlassTokens.Space.s3)
+                    .glassSurface(.nodeCard)
+            }
+            .padding(GlassTokens.Space.panePadding)
+        }
+    }
+
+    /// The Private AI view needs the core's name for it; until the core
+    /// has said it, the map stays on Traces without changing the choice.
+    private var shownTab: MonitorWindowView.MapTab {
+        privateAILabel == nil ? .traces : mapTab
     }
 
     /// Traces, and the Private AI tab once the Rust core has said what it is
@@ -281,15 +385,52 @@ private struct MonitorMapPane: View {
     }
 }
 
-/// The Settings window (D8): the existing settings, in a macOS Settings
-/// window opened with ⌘,. Its theming may later move to the glass system to
-/// match the monitor window (#1173).
+/// The Settings window (D8; R11 of #1173): the section list and, beside
+/// it, the selected section alone, each scrolling on its own (spec,
+/// "Settings navigation"). The sections are the existing settings, with
+/// their behaviour and the core's copy unchanged; the list only chooses
+/// which one is drawn. The selection is restored, and opening or closing
+/// this window leaves the monitor window as it was.
 struct MonitorSettingsWindow: View {
     let navigation: MainWindowNavigation
 
+    @EnvironmentObject private var model: AppModel
+    @Environment(ComputeModel.self) private var compute
+    @SceneStorage("settings.section") private var section: SettingsSection = .connection
+
     var body: some View {
-        SettingsView(navigation: navigation)
-            .frame(minWidth: 620, minHeight: 520)
+        NavigationSplitView {
+            // One list with arrow-key selection, not a button per row.
+            List(selection: Binding(get: { section }, set: { if let value = $0 { section = value } })) {
+                ForEach(SettingsSection.allCases) { item in
+                    // A section whose copy has not loaded is a disabled
+                    // placeholder, never a missing row.
+                    let row = SettingsSection.ListRow.row(title: item.title(model: model, compute: compute.snapshot?.title))
+                    Label(row.text, systemImage: item.symbol)
+                        .lineLimit(2)
+                        .foregroundStyle(row.enabled ? .primary : .secondary)
+                        .accessibilityLabel(row.enabled ? row.text : MonitorWords.unknown)
+                        .selectionDisabled(!row.enabled)
+                        .tag(item)
+                }
+            }
+            .navigationSplitViewColumnWidth(min: 200, ideal: 230, max: 280)
+        } detail: {
+            Group {
+                switch section {
+                case .compute:
+                    ComputeView(model: compute)
+                default:
+                    ScrollView {
+                        SettingsContent(navigation: navigation, section: section)
+                    }
+                    .tcScreen()
+                }
+            }
+            // A fresh view per section, so the scroll starts at its top.
+            .id(section)
+        }
+        .frame(minWidth: 760, minHeight: 520)
     }
 }
 #endif

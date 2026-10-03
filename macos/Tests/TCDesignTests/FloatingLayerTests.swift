@@ -29,18 +29,17 @@ final class FloatingLayerTests: XCTestCase {
         }
     }
 
-    /// Under Reduce Transparency a floating surface is opaque: the painted
-    /// tier over the opaque pane base, not a translucent fill showing the
-    /// map's dots sharply through its text. In a pane nothing changes, since
-    /// the pane under it is already opaque.
-    func test_reduceTransparencyMakesAFloatingSurfaceOpaque() {
-        XCTAssertEqual(GlassSurfaceBacking.choose(floating: true, reduceTransparency: true), .opaqueBase)
-        XCTAssertEqual(GlassSurfaceBacking.choose(floating: false, reduceTransparency: true), .painted)
-        XCTAssertEqual(GlassSurfaceBacking.choose(floating: false, reduceTransparency: false), .painted)
+    /// A floating surface is native glass (Liquid Glass on 26, the HUD blur
+    /// before it) whatever Reduce Transparency says, and a surface in a pane
+    /// is the painted tier. Under Reduce Transparency the system makes both
+    /// native backings opaque by itself (Liquid Glass frosts,
+    /// `NSVisualEffectView` draws solid), so floating text never shows the
+    /// map through; Apple's guidance is to let it (R14).
+    func test_floatingSurfacesStayNativeAndTheSystemHandlesReduceTransparency() {
         let native: GlassSurfaceBacking
         if #available(macOS 26.0, *) { native = .liquidGlass } else { native = .blur }
-        XCTAssertEqual(GlassSurfaceBacking.choose(floating: true, reduceTransparency: false), native)
-        XCTAssertEqual(GlassTokens.Color.paneOpaque.alpha, 1)
+        XCTAssertEqual(GlassSurfaceBacking.choose(floating: true), native)
+        XCTAssertEqual(GlassSurfaceBacking.choose(floating: false), .painted)
     }
 
     private static func sources() throws -> [(String, String)] {

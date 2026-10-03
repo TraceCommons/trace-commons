@@ -89,7 +89,7 @@ public struct GlassSegmentedTabs<Value: Hashable>: View {
                         // behind an unselected label; never the label.
                         if selected {
                             if floating {
-                                Capsule().fill(Color.white.opacity(0.18)).glassPressedFill()
+                                Capsule().fill(GlassTokens.Color.controlSelected.color).glassPressedFill()
                             } else {
                                 Capsule().fill(GlassTokens.Color.controlSelected.color)
                                     .glassPressedFill()
@@ -203,7 +203,7 @@ public struct GlassStepProgress: View {
             ForEach(Array(labels.enumerated()), id: \.offset) { index, label in
                 if index > 0 {
                     Capsule()
-                        .fill(index <= current ? GlassTokens.Color.purpleSoft.color : Color.white.opacity(0.14))
+                        .fill(index <= current ? GlassTokens.Color.purpleSoft.color : GlassColor.ink(0.14))
                         .frame(height: 2)
                         .padding(.horizontal, 6)
                         .padding(.top, 6)
