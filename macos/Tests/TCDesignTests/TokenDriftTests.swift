@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import XCTest
 
@@ -45,7 +46,19 @@ final class TokenDriftTests: XCTestCase {
             let generated = GlassTokens.Color.all[name]
             XCTAssertTrue(generated?.rgb == Self.rgb(entry["hex"]), "color.\(name)")
             XCTAssertTrue(generated?.alpha == Self.number(entry["alpha"], default: 1), "color.\(name) alpha")
+            Self.checkLight(generated, entry, "color.\(name)")
         }
+    }
+
+    /// A token's light appearance value matches the JSON's `light`, or is
+    /// absent when the JSON has none.
+    private static func checkLight(_ generated: GlassRGBA?, _ entry: [String: Any], _ name: String) {
+        guard let light = entry["light"] as? [String: Any] else {
+            XCTAssertTrue(generated?.lightRGB == nil && generated?.lightAlpha == nil, "\(name) has no light value")
+            return
+        }
+        XCTAssertTrue(generated?.lightRGB == rgb(light["hex"]), "\(name).light")
+        XCTAssertTrue(generated?.lightAlpha == number(light["alpha"], default: 1), "\(name).light alpha")
     }
 
     func test_gradientsMatchTheSource() {
@@ -61,6 +74,7 @@ final class TokenDriftTests: XCTestCase {
                 let made = generated!.stops[index]
                 XCTAssertTrue(made.color.rgb == Self.rgb(stop["hex"]), "gradient.\(name)[\(index)]")
                 XCTAssertTrue(made.color.alpha == Self.number(stop["alpha"], default: 1), "gradient.\(name)[\(index)] alpha")
+                Self.checkLight(made.color, stop, "gradient.\(name)[\(index)]")
                 XCTAssertTrue(Double(made.location) == Self.number(stop["at"]), "gradient.\(name)[\(index)] at")
             }
         }
@@ -80,6 +94,7 @@ final class TokenDriftTests: XCTestCase {
                 XCTAssertTrue(Double(made.blur) == Self.number(layer["blur"]), "shadow.\(name)[\(index)] blur")
                 XCTAssertTrue(made.color.rgb == Self.rgb(layer["hex"]), "shadow.\(name)[\(index)] colour")
                 XCTAssertTrue(made.color.alpha == Self.number(layer["alpha"], default: 1), "shadow.\(name)[\(index)] alpha")
+                Self.checkLight(made.color, layer, "shadow.\(name)[\(index)]")
                 XCTAssertTrue(made.inset == ((layer["inset"] as? Bool) ?? false), "shadow.\(name)[\(index)] inset")
             }
         }
@@ -115,6 +130,7 @@ final class TokenDriftTests: XCTestCase {
             XCTAssertTrue(made.uppercase == ((entry["uppercase"] as? Bool) ?? false), "type.\(name) uppercase")
             XCTAssertTrue(made.tabular == ((entry["tabular"] as? Bool) ?? false), "type.\(name) tabular")
             XCTAssertTrue((made.design == .monospaced) == ((entry["design"] as? String) == "monospaced"), "type.\(name) design")
+            XCTAssertTrue(String(describing: made.textStyle) == (entry["textStyle"] as? String), "type.\(name) textStyle")
         }
     }
 
@@ -140,5 +156,95 @@ final class GradientGeometryTests: XCTestCase {
         XCTAssertTrue(abs(points.start.x - 0) < 1e-9)
         XCTAssertTrue(abs(points.end.x - 1) < 1e-9)
         XCTAssertTrue(abs(points.start.y - 0.5) < 1e-9)
+    }
+}
+
+/// R2: the type scale is SF Pro and SF Mono set as macOS text styles, so it
+/// follows the system text size instead of sitting at fixed points.
+final class TypeScaleTests: XCTestCase {
+    private static let styles: [GlassTextStyle] = [
+        .largeTitle, .title, .title2, .title3, .headline, .body, .callout, .subheadline, .footnote, .caption, .caption2,
+    ]
+
+    /// Each step resolves its size from its own text style.
+    /// macOS's text-style sizes at the default system text size, stated
+    /// independently of the mapping under test. A style mapped to the wrong
+    /// AppKit style resolves to the wrong size and fails here.
+    private static let defaultSizes: [GlassTextStyle: CGFloat] = [
+        .largeTitle: 26, .title: 22, .title2: 17, .title3: 15, .headline: 13, .body: 13,
+        .callout: 12, .subheadline: 11, .footnote: 10, .caption: 10, .caption2: 10,
+    ]
+
+    func test_eachStepResolvesItsSizeFromItsTextStyle() {
+        for (name, step) in GlassTokens.TypeScale.all {
+            XCTAssertEqual(step.textStyle.resolvedSize, Self.defaultSizes[step.textStyle], "type.\(name)")
+            XCTAssertEqual(step.size, Self.defaultSizes[step.textStyle], "type.\(name) states its style's size")
+        }
+    }
+
+    /// A mapping that answered `.body` for everything would pass the test
+    /// above and flatten the scale.
+    func test_theTextStyleMappingIsNotDegenerate() {
+        let appKit = Self.styles.map { $0.appKit.rawValue }
+        XCTAssertEqual(Set(appKit).count, Self.styles.count)
+        XCTAssertGreaterThan(GlassTextStyle.largeTitle.resolvedSize, GlassTextStyle.title.resolvedSize)
+        XCTAssertGreaterThan(GlassTextStyle.title.resolvedSize, GlassTextStyle.body.resolvedSize)
+        XCTAssertGreaterThan(GlassTextStyle.body.resolvedSize, GlassTextStyle.subheadline.resolvedSize)
+    }
+
+    /// The scale climbs: no step is drawn smaller than a step below it.
+    func test_theScaleIsOrdered() {
+        let order = ["micro", "caption", "label", "body", "title", "heading", "display", "number"]
+        let sizes = order.compactMap { GlassTokens.TypeScale.all[$0]?.size }
+        XCTAssertEqual(sizes.count, order.count)
+        XCTAssertEqual(sizes, sizes.sorted())
+    }
+
+    /// Leading and tracking scale with the drawn size, not apart from it.
+    func test_leadingAndTrackingFollowTheDrawnSize() {
+        for (name, step) in GlassTokens.TypeScale.all {
+            XCTAssertEqual(step.scale, step.textStyle.resolvedSize / step.size, accuracy: 0.0001, "type.\(name)")
+            XCTAssertEqual(step.resolvedTracking, step.tracking * step.scale, accuracy: 0.0001, "type.\(name)")
+            XCTAssertGreaterThanOrEqual(step.lineSpacing, 0, "type.\(name)")
+        }
+    }
+
+    /// Only the mono step is SF Mono; prose is never monospaced.
+    func test_onlyMonoIsMonospaced() {
+        for (name, step) in GlassTokens.TypeScale.all {
+            XCTAssertEqual(step.design == .monospaced, name == "mono", "type.\(name)")
+        }
+    }
+}
+
+/// Words in TCDesign are set with `glassType(_:)`, never at fixed points.
+/// The one fixed-size font is `glassGlyph(_:weight:)`, for marks inside a
+/// control of fixed size.
+final class FixedPointTypeTests: XCTestCase {
+    func test_noComponentSetsWordsAtFixedPoints() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()  // TCDesignTests
+            .deletingLastPathComponent()  // Tests
+            .deletingLastPathComponent()  // macos
+            .appendingPathComponent("Sources/TCDesign")
+        let files = try XCTUnwrap(FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil))
+            .compactMap { $0 as? URL }
+            .filter { $0.pathExtension == "swift" }
+        XCTAssertGreaterThanOrEqual(files.count, 8, "the TCDesign sources were not found")
+
+        var allowed = 0
+        var failures: [String] = []
+        for file in files {
+            let lines = try String(contentsOf: file, encoding: .utf8).components(separatedBy: "\n")
+            for (index, line) in lines.enumerated() where line.contains("system(size:") {
+                if line.contains("font(.system(size: size, weight: weight.font))") {
+                    allowed += 1
+                } else {
+                    failures.append("\(file.lastPathComponent):\(index + 1) sets a fixed point size; use glassType or glassGlyph")
+                }
+            }
+        }
+        XCTAssertEqual(allowed, 1, "glassGlyph's own font was not found; this scan proved nothing")
+        XCTAssertTrue(failures.isEmpty, failures.joined(separator: "\n"))
     }
 }

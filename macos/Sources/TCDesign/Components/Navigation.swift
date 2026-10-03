@@ -1,21 +1,43 @@
 import SwiftUI
 
+/// A badge's value: a count, or unknown (a dash).
+public enum GlassBadgeValue: Sendable, Equatable {
+    case count(Int)
+    case unknown
+}
+
 /// One segment of `GlassSegmentedTabs`.
 public struct GlassSegment<Value: Hashable>: Identifiable {
     public let value: Value
     public let title: String
     /// Decisions owed, as a count pill. Never queue depth or credit.
-    public let badge: Int?
-    /// A status dot after the title (Inference: Private AI on or off).
+    public let badge: GlassBadgeValue?
+    /// A status dot after the title (Inference: whether Private AI is
+    /// answering). Colour alone, so pair it with `accessibilityValue`.
     public let dot: GlassStatus?
+    /// What the dot and the badge say, in words, for VoiceOver: the dot is
+    /// hidden from assistive tech, so a tab with one must carry its text
+    /// equivalent here, from the core's copy.
+    public let accessibilityValue: String?
 
     public var id: Value { value }
 
-    public init(_ title: String, value: Value, badge: Int? = nil, dot: GlassStatus? = nil) {
+    public init(_ title: String, value: Value, badge: Int? = nil, dot: GlassStatus? = nil, accessibilityValue: String? = nil) {
+        self.init(title, value: value, badgeValue: badge.map(GlassBadgeValue.count), dot: dot,
+                  accessibilityValue: accessibilityValue)
+    }
+
+    /// `badgeValue: .unknown` draws a dash: a count the core did not give is
+    /// never shown as a number. Pass nil, or `.count(0)`, for no badge.
+    public init(
+        _ title: String, value: Value, badgeValue: GlassBadgeValue?, dot: GlassStatus? = nil,
+        accessibilityValue: String? = nil
+    ) {
         self.title = title
         self.value = value
-        self.badge = badge
+        self.badge = badgeValue == .count(0) ? nil : badgeValue
         self.dot = dot
+        self.accessibilityValue = accessibilityValue
     }
 }
 
@@ -46,34 +68,46 @@ public struct GlassSegmentedTabs<Value: Hashable>: View {
                         if let dot = segment.dot {
                             GlassStatusDot(dot, size: 6)
                         }
-                        if let badge = segment.badge {
-                            GlassBadge(count: badge, subtle: true)
+                        // With a text equivalent, the badge is not read on
+                        // its own: the segment's value says it in words.
+                        Group {
+                            switch segment.badge {
+                            case .count(let count): GlassBadge(count: count, subtle: true)
+                            case .unknown: GlassBadge(count: nil, subtle: true)
+                            case nil: EmptyView()
+                            }
                         }
+                        .accessibilityHidden(segment.accessibilityValue != nil)
                     }
-                    .font(.system(size: 12, weight: selected ? .semibold : .medium))
+                    .glassType(GlassTokens.TypeScale.label.weight(selected ? .semibold : .medium))
                     .foregroundStyle(selected ? GlassColor.textPrimary : (floating ? GlassColor.textSecondary : GlassColor.textTertiary))
                     .padding(.horizontal, floating ? 12 : 8)
                     .frame(maxWidth: floating ? nil : .infinity)
-                    .frame(height: floating ? 24 : GlassTokens.Size.tab)
+                    .frame(minHeight: floating ? 24 : GlassTokens.Size.tab)
                     .background {
+                        // The press darkens the selected fill, or a wash
+                        // behind an unselected label; never the label.
                         if selected {
                             if floating {
-                                Capsule().fill(Color.white.opacity(0.18))
+                                Capsule().fill(GlassTokens.Color.controlSelected.color).glassPressedFill()
                             } else {
                                 Capsule().fill(GlassTokens.Color.controlSelected.color)
+                                    .glassPressedFill()
                                     .glassEdge(GlassTokens.Shadow.controlSelectedEdge, in: Capsule())
                             }
                         }
                     }
+                    .glassPressedWash(Capsule())
                     .contentShape(Capsule())
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(GlassPressStyle())
+                .accessibilityValue(segment.accessibilityValue ?? "")
                 .accessibilityAddTraits(selected ? [.isSelected, .isButton] : .isButton)
             }
         }
         .padding(2)
-        .frame(height: floating ? nil : GlassTokens.Size.segmentedTrack)
-        .glassTier(floating ? .control : .well)
+        .frame(minHeight: floating ? nil : GlassTokens.Size.segmentedTrack)
+        .glassSurface(floating ? .control : .well, floating: floating)
         .accessibilityElement(children: .contain)
         .accessibilityLabel(label)
     }
@@ -118,25 +152,50 @@ public struct GlassBreadcrumb: View {
                     Text(crumb.title).foregroundStyle(GlassColor.textPrimary)
                         .accessibilityAddTraits(.isHeader)
                 } else {
-                    Button(crumb.title) { crumb.action?() }
-                        .buttonStyle(.plain)
+                    // A text link: no fill, so the text takes the press.
+                    Button { crumb.action?() } label: { Text(crumb.title).glassPressedFill() }
+                        .buttonStyle(GlassPressStyle())
                         .foregroundStyle(GlassColor.textSecondary)
                 }
             }
         }
-        .font(.system(size: 12, weight: .semibold))
+        .glassType(GlassTokens.TypeScale.label.weight(.semibold))
     }
 }
 
 /// Sequential glass nodes joined by lines, for the first run. Not a tab
 /// control: the steps are not chosen, they are reached.
 public struct GlassStepProgress: View {
+    /// What VoiceOver says for a step that is behind, at or ahead of the
+    /// current one, from the core's copy.
+    public struct StateValues: Sendable, Equatable {
+        public let done: String
+        public let current: String
+        public let pending: String
+
+        public init(done: String, current: String, pending: String) {
+            self.done = done
+            self.current = current
+            self.pending = pending
+        }
+    }
+
     private let labels: [String]
     private let current: Int
+    private let stateValues: StateValues?
 
-    public init(labels: [String], current: Int) {
+    /// With no `stateValues` a step speaks only its label, and the current
+    /// step is marked selected; the component authors no state words.
+    public init(labels: [String], current: Int, stateValues: StateValues? = nil) {
         self.labels = labels
         self.current = current
+        self.stateValues = stateValues
+    }
+
+    /// The accessibility value of the step at `index`.
+    func value(at index: Int) -> String {
+        guard let stateValues else { return "" }
+        return index < current ? stateValues.done : index == current ? stateValues.current : stateValues.pending
     }
 
     public var body: some View {
@@ -144,7 +203,7 @@ public struct GlassStepProgress: View {
             ForEach(Array(labels.enumerated()), id: \.offset) { index, label in
                 if index > 0 {
                     Capsule()
-                        .fill(index <= current ? GlassTokens.Color.purpleSoft.color : Color.white.opacity(0.14))
+                        .fill(index <= current ? GlassTokens.Color.purpleSoft.color : GlassColor.ink(0.14))
                         .frame(height: 2)
                         .padding(.horizontal, 6)
                         .padding(.top, 6)
@@ -165,7 +224,7 @@ public struct GlassStepProgress: View {
                 }
                 .fixedSize()
                 .accessibilityElement(children: .combine)
-                .accessibilityValue(index < current ? "done" : index == current ? "current" : "pending")
+                .accessibilityValue(value(at: index))
                 .accessibilityAddTraits(index == current ? .isSelected : [])
             }
         }

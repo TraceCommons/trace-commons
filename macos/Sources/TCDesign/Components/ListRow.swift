@@ -16,7 +16,10 @@ public struct GlassListRow: View {
     private let expanded: Bool?
     private let submitTitle: String?
     private let submitDone: Bool
+    private let submitFocusable: Bool
     private let watched: Binding<Bool>?
+    private let watchDisabled: Bool
+    private let accessory: AnyView?
     private let watchLabel: String
     private let expandLabel: String?
     private let menuLabel: String
@@ -26,13 +29,17 @@ public struct GlassListRow: View {
     private let onSubmit: (() -> Void)?
     private let onMenu: (() -> Void)?
 
-    /// `expanded` is nil for a row that cannot expand. `watched` is nil for
+    /// `accessory` is a control drawn before the row menu (a folder's mode
+    /// picker). `watchDisabled` shows the switch's state without letting it
+    /// change. `expanded` is nil for a row that cannot expand. `watched` is nil for
     /// a row with no switch of its own (a session). A nil `onSubmit` with a
     /// `submitTitle` shows the pill disabled. Every word is the caller's:
     /// `watchLabel` names the switch, `expandLabel` the chevron and
     /// `menuLabel` the row menu, from the core's copy; the components author no
     /// wording. A row menu with an empty `menuLabel` is not drawn, so it can
-    /// never borrow the row's own name.
+    /// never borrow the row's own name. `submitFocusable` false keeps the
+    /// pill out of the keyboard's tab order, for a list whose focus roves
+    /// with its selection (only the selected row's pill is a stop).
     public init(
         depth: Depth,
         tile: GlassToolTile.Kind,
@@ -44,7 +51,10 @@ public struct GlassListRow: View {
         expanded: Bool? = nil,
         submitTitle: String? = nil,
         submitDone: Bool = false,
+        submitFocusable: Bool = true,
         watched: Binding<Bool>? = nil,
+        watchDisabled: Bool = false,
+        accessory: AnyView? = nil,
         watchLabel: String = "",
         expandLabel: String? = nil,
         menuLabel: String = "",
@@ -64,7 +74,10 @@ public struct GlassListRow: View {
         self.expanded = expanded
         self.submitTitle = submitTitle
         self.submitDone = submitDone
+        self.submitFocusable = submitFocusable
         self.watched = watched
+        self.watchDisabled = watchDisabled
+        self.accessory = accessory
         self.watchLabel = watchLabel
         self.expandLabel = expandLabel
         self.menuLabel = menuLabel
@@ -88,11 +101,12 @@ public struct GlassListRow: View {
                 if let expanded, let onToggleExpand {
                     Button(action: onToggleExpand) {
                         Text("›")
-                            .font(.system(size: 14))
+                            .glassGlyph(14)
                             .foregroundStyle(selected ? Self.selectedInk.color : GlassTokens.Color.statusOff.color)
                             .rotationEffect(.degrees(expanded ? 90 : 0))
+                            .glassPressedFill()
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(GlassPressStyle())
                     // A native disclosure for assistive tech, so the system
                     // says expanded or collapsed in the person's language.
                     .accessibilityRepresentation {
@@ -112,11 +126,11 @@ public struct GlassListRow: View {
 
             VStack(alignment: .leading, spacing: 0) {
                 Text(title)
-                    .font(.system(size: 13, weight: depth == .session ? .medium : .semibold))
+                    .glassType(GlassTokens.TypeScale.body.weight(depth == .session ? .medium : .semibold))
                     .lineLimit(1)
                 if let sub {
                     Text(sub)
-                        .font(.system(size: 11))
+                        .glassType(GlassTokens.TypeScale.caption)
                         .foregroundStyle(subColor)
                         .lineLimit(1)
                 }
@@ -127,12 +141,19 @@ public struct GlassListRow: View {
                 Button(submitTitle) { onSubmit?() }
                     .buttonStyle(GlassButtonStyle(.submit(done: submitDone)))
                     .disabled(onSubmit == nil)
+                    .focusable(submitFocusable)
+            }
+
+            if let accessory {
+                accessory
             }
 
             if let watched {
                 Toggle(watchLabel, isOn: watched)
-                    .labelsHidden()
-                    .toggleStyle(GlassToggleStyle(.watch))
+                    .toggleStyle(GlassToggleStyle(.watch, showsLabel: false))
+                    // A switch the person cannot change here is disabled, so
+                    // assistive tech does not offer a control that does nothing.
+                    .disabled(watchDisabled)
             }
 
             Group {
@@ -149,27 +170,37 @@ public struct GlassListRow: View {
         .foregroundStyle(selected ? Self.selectedInk.color : GlassColor.textPrimary)
         .padding(.leading, 8 + CGFloat(depth.rawValue) * 18)
         .padding(.trailing, 6)
-        .frame(height: GlassTokens.Size.listRow)
+        .frame(minHeight: GlassTokens.Size.listRow)
         .background(
             RoundedRectangle(cornerRadius: GlassTokens.Radius.control, style: .continuous)
                 .fill(selected ? GlassTokens.Color.selection.color : Color.clear)
         )
         .opacity(off ? GlassTokens.Opacity.rowOff : 1)
         .contentShape(Rectangle())
+        // A click selects the row. The keyboard does not stop on each row:
+        // the list holding the rows is one tab stop and the arrow keys move
+        // its selection (spec, "Components": one list, not a tab stop per
+        // row), as the Traces tree does. VoiceOver selects with the row's
+        // default action.
         .onTapGesture { onSelect?() }
-        // Full Keyboard Access and VoiceOver reach the row too: focusable,
-        // Return or Space selects it, and its default action is the same.
-        .focusable(onSelect != nil)
-        .onKeyPress(keys: [.return, .space]) { _ in
-            guard let onSelect else { return .ignored }
-            onSelect()
-            return .handled
-        }
         .accessibilityAction { onSelect?() }
         .accessibilityElement(children: .contain)
         .accessibilityLabel(title)
         .accessibilityValue(sub ?? "")
         .accessibilityAddTraits(selected ? [.isSelected, .isButton] : .isButton)
+        // The tree's depth, for assistive tech: a tool row heads its
+        // folders, a folder row its sessions, so the rotor and heading
+        // navigation walk the levels as they are drawn.
+        .accessibilityAddTraits(depth == .session ? [] : .isHeader)
+        .accessibilityHeading(Self.heading(depth))
+    }
+
+    static func heading(_ depth: Depth) -> AccessibilityHeadingLevel {
+        switch depth {
+        case .tool: .h1
+        case .folder: .h2
+        case .session: .unspecified
+        }
     }
 
     private var subColor: Color {

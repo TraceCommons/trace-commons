@@ -21,11 +21,15 @@ public struct GlassGallery: View {
     @State private var hovered: String?
 
     private let scrolls: Bool
+    private let scene: Bool
 
     /// `scrolls: false` lays the gallery out at full height, for snapshot
     /// renders (`ImageRenderer` does not draw a scroll view's content).
-    public init(scrolls: Bool = true) {
+    /// `scene: false` draws no ground, for a glass window whose panes show
+    /// the desktop (`TCDesignGallery`).
+    public init(scrolls: Bool = true, scene: Bool = true) {
         self.scrolls = scrolls
+        self.scene = scene
     }
 
     public var body: some View {
@@ -37,8 +41,7 @@ public struct GlassGallery: View {
             }
         }
         .frame(minWidth: 900, minHeight: 700)
-        .background(GlassTokens.Color.sceneBase.color)
-        .preferredColorScheme(.dark)
+        .background(scene ? GlassTokens.Color.sceneBase.color : .clear)
     }
 
     private var sections: some View {
@@ -50,6 +53,7 @@ public struct GlassGallery: View {
             section("Navigation") { navigation }
             section("Indicators") { indicators }
             section("Patterns") { patterns }
+            section("Floating") { floatingLayer }
         }
         .padding(28)
     }
@@ -83,7 +87,7 @@ public struct GlassGallery: View {
                 Text("textTertiary").foregroundStyle(GlassColor.textTertiary)
                 Text("purpleText").foregroundStyle(GlassColor.accentText)
             }
-            .font(.system(size: 13))
+            .glassType(GlassTokens.TypeScale.body)
         }
     }
 
@@ -116,7 +120,7 @@ public struct GlassGallery: View {
 
     private var type: some View {
         VStack(alignment: .leading, spacing: 6) {
-            ForEach(["display", "heading", "title", "body", "bodyStrong", "label", "caption", "eyebrow", "mono", "number"], id: \.self) { name in
+            ForEach(["display", "heading", "title", "body", "bodyStrong", "label", "caption", "micro", "eyebrow", "mono", "number"], id: \.self) { name in
                 if let style = GlassTokens.TypeScale.all[name] {
                     Text(name)
                         .glassType(style)
@@ -160,9 +164,9 @@ public struct GlassGallery: View {
                 )
             }
             HStack(spacing: 14) {
-                Toggle("Toggle", isOn: $toggle).labelsHidden().toggleStyle(GlassToggleStyle())
-                Toggle("settings", isOn: $settingsToggle).labelsHidden().toggleStyle(GlassToggleStyle(.settings))
-                Toggle("watch", isOn: $watched).labelsHidden().toggleStyle(GlassToggleStyle(.watch))
+                Toggle("Toggle", isOn: $toggle).toggleStyle(GlassToggleStyle(showsLabel: false))
+                Toggle("settings", isOn: $settingsToggle).toggleStyle(GlassToggleStyle(.settings, showsLabel: false))
+                Toggle("watch", isOn: $watched).toggleStyle(GlassToggleStyle(.watch, showsLabel: false))
                 Toggle("Single", isOn: $checked).toggleStyle(GlassCheckboxStyle())
                 Toggle("Group", sources: $children, isOn: \.self)
                     .toggleStyle(GlassCheckboxStyle())
@@ -263,9 +267,9 @@ public struct GlassGallery: View {
             .frame(width: 420, height: 150)
             VStack(alignment: .leading, spacing: 10) {
                 GlassEyebrowCard("History", action: {}) {
-                    Text("accessory").font(.system(size: 11)).foregroundStyle(GlassColor.textSecondary)
+                    Text("accessory").glassType(GlassTokens.TypeScale.caption).foregroundStyle(GlassColor.textSecondary)
                 } content: {
-                    Text("content").font(.system(size: 13, weight: .semibold)).foregroundStyle(GlassColor.textPrimary)
+                    Text("content").glassType(GlassTokens.TypeScale.bodyStrong).foregroundStyle(GlassColor.textPrimary)
                 }
                 GlassConsentBlock("consent")
                 GlassKeyValueList([.init("Path", "~/code/orchard-api", mono: true), .init("Sessions", "18")])
@@ -281,6 +285,49 @@ public struct GlassGallery: View {
             }
             .frame(width: 360)
         }
+    }
+
+    /// The floating layer over a stand-in map field: Liquid Glass on macOS
+    /// 26, the painted tiers before it.
+    private var floatingLayer: some View {
+        ZStack(alignment: .topLeading) {
+            RoundedRectangle(cornerRadius: GlassTokens.Radius.pane, style: .continuous)
+                .fill(RadialGradient(
+                    colors: [GlassTokens.Color.mapFieldInner.color, GlassTokens.Color.mapFieldOuter.color],
+                    center: .center, startRadius: 10, endRadius: 420))
+            ForEach(0..<14, id: \.self) { index in
+                Circle()
+                    .fill(index % 3 == 0 ? GlassTokens.Color.purpleSoft.color : GlassTokens.Color.blue.color)
+                    .frame(width: 18, height: 18)
+                    .offset(x: CGFloat(60 + (index * 97) % 620), y: CGFloat(70 + (index * 53) % 230))
+            }
+            GlassFloatingGroup {
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack(spacing: 10) {
+                        GlassSegmentedTabs(
+                            "map",
+                            selection: $mapTab,
+                            segments: [
+                                GlassSegment("Traces", value: "traces"),
+                                GlassSegment("AI", value: "ai", dot: .on),
+                            ],
+                            floating: true
+                        )
+                        Spacer()
+                        GlassToolbarGroup {
+                            GlassToolbarButton("graph", systemImage: "chart.bar", pressed: true) {}
+                            GlassToolbarButton("map", systemImage: "map") {}
+                        }
+                        GlassRoundButton("Settings", systemImage: "gearshape") {}
+                    }
+                    Spacer()
+                    GlassNodeCard("nodeCard", detail: "detail", hint: "hint")
+                        .frame(width: GlassTokens.Size.nodeCardWidth)
+                }
+                .padding(14)
+            }
+        }
+        .frame(width: 720, height: 340)
     }
 }
 

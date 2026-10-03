@@ -87,6 +87,11 @@ public struct ProjectRow: Decodable, Identifiable, Equatable, Sendable {
     /// On an armed row only: `true` when armed from now, so the backlog
     /// waits. Absent (nil) on rows that are not armed.
     public let fromNow: Bool?
+    /// On an armed row only: which disclosure is true for this folder's
+    /// automatic sessions, as the daemon chose it (`patterns_only` or
+    /// `model_scrubbed`). Absent on rows that are not armed. A shell words
+    /// it through the core (`tc_automatic_grant_copy_json`) and never picks.
+    public let automaticDisclosure: String?
     /// The folder's own mode, which a contribution override (#1173) never
     /// writes: what clearing the override returns `mode` to. `nil` from a
     /// daemon predating the override.
@@ -112,6 +117,7 @@ public struct ProjectRow: Decodable, Identifiable, Equatable, Sendable {
         sessionCount: Int? = nil,
         lastSessionAt: Date? = nil,
         fromNow: Bool? = nil,
+        automaticDisclosure: String? = nil,
         folderMode: ProjectMode? = nil,
         tools: [ProjectTool] = []
     ) {
@@ -127,6 +133,7 @@ public struct ProjectRow: Decodable, Identifiable, Equatable, Sendable {
         self.sessionCount = sessionCount
         self.lastSessionAt = lastSessionAt
         self.fromNow = fromNow
+        self.automaticDisclosure = automaticDisclosure
         self.folderMode = folderMode
         self.tools = tools
     }
@@ -144,6 +151,7 @@ public struct ProjectRow: Decodable, Identifiable, Equatable, Sendable {
         case sessionCount = "session_count"
         case lastSessionAt = "last_session_at"
         case fromNow = "from_now"
+        case automaticDisclosure = "automatic_disclosure"
         case folderMode = "folder_mode"
         case tools
     }
@@ -173,6 +181,7 @@ public struct ProjectRow: Decodable, Identifiable, Equatable, Sendable {
         sessionCount = try c.decodeIfPresent(Int.self, forKey: .sessionCount)
         lastSessionAt = try c.decodeIfPresent(Date.self, forKey: .lastSessionAt)
         fromNow = try c.decodeIfPresent(Bool.self, forKey: .fromNow)
+        automaticDisclosure = try c.decodeIfPresent(String.self, forKey: .automaticDisclosure)
         folderMode = try c.decodeIfPresent(ProjectMode.self, forKey: .folderMode)
         tools = try c.decodeIfPresent([ProjectTool].self, forKey: .tools) ?? []
     }

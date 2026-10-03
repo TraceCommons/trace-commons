@@ -29,6 +29,22 @@ OUTPUT = REPO / "macos" / "Sources" / "TCDesign" / "Generated" / "GlassTokens.sw
 
 WEIGHTS = {"regular", "medium", "semibold", "bold", "heavy"}
 DESIGNS = {"default", "monospaced"}
+# macOS text styles and their sizes at the default system text size. A type
+# step names its style and states that size, so the scale follows the system
+# setting the way the rest of the shell does (see TC.Font_ in the app).
+TEXT_STYLES = {
+    "largeTitle": 26,
+    "title": 22,
+    "title2": 17,
+    "title3": 15,
+    "headline": 13,
+    "body": 13,
+    "callout": 12,
+    "subheadline": 11,
+    "footnote": 10,
+    "caption": 10,
+    "caption2": 10,
+}
 IDENTIFIER = re.compile(r"^[a-z][A-Za-z0-9]*$")
 
 
@@ -66,8 +82,16 @@ def doc(note: str | None, indent: str) -> list[str]:
     return [f"{indent}/// {note}"] if note else []
 
 
+def light_expr(entry: dict, where: str) -> str:
+    """The `light:` argument for an entry with a light appearance value."""
+    light = entry.get("light")
+    if light is None:
+        return ""
+    return f", light: GlassRGBA({rgb(light['hex'], where + '.light')}, alpha: {alpha(light, where + '.light')})"
+
+
 def color_expr(entry: dict, where: str) -> str:
-    return f"GlassRGBA({rgb(entry['hex'], where)}, alpha: {alpha(entry, where)})"
+    return f"GlassRGBA({rgb(entry['hex'], where)}, alpha: {alpha(entry, where)}{light_expr(entry, where)})"
 
 
 def render(tokens: dict) -> str:
@@ -82,7 +106,8 @@ def render(tokens: dict) -> str:
         "",
         "// swiftlint:disable all",
         "",
-        "/// The glass design system's values: dark only, purple brand, SF Pro.",
+        "/// The glass design system's values: light and dark (each colour follows",
+        "/// the person's system appearance), purple brand, SF Pro.",
         "public enum GlassTokens {",
     ]
 
@@ -110,7 +135,7 @@ def render(tokens: dict) -> str:
     for key, entry in tokens["gradient"].items():
         where = f"gradient.{key}"
         stops = ", ".join(
-            f"GlassStop({rgb(stop['hex'], where)}, alpha: {alpha(stop, where)}, at: {number(stop['at'], where)})"
+            f"GlassStop({rgb(stop['hex'], where)}, alpha: {alpha(stop, where)}, at: {number(stop['at'], where)}{light_expr(stop, where)})"
             for stop in entry["stops"]
         )
         gradients.append(
@@ -128,7 +153,7 @@ def render(tokens: dict) -> str:
                 f"x: {number(layer.get('x', 0), where)}, "
                 f"y: {number(layer.get('y', 0), where)}, "
                 f"blur: {number(layer.get('blur', 0), where)}, "
-                f"color: GlassRGBA({rgb(layer['hex'], where)}, alpha: {alpha(layer, where)}), "
+                f"color: GlassRGBA({rgb(layer['hex'], where)}, alpha: {alpha(layer, where)}{light_expr(layer, where)}), "
                 f"inset: {'true' if layer.get('inset') else 'false'})"
             )
         shadows.append((identifier(key, where), "[" + ", ".join(parts) + "]", None))
@@ -151,10 +176,16 @@ def render(tokens: dict) -> str:
             raise TokenError(f"{where}: weight {weight!r}")
         if design not in DESIGNS:
             raise TokenError(f"{where}: design {design!r}")
+        style = entry.get("textStyle")
+        if style not in TEXT_STYLES:
+            raise TokenError(f"{where}: textStyle {style!r}")
+        if number(entry["size"], where) != str(TEXT_STYLES[style]):
+            raise TokenError(f"{where}: size {entry['size']} is not {style}'s {TEXT_STYLES[style]}")
         types.append(
             (
                 identifier(key, where),
                 "GlassTypeStyle("
+                f"textStyle: .{style}, "
                 f"size: {number(entry['size'], where)}, "
                 f"weight: .{weight}, "
                 f"lineHeight: {number(entry['lineHeight'], where)}, "

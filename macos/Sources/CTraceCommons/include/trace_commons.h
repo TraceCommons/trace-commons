@@ -2409,6 +2409,32 @@ char*       tc_legacy_migration_offer_json(void);
  */
 char*       tc_legacy_migration_refusal_text(const char* label);
 
+/* The glass monitor's Traces words (preview_copy::monitor_traces_copy):
+ * the inspector's row labels, the review's actions, and the lines for a core
+ * that does not answer. NULL only on a caught panic.
+ */
+char*       tc_monitor_traces_copy_json(void);
+
+/* The glass monitor's other screens' words
+ * (preview_copy::monitor_screens_copy): the map, Inference, Home, History,
+ * Missions and the menu-bar popover. NULL only on a caught panic.
+ */
+char*       tc_monitor_screens_copy_json(void);
+
+/* The grant screens' words for one disclosure the daemon chose and named
+ * (consent_copy::automatic_grant_copy_named): an armed folder's list_projects
+ * row carries automatic_disclosure ("patterns_only" or "model_scrubbed"),
+ * and this words that answer. NULL for a NULL or unknown name, and on a
+ * caught panic.
+ */
+char*       tc_automatic_grant_copy_json(const char* disclosure);
+
+/* The Traces badge's text equivalent (preview_copy::decisions_owed_text).
+ * A negative decisions_owed is an unknown count, never zero. The EMPTY
+ * STRING for zero. NULL only on a caught panic.
+ */
+char*       tc_decisions_owed_text(int64_t decisions_owed);
+
 /* The connecting-inference step's sentences (K12,
  * consent_copy::inference_connection_copy). NULL only on a caught panic.
  */

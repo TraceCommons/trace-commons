@@ -122,6 +122,50 @@ jobs:
       # runs exactly when a save is about to happen.
       - uses: ./.github/actions/trim-cargo-cache
 
+  # The glass design system's pre-Liquid Glass fallback. Every other macOS
+  # job runs on macos-26, where `GlassMaterial.current` always answers
+  # `.liquidGlass`, so the vibrancy branch -- the one every Mac from the
+  # macOS 14 floor to 25 draws -- had executed nowhere. This job runs the
+  # TCDesign tests on macOS 15 so that branch runs.
+  #
+  # Advisory: not a required check. It builds with an Xcode 26 SDK, because
+  # `NSGlassEffectView` only exists in the 26 SDK even though the code that
+  # uses it is behind `#available(macOS 26.0, *)`.
+  macos-15-fallback-tests:
+    name: macOS 15 fallback tests
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-macos-15-fallback-tests-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-macos-15-fallback-tests-
+      # The newest Xcode 26 the image carries. Fails, rather than quietly
+      # building with an older SDK, when there is none.
+      - name: Select an Xcode 26 toolchain
+        run: |
+          xcode="$(ls -d /Applications/Xcode_26*.app | sort -V | tail -n 1)"
+          test -n "$xcode"
+          sudo xcode-select -s "$xcode"
+          xcodebuild -version
+          swift --version
+      # The package links the FFI dylib for every target, TCDesign's tests
+      # included, so it has to exist first; see macos-app-tests.
+      - name: Build the FFI dylib
+        run: cargo build -p trace-commons-contributor-ffi
+      - name: swift test (TCDesign)
+        working-directory: macos
+        run: swift test --filter TCDesignTests
+      - uses: ./.github/actions/trim-cargo-cache
+
   windows-pipe-acl:
     name: windows named-pipe ACL
     runs-on: windows-latest

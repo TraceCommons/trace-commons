@@ -56,7 +56,8 @@ public struct GlassEyebrowCard<Accessory: View, Content: View>: View {
 
     public var body: some View {
         if let action {
-            Button(action: action) { card }.buttonStyle(.plain)
+            // The card's tier fill darkens while pressed (`GlassPressStyle`).
+            Button(action: action) { card }.buttonStyle(GlassPressStyle())
         } else {
             card
         }
@@ -87,8 +88,7 @@ public struct GlassConsentBlock: View {
 
     public var body: some View {
         Text(text)
-            .glassType(GlassTokens.TypeScale.label)
-            .font(.system(size: 12))
+            .glassType(GlassTokens.TypeScale.label.weight(.regular))
             .foregroundStyle(GlassColor.textPrimary)
             .padding(.vertical, 10)
             .padding(.horizontal, 12)
@@ -122,9 +122,9 @@ public struct GlassLegendCell: View {
             Spacer(minLength: GlassTokens.Space.s4)
             Text(value).monospacedDigit().fontWeight(.semibold).foregroundStyle(GlassColor.textPrimary)
         }
-        .font(.system(size: 12))
+        .glassType(GlassTokens.TypeScale.label.weight(.regular))
         .padding(.horizontal, 10)
-        .frame(height: GlassTokens.Size.controlLarge)
+        .frame(minHeight: GlassTokens.Size.controlLarge)
         .glassTier(.well)
         .accessibilityElement(children: .combine)
     }
@@ -172,7 +172,7 @@ public struct GlassKeyValueList: View {
                 .accessibilityElement(children: .combine)
             }
         }
-        .font(.system(size: 12))
+        .glassType(GlassTokens.TypeScale.label.weight(.regular))
     }
 }
 
@@ -188,7 +188,7 @@ public struct GlassTableRow<Content: View>: View {
 
     public var body: some View {
         content
-            .font(.system(size: 12))
+            .glassType(GlassTokens.TypeScale.label.weight(.regular))
             .padding(.vertical, 9)
             .padding(.horizontal, 12)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -216,7 +216,7 @@ public struct GlassSectionRule: View {
                 .foregroundStyle(GlassColor.accentText)
                 .fixedSize()
                 .accessibilityAddTraits(.isHeader)
-            Rectangle().fill(Color.white.opacity(0.14)).frame(height: 0.5)
+            Rectangle().fill(GlassColor.ink(0.14)).frame(height: 0.5)
         }
         .padding(.top, GlassTokens.Space.s3)
     }
@@ -242,7 +242,7 @@ public struct GlassNotice<Content: View>: View {
                     GlassStatusLabel(title, status: tone).fontWeight(.semibold)
                 }
                 content
-                    .font(.system(size: 12))
+                    .glassType(GlassTokens.TypeScale.label.weight(.regular))
                     .foregroundStyle(GlassColor.textSecondary)
             }
         }
