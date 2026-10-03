@@ -4,6 +4,11 @@ import TCShellCore
 @testable import TraceCommonsApp
 
 final class HealthQueueReviewTests: XCTestCase {
+    func testDailyCapBannerTitleIsTheDailyBudgetTitle() {
+        XCTAssertEqual(
+            HealthCopy.core(label: "daily-cap-reached", maxQueueEntries: nil).title, DailyBudgetCopy.title)
+    }
+
     func testUnsupportedOpenCodeVersionUsesSharedRecoveryCopy() throws {
         let shared = try XCTUnwrap(TCSourceChecks.settingsCopy())
         let health = HealthCopy.core(label: "opencode-export-version-unsupported", maxQueueEntries: nil)
