@@ -92,5 +92,90 @@ final class HistoryParityTests: XCTestCase {
         XCTAssertEqual(source.components(separatedBy: "model.withdraw(record)").count - 1, 2,
                        "only Retry and the confirmation withdraw")
     }
+
+    /// The session detail keeps every legacy gate: the reloads, the shared
+    /// Skills predicate (asked, never re-derived here), the editor only for
+    /// an active contribution, the core's validation, the evidence cap and
+    /// the reuse choice.
+    func test_theSessionDetailKeepsItsGatesAndTheEditor() throws {
+        let source = try Self.text("Views/SessionDetailView.swift")
+        for needle in [
+            "model.loadSessionDetail(record)", "NSApplication.didBecomeActiveNotification",
+            "model.ensureLocalInstalledSkillStatus(for: record)",
+            "SessionContributionOverview(record: record, detail: detail, copy: copy)",
+            "SessionWithdrawalAction(record: record, currentStatus: currentStatus, copy: copy)",
+            "SkillLearningView(record: record, copy: skillCopy)",
+            "SkillLearningGate.offersLearning(detail, recordStatus: record.status, withdrawalCompleted: withdrawalCompleted)",
+            "Text(copy.publicationAfterAcceptance)",
+            "PublicRunEditor(record: record, detail: detail, copy: copy)", "TCPublicRun.validateEditorJSON(json)",
+            "model.publishPublicRun(record, draft: draft)", "model.unpublishPublicRun(record)",
+            "maximum: 100)", "maximum: 600)", "maximum: 4_000)", "ForEach(copy.reusePermissions)",
+            "Text(copy.exactPublicPreview)", "model.publicRunErrors[record.submissionID]",
+            "Text(copy.choosePermission)", "Text(copy.publicationDisclosure)",
+        ] {
+            XCTAssertTrue(source.contains(needle), "SessionDetailView.swift lacks \(needle)")
+        }
+        XCTAssertEqual(source.components(separatedBy: "Button(copy.retryRead)").count - 1, 2,
+                       "the read error and the installed-skill status each offer Retry")
+        XCTAssertTrue(source.contains("let onBack: (() -> Void)?"))
+        XCTAssertTrue(source.contains("init(record: HistoryRecord, onBack: (() -> Void)? = nil)"),
+                      "the inspector draws it without a back control")
+        try LegacySymbols.assertClean("Views/SessionDetailView.swift")
+    }
+
+    /// The glass shapes, and the publish gates pinned where they sit: Review
+    /// page needs a draft, the fifth evidence item is refused, and nothing
+    /// publishes or unpublishes twice.
+    func test_theSessionDetailIsDrawnOnGlass() throws {
+        let source = try Self.text("Views/SessionDetailView.swift")
+        let flat = source.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        for needle in [
+            // The reloads hang on a container that is always there.
+            "VStack(alignment: .leading, spacing: GlassTokens.Space.s6) { if let copy = model.publicRunCopy "
+                + "{ content(copy) } } .frame(maxWidth: .infinity, alignment: .leading) .onAppear {",
+            "if let onBack { GlassBreadcrumb([GlassCrumb(copy.allContributions, action: onBack)], "
+                + "backLabel: copy.allContributions, onBack: onBack)",
+            "GlassNotice(tone: .outside, title: message) { Button(copy.retryRead) { model.loadSessionDetail(record) } "
+                + ".buttonStyle(GlassButtonStyle(.glass)) .frame(minHeight: 44) }",
+            "GlassEyebrowCard(copy.publicWorkflow) {",
+            "GlassTag(copy.published, tone: .on)",
+            "Link(copy.openPage, destination: url) .buttonStyle(GlassButtonStyle(.primary)) .frame(minHeight: 44)",
+            "Button(working ? copy.unpublishing : copy.unpublish) { model.unpublishPublicRun(record) } "
+                + ".buttonStyle(GlassButtonStyle(.glass)) .frame(minHeight: 44) .disabled(working)",
+            "Text(\"\\(count)/\\(maximum)\") .glassType(GlassTokens.TypeScale.mono)",
+            ".toggleStyle(GlassCheckboxStyle()) .disabled( selectedEvidence.count >= 4 "
+                + "&& !selectedEvidence.contains(evidence.eventID) ) .frame(minHeight: 44, alignment: .leading)",
+            "Toggle(copy.publishCorrection, isOn: $includeCorrection) .toggleStyle(GlassCheckboxStyle()) .frame(minHeight: 44",
+            "GlassCheckMark(checked: selected)",
+            ".accessibilityAddTraits(selected ? [.isSelected, .isButton] : .isButton)",
+            "GlassStatusLabel(problem, status: .outside)",
+            "Button(copy.reviewPage) { reviewDraft = makeDraft() } .buttonStyle(GlassButtonStyle(.primary)) "
+                + ".frame(minHeight: 44) .disabled(makeDraft() == nil)",
+            "Button(copy.cancelEdit) { editingPublished = false } .buttonStyle(GlassButtonStyle(.glass))",
+            "Button(copy.editDraft) { reviewDraft = nil } .buttonStyle(GlassButtonStyle(.glass))",
+            "{ model.publishPublicRun(record, draft: draft) } .buttonStyle(GlassButtonStyle(.primary)) "
+                + ".frame(minHeight: 44) .disabled(working)",
+            // Fields carry their names for VoiceOver.
+            "TextField(copy.pageTitle, text: $title)", ".accessibilityLabel(copy.publicOutcome)",
+            ".accessibilityLabel(copy.reusableInstructions)", "TextField(copy.sourcePlaceholder, text: $source)",
+            // A publication error can be put away; the next attempt shows it again.
+            "Button(Self.dismissLabel ?? ActionMessageBanner.dismissWord) { dismissedError = message }",
+        ] {
+            XCTAssertTrue(flat.contains(needle), "SessionDetailView.swift lacks \(needle)")
+        }
+        XCTAssertTrue(GlassSurfaceRulesTests.files.contains("Views/SessionDetailView.swift"))
+    }
+
+    /// The legacy window passes Back as a trailing closure; the inspector
+    /// passes nothing.
+    @MainActor
+    func test_theSessionDetailIsBuiltWithAndWithoutBack() {
+        let record = HistoryRecord(
+            submissionID: "sub-1", submittedAt: Date(timeIntervalSince1970: 0), projectID: "project",
+            projectLabel: "project", source: "claude_code", status: "accepted", consentScopes: [],
+            creditPointsPending: 0, creditPointsFinal: nil, explanations: [], lastRefreshedAt: nil)
+        XCTAssertNil(SessionDetailView(record: record).onBack)
+        XCTAssertNotNil(SessionDetailView(record: record) {}.onBack)
+    }
 }
 #endif
