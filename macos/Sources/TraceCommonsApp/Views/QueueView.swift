@@ -1332,3 +1332,10 @@ struct ArmingOfferCard: View {
         }
     }
 }
+
+extension ScrubbingCaveat {
+    /// The legacy queue row's marker; the glass surfaces read `status(redactionCount:)`.
+    static func tone(redactionCount: Int) -> TC.Tone {
+        redactionCount == 0 ? .attention : .neutral
+    }
+}

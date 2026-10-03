@@ -1,5 +1,6 @@
 import SwiftUI
 import TCBridge
+import TCDesign
 import TCShellCore
 
 /// The sessions a witness certificate is held for, drawn together above the
@@ -34,27 +35,32 @@ struct CertificateSection: View {
 
     var body: some View {
         if let title = TCCertificate.listTitle(evidenceAdmitted: evidenceAdmitted) {
-            VStack(alignment: .leading, spacing: TC.Space.s) {
-                Text(title).font(TC.Font_.cardTitle)
-                if held.isEmpty {
-                    Text(model.privateInferenceCopy?.certificateListEmpty ?? "")
-                        .font(TC.Font_.caption)
-                        .foregroundStyle(TC.inkSecondary)
-                } else if let line = TCCertificate.rowLine(evidenceAdmitted: evidenceAdmitted) {
-                    ForEach(held) { entry in
-                        VStack(alignment: .leading, spacing: TC.Space.micro) {
-                            Text(entry.projectLabel)
-                            Text(line)
-                                .font(TC.Font_.caption)
-                                .foregroundStyle(TC.inkSecondary)
+            GlassCard(quiet: true) {
+                VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
+                    Text(title)
+                        .glassType(GlassTokens.TypeScale.bodyStrong)
+                        .foregroundStyle(GlassColor.textPrimary)
+                    if held.isEmpty {
+                        Text(model.privateInferenceCopy?.certificateListEmpty ?? "")
+                            .glassType(GlassTokens.TypeScale.caption)
+                            .foregroundStyle(GlassColor.textSecondary)
+                    } else if let line = TCCertificate.rowLine(evidenceAdmitted: evidenceAdmitted) {
+                        VStack(spacing: 0) {
+                            ForEach(Array(held.enumerated()), id: \.element.id) { index, entry in
+                                GlassTableRow(first: index == 0) {
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(entry.projectLabel)
+                                            .foregroundStyle(GlassColor.textPrimary)
+                                        Text(line)
+                                            .glassType(GlassTokens.TypeScale.caption)
+                                            .foregroundStyle(GlassColor.textSecondary)
+                                    }
+                                }
+                            }
                         }
-                        .frame(maxWidth: .infinity, alignment: .leading)
                     }
                 }
             }
-            .padding(TC.Space.md)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(TC.surface)
         }
     }
 }
