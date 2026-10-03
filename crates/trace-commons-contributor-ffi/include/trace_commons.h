@@ -2383,7 +2383,7 @@ char*       tc_arming_offer_copy_json(const char* project_label, uint32_t count)
 
 /* The menu-bar Contribution mode pill (#1173, project_copy::
  * contribution_mode_copy): {title, mixed, choices, override_active, clear},
- * choices being [{mode, label, line}] for Ask me, Auto contribute and Never.
+ * choices being [{mode, label, line}] for Ask me, Automatic and Never.
  * NULL only on a caught panic.
  */
 char*       tc_contribution_mode_copy_json(void);

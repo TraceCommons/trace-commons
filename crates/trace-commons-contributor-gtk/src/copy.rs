@@ -1611,14 +1611,17 @@ pub const ONBOARD_WATCH_SUBTITLE: &str = "Every project starts at ask-first: you
 /// The eyebrow over the list. `style::section` uppercases it.
 pub const ONBOARD_WATCH_SECTION: &str = "Projects";
 
-/// The per-row state, in the vocabulary `settings.rs` already uses for the
-/// same mode -- its dropdown reads "Ask me first". Two screens that set the
-/// same field must not name it two ways.
-pub const ONBOARD_WATCH_ASK_FIRST: &str = "Ask me first";
+/// The per-row state: the core's one name for the mode
+/// (`project_copy::CONTRIBUTION_MODE_ASK_LABEL`), which `settings.rs`'s
+/// dropdown and the pill read too. Two screens that set the same field must
+/// not name it two ways.
+pub const ONBOARD_WATCH_ASK_FIRST: &str =
+    trace_commons_contributor::project_copy::CONTRIBUTION_MODE_ASK_LABEL;
 
-/// The state after `Ignore`. Echoes the button that produced it rather than
-/// introducing a third name for the mode.
-pub const ONBOARD_WATCH_IGNORED: &str = "Ignored";
+/// The state after the button that sets `ignore`: the core's one name for
+/// that mode, the same word the button says.
+pub const ONBOARD_WATCH_IGNORED: &str =
+    trace_commons_contributor::project_copy::CONTRIBUTION_MODE_NEVER_LABEL;
 
 /// Shown when `list_projects` returns nothing. This was the state of the
 /// screen on EVERY machine until the `local_path` deserialisation bug was
@@ -1645,18 +1648,20 @@ pub const ONBOARD_WATCH_UNKNOWN_LABEL: &str = "Sessions with no project";
 /// might try to fix.
 ///
 /// It replaces the state line rather than adding a third: "you'll always be
-/// asked" already says what `Ask me first` says.
+/// asked" already says what `Ask me` says.
 pub const ONBOARD_WATCH_UNKNOWN_NOTE: &str = concat!(
     app_name!(),
     " can't tell which folder these ran in, so they can never be contributed automatically. \
      You'll always be asked."
 );
 
-/// The per-project control on screen 5. `Ignore` is offered here and
+/// The per-project control on screen 5. `ignore` is offered here and
 /// `auto_upload` is not, per the shared spec: excluding a repository is a
 /// live thought at this moment and never returns, whereas arming automation
-/// before a single preview has been seen asks for trust not yet earned.
-pub const ONBOARD_IGNORE: &str = "Ignore";
+/// before a single preview has been seen asks for trust not yet earned. It
+/// names the mode it sets, by the core's one name.
+pub const ONBOARD_IGNORE: &str =
+    trace_commons_contributor::project_copy::CONTRIBUTION_MODE_NEVER_LABEL;
 
 /// Shown when `set_project_mode` refuses. The same sentence the settings
 /// screen uses for the same refusal, so the two places that change a
@@ -2431,6 +2436,19 @@ mod tests {
     use super::*;
 
     use crate::model::human_bytes;
+
+    /// Onboarding names a project's mode by the core's one name, the words
+    /// Settings and the pill use (owner decision, 2026-10-02), and its
+    /// button names the mode it sets.
+    #[test]
+    fn onboarding_names_each_mode_by_the_cores_name() {
+        use trace_commons_contributor::project_copy::{
+            CONTRIBUTION_MODE_ASK_LABEL, CONTRIBUTION_MODE_NEVER_LABEL,
+        };
+        assert_eq!(ONBOARD_WATCH_ASK_FIRST, CONTRIBUTION_MODE_ASK_LABEL);
+        assert_eq!(ONBOARD_WATCH_IGNORED, CONTRIBUTION_MODE_NEVER_LABEL);
+        assert_eq!(ONBOARD_IGNORE, CONTRIBUTION_MODE_NEVER_LABEL);
+    }
 
     /// The correction disclosure, character for character, and then in the
     /// other two shells' actual sources.

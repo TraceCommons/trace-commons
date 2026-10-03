@@ -124,7 +124,7 @@ public protocol DaemonDataClient: Sendable {
     ///
     /// `confirm` is sent only with `.autoUpload`, and only as `true`: it says
     /// the contributor confirmed the core's confirmation, which carries the
-    /// arming disclosure. Auto contribute without it is refused
+    /// arming disclosure. Automatic without it is refused
     /// (`bad_params` / `confirm-required`), and is refused without grant
     /// terms in force (`unavailable` / `arming-terms-unavailable`) before
     /// anything is recorded. Ask me and Never take no confirmation on the

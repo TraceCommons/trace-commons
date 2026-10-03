@@ -69,15 +69,22 @@ final class ProjectArmingCopyTests: XCTestCase {
     // states the scrubbing, that review stops and the way back, are asserted
     // against the real export in `TCBridgeTests/CoreCopyExportTests`.
 
-    // MARK: - Picker labels
+    // MARK: - Mode names
 
-    /// The picker offers choices, so its labels are actions ("Contribute
-    /// automatically"), not the state sentences Settings shows beside a row
-    /// ("Contributed without asking"). Both exist; they are not
-    /// interchangeable, and these are the Linux shell's `mode_choices` words.
-    func testChoiceLabelsAreActionsNotStates() {
-        XCTAssertEqual(ProjectCopy.modeChoiceLabel(.ask), "Ask me first")
-        XCTAssertEqual(ProjectCopy.modeChoiceLabel(.autoUpload), "Contribute automatically")
-        XCTAssertEqual(ProjectCopy.modeChoiceLabel(.ignore), "Never offer this one")
+    /// A project mode reads by the core's one name for it, looked up in the
+    /// pill's table by wire mode (owner decision, 2026-10-02). The words here
+    /// are a fixture; `TraceCommonsAppTests/ProjectModeWordsTests` checks the
+    /// real export.
+    func testAModeReadsByItsNameInThePillTable() throws {
+        let json = #"""
+            {"title":"t","mixed":"m","override_active":"o","clear":"c","auto_partial":"p",
+             "choices":[{"mode":"notify_only","label":"A","line":"a"},
+                        {"mode":"auto_upload","label":"B","line":"b"},
+                        {"mode":"ignore","label":"C","line":"c"}]}
+            """#
+        let copy = try XCTUnwrap(ContributionModeCopy.decode(fromJSON: json))
+        XCTAssertEqual(copy.label(for: .ask), "A")
+        XCTAssertEqual(copy.label(for: .autoUpload), "B")
+        XCTAssertEqual(copy.label(for: .ignore), "C")
     }
 }

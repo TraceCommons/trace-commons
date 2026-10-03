@@ -80,6 +80,12 @@ pub fn contributor_disclosure_copy() -> Value {
                 .map(|row| (row.status.to_owned(), Value::from(row.label)))
                 .collect::<serde_json::Map<String, Value>>(),
         },
+        // Each folder mode's one name (`project_copy::FOLDER_MODE_LABELS`),
+        // keyed by wire mode: Settings, onboarding and the pill read it.
+        "folder_mode_labels": crate::project_copy::FOLDER_MODE_LABELS
+            .iter()
+            .map(|(mode, label)| ((*mode).to_owned(), Value::from(*label)))
+            .collect::<serde_json::Map<String, Value>>(),
         "outcome": crate::outcome_copy::outcome_copy(),
         "private_inference": {
             "destination": inference.destination,
@@ -142,6 +148,7 @@ mod tests {
             "insights_ui",
             "mission_drafts_ui",
             "history_ui",
+            "folder_mode_labels",
             "outcome",
             "private_inference",
             "project_automatic_unavailable",
@@ -281,6 +288,24 @@ mod tests {
                 Some(row.label),
                 "{}",
                 row.status
+            );
+        }
+    }
+
+    /// The folder modes' names are carried whole, keyed by wire mode, so
+    /// Windows and Tauri look a mode up rather than typing its name.
+    #[test]
+    fn the_bundle_carries_the_folder_mode_labels() {
+        let copy = contributor_disclosure_copy();
+        let labels = copy["folder_mode_labels"]
+            .as_object()
+            .expect("the bundle carries folder_mode_labels");
+        assert_eq!(labels.len(), crate::project_copy::FOLDER_MODE_LABELS.len());
+        for (mode, label) in crate::project_copy::FOLDER_MODE_LABELS {
+            assert_eq!(
+                labels.get(mode).and_then(Value::as_str),
+                Some(label),
+                "{mode}"
             );
         }
     }
