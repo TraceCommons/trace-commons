@@ -188,6 +188,9 @@ extension DaemonData {
         /// Fixed reasons: `nothing-matched`, `looks-unsure`, `trimmed-to-fit`.
         /// Empty is an all-clear only when `scrub` is `scrubbed`.
         public let secondLook: [String]?
+        /// The sentence for each `secondLook` reason, index for index (R6/R7;
+        /// DRAFT wording). Never shorter than `secondLook`.
+        public let secondLookLines: [String]?
 
         public var id: String { entryId }
 
@@ -225,6 +228,7 @@ extension DaemonData {
             case contentMarks = "content_marks"
             case unsureSpans = "unsure_spans"
             case secondLook = "second_look"
+            case secondLookLines = "second_look_lines"
         }
 
         public var queueState: QueueStateLabel? { QueueStateLabel(rawValue: state) }
@@ -540,6 +544,9 @@ extension DaemonData {
         /// how many spans `preview_unsure_spans` would report.
         public let unsureSpans: Int?
         public let secondLook: [String]?
+        /// The sentence for each `secondLook` reason, index for index (R6/R7;
+        /// DRAFT wording).
+        public let secondLookLines: [String]?
 
         public enum CodingKeys: String, CodingKey, CaseIterable {
             case entry, title, redactions, enrolled, scrub, marks
@@ -559,6 +566,7 @@ extension DaemonData {
             case contentMarks = "content_marks"
             case unsureSpans = "unsure_spans"
             case secondLook = "second_look"
+            case secondLookLines = "second_look_lines"
         }
     }
 
@@ -970,11 +978,19 @@ extension DaemonData {
         public let sessionsRoute: String?
         public let folders: FolderCounts?
         public let tools: [ToolDestination]
+        /// The window `counts` cover, in hours (K14): the same 24 hours
+        /// `inference_calls` uses.
+        public let windowHours: Int?
+        /// The window's listed calls no tool can be named for (K14). `nil`
+        /// when no ledger answered -- not zero.
+        public let unattributedCalls: Int?
 
         public enum CodingKeys: String, CodingKey {
             case folders, tools
             case privateAi = "private_ai"
             case sessionsRoute = "sessions_route"
+            case windowHours = "window_hours"
+            case unattributedCalls = "unattributed_calls"
         }
     }
 
@@ -994,12 +1010,28 @@ extension DaemonData {
         public let name: String?
         public let sessions: SessionRoute?
         public let modelCalls: ModelCallRoute?
+        /// The map's per-tool node counts over `windowHours` (K14).
+        public let counts: ToolCounts?
 
         public var id: String { tool }
 
         public enum CodingKeys: String, CodingKey {
-            case tool, name, sessions
+            case tool, name, sessions, counts
             case modelCalls = "model_calls"
+        }
+    }
+
+    /// One tool's counts for the window. `nil` is "could not be read",
+    /// never zero.
+    public struct ToolCounts: Codable, Equatable, Sendable {
+        /// Sessions, once per session hash, under the tool each reads as.
+        public let sessions: Int?
+        /// Exactly the `inference_calls` rows naming this tool.
+        public let inferenceCalls: Int?
+
+        public enum CodingKeys: String, CodingKey {
+            case sessions
+            case inferenceCalls = "inference_calls"
         }
     }
 

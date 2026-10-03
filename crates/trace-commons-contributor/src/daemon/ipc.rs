@@ -407,6 +407,12 @@ pub const EVENT_RESYNC_REQUIRED: &str = "resync_required";
 /// published for a job that was cancelled while it ran; see
 /// `preview_scheduler::PreviewScheduler::cancel`.
 pub const EVENT_PREVIEW_READY: &str = "preview_ready";
+/// The poll tick read a call from IronWire's log that no earlier tick had
+/// (K14). Label-only: the call's ledger id, the tool `inference_calls`
+/// names for it, its model label and IronWire's proof label -- see
+/// `inference_map::call_added`. At most `inference_map::MAX_ADDED_PER_TICK`
+/// per tick, newest kept.
+pub const EVENT_INFERENCE_CALL_ADDED: &str = "inference_call_added";
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Request {
@@ -1465,6 +1471,9 @@ impl DaemonShared {
             return;
         };
         ledger.refresh().await;
+        // Once per row this tick read that no earlier tick had. Reads only
+        // the snapshot the refresh above committed; never a second fetch.
+        super::inference_map::publish_added_calls(self, &ledger.take_added_rows());
         if let Some(has_rows) = self.routing_transition(ledger.has_rows()) {
             // Hash-only by construction: `has_rows` is a bool, and nothing
             // else about the ledger -- port, token, row contents -- appears
@@ -2495,7 +2504,7 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
                 "methods": METHODS,
                 "events": [
                     EVENT_SNAPSHOT, EVENT_QUEUE_CHANGED, EVENT_STATUS_CHANGED,
-                    EVENT_DIGEST_DUE, EVENT_RESYNC_REQUIRED,
+                    EVENT_DIGEST_DUE, EVENT_RESYNC_REQUIRED, EVENT_INFERENCE_CALL_ADDED,
                 ],
                 "max_line_bytes": MAX_LINE_BYTES,
             }),
@@ -3036,8 +3045,23 @@ fn handle_undo_keep(shared: &DaemonShared, req: &Request) -> Response {
 // which every shell does to it, because the raw label is a slug no
 // contributor should read. Clients MUST NOT recognise this row by
 // label.
+/// Per-project session bookkeeping from the cwd cache: how many sessions,
+/// when the latest was last written, and which tools produced them.
+#[derive(Debug, Clone, Default, PartialEq)]
+struct ProjectSessionsSeen {
+    count: usize,
+    last_modified_at: Option<chrono::DateTime<Utc>>,
+    /// Session count per tool (K11), e.g. `claude-code` or an imported
+    /// conversation's declared source like `antigravity`. Absent for an
+    /// entry written before `CwdCacheEntry::tool` existed -- it is never
+    /// backfilled, since the tool that discovered a session cannot be
+    /// recovered from where it ran -- so this map can undercount `count`
+    /// and must never be asserted to sum to it.
+    tools: std::collections::BTreeMap<String, usize>,
+}
+
 /// Sessions the watcher has observed per project key, with the latest one's
-/// modification time, from the cwd cache.
+/// modification time and a per-tool breakdown (K11), from the cwd cache.
 ///
 /// The project key is read from each entry, where the watcher recorded it at
 /// insert, so this canonicalizes nothing under the state lock. An entry
@@ -3050,7 +3074,7 @@ fn handle_undo_keep(shared: &DaemonShared, req: &Request) -> Response {
 /// not when it started.
 fn sessions_seen_per_project(
     shared: &DaemonShared,
-) -> std::collections::BTreeMap<String, (usize, chrono::DateTime<Utc>)> {
+) -> std::collections::BTreeMap<String, ProjectSessionsSeen> {
     let unresolved: Vec<(String, Option<String>)> = {
         let state = shared.state.lock().expect("state lock");
         state
@@ -3073,15 +3097,21 @@ fn sessions_seen_per_project(
         }
     }
     let state = shared.state.lock().expect("state lock");
-    let mut seen: std::collections::BTreeMap<String, (usize, chrono::DateTime<Utc>)> =
+    let mut seen: std::collections::BTreeMap<String, ProjectSessionsSeen> =
         std::collections::BTreeMap::new();
     for cached in state.cwd_cache.values() {
         let Some(key) = cached.project_key.clone() else {
             continue;
         };
-        let slot = seen.entry(key).or_insert((0, cached.modified_at));
-        slot.0 += 1;
-        slot.1 = slot.1.max(cached.modified_at);
+        let slot = seen.entry(key).or_default();
+        slot.count += 1;
+        slot.last_modified_at = Some(match slot.last_modified_at {
+            Some(current) => current.max(cached.modified_at),
+            None => cached.modified_at,
+        });
+        if let Some(tool) = cached.tool.clone() {
+            *slot.tools.entry(tool).or_insert(0) += 1;
+        }
     }
     seen
 }
@@ -3135,11 +3165,32 @@ fn handle_list_projects(shared: &DaemonShared, req: &Request) -> Response {
         let key = row["project_id"]
             .as_str()
             .and_then(|id| project_key_for_id(id, &known));
-        let (session_count, last_session_at) = key
-            .and_then(|k| seen.get(&k).copied())
-            .map_or((0, None), |(n, at)| (n, Some(at)));
+        let project_seen = key.and_then(|k| seen.get(&k));
+        let session_count = project_seen.map_or(0, |s| s.count);
+        let last_session_at = project_seen.and_then(|s| s.last_modified_at);
         row["session_count"] = serde_json::Value::from(session_count);
         row["last_session_at"] = serde_json::json!(last_session_at);
+        // K11: which tool each of this project's sessions came from, with a
+        // count per tool -- read off the same cwd cache `session_count`
+        // already comes from, so this costs no extra pass over the
+        // filesystem. Always an array, empty rather than absent when
+        // nothing is known yet, so a client never has to test for the key.
+        row["tools"] = serde_json::json!(
+            project_seen
+                .map(|s| s.tools.clone())
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(source, session_count)| serde_json::json!({
+                    "source": source,
+                    "session_count": session_count,
+                    // The same fixed vendor word `tc_discover_sources` and
+                    // `harness_list` draw `answers_at` from (K13 extends the
+                    // table with Antigravity's), so this cannot name a
+                    // vendor differently from either surface.
+                    "answers_at": crate::source::source_answers_at(&source),
+                }))
+                .collect::<Vec<_>>()
+        );
         row["pending_count"] = serde_json::Value::from(counts.0);
         if let Some(contributable) = counts.1 {
             row["contributable_count"] = serde_json::Value::from(contributable);
@@ -3306,9 +3357,16 @@ fn automatic_grant_value(shared: &DaemonShared) -> serde_json::Value {
     }
 }
 
+/// `grant_automatic` refused: the request did not carry `confirmed: true`,
+/// the grant screen's button. The same label `flow1::grant_precondition`
+/// refuses with in a shell, so the daemon holds the confirmation for every
+/// IPC caller rather than trusting each shell to have asked.
+pub const ERR_GRANT_CONFIRMATION_REQUIRED: &str = crate::flow1::GRANT_CONFIRMATION_REQUIRED;
 /// `grant_automatic` refused: the saved consent scopes were never chosen
-/// through `set_consent_scopes` (R7). An enrollment saves the floor scope
-/// with nobody having picked it, so a non-empty list is not a choice.
+/// through `set_consent_scopes` (R7), or the saved list is empty. An
+/// enrollment saves the floor scope with nobody having picked it, so a
+/// non-empty list is not a choice; and a choice recorded over an empty list
+/// names nothing to grant under.
 pub const ERR_GRANT_SCOPES_NOT_CHOSEN: &str = "automatic-grant-scopes-not-chosen";
 /// `grant_automatic` refused: the caller did not say which witness the
 /// contributor was shown (`witness_signing_address`, a string or `null`).
@@ -3317,15 +3375,22 @@ pub const ERR_GRANT_WITNESS_REQUIRED: &str = "automatic-grant-witness-required";
 /// contributor was shown.
 pub const ERR_GRANT_WITNESS_CHANGED: &str = "automatic-grant-witness-changed";
 
-/// Why the Flow 1 grant may not be given under `cfg`, given the witness
-/// signing address the caller says the contributor was shown. `None` when it
-/// may. The labels are fixed and carry no content.
+/// Why the Flow 1 grant may not be given under `cfg`, given the caller's
+/// confirmation and the witness signing address the caller says the
+/// contributor was shown. `None` when it may. The labels are fixed and carry
+/// no content.
 fn grant_automatic_refusal(
     cfg: &crate::config::ContributorConfig,
     params: &serde_json::Value,
 ) -> Option<&'static str> {
-    // R7: a scope nobody chose never carries a standing grant.
-    if !cfg.consent_scopes_chosen {
+    // The grant screen's button. Only a JSON `true` is a confirmation: an
+    // absent key, `false`, and a string or number are not.
+    if params.get("confirmed").and_then(serde_json::Value::as_bool) != Some(true) {
+        return Some(ERR_GRANT_CONFIRMATION_REQUIRED);
+    }
+    // R7: a scope nobody chose never carries a standing grant, and an empty
+    // list names nothing to grant under.
+    if !cfg.consent_scopes_chosen || cfg.consent_scopes.is_empty() {
         return Some(ERR_GRANT_SCOPES_NOT_CHOSEN);
     }
     // The witness shown on the disclosure screen, or `null` for none. It
@@ -3345,8 +3410,9 @@ fn grant_automatic_refusal(
 // Give the Flow 1 grant: arm projects discovered from now on (K3), never
 // anything already on disk (K4). Refused without terms to grant under, like
 // arming one project, and recorded before it takes effect. Refused, too,
-// unless the contributor chose the scopes (R7) and the witness configured
-// now is the one the disclosure screen showed.
+// unless the caller states the contributor confirmed (`confirmed: true`),
+// the contributor chose a non-empty scope list (R7), and the witness
+// configured now is the one the disclosure screen showed.
 fn handle_grant_automatic(shared: &DaemonShared, req: &Request) -> Response {
     let Ok(Some(cfg)) = shared.store.load_config() else {
         return Response::err(req.id, ERR_UNAVAILABLE, "arming-terms-unavailable");
@@ -5523,6 +5589,10 @@ fn preview_card_fields(summary: &super::preview::PreviewCardSummary) -> serde_js
         "event_count": summary.event_count,
         "opening_prompt": summary.opening_prompt,
         "redactions": summary.redactions,
+        // Distinct values removed per label (R7, #1173): a card needs this
+        // the same way the full summary does, to say "185 local path (12
+        // distinct)" rather than just a total. Counts only, never content.
+        "redactions_distinct": summary.redactions_distinct,
         "pii_labels_present": summary.pii_labels_present,
         "consent_scopes": summary.consent_scopes,
         "residual_risk": summary.residual_risk,
@@ -6872,7 +6942,19 @@ fn probe_credential(req: &Request) -> Result<(u16, String, std::path::PathBuf), 
             // treated as absent, because falling through to the
             // environment would answer about a path the caller did not ask
             // about.
-            Some(dir) if !dir.is_empty() => Some(std::path::PathBuf::from(dir)),
+            Some(dir) if !dir.is_empty() => {
+                // Relative would resolve against the daemon's working
+                // directory, which no shell controls: the same floor
+                // `set_settings` holds a saved declaration to.
+                if !std::path::Path::new(dir).is_absolute() {
+                    return Err(Box::new(Response::err(
+                        req.id,
+                        ERR_BAD_PARAMS,
+                        super::settings::ERR_ROUTING_TOKEN_DIR_MUST_BE_ABSOLUTE,
+                    )));
+                }
+                Some(std::path::PathBuf::from(dir))
+            }
             _ => {
                 return Err(Box::new(Response::err(
                     req.id,
@@ -7905,6 +7987,42 @@ mod tests {
             method: method.to_string(),
             params,
         }
+    }
+
+    /// The card shape (R7, #1173) carries `redactions_distinct` the same way
+    /// the full summary does: `preview` for a non-certificate entry,
+    /// `preview_request`'s cache hit, and `preview_ready` all share
+    /// `preview_card_value`, so one assertion here covers all three.
+    #[test]
+    fn preview_card_value_carries_redactions_distinct() {
+        let mut redactions = std::collections::BTreeMap::new();
+        redactions.insert("local_path".to_string(), 185);
+        let mut redactions_distinct = std::collections::BTreeMap::new();
+        redactions_distinct.insert("local_path".to_string(), 12);
+        let summary = super::super::preview::PreviewCardSummary {
+            would_send_bytes: 100,
+            raw_session_bytes: 200,
+            event_count: 3,
+            opening_prompt: "hello".to_string(),
+            title: None,
+            redactions,
+            redactions_distinct: redactions_distinct.clone(),
+            pii_labels_present: Vec::new(),
+            consent_scopes: Vec::new(),
+            residual_risk: "none".to_string(),
+            input_fingerprint: "fp".to_string(),
+            enrolled: true,
+            subagent_count: 0,
+            subagents_dropped: 0,
+            scrub_counts: super::super::second_look::ScrubCounts::default(),
+        };
+        let value = preview_card_value(&summary);
+        assert_eq!(
+            value["redactions_distinct"],
+            serde_json::to_value(&redactions_distinct).unwrap(),
+            "the card summary must carry redactions_distinct, a count only, \
+             the same way the full summary does"
+        );
     }
 
     use crate::daemon::test_support::at;
@@ -9823,6 +9941,84 @@ mod tests {
             .result
             .unwrap();
         assert_eq!(result["unpurposed_traces"], 1, "{result}");
+    }
+
+    /// K11: a project's `list_projects` row names the tools that produced
+    /// its sessions, with a count per tool -- from the same cwd cache
+    /// `session_count` already reads, so no extra scan.
+    ///
+    /// Also K13: an imported Antigravity conversation and a Gemini CLI
+    /// session in the same project are reported as two distinct tool rows,
+    /// not folded into one, even though both answer at the same vendor.
+    #[test]
+    fn list_projects_breaks_sessions_down_by_tool() {
+        let s = shared();
+        let project_key = "/tmp/multi-tool-proj";
+        seed_entry(&s, project_key);
+
+        let insert = |path: &str, tool: &str| {
+            s.state.lock().unwrap().cwd_cache.insert(
+                path.to_string(),
+                super::super::state::CwdCacheEntry {
+                    size_bytes: 10,
+                    modified_at: Utc::now(),
+                    cwd: Some(project_key.to_string()),
+                    project_key: Some(project_key.to_string()),
+                    tool: Some(tool.to_string()),
+                },
+            );
+        };
+        insert("/tmp/claude-a.jsonl", "claude-code");
+        insert("/tmp/claude-b.jsonl", "claude-code");
+        insert("/tmp/gemini-a.json", "gemini-cli");
+        insert("/staged/antigravity-a.json", "antigravity");
+        // An entry with no recorded tool (written before K11, or never
+        // re-touched since) must not crash the rollup and must not be
+        // counted under any tool.
+        s.state.lock().unwrap().cwd_cache.insert(
+            "/tmp/legacy.jsonl".to_string(),
+            super::super::state::CwdCacheEntry {
+                size_bytes: 10,
+                modified_at: Utc::now(),
+                cwd: Some(project_key.to_string()),
+                project_key: Some(project_key.to_string()),
+                tool: None,
+            },
+        );
+
+        let rows = projects_of(&s);
+        let row = rows
+            .into_iter()
+            .find(|r| r["project_id"] == serde_json::json!(project_id_for(project_key)))
+            .expect("the project is listed");
+
+        assert_eq!(row["session_count"], 5, "{row}");
+        let tools = row["tools"].as_array().expect("tools is an array");
+        let tool_count = |name: &str| {
+            tools
+                .iter()
+                .find(|t| t["source"] == name)
+                .unwrap_or_else(|| panic!("no {name} row in {tools:?}"))["session_count"]
+                .clone()
+        };
+        assert_eq!(tool_count("claude-code"), serde_json::json!(2));
+        assert_eq!(tool_count("gemini-cli"), serde_json::json!(1));
+        assert_eq!(tool_count("antigravity"), serde_json::json!(1));
+        assert_eq!(
+            tools.len(),
+            3,
+            "the legacy entry with no tool must not mint a fourth row: {tools:?}"
+        );
+
+        let answers_at =
+            |name: &str| tools.iter().find(|t| t["source"] == name).unwrap()["answers_at"].clone();
+        assert_eq!(answers_at("claude-code"), serde_json::json!("Anthropic"));
+        assert_eq!(answers_at("gemini-cli"), serde_json::json!("Google"));
+        assert_eq!(
+            answers_at("antigravity"),
+            serde_json::json!("Google"),
+            "Antigravity must name its own vendor rather than falling through to null"
+        );
     }
 
     /// Seed one pending queue entry for `project_key`, the way a poll that
@@ -13953,6 +14149,24 @@ mod tests {
             .expect("a non-string token_dir is refused");
         assert_eq!(error.code, ERR_BAD_PARAMS);
         assert_eq!(error.message, "token-dir-invalid");
+        // A relative token_dir would be read against the daemon's working
+        // directory: the probe refuses it with the label `set_settings`
+        // uses, so a shell cannot be told a token was found at a path no
+        // saved declaration could ever name.
+        let req = Request {
+            id: 7,
+            method: "probe_routing".to_string(),
+            params: serde_json::json!({"port": 8463, "token_dir": "relative/ironwire"}),
+        };
+        let error = handle_probe_routing(&req)
+            .await
+            .error
+            .expect("a relative token_dir is refused");
+        assert_eq!(error.code, ERR_BAD_PARAMS);
+        assert_eq!(
+            error.message,
+            super::super::settings::ERR_ROUTING_TOKEN_DIR_MUST_BE_ABSOLUTE
+        );
         drop(dir);
     }
 

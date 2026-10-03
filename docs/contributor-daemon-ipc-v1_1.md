@@ -136,6 +136,13 @@ old behaviour, because no application has shipped against `v1` yet. See
   withdrawal; it does not move on a later poll that only re-confirms the same
   status. See
   ["Withdrawal dates on revoked rows (K12)"](#withdrawal-dates-on-revoked-rows-k12).
+- **K15 (the native View menu's Group by and Sort by).** No field is added
+  for this. Every Group by and Sort by option the native Traces tab needs
+  is already answerable from `list_pending`'s entry fields, `list_projects`,
+  and `list_history` -- once K11's `list_projects[].tools` (#1192) lands.
+  K9's `title` (#1191) and K10's `would_send_bytes` and `uploaded_bytes`
+  (#1196) have already landed. See ["View menu: Group by and Sort by
+  (K15)"](#view-menu-group-by-and-sort-by-k15).
 
 `crates/trace-commons-contributor/tests/daemon_ipc_contract.rs` is the
 executable half of this document. `hello` reports its own method list and a
@@ -593,8 +600,8 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `withdraw_bulk` | `status` (`submitted` \| `quarantined` \| `accepted`) | `withdrawn: <count>`, `failed: <count>` | performs real network I/O; see "Withdrawal" below |
 | `inference_connection_offers` | — | `offers[]` of `{offer_id, revision, provider_id, disclosure_version, config_digest}` | account session; a read that selects nothing; see "Connecting inference" below |
 | `inference_connection_current` | — | `selection` (or `null`), `installed_on_this_device`, `pending_install`, `revocation_applied` | account session; applies an observed revocation on this device; see "Connecting inference" below |
-| `inference_connection_select` | `offer_id`, `provider_id`, `revision`, `config_digest`, `disclosure_version` (all **required**, exactly as shown); `expected_current_version` (optional); `idempotency_key` (optional UUID) | `selected: true`, `connection_id`, `state_version`, `offer_id`, `revision`, `config_digest`, `disclosure_version`, `receipt_endpoint_offered`, `install_required: true`, `previous_witness_removed` | account session; installs nothing; see "Connecting inference" below |
-| `inference_connection_install` | `connection_id`, `config_digest` (both **required**) | `installed: true`, `connection_id`, `state_version`, `receipt_endpoint_installed` | account session; the separate explicit step that writes the witness on this device; see "Connecting inference" below |
+| `inference_connection_select` | `offer_id`, `provider_id`, `revision`, `config_digest`, `disclosure_version`, `confirmed: true` (all **required**, exactly as shown); `expected_current_version` (optional); `idempotency_key` (optional UUID) | `selected: true`, `connection_id`, `state_version`, `offer_id`, `revision`, `config_digest`, `disclosure_version`, `receipt_endpoint_offered`, `install_required: true`, `previous_witness_removed` | account session; installs nothing; see "Connecting inference" below |
+| `inference_connection_install` | `connection_id`, `config_digest`, `confirmed: true` (all **required**) | `installed: true`, `connection_id`, `state_version`, `receipt_endpoint_installed` | account session; the separate explicit step that writes the witness on this device; see "Connecting inference" below |
 | `inference_connection_disconnect` | `connection_id` (**required**) | `disconnected`, `connection_id`, `state_version` (or `null`), `local_witness_removed`, `server_disconnect` (`revoked` / `not-found` / `pending`), `server_refusal` (label or `null`) | removes the local witness first, with or without an account session; see "Connecting inference" below |
 
 ### `status`
@@ -648,6 +655,48 @@ invite identity" below.
 `health.last_error_label` is the field a tray renders when something is
 wrong. It is one of the labels in "Health precedence" below, or `null` when
 healthy.
+
+The banner's words -- a title, a sentence stating what is held and the data
+consequence, and an action label where there is a real recovery step -- are
+`health_copy::health_copy_for_label`, across the C ABI as `tc_health_copy_json`
+(R6/R7, #1173). Pass `reachable: 0` instead of a label when the daemon
+cannot be reached at all; that returns the separate core-down sentence
+(`health_copy::core_down_copy`, **DRAFT, NEEDS APPROVAL** -- no shell has
+shown a contributor-facing sentence for a fully unreachable daemon before).
+`reachable` is never derived from this call: it is the caller's own
+liveness fact, from whatever probe or IPC failure told it the daemon is
+down. A reachable daemon with `last_error_label: null` has nothing to show
+and should not call this at all; passed anyway with an empty label it
+answers `NULL`, not a banner. A non-empty label that is not UTF-8 gets the
+on-hold banner, never `NULL`.
+
+The C signature is `tc_health_copy_json(reachable, label,
+max_queue_entries)`: pass `get_settings.max_queue_entries` so `queue-full`
+says how many are waiting, or `0` when unknown and the sentence names no
+number. The JSON is `{title, detail, action, action_kind, severity}`:
+
+- `severity` is `actionable` (the contributor can act on it) or `waiting`
+  (it clears on its own) -- Swift `HealthCopy.Severity`'s two banner kinds.
+  It cannot be derived from `action`: an unsupported OpenCode export is
+  actionable with no button.
+- `action_kind` is a stable kind for the button, present exactly when
+  `action` is: `reconnect`, `privacy_scan_notice` or `review_queue` (Swift's
+  `reviewsQueue`). Switch on it, never on the button's words.
+- `opencode-export-version-unsupported` is answered with the source settings'
+  own version sentence (`source_copy`), not the generic banner.
+
+The core-down detail (draft) says the queue is safe and that sessions from
+while the daemon was down are picked up when it is running again: the queue
+is persisted, and the daemon's first poll after it starts is a full pass over
+every watched source.
+
+Moved into the core from
+`macos/Sources/TraceCommonsApp/HealthCopy.swift`, which has shipped this
+table since before this export existed; Windows
+(`windows/src/TraceCommons.Interop/HealthCopy.cs`) independently wrote the
+same sentences by hand. Neither shell has been switched over to the export
+yet -- that is follow-up work, not part of this change -- so the two Swift
+and C# tables still carry their own copies for now.
 
 `next_digest_at` depends on `digest_schedule` (see `set_settings`). Under
 `interval` it is `null` until a first digest has fired, then that digest's
@@ -1087,6 +1136,16 @@ direction, only that `would_send_bytes` is the number that governs consent.
 in the response ever contains the actual matched text, only counts and
 category labels.
 
+`redactions_distinct` (R7, #1173) is distinct values removed per label,
+beside the occurrence counts in `redactions`: a client renders "185 local
+path (12 distinct)" rather than just the total. It was previously only on
+the full summary (a certificate entry's `preview`, and `tc_preview_summary_json`
+across the C ABI); it is now on the card shape too -- `preview` for every
+other entry, `preview_request`'s cache hit, and the `preview_ready` event --
+since the review screen needs it on a card exactly as much as on the full
+sheet. A count only, like every other field here: no value removed is ever
+named.
+
 **`preview` does not require an enrollment.** It performs no network I/O and
 needs neither the daemon's file lock nor its running loop, so an app can
 show a contributor what would be sent *before* they decide to enrol -- which
@@ -1132,6 +1191,17 @@ in additive fields on every queue entry (`list_pending`, `snapshot`, the
 | `content_marks` | **only when `scrubbed`** | `marks` without the path family (`local_path`). |
 | `unsure_spans` | **only when `scrubbed`** | how many spans `preview_unsure_spans` would report for that build's body. |
 | `second_look` | always, possibly empty | fixed reasons, in this order: `nothing-matched`, `looks-unsure`, `trimmed-to-fit` |
+| `second_look_lines` | always, possibly empty (R6/R7, #1173; **DRAFT, NEEDS APPROVAL**) | `second_look`'s reasons, in the same order, each already turned into the sentence a person reads for it (`preview_copy::second_look_line`) |
+
+`second_look_lines` exists so a card or the review sheet can render the
+explanation without separately asking `tc_second_look_line_text` for each
+reason; it is the same table, inlined. It is exactly as long as
+`second_look` and lines up with it index for index -- never reordered,
+never deduplicated, and never shorter: a reason this build has no sentence
+for gets a generic fallback line rather than being dropped. **DRAFT, NEEDS APPROVAL** because the sentences it
+quotes (`preview_copy::second_look_line`) are themselves unapproved spec
+wording; a client that renders it should expect the words, not the
+presence or absence of the field, to still change.
 
 The reasons:
 
@@ -1987,7 +2057,11 @@ handle with `preview-requires-embedded`.
       "session_count": 22,
       "last_session_at": "2026-09-12T11:18:00Z",
       "pending_count": 7,
-      "contributable_count": 3
+      "contributable_count": 3,
+      "tools": [
+        { "source": "antigravity", "session_count": 2, "answers_at": "Google" },
+        { "source": "claude-code", "session_count": 20, "answers_at": "Anthropic" }
+      ]
     }
   ]
 }
@@ -2002,6 +2076,51 @@ written, not when it started -- or `null` when none has been observed. Both
 come from the daemon's per-session record of each session's project, recorded
 when the watcher resolves it, so answering reads and canonicalizes nothing. A tool's own totals are in `tc_discover_sources` (`session_count`,
 `most_recent`).
+
+#### `tools` (K11)
+
+Which tool (or tools) this project's sessions came from, each with its own
+`session_count` within this project -- the design's first-run screen says
+"Repos found in Claude Code sessions"; this is what lets a later screen say
+the same thing about any project, for any tool, once more than one has
+contributed to it.
+
+Each row names a `source`: an adapter name (`claude-code`, `codex`,
+`gemini-cli`, `cline`, `opencode`) for a session the daemon watched directly,
+or the declared source a trajectory file names for one that was staged
+(`trajectory`'s own imports carry their vendor's name, e.g. `antigravity` for
+an imported Antigravity conversation -- see "Antigravity" under `harness_list`
+below). This is the same preference a queue entry's own display already
+applies: what a session declares about itself over the adapter that happens
+to store it, so an imported conversation is never attributed to `trajectory`.
+
+For a staged import the `source` is **self-declared**: it is the
+`meta.source` field of a file anyone can drop into the staging directory,
+checked for shape (`validate_source_name`) but not verified. A staged
+trajectory that claims `claude-code` is counted here as Claude Code and
+reads `answers_at: "Anthropic"`. The effect is local display only; nothing
+decides routing, consent or upload on this field.
+
+`answers_at` is the same fixed vendor word `tc_discover_sources` and
+`harness_list` read `answers_at` from, so a project's tool breakdown cannot
+name a vendor differently than either surface does for the same tool.
+`null` for a tool this build has no fixed default for (Cline, OpenCode) or
+does not recognise.
+
+Always an array, empty rather than absent when nothing is known yet -- a
+client tests its length rather than testing for the key, the way `tools`
+being empty and `session_count` being `0` already agree with each other.
+Rows are ordered by `source`, alphabetically, not by count.
+
+**This can undercount `session_count`.** The per-tool breakdown is read from
+the same per-session record `session_count` already comes from, but the tool
+a session came from was not recorded before this field existed, and a cache
+entry whose file has not changed since is never rewritten just to backfill
+it. A project can therefore show `"session_count": 22` with its `tools[]`
+entries summing to fewer than 22 on a daemon upgraded from an older state
+file, until those sessions' files change again. Never read `tools[]` as a
+second, more detailed `session_count` -- read `session_count` for the total
+and `tools[]` for what it can say about the sessions it has re-seen since.
 
 `pending_count` is how many `Pending` entries this project holds.
 `contributable_count` is how many of those a group-level `approve` would act
@@ -2120,6 +2239,60 @@ side effects, computed from the same queue and policy state a client already
 fetches `list_projects` to draw. It is always present (never absent, unlike
 `contributable_count`), because whether a session is undecided-and-Ask-me is
 a question every contributor's queue can answer, invited or not.
+
+### View menu: Group by and Sort by (K15)
+
+The native app's View menu (#1146, #1152) offers Group by and Sort by for
+the Traces tab, alongside the already-built "Show ignored folders". Neither
+needs a new field: every option is answerable from `list_pending`'s entry
+fields (`entry_value`), `list_projects`, and `list_history`, below. One of
+those fields is on an open, not-yet-merged PR -- `list_projects[].tools`
+(K11, #1192); the table names it, so nothing here is duplicated when it
+lands. K9's `title` (#1191) and K10's `would_send_bytes` and
+`uploaded_bytes` (#1196) have landed and are listed as existing.
+
+**Group by**
+
+| Option | What it groups on | Source |
+|---|---|---|
+| Tool (default) | an entry's `source` / `declared_source` | `list_pending`, existing |
+| Tool, for a folder with nothing waiting | the per-tool session counts the project has seen | `list_projects[].tools[].source` (K11, #1192) -- until it lands, such a folder cannot be placed and is listed on its own, exactly as #1183 (R6) documents |
+| Folder / project | `project_id` (grouping key) and `project_label` (display) | both existing, on every entry and every `list_projects` row |
+| None (flat list) | no grouping field; every entry already carries enough to render a row on its own | — |
+
+**Sort by**
+
+| Option | What it sorts on | Source |
+|---|---|---|
+| Name | a session's `title`, falling back to its formatted `started_at` when `title` is `null` (the existing fallback, unchanged) | `title` on every `list_pending` entry (K9, existing; `null` on an entry queued before K9, see ["`title`"](#title)); `started_at` existing |
+| Name, for a folder | `project_label` | existing, on every `list_projects` row (already disambiguated when two projects share a basename) |
+| Date | a session's `started_at`, or `discovered_at` when `started_at` is unknown | both existing, on every `list_pending` entry |
+| Date, for a folder | `last_session_at`, falling back to `added_at` for a configured folder the watcher has not yet observed a session in | both existing, on every `list_projects` row |
+| Size | a session's `would_send_bytes` (what an upload would actually send), falling back to `size_bytes` (the raw file) when no envelope is pinned | `would_send_bytes` on `list_pending` (K10, #1196); `size_bytes` existing |
+| Size, in history | `uploaded_bytes` | `list_history` rows (K10, #1196) |
+| Status | `state` and `reason_label` for a queued session, plus `eligibility` where it is present; `status` for a history row | all existing; `eligibility` is ABSENT whenever the signup flag is off (see ["Contribution eligibility"](#contribution-eligibility)), so a client must not require it -- sort an entry without it as `eligible`, since an invited contributor's whole queue is contributable |
+
+No row carries a folder-level size or count total. A client that wants one
+-- to sort folders themselves by total size, say -- already holds every
+session in that folder from `list_pending` and can sum `size_bytes` or
+`would_send_bytes` itself; `list_projects` already carries the plain count
+(`session_count`, `pending_count`). Nothing here asks the daemon to
+pre-aggregate what the client already has the parts for.
+
+**A stable sort key needs no new field.** Every row already carries a
+daemon-issued, stable, unique id to break ties deterministically: `entry_id`
+on a queue entry, `submission_id` on a history row, `project_id` on a
+project. The underlying lists are themselves returned in a deterministic
+order, so two reads with nothing changed produce the same order even before
+a client's own Group by / Sort by choice is applied: `list_pending` is the
+queue's insertion order, and `list_projects` is every configured project
+(sorted by its policy key) followed by every discovered-but-unconfigured
+one (sorted by its key) -- so a configured `/z/repo` precedes a discovered
+`/a/repo`. Neither order is alphabetical by anything a contributor sees; a
+client that offers a sort sorts for itself.
+
+A project's label on an entry needs no new field either: `project_label` is
+a plain (non-optional) `String` on every `QueueEntry`, never absent.
 
 ### The `outcome` verdict
 
@@ -2557,18 +2730,31 @@ automatically from projects discovered from now on.
 { "granted": true, "granted_at": "2026-09-25T12:00:00Z", "on_disk_recorded": false }
 ```
 
-`grant_automatic` takes one required param, `witness_signing_address`: the
-signing address of the witness the contributor was shown on the disclosure
-screen, or `null` when that screen showed none. It returns the grant as
-`automatic_grant` reports it. Nothing is granted when it is refused:
+`grant_automatic` takes two required params:
+
+- `confirmed`: JSON `true`, sent only from the grant screen's button, after
+  the contributor has gone through the scope, path and disclosure screens.
+- `witness_signing_address`: the signing address of the witness the
+  contributor was shown on the disclosure screen, or `null` when that screen
+  showed none.
+
+It returns the grant as `automatic_grant` reports it. Nothing is granted when
+it is refused:
 
 - `arming-terms-unavailable` (`ERR_UNAVAILABLE`): there is no config to record
   terms from.
+- `automatic-grant-confirmation-required` (`bad_params`): `confirmed` is
+  absent, `false`, or not a boolean (`"true"` and `1` are refused). The same
+  label `flow1::grant_precondition` gives a shell, so the daemon holds the
+  confirmation for every IPC caller rather than trusting a shell to have
+  asked.
 - `automatic-grant-scopes-not-chosen` (`bad_params`): the config's
-  `consent_scopes_chosen` is false, so nobody chose the saved scopes (R7). A
-  saved scope list is not a choice: every enrollment saves at least the floor
-  scope, which `validate_scopes` adds, and an invite enrollment saves it with
-  nobody having picked it. Only `set_consent_scopes` records a choice.
+  `consent_scopes_chosen` is false, so nobody chose the saved scopes (R7), or
+  the saved `consent_scopes` list is empty, so there is nothing to grant
+  under. A saved scope list is not a choice: every enrollment saves at least
+  the floor scope, which `validate_scopes` adds, and an invite enrollment
+  saves it with nobody having picked it. Only `set_consent_scopes` records a
+  choice.
 - `automatic-grant-witness-required` (`bad_params`): `witness_signing_address`
   is absent, or neither a string nor `null`.
 - `automatic-grant-witness-changed` (`bad_params`): the witness configured now
@@ -2832,6 +3018,51 @@ default either. Like `family`, this is a fixed fact about the tool's own
 released default, never something this daemon checked against the copy
 actually installed.
 
+#### Gemini CLI and Antigravity are not rows here (K13)
+
+`harness_list` is deliberately narrower than "every coding tool this daemon
+knows about". `found` above is `ironwire_agents::tools::all(catalog)`, and
+with no catalog loaded (`catalog_present: false`, the only state this build
+ships in today) that is **exactly** `claude` and `codex` -- the two tools
+IronWire's embedded proxy can redirect, because `Facade::url` only speaks
+the Anthropic and OpenAI wire shapes. Gemini CLI speaks neither, so it has
+never had a row here, and Antigravity -- which is not even a watched
+source; see below -- cannot either. Adding either would mean writing our
+loopback URL into a config key that does not actually redirect that tool's
+calls, which is the exact hazard `owned_agents`'s doc comment refuses to
+guess at. Nothing in K13 changes this list; "Gemini CLI keeps its row"
+refers to its row in `tc_discover_sources` (a watched session store, not a
+redirectable harness), not to this one.
+
+Antigravity's own `answers_at` is `"Google"`, from the same
+`source::source_default_family` table as `gemini-cli`'s -- see `tools` under
+`list_projects` above, and "Antigravity" under `tc_discover_sources`-shaped
+discovery, below.
+
+#### Antigravity has no `tc_discover_sources` row either, and that is also deliberate
+
+Antigravity is not a `TraceSource`: there is no conventional, watchable
+per-user store for it to probe blind, the way `claude-code`, `codex`,
+`gemini-cli` and `cline` are probed. It ships as a one-shot
+`import-antigravity` command that reads the running IDE's local API and
+stages what it finds as `trajectory` files -- see
+`crates/trace-commons-contributor/src/antigravity/mod.rs`'s own doc comment.
+Nothing it stages shares a folder with Gemini CLI's `~/.gemini/tmp` adapter,
+and the two were never actually merged in the shipped code: an earlier,
+abandoned design (`docs/superpowers/specs/2026-08-29-antigravity-source-design.md`)
+would have read Antigravity's own SQLite files from under `~/.gemini/`, but
+it was superseded before it shipped by the API-import design actually in
+place (`docs/superpowers/specs/2026-08-31-antigravity-import-command-design.md`).
+
+What an imported conversation DOES carry, and has carried since that design
+landed, is its own declared source: `meta.source: "antigravity"` on the
+staged file, read back as `SessionRef::declared_source` and shown as
+`"Antigravity"` by every shell's agent label -- never as `"trajectory"`,
+and never merged with a real Gemini CLI session. K11's `tools` field and
+K13's `source_default_family` entry read that same string, so a project
+mixing an Antigravity import with a real Gemini CLI session reports two
+distinct tool rows, not one.
+
 `spend` is what the calls answered **on this computer** have cost since the
 most recent local midnight, in millionths of a dollar. It comes from the
 proxy's own status object, which is why it is metered-only: the ledger rows
@@ -2982,8 +3213,10 @@ ledger -- and make no network call and read no body.
 
 Every value on the wire is a fixed label, a count, a time or a ledger row id,
 with one exception: `model` is free text (see below). No prompt, response,
-body reference, body digest, provider exchange identifier, session id, token
-or URL crosses the socket, and nothing here is logged.
+body reference, body digest, provider exchange identifier, session id, token,
+endpoint or URL crosses the socket, and nothing here is logged. The same holds
+for the `inference_call_added` event (K14), which carries a subset of an
+`inference_calls` row.
 
 #### `tool_destinations`
 
@@ -2991,13 +3224,16 @@ or URL crosses the socket, and nothing here is logged.
 {
   "private_ai": "running",
   "sessions_route": "witness",
+  "window_hours": 24,
+  "unattributed_calls": 2,
   "folders": { "armed": 1, "ask_first": 3, "ignored": 0 },
   "tools": [
     {
       "tool": "claude-code",
       "name": "Claude Code",
       "sessions": { "watch": "watched", "to": ["commons", "witness"] },
-      "model_calls": { "to": "near_ai", "basis": "observed" }
+      "model_calls": { "to": "near_ai", "basis": "observed" },
+      "counts": { "sessions": 4, "inference_calls": 37 }
     }
   ]
 }
@@ -3018,6 +3254,39 @@ does not name; the witness a connected inference offer installs
 (`inference_connection_install`) reaches the map through it. `folders` counts
 the per-repository rules (`auto_upload`, `notify_only`, `ignore`). They are
 per repository across tools, so they say *when* a session goes, not *where*.
+
+`counts` (K14) is the map's per-tool node data over `window_hours`, the same
+24-hour window `inference_calls` uses. Local reads only; nothing new is
+fetched.
+
+- `sessions` counts the sessions this daemon saw in the window, once per
+  session hash: queue entries whose session was last seen written (or, for an
+  entry from before that was recorded, discovered) inside it, and history
+  records submitted inside it. An entry still in the queue and its history
+  record are one session. `null` when the history cache cannot be read; a
+  count from the queue alone would undercount.
+
+  A session counts under the tool it reads as: its declared source when
+  discovery knew one, else the adapter that read it -- the rule
+  `list_projects.tools` and the CLI's session table use. So an imported
+  Antigravity conversation (read by the `trajectory` adapter, declaring
+  `antigravity`) counts as `antigravity`, never as `trajectory`, and never
+  under both. A history record names only the adapter, so it takes its label
+  from the queue entry with the same session hash; one with no queue twin (a
+  CLI `submit`, say) falls back to the adapter. There is no `antigravity`
+  row on this map -- it has no adapter, watch declaration or connection of
+  its own -- so those sessions are not counted on any tool row today.
+- `inference_calls` counts exactly the rows `inference_calls` lists (rows
+  with a ledger id) by the `tool` it names for them, so the map and the
+  Inference tab cannot disagree. `null` when no ledger has answered
+  (`inference_calls.readable: false`), which is not zero.
+- `unattributed_calls` is the window's listed calls whose `tool` is
+  `unknown`. They are counted there and never folded into a tool; `null`
+  under the same condition as `inference_calls`.
+
+A shell that pulses on `inference_call_added` should re-read these counts
+rather than add to them: the event is capped per poll and is a pulse, not a
+ledger.
 
 `model_calls.to` and `basis`:
 
@@ -3079,11 +3348,47 @@ expose an `id` are not listed.
 calls and must not be drawn as an empty table. The window is the ledger's
 own 24 hours.
 
-- `tool` is named only when exactly one tool connected **now** speaks the
-  call's protocol family (the rule `harness_list` applies to `answering`);
-  otherwise `unknown`. It is approximate: a row from before a connection
-  changed can carry the wrong name. `family` is `anthropic`, `openai` or
-  `unknown`.
+- `tool` (K14). IronWire's log rows carry no harness, only the facade that
+  took the call and the endpoint inside it the client called. Each tool this
+  daemon connects is pointed at its own facade and speaks its own API there,
+  so the endpoint names the tool, connected now or not:
+
+  | facade | endpoint | `tool` |
+  |---|---|---|
+  | `anthropic` | `/v1/messages`, `/v1/messages/count_tokens` | `claude-code` |
+  | `openai` | `/v1/responses` (Codex is connected with `wire_api = "responses"`) | `codex` |
+  | any | any other endpoint, e.g. `/v1/chat/completions` | `unknown` |
+
+  An endpoint no connection writes is `unknown` even while a tool of that
+  family is connected: it is not that tool's own wire. A named endpoint is
+  also `unknown` while a *different* connected tool speaks the same family.
+  On a proxy too old to record the endpoint, the fallback is the harness
+  that set the proxy: the one tool connected **now** that speaks the call's
+  family (the rule `harness_list` applies to `answering`), else `unknown`;
+  that fallback is approximate, since a row from before a connection changed
+  can carry the wrong name. A tool pointed at the proxy by hand, speaking the
+  same API at the same facade as a connected one, cannot be told apart in the
+  row and reads as that tool. The endpoint is read for this and never passed
+  through. `family` is `anthropic`, `openai` or `unknown`.
+
+  **Limit: endpoint attribution does not check who set up the proxy.** Any
+  `/anthropic` + `/v1/messages` call reads `claude-code`, and any `/openai`
+  + `/v1/responses` call reads `codex`, whether or not this daemon connected
+  that tool, and whether or not this daemon owns the proxy at all. An agent
+  routed through IronWire's own catalog, or by another program that manages
+  the same proxy, is counted as Claude Code or Codex, and the "different
+  connected tool" check above cannot see it, because only tools this daemon
+  connects are speakers. The label means "called the endpoint Claude Code's
+  connection writes", not "came from Claude Code".
+
+  `/v1/messages/count_tokens` calls are included: they are listed, counted
+  in `tool_destinations.counts.inference_calls` and announced by
+  `inference_call_added` like any other call.
+
+  The "different connected tool speaks the same family" case cannot arise
+  today, since each family has exactly one tool this daemon connects; it is
+  there so a second one in a family turns that family's endpoints
+  `unknown` rather than crediting the first.
 - `model` is **free text, not a fixed label**: the served model as recorded,
   else the requested one, passed through when it is at most 128 characters of
   `[A-Za-z0-9._:/@-]` and names no URL; else `unknown`. It comes from a proxy
@@ -3122,8 +3427,9 @@ routed answer. These are not in the local ledger, and nothing here invents
 them:
 
 - **kind of work** -- no field records it; there is no classifier;
-- **tool** -- the ledger records a facade, so a call is attributable only
-  when one connected tool speaks that family;
+- **tool** -- the ledger records a facade and an endpoint, not a harness,
+  so a call is attributed by the endpoint its tool's connection writes (see
+  `inference_calls.tool`), and is `unknown` otherwise;
 - **billed cost** -- the ledger prices every call; only the day's metered
   total (`harness_list.spend`) is billed spend;
 - **outside calls that bypass the proxy** -- a tool not connected to Private
@@ -3178,14 +3484,53 @@ when older settings load. Watch reads direct `.json` children exported with
 records version support and routing limits, and the declaration grants neither
 body capture nor remote submission.
 
-`approval_hold_secs` takes a non-negative integer: how long an approval is
+`approval_hold_secs` takes a non-negative integer no greater than 300
+(five minutes): how long an approval is
 held before the uploader will touch it, which sets the duration of the
 contributor's undo; the default is 10, while `0` disables the hold and makes `approve` report
 `hold_until: null` so a client knows to offer no undo. It is read at each
 upload pass, so a change applies to approvals already sitting in the queue,
 and a shortened hold can release an entry a client is still counting down
 for -- treat the `hold_until` from `approve` as authoritative for the
-approval it accompanied, and do not change this setting mid-countdown.
+approval it accompanied, and do not change this setting mid-countdown. A
+value outside `0..=300` is `bad_params` / `settings-invalid-value`.
+
+`quiescence_secs` and `digest_interval_secs` are likewise bounded, not open
+`u64` fields: `quiescence_secs` to `0..=14_400` (zero is meaningful -- a
+session counts as finished the instant it stops growing -- and 14,400
+seconds is four hours, past which "done" never realistically arrives for a
+session still being written) and `digest_interval_secs` to `3_600..=86_400`
+(one hour to one day). Each used to accept any value, with only the Tauri
+shell's own command layer clamping before the call ever reached
+`set_settings`; a raw caller had no such floor. Both are now validated in
+`apply_settings_object` itself, so every caller gets the same bound with the
+same label-only `settings-invalid-value` the other numeric fields already
+use.
+
+Every numeric field's exact bounds -- `quiescence_secs`, `approval_hold_secs`,
+`digest_interval_secs`, `max_uploads_per_day` and `max_bytes_per_day`, all in
+the unit `set_settings` itself stores and validates (seconds or bytes, never
+a shell's own minute/hour/megabyte control granularity) -- are available
+without guessing or hard-coding a second copy: the C ABI's
+`tc_settings_ranges_json` returns them as one JSON object, so a shell can
+draw its controls' bounds from the same numbers this method enforces.
+
+`ironwire`'s `{"mode":"watch","port":P,"token_dir":D}` now validates `P` and
+`D` with the same floor `probe_routing` holds: `port` must be non-zero (`0` is
+the ask-the-kernel sentinel, never a port a proxy actually listens on,
+`bad_params` / `settings-invalid-value` -- more precisely
+`routing-port-invalid`), and `token_dir`, when present and non-empty, must be
+an absolute path (`routing-token-dir-must-be-absolute`); an empty `token_dir`
+is treated as absent. The two differ in two labelled ways a shell should
+know: `probe_routing` refuses port `0` as `port-invalid` (not
+`routing-port-invalid`), and refuses an empty `token_dir` as
+`token-dir-invalid` rather than treating it as absent, because a probe that
+fell through to the environment would answer about a path the caller did
+not ask about. A relative `token_dir` is refused by both, with
+`routing-token-dir-must-be-absolute`. Before this, only the Tauri shell's own command layer
+refused these two shapes -- a raw `set_settings` caller (another shell, or a
+future one) had no such floor and could persist a declaration nothing would
+ever actually route through.
 
 `claude_root` and `codex_root` each take a JSON string (a filesystem path)
 or `null` (clear the override, falling back to the conventional per-user
@@ -4996,7 +5341,12 @@ The flow a shell drives:
 2. The shell shows one offer and the disclosure its `disclosure_version`
    names, and on the contributor's choice calls `inference_connection_select`
    with **exactly** that offer's `offer_id`, `provider_id`, `revision`,
-   `config_digest` and `disclosure_version`. The daemon sends those values
+   `config_digest` and `disclosure_version`, plus `confirmed: true` --
+   refused (`bad_params` / `inference-connection-confirmation-required`)
+   without it, even with an otherwise well-formed offer. (Before this
+   existed, the only place this was ever checked was the Tauri shell's own
+   command layer, which refused locally and never forwarded the choice; a
+   raw caller had no such floor.) The daemon sends those values
    unchanged (`provider_id` is not sent; it is bound into the digest check
    below) and fills in nothing. Pass `expected_current_version` as the `state_version` from
    `inference_connection_current` when replacing an existing selection
@@ -5016,8 +5366,10 @@ The flow a shell drives:
 3. **Selecting installs nothing.** The witness material the server returns is
    held on this device only. The shell then asks the contributor, separately,
    whether to use this witness on this device, and on confirmation calls
-   `inference_connection_install` with the `connection_id` and
-   `config_digest` from the select result. The daemon re-checks the held
+   `inference_connection_install` with the `connection_id`, `config_digest`
+   from the select result, and `confirmed: true` -- refused
+   (`inference-connection-confirmation-required`) without it, same as
+   `inference_connection_select` above. The daemon re-checks the held
    material against its digest (`inference-connection-digest-mismatch`), then
    re-reads the account's selection; if it was disconnected or replaced since,
    the answer is `inference-connection-not-current`, and if its revision was
@@ -5144,6 +5496,27 @@ removed at logout.
 | `digest_due` | batching interval elapsed with pending work | `{pending, text}` |
 | `resync_required` | this client fell behind the event buffer | `{}` |
 | `preview_ready` | a scheduled preview finished and was delivered | the same object `preview_request` returns for a cache hit -- see "Scheduled previews" |
+| `inference_call_added` | the poll tick read a call from IronWire's log that no earlier tick had (K14) | `{id, tool, model, proof}` -- see below |
+
+`inference_call_added` is published where the daemon already reads IronWire's
+`/log`: the poll tick's routing refresh. Nothing is fetched for it and it adds
+no poll of its own, so a call is announced on the first tick after it lands
+(the daemon's poll interval). Its data is label-only and is the same labels
+`inference_calls` puts on that row: `id` (the ledger row id), `tool`,
+`model` (the same free-text rule) and `proof` (IronWire's label, or
+`unrecorded`). No body, URL, endpoint, session id, digest or token.
+
+- Once per call. New is tracked per ledger by the highest row id announced.
+- The first window a ledger reads is the backlog and is not announced; it
+  sets the baseline. A ledger rebuilt for a new endpoint starts over the
+  same way, and so does one whose ids went backwards (a proxy whose own
+  ledger started over). A ledger that started over and climbed past the old
+  highest id within one tick cannot be told from one that only grew: its
+  rows above the old id are announced, and the rest are never announced.
+  Counts on `tool_destinations` are unaffected.
+- Rows without an id (a proxy too old to expose one) are never announced.
+- At most 64 per tick, the newest kept, so a burst cannot push a subscriber
+  into `resync_required`. Re-read `tool_destinations` for exact counts.
 
 `subscribe` sends a full `snapshot` before any delta, so a client never has to
 race `list_pending` against the stream at startup. On `resync_required`, call
