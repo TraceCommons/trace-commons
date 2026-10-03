@@ -1417,10 +1417,12 @@ pub struct PipelineControlHealth {
 ///   list each fail it.
 ///   Zaki review 3, Z3-L5: it also fails when a table has a permissive
 ///   policy besides the tenant policy that applies to the current role
-///   (to `PUBLIC` or a role it is a member of), which PostgreSQL would OR
-///   with the tenant policy. A policy for another role (V105's
+///   (to `PUBLIC` or a role whose privileges it has, `pg_has_role` with
+///   `USAGE`, the test PostgreSQL uses to apply a policy), which PostgreSQL
+///   would OR with the tenant policy. A policy for another role (V105's
 ///   `trace_gate_driver_cross_tenant_read`) does not open the current
-///   role's reads.
+///   role's reads, also when the current role is a member of that role and
+///   does not inherit its privileges.
 /// - Audit immutability passes only when both of `phase_outcomes`'
 ///   immutability triggers exist on that table in the current schema, fire
 ///   for ordinary sessions (`tgenabled` `O` or `A`: not disabled, not
@@ -1454,7 +1456,7 @@ pub async fn pipeline_control_health(
                        OR EXISTS (
                            SELECT 1 FROM unnest(p.polroles) AS r(role_oid)
                             WHERE r.role_oid <> 0
-                              AND pg_has_role(current_user, r.role_oid, 'MEMBER')
+                              AND pg_has_role(current_user, r.role_oid, 'USAGE')
                        )
                    )
              )",

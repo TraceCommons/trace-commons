@@ -24680,6 +24680,9 @@ async fn a_disabled_immutability_trigger_fails_the_audit_control() {
 ///   change, or once per statement, fails the audit control (`tgtype`), and
 ///   an extra permissive policy beside the tenant policy (which PostgreSQL
 ///   ORs with it) fails the isolation control;
+/// - multi-lens review C6: an extra permissive policy for another role
+///   fails the isolation control only for a role that has that role's
+///   privileges, not for a member that does not inherit them;
 /// - a role that bypasses row-level security (the owner superuser here)
 ///   fails the isolation control, whatever the tables' flags.
 #[tokio::test]
@@ -24744,6 +24747,30 @@ async fn the_pipeline_controls_fail_when_what_makes_them_work_is_changed() {
             assert!(!controls.audit_immutability_passed, "{case}");
             assert!(controls.tenant_isolation_passed, "{case}");
         }
+        tx.rollback().await.unwrap();
+    }
+
+    // Multi-lens review C6: a permissive policy for another role opens the
+    // reads of a role that has that role's privileges, which is PostgreSQL's
+    // own rule. A member that does not inherit them (as the role that
+    // created the policy role is) keeps the control.
+    for (case, inherit, isolated) in [
+        ("membership that does not inherit", "NOINHERIT", true),
+        ("inherited membership", "INHERIT", false),
+    ] {
+        let tx = owner.transaction().await.unwrap();
+        tx.batch_execute(&format!(
+            "CREATE ROLE pipeline_control_test_policy_role NOLOGIN;
+             CREATE ROLE pipeline_control_test_reader NOLOGIN {inherit};
+             GRANT pipeline_control_test_policy_role TO pipeline_control_test_reader;
+             CREATE POLICY pipeline_control_test_role_open ON pipeline_runs
+                 FOR SELECT TO pipeline_control_test_policy_role USING (true);
+             SET LOCAL ROLE pipeline_control_test_reader"
+        ))
+        .await
+        .unwrap_or_else(|error| panic!("{case}: {error}"));
+        let controls = pipeline_control_health(&tx, &tables).await.unwrap();
+        assert_eq!(controls.tenant_isolation_passed, isolated, "{case}");
         tx.rollback().await.unwrap();
     }
 
