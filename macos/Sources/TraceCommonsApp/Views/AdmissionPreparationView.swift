@@ -1,4 +1,5 @@
 import SwiftUI
+import TCDesign
 
 struct AdmissionPreparationView: View {
     @EnvironmentObject private var model: AppModel
@@ -10,24 +11,37 @@ struct AdmissionPreparationView: View {
 
     var body: some View {
         if let copy = model.witnessCopy?.admission {
-        VStack(alignment: .leading, spacing: TC.Space.m) {
-            Text(copy.heading).font(TC.Font_.cardTitle)
-            Text(copy.disclosure)
-                .font(.callout).foregroundStyle(.secondary)
-            Text(copy.prerequisite)
-                .font(.caption).foregroundStyle(.secondary)
-            HStack {
-                TextField(copy.backend, text: $backend).textFieldStyle(.roundedBorder).disabled(working)
-                Button(copy.confirm, action: prepare)
-                    .disabled(working || backend.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.daemonSettings?.inferenceEvidenceEnabled != true)
+            GlassCard {
+                VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
+                    Text(copy.heading)
+                        .glassType(GlassTokens.TypeScale.label.weight(.semibold))
+                        .foregroundStyle(GlassColor.textPrimary)
+                    Text(copy.disclosure)
+                        .glassType(GlassTokens.TypeScale.body)
+                        .foregroundStyle(GlassColor.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text(copy.prerequisite)
+                        .glassType(GlassTokens.TypeScale.label.weight(.regular))
+                        .foregroundStyle(GlassColor.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    HStack(alignment: .bottom, spacing: GlassTokens.Space.s4) {
+                        GlassTextField(copy.backend, text: $backend).disabled(working)
+                        Button(copy.confirm, action: prepare)
+                            .buttonStyle(GlassButtonStyle(.primary))
+                            .disabled(working || backend.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.daemonSettings?.inferenceEvidenceEnabled != true)
+                    }
+                    if model.daemonSettings?.inferenceEvidenceEnabled != true {
+                        SettingsLink { Text(copy.permission) }
+                    }
+                    if working { ProgressView().controlSize(.small) }
+                    if refused { NativeFlowNotice(message: message, glyph: copy.refusedGlyph, tone: copy.refusedTone) }
+                    else if !message.isEmpty {
+                        Text(message)
+                            .glassType(GlassTokens.TypeScale.body)
+                            .foregroundStyle(GlassColor.textSecondary)
+                    }
+                }
             }
-            if model.daemonSettings?.inferenceEvidenceEnabled != true {
-                SettingsLink { Text(copy.permission) }
-            }
-            if working { ProgressView().controlSize(.small) }
-            if refused { NativeFlowNotice(message: message, glyph: copy.refusedGlyph, tone: copy.refusedTone) }
-            else if !message.isEmpty { Text(message).font(.callout).foregroundStyle(.secondary) }
-        }
         }
     }
 

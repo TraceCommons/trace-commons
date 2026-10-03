@@ -1,72 +1,10 @@
 import SwiftUI
 import TCShellCore
 
-/// K11: the raw send, both enclaves, and where the witness came from.
-///
-/// Every fact is the daemon's (`route_disclosure`) and every sentence is the
-/// shared crate's (`tc_route_disclosure_copy`); this file only lays them out.
-/// A block is drawn only when the Rust sent words for it, and
-/// `RouteDisclosure.decode` has already refused words that do not match the
-/// facts.
-struct RouteDisclosureBody: View {
-    let disclosure: RouteDisclosure
-
-    var body: some View {
-        let copy = disclosure.copy
-        VStack(alignment: .leading, spacing: TC.Space.s) {
-            Text(copy.route)
-            if let line = copy.localFilter { Text(line) }
-            if let facts = disclosure.facts.witness, let witness = copy.witness {
-                VStack(alignment: .leading, spacing: TC.Space.xs) {
-                    Text(witness.heading).font(TC.Font_.cardTitle)
-                    TCFieldLabel(witness.addressLabel)
-                    Text(facts.url).font(.system(.caption, design: .monospaced)).textSelection(.enabled)
-                    TCFieldLabel(witness.signingLabel)
-                    Text(facts.signingAddress).font(.system(.caption, design: .monospaced))
-                        .textSelection(.enabled)
-                    TCFieldLabel(witness.measurementsLabel)
-                    ForEach(Array(facts.pinnedMeasurements.enumerated()), id: \.offset) { _, pin in
-                        Text(pin).font(.system(.caption, design: .monospaced)).textSelection(.enabled)
-                    }
-                    Text(witness.check)
-                    if let classifier = witness.classifier { Text(classifier) }
-                    Text(witness.origin)
-                }
-                .padding(TC.Space.md)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(TC.surface)
-            }
-            if let line = copy.attestedBodies { Text(line) }
-            if let line = copy.receipts { Text(line) }
-        }
-        .font(TC.Font_.caption)
-        .fixedSize(horizontal: false, vertical: true)
-    }
-}
-
-/// The Settings section. Unreadable is said as such and never drawn as some
-/// other route; before the first answer it shows that it is loading.
-struct RouteDisclosureSection: View {
-    @EnvironmentObject private var model: AppModel
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: TC.Space.s) {
-            switch model.routeDisclosureState {
-            case .shown(let disclosure):
-                TCSectionHeader(title: disclosure.copy.title)
-                RouteDisclosureBody(disclosure: disclosure)
-            case .loading:
-                ProgressView().controlSize(.small)
-            case .unreadable:
-                if let title = model.routeDisclosureUnreadableCopy?.title {
-                    TCSectionHeader(title: title)
-                }
-                RouteDisclosureUnreadableLine(line: model.routeDisclosureUnreadableCopy?.panel)
-            }
-        }
-        .onAppear { model.refreshRouteDisclosure() }
-    }
-}
+// The review sheet's per-session send disclosure, moved unchanged from the
+// retired `RouteDisclosureView.swift` when Settings' route-disclosure panel
+// moved to glass (`Views/Settings/PrivateAISection.swift`). The unreadable
+// line moved with it because this view draws it.
 
 /// The unreadable state. Marked by a glyph as well as colour, so it
 /// survives greyscale and colour-blindness; and drawn even when the Rust's

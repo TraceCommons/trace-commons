@@ -32,7 +32,7 @@ final class PrivateInferenceActivationTests: XCTestCase {
         for section: MainWindowView.Section in [.queue, .history, .settings] {
             navigation.section = section
             let words = try recognizedWords(await render(model: model, navigation: navigation))
-            XCTAssertTrue(words.contains("GET STARTED"), "\(section) must retain the Commons welcome")
+            XCTAssertTrue(words.localizedCaseInsensitiveContains(OnboardingWelcomeWords.getStarted), "\(section) must retain the Commons welcome")
             XCTAssertFalse(model.status.loggedIn)
             XCTAssertFalse(model.isOnboardingComplete)
         }

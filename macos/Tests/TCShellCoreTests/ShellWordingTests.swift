@@ -79,7 +79,7 @@ final class ShellWordingTests: XCTestCase {
         "TraceCommonsApp/Views/QueueFolderRow.swift": 3,
         "TraceCommonsApp/Views/QueueView.swift": 25,
         "TraceCommonsApp/Views/ScrubbingCaveat.swift": 4,
-        "TraceCommonsApp/Views/SettingsView.swift": 40,
+        "TraceCommonsApp/Views/SettingsView.swift": 39,
         "TraceCommonsApp/Views/WhatGetsRemovedSheet.swift": 4,
         "TraceCommonsApp/Views/WithdrawalCopy.swift": 48,
     ]

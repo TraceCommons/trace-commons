@@ -180,7 +180,7 @@ struct TracesTreeView: View {
         if change.watch {
             // `get_settings` never reports a path, so watching asks which
             // folder, as Settings does.
-            guard let path = SourceRootRow.chooseFolder() else { return }
+            guard let path = GlassSourceRow.chooseFolder() else { return }
             Task { await store.setSource(change.kind, .watch(path: path)) }
         } else {
             Task { await store.setSource(change.kind, .off) }
@@ -681,7 +681,7 @@ struct SessionInspectorView: View {
         }
         let result: Result<DaemonData.PreviewSummary, DaemonDataError>
         do {
-            result = .success(try await store.client.preview(entryId: entryId))
+            result = .success(try await store.attached().preview(entryId: entryId))
         } catch {
             result = .failure(error as? DaemonDataError ?? .undecodable(method: "preview"))
         }

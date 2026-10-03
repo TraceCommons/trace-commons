@@ -1,4 +1,6 @@
 import SwiftUI
+import TCBridge
+import TCDesign
 import TCShellCore
 
 /// Onboarding screen 5, "What to watch" -- lists the projects the daemon has
@@ -16,6 +18,12 @@ import TCShellCore
 /// a client repo is a live thought at this exact moment and never returns,
 /// whereas arming automation before the contributor has seen a single
 /// preview asks for trust they have no basis to give yet.
+///
+/// Every mode is named by the core's one name for it
+/// (`ProjectCopy.modeChoiceLabel`, owner decision 2026-10-02): the tag reads
+/// the mode in force, and the button reads the mode it moves to -- Never,
+/// or back to Ask me. With no table neither is drawn, so no control is
+/// wordless and no mode is shown that the core did not name.
 ///
 /// Choosing `Ignore` calls `AppModel.setProjectMode` -- a real
 /// `set_project_mode` call, not local-only state -- and the row reflects
@@ -58,99 +66,93 @@ struct OnboardingProjectsContent: View {
     var onContinue: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: TC.Space.xl) {
+        VStack(alignment: .leading, spacing: GlassTokens.Space.s6) {
             header
-            if let error = model.lastActionError {
-                ActionMessageBanner(text: error) { model.lastActionError = nil }
-            }
+            ProjectErrorNotice()
             projectList
             continueButton
         }
-        .padding(TC.Space.xxl)
-        .tcColumn(TC.Measure.prose)
-        .tcScreen()
+        .padding(GlassTokens.Space.panePadding)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     /// The subtitle states the default before the exception on purpose: the
     /// default is what happens to a contributor who reads nothing and clicks
     /// Continue, which is most of them.
     private var header: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("What to watch").font(TC.Font_.sectionTitle)
-            // "Ignore a project" is not offered when there is no project to
-            // ignore, so the sentence stops before it.
-            Text(
-                model.projects.isEmpty
-                    ? "Every project starts at ask-first: you see each session before anything is sent."
-                    : """
-                    Every project starts at ask-first: you see each session before \
-                    anything is sent. Ignore a project to leave it out entirely.
-                    """
-            )
-            .font(.callout)
-            .foregroundStyle(.secondary)
-            .fixedSize(horizontal: false, vertical: true)
+        VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
+            Text(OnboardingProjectsWords.heading)
+                .glassType(GlassTokens.TypeScale.heading)
+                .foregroundStyle(GlassColor.textPrimary)
+                .accessibilityAddTraits(.isHeader)
+            // The instruction to ignore a project is not drawn: Ignore is
+            // now named by the core's mode word on each row, and a sentence
+            // naming "Ignore" would no longer match the button's word.
+            Text(OnboardingProjectsWords.everyProjectAsksFirst)
+                .glassType(GlassTokens.TypeScale.body)
+                .foregroundStyle(GlassColor.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
     /// On a fresh install this is almost always the empty branch: a session
     /// is queued only after 30 minutes of quiet, and `list_projects` is
     /// built from the queue, so nothing has had time to appear. The step
-    /// collapses to its one line and Continue rather than a field label
-    /// over an empty list; nothing is invented to fill the space.
+    /// collapses to its one line and Continue rather than a card over an
+    /// empty list; nothing is invented to fill the space. Before the daemon
+    /// answers, the list's empty default is not read as "no projects yet".
     @ViewBuilder
     private var projectList: some View {
-        if model.projects.isEmpty {
-            Text("No projects yet. Sessions you run later will appear here, and in Settings.")
-                .font(.callout)
-                .foregroundStyle(.secondary)
+        if !model.status.answered {
+            SettingsAwaiting()
+        } else if model.projects.isEmpty {
+            Text(OnboardingProjectsWords.noProjectsYet)
+                .glassType(GlassTokens.TypeScale.body)
+                .foregroundStyle(GlassColor.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
         } else {
-            VStack(alignment: .leading, spacing: 10) {
-                TCFieldLabel("Projects")
-                ForEach(model.projects) { project in
-                    projectRow(project)
+            GlassEyebrowCard(OnboardingProjectsWords.projects) {
+                VStack(alignment: .leading, spacing: 0) {
+                    ForEach(model.projects) { project in
+                        GlassTableRow(first: project.id == model.projects.first?.id) { projectRow(project) }
+                    }
                 }
             }
         }
     }
 
     private func projectRow(_ project: ProjectRow) -> some View {
-        let isIgnored = project.mode == .ignore
-        let isBucket = project.isUnresolvedBucket
-        return HStack(alignment: .top, spacing: TC.Space.m) {
-            VStack(alignment: .leading, spacing: TC.Space.xxs) {
+        let target = OnboardingProjectsModes.target(from: project.mode)
+        return HStack(alignment: .top, spacing: GlassTokens.Space.s4) {
+            VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
                 // The bucket's own label is `unknown-project`, a slug that
                 // means nothing to a contributor. The daemon marks the row;
                 // the shell names it, with the words Settings uses too.
                 Text(project.displayLabel)
-                    .font(TC.Font_.body.weight(.semibold))
-                // `Ask me first` and `Ignored` are the words Settings already
-                // uses for these modes. Two screens setting one field must
-                // not name it two ways.
-                TCTag(
-                    text: isIgnored ? "Ignored" : "Ask me first",
-                    tone: isIgnored ? .neutral : .clear,
-                    symbol: isIgnored ? "minus.circle" : "hand.raised"
-                )
-                if isBucket {
+                    .glassType(GlassTokens.TypeScale.bodyStrong)
+                    .fixedSize(horizontal: false, vertical: true)
+                if let tag = OnboardingProjectsModes.name(project.mode) {
+                    GlassTag(tag, tone: OnboardingProjectsModes.tone(project.mode))
+                }
+                if project.isUnresolvedBucket {
                     Text(ProjectCopy.unresolvedBucketNote)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .glassType(GlassTokens.TypeScale.caption)
+                        .foregroundStyle(GlassColor.textSecondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
-            Spacer(minLength: TC.Space.m)
+            Spacer(minLength: GlassTokens.Space.s4)
             // Offered on the bucket too: it can be silenced even though it
-            // can never be armed.
-            Button(isIgnored ? "Ignored" : "Ignore") {
-                model.setProjectMode(project, mode: isIgnored ? .ask : .ignore)
+            // can never be armed. Named by the mode it moves to; VoiceOver
+            // hears the project too, since "Never" alone names no row.
+            if let move = OnboardingProjectsModes.name(target) {
+                Button(move) {
+                    model.setProjectMode(project, mode: target)
+                }
+                .buttonStyle(GlassButtonStyle(.glass))
+                .accessibilityLabel([project.displayLabel, move].joined(separator: ", "))
             }
-            .buttonStyle(.bordered)
         }
-        .padding(TC.Space.m)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .tcCard()
     }
 
     // The standing note that used to live here is gone. It said the same
@@ -161,10 +163,56 @@ struct OnboardingProjectsContent: View {
     // rendered as one.
 
     private var continueButton: some View {
-        Button("Continue") {
-            onContinue()
+        HStack(spacing: GlassTokens.Space.s4) {
+            Spacer(minLength: 0)
+            Button(OnboardingProjectsWords.continueButton) {
+                onContinue()
+            }
+            .buttonStyle(GlassButtonStyle(.primary))
+            .keyboardShortcut(.defaultAction)
         }
-                .tcPrimaryAction()
-        .keyboardShortcut(.defaultAction)
     }
+}
+
+/// The two modes this step moves between, and their names. Pure so the
+/// rules are testable: the toggle's target is Never, or back to Ask me, and
+/// never Automatic; a mode the core does not name has no name here, so
+/// neither its tag nor the toggle that moves to it is drawn.
+enum OnboardingProjectsModes {
+    static func target(from mode: ProjectMode) -> ProjectMode {
+        mode == .ignore ? .ask : .ignore
+    }
+
+    /// The tag's tone follows the mode in force: ask is the standing state,
+    /// automatic is on, ignore is quiet.
+    static func tone(_ mode: ProjectMode) -> GlassTag.Tone {
+        // Written without naming Automatic: this step never offers it, and
+        // its parity test keeps that name out of the file.
+        switch mode {
+        case .ask: .ask
+        case .ignore: .neutral
+        default: .on
+        }
+    }
+
+    static func name(_ mode: ProjectMode, label: (ProjectMode) -> String = ProjectCopy.modeChoiceLabel) -> String? {
+        let name = label(mode)
+        return name.isEmpty ? nil : name
+    }
+}
+
+/// This screen's sentences, held verbatim from the legacy screen. A mode's
+/// name is not here: it is the core's (`ProjectCopy.modeChoiceLabel`).
+enum OnboardingProjectsWords {
+    static let heading = "What to watch"
+    static let everyProjectAsksFirst =
+        "Every project starts at ask-first: you see each session before anything is sent."
+    /// Held, not drawn: it names an instruction the rows no longer carry.
+    static let everyProjectAsksFirstIgnore = """
+        Every project starts at ask-first: you see each session before \
+        anything is sent. Ignore a project to leave it out entirely.
+        """
+    static let noProjectsYet = "No projects yet. Sessions you run later will appear here, and in Settings."
+    static let projects = "Projects"
+    static let continueButton = "Continue"
 }
