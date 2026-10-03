@@ -34,6 +34,10 @@ final class InferenceStore {
     /// (`PrivateInferenceCopy.writeUnconfirmed`); cleared by the next
     /// confirmed write or by the person.
     private(set) var privateAIRefusal: String?
+    /// Bumped when a switch write starts and when it answers. A switch read
+    /// that started under an older value answers about the switch before
+    /// that write, and is dropped rather than drawn over its result.
+    private var privateAIWrites = 0
     /// The last read that failed, by method; cleared when it next succeeds.
     private(set) var failures: [String: DaemonDataError] = [:]
 
@@ -100,28 +104,59 @@ final class InferenceStore {
     }
 
     private func loadPrivateAI() async {
-        await read("private_ai", { try await $0.privateAI() }) { if let value = $0 { self.privateAI = value } }
+        let startedAt = beginPrivateAIRead()
+        await read("private_ai", { try await $0.privateAI() }) { self.landPrivateAIRead($0, startedAt: startedAt) }
+    }
+
+    /// The write count a switch read starts under.
+    func beginPrivateAIRead() -> Int { privateAIWrites }
+
+    /// A switch read's answer, kept only when no write started or answered
+    /// since the read began: an older read never undoes a confirmed write.
+    /// A failed read (nil) keeps the last value.
+    func landPrivateAIRead(_ value: DaemonData.PrivateAISwitch?, startedAt: Int) {
+        guard let value, startedAt == privateAIWrites else { return }
+        privateAI = value
     }
 
     /// Turns Private AI on or off. The reply is taken only when the core's
-    /// rule confirms it (`TCPrivateInference.writeConfirmed`); otherwise, or
-    /// when the write fails, `unconfirmed` is shown and the switch is read
-    /// again, so it stands where the daemon has it.
-    func setPrivateAI(on: Bool, unconfirmed: String?) async {
+    /// rule `check` (`TCPrivateInference.writeConfirmed`) confirms it;
+    /// otherwise, or when the write fails, `unconfirmed` is shown and the
+    /// switch is read again, so it stands where the daemon has it. A write
+    /// that threw is recorded under `set_private_ai`.
+    func setPrivateAI(
+        on: Bool, unconfirmed: String?,
+        check: (Bool?, Bool?, Bool?) -> Bool = TCPrivateInference.writeConfirmed
+    ) async {
         guard !privateAIBusy else { return }
         guard let client else {
+            failures["set_private_ai"] = .unreachable
             privateAIRefusal = unconfirmed
             return
         }
         let mine = generation
         privateAIBusy = true
-        let reply = try? await client.setPrivateAI(on: on)
+        privateAIWrites += 1
+        let result: Result<DaemonData.PrivateAISwitch, DaemonDataError>
+        do {
+            result = .success(try await client.setPrivateAI(on: on))
+        } catch {
+            result = .failure(error as? DaemonDataError ?? .undecodable(method: "set_private_ai"))
+        }
         guard mine == generation else { return }
         privateAIBusy = false
-        if let reply, Self.confirmed(reply, requested: on, check: TCPrivateInference.writeConfirmed) {
+        privateAIWrites += 1
+        switch result {
+        case .success(let reply) where Self.confirmed(reply, requested: on, check: check):
+            failures["set_private_ai"] = nil
             privateAIRefusal = nil
             privateAI = reply
-        } else {
+        case .success:
+            failures["set_private_ai"] = nil
+            privateAIRefusal = unconfirmed
+            await loadPrivateAI()
+        case .failure(let error):
+            failures["set_private_ai"] = error
             privateAIRefusal = unconfirmed
             await loadPrivateAI()
         }
