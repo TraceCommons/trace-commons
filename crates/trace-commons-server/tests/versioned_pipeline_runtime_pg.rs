@@ -25069,6 +25069,104 @@ async fn a_line_submitted_under_http_is_not_confirmed_under_dry_run() {
     );
 }
 
+/// Multi-lens review C3 (owner decision): a `submitted` line whose stored
+/// call has no `pipeline_submission_mode` key was submitted by code from
+/// before the key, which had no mode rule. It reads as submitted under
+/// `http`: the dry-run adapter does not confirm it and its transaction hash
+/// is unchanged, so a synthetic hash never replaces a real one, and `http`
+/// confirms it.
+#[tokio::test]
+async fn a_submitted_line_with_no_mode_key_is_confirmed_only_under_http() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let near = Arc::new(RecordingNearAdapter::new());
+    let http = payout_service_under(&backend, &dir, near.clone(), HTTP_NEAR_PAYOUT_CONTROLS).await;
+    let tenant = format!("payout-mode-no-key-{}", uuid::Uuid::new_v4());
+    let run = submit_and_complete(&http, &tenant, RECEIPT_PRINCIPAL).await;
+    assert_eq!(http.process_payouts(&tenant, 32).await.unwrap(), 1);
+    // The line as the earlier code left it: submitted, with no mode key.
+    let mut owner = owner_client().await;
+    let tx = owner_tenant_tx(&mut owner, &tenant).await;
+    assert_eq!(
+        tx.execute(
+            "UPDATE trace_near_credit_outbox
+                SET near_call_json = near_call_json - 'pipeline_submission_mode'
+              WHERE tenant_id = $1 AND status = 'submitted'
+                AND near_call_json ? 'pipeline_submission_mode'",
+            &[&tenant],
+        )
+        .await
+        .unwrap(),
+        1
+    );
+    tx.commit().await.unwrap();
+    drop(owner);
+    let line = || async {
+        let mut client = backend.trace_pool_for_test().get().await.unwrap();
+        let tx = tenant_tx(&mut client, &tenant).await;
+        let row = tx
+            .query_one(
+                "SELECT status, near_transaction_hash FROM trace_near_credit_outbox
+                  WHERE tenant_id = $1",
+                &[&tenant],
+            )
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        (
+            row.get::<_, String>("status"),
+            row.get::<_, Option<String>>("near_transaction_hash"),
+        )
+    };
+    let submitted = line().await;
+    assert_eq!(submitted.0, "submitted");
+
+    let dry_run = payout_service_under(
+        &backend,
+        &dir,
+        near.clone(),
+        PipelineNearPayoutControls {
+            settlement_mode: PipelineNearSettlementMode::DryRun,
+            require_adapter_auth: false,
+        },
+    )
+    .await;
+    dry_run
+        .process_payout(&tenant, run.run_id)
+        .await
+        .expect("the dry-run pass runs");
+    assert_eq!(
+        line().await,
+        submitted,
+        "the dry-run adapter does not confirm the line or change its transaction hash"
+    );
+
+    let idempotency_key = near.requests()[0].idempotency_key.clone();
+    let confirmed_hash = format!("sha256:{}", "a".repeat(64));
+    near.record_confirmation(
+        &idempotency_key,
+        confirmed_hash.clone(),
+        format!("sha256:{}", "b".repeat(64)),
+    )
+    .unwrap();
+    http.process_payout(&tenant, run.run_id)
+        .await
+        .expect("the http pass runs");
+    assert_eq!(
+        line().await,
+        ("confirmed".to_string(), Some(confirmed_hash)),
+        "http confirms the line it reads as its own"
+    );
+    assert_eq!(
+        trace_credit_settlement(&http, &tenant, run.run_id)
+            .await
+            .payout_state,
+        "confirmed"
+    );
+}
+
 /// Finding 2: under `TRACE_COMMONS_NEAR_CREDIT_REQUIRE_ADAPTER_AUTH`, as
 /// `main` refuses to start its NEAR adapters without their credentials, an
 /// enabled payout on an adapter that presents none is refused at build,

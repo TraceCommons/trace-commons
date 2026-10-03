@@ -180,7 +180,8 @@ pub const PIPELINE_INDEX_WRITE_FENCE_MARGIN_SECONDS: i64 = 60;
 pub const PIPELINE_INDEX_DISPATCH_BUDGET_SECONDS: i64 = 30;
 /// The key of a pipeline NEAR outbox line's stored call that records the
 /// settlement mode that submitted it (`dry_run` or `http`); only that mode
-/// confirms the line (Zaki review 3, Z3-L2).
+/// confirms the line (Zaki review 3, Z3-L2). A line with no key reads as
+/// `http` (multi-lens review C3).
 pub const PIPELINE_NEAR_SUBMISSION_MODE_KEY: &str = "pipeline_submission_mode";
 /// Startup refusal labels of `PipelineService::check_tenant_bundles` that
 /// the default package's checks do not share: a tenant bundle whose scorer
@@ -12186,10 +12187,17 @@ impl PipelineService {
                     .await?
                 {
                     Some((status, stored_call)) => {
-                        let submission_mode = stored_call
-                            .get(PIPELINE_NEAR_SUBMISSION_MODE_KEY)
-                            .and_then(serde_json::Value::as_str)
-                            .map(str::to_string);
+                        // Multi-lens review C3 (owner decision): a line with
+                        // no key was submitted by code from before the key.
+                        // It reads as `http`, so `http` confirms it and the
+                        // dry-run adapter never puts a synthetic hash on it.
+                        let submission_mode = Some(
+                            stored_call
+                                .get(PIPELINE_NEAR_SUBMISSION_MODE_KEY)
+                                .and_then(serde_json::Value::as_str)
+                                .unwrap_or(PipelineNearSettlementMode::Http.as_label())
+                                .to_string(),
+                        );
                         let call: crate::near_credit::NearCreditReceiptCall =
                             serde_json::from_value(stored_call)
                                 .map_err(|_| anyhow::anyhow!(PIPELINE_NEAR_CALL_INVALID_LABEL))?;
@@ -12317,7 +12325,9 @@ impl PipelineService {
                             last_error_hash = NULL
                       WHERE tenant_id = $1 AND near_outbox_id = $2
                         AND status = 'submitted'
-                        AND near_call_json ->> 'pipeline_submission_mode' = $5",
+                        AND COALESCE(
+                                near_call_json ->> 'pipeline_submission_mode', 'http'
+                            ) = $5",
                     &[
                         &run.tenant_id,
                         &outbox_id,
