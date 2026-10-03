@@ -1,0 +1,33 @@
+{
+  "projects": [
+    {
+      "project_id": "proj_f521cc304a06c2a9",
+      "project_label": "api",
+      "project_path": "/Users/sample/src/api",
+      "mode": "auto_upload",
+      "added_at": "2026-09-02T10:00:00Z",
+      "configured": true,
+      "is_unresolved_bucket": false,
+      "session_count": 22,
+      "last_session_at": "2026-09-30T09:00:00Z",
+      "pending_count": 2,
+      "automatic_disclosure": "patterns_only",
+      "from_now": false
+    },
+    {
+      "project_id": "proj_9c3104d8d0e56788",
+      "project_label": "web",
+      "project_path": "/Users/sample/src/web",
+      "mode": "auto_upload",
+      "added_at": "2026-09-02T10:00:00Z",
+      "configured": true,
+      "is_unresolved_bucket": false,
+      "session_count": 9,
+      "last_session_at": "2026-09-30T09:00:00Z",
+      "pending_count": 2,
+      "automatic_disclosure": "patterns_only",
+      "from_now": false
+    }
+  ],
+  "unpurposed_traces": 0
+}

@@ -12,7 +12,7 @@ public protocol DaemonTransport: AnyObject {
     func call(_ method: String, params paramsJSON: String) -> String
 }
 
-/// The real `DaemonDataClient`, over `tc_call`.
+/// The real `DaemonDataClient`, over `tc_call` (K1 of #1173).
 ///
 /// Wired for every method that exists on main, `preview_unsure_spans`
 /// included: `tc_call` answers through `ipc::handle_local`, which runs the
@@ -27,6 +27,14 @@ public protocol DaemonTransport: AnyObject {
 /// and blocking a Swift concurrency thread for that long starves the
 /// cooperative pool -- the reason `TCDaemon` gives for not being an actor.
 ///
+/// Events: `deliver(eventJSON:)` is fed by the app's one `tc_subscribe`
+/// callback (`AppModel.subscribe`), so the data client and the existing
+/// `AppModel` handlers see the same frames from the same subscription.
+/// `tc_subscribe` sends no `snapshot` on the in-process path, so each
+/// `events()` stream opens with one built here from `status` and
+/// `list_pending`, as the contract promises; frames that arrive while it is
+/// being built are held and follow it in order.
+///
 /// `@unchecked Sendable`: the state is the transport, which is safe to call
 /// from any thread (`DaemonClient` already calls it off the main actor),
 /// and the subscriber table, guarded by `lock`.
@@ -34,11 +42,26 @@ public final class LiveDaemonClient: DaemonDataClient, @unchecked Sendable {
     private let transport: any DaemonTransport
     private let workQueue = DispatchQueue(
         label: "trace-commons.live-daemon-client", qos: .userInitiated, attributes: .concurrent)
+
+    private struct Subscriber {
+        let continuation: AsyncStream<DaemonDataEvent>.Continuation
+        /// Frames delivered before this stream's opening snapshot was sent.
+        /// `nil` once the snapshot is out and frames are yielded directly.
+        var held: [DaemonDataEvent]? = []
+    }
+
     private let lock = NSLock()
-    private var continuations: [UUID: AsyncStream<DaemonDataEvent>.Continuation] = [:]
+    private var subscribers: [UUID: Subscriber] = [:]
+    private var eventsFinished = false
 
     public init(transport: any DaemonTransport) {
         self.transport = transport
+    }
+
+    /// No client, no more frames: a stream outliving its client ends
+    /// rather than waiting forever.
+    deinit {
+        finishEvents()
     }
 
     // MARK: Status and the queue
@@ -230,30 +253,105 @@ public final class LiveDaemonClient: DaemonDataClient, @unchecked Sendable {
 
     // MARK: Live updates
 
-    /// A stream fed by `deliver(eventJSON:)`. The app's existing
-    /// `tc_subscribe` callback forwards each frame there (K1 wires it).
+    /// A fresh stream that opens with a `snapshot` (built from `status` and
+    /// `list_pending`, since `tc_subscribe` sends none in process) and then
+    /// carries every frame `deliver(eventJSON:)` is given.
+    ///
+    /// A daemon that is unreachable when the snapshot is built finishes the
+    /// stream at once, exactly as `SampleDaemonClient(.coreDown)` does. A
+    /// snapshot that cannot be built for any other reason opens with
+    /// `.resyncRequired` instead, which tells the screen to fetch for itself.
     public func events() -> AsyncStream<DaemonDataEvent> {
         let id = UUID()
-        return AsyncStream { continuation in
-            lock.lock()
-            continuations[id] = continuation
+        let (stream, continuation) = AsyncStream.makeStream(of: DaemonDataEvent.self)
+        lock.lock()
+        if eventsFinished {
             lock.unlock()
-            continuation.onTermination = { [weak self] _ in
-                guard let self else { return }
-                self.lock.lock()
-                self.continuations[id] = nil
-                self.lock.unlock()
+            continuation.finish()
+            return stream
+        }
+        subscribers[id] = Subscriber(continuation: continuation)
+        lock.unlock()
+        continuation.onTermination = { [weak self] _ in
+            guard let self else { return }
+            self.lock.lock()
+            self.subscribers[id] = nil
+            self.lock.unlock()
+        }
+        // Strong: the snapshot is built even if the caller let go of the
+        // client right after asking for the stream. Once it is sent the
+        // stream holds no reference, and `deinit` finishes it.
+        workQueue.async { [self] in
+            self.open(subscriber: id)
+        }
+        return stream
+    }
+
+    /// Hands one subscription frame to every open `events()` stream. Safe to
+    /// call from the Rust thread a `tc_subscribe` callback runs on: it only
+    /// parses and yields, and never calls back into the daemon.
+    public func deliver(eventJSON: String) {
+        let event = DaemonDataEventParser.parse(eventJSON)
+        lock.lock()
+        defer { lock.unlock() }
+        for (id, subscriber) in subscribers {
+            if subscriber.held != nil {
+                subscribers[id]?.held?.append(event)
+            } else {
+                subscriber.continuation.yield(event)
             }
         }
     }
 
-    /// Hands one subscription frame to every open `events()` stream.
-    public func deliver(eventJSON: String) {
-        let event = DaemonDataEventParser.parse(eventJSON)
+    /// Ends every open stream and refuses new ones: the daemon is gone.
+    /// Called by the app at teardown, so a screen's `for await` loop ends
+    /// rather than waiting on a subscription that no longer exists.
+    public func finishEvents() {
         lock.lock()
-        let targets = Array(continuations.values)
+        eventsFinished = true
+        let open = subscribers.values.map(\.continuation)
+        subscribers.removeAll()
         lock.unlock()
-        for continuation in targets { continuation.yield(event) }
+        for continuation in open { continuation.finish() }
+    }
+
+    /// Builds and sends one stream's opening snapshot, then releases the
+    /// frames held while it was built. Runs on `workQueue`.
+    private func open(subscriber id: UUID) {
+        let opening: DaemonDataEvent?
+        do {
+            // A reply that is not a frame, or a refusal, throws: the stream
+            // opens with `.resyncRequired`. Only a well-formed `status` body
+            // this build cannot read is unknown, which is not a reason to
+            // withhold the queue.
+            let statusBody = try DaemonFrame.result(of: transport.call("status", params: "{}"), method: "status")
+            let status = try? DaemonDataDecoding.decoder().decode(DaemonData.Status.self, from: statusBody)
+            let pending = try Self.decode(transport.call("list_pending", params: "{}"), method: "list_pending",
+                                          as: DaemonData.PendingList.self).pending
+            opening = .snapshot(pending: pending, status: status)
+        } catch DaemonDataError.unreachable {
+            opening = nil
+        } catch {
+            opening = .resyncRequired
+        }
+        lock.lock()
+        guard let subscriber = subscribers[id] else {
+            lock.unlock()
+            return
+        }
+        guard let opening else {
+            subscribers[id] = nil
+            lock.unlock()
+            // Outside the lock: `finish` runs `onTermination`, which takes it.
+            subscriber.continuation.finish()
+            return
+        }
+        defer { lock.unlock() }
+        // Yielding under the lock is what keeps held frames behind the
+        // snapshot; `yield` never runs `onTermination`.
+        subscriber.continuation.yield(opening)
+        for event in subscriber.held ?? [] { subscriber.continuation.yield(event) }
+        subscribers[id]?.held = nil
     }
 
     /// The daemon went away: its subscription ended, or a call answered
