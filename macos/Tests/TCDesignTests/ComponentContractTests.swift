@@ -99,9 +99,14 @@ final class ComponentContractTests: XCTestCase {
     /// row therefore rests on the screen that holds the rows (R6's Traces
     /// tree), which must give the list focus, arrow-key selection and
     /// Return/Space. Do not ship a screen of rows without it.
+    ///
+    /// The one `.focusable` the row may carry is its pill's opt-out, which
+    /// only ever takes a stop away (roving focus: the selected row's pill is
+    /// the only one); nothing in the row may make itself a stop.
     func test_aListRowIsNotItsOwnTabStop() throws {
         let row = try XCTUnwrap(try Self.componentSources().first { $0.0 == "ListRow.swift" }?.1)
-        XCTAssertFalse(row.contains(".focusable("))
+        let calls = row.components(separatedBy: ".focusable(").dropFirst().map { $0.prefix { $0 != ")" } }
+        XCTAssertEqual(calls, ["submitFocusable"])
     }
 
     /// Menus and popovers close on Escape through their caller.

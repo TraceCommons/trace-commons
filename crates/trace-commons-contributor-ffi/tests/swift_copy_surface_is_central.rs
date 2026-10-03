@@ -630,6 +630,34 @@ fn no_pinned_core_sentence_is_a_swift_literal() {
 /// must reach.
 const SURFACES: &[(&str, &str, &str, &str, &str)] = &[
     (
+        "armed folder disclosure in Traces",
+        "TraceCommonsApp/Views/Monitor/TracesStore.swift",
+        "TCCoreCopy.automaticGrantCopyJSON",
+        "TCBridge/TCCoreCopy.swift",
+        "tc_automatic_grant_copy_json",
+    ),
+    (
+        "monitor Traces words",
+        "TraceCommonsApp/Views/Monitor/TracesStore.swift",
+        "TCCoreCopy.monitorTracesCopyJSON",
+        "TCBridge/TCCoreCopy.swift",
+        "tc_monitor_traces_copy_json",
+    ),
+    (
+        "monitor screens words",
+        "TraceCommonsApp/Views/Monitor/InferenceViews.swift",
+        "TCCoreCopy.monitorScreensCopyJSON",
+        "TCBridge/TCCoreCopy.swift",
+        "tc_monitor_screens_copy_json",
+    ),
+    (
+        "monitor Traces badge words",
+        "TraceCommonsApp/Views/MonitorWindowView.swift",
+        "TCCoreCopy.decisionsOwedText",
+        "TCBridge/TCCoreCopy.swift",
+        "tc_decisions_owed_text",
+    ),
+    (
         "consent gate",
         "TraceCommonsApp/Views/PreviewSheet.swift",
         "TCConsentCopy.copyJSON",

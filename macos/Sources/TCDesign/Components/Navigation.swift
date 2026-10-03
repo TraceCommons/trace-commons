@@ -1,21 +1,43 @@
 import SwiftUI
 
+/// A badge's value: a count, or unknown (a dash).
+public enum GlassBadgeValue: Sendable, Equatable {
+    case count(Int)
+    case unknown
+}
+
 /// One segment of `GlassSegmentedTabs`.
 public struct GlassSegment<Value: Hashable>: Identifiable {
     public let value: Value
     public let title: String
     /// Decisions owed, as a count pill. Never queue depth or credit.
-    public let badge: Int?
-    /// A status dot after the title (Inference: Private AI on or off).
+    public let badge: GlassBadgeValue?
+    /// A status dot after the title (Inference: whether Private AI is
+    /// answering). Colour alone, so pair it with `accessibilityValue`.
     public let dot: GlassStatus?
+    /// What the dot and the badge say, in words, for VoiceOver: the dot is
+    /// hidden from assistive tech, so a tab with one must carry its text
+    /// equivalent here, from the core's copy.
+    public let accessibilityValue: String?
 
     public var id: Value { value }
 
-    public init(_ title: String, value: Value, badge: Int? = nil, dot: GlassStatus? = nil) {
+    public init(_ title: String, value: Value, badge: Int? = nil, dot: GlassStatus? = nil, accessibilityValue: String? = nil) {
+        self.init(title, value: value, badgeValue: badge.map(GlassBadgeValue.count), dot: dot,
+                  accessibilityValue: accessibilityValue)
+    }
+
+    /// `badgeValue: .unknown` draws a dash: a count the core did not give is
+    /// never shown as a number. Pass nil, or `.count(0)`, for no badge.
+    public init(
+        _ title: String, value: Value, badgeValue: GlassBadgeValue?, dot: GlassStatus? = nil,
+        accessibilityValue: String? = nil
+    ) {
         self.title = title
         self.value = value
-        self.badge = badge
+        self.badge = badgeValue == .count(0) ? nil : badgeValue
         self.dot = dot
+        self.accessibilityValue = accessibilityValue
     }
 }
 
@@ -46,9 +68,16 @@ public struct GlassSegmentedTabs<Value: Hashable>: View {
                         if let dot = segment.dot {
                             GlassStatusDot(dot, size: 6)
                         }
-                        if let badge = segment.badge {
-                            GlassBadge(count: badge, subtle: true)
+                        // With a text equivalent, the badge is not read on
+                        // its own: the segment's value says it in words.
+                        Group {
+                            switch segment.badge {
+                            case .count(let count): GlassBadge(count: count, subtle: true)
+                            case .unknown: GlassBadge(count: nil, subtle: true)
+                            case nil: EmptyView()
+                            }
                         }
+                        .accessibilityHidden(segment.accessibilityValue != nil)
                     }
                     .glassType(GlassTokens.TypeScale.label.weight(selected ? .semibold : .medium))
                     .foregroundStyle(selected ? GlassColor.textPrimary : (floating ? GlassColor.textSecondary : GlassColor.textTertiary))
@@ -60,7 +89,7 @@ public struct GlassSegmentedTabs<Value: Hashable>: View {
                         // behind an unselected label; never the label.
                         if selected {
                             if floating {
-                                Capsule().fill(Color.white.opacity(0.18)).glassPressedFill()
+                                Capsule().fill(GlassTokens.Color.controlSelected.color).glassPressedFill()
                             } else {
                                 Capsule().fill(GlassTokens.Color.controlSelected.color)
                                     .glassPressedFill()
@@ -72,6 +101,7 @@ public struct GlassSegmentedTabs<Value: Hashable>: View {
                     .contentShape(Capsule())
                 }
                 .buttonStyle(GlassPressStyle())
+                .accessibilityValue(segment.accessibilityValue ?? "")
                 .accessibilityAddTraits(selected ? [.isSelected, .isButton] : .isButton)
             }
         }
@@ -173,7 +203,7 @@ public struct GlassStepProgress: View {
             ForEach(Array(labels.enumerated()), id: \.offset) { index, label in
                 if index > 0 {
                     Capsule()
-                        .fill(index <= current ? GlassTokens.Color.purpleSoft.color : Color.white.opacity(0.14))
+                        .fill(index <= current ? GlassTokens.Color.purpleSoft.color : GlassColor.ink(0.14))
                         .frame(height: 2)
                         .padding(.horizontal, 6)
                         .padding(.top, 6)

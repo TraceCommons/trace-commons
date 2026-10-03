@@ -76,7 +76,7 @@ private struct GlassButtonBody: View {
         case let .submit(done):
             configuration.label
                 .glassType(GlassTokens.TypeScale.caption.weight(.bold))
-                .foregroundStyle(done ? GlassTokens.Color.statusOn.color : GlassColor.textPrimary)
+                .foregroundStyle(done ? GlassTokens.Color.statusOnText.color : GlassColor.textPrimary)
                 .padding(.horizontal, 10)
                 .frame(minHeight: GlassTokens.Size.submitPill)
                 .glassSurface(.control)
@@ -247,7 +247,7 @@ public struct GlassKebab: View {
                 .frame(width: 22, height: 24)
                 .background(
                     RoundedRectangle(cornerRadius: 6, style: .continuous)
-                        .fill(open ? Color.white.opacity(0.14) : .clear)
+                        .fill(open ? GlassColor.ink(0.14) : .clear)
                 )
                 .glassPressedFill()
                 .contentShape(Rectangle())
@@ -353,7 +353,11 @@ public struct GlassPicker<Value: Hashable>: View {
             .frame(minHeight: GlassTokens.Size.controlLarge)
             .glassSurface(.control)
         }
-        .menuStyle(.borderlessButton)
+        // A button-style menu draws the label as given (the borderless
+        // style keeps only its text, tinted, and drops the pill), and
+        // GlassPressStyle darkens the pill's fill while it is pressed.
+        .menuStyle(.button)
+        .buttonStyle(GlassPressStyle())
         .menuIndicator(.hidden)
         .fixedSize()
         .accessibilityLabel(label)
@@ -372,9 +376,14 @@ public enum GlassSwitchKind: Sendable, Equatable {
 /// `Toggle("Start at login", isOn: $on).toggleStyle(GlassToggleStyle(.settings))`.
 public struct GlassToggleStyle: ToggleStyle {
     private let kind: GlassSwitchKind
+    private let showsLabel: Bool
 
-    public init(_ kind: GlassSwitchKind = .standard) {
+    /// `showsLabel: false` draws the switch alone; the label still names it
+    /// for VoiceOver. `.labelsHidden()` does not reach a custom style before
+    /// macOS 15, so this is the way to hide it.
+    public init(_ kind: GlassSwitchKind = .standard, showsLabel: Bool = true) {
         self.kind = kind
+        self.showsLabel = showsLabel
     }
 
     /// The track colour when on.
@@ -399,8 +408,12 @@ public struct GlassToggleStyle: ToggleStyle {
         let height = watch ? GlassTokens.Size.watchSwitchHeight : GlassTokens.Size.toggleHeight
         let inset: CGFloat = watch ? 2 : 3
         let onColor = Self.onColor(kind)
-        return HStack(spacing: GlassTokens.Space.s6) {
-            configuration.label
+        return HStack(spacing: showsLabel ? GlassTokens.Space.s6 : 0) {
+            // Hidden or not, the native toggle below carries the label to
+            // VoiceOver.
+            if showsLabel {
+                configuration.label
+            }
             Button {
                 withAnimation(GlassMotion.fast(GlassMotion.systemReducesMotion)) { configuration.isOn.toggle() }
             } label: {
