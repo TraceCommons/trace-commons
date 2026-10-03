@@ -204,8 +204,9 @@ impl<'de> Deserialize<'de> for ExpectedRecord {
 /// optional: the record id, the state, or both. Every part that is named must
 /// hold under the routing lock, else `pipeline_routing_state_changed`. A
 /// `contain` may name none (an emergency stop needs no read first). A
-/// `deactivate` of a contained tenant must name one
-/// (`pipeline_routing_expectation_required`).
+/// `deactivate` of a contained tenant must name the record id
+/// (`pipeline_routing_expectation_required`); the state alone is not enough
+/// there.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RoutingExpectation {
     pub record: Option<ExpectedRecord>,
@@ -233,10 +234,6 @@ impl RoutingExpectation {
             record: None,
             state: Some(state),
         }
-    }
-
-    fn is_named(self) -> bool {
-        self.record.is_some() || self.state.is_some()
     }
 }
 
@@ -1578,12 +1575,16 @@ impl PipelineActivationStore {
     /// comparison comes first: a routing the caller did not expect is
     /// reported as changed, not as `activation_state_invalid`.
     ///
-    /// A contained tenant needs an expectation (plan review G11): with none,
-    /// the deactivation is refused with
-    /// `pipeline_routing_expectation_required` and writes nothing. A
-    /// deactivation prepared for a `pipeline` tenant would otherwise send a
-    /// tenant that an incident contained back to the legacy path, with no
-    /// gate. From `pipeline` the expectation stays optional.
+    /// A contained tenant needs the record id in force (plan review G11;
+    /// review of the fix wave, C4): without `expected.record`, the
+    /// deactivation is refused with `pipeline_routing_expectation_required`
+    /// and writes nothing, also when `expected.state` is `contained` and
+    /// holds. A deactivation prepared for a `pipeline` tenant would otherwise
+    /// send a tenant that an incident contained back to the legacy path, with
+    /// no gate; and the state does not tell two containments apart, so a
+    /// deactivation prepared in one incident would reopen intake in the next
+    /// one (contain, reopen, contain). When both parts are named, both must
+    /// hold. From `pipeline` the expectation stays optional.
     pub async fn deactivate_expecting(
         &self,
         tenant_id: &str,
@@ -2136,10 +2137,11 @@ impl PipelineActivationStore {
         require_expected_routing(expected, current)?;
         let current = current.map(|row| row.state);
         // A contained tenant leaves containment for the legacy path only at
-        // the word of a caller that names what it read (G11).
+        // the word of a caller that names the record it read (G11). The
+        // state alone is the same in every containment, so it is not enough.
         if action == ActivationAction::Deactivate
             && current == Some(RoutingState::Contained)
-            && !expected.is_named()
+            && expected.record.is_none()
         {
             return Err(DatabaseError::Constraint(
                 PIPELINE_ROUTING_EXPECTATION_REQUIRED_LABEL.to_string(),
@@ -2477,9 +2479,6 @@ mod tests {
             RoutingExpectation::record(other),
             Some(row)
         )));
-        assert!(RoutingExpectation::record(this).is_named());
-        assert!(RoutingExpectation::state(ExpectedRouting::Contained).is_named());
-        assert!(!RoutingExpectation::NONE.is_named());
     }
 
     #[test]

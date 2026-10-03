@@ -39883,13 +39883,88 @@ async fn a_rollback_names_the_routing_row_it_read() {
     assert_eq!(store.events(&tenant, 10).await.unwrap().len(), 5);
 }
 
+/// A deactivation prepared in one incident does not reopen intake in the next
+/// one (review of the fix wave, C4): the tenant is contained, opened again,
+/// and contained again. A deactivation that names the first containment's
+/// record is `pipeline_routing_state_changed`; one that names only the state
+/// `contained`, which holds in both incidents, is
+/// `pipeline_routing_expectation_required`. Neither writes a row. The record
+/// in force passes.
+#[tokio::test]
+async fn a_deactivation_prepared_for_an_earlier_containment_is_refused() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let fixture = two_qualified_bundles(backend.clone(), &dir).await;
+    let store = fixture.activation_store();
+    let tenant = routing_tenant("deactivate-aba");
+    let actor = routing_actor();
+    fixture.qualify(&tenant, &fixture.a, &gate_revision()).await;
+    fixture.activate(&tenant, &fixture.a).await;
+    let first = store
+        .contain(&tenant, &actor, "contain_for_incident")
+        .await
+        .unwrap();
+    fixture.activate(&tenant, &fixture.a).await;
+    let second = store
+        .contain(&tenant, &actor, "contain_for_incident")
+        .await
+        .unwrap();
+    assert_ne!(first.activation_record_id, second.activation_record_id);
+
+    let before = activation_rows(&tenant).await;
+    for (what, expectation, label) in [
+        (
+            "the first containment's record",
+            expecting(&first),
+            PIPELINE_ROUTING_STATE_CHANGED_LABEL,
+        ),
+        (
+            "the first containment's record beside the state",
+            RoutingExpectation {
+                state: Some(ExpectedRouting::Contained),
+                ..expecting(&first)
+            },
+            PIPELINE_ROUTING_STATE_CHANGED_LABEL,
+        ),
+        (
+            "the state alone",
+            RoutingExpectation::state(ExpectedRouting::Contained),
+            PIPELINE_ROUTING_EXPECTATION_REQUIRED_LABEL,
+        ),
+    ] {
+        assert_gate_refused(
+            store
+                .deactivate_expecting(&tenant, &actor, "return_to_legacy", expectation)
+                .await,
+            label,
+            what,
+        );
+        assert_eq!(activation_rows(&tenant).await, before, "{what}");
+        assert_eq!(
+            store.routing(&tenant).await.unwrap(),
+            Some(second.clone()),
+            "{what}: the tenant stays contained"
+        );
+    }
+    let legacy = store
+        .deactivate_expecting(&tenant, &actor, "return_to_legacy", expecting(&second))
+        .await
+        .expect("the record in force passes");
+    assert_eq!(legacy.routing_state, RoutingState::Legacy);
+}
+
 /// A deactivation of a contained tenant needs an expectation (plan review
 /// G11): with none it is refused with `pipeline_routing_expectation_required`
 /// and the tenant stays contained, so a deactivation prepared for a
 /// `pipeline` tenant does not send a tenant that an incident contained back
 /// to the legacy path. An expectation that does not hold is
-/// `pipeline_routing_state_changed`. The state `contained`, the record id in
-/// force, or both pass. From `pipeline` a deactivation needs none.
+/// `pipeline_routing_state_changed`. The expectation that a contained tenant
+/// needs is the record id in force (review of the fix wave, C4): the state
+/// `contained` alone holds and is refused with the same label as none, because
+/// it does not tell two containments apart. The record id in force passes,
+/// alone or beside the state. From `pipeline` a deactivation needs none.
 #[tokio::test]
 async fn a_deactivation_of_a_contained_tenant_names_what_it_read() {
     let Some(backend) = runtime_backend(4).await else {
@@ -39911,6 +39986,11 @@ async fn a_deactivation_of_a_contained_tenant_names_what_it_read() {
         (
             "no expectation",
             RoutingExpectation::NONE,
+            PIPELINE_ROUTING_EXPECTATION_REQUIRED_LABEL,
+        ),
+        (
+            "the state alone",
+            RoutingExpectation::state(ExpectedRouting::Contained),
             PIPELINE_ROUTING_EXPECTATION_REQUIRED_LABEL,
         ),
         (
@@ -39962,12 +40042,11 @@ async fn a_deactivation_of_a_contained_tenant_names_what_it_read() {
         "the tenant stays contained"
     );
 
-    // Each form of the expectation passes.
+    // The record id in force passes, alone and beside the state.
     let mut contained = contained;
-    for form in 0..3 {
+    for form in 0..2 {
         let expectation = match form {
-            0 => RoutingExpectation::state(ExpectedRouting::Contained),
-            1 => expecting(&contained),
+            0 => expecting(&contained),
             _ => RoutingExpectation {
                 state: Some(ExpectedRouting::Contained),
                 ..expecting(&contained)
