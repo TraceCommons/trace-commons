@@ -7,6 +7,8 @@ import TCShellCore
 enum SettingsSection: String, CaseIterable, Identifiable {
     case connection
     case startup
+    case notifications
+    case updates
     case watching
     case consent
     case publicProfile
@@ -25,21 +27,61 @@ enum SettingsSection: String, CaseIterable, Identifiable {
     /// Nil while that copy has not loaded; the list then draws the row as a
     /// disabled placeholder (`ListRow`) rather than inventing a name or
     /// hiding the section.
-    @MainActor
-    func title(model: AppModel, compute: String?) -> String? {
+    func title(_ sources: TitleSources) -> String? {
         switch self {
         case .connection: SettingsWords.connection
         case .startup: SettingsWords.startup
+        case .notifications: sources.notifications
+        case .updates: SettingsWords.updates
         case .watching: SettingsWords.watching
         case .consent: SettingsContent.consentHeading
         case .publicProfile: PublicProfileCopy.heading
-        case .watchedFolders: TCSourceChecks.settingsCopy()?.heading
-        case .tools: model.routingCopy?.toolsHeading
-        case .privateAI: model.privateInferenceCopy?.settingsTitle
-        case .witness: model.witnessCopy?.heading
+        case .watchedFolders: sources.watchedFolders
+        case .tools: sources.tools
+        case .privateAI: sources.privateAI
+        case .witness: sources.witness
         case .projects: SettingsWords.projects
         case .changes: SettingsContent.auditHeading
-        case .compute: compute ?? SettingsWords.compute
+        case .compute: sources.compute ?? SettingsWords.compute
+        }
+    }
+
+    /// The row the list draws for this section.
+    func listRow(_ sources: TitleSources) -> ListRow {
+        ListRow.row(title: title(sources))
+    }
+
+    /// The headings that come from loaded copy, each nil until its copy
+    /// has loaded. Held apart from `AppModel` so the list's rows can be
+    /// checked with any of them missing.
+    struct TitleSources {
+        var notifications: String?
+        var watchedFolders: String?
+        var tools: String?
+        var privateAI: String?
+        var witness: String?
+        var compute: String?
+
+        @MainActor
+        init(model: AppModel, compute: String?) {
+            notifications = Notifier.copy?.notificationHeading
+            watchedFolders = TCSourceChecks.settingsCopy()?.heading
+            tools = model.routingCopy?.toolsHeading
+            privateAI = model.privateInferenceCopy?.settingsTitle
+            witness = model.witnessCopy?.heading
+            self.compute = compute
+        }
+
+        init(
+            notifications: String? = nil, watchedFolders: String? = nil, tools: String? = nil,
+            privateAI: String? = nil, witness: String? = nil, compute: String? = nil
+        ) {
+            self.notifications = notifications
+            self.watchedFolders = watchedFolders
+            self.tools = tools
+            self.privateAI = privateAI
+            self.witness = witness
+            self.compute = compute
         }
     }
 
@@ -62,6 +104,8 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         switch self {
         case .connection: "link"
         case .startup: "power"
+        case .notifications: "bell"
+        case .updates: "arrow.down.circle"
         case .watching: "eye"
         case .consent: "checkmark.shield"
         case .publicProfile: "person.crop.circle"
@@ -81,6 +125,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
 enum SettingsWords {
     static let connection = "Connection"
     static let startup = "Startup"
+    static let updates = "Updates"
     static let watching = "Watching"
     static let projects = "Projects"
     static let compute = "Compute"

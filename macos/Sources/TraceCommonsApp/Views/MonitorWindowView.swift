@@ -405,7 +405,7 @@ struct MonitorSettingsWindow: View {
                 ForEach(SettingsSection.allCases) { item in
                     // A section whose copy has not loaded is a disabled
                     // placeholder, never a missing row.
-                    let row = SettingsSection.ListRow.row(title: item.title(model: model, compute: compute.snapshot?.title))
+                    let row = item.listRow(.init(model: model, compute: compute.snapshot?.title))
                     Label(row.text, systemImage: item.symbol)
                         .lineLimit(2)
                         .foregroundStyle(row.enabled ? .primary : .secondary)

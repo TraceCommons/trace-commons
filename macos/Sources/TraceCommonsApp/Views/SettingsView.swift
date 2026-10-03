@@ -138,24 +138,9 @@ struct SettingsContent: View {
         // Spec §5.4 gap: 18 between sections (`TC.Space.lg`), not the
         // 28 this screen used before.
         VStack(alignment: .leading, spacing: TC.Space.lg) {
-            if shows(.connection) { connection }
-            if shows(.startup) {
-                loginItem
-                notifications
-                updatesSection
+            ForEach(Self.parts(for: section), id: \.self) { part in
+                view(for: part)
             }
-            if shows(.consent) { consent }
-            if shows(.publicProfile) { publicProfile }
-            if shows(.watching) { watching }
-            if shows(.watchedFolders) { watchedFolders }
-            if shows(.tools) { routing }
-            if shows(.privateAI) {
-                privateInference
-                RouteDisclosureSection()
-            }
-            if shows(.witness) { witness }
-            if shows(.projects) { projects }
-            if shows(.changes) { audit }
         }
         .padding(.top, TC.Space.Content.top)
         .padding(.horizontal, TC.Space.Content.horizontal)
@@ -182,8 +167,53 @@ struct SettingsContent: View {
         }
     }
 
-    private func shows(_ candidate: SettingsSection) -> Bool {
-        section == nil || section == candidate
+    /// The blocks this screen draws, in the main window's order.
+    enum Part: CaseIterable, Hashable {
+        case connection, loginItem, notifications, updates, consent, publicProfile, watching
+        case watchedFolders, routing, privateInference, routeDisclosure, witness, projects, audit
+    }
+
+    /// Which blocks a section draws: every block, in order, for nil (the
+    /// main window); a section's own blocks for the Settings window's list.
+    /// Compute is its own view and draws none here.
+    static func parts(for section: SettingsSection?) -> [Part] {
+        guard let section else { return Part.allCases }
+        switch section {
+        case .connection: return [.connection]
+        case .startup: return [.loginItem]
+        case .notifications: return [.notifications]
+        case .updates: return [.updates]
+        case .consent: return [.consent]
+        case .publicProfile: return [.publicProfile]
+        case .watching: return [.watching]
+        case .watchedFolders: return [.watchedFolders]
+        case .tools: return [.routing]
+        case .privateAI: return [.privateInference, .routeDisclosure]
+        case .witness: return [.witness]
+        case .projects: return [.projects]
+        case .changes: return [.audit]
+        case .compute: return []
+        }
+    }
+
+    @ViewBuilder
+    private func view(for part: Part) -> some View {
+        switch part {
+        case .connection: connection
+        case .loginItem: loginItem
+        case .notifications: notifications
+        case .updates: updatesSection
+        case .consent: consent
+        case .publicProfile: publicProfile
+        case .watching: watching
+        case .watchedFolders: watchedFolders
+        case .routing: routing
+        case .privateInference: privateInference
+        case .routeDisclosure: RouteDisclosureSection()
+        case .witness: witness
+        case .projects: projects
+        case .audit: audit
+        }
     }
 
     // MARK: - Connection (spec §5.4)
@@ -347,7 +377,7 @@ struct SettingsContent: View {
     /// manager over the same file.
     private var updatesSection: some View {
         VStack(alignment: .leading, spacing: TC.Space.m) {
-            TCSectionHeader(title: "Updates")
+            TCSectionHeader(title: SettingsWords.updates)
 
             HStack(spacing: TC.Space.s) {
                 TCFieldLabel("Version")
