@@ -106,18 +106,36 @@ fn tauri_commands_project_shared_contributor_copy() {
 
     // The automatic-contribution sentences come from the contributor core,
     // and so does the choice between the model-scrub and patterns-only
-    // wording (R1): Tauri asks `automatic_gate::disclosure` and passes the
-    // answer to `consent_copy::automatic_grant_copy`. It never reads the
-    // `auto_scrub_*` fields itself, which would put the model-scrub wording
-    // on a route where no model ran.
+    // wording (R1). K3 (#1173) moved the pairing into the core so the C
+    // ABI reaches it too: Tauri and the FFI ask
+    // `consent_copy::automatic_contribution_copy`, which asks
+    // `automatic_gate::disclosure` and passes the answer to
+    // `automatic_grant_copy`. None of the three reads the `auto_scrub_*`
+    // fields itself, which would put the model-scrub wording on a route
+    // where no model ran.
     let automatic = rust_function(&native_flows, "fn automatic_contribution_value");
-    assert!(automatic.contains("automatic_gate::disclosure"));
-    assert!(automatic.contains("consent_copy::automatic_grant_copy"));
-    for field in ["auto_scrub_scope", "auto_scrub_limit", "AUTO_SCRUB_SCOPE"] {
-        assert!(
-            !automatic.contains(field),
-            "Tauri must not pick the scrub wording itself (`{field}`)"
-        );
+    assert!(automatic.contains("consent_copy::automatic_contribution_copy"));
+    let core_consent = read(
+        &root,
+        "crates/trace-commons-contributor/src/consent_copy.rs",
+    );
+    let core_automatic = rust_function(&core_consent, "fn automatic_contribution_copy");
+    assert!(core_automatic.contains("automatic_gate::disclosure"));
+    assert!(core_automatic.contains("automatic_grant_copy"));
+    let ffi = read(&root, "crates/trace-commons-contributor-ffi/src/lib.rs");
+    let ffi_automatic = rust_function(&ffi, "fn tc_automatic_contribution_copy_json");
+    assert!(ffi_automatic.contains("consent_copy::automatic_contribution_copy"));
+    for (who, body) in [
+        ("Tauri", &automatic),
+        ("the core's pairing", &core_automatic),
+        ("the FFI", &ffi_automatic),
+    ] {
+        for field in ["auto_scrub_scope", "auto_scrub_limit", "AUTO_SCRUB_SCOPE"] {
+            assert!(
+                !body.contains(field),
+                "{who} must not pick the scrub wording itself (`{field}`)"
+            );
+        }
     }
     let wrapper = rust_function(&native_flows, "fn automatic_contribution_copy");
     assert!(wrapper.contains("automatic_contribution_value"));
@@ -151,7 +169,10 @@ fn tauri_commands_project_shared_contributor_copy() {
     }
 
     let eligibility_group = rust_function(&daemon, "fn eligibility_group_copy");
-    assert!(eligibility_group.contains("group_control"));
+    // The eligible/withheld arithmetic itself (K6 of #1173) moved into the
+    // core's `group_eligibility`, which already calls `group_control`
+    // internally; Tauri no longer computes `min`/`saturating_sub` itself.
+    assert!(eligibility_group.contains("group_eligibility"));
     assert!(eligibility_group.contains("group_withheld_line"));
 
     let withdrawal = rust_function(&history, "fn withdrawal_confirmation_prompt");

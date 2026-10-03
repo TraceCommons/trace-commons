@@ -2109,6 +2109,17 @@ pub fn entry_value(
         "ended_at": e.shape.as_ref().and_then(|s| s.ended_at),
         "duration_secs": e.shape.as_ref().and_then(super::queue::SessionShape::duration_secs),
         "user_turns": e.shape.as_ref().map(|s| s.user_turns),
+        // K9: the redacted opening prompt, cut at a word to 60 chars. Null
+        // for an entry queued before this existed, or whose task named no
+        // description.
+        "title": e.title,
+        // K10: the serialized size, in bytes, of the redacted envelope a
+        // preview pinned for this entry -- what an upload of it would
+        // actually send, as opposed to `size_bytes` above, the raw session
+        // file on disk before redaction. Null when nothing is pinned: an
+        // entry never previewed (an armed auto-upload, an approve-all), or
+        // one written before this field existed.
+        "would_send_bytes": e.would_send_bytes,
     });
     // ABSENT, NOT `unknown`, WHENEVER THE SIGNUP FLAG IS OFF.
     //
@@ -5096,10 +5107,15 @@ async fn handle_witness_preview_request_inner(
         return Response::err(req.id, ERR_UNAVAILABLE, "witness-review-save-failed");
     }
     let previous_queue = queue.clone();
+    // K10: the certified response's own bytes -- exactly what an upload of
+    // this pin would send over `call_bytes` -- not a re-serialization of the
+    // parsed envelope, which would not be measuring the same wire bytes.
+    let would_send_bytes = Some(review.artifact.response().envelope_bytes.len() as u64);
     if !queue.record_previewed_envelope(
         id,
         &review.summary.envelope_digest,
         review.artifact.attested_inference().cloned(),
+        would_send_bytes,
     ) || {
         queue.record_scrub(
             id,
@@ -6078,7 +6094,10 @@ fn pin_previewed_envelope(
     if super::approved_envelope::save(&shared.store, entry_id, envelope).is_err() {
         return;
     }
-    if queue.record_previewed_envelope(entry_id, &summary.envelope_digest, None) {
+    // K10: the summary already measured the bytes this envelope serializes
+    // to; mirror it onto the pin rather than re-measuring.
+    let would_send_bytes = Some(summary.would_send_bytes as u64);
+    if queue.record_previewed_envelope(entry_id, &summary.envelope_digest, None, would_send_bytes) {
         // The counts go down with the pin they describe; see
         // `QueueEntry::scrub`.
         queue.record_scrub(entry_id, &summary.envelope_digest, summary.scrub_counts);
@@ -6572,7 +6591,19 @@ fn probe_credential(req: &Request) -> Result<(u16, String, std::path::PathBuf), 
             // treated as absent, because falling through to the
             // environment would answer about a path the caller did not ask
             // about.
-            Some(dir) if !dir.is_empty() => Some(std::path::PathBuf::from(dir)),
+            Some(dir) if !dir.is_empty() => {
+                // Relative would resolve against the daemon's working
+                // directory, which no shell controls: the same floor
+                // `set_settings` holds a saved declaration to.
+                if !std::path::Path::new(dir).is_absolute() {
+                    return Err(Box::new(Response::err(
+                        req.id,
+                        ERR_BAD_PARAMS,
+                        super::settings::ERR_ROUTING_TOKEN_DIR_MUST_BE_ABSOLUTE,
+                    )));
+                }
+                Some(std::path::PathBuf::from(dir))
+            }
             _ => {
                 return Err(Box::new(Response::err(
                     req.id,
@@ -7313,7 +7344,7 @@ mod tests {
         s.queue
             .lock()
             .unwrap()
-            .record_previewed_envelope(id, "witness-sha256:missing", None);
+            .record_previewed_envelope(id, "witness-sha256:missing", None, None);
         assert!(open_preview(&s, id).await.is_err());
         assert!(resolve_preview_envelope(&s, id).await.is_err());
         let response = handle_request_async(
@@ -9138,7 +9169,7 @@ mod tests {
         {
             let mut queue = s.queue.lock().unwrap();
             for id in ids {
-                assert!(queue.record_previewed_envelope(id, "sha256:pinned", None));
+                assert!(queue.record_previewed_envelope(id, "sha256:pinned", None, None));
             }
         }
 
@@ -9510,8 +9541,13 @@ mod tests {
         let armed_and_previewed = seed_entry(&s, armed_project);
         {
             let mut queue = s.queue.lock().unwrap();
-            assert!(queue.record_previewed_envelope(scrubbed_and_undecided, "sha256:a", None));
-            assert!(queue.record_previewed_envelope(armed_and_previewed, "sha256:b", None));
+            assert!(queue.record_previewed_envelope(
+                scrubbed_and_undecided,
+                "sha256:a",
+                None,
+                None
+            ));
+            assert!(queue.record_previewed_envelope(armed_and_previewed, "sha256:b", None, None));
         }
 
         let result = handle_request(&s, &req("list_projects", serde_json::json!({})))
@@ -10934,6 +10970,55 @@ mod tests {
         assert!(body.contains("secret-client-project"));
     }
 
+    /// K9: `list_pending` carries the queued title, and says `null` rather
+    /// than omitting the field for an entry that has none.
+    #[test]
+    fn entry_value_reports_the_queued_title() {
+        use crate::daemon::queue::{QueueEntry, entry_id_for};
+        let e = QueueEntry {
+            entry_id: entry_id_for("sha256:aa"),
+            session_hash: "sha256:aa".into(),
+            source: "claude-code".into(),
+            project_key: "/Users/z/code/proj".into(),
+            project_label: "proj".into(),
+            path: "/Users/z/.claude/projects/x/s.jsonl".into(),
+            size_bytes: 10,
+            discovered_at: Utc::now(),
+            title: Some("add a rate limiter".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(entry_value(&e, None)["title"], "add a rate limiter");
+        let untitled = QueueEntry { title: None, ..e };
+        assert!(entry_value(&untitled, None)["title"].is_null());
+    }
+
+    /// K10: `list_pending` carries the pinned preview's measured size, and
+    /// says `null` rather than omitting the field for an entry with none
+    /// pinned.
+    #[test]
+    fn entry_value_reports_the_would_send_bytes_of_a_pinned_preview() {
+        use crate::daemon::queue::{QueueEntry, entry_id_for};
+        let e = QueueEntry {
+            entry_id: entry_id_for("sha256:aa"),
+            session_hash: "sha256:aa".into(),
+            source: "claude-code".into(),
+            project_key: "/Users/z/code/proj".into(),
+            project_label: "proj".into(),
+            path: "/Users/z/.claude/projects/x/s.jsonl".into(),
+            size_bytes: 10,
+            discovered_at: Utc::now(),
+            previewed_envelope_digest: Some("sha256:redacted".to_string()),
+            would_send_bytes: Some(4096),
+            ..Default::default()
+        };
+        assert_eq!(entry_value(&e, None)["would_send_bytes"], 4096);
+        let unpinned = QueueEntry {
+            would_send_bytes: None,
+            ..e
+        };
+        assert!(entry_value(&unpinned, None)["would_send_bytes"].is_null());
+    }
+
     #[test]
     fn the_upgrade_retires_entries_that_stand_for_a_lone_subagent_transcript() {
         // Discovery no longer yields a `subagents/` path, so these entries
@@ -11402,8 +11487,10 @@ mod tests {
             explanations: vec![],
             last_refreshed_at: None,
             withdrawn_at: None,
+            revoked_at: None,
             approved_unattended: None,
             approved_verdict: None,
+            uploaded_bytes: None,
         };
         let json = serde_json::to_string(&record).unwrap();
         assert!(
@@ -11489,7 +11576,8 @@ mod tests {
             assert!(queue.record_previewed_envelope(
                 id,
                 &pin,
-                review.artifact.attested_inference().cloned()
+                review.artifact.attested_inference().cloned(),
+                None
             ));
             queue.save(&s.store).unwrap();
         }
@@ -13674,6 +13762,24 @@ mod tests {
             .expect("a non-string token_dir is refused");
         assert_eq!(error.code, ERR_BAD_PARAMS);
         assert_eq!(error.message, "token-dir-invalid");
+        // A relative token_dir would be read against the daemon's working
+        // directory: the probe refuses it with the label `set_settings`
+        // uses, so a shell cannot be told a token was found at a path no
+        // saved declaration could ever name.
+        let req = Request {
+            id: 7,
+            method: "probe_routing".to_string(),
+            params: serde_json::json!({"port": 8463, "token_dir": "relative/ironwire"}),
+        };
+        let error = handle_probe_routing(&req)
+            .await
+            .error
+            .expect("a relative token_dir is refused");
+        assert_eq!(error.code, ERR_BAD_PARAMS);
+        assert_eq!(
+            error.message,
+            super::super::settings::ERR_ROUTING_TOKEN_DIR_MUST_BE_ABSOLUTE
+        );
         drop(dir);
     }
 

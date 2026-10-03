@@ -1286,17 +1286,28 @@ struct WhatsInItTab: View {
     /// line -- which put `residual_secret_at:events.3.correction` under the
     /// heading "What scrubbing removed", stating the exact opposite of what
     /// happened about a secret that is still in the payload. See
-    /// `RedactionSummary` and `RedactionLabels`.
-    private var rows: (removed: [RedactionSummaryRow], stillPresent: [RedactionSummaryRow]) {
-        RedactionSummary.rows(
+    /// `RedactionSummary` and `RedactionLabels`. The grouping, the split and
+    /// every description are the core's (`tc_redaction_summary_json`); nil
+    /// when its answer cannot be read, and then the panel lists nothing
+    /// rather than claiming nothing matched.
+    private var rows: (removed: [RedactionSummaryRow], stillPresent: [RedactionSummaryRow])? {
+        RedactionSummary.rows(fromJSON: TCCoreCopy.redactionSummaryJSON(
             occurrences: summary.redactions,
             distinct: summary.redactionsDistinct
-        )
+        ))
     }
 
     @ViewBuilder
     private var removedPanel: some View {
-        let rows = self.rows
+        if let rows = self.rows {
+            removedPanel(rows)
+        }
+    }
+
+    @ViewBuilder
+    private func removedPanel(
+        _ rows: (removed: [RedactionSummaryRow], stillPresent: [RedactionSummaryRow])
+    ) -> some View {
         TCSectionHeader(title: "What scrubbing removed")
         if rows.removed.isEmpty {
             nothingMatchedCard

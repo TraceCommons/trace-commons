@@ -295,6 +295,24 @@ tc_handle*  tc_daemon_start(const char* config_dir, char** err);
  */
 tc_handle*  tc_daemon_start_with_settings(const char* config_dir, const char* settings_json, char** err);
 
+/* Every numeric setting's valid range, in the unit set_settings itself
+ * stores and validates -- seconds or bytes, never the minutes, hours or
+ * megabytes a shell's own control is scaled in. A shell draws its
+ * slider/stepper bounds from this rather than hard-coding a second copy of
+ * the numbers daemon::settings::apply_settings_object enforces.
+ *
+ * {"quiescence_secs":{"min":0,"max":14400},
+ *  "approval_hold_secs":{"min":0,"max":300},
+ *  "digest_interval_secs":{"min":3600,"max":86400},
+ *  "max_uploads_per_day":{"min":1,"max":1000},
+ *  "max_bytes_per_day":{"min":1,"max":5368709120}}
+ *
+ * Reads nothing and writes nothing; the same object for every caller on
+ * this build. Returns an owned string; free it with tc_string_free. NULL
+ * only on a caught panic.
+ */
+char*       tc_settings_ranges_json(void);
+
 /* Attach to a daemon ALREADY RUNNING in another process, over its socket.
  *
  * This is the answer to tc_daemon_start reporting "already-running". That
@@ -1098,6 +1116,32 @@ int32_t     tc_contribution_group_control(int64_t pending, int64_t contributable
  * panic.
  */
 char*       tc_contribution_withheld_line(int64_t withheld);
+
+/* How many of pending are actually eligible, clamped to pending.
+ *
+ * Before this existed, a caller that wanted both the eligible count and
+ * tc_contribution_withheld_line's sentence had to derive withheld itself --
+ * pending minus contributable -- which is the exact arithmetic this call and
+ * tc_contribution_group_withheld_count now do once, in the core, instead of
+ * in each shell's own language.
+ *
+ * Same pending/contributable convention as tc_contribution_group_control:
+ * contributable is a list_projects row's contributable_count, or any
+ * NEGATIVE value for an ABSENT one -- never zero, which means the question
+ * applies and nothing qualifies.
+ *
+ * pending is read as 0 on a negative value, which no honest caller produces;
+ * a negative contributable is read as absent, per the convention above.
+ */
+int64_t     tc_contribution_group_eligible_count(int64_t pending, int64_t contributable);
+
+/* pending minus tc_contribution_group_eligible_count's answer, never
+ * negative. The exact value tc_contribution_withheld_line expects.
+ *
+ * Same pending/contributable convention as
+ * tc_contribution_group_eligible_count.
+ */
+int64_t     tc_contribution_group_withheld_count(int64_t pending, int64_t contributable);
 
 /* K9 (#1118): the toast after a submit -- "Sent. N left to decide - upload
  * limit X of Y", the WYSIWYG design's Flow 2/3 example.
@@ -2288,6 +2332,124 @@ void        tc_string_free(char*);
  * the returned pointer.
  */
 const char* tc_last_error(void);
+
+/* ------------------------------------------------------------------------
+ * K3 (#1173): the copy commands that reached only Tauri. Each is the C ABI
+ * route to a sentence, or a table of them, the contributor core already
+ * assembles; none chooses or writes a word of its own. Every returned char*
+ * is owned; free it with tc_string_free.
+ * ------------------------------------------------------------------------ */
+
+/* The line for secrets found and left in what would be sent
+ * (preview_copy::residual_secret_line). count is detection SITES, never
+ * secrets. sites_json, if non-null, is a JSON array of the sites' schema
+ * paths, named in the sentence; NULL or anything else names none.
+ * NULL only on a caught panic.
+ */
+char*       tc_residual_secret_line_text(uint32_t count, const char* sites_json);
+
+/* The preview's removed-summary panel (redaction_summary::summary_copy):
+ * {"removed": [row], "still_present": [row]}, each row {family, display,
+ * description, occurrences, distinct, detail}. redactions_json and
+ * distinct_json are the preview summary's redaction_counts and
+ * redactions_distinct objects passed through; a NULL or unparseable
+ * distinct_json reads as no distinct counts. Which rows are removals and
+ * which are still present is the core's choice. NULL for an unreadable
+ * redactions_json and on a caught panic.
+ */
+char*       tc_redaction_summary_json(const char* redactions_json, const char* distinct_json);
+
+/* The ignore-project control and confirmation (project_copy::
+ * ignore_project_copy): {title, body, button, tooltip}. pending is the count
+ * the confirmation names; negative clamps to 0. NULL for an unreadable
+ * project_label and on a caught panic.
+ */
+char*       tc_project_ignore_copy_json(const char* project_label, int64_t pending);
+
+/* What is said after an ignore when the daemon's purged count differs from
+ * the promised one (project_copy::ignore_project_reconciled). The EMPTY
+ * STRING when they agree. Negative values clamp to 0. NULL for an unreadable
+ * project_label and on a caught panic.
+ */
+char*       tc_project_ignore_reconciled_text(const char* project_label, int64_t promised, int64_t purged);
+
+/* The arming offer and confirmation (project_copy::arming_offer_copy):
+ * {evidence, question, confirm, decline, body, body_with_backlog, customize}.
+ * count is arming_suggestion's contributed_count; a confirmation shown from
+ * Settings passes 0 and does not render evidence. NULL for an unreadable
+ * project_label and on a caught panic.
+ */
+char*       tc_arming_offer_copy_json(const char* project_label, uint32_t count);
+
+/* The legacy invite migration offer (consent_copy::legacy_migration_offer),
+ * as LegacyMigrationOfferCopy's fields. NULL only on a caught panic.
+ */
+char*       tc_legacy_migration_offer_json(void);
+
+/* The sentence for a refused legacy_invite_migrate, from the IPC error's
+ * label (consent_copy::legacy_migration_refusal_line). An unknown, NULL or
+ * non-UTF-8 label gets the core's fallback. NULL only on a caught panic.
+ */
+char*       tc_legacy_migration_refusal_text(const char* label);
+
+/* The connecting-inference step's sentences (K12,
+ * consent_copy::inference_connection_copy). NULL only on a caught panic.
+ */
+char*       tc_inference_connection_copy_json(void);
+
+/* The Flow 1 grant screens' sentences for the configuration in config_dir
+ * (consent_copy::automatic_contribution_copy). The core chooses the
+ * disclosure: exactly one of patterns_only and model_scrubbed is present.
+ * NULL for an unreadable config_dir or configuration and on a caught panic.
+ */
+char*       tc_automatic_contribution_copy_json(const char* config_dir);
+
+/* The quit prompt true for the process holding handle (quit_copy::
+ * quit_prompt): {role, title, body, confirm, cancel}. The role is read off
+ * the handle: hosting for a daemon run in this process, attached for one
+ * another process runs, unavailable for NULL, a handle that is not live, or
+ * a stopped daemon. NULL only on a caught panic.
+ */
+char*       tc_quit_prompt_json(const tc_handle* handle);
+
+/* The withdrawal confirmation for a trace whose reach this machine cannot
+ * know (withdraw::confirmation_prompt_unknown), paragraphs separated by a
+ * blank line. NULL only on a caught panic.
+ */
+char*       tc_withdrawal_confirmation_prompt_text(void);
+
+/* The extra privacy scan's words (privacy_scan_copy::privacy_scan_copy), for
+ * onboarding's scan screen and the near-ai-notice recovery prompt. NULL only
+ * on a caught panic.
+ */
+char*       tc_privacy_scan_copy_json(void);
+
+/* The "keychain" block of the private-AI credential status
+ * (DaemonSettings::keychain_status_json): what the credential store at
+ * config_dir holds, as labels and booleans only -- never the inference key,
+ * never the session's refresh token. MAY PROMPT FOR OS STORAGE; call off a
+ * blocking worker. NULL for a NULL or non-UTF-8 config_dir, and on a caught
+ * panic; an unreadable config_dir or an unloadable settings document answers
+ * the unavailable fallback instead of NULL.
+ */
+char*       tc_private_ai_keychain_status_json(const char* config_dir);
+
+/* Parse one deep link or launch argument (deep_link::parse_deep_link): a
+ * JSON object naming exactly one action -- enroll, public_run, credential,
+ * or navigate. PARSING ONLY: never opens anything, never stores anything.
+ * NULL and *err = "deep-link-invalid" for anything this build does not
+ * recognise, including a malformed link and a NULL or non-UTF-8 url.
+ */
+char*       tc_parse_deep_link_json(const char* url, char** err);
+
+/* Whether url is one of the fixed external destinations the app may hand to
+ * the OS to open (external_url::is_allowed): the near.ai credits dashboard,
+ * a tracecommons.ai public run, the CI fixture commit on GitHub, and a
+ * loopback OAuth callback. The list is exactly Tauri's open_external_url
+ * allowlist, unchanged. 1 allowed, 0 refused -- including a NULL or
+ * non-UTF-8 url, and on a caught panic.
+ */
+int32_t     tc_external_url_is_allowed(const char* url);
 
 /*
  * Can this process reach the Cloud credential store?

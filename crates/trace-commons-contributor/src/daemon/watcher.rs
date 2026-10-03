@@ -1360,6 +1360,9 @@ fn visit_session(
         // is no shown artifact to pin to. The input fingerprint is
         // the guard that applies to them.
         previewed_envelope_digest: None,
+        // Same reason as `previewed_envelope_digest` immediately above:
+        // nothing was previewed, so there is no measured size to report.
+        would_send_bytes: None,
         // No post-approval hold on a standing opt-in: it is a
         // decision taken in advance, separately audited, with no
         // click to take back and no client counting down for it.
@@ -1368,6 +1371,9 @@ fn visit_session(
         subagent_count: transcript.subagent_count,
         subagents_dropped: transcript.subagents_dropped,
         shape: Some(super::queue::SessionShape::of(&transcript)),
+        // K9: built from the same raw transcript, at the same moment, for
+        // the same reason -- see `queue::title_of`.
+        title: super::queue::title_of(&transcript),
         // The observation this entry is made of, so the next poll
         // can recognize it without reading the group again. See
         // `QueueEntry::observed_modified_at`.
@@ -3882,7 +3888,12 @@ mod tests {
         crate::daemon::approved_envelope::save(&f.shared.store, entry_id, &envelope).unwrap();
         {
             let mut queue = f.shared.queue.lock().unwrap();
-            assert!(queue.record_previewed_envelope(entry_id, &summary.envelope_digest, None));
+            assert!(queue.record_previewed_envelope(
+                entry_id,
+                &summary.envelope_digest,
+                None,
+                Some(summary.would_send_bytes as u64)
+            ));
         }
         assert!(
             crate::daemon::approved_envelope::load(&f.shared.store, entry_id)
@@ -4276,6 +4287,59 @@ mod tests {
             .unwrap();
         assert_eq!(row.detail.as_deref(), Some("from-now"));
         assert_eq!(row.project_label.as_deref(), Some("proj"));
+    }
+
+    /// K6: a full pass can move `status.decisions_owed` with no queue change.
+    /// Until a pass records what was on disk for an arming from now, the
+    /// hold covers every session in the folder, so a waiting entry there
+    /// counts; the record releases one that was not on disk, and nothing in
+    /// the queue moves. The pass must say so with `status_changed`, or a
+    /// shell that refreshes status only on `queue_changed` keeps the old
+    /// badge.
+    #[tokio::test]
+    async fn a_full_pass_that_moves_decisions_owed_publishes_status_changed() {
+        let f = WatcherFixture::new();
+        let key = "/w/k6-pass";
+        let now = at("2030-01-01T00:00:00Z");
+        {
+            let mut policy = f.shared.policy.lock().unwrap();
+            policy.set_mode(key, ProjectMode::AutoUpload, now).unwrap();
+            policy.arm_from_now(key, now);
+        }
+        f.shared
+            .queue
+            .lock()
+            .unwrap()
+            .upsert(
+                QueueEntry {
+                    entry_id: uuid::Uuid::new_v4(),
+                    session_hash: "sha256:k6-pass".to_string(),
+                    source: "claude-code".to_string(),
+                    project_key: key.to_string(),
+                    project_label: "k6-pass".to_string(),
+                    // Not on disk, so no source lists it and the pass never
+                    // visits it: only the record can move it.
+                    path: PathBuf::from("/nowhere/k6-pass.jsonl"),
+                    size_bytes: 1,
+                    discovered_at: now,
+                    ..Default::default()
+                },
+                500,
+            )
+            .unwrap();
+        assert_eq!(f.shared.decisions_owed_value(), 1, "nothing recorded yet");
+        let states_before = f.states();
+        let mut rx = f.shared.events.subscribe();
+
+        tick(&f.shared, now).await.unwrap();
+
+        assert_eq!(f.states(), states_before, "the queue did not move");
+        assert_eq!(f.shared.decisions_owed_value(), 0, "the record released it");
+        let mut saw_status = false;
+        while let Ok(event) = rx.try_recv() {
+            saw_status |= event.event == super::super::ipc::EVENT_STATUS_CHANGED;
+        }
+        assert!(saw_status, "the badge moved; status_changed must say so");
     }
 
     /// `include_backlog: true` is the old arming: the backlog, queued or not,
