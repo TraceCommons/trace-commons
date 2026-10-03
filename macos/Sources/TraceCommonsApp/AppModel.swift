@@ -108,6 +108,12 @@ final class AppModel: ObservableObject {
     /// -- a raw stat and the cap -- never a would-send estimate.
     @Published private(set) var tooLarge: [String: PreviewTooLarge] = [:]
     @Published private(set) var history: [HistoryRecord] = []
+    /// Whether the daemon has answered `list_pending` (or sent a snapshot)
+    /// and `list_history`. Until then `pending` and `history` are
+    /// placeholders, and an empty one is not "none"; a failed read leaves
+    /// them false.
+    @Published private(set) var queueAnswered = false
+    @Published private(set) var historyAnswered = false
     @Published private(set) var rollup: HistoryRollup?
     @Published private(set) var projects: [ProjectRow] = []
     /// The one project the daemon suggests arming, or nil. Refreshed
@@ -1258,6 +1264,7 @@ final class AppModel: ObservableObject {
     func refreshHistory() {
         perform("list_history", work: { try $0.listHistory() }) {
             self.publishIfChanged(\.history, $0)
+            self.publishIfChanged(\.historyAnswered, true)
         }
         perform("history_rollup", work: { try $0.historyRollup() }) {
             self.publishIfChanged(\.rollup, $0)
@@ -1928,6 +1935,7 @@ final class AppModel: ObservableObject {
     func applyPendingUpdate(_ entries: [QueueEntry]) {
         let previousIDs = Set(pending.map(\.entryID))
         publishIfChanged(\.pending, entries)
+        publishIfChanged(\.queueAnswered, true)
         let currentIDs = Set(entries.map(\.entryID))
         let vanished = previousIDs.subtracting(currentIDs)
         if !vanished.isEmpty {

@@ -375,6 +375,20 @@ final class TracesParityTests: XCTestCase {
         // No control without words: an absent core word falls back to an
         // existing one, never to an empty title.
         XCTAssertFalse(offers.contains("?? \"\""), "a control would be wordless without the core")
+        // An unread list is not an empty one: the certificate list and the
+        // first-contribution note wait for the daemon's answer, and draw
+        // nothing before it (standing rule: fail closed).
+        let flatOffers = offers.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        for needle in [
+            "if model.queueAnswered { CertificateSection(entries: model.awaitingDecision) }",
+            "if model.historyAnswered, model.queueAnswered, model.history.isEmpty, "
+                + "let copy = model.witnessCopy?.onboarding { "
+                + "FirstContributionGlassNote(copy: copy, reviewing: !model.awaitingDecision.isEmpty) }",
+        ] {
+            XCTAssertTrue(flatOffers.contains(needle), "TracesOffers.swift lacks \(needle)")
+        }
+        XCTAssertEqual(offers.components(separatedBy: "CertificateSection(").count - 1, 1)
+        XCTAssertEqual(offers.components(separatedBy: "FirstContributionGlassNote(copy:").count - 1, 1)
         try LegacySymbols.assertClean("Views/Monitor/TracesOffers.swift")
         XCTAssertTrue(GlassSurfaceRulesTests.files.contains("Views/Monitor/TracesOffers.swift"))
 
