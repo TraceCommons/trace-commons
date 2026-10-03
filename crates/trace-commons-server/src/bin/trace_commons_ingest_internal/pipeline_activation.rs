@@ -95,7 +95,8 @@ pub(crate) const PIPELINE_ROUTING_STORE_MISSING_LABEL: &str = "pipeline_routing_
 const BUNDLE_PACKAGE_MISSING_LABEL: &str = "bundle_package_missing";
 
 /// The most attestations one request may carry: a full qualification set is
-/// one for each of the 19 required checks.
+/// one for each of the 22 entries of `PROMOTION_REQUIRED_CHECKS` (the 19
+/// checks that `qualify` produces and the three promotion-only checks).
 pub(crate) const PIPELINE_MAX_ATTESTATIONS: usize = 64;
 /// The most routing events `GET /v1/admin/pipeline/routing` answers, newest
 /// first.

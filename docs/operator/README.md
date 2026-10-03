@@ -30,7 +30,7 @@ the link.
 | Cutting the pilot over from `5f239be4`/V74 to `main`/V91 (go/no-go, pre-checks, rollback, withdrawal tombstone repair) | [`./pilot-cutover-2026-09.md`](./pilot-cutover-2026-09.md) |
 | Running a versioned pipeline corpus locally | [`./pipeline-lab.md`](./pipeline-lab.md) |
 | Qualifying a versioned pipeline candidate locally | [`./pipeline-qualification.md`](./pipeline-qualification.md) |
-| Activating or containing the versioned pipeline (design stage) | [`./pipeline-activation.md`](./pipeline-activation.md) |
+| Activating, rolling back, or containing the versioned pipeline for a tenant, suspending a policy, or reading the legacy drain report | [`./pipeline-activation.md`](./pipeline-activation.md) |
 | Verifying the contributor apps before tagging a release | [`./client-end-to-end-verification.md`](./client-end-to-end-verification.md) |
 | Running the model bake-off | [`./calibration.md`](./calibration.md) (Phase 0) + [`./agent-traces-bakeoff-run.md`](./agent-traces-bakeoff-run.md) |
 | Building or admitting a bake-off corpus | [`./corpus-validity-battery.md`](./corpus-validity-battery.md) |
@@ -200,16 +200,19 @@ Every runbook in this directory, with a one-line description.
   env-var matrix, common sequences, defense-in-depth notes, and an
   error-variant troubleshooting table.
 - [`./participant-rewards.md`](./participant-rewards.md): publish readable offers, provision account access, and inspect participant reservations and history.
-- [`./pipeline-activation.md`](./pipeline-activation.md) — design stage:
-  activation, containment, rollback, and legacy-writer retirement for
-  qualified bundles.
+- [`./pipeline-activation.md`](./pipeline-activation.md) — the pipeline's
+  scope lists and routing row, the nine `/v1/admin/pipeline/` routes
+  (qualification, activation, rollback, containment, deactivation, policy
+  suspension, routing, and the legacy drain report), and the rules for the
+  receipt, settlement, payout, withdrawal, and rebuild paths.
 - [`./pipeline-lab.md`](./pipeline-lab.md) — running a versioned pipeline
   corpus locally with `pipeline.py run` and `pipeline.py package`: the HF
   pin, report fields, isolation and privacy, and failure labels.
 - [`./pipeline-qualification.md`](./pipeline-qualification.md) — running
   `pipeline.py qualify` and `restore-drill` locally: what each check does,
-  the result contract, `.local/` outputs, the catalog, and what local
-  evidence is not.
+  the result contract, signing results (`--signing-key`, `keygen`,
+  `revision`), `.local/` outputs, the catalog, the qualification route, and
+  what local evidence is not.
 - [`./pii-classify-policy.md`](./pii-classify-policy.md) — `TRACE_COMMONS_PII_CLASSIFY_POLICY`
   (`all-events` / `prose-only`): the measured ~10x round-trip reduction from
   restricting the NEAR AI privacy filter to prose events, the accepted

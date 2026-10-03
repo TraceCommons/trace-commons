@@ -1,9 +1,12 @@
 # Pipeline activation and migration
 
-> **Status: design stage.** This runbook describes tooling that is not in this
-> repository yet: the activation routes and the `versioned_pipeline_pg` suite.
-> It arrives with the pipeline runtime and qualification changes, and its
-> commands can change before then. Do not follow it on a deployment.
+> **Status: activation is in the repository, and production routing is off.**
+> The routing record, the nine admin routes, containment, rollback, policy
+> suspension, and the legacy drain report are built and tested. No tenant is
+> routed to the pipeline until an operator activates it. A deployment can
+> activate a tenant only with a full set of signed check results, which this
+> repository's local tooling cannot produce on its own (see "Current
+> completion").
 
 Pipeline activation routes the qualified pipeline for new submissions. Retained
 legacy records stay readable. The switch assigns each receipt to one
@@ -11,33 +14,43 @@ implementation.
 
 The pipeline now has these properties:
 
-- A receipt ownership record selects the legacy executor or the pipeline.
-- A retry of a pre-switch receipt returns the original operation.
-- It does not start a new pipeline run.
-- Unique ledger source keys prevent both paths from awarding the same receipt.
-- Tenant routing is an explicit record. Timestamps do not select the bundle.
-- Activation and expansion require current drills, readiness, corpus
-  evidence, credit reconciliation, index checks, and invalidation checks.
-- Rollback selects an earlier qualified bundle for later runs only.
-- An unsafe bound policy must be suspended. The run keeps its package.
-- First-rollout containment stops new pipeline receipts. Workers and
-  packages remain available.
-- Legacy writers disable only after their pending owned work completes.
+- A committed routing row decides where a tenant's new uploads go: the legacy
+  path, the pipeline, or nowhere (contained). The two tenant lists are the
+  scope of a process, and a row cannot widen it.
+- Each receipt has one permanent owner, the legacy path or the pipeline. A
+  retry goes to its first owner, whatever the routing row says now.
+  Timestamps are audit metadata: they select no bundle and no owner.
+- Activation needs a qualification of the bundle on the deployed code
+  revision, a full set of signed check results, the deployed revision, the
+  dependency profile of the process, four runnable policies, and the tenant's
+  readiness. The server builds these inputs itself, from the verified signed
+  results and its own state. A request body cannot carry a decision, a
+  readiness, a dependency profile, or a revision.
+- Rollback selects an earlier bundle that was active for the tenant, for later
+  runs only. It runs the same gate as an activation, without the readiness
+  check.
+- Containment refuses a tenant's new uploads with `503` and keeps the worker:
+  runs in flight, invalidations, and payouts still finish.
+- A suspended policy keeps its run. The run waits, uncharged, under the same
+  bundle, and goes on after the resume.
+- The legacy drain report shows what the legacy path still owes a tenant. It
+  disables nothing: this release retires no legacy writer.
 - Destructive schema cleanup is not part of this phase.
 
-## Pipeline receipt routing before activation
+## Scope lists and the routing row
 
-`TRACE_COMMONS_PIPELINE_RECEIPTS_TENANT_IDS` lists the tenants whose new
-receipts go to the pipeline. It has an effect only when the ingest build
-injects a pipeline runtime. The repository binary injects none.
+Two environment variables list tenants. They are the scope of one process.
+Both need a pipeline runtime in the build, and the repository binary injects
+none.
 
-- Unset or empty (the default): every receipt takes the legacy path.
-- Tenants listed with a runtime: those tenants' receipts go to the pipeline.
-- Tenants listed without a runtime: ingest refuses to start with
-  `pipeline_receipts_configured_without_runtime`.
+`TRACE_COMMONS_PIPELINE_RECEIPTS_TENANT_IDS` is the receipts list: the tenants
+whose new uploads this process may route to the pipeline. Unset or empty (the
+default), this process routes no upload to the pipeline. A tenant listed
+without a runtime: ingest refuses to start with
+`pipeline_receipts_configured_without_runtime`.
 
 `TRACE_COMMONS_PIPELINE_DRAIN_TENANT_IDS` lists tenants whose pipeline work
-the worker still processes while none of their receipts is routed to the
+the worker still processes while none of their new receipts is routed to the
 pipeline: runs in flight, withdrawal follow-ups, index invalidations, NEAR
 payouts and confirmations, and the staged-receipt sweep. The worker drains
 the union of the two lists. The drain list also needs a runtime: without
@@ -60,11 +73,93 @@ principal with `409` as `main` refuses one, and a tenant on neither list, or
 a build with no pipeline runtime, answers `409`
 (`submission_owned_by_pipeline_run`).
 
-To roll a tenant back from the pipeline, move it from
-`TRACE_COMMONS_PIPELINE_RECEIPTS_TENANT_IDS` to
-`TRACE_COMMONS_PIPELINE_DRAIN_TENANT_IDS` and restart ingest. Its new
-receipts take the legacy path at once, and its existing pipeline work is
-finished. Keep it on the drain list until the operational summary shows no
+The lists do not decide where an upload goes. The tenant's routing row
+decides, inside the scope. The row (`pipeline_tenant_routing`, one for each
+tenant) holds one state: `legacy`, `pipeline`, or `contained`. A tenant has no
+row until an operator acts on it. The routes in "Activate, roll back, contain,
+deactivate" write it. A process reads the row once for each new upload:
+
+| Routing row | On the receipts list | A new upload | Answer |
+|---|---|---|---|
+| none | no | takes the legacy path | none |
+| none | yes | takes the legacy path (see the test-only rule below) | none |
+| `legacy` | either | takes the legacy path | none |
+| `pipeline` | yes | goes to the pipeline | none |
+| `pipeline` | no | is refused, and nothing is stored | `503` `pipeline_tenant_not_served` |
+| `contained` | either | is refused, and nothing is stored | `503` `pipeline_receipt_intake_contained` |
+| cannot be read | either | is refused | `503` `pipeline_routing_unavailable` |
+
+The last row also covers a build with a runtime and no routing store. Ingest
+never falls back to the legacy path for a row it cannot read. A build with no
+pipeline runtime (the repository binary) reads no row and sends every upload
+to the legacy path.
+
+A row cannot widen the scope: a tenant whose row says `pipeline` and that is
+not on this process's receipts list is refused, not sent to the legacy path.
+A tenant whose row says `contained` is refused whatever the lists say. This
+includes a tenant that has no pipeline work: `contain` stops every new upload
+of the tenant on each process that holds a runtime.
+
+Before its first write the legacy path claims the submission id. The claim is
+an ownership row with the owner `legacy` (`pipeline_receipt_ownership`),
+made in one transaction that first checks that no pipeline run has the id. The
+claim happens for a tenant on either list or with a routing row. A tenant
+with no row that is on neither list claims nothing. The pipeline commits its
+own ownership row (owner `pipeline`) in its receipt transaction, with the run.
+So each submission id has one owner for good:
+
+- A retry of an existing receipt is answered before the route is decided. It
+  goes to its first owner, whatever the row says now, and adds no routing read.
+- An id that the legacy path claimed stays legacy, even when its first
+  attempt failed before it wrote a record: a later upload of it goes to the
+  legacy path, whatever the row says.
+- An id that a pipeline run owns is never taken by the legacy path. The
+  pipeline's library refuses a second idempotency key for it with `submission
+  identity is already bound to another receipt`. Ingest uses the submission id
+  as the key, so over HTTP the same upload replays instead.
+
+The route is decided after the checks that need no store (authentication, the
+submit rate limit, envelope validation, the admission reservation, the
+tenant-access check, and the check for a retry), and before the server
+re-scrub, the tombstone check, and the submission quota. A refusal therefore
+costs no classifier call. It releases the admission attempt: the attempt is not
+left processing, so a retry is not `409` in progress. A pipeline upload still
+passes the tombstone and quota checks before the pipeline takes it. A tenant
+that is contained or not served gets its `503` before a tombstone or quota
+refusal. An upload that carries anchored evidence has one more limit: a
+released reservation can be retried only while its evidence is unexpired. A
+containment that lasts longer than the evidence stays valid makes that
+submission id unusable on that path (fresh evidence under the same id is a
+conflict). The account-trust path relaxes the time limit for an existing
+binding.
+
+The test-only rule. `TRACE_COMMONS_PIPELINE_ALLOW_TEST_DEPENDENCIES` also
+sends a tenant on the receipts list that has no routing row to the pipeline.
+That is for tests and local development only. Production must never set it.
+Setting it together with `TRACE_COMMONS_PIPELINE_RUNTIME_REQUIRED` refuses
+startup (`pipeline_test_dependencies_not_allowed_when_required`; the routing
+setting has its own refusal for any other caller of the assembly,
+`pipeline_unqualified_routing_not_allowed_when_required`). An assembly whose
+service does not hold the same setting is refused with
+`pipeline_runtime_unqualified_routing_mismatch`.
+
+The cost. With a runtime, each new upload reads the routing row once, in a
+short transaction with one query, by primary key. Each new upload that takes
+the legacy path of a tenant in scope, or with a row, adds the claim: four
+statements in one transaction (the run check, the tenant upsert, the
+ownership insert, and the owner read). A new upload of a tenant on neither
+list with no row adds only the read. A retry adds neither. A pipeline receipt's
+own transactions then check the routing and the ownership again, because the
+receipt transaction is the authority on a race: a row that changed after the
+decision is answered by what the transaction finds.
+
+To send a tenant back to the legacy path, deactivate it first
+(`POST /v1/admin/pipeline/deactivate`): its row says `legacy`, and its new
+uploads take the legacy path at once. Then move it from the receipts list to
+the drain list and restart ingest. Do not remove a tenant from the receipts
+list while its row says `pipeline`: every new upload of the tenant is then
+refused with `503` `pipeline_tenant_not_served`, and none goes to the legacy
+path. Keep the tenant on the drain list until the operational summary shows no
 pending runs, invalidations, or payouts for it, and for as long as its
 contributors need their pipeline submissions' statuses: the status route
 (`POST /v1/contributors/me/submission-status`) reads the pipeline's view
@@ -75,9 +170,26 @@ and payouts wait, unprocessed, until the tenant is listed again. Its status
 answers are `main`'s alone: a submission only the pipeline recorded is not
 described, and a document `main` holds carries no pipeline block.
 
-Activation replaces this list with qualified routing.
+Run one build and one configuration on every replica of ingest:
 
-The pipeline's own tables (V92 to V95 and V105 to V108) grant the ingest runtime group,
+- A replica whose build has no pipeline runtime reads no routing row. It
+  sends every new upload of a tenant to the legacy path, a tenant whose row
+  says `pipeline` or `contained` included. Do not mix builds with and without
+  a runtime while any tenant has a routing row.
+- A replica whose receipts list lacks a tenant whose row says `pipeline`
+  refuses that tenant's uploads with `503` `pipeline_tenant_not_served`. While
+  a list change rolls through the replicas, some uploads are refused until
+  every replica holds the new list.
+
+`GET /v1/admin/config-status` reports the receipts list's size as
+`tenant_rollout_gate_counts.pipeline_receipts` (a count), and the rollback
+drill (`POST /v1/admin/rollback-drill`) names `pipeline_receipts` in
+`active_rollout_flags` for a tenant on the list. Both now mean "in scope". They
+no longer mean "routed to the pipeline": a tenant on the list is routed only
+while its row says `pipeline`. Read the routing row (`GET
+/v1/admin/pipeline/routing`) for that.
+
+The pipeline's own tables (V92 to V95 and V105 to V113) grant the ingest runtime group,
 `trace_ingest_runtime`, exactly what the pipeline reads and writes there. The
 pipeline also reads and writes tables from V62 and earlier -- submissions,
 object refs, derived records, tombstones, withdrawals, credit holds, the
@@ -91,7 +203,485 @@ that belongs to a source session, both withdrawal routes also need the
 ingest login to be a member of `trace_account_admission_runtime`, as
 `main`'s withdrawal already does ([deployment.md](deployment.md), "V92 to
 V95: the pipeline tables", "V105 and V106: review, invalidation, and export
-tables", and "V107 and V108: qualification and attempt artifact tables").
+tables", "V107 and V108: qualification and attempt artifact tables", and "V110
+to V113: activation, policy interventions, the activation gate, and the
+rebuild fence").
+
+## Activate, roll back, contain, deactivate
+
+These nine routes qualify a bundle and move a tenant between the legacy path
+and the pipeline: eight paths, and `policy-interventions` has a `GET` and a
+`POST`. (The operational summary, the forensic trace, and the index requeue
+route sit under the same prefix. They are older.) Each of the nine is under
+`/v1/admin/pipeline/` and needs an admin credential of the tenant it acts on
+(`403` `admin token required` otherwise). The tenant and the actor come from the
+credential alone. No body names a tenant, and each body refuses any field it
+does not list (`422` `pipeline_request_invalid`). A body is at most 1 MiB
+(`413` `pipeline_request_too_large`). A `reason_code` is a label: lowercase
+letters, digits, and `_`, 1 to 64 characters. A bundle id is `sha256:` and 64
+lowercase hex digits; a malformed one is `422`.
+
+| Route | Body | Answer |
+|---|---|---|
+| `POST /v1/admin/pipeline/qualifications` | `{signed_package, attestations}` | the qualification record: `bundle_id`, `package_hash`, `signing_key_id`, `signature_hash`, `metadata` (six digests), `qualified_at` |
+| `POST /v1/admin/pipeline/activate` | `{bundle_id, reason_code, attestations}` | the routing row |
+| `POST /v1/admin/pipeline/rollback` | `{bundle_id, reason_code, attestations}` | the routing row |
+| `POST /v1/admin/pipeline/contain` | `{reason_code}` | the routing row |
+| `POST /v1/admin/pipeline/deactivate` | `{reason_code}` | the routing row |
+| `POST /v1/admin/pipeline/policy-interventions` | `{bundle_id, phase, action, reason_code}` | the intervention record ("Suspend a policy") |
+| `GET /v1/admin/pipeline/policy-interventions?bundle_id=...` | none | `{interventions: [...]}`, oldest first |
+| `GET /v1/admin/pipeline/routing` | none | `{routing_state, active_bundle_id, events}`: `routing_state` is null for a tenant with no row, and `events` are the newest 100, newest first, read in one snapshot |
+| `GET /v1/admin/pipeline/legacy-drain` | none | the drain report ("Legacy drain report") |
+
+The routing row has the fields `routing_state`, `activation_record_id`,
+`actor_principal_ref`, `reason_code`, `evidence_hash`, and `recorded_at`.
+`attestations` are signed check results (see
+[pipeline-qualification.md](pipeline-qualification.md), "Signed check
+results"): at most 64 in one request (`413` `pipeline_evidence_too_large`).
+
+Every route except the two read routes `routing` and `legacy-drain` needs a
+pipeline runtime in the build (`404` `pipeline runtime not configured`
+without one). A route that reads or writes routing needs the routing store,
+which exists only with the database mirror (`404`
+`pipeline_routing_store_missing`).
+
+What each action does:
+
+- `qualifications` records the signed package's qualification for the tenant on
+  this build's code revision, and registers the package for the tenant (the
+  package and its four policy rows, each runnable; a package that is already
+  registered keeps its rows as they are, so a suspended policy stays
+  suspended). It changes no routing.
+  The rules are in [pipeline-qualification.md](pipeline-qualification.md).
+- `activate` routes the tenant's new uploads to the pipeline with the bundle,
+  from any state (no row, `legacy`, `pipeline`, or `contained`). It switches the
+  tenant's active bundle for later runs. A run that exists keeps its bundle.
+- `rollback` routes a tenant whose row says `pipeline` or `contained` to the
+  pipeline with an earlier bundle: one that an `activate` or a `rollback` of
+  this tenant selected before, and that is not the active bundle now. A tenant
+  routed to `legacy`, or with no row, is `409` `activation_state_invalid`. A
+  bundle that was never active for the tenant, or is active now, is `409`
+  `earlier_qualified_bundle_required`. A rollback runs the gate below with its
+  own fresh evidence, and reads no readiness. A run that exists keeps its
+  bundle.
+- `contain` stops the tenant's new uploads (`503`
+  `pipeline_receipt_intake_contained`, see "Scope lists and the routing row").
+  It works from any state, a tenant with no row included. It changes no bundle,
+  no run, and no receipt that already has an owner. The worker keeps going:
+  runs in flight, invalidations, withdrawals, payouts, and confirmations of a
+  listed tenant still finish, and a retry of an earlier receipt is still
+  answered.
+- `deactivate` returns a tenant that has a row to the legacy path: the row
+  says `legacy`. It changes no bundle. A tenant with no row, or whose row
+  already says `legacy`, is `409` `activation_state_invalid`.
+
+Every action writes one row to `pipeline_activation_events`, in the same
+transaction as the routing row. The event holds the action, the previous and the
+resulting state (the previous state is null for a tenant that had no row), the
+previous and the resulting bundle, the actor's `principal_ref`, the reason, an
+evidence hash, and the time. The rows are immutable (a trigger refuses `UPDATE`
+and a direct `DELETE`). They are the audit record of a routing change: an action
+adds no row to `main`'s audit log. Each action also logs one line, `pipeline
+admin action recorded`, with the tenant's storage reference, an action label,
+and the evidence hash. Each `GET` route appends one control-plane read audit
+row (the surfaces `pipeline_routing`, `pipeline_policy_interventions`, and
+`pipeline_legacy_drain`); a refused read appends none. A reason that is not a
+label is `409` `activation_actor_invalid`.
+
+### What the process needs
+
+The two trust stores. `TRACE_COMMONS_PIPELINE_PACKAGE_TRUSTED_KEYS_PATH`
+names a JSON file of the keys whose signatures make a bundle package trusted.
+`TRACE_COMMONS_PIPELINE_CHECK_TRUSTED_KEYS_PATH` names a JSON file of the keys
+whose signatures make a check result count. Each file is a JSON array, not a
+single object, of `{"key_id": "...", "public_key_base64url": "..."}`: at least
+one key, distinct key ids, and each a 32-byte Ed25519 public key.
+`pipeline.py keygen` writes one such object, so wrap it (or several) in
+`[...]`. Both files are read once, at start.
+
+- A variable that is set and whose file is not valid refuses the start with
+  `pipeline_trust_store_invalid`. The message names the variable, never the
+  path.
+- A check key that is also a package key, by public key under any id or by
+  key id, refuses the start with `pipeline_trust_store_overlap`. The two
+  stores are two key pairs on purpose: a key that signs packages does not
+  vouch for check results.
+- A variable that is unset leaves its store empty. `qualifications`,
+  `activate`, and `rollback` then answer `503` `pipeline_trust_store_missing`.
+- The check-signing key is not held by anyone who holds the tenant's admin
+  credential. Who holds it is decided when the deployment is promoted. This
+  repository's CI runs `qualify` unsigned.
+
+The deployed code revision. `TRACE_COMMONS_BUILD_CODE_REVISION_HASH` is a
+build-time variable. Set it when you compile `trace-commons-ingest`, to the
+output of `python3 scripts/operator/pipeline.py revision` for the same tree
+(`sha256:` and 64 hex digits). The tool hashes the path and content of every
+file in the checkout that git tracks or does not ignore, except the top-level
+`.local`, `.vscode`, and `target` directories. So any edit, a document
+included, changes the revision, and the command needs a git checkout. Qualify
+and build from the same tree. A binary built without the variable has no
+revision: `qualifications`, `activate`, and `rollback` answer `409`
+`bundle_runtime_revision_unknown`. Nothing in this repository sets the variable
+for you. The pilot's `cloudbuild.yaml` does not pass it, and its source tree
+has no `.git/`, so a build from it has no revision until you pass one in.
+
+The infrastructure profile. The routes derive it from this process's own
+configuration (the fields `GET /v1/admin/config-status` reports). A request
+cannot change it. Only a production value counts as production, and a value the
+process cannot read is not production. A bundle cannot be qualified or
+activated while any of these holds:
+
+- the database mirror is absent, or its writes are not required
+  (`TRACE_COMMONS_REQUIRE_DB_MIRROR_WRITES`): `authoritative_metadata_not_production`,
+  and `best_effort_database_mirror_enabled` for a mirror that is on and best
+  effort;
+- the artifact store is not a GCS store with object IO (the file-system and the
+  local encrypted stores are development stores): `artifact_store_not_production`;
+- the artifact store allows plaintext compatibility, or none is configured:
+  `plaintext_fallback_enabled`;
+- the key wrapper is not Cloud KMS (a local master key is a development
+  wrapper): `key_wrapper_not_production`;
+- signed tokens are not verified, or managed EdDSA tokens are not required
+  (`TRACE_COMMONS_REQUIRE_MANAGED_EDDSA_SIGNED_TOKENS`):
+  `authentication_not_production`;
+- any static bearer token is configured: `static_bearer_authentication_enabled`;
+- the verifier holds an HS256 key besides EdDSA keys:
+  `hs256_bridge_authentication_enabled`;
+- the pipeline runtime's payout is enabled: `live_external_payout_enabled`.
+
+The bundle's own dependencies add labels of their own:
+`runtime_scorer_not_production`, `runtime_embedder_not_production`,
+`runtime_index_reader_not_production`, `runtime_index_writer_not_production`,
+`runtime_settlement_not_production`, `runtime_authority_not_production`,
+`runtime_privacy_not_production`, `runtime_payout_not_production`, and
+`bundle_configuration_not_qualifiable`. The answer (`409`) is the first label
+that applies, in this order: the bundle's own labels, then the four
+`_not_production` labels (metadata, artifact store, key wrapper,
+authentication), then the flags (plaintext, best-effort mirror, static tokens,
+HS256 bridge, live payout).
+
+### The order of checks
+
+An activation or a rollback passes these steps in order. A refusal at any step
+writes nothing.
+
+1. The request. The body must parse (`422`), the bundle id must have its shape
+   (`422`), and the attestations must number at most 64 (`413`).
+2. The process. Both trust stores must exist (`503`
+   `pipeline_trust_store_missing`), and the build must have a revision (`409`
+   `bundle_runtime_revision_unknown`).
+3. The evidence. Each attestation must verify against the check trust store:
+   `check_attestation_invalid` (the shape is wrong, or a check appears twice),
+   `check_attestation_signature_invalid`, or `check_attestation_signer_untrusted`
+   (all `409`). An attestation for a check outside the 22 required checks is
+   `409` `qualification_evidence_invalid`. The server then evaluates the
+   promotion over the verified results, now.
+4. The package. The tenant must have a stored package of the bundle (`404`
+   `bundle_package_missing`). The startup checks of a tenant bundle (see "Each
+   tenant's bundles at startup") then run on it with this process's
+   configuration: `pipeline_tenant_bundle_dependency_missing`,
+   `pipeline_tenant_bundle_not_runnable`,
+   `pipeline_runtime_main_gate_config_mismatch`,
+   `pipeline_credit_issuer_principal_missing`, and
+   `pipeline_runtime_dependencies_not_production_qualified` (all `409`). The
+   dependency profile is built next; a package whose dependencies the running
+   service does not hold is `409` `bundle_dependency_missing`.
+5. The readiness, for an activation only: `409` `activation_readiness_failed`.
+6. The gate. It runs in one transaction under the tenant's routing lock.
+
+The readiness reads the tenant's pipeline operational summary
+(`GET /v1/admin/pipeline/operational-summary`) just before the call. It passes
+only when all of these hold:
+
+- the tenant-isolation and audit-immutability controls pass
+  (`tenant_isolation_control_passed`, `audit_immutability_control_passed`);
+- `retryable_error_count` is 0: no run is in the state `retry`;
+- no run in the state `pending`, `retry`, or `leased` has waited in its phase
+  for more than 300 seconds;
+- `held_credit_count` and `delayed_credit_count` are both 0;
+- `pending_index_command_count` and `failed_index_command_count` are both 0;
+- `pending_invalidation_count` and `failed_invalidation_count` are both 0.
+
+So a tenant with work in flight, or with a suspended policy that holds a run
+in `retry`, cannot be activated until the work finishes. Activate a tenant
+when it is quiet.
+
+The gate holds when every term holds, in this order. Each `409` label names
+the first term that fails:
+
+1. The promotion is ready and carries no blocker
+   (`bundle_activation_promotion_not_ready`). The refusal does not name the
+   blocking check: see "The result contract, and what makes a result invalid"
+   in [pipeline-qualification.md](pipeline-qualification.md) for what a ready
+   decision needs.
+2. The promotion was evaluated at most 15 minutes before the gate, and not
+   after it (`bundle_activation_promotion_stale`).
+3. The build's revision is a `sha256:` digest
+   (`bundle_runtime_revision_unknown`), and it is the revision of the results
+   (`bundle_runtime_revision_mismatch`).
+4. The tenant has a qualification of the bundle
+   (`bundle_qualification_missing`), on the build's revision
+   (`bundle_runtime_revision_mismatch`).
+5. The stored package loads and validates (`bundle_package_missing`; a package
+   that was altered reads the same), and the results name exactly its three
+   digests (`bundle_activation_package_mismatch`).
+6. The dependency profile was built for this bundle
+   (`bundle_qualification_profile_mismatch`), has no blocker (the label of its
+   first one, from the lists above), and its runtime identity is the one the
+   qualification recorded (`runtime_dependency_identity_mismatch`).
+7. The bundle's four policies (Admission, Review, Score, Settle) are runnable
+   (`bundle_policy_not_runnable`).
+
+Then the gate switches the active bundle, and the routing row and the event
+are written in the same transaction. One qualification covers one code
+revision. After a deploy to a new revision, every bundle of the tenant needs a
+qualification on it, an earlier bundle included.
+
+The 15-minute rule. Both the readiness (an activation) and the promotion
+(an activation or a rollback) must be at most 15 minutes old at the gate. The
+route evaluates both within the request, shortly before the gate, so these two
+rules refuse a request that stalls for more than 15 minutes in between (waiting
+for the tenant's routing lock, for example). They do not refuse a result that
+is old. A result's own age is the
+maximum age its signer gave it (see
+[pipeline-qualification.md](pipeline-qualification.md)): a result older than
+that blocks the promotion (`bundle_activation_promotion_not_ready`). The
+qualification route refuses a maximum age above seven days. Activation and
+rollback do not apply that ceiling, so the signer's choice is the bound there.
+Sign the set shortly before you use it.
+
+Rollback and containment.
+
+- After a deploy, a rollback needs the earlier bundle qualified on the deployed
+  revision, which takes a full qualification run on that revision. So
+  `contain` is the emergency stop, and rollback is the controlled path back:
+  contain a tenant when you doubt it, and roll back once the earlier bundle is
+  qualified on the revision that runs.
+- A rollback sets the row to `pipeline`, from `pipeline` or from `contained`.
+  From `contained` it reopens the tenant's uploads, and it does so without the
+  readiness check that an activation makes. A rollback ends a containment as a
+  side effect. Read the row (`GET /v1/admin/pipeline/routing`) after a rollback
+  to confirm the state.
+- A routing change takes the tenant's routing lock exclusively. A receipt
+  that is in its staging or commit transaction holds the lock shared, so a
+  change waits for it, and a receipt that starts afterwards sees the change.
+  A receipt that staged before an activation and commits after it keeps the
+  bundle it staged under.
+
+The order of a first rollout:
+
+1. Build `trace-commons-ingest` with the revision of the tree, with a pipeline
+   runtime assembly. Set both trust store variables. List the tenant on
+   `TRACE_COMMONS_PIPELINE_RECEIPTS_TENANT_IDS` on every replica and start every
+   replica. With no routing row, the tenant stays on the legacy path.
+2. Qualify. Produce a full set of signed results on the revision that
+   runs, and `POST` it with the signed package to `qualifications`.
+3. Activate one tenant: `POST` a fresh set to `activate`. A request activates
+   one tenant, the credential's. Activate another tenant with its own
+   credential, after the first one has run clean.
+4. Watch the tenant. Read `GET /v1/admin/pipeline/operational-summary` (work by
+   state, `retryable_error_count`, `terminal_error_count`,
+   `suspended_policy_count`, the index and invalidation counts, the NEAR outbox
+   by state) and `GET /v1/admin/pipeline/routing` (the events).
+5. Contain on doubt: `POST` `contain`. New uploads are refused with `503`, and
+   the worker keeps processing what the tenant already has.
+6. Roll back or deactivate. `rollback` selects an earlier qualified bundle for
+   later runs. `deactivate` returns the tenant to the legacy path; then move it
+   to the drain list as "Scope lists and the routing row" says.
+
+## Suspend a policy
+
+An operator suspends one policy of one bundle of the tenant, and resumes it
+later. A suspension is the lever for a bound policy that has become unsafe: the
+runs bound to it keep their package.
+
+`POST /v1/admin/pipeline/policy-interventions` takes `{bundle_id, phase,
+action, reason_code}`. `phase` is `admission`, `review`, `score`, or `settle`.
+`action` is `suspend` or `resume`. The answer is the intervention record:
+`intervention_id`, `bundle_id`, `phase`, `action`, `actor_principal_ref`,
+`reason_code`, `previous_status`, `resulting_status`, `evidence_hash`, and
+`recorded_at`. `GET /v1/admin/pipeline/policy-interventions?bundle_id=...` lists
+the records of one bundle, oldest first. The record is in
+`pipeline_policy_interventions` and is immutable. The operational summary counts
+the tenant's suspended policies as `suspended_policy_count`.
+
+| Answer | Meaning |
+|---|---|
+| `409` `policy_intervention_not_supported` | the action is `terminate`: the status exists in the schema, and no behavior is defined for a run bound to a terminated policy, so it is refused and writes nothing |
+| `409` `policy_intervention_no_transition` | a `suspend` of a policy that is not runnable, or a `resume` of one that is |
+| `409` `policy_intervention_invalid` | an unknown action, a malformed bundle id, or a reason that is not a label |
+| `404` `bundle_package_missing` | the tenant has no policy row for that bundle and phase |
+
+What a suspended policy shows:
+
+- A receipt that reaches a suspended Admission policy is refused with `503`
+  `bundle_policy_not_runnable`, and nothing is stored.
+- A run bound to a suspended Review, Score, or Settle policy waits in `retry`
+  with the label `bundle_policy_not_runnable` (the operational summary shows it
+  as the work item's reason). The retry is uncharged: the wait does not count
+  against the run's attempts. The run keeps its bundle and goes on from what it
+  has stored after the resume.
+- An activation of a bundle with a suspended policy is refused (`409`
+  `bundle_policy_not_runnable`).
+
+What a suspension stops. Each phase's commit, in every policy state it guards:
+Admission at the receipt, Review, Score, and Settle. In Settle: a new
+selection, the index write, each leg's external call, and the credit event with
+its settlement batch. And a payout dispatch (a submit to the NEAR adapter): a
+payout leg waits while its Settle policy is suspended, and a payout that is
+already submitted is still confirmed, because a confirmation is a lookup and not
+a dispatch.
+
+What it does not stop:
+
+- An external effect that already runs. A guard does not retract an accepted
+  operation: an index write that holds the policy row finishes first, a leg's
+  adapter call that was accepted stays accepted, and a NEAR submit already made
+  stays made. A Settle commit holds the policy row only for its own short
+  transaction, so a suspension refuses a commit and stops nothing that has
+  started; the run retries and resumes from its stored selection.
+- The failure and withdrawal paths. They write no outcome and run in every
+  policy state.
+- The index rebuild. It upserts the index entries of complete runs in every
+  policy state, because it replays committed Settle effects.
+
+Three things an operator must not assume:
+
+- `resume` does not wake a suspended run at once. The run retries on its backoff:
+  the age of its phase, from one second up to one hour.
+- A suspension of a Settle policy can wait for one index dispatch. A dispatch
+  holds the run, the submission, and the policy row until its write commits, for
+  at most the earlier of the Settle lease's end and 30 seconds (the dispatch
+  budget). That is the length of one dispatch, not a bound on the wait:
+  overlapping Settle transactions of one bundle can extend it, and the call sets
+  no lock timeout.
+- Do not read "suspend has returned" as "no dispatch will start". Two short
+  transactions lie between a dispatch's guard read and its external submit.
+
+## Legacy drain report
+
+`GET /v1/admin/pipeline/legacy-drain` shows what the legacy path still owes the
+tenant for the receipts it took. It is a report. `drained` disables nothing,
+and this release has no route that retires a legacy writer.
+
+The answer has these fields: `generated_at`, `routing_state` (the tenant's row
+in the same snapshot, null with none), `gate_driver_enabled`, `pending`,
+`not_blocking`, `drained`, and `evidence_hash`. `pending` holds ten counts,
+zeros included. `drained` is true only when all ten are 0. A count is the
+selection of the legacy worker that does the work, limited to what the pipeline
+does not own: by submission with no pipeline run for the first seven, by
+payout instrument (none) for the two NEAR counts, and tenant-wide for the
+withdrawals. A count that cannot copy its worker exactly counts more, never
+less.
+
+| Count in `pending` | What it counts | The legacy work that clears it |
+|---|---|---|
+| `awaiting_pii_backstop` | submissions in the status `awaiting_pii_backstop` | the PII backstop's verdict |
+| `gate_decision_pending` | with the gate driver on: submissions with an active submitted envelope and no gate decision, below the driver's attempt ceiling | the gate driver, or a `POST /v1/workers/gate/evaluate` that names the submission |
+| `gate_decision_exhausted` | with the gate driver on: the same, at or above the ceiling | a person: reset the attempt row or accept the loss |
+| `quarantine_review_pending` | quarantined submissions | a reviewer's decision |
+| `vector_index_pending` | the current precheck records of accepted submissions that have no active vector entry | the vector index worker |
+| `delayed_credit_unsettled` | positive credit events of the four settlement-eligible types on accepted submissions that no finalized settlement batch names | credit settlement |
+| `revocation_propagation_pending` | revocation propagation items `pending`, `in_progress`, or `failed` | the revocation propagation worker |
+| `near_outbox_pending` | `main`'s NEAR outbox rows `pending`, `failed`, or `submitted`, for the whole tenant | the NEAR submitter and confirmer |
+| `near_payout_unqueued` | line items of finalized `main` settlement batches that have a NEAR contract and no outbox row: a payout held for want of a payout target, or an outbox row that is missing | enrolling or designating a payout target, then a live settlement run |
+| `withdrawal_completion_pending` | submissions of a withdrawn source session whose withdrawal is not complete, for the whole tenant, a version with a pipeline run included | the revocation propagation worker |
+
+Read these rules before you trust a number:
+
+- `near_outbox_pending` counts a row until the NEAR workers confirm it. A
+  tenant with a NEAR contract cannot read `drained` before they have run.
+  `near_payout_unqueued` is 0 for a deployment that never had a NEAR contract on
+  a batch.
+- `withdrawal_completion_pending` stays above zero until the revocation
+  propagation worker has run for the tenant. Its in-process scheduler covers
+  only the tenant of its own token. A legal hold keeps its attachments out of
+  the count (`TRACE_COMMONS_LEGAL_HOLD_RETENTION_POLICIES`).
+- Several counts can stay above zero with no legacy code that clears them, and a
+  person has to act: `gate_decision_exhausted`, `awaiting_pii_backstop` after
+  its attempts run out, `quarantine_review_pending`, a
+  `revocation_propagation_pending` item that a crashed run left `in_progress`
+  (the worker never lists it again), `delayed_credit_unsettled` for an account
+  with a credit hold or for credit that a ranking gate or the per-account cap
+  holds back, `vector_index_pending` for a record that a consent check refuses,
+  `near_outbox_pending` for a line `submitted` with no transaction hash, and
+  `near_payout_unqueued` for an account with no payout target.
+
+The gate driver has two modes, and `gate_driver_enabled` says which one you read.
+The default deployment has the driver off.
+
+- Driver on (`TRACE_COMMONS_PERPLEXITY_DRIVER_ENABLED`): `gate_decision_pending`
+  and `gate_decision_exhausted` are counted as above, and they block `drained`.
+- Driver off: both read 0, and `not_blocking.gate_decision_absent` is the number
+  of legacy submissions that have an active submitted envelope and no gate
+  decision, whatever their attempts. It never changes `drained`. So
+  `drained: true` with the driver off does not mean that those submissions have
+  a decision. They have none. It means that no legacy code owes one. A gate run
+  also awards `NoveltyUtility` credit, so the report does not ask for one.
+  `POST /v1/workers/gate/evaluate` can still score a submission that its caller
+  names, in either mode. To get the decisions, turn the driver on and read the
+  report again.
+
+The route reads the gate driver setting of the replica that answers. Run one
+gate driver setting on every replica, or two replicas answer in two modes. The
+`evidence_hash` belongs to one mode: the same rows in the two modes hash
+differently, so compare hashes only within a mode.
+
+What the report does not count, because none of it is follow-up that the legacy
+path owes for a receipt it took. This list is the owner's, and nothing proves it
+complete:
+
+- retention and purge: time-driven maintenance over every submission, which
+  covers the pipeline's submissions too;
+- export jobs: snapshots that an operator requests and completes;
+- benchmark and process-evaluation work: it runs when an operator calls its
+  route, with the inputs of the request;
+- the database mirror backfill: it copies file records into the tables, as an
+  operator's maintenance over the file store;
+- `/v1/workers/utility-credit`: it takes its submission ids from its caller, so no
+  table lists what it still has to do.
+
+The precondition. The report reads the database tables only. It is a drain
+signal only when the tenant's legacy records in the database are authoritative,
+and the route checks that this process is configured so:
+
+- the legacy path's database writes are required
+  (`TRACE_COMMONS_REQUIRE_DB_MIRROR_WRITES`, or account admission is on), so a
+  failed write fails the legacy operation instead of leaving a file-only
+  record; and
+- the tenant's review, credit, settlement, and outbox reads come from the
+  database (`TRACE_COMMONS_DB_REVIEWER_READS`, or the tenant on
+  `TRACE_COMMONS_DB_REVIEWER_READS_TENANT_IDS`).
+
+A tenant that fails this is refused with `409`
+`legacy_drain_records_not_authoritative`. The check reads this process's
+configuration. It does not read the tenant's history. A record that exists only
+in the file store, from before the writes were required, is owed work that the
+report cannot see, and it reads zero with `drained` true. Run the database
+mirror backfill for the tenant before you trust the report: `POST
+/v1/admin/maintenance` with the tenant's admin credential and the body
+`{"backfill_db_mirror": true, "prune_export_cache": false}` (the second field
+keeps the call from also pruning the export cache, which it does by default).
+
+The report runs as the ingest runtime login in one read-only, single-snapshot
+transaction (`REPEATABLE READ`): nine or ten statements, one for each count the
+mode takes, each a `COUNT` filtered by the tenant, with no row lock and no write. It
+reads these tables: `pipeline_runs`, `pipeline_tenant_routing`,
+`trace_submissions`, `trace_object_refs`, `trace_gate_decisions`,
+`trace_gate_evaluation_attempts`, `trace_derived_records`,
+`trace_vector_entries`, `trace_credit_ledger`,
+`trace_credit_settlement_batches`, `trace_near_credit_outbox`,
+`trace_revocation_propagation_items`, `trace_withdrawals`,
+`trace_submission_sessions`, `trace_source_sessions`, and
+`trace_token_attachments`. Most are older than V62, and the login holds `SELECT`
+on them only through the pilot's V62-era table grants (see
+[deployment.md](deployment.md)). A deployment without those grants answers with a
+`500`, not with a zero. Each call appends one control-plane read audit row.
+
+The rehearsal runs the legacy work through the legacy routes and reads the
+report at each step:
+`tests::pipeline_activation_pg_tests::the_legacy_drain_report_counts_real_pending_work_and_reaches_zero`
+(see "Rehearse the switch").
 
 ## Fail-closed dependency qualification
 
@@ -877,20 +1467,35 @@ to start on the first failure:
 | The package passes the default package's qualification gate, unless `TRACE_COMMONS_PIPELINE_ALLOW_TEST_DEPENDENCIES` is set: every dependency it names is production-qualified (the runtime may hold one that is not, as long as its default package does not name it), and a compatibility package's configuration is qualifiable. | `pipeline_runtime_dependencies_not_production_qualified` |
 | The tenant's bundles can be read. | `pipeline_tenant_bundle_unreadable` |
 
+The activation and rollback routes run the same checks on the bundle they
+select, with the process's own configuration, before their gate (see "The
+order of checks" in "Activate, roll back, contain, deactivate"): the gate
+holds no service, so the routes are what keeps these checks true for a bundle
+that is selected after start.
+
 To change a value the default package carries (a floor, the threshold, the
 delta, the scorer or the embedder), every routed or drained tenant must
 leave its old bundle first, since startup refuses the new configuration
 while a tenant can still run the old one. For each such tenant:
 
-1. Under the old configuration, move the tenant from the receipts list to
-   the drain list (its receipts take `main`'s path again) and wait until the
-   operational summary shows no run of it in flight.
-2. As the database owner (the runtime login has no `DELETE` on the
-   selection), remove its selection:
-   `DELETE FROM pipeline_active_bundles WHERE tenant_id = '<tenant>'`.
+1. Under the old configuration, deactivate the tenant
+   (`POST /v1/admin/pipeline/deactivate`), move it from the receipts list to
+   the drain list, and wait until the operational summary shows no run of it
+   in flight. Deactivating first matters: a tenant whose row says `pipeline`
+   and that is only moved off the receipts list is refused with `503`
+   `pipeline_tenant_not_served`, and is not sent to `main`'s path.
+2. As the database owner, remove its selection:
+   `DELETE FROM pipeline_active_bundles WHERE tenant_id = '<tenant>'`. The
+   runtime login has no `DELETE` on the selection, and its only `UPDATE` on
+   it (`UPDATE (bundle_id, selected_at)`, V112) is the activation gate's, which
+   switches a tenant to a bundle that is qualified on the running revision.
 3. Start ingest with the new configuration and the tenant back on the
    receipts list. Startup finds no old bundle to check for it, registers the
-   new default package, and activates it.
+   new default package, and selects it as the tenant's active bundle. The
+   tenant's routing row still says `legacy`, so its uploads stay on the legacy
+   path. Qualify the new bundle on the new build's revision and activate the
+   tenant again (`POST /v1/admin/pipeline/qualifications`, then `POST
+   /v1/admin/pipeline/activate`).
 
 A tenant left on the drain list for good keeps no active bundle and runs no
 new receipt, so step 3 may leave it on the drain list.
@@ -1144,53 +1749,89 @@ therefore receive a legacy 429 for a pipeline receipt.
 
 ## Rehearse the switch
 
-This section describes activation tooling that is not in this repository
-yet -- the `versioned_pipeline_pg` test target it names below does not
-exist.
-
-Set `TRACE_COMMONS_PG_TEST_DATABASE_URL` to a PostgreSQL test database.
-Then run this command:
+The switch has four exact tests, two in the runtime suite and two in the
+ingest binary. Each needs a PostgreSQL test database: use a fresh database
+named `admission_test_<name>` on the literal host `127.0.0.1` for each command,
+and set `TRACE_COMMONS_PG_TEST_DATABASE_URL` to it. Run the ingest binary's tests
+with `TRACE_COMMONS_LOGIN_RESOLVER_DATABASE_URL` set too (a login that is a
+member of `trace_login_resolver`, see
+[login-resolver-role.md](login-resolver-role.md)), and single-threaded, because
+its tests share a fixture tenant. Then run these
+commands:
 
 ```bash
-cargo test -p trace-commons-server --test versioned_pipeline_pg pipeline_activation
+cargo test -p trace-commons-server --test versioned_pipeline_runtime_pg -- \
+  rollback_selects activation_requires
+cargo test -p trace-commons-server --bin trace-commons-ingest -- --test-threads=1 \
+  containment_refuses_new_receipts the_legacy_drain_report_counts_real_pending_work_and_reaches_zero
 ```
 
-The tests cover mixed legacy and pipeline records, exact replay of a
-pre-switch receipt, unique ledger sources, tenant expansion gates,
-rollback, containment, suspension instead of rebinding, and writer
-retirement after pending work completes.
+The tests cover:
 
-[`pipeline.py qualify`](pipeline-qualification.md) runs nine exact tests
-from the `versioned_pipeline_runtime_pg` suite as required database checks;
-`pipeline.py test --check postgres` runs the whole suite. Corpus and package
+- `activation_requires_every_term_of_the_gate`: each term of the activation gate
+  refuses on its own, with its label, and a refused activation writes no
+  routing row, no event, and no active bundle.
+- `rollback_selects_an_earlier_bundle_for_new_runs_only`: a rollback selects an
+  earlier bundle for new runs, and the runs that exist keep their bundle and
+  their outcomes. A rollback to the active bundle, or to one that was never
+  active for the tenant, is refused. A contained tenant rolls back to the
+  pipeline. It emits the check `pipeline_activation_rollback`.
+- `containment_refuses_new_receipts_and_keeps_pending_work`: with two replicas, a
+  receipt taken before containment stays answerable on both and the worker
+  completes it while the row says `contained`. A new upload through either
+  replica is a `503` that writes no record, no ownership row, and no run, and
+  it is accepted when the row says `pipeline` again. It emits the check
+  `pipeline_activation_containment`.
+- `the_legacy_drain_report_counts_real_pending_work_and_reaches_zero`: the legacy
+  work is done through the legacy routes (a review decision, gate evaluation,
+  the vector index worker, and credit settlement), the report counts what is
+  pending at each step and reaches zero, the pipeline's own runs do not count,
+  and the legacy writer still takes a receipt afterwards. It emits the check
+  `pipeline_legacy_drain`.
+
+The other tests of these areas run in the same two targets: mixed legacy and
+pipeline receipts and their replays across every switch, the ownership races,
+the route guards, policy suspension instead of rebinding, and the rebuild fence.
+
+[`pipeline.py qualify`](pipeline-qualification.md) runs ten exact tests from the
+`versioned_pipeline_runtime_pg` suite, four from the ingest binary, and one from
+the library as required database checks, among them the three above that emit the
+activation checks; `pipeline.py test --check postgres` runs the whole suite. Corpus and package
 evidence stays in local files; these PostgreSQL integration tests remain
 separate schema and recovery checks.
 
-## Local operator routes
-
-This section describes activation tooling that is not in this repository
-yet -- the `trace-commons-pipeline-local` binary it names below does not
-exist.
-
-`trace-commons-pipeline-local` adds these routes:
-
-- `POST /v1/pipeline/switched-submissions`
-- `GET /v1/admin/pipeline-routing`
-- `POST /v1/admin/pipeline-contain`
-- `POST /v1/admin/pipeline-retire-legacy-writer`
-
-The existing corpus paths still submit directly to the pipeline executor.
-The switched route is the dual-path receipt used during migration.
-
 ## Current completion
 
-The versioned pipeline contracts, runtime, compatibility capabilities, and
-qualification tooling are in this repository: `pipeline.py test`, `run`,
-`package`, `restore-drill`, and `qualify` (see
-[pipeline-qualification.md](pipeline-qualification.md)) exercise them
-against a real PostgreSQL server today. Activation -- the
-switched-submission route, tenant routing, containment, and
-legacy-writer retirement described above -- arrives with a later change.
+The versioned pipeline contracts, runtime, compatibility capabilities,
+qualification tooling, and activation are in this repository: `pipeline.py
+test`, `run`, `package`, `restore-drill`, `qualify`, `keygen`, and `revision`
+(see [pipeline-qualification.md](pipeline-qualification.md)) exercise the
+pipeline against a real PostgreSQL server, and the nine admin routes above
+qualify, activate, roll back, contain, and deactivate a tenant and suspend a
+policy. Production routing is off until an operator activates a tenant. The
+repository binary injects no runtime, so it reads no routing row, and every
+upload takes the legacy path.
+
+What remains for promotion:
+
+- An activation through the route needs a full set of 22 verified results: the
+  19 that `qualify` produces and the three promotion-only checks
+  (`pipeline_production_adapters`, `pipeline_remote_restore`,
+  `pipeline_hf_network_canary`). Those three need the production assembly, no
+  code in this repository emits them, and a local run's restore drill result
+  carries the blocker `filesystem_restore_local_only`. So no tenant can be
+  activated with the results of a local `qualify` run alone.
+- The production assembly (a production scorer, embedder, index, settlement
+  adapter, and payout), a remote object-store restore drill, and the Hugging
+  Face network canary are promotion work. So is the choice of who holds the
+  check-signing key.
+- `terminate` of a policy is not supported. The specification that says what a
+  terminated policy does to a run opens later, with promotion.
+- No legacy writer is retired. The drain report shows what the legacy path still
+  owes a tenant, and nothing acts on it.
+- CI's `pipeline qualification and restore` job runs `qualify` unsigned and is not
+  a required check.
+
 `SCR-005` stays deferred until the external valuation protocol exists. New
 valuation rules use a later bundle through the same qualification and
 activation process.

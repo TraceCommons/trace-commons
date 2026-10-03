@@ -148,7 +148,13 @@ that injects a pipeline runtime; the repository binary injects none and
 answers `404` there. Do these steps in this order:
 
 1. Restore PostgreSQL (the pipeline's rows restore with everything else --
-   there is no separate pipeline backup or restore path for the database).
+   there is no separate pipeline backup or restore path for the database). The
+   routing rows, the activation events, the receipt ownership rows, the policy
+   interventions, the qualifications, and the rebuild fences are pipeline rows:
+   they come back with the database, as they were at the time of the backup. A
+   routing change made after that time is lost with the rest of it. Read each
+   tenant's row and events (`GET /v1/admin/pipeline/routing`) after step 5, and
+   repeat a change that the restore undid.
 2. Restore the encrypted object store.
 3. Start every `trace-commons-ingest` process with
    `TRACE_COMMONS_PIPELINE_RECEIPTS_TENANT_IDS` and
@@ -158,8 +164,12 @@ answers `404` there. Do these steps in this order:
    `pipeline_index_rebuild_tenant_active`).
    The worker reads both lists once, at start, so it drains no tenant: it
    scores no pending run, and it pays and invalidates nothing. Keep these
-   processes out of client traffic until step 5: while a tenant is on
-   neither list, a new upload of that tenant takes the legacy path.
+   processes out of client traffic until step 5. While a tenant is on neither
+   list, a new upload of a tenant whose routing row says `pipeline` is refused
+   with `503` `pipeline_tenant_not_served`, and does not take the legacy path.
+   An upload of a tenant whose row says `contained` is refused with `503`
+   `pipeline_receipt_intake_contained`. A tenant with no row, or whose row says
+   `legacy`, takes the legacy path.
 4. For each tenant, call `POST /v1/workers/pipeline/index-rebuild` with that
    tenant's vector worker bearer token or an admin token -- the same gate
    as `main`'s vector index worker route (see
@@ -174,23 +184,56 @@ answers `404` there. Do these steps in this order:
    second request for a tenant whose rebuild is running is refused (`409`
    `pipeline_index_rebuild_in_progress`). A run's writes hold its rows for
    at most the smaller of the Settle lease and 30 seconds; past that, the
-   rebuild stops with `503` `index_unavailable`. A rerun starts again from
+   rebuild stops with `503` `index_unavailable`. A run's deadline starts before
+   its fence write (below), so it includes the wait for the run's row lock: a
+   slow wait, for a withdrawal that holds the row for example, fails the run
+   with `503` `index_unavailable` and writes nothing. A rerun starts again from
    the first run and reports the entries already written as unchanged; a
-   run whose writes take longer than that deadline fails on every rerun.
+   run whose writes take longer than that deadline fails on every rerun. A
+   fence that cannot be written (a database fault) stops the rebuild before
+   that run's first write with `503` `index_rebuild_fence_unavailable`. Rerun
+   once the database is healthy.
 
-   A withdrawal during the rebuild is safe because of step 3, not because
-   no withdrawal happens: withdrawals come from clients, from `main`'s
-   retention maintenance, and from the revocation-propagation reconciler,
-   and keeping client traffic away stops only the first. A run withdrawn
-   before its entries are written is skipped. A withdrawal of a run whose
-   entries are being written usually waits for them, but not always (a lost
-   database session, a stopped rebuild, a process exit), and it queues the
-   run's removal at once. With both lists unset, no worker processes that
-   removal until step 5, so it always runs after the rebuild's last write.
-   Run the rebuild only in step 3's configuration, on every process: a
-   process that drains or routes the tenant would process the removal
-   during the rebuild. A fence that closes this without step 3 (a committed
-   rebuild marker that the withdrawal's removal reads) is PR 5 work.
+   A withdrawal during the rebuild is safe because of the rebuild's fence, not
+   because no withdrawal happens: withdrawals come from clients, from `main`'s
+   retention maintenance, and from the revocation-propagation reconciler, and
+   keeping client traffic away stops only the first. A withdrawal of a complete
+   run queues the run's index removal at once. While a tenant has an unexpired
+   row in `pipeline_index_rebuild_fences` (V113), no worker in any process
+   claims that tenant's index invalidations, so a removal cannot run before the
+   rebuild's last write:
+
+   - A rebuild keeps one row for itself. Before each run's writes it sets the
+     row to the run's deadline plus the fence margin (60 seconds,
+     `PIPELINE_INDEX_WRITE_FENCE_MARGIN_SECONDS`), and it never shortens it.
+     When the rebuild ends it deletes its own row and the tenant's expired rows.
+     It never shortens or deletes another rebuild's row, so two rebuilds of one
+     tenant (a client retry that reaches another replica, for example) each hold
+     their own fence.
+   - A run withdrawn before its entries are written is skipped: the rebuild
+     looks at the run again after it has set the fence.
+   - A withdrawal of a run whose entries are being written usually waits for
+     them, but not always (a lost database session, an abort past the shutdown
+     grace period, a process exit). The fence then holds the removal back until
+     the write's time has passed.
+   - A rebuild that is lost (a lost session, an abort, a process exit, or an
+     index call still running at the deadline plus the margin) leaves its row,
+     and the row expires on its own. Its fence holds the tenant's index removals
+     back for at most 90 seconds at the defaults: a run deadline of 30 seconds
+     (the smaller of the Settle lease and the 30 second dispatch budget) plus the
+     60 second margin, counted from the lost rebuild's last fence write. The
+     worker then claims the removals on its next invalidation pass. No operator
+     action is needed. The tenant's next rebuild deletes the expired row when it
+     ends.
+   - The margin is a contract with the index writer. The fence does not enforce
+     it. The guarantee holds as long as each index call returns within the 60
+     second margin; an index call that takes longer is outside what the fence
+     covers.
+
+   Step 3 stays. The route still refuses a tenant that its own process routes or
+   drains (`409` `pipeline_index_rebuild_tenant_active`), because a Score of that
+   tenant must not read a partly rebuilt index, and that refusal reaches only its
+   own process. Run the rebuild only in step 3's configuration, on every process.
 5. Restart every `trace-commons-ingest` process with both lists set back to
    their values before the restore. The worker then resumes the pending
    runs, and processes the queued invalidations and payouts, against the
