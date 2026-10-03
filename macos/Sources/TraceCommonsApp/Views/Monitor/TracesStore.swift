@@ -108,6 +108,7 @@ final class TracesStore {
         status = nil
         destinations = nil
         lastContributedFolder = nil
+        folderNotice = nil
     }
 
     /// Marks the data as a sample set in a debug build; nil over the daemon.
@@ -327,6 +328,8 @@ final class TracesStore {
                 // `notApproved` and is said as a refusal, never as success.
                 let response = try await client.approve(entryId: entryId)
                 lastContributed = Contributed(entryId: entryId, toast: response.toast)
+                // One undo slot: a single-session contribute ends the folder's undo.
+                lastContributedFolder = nil
                 // A newer decision ends the older Keep's undo.
                 lastKept = nil
             case .undoContribute:

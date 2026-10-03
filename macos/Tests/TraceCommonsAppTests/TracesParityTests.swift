@@ -436,11 +436,12 @@ final class TracesParityTests: XCTestCase {
         let tree = try Self.text("Views/Monitor/TracesViews.swift")
         for needle in ["store.groupOffer(", "offer.offersContribute", "QueueFolderWords.submitAll(offer.count)",
                        "QueueFolderWords.submitAllHelp(", "store.contributeFolder(", "VerdictCopy.submitAllAs",
-                       "ContributorVerdict.allCases", "offer.withheldLine"] {
+                       "ContributorVerdict.allCases", "offer.withheldLine", "submitTitle: submits ?", "onSubmit: submits ?",
+                       "onMenu: submits ?", "menuLabel: submits ?", "store.mayContributeFolder(folder)"] {
             XCTAssertTrue(tree.contains(needle), "TracesViews.swift lacks \(needle)")
         }
         let store = try Self.text("Views/Monitor/TracesStore.swift")
-        for needle in ["approveFolder(projectId:", "verdict:", "excludedIneligible", "withheldLine(", "cancelFolder(projectId:",
+        for needle in ["approveFolder(projectId: folder.id, verdict: verdict)", "verdict:", "excludedIneligible", "withheldLine(", "cancelFolder(projectId:",
                        "EligibilitySurface.groupSubmit("] {
             XCTAssertTrue(store.contains(needle), "TracesStore.swift lacks \(needle)")
         }
