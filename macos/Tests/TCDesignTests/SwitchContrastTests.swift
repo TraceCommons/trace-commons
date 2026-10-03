@@ -12,6 +12,15 @@ final class SwitchContrastTests: XCTestCase {
         }
     }
 
+    /// The same in light: the light tracks are deeper (the watch green is
+    /// statusOn's light value since R-42, 4.7:1 under the dark knob).
+    func test_everyKnobClearsTheGlyphFloorWhenOnInLight() {
+        for kind in [GlassSwitchKind.standard, .settings, .watch] {
+            let ratio = Self.contrast(GlassToggleStyle.knob(kind, isOn: true).light, GlassToggleStyle.onColor(kind).light)
+            XCTAssertGreaterThanOrEqual(ratio, 3, "\(kind): \(ratio)")
+        }
+    }
+
     func test_whiteOnTheWatchGreenWouldNot() {
         XCTAssertLessThan(Self.contrast(GlassTokens.Color.textOnAccent, GlassTokens.Color.watchOn), 3)
     }

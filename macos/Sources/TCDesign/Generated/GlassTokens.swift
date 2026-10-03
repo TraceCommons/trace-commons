@@ -65,7 +65,8 @@ public enum GlassTokens {
         public static let toggleOn: GlassRGBA = GlassRGBA(0x3A7BD5, alpha: 1, light: GlassRGBA(0x2F6BC4, alpha: 1))
         public static let toggleOff: GlassRGBA = GlassRGBA(0xFFFFFF, alpha: 0.18, light: GlassRGBA(0x000000, alpha: 0.16))
         public static let toggleOnSettings: GlassRGBA = GlassRGBA(0x8A3DFF, alpha: 1, light: GlassRGBA(0x7A2CF5, alpha: 1))
-        public static let watchOn: GlassRGBA = GlassRGBA(0x3DDC84, alpha: 1, light: GlassRGBA(0x28B463, alpha: 1))
+        /// The watch switch's track when on. Light takes statusOn's light value (watching): 3:1 or more on every light ground (3.01 on a well over the scene) with the dark knob at 4.7:1; #28b463 was 1.96 to 2.59 (R-42).
+        public static let watchOn: GlassRGBA = GlassRGBA(0x3DDC84, alpha: 1, light: GlassRGBA(0x1A8F4C, alpha: 1))
         /// Rows inside a list only; never around a container.
         public static let hairline: GlassRGBA = GlassRGBA(0xFFFFFF, alpha: 0.07, light: GlassRGBA(0x000000, alpha: 0.08))
         public static let popoverFill: GlassRGBA = GlassRGBA(0x22242A, alpha: 0.78, light: GlassRGBA(0xF7F7F9, alpha: 0.84))
@@ -214,9 +215,9 @@ public enum GlassTokens {
         public static let cardFill: GlassGradient = GlassGradient(angle: 180, stops: [GlassStop(0xFFFFFF, alpha: 0.085, at: 0, light: GlassRGBA(0xFFFFFF, alpha: 0.72)), GlassStop(0xFFFFFF, alpha: 0.045, at: 1, light: GlassRGBA(0xFFFFFF, alpha: 0.52))])
         public static let cardFillQuiet: GlassGradient = GlassGradient(angle: 180, stops: [GlassStop(0xFFFFFF, alpha: 0.075, at: 0, light: GlassRGBA(0xFFFFFF, alpha: 0.6)), GlassStop(0xFFFFFF, alpha: 0.04, at: 1, light: GlassRGBA(0xFFFFFF, alpha: 0.42))])
         public static let controlFill: GlassGradient = GlassGradient(angle: 180, stops: [GlassStop(0xFFFFFF, alpha: 0.14, at: 0, light: GlassRGBA(0xFFFFFF, alpha: 0.92)), GlassStop(0xFFFFFF, alpha: 0.07, at: 1, light: GlassRGBA(0xFFFFFF, alpha: 0.72))])
-        public static let ctaFill: GlassGradient = GlassGradient(angle: 180, stops: [GlassStop(0x8A3DFF, alpha: 0.72, at: 0, light: GlassRGBA(0x7A2CF5, alpha: 1)), GlassStop(0x6D14F3, alpha: 0.62, at: 1, light: GlassRGBA(0x6D14F3, alpha: 1))])
+        public static let ctaFill: GlassGradient = GlassGradient(angle: 180, stops: [GlassStop(0x8A3DFF, alpha: 1, at: 0, light: GlassRGBA(0x7A2CF5, alpha: 1)), GlassStop(0x8A3DFF, alpha: 1, at: 1, light: GlassRGBA(0x6D14F3, alpha: 1))])
         public static let ctaSecondaryFill: GlassGradient = GlassGradient(angle: 180, stops: [GlassStop(0x4A0EA6, alpha: 0.6, at: 0, light: GlassRGBA(0x5A12C9, alpha: 1)), GlassStop(0x320878, alpha: 0.55, at: 1, light: GlassRGBA(0x4A0EA6, alpha: 1))])
-        public static let checkboxOnFill: GlassGradient = GlassGradient(angle: 180, stops: [GlassStop(0x8A3DFF, alpha: 0.8, at: 0, light: GlassRGBA(0x7A2CF5, alpha: 1)), GlassStop(0x6D14F3, alpha: 0.7, at: 1, light: GlassRGBA(0x6D14F3, alpha: 1))])
+        public static let checkboxOnFill: GlassGradient = GlassGradient(angle: 180, stops: [GlassStop(0x8A3DFF, alpha: 1, at: 0, light: GlassRGBA(0x7A2CF5, alpha: 1)), GlassStop(0x8A3DFF, alpha: 1, at: 1, light: GlassRGBA(0x6D14F3, alpha: 1))])
 
         /// Every gradient token by its JSON name.
         public static let all: [String: GlassGradient] = [
