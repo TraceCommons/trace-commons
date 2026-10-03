@@ -148,7 +148,8 @@ struct MonitorWindowView: View {
             GlassPane {
                 // An empty branch would leave the pane nothing to draw, and
                 // it would vanish while the layout still reserved its width.
-                if model.requiresOnboarding {
+                if !LaunchRouting.onboardingKnown(startup: model.startup, statusAnswered: model.status.answered)
+                    || model.requiresOnboarding {
                     Color.clear
                 } else {
                     switch tab {
@@ -342,8 +343,12 @@ private struct MonitorMainPane<Content: View>: View {
                 ShellNotices()
                 // No tab before onboarding is done: its screens act on
                 // consent that has not been given. The button opens first
-                // run, which is where every request goes until then.
-                if model.requiresOnboarding {
+                // run, which is where every request goes until then. Before
+                // the core says, the placeholder status is not "signed out".
+                if !LaunchRouting.onboardingKnown(startup: model.startup, statusAnswered: model.status.answered) {
+                    SettingsAwaiting()
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if model.requiresOnboarding {
                     GlassNotice(tone: .ask, title: MonitorWords.signedOut) {
                         Button(OnboardingWelcomeWords.getStarted) { OpenMonitor.request() }
                     }
