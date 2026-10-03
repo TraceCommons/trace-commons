@@ -325,20 +325,15 @@ final class TracesFolderModeTests: XCTestCase {
 final class TracesRowWordsTests: XCTestCase {
     /// A sample entry, held for a second look or carrying `extra` fields.
     private func entry(_ extra: String = "", held: Bool = false) throws -> DaemonData.QueueEntry {
-        // The first pending entry of the K2 recording, set held or given
-        // `extra` fields.
-        let reply = try XCTUnwrap(SampleDaemonData.reply("list_pending", in: .normalDay))
-        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(reply.utf8)) as? [String: Any])
-        let entries = try XCTUnwrap(object["pending"] as? [[String: Any]])
-        var row = try XCTUnwrap(entries.first)
-        row["state"] = held ? "held" : "pending"
-        row["reason_label"] = held ? DaemonData.ReasonLabel.secondLookReviewRequired : NSNull()
+        var fields: [String: Any] = [
+            "state": held ? "held" : "pending",
+            "reason_label": held ? DaemonData.ReasonLabel.secondLookReviewRequired : NSNull(),
+        ]
         if !extra.isEmpty {
             let more = try XCTUnwrap(JSONSerialization.jsonObject(with: Data("{\(extra)}".utf8)) as? [String: Any])
-            row.merge(more) { _, new in new }
+            fields.merge(more) { _, new in new }
         }
-        let data = try JSONSerialization.data(withJSONObject: row)
-        return try DaemonDataDecoding.decoder().decode(DaemonData.QueueEntry.self, from: data)
+        return try recordedEntry(fields)
     }
 
     /// The unresolvable bucket is drawn under its shared name, never the
@@ -520,11 +515,8 @@ final class TracesQueueStateTests: XCTestCase {
     /// The badge pairs with the queue shield: something waiting that is
     /// worth a second look adds the core's words to its text equivalent.
     func test_theBadgeSaysWhenSomethingIsWorthASecondLook() throws {
-        let decode = { (json: String) in
-            try DaemonDataDecoding.decoder().decode(DaemonData.QueueEntry.self, from: Data(json.utf8))
-        }
-        let plain = try decode(SampleDaemonData.entry(1, SampleDaemonData.api))
-        let flagged = try decode(SampleDaemonData.entry(2, SampleDaemonData.api, secondLook: ["nothing-matched"]))
+        let plain = try recordedEntry(["second_look": [String]()])
+        let flagged = try recordedEntry(["entry_id": "00000000-0000-4000-8000-000000000002", "second_look": ["nothing-matched"]])
         XCTAssertEqual(TracesStore.shield([]), .clear)
         XCTAssertEqual(TracesStore.shield([plain]), .waiting)
         XCTAssertEqual(TracesStore.shield([plain, flagged]), .attention)
@@ -536,4 +528,16 @@ final class TracesQueueStateTests: XCTestCase {
             MonitorWindowView.tracesDescription(2, shield: .waiting, secondLook: words.secondLookWaiting),
             TCCoreCopy.decisionsOwedText(2))
     }
+}
+
+/// The first pending entry of the K2 `normalDay` recording, with `fields`
+/// replacing its own. Main's #1204 replaced the hand-written sample
+/// builders with recorded daemon replies.
+func recordedEntry(_ fields: [String: Any] = [:]) throws -> DaemonData.QueueEntry {
+    let reply = try XCTUnwrap(SampleDaemonData.reply("list_pending", in: .normalDay))
+    let object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(reply.utf8)) as? [String: Any])
+    var row = try XCTUnwrap((object["pending"] as? [[String: Any]])?.first)
+    row.merge(fields) { _, new in new }
+    let data = try JSONSerialization.data(withJSONObject: row)
+    return try DaemonDataDecoding.decoder().decode(DaemonData.QueueEntry.self, from: data)
 }
