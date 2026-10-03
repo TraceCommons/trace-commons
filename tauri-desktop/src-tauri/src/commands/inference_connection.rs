@@ -81,6 +81,12 @@ pub(crate) struct ChosenOffer {
 /// The select's parameters, or the label it is refused with before the
 /// daemon is asked: without the contributor's confirmation, or for an offer
 /// whose disclosure this build cannot show. The labels carry no content.
+///
+/// `confirmed` now also rides on the call to the daemon: `handle_select`
+/// requires it too (previously this file's own refusal, above, was the only
+/// place that was ever checked), so this call is always already-true by the
+/// time it reaches `params` -- this file's own behaviour does not change --
+/// but the gate itself no longer lives only here.
 fn select_params(
     confirmed: bool,
     offer: &ChosenOffer,
@@ -98,6 +104,7 @@ fn select_params(
         "revision": offer.revision,
         "config_digest": offer.config_digest,
         "disclosure_version": offer.disclosure_version,
+        "confirmed": confirmed,
     });
     if let Some(version) = expected_current_version {
         params["expected_current_version"] = json!(version);
@@ -134,7 +141,11 @@ pub(crate) async fn inference_connection_install(
     call_daemon(
         shared_state(&state)?,
         "inference_connection_install",
-        json!({ "connection_id": connection_id, "config_digest": config_digest }),
+        json!({
+            "connection_id": connection_id,
+            "config_digest": config_digest,
+            "confirmed": confirmed,
+        }),
     )
     .await
 }
@@ -206,7 +217,9 @@ mod tests {
 
     /// The daemon sends exactly what the contributor was shown, so the
     /// shell passes every field through unchanged and adds only the
-    /// version it read.
+    /// version it read, plus the `confirmed` the daemon's own
+    /// `inference_connection_select` now also requires (it used to be
+    /// checked only by this file's own refusal above).
     #[test]
     fn select_passes_the_shown_offer_through_unchanged() {
         let params = select_params(true, &offer(DISCLOSURE_VERSION), None).unwrap();
@@ -218,6 +231,7 @@ mod tests {
                 "revision": "a".repeat(64),
                 "config_digest": "b".repeat(64),
                 "disclosure_version": DISCLOSURE_VERSION,
+                "confirmed": true,
             })
         );
         let replacing = select_params(true, &offer(DISCLOSURE_VERSION), Some(3)).unwrap();

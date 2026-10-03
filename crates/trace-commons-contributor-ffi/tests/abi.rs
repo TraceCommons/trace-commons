@@ -3950,6 +3950,45 @@ fn the_withheld_line_crosses_and_says_nothing_at_zero() {
     assert!(!line(4).is_empty());
 }
 
+/// `tc_contribution_group_eligible_count` and
+/// `_group_withheld_count` are the arithmetic a caller used to derive by
+/// hand from `pending` and `contributable` -- clamped to `pending`, and the
+/// non-negative remainder -- matching exactly what the core's own
+/// `group_eligibility` computes, and what `tc_contribution_withheld_line`
+/// expects as its `withheld` argument.
+#[test]
+fn the_group_eligible_and_withheld_counts_cross_and_clamp() {
+    use trace_commons_contributor::private_inference_copy::group_eligibility;
+    use trace_commons_contributor_ffi::{
+        tc_contribution_group_eligible_count, tc_contribution_group_withheld_count,
+    };
+
+    for (pending, contributable) in [(7i64, Some(3u64)), (7, None), (7, Some(0)), (3, Some(9))] {
+        let expected = group_eligibility(pending as u64, contributable);
+        assert_eq!(
+            tc_contribution_group_eligible_count(pending, contributable.map_or(-1, |c| c as i64)),
+            expected.eligible_count as i64,
+            "eligible_count for pending={pending} contributable={contributable:?}"
+        );
+        assert_eq!(
+            tc_contribution_group_withheld_count(pending, contributable.map_or(-1, |c| c as i64)),
+            expected.withheld_count as i64,
+            "withheld_count for pending={pending} contributable={contributable:?}"
+        );
+    }
+
+    // `contributable` above `pending` is clamped, not a negative withheld
+    // count -- the same trap `tc_contribution_withheld_line` guards against
+    // by clamping a negative input to zero.
+    assert_eq!(tc_contribution_group_eligible_count(3, 9), 3);
+    assert_eq!(tc_contribution_group_withheld_count(3, 9), 0);
+
+    // A negative `pending` is nobody's honest answer; read as 0, matching
+    // every other scalar in this file's negative-input convention.
+    assert_eq!(tc_contribution_group_eligible_count(-1, 5), 0);
+    assert_eq!(tc_contribution_group_withheld_count(-1, 5), 0);
+}
+
 /// The contribution control numbering shares no number with a credential
 /// action or a tone. Both blocks have a "nothing" member, and one collision
 /// draws a sign-in button on a queue row.
@@ -5231,6 +5270,37 @@ fn the_inference_connection_and_privacy_scan_copy_cross_the_abi() {
 }
 
 #[test]
+fn the_settings_ranges_cross_the_abi_and_match_what_set_settings_enforces() {
+    use trace_commons_contributor::daemon::settings::{self, DaemonSettings, settings_ranges};
+    use trace_commons_contributor_ffi::tc_settings_ranges_json;
+
+    let ranges = json_owned(tc_settings_ranges_json());
+    assert_eq!(ranges, serde_json::to_value(settings_ranges()).unwrap());
+
+    // The exported ceiling is not a number this test invented separately: a
+    // value one past it is the exact value `apply_settings_object` refuses,
+    // and a value at it is the exact value accepted. A drift between the
+    // exported range and the enforced one would show up here as one of
+    // these two assertions failing, not as a silently wrong control bound.
+    let max_uploads = ranges["max_uploads_per_day"]["max"].as_u64().unwrap();
+    let mut s = DaemonSettings::default();
+    assert_eq!(
+        settings::apply_settings_object(
+            &mut s,
+            &serde_json::json!({ "max_uploads_per_day": max_uploads + 1 }),
+        ),
+        Err(settings::ERR_SETTINGS_INVALID_VALUE)
+    );
+    assert_eq!(
+        settings::apply_settings_object(
+            &mut s,
+            &serde_json::json!({ "max_uploads_per_day": max_uploads }),
+        ),
+        Ok(true)
+    );
+}
+
+#[test]
 fn the_automatic_contribution_copy_crosses_the_abi_patterns_only() {
     use trace_commons_contributor::consent_copy::automatic_contribution_copy;
     use trace_commons_contributor_ffi::tc_automatic_contribution_copy_json;
@@ -5248,6 +5318,120 @@ fn the_automatic_contribution_copy_crosses_the_abi_patterns_only() {
     // A configuration that cannot be read is not answered with a guess.
     std::fs::write(dir.path().join("contributor.json"), "not json").unwrap();
     assert!(unsafe { tc_automatic_contribution_copy_json(cstr(dir.path()).as_ptr()) }.is_null());
+}
+
+#[test]
+fn the_keychain_status_crosses_the_abi_with_no_secret_material() {
+    use trace_commons_contributor::daemon::settings::{
+        DaemonSettings, keychain_status_unavailable_json,
+    };
+    use trace_commons_contributor_ffi::tc_private_ai_keychain_status_json;
+
+    let dir = tempfile::tempdir().unwrap();
+    let value =
+        json_owned(unsafe { tc_private_ai_keychain_status_json(cstr(dir.path()).as_ptr()) });
+    assert_eq!(
+        value,
+        serde_json::to_value(DaemonSettings::default().keychain_status_json()).unwrap()
+    );
+    assert_eq!(value["state"], "empty");
+    assert_eq!(value["inference_present"], false);
+    assert_eq!(value["session_present"], false);
+
+    // A NULL/non-UTF-8 config_dir is a caller error, not a business state.
+    assert!(unsafe { tc_private_ai_keychain_status_json(std::ptr::null()) }.is_null());
+
+    // A settings document this process cannot parse answers the
+    // "unavailable" fallback rather than NULL: the daemon's own IPC answer
+    // already names the storage failure, so this must read as "nothing
+    // here", not as an error with no button.
+    std::fs::write(dir.path().join("daemon-settings.json"), "not json").unwrap();
+    let unavailable =
+        json_owned(unsafe { tc_private_ai_keychain_status_json(cstr(dir.path()).as_ptr()) });
+    assert_eq!(
+        unavailable,
+        serde_json::to_value(keychain_status_unavailable_json()).unwrap()
+    );
+    assert_eq!(unavailable["state"], "unavailable");
+}
+
+#[test]
+fn deep_links_cross_the_abi_as_a_typed_action_or_a_refusal_label() {
+    use trace_commons_contributor::deep_link::{DEEP_LINK_INVALID, REVIEW_DEEP_LINK};
+    use trace_commons_contributor_ffi::tc_parse_deep_link_json;
+
+    let mut err: *mut c_char = std::ptr::null_mut();
+    let review = cstr_str(REVIEW_DEEP_LINK);
+    let value = json_owned(unsafe { tc_parse_deep_link_json(review.as_ptr(), &mut err) });
+    assert_eq!(
+        value,
+        serde_json::json!({"kind": "navigate", "path": "/waiting"})
+    );
+    assert!(err.is_null());
+
+    let enroll =
+        cstr_str("tracecommons://enroll?invite=https%3A%2F%2Fissuer.example%2Fonboard%23CODE");
+    let value = json_owned(unsafe { tc_parse_deep_link_json(enroll.as_ptr(), &mut err) });
+    assert_eq!(
+        value,
+        serde_json::json!({
+            "kind": "enroll",
+            "invite": "https://issuer.example/onboard#CODE",
+        })
+    );
+
+    // Unknown, malformed, NULL, and a `javascript:` scheme are all refused
+    // identically, with the one stable label -- never NULL with no `*err`,
+    // and never a different label per failure shape.
+    for garbage in [
+        cstr_str("not-a-deep-link"),
+        cstr_str("javascript:alert(1)"),
+        cstr_str("tracecommons://review@evil.example"),
+    ] {
+        let mut err: *mut c_char = std::ptr::null_mut();
+        assert!(unsafe { tc_parse_deep_link_json(garbage.as_ptr(), &mut err) }.is_null());
+        assert_eq!(take_owned(err), DEEP_LINK_INVALID);
+    }
+    let mut err: *mut c_char = std::ptr::null_mut();
+    assert!(unsafe { tc_parse_deep_link_json(std::ptr::null(), &mut err) }.is_null());
+    assert_eq!(take_owned(err), DEEP_LINK_INVALID);
+    assert_last_error_contains(DEEP_LINK_INVALID);
+}
+
+#[test]
+fn the_external_url_allowlist_crosses_the_abi() {
+    use trace_commons_contributor::external_url::is_allowed;
+    use trace_commons_contributor_ffi::tc_external_url_is_allowed;
+
+    for url in [
+        "http://127.0.0.1:49152/near-ai/callback?state=abc",
+        "https://cloud.near.ai/dashboard/organizations/example/credits",
+        "https://tracecommons.ai/runs/repair-a-stalled-upload",
+        "https://github.com/TraceCommons/trace-commons/commit/b6722426bb4b83d90425494b664ac468d67943b5",
+    ] {
+        assert!(is_allowed(url), "{url}");
+        let c = cstr_str(url);
+        assert_eq!(
+            unsafe { tc_external_url_is_allowed(c.as_ptr()) },
+            1,
+            "{url}"
+        );
+    }
+    for url in [
+        "https://example.com/redirect",
+        "javascript:alert(1)",
+        "https://cloud.near.ai.evil.example/dashboard/organizations/example/credits",
+    ] {
+        assert!(!is_allowed(url), "{url}");
+        let c = cstr_str(url);
+        assert_eq!(
+            unsafe { tc_external_url_is_allowed(c.as_ptr()) },
+            0,
+            "{url}"
+        );
+    }
+    // A NULL/non-UTF-8 url refuses, the safe sentinel, rather than crashing.
+    assert_eq!(unsafe { tc_external_url_is_allowed(std::ptr::null()) }, 0);
 }
 
 #[test]
