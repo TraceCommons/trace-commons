@@ -38,3 +38,59 @@ reason, `normalDay` and `busyQueue` override `status.json`'s
 (connected, `answering`), `activity`, `spend` (known) and
 `destination_port`; `empty/harness_list.json` overrides `spend` to a known
 zero.
+
+## Dev-only dry run on your own sessions (K2)
+
+The other half of K2: rather than the fixtures above, `DaemonDataWiring.live`
+can run against your own real Claude Code and Codex sessions while you build
+screens, with a guarantee enforced by the daemon itself, not by this app --
+**nothing it does can reach the network.**
+
+Set `TC_DEV_DRY_RUN=1` in the process environment before launching a Debug
+build (an Xcode scheme's environment variables, or
+`TC_DEV_DRY_RUN=1 .build/debug/TraceCommonsApp`), then go through the
+ordinary first-run flow and point it at your own real session folders, same
+as any contributor would. `AppModel` logs a console notice once the daemon
+starts, so you can confirm the mode took.
+
+What the daemon refuses, unconditionally, while that variable is set:
+
+- `approve`, including a whole project/folder
+- `set_project_mode` arming a project for `auto_upload`
+- `set_contribution_override` set to `auto_upload`
+- `grant_automatic`
+- `enroll`
+- a witness network preview (`witness_preview_request`), which otherwise
+  sends a session's redacted body to a witness service independent of
+  `approve`
+- hosting IronWire at all (`private_inference`'s proxy never binds, however
+  your settings read)
+- the one call that actually puts bytes on the wire for an approved upload
+  (`SubmitContext::submit_loaded`), checked by `Uploader::upload_entry`
+  immediately before it runs
+
+Every one of those is refused with the same fixed label (`dev-dry-run`,
+`ERR_DEV_DRY_RUN` / `uploader::REASON_DEV_DRY_RUN` in the Rust source), so a
+refusal is never confused with the account, scope, or terms refusals the UI
+otherwise handles.
+
+The switch is a single `DaemonShared.dev_dry_run: bool`
+(`crates/trace-commons-contributor/src/daemon/ipc.rs`), set exactly once --
+by `daemon::start_embedded`, from `TC_DEV_DRY_RUN` in the process
+environment -- before the daemon's shared state is ever cloned across
+threads. No IPC handler ever reads or writes it, and no wire method names it,
+which is what makes it impossible to set, clear, or discover over the
+socket: a native app embeds this library in-process, so the only way to
+change it is to restart the daemon with a different environment.
+
+On the Swift side, `DaemonDataWiring.devDryRunActive` is the only place the
+variable's name appears, and it is compiled `#if DEBUG`: a Release build
+never offers the switch at all. `macos/scripts/check-dev-dry-run-release.sh`
+builds the app `-c release` and greps the product for the string, the same
+method C1 used for `SampleDaemonClient`.
+
+This mode adds no capture or dump helper of its own. The sessions it reads
+are whatever real folders you declare, exactly as in ordinary use, and
+nothing about this mode writes anywhere new; a tool that did add one would
+have to write outside this repository (`~/Library/Caches/TraceCommons/dev-dry-run/`),
+never into it.

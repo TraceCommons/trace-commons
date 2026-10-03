@@ -6532,6 +6532,7 @@ mod tests {
                 settings: &settings,
                 state: &mut state,
                 health: &mut health,
+                dev_dry_run: false,
             }
             .upload_entry(source.as_ref(), &reference, &entry, Utc::now()),
         )
@@ -6604,6 +6605,7 @@ mod tests {
             settings: &settings,
             state: &mut state,
             health: &mut health,
+            dev_dry_run: false,
         }
         .upload_entry(source.as_ref(), &reference, &entry, Utc::now())
         .await
@@ -6657,6 +6659,7 @@ mod tests {
             settings: &settings,
             state: &mut state,
             health: &mut health,
+            dev_dry_run: false,
         }
         .upload_entry(source.as_ref(), &reference, &approved, Utc::now())
         .await

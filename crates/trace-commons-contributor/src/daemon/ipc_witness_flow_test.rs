@@ -197,6 +197,7 @@ async fn provisioned_near_window_review_builds_over_http_and_uploads_exact_appro
         settings: &settings,
         state: &mut state,
         health: &mut health,
+        dev_dry_run: false,
     };
     let roots = s.source_roots_with_routing();
     let sources = crate::source::all_sources(&roots);
