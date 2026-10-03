@@ -1,6 +1,6 @@
 /// Home's pages. Top-level rather than nested in `HomeTabView` (which names
-/// it `HomeTabView.Page`) so a release build, where the Monitor's views are
-/// still debug-only until R15, can name a destination (ruling R-33).
+/// it `HomeTabView.Page`), so `MonitorDestination` can name one without
+/// reaching into a view.
 enum HomePage: String {
     case overview
     case history
@@ -68,12 +68,15 @@ enum OpenMonitor {
 }
 
 /// Which window a request opens: first run while onboarding is required,
-/// the Monitor otherwise. Pure.
+/// the Monitor otherwise -- except Inference, which opens the Monitor even
+/// while onboarding is required, so Private AI sign-in is reachable before
+/// Commons enrollment (R-38). Pure.
 enum LaunchRouting {
     enum Window: Equatable { case firstRun, monitor }
 
-    static func window(requiresOnboarding: Bool) -> Window {
-        requiresOnboarding ? .firstRun : .monitor
+    static func window(for destination: MonitorDestination?, requiresOnboarding: Bool) -> Window {
+        guard requiresOnboarding else { return .monitor }
+        return destination == .inference ? .monitor : .firstRun
     }
 
     /// What one request opens: its window, and the Settings section it
@@ -85,7 +88,8 @@ enum LaunchRouting {
     }
 
     static func opening(_ destination: MonitorDestination?, requiresOnboarding: Bool) -> Opening {
-        Opening(window: window(requiresOnboarding: requiresOnboarding), settings: destination?.settingsSection)
+        Opening(window: window(for: destination, requiresOnboarding: requiresOnboarding),
+                settings: destination?.settingsSection)
     }
 
     /// Whether the core has said enough to know if onboarding is required:

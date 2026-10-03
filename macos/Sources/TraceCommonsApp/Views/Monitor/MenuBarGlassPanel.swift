@@ -5,9 +5,8 @@ import TCShellCore
 
 /// The menu-bar popover (R13 of #1173), from the "Menu bar item and
 /// popover" handoff: three state pills, a sub-list, the shared/kept legend
-/// and day graph, recent activity, and shortcuts into the app. The only
-/// menu-bar item since R15; debug-only until T11 strips the Monitor files it
-/// reads (ruling R-35).
+/// and day graph, recent activity, and shortcuts into the app. It is the
+/// app's only menu-bar item, in every build.
 ///
 /// The handoff's rules hold here:
 /// - Nothing is sent from the popover. The writes are pausing, resuming,

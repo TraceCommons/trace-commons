@@ -127,8 +127,9 @@ struct TraceCommonsShell: App {
 ///
 /// It authors no wording: each tab's item is the tab's own word
 /// (`MonitorWindowView.Tab.title`), the switch's is the core's. Every item
-/// opens through `OpenMonitor`, so while onboarding is required it opens
-/// first run, never a tab.
+/// opens through `OpenMonitor`, so while onboarding is required Home and
+/// Traces open first run, and Inference opens the Monitor on its own tab,
+/// where Private AI sign-in is (R-38).
 struct MonitorCommands: Commands {
     @ObservedObject var model: AppModel
 

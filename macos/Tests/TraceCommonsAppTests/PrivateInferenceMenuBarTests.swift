@@ -99,7 +99,8 @@ final class PrivateInferenceMenuBarTests: XCTestCase {
     }
 
     /// Each tab's item opens through `OpenMonitor` at its own tab, so while
-    /// onboarding is required it opens first run instead.
+    /// onboarding is required Home and Traces open first run instead and
+    /// Inference opens the Monitor (R-38; `InferenceDuringOnboardingTests`).
     @MainActor
     func testEachTabCommandOpensItsTab() throws {
         XCTAssertEqual(MonitorCommands.destination(.home), .home(.overview))

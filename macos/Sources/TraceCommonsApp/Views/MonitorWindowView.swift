@@ -27,6 +27,18 @@ struct MonitorWindowView: View {
             case .traces: String(localized: "Traces", comment: "Monitor tab")
             }
         }
+
+        /// The tabs the strip shows: all three once onboarding is done, and
+        /// Inference alone before, where Private AI sign-in is (R-38).
+        static func shown(requiresOnboarding: Bool) -> [Tab] {
+            requiresOnboarding ? [.inference] : allCases
+        }
+    }
+
+    /// The tab drawn for the restored one: Inference while onboarding is
+    /// required, whatever was restored; the restored tab otherwise.
+    static func shownTab(_ tab: Tab, requiresOnboarding: Bool) -> Tab {
+        requiresOnboarding ? .inference : tab
     }
 
     enum MapTab: String {
@@ -124,7 +136,7 @@ struct MonitorWindowView: View {
                 showsMap: $showsMap, showsInspector: $showsInspector,
                 onSettings: { openSettings() }
             ) {
-                switch tab {
+                switch Self.shownTab(tab, requiresOnboarding: model.requiresOnboarding) {
                 case .traces:
                     TracesTreeView(store: traces, selection: $selectedSession) { entryId in
                         Self.review(entryId, selection: &selectedSession, showsInspector: &showsInspector)
@@ -152,11 +164,12 @@ struct MonitorWindowView: View {
             GlassPane {
                 // An empty branch would leave the pane nothing to draw, and
                 // it would vanish while the layout still reserved its width.
-                if !LaunchRouting.onboardingKnown(startup: model.startup, statusAnswered: model.status.answered, statusFailed: model.statusReadFailed)
-                    || model.requiresOnboarding {
+                // While onboarding is required only Inference is shown, so
+                // the Private AI inspector is the only one admitted (R-38).
+                if !LaunchRouting.onboardingKnown(startup: model.startup, statusAnswered: model.status.answered, statusFailed: model.statusReadFailed) {
                     Color.clear
                 } else {
-                    switch tab {
+                    switch Self.shownTab(tab, requiresOnboarding: model.requiresOnboarding) {
                     case .traces:
                         SessionInspectorView(store: traces, entry: selectedEntry)
                     case .inference:
@@ -348,23 +361,28 @@ private struct MonitorMainPane<Content: View>: View {
                 // hold during monitor use is told whatever the map and the
                 // inspector are doing.
                 ShellNotices()
-                // No tab before onboarding is done: its screens act on
-                // consent that has not been given. The button opens first
-                // run, which is where every request goes until then. Before
-                // the core says, the placeholder status is not "signed out".
+                // No Home or Traces before onboarding is done: their screens
+                // act on consent that has not been given. Inference stays, so
+                // Private AI sign-in is reachable before Commons enrollment
+                // (R-38); its own startup handling (roots, starting, refused)
+                // is its gate. The button opens first run, which is where
+                // every other request goes until then. Before the core says,
+                // the placeholder status is not "signed out".
                 if !LaunchRouting.onboardingKnown(startup: model.startup, statusAnswered: model.status.answered, statusFailed: model.statusReadFailed) {
                     SettingsAwaiting()
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
-                } else if model.requiresOnboarding {
-                    GlassNotice(tone: .ask, title: MonitorWords.signedOut) {
-                        Button(OnboardingWelcomeWords.getStarted) { OpenMonitor.request() }
-                    }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
                 } else {
+                    if model.requiresOnboarding {
+                        GlassNotice(tone: .ask, title: MonitorWords.signedOut) {
+                            Button(OnboardingWelcomeWords.getStarted) { OpenMonitor.request() }
+                        }
+                    }
                     GlassSegmentedTabs(
                         String(localized: "Monitor", comment: "Monitor tabs name"),
-                        selection: $tab,
-                        segments: MonitorWindowView.Tab.allCases.map { item in
+                        selection: Binding(
+                            get: { MonitorWindowView.shownTab(tab, requiresOnboarding: model.requiresOnboarding) },
+                            set: { tab = $0 }),
+                        segments: MonitorWindowView.Tab.shown(requiresOnboarding: model.requiresOnboarding).map { item in
                             GlassSegment(
                                 item.title, value: item,
                                 badgeValue: item == .traces ? tracesBadge : nil,
