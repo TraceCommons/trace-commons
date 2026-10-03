@@ -64,6 +64,14 @@ final class DaemonDataContractTests: XCTestCase {
 
     // MARK: - Unknown stays unknown
 
+    /// `unknownCounts` draws Ron's badge as "—": the one state meant for an
+    /// older daemon, or one that is unreachable, neither of which a temp
+    /// store's real daemon can be (`status_value` in `daemon::ipc` always
+    /// computes a concrete `decisions_owed`). K2's recorder records the real
+    /// reply and then removes this one field by hand, marking the file
+    /// `"_sample":"absent on purpose: older daemon"` -- see
+    /// `k2_sample_recorder.rs`'s `apply_hand_written_overrides` -- so this is
+    /// the one sample file the drift test excludes rather than compares.
     func testAbsentDecisionsOwedDecodesAsNil() async throws {
         let status = try await SampleDaemonClient(.unknownCounts).status()
         XCTAssertNil(status.decisionsOwed)
@@ -153,8 +161,29 @@ final class DaemonDataContractTests: XCTestCase {
         XCTAssertEqual(rollup.takenBack, 1)
     }
 
+    /// K2 of #1173: `inference_calls` is only ever `readable` with a live
+    /// IronWire proxy answering (`shared.routing_ledger()`), which no temp
+    /// store can run, so `normalDay`'s recording is hand-written --
+    /// `k2_sample_recorder.rs`'s `apply_hand_written_overrides`, marked
+    /// `"_sample":"no live IronWire in a temp store"` and excluded from the
+    /// drift test -- shaped exactly like the real reply `calls_page` builds
+    /// (`daemon/inference_map.rs` and its own tests), not invented.
     func testOnlyVerifiedIsProof() async throws {
-        let calls = try await SampleDaemonClient(.normalDay).inferenceCalls(limit: 50, cursor: nil).calls
+        let sampleCalls = try await SampleDaemonClient(.normalDay).inferenceCalls(limit: 50, cursor: nil).calls
+        XCTAssertEqual(sampleCalls.filter { $0.proofLabel.isProof }.map(\.proof), ["verified"])
+        XCTAssertTrue(sampleCalls.contains { $0.proofLabel == .failed })
+
+        // The filter this test is actually about, `ProofLabel.isProof`,
+        // exercised directly against decoded calls too, so it holds
+        // independent of the sample's own content.
+        func call(proof: String) throws -> DaemonData.InferenceCall {
+            try DaemonDataDecoding.decoder().decode(
+                DaemonData.InferenceCall.self,
+                from: Data(
+                    #"{"id":1,"at":"2026-09-30T09:00:00Z","tool":"claude-code","family":"anthropic","model":"m","route":"routed","proof":"\#(proof)"}"#
+                        .utf8))
+        }
+        let calls = try [call(proof: "verified"), call(proof: "pending"), call(proof: "failed"), call(proof: "gateway_only")]
         XCTAssertEqual(calls.filter { $0.proofLabel.isProof }.map(\.proof), ["verified"])
         XCTAssertTrue(calls.contains { $0.proofLabel == .failed })
         XCTAssertEqual(DaemonData.ProofLabel.allCases.filter(\.isProof), [.verified])
@@ -297,6 +326,8 @@ final class DaemonDataContractTests: XCTestCase {
     }
 
     func testLiveEventsDeliverParsedFrames() async {
+        // "{}" is not a frame, so the opening snapshot cannot be built and
+        // the stream opens with a resync instead; frames follow it.
         let client = LiveDaemonClient(transport: FakeTransport(response: "{}"))
         let stream = client.events()
         client.deliver(eventJSON: #"{"event":"status_changed","data":{}}"#)
@@ -305,6 +336,8 @@ final class DaemonDataContractTests: XCTestCase {
         // or `cost`.
         client.deliver(eventJSON: #"{"event":"inference_call_added","data":{"id":7,"tool":"codex","model":"m","proof":"pending"}}"#)
         var iterator = stream.makeAsyncIterator()
+        let opening = await iterator.next()
+        XCTAssertEqual(opening, .resyncRequired)
         let first = await iterator.next()
         XCTAssertEqual(first, .statusChanged)
         guard case .inferenceCallAdded(let call)? = await iterator.next() else {
