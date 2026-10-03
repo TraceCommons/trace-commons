@@ -2424,7 +2424,9 @@ char*       tc_flow1_start_json(int32_t regrant);
  * returned, event_json {"event": <name>, ...}. The step order, Back, and
  * which events leave the disclosures unread are the core's. Set
  * progress.connected from the daemon's status before each call. NULL for an
- * unreadable argument, an unknown event and on a caught panic.
+ * unreadable argument, an unknown event, an event the step on screen does
+ * not offer (Back from the welcome or once done included) and on a caught
+ * panic; a NULL leaves the state the shell holds as it was.
  */
 char*       tc_flow1_apply_json(const char* state_json, const char* event_json);
 

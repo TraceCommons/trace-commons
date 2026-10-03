@@ -5410,6 +5410,14 @@ fn the_flow1_steps_cross_the_abi_and_back_undoes_the_disclosures() {
     let state_c = cstr_str(&state.to_string());
     let unknown = cstr_str(r#"{"event": "grant_anyway"}"#);
     assert!(unsafe { tc_flow1_apply_json(state_c.as_ptr(), unknown.as_ptr()) }.is_null());
+    // A known event the step on screen does not offer moves nothing: the
+    // scrub disclosure "read" from the grant screen, and Back from the
+    // welcome.
+    let scrub = cstr_str(r#"{"event": "scrub_disclosure_read"}"#);
+    assert!(unsafe { tc_flow1_apply_json(state_c.as_ptr(), scrub.as_ptr()) }.is_null());
+    let welcome = cstr_str(&first.to_string());
+    let back_c = cstr_str(r#"{"event": "back"}"#);
+    assert!(unsafe { tc_flow1_apply_json(welcome.as_ptr(), back_c.as_ptr()) }.is_null());
     assert!(unsafe { tc_flow1_apply_json(std::ptr::null(), unknown.as_ptr()) }.is_null());
     let garbage = cstr_str("not json");
     let back_event = cstr_str(r#"{"event": "back"}"#);

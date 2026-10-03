@@ -5678,7 +5678,9 @@ pub extern "C" fn tc_flow1_start_json(regrant: i32) -> *mut c_char {
 ///
 /// Returns an owned JSON string; free it with [`tc_string_free`]. NULL for a
 /// NULL, non-UTF-8 or unparseable argument, an event this build does not
-/// know, and on a caught panic.
+/// know, an event the step on screen does not offer
+/// (`flow1::event_belongs_to`; Back from the welcome or once done included),
+/// and on a caught panic. A NULL leaves the state the shell holds as it was.
 ///
 /// # Safety
 /// `state_json` and `event_json`, if non-null, must each point to a valid,
@@ -5700,9 +5702,11 @@ pub unsafe extern "C" fn tc_flow1_apply_json(
         else {
             return Ok(std::ptr::null_mut());
         };
-        Ok(to_owned_cstring(&serde_json::to_string(&apply(
-            &state, event,
-        ))?))
+        // An event the step on screen does not offer moves nothing.
+        let Ok(next) = apply(&state, event) else {
+            return Ok(std::ptr::null_mut());
+        };
+        Ok(to_owned_cstring(&serde_json::to_string(&next)?))
     })
 }
 

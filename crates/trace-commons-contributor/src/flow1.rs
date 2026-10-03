@@ -316,15 +316,61 @@ pub fn previous_step(
     }
 }
 
-/// The state after `event`.
+/// [`apply`] refused an event that is not one the step on screen offers.
+pub const FLOW1_EVENT_NOT_FOR_STEP: &str = "flow1-event-not-for-step";
+
+/// Whether `event` is something the contributor can do on `step`. Each
+/// event belongs to the one screen that offers it; Back belongs to every
+/// step that has a step before it, so not the welcome and not done.
+///
+/// Tauri's onboarding gets the same rule from its structure: each of its
+/// handlers is reached only from its own screen's button.
+#[must_use]
+pub fn event_belongs_to(step: OnboardingStep, event: &Flow1Event) -> bool {
+    use Flow1Event as E;
+    use OnboardingStep as S;
+    match event {
+        E::RootsStarted => step == S::Welcome,
+        E::RootsReady => step == S::Roots,
+        E::Enrolled => step == S::Connect,
+        E::ScopesSaved { .. } | E::DecideLater { .. } => step == S::Consent,
+        E::ChoosePath { .. } => step == S::Path,
+        E::PrivacySaved => step == S::Privacy,
+        E::InferenceFinished => step == S::Inference,
+        E::ScrubDisclosureRead => step == S::DisclosureScrub,
+        E::WitnessDisclosureRead { .. } => step == S::DisclosureWitness,
+        E::Granted | E::SkipGrant => step == S::Grant,
+        E::ProjectsFinished => step == S::Projects,
+        E::Back => !matches!(step, S::Welcome | S::Done),
+    }
+}
+
+/// The state after `event`, or [`FLOW1_EVENT_NOT_FOR_STEP`] when the step
+/// on screen does not offer it ([`event_belongs_to`]); a refused event moves
+/// nothing, so a disclosure is never marked read from another screen.
 ///
 /// Every event that changes the path, the scopes or the step order before
 /// the disclosures leaves both disclosures unread, and so does Back: the
 /// grant is given only under screens read in order, for the choices on
 /// screen now.
-#[must_use]
-pub fn apply(state: &Flow1State, event: Flow1Event) -> Flow1State {
+///
+/// `Enrolled` moves the step on and does not set `progress.connected`. That
+/// is deliberate: `connected` is the daemon's answer, which a shell sets
+/// from its status before each call, as Tauri's onboarding derives it from
+/// `daemon.logged_in` on every render. A step machine that remembered it
+/// would keep saying connected after the daemon stopped saying so.
+///
+/// Back from the grant screen lands on the witness screen with both
+/// disclosures unread, so reading the witness screen alone leaves the scrub
+/// disclosure as a blocker; the contributor goes Back once more to read it.
+/// That fails closed, and it is what Tauri's `goBack` in `flow1.ts` does,
+/// which D1 leaves as it is; the two are kept the same rather than fixed in
+/// one.
+pub fn apply(state: &Flow1State, event: Flow1Event) -> Result<Flow1State, &'static str> {
     use OnboardingStep as S;
+    if !event_belongs_to(state.step, &event) {
+        return Err(FLOW1_EVENT_NOT_FOR_STEP);
+    }
     let mut next = state.clone();
     match event {
         Flow1Event::RootsStarted => next.step = S::Roots,
@@ -390,7 +436,7 @@ pub fn apply(state: &Flow1State, event: Flow1Event) -> Flow1State {
             next.progress = next.progress.with_disclosures_unread();
         }
     }
-    next
+    Ok(next)
 }
 
 #[cfg(test)]
@@ -626,26 +672,34 @@ mod tests {
                 show_privacy,
             },
         ] {
-            state = apply(&state, event);
+            state = go(&state, event);
         }
         if show_privacy {
             assert_eq!(state.step, OnboardingStep::Privacy);
-            state = apply(&state, Flow1Event::PrivacySaved);
+            state = go(&state, Flow1Event::PrivacySaved);
         }
         assert_eq!(state.step, OnboardingStep::Inference);
-        state = apply(&state, Flow1Event::InferenceFinished);
+        state = go(&state, Flow1Event::InferenceFinished);
         assert_eq!(state.step, OnboardingStep::DisclosureScrub);
-        state = apply(&state, Flow1Event::ScrubDisclosureRead);
+        state = go(&state, Flow1Event::ScrubDisclosureRead);
         assert_eq!(state.step, OnboardingStep::DisclosureWitness);
-        state = apply(
+        state = go(
             &state,
             Flow1Event::WitnessDisclosureRead {
                 signing_address: Some("0xabc".to_owned()),
             },
         );
         assert_eq!(state.step, OnboardingStep::Grant);
+        // `Enrolled` does not set it: a shell sets `connected` from the
+        // daemon's status before each call, as this does for one that says
+        // enrolled.
         state.progress.connected = true;
         state
+    }
+
+    /// `apply` for an event the step on screen offers.
+    fn go(state: &Flow1State, event: Flow1Event) -> Flow1State {
+        apply(state, event).expect("an event the step on screen offers")
     }
 
     #[test]
@@ -653,10 +707,7 @@ mod tests {
         for show_privacy in [true, false] {
             let state = walk_to_grant(show_privacy);
             assert_eq!(grant_request(&state.progress), Ok(Some("0xabc")));
-            assert_eq!(
-                apply(&state, Flow1Event::Granted).step,
-                OnboardingStep::Done
-            );
+            assert_eq!(go(&state, Flow1Event::Granted).step, OnboardingStep::Done);
         }
         // The ask-first path never reaches the disclosures.
         assert_eq!(after_inference(None), OnboardingStep::Projects);
@@ -673,7 +724,7 @@ mod tests {
     #[test]
     fn back_undoes_the_disclosures_read() {
         let at_grant = walk_to_grant(false);
-        let back = apply(&at_grant, Flow1Event::Back);
+        let back = go(&at_grant, Flow1Event::Back);
         assert_eq!(back.step, OnboardingStep::DisclosureWitness);
         assert!(!back.progress.scrub_disclosure_seen);
         assert!(!back.progress.witness_disclosure_seen);
@@ -692,9 +743,17 @@ mod tests {
 
     #[test]
     fn changing_the_path_or_the_scopes_undoes_the_disclosures_read() {
-        let at_grant = walk_to_grant(false);
-        let rechosen = apply(
-            &at_grant,
+        // Both disclosures read, then on the path question and on the scope
+        // picker. Back would have unread them already, so these states are
+        // built by hand: they pin that a new choice unreads them on its own.
+        let read = walk_to_grant(false);
+        let on = |step: OnboardingStep| Flow1State {
+            step,
+            ..read.clone()
+        };
+        assert!(on(OnboardingStep::Path).progress.scrub_disclosure_seen);
+        let rechosen = go(
+            &on(OnboardingStep::Path),
             Flow1Event::ChoosePath {
                 path: ContributionPath::Automatic,
                 show_privacy: false,
@@ -703,8 +762,8 @@ mod tests {
         assert!(!rechosen.progress.scrub_disclosure_seen);
         assert!(!rechosen.progress.witness_disclosure_seen);
         assert_eq!(rechosen.progress.witness_shown, None);
-        let rescoped = apply(
-            &at_grant,
+        let rescoped = go(
+            &on(OnboardingStep::Consent),
             Flow1Event::ScopesSaved {
                 scopes: names(&["debugging_evaluation", "benchmark_only"]),
             },
@@ -749,8 +808,12 @@ mod tests {
     #[test]
     fn decide_later_saves_no_scope_and_gives_no_grant() {
         for show_privacy in [true, false] {
-            let at_picker = apply(&start(false), Flow1Event::Enrolled);
-            let later = apply(&at_picker, Flow1Event::DecideLater { show_privacy });
+            let connect = Flow1State {
+                step: OnboardingStep::Connect,
+                ..start(false)
+            };
+            let at_picker = go(&connect, Flow1Event::Enrolled);
+            let later = go(&at_picker, Flow1Event::DecideLater { show_privacy });
             assert_eq!(later.progress.scopes_saved, None);
             assert_eq!(later.progress.path, Some(ContributionPath::AskFirst));
             assert_eq!(later.privacy_included, show_privacy);
@@ -776,12 +839,12 @@ mod tests {
 
     #[test]
     fn leaving_the_grant_screen_is_flow_2_not_a_half_grant() {
-        let skipped = apply(&walk_to_grant(false), Flow1Event::SkipGrant);
+        let skipped = go(&walk_to_grant(false), Flow1Event::SkipGrant);
         assert_eq!(skipped.step, OnboardingStep::Projects);
         assert_eq!(skipped.progress.path, Some(ContributionPath::AskFirst));
         assert_eq!(grant_blockers(&skipped.progress), [GrantBlocker::Path]);
         assert_eq!(
-            apply(&skipped, Flow1Event::ProjectsFinished).step,
+            go(&skipped, Flow1Event::ProjectsFinished).step,
             OnboardingStep::Done
         );
     }
@@ -808,6 +871,83 @@ mod tests {
                 GrantBlocker::WitnessDisclosure
             ]
         );
+    }
+
+    /// An event is what the contributor did on the step on screen, so one
+    /// sent from any other step is refused and the state is not moved: a
+    /// scrub disclosure "read" from the welcome must not mark it read.
+    #[test]
+    fn an_event_from_another_step_is_refused() {
+        use OnboardingStep as S;
+        let event_for = |step: S| -> Flow1Event {
+            match step {
+                S::Welcome => Flow1Event::RootsStarted,
+                S::Roots => Flow1Event::RootsReady,
+                S::Connect => Flow1Event::Enrolled,
+                S::Consent => Flow1Event::ScopesSaved {
+                    scopes: names(&["debugging_evaluation"]),
+                },
+                S::Path => Flow1Event::ChoosePath {
+                    path: ContributionPath::Automatic,
+                    show_privacy: false,
+                },
+                S::Privacy => Flow1Event::PrivacySaved,
+                S::Inference => Flow1Event::InferenceFinished,
+                S::DisclosureScrub => Flow1Event::ScrubDisclosureRead,
+                S::DisclosureWitness => Flow1Event::WitnessDisclosureRead {
+                    signing_address: None,
+                },
+                S::Grant => Flow1Event::Granted,
+                S::Projects => Flow1Event::ProjectsFinished,
+                S::Done => Flow1Event::Back,
+            }
+        };
+        let steps = [
+            S::Welcome,
+            S::Roots,
+            S::Connect,
+            S::Consent,
+            S::Path,
+            S::Privacy,
+            S::Inference,
+            S::DisclosureScrub,
+            S::DisclosureWitness,
+            S::Grant,
+            S::Projects,
+        ];
+        for on in steps {
+            let state = Flow1State {
+                step: on,
+                progress: Flow1Progress::default(),
+                privacy_included: false,
+            };
+            for from in steps {
+                let result = apply(&state, event_for(from));
+                if on == from {
+                    assert!(result.is_ok(), "{from:?}'s event on {on:?}");
+                } else {
+                    assert_eq!(
+                        result,
+                        Err(FLOW1_EVENT_NOT_FOR_STEP),
+                        "{from:?}'s event on {on:?}"
+                    );
+                }
+            }
+        }
+        // The scrub disclosure read from the welcome marks nothing read.
+        assert_eq!(
+            apply(&start(false), Flow1Event::ScrubDisclosureRead),
+            Err(FLOW1_EVENT_NOT_FOR_STEP)
+        );
+        // Back has nowhere to go from the welcome or once done.
+        assert!(apply(&start(false), Flow1Event::Back).is_err());
+        let done = Flow1State {
+            step: S::Done,
+            ..start(false)
+        };
+        assert!(apply(&done, Flow1Event::Back).is_err());
+        assert!(apply(&done, Flow1Event::Granted).is_err());
+        assert_eq!(FLOW1_EVENT_NOT_FOR_STEP, "flow1-event-not-for-step");
     }
 
     #[test]
