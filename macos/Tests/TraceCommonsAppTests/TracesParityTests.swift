@@ -318,5 +318,95 @@ final class TracesParityTests: XCTestCase {
         XCTAssertEqual(SearchTab.matchCount(2), "2 matches")
         XCTAssertEqual(SearchTab.matchCount(20), "20 matches")
     }
+
+    /// Undo and the consent offers sit above the tree, so they are on
+    /// screen with the inspector hidden (spec, "Behaviour that must not
+    /// depend on the inspector"), and read the same model members and core
+    /// words the legacy queue does.
+    func test_offersAndUndoLiveAboveTheTree() throws {
+        let tree = try Self.text("Views/Monitor/TracesViews.swift")
+        let treeView = try XCTUnwrap(tree.range(of: "struct TracesTreeView"))
+        let inspector = try XCTUnwrap(tree.range(of: "struct SessionInspectorView"))
+        XCTAssertTrue(tree[treeView.lowerBound..<inspector.lowerBound].contains("TracesOffersBar(store: store)"))
+        XCTAssertFalse(tree[inspector.lowerBound...].contains("pendingUndo"), "undo must not live only in the inspector")
+        XCTAssertTrue(tree.contains("Text(QueueLegacyWords.nothingWaiting)"))
+        XCTAssertTrue(tree.contains("Text(QueueLegacyWords.nothingWaitingDetail)"))
+        // A refused undo is said beside it, by the one helper the inspector
+        // shares.
+        XCTAssertTrue(tree.contains("TracesRefusal(store: store, entryId: entry.entryId)"))
+
+        let offers = try Self.text("Views/Monitor/TracesOffers.swift")
+        for needle in [
+            "model.undo", "model.undoApproval()", "model.dismissUndo()", ".keyboardShortcut(.defaultAction)",
+            "QueueLegacyWords.undoWillSend", "QueueLegacyWords.closeNoticeStillSends", "QueueLegacyWords.closeNotice)",
+            "QueueLegacyWords.approvedAgo(", "store.lastContributed", "store.lastKept", ".undoContribute", ".undoKeep",
+            "model.showsPrivateInferenceOffer", "model.answerPrivateInferenceOffer(accepted: true)",
+            "model.answerPrivateInferenceOffer(accepted: false)", "model.privateInferenceBusy",
+            "copy.offerWhat", "copy.offerExposure", "copy.offerNoRepoint", "copy.offerAskedOnce",
+            "model.armingOffer", "model.acceptArmingOffer(", "model.declineArmingOffer(",
+            "TCCoreCopy.armingOfferCopyJSON(", "CertificateSection(entries: model.awaitingDecision)",
+            "model.outcomeCounts", "TCOutcome.line(label:", "QueueLegacyWords.noLongerWaiting(",
+            "QueueLegacyWords.notOfferedScope", "model.lastActionError = nil", "model.lastActionNotice = nil",
+            "model.witnessCopy?.onboarding", "QueueLegacyWords.agentSetup", "QueueLegacyWords.undo)",
+            "ActionMessageBanner.dismissWord",
+        ] {
+            XCTAssertTrue(offers.contains(needle), "TracesOffers.swift lacks \(needle)")
+        }
+        // No control without words: an absent core word falls back to an
+        // existing one, never to an empty title.
+        XCTAssertFalse(offers.contains("?? \"\""), "a control would be wordless without the core")
+        try LegacySymbols.assertClean("Views/Monitor/TracesOffers.swift")
+        XCTAssertTrue(GlassSurfaceRulesTests.files.contains("Views/Monitor/TracesOffers.swift"))
+
+        // The legacy queue reads the same table, one literal per sentence.
+        let queue = try Self.text("Views/QueueView.swift")
+        for needle in [
+            "Text(QueueLegacyWords.undoWillSend)", "QueueLegacyWords.closeNoticeStillSends",
+            "QueueLegacyWords.approvedAgo(undo.heldSeconds)", "Text(QueueLegacyWords.noLongerWaiting(",
+            "Text(QueueLegacyWords.notOfferedScope)", "title: QueueLegacyWords.nothingWaiting,",
+            "detail: QueueLegacyWords.nothingWaitingDetail", "Button(QueueLegacyWords.lookInside,",
+            "DisclosureGroup(QueueLegacyWords.agentSetup)", "Button(QueueLegacyWords.undo,",
+        ] {
+            XCTAssertTrue(queue.contains(needle), "QueueView.swift lacks \(needle)")
+        }
+    }
+
+    /// The words table holds the legacy sentences verbatim.
+    func test_theQueueWordsAreTheLegacySentences() {
+        XCTAssertEqual(QueueLegacyWords.nothingWaiting, "Nothing is waiting.")
+        XCTAssertEqual(
+            QueueLegacyWords.nothingWaitingDetail,
+            "When a session finishes and goes quiet, it shows up here. Nothing is sent unless you say so.")
+        XCTAssertEqual(
+            QueueLegacyWords.undoWillSend,
+            "Approved sessions will send automatically. You can undo until uploading starts.")
+        XCTAssertEqual(
+            QueueLegacyWords.closeNoticeStillSends,
+            "Close this notice. Approved sessions will still send automatically.")
+        XCTAssertEqual(QueueLegacyWords.closeNotice, "Close this notice.")
+        XCTAssertEqual(QueueLegacyWords.approvedAgo(7), "Approved 7s ago")
+        XCTAssertEqual(QueueLegacyWords.approvedAgo(AppModel.Undo.tickCeiling), "Approved 120s+ ago")
+        XCTAssertEqual(QueueLegacyWords.approvedAgo(500), "Approved 120s+ ago")
+        XCTAssertEqual(QueueLegacyWords.noLongerWaiting(3), "Sessions no longer waiting (3)")
+        XCTAssertEqual(
+            QueueLegacyWords.notOfferedScope,
+            "This covers sessions that reached the queue. Sessions that were never queued at all are not counted here.")
+    }
+
+    /// Declining comes first and neither answer is the primary action, on
+    /// both offers (`QueueView.swift:1262-1268, 1321-1325`).
+    func test_neitherOfferLeadsTheEyeToYes() throws {
+        let offers = try Self.text("Views/Monitor/TracesOffers.swift")
+        let decline = try XCTUnwrap(offers.range(of: "copy.offerDecline"))
+        let accept = try XCTUnwrap(offers.range(of: "copy.offerAccept"))
+        XCTAssertLessThan(decline.lowerBound, accept.lowerBound)
+        let armDecline = try XCTUnwrap(offers.range(of: "Button(copy.decline"))
+        let armConfirm = try XCTUnwrap(offers.range(of: "Button(copy.confirm"))
+        XCTAssertLessThan(armDecline.lowerBound, armConfirm.lowerBound)
+        let arming = try XCTUnwrap(offers.range(of: "struct ArmingOfferGlassCard"))
+        XCTAssertFalse(offers[arming.lowerBound...].prefix(1500).contains("GlassButtonStyle(.primary"))
+        let privateAI = try XCTUnwrap(offers.range(of: "struct PrivateAIOfferGlassCard"))
+        XCTAssertFalse(offers[privateAI.lowerBound..<arming.lowerBound].contains("GlassButtonStyle(.primary"))
+    }
 }
 #endif
