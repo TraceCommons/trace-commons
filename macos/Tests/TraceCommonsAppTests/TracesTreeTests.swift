@@ -506,12 +506,21 @@ final class TracesQueueStateTests: XCTestCase {
     /// and not twice when the budget does.
     func test_theHealthLabelIsNotSaidTwice() async throws {
         let full = try await status { $0["health"] = ["last_error_label": "queue-full"] }
-        XCTAssertEqual(TracesStore.safeguards(full).map(\.title), [HealthCopy.forLabel("queue-full").title])
+        XCTAssertEqual(TracesStore.safeguards(full).map(\.title), [HealthCopy.core(label: "queue-full", maxQueueEntries: nil).title])
         let capped = try await status {
             $0["health"] = ["last_error_label": "daily-cap-reached"]
             Self.spend(&$0)
         }
         XCTAssertEqual(TracesStore.safeguards(capped).map(\.title), [DailyBudgetCopy.title])
+    }
+
+    /// A full queue names the configured limit when the settings were read,
+    /// in the core's words, as the main window's banner does.
+    func test_aFullQueueNamesItsLimit() async throws {
+        let full = try await status { $0["health"] = ["last_error_label": "queue-full"] }
+        let named = TracesStore.safeguards(full, maxQueueEntries: 500).first?.body
+        XCTAssertEqual(named, HealthCopy.core(label: "queue-full", maxQueueEntries: 500).detail)
+        XCTAssertNotEqual(named, TracesStore.safeguards(full, maxQueueEntries: nil).first?.body)
     }
 
     /// The badge pairs with the queue shield: something waiting that is
@@ -542,4 +551,106 @@ func recordedEntry(_ fields: [String: Any] = [:]) throws -> DaemonData.QueueEntr
     row.merge(fields) { _, new in new }
     let data = try JSONSerialization.data(withJSONObject: row)
     return try DaemonDataDecoding.decoder().decode(DaemonData.QueueEntry.self, from: data)
+}
+
+/// Submit all and Submit all as on a folder row (B9), against the sample core.
+@MainActor
+final class TracesFolderSubmitTests: XCTestCase {
+    private func loaded() async throws -> (TracesStore, TracesTree.FolderNode) {
+        let store = TracesStore(client: SampleDaemonClient(.normalDay))
+        await store.load()
+        let folder = try XCTUnwrap(
+            (store.tree.tools.flatMap(\.folders) + store.tree.unplaced).first { !$0.sessions.isEmpty })
+        return (store, folder)
+    }
+
+    func test_aFolderCarriesTheCoresCountsFromItsProjectRow() async throws {
+        let client = SampleDaemonClient(.normalDay)
+        let projects = try await client.listProjects().projects
+        let tree = TracesTree.build(
+            entries: try await client.listPending(projectId: nil), projects: projects, settings: nil,
+            scansWhenUnset: [])
+        for folder in tree.tools.flatMap(\.folders) + tree.unplaced {
+            let row = projects.first { $0.projectId == folder.id }
+            XCTAssertEqual(folder.pendingCount, row?.pendingCount, folder.id)
+            XCTAssertEqual(folder.contributableCount, row?.contributableCount, folder.id)
+        }
+    }
+
+    func test_contributingAFolderKeepsTheCoresToastAndUndoClearsIt() async throws {
+        let (store, folder) = try await loaded()
+        await store.contributeFolder(folder, verdict: .worked)
+        let contributed = try XCTUnwrap(store.lastContributedFolder)
+        XCTAssertEqual(contributed.projectId, folder.id)
+        XCTAssertFalse(contributed.toast.line.isEmpty)
+        XCTAssertNil(store.lastContributed, "a newer decision ends the single-session undo")
+        await store.undoFolder(folder.id)
+        XCTAssertNil(store.lastContributedFolder)
+    }
+
+    /// One undo slot, as the legacy queue had: a session contributed after a
+    /// folder ends the folder's undo, so its cancel cannot reach that session.
+    func test_aSessionContributeEndsTheFoldersUndo() async throws {
+        let (store, folder) = try await loaded()
+        await store.contributeFolder(folder, verdict: nil)
+        XCTAssertNotNil(store.lastContributedFolder)
+        let id = try XCTUnwrap(store.tree.allSessions.first?.entryId)
+        await store.perform(.contribute, on: id)
+        XCTAssertNil(store.lastContributedFolder)
+        XCTAssertNotNil(store.lastContributed)
+    }
+
+    func test_attachClearsTheFolderNotice() async throws {
+        let (store, folder) = try await loaded()
+        // Both seeded first, so the clear is what the asserts below pin:
+        // the folder's undo, then the core's ignore notice (the sample core
+        // purges 0 of the sessions the confirmation promised).
+        await store.contributeFolder(folder, verdict: nil)
+        await store.setFolderMode(folder, .ignore, promised: folder.sessions.count)
+        XCTAssertNotNil(store.lastContributedFolder)
+        XCTAssertNotNil(store.folderNotice)
+        store.attach(nil)
+        XCTAssertNil(store.folderNotice)
+        XCTAssertNil(store.lastContributedFolder)
+    }
+
+    /// A new client is a new daemon: no undo, toast or refusal from the old
+    /// one survives into it.
+    func test_attachClearsEveryAnswerFromTheOldDaemon() async throws {
+        let (store, _) = try await loaded()
+        let ids = store.tree.allSessions.map(\.entryId)
+        await store.perform(.contribute, on: try XCTUnwrap(ids.last))
+        await store.perform(.keep, on: try XCTUnwrap(ids.first))
+        await store.perform(.undoContribute, on: try XCTUnwrap(ids.last))
+        let ghost = TracesTree.FolderNode(id: "proj_does_not_exist", label: "ghost", mode: nil, sessions: [])
+        await store.contributeFolder(ghost, verdict: nil)
+        XCTAssertNotNil(store.lastKept)
+        XCTAssertNotNil(store.lastContributed)
+        XCTAssertNotNil(store.actionError)
+        XCTAssertFalse(store.writeErrors.isEmpty)
+        store.attach(nil)
+        XCTAssertNil(store.lastKept)
+        XCTAssertNil(store.lastContributed)
+        XCTAssertNil(store.actionError)
+        XCTAssertTrue(store.writeErrors.isEmpty)
+    }
+
+    func test_aFolderRefusalIsKeptBesideTheFolder() async throws {
+        let (store, _) = try await loaded()
+        let ghost = TracesTree.FolderNode(id: "proj_does_not_exist", label: "ghost", mode: nil, sessions: [])
+        await store.contributeFolder(ghost, verdict: nil)
+        XCTAssertEqual(store.writeErrors[ghost.id], .daemon(code: "bad_params", message: "project-id-unrecognized"))
+        XCTAssertNil(store.lastContributedFolder)
+    }
+
+    func test_noFolderIsSubmittedWithoutAClientOrForAnIgnoredOne() async throws {
+        let (store, folder) = try await loaded()
+        XCTAssertTrue(store.mayContributeFolder(folder))
+        let ignored = TracesTree.FolderNode(id: folder.id, label: folder.label, mode: .ignore, sessions: folder.sessions)
+        XCTAssertFalse(store.mayContributeFolder(ignored))
+        store.attach(nil)
+        XCTAssertFalse(store.mayContributeFolder(folder))
+        await store.contributeFolder(folder, verdict: nil)
+        XCTAssertNil(store.lastContributedFolder)
+    }
 }

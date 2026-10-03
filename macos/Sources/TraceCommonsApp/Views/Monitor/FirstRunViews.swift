@@ -1,4 +1,3 @@
-#if DEBUG
 import SwiftUI
 import TCDesign
 import TCShellCore
@@ -6,20 +5,24 @@ import TCShellCore
 /// First run in the glass system (R12 of #1173): a single pane over the
 /// painted scene, with step progress above the step (spec, "Screens").
 ///
-/// The steps are the existing onboarding screens, sequenced by
+/// The steps are glass from Phase 2: the existing onboarding screens,
+/// rebuilt in place on TCDesign and sequenced by
 /// `OnboardingCoordinatorView` exactly as the shipping window sequences
 /// them: the same daemon calls, the same consent order, the same resume
 /// rules. This view draws the frame and the progress, and nothing else.
 ///
-/// It is gated as the main window gates its own onboarding
-/// (`MainWindowView`): the coordinator is drawn only while
+/// It is the onboarding gate (R15): the coordinator is drawn only while
 /// `model.requiresOnboarding`, and the window closes itself as soon as
-/// that is false, so an onboarded person never lands in the flow.
+/// that is false and opens the Monitor, so an onboarded person never lands
+/// in the flow.
 ///
 /// The passkey popups from #1030 are not here: #1030 hides the passkey card
 /// in the first release (its rule 12), and the passkey client (Z11) does
 /// not exist yet.
 struct FirstRunWindowView: View {
+    /// Where an earlier opener asked the Monitor to go, kept through the
+    /// hand-off (`LaunchRouting.handOff`).
+    let navigation: MainWindowNavigation
     @EnvironmentObject private var model: AppModel
     @Environment(\.dismissWindow) private var dismissWindow
     @State private var step: OnboardingNavigation.Step = .welcome
@@ -49,6 +52,10 @@ struct FirstRunWindowView: View {
                                 .padding(.horizontal, GlassTokens.Space.s10)
                                 .frame(maxWidth: .infinity)
                         }
+                        // A void or a gate hold can arrive while someone is
+                        // still setting up, and is told here too.
+                        ShellNotices()
+                            .padding(.horizontal, GlassTokens.Space.s6)
                         OnboardingCoordinatorView(
                             startAt: model.status.loggedIn ? .consent : .welcome,
                             onStep: { step = $0 },
@@ -62,10 +69,11 @@ struct FirstRunWindowView: View {
                             })
                     }
                 }
+                // Bounded by the window, not grown to the step: each step
+                // scrolls in its own ScrollView, which a pane sized to its
+                // step would let run past the window's bottom edge (a Uses
+                // step with many scopes), out of reach.
                 .frame(width: FirstRunProgress.paneWidth)
-                // As tall as the step, not the window: the pane sits on the
-                // scene rather than filling it.
-                .fixedSize(horizontal: false, vertical: true)
                 .padding(.vertical, GlassTokens.Space.windowPadding * 3)
             }
         }
@@ -74,14 +82,24 @@ struct FirstRunWindowView: View {
         .onChange(of: model.startup, initial: true) { _, startup in
             if asksForFolders == nil { asksForFolders = FirstRunProgress.asksForFolders(startup) }
         }
+        // Finishing first run hands off to the Monitor: at the destination
+        // an earlier opener left waiting, on Home otherwise. Initially too:
+        // first run opened for someone already onboarded closes and opens
+        // the Monitor instead.
         .onChange(of: model.requiresOnboarding, initial: true) { _, requires in
-            if !requires { dismissWindow(id: WindowID.firstRun) }
+            guard !requires else { return }
+            dismissWindow(id: WindowID.firstRun)
+            OpenMonitor.request(LaunchRouting.handOff(pending: navigation.pending))
         }
     }
 }
 
 /// The step progress for one onboarding step: which steps it shows and
 /// where the person is. Pure, so the mapping is tested.
+///
+/// The order is Folders, Join, Uses, Scan, Projects on a fresh install: the
+/// folders come before Join because the daemon cannot start without them and
+/// Join needs the daemon (D-3). It is not the concept's Join-first order.
 struct FirstRunProgress: Equatable {
     let labels: [String]
     let current: Int
@@ -127,4 +145,3 @@ enum FirstRunWords {
     static let scan = "Scan"
     static let projects = "Projects"
 }
-#endif

@@ -30,13 +30,13 @@ final class DaemonDataKeyCoverageTests: XCTestCase {
             "history_poll_secs", "growth_factor", "growth_min_new_bytes", "max_queue_entries", "max_reuploads",
             "queue_ttl_days",
             // Read by the app's existing settings model
-            // (`DaemonSettingsView`, `PrivateInferenceStateView` in
-            // `TraceCommonsApp/Models.swift`), which owns those screens; C1's
-            // screens do not draw them.
+            // (`DaemonSettingsView` in `TraceCommonsApp/Models.swift`), which
+            // owns those screens; C1's screens do not draw them. The
+            // `private_inference_*` keys are modelled by the contract now
+            // (the Private AI switch); `DaemonSettingsView` still reads them
+            // for the legacy screens.
             "admission_evidence_required", "claude_root_configured", "codex_root_configured",
             "near_ai_configured", "near_ai_inference_configured", "near_ai_session_retained",
-            "private_inference_offer_seen", "private_inference_state", "private_inference_state.port",
-            "private_inference_state.state",
             // Token capture and its storage notice: `TokenStorageView` owns
             // them, with copy from the core.
             "token_capture_enabled", "token_distributions_contribution", "token_storage",
@@ -379,6 +379,37 @@ final class DaemonDataKeyCoverageTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(checked["set_contribution_override"] ?? 0, 3)
     }
 
+    /// Z1.5 against the real daemon on a temp store: the switch is a
+    /// settings write the core confirms by its own rule, every key of the
+    /// reply is declared (the `private_inference_*` keys are modelled now,
+    /// not dropped), and turning it off again is confirmed too. A listener
+    /// that cannot start says so in `state`; it is never assumed running.
+    func testThePrivateAISwitchAgainstTheRealDaemon() async throws {
+        let daemon = try startDaemonWithOneSession()
+        let client = LiveDaemonClient(transport: Pipe(daemon))
+        let before = try await client.privateAI()
+        XCTAssertEqual(before.on, false)
+        XCTAssertNotNil(before.state, "the daemon always reports the listener's state")
+
+        let on = try await client.setPrivateAI(on: true)
+        XCTAssertEqual(on.on, true)
+        XCTAssertEqual(on.offerSeen, true)
+        XCTAssertTrue(TCPrivateInference.writeConfirmed(requestedOn: true, echoedSeen: on.offerSeen, echoedOn: on.on))
+        XCTAssertFalse(on.state?.state.isEmpty ?? true, "a label, whatever the listener did")
+
+        let off = try await client.setPrivateAI(on: false)
+        XCTAssertEqual(off.on, false)
+        XCTAssertTrue(TCPrivateInference.writeConfirmed(requestedOn: false, echoedSeen: off.offerSeen, echoedOn: off.on))
+        assertDeclared(
+            DaemonData.Settings.self,
+            try result(daemon, "set_settings", ["private_inference": false, "private_inference_offer_seen": true]),
+            method: "set_settings")
+        assertDeclared(DaemonData.Settings.self, try result(daemon, "get_settings"), method: "get_settings")
+        let after = try await client.privateAI()
+        XCTAssertEqual(after.on, false)
+        XCTAssertGreaterThanOrEqual(checked["set_settings"] ?? 0, 1)
+    }
+
     /// R6 against the real daemon: the tool switch writes the declaration
     /// and reads back its mode, and a folder approve answers for the group.
     func testTheToolSwitchAndFolderApproveAgainstTheRealDaemon() async throws {
@@ -402,6 +433,9 @@ final class DaemonDataKeyCoverageTests: XCTestCase {
         XCTAssertNotNil(group.excludedHeld, "a group call always reports what it held back")
         XCTAssertEqual(group.skipped.map(\.reasonLabel), ["not-enrolled"])
         assertDeclared(ApproveResponse.self, try result(daemon, "approve", ["project_id": projectId]), method: "approve")
+        let withVerdict = try await client.approveFolder(projectId: projectId, verdict: .worked)
+        XCTAssertEqual(withVerdict.approved, 0)
+        XCTAssertEqual(withVerdict.skipped.map(\.reasonLabel), ["not-enrolled"])
         do {
             _ = try await client.approveFolder(projectId: "proj_does_not_exist")
             XCTFail("an unknown project answered")

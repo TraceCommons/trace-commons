@@ -1,4 +1,5 @@
 import SwiftUI
+import TCDesign
 import TCBridge
 
 struct InsightCardsView: View {
@@ -14,7 +15,7 @@ struct InsightCardsView: View {
                 Button(model.text("card_update")) { model.generateCards() }
                 if model.cardBusy { ProgressView().controlSize(.small) }
             }
-            if let error = model.cardError { Text(error).foregroundStyle(.red) }
+            if let error = model.cardError { Text(error).foregroundStyle(GlassTokens.Color.statusOutsideText.color) }
             if let result = model.cardResult {
                 Text("\(model.text("provider")): \(result.provider.id) · \(result.provider.rubric_version)")
                     .font(.caption).foregroundStyle(.secondary)

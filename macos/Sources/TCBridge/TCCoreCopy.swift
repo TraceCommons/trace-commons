@@ -118,6 +118,16 @@ public enum TCCoreCopy {
         take(tc_privacy_scan_copy_json())
     }
 
+    /// `tc_health_copy_json`: the health banner's words. `reachable` is this
+    /// shell's own liveness fact; a nil or empty `label` on a reachable
+    /// daemon is nil (nothing to show). A nil `maxQueueEntries` is passed as
+    /// -1 (unknown). Decoded by `TCShellCore.HealthLineCopy`.
+    public static func healthCopyJSON(reachable: Bool, label: String?, maxQueueEntries: Int?) -> String? {
+        let limit = Int64(maxQueueEntries ?? -1)
+        guard let label else { return take(tc_health_copy_json(reachable ? 1 : 0, nil, limit)) }
+        return take(label.withCString { tc_health_copy_json(reachable ? 1 : 0, $0, limit) })
+    }
+
     /// `tc_monitor_traces_copy_json`: the monitor's Traces words. Decoded by
     /// `TCShellCore.MonitorTracesCopy`.
     public static func monitorTracesCopyJSON() -> String? {

@@ -19,12 +19,10 @@ struct TraceCommonsShell: App {
     @State private var compute = ComputeModel()
     @State private var navigation = MainWindowNavigation()
     @State private var missionDrafts = MissionDraftsModel()
-    #if DEBUG
     /// The glass menu-bar popover's data (R13), shared by its item and panel.
     /// No client until the daemon runs: the menu-bar label attaches the
     /// app's live one (`AppModel.daemonData`), never sample data.
     @State private var menuPanel = MenuPanelStore(client: nil)
-    #endif
     /// Quit confirmation, Dock reopen and invite links all arrive outside
     /// SwiftUI's reach. See `AppDelegate`.
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
@@ -41,105 +39,67 @@ struct TraceCommonsShell: App {
         RecentSearches.purgeLegacyStore()
     }
 
-    /// Whether the glass menu-bar panel (R13) stands in for the shipping
-    /// menu. Debug builds only, on `TRACE_COMMONS_GLASS_MENU=1`; a release
-    /// build always has the shipping menu.
-    private static let glassMenu: Bool = {
-        #if DEBUG
-        ProcessInfo.processInfo.environment["TRACE_COMMONS_GLASS_MENU"] == "1"
-        #else
-        false
-        #endif
-    }()
-
     var body: some Scene {
-        // Exactly one of the two menu-bar items is inserted, so exactly one
-        // `Launcher` (which starts the app's services) runs.
-        MenuBarExtra(isInserted: .constant(!Self.glassMenu)) {
-            MenuBarContent(navigation: navigation)
+        // The glass strip and panel (R13 of #1173), the only menu-bar item
+        // since R15. Its label is the `Launcher`, which starts the app's
+        // services.
+        MenuBarExtra {
+            MenuBarGlassPanel(store: menuPanel)
                 .environmentObject(model)
-                .tint(TC.accent)
-        } label: {
-            Launcher(model: model, compute: compute, navigation: navigation,
-                     appDelegate: appDelegate, missionDrafts: missionDrafts)
-        }
-
-        #if DEBUG
-        // The glass menu-bar panel (R13 of #1173), in place of the shipping
-        // menu when TRACE_COMMONS_GLASS_MENU=1, until R15.
-        MenuBarExtra(isInserted: .constant(Self.glassMenu)) {
-            MenuBarGlassPanel(navigation: navigation, store: menuPanel)
-                .environmentObject(model)
-                .tint(TC.accent)
+                .tint(GlassTokens.Color.purpleSoft.color)
         } label: {
             Launcher(model: model, compute: compute, navigation: navigation,
                      appDelegate: appDelegate, missionDrafts: missionDrafts, menuPanel: menuPanel)
         }
         .menuBarExtraStyle(.window)
-        #endif
 
-        Window("Trace Commons", id: WindowID.main) {
-            MainWindowView(navigation: navigation, missionDrafts: missionDrafts,
-                           insightsStoreSelection: insightsStoreSelection)
+        // The main window (R5 of #1173, the release default since R15).
+        // `OpenMonitor` opens it, or first run while onboarding is required.
+        Window("Monitor", id: WindowID.monitor) {
+            MonitorWindowView(navigation: navigation, insightsStoreSelection: insightsStoreSelection, missionDrafts: missionDrafts)
                 .environmentObject(model)
+                // The monitor reads the daemon, so it starts services on
+                // appear (D-11).
+                .onAppear { navigation.activateServicesForWindow() }
                 .environment(compute)
-                .frame(minWidth: 760, minHeight: 520)
                 // The brand purple (D3), not the platform blue. Overriding the
                 // user's chosen accent colour is a real departure from macOS
                 // convention and it is made on purpose: the accent is the
                 // single strongest cue that this app is the Trace product.
-                // It tints fills (prominent buttons, checked boxes), so it is
-                // the purple that carries white at 6.9:1 in both schemes.
                 // Everything else about the controls -- shape, focus ring,
                 // keyboard behaviour -- stays stock.
-                .tint(TC.accent)
-        }
-        .defaultSize(width: 940, height: 660)
-        // Cmd-1..7 for the seven destinations, and Cmd-Shift-M for the one
-        // switch worth reaching without the window. Menu items, so they are
-        // in-app only; see `MainWindowCommands`.
-        .commands {
-            MainWindowCommands(model: model, compute: compute, navigation: navigation,
-                               missionDrafts: missionDrafts)
-            #if DEBUG
-            MonitorWindowCommands()
-            #endif
-        }
-
-        #if DEBUG
-        // The glass monitor window and the Settings window (R5 of #1173),
-        // in debug builds until the screens they frame match the design.
-        // TRACE_COMMONS_MONITOR=1 opens the monitor at launch.
-        Window("Monitor", id: WindowID.monitor) {
-            MonitorWindowView()
-                .environmentObject(model)
-                // The monitor reads the daemon whatever the main window
-                // shows (Insights defers services).
-                .onAppear { navigation.activateServicesForWindow() }
-                .environment(compute)
-                .tint(TC.accent)
+                .tint(GlassTokens.Color.purpleSoft.color)
         }
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: GlassThreePane<EmptyView, EmptyView, EmptyView>.defaultWidth,
                      height: GlassTokens.Size.windowHeight)
         .windowResizability(.contentMinSize)
+        // Cmd-1..3 for the three tabs, and Cmd-Shift-M for the one switch
+        // worth reaching without the window. Menu items, so they are in-app
+        // only; see `MonitorCommands`.
+        .commands {
+            MonitorCommands(model: model)
+        }
 
+        #if DEBUG
         // The menu-bar item and popover in a window (R13 of #1173), for
-        // review on a menu bar with no room for the item.
-        // TRACE_COMMONS_MENU_PREVIEW=1 opens it at launch.
+        // review on a menu bar with no room for the item. Debug builds only
+        // (D-18). TRACE_COMMONS_MENU_PREVIEW=1 opens it at launch.
         Window("Menu bar", id: WindowID.menuPreview) {
-            MenuBarPreviewWindow(navigation: navigation, store: menuPanel)
+            MenuBarPreviewWindow(store: menuPanel)
                 .environmentObject(model)
-                .tint(TC.accent)
+                .tint(GlassTokens.Color.purpleSoft.color)
         }
         .windowResizability(.contentSize)
+        #endif
 
-        // First run in a glass pane over the scene (R12 of #1173).
-        // TRACE_COMMONS_FIRST_RUN=1 opens it at launch.
+        // First run in a glass pane over the scene (R12 of #1173): the
+        // onboarding gate, opened by `OpenMonitor` while onboarding is
+        // required.
         Window("First run", id: WindowID.firstRun) {
-            FirstRunWindowView()
+            FirstRunWindowView(navigation: navigation)
                 .environmentObject(model)
-                .tint(TC.accent)
+                .tint(GlassTokens.Color.purpleSoft.color)
         }
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 860, height: 760)
@@ -147,69 +107,122 @@ struct TraceCommonsShell: App {
         Settings {
             MonitorSettingsWindow(navigation: navigation)
                 .environmentObject(model)
-                // Settings loads and saves through the daemon; opened with
-                // ⌘, while the main window rests on Insights it would
-                // otherwise show nothing and drop edits.
+                // Settings loads and saves through the daemon; opened
+                // before services started it would otherwise show nothing
+                // and drop edits.
                 .onAppear { navigation.activateServicesForWindow() }
                 .environment(compute)
-                .tint(TC.accent)
+                .tint(GlassTokens.Color.purpleSoft.color)
         }
-        #endif
     }
 }
 
-#if DEBUG
-/// Window ▸ Monitor, to open the glass monitor window in a debug build.
-private struct MonitorWindowCommands: Commands {
+/// The View menu's Monitor commands, and the one shortcut that acts rather
+/// than navigates.
+///
+/// In-app only, by construction: these are menu items, so they fire when
+/// this app is frontmost and never while another app owns the keyboard. A
+/// global, system-wide hotkey would need a registration this app does not
+/// make and is deliberately out of scope.
+///
+/// It authors no wording: each tab's item is the tab's own word
+/// (`MonitorWindowView.Tab.title`), the switch's is the core's. Every item
+/// opens through `OpenMonitor`, so while onboarding is required Home and
+/// Traces open first run, and Inference opens the Monitor on its own tab,
+/// where Private AI sign-in is (R-38).
+struct MonitorCommands: Commands {
+    @ObservedObject var model: AppModel
+
+    /// Cmd-N for the Nth tab.
+    static let tabModifiers: EventModifiers = [.command]
+    /// Cmd-Shift-M for the switch. Shifted so it cannot be reached by the
+    /// same reflex that reaches a tab: this one changes what the machine is
+    /// doing, the other three only change what is on screen.
+    static let toggleModifiers: EventModifiers = [.command, .shift]
+    static let toggleKey: Character = "m"
+
+    /// The tab's shortcut: its position in the tab strip.
+    static func shortcut(_ tab: MonitorWindowView.Tab) -> Character {
+        switch tab {
+        case .home: "1"
+        case .inference: "2"
+        case .traces: "3"
+        }
+    }
+
+    /// Where the tab's item goes. Home lands on its overview.
+    static func destination(_ tab: MonitorWindowView.Tab) -> MonitorDestination {
+        switch tab {
+        case .home: .home(.overview)
+        case .inference: .inference
+        case .traces: .traces(entryId: nil)
+        }
+    }
+
     var body: some Commands {
-        CommandGroup(after: .windowList) {
-            OpenMonitorButton()
+        CommandGroup(after: .sidebar) {
+            ForEach(MonitorWindowView.Tab.allCases) { tab in
+                Button(tab.title) { OpenMonitor.request(Self.destination(tab)) }
+                    .keyboardShortcut(KeyEquivalent(Self.shortcut(tab)), modifiers: Self.tabModifiers)
+            }
+            Divider()
+            toggle
+        }
+    }
+
+    /// The switch, under the same asymmetry the menu-bar row follows.
+    ///
+    /// This is a menu, and a menu press must not enable answering: the on
+    /// direction raises the window at the destination, where
+    /// `offer_exposure` is, and writes nothing. It shares
+    /// `PrivateInferenceTray.perform` with the menu-bar row rather than
+    /// restating the rule, because two statements of one rule is how this
+    /// shortcut came to disagree with that row in the first place.
+    ///
+    /// The off direction *sets* false; it does not invert. An inverted press
+    /// against a stale switch position is an enable.
+    @ViewBuilder
+    private var toggle: some View {
+        if let copy = model.privateInferenceCopy {
+            let on = model.daemonSettings?.privateInferenceOn ?? false
+            Button(PrivateInferenceTray.label(on: on, copy: copy)) {
+                PrivateInferenceTray.perform(
+                    on: on,
+                    turnOff: { model.applyPrivateInference(false) },
+                    open: { OpenMonitor.request(.inference) })
+            }
+            .keyboardShortcut(KeyEquivalent(Self.toggleKey), modifiers: Self.toggleModifiers)
+            // Only the writing direction can be unavailable. Navigation stays
+            // reachable whatever the daemon is doing.
+            .disabled(
+                on && (model.privateInferenceBusy || model.daemonSettings?.privateInference == nil))
         }
     }
 }
-
-private struct OpenMonitorButton: View {
-    @Environment(\.openWindow) private var openWindow
-
-    var body: some View {
-        Button("Monitor") { openWindow(id: WindowID.monitor) }
-        Button("First run") { openWindow(id: WindowID.firstRun) }
-    }
-}
-#endif
 
 /// The menu-bar label, plus the one-time launch work. It lives in a view
-/// rather than in `App` so it can reach `openWindow`, which the notification
-/// `Review` action and the queue-full banner both need.
+/// rather than in `App` so it can reach `openWindow` and `openSettings`,
+/// which every `OpenMonitor` request needs.
 private struct Launcher: View {
     @ObservedObject var model: AppModel
     let compute: ComputeModel
     let navigation: MainWindowNavigation
     let appDelegate: AppDelegate
     let missionDrafts: MissionDraftsModel
-    #if DEBUG
-    /// Set for the glass menu-bar item (R13): its strip replaces the mark.
-    var menuPanel: MenuPanelStore?
-    #endif
+    /// The glass menu-bar item's data (R13), drawn as its strip.
+    let menuPanel: MenuPanelStore
     @Environment(\.openWindow) private var openWindow
+    @Environment(\.openSettings) private var openSettings
+
+    /// Whether the launch has made its one `OpenMonitor` request.
+    @State private var openedAtLaunch = false
 
     var body: some View {
-        label
+        MenuBarStripLabel(model: model, store: menuPanel)
             .task { launch() }
-            .onChange(of: navigation.section) { activateServices() }
-    }
-
-    @ViewBuilder
-    private var label: some View {
-        #if DEBUG
-        if let menuPanel {
-            MenuBarStripLabel(model: model, store: menuPanel)
-        } else {
-            MenuBarLabel(model: model)
-        }
-        #else
-        MenuBarLabel(model: model)
-        #endif
+            .onChange(of: model.onboardingKnown, initial: true) { _, ready in
+                openAtLaunch(ready)
+            }
     }
 
     @MainActor
@@ -217,9 +230,8 @@ private struct Launcher: View {
         navigation.activateServicesIfNeeded { startServices() }
     }
 
-    /// The service start, once, from whichever comes first: the main
-    /// window leaving Insights, or a window that needs services (Settings,
-    /// the monitor) opening.
+    /// The service start, once, from whichever comes first: launch, or a
+    /// window that needs services (Settings, the monitor) opening (D-11).
     @MainActor
     private func startServices() {
         model.start()
@@ -237,17 +249,17 @@ private struct Launcher: View {
     @MainActor
     private func launch() {
         missionDrafts.loadCopy()
-        OpenMainWindow.handler = {
-            NSApp.activate(ignoringOtherApps: true)
-            openWindow(id: WindowID.main)
+        OpenMonitor.handler = { destination, activate in
+            if activate { NSApp.activate(ignoringOtherApps: true) }
+            open(destination)
         }
         appDelegate.compute = compute
-        appDelegate.navigation = navigation
         appDelegate.model = model
         navigation.registerServiceStart { startServices() }
         activateServices()
-        // The only thing a notification action may do is open this window.
-        Notifier.shared.onReview = { OpenMainWindow.request() }
+        // The only thing a notification action may do is open the Monitor
+        // at Traces.
+        Notifier.shared.onReview = { OpenMonitor.request(.traces(entryId: nil)) }
 
         NotificationCenter.default.addObserver(
             forName: NSApplication.willTerminateNotification,
@@ -268,76 +280,70 @@ private struct Launcher: View {
         default: break
         }
 
-        // Used by scripts/run-demo.sh to bring the window up for a
-        // screenshot. Since the app became a regular one it opens its window
-        // on a normal launch anyway, so this now only matters for the paths
-        // that do not -- a login launch, and `open -g`.
+        // Used by scripts/run-demo.sh to bring the window up, activated, for
+        // a screenshot: the Monitor, or first run while onboarding is
+        // required. The launch's own request (`openAtLaunch`) opens the same
+        // window but activates the app only when onboarding is required, so
+        // a login launch or `open -g` of an onboarded install comes up
+        // without taking focus (R-44); this hook always activates.
         if ProcessInfo.processInfo.environment["TRACE_COMMONS_SHOW_WINDOW"] == "1" {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                OpenMainWindow.request()
+                OpenMonitor.request()
             }
         }
         #if DEBUG
-        if ProcessInfo.processInfo.environment["TRACE_COMMONS_MONITOR"] == "1" {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                openWindow(id: WindowID.monitor)
-            }
-        }
         if ProcessInfo.processInfo.environment["TRACE_COMMONS_MENU_PREVIEW"] == "1" {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                 openWindow(id: WindowID.menuPreview)
-            }
-        }
-        if ProcessInfo.processInfo.environment["TRACE_COMMONS_FIRST_RUN"] == "1" {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                openWindow(id: WindowID.firstRun)
             }
         }
         #endif
         DebugScreenshot.scheduleIfRequested(model: model)
         SelfTest.runIfRequested(model: model)
     }
+
+    /// The launch's window, once the core has said whether onboarding is
+    /// required (`AppModel.onboardingKnown`), so the choice is never made
+    /// from the placeholder status. Once, and not over an opener that got
+    /// there first: an invite link or a notification's Review has already
+    /// opened a window, and its destination waits in `navigation.pending`
+    /// for the Monitor, which a plain request would overwrite. Quietly
+    /// unless onboarding is required (R-44): launch behaviour is uniform
+    /// (`AppDelegate`), so an onboarded launch, a login launch among them,
+    /// does not take focus; a fresh install raises first run.
+    @MainActor
+    private func openAtLaunch(_ ready: Bool) {
+        guard ready, !openedAtLaunch else { return }
+        openedAtLaunch = true
+        guard navigation.pending == nil else { return }
+        OpenMonitor.request(activate: LaunchRouting.launchActivates(requiresOnboarding: model.requiresOnboarding))
+    }
+
+    /// One `OpenMonitor` request: first run while onboarding is required,
+    /// the Monitor otherwise (and before the core has said, which the
+    /// Monitor waits on), which consumes `navigation.pending`; a Settings
+    /// destination also opens Settings at its section.
+    @MainActor
+    private func open(_ destination: MonitorDestination?) {
+        navigation.pending = destination
+        let opening = LaunchRouting.opening(destination, requiresOnboarding: model.requiresOnboarding, onboardingKnown: model.onboardingKnown)
+        switch opening.window {
+        case .firstRun: openWindow(id: WindowID.firstRun)
+        case .monitor: openWindow(id: WindowID.monitor)
+        }
+        if let section = opening.settings {
+            navigation.settingsSection = section
+            openSettings()
+        }
+    }
 }
 
 enum WindowID {
-    static let main = "trace-commons-main"
-    /// The glass monitor window (R5), debug builds only for now.
+    /// The glass monitor window (R5), the main window since R15.
     static let monitor = "trace-commons-monitor"
-    /// The glass first-run pane (R12), debug builds only for now.
+    /// The glass first-run pane (R12), the onboarding gate.
     static let firstRun = "trace-commons-first-run"
     /// The menu-bar item and popover in a window (R13), for review where
     /// the menu bar has no room for the item. Debug builds only.
     static let menuPreview = "trace-commons-menu-preview"
-}
-
-/// Opening the window from outside a SwiftUI view (a notification action, a
-/// Dock-icon click, an invite link) needs a hook that is not
-/// `@Environment(\.openWindow)`.
-///
-/// Requests that arrive before the handler exists are held rather than
-/// dropped. That is not defensive coding: the handler is installed from a
-/// `.task` on the menu-bar label, and both of the new callers can genuinely
-/// beat it. `applicationDidFinishLaunching` runs first by definition, and a
-/// `tracecommons://` link that launches the app is delivered while SwiftUI is
-/// still assembling its scenes. Dropping those would make exactly the
-/// cold-start cases fail while every warm test passed.
-enum OpenMainWindow {
-    @MainActor static var handler: (() -> Void)? {
-        didSet {
-            guard handler != nil, pending else { return }
-            pending = false
-            handler?()
-        }
-    }
-
-    @MainActor private static var pending = false
-
-    @MainActor
-    static func request() {
-        guard let handler else {
-            pending = true
-            return
-        }
-        handler()
-    }
 }

@@ -60,7 +60,7 @@ enum SelfTest {
         NSApp.terminate(nil)
     }
 
-    /// Reports the exact two predicates `MainWindowView` branches on
+    /// Reports the exact two predicates the onboarding gate branches on
     /// (`status.logged_in`, `isOnboardingComplete`), with no side effects.
     /// Meant to be run as a *second*, separate launch against a state
     /// directory a prior `TRACE_COMMONS_ONBOARD_SELFTEST_OUT` run already
@@ -169,7 +169,7 @@ enum SelfTest {
             + "consent_scopes=\(model.status.consentScopes)")
 
         // Screen 6 equivalent: mark onboarding complete, the way
-        // `OnboardingDoneView`'s `onFinish` does via `MainWindowView`'s
+        // `OnboardingDoneView`'s `onFinish` does via the coordinator's
         // `onComplete` closure, and confirm it sticks -- unless asked to
         // stop short of it, which is how this same self-test doubles as
         // the "resumed mid-onboarding across a relaunch" check: a second
@@ -215,6 +215,13 @@ enum SelfTest {
         }
         lines.append("entry: project=\(entry.projectLabel) agent=\(entry.agentName) state=\(entry.state)")
 
+        // The legacy queue row asked for this preview when it appeared; no
+        // window does since R15, so the self-test asks, and waits for the
+        // daemon's answer or its refusal.
+        model.requestPreview(for: entry)
+        for _ in 0..<100 where model.summaries[entry.entryID] == nil && model.summaryErrors[entry.entryID] == nil {
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
         if let summary = model.summaries[entry.entryID] {
             lines.append("socket preview: would_send=\(summary.wouldSendBytes) "
                 + "raw=\(summary.rawSessionBytes) events=\(summary.eventCount)")

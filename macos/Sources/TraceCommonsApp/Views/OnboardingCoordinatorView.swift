@@ -1,4 +1,5 @@
 import SwiftUI
+import TCDesign
 
 /// Chains the existing onboarding screens into one first-run flow.
 ///
@@ -68,8 +69,8 @@ import SwiftUI
 /// This is what keeps a crash or quit between `enroll` and Done from ever
 /// landing a contributor in the main window with an unset (floor-only)
 /// consent choice they never actually confirmed -- the forbidden outcome.
-/// `TraceCommonsAppMain`/`MainWindowView` is what reads `isOnboardingComplete`
-/// to make that branch; this view only needs `startAt` to know where in the
+/// `LaunchRouting` and the first-run window read `isOnboardingComplete`
+/// (through `requiresOnboarding`) to make that branch; this view only needs `startAt` to know where in the
 /// sequence to resume.
 struct OnboardingCoordinatorView: View {
     @EnvironmentObject private var model: AppModel
@@ -141,18 +142,15 @@ struct OnboardingCoordinatorView: View {
 
     private func backBar(to previous: Step) -> some View {
         HStack {
-            Button {
-                navigation.enter(previous)
-            } label: {
-                Label("Back", systemImage: "chevron.left")
+            Button { navigation.enter(previous) } label: {
+                Label(OnboardingCoordinatorWords.back, systemImage: "chevron.left")
             }
-            .buttonStyle(.plain)
-            .foregroundStyle(.secondary)
-            .accessibilityLabel("Back to the previous step")
+            .buttonStyle(GlassButtonStyle(.link))
+            .accessibilityLabel(OnboardingCoordinatorWords.backToPreviousStep)
             Spacer()
         }
-        .padding(.horizontal, 24)
-        .padding(.top, 16)
+        .padding(.horizontal, GlassTokens.Space.panePadding)
+        .padding(.top, GlassTokens.Space.s4)
     }
 
     @ViewBuilder
@@ -179,20 +177,21 @@ struct OnboardingCoordinatorView: View {
             OnboardingConnectView(onEnrolled: { navigation.enrolled(visit: visit) })
 
         case .consent:
-            VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
                 if settingsUnavailable {
-                    Text("Watcher settings are still loading. Try Continue again once they are available.")
-                        .font(.callout)
+                    GlassNotice(tone: .ask) {
+                        Text(OnboardingCoordinatorWords.settingsLoading)
+                        dismissButton { settingsUnavailable = false }
+                    }
+                    .padding(.horizontal, GlassTokens.Space.panePadding)
                 }
                 if consentSaveFailed {
-                    Text("""
-                    Couldn't save your choices -- the watcher may not be running. \
-                    Check your connection and try again.
-                    """)
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, 24)
-                    .padding(.top, 16)
+                    GlassNotice(tone: .outside) {
+                        Text(OnboardingCoordinatorWords.couldNotSave)
+                        dismissButton { consentSaveFailed = false }
+                    }
+                    .padding(.horizontal, GlassTokens.Space.panePadding)
+                    .padding(.top, GlassTokens.Space.s4)
                 }
                 ConsentScopesView(onContinue: advanceFromConsent, initialSelection: selectedScopes)
             }
@@ -201,17 +200,23 @@ struct OnboardingCoordinatorView: View {
             if model.daemonSettings?.nearAIConfigured == true {
                 OnboardingPrivacyScanView(onContinue: { navigation.enter(.projects) })
             } else {
-                VStack {
-                    Text("The extra privacy scan is no longer available.")
-                    Button("Continue") { navigation.enter(.projects) }
+                VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
+                    GlassNotice(tone: .outside) {
+                        Text(OnboardingCoordinatorWords.scanNoLongerAvailable)
+                    }
+                    Button(OnboardingPrivacyScanWords.continueButton) { navigation.enter(.projects) }
+                        .buttonStyle(GlassButtonStyle(.glass))
                 }
+                .padding(GlassTokens.Space.panePadding)
             }
 
         case .projects:
-            VStack {
+            VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
                 if !navigation.scanIncluded {
-                    Text("The extra privacy scan was not included in this setup.")
-                        .font(.callout).foregroundStyle(.secondary)
+                    GlassNotice(tone: .ask) {
+                        Text(OnboardingCoordinatorWords.scanNotIncluded)
+                    }
+                    .padding(.horizontal, GlassTokens.Space.panePadding)
                 }
                 OnboardingProjectsView(onContinue: { navigation.enter(.done) })
             }
@@ -219,6 +224,13 @@ struct OnboardingCoordinatorView: View {
         case .done:
             OnboardingDoneView(onFinish: onComplete)
         }
+    }
+
+    /// An error is never undismissable: the word is the banner's own, by
+    /// reference.
+    private func dismissButton(_ action: @escaping () -> Void) -> some View {
+        Button(ActionNoticeWords.dismissWord, action: action)
+            .buttonStyle(GlassButtonStyle(.glass))
     }
 
     /// Applies the chosen scopes via `set_consent_scopes` and only advances
@@ -251,4 +263,17 @@ struct OnboardingCoordinatorView: View {
             }
         }
     }
+}
+
+/// This screen's sentences, held verbatim from the legacy screen.
+enum OnboardingCoordinatorWords {
+    static let back = "Back"
+    static let backToPreviousStep = "Back to the previous step"
+    static let settingsLoading = "Watcher settings are still loading. Try Continue again once they are available."
+    static let couldNotSave = """
+        Couldn't save your choices -- the watcher may not be running. \
+        Check your connection and try again.
+        """
+    static let scanNoLongerAvailable = "The extra privacy scan is no longer available."
+    static let scanNotIncluded = "The extra privacy scan was not included in this setup."
 }

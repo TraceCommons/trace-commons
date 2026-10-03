@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Assemble TraceCommons.app around the SwiftPM executable.
 #
-# SwiftPM produces a bare Mach-O; a menu-bar app needs a bundle so that
-# LSUIElement (no Dock icon) and a bundle identifier (UNUserNotificationCenter)
-# exist at all. Signing, notarization and a DMG are out of scope -- this is an
-# ad-hoc-signed development bundle.
+# SwiftPM produces a bare Mach-O; the app needs a bundle so that an Info.plist
+# and a bundle identifier (UNUserNotificationCenter) exist at all. The app is a
+# regular Dock app (LSUIElement is not set). Signing, notarization and a DMG
+# are out of scope -- this is an ad-hoc-signed development bundle.
 #
 # The app ships as a universal (arm64 + x86_64) binary so it runs on both
 # Apple silicon and Intel Macs. That means both the FFI dylib and the Swift

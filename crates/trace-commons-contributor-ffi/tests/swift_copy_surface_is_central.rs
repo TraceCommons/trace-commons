@@ -468,6 +468,23 @@ fn pinned_sentences() -> Vec<(&'static str, String)> {
         "privacy_scan_copy",
         table(json!(privacy_scan_copy::privacy_scan_copy())),
     );
+    // The health banner (R6/R7, #1173): every label's words and the
+    // core-down banner. `daily-cap-reached` is left out: its title is
+    // `DAILY_BUDGET_TITLE`, which `DailyBudgetCopy.swift` holds as Swift
+    // until the budget banner has an export of its own.
+    {
+        use trace_commons_contributor::{daemon::health::ALL_LABELS, health_copy};
+        let mut lines = table(json!(health_copy::core_down_copy()));
+        for label in ALL_LABELS
+            .iter()
+            .filter(|label| **label != "daily-cap-reached")
+        {
+            lines.extend(table(json!(health_copy::health_copy_for_label(
+                label, None
+            ))));
+        }
+        add("health_copy", lines);
+    }
     add(
         "preview_copy::REDACTION_CATEGORY_*",
         [
@@ -577,6 +594,25 @@ fn pinned_sentences() -> Vec<(&'static str, String)> {
 /// names a file and the fragment, so a NEW file repeating the same words
 /// still fails. Remove an entry when its reason stops being true.
 const ALLOWED: &[(&str, &str, &str)] = &[
+    // The export-failure fallback (`HealthCopy.onHoldFallback`): the core's
+    // `on_hold_copy()`, verbatim, drawn only when `tc_health_copy_json`
+    // returns NULL for a reported label -- a caught panic -- so a reported
+    // condition is never drawn as healthy.
+    (
+        "TraceCommonsApp/HealthCopy.swift",
+        "Contributions are on hold.",
+        "health export-failure fallback",
+    ),
+    (
+        "TraceCommonsApp/HealthCopy.swift",
+        "Something is stopping traces from being sent.",
+        "health export-failure fallback",
+    ),
+    (
+        "TraceCommonsApp/HealthCopy.swift",
+        "Nothing has been lost, and nothing has gone out.",
+        "health export-failure fallback",
+    ),
     // The per-tier withdrawal confirmations (`WithdrawalCopy.canonical*`)
     // reproduce `docs/contributor-daemon-ipc-v1_1.md`'s "Canonical
     // confirmation copy" table, and their credit note is the same two
@@ -594,26 +630,9 @@ const ALLOWED: &[(&str, &str, &str)] = &[
         "Credit still pending is forfeited.",
         "per-tier withdrawal credit note; no core export yet",
     ),
-    // The rollup tallies over History and the queue's week figures name a
-    // count of rows in a state, in the same words as the row's status tag.
-    // The core exports the row label (`history_status_labels`) but no tally
-    // heading yet, so these headings stay Swift's until it does. The row
-    // tag itself reads the core (see `history_rows_read_the_cores_status_words`).
-    (
-        "TraceCommonsApp/Views/HistoryView.swift",
-        "Held for privacy review",
-        "rollup tally heading; no core tally export yet",
-    ),
-    (
-        "TraceCommonsApp/Views/HistoryView.swift",
-        "Waiting to be scored",
-        "rollup tally heading; no core tally export yet",
-    ),
-    (
-        "TraceCommonsApp/Views/QueueView.swift",
-        "Held for privacy review",
-        "week tally heading; no core tally export yet",
-    ),
+    // The legacy History rollup tallies and the queue's week figures, which
+    // held the core's status words as headings, left the shell with the
+    // legacy screens (R15); their allowances went with them.
 ];
 
 #[test]
@@ -715,14 +734,14 @@ const SURFACES: &[(&str, &str, &str, &str, &str)] = &[
     ),
     (
         "grant void notice",
-        "TraceCommonsApp/Views/MainWindowView.swift",
+        "TraceCommonsApp/Views/ShellNotices.swift",
         "TCConsentCopy.voidNoticeJSON",
         "TCBridge/TCConsentCopy.swift",
         "tc_grant_void_notice",
     ),
     (
         "arming rewording notice",
-        "TraceCommonsApp/Views/MainWindowView.swift",
+        "TraceCommonsApp/Views/ShellNotices.swift",
         "TCConsentCopy.armingRewordedNoticeJSON",
         "TCBridge/TCConsentCopy.swift",
         "tc_arming_reworded_notice",
@@ -764,7 +783,7 @@ const SURFACES: &[(&str, &str, &str, &str, &str)] = &[
     ),
     (
         "ignore project",
-        "TraceCommonsApp/Views/QueueFolderRow.swift",
+        "TraceCommonsApp/Views/Monitor/TracesViews.swift",
         "TCCoreCopy.projectIgnoreCopyJSON",
         "TCBridge/TCCoreCopy.swift",
         "tc_project_ignore_copy_json",
@@ -799,21 +818,21 @@ const SURFACES: &[(&str, &str, &str, &str, &str)] = &[
     ),
     (
         "arming offer",
-        "TraceCommonsApp/Views/QueueView.swift",
+        "TraceCommonsApp/Views/Monitor/TracesOffers.swift",
         "TCCoreCopy.armingOfferCopyJSON",
         "TCBridge/TCCoreCopy.swift",
         "tc_arming_offer_copy_json",
     ),
     (
         "arming confirmation",
-        "TraceCommonsApp/Views/SettingsView.swift",
+        "TraceCommonsApp/Views/Settings/ProjectsSection.swift",
         "TCCoreCopy.armingOfferCopyJSON",
         "TCBridge/TCCoreCopy.swift",
         "tc_arming_offer_copy_json",
     ),
     (
-        "surviving secret",
-        "TraceCommonsApp/Views/QueueView.swift",
+        "surviving secret in Traces",
+        "TraceCommonsApp/Views/Monitor/TracesStore.swift",
         "TCCoreCopy.residualSecretLine",
         "TCBridge/TCCoreCopy.swift",
         "tc_residual_secret_line_text",
@@ -835,9 +854,16 @@ const SURFACES: &[(&str, &str, &str, &str, &str)] = &[
     (
         "extra privacy scan recovery",
         "TraceCommonsApp/HealthCopy.swift",
-        "TCCoreCopy.privacyScanCopyJSON",
+        "TCCoreCopy.healthCopyJSON",
         "TCBridge/TCCoreCopy.swift",
-        "tc_privacy_scan_copy_json",
+        "tc_health_copy_json",
+    ),
+    (
+        "health banner in Traces",
+        "TraceCommonsApp/Views/Monitor/TracesStore.swift",
+        "HealthCopy.core(",
+        "TCBridge/TCCoreCopy.swift",
+        "tc_health_copy_json",
     ),
     (
         "withdrawal of an unknown reach",
@@ -940,24 +966,24 @@ fn history_rows_read_the_cores_status_words() {
         "PublicRunCopy.historyStatusLabel(for:) no longer reads historyStatusLabels"
     );
 
-    let history = read("TraceCommonsApp/Views/HistoryView.swift");
+    let history = read("TraceCommonsApp/Views/Monitor/HomeViews.swift");
     let start = history
-        .find("static func statusSentence(")
-        .expect("HistoryRow.statusSentence exists");
+        .find("static func historyStatusLabel(")
+        .expect("HomeFormat.historyStatusLabel exists");
     let end = history[start..]
         .find("\n    }\n")
         .map(|at| start + at)
-        .expect("statusSentence has a body");
+        .expect("historyStatusLabel has a body");
     let body = &history[start..end];
     assert!(
         swift_code(body).contains("historyStatusLabel(for:"),
-        "HistoryRow.statusSentence must read the core's table"
+        "HomeFormat.historyStatusLabel must read the core's table"
     );
     let literals = swift_literals(body);
     for row in trace_commons_contributor::history_copy::STATUS_LABELS {
         assert!(
             !literals.iter().any(|lit| lit.contains(row.label)),
-            "HistoryRow.statusSentence types the core's word {:?} for {}",
+            "HomeFormat.historyStatusLabel types the core's word {:?} for {}",
             row.label,
             row.status
         );

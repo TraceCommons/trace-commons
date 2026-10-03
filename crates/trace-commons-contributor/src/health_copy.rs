@@ -321,7 +321,8 @@ mod tests {
         }
     }
 
-    /// Swift's `HealthCopy.forLabel` severities, label for label.
+    /// Each label's severity, label for label, as the Swift table this
+    /// replaced (the deleted `HealthCopy.forLabel`) weighted it.
     #[test]
     fn severity_matches_the_swift_table() {
         use HealthSeverity::{Actionable, Waiting};

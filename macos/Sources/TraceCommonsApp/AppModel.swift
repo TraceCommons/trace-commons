@@ -108,6 +108,17 @@ final class AppModel: ObservableObject {
     /// -- a raw stat and the cap -- never a would-send estimate.
     @Published private(set) var tooLarge: [String: PreviewTooLarge] = [:]
     @Published private(set) var history: [HistoryRecord] = []
+    /// Whether the last `status` read failed. Until a status answers, a
+    /// failed read is the launch's answer: `LaunchRouting.onboardingKnown`
+    /// takes it as known, and the unanswered status requires onboarding, so
+    /// first run opens rather than nothing (fail closed).
+    @Published private(set) var statusReadFailed = false
+    /// Whether the daemon has answered `list_pending` (or sent a snapshot)
+    /// and `list_history`. Until then `pending` and `history` are
+    /// placeholders, and an empty one is not "none"; a failed read leaves
+    /// them false.
+    @Published private(set) var queueAnswered = false
+    @Published private(set) var historyAnswered = false
     @Published private(set) var rollup: HistoryRollup?
     @Published private(set) var projects: [ProjectRow] = []
     /// The one project the daemon suggests arming, or nil. Refreshed
@@ -819,8 +830,8 @@ final class AppModel: ObservableObject {
     /// Nothing here clears it on the way to somewhere else -- only two
     /// actions ever assign it, so unlike `lastActionError` it is not
     /// overwritten by the next thing that goes wrong. Its dismiss control on
-    /// the Waiting screen is therefore the only way out of it, which is why
-    /// it has one: see `ActionMessageBanner`.
+    /// the Traces tab (`TracesOffersBar`'s notice) is therefore the only way
+    /// out of it, which is why it has one.
     @Published var lastActionNotice: String?
 
     private var daemon: TCDaemon?
@@ -945,14 +956,14 @@ final class AppModel: ObservableObject {
         // And the held-folder notice, which names the folders and says why --
         // again only when it is going to be drawn.
         if label == GateHeld.label && gateHeldNotice != nil { return nil }
-        return HealthCopy.forLabel(label)
+        return HealthCopy.core(label: label, maxQueueEntries: daemonSettings?.maxQueueEntries)
     }
 
     /// The notice for armed folders the automatic-contribution gate is
     /// holding, in the Rust's words, when there are any. Independent of
     /// `health` for the reason `witnessCapacityHealth` is. Nil when nothing
     /// is held or the notice cannot be read; the label, if it holds the
-    /// slot, then falls back to `forLabel`'s on-hold line.
+    /// slot, then falls back to the core's on-hold line.
     var gateHeldNotice: GateHeldNotice? {
         guard status.gateHeld.held else { return nil }
         return TCConsentCopy.gateHeldNoticeJSON(forHeld: status.gateHeld.json)
@@ -1246,7 +1257,10 @@ final class AppModel: ObservableObject {
     }
 
     func refreshStatus() {
-        perform("status", work: { try $0.status() }) { self.publishIfChanged(\.status, $0) }
+        perform("status", work: { try $0.status() }, onFailure: { self.publishIfChanged(\.statusReadFailed, true) }) {
+            self.publishIfChanged(\.status, $0)
+            self.publishIfChanged(\.statusReadFailed, false)
+        }
     }
 
     func refreshQueue() {
@@ -1258,6 +1272,7 @@ final class AppModel: ObservableObject {
     func refreshHistory() {
         perform("list_history", work: { try $0.listHistory() }) {
             self.publishIfChanged(\.history, $0)
+            self.publishIfChanged(\.historyAnswered, true)
         }
         perform("history_rollup", work: { try $0.historyRollup() }) {
             self.publishIfChanged(\.rollup, $0)
@@ -1845,6 +1860,13 @@ final class AppModel: ObservableObject {
     /// onboarding, not straight to the main window with whatever scopes
     /// `enroll`'s floor-only default happened to leave in place -- see the
     /// coordinator's atomicity note.
+    /// Whether the core has said enough to know if onboarding is required
+    /// (`LaunchRouting.onboardingKnown`), in one spelling for the launch,
+    /// the Monitor's gates and every request's routing.
+    var onboardingKnown: Bool {
+        LaunchRouting.onboardingKnown(startup: startup, statusAnswered: status.answered, statusFailed: statusReadFailed)
+    }
+
     var requiresOnboarding: Bool {
         startup == .needsRoots || !status.loggedIn || !isOnboardingComplete
     }
@@ -1884,6 +1906,7 @@ final class AppModel: ObservableObject {
     }
     func setDaemonSettingsForTesting(_ settings: DaemonSettingsView) { publishIfChanged(\.daemonSettings, settings) }
     func setStartupForTesting(_ startup: Startup) { self.startup = startup }
+    func setHistoryForTesting(_ history: [HistoryRecord]) { publishIfChanged(\.history, history) }
 
     func setStatusForTesting(_ status: DaemonStatus) {
         publishIfChanged(\.status, status)
@@ -1915,9 +1938,10 @@ final class AppModel: ObservableObject {
     /// before #353/#357 made the queue's row list a `LazyVStack`. Doing so
     /// here would mean asking the daemon about all 500 entries the instant
     /// a snapshot arrives, which defeats the point of realizing rows lazily
-    /// in the first place: `QueueRow.onAppear` drives `requestPreview(for:)`
-    /// for whatever the viewport actually realizes, so this stays
-    /// proportional to what is on screen.
+    /// in the first place: the legacy queue row drove `requestPreview(for:)`
+    /// from `onAppear` for whatever the viewport realized, so this stayed
+    /// proportional to what was on screen. Since R15 the glass Traces tab
+    /// reads previews through `TracesStore`, and only `SelfTest` asks here.
     ///
     /// Internal rather than private so a test can land a snapshot and watch
     /// what a view holding this model would see. `pending` is
@@ -1928,6 +1952,7 @@ final class AppModel: ObservableObject {
     func applyPendingUpdate(_ entries: [QueueEntry]) {
         let previousIDs = Set(pending.map(\.entryID))
         publishIfChanged(\.pending, entries)
+        publishIfChanged(\.queueAnswered, true)
         let currentIDs = Set(entries.map(\.entryID))
         let vanished = previousIDs.subtracting(currentIDs)
         if !vanished.isEmpty {
@@ -1942,10 +1967,11 @@ final class AppModel: ObservableObject {
     }
 
     /// One `preview_request` per card, requirement 1 of the scheduler
-    /// design: draw a pending card immediately ("Reading it locally...",
-    /// see `QueueRow`) and never block waiting for the daemon's answer.
+    /// design: draw a pending card immediately and never block waiting for
+    /// the daemon's answer.
     ///
-    /// Called from `QueueRow.onAppear` -- the same trigger #357 introduced
+    /// Called by `SelfTest` since R15; before it, from the legacy queue
+    /// row's `onAppear` -- the same trigger #357 introduced
     /// as `requestSummary(for:)`, kept here under the scheduler's name
     /// because what changed is not when a row asks, only what happens once
     /// it does: this goes through the daemon's bounded preview scheduler
@@ -2433,6 +2459,11 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Reads a session's detail. The detail already held stays until the
+    /// daemon answers: replaced when it does, kept beside the error when it
+    /// fails, so a reload (one runs on every app switch) never unmounts the
+    /// public-run editor drawn from it, or the draft typed there. An account
+    /// change still clears it (`clearAccountOwnedContent`).
     func loadSessionDetail(_ record: HistoryRecord) {
         guard let client else { return }
         let id = record.submissionID
@@ -2441,7 +2472,6 @@ final class AppModel: ObservableObject {
         sessionDetailRequestSequence &+= 1
         let requestSequence = sessionDetailRequestSequence
         loadingSessionDetails.insert(id)
-        sessionDetails[id] = nil
         sessionDetailErrors[id] = nil
         Task.detached(priority: .userInitiated) {
             let result = Result { try client.sessionDetail(submissionID: id) }
@@ -2453,7 +2483,6 @@ final class AppModel: ObservableObject {
                     self.reconcileAccountOwnedContent(scope: detail.ownerScopeSHA256)
                     self.sessionDetails[id] = detail
                 case .failure(let error):
-                    self.sessionDetails[id] = nil
                     let label = (error as? DaemonClient.Failure)?.message ?? ""
                     if label == "account-session-required"
                         || label == "session-detail-not-found"
@@ -2740,6 +2769,7 @@ final class AppModel: ObservableObject {
     private func perform<T>(
         _ label: String,
         work: @escaping (DaemonClient) throws -> T,
+        onFailure: (() -> Void)? = nil,
         onSuccess: @escaping (T) -> Void
     ) {
         guard let client else { return }
@@ -2757,6 +2787,7 @@ final class AppModel: ObservableObject {
                     } else {
                         self.lastActionError = "\(label): failed"
                     }
+                    onFailure?()
                 }
             }
         }

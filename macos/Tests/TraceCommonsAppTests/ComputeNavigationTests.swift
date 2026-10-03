@@ -20,10 +20,12 @@ final class ComputeNavigationTests: XCTestCase {
         let root = try directory()
         let trace = AppModel()
         let compute = ComputeModel()
-        let navigation = MainWindowNavigation()
-        navigation.section = .compute
         await compute.start(configDirectory: root.path)
-        XCTAssertTrue(navigation.displaysCompute)
+        // A quit refusal opens Settings at Compute for this not-yet-onboarded
+        // contributor (the launcher's pin: MonitorNavigationTests
+        // test_theLauncherOpensSettingsOutsideTheWindowSwitch).
+        XCTAssertTrue(trace.requiresOnboarding)
+        XCTAssertEqual(LaunchRouting.opening(.settings(.compute), requiresOnboarding: trace.requiresOnboarding, onboardingKnown: true).settings, .compute)
         XCTAssertEqual(trace.startup, .starting)
         XCTAssertFalse(trace.status.loggedIn)
         XCTAssertFalse(trace.isOnboardingComplete)
@@ -50,13 +52,11 @@ final class ComputeNavigationTests: XCTestCase {
         XCTAssertEqual(trace.startup, .needsRoots, "fresh launch must refuse watcher before scanning")
         let compute = ComputeModel()
         await compute.start(configDirectory: root.path)
-        let navigation = MainWindowNavigation()
-        navigation.section = .compute
-        XCTAssertTrue(navigation.displaysCompute)
+        // Compute is reached while the roots gate holds onboarding open.
+        XCTAssertEqual(LaunchRouting.opening(.settings(.compute), requiresOnboarding: trace.requiresOnboarding, onboardingKnown: true).settings, .compute)
         XCTAssertNotNil(compute.snapshot)
-        for section: MainWindowView.Section in [.queue, .history, .settings] {
-            navigation.section = section
-            XCTAssertFalse(navigation.displaysCompute)
+        for destination: MonitorDestination in [.traces(entryId: nil), .home(.history), .settings(.watchedFolders)] {
+            XCTAssertNotEqual(LaunchRouting.opening(destination, requiresOnboarding: trace.requiresOnboarding, onboardingKnown: true).settings, .compute)
             XCTAssertEqual(trace.startup, .needsRoots)
             XCTAssertFalse(trace.traceNavigationReady)
             XCTAssertFalse(trace.isOnboardingComplete)
@@ -89,9 +89,8 @@ final class ComputeNavigationTests: XCTestCase {
         try Data("invalid".utf8).write(to: settings.appendingPathComponent("settings.json"))
         let compute = ComputeModel()
         await compute.start(configDirectory: root.path)
-        let navigation = MainWindowNavigation()
-        navigation.section = .compute
-        XCTAssertTrue(navigation.displaysCompute)
+        // Invalid Compute settings do not stop a request reaching Compute.
+        XCTAssertEqual(LaunchRouting.opening(.settings(.compute), requiresOnboarding: true, onboardingKnown: true).settings, .compute)
         XCTAssertNotNil(compute.copy)
         XCTAssertNil(compute.snapshot)
         XCTAssertNotNil(compute.failureLabel)

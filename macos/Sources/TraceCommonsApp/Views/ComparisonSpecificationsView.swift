@@ -1,4 +1,5 @@
 import SwiftUI
+import TCDesign
 import TCBridge
 
 struct ComparisonSpecificationsView: View {
@@ -15,8 +16,8 @@ struct ComparisonSpecificationsView: View {
                 if model.busy { ProgressView().controlSize(.small) }
             }
             Text(text("comparison_retrospective_notice")).foregroundStyle(.secondary)
-            if let notice = model.notice { Text(text(notice)).foregroundStyle(.green) }
-            if let error = model.error { Text(text(error)).foregroundStyle(.red) }
+            if let notice = model.notice { Text(text(notice)).foregroundStyle(GlassTokens.Color.statusOnText.color) }
+            if let error = model.error { Text(text(error)).foregroundStyle(GlassTokens.Color.statusOutsideText.color) }
             draft
             if let specification = model.previewSpecification, let result = model.previewResult {
                 Divider(); Text(text("comparison_preview_notice")).font(.headline)

@@ -1,4 +1,3 @@
-#if DEBUG
 import Foundation
 import Observation
 import TCBridge
@@ -180,6 +179,12 @@ final class MenuPanelStore {
 
 /// The popover's rules, as pure functions so they are tested.
 enum MenuPanelData {
+    /// Where "Manage rules" goes: the watched folders in Settings, or first
+    /// run while onboarding is required, with no Settings section (R-43).
+    static func manageRules(requiresOnboarding: Bool) -> MonitorDestination? {
+        requiresOnboarding ? nil : .settings(.watchedFolders)
+    }
+
     /// The roll-up of every listed folder's mode, for the mode pill.
     enum ModeRollup: Equatable {
         case ask, armed, never
@@ -269,7 +274,7 @@ enum MenuPanelData {
     /// outside model with their proof label.
     static func recent(
         pending: [DaemonData.QueueEntry], history: [DaemonData.HistoryRow], calls: [DaemonData.InferenceCall],
-        statusLabel: (String) -> String?, limit: Int = 3
+        statusLabel: (String?) -> String?, limit: Int = 3
     ) -> [Recent] {
         var rows: [Recent] = []
         for entry in pending {
@@ -279,10 +284,13 @@ enum MenuPanelData {
                 text: "\(entry.projectLabel) · \(MonitorWords.waiting)", trailing: nil))
         }
         for row in history {
-            guard let at = row.submittedAt, let status = row.status else { continue }
+            // A row with no status is still activity: the shared table
+            // reads it as unavailable, as the History list does.
+            guard let at = row.submittedAt else { continue }
             rows.append(Recent(
                 id: "history:\(row.submissionId)", kind: .contributed, at: at, tool: row.source.flatMap(tool),
-                text: "\(row.projectLabel ?? "—") · \(statusLabel(status) ?? status)", trailing: nil))
+                text: [row.projectLabel ?? "—", statusLabel(row.status)].compactMap { $0 }.joined(separator: " · "),
+                trailing: nil))
         }
         for call in calls where call.route == "outside" {
             rows.append(Recent(
@@ -297,4 +305,3 @@ enum MenuPanelData {
         SourceKind(rawValue: source).map(TracesTreeView.glassTool)
     }
 }
-#endif

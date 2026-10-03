@@ -1,5 +1,5 @@
-#if DEBUG
 import SwiftUI
+import TCBridge
 import TCDesign
 import TCShellCore
 
@@ -11,28 +11,63 @@ import TCShellCore
 /// credit is shown only beside the commons' own statement of what it waits
 /// on (D6), and never as earned.
 struct HomeTabView: View {
-    enum Page: String {
-        case overview
-        case history
-        case missions
-    }
+    /// Declared top-level (`MonitorNavigation.swift`) so a destination can
+    /// name a page in a release build.
+    typealias Page = HomePage
 
     let store: HomeStore
     let traces: TracesStore
     /// The core's label for a history status, when its copy has loaded.
-    let statusLabel: (String) -> String?
+    let statusLabel: (String?) -> String?
     @Binding var page: Page
+    /// The selected History row's submission id; empty for none. The
+    /// inspector shows its details.
+    @Binding var selection: String
+    /// The hosted Insights and Mission drafts screens' inputs, from
+    /// `TraceCommonsAppMain`.
+    let insightsStoreSelection: InsightsStoreSelection
+    let missionDrafts: MissionDraftsModel
 
     var body: some View {
         switch page {
         case .overview:
             HomeOverview(
                 store: store, traces: traces, statusLabel: statusLabel,
-                openHistory: { page = .history }, openMissions: { page = .missions })
+                insightsHeading: HomeFormat.cardHeading(TCInsights.copy()?["title"]),
+                missionDraftsHeading: HomeFormat.cardHeading(missionDrafts.copy["title"]),
+                openHistory: { page = .history }, openMissions: { page = .missions },
+                openInsights: { page = .insights }, openMissionDrafts: { page = .missionDrafts })
         case .history:
-            HistoryPage(store: store, statusLabel: statusLabel, back: { page = .overview })
+            HistoryPage(store: store, statusLabel: statusLabel, selection: $selection, back: { page = .overview })
         case .missions:
             MissionsPage(store: store, back: { page = .overview })
+        case .insights:
+            HostedPage(heading: HomeFormat.cardHeading(TCInsights.copy()?["title"]), back: { page = .overview }) {
+                InsightsView(storeSelection: insightsStoreSelection)
+            }
+        case .missionDrafts:
+            HostedPage(heading: HomeFormat.cardHeading(missionDrafts.copy["title"]), back: { page = .overview }) {
+                MissionDraftsView(model: missionDrafts)
+            }
+        }
+    }
+}
+
+/// A Home page that hosts a screen built outside the glass shell
+/// (Insights, Mission drafts): the breadcrumb back to Home, then the
+/// screen as it is. Its heading is the core's word; without it the crumb
+/// is not drawn, never replaced with a word of this shell's own.
+private struct HostedPage<Content: View>: View {
+    let heading: String?
+    let back: () -> Void
+    @ViewBuilder let content: () -> Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
+            GlassBreadcrumb(
+                [GlassCrumb(MonitorWindowView.Tab.home.title, action: back)] + (heading.map { [GlassCrumb($0)] } ?? []),
+                backLabel: MonitorWindowView.Tab.home.title, onBack: back)
+            content()
         }
     }
 }
@@ -40,9 +75,15 @@ struct HomeTabView: View {
 private struct HomeOverview: View {
     let store: HomeStore
     let traces: TracesStore
-    let statusLabel: (String) -> String?
+    let statusLabel: (String?) -> String?
+    /// The core's headings for the two hosted screens; nil until the
+    /// core's copy has arrived, and then the card is not drawn.
+    let insightsHeading: String?
+    let missionDraftsHeading: String?
     let openHistory: () -> Void
     let openMissions: () -> Void
+    let openInsights: () -> Void
+    let openMissionDrafts: () -> Void
 
     var body: some View {
         ScrollView {
@@ -63,6 +104,12 @@ private struct HomeOverview: View {
                         .glassType(GlassTokens.TypeScale.title)
                         .foregroundStyle(GlassColor.textPrimary)
                 }
+                if let insightsHeading {
+                    hostedCard(insightsHeading, action: openInsights)
+                }
+                if let missionDraftsHeading {
+                    hostedCard(missionDraftsHeading, action: openMissionDrafts)
+                }
                 GlassEyebrowCard(MonitorWords.history, action: openHistory) {
                     Image(systemName: "chevron.right")
                         .glassGlyph(10, weight: .semibold)
@@ -73,6 +120,18 @@ private struct HomeOverview: View {
             }
         }
         .scrollIndicators(.never)
+    }
+
+    /// A way into a hosted screen: the core's heading and a chevron, and
+    /// nothing else (the screen holds its own words).
+    private func hostedCard(_ heading: String, action: @escaping () -> Void) -> some View {
+        GlassEyebrowCard(heading, action: action) {
+            Image(systemName: "chevron.right")
+                .glassGlyph(10, weight: .semibold)
+                .foregroundStyle(GlassColor.textTertiary)
+        } content: {
+            EmptyView()
+        }
     }
 
     /// Paused, or watching N tools, from the core's status and the tree.
@@ -96,7 +155,7 @@ private struct HomeOverview: View {
                         Text(MonitorWords.signedOut)
                     case .unhealthy(let label):
                         GlassStatusDot(.outside, ring: true)
-                        Text(HealthCopy.forLabel(label).title)
+                        Text(HealthCopy.core(label: label, maxQueueEntries: nil).title)
                     case .watching(let tools):
                         GlassStatusDot(.on, ring: true)
                         Text(FlowMapScene.pair(MonitorWords.watching, tools))
@@ -137,13 +196,19 @@ private struct HomeOverview: View {
 }
 
 /// History: every contribution from this machine, newest first, with its
-/// status and how it was approved. Withdrawing a contribution stays in the
-/// shipping window until C1 carries the withdrawal call.
+/// status and how it was approved, and what is held for review, explained
+/// apart. Withdraw, the session detail and Skills are in the selected
+/// row's inspector (`HistoryDetailInspector`).
 private struct HistoryPage: View {
     let store: HomeStore
-    let statusLabel: (String) -> String?
+    let statusLabel: (String?) -> String?
+    @Binding var selection: String
     let back: () -> Void
+    @EnvironmentObject private var model: AppModel
 
+    // The app's own records, which the inspector's Withdraw and session
+    // detail resolve against, are read again on every visit: the daemon's
+    // view, not the one it had at launch (the legacy screen's rule).
     var body: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
             GlassBreadcrumb(
@@ -154,6 +219,7 @@ private struct HistoryPage: View {
                     if let failure = store.failures["list_history"] {
                         GlassNotice(tone: .outside, title: MonitorWords.table?.line(for: failure) ?? "") { EmptyView() }
                     }
+                    held
                     if let rows = store.history {
                         if let cap = HomeFormat.cap(rows.count, rollup: store.rollup) {
                             Text(cap)
@@ -168,7 +234,7 @@ private struct HistoryPage: View {
                             GlassCard {
                                 VStack(spacing: 0) {
                                     ForEach(Array(rows.enumerated()), id: \.element.id) { index, row in
-                                        GlassTableRow(first: index == 0) { HistoryRowView(row: row, statusLabel: statusLabel, compact: false) }
+                                        selectable(row, first: index == 0)
                                     }
                                 }
                             }
@@ -180,6 +246,46 @@ private struct HistoryPage: View {
             }
             .scrollIndicators(.never)
         }
+        .onAppear { model.refreshHistory() }
+    }
+
+    /// Held for review, never as rejected: the core's sentence, no promised
+    /// wait, the server's distinct reasons without digests, and why there is
+    /// no bulk action. Only when the rollup counts something held and the
+    /// core's words are there (never an empty title). The reasons span every
+    /// record the app holds, not the list's capped page.
+    @ViewBuilder
+    private var held: some View {
+        if (store.rollup?.quarantined ?? 0) > 0, let words = MonitorWords.table {
+            GlassNotice(tone: .ask, title: words.heldForReview) {
+                VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
+                    Text(words.heldExplanation)
+                    Text(HistoryLegacyWords.typicalWait)
+                    ForEach(HeldExplanations.lines(in: model.history.filter { $0.status == "quarantined" }.map(\.explanations)),
+                            id: \.self) { line in
+                        Text(line)
+                    }
+                    Text(WithdrawalCopy.noBulkAction)
+                }
+                .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    /// A row a click selects, highlighted across its full width; the
+    /// inspector shows the selected row's details.
+    private func selectable(_ row: DaemonData.HistoryRow, first: Bool) -> some View {
+        let selected = selection == row.submissionId
+        return Button(action: { selection = row.submissionId }) {
+            GlassTableRow(first: first) { HistoryRowView(row: row, statusLabel: statusLabel, compact: false) }
+                .background(
+                    RoundedRectangle(cornerRadius: GlassTokens.Radius.control, style: .continuous)
+                        .fill(selected ? GlassColor.ink(0.12) : Color.clear)
+                )
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(selected ? [.isButton, .isSelected] : .isButton)
     }
 }
 
@@ -187,7 +293,7 @@ private struct HistoryPage: View {
 /// how it was approved and its credit.
 struct HistoryRowView: View {
     let row: DaemonData.HistoryRow
-    let statusLabel: (String) -> String?
+    let statusLabel: (String?) -> String?
     let compact: Bool
 
     var body: some View {
@@ -216,9 +322,8 @@ struct HistoryRowView: View {
                     .glassType(GlassTokens.TypeScale.caption)
                     .foregroundStyle(GlassColor.textSecondary)
             }
-            if let status = row.status,
-               let tag = HomeFormat.statusWord(status, table: MonitorWords.table, fallback: statusLabel) {
-                GlassTag(tag, tone: HomeFormat.tone(status))
+            if let tag = HomeFormat.statusWord(row.status, label: statusLabel) {
+                GlassTag(tag, tone: HomeFormat.tone(row.status))
                     .fixedSize()
             }
         }
@@ -301,6 +406,14 @@ struct HomeSummaryInspector: View {
 
 /// Formatting for Home and History. Pure, so the rules are tested.
 enum HomeFormat {
+    /// A card heading from the core's copy: the word, or nil when the copy
+    /// has not arrived (or the word is empty), so no card is drawn on a
+    /// word of this shell's own.
+    static func cardHeading(_ word: String?) -> String? {
+        guard let word, !word.isEmpty else { return nil }
+        return word
+    }
+
     /// A count, or a dash when the core did not say. Zero is a number.
     static func count(_ value: Int?) -> String {
         value.map(String.init) ?? "—"
@@ -403,26 +516,29 @@ enum HomeFormat {
         row.creditPointsFinal.map(points)
     }
 
-    /// A row's status tag. A submission is said in History's own words
-    /// (waiting to be scored), not the shared status label, which reads
-    /// "Submitted" as though it were done. Every other status takes the
-    /// shared label, which for a status the core does not name is "Status
-    /// unavailable". With no core copy decoded there is no tag at all --
-    /// never the raw wire token, which is not a word a contributor was
-    /// meant to read.
-    static func statusWord(
-        _ status: String, table: MonitorScreensCopy?, fallback: (String) -> String?
-    ) -> String? {
-        if status == "submitted", let word = table?.historySubmitted { return word }
-        return fallback(status)
+    /// A row's status tag, from the core's one status table. A missing or
+    /// empty status reads the core's unavailable word too. With no core copy
+    /// decoded there is no tag at all -- never the raw wire token, which is
+    /// not a word a contributor was meant to read.
+    static func statusWord(_ status: String?, label: (String?) -> String?) -> String? {
+        label(status.flatMap { $0.isEmpty ? nil : $0 })
+    }
+
+    /// The word for a status, from the core's one table (`PublicRunCopy`).
+    /// A missing or empty status reads the core's unavailable word; with no
+    /// core copy decoded there is no word at all, never the raw token.
+    static func historyStatusLabel(copy: PublicRunCopy?, _ status: String?) -> String? {
+        guard let copy else { return nil }
+        guard let status, !status.isEmpty else { return copy.contributionStatusUnavailable }
+        return copy.historyStatusLabel(for: status)
     }
 
     /// Accepted reads as done; held for review and submitted as waiting;
     /// withdrawn as neutral. Held is never drawn as rejected.
-    static func tone(_ status: String) -> GlassTag.Tone {
+    static func tone(_ status: String?) -> GlassTag.Tone {
         switch status {
         case "accepted": .on
-        case "submitted", "quarantined": .ask
+        case "submitted", "processing", "quarantined": .ask
         default: .neutral
         }
     }
@@ -453,4 +569,3 @@ extension MonitorWords {
     static var approved: String { table?.approved ?? "" }
     static var unrecorded: String { table?.unrecorded ?? "" }
 }
-#endif

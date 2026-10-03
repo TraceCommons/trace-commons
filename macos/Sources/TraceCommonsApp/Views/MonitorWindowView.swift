@@ -1,4 +1,3 @@
-#if DEBUG
 import SwiftUI
 import TCBridge
 import TCDesign
@@ -9,10 +8,8 @@ import TCShellCore
 /// the map and the inspector hide independently (and the map below 1100pt),
 /// and the tab and both preferences are restored per window.
 ///
-/// Debug builds only, until the screens it frames (R6 onward) match the
-/// design. The shipping window stays `MainWindowView` until then (R15).
-/// Every label here is a single word or comes from the Rust core
-/// (`ShellWordingTests`).
+/// The main window since R15. Every label here is a single word or comes
+/// from the Rust core (`ShellWordingTests`).
 struct MonitorWindowView: View {
     enum Tab: String, CaseIterable, Identifiable {
         case home = "Home"
@@ -30,12 +27,30 @@ struct MonitorWindowView: View {
             case .traces: String(localized: "Traces", comment: "Monitor tab")
             }
         }
+
+        /// The tabs the strip shows: all three once onboarding is done, and
+        /// Inference alone before, where Private AI sign-in is (R-38).
+        static func shown(requiresOnboarding: Bool) -> [Tab] {
+            requiresOnboarding ? [.inference] : allCases
+        }
+    }
+
+    /// The tab drawn for the restored one: Inference while onboarding is
+    /// required, whatever was restored; the restored tab otherwise.
+    static func shownTab(_ tab: Tab, requiresOnboarding: Bool) -> Tab {
+        requiresOnboarding ? .inference : tab
     }
 
     enum MapTab: String {
         case traces
         case privateAI
     }
+
+    /// Where an outside opener asked this window to go (`OpenMonitor`).
+    let navigation: MainWindowNavigation
+    /// The hosted Insights and Mission drafts screens' inputs (Home pages).
+    let insightsStoreSelection: InsightsStoreSelection
+    let missionDrafts: MissionDraftsModel
 
     @EnvironmentObject private var model: AppModel
     @Environment(\.openSettings) private var openSettings
@@ -50,41 +65,56 @@ struct MonitorWindowView: View {
     @SceneStorage("monitor.selectedSession") private var selectedSession = ""
     /// Home's page: the overview or History, restored per window.
     @SceneStorage("monitor.homePage") private var homePage: HomeTabView.Page = .overview
+    /// The selected History row's submission id; empty for none.
+    @SceneStorage("monitor.selectedHistory") private var selectedHistory = ""
 
-    /// The screens' data (C1). Sample data in this debug window until K1
-    /// moves the screens to the live client: `TRACE_COMMONS_SAMPLE` names
-    /// the set (`normalDay` by default).
-    @State private var traces = MonitorWindowView.tracesStore()
+    /// The screens' data, read through the app's live client
+    /// (`AppModel.daemonData`), which the body attaches whenever the daemon
+    /// starts or restarts. Until then each store says the core is down.
+    @State private var traces = TracesStore(client: nil)
     /// The map's Private AI view and the Inference tab (R8).
-    @State private var inference = InferenceStore(client: MonitorWindowView.dataClient())
+    @State private var inference = InferenceStore(client: nil)
     /// Home and History (R9).
-    @State private var home = HomeStore(client: MonitorWindowView.dataClient())
+    @State private var home = HomeStore(client: nil)
 
-    /// The Traces store over the sample set `TRACE_COMMONS_SAMPLE` names. A
-    /// name that is not a set falls back to `normalDay`, and says so: the tab
-    /// marks the data as sample, and an unknown name both in the marker and
-    /// in the log.
-    static func tracesStore() -> TracesStore {
+    /// Sample data, debug builds only, when `TRACE_COMMONS_SAMPLE` names a
+    /// set; nil otherwise, and then the live client is attached below. A
+    /// name that is not a set falls back to `normalDay`, and says so in the
+    /// log and in the Traces tab's sample marker.
+    static func sampleClient() -> (any DaemonDataClient)? {
+        #if DEBUG
         let choice = sampleChoice(ProcessInfo.processInfo.environment["TRACE_COMMONS_SAMPLE"])
-        if choice.unknown {
-            NSLog("TRACE_COMMONS_SAMPLE unrecognised; fallback %@", choice.set.rawValue)
-        }
-        return TracesStore(
-            client: DaemonDataWiring.sample(choice.set), sample: choice.set.rawValue, sampleUnknown: choice.unknown)
+        guard ProcessInfo.processInfo.environment["TRACE_COMMONS_SAMPLE"] != nil else { return nil }
+        if choice.unknown { NSLog("TRACE_COMMONS_SAMPLE unrecognised; fallback %@", choice.set.rawValue) }
+        let set = choice.set
+        return DaemonDataWiring.sample(set)
+        #else
+        return nil
+        #endif
     }
 
-    /// The sample client for the window's other stores, over the same set.
-    static func dataClient() -> any DaemonDataClient {
-        DaemonDataWiring.sample(sampleChoice(ProcessInfo.processInfo.environment["TRACE_COMMONS_SAMPLE"]).set)
+    /// The Traces tab's sample marker for `sampleClient()`'s set: its name,
+    /// and whether `TRACE_COMMONS_SAMPLE` named no set. Nil over the daemon.
+    static func sampleMarker() -> (set: String, unknown: Bool)? {
+        #if DEBUG
+        guard let name = ProcessInfo.processInfo.environment["TRACE_COMMONS_SAMPLE"] else { return nil }
+        let choice = sampleChoice(name)
+        return (choice.set.rawValue, choice.unknown)
+        #else
+        return nil
+        #endif
     }
 
+    #if DEBUG
     /// The set a `TRACE_COMMONS_SAMPLE` value names, and whether it named
-    /// none (unset or empty is the default, not unknown).
+    /// none (unset or empty is the default, not unknown). Debug builds
+    /// only, with the sample sets.
     static func sampleChoice(_ name: String?) -> (set: SampleDaemonClient.SampleSet, unknown: Bool) {
         guard let name, !name.isEmpty else { return (.normalDay, false) }
         guard let set = SampleDaemonClient.SampleSet(rawValue: name) else { return (.normalDay, true) }
         return (set, false)
     }
+    #endif
     /// False until this window has seeded the two preferences from its
     /// width (map from 1100pt, inspector from 900pt). After that the
     /// window restores whatever the person chose.
@@ -106,7 +136,7 @@ struct MonitorWindowView: View {
                 showsMap: $showsMap, showsInspector: $showsInspector,
                 onSettings: { openSettings() }
             ) {
-                switch tab {
+                switch Self.shownTab(tab, requiresOnboarding: model.requiresOnboarding) {
                 case .traces:
                     TracesTreeView(store: traces, selection: $selectedSession) { entryId in
                         Self.review(entryId, selection: &selectedSession, showsInspector: &showsInspector)
@@ -115,8 +145,14 @@ struct MonitorWindowView: View {
                 case .home:
                     HomeTabView(
                         store: home, traces: traces,
-                        statusLabel: { status in model.publicRunCopy?.contributionStatusLabel(for: status) },
-                        page: $homePage)
+                        statusLabel: { HomeFormat.historyStatusLabel(copy: model.publicRunCopy, $0) },
+                        page: $homePage,
+                        // Selecting a row shows the inspector, where its
+                        // details are, as a session's Review does.
+                        selection: Binding(
+                            get: { selectedHistory },
+                            set: { Self.review($0, selection: &selectedHistory, showsInspector: &showsInspector) }),
+                        insightsStoreSelection: insightsStoreSelection, missionDrafts: missionDrafts)
                 }
             }
         } map: {
@@ -128,22 +164,55 @@ struct MonitorWindowView: View {
             GlassPane {
                 // An empty branch would leave the pane nothing to draw, and
                 // it would vanish while the layout still reserved its width.
-                switch tab {
-                case .traces:
-                    SessionInspectorView(store: traces, entry: selectedEntry)
-                case .inference:
-                    PrivateAIInspectorView(
-                        store: inference, destinationLabel: model.privateInferenceCopy?.destination,
-                        sentence: { Self.rowSentence($0, copy: model.privateInferenceCopy, calls: model.harnessCalls) })
-                case .home:
-                    HomeSummaryInspector(store: home)
+                // While onboarding is required only Inference is shown, so
+                // the Private AI inspector is the only one admitted (R-38).
+                if !model.onboardingKnown {
+                    Color.clear
+                } else {
+                    switch Self.shownTab(tab, requiresOnboarding: model.requiresOnboarding) {
+                    case .traces:
+                        SessionInspectorView(store: traces, entry: selectedEntry)
+                    case .inference:
+                        PrivateAIInspectorView(store: inference, destinationLabel: model.privateInferenceCopy?.destination)
+                    case .home:
+                        // History's selected row, while it is still listed; the
+                        // record as a whole otherwise.
+                        if homePage == .history, let row = selectedHistoryRow {
+                            HistoryDetailInspector(row: row)
+                        } else {
+                            HomeSummaryInspector(store: home)
+                        }
+                    }
                 }
             }
         }
         .glassWindow()
-        .task { await traces.run() }
-        .task { await inference.run() }
-        .task { await home.run() }
+        .onAppear { model.refreshAll() }
+        // The app's own reads (settings, the tools, the credential, the
+        // change log) refresh when someone looks, on this always-present
+        // container, as the legacy window did.
+        .onChange(of: navigation.pending, initial: true) { _, destination in
+            // An outside opener's destination, consumed once; initially
+            // too, for a request that opened this window.
+            guard let destination else { return }
+            Self.land(destination, tab: &tab, homePage: &homePage,
+                      selectedSession: &selectedSession, showsInspector: &showsInspector)
+            navigation.pending = nil
+        }
+        // The app's live client, re-attached whenever the daemon restarts;
+        // with none, each store draws the core as down.
+        .task(id: model.liveData.map(ObjectIdentifier.init)) {
+            let client = Self.sampleClient() ?? model.daemonData
+            traces.attach(client)
+            let marker = Self.sampleMarker()
+            traces.markSample(marker?.set, unknown: marker?.unknown ?? false)
+            inference.attach(client)
+            home.attach(client)
+            async let a: () = traces.run()
+            async let b: () = inference.run()
+            async let c: () = home.run()
+            _ = await (a, b, c)
+        }
     }
 
     /// The sentence one tool's row shows (`HarnessSurface.rowSentence`): a
@@ -179,12 +248,40 @@ struct MonitorWindowView: View {
         traces.tree.allSessions.first { $0.entryId == selectedSession }
     }
 
+    /// The selected History row, while it is still in the list.
+    private var selectedHistoryRow: DaemonData.HistoryRow? {
+        guard !selectedHistory.isEmpty else { return nil }
+        return home.history?.first { $0.submissionId == selectedHistory }
+    }
+
     /// A session's Review: select it and show the inspector, where its
     /// review is. With the inspector hidden, selecting alone did nothing a
-    /// person could see.
+    /// person could see. Selecting a History row goes the same way.
     static func review(_ entryId: String, selection: inout String, showsInspector: inout Bool) {
         selection = entryId
         showsInspector = true
+    }
+
+    /// Where a destination lands in this window. A Settings destination
+    /// opens the Settings window (`Launcher`) and leaves the tabs alone.
+    static func land(
+        _ destination: MonitorDestination, tab: inout Tab, homePage: inout HomeTabView.Page,
+        selectedSession: inout String, showsInspector: inout Bool
+    ) {
+        switch destination {
+        case .home(let page):
+            tab = .home
+            homePage = page
+        case .inference:
+            // The Private AI switch and sign-in are in the inspector.
+            tab = .inference
+            showsInspector = true
+        case .traces(let entryId):
+            tab = .traces
+            if let entryId { review(entryId, selection: &selectedSession, showsInspector: &showsInspector) }
+        case .settings:
+            break
+        }
     }
 
     /// The first time this window lays out, open the panes its width suits.
@@ -204,11 +301,7 @@ struct MonitorWindowView: View {
     /// neither on nor off.
     static func inferenceDot(_ state: PrivateInferenceState?, calls: PrivateInferenceCalls) -> GlassStatus? {
         guard let state, !state.label.isEmpty else { return nil }
-        switch PrivateInferenceSurface.tone(state, calls: calls) {
-        case .clear: return .on
-        case .held, .attention, .refused: return .ask
-        case .neutral: return .off
-        }
+        return PrivateInferenceIndicator.status(PrivateInferenceSurface.tone(state, calls: calls))
     }
 
     /// The dot's text equivalent: the core's sentence for the same state.
@@ -237,6 +330,7 @@ private struct MonitorMainPane<Content: View>: View {
     /// The window is too narrow for the map: the toggle shows it hidden and
     /// cannot show it, and widening the window brings back the preference.
     @Environment(\.glassMapCompacted) private var mapCompacted
+    @EnvironmentObject private var model: AppModel
     /// Half the unified title bar's 52pt height.
     static var lightsCentre: CGFloat { 26 }
 
@@ -254,7 +348,10 @@ private struct MonitorMainPane<Content: View>: View {
                             showsInspector.toggle()
                         }
                     }
+                    // No consent surface before onboarding: Settings writes
+                    // what first run is there to ask.
                     GlassRoundButton(String(localized: "Settings", comment: "Settings button"), systemImage: "gearshape", small: true, action: onSettings)
+                        .disabled(model.requiresOnboarding)
                 }
                 // Clearance for the real traffic lights, not an origin.
                 .padding(.leading, GlassTokens.Space.windowControlsWidth - GlassTokens.Space.panePadding)
@@ -268,19 +365,38 @@ private struct MonitorMainPane<Content: View>: View {
                 // hold during monitor use is told whatever the map and the
                 // inspector are doing.
                 ShellNotices()
-                GlassSegmentedTabs(
-                    String(localized: "Monitor", comment: "Monitor tabs name"),
-                    selection: $tab,
-                    segments: MonitorWindowView.Tab.allCases.map { item in
-                        GlassSegment(
-                            item.title, value: item,
-                            badgeValue: item == .traces ? tracesBadge : nil,
-                            dot: item == .inference ? inferenceDot : item == .traces ? tracesDot : nil,
-                            accessibilityValue: item == .inference
-                                ? inferenceDescription : item == .traces ? tracesDescription : nil)
-                    })
-                content()
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                // No Home or Traces before onboarding is done: their screens
+                // act on consent that has not been given. Inference stays, so
+                // Private AI sign-in is reachable before Commons enrollment
+                // (R-38); its own startup handling (roots, starting, refused)
+                // is its gate. The button opens first run, which is where
+                // every other request goes until then. Before the core says,
+                // the placeholder status is not "signed out".
+                if !model.onboardingKnown {
+                    SettingsAwaiting()
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    if model.requiresOnboarding {
+                        GlassNotice(tone: .ask, title: MonitorWords.signedOut) {
+                            Button(OnboardingWelcomeWords.getStarted) { OpenMonitor.request() }
+                        }
+                    }
+                    GlassSegmentedTabs(
+                        String(localized: "Monitor", comment: "Monitor tabs name"),
+                        selection: Binding(
+                            get: { MonitorWindowView.shownTab(tab, requiresOnboarding: model.requiresOnboarding) },
+                            set: { tab = $0 }),
+                        segments: MonitorWindowView.Tab.shown(requiresOnboarding: model.requiresOnboarding).map { item in
+                            GlassSegment(
+                                item.title, value: item,
+                                badgeValue: item == .traces ? tracesBadge : nil,
+                                dot: item == .inference ? inferenceDot : item == .traces ? tracesDot : nil,
+                                accessibilityValue: item == .inference
+                                    ? inferenceDescription : item == .traces ? tracesDescription : nil)
+                        })
+                    content()
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                }
             }
         }
     }
@@ -417,20 +533,42 @@ struct MonitorSettingsWindow: View {
             .navigationSplitViewColumnWidth(min: 200, ideal: 230, max: 280)
         } detail: {
             Group {
-                switch section {
-                case .compute:
-                    ComputeView(model: compute)
-                default:
-                    ScrollView {
-                        SettingsContent(navigation: navigation, section: section)
+                // Before onboarding, no write surface outside first run
+                // (R-43): a section that writes what first run asks draws
+                // the Monitor's onboarding notice instead, whose button
+                // opens first run.
+                if model.requiresOnboarding && !section.availableBeforeOnboarding {
+                    GlassNotice(tone: .ask, title: MonitorWords.signedOut) {
+                        Button(OnboardingWelcomeWords.getStarted) { OpenMonitor.request() }
                     }
-                    .tcScreen()
+                    .padding(GlassTokens.Space.panePadding)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                } else {
+                    switch section {
+                    case .compute:
+                        ScrollView {
+                            ComputeView(model: compute)
+                                .padding(GlassTokens.Space.panePadding)
+                                .frame(maxWidth: 560, alignment: .leading)
+                                .frame(maxWidth: .infinity, alignment: .topLeading)
+                        }
+                    default:
+                        ScrollView {
+                            GlassSettingsContent(section: section)
+                        }
+                    }
                 }
             }
             // A fresh view per section, so the scroll starts at its top.
             .id(section)
         }
         .frame(minWidth: 760, minHeight: 520)
+        // A request for a section (a quit refusal's Compute), consumed
+        // once, whether or not this window was already open.
+        .onChange(of: navigation.settingsSection, initial: true) { _, wanted in
+            guard let wanted else { return }
+            section = wanted
+            navigation.settingsSection = nil
+        }
     }
 }
-#endif

@@ -1,4 +1,3 @@
-#if DEBUG
 import SwiftUI
 import TCBridge
 import TCDesign
@@ -12,6 +11,9 @@ import TCShellCore
 /// carries (`ShellWordingTests`).
 struct TracesTreeView: View {
     let store: TracesStore
+    /// Only for the queue's configured limit, which the queue-full banner
+    /// names (the store's data contract does not carry it).
+    @EnvironmentObject private var model: AppModel
     @Binding var selection: String
     /// A session's Review pill: select it and show the inspector its review
     /// lives in, so Review is never a press that does nothing visible.
@@ -25,6 +27,8 @@ struct TracesTreeView: View {
     /// A tool switch change waiting on the core's explanation of what the
     /// source declaration does.
     @State private var sourceChange: SourceChange?
+    /// The folder whose "Submit all as" menu is open.
+    @State private var verdictMenu: String?
     /// VoiceOver's focus, which follows the selection the arrow keys move,
     /// so a person hearing the tree hears where it went.
     @AccessibilityFocusState private var spoken: String?
@@ -72,28 +76,36 @@ struct TracesTreeView: View {
             if let notice = store.folderNotice {
                 GlassNotice(tone: .ask) { Text(notice) }
             }
-            // Why approved sessions are not moving, beside the tree and
-            // before Contribute is reached, in the words the main window uses.
-            ForEach(store.safeguards, id: \.title) { safeguard in
-                GlassNotice(tone: .ask, title: safeguard.title) {
-                    if let body = safeguard.body { Text(body) }
-                }
-            }
-            if case .failed(let error) = store.phase, let line = store.words?.line(for: error) {
-                // The core's line for a core that does not answer, or for a
-                // refused request; never the error's fixed label. The last
-                // good tree stays below it.
-                GlassNotice(tone: .outside, title: line) { EmptyView() }
-            }
+            // Why approved sessions are not moving, or that the core is not
+            // answering, beside the tree and before Contribute is reached.
+            // The last good tree stays below a failed refresh. An unread
+            // status is never drawn as healthy.
+            ForEach(TracesHealth.banners(
+                phase: store.phase, status: store.status, words: store.words, coreDown: TracesHealth.coreDownLine,
+                maxQueueEntries: model.daemonSettings?.maxQueueEntries)
+            ) { GlassHealthBanner(banner: $0) }
+            // Undo and the consent offers, here rather than in the
+            // inspector, so they are on screen with the inspector hidden.
+            TracesOffersBar(store: store)
             if store.phase == .loading && isEmpty {
                 ProgressView().controlSize(.small).frame(maxWidth: .infinity)
             } else if isEmpty && store.phase == .loaded {
-                Image(systemName: "tray")
-                    .glassGlyph(22)
-                    .foregroundStyle(GlassColor.textTertiary)
-                    .frame(maxWidth: .infinity)
-                    .padding(.top, GlassTokens.Space.s10)
-                    .accessibilityLabel(MonitorWindowView.Tab.traces.title)
+                VStack(spacing: GlassTokens.Space.s2) {
+                    Image(systemName: "tray")
+                        .glassGlyph(22)
+                        .foregroundStyle(GlassColor.textTertiary)
+                        .accessibilityLabel(MonitorWindowView.Tab.traces.title)
+                    Text(QueueLegacyWords.nothingWaiting)
+                        .glassType(GlassTokens.TypeScale.bodyStrong)
+                        .foregroundStyle(GlassColor.textPrimary)
+                    Text(QueueLegacyWords.nothingWaitingDetail)
+                        .glassType(GlassTokens.TypeScale.caption)
+                        .foregroundStyle(GlassColor.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: .infinity)
+                .padding(.top, GlassTokens.Space.s10)
             } else {
                 ScrollViewReader { proxy in
                     ScrollView {
@@ -180,7 +192,7 @@ struct TracesTreeView: View {
         if change.watch {
             // `get_settings` never reports a path, so watching asks which
             // folder, as Settings does.
-            guard let path = SourceRootRow.chooseFolder() else { return }
+            guard let path = GlassSourceRow.chooseFolder() else { return }
             Task { await store.setSource(change.kind, .watch(path: path)) }
         } else {
             Task { await store.setSource(change.kind, .off) }
@@ -360,6 +372,11 @@ struct TracesTreeView: View {
 
     @ViewBuilder
     private func folderRows(_ folder: TracesTree.FolderNode) -> some View {
+        // Submit all and Submit all as are a consent action: drawn only when
+        // the shared table offers Contribute for the daemon's counts, never
+        // for a folder that is not sent, and removed rather than disabled.
+        let offer = store.groupOffer(folder)
+        let submits = offer.offersContribute && store.mayContributeFolder(folder)
         GlassListRow(
             depth: .folder,
             tile: .folder,
@@ -367,14 +384,36 @@ struct TracesTreeView: View {
             // The mode is the picker's; the sub-line counts what is waiting.
             sub: folder.sessions.isEmpty ? nil : String(folder.sessions.count),
             expanded: folder.sessions.isEmpty ? nil : isOpen(folder.id),
+            submitTitle: submits ? QueueFolderWords.submitAll(offer.count) : nil,
             // The folder's mode: the three-way choice, with the core's
             // confirmations. A folder the core has not listed has no mode.
             accessory: modePicker(folder),
             expandLabel: folder.label,
-            onToggleExpand: { toggle(folder.id) }
+            menuLabel: submits ? VerdictCopy.submitAllAs : "",
+            menuOpen: verdictMenu == folder.id,
+            onToggleExpand: { toggle(folder.id) },
+            onSubmit: submits ? { Task { await store.contributeFolder(folder, verdict: nil) } } : nil,
+            onMenu: submits ? { verdictMenu = verdictMenu == folder.id ? nil : folder.id } : nil
         )
+        .help(submits ? QueueFolderWords.submitAllHelp(folder.label) : "")
         .disabled(store.writing.contains(folder.id))
-        notes(folderNotes(folder), depth: .folder)
+        if submits, verdictMenu == folder.id {
+            GlassMenu(onDismiss: { verdictMenu = nil }) {
+                ForEach(ContributorVerdict.allCases, id: \.rawValue) { option in
+                    GlassMenuItem(option.label) {
+                        verdictMenu = nil
+                        Task { await store.contributeFolder(folder, verdict: option) }
+                    }
+                }
+            }
+            .help(VerdictCopy.submitAllAsTooltip)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.leading, 8 + 16 + GlassTokens.Space.s4 + CGFloat(GlassListRow.Depth.folder.rawValue) * 18)
+            .padding(.bottom, GlassTokens.Space.s2)
+        }
+        // The withheld line is drawn once: the tab's notice may already say it.
+        let withheld: [String] = offer.withheldLine.flatMap { $0 == store.folderNotice ? nil : [$0] } ?? []
+        notes(folderNotes(folder) + withheld, depth: .folder)
         if isOpen(folder.id) {
             ForEach(folder.sessions) { sessionRow($0) }
         }
@@ -465,6 +504,10 @@ struct SessionInspectorView: View {
     let entry: DaemonData.QueueEntry?
     /// The tab's words, from the core, decoded once by the store.
     private var words: MonitorTracesCopy? { store.words }
+    /// The legacy queue's entries, which the preview sheet still takes.
+    @EnvironmentObject private var model: AppModel
+    /// The session whose preview sheet is open, as the legacy queue holds it.
+    @State private var previewing: QueueEntry?
 
     /// The preview, keyed by the session it was asked for. Only the
     /// selected session's answer is ever read out of it.
@@ -482,10 +525,6 @@ struct SessionInspectorView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
-            // Above the selection, never inside it: selecting another
-            // session must not hide an Undo that can still take something
-            // back, and an Undo that failed is said here, beside it.
-            pendingUndo
             if let entry {
                 ScrollView {
                     VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
@@ -513,12 +552,20 @@ struct SessionInspectorView: View {
                                 eligibility: store.eligibilityValue(entry), attestation: store.attestationValue(entry)))
                         }
                         if let summary { redactions(summary) }
+                        queueCardFacts(entry)
                         if let reasons = entry.secondLook, !reasons.isEmpty {
                             // The core's fixed reason labels until K4 gives
                             // them words.
                             VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
                                 ForEach(reasons, id: \.self) { GlassChip($0, status: .ask) }
                             }
+                        }
+                        // The full review, on the legacy queue's entry for
+                        // this same session. Absent, not disabled, when the
+                        // legacy queue does not hold it: no sheet for another.
+                        if let legacy = QueueEntryBridge.legacyEntry(for: entry.entryId, in: model.awaitingDecision) {
+                            Button(QueueLegacyWords.lookInside) { previewing = legacy }
+                                .buttonStyle(GlassButtonStyle(.glass))
                         }
                         review(entry)
                     }
@@ -529,37 +576,51 @@ struct SessionInspectorView: View {
                 Spacer(minLength: 0)
             }
         }
-    }
-
-    /// The contribution and the keep that can still be taken back, each
-    /// with the core's words and any refusal of its undo.
-    @ViewBuilder
-    private var pendingUndo: some View {
-        if let contributed = store.lastContributed, let words {
-            GlassNotice(tone: .ask, title: contributed.toast.line) {
-                if contributed.toast.offerUndo {
-                    Button(words.undoContribute) {
-                        Task { await store.perform(.undoContribute, on: contributed.entryId) }
-                    }
-                    .buttonStyle(GlassButtonStyle(.glass))
-                    .disabled(store.acting.contains(contributed.entryId))
-                }
+        .sheet(item: $previewing) { PreviewSheet(entry: $0).environmentObject(model) }
+        .onChange(of: model.awaitingDecision.count) { _, _ in
+            // Development hook, as the legacy queue's: opens the first
+            // preview so the sheet can be captured. Never on by default.
+            if ProcessInfo.processInfo.environment["TRACE_COMMONS_DEMO_PREVIEW"] == "1",
+                previewing == nil,
+                let first = model.awaitingDecision.first
+            {
+                previewing = first
             }
-            refusal(for: contributed.entryId)
-        }
-        if let kept = store.lastKept, let words {
-            Button(words.undoKeep) { Task { await store.perform(.undoKeep, on: kept) } }
-                .buttonStyle(GlassButtonStyle(.glass))
-                .disabled(store.acting.contains(kept))
-            refusal(for: kept)
         }
     }
 
-    /// The core's words for a refused action on `entryId`, if there is one.
+    /// What the queue card said about this session that the rows above do
+    /// not: a secret the scan found and left in, what scrubbing did and
+    /// what that does not prove, and whether delegated subagent transcripts
+    /// were trimmed to fit. Each line carries its words beside its dot.
     @ViewBuilder
-    private func refusal(for entryId: String) -> some View {
-        if let refused = store.actionError, refused.entryId == entryId, let line = store.message(for: refused.error) {
-            GlassNotice(tone: .outside, title: line) { EmptyView() }
+    private func queueCardFacts(_ entry: DaemonData.QueueEntry) -> some View {
+        if let survivor = TracesStore.survivorLine(summary) {
+            GlassStatusLabel(survivor, status: .ask)
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityLabel(survivor)
+        }
+        // Only once the preview has counted: an unread count is never
+        // read as "nothing matched".
+        if let redactions = summary?.redactions {
+            let removed = RedactionLabels.removedTotal(redactions)
+            GlassStatusLabel(
+                ScrubbingCaveat.rowLine(redactionCount: removed),
+                status: ScrubbingCaveat.status(redactionCount: removed))
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        // A load-time fact on the entry, so it is said before the preview
+        // is in: a trimmed conversation never reaches a decision unsaid.
+        if let line = SubagentCopy.line(count: entry.subagentCount ?? 0, dropped: entry.subagentsDropped ?? 0) {
+            if (entry.subagentsDropped ?? 0) > 0 {
+                GlassStatusLabel(line, status: .ask)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                Text(line)
+                    .glassType(GlassTokens.TypeScale.caption)
+                    .foregroundStyle(GlassColor.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
     }
 
@@ -634,7 +695,7 @@ struct SessionInspectorView: View {
                 .foregroundStyle(GlassColor.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
-        refusal(for: entry.entryId)
+        TracesRefusal(store: store, entryId: entry.entryId)
         if let words {
             HStack(spacing: GlassTokens.Space.s4) {
                 Button(words.dismiss) { act(.dismiss, entry) }
@@ -681,7 +742,7 @@ struct SessionInspectorView: View {
         }
         let result: Result<DaemonData.PreviewSummary, DaemonDataError>
         do {
-            result = .success(try await store.client.preview(entryId: entryId))
+            result = .success(try await store.attached().preview(entryId: entryId))
         } catch {
             result = .failure(error as? DaemonDataError ?? .undecodable(method: "preview"))
         }
@@ -765,4 +826,12 @@ struct PreviewSlot: Equatable {
     }
 }
 
-#endif
+/// The preview sheet still takes the legacy queue's entry. The inspector's
+/// session is found there by id, and only by id: a session the legacy
+/// queue does not hold opens no sheet, never a sheet for another session.
+enum QueueEntryBridge {
+    static func legacyEntry(for entryId: String, in awaiting: [QueueEntry]) -> QueueEntry? {
+        awaiting.first { $0.entryID == entryId }
+    }
+}
+
