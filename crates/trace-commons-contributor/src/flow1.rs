@@ -950,6 +950,112 @@ mod tests {
         assert_eq!(FLOW1_EVENT_NOT_FOR_STEP, "flow1-event-not-for-step");
     }
 
+    /// The table `flow1.ts` runs too (`flow1.test.mjs`), so a change to the
+    /// step order, Back, or the grant blockers in either one fails here or
+    /// there rather than going unseen.
+    #[test]
+    fn the_shared_flow1_table_is_what_the_core_does() {
+        let table: serde_json::Value =
+            serde_json::from_str(include_str!("flow1_table.json")).expect("the shared table");
+        let label = |value: &serde_json::Value| value.as_str().expect("a label").to_owned();
+        let step = |value: &serde_json::Value| -> OnboardingStep {
+            serde_json::from_value(value.clone()).expect("a step")
+        };
+        let path = |value: &serde_json::Value| -> Option<ContributionPath> {
+            serde_json::from_value(value.clone()).expect("a path or null")
+        };
+
+        // Every step and blocker the core has, in order, and no other.
+        use OnboardingStep as S;
+        let all_steps = [
+            S::Welcome,
+            S::Roots,
+            S::Connect,
+            S::Consent,
+            S::Path,
+            S::Privacy,
+            S::Inference,
+            S::DisclosureScrub,
+            S::DisclosureWitness,
+            S::Grant,
+            S::Projects,
+            S::Done,
+        ];
+        // A new variant fails to compile here until it is listed above.
+        for s in all_steps {
+            match s {
+                S::Welcome
+                | S::Roots
+                | S::Connect
+                | S::Consent
+                | S::Path
+                | S::Privacy
+                | S::Inference
+                | S::DisclosureScrub
+                | S::DisclosureWitness
+                | S::Grant
+                | S::Projects
+                | S::Done => {}
+            }
+        }
+        let steps: Vec<OnboardingStep> = table["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(step)
+            .collect();
+        assert_eq!(steps, all_steps);
+        let blockers: Vec<String> = table["blockers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(label)
+            .collect();
+        assert_eq!(
+            serde_json::to_value(grant_blockers(&Flow1Progress::default())).unwrap(),
+            serde_json::json!(blockers)
+        );
+
+        for row in table["back"].as_array().unwrap() {
+            assert_eq!(
+                previous_step(
+                    step(&row["from"]),
+                    row["privacy_included"].as_bool().unwrap(),
+                    path(&row["path"]),
+                    row["scopes_chosen"].as_bool().unwrap(),
+                ),
+                step(&row["to"]),
+                "{row}"
+            );
+        }
+        // Back is listed from every step.
+        for s in all_steps {
+            assert!(
+                table["back"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|row| step(&row["from"]) == s),
+                "no Back row from {s:?}"
+            );
+        }
+        for row in table["after_inference"].as_array().unwrap() {
+            assert_eq!(
+                after_inference(path(&row["path"])),
+                step(&row["to"]),
+                "{row}"
+            );
+        }
+        for row in table["grant_blockers"].as_array().unwrap() {
+            let progress: Flow1Progress = serde_json::from_value(row["progress"].clone()).unwrap();
+            assert_eq!(
+                serde_json::to_value(grant_blockers(&progress)).unwrap(),
+                row["blockers"],
+                "{row}"
+            );
+        }
+    }
+
     #[test]
     fn events_and_states_read_from_the_wire() {
         let state: Flow1State =

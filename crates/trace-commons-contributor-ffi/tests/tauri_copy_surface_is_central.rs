@@ -1234,7 +1234,6 @@ fn legacy_migration_copy_is_central_and_the_shell_holds_no_literal() {
 /// step and blocker the core does, so the two cannot drift apart unseen.
 #[test]
 fn the_flow1_decisions_are_the_cores_and_the_abi_takes_none_itself() {
-    use trace_commons_contributor::flow1::{GrantBlocker, OnboardingStep};
     let root = repo_root();
     let ffi = read(&root, "crates/trace-commons-contributor-ffi/src/lib.rs");
     for (export, core_call) in [
@@ -1274,35 +1273,33 @@ fn the_flow1_decisions_are_the_cores_and_the_abi_takes_none_itself() {
         &root,
         "tauri-desktop/frontend/src/features/onboarding/flow1.ts",
     );
-    let steps = [
-        OnboardingStep::Welcome,
-        OnboardingStep::Roots,
-        OnboardingStep::Connect,
-        OnboardingStep::Consent,
-        OnboardingStep::Path,
-        OnboardingStep::Privacy,
-        OnboardingStep::Inference,
-        OnboardingStep::DisclosureScrub,
-        OnboardingStep::DisclosureWitness,
-        OnboardingStep::Grant,
-        OnboardingStep::Projects,
-        OnboardingStep::Done,
-    ];
-    let blockers = [
-        GrantBlocker::Connect,
-        GrantBlocker::Scope,
-        GrantBlocker::Path,
-        GrantBlocker::ScrubDisclosure,
-        GrantBlocker::WitnessDisclosure,
-    ];
-    let labels = steps
+    // The labels come from the table both implementations run
+    // (`flow1_table.json`): the core's unit test pins it to the core's
+    // enums, and `flow1.test.mjs` runs flow1.ts's Back, after-inference and
+    // blockers against it. This only checks flow1.ts still names them.
+    let table: serde_json::Value = serde_json::from_str(&read(
+        &root,
+        "crates/trace-commons-contributor/src/flow1_table.json",
+    ))
+    .expect("the shared Flow 1 table");
+    let tauri_test = read(
+        &root,
+        "tauri-desktop/frontend/src/features/onboarding/flow1.test.mjs",
+    );
+    assert!(
+        tauri_test.contains("crates/trace-commons-contributor/src/flow1_table.json"),
+        "flow1.test.mjs must run the shared Flow 1 table"
+    );
+    let package = read(&root, "tauri-desktop/frontend/package.json");
+    assert!(
+        package.contains("src/features/onboarding/flow1.test.mjs"),
+        "`pnpm test` must run flow1.test.mjs"
+    );
+    let labels = table["steps"]
+        .as_array()
+        .expect("steps")
         .iter()
-        .map(|step| serde_json::to_value(step).unwrap())
-        .chain(
-            blockers
-                .iter()
-                .map(|blocker| serde_json::to_value(blocker).unwrap()),
-        );
+        .chain(table["blockers"].as_array().expect("blockers"));
     for label in labels {
         let label = label.as_str().expect("a label").to_owned();
         assert!(
