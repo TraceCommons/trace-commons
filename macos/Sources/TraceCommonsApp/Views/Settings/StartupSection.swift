@@ -66,37 +66,59 @@ struct NotificationsSection: View {
     @State private var notificationRequestPending = false
 
     var body: some View {
-        Group {
-            if let status = notificationStatus {
-                GlassEyebrowCard(Notifier.copy?.notificationHeading ?? "") {
-                    VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
-                        Text(Notifier.purpose)
-                            .glassType(GlassTokens.TypeScale.caption)
-                            .foregroundStyle(GlassColor.textSecondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                        switch status {
-                        case .authorized, .provisional, .ephemeral:
-                            SettingsStateRow(title: Notifier.copy?.notificationAllowed ?? "", isOn: true)
-                        case .denied:
-                            SettingsStateRow(title: Notifier.copy?.notificationDenied ?? "", isOn: false)
-                            settingsLink
-                        case .notDetermined:
-                            SettingsStateRow(title: Notifier.copy?.notificationNotAsked ?? "", isOn: false)
-                            Button(Notifier.copy?.notificationAllow ?? "") { requestAuthorization() }
-                                .buttonStyle(GlassButtonStyle(.glass))
-                                .disabled(notificationRequestPending)
-                        @unknown default:
-                            Text(Notifier.copy?.notificationUnknown ?? "").glassType(GlassTokens.TypeScale.body)
-                            settingsLink
-                        }
-                    }
-                }
+        // The refresh hangs on a node that always exists: with no status yet
+        // the card below can be empty, and a modifier on an empty container
+        // may never run, which would leave the status nil for good.
+        VStack(alignment: .leading, spacing: 0) {
+            Color.clear.frame(width: 0, height: 0).accessibilityHidden(true)
+            if let heading = Notifier.copy?.notificationHeading {
+                GlassEyebrowCard(heading) { card }
             }
         }
-        .task { notificationStatus = await Notifier.shared.authorizationStatus() }
+        .task { await refreshStatus() }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
-            Task { notificationStatus = await Notifier.shared.authorizationStatus() }
+            Task { await refreshStatus() }
         }
+    }
+
+    /// Until the system answers (and for good where there is no centre) the
+    /// card says the state is unknown, never a healthy row.
+    @ViewBuilder
+    private var card: some View {
+        VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
+            Text(Notifier.purpose)
+                .glassType(GlassTokens.TypeScale.caption)
+                .foregroundStyle(GlassColor.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+            if let status = notificationStatus {
+                switch status {
+                case .authorized, .provisional, .ephemeral:
+                    SettingsStateRow(title: Notifier.copy?.notificationAllowed ?? "", isOn: true)
+                case .denied:
+                    SettingsStateRow(title: Notifier.copy?.notificationDenied ?? "", isOn: false)
+                    settingsLink
+                case .notDetermined:
+                    SettingsStateRow(title: Notifier.copy?.notificationNotAsked ?? "", isOn: false)
+                    Button(Notifier.copy?.notificationAllow ?? "") { requestAuthorization() }
+                        .buttonStyle(GlassButtonStyle(.glass))
+                        .disabled(notificationRequestPending)
+                @unknown default:
+                    unknown
+                }
+            } else {
+                unknown
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var unknown: some View {
+        Text(Notifier.copy?.notificationUnknown ?? "").glassType(GlassTokens.TypeScale.body)
+        settingsLink
+    }
+
+    private func refreshStatus() async {
+        notificationStatus = await Notifier.shared.authorizationStatus()
     }
 
     private var settingsLink: some View {
@@ -111,7 +133,7 @@ struct NotificationsSection: View {
         Task {
             defer { notificationRequestPending = false }
             _ = await Notifier.shared.requestAuthorization()
-            notificationStatus = await Notifier.shared.authorizationStatus()
+            await refreshStatus()
         }
     }
 }
@@ -127,7 +149,7 @@ struct UpdatesSection: View {
         GlassEyebrowCard(SettingsWords.updates) {
             VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
                 HStack(spacing: GlassTokens.Space.s3) {
-                    Text("Version").glassType(GlassTokens.TypeScale.label)
+                    Text(SettingsLegacyWords.version).glassType(GlassTokens.TypeScale.label)
                         .foregroundStyle(GlassColor.textSecondary)
                     Text(updates.currentVersion)
                         .glassType(GlassTokens.TypeScale.mono)
@@ -141,7 +163,7 @@ struct UpdatesSection: View {
                     // happened: Sparkle finds the update in the background
                     // and then asks; the download follows the yes.
                     caption(SettingsLegacyWords.checksAutomatically)
-                    Button("Check Now") { updates.checkNow() }
+                    Button(SettingsLegacyWords.checkNow) { updates.checkNow() }
                         .buttonStyle(GlassButtonStyle(.glass))
                         .disabled(!updates.canCheckNow)
                 case .managedByHomebrew(let command):
@@ -155,7 +177,7 @@ struct UpdatesSection: View {
                                 .padding(GlassTokens.Space.s3)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                         }
-                        Button("Copy") {
+                        Button(SettingsLegacyWords.copy) {
                             NSPasteboard.general.clearContents()
                             NSPasteboard.general.setString(command, forType: .string)
                         }

@@ -377,7 +377,7 @@ struct SettingsContent: View {
             TCSectionHeader(title: SettingsWords.updates)
 
             HStack(spacing: TC.Space.s) {
-                TCFieldLabel("Version")
+                TCFieldLabel(SettingsLegacyWords.version)
                 Text(updates.currentVersion)
                     .font(TC.Font_.ledger)
                     .textSelection(.enabled)
@@ -399,7 +399,7 @@ struct SettingsContent: View {
                     .font(TC.Font_.meta)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
-                Button("Check Now") { updates.checkNow() }
+                Button(SettingsLegacyWords.checkNow) { updates.checkNow() }
                     .buttonStyle(.bordered)
                     .disabled(!updates.canCheckNow)
 
@@ -416,7 +416,7 @@ struct SettingsContent: View {
                         .padding(TC.Space.s)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .tcCard()
-                    Button("Copy") {
+                    Button(SettingsLegacyWords.copy) {
                         NSPasteboard.general.clearContents()
                         NSPasteboard.general.setString(command, forType: .string)
                     }
@@ -2154,6 +2154,9 @@ enum SettingsLegacyWords {
         """
     static func couldNotTurnOn(_ message: String) -> String { "Couldn't turn this on: \(message)" }
     static func couldNotTurnOff(_ message: String) -> String { "Couldn't turn this off: \(message)" }
+    static let version = "Version"
+    static let checkNow = "Check Now"
+    static let copy = "Copy"
     static let checksDaily = "Checks daily"
     static let checksAutomatically = """
         Trace Commons checks for updates automatically and asks before installing.

@@ -87,6 +87,22 @@ final class SettingsParityTests: XCTestCase {
         XCTAssertEqual(SettingsLegacyWords.stateLabel("X", false), "X: no")
     }
 
+    /// The notification refresh must hang on a node that exists while the
+    /// status is still nil, never on a container whose only child is the
+    /// conditional card (an empty container may never run its modifiers).
+    func test_notificationRefreshIsOnAnAlwaysPresentContainer() throws {
+        let source = try Self.text("Views/Settings/StartupSection.swift")
+        let start = try XCTUnwrap(source.range(of: "struct NotificationsSection"))
+        let body = String(source[start.lowerBound...])
+        XCTAssertTrue(body.contains("Color.clear.frame(width: 0, height: 0)"), "no always-present anchor")
+        XCTAssertFalse(body.contains("Group {"), "refresh chained onto a conditional-only Group")
+        let anchor = try XCTUnwrap(body.range(of: "Color.clear.frame(width: 0, height: 0)"))
+        let task = try XCTUnwrap(body.range(of: ".task { await refreshStatus() }"))
+        XCTAssertLessThan(anchor.lowerBound, task.lowerBound)
+        XCTAssertEqual(body.components(separatedBy: "Notifier.shared.authorizationStatus()").count - 1, 1,
+                       "the refresh closure is duplicated")
+    }
+
     func test_theGlassContentDrawsEverySection() throws {
         let source = try Self.text("Views/Settings/GlassSettingsContent.swift")
         for section in SettingsSection.allCases where section != .compute {
