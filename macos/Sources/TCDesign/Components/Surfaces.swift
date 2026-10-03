@@ -4,12 +4,19 @@ import SwiftUI
 /// between them; there is no window chrome around them.
 public struct GlassPane<Content: View>: View {
     private let padding: CGFloat?
+    private let isContent: Bool
     private let content: Content
 
     /// `padding` defaults to the pane padding; pass 0 for edge-to-edge
-    /// content such as the Traces tree.
-    public init(padding: CGFloat? = GlassTokens.Space.panePadding, @ViewBuilder content: () -> Content) {
+    /// content such as the Traces tree. `isContent` puts the pane in the
+    /// content layer (the map): the opaque base, never Liquid Glass, so the
+    /// glass controls floating on it are not glass on glass.
+    public init(
+        padding: CGFloat? = GlassTokens.Space.panePadding, isContent: Bool = false,
+        @ViewBuilder content: () -> Content
+    ) {
         self.padding = padding
+        self.isContent = isContent
         self.content = content()
     }
 
@@ -18,21 +25,31 @@ public struct GlassPane<Content: View>: View {
             .padding(padding ?? 0)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .glassTier(.pane)
+            .environment(\.glassPaneIsContent, isContent)
     }
 }
 
 /// Popover tier: the menu-bar panel, floating menus.
+///
+/// One container for VoiceOver. Escape calls `onDismiss`; whoever presents
+/// the popover closes it there and puts focus back on the control that
+/// opened it (a SwiftUI `.popover` does both itself).
 public struct GlassPopover<Content: View>: View {
+    private let onDismiss: (() -> Void)?
     private let content: Content
 
-    public init(@ViewBuilder content: () -> Content) {
+    public init(onDismiss: (() -> Void)? = nil, @ViewBuilder content: () -> Content) {
+        self.onDismiss = onDismiss
         self.content = content()
     }
 
     public var body: some View {
         content
             .padding(GlassTokens.Space.s5)
-            .glassTier(.popover)
+            .glassSurface(.popover, floating: true)
+            .focusSection()
+            .onExitCommand { onDismiss?() }
+            .accessibilityElement(children: .contain)
     }
 }
 
@@ -65,10 +82,18 @@ public struct GlassSheet<Content: View>: View {
 }
 
 /// A floating menu (view options, a row's menu). Items are `GlassMenuItem`.
+///
+/// One container for VoiceOver, and one focus section, so Tab and Full
+/// Keyboard Access move through its items and the system focus ring shows
+/// on each; Space or Return activates the focused item (it is a button).
+/// Escape calls `onDismiss`; the presenter closes the menu there and puts
+/// focus back on the control that opened it.
 public struct GlassMenu<Content: View>: View {
+    private let onDismiss: (() -> Void)?
     private let content: Content
 
-    public init(@ViewBuilder content: () -> Content) {
+    public init(onDismiss: (() -> Void)? = nil, @ViewBuilder content: () -> Content) {
+        self.onDismiss = onDismiss
         self.content = content()
     }
 
@@ -76,7 +101,9 @@ public struct GlassMenu<Content: View>: View {
         VStack(alignment: .leading, spacing: 0) { content }
             .padding(5)
             .frame(minWidth: 220, alignment: .leading)
-            .glassTier(.menu)
+            .glassSurface(.menu, floating: true)
+            .focusSection()
+            .onExitCommand { onDismiss?() }
             .accessibilityElement(children: .contain)
     }
 }
@@ -105,16 +132,18 @@ public struct GlassMenuItem: View {
                 Spacer(minLength: 0)
             }
             .glassType(GlassTokens.TypeScale.body)
-            .foregroundStyle(isEnabled ? GlassColor.textPrimary : GlassColor.textTertiary)
+            // On the hover fill, the menu selection's text: white in light.
+            .foregroundStyle(isEnabled ? (hovering ? GlassTokens.Color.menuHoverText.color : GlassColor.textPrimary) : GlassColor.textTertiary)
             .padding(.horizontal, GlassTokens.Space.s5)
             .padding(.vertical, GlassTokens.Space.s2)
             .background(
                 RoundedRectangle(cornerRadius: 5, style: .continuous)
                     .fill(hovering && isEnabled ? GlassTokens.Color.menuHover.color : .clear)
+                    .glassPressedFill()
             )
             .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(GlassPressStyle())
         .onHover { hovering = $0 }
         .accessibilityAddTraits(checked == true ? .isSelected : [])
     }
@@ -130,5 +159,40 @@ public struct GlassMenuSeparator: View {
             .padding(.horizontal, GlassTokens.Space.s4)
             .padding(.vertical, GlassTokens.Space.s2)
             .accessibilityHidden(true)
+    }
+}
+
+/// A row in a menu-like panel whose rows are ordinary buttons (the
+/// menu-bar panel): full width, the menu hover fill, and the pressed fill
+/// 8% darker. The button's own label is drawn; this style authors no words.
+public struct GlassMenuRowStyle: ButtonStyle {
+    public init() {}
+
+    public func makeBody(configuration: Configuration) -> some View {
+        GlassMenuRowBody(configuration: configuration)
+    }
+}
+
+private struct GlassMenuRowBody: View {
+    let configuration: ButtonStyleConfiguration
+    @State private var hovering = false
+    @Environment(\.isEnabled) private var isEnabled
+
+    var body: some View {
+        configuration.label
+            .glassType(GlassTokens.TypeScale.body)
+            .foregroundStyle(hovering && isEnabled ? Color.white : (isEnabled ? GlassColor.textPrimary : GlassColor.textTertiary))
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, GlassTokens.Space.s4)
+            .padding(.vertical, GlassTokens.Space.s2)
+            // The macOS menu selection: blue, with white text.
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(hovering && isEnabled ? GlassTokens.Color.menuSelection.color : .clear)
+                    .glassPressedFill()
+            )
+            .environment(\.glassPressed, configuration.isPressed && isEnabled)
+            .contentShape(Rectangle())
+            .onHover { hovering = $0 }
     }
 }
