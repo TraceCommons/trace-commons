@@ -1274,7 +1274,8 @@ async fn credit_audit_events_in_file(
             };
             if event_ids.contains(&event.event_id) {
                 ensure_audit_event_tenant(&event, &tenant)?;
-                events.insert(event.event_id, event);
+                // The first line of an id, as the scan this replaces took.
+                events.entry(event.event_id).or_insert(event);
             }
         }
         anyhow::Ok((events, skipped_lines))
