@@ -1,0 +1,514 @@
+/* First-run (FTUX) layout on the WYSIWYG glass design system.
+   Surfaces, controls and type come from src/design-system (tc-*). This file
+   only lays the flow out, and draws the imitation macOS sheets, which are
+   not part of the design system. Values read --tc-* tokens where one exists. */
+
+/* Frame --------------------------------------------------------------- */
+
+.ftux-scene {
+  min-height: 100vh;
+  align-items: center;
+  justify-content: center;
+  padding: 32px 16px;
+}
+
+.ftux-preview-tag {
+  position: absolute;
+  top: 12px;
+  left: 16px;
+  z-index: 50;
+}
+
+.ftux-pane {
+  display: flex;
+  width: min(100%, 450px);
+  height: min(640px, calc(100vh - 64px));
+  min-height: 520px;
+  flex-direction: column;
+  gap: var(--tc-space-6);
+  outline: none;
+}
+
+.ftux-pane__bar {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.ftux-pane__body {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: var(--tc-space-6);
+}
+
+.ftux-scroll {
+  min-height: 0;
+  flex: 1;
+  overflow: auto;
+}
+
+.ftux-light {
+  font-weight: 400;
+}
+
+.ftux-footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--tc-space-6);
+}
+
+.ftux-footer[data-split] {
+  justify-content: space-between;
+}
+
+/* Small layout helpers ---------------------------------------------------- */
+
+.ftux-row {
+  display: flex;
+  align-items: center;
+  gap: var(--tc-gap-inline);
+}
+
+.ftux-row--between {
+  justify-content: space-between;
+  gap: var(--tc-space-5);
+}
+
+.ftux-row--end {
+  justify-content: flex-end;
+}
+
+.ftux-row--top {
+  align-items: flex-start;
+}
+
+.ftux-grow {
+  flex: 1;
+}
+
+.ftux-min-0 {
+  min-width: 0;
+}
+
+.ftux-gap-0 {
+  gap: 0;
+}
+
+.ftux-gap-2 {
+  gap: var(--tc-space-2);
+}
+
+.ftux-block {
+  display: block;
+}
+
+.ftux-ellipsis {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ftux-nowrap {
+  white-space: nowrap;
+}
+
+.ftux-indent {
+  padding-left: 25px;
+}
+
+.ftux-self-start {
+  align-self: flex-start;
+}
+
+.ftux-self-center {
+  align-self: center;
+}
+
+.ftux-center {
+  text-align: center;
+}
+
+.ftux-repo-row {
+  padding-top: 7px;
+}
+
+.ftux-muted-row {
+  color: var(--tc-text-tertiary);
+  opacity: 0.7;
+}
+
+.ftux-add-tool {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: var(--tc-space-5);
+  padding: var(--tc-pad-card);
+  border: 1px dashed rgba(255, 255, 255, 0.28);
+  border-radius: var(--tc-radius-card);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.ftux-add-tool[data-dragging="true"] {
+  border-color: var(--tc-purple-text);
+  background: var(--tc-tint-neutral);
+}
+
+.ftux-spinner {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border: 1.5px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: ftux-spin 0.8s linear infinite;
+}
+
+@keyframes ftux-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Passkey popups: the design system's narrow modal over its scrim. -------- */
+
+.ftux-scrim {
+  position: fixed;
+  z-index: 40;
+}
+
+.ftux-popup {
+  position: relative;
+  display: flex;
+  max-width: 380px;
+  flex-direction: column;
+  gap: var(--tc-space-7);
+  padding: 22px 22px 20px;
+}
+
+.ftux-popup-icon {
+  display: inline-flex;
+  width: 52px;
+  height: 52px;
+  align-items: center;
+  align-self: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: rgba(109, 20, 243, 0.35);
+  box-shadow: var(--tc-card-edge);
+  color: var(--tc-purple-text);
+}
+
+.ftux-popup-icon[data-tone="green"] {
+  background: var(--tc-tint-on);
+  color: var(--tc-status-on);
+}
+
+.ftux-popup-heading {
+  display: flex;
+  flex-direction: column;
+  gap: var(--tc-space-3);
+  text-align: center;
+}
+
+.ftux-corner {
+  position: absolute;
+  top: 14px;
+}
+
+.ftux-corner[data-side="left"] {
+  left: 14px;
+}
+
+.ftux-corner[data-side="right"] {
+  right: 14px;
+}
+
+.ftux-block-btn {
+  width: 100%;
+  height: 40px;
+  justify-content: center;
+}
+
+.ftux-btn-outline {
+  box-shadow:
+    inset 0 0 0 1.5px rgba(255, 255, 255, 0.7),
+    0 0 0 3px rgba(255, 255, 255, 0.12);
+}
+
+.ftux-name-field {
+  display: flex;
+  height: 44px;
+  align-items: center;
+  gap: var(--tc-space-4);
+  padding: 0 14px;
+  border-radius: var(--tc-radius-card-sm);
+  background: var(--tc-field-fill);
+}
+
+.ftux-name-field:focus-within {
+  box-shadow: 0 0 0 1px var(--tc-purple-text);
+}
+
+.ftux-name-field input {
+  min-width: 0;
+  flex: 1;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: var(--tc-text-primary);
+  font: var(--tc-text-body);
+}
+
+.ftux-clear {
+  display: inline-flex;
+  width: 18px;
+  height: 18px;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.2);
+  color: var(--tc-text-on-status);
+  cursor: pointer;
+}
+
+.ftux-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--tc-space-5);
+  font: var(--tc-text-label);
+  font-weight: 400;
+  line-height: 17px;
+  color: var(--tc-text-primary);
+}
+
+.ftux-notice__glyph {
+  display: inline-flex;
+  flex: none;
+  height: 17px;
+  align-items: center;
+}
+
+.ftux-notice[data-tone="ask"] .ftux-notice__glyph {
+  color: var(--tc-status-ask);
+}
+
+.ftux-notice[data-tone="outside"] {
+  color: var(--tc-status-outside);
+}
+
+.ftux-welcome-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--tc-space-7);
+  padding: 20px 16px;
+}
+
+.ftux-card-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+/* Simulated macOS sheets. The real ones are drawn by the OS when WebAuthn
+   asks; these stand in on mock data and say so. ------------------------- */
+
+.ftux-simulated {
+  align-self: flex-start;
+}
+
+.ftux-sheet {
+  display: flex;
+  width: min(100%, 380px);
+  flex-direction: column;
+  gap: var(--tc-space-7);
+  padding: 20px 20px 18px;
+  border-radius: 16px;
+  background: rgba(44, 44, 48, 0.94);
+  box-shadow:
+    inset 0 0 0 0.5px rgba(255, 255, 255, 0.14),
+    0 30px 60px rgba(0, 0, 0, 0.45);
+  -webkit-backdrop-filter: var(--tc-blur-window);
+  backdrop-filter: var(--tc-blur-window);
+  color: var(--tc-text-primary);
+}
+
+.ftux-sheet-title {
+  margin: 0;
+  font: var(--tc-text-title);
+  font-weight: 700;
+}
+
+.ftux-sheet-text {
+  margin: 0;
+  font: var(--tc-text-label);
+  font-weight: 400;
+  color: var(--tc-text-secondary);
+}
+
+.ftux-sheet-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--tc-space-6);
+  margin: 0;
+  padding: 12px 14px;
+  border: 0;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.ftux-sheet-option {
+  display: flex;
+  align-items: center;
+  gap: var(--tc-space-5);
+  cursor: pointer;
+}
+
+.ftux-sheet-option input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  border: 1px solid rgba(255, 255, 255, 0.4);
+  border-radius: 50%;
+  appearance: none;
+  -webkit-appearance: none;
+  cursor: pointer;
+}
+
+.ftux-sheet-option input:checked {
+  border: 5px solid #0a84ff;
+  background: #0a84ff;
+  box-shadow: inset 0 0 0 3px #fff;
+}
+
+.ftux-app-icon {
+  display: inline-flex;
+  width: 22px;
+  height: 22px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  background: linear-gradient(135deg, #f5c142, #3ddc84, #3aa0ff);
+  color: #fff;
+  font-size: 9px;
+  font-weight: 700;
+}
+
+.ftux-app-icon[data-app="1password"] {
+  background: #1a73e8;
+}
+
+.ftux-sheet-buttons {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--tc-space-4);
+}
+
+.ftux-sheet-btn {
+  height: 28px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.14);
+  color: #fff;
+  font: var(--tc-text-body);
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.ftux-sheet-btn[data-default="true"] {
+  background: #0a84ff;
+}
+
+.ftux-touch-id {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  align-self: center;
+  gap: var(--tc-space-4);
+  padding: 6px 12px 2px;
+  border: 0;
+  border-radius: 12px;
+  background: none;
+  color: var(--tc-text-primary);
+  font: var(--tc-text-body);
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.ftux-touch-id svg {
+  color: var(--tc-status-outside);
+}
+
+.ftux-touch-id[data-busy="true"] svg {
+  animation: ftux-pulse 0.9s ease-in-out infinite;
+}
+
+@keyframes ftux-pulse {
+  50% {
+    opacity: 0.4;
+  }
+}
+
+/* Preferences --------------------------------------------------------------- */
+
+@media (prefers-reduced-motion: reduce) {
+  .ftux-spinner,
+  .ftux-touch-id[data-busy="true"] svg {
+    animation: none;
+  }
+}
+
+/* macOS "Reduce transparency": solid surfaces, no blur. */
+@media (prefers-reduced-transparency: reduce) {
+  .ftux-scene {
+    background: var(--tc-scene-base);
+  }
+
+  .ftux-pane,
+  .ftux-popup,
+  .ftux-sheet,
+  .ftux-scrim {
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
+
+  .ftux-pane,
+  .ftux-popup {
+    background: var(--tc-scene-warm);
+  }
+
+  .ftux-sheet {
+    background: #2c2c30;
+  }
+}
+
+/* "Increase contrast": firmer edges on the flow's own surfaces. */
+@media (prefers-contrast: more) {
+  .ftux-pane,
+  .ftux-popup,
+  .ftux-name-field,
+  .ftux-add-tool {
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.7);
+  }
+}
+
+/* Popup headings are h2 for the dialog outline; keep their design sizes over
+   the design system's `.tc-root h2` title size. */
+.tc-root .ftux-popup h2.tc-display {
+  font: var(--tc-text-display);
+  letter-spacing: var(--tc-tracking-display);
+}
+
+.tc-root .ftux-popup h2.tc-heading {
+  font: var(--tc-text-heading);
+}
