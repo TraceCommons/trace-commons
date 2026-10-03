@@ -117,6 +117,32 @@ old behaviour, because no application has shipped against `v1` yet. See
   `title` uses, but through the deterministic redaction pass alone rather
   than a full preview build. See ["`title`"](#title) and
   ["The preview content boundary"](#the-preview-content-boundary).
+- **K10 (sizes in history, and the would-send size).** Two additive fields,
+  so the History graph can weigh contributions by bytes and not only by
+  count. `list_history` rows now carry `uploaded_bytes`: the serialized size
+  of the redacted envelope a submission actually sent, recorded once at
+  upload time. Every queue entry (`list_pending`, the `snapshot` event) now
+  also carries `would_send_bytes`: the serialized size of the redacted
+  envelope a preview pinned for that entry, present only once a preview has
+  run. Neither is the raw session size on disk (`size_bytes`), which was the
+  only figure either surface could report before this. See
+  ["Sizes in history, and the would-send size (K10)"](#sizes-in-history-and-the-would-send-size-k10).
+- **K12 (withdrawal dates on revoked rows).** `list_history` rows now carry
+  `revoked_at`: when a server `revoked` read-back -- a withdrawal made on the
+  web, which this daemon never drove -- was first observed, so a revoked row
+  can show a date the way a locally `withdrawn` one already does from
+  `withdrawn_at`. The server's read-back itself carries no timestamp, so this
+  is the moment of first discovery rather than the moment of the web
+  withdrawal; it does not move on a later poll that only re-confirms the same
+  status. See
+  ["Withdrawal dates on revoked rows (K12)"](#withdrawal-dates-on-revoked-rows-k12).
+- **K15 (the native View menu's Group by and Sort by).** No field is added
+  for this. Every Group by and Sort by option the native Traces tab needs
+  is already answerable from `list_pending`'s entry fields, `list_projects`,
+  and `list_history` -- once K11's `list_projects[].tools` (#1192) lands.
+  K9's `title` (#1191) and K10's `would_send_bytes` and `uploaded_bytes`
+  (#1196) have already landed. See ["View menu: Group by and Sort by
+  (K15)"](#view-menu-group-by-and-sort-by-k15).
 
 `crates/trace-commons-contributor/tests/daemon_ipc_contract.rs` is the
 executable half of this document. `hello` reports its own method list and a
@@ -498,7 +524,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 |---|---|---|---|
 | `hello` | — | `schema_version`, `supported_versions[]`, `methods[]`, `events[]`, `max_line_bytes` | |
 | `status` | — | see below | |
-| `list_pending` | `project_id` (optional) | `pending[]` of queue entries | `project_id` narrows the list to that project's `pending` entries, for Customize's past-session picker; refused with `project-id-unrecognized` if the daemon does not know that project, or `project_id-invalid` if it is not a string. Absent is every project, as before. Each entry carries `scrub`, `marks` / `content_marks` / `unsure_spans` (only once its pinned bytes are counted) and `second_look[]`; see "The scrub state and `second_look`" below |
+| `list_pending` | `project_id` (optional) | `pending[]` of queue entries | `project_id` narrows the list to that project's `pending` entries, for Customize's past-session picker; refused with `project-id-unrecognized` if the daemon does not know that project, or `project_id-invalid` if it is not a string. Absent is every project, as before. Each entry carries `scrub`, `marks` / `content_marks` / `unsure_spans` (only once its pinned bytes are counted) and `second_look[]`; see "The scrub state and `second_look`" below. Each entry also carries `would_send_bytes`, the pinned preview's measured size (K10); see ["Sizes in history, and the would-send size (K10)"](#sizes-in-history-and-the-would-send-size-k10) |
 | `certificate_detail` | `entry_id` | held certificate claims and verification metadata | read-only; refuses entries without a witness pin and never returns raw artifact bytes |
 | `route_disclosure` | — | `route`, `witness`, `local_filter`, `receipts`, `attested_bodies` | read-only, no network; what leaves this machine, to whom, and what this client checked; see "`route_disclosure`" below |
 | `preview` | `entry_id` | see below | summary only; the body is `preview_body` |
@@ -530,7 +556,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `resume` | — | `paused: false` | |
 | `list_projects` | — | `projects[]` of `{project_id, project_label, mode, added_at, configured, is_unresolved_bucket}`, plus a top-level `unpurposed_traces` | configured **and** discovered projects; see "`list_projects`" below |
 | `set_project_mode` | `project_id` **or** `project_key`, `mode` (`label` accepted and ignored), `include_backlog` (optional boolean, `auto_upload` only) | `ok: true`, `purged: <count>`, `retracted: <count>`, `from_now` | socket clients send `project_id`; `auto_upload` no longer requires a terminal; see "Naming a project" above, "`set_project_mode` and the ignore purge" and "Arming from now" below |
-| `list_history` | `limit` (optional, default 50, max 1000) | `history[]`, each row now also carrying `approved_unattended` and `approved_verdict` | see "History provenance (K7)" below |
+| `list_history` | `limit` (optional, default 50, max 1000) | `history[]`, each row now also carrying `approved_unattended`, `approved_verdict`, `uploaded_bytes`, and `revoked_at` | see "History provenance (K7)", "Sizes in history, and the would-send size (K10)" and "Withdrawal dates on revoked rows (K12)" below |
 | `history_rollup` | — | see below | now also carries `taken_back`, and a `withdrawn` bucket in each window |
 | `commons_credit_summary` | — | `posture_state`, `commons_settlement`, `commons_settlement_explanation`, `commons_graded` (device route); `points_state`, `commons_points_earned_this_period`, `commons_points_lifetime_earned`, `commons_pending_review`, `commons_currency_code`, `commons_currency_earned_this_period`, `commons_period_start`, `commons_period_end` (account route); `observed_at` | always succeeds; see "`commons_credit_summary`" below |
 | `history_detail` | `submission_id` | owned redacted outcome, correction, up to 24 evidence candidates, contributed versions, publication state, and an opaque local owner-scope digest | one account-authenticated request; each excerpt capped at 700 characters; native clients use the digest only to evict account-owned caches after sign-in changes |
@@ -572,8 +598,8 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `withdraw_bulk` | `status` (`submitted` \| `quarantined` \| `accepted`) | `withdrawn: <count>`, `failed: <count>` | performs real network I/O; see "Withdrawal" below |
 | `inference_connection_offers` | — | `offers[]` of `{offer_id, revision, provider_id, disclosure_version, config_digest}` | account session; a read that selects nothing; see "Connecting inference" below |
 | `inference_connection_current` | — | `selection` (or `null`), `installed_on_this_device`, `pending_install`, `revocation_applied` | account session; applies an observed revocation on this device; see "Connecting inference" below |
-| `inference_connection_select` | `offer_id`, `provider_id`, `revision`, `config_digest`, `disclosure_version` (all **required**, exactly as shown); `expected_current_version` (optional); `idempotency_key` (optional UUID) | `selected: true`, `connection_id`, `state_version`, `offer_id`, `revision`, `config_digest`, `disclosure_version`, `receipt_endpoint_offered`, `install_required: true`, `previous_witness_removed` | account session; installs nothing; see "Connecting inference" below |
-| `inference_connection_install` | `connection_id`, `config_digest` (both **required**) | `installed: true`, `connection_id`, `state_version`, `receipt_endpoint_installed` | account session; the separate explicit step that writes the witness on this device; see "Connecting inference" below |
+| `inference_connection_select` | `offer_id`, `provider_id`, `revision`, `config_digest`, `disclosure_version`, `confirmed: true` (all **required**, exactly as shown); `expected_current_version` (optional); `idempotency_key` (optional UUID) | `selected: true`, `connection_id`, `state_version`, `offer_id`, `revision`, `config_digest`, `disclosure_version`, `receipt_endpoint_offered`, `install_required: true`, `previous_witness_removed` | account session; installs nothing; see "Connecting inference" below |
+| `inference_connection_install` | `connection_id`, `config_digest`, `confirmed: true` (all **required**) | `installed: true`, `connection_id`, `state_version`, `receipt_endpoint_installed` | account session; the separate explicit step that writes the witness on this device; see "Connecting inference" below |
 | `inference_connection_disconnect` | `connection_id` (**required**) | `disconnected`, `connection_id`, `state_version` (or `null`), `local_witness_removed`, `server_disconnect` (`revoked` / `not-found` / `pending`), `server_refusal` (label or `null`) | removes the local witness first, with or without an account session; see "Connecting inference" below |
 
 ### `status`
@@ -1014,7 +1040,9 @@ session is next loaded (it grows, or is re-offered).
 
 Every entry also carries `title` (K9) -- unlike the fields above, redacted
 *content*, not metadata, so it is documented on its own: see
-["`title`"](#title).
+["`title`"](#title). It also carries `would_send_bytes` (K10), the pinned
+preview's measured size, documented in
+["Sizes in history, and the would-send size (K10)"](#sizes-in-history-and-the-would-send-size-k10).
 
 `envelope_digest` identifies the redacted envelope this summary describes;
 `input_fingerprint` identifies the configuration that produced it. Both are
@@ -1946,6 +1974,60 @@ side effects, computed from the same queue and policy state a client already
 fetches `list_projects` to draw. It is always present (never absent, unlike
 `contributable_count`), because whether a session is undecided-and-Ask-me is
 a question every contributor's queue can answer, invited or not.
+
+### View menu: Group by and Sort by (K15)
+
+The native app's View menu (#1146, #1152) offers Group by and Sort by for
+the Traces tab, alongside the already-built "Show ignored folders". Neither
+needs a new field: every option is answerable from `list_pending`'s entry
+fields (`entry_value`), `list_projects`, and `list_history`, below. One of
+those fields is on an open, not-yet-merged PR -- `list_projects[].tools`
+(K11, #1192); the table names it, so nothing here is duplicated when it
+lands. K9's `title` (#1191) and K10's `would_send_bytes` and
+`uploaded_bytes` (#1196) have landed and are listed as existing.
+
+**Group by**
+
+| Option | What it groups on | Source |
+|---|---|---|
+| Tool (default) | an entry's `source` / `declared_source` | `list_pending`, existing |
+| Tool, for a folder with nothing waiting | the per-tool session counts the project has seen | `list_projects[].tools[].source` (K11, #1192) -- until it lands, such a folder cannot be placed and is listed on its own, exactly as #1183 (R6) documents |
+| Folder / project | `project_id` (grouping key) and `project_label` (display) | both existing, on every entry and every `list_projects` row |
+| None (flat list) | no grouping field; every entry already carries enough to render a row on its own | — |
+
+**Sort by**
+
+| Option | What it sorts on | Source |
+|---|---|---|
+| Name | a session's `title`, falling back to its formatted `started_at` when `title` is `null` (the existing fallback, unchanged) | `title` on every `list_pending` entry (K9, existing; `null` on an entry queued before K9, see ["`title`"](#title)); `started_at` existing |
+| Name, for a folder | `project_label` | existing, on every `list_projects` row (already disambiguated when two projects share a basename) |
+| Date | a session's `started_at`, or `discovered_at` when `started_at` is unknown | both existing, on every `list_pending` entry |
+| Date, for a folder | `last_session_at`, falling back to `added_at` for a configured folder the watcher has not yet observed a session in | both existing, on every `list_projects` row |
+| Size | a session's `would_send_bytes` (what an upload would actually send), falling back to `size_bytes` (the raw file) when no envelope is pinned | `would_send_bytes` on `list_pending` (K10, #1196); `size_bytes` existing |
+| Size, in history | `uploaded_bytes` | `list_history` rows (K10, #1196) |
+| Status | `state` and `reason_label` for a queued session, plus `eligibility` where it is present; `status` for a history row | all existing; `eligibility` is ABSENT whenever the signup flag is off (see ["Contribution eligibility"](#contribution-eligibility)), so a client must not require it -- sort an entry without it as `eligible`, since an invited contributor's whole queue is contributable |
+
+No row carries a folder-level size or count total. A client that wants one
+-- to sort folders themselves by total size, say -- already holds every
+session in that folder from `list_pending` and can sum `size_bytes` or
+`would_send_bytes` itself; `list_projects` already carries the plain count
+(`session_count`, `pending_count`). Nothing here asks the daemon to
+pre-aggregate what the client already has the parts for.
+
+**A stable sort key needs no new field.** Every row already carries a
+daemon-issued, stable, unique id to break ties deterministically: `entry_id`
+on a queue entry, `submission_id` on a history row, `project_id` on a
+project. The underlying lists are themselves returned in a deterministic
+order, so two reads with nothing changed produce the same order even before
+a client's own Group by / Sort by choice is applied: `list_pending` is the
+queue's insertion order, and `list_projects` is every configured project
+(sorted by its policy key) followed by every discovered-but-unconfigured
+one (sorted by its key) -- so a configured `/z/repo` precedes a discovered
+`/a/repo`. Neither order is alphabetical by anything a contributor sees; a
+client that offers a sort sorts for itself.
+
+A project's label on an entry needs no new field either: `project_label` is
+a plain (non-optional) `String` on every `QueueEntry`, never absent.
 
 ### The `outcome` verdict
 
@@ -2994,14 +3076,53 @@ when older settings load. Watch reads direct `.json` children exported with
 records version support and routing limits, and the declaration grants neither
 body capture nor remote submission.
 
-`approval_hold_secs` takes a non-negative integer: how long an approval is
+`approval_hold_secs` takes a non-negative integer no greater than 300
+(five minutes): how long an approval is
 held before the uploader will touch it, which sets the duration of the
 contributor's undo; the default is 10, while `0` disables the hold and makes `approve` report
 `hold_until: null` so a client knows to offer no undo. It is read at each
 upload pass, so a change applies to approvals already sitting in the queue,
 and a shortened hold can release an entry a client is still counting down
 for -- treat the `hold_until` from `approve` as authoritative for the
-approval it accompanied, and do not change this setting mid-countdown.
+approval it accompanied, and do not change this setting mid-countdown. A
+value outside `0..=300` is `bad_params` / `settings-invalid-value`.
+
+`quiescence_secs` and `digest_interval_secs` are likewise bounded, not open
+`u64` fields: `quiescence_secs` to `0..=14_400` (zero is meaningful -- a
+session counts as finished the instant it stops growing -- and 14,400
+seconds is four hours, past which "done" never realistically arrives for a
+session still being written) and `digest_interval_secs` to `3_600..=86_400`
+(one hour to one day). Each used to accept any value, with only the Tauri
+shell's own command layer clamping before the call ever reached
+`set_settings`; a raw caller had no such floor. Both are now validated in
+`apply_settings_object` itself, so every caller gets the same bound with the
+same label-only `settings-invalid-value` the other numeric fields already
+use.
+
+Every numeric field's exact bounds -- `quiescence_secs`, `approval_hold_secs`,
+`digest_interval_secs`, `max_uploads_per_day` and `max_bytes_per_day`, all in
+the unit `set_settings` itself stores and validates (seconds or bytes, never
+a shell's own minute/hour/megabyte control granularity) -- are available
+without guessing or hard-coding a second copy: the C ABI's
+`tc_settings_ranges_json` returns them as one JSON object, so a shell can
+draw its controls' bounds from the same numbers this method enforces.
+
+`ironwire`'s `{"mode":"watch","port":P,"token_dir":D}` now validates `P` and
+`D` with the same floor `probe_routing` holds: `port` must be non-zero (`0` is
+the ask-the-kernel sentinel, never a port a proxy actually listens on,
+`bad_params` / `settings-invalid-value` -- more precisely
+`routing-port-invalid`), and `token_dir`, when present and non-empty, must be
+an absolute path (`routing-token-dir-must-be-absolute`); an empty `token_dir`
+is treated as absent. The two differ in two labelled ways a shell should
+know: `probe_routing` refuses port `0` as `port-invalid` (not
+`routing-port-invalid`), and refuses an empty `token_dir` as
+`token-dir-invalid` rather than treating it as absent, because a probe that
+fell through to the environment would answer about a path the caller did
+not ask about. A relative `token_dir` is refused by both, with
+`routing-token-dir-must-be-absolute`. Before this, only the Tauri shell's own command layer
+refused these two shapes -- a raw `set_settings` caller (another shell, or a
+future one) had no such floor and could persist a declaration nothing would
+ever actually route through.
 
 `claude_root` and `codex_root` each take a JSON string (a filesystem path)
 or `null` (clear the override, falling back to the conventional per-user
@@ -3891,6 +4012,105 @@ the row -- "you approved" and "armed" are not synonyms for any existing
 status, and mean nothing about whether the submission was later accepted,
 quarantined, or withdrawn.
 
+### Sizes in history, and the would-send size (K10)
+
+Before this, a history row carried no bytes at all -- only the server's
+status, credit and explanation prose -- so the History graph could count
+sessions but not weigh them, and nothing on a queue entry said how large an
+upload would actually be once redaction ran. `size_bytes` on a queue entry
+is the raw session file on disk, which redaction shrinks or reshapes; it was
+never a stand-in for either figure.
+
+`list_history` rows (`HistoryRecord`) carry one more field:
+
+```json
+{
+  "submission_id": "…",
+  "...": "…existing fields unchanged…",
+  "uploaded_bytes": 15320
+}
+```
+
+- **`uploaded_bytes`** -- the serialized size, in bytes, of the redacted
+  envelope this submission actually sent, or `null`. Recorded once, at
+  upload time, in `submit_loaded`: a witnessed submission reports the
+  witness's own certified `envelope_bytes.len()` -- the exact wire bytes
+  `/v1/traces` received -- and an ordinary submission reports
+  `envelope::envelope_size` on the final, grant-stamped envelope, which is
+  what the same call serializes onto the wire. Written onto the receipt
+  by `submit_loaded`, and carried from there onto the history row.
+
+Every queue entry (`list_pending`, the `snapshot` event) carries a sibling
+field:
+
+```json
+{
+  "entry_id": "…",
+  "...": "…existing fields unchanged…",
+  "size_bytes": 48210,
+  "would_send_bytes": 15320
+}
+```
+
+- **`would_send_bytes`** -- the serialized size of the redacted envelope a
+  preview pinned for this entry, or `null` when nothing is pinned: an entry
+  never previewed (an armed auto-upload, an approve-all), or one written
+  before this field existed. The same figure [`preview`](#preview)'s own
+  `would_send_bytes` reports, mirrored onto the entry at the moment a
+  preview pins it (`QueueEntry::previewed_envelope_digest`'s own sibling
+  field) so a queue list can say it without opening the stored envelope for
+  every row -- the same reason `attested_inference` is mirrored there. It
+  is cleared wherever the pin is (keep, Undo, a released preview, a revoked
+  approval). For a local preview it is measured before the upload stamps
+  the grant's scopes onto the envelope, so it can be a few bytes short of
+  `uploaded_bytes`; treat it as the size to expect, not a promise.
+
+Both `uploaded_bytes` and `would_send_bytes` are `Option<u64>`,
+`#[serde(default)]` on the wire, so a cached row or a queue line written
+before either field existed still loads, reading `null`.
+
+### Withdrawal dates on revoked rows (K12)
+
+A locally driven withdrawal (`withdraw`, `withdraw_bulk`) stamps
+`withdrawn_at` the moment it runs, so a `withdrawn` row has always been able
+to show a date. A withdrawal made on the web instead, which this daemon only
+learns about the next time it polls submission status and gets back
+`revoked`, had no equivalent: the server's status read-back
+(`TraceSubmissionStatusUpdate`) carries a status and credit figures, never a
+timestamp, so a `revoked` row had no date to show at all.
+
+`list_history` rows (`HistoryRecord`) carry one more field:
+
+```json
+{
+  "submission_id": "…",
+  "...": "…existing fields unchanged…",
+  "status": "revoked",
+  "revoked_at": "2026-08-09T12:00:00Z"
+}
+```
+
+- **`revoked_at`** -- when this row was first seen carrying status
+  `revoked`, or `null` for a row that is not (or not yet) revoked, or one
+  written before this field existed. **Not** the moment of the web
+  withdrawal itself, which this daemon has no way to learn -- the moment
+  this device first discovered it, the same honest compromise
+  `observed_modified_at` and `review_started_at` already make elsewhere on
+  this contract for a fact only discoverable by polling. Stamped once, by
+  the history join that first sees `revoked`, from that poll's own
+  `last_refreshed_at`, and carried forward on every later refresh exactly
+  the way a local `withdrawn_at` already is -- a later poll that merely
+  re-confirms the same `revoked` status must not push the date forward.
+  Two cases stay `null` on purpose: a row the cache already held as
+  `revoked` before this field existed (it was withdrawn on a day this
+  device cannot know, and the upgrade's first poll is not that day), and a
+  withdrawal this device drove itself, which already carries `withdrawn_at`
+  and whose `revoked` read-back is not a web withdrawal.
+
+`#[serde(default)]` on the wire, like every other field on this row, so a
+cached row written before this field existed still loads, reading `null`
+until the next poll re-observes the revocation and dates it.
+
 ### `history_rollup`
 
 ```json
@@ -4713,7 +4933,12 @@ The flow a shell drives:
 2. The shell shows one offer and the disclosure its `disclosure_version`
    names, and on the contributor's choice calls `inference_connection_select`
    with **exactly** that offer's `offer_id`, `provider_id`, `revision`,
-   `config_digest` and `disclosure_version`. The daemon sends those values
+   `config_digest` and `disclosure_version`, plus `confirmed: true` --
+   refused (`bad_params` / `inference-connection-confirmation-required`)
+   without it, even with an otherwise well-formed offer. (Before this
+   existed, the only place this was ever checked was the Tauri shell's own
+   command layer, which refused locally and never forwarded the choice; a
+   raw caller had no such floor.) The daemon sends those values
    unchanged (`provider_id` is not sent; it is bound into the digest check
    below) and fills in nothing. Pass `expected_current_version` as the `state_version` from
    `inference_connection_current` when replacing an existing selection
@@ -4733,8 +4958,10 @@ The flow a shell drives:
 3. **Selecting installs nothing.** The witness material the server returns is
    held on this device only. The shell then asks the contributor, separately,
    whether to use this witness on this device, and on confirmation calls
-   `inference_connection_install` with the `connection_id` and
-   `config_digest` from the select result. The daemon re-checks the held
+   `inference_connection_install` with the `connection_id`, `config_digest`
+   from the select result, and `confirmed: true` -- refused
+   (`inference-connection-confirmation-required`) without it, same as
+   `inference_connection_select` above. The daemon re-checks the held
    material against its digest (`inference-connection-digest-mismatch`), then
    re-reads the account's selection; if it was disconnected or replaced since,
    the answer is `inference-connection-not-current`, and if its revision was
