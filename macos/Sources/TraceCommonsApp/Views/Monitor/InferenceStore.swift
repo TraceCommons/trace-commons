@@ -1,4 +1,3 @@
-#if DEBUG
 import Foundation
 import Observation
 import TCBridge
@@ -227,4 +226,3 @@ final class InferenceStore {
         }
     }
 }
-#endif

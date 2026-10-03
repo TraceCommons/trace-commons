@@ -1,4 +1,3 @@
-#if DEBUG
 import SwiftUI
 import TCDesign
 import TCShellCore
@@ -143,4 +142,3 @@ enum FirstRunWords {
     static let scan = "Scan"
     static let projects = "Projects"
 }
-#endif

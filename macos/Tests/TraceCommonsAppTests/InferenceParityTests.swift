@@ -1,4 +1,3 @@
-#if DEBUG
 import TCBridge
 import TCDesign
 import TCShellCore
@@ -378,9 +377,8 @@ final class InferenceParityTests: XCTestCase {
         }
         XCTAssertFalse(source.contains("palette("), "the row reads the glass status, not the TC palette")
         XCTAssertEqual(source.components(separatedBy: "GlassStatusLabel(").count - 1, 1, "one worded state per row")
-        // The legacy window draws this list in release; the flow map is
-        // debug-only, so the artwork lives here and the map forwards to it.
-        XCTAssertFalse(source.contains("FlowMapScene"), "a release file must not read the debug-only flow map")
+        // One mapping: the artwork lives here and the map forwards to it.
+        XCTAssertFalse(source.contains("FlowMapScene"), "the list must not read the flow map's copy of the art")
         let map = try Self.text("Views/Monitor/FlowMapScene.swift")
         XCTAssertTrue(map.contains("static func glassTool(harness id: String) -> GlassTool? {\n"
             + "        HarnessToolArt.tool(harness: id)\n    }"), "one mapping, forwarded")
@@ -446,7 +444,7 @@ final class InferenceParityTests: XCTestCase {
         XCTAssertFalse(account.contains("truncatingIfNeeded"), "a port out of range is unknown, never another port")
         XCTAssertEqual(account.components(separatedBy: "PrivateAISwitchCard(").count - 1, 1)
         try LegacySymbols.assertClean("Views/Monitor/InferenceAccount.swift")
-        XCTAssertTrue(account.hasPrefix("#if DEBUG\n") && account.hasSuffix("#endif\n"), "a Monitor file is debug-only")
+        XCTAssertFalse(account.hasPrefix("#if DEBUG"), "the Monitor is the release default (R15)")
     }
 
     /// The daemon's listener report onto the card's state: the label as
@@ -526,4 +524,3 @@ final class InferenceParityTests: XCTestCase {
         }
     }
 }
-#endif

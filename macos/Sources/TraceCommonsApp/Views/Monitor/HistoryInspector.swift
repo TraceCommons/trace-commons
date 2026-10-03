@@ -1,4 +1,3 @@
-#if DEBUG
 import SwiftUI
 import TCDesign
 import TCShellCore
@@ -131,4 +130,3 @@ enum HistorySelection {
         record == nil || detail == nil
     }
 }
-#endif

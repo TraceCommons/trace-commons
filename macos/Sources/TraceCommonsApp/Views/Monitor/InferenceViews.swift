@@ -1,4 +1,3 @@
-#if DEBUG
 import SwiftUI
 import TCBridge
 import TCDesign
@@ -352,4 +351,3 @@ enum MonitorWords {
     static var priced: String { table?.priced ?? "" }
     static var unknown: String { table?.unknown ?? "" }
 }
-#endif

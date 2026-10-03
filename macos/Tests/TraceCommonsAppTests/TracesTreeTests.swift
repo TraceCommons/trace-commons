@@ -614,6 +614,27 @@ final class TracesFolderSubmitTests: XCTestCase {
         XCTAssertNil(store.lastContributedFolder)
     }
 
+    /// A new client is a new daemon: no undo, toast or refusal from the old
+    /// one survives into it.
+    func test_attachClearsEveryAnswerFromTheOldDaemon() async throws {
+        let (store, _) = try await loaded()
+        let ids = store.tree.allSessions.map(\.entryId)
+        await store.perform(.contribute, on: try XCTUnwrap(ids.last))
+        await store.perform(.keep, on: try XCTUnwrap(ids.first))
+        await store.perform(.undoContribute, on: try XCTUnwrap(ids.last))
+        let ghost = TracesTree.FolderNode(id: "proj_does_not_exist", label: "ghost", mode: nil, sessions: [])
+        await store.contributeFolder(ghost, verdict: nil)
+        XCTAssertNotNil(store.lastKept)
+        XCTAssertNotNil(store.lastContributed)
+        XCTAssertNotNil(store.actionError)
+        XCTAssertFalse(store.writeErrors.isEmpty)
+        store.attach(nil)
+        XCTAssertNil(store.lastKept)
+        XCTAssertNil(store.lastContributed)
+        XCTAssertNil(store.actionError)
+        XCTAssertTrue(store.writeErrors.isEmpty)
+    }
+
     func test_aFolderRefusalIsKeptBesideTheFolder() async throws {
         let (store, _) = try await loaded()
         let ghost = TracesTree.FolderNode(id: "proj_does_not_exist", label: "ghost", mode: nil, sessions: [])

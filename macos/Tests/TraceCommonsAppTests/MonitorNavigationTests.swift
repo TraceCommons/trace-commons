@@ -248,7 +248,7 @@ final class MonitorNavigationTests: XCTestCase {
                     navigation.settingsSection = section
                     openSettings()
                 }
-                #else
+            }
         """), "Settings must open from the opening, outside the window switch")
     }
 
@@ -298,19 +298,6 @@ final class MonitorNavigationTests: XCTestCase {
         }
     }
 
-    /// Until R15 (T11) a release build has only the legacy window, which
-    /// is opened at the matching legacy section; a quit refusal still lands
-    /// on Compute there. T11 deletes this with `section` (ruling R-33).
-    func test_aReleaseBuildOpensTheLegacyWindowAtTheMatchingSection() {
-        XCTAssertEqual(MainWindowNavigation.legacySection(for: .settings(.compute)), .compute)
-        XCTAssertEqual(MainWindowNavigation.legacySection(for: .settings(.watchedFolders)), .settings)
-        XCTAssertEqual(MainWindowNavigation.legacySection(for: .traces(entryId: nil)), .queue)
-        XCTAssertEqual(MainWindowNavigation.legacySection(for: .home(.history)), .history)
-        XCTAssertEqual(MainWindowNavigation.legacySection(for: .inference), .privateInference)
-        XCTAssertNil(MainWindowNavigation.legacySection(for: .home(.overview)), "no legacy overview: stays where it was")
-        XCTAssertNil(MainWindowNavigation.legacySection(for: nil))
-    }
-
     /// The glass strip and panel are the only menu-bar item; the AppKit
     /// menu, its label and the env flag that chose between them are gone,
     /// and the pause words are all `MenuBarView.swift` keeps (D-12).
@@ -325,12 +312,11 @@ final class MonitorNavigationTests: XCTestCase {
         XCTAssertTrue(main.contains(".menuBarExtraStyle(.window)"))
         XCTAssertTrue(main.contains("MenuBarGlassPanel(store: menuPanel)"))
         XCTAssertTrue(main.contains("MenuBarStripLabel(model: model, store: menuPanel)"))
-        // Ruling R-35: the panel's Monitor dependencies are debug-only until
-        // T11 strips them, so a release build draws an empty item until then.
-        XCTAssertTrue(main.contains("#else\n            // Transitional (ruling R-35): T11 removes this branch"))
-        // The release strip is drawn unavailable, and VoiceOver says so too.
-        XCTAssertTrue(main.contains("GlassMenuBarStrip(columns: [], condition: .unavailable, badge: nil)"))
-        XCTAssertTrue(main.contains("paused: model.status.paused, available: false))"))
+        // R15: a release build draws the same panel and strip; no branch
+        // of its own stands in for them (ruling R-35's transitional
+        // `#else` is gone).
+        XCTAssertFalse(main.contains("Transitional (ruling R-35)"))
+        XCTAssertFalse(main.contains("GlassMenuBarStrip(columns: [], condition: .unavailable, badge: nil)"))
         let menu = try Self.text("Views/MenuBarView.swift")
         XCTAssertFalse(menu.contains("struct MenuBarContent"))
         XCTAssertFalse(menu.contains("struct MenuBarLabel"))
@@ -357,8 +343,8 @@ final class MonitorNavigationTests: XCTestCase {
     }
 
     /// Every outside opener goes through OpenMonitor; nothing names the
-    /// deleted main window's opener. (`WindowID.main` itself leaves
-    /// TraceCommonsAppMain.swift with the legacy window in T11, ruling R-33.)
+    /// deleted main window's opener. (`LegacyShellRetiredTests` pins that
+    /// `WindowID.main` left with the legacy window.)
     func test_everyOpenerUsesOpenMonitor() throws {
         let delegate = try Self.text("AppDelegate.swift")
         XCTAssertTrue(delegate.contains("OpenMonitor.request(.settings(.compute))"), "quit refusal must land on Compute")
@@ -414,7 +400,7 @@ final class MonitorNavigationTests: XCTestCase {
                         // consent that has not been given. The button opens first
                         // run, which is where every request goes until then. Before
                         // the core says, the placeholder status is not "signed out".
-                        if !LaunchRouting.onboardingKnown(startup: model.startup, statusAnswered: model.status.answered) {
+                        if !LaunchRouting.onboardingKnown(startup: model.startup, statusAnswered: model.status.answered, statusFailed: model.statusReadFailed) {
                             SettingsAwaiting()
                                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                         } else if model.requiresOnboarding {
@@ -433,7 +419,7 @@ final class MonitorNavigationTests: XCTestCase {
                     GlassPane {
                         // An empty branch would leave the pane nothing to draw, and
                         // it would vanish while the layout still reserved its width.
-                        if !LaunchRouting.onboardingKnown(startup: model.startup, statusAnswered: model.status.answered)
+                        if !LaunchRouting.onboardingKnown(startup: model.startup, statusAnswered: model.status.answered, statusFailed: model.statusReadFailed)
                             || model.requiresOnboarding {
                             Color.clear
                         } else {
@@ -471,12 +457,47 @@ final class MonitorNavigationTests: XCTestCase {
     /// enough: never from the placeholder status of a running daemon. A
     /// daemon that needs its folders, or refused, has no status to wait for.
     func test_onboardingIsKnownOnlyOnceTheCoreAnswers() {
-        XCTAssertFalse(LaunchRouting.onboardingKnown(startup: .starting, statusAnswered: false))
-        XCTAssertFalse(LaunchRouting.onboardingKnown(startup: .starting, statusAnswered: true))
-        XCTAssertFalse(LaunchRouting.onboardingKnown(startup: .running, statusAnswered: false))
-        XCTAssertTrue(LaunchRouting.onboardingKnown(startup: .running, statusAnswered: true))
-        XCTAssertTrue(LaunchRouting.onboardingKnown(startup: .needsRoots, statusAnswered: false))
-        XCTAssertTrue(LaunchRouting.onboardingKnown(startup: .refused("no"), statusAnswered: false))
+        XCTAssertFalse(LaunchRouting.onboardingKnown(startup: .starting, statusAnswered: false, statusFailed: false))
+        XCTAssertFalse(LaunchRouting.onboardingKnown(startup: .starting, statusAnswered: true, statusFailed: false))
+        XCTAssertFalse(LaunchRouting.onboardingKnown(startup: .running, statusAnswered: false, statusFailed: false))
+        XCTAssertTrue(LaunchRouting.onboardingKnown(startup: .running, statusAnswered: true, statusFailed: false))
+        XCTAssertTrue(LaunchRouting.onboardingKnown(startup: .needsRoots, statusAnswered: false, statusFailed: false))
+        XCTAssertTrue(LaunchRouting.onboardingKnown(startup: .refused("no"), statusAnswered: false, statusFailed: false))
+    }
+
+    /// A first status read that fails is an answer for the launch: the
+    /// unanswered status requires onboarding, so first run opens (fail
+    /// closed) rather than nothing at all.
+    func test_aFailedStatusReadOpensFirstRun() {
+        XCTAssertTrue(LaunchRouting.onboardingKnown(startup: .running, statusAnswered: false, statusFailed: true))
+        XCTAssertFalse(LaunchRouting.onboardingKnown(startup: .starting, statusAnswered: false, statusFailed: true),
+                       "a daemon still starting has not been asked")
+        let model = AppModel()
+        XCTAssertFalse(model.statusReadFailed)
+        XCTAssertTrue(model.requiresOnboarding, "the placeholder status requires onboarding")
+        XCTAssertEqual(LaunchRouting.opening(nil, requiresOnboarding: model.requiresOnboarding).window, .firstRun)
+    }
+
+    /// The failure is recorded from the `status` read itself, and cleared
+    /// by its next answer.
+    func test_theStatusReadRecordsItsFailure() throws {
+        let model = try Self.text("AppModel.swift")
+        XCTAssertTrue(model.contains(#"""
+                perform("status", work: { try $0.status() }, onFailure: { self.publishIfChanged(\.statusReadFailed, true) }) {
+                    self.publishIfChanged(\.status, $0)
+                    self.publishIfChanged(\.statusReadFailed, false)
+                }
+        """#))
+    }
+
+    /// No consent surface before onboarding: the Monitor's Settings button
+    /// is disabled while onboarding is required.
+    func test_theSettingsButtonWaitsForOnboarding() throws {
+        let window = try Self.text("Views/MonitorWindowView.swift")
+        XCTAssertTrue(window.contains("""
+                            GlassRoundButton(String(localized: "Settings", comment: "Settings button"), systemImage: "gearshape", small: true, action: onSettings)
+                                .disabled(model.requiresOnboarding)
+        """))
     }
 
     /// The placeholder status is not an answer; the first reply is. (The
@@ -496,9 +517,9 @@ final class MonitorNavigationTests: XCTestCase {
     func test_theLaunchOpensOnceWithoutOverridingAnEarlierRequest() throws {
         let main = try Self.text("TraceCommonsAppMain.swift")
         XCTAssertTrue(main.contains("""
-                label
+                MenuBarStripLabel(model: model, store: menuPanel)
                     .task { launch() }
-                    .onChange(of: LaunchRouting.onboardingKnown(startup: model.startup, statusAnswered: model.status.answered),
+                    .onChange(of: LaunchRouting.onboardingKnown(startup: model.startup, statusAnswered: model.status.answered, statusFailed: model.statusReadFailed),
                               initial: true) { _, ready in
                         openAtLaunch(ready)
                     }

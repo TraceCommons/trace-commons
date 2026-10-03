@@ -93,11 +93,13 @@ enum LaunchRouting {
     /// has answered, so neither the launch's window nor the Monitor's gate is
     /// chosen from the placeholder status. A daemon that needs its folders,
     /// or refused, has no status to wait for, and onboarding is required
-    /// either way.
-    static func onboardingKnown(startup: AppModel.Startup, statusAnswered: Bool) -> Bool {
+    /// either way. A status read that failed is known too: the status is
+    /// still the placeholder, which requires onboarding, so first run opens
+    /// rather than nothing (fail closed).
+    static func onboardingKnown(startup: AppModel.Startup, statusAnswered: Bool, statusFailed: Bool) -> Bool {
         switch startup {
         case .starting: false
-        case .running: statusAnswered
+        case .running: statusAnswered || statusFailed
         case .needsRoots, .refused: true
         }
     }

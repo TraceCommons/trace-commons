@@ -108,6 +108,11 @@ final class AppModel: ObservableObject {
     /// -- a raw stat and the cap -- never a would-send estimate.
     @Published private(set) var tooLarge: [String: PreviewTooLarge] = [:]
     @Published private(set) var history: [HistoryRecord] = []
+    /// Whether the last `status` read failed. Until a status answers, a
+    /// failed read is the launch's answer: `LaunchRouting.onboardingKnown`
+    /// takes it as known, and the unanswered status requires onboarding, so
+    /// first run opens rather than nothing (fail closed).
+    @Published private(set) var statusReadFailed = false
     /// Whether the daemon has answered `list_pending` (or sent a snapshot)
     /// and `list_history`. Until then `pending` and `history` are
     /// placeholders, and an empty one is not "none"; a failed read leaves
@@ -1252,7 +1257,10 @@ final class AppModel: ObservableObject {
     }
 
     func refreshStatus() {
-        perform("status", work: { try $0.status() }) { self.publishIfChanged(\.status, $0) }
+        perform("status", work: { try $0.status() }, onFailure: { self.publishIfChanged(\.statusReadFailed, true) }) {
+            self.publishIfChanged(\.status, $0)
+            self.publishIfChanged(\.statusReadFailed, false)
+        }
     }
 
     func refreshQueue() {
@@ -2751,6 +2759,7 @@ final class AppModel: ObservableObject {
     private func perform<T>(
         _ label: String,
         work: @escaping (DaemonClient) throws -> T,
+        onFailure: (() -> Void)? = nil,
         onSuccess: @escaping (T) -> Void
     ) {
         guard let client else { return }
@@ -2768,6 +2777,7 @@ final class AppModel: ObservableObject {
                     } else {
                         self.lastActionError = "\(label): failed"
                     }
+                    onFailure?()
                 }
             }
         }
