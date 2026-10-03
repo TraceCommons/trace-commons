@@ -30,11 +30,19 @@ use crate::config::{ConfigStore, DAEMON_HISTORY_FILE, Receipt};
 pub const STATUS_QUARANTINED: &str = "quarantined";
 pub const STATUS_ACCEPTED: &str = "accepted";
 pub const STATUS_SUBMITTED: &str = "submitted";
+/// Server-side status for a submission the server will not take.
+pub const STATUS_REJECTED: &str = "rejected";
 /// Receipt status from the versioned pipeline (`route_pipeline_receipt` on
-/// the server): the upload is in and processing runs asynchronously. To a
-/// contributor that is [`STATUS_SUBMITTED`] -- uploaded, no verdict yet --
-/// and every client surface reads it as such through [`status_bucket`].
-/// Receipts are append-only, so a `processing` receipt is never rewritten.
+/// the server): the upload is in. To a contributor that is
+/// [`STATUS_SUBMITTED`] -- uploaded, no verdict reported yet -- and every
+/// client surface reads it as such through [`status_bucket`].
+///
+/// "No verdict reported", not "no verdict": Admission runs inside the
+/// request that returns this receipt, and a trace it quarantined or
+/// rejected gets the same `processing` receipt. Receipts are append-only,
+/// so that receipt is never rewritten; the verdict arrives only through
+/// the status read-back. Code deciding whether a session is already
+/// submitted reads the read-back first, through [`reported_verdicts`].
 pub const STATUS_PROCESSING: &str = "processing";
 /// Local status this cache stamps onto a record once `daemon::withdraw` has
 /// had the server confirm a withdrawal. Not a status the server itself ever
@@ -57,6 +65,42 @@ pub fn status_bucket(status: &str) -> &str {
     } else {
         status
     }
+}
+
+/// The verdicts the server has read back, by submission id: rows a status
+/// read-back refreshed (`last_refreshed_at` set; `merge_new_receipts` never
+/// sets it), not taken back, whose status is `accepted`, `quarantined` or
+/// `rejected`.
+///
+/// For a [`STATUS_PROCESSING`] receipt only; see [`receipt_status`]. A
+/// withdrawn or revoked row is deliberately absent: it is not a verdict,
+/// and reading it as one would make a `processing` receipt look not
+/// submitted, and a re-run would upload a trace the contributor took back.
+pub fn reported_verdicts(records: &[HistoryRecord]) -> BTreeMap<Uuid, String> {
+    records
+        .iter()
+        .filter(|r| r.last_refreshed_at.is_some() && !is_taken_back(r))
+        .filter(|r| {
+            [STATUS_ACCEPTED, STATUS_QUARANTINED, STATUS_REJECTED].contains(&r.status.as_str())
+        })
+        .map(|r| (r.submission_id, r.status.clone()))
+        .collect()
+}
+
+/// The status a receipt is judged by: the receipt's own, except that a
+/// [`STATUS_PROCESSING`] receipt takes the verdict the server has since
+/// read back for that submission, when [`reported_verdicts`] holds one.
+///
+/// Only `processing` is overridden. Every other receipt status already came
+/// from the server's answer to the upload, and a cache row must not
+/// overrule it.
+pub fn receipt_status<'a>(receipt: &'a Receipt, verdicts: &'a BTreeMap<Uuid, String>) -> &'a str {
+    if receipt.status == STATUS_PROCESSING {
+        if let Some(verdict) = verdicts.get(&receipt.submission_id) {
+            return verdict;
+        }
+    }
+    &receipt.status
 }
 
 /// Whether a row has been taken back: withdrawn here (`withdrawn_at`, or the
@@ -351,7 +395,8 @@ pub fn join(
 }
 
 /// Add a record for every receipt the cache does not already know about,
-/// carrying the receipt's own locally recorded status (`submitted`).
+/// carrying the receipt's own locally recorded status (`submitted`, or the
+/// versioned pipeline's `processing`).
 ///
 /// This exists because "uploaded, no verdict yet" is a real state that was
 /// invisible for up to a full `history_poll_secs` -- half an hour on the
