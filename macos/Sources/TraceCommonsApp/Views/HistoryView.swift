@@ -511,7 +511,7 @@ struct HistoryRow: View {
     /// not offered again -- the daemon would treat it as a no-op, and an
     /// enabled button on it would suggest the first one did not take.
     private var isWithdrawable: Bool {
-        !ContributionStatusPresentation.isTerminal(record.status)
+        ContributionStatusPresentation.offersWithdraw(record.status)
     }
 
     private var statusSentence: String {
