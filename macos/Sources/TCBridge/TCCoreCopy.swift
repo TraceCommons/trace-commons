@@ -124,6 +124,12 @@ public enum TCCoreCopy {
         take(tc_monitor_traces_copy_json())
     }
 
+    /// `tc_contribution_mode_copy_json`: the menu-bar Contribution mode
+    /// pill's words (#1208). Decoded by `TCShellCore.ContributionModeCopy`.
+    public static func contributionModeCopyJSON() -> String? {
+        take(tc_contribution_mode_copy_json())
+    }
+
     /// `tc_monitor_screens_copy_json`: the monitor's other screens' words.
     /// Decoded by `TCShellCore.MonitorScreensCopy`.
     public static func monitorScreensCopyJSON() -> String? {
