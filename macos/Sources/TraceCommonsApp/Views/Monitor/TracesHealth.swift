@@ -14,8 +14,21 @@ enum TracesHealth {
         let title: String
         let detail: String?
         let tone: GlassStatus
-        var id: String { title }
+        /// Position plus title, so two lines with one title never collide.
+        let id: String
+
+        init(title: String, detail: String?, tone: GlassStatus, index: Int = 0) {
+            self.title = title
+            self.detail = detail
+            self.tone = tone
+            id = "\(index)-\(title)"
+        }
     }
+
+    /// The core's unknown word, the last resort for a down or unread state
+    /// when the health words themselves cannot be read: a banner is never
+    /// blank, and an absent signal never reads as healthy.
+    static let unknownWord = MonitorScreensCopy.decode(fromJSON: TCCoreCopy.monitorScreensCopyJSON())?.unknown
 
     /// The core-down line as the production tab passes it.
     static let coreDownLine = HealthLineCopy.decode(
@@ -24,29 +37,30 @@ enum TracesHealth {
     static func banners(
         phase: TracesStore.Phase, status: DaemonData.Status?, words: MonitorTracesCopy?, coreDown: HealthLineCopy?
     ) -> [Banner] {
-        let drawn: [Banner]
+        func failed(_ title: String?, _ detail: String? = nil) -> [Banner] {
+            if let title, !title.isEmpty { return [Banner(title: title, detail: detail, tone: .outside)] }
+            guard let unknown = Self.unknownWord, !unknown.isEmpty else { return [] }
+            return [Banner(title: unknown, detail: nil, tone: .outside)]
+        }
         switch phase {
         case .failed(.unreachable):
-            if let coreDown {
-                drawn = [Banner(title: coreDown.title, detail: coreDown.detail, tone: .outside)]
-            } else {
-                drawn = [Banner(title: words?.line(for: .unreachable) ?? "", detail: nil, tone: .outside)]
-            }
+            if let coreDown { return failed(coreDown.title, coreDown.detail) }
+            return failed(words?.line(for: .unreachable))
         case .failed(let other):
-            drawn = [Banner(title: words?.line(for: other) ?? "", detail: nil, tone: .outside)]
+            return failed(words?.line(for: other))
         case .loading where status == nil:
-            drawn = []
+            return []
         case .loaded where status == nil:
             // The tab loaded but the status read did not: unknown, not healthy.
-            drawn = [Banner(title: words?.requestFailed ?? "", detail: nil, tone: .outside)]
+            return failed(words?.requestFailed)
         default:
             // A waiting line is still not healthy, so it is `.ask`; `.off`
-            // would read as "off".
-            drawn = TracesStore.safeguards(status).map {
-                Banner(title: $0.title, detail: $0.body, tone: .ask)
-            }
+            // would read as "off". A safeguard line with no title is dropped.
+            return TracesStore.safeguards(status)
+                .filter { !$0.title.isEmpty }
+                .enumerated()
+                .map { Banner(title: $1.title, detail: $1.body, tone: .ask, index: $0) }
         }
-        return drawn.filter { !$0.title.isEmpty }
     }
 }
 
