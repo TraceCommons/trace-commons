@@ -52,8 +52,39 @@ final class TracesParityTests: XCTestCase {
         XCTAssertTrue(TracesHealth.banners(phase: .loaded, status: status, words: words, coreDown: Self.coreDown).isEmpty)
     }
 
-    func test_aBlankTitleIsDroppedNotDrawn() {
-        XCTAssertTrue(TracesHealth.banners(phase: .loaded, status: nil, words: nil, coreDown: nil).isEmpty)
+    /// With no health words at all, a down or unread core still draws the
+    /// core's unknown word; it never reads as healthy.
+    func test_aDownCoreWithNoHealthWordsStillDrawsABanner() throws {
+        let unknown = try XCTUnwrap(TracesHealth.unknownWord)
+        XCTAssertFalse(unknown.isEmpty)
+        let phases: [TracesStore.Phase] = [.failed(.unreachable), .failed(.notAvailableYet(method: "x")), .loaded]
+        for phase in phases {
+            let banners = TracesHealth.banners(phase: phase, status: nil, words: nil, coreDown: nil)
+            XCTAssertEqual(banners.map(\.title), [unknown])
+            XCTAssertEqual(banners.first?.tone, .outside)
+        }
+    }
+
+    func test_equalTitlesDoNotCollide() {
+        let a = TracesHealth.Banner(title: "x", detail: nil, tone: .ask, index: 0)
+        let b = TracesHealth.Banner(title: "x", detail: nil, tone: .ask, index: 1)
+        XCTAssertNotEqual(a.id, b.id)
+    }
+
+    /// Severity per line: budget, witness and gate-held are waiting; the
+    /// label line carries the core's own severity.
+    func test_eachSafeguardCarriesItsSeverity() throws {
+        let json = """
+        {"health":{"last_error_label":"pii-filter-unavailable"},
+         "daily_budget":{"blocked":true,"blocked_entries":2}}
+        """
+        let status = try DaemonDataDecoding.decoder().decode(DaemonData.Status.self, from: Data(json.utf8))
+        let lines = TracesStore.safeguards(status)
+        let label = HealthCopy.core(label: "pii-filter-unavailable", maxQueueEntries: nil)
+        XCTAssertEqual(lines.first?.title, label.title)
+        XCTAssertEqual(lines.first?.severity, label.severity)
+        XCTAssertEqual(lines.dropFirst().map(\.severity), [.waiting])
+        XCTAssertEqual(lines.dropFirst().first?.title, DailyBudgetCopy.title)
     }
 
     func test_theTreeDrawsTheBannersAboveItself() throws {
@@ -67,6 +98,10 @@ final class TracesParityTests: XCTestCase {
         let banner = try Self.text("Views/Monitor/TracesHealth.swift")
         XCTAssertFalse(banner.contains("Button("), "the Traces tab's banners carry no action")
         XCTAssertTrue(banner.contains("TCCoreCopy.healthCopyJSON(reachable: false"))
+        XCTAssertTrue(body.contains("coreDown: TracesHealth.coreDownLine)"))
+        let banners = try XCTUnwrap(body.range(of: "TracesHealth.banners("))
+        let spinner = try XCTUnwrap(body.range(of: "ProgressView()"))
+        XCTAssertLessThan(banners.lowerBound, spinner.lowerBound, "the banners precede the spinner and the tree")
     }
 }
 #endif
