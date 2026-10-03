@@ -370,6 +370,30 @@ final class WitnessBindingTests: XCTestCase {
                 .canConfigure)
     }
 
+    /// Before the daemon answers, neither evidence switch can be pressed: an
+    /// absent setting is neither on nor off, so Enable and Disable both wait
+    /// for it, and the status line is the loading state rather than a word.
+    func testTheEvidenceSwitchesWaitForTheSettingTheyChange() throws {
+        let bodies = try XCTUnwrap(WitnessCard.evidenceBodies())
+        for (body, enable, disable, setting) in [
+            (bodies[0], "Button(copy.inferenceEnable)", "Button(copy.inferenceDisable)",
+             "model.inferenceEvidenceBusy || model.daemonSettings?.ironwireAttestedBodies == nil"),
+            (bodies[1], "Button(copy.tokenEnable ?? \"\")", "Button(copy.tokenDisable ?? \"\")",
+             "model.tokenContributionBusy || model.daemonSettings?.tokenDistributionsContribution == nil"),
+        ] {
+            for control in [enable, disable] {
+                let anchor = try XCTUnwrap(body.range(of: control), "no \(control)")
+                let call = try XCTUnwrap(
+                    body.range(of: ".disabled(", range: anchor.upperBound..<body.endIndex), "\(control) is never gated")
+                let line = body[call.upperBound...].prefix { $0 != "\n" }
+                XCTAssertEqual(String(line), setting + ")", "\(control) is gated on `\(line)`")
+            }
+            XCTAssertTrue(
+                body.contains("if model.daemonSettings == nil {\n                    SettingsAwaiting()\n"),
+                "the status line is drawn before the daemon answers")
+        }
+    }
+
     // MARK: - The pinned measurements
 
     /// The count is a sentence from the Rust, never a bare numeral. A number
