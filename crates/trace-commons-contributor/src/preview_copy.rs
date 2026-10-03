@@ -364,7 +364,7 @@ pub struct MonitorScreensCopy {
     /// cover, from `window_hours` on `inference_calls` and
     /// `tool_destinations`. `{hours}` is replaced with a number.
     pub window_last_hours: &'static str,
-    /// DRAFT, NEEDS APPROVAL. History's word for a contribution whose
+    /// History's word for a contribution whose
     /// status is `submitted`: sent, and not yet scored. The shipping
     /// History's sentence, moved here; never "Submitted", which reads as
     /// done.
@@ -428,7 +428,7 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
         core_unreachable: MONITOR_CORE_UNREACHABLE,
         request_failed: MONITOR_REQUEST_FAILED,
         held_for_review: crate::history_copy::HELD_FOR_PRIVACY_REVIEW,
-        held_explanation: "Automated checks saw something that might be personal and couldn't decide on their own. It has not been rejected, and it has not been shared with anyone but the reviewer.",
+        held_explanation: crate::history_copy::HELD_ROW_BODY,
         credit_not_currency: "A credit is a signed record that a contribution was accepted. It is not currency.",
         history_shown_of: "Showing the newest {shown} of {total}",
         history_shown: "Showing the newest {shown}",
@@ -466,6 +466,9 @@ mod tests {
         assert!(copy.window_last_hours.contains("{hours}"));
         // A submission is said as waiting, never as done.
         assert_ne!(copy.history_submitted, "Submitted");
+        // One held-for-review explanation (owner ruling, 2026-10-02): the
+        // monitor and History read the same sentence.
+        assert_eq!(copy.held_explanation, crate::history_copy::HELD_ROW_BODY);
         // Projected mission credit is never said as pending.
         assert_ne!(copy.projected, copy.pending);
         assert!(copy.projected_note.contains("not earned"));
