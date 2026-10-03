@@ -43,7 +43,7 @@
     "menuFill": { "hex": "#22242a", "alpha": 0.72, "light": { "hex": "#f7f7f9", "alpha": 0.8 } },
     "menuHover": { "hex": "#3a7bd5", "alpha": 0.85, "note": "Light: deep enough for menuHoverText at 4.5:1 (4.91).", "light": { "hex": "#2a62b5", "alpha": 0.9 } },
     "menuHoverText": { "hex": "#f2f2f4", "note": "A menu item's text on menuHover: textPrimary in dark, white in light, as the macOS menu selection.", "light": { "hex": "#ffffff" } },
-    "menuSelection": { "hex": "#3a7bd5", "note": "The menu-row hover behind white text. Dark is blue; light is deeper so white clears 4.5:1 (5.98; blue's light value was 4.37 under it).", "light": { "hex": "#2a62b5" } },
+    "menuSelection": { "hex": "#2f6ac0", "note": "The menu-row hover behind white text. Dark is the selection colour, so white clears 4.5:1 (5.3; white on blue #3a7bd5 was 4.22); light is deeper so white clears 4.5:1 (5.98; blue's light value was 4.37 under it).", "light": { "hex": "#2a62b5" } },
     "menuModeAsk": { "hex": "#f0a030", "note": "Menu-bar mode circle: ask me." },
     "menuModeArmed": { "hex": "#34c759", "note": "Menu-bar mode circle and Private AI on option: contribute automatically." },
     "menuModeNever": { "hex": "#ff453a", "note": "Menu-bar mode circle: never; also the menu-bar badge." },

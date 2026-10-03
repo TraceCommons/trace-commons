@@ -67,7 +67,6 @@ final class LightContrastGroundsTests: XCTestCase {
         XCTAssertEqual(c.statusAskText.dark, c.statusAsk.dark)
         XCTAssertEqual(c.statusOutsideText.dark, c.statusOutside.dark)
         XCTAssertEqual(c.badgeFill.dark, c.statusOutside.dark)
-        XCTAssertEqual(c.menuSelection.dark, c.blue.dark)
         XCTAssertEqual(c.menuHoverText.dark, c.textPrimary.dark)
     }
 
@@ -112,6 +111,15 @@ final class LightContrastGroundsTests: XCTestCase {
             let selection = Self.over(c.menuSelection.light, rgb)
             XCTAssertGreaterThanOrEqual(Self.contrast(Self.solid(c.textOnAccent.light), selection), 4.5, "menu row on selection over \(ground)")
         }
+    }
+
+    /// White on the menu-row selection reaches 4.5:1 in dark too: the
+    /// selection is opaque, so it is checked on its own (white on the old
+    /// #3a7bd5 was 4.22).
+    func test_whiteOnTheMenuSelectionReachesFourPointFiveInDark() {
+        let c = GlassTokens.Color.self
+        XCTAssertEqual(c.menuSelection.dark.alpha, 1)
+        XCTAssertGreaterThanOrEqual(Self.contrast(Self.solid(c.textOnAccent.dark), Self.solid(c.menuSelection.dark)), 4.5)
     }
 
     /// Under Increase Contrast, the painted edge and the hairline reach the

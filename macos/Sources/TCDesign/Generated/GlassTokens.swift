@@ -74,8 +74,8 @@ public enum GlassTokens {
         public static let menuHover: GlassRGBA = GlassRGBA(0x3A7BD5, alpha: 0.85, light: GlassRGBA(0x2A62B5, alpha: 0.9))
         /// A menu item's text on menuHover: textPrimary in dark, white in light, as the macOS menu selection.
         public static let menuHoverText: GlassRGBA = GlassRGBA(0xF2F2F4, alpha: 1, light: GlassRGBA(0xFFFFFF, alpha: 1))
-        /// The menu-row hover behind white text. Dark is blue; light is deeper so white clears 4.5:1 (5.98; blue's light value was 4.37 under it).
-        public static let menuSelection: GlassRGBA = GlassRGBA(0x3A7BD5, alpha: 1, light: GlassRGBA(0x2A62B5, alpha: 1))
+        /// The menu-row hover behind white text. Dark is the selection colour, so white clears 4.5:1 (5.3; white on blue #3a7bd5 was 4.22); light is deeper so white clears 4.5:1 (5.98; blue's light value was 4.37 under it).
+        public static let menuSelection: GlassRGBA = GlassRGBA(0x2F6AC0, alpha: 1, light: GlassRGBA(0x2A62B5, alpha: 1))
         /// Menu-bar mode circle: ask me.
         public static let menuModeAsk: GlassRGBA = GlassRGBA(0xF0A030, alpha: 1)
         /// Menu-bar mode circle and Private AI on option: contribute automatically.
