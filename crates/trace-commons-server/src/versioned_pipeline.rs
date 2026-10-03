@@ -7093,7 +7093,7 @@ pub struct PipelineIndexRebuildReport {
     pub command_set_hash: String,
 }
 
-/// What [`PipelineService::rebuild_index_run`] did for one listed run.
+/// What `PipelineService::rebuild_index_run` did for one listed run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PipelineIndexRebuildRun {
     /// The run's sealed command was replayed: its hash, the entries upserted,
@@ -9866,7 +9866,9 @@ impl PipelineService {
     /// its own clock after that, then reaches past the deadline plus the
     /// margin, and the lock wait counts against the deadline. A run whose
     /// lock wait outlasts the deadline fails as `index_unavailable` and
-    /// writes nothing; a run never writes later than before. No upsert
+    /// writes nothing; a run never writes later than before. The deadline
+    /// is monotonic (`std::time::Instant`), so a step of the application's
+    /// wall clock cannot let an upsert start after the fence's end. No upsert
     /// starts past the deadline. At the deadline the transaction rolls back
     /// at once, so the rows are free, the rebuild waits at most the margin
     /// for the call in flight, and it fails closed as `index_unavailable`
@@ -9880,7 +9882,7 @@ impl PipelineService {
     /// rebuilt index. That refusal reaches only its own process, so the
     /// restore runbook still starts every process with both tenant lists
     /// unset for the rebuild (`backup-restore.md`, step 3).
-    pub async fn rebuild_index_run(
+    async fn rebuild_index_run(
         &self,
         run: &PipelineRunRecord,
         writer: &Arc<dyn IdentifiedIndexWriter>,
@@ -9899,18 +9901,22 @@ impl PipelineService {
         // dispatch budget, and no upsert starts past that deadline. PR 5:
         // the deadline starts before the fence write, so the fence's end,
         // read from the database's clock after this, reaches past the
-        // deadline plus the margin.
+        // deadline plus the margin. The deadline is on the monotonic clock,
+        // so a step of the wall clock cannot let an upsert start after the
+        // fence's end.
         let run_deadline = self
             .lease_config
             .settle()
-            .min(Duration::seconds(PIPELINE_INDEX_DISPATCH_BUDGET_SECONDS));
-        let deadline = Utc::now() + run_deadline;
+            .min(Duration::seconds(PIPELINE_INDEX_DISPATCH_BUDGET_SECONDS))
+            .to_std()
+            .unwrap_or_default();
+        let deadline = std::time::Instant::now() + run_deadline;
         let margin = self.index_rebuild_fence_margin;
         PgPipelineStore::set_index_rebuild_fence_on(
             &mut client,
             &run.tenant_id,
             fence_id,
-            run_deadline.to_std().unwrap_or_default() + margin,
+            run_deadline + margin,
         )
         .await
         .map_err(|_| anyhow::anyhow!(PIPELINE_INDEX_REBUILD_FENCE_UNAVAILABLE_LABEL))?;
@@ -9934,7 +9940,7 @@ impl PipelineService {
             let mut entry_count = 0usize;
             let mut unchanged_entry_count = 0usize;
             for (key, embedding, content_hash) in &entries {
-                if Utc::now() >= deadline {
+                if std::time::Instant::now() >= deadline {
                     return Err(anyhow::anyhow!(PIPELINE_INDEX_UNAVAILABLE_LABEL));
                 }
                 match writer.upsert(key, embedding, content_hash) {
@@ -9946,7 +9952,7 @@ impl PipelineService {
             }
             Ok((entry_count, unchanged_entry_count))
         });
-        let budget = (deadline - Utc::now()).to_std().unwrap_or_default();
+        let budget = deadline.saturating_duration_since(std::time::Instant::now());
         let (entry_count, unchanged_entry_count) =
             match tokio::time::timeout(budget, &mut writes).await {
                 Ok(joined) => {

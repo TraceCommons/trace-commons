@@ -29743,8 +29743,10 @@ async fn an_index_rebuild_past_its_deadline_releases_the_rows() {
 /// The rebuild fence margin the fence tests give a rebuilding service
 /// (`PipelineServiceBuilder::with_index_rebuild_fence_margin`): long enough
 /// that each check a test makes while the fence holds runs well inside it,
-/// short enough that the test can wait for the fence to pass.
-const TEST_REBUILD_FENCE_MARGIN: std::time::Duration = std::time::Duration::from_secs(4);
+/// also on a loaded runner, short enough that the test can wait for the
+/// fence to pass. A test still checks the fence before each claim it
+/// expects to take nothing (`assert_fence_still_holds`).
+const TEST_REBUILD_FENCE_MARGIN: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// A service like `test_service` whose index reader and writer are `index`,
 /// with `lease_config` and, when given, the rebuild fence margin `margin`.
@@ -29858,6 +29860,21 @@ async fn insert_expired_rebuild_fence(tenant: &str, fence_id: uuid::Uuid) {
         )
         .await
         .expect("write an expired fence");
+}
+
+/// Asserts, on the owner connection, that the tenant's one fence row has not
+/// reached its end (`clock_timestamp() < fenced_until`). A test calls it just
+/// before a claim it expects to take nothing, so a run too slow to make that
+/// claim inside the fence fails here, with this message, and not as a claim
+/// that looks like a privacy failure.
+async fn assert_fence_still_holds(tenant: &str, check: &str) {
+    let rows = rebuild_fence_rows(tenant).await;
+    assert_eq!(rows.len(), 1, "{check}: one fence row: {rows:?}");
+    assert!(
+        rows[0].unexpired,
+        "{check}: the test reached this check after the fence's end, so it ran too slowly to \
+         test the fence; this is not a privacy failure: {rows:?}"
+    );
 }
 
 /// A tenant row for `tenant`, which a fence row references, written through
@@ -30443,8 +30460,8 @@ async fn a_rebuild_that_loses_its_session_cannot_be_overtaken_by_an_invalidation
     )
     .await;
     let rebuilt = IsolatedPipelineIndex::new();
-    // The rebuilding replica: a one-second run deadline and a short margin,
-    // so its fence passes within the test.
+    // The rebuilding replica: a one-second run deadline and a margin of
+    // `TEST_REBUILD_FENCE_MARGIN`, so its fence passes within the test.
     let rebuilder = fence_test_service(
         backend.clone(),
         artifacts.clone(),
@@ -30517,6 +30534,7 @@ async fn a_rebuild_that_loses_its_session_cannot_be_overtaken_by_an_invalidation
         .expect("the withdrawal commits once the rebuild's locks are gone")
         .expect("the withdrawal task did not panic");
     assert_invalidation_due(&backend, &tenant, settled.run_id).await;
+    assert_fence_still_holds(&tenant, "before the first claim").await;
     assert_eq!(
         replica
             .process_index_invalidations(&tenant, 32)
@@ -30542,6 +30560,7 @@ async fn a_rebuild_that_loses_its_session_cannot_be_overtaken_by_an_invalidation
         2,
         "the late write landed, and no write started past the deadline"
     );
+    assert_fence_still_holds(&tenant, "before the claim after the late write").await;
     assert_eq!(
         replica
             .process_index_invalidations(&tenant, 32)
@@ -30552,7 +30571,7 @@ async fn a_rebuild_that_loses_its_session_cannot_be_overtaken_by_an_invalidation
     );
 
     let fenced_until = rebuild_fence_rows(&tenant).await[0].fenced_until;
-    let passed = std::time::Instant::now() + HELD_CALL_BOUND;
+    let passed = std::time::Instant::now() + TEST_REBUILD_FENCE_MARGIN + HELD_CALL_BOUND;
     while replica
         .process_index_invalidations(&tenant, 32)
         .await
