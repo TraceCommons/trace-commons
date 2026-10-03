@@ -1098,6 +1098,50 @@ fn copy_commands_reach_the_frontend_through_tauri_and_render_at_safety_surfaces(
     );
     assert!(copy_api.contains("stringTable(historyUi, \"status_labels\")"));
 
+    // Owner decision, 2026-10-02: a folder mode has one name on every
+    // surface (`project_copy::FOLDER_MODE_LABELS`, carried as the bundle's
+    // `folder_mode_labels`). The Settings field and the arming disclosure
+    // that name a mode look it up; neither types the core's name nor a
+    // retired one.
+    assert!(copy_api.contains("stringTable(value, \"folder_mode_labels\")"));
+    for path in [
+        "tauri-desktop/frontend/src/features/settings/components/project-mode-field.tsx",
+        "tauri-desktop/frontend/src/components/project-auto-upload-disclosure.tsx",
+    ] {
+        let source = read(&root, path);
+        assert!(
+            code_only(&source).contains("folder_mode_labels"),
+            "{path} must read the core's folder_mode_labels"
+        );
+        let core = trace_commons_contributor::project_copy::FOLDER_MODE_LABELS
+            .iter()
+            .map(|(_, label)| *label);
+        let retired = [
+            "Ask me first",
+            "Contribute automatically",
+            "Never offer this one",
+            "Auto contribute",
+        ];
+        for word in core {
+            for quoted in [
+                format!("\"{word}\""),
+                format!("'{word}'"),
+                format!(">{word}<"),
+            ] {
+                assert!(
+                    !source.contains(&quoted),
+                    "{path} types the core's mode name {word:?}"
+                );
+            }
+        }
+        for word in retired {
+            assert!(
+                !source.contains(word),
+                "{path} still says the retired mode name {word:?}"
+            );
+        }
+    }
+
     let eligibility = read(
         &root,
         "tauri-desktop/frontend/src/features/waiting/components/waiting-review.tsx",
