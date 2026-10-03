@@ -397,7 +397,7 @@ final class MonitorNavigationTests: XCTestCase {
         XCTAssertFalse(panel.contains("openMain("))
         XCTAssertTrue(panel.contains("OpenMonitor.request(destination)"))
         for needle in ["open(.inference)", "open(.traces(entryId: nil))", "open(.home(.history))",
-                       "open(.settings(.watchedFolders))"] {
+                       "open(MenuPanelData.manageRules(requiresOnboarding: model.requiresOnboarding))"] {
             XCTAssertTrue(panel.contains(needle), "the menu panel never opens \(needle)")
         }
         let pointer = try Self.text("Views/Settings/PrivateAISection.swift")
