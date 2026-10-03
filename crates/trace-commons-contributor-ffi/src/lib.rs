@@ -5710,29 +5710,50 @@ pub unsafe extern "C" fn tc_external_url_is_allowed(url: *const c_char) -> i32 {
 ///
 /// `reachable` is the caller's own liveness fact -- whether its IPC call to
 /// the daemon answered at all -- and is never derived here; this export has
-/// no way to probe a daemon on its own. When `reachable` is non-zero, a NULL,
-/// non-UTF-8 or empty `label` means a reachable daemon reported nothing
-/// wrong, and this returns NULL: there is no banner to draw. A non-empty
-/// `label` this build does not know still gets a banner, never raw-label
-/// text.
+/// no way to probe a daemon on its own. When `reachable` is non-zero, a NULL
+/// or empty `label` means a reachable daemon reported nothing wrong, and this
+/// returns NULL: there is no banner to draw. A non-empty `label` this build
+/// does not know -- including one that is not UTF-8 -- still gets the
+/// on-hold banner, never NULL (which a shell reads as healthy) and never
+/// raw-label text.
 ///
-/// Returns an owned JSON string of `{title, detail, action}`; free it with
-/// [`tc_string_free`]. NULL for nothing to show, and on a caught panic.
+/// `max_queue_entries` is the daemon's configured queue limit
+/// (`get_settings.max_queue_entries`), used only for `queue-full`'s count; 0
+/// or negative means the caller does not know it, and the sentence then
+/// names no number.
+///
+/// Returns an owned JSON string of `{title, detail, action, action_kind,
+/// severity}`; free it with [`tc_string_free`]. NULL for nothing to show,
+/// and on a caught panic.
 ///
 /// # Safety
 /// `label`, if non-null, must point to a valid, NUL-terminated C string.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn tc_health_copy_json(reachable: i32, label: *const c_char) -> *mut c_char {
+pub unsafe extern "C" fn tc_health_copy_json(
+    reachable: i32,
+    label: *const c_char,
+    max_queue_entries: i64,
+) -> *mut c_char {
+    use trace_commons_contributor::health_copy;
     guarded_string_no_err(|| {
         if reachable == 0 {
-            let copy = trace_commons_contributor::health_copy::core_down_copy();
+            let copy = health_copy::core_down_copy();
             return Ok(to_owned_cstring(&serde_json::to_string(&copy)?));
         }
-        let Some(label) = unsafe { borrow_optional_str(label) }.filter(|label| !label.is_empty())
-        else {
+        if label.is_null() {
             return Ok(std::ptr::null_mut());
+        }
+        let bytes = unsafe { CStr::from_ptr(label) }.to_bytes();
+        if bytes.is_empty() {
+            return Ok(std::ptr::null_mut());
+        }
+        let max = u64::try_from(max_queue_entries).ok().filter(|max| *max > 0);
+        let copy = match std::str::from_utf8(bytes) {
+            Ok(label) => health_copy::health_copy_for_label(label, max),
+            // A condition is being reported; this build just cannot read
+            // its name.
+            Err(_) => health_copy::on_hold_copy(),
         };
-        let copy = trace_commons_contributor::health_copy::health_copy_for_label(label);
         Ok(to_owned_cstring(&serde_json::to_string(&copy)?))
     })
 }

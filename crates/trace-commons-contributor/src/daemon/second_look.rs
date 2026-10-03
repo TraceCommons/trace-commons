@@ -219,9 +219,11 @@ pub fn insert_fields(value: &mut serde_json::Value, scrub: Scrub, subagents_drop
         );
     }
     let reasons = second_look_reasons(scrub, subagents_dropped);
+    // Total, never `filter_map`: a reason with no sentence still gets a
+    // line, so `second_look_lines[i]` is always `second_look[i]`'s.
     let lines: Vec<&'static str> = reasons
         .iter()
-        .filter_map(|reason| crate::preview_copy::second_look_line(reason))
+        .map(|reason| crate::preview_copy::second_look_line_or_fallback(reason))
         .collect();
     object.insert("second_look".into(), serde_json::Value::from(reasons));
     object.insert("second_look_lines".into(), serde_json::Value::from(lines));
@@ -489,6 +491,30 @@ mod tests {
         insert_fields(&mut clean, counts(7, 7, 0), 0);
         assert!(clean["second_look"].as_array().unwrap().is_empty());
         assert!(clean["second_look_lines"].as_array().unwrap().is_empty());
+    }
+
+    /// A new reason cannot ship without its own line: every reason in
+    /// `SECOND_LOOK_REASONS` has a sentence that is not the fallback, and
+    /// `second_look_reasons` produces nothing outside that list.
+    #[test]
+    fn every_second_look_reason_has_its_own_line() {
+        use crate::preview_copy::{SECOND_LOOK_FALLBACK_LINE, second_look_line_or_fallback};
+        for reason in SECOND_LOOK_REASONS {
+            assert_ne!(
+                second_look_line_or_fallback(reason),
+                SECOND_LOOK_FALLBACK_LINE,
+                "{reason} has no sentence of its own"
+            );
+        }
+        for (content, unsure, dropped) in [(0, 0, 0), (0, 2, 1), (3, 0, 0), (3, 1, 2)] {
+            for reason in second_look_reasons(counts(content, content, unsure), dropped) {
+                assert!(SECOND_LOOK_REASONS.contains(&reason), "{reason}");
+            }
+        }
+        assert_eq!(
+            second_look_line_or_fallback("a-reason-this-build-does-not-know"),
+            SECOND_LOOK_FALLBACK_LINE
+        );
     }
 
     #[test]

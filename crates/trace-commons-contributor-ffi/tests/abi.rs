@@ -5272,43 +5272,68 @@ fn the_settings_ranges_cross_the_abi_and_match_what_set_settings_enforces() {
 
 #[test]
 fn the_health_copy_crosses_the_abi_core_down_and_per_label() {
-    use trace_commons_contributor::daemon::health::LABEL_NOT_LOGGED_IN;
-    use trace_commons_contributor::health_copy::{core_down_copy, health_copy_for_label};
+    use trace_commons_contributor::daemon::health::{LABEL_NOT_LOGGED_IN, LABEL_QUEUE_FULL};
+    use trace_commons_contributor::health_copy::{
+        core_down_copy, health_copy_for_label, on_hold_copy,
+    };
     use trace_commons_contributor_ffi::tc_health_copy_json;
 
     // Unreachable: the core-down sentence, whatever label is passed (even
     // one that would otherwise answer), because `reachable` governs.
     let label = cstr_str(LABEL_NOT_LOGGED_IN);
     assert_eq!(
-        json_owned(unsafe { tc_health_copy_json(0, label.as_ptr()) }),
+        json_owned(unsafe { tc_health_copy_json(0, label.as_ptr(), 500) }),
         serde_json::to_value(core_down_copy()).unwrap()
     );
     assert_eq!(
-        json_owned(unsafe { tc_health_copy_json(0, std::ptr::null()) }),
+        json_owned(unsafe { tc_health_copy_json(0, std::ptr::null(), 0) }),
         serde_json::to_value(core_down_copy()).unwrap()
     );
 
-    // Reachable with a known label: the per-label table.
+    // Reachable with a known label: the per-label table, with its severity
+    // and action kind.
+    let banner = json_owned(unsafe { tc_health_copy_json(1, label.as_ptr(), 500) });
     assert_eq!(
-        json_owned(unsafe { tc_health_copy_json(1, label.as_ptr()) }),
-        serde_json::to_value(health_copy_for_label(LABEL_NOT_LOGGED_IN)).unwrap()
+        banner,
+        serde_json::to_value(health_copy_for_label(LABEL_NOT_LOGGED_IN, Some(500))).unwrap()
+    );
+    assert_eq!(banner["severity"], "actionable");
+    assert_eq!(banner["action_kind"], "reconnect");
+
+    // The queue limit crosses: a configured limit is the number shown, and
+    // 0 (unknown) names none.
+    let full = cstr_str(LABEL_QUEUE_FULL);
+    let banner = json_owned(unsafe { tc_health_copy_json(1, full.as_ptr(), 2000) });
+    assert!(
+        banner["detail"].as_str().unwrap().contains("2,000"),
+        "{banner}"
+    );
+    let banner = json_owned(unsafe { tc_health_copy_json(1, full.as_ptr(), 0) });
+    assert_eq!(
+        banner,
+        serde_json::to_value(health_copy_for_label(LABEL_QUEUE_FULL, None)).unwrap()
     );
 
     // Reachable with an unrecognised label still gets a banner, never raw
     // label text.
     let unknown = cstr_str("a-future-label");
-    let banner = json_owned(unsafe { tc_health_copy_json(1, unknown.as_ptr()) });
-    assert_eq!(
-        banner,
-        serde_json::to_value(health_copy_for_label("a-future-label")).unwrap()
-    );
+    let banner = json_owned(unsafe { tc_health_copy_json(1, unknown.as_ptr(), 500) });
+    assert_eq!(banner, serde_json::to_value(on_hold_copy()).unwrap());
     assert_eq!(banner["title"], "Contributions are on hold.");
+
+    // A label that is not UTF-8 is still a reported condition: the on-hold
+    // banner, never NULL, which a shell would read as healthy.
+    let not_utf8 = std::ffi::CString::new(vec![0xff_u8, 0xfe, b'x']).unwrap();
+    assert_eq!(
+        json_owned(unsafe { tc_health_copy_json(1, not_utf8.as_ptr(), 500) }),
+        serde_json::to_value(on_hold_copy()).unwrap()
+    );
 
     // Reachable with no label (NULL or empty): nothing is wrong, so there is
     // no banner to draw.
-    assert!(unsafe { tc_health_copy_json(1, std::ptr::null()) }.is_null());
+    assert!(unsafe { tc_health_copy_json(1, std::ptr::null(), 500) }.is_null());
     let empty = cstr_str("");
-    assert!(unsafe { tc_health_copy_json(1, empty.as_ptr()) }.is_null());
+    assert!(unsafe { tc_health_copy_json(1, empty.as_ptr(), 500) }.is_null());
 }
 
 #[test]

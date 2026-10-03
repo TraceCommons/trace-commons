@@ -658,7 +658,30 @@ shown a contributor-facing sentence for a fully unreachable daemon before).
 liveness fact, from whatever probe or IPC failure told it the daemon is
 down. A reachable daemon with `last_error_label: null` has nothing to show
 and should not call this at all; passed anyway with an empty label it
-answers `NULL`, not a banner. Moved into the core from
+answers `NULL`, not a banner. A non-empty label that is not UTF-8 gets the
+on-hold banner, never `NULL`.
+
+The C signature is `tc_health_copy_json(reachable, label,
+max_queue_entries)`: pass `get_settings.max_queue_entries` so `queue-full`
+says how many are waiting, or `0` when unknown and the sentence names no
+number. The JSON is `{title, detail, action, action_kind, severity}`:
+
+- `severity` is `actionable` (the contributor can act on it) or `waiting`
+  (it clears on its own) -- Swift `HealthCopy.Severity`'s two banner kinds.
+  It cannot be derived from `action`: an unsupported OpenCode export is
+  actionable with no button.
+- `action_kind` is a stable kind for the button, present exactly when
+  `action` is: `reconnect`, `privacy_scan_notice` or `review_queue` (Swift's
+  `reviewsQueue`). Switch on it, never on the button's words.
+- `opencode-export-version-unsupported` is answered with the source settings'
+  own version sentence (`source_copy`), not the generic banner.
+
+The core-down detail (draft) says the queue is safe and that sessions from
+while the daemon was down are picked up when it is running again: the queue
+is persisted, and the daemon's first poll after it starts is a full pass over
+every watched source.
+
+Moved into the core from
 `macos/Sources/TraceCommonsApp/HealthCopy.swift`, which has shipped this
 table since before this export existed; Windows
 (`windows/src/TraceCommons.Interop/HealthCopy.cs`) independently wrote the
@@ -1157,7 +1180,8 @@ in additive fields on every queue entry (`list_pending`, `snapshot`, the
 explanation without separately asking `tc_second_look_line_text` for each
 reason; it is the same table, inlined. It is exactly as long as
 `second_look` and lines up with it index for index -- never reordered,
-never deduplicated. **DRAFT, NEEDS APPROVAL** because the sentences it
+never deduplicated, and never shorter: a reason this build has no sentence
+for gets a generic fallback line rather than being dropped. **DRAFT, NEEDS APPROVAL** because the sentences it
 quotes (`preview_copy::second_look_line`) are themselves unapproved spec
 wording; a client that renders it should expect the words, not the
 presence or absence of the field, to still change.
