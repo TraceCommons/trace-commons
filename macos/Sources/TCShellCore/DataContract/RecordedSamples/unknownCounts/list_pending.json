@@ -30,7 +30,8 @@
       "marks": 7,
       "content_marks": 4,
       "unsure_spans": 0,
-      "second_look": []
+      "second_look": [],
+      "second_look_lines": []
     },
     {
       "entry_id": "513d9eb1-dd1f-5bf7-9623-8fd21a94155e",
@@ -59,7 +60,8 @@
       "holds_certificate": false,
       "attestation": "unknown",
       "scrub": "not-yet-scrubbed",
-      "second_look": []
+      "second_look": [],
+      "second_look_lines": []
     },
     {
       "entry_id": "596d86a8-33e2-543d-a3b2-59ed7f7b6f7b",
@@ -88,7 +90,8 @@
       "holds_certificate": false,
       "attestation": "unknown",
       "scrub": "not-yet-scrubbed",
-      "second_look": []
+      "second_look": [],
+      "second_look_lines": []
     }
   ]
 }

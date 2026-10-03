@@ -5,11 +5,13 @@
       "project_label": "api",
       "project_path": "/Users/sample/src/api",
       "mode": "notify_only",
+      "folder_mode": "notify_only",
       "added_at": null,
       "configured": false,
       "is_unresolved_bucket": false,
       "session_count": 0,
       "last_session_at": null,
+      "tools": [],
       "pending_count": 2
     },
     {
@@ -17,11 +19,13 @@
       "project_label": "web",
       "project_path": "/Users/sample/src/web",
       "mode": "notify_only",
+      "folder_mode": "notify_only",
       "added_at": null,
       "configured": false,
       "is_unresolved_bucket": false,
       "session_count": 0,
       "last_session_at": null,
+      "tools": [],
       "pending_count": 1
     }
   ],

@@ -34,6 +34,11 @@
         "nothing-matched",
         "looks-unsure",
         "trimmed-to-fit"
+      ],
+      "second_look_lines": [
+        "No personal details matched, only file paths or nothing at all; that is why this one waits.",
+        "Something here looks like an email, phone number or key that was not matched; that is why this one waits.",
+        "Trimmed to fit the upload limit, so part of this session is not in what would be sent. That is why this one waits."
       ]
     },
     {
@@ -68,6 +73,9 @@
       "unsure_spans": 1,
       "second_look": [
         "looks-unsure"
+      ],
+      "second_look_lines": [
+        "Something here looks like an email, phone number or key that was not matched; that is why this one waits."
       ]
     },
     {
@@ -97,7 +105,8 @@
       "holds_certificate": false,
       "attestation": "unknown",
       "scrub": "not-yet-scrubbed",
-      "second_look": []
+      "second_look": [],
+      "second_look_lines": []
     },
     {
       "entry_id": "b6ecb6a3-bf1e-51fd-8b13-e12cf0ed33fb",
@@ -126,7 +135,8 @@
       "holds_certificate": false,
       "attestation": "unknown",
       "scrub": "not-yet-scrubbed",
-      "second_look": []
+      "second_look": [],
+      "second_look_lines": []
     }
   ]
 }

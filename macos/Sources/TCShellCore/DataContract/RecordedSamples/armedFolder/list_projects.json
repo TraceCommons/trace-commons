@@ -5,11 +5,19 @@
       "project_label": "infra",
       "project_path": "/Users/sample/src/infra",
       "mode": "auto_upload",
+      "folder_mode": "auto_upload",
       "added_at": "2026-09-30T08:00:00Z",
       "configured": true,
       "is_unresolved_bucket": false,
       "session_count": 17,
       "last_session_at": "2026-09-30T09:00:00Z",
+      "tools": [
+        {
+          "source": "claude-code",
+          "session_count": 17,
+          "answers_at": "Anthropic"
+        }
+      ],
       "pending_count": 3,
       "automatic_disclosure": "patterns_only",
       "from_now": true
