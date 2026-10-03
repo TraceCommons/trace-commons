@@ -380,8 +380,16 @@ not the trace's fault:
   Google Cloud Storage) or not what its receipt names (a hash or reference
   mismatch, a decode or decrypt failure), the attempt is charged instead, as
   `artifact_integrity_failed`, and the phase's attempt budget ends the run.
+  Charged attempts under this label are one hour apart, not the short
+  backoff of the other charged labels: with the default budget of 5
+  attempts, the run fails about four hours after the first failure. A store
+  configuration fault (a root that is not mounted, a wrong
+  `TRACE_COMMONS_ARTIFACT_KEY_HEX`, a wrong bucket) looks like an integrity
+  failure, so correct the store within that time; a run that fails is not
+  put back.
   Any other Google Cloud Storage fetch failure (credentials, network, 429,
-  5xx) and a KMS unwrap failure wait here, retried at most once an hour.
+  5xx) and a KMS unwrap failure wait here, uncharged, retried at most once
+  an hour.
   Settle's read of the stored index command is always charged
   (`index_command_invalid`).
 - `serialized_json_object_key_unavailable` and

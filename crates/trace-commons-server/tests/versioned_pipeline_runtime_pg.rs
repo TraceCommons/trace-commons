@@ -29032,11 +29032,25 @@ async fn an_artifact_store_outage_is_an_uncharged_suspension_in_every_phase() {
     assert_eq!(count_novelty_utility_rows(&backend, &tenant).await, 1);
 }
 
+/// Multi-lens review C5 (owner decision): a charged
+/// `artifact_integrity_failed` attempt is retried one hour later, not after
+/// the 50 ms backoff of the other charged labels. A store configuration
+/// fault looks like an integrity failure, and the attempt budget then covers
+/// hours in which an operator can correct it.
+fn assert_integrity_retry_waits_an_hour(run: &PipelineRunRecord) {
+    let wait = run.next_attempt_at - chrono::Utc::now();
+    assert!(
+        wait >= chrono::Duration::minutes(59) && wait <= chrono::Duration::minutes(61),
+        "the next attempt is one hour later, not {wait}"
+    );
+}
+
 /// Zaki's approval of #1143, ZA-2: a store read that finds the object
 /// missing is an integrity failure, not an outage. It is the charged
 /// `artifact_integrity_failed`, so Review's attempt budget ends the run with
-/// it, instead of an uncharged suspension retried hourly for good. (A
-/// transport failure stays uncharged:
+/// it, instead of an uncharged suspension retried hourly for good. Its
+/// attempts are one hour apart (multi-lens review C5), and the run fails
+/// only after the last one. (A transport failure stays uncharged:
 /// `an_artifact_store_outage_is_an_uncharged_suspension_in_every_phase`.)
 #[tokio::test]
 async fn a_missing_source_object_is_charged_and_ends_the_run() {
@@ -29100,14 +29114,31 @@ async fn a_missing_source_object_is_charged_and_ends_the_run() {
         ),
         "a missing object is charged"
     );
+    assert_integrity_retry_waits_an_hour(&first);
     let mut last = first;
-    for _ in 1..last.max_attempts {
+    for attempt in 2..=last.max_attempts {
         force_due(&backend, &tenant, created.run_id).await;
         last = service
             .process_run(&tenant, created.run_id)
             .await
             .unwrap()
             .expect("Review runs again");
+        if attempt < last.max_attempts {
+            assert_eq!(
+                (
+                    last.state,
+                    last.last_error_label.as_deref(),
+                    last.attempt_count
+                ),
+                (
+                    PipelineRunState::Retry,
+                    Some(PIPELINE_ARTIFACT_INTEGRITY_FAILED_LABEL),
+                    attempt
+                ),
+                "the run fails only after its last attempt"
+            );
+            assert_integrity_retry_waits_an_hour(&last);
+        }
     }
     assert_eq!(
         (last.state, last.last_error_label.as_deref()),
@@ -29160,8 +29191,8 @@ impl GcsObjectClient for ProbeGcsClient {
 /// Zaki's approval of #1143, ZA-2 follow-up: on the Google Cloud Storage
 /// store, a fetch the bucket answers with "not found" is an integrity
 /// failure, charged as `artifact_integrity_failed`, so Review's attempt
-/// budget ends the run; any other fetch failure stays the uncharged
-/// `artifact_store_unavailable`.
+/// budget ends the run, with its attempts one hour apart; any other fetch
+/// failure stays the uncharged `artifact_store_unavailable`.
 #[tokio::test]
 async fn a_missing_gcs_object_is_charged_and_any_other_gcs_fetch_failure_is_not() {
     let Some(backend) = runtime_backend(4).await else {
@@ -29242,14 +29273,31 @@ async fn a_missing_gcs_object_is_charged_and_any_other_gcs_fetch_failure_is_not(
         ),
         "a missing object is charged"
     );
+    assert_integrity_retry_waits_an_hour(&first);
     let mut last = first;
-    for _ in 1..last.max_attempts {
+    for attempt in 2..=last.max_attempts {
         force_due(&backend, &tenant, created.run_id).await;
         last = service
             .process_run(&tenant, created.run_id)
             .await
             .unwrap()
             .expect("Review runs again");
+        if attempt < last.max_attempts {
+            assert_eq!(
+                (
+                    last.state,
+                    last.last_error_label.as_deref(),
+                    last.attempt_count
+                ),
+                (
+                    PipelineRunState::Retry,
+                    Some(PIPELINE_ARTIFACT_INTEGRITY_FAILED_LABEL),
+                    attempt
+                ),
+                "the run fails only after its last attempt"
+            );
+            assert_integrity_retry_waits_an_hour(&last);
+        }
     }
     assert_eq!(
         (last.state, last.last_error_label.as_deref()),

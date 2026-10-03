@@ -297,6 +297,16 @@ pub const PIPELINE_BUNDLE_STORE_UNAVAILABLE_LABEL: &str = "bundle_store_unavaila
 pub const PIPELINE_DEFAULT_OBJECT_STORE_NAME: &str = "pipeline_local_encrypted";
 pub const INJECTED_PIPELINE_CRASH: &str = "injected_pipeline_crash";
 const DEFAULT_RETRY_MILLISECONDS: i64 = 50;
+/// The longest wait of an uncharged suspension
+/// (`PgPipelineStore::mark_transient_retry`), and the wait between two
+/// charged `artifact_integrity_failed` attempts
+/// (`PgPipelineStore::mark_retry`), as a SQL interval. One definition, so
+/// the two stay equal. A macro, so each query stays one `&'static str`.
+macro_rules! suspension_max_delay_sql {
+    () => {
+        "INTERVAL '1 hour'"
+    };
+}
 /// Label for an adapter call error or a charged settlement blocker; the leg
 /// waits and the run retries (`complete_settle_phase`).
 const PIPELINE_SETTLEMENT_RETRY_LABEL: &str = "settlement_operation_retry";
@@ -423,7 +433,8 @@ where
 /// integrity failure the store reports
 /// (`is_trace_artifact_integrity_error`: the object missing, or not what
 /// its receipt names) is the charged `artifact_integrity_failed`, which the
-/// phase's attempt budget ends. The caller's own checks of the content the
+/// phase's attempt budget ends, with its attempts one hour apart
+/// (`PgPipelineStore::mark_retry`). The caller's own checks of the content the
 /// store returned (a decode, a hash or a revision mismatch) stay charged,
 /// and a lost blocking task keeps `blocking_call_failed`. The attempt sweep
 /// has no run to charge: a store call of the sweep that fails keeps its row
@@ -4199,6 +4210,16 @@ impl PgPipelineStore {
     /// worker calls this through `PipelineService::charged_retry`, which
     /// first reconciles the dispatched external legs of a run this retry
     /// will exhaust.
+    ///
+    /// The next attempt is due after a backoff that doubles from
+    /// `DEFAULT_RETRY_MILLISECONDS`. Multi-lens review C5 (owner decision):
+    /// under `artifact_integrity_failed` it is due one hour later
+    /// (`suspension_max_delay_sql!`) instead. A store configuration fault
+    /// (a root that is not mounted, a wrong key, a wrong bucket) reads as
+    /// an integrity failure, and the fast backoff used the whole attempt
+    /// budget in about one second; one hour apart, the budget covers hours
+    /// in which an operator can correct the store, and the terminal bound
+    /// stays.
     pub async fn mark_retry(
         &self,
         run: &PipelineRunRecord,
@@ -4208,11 +4229,13 @@ impl PgPipelineStore {
         let exponent = run.attempt_count.saturating_sub(1).min(9);
         let multiplier = 1_i64 << exponent;
         let delay_milliseconds = DEFAULT_RETRY_MILLISECONDS.saturating_mul(multiplier);
+        let hourly = error_label == PIPELINE_ARTIFACT_INTEGRITY_FAILED_LABEL;
         let mut client = self.backend.trace_pool().get().await?;
         let tx = Self::tenant_transaction(&mut client, &run.tenant_id).await?;
         let row = tx
             .query_opt(
-                "UPDATE pipeline_runs
+                concat!(
+                    "UPDATE pipeline_runs
                  SET state = CASE
                          WHEN attempt_count >= max_attempts THEN 'failed'
                          ELSE 'retry'
@@ -4221,6 +4244,9 @@ impl PgPipelineStore {
                      lease_expires_at = NULL,
                      next_attempt_at = CASE
                          WHEN attempt_count >= max_attempts THEN next_attempt_at
+                         WHEN $7::boolean THEN NOW() + ",
+                    suspension_max_delay_sql!(),
+                    "
                          ELSE NOW() + ($5::bigint * INTERVAL '1 millisecond')
                      END,
                      last_error_label = CASE
@@ -4230,7 +4256,8 @@ impl PgPipelineStore {
                      updated_at = NOW()
                  WHERE tenant_id = $1 AND run_id = $2 AND state = 'leased'
                    AND lease_token = $6 AND lease_expires_at > NOW()
-                 RETURNING *",
+                 RETURNING *"
+                ),
                 &[
                     &run.tenant_id,
                     &run.run_id,
@@ -4238,6 +4265,7 @@ impl PgPipelineStore {
                     &PIPELINE_ATTEMPTS_EXHAUSTED_LABEL,
                     &delay_milliseconds,
                     &lease_token,
+                    &hourly,
                 ],
             )
             .await?
@@ -4277,17 +4305,21 @@ impl PgPipelineStore {
         let tx = Self::tenant_transaction(&mut client, &run.tenant_id).await?;
         let row = tx
             .query_opt(
-                "UPDATE pipeline_runs
+                concat!(
+                    "UPDATE pipeline_runs
                     SET state = 'retry', lease_token = NULL, lease_expires_at = NULL,
                         attempt_count = GREATEST(attempt_count - 1, 0),
                         next_attempt_at = NOW() + LEAST(
                             GREATEST(NOW() - phase_started_at, INTERVAL '1 second'),
-                            INTERVAL '1 hour'
+                            ",
+                    suspension_max_delay_sql!(),
+                    "
                         ),
                         last_error_label = $3, updated_at = NOW()
                   WHERE tenant_id = $1 AND run_id = $2 AND state = 'leased'
                     AND lease_token = $4 AND lease_expires_at > NOW()
-                  RETURNING *",
+                  RETURNING *"
+                ),
                 &[&run.tenant_id, &run.run_id, &error_label, &lease_token],
             )
             .await?
