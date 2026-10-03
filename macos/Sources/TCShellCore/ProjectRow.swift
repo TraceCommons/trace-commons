@@ -87,6 +87,10 @@ public struct ProjectRow: Decodable, Identifiable, Equatable, Sendable {
     /// On an armed row only: `true` when armed from now, so the backlog
     /// waits. Absent (nil) on rows that are not armed.
     public let fromNow: Bool?
+    /// The folder's own mode, which a contribution override (#1173) never
+    /// writes: what clearing the override returns `mode` to. `nil` from a
+    /// daemon predating the override.
+    public let folderMode: ProjectMode?
     /// Which tools this project's sessions came from, one row per tool,
     /// ordered by `source` (K11). Empty when nothing is known yet, and from
     /// a daemon predating the field. Can undercount `sessionCount`: never
@@ -108,6 +112,7 @@ public struct ProjectRow: Decodable, Identifiable, Equatable, Sendable {
         sessionCount: Int? = nil,
         lastSessionAt: Date? = nil,
         fromNow: Bool? = nil,
+        folderMode: ProjectMode? = nil,
         tools: [ProjectTool] = []
     ) {
         self.projectId = projectId
@@ -122,6 +127,7 @@ public struct ProjectRow: Decodable, Identifiable, Equatable, Sendable {
         self.sessionCount = sessionCount
         self.lastSessionAt = lastSessionAt
         self.fromNow = fromNow
+        self.folderMode = folderMode
         self.tools = tools
     }
 
@@ -138,6 +144,7 @@ public struct ProjectRow: Decodable, Identifiable, Equatable, Sendable {
         case sessionCount = "session_count"
         case lastSessionAt = "last_session_at"
         case fromNow = "from_now"
+        case folderMode = "folder_mode"
         case tools
     }
 
@@ -166,6 +173,7 @@ public struct ProjectRow: Decodable, Identifiable, Equatable, Sendable {
         sessionCount = try c.decodeIfPresent(Int.self, forKey: .sessionCount)
         lastSessionAt = try c.decodeIfPresent(Date.self, forKey: .lastSessionAt)
         fromNow = try c.decodeIfPresent(Bool.self, forKey: .fromNow)
+        folderMode = try c.decodeIfPresent(ProjectMode.self, forKey: .folderMode)
         tools = try c.decodeIfPresent([ProjectTool].self, forKey: .tools) ?? []
     }
 

@@ -5195,6 +5195,75 @@ fn the_arming_offer_copy_crosses_the_abi() {
 }
 
 #[test]
+fn the_contribution_mode_copy_crosses_the_abi() {
+    use trace_commons_contributor::project_copy::{
+        CONTRIBUTION_MODE_NEVER_LINE, contribution_mode_copy,
+    };
+    use trace_commons_contributor_ffi::tc_contribution_mode_copy_json;
+    let value = json_owned(tc_contribution_mode_copy_json());
+    assert_eq!(
+        value,
+        serde_json::to_value(contribution_mode_copy()).unwrap()
+    );
+    assert_eq!(value["choices"][2]["mode"], "ignore");
+    assert_eq!(value["choices"][2]["line"], CONTRIBUTION_MODE_NEVER_LINE);
+}
+
+#[test]
+fn the_contribution_override_confirmation_crosses_the_abi() {
+    use trace_commons_contributor::daemon::policy::ProjectMode;
+    use trace_commons_contributor::project_copy::contribution_override_confirm_copy;
+    use trace_commons_contributor_ffi::tc_contribution_override_confirm_json;
+    let dir = tempfile::tempdir().unwrap();
+    for (wire, mode) in [
+        ("notify_only", ProjectMode::NotifyOnly),
+        ("ignore", ProjectMode::Ignore),
+    ] {
+        let wire = cstr_str(wire);
+        let value = json_owned(unsafe {
+            tc_contribution_override_confirm_json(wire.as_ptr(), std::ptr::null())
+        });
+        assert_eq!(
+            value,
+            serde_json::to_value(contribution_override_confirm_copy(mode, None)).unwrap()
+        );
+        assert!(value["arming"].is_null());
+    }
+    let auto = cstr_str("auto_upload");
+    let value = json_owned(unsafe {
+        tc_contribution_override_confirm_json(auto.as_ptr(), cstr(dir.path()).as_ptr())
+    });
+    assert_eq!(
+        value,
+        serde_json::to_value(contribution_override_confirm_copy(
+            ProjectMode::AutoUpload,
+            None
+        ))
+        .unwrap()
+    );
+    assert_eq!(value["arming"]["disclosure"], "patterns_only");
+    // The arming disclosure is never guessed: no directory, or one whose
+    // configuration cannot be read, answers NULL.
+    assert!(
+        unsafe { tc_contribution_override_confirm_json(auto.as_ptr(), std::ptr::null()) }.is_null()
+    );
+    std::fs::write(dir.path().join("contributor.json"), "not json").unwrap();
+    assert!(
+        unsafe { tc_contribution_override_confirm_json(auto.as_ptr(), cstr(dir.path()).as_ptr()) }
+            .is_null()
+    );
+    let unknown = cstr_str("always");
+    assert!(
+        unsafe { tc_contribution_override_confirm_json(unknown.as_ptr(), std::ptr::null()) }
+            .is_null()
+    );
+    assert!(
+        unsafe { tc_contribution_override_confirm_json(std::ptr::null(), std::ptr::null()) }
+            .is_null()
+    );
+}
+
+#[test]
 fn the_legacy_migration_offer_and_refusal_cross_the_abi() {
     use trace_commons_contributor::consent_copy::{
         legacy_migration_offer, legacy_migration_refusal_line,

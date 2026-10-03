@@ -321,6 +321,16 @@ extension DaemonData {
         /// Whether moving a legacy invite identity is offered, and the
         /// notice after it moved. `nil` when the daemon did not say.
         public let legacyInviteMigration: LegacyInviteMigration?
+        /// The menu-bar pill's global override (#1173): `nil` when none is in
+        /// force, or from a daemon predating it.
+        public let contributionOverride: ContributionOverride?
+        /// The pill's roll-up: `notify_only`, `auto_upload`, `ignore` or
+        /// `mixed`. Computed by the daemon; a shell never derives it.
+        public let contributionMode: String?
+        /// `true` when `contributionMode` is `auto_upload` but a Never folder
+        /// or the unidentified bucket does not upload (#1208): draw the core's
+        /// `auto_partial` line under the label.
+        public let contributionModePartial: Bool?
 
         public enum CodingKeys: String, CodingKey, CaseIterable {
             case schemaVersion = "schema_version"
@@ -340,7 +350,16 @@ extension DaemonData {
             case automaticContributionHeld = "automatic_contribution_held"
             case grantVoids = "grant_voids"
             case legacyInviteMigration = "legacy_invite_migration"
+            case contributionOverride = "contribution_override"
+            case contributionMode = "contribution_mode"
+            case contributionModePartial = "contribution_mode_partial"
         }
+    }
+
+    /// `status.contribution_override` while one is in force.
+    public struct ContributionOverride: Codable, Equatable, Sendable {
+        public let mode: String?
+        public let since: Date?
     }
 
     /// `status.legacy_invite_migration` (`legacy_migration::status_value`).
@@ -692,10 +711,15 @@ extension DaemonData {
         public let purged: Int?
         public let retracted: Int?
         public let fromNow: Bool?
+        /// The contribution override's mode when it still decides this
+        /// folder, so the change is saved but not yet in effect (#1208).
+        /// `nil` when the folder now resolves to what was set.
+        public let overriddenBy: String?
 
         public enum CodingKeys: String, CodingKey {
             case ok, purged, retracted
             case fromNow = "from_now"
+            case overriddenBy = "overridden_by"
         }
     }
 }

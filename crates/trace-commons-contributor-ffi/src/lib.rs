@@ -5440,6 +5440,77 @@ pub unsafe extern "C" fn tc_arming_offer_copy_json(
     })
 }
 
+/// The menu-bar Contribution mode pill (#1173,
+/// `project_copy::contribution_mode_copy`): a JSON object `{title, mixed,
+/// choices, override_active, clear}`, `choices` being `[{mode, label,
+/// line}]` for Ask me, Auto contribute and Never, in that order. `mode` is
+/// what `set_contribution_override` takes. DRAFT, NEEDS APPROVAL, every
+/// sentence.
+///
+/// Returns an owned JSON string; free it with [`tc_string_free`]. NULL only
+/// on a caught panic.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_contribution_mode_copy_json() -> *mut c_char {
+    guarded_string_no_err(|| {
+        let copy = trace_commons_contributor::project_copy::contribution_mode_copy();
+        Ok(to_owned_cstring(&serde_json::to_string(&copy)?))
+    })
+}
+
+/// The confirmation for one contribution override (#1173,
+/// `project_copy::contribution_override_confirm_copy`): a JSON object
+/// `{mode, title, body, confirm, cancel, arming}`. `mode` is
+/// `"notify_only"`, `"auto_upload"` or `"ignore"`, as
+/// `set_contribution_override` takes it.
+///
+/// `arming` is the arming disclosure -- the Flow 1 grant screens' table,
+/// with the disclosure the core chose for the configuration in
+/// `config_dir` -- for `auto_upload`, and `null` otherwise. `config_dir` is
+/// read for `auto_upload` only, and may be NULL for the other two.
+///
+/// Returns an owned JSON string; free it with [`tc_string_free`]. NULL for a
+/// NULL, non-UTF-8 or unknown `mode`; for `auto_upload`, also for a NULL or
+/// non-UTF-8 `config_dir` or a configuration that cannot be read, since the
+/// disclosure is not guessed; and on a caught panic.
+///
+/// # Safety
+/// `mode` and `config_dir`, if non-null, must point to valid, NUL-terminated
+/// C strings.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_contribution_override_confirm_json(
+    mode: *const c_char,
+    config_dir: *const c_char,
+) -> *mut c_char {
+    use trace_commons_contributor::daemon::policy::ProjectMode;
+    guarded_string_no_err(|| {
+        let Some(mode) = (unsafe { borrow_optional_str(mode) }) else {
+            return Ok(std::ptr::null_mut());
+        };
+        let Ok(mode) = serde_json::from_value::<ProjectMode>(serde_json::json!(mode)) else {
+            return Ok(std::ptr::null_mut());
+        };
+        let config = if mode == ProjectMode::AutoUpload {
+            let Some(dir) = (unsafe { borrow_optional_str(config_dir) }) else {
+                return Ok(std::ptr::null_mut());
+            };
+            let Ok(store) = ConfigStore::open(std::path::PathBuf::from(dir)) else {
+                return Ok(std::ptr::null_mut());
+            };
+            let Ok(config) = store.load_config() else {
+                return Ok(std::ptr::null_mut());
+            };
+            config
+        } else {
+            None
+        };
+        let copy = trace_commons_contributor::project_copy::contribution_override_confirm_copy(
+            mode,
+            config.as_ref(),
+        );
+        Ok(to_owned_cstring(&serde_json::to_string(&copy)?))
+    })
+}
+
 /// The offer to move a legacy invite identity to a NEAR AI account
 /// (`consent_copy::legacy_migration_offer`), as a JSON object of
 /// `LegacyMigrationOfferCopy`'s fields. Shown only while
