@@ -448,5 +448,67 @@ final class TracesParityTests: XCTestCase {
         XCTAssertTrue(try Self.text("Views/Monitor/TracesOffers.swift").contains("store.lastContributedFolder"))
         XCTAssertTrue(try Self.text("Views/QueueFolderRow.swift").contains("enum QueueFolderWords"))
     }
+
+    /// The legacy entry is found by id; a session the legacy queue does not
+    /// hold opens no sheet (fail closed), rather than a sheet for another.
+    func test_theSheetOpensOnlyForTheSameSession() throws {
+        let json = #"[{"entry_id":"e-1","session_hash":"h","source":"claude-code","project_id":"p","project_label":"payments","size_bytes":10,"discovered_at":"2026-10-01T00:00:00Z","state":"pending","attempts":0}]"#
+        let awaiting = try DaemonDecoding.decoder().decode([QueueEntry].self, from: Data(json.utf8))
+        XCTAssertEqual(QueueEntryBridge.legacyEntry(for: "e-1", in: awaiting)?.entryID, "e-1")
+        XCTAssertNil(QueueEntryBridge.legacyEntry(for: "e-2", in: awaiting))
+        XCTAssertNil(QueueEntryBridge.legacyEntry(for: "e-1", in: []))
+    }
+
+    /// A secret the scan found and left in is said in the core's words,
+    /// counted by site; removals alone, or no summary yet, say nothing.
+    func test_theSurvivorLineIsTheCoresAndOnlyForASurvivor() throws {
+        func summary(_ redactions: String) throws -> DaemonData.PreviewSummary {
+            try DaemonDataDecoding.decoder().decode(
+                DaemonData.PreviewSummary.self, from: Data(#"{"redactions":\#(redactions)}"#.utf8))
+        }
+        XCTAssertNil(TracesStore.survivorLine(nil))
+        XCTAssertNil(TracesStore.survivorLine(
+            try DaemonDataDecoding.decoder().decode(DaemonData.PreviewSummary.self, from: Data("{}".utf8))))
+        XCTAssertNil(TracesStore.survivorLine(try summary(#"{"api_key":2}"#)))
+        let counts = ["api_key": 2, "residual_secret_at:events.3.correction": 1]
+        let line = try XCTUnwrap(TracesStore.survivorLine(
+            try summary(#"{"api_key":2,"residual_secret_at:events.3.correction":1}"#)))
+        XCTAssertEqual(line, TCCoreCopy.residualSecretLine(
+            count: RedactionLabels.survivorTotal(counts), sites: RedactionLabels.survivors(counts).map(\.site)))
+        XCTAssertTrue(line.contains("events.3.correction"), line)
+    }
+
+    /// The queue card's facts, drawn by the inspector from the same sources:
+    /// the surviving secret, the scrubbing caption, the subagent line, and
+    /// Look inside opening the preview sheet for this session only.
+    func test_theInspectorSaysWhatTheQueueCardSaid() throws {
+        let tree = try Self.text("Views/Monitor/TracesViews.swift")
+        let inspector = try XCTUnwrap(tree.range(of: "struct SessionInspectorView"))
+        let end = try XCTUnwrap(tree.range(of: "struct PreviewSlot", range: inspector.upperBound..<tree.endIndex))
+        let body = tree[inspector.lowerBound..<end.lowerBound]
+        for needle in ["TracesStore.survivorLine(summary)", "GlassStatusLabel(survivor, status: .ask)",
+                       "RedactionLabels.removedTotal(redactions)",
+                       "ScrubbingCaveat.rowLine(redactionCount: removed)",
+                       "ScrubbingCaveat.status(redactionCount: removed)",
+                       "SubagentCopy.line(count: entry.subagentCount ?? 0, dropped: entry.subagentsDropped ?? 0)",
+                       "QueueEntryBridge.legacyEntry(for: entry.entryId, in: model.awaitingDecision)",
+                       "Button(QueueLegacyWords.lookInside)", ".sheet(item: $previewing)",
+                       "PreviewSheet(entry: $0)", "@EnvironmentObject private var model: AppModel",
+                       #"ProcessInfo.processInfo.environment["TRACE_COMMONS_DEMO_PREVIEW"] == "1","#,
+                       ".onChange(of: model.awaitingDecision.count)", "previewing == nil,"] {
+            XCTAssertTrue(body.contains(needle), "SessionInspectorView lacks \(needle)")
+        }
+        // The sheet and the demo hook hang off the always-present container,
+        // not the selected-session branch.
+        XCTAssertTrue(body.contains("""
+                        Spacer(minLength: 0)
+                    }
+                }
+                .sheet(item: $previewing) { PreviewSheet(entry: $0).environmentObject(model) }
+                .onChange(of: model.awaitingDecision.count) { _, _ in
+        """), "the sheet and the demo hook must sit on the inspector's outer VStack")
+        XCTAssertTrue(try Self.text("Views/Monitor/TracesStore.swift")
+            .contains("TCCoreCopy.residualSecretLine(count: total,"))
+    }
 }
 #endif

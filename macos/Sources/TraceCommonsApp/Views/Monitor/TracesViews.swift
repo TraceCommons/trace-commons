@@ -501,6 +501,10 @@ struct SessionInspectorView: View {
     let entry: DaemonData.QueueEntry?
     /// The tab's words, from the core, decoded once by the store.
     private var words: MonitorTracesCopy? { store.words }
+    /// The legacy queue's entries, which the preview sheet still takes.
+    @EnvironmentObject private var model: AppModel
+    /// The session whose preview sheet is open, as the legacy queue holds it.
+    @State private var previewing: QueueEntry?
 
     /// The preview, keyed by the session it was asked for. Only the
     /// selected session's answer is ever read out of it.
@@ -545,12 +549,20 @@ struct SessionInspectorView: View {
                                 eligibility: store.eligibilityValue(entry), attestation: store.attestationValue(entry)))
                         }
                         if let summary { redactions(summary) }
+                        queueCardFacts(entry)
                         if let reasons = entry.secondLook, !reasons.isEmpty {
                             // The core's fixed reason labels until K4 gives
                             // them words.
                             VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
                                 ForEach(reasons, id: \.self) { GlassChip($0, status: .ask) }
                             }
+                        }
+                        // The full review, on the legacy queue's entry for
+                        // this same session. Absent, not disabled, when the
+                        // legacy queue does not hold it: no sheet for another.
+                        if let legacy = QueueEntryBridge.legacyEntry(for: entry.entryId, in: model.awaitingDecision) {
+                            Button(QueueLegacyWords.lookInside) { previewing = legacy }
+                                .buttonStyle(GlassButtonStyle(.glass))
                         }
                         review(entry)
                     }
@@ -559,6 +571,52 @@ struct SessionInspectorView: View {
                 .task(id: entry.entryId) { await load(entry.entryId) }
             } else {
                 Spacer(minLength: 0)
+            }
+        }
+        .sheet(item: $previewing) { PreviewSheet(entry: $0).environmentObject(model) }
+        .onChange(of: model.awaitingDecision.count) { _, _ in
+            // Development hook, as the legacy queue's: opens the first
+            // preview so the sheet can be captured. Never on by default.
+            if ProcessInfo.processInfo.environment["TRACE_COMMONS_DEMO_PREVIEW"] == "1",
+                previewing == nil,
+                let first = model.awaitingDecision.first
+            {
+                previewing = first
+            }
+        }
+    }
+
+    /// What the queue card said about this session that the rows above do
+    /// not: a secret the scan found and left in, what scrubbing did and
+    /// what that does not prove, and whether delegated subagent transcripts
+    /// were trimmed to fit. Each line carries its words beside its dot.
+    @ViewBuilder
+    private func queueCardFacts(_ entry: DaemonData.QueueEntry) -> some View {
+        if let survivor = TracesStore.survivorLine(summary) {
+            GlassStatusLabel(survivor, status: .ask)
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityLabel(survivor)
+        }
+        // Only once the preview has counted: an unread count is never
+        // read as "nothing matched".
+        if let redactions = summary?.redactions {
+            let removed = RedactionLabels.removedTotal(redactions)
+            GlassStatusLabel(
+                ScrubbingCaveat.rowLine(redactionCount: removed),
+                status: ScrubbingCaveat.status(redactionCount: removed))
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        // A load-time fact on the entry, so it is said before the preview
+        // is in: a trimmed conversation never reaches a decision unsaid.
+        if let line = SubagentCopy.line(count: entry.subagentCount ?? 0, dropped: entry.subagentsDropped ?? 0) {
+            if (entry.subagentsDropped ?? 0) > 0 {
+                GlassStatusLabel(line, status: .ask)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                Text(line)
+                    .glassType(GlassTokens.TypeScale.caption)
+                    .foregroundStyle(GlassColor.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
     }
@@ -762,6 +820,15 @@ struct PreviewSlot: Equatable {
 
     func failure(for entryId: String?) -> DaemonDataError? {
         entryId != nil && entryId == self.entryId ? failure : nil
+    }
+}
+
+/// The preview sheet still takes the legacy queue's entry. The inspector's
+/// session is found there by id, and only by id: a session the legacy
+/// queue does not hold opens no sheet, never a sheet for another session.
+enum QueueEntryBridge {
+    static func legacyEntry(for entryId: String, in awaiting: [QueueEntry]) -> QueueEntry? {
+        awaiting.first { $0.entryID == entryId }
     }
 }
 

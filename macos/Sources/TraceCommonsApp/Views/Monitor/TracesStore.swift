@@ -167,6 +167,17 @@ final class TracesStore {
         entry.eligibility.map { ContributionEligibility(state: $0, reason: entry.eligibilityReason) }
     }
 
+    /// Secrets the scan found and left in what would be sent, in the core's
+    /// words (`tc_residual_secret_line_text`), as the queue card said them.
+    /// Counted by detection site, never by secret, and the sites are named.
+    /// Nil before the preview is in, and when nothing survived.
+    static func survivorLine(_ summary: DaemonData.PreviewSummary?) -> String? {
+        guard let redactions = summary?.redactions else { return nil }
+        let total = RedactionLabels.survivorTotal(redactions)
+        guard total > 0 else { return nil }
+        return TCCoreCopy.residualSecretLine(count: total, sites: RedactionLabels.survivors(redactions).map(\.site))
+    }
+
     /// The core's sentence for a session that cannot be contributed as it
     /// stands, with its reason; nil when it can, or eligibility does not
     /// apply. A row says this so an ineligible session never looks like one
