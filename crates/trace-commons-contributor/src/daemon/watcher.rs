@@ -1686,15 +1686,13 @@ fn resolve_cwd(
         .or_else(|| source.load(session_ref).ok().and_then(|t| t.cwd));
     // Resolved before the lock: it canonicalizes the path on disk.
     let project_key = project_for(cwd.as_deref()).0;
-    // K11: which tool this session reads as. Prefer what the session itself
-    // declared over the adapter that stores it -- the same preference
-    // `QueueEntry::agent_label` and `commands::session_row` already apply,
-    // so an imported Antigravity conversation is counted as "antigravity"
-    // here too, not as the `trajectory` adapter that happens to read it.
-    let tool = session_ref
-        .declared_source
-        .clone()
-        .unwrap_or_else(|| session_ref.source.to_string());
+    // K11: which tool this session reads as -- `SessionRef::displayed_source`,
+    // the declared source over the adapter that stores it, the rule
+    // `commands::session_row` applies too. So an imported Antigravity
+    // conversation is counted as "antigravity" here, not as the
+    // `trajectory` adapter that happens to read it. For a staged import that
+    // name is self-declared; see the method's doc.
+    let tool = session_ref.displayed_source().to_string();
     let mut state = shared.state.lock().expect("state lock");
     state.cwd_cache.insert(
         key,

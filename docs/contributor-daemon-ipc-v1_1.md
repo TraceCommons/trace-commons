@@ -1850,8 +1850,8 @@ handle with `preview-requires-embedded`.
       "pending_count": 7,
       "contributable_count": 3,
       "tools": [
-        { "source": "claude-code", "session_count": 20, "answers_at": "Anthropic" },
-        { "source": "antigravity", "session_count": 2, "answers_at": "Google" }
+        { "source": "antigravity", "session_count": 2, "answers_at": "Google" },
+        { "source": "claude-code", "session_count": 20, "answers_at": "Anthropic" }
       ]
     }
   ]
@@ -1885,6 +1885,13 @@ below). This is the same preference a queue entry's own display already
 applies: what a session declares about itself over the adapter that happens
 to store it, so an imported conversation is never attributed to `trajectory`.
 
+For a staged import the `source` is **self-declared**: it is the
+`meta.source` field of a file anyone can drop into the staging directory,
+checked for shape (`validate_source_name`) but not verified. A staged
+trajectory that claims `claude-code` is counted here as Claude Code and
+reads `answers_at: "Anthropic"`. The effect is local display only; nothing
+decides routing, consent or upload on this field.
+
 `answers_at` is the same fixed vendor word `tc_discover_sources` and
 `harness_list` read `answers_at` from, so a project's tool breakdown cannot
 name a vendor differently than either surface does for the same tool.
@@ -1894,6 +1901,7 @@ does not recognise.
 Always an array, empty rather than absent when nothing is known yet -- a
 client tests its length rather than testing for the key, the way `tools`
 being empty and `session_count` being `0` already agree with each other.
+Rows are ordered by `source`, alphabetically, not by count.
 
 **This can undercount `session_count`.** The per-tool breakdown is read from
 the same per-session record `session_count` already comes from, but the tool

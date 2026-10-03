@@ -227,6 +227,29 @@ pub struct SessionRef {
     pub group_member_count: u32,
 }
 
+impl SessionRef {
+    /// Which tool this session reads as: what it declares itself to be when
+    /// discovery knows, and otherwise the adapter that found it.
+    ///
+    /// The one rule every display and per-tool count uses -- the CLI's
+    /// session table, `list_projects.tools` (via the watcher's cwd cache)
+    /// and the queue's `QueueEntry` label -- so an imported Antigravity
+    /// conversation is `antigravity` everywhere, never `trajectory` on one
+    /// surface. Never a substitute for `source` when pairing a ref back to
+    /// an adapter.
+    ///
+    /// For a staged import this is self-declared: `meta.source` in a file
+    /// anyone can drop into the staging directory, bounded by
+    /// `validate_source_name` but not verified. A trajectory claiming
+    /// `claude-code` is counted, and shown as answering at Anthropic, as
+    /// Claude Code. The effect is local display only; nothing here decides
+    /// routing, consent or upload on it.
+    #[must_use]
+    pub fn displayed_source(&self) -> &str {
+        self.declared_source.as_deref().unwrap_or(self.source)
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub enum SessionEventKind {
     User,

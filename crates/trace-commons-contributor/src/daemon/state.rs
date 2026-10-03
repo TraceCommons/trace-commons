@@ -50,10 +50,11 @@ pub struct CwdCacheEntry {
     /// Which tool this session reads as having come from (K11), recorded
     /// when the entry is written: `SessionRef::declared_source` when the
     /// source that discovered it named one (an imported Antigravity
-    /// conversation, say), otherwise the adapter's own name. The same
-    /// preference order `QueueEntry::agent_label` already uses for a
-    /// contributor-facing name -- see `source::mod::SessionRef`'s doc on
-    /// `declared_source`.
+    /// conversation, say), otherwise the adapter's own name -- that is,
+    /// `SessionRef::displayed_source`, the same preference the CLI's session
+    /// table and the GTK shell's `agent_label` use for a contributor-facing
+    /// name. For a staged import the declared name is self-declared and
+    /// unverified; see that method's doc.
     ///
     /// `#[serde(default)]` so a state file written before this field
     /// existed still loads, and `None` is never backfilled retroactively:
