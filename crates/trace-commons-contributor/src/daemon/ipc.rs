@@ -401,6 +401,12 @@ pub const EVENT_RESYNC_REQUIRED: &str = "resync_required";
 /// published for a job that was cancelled while it ran; see
 /// `preview_scheduler::PreviewScheduler::cancel`.
 pub const EVENT_PREVIEW_READY: &str = "preview_ready";
+/// The poll tick read a call from IronWire's log that no earlier tick had
+/// (K14). Label-only: the call's ledger id, the tool `inference_calls`
+/// names for it, its model label and IronWire's proof label -- see
+/// `inference_map::call_added`. At most `inference_map::MAX_ADDED_PER_TICK`
+/// per tick, newest kept.
+pub const EVENT_INFERENCE_CALL_ADDED: &str = "inference_call_added";
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Request {
@@ -1459,6 +1465,9 @@ impl DaemonShared {
             return;
         };
         ledger.refresh().await;
+        // Once per row this tick read that no earlier tick had. Reads only
+        // the snapshot the refresh above committed; never a second fetch.
+        super::inference_map::publish_added_calls(self, &ledger.take_added_rows());
         if let Some(has_rows) = self.routing_transition(ledger.has_rows()) {
             // Hash-only by construction: `has_rows` is a bool, and nothing
             // else about the ledger -- port, token, row contents -- appears
@@ -2447,7 +2456,7 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
                 "methods": METHODS,
                 "events": [
                     EVENT_SNAPSHOT, EVENT_QUEUE_CHANGED, EVENT_STATUS_CHANGED,
-                    EVENT_DIGEST_DUE, EVENT_RESYNC_REQUIRED,
+                    EVENT_DIGEST_DUE, EVENT_RESYNC_REQUIRED, EVENT_INFERENCE_CALL_ADDED,
                 ],
                 "max_line_bytes": MAX_LINE_BYTES,
             }),
