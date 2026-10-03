@@ -62,6 +62,15 @@ pub struct RoutedExchange {
     #[serde(default)]
     pub total_ms: Option<i64>,
     pub facade: String,
+    /// The endpoint the client called, inside its facade: `/v1/messages`,
+    /// `/v1/responses`, `/v1/chat/completions`. A fixed route IronWire
+    /// writes from its own router, never a URL or a query. `None` on a
+    /// proxy older than the release that records it.
+    ///
+    /// Read for one thing: which tool's connection writes this endpoint
+    /// (`daemon::inference_map`). It is not passed through anywhere.
+    #[serde(default)]
+    pub path: Option<String>,
     pub backend: String,
     #[serde(default)]
     pub requested_model: Option<String>,
