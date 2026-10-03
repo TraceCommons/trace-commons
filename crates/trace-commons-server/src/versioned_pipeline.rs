@@ -5425,8 +5425,9 @@ async fn receipt_key_refusal(
 }
 
 /// Why a new receipt may not start a run for `tenant_id` now, read inside
-/// `tx`: the legacy path owns the submission id, or the tenant's routing does
-/// not send new receipts to the pipeline. `None` when the receipt may go on.
+/// `tx`: the tenant is contained, the legacy path owns the submission id, or
+/// the tenant's routing does not send new receipts to the pipeline, in that
+/// order. `None` when the receipt may go on.
 /// With `lock`, the tenant's routing lock is held shared for the rest of
 /// `tx`, so a routing change waits for this transaction and no later one
 /// misses the change. The lock is the one `PipelineActivationStore` takes
@@ -5480,13 +5481,23 @@ async fn new_receipt_refusal_in(
             &[&tenant_id, &submission_id],
         )
         .await?;
-    if row.get::<_, bool>("legacy_owned") {
-        return Ok(Some(PipelineReceiptResult::LegacyOwned));
-    }
     let state = row
         .get::<_, Option<String>>("routing_state")
         .map(|state| RoutingState::from_db(state.as_str()))
         .transpose()?;
+    // Containment is answered before the owner (review round 1, point 7): a
+    // legacy-owned id with no legacy record (a claim whose write failed)
+    // would else go back to the handler as `LegacyOwned`, and the handler's
+    // legacy path would write for a tenant whose containment committed after
+    // the handler's own routing read.
+    if state == Some(RoutingState::Contained) {
+        return Ok(Some(PipelineReceiptResult::NotRouted(
+            RoutingState::Contained,
+        )));
+    }
+    if row.get::<_, bool>("legacy_owned") {
+        return Ok(Some(PipelineReceiptResult::LegacyOwned));
+    }
     Ok(match state {
         Some(RoutingState::Pipeline) => None,
         Some(other) => Some(PipelineReceiptResult::NotRouted(other)),
@@ -7112,7 +7123,8 @@ pub enum PipelineReceiptResult {
     /// The legacy path owns the submission id: its ownership row says so, or
     /// a legacy submission row holds the id. The pipeline never gives such an
     /// id a run, and the receipt stored nothing
-    /// (`PIPELINE_LEGACY_RECEIPT_OWNED_LABEL`).
+    /// (`PIPELINE_LEGACY_RECEIPT_OWNED_LABEL`). A contained tenant is
+    /// answered `NotRouted(Contained)` before this, whoever owns the id.
     LegacyOwned,
     /// The tenant's routing does not send new receipts to the pipeline: its
     /// committed routing row is `legacy` or `contained`, or it has no row and
@@ -8791,8 +8803,9 @@ impl PipelineService {
     /// written. In order: an existing run for the key (`Replayed` or
     /// `ContentConflict`); an attempt for the key staged with other content
     /// (`ContentConflict`); the tenant's routing lock, taken shared, and the
-    /// refusal of a new receipt (`LegacyOwned` when the legacy path owns the
-    /// submission id, `NotRouted` when the tenant's routing does not send new
+    /// refusal of a new receipt (`NotRouted(Contained)` for a contained
+    /// tenant, then `LegacyOwned` when the legacy path owns the submission
+    /// id, then `NotRouted` when the tenant's routing does not send new
     /// receipts to the pipeline: `new_receipt_refusal_in`); the bound bundle;
     /// tombstones (`Tombstoned`); the quota (`QuotaExceeded`). The routing
     /// lock is the last lock this transaction takes, after the receipt lock

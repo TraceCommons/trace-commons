@@ -34460,6 +34460,114 @@ async fn a_legacy_submission_is_never_given_a_pipeline_run() {
     assert_eq!(count_files_under(dir.path()), 0);
 }
 
+/// Review round 1, point 7 (G7): in the receipt transaction a contained
+/// tenant is answered before the owner. A submission id that the legacy path
+/// owns and has no legacy record for (a claim whose write failed), or one
+/// that only a legacy submission row holds, is `LegacyOwned` while the row
+/// says `pipeline` or `legacy`, and the handler then writes it on the legacy
+/// path. Once a `contain` committed, the same receipt is
+/// `NotRouted(Contained)`, so the handler refuses it and the legacy path
+/// writes nothing for the contained tenant. The owner of the id is unchanged.
+#[tokio::test]
+async fn a_legacy_owned_id_is_refused_when_containment_commits_before_the_receipt() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let activation = PipelineActivationStore::new(backend.clone());
+
+    for claimed in [true, false] {
+        let case = if claimed {
+            "a claimed id"
+        } else {
+            "a legacy submission row"
+        };
+        let tenant = routing_tenant(if claimed {
+            "contained-legacy-claimed"
+        } else {
+            "contained-legacy-record"
+        });
+        let env = envelope(uuid::Uuid::new_v4()).await;
+        let raw = serde_json::to_vec(&env).unwrap();
+        let key = env.submission_id.to_string();
+        if claimed {
+            assert_eq!(
+                activation
+                    .claim_legacy_receipt(&tenant, env.submission_id)
+                    .await
+                    .unwrap(),
+                ReceiptOwner::Legacy
+            );
+        } else {
+            let mut owner = owner_client().await;
+            let tx = owner_tenant_tx(&mut owner, &tenant).await;
+            insert_legacy_submission_in(&tx, &tenant, &env).await;
+            tx.commit().await.unwrap();
+        }
+        let before = receipt_rows(&tenant).await;
+
+        // The row says `pipeline`: the legacy path owns the id.
+        write_routing_as_operator(&tenant, "pipeline").await;
+        let result = submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+            .await
+            .unwrap();
+        assert!(
+            matches!(result, PipelineReceiptResult::LegacyOwned),
+            "{case}, pipeline: {result:?}"
+        );
+
+        // Containment commits: the same receipt is refused as contained.
+        activation
+            .contain(&tenant, &routing_actor(), "contain_for_incident")
+            .await
+            .expect("contain the tenant");
+        let result = submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+            .await
+            .unwrap();
+        assert!(
+            matches!(
+                result,
+                PipelineReceiptResult::NotRouted(RoutingState::Contained)
+            ),
+            "{case}, contained: {result:?}"
+        );
+        assert_eq!(
+            receipt_rows(&tenant).await,
+            before,
+            "{case}: the refused receipts stored nothing"
+        );
+        assert_eq!(count_files_under(dir.path()), 0, "{case}");
+        if claimed {
+            assert_eq!(
+                activation
+                    .ownership(&tenant, env.submission_id)
+                    .await
+                    .unwrap()
+                    .map(|row| row.owner),
+                Some(ReceiptOwner::Legacy),
+                "{case}: the owner is unchanged"
+            );
+        }
+
+        // Back on the legacy path: the legacy path owns the id again.
+        write_routing_as_operator(&tenant, "legacy").await;
+        let result = submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+            .await
+            .unwrap();
+        assert!(
+            matches!(result, PipelineReceiptResult::LegacyOwned),
+            "{case}, legacy: {result:?}"
+        );
+    }
+}
+
 /// Review Focus 1: the ownership row is the one place the two paths meet. In
 /// each round a fresh id is claimed by the legacy path and received by the
 /// pipeline at the same moment (the claim starts a little later each round, so
