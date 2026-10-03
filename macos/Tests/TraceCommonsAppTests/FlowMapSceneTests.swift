@@ -365,4 +365,20 @@ final class FlowMapSceneTests: XCTestCase {
         XCTAssertNil(store.calls)
         XCTAssertNotNil(store.failures["inference_calls"])
     }
+
+    /// A node's halo scales with the map, as its disc does: zoomed in, the
+    /// gap and the stroke grow; zoomed out, they shrink. At the design size
+    /// they are the design's 4 and 3.
+    func test_theRingScalesWithZoom() {
+        let field = CGSize(width: FlowMapScene.size.width, height: FlowMapScene.size.height)
+        let base = FlowMapView.ringMetrics(scale: FlowMapGeometry(size: field, zoom: 1).scale)
+        XCTAssertEqual(base.offset, 4, accuracy: 0.0001)
+        XCTAssertEqual(base.lineWidth, 3, accuracy: 0.0001)
+        for zoom in [FlowMapView.zoomRange.lowerBound, 1.5, FlowMapView.zoomRange.upperBound] {
+            let scale = FlowMapGeometry(size: field, zoom: zoom).scale
+            let ring = FlowMapView.ringMetrics(scale: scale)
+            XCTAssertEqual(ring.offset, 4 * zoom, accuracy: 0.0001, "offset at zoom \(zoom)")
+            XCTAssertEqual(ring.lineWidth, 3 * zoom, accuracy: 0.0001, "width at zoom \(zoom)")
+        }
+    }
 }

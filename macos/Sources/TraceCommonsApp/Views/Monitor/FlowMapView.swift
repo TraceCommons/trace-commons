@@ -24,6 +24,10 @@ struct FlowMapView: View {
     @State private var zoom: CGFloat = 1
     @State private var hovered: String?
     @State private var pinned: String?
+    /// The node keyboard focus is on (Full Keyboard Access). It selects the
+    /// node as a hover does, so a keyboard user sees the same ring and card
+    /// a pointer gets; the system focus ring stays on the button itself.
+    @FocusState private var focused: String?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.colorSchemeContrast) private var contrast
 
@@ -45,7 +49,7 @@ struct FlowMapView: View {
                     target(node, fit: fit)
                 }
 
-                if let id = hovered ?? pinned, let node = scene.nodes.first(where: { $0.id == id }) {
+                if let id = selection, let node = scene.nodes.first(where: { $0.id == id }) {
                     card(node, fit: fit, in: proxy.size)
                 }
             }
@@ -61,6 +65,7 @@ struct FlowMapView: View {
         .accessibilityLabel(accessibilityName)
         .onChange(of: scene) { _, scene in
             if let pinned, !scene.nodes.contains(where: { $0.id == pinned }) { self.pinned = nil }
+            if let focused, !scene.nodes.contains(where: { $0.id == focused }) { self.focused = nil }
         }
     }
 
@@ -120,15 +125,15 @@ struct FlowMapView: View {
         let disc = Path(ellipseIn: CGRect(x: centre.x - radius, y: centre.y - radius, width: radius * 2, height: radius * 2))
         var layer = context
         layer.opacity = node.dim
-        let selected = (hovered ?? pinned) == node.id
+        let selected = selection == node.id
 
         switch node.kind {
         case .hub:
             layer.fill(disc, with: .color(GlassTokens.Color.statusOff.color))
-            ring(disc, radius: radius, centre: centre, in: &layer, colour: GlassColor.ink(0.25))
+            ring(disc, radius: radius, centre: centre, in: &layer, colour: GlassColor.ink(0.25), scale: fit.scale)
         case .library(let active):
             layer.fill(disc, with: .color(active ? GlassTokens.Color.blue.color : GlassTokens.Color.mapNodeOff.color))
-            if active { ring(disc, radius: radius, centre: centre, in: &layer, colour: GlassTokens.Color.blue.color.opacity(0.35)) }
+            if active { ring(disc, radius: radius, centre: centre, in: &layer, colour: GlassTokens.Color.blue.color.opacity(0.35), scale: fit.scale) }
         case .tool(let tool, let off):
             layer.fill(disc, with: .color(GlassColor.ink(0.12)))
             mark(tool, centre: centre, side: 16 * fit.scale, in: &layer)
@@ -148,7 +153,7 @@ struct FlowMapView: View {
         case .destination(let lamp):
             let lit = lamp == .answering || lamp == .running
             layer.fill(disc, with: .color(lit ? GlassTokens.Color.mapCredentialOn.color : GlassTokens.Color.mapNodeOff.color))
-            if lamp == .answering { ring(disc, radius: radius, centre: centre, in: &layer, colour: GlassTokens.Color.statusOn.color.opacity(0.35)) }
+            if lamp == .answering { ring(disc, radius: radius, centre: centre, in: &layer, colour: GlassTokens.Color.statusOn.color.opacity(0.35), scale: fit.scale) }
             if lamp == .unknown {
                 // Unknown is not off: a dotted rim says the core did not say.
                 layer.stroke(disc, with: .color(.white.opacity(0.5)),
@@ -169,11 +174,24 @@ struct FlowMapView: View {
             at: CGPoint(x: centre.x, y: centre.y + radius + 9 * fit.scale))
     }
 
-    private func ring(_ disc: Path, radius: CGFloat, centre: CGPoint, in context: inout GraphicsContext, colour: Color) {
-        let outer = radius + 4
+    private func ring(_ disc: Path, radius: CGFloat, centre: CGPoint, in context: inout GraphicsContext, colour: Color, scale: CGFloat) {
+        let metrics = Self.ringMetrics(scale: scale)
+        let outer = radius + metrics.offset
         context.stroke(
             Path(ellipseIn: CGRect(x: centre.x - outer, y: centre.y - outer, width: outer * 2, height: outer * 2)),
-            with: .color(colour), lineWidth: 3)
+            with: .color(colour), lineWidth: metrics.lineWidth)
+    }
+
+    /// A node's halo, in design units scaled with the map: its gap from the
+    /// disc and its width grow and shrink with zoom, as the disc does.
+    static func ringMetrics(scale: CGFloat) -> (offset: CGFloat, lineWidth: CGFloat) {
+        (4 * scale, 3 * scale)
+    }
+
+    /// The node whose ring and card are drawn: the hovered one, then the
+    /// one with keyboard focus, then the pinned one.
+    private var selection: String? {
+        hovered ?? focused ?? pinned
     }
 
     /// The tool's logo in its tint, or its initials when it has none.
@@ -224,6 +242,10 @@ struct FlowMapView: View {
             Circle().fill(Color.clear).frame(width: side, height: side).contentShape(Circle())
         }
         .buttonStyle(.plain)
+        // Focusable under Full Keyboard Access, with the system focus ring
+        // (#1206 chose it over a drawn outline); focus also selects the
+        // node, so its ring and card show.
+        .focused($focused, equals: node.id)
         .onHover { inside in
             if inside { hovered = node.id } else if hovered == node.id { hovered = nil }
         }
