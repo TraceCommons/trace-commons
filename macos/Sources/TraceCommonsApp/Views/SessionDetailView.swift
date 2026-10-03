@@ -81,8 +81,17 @@ struct SessionDetailView: View {
                     .frame(minHeight: 44)
             }
         }
+        SessionWithdrawalAction(record: record, currentStatus: Self.withdrawalStatus(record, detail: model.sessionDetails[record.submissionID]), copy: copy)
 
         localInstalledSkillSurface(copy)
+    }
+
+    /// The status Withdraw asks about: the detail's when it has been read,
+    /// else the app's own record's. Withdraw stands on the record, as the
+    /// legacy row offered it, so reading the detail, or failing to, never
+    /// hides it or its outcome. An unknown status still offers none.
+    static func withdrawalStatus(_ record: HistoryRecord, detail: SessionDetail?) -> String {
+        detail?.contributionStatus ?? record.status
     }
 
     @ViewBuilder
@@ -116,7 +125,6 @@ struct SessionDetailView: View {
 
     @ViewBuilder
     private func detailContent(_ detail: SessionDetail, copy: PublicRunCopy) -> some View {
-        let currentStatus = detail.contributionStatus ?? record.status
         let contributionIsWithdrawn = SkillLearningGate.contributionIsWithdrawn(
             detail, recordStatus: record.status, withdrawalCompleted: withdrawalCompleted)
         let contributionIsActive = SkillLearningGate.contributionIsActive(
@@ -137,8 +145,6 @@ struct SessionDetailView: View {
                 .foregroundStyle(GlassColor.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
-
-        SessionWithdrawalAction(record: record, currentStatus: currentStatus, copy: copy)
     }
 
     private var withdrawalCompleted: Bool {

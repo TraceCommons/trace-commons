@@ -78,8 +78,9 @@ final class ComputeSkillsParityTests: XCTestCase {
         XCTAssertTrue(inspector.contains("var body: some View {\n        ScrollView {\n"))
         XCTAssertTrue(inspector.contains(
             "        .scrollIndicators(.never)\n"
-                + "        .task(id: [row.submissionId, record?.status ?? \"\"]) { load() }\n"
-                + "        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in\n"))
+                + "        .task(id: [row.submissionId, record?.status ?? \"\"]) { load() }\n    }\n"))
+        // The reload on activation is the session detail's own, once.
+        XCTAssertFalse(inspector.contains("didBecomeActiveNotification"))
         let skills = try Self.text("Views/SkillLearningView.swift")
         XCTAssertTrue(skills.contains("        GlassEyebrowCard(copy.heading) {\n"))
         XCTAssertTrue(skills.contains(
