@@ -9616,6 +9616,97 @@ async fn a_file_only_credit_audit_event_is_not_marked_until_its_mirror_is_writte
     );
 }
 
+/// Multi-lens review C9 (e): one credit event whose audit event cannot be
+/// written does not stop the tenant's later ones. Here the first event is in
+/// the file log only and the database refuses its mirror on each pass: the
+/// tenant had no hashed audit row when that mirror failed, so the database
+/// accepted a later event of `main` and its chain is now past the file-only
+/// event. The pass leaves that leg unmarked, appends the second event and
+/// marks its leg; a pass in which nothing succeeds reports the failure.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_credit_audit_event_the_database_refuses_does_not_stop_the_later_ones() {
+    let Some(runtime) = runtime_backend(4).await else {
+        return;
+    };
+    let owner = account_owner_backend()
+        .await
+        .expect("the same variable runtime_backend read is set");
+    let suffix = Uuid::new_v4().simple().to_string();
+    let tenant = format!("tenant-audit-refused-{suffix}");
+    let dir = tempfile::tempdir().expect("temp dir");
+    let artifacts = local_artifacts(&dir);
+    let service = trace_credit_payout_service(
+        runtime.clone(),
+        artifacts.clone(),
+        Arc::new(RecordingNearAdapter::new()),
+    );
+    let state = test_state_with_options(
+        dir.path().to_path_buf(),
+        Some(mains_database().await),
+        Some(artifacts),
+        false,
+        false,
+        false,
+        false,
+    );
+    assert!(!state.require_db_mirror_writes);
+    let principal = static_token_principal_ref(&format!("token-audit-refused-{suffix}"));
+    let append = || async {
+        pipeline_runtime::append_pipeline_credit_audit_events(
+            state.as_ref(),
+            service.as_ref(),
+            &tenant,
+            32,
+        )
+        .await
+    };
+
+    // The first event reaches the file log only: its mirror fails.
+    let refused = completed_pipeline_run(&service, &tenant, &principal).await;
+    let fault = AuditMirrorFault::install(&owner, &tenant).await;
+    let first = append().await;
+    fault.remove(&owner).await;
+    assert!(first.is_err(), "the first pass has no database row");
+    // The database holds no hashed row of the tenant, so it accepts this
+    // event of `main`, which chains from the file-only event.
+    let actor = system_audit_tenant(&tenant, "pipeline_test");
+    append_control_plane_read_audit(state.as_ref(), &actor, "pipeline_test", 0)
+        .await
+        .expect("append one of main's audit events");
+    let later = completed_pipeline_run(&service, &tenant, &principal).await;
+
+    let second = append().await;
+    assert_eq!(
+        second.expect("the later event is appended"),
+        1,
+        "the pass counts the leg it marked"
+    );
+    assert!(credit_leg_is_audited(&owner, &tenant, later.run_id).await);
+    assert_eq!(
+        credit_mutate_audit_rows(&owner, &tenant, later.submission_id).await,
+        1
+    );
+    assert!(
+        !credit_leg_is_audited(&owner, &tenant, refused.run_id).await,
+        "the leg whose event the database refuses stays unmarked"
+    );
+    assert_eq!(
+        credit_mutate_audit_rows(&owner, &tenant, refused.submission_id).await,
+        0
+    );
+    assert_eq!(
+        credit_mutate_file_lines(dir.path(), &tenant),
+        2,
+        "one file line for each event"
+    );
+
+    assert!(
+        append().await.is_err(),
+        "a pass in which no leg is marked reports the failure"
+    );
+    assert!(!credit_leg_is_audited(&owner, &tenant, refused.run_id).await);
+}
+
 /// Zaki review 1, round 2, N-8: under `main`'s database contributor reads,
 /// a minimal-family run's Trace Credit award is reported with its points,
 /// as under file reads and in the pipeline block: the status route answers

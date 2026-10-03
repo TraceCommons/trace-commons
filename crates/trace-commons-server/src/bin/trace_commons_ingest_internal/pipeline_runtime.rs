@@ -1134,8 +1134,13 @@ pub(crate) async fn drain_pipeline_tenant(
 /// row's: for a `NoveltyUtility` event the pipeline's issuer, in the role
 /// `main` records for its gate worker; an actor whose role is not a token
 /// role (a minimal-family `accepted` event's `pipeline_worker`) is recorded
-/// as the in-process pipeline worker, role `system`. Returns how many legs
-/// it handled.
+/// as the in-process pipeline worker, role `system`.
+///
+/// Multi-lens review C9 (e): an event that cannot be appended, mirrored or
+/// verified does not stop the events after it. Its leg stays unmarked, so
+/// the next pass tries it again, and the failure is logged by label, with a
+/// hash of the event id. Returns how many legs it marked, or the first
+/// error when it marked none and one failed.
 pub(crate) async fn append_pipeline_credit_audit_events(
     state: &AppState,
     service: &PipelineService,
@@ -1149,99 +1154,142 @@ pub(crate) async fn append_pipeline_credit_audit_events(
     // The pass's one read of the file log, made for the first item that
     // needs it.
     let mut file_events: Option<BTreeMap<Uuid, TraceCommonsAuditEvent>> = None;
+    let mut audited = 0;
+    let mut first_error = None;
     for item in &items {
-        // Zaki review 3, Z3-L6: the append is idempotent. The event's id is
-        // the credit event's, so an event a crashed pass already appended --
-        // to the database mirror, or to the file log before the mirror or
-        // the audited mark -- is found again and not appended twice; one in
-        // the file log only is mirrored, as it was written. One in the
-        // database only (a required mirror writes the row first, and a pass
-        // can stop before the file line) gets no file line here: the leg is
-        // marked and the event stays in the database only, as an event of
-        // `main` does after the same stop.
-        let in_database = match state.db_mirror.as_ref() {
-            Some(db) => db
-                .get_trace_audit_event_by_id(tenant_id, item.credit_event_id)
-                .await?
-                .is_some(),
-            None => false,
-        };
-        // Multi-lens review C9: with a required mirror the database row is
-        // written before the file line (`append_audit_event_mirrored`), so
-        // an event with no row has no line and the file is not read.
-        let in_file = if in_database || state.require_db_mirror_writes {
-            None
-        } else {
-            if file_events.is_none() {
-                file_events = Some(credit_audit_events_in_file(state, tenant_id, &items).await?);
-            }
-            file_events
-                .as_mut()
-                .and_then(|events| events.remove(&item.credit_event_id))
-        };
-        if !in_database {
-            let points = item
-                .points_delta
-                .parse::<f32>()
-                .map_err(|_| anyhow::anyhow!("pipeline_credit_points_invalid"))?;
-            let (actor, actor_role_label) = match serde_json::from_value::<TokenRole>(
-                serde_json::Value::String(item.actor_role.clone()),
-            ) {
-                Ok(role) => (
-                    TenantAuth {
-                        role,
-                        principal_ref: item.actor_principal_ref.clone(),
-                        ..system_audit_tenant(tenant_id, PIPELINE_WORKER_AUDIT_ACTOR_REF)
-                    },
-                    None,
-                ),
-                Err(_) => (
-                    system_audit_tenant(tenant_id, PIPELINE_WORKER_AUDIT_ACTOR_REF),
-                    Some("system"),
-                ),
-            };
-            let row = AuditRowMirror {
-                action: StorageTraceAuditAction::CreditMutate,
-                metadata: StorageTraceAuditSafeMetadata::CreditMutation {
-                    event_type: item.event_type,
-                    credit_points_delta_micros: credit_delta_micros(points),
-                    reason_hash: sha256_prefixed(item.reason.as_deref().unwrap_or_default()),
-                    external_ref_hash: item.external_ref.as_deref().map(sha256_prefixed),
-                },
-                object_ref_id: None,
-                actor_role_label,
-            };
-            match in_file {
-                Some(event) => {
-                    let mirrored = mirror_audit_event_row_to_db(state, &actor, &event, row).await;
-                    enforce_db_mirror_write_result(state, "pipeline credit audit event", mirrored)?;
-                    // A mirror that is not required can fail with no error
-                    // here; the leg is marked only when the database holds
-                    // the event, as after the first append.
-                    verify_mirrored_audit_event_after_file_append(state, &actor, &event).await?;
-                }
-                None => {
-                    let mut event = TraceCommonsAuditEvent::credit_mutation(
-                        &actor,
-                        item.submission_id,
-                        points,
-                        item.reason.as_deref(),
-                    );
-                    event.event_id = item.credit_event_id;
-                    append_audit_event_mirrored(
-                        state,
-                        &actor,
-                        event,
-                        row,
-                        "pipeline credit audit event",
-                    )
-                    .await?;
-                }
+        match append_pipeline_credit_audit_event(
+            state,
+            service,
+            tenant_id,
+            &items,
+            item,
+            &mut file_events,
+        )
+        .await
+        {
+            Ok(()) => audited += 1,
+            Err(error) => {
+                tracing::warn!(
+                    error_class = "pipeline_worker_credit_audit_item_failed",
+                    tenant_storage_ref = %tenant_storage_ref(tenant_id),
+                    event_ref_hash = %sha256_prefixed(&item.credit_event_id.to_string()),
+                    error_hash = %safe_display_error_hash(&error),
+                    "pipeline worker credit audit event failed"
+                );
+                first_error.get_or_insert(error);
             }
         }
-        service.store().mark_credit_audited(tenant_id, item).await?;
     }
-    Ok(items.len())
+    match first_error {
+        Some(error) if audited == 0 => Err(error),
+        _ => Ok(audited),
+    }
+}
+
+/// One item of `append_pipeline_credit_audit_events`: appends, or mirrors,
+/// `item`'s audit event as that function says, and marks its leg audited.
+/// `file_events` is the pass's one read of the file log
+/// (`credit_audit_events_in_file` over `items`), made here for the first
+/// item that needs it.
+async fn append_pipeline_credit_audit_event(
+    state: &AppState,
+    service: &PipelineService,
+    tenant_id: &str,
+    items: &[trace_commons_server::versioned_pipeline::PipelineCreditAuditItem],
+    item: &trace_commons_server::versioned_pipeline::PipelineCreditAuditItem,
+    file_events: &mut Option<BTreeMap<Uuid, TraceCommonsAuditEvent>>,
+) -> anyhow::Result<()> {
+    // Zaki review 3, Z3-L6: the append is idempotent. The event's id is
+    // the credit event's, so an event a crashed pass already appended --
+    // to the database mirror, or to the file log before the mirror or
+    // the audited mark -- is found again and not appended twice; one in
+    // the file log only is mirrored, as it was written. One in the
+    // database only (a required mirror writes the row first, and a pass
+    // can stop before the file line) gets no file line here: the leg is
+    // marked and the event stays in the database only, as an event of
+    // `main` does after the same stop.
+    let in_database = match state.db_mirror.as_ref() {
+        Some(db) => db
+            .get_trace_audit_event_by_id(tenant_id, item.credit_event_id)
+            .await?
+            .is_some(),
+        None => false,
+    };
+    // Multi-lens review C9: with a required mirror the database row is
+    // written before the file line (`append_audit_event_mirrored`), so
+    // an event with no row has no line and the file is not read.
+    let in_file = if in_database || state.require_db_mirror_writes {
+        None
+    } else {
+        if file_events.is_none() {
+            *file_events = Some(credit_audit_events_in_file(state, tenant_id, items).await?);
+        }
+        file_events
+            .as_mut()
+            .and_then(|events| events.remove(&item.credit_event_id))
+    };
+    if !in_database {
+        let points = item
+            .points_delta
+            .parse::<f32>()
+            .map_err(|_| anyhow::anyhow!("pipeline_credit_points_invalid"))?;
+        let (actor, actor_role_label) = match serde_json::from_value::<TokenRole>(
+            serde_json::Value::String(item.actor_role.clone()),
+        ) {
+            Ok(role) => (
+                TenantAuth {
+                    role,
+                    principal_ref: item.actor_principal_ref.clone(),
+                    ..system_audit_tenant(tenant_id, PIPELINE_WORKER_AUDIT_ACTOR_REF)
+                },
+                None,
+            ),
+            Err(_) => (
+                system_audit_tenant(tenant_id, PIPELINE_WORKER_AUDIT_ACTOR_REF),
+                Some("system"),
+            ),
+        };
+        let row = AuditRowMirror {
+            action: StorageTraceAuditAction::CreditMutate,
+            metadata: StorageTraceAuditSafeMetadata::CreditMutation {
+                event_type: item.event_type,
+                credit_points_delta_micros: credit_delta_micros(points),
+                reason_hash: sha256_prefixed(item.reason.as_deref().unwrap_or_default()),
+                external_ref_hash: item.external_ref.as_deref().map(sha256_prefixed),
+            },
+            object_ref_id: None,
+            actor_role_label,
+        };
+        match in_file {
+            Some(event) => {
+                let mirrored = mirror_audit_event_row_to_db(state, &actor, &event, row).await;
+                enforce_db_mirror_write_result(state, "pipeline credit audit event", mirrored)?;
+                // A mirror that is not required can fail with no error
+                // here; the leg is marked only when the database holds
+                // the event, as after the first append.
+                verify_mirrored_audit_event_after_file_append(state, &actor, &event).await?;
+            }
+            None => {
+                let mut event = TraceCommonsAuditEvent::credit_mutation(
+                    &actor,
+                    item.submission_id,
+                    points,
+                    item.reason.as_deref(),
+                );
+                event.event_id = item.credit_event_id;
+                append_audit_event_mirrored(
+                    state,
+                    &actor,
+                    event,
+                    row,
+                    "pipeline credit audit event",
+                )
+                .await?;
+            }
+        }
+    }
+    service.store().mark_credit_audited(tenant_id, item).await?;
+    Ok(())
 }
 
 /// The tenant's file audit events whose id is the credit event id of one of

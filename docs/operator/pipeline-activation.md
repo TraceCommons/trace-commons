@@ -846,7 +846,16 @@ actor is the issuer in the role `vector_worker` (for a minimal-family
 `accepted` event, the pipeline worker, role `system`), and its metadata
 holds the event type, the delta, and hashes of the reason and the source
 key. The leg is marked audited (`credit_audited_at`) once the event is
-appended.
+appended. An event the worker cannot append, mirror or verify is logged as
+`pipeline_worker_credit_audit_item_failed` (with the tenant's
+`tenant_storage_ref` and a hash of the event id); its leg stays unmarked and
+is tried again on each pass, and the tenant's later events are not held
+back. When the database refuses the mirror of an event that is in the file
+log only on each pass, the tenant's database audit chain is past that event:
+run the audit-chain drill and follow
+[audit-trail-forensics.md](audit-trail-forensics.md); the audit-chain repair
+route restores file lines from database rows and does not add the missing
+database row.
 
 A credit hold on the contributor does not stop this event, as it does not on
 `main`: holds gate settlement batches and payouts only.
