@@ -364,6 +364,11 @@ pub struct MonitorScreensCopy {
     /// cover, from `window_hours` on `inference_calls` and
     /// `tool_destinations`. `{hours}` is replaced with a number.
     pub window_last_hours: &'static str,
+    /// DRAFT, NEEDS APPROVAL. History's word for a contribution whose
+    /// status is `submitted`: sent, and not yet scored. The shipping
+    /// History's sentence, moved here; never "Submitted", which reads as
+    /// done.
+    pub history_submitted: &'static str,
 }
 
 /// The one table of the monitor screens' words. See [`MonitorScreensCopy`].
@@ -432,6 +437,7 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
         projected_note: "Projected credit is an estimate for a contribution that matches a mission. \
             It is not earned until a contribution is accepted and scored.",
         window_last_hours: "Last {hours} hours",
+        history_submitted: "Waiting to be scored",
     }
 }
 
@@ -458,6 +464,8 @@ mod tests {
         assert!(copy.history_shown.contains("{shown}") && !copy.history_shown.contains("{total}"));
         // The Inference tab's window carries its number's place.
         assert!(copy.window_last_hours.contains("{hours}"));
+        // A submission is said as waiting, never as done.
+        assert_ne!(copy.history_submitted, "Submitted");
         // Projected mission credit is never said as pending.
         assert_ne!(copy.projected, copy.pending);
         assert!(copy.projected_note.contains("not earned"));

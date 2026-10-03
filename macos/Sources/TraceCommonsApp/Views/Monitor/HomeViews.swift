@@ -217,7 +217,7 @@ struct HistoryRowView: View {
                     .foregroundStyle(GlassColor.textSecondary)
             }
             if let status = row.status {
-                GlassTag(statusLabel(status) ?? status, tone: HomeFormat.tone(status))
+                GlassTag(HomeFormat.statusWord(status, table: MonitorWords.table, fallback: statusLabel), tone: HomeFormat.tone(status))
                     .fixedSize()
             }
         }
@@ -400,6 +400,17 @@ enum HomeFormat {
     /// summary, not per row.
     static func credit(_ row: DaemonData.HistoryRow) -> String? {
         row.creditPointsFinal.map(points)
+    }
+
+    /// A row's status tag. A submission is said in History's own words
+    /// (waiting to be scored), not the shared status label, which reads
+    /// "Submitted" as though it were done. Every other status takes the
+    /// shared label, then the raw value.
+    static func statusWord(
+        _ status: String, table: MonitorScreensCopy?, fallback: (String) -> String?
+    ) -> String {
+        if status == "submitted", let word = table?.historySubmitted { return word }
+        return fallback(status) ?? status
     }
 
     /// Accepted reads as done; held for review and submitted as waiting;
