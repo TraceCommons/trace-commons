@@ -1686,6 +1686,13 @@ fn resolve_cwd(
         .or_else(|| source.load(session_ref).ok().and_then(|t| t.cwd));
     // Resolved before the lock: it canonicalizes the path on disk.
     let project_key = project_for(cwd.as_deref()).0;
+    // K11: which tool this session reads as -- `SessionRef::displayed_source`,
+    // the declared source over the adapter that stores it, the rule
+    // `commands::session_row` applies too. So an imported Antigravity
+    // conversation is counted as "antigravity" here, not as the
+    // `trajectory` adapter that happens to read it. For a staged import that
+    // name is self-declared; see the method's doc.
+    let tool = session_ref.displayed_source().to_string();
     let mut state = shared.state.lock().expect("state lock");
     state.cwd_cache.insert(
         key,
@@ -1694,6 +1701,7 @@ fn resolve_cwd(
             modified_at: obs.modified_at,
             cwd: cwd.clone(),
             project_key: Some(project_key),
+            tool: Some(tool),
         },
     );
     cwd
@@ -3068,6 +3076,7 @@ mod tests {
             // The witness the disclosure screen would have shown: the one
             // configured now.
             params: serde_json::json!({
+                "confirmed": true,
                 "witness_signing_address": f
                     .shared
                     .store
@@ -3142,9 +3151,16 @@ mod tests {
     async fn the_enforced_gate_holds_a_session_in_a_project_the_grant_armed() {
         ENFORCE_GATE_FOR_TEST.with(|c| c.set(true));
         let f = WatcherFixture::new();
-        f.shared.store.save_config(&grant_test_cfg(&[])).unwrap();
+        // The daemon refuses a grant over an empty scope list, so the grant
+        // is given under a chosen scope; narrowing the list to nothing
+        // afterwards is what the enforced gate refuses on.
+        f.shared
+            .store
+            .save_config(&grant_test_cfg(&["debugging_evaluation"]))
+            .unwrap();
         f.write_session("old", "11111111-1111-1111-1111-111111111111", 0);
         grant_automatic(&f);
+        f.shared.store.save_config(&grant_test_cfg(&[])).unwrap();
         f.settle(Utc::now() + chrono::Duration::hours(30)).await;
         f.write_session("old", "22222222-2222-2222-2222-222222222222", 0);
         f.write_session("new", "33333333-3333-3333-3333-333333333333", 0);
@@ -3556,6 +3572,26 @@ mod tests {
         f.write_session("beta", "22222222-2222-2222-2222-222222222222", 0);
         let report = f.settle(at("2030-01-01T00:00:00Z")).await;
         assert_eq!(report.queued, 2, "{report:?}");
+    }
+
+    /// K11: the watcher records which tool a session came from in the cwd
+    /// cache entry it writes, not just the cwd and project key.
+    #[tokio::test]
+    async fn resolve_cwd_records_the_adapter_that_discovered_the_session() {
+        let f = WatcherFixture::new();
+        let path = f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+
+        let state = f.shared.state.lock().unwrap();
+        let entry = state
+            .cwd_cache
+            .get(path.to_str().unwrap())
+            .expect("the session's cwd cache entry must exist after a settled pass");
+        assert_eq!(
+            entry.tool.as_deref(),
+            Some(crate::source::SOURCE_CLAUDE_CODE),
+            "a Claude Code session must record its own adapter as the tool"
+        );
     }
 
     #[tokio::test]

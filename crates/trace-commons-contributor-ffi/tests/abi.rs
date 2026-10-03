@@ -5532,3 +5532,252 @@ fn the_withdrawal_confirmation_prompt_crosses_the_abi() {
     assert_eq!(prompt, confirmation_prompt_unknown());
     assert!(prompt.contains("cannot be recalled"));
 }
+
+// ---------------------------------------------------------------------------
+// K5 (#1173): the disclosure bundle and the Flow 1 decisions cross the ABI
+// as the core takes them.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_disclosure_bundle_crosses_the_abi_with_the_state_map() {
+    use trace_commons_contributor::disclosure_copy::contributor_disclosure_copy;
+    use trace_commons_contributor::private_inference_copy::{
+        LABEL_CRASHED, LABEL_RUNNING, STATE_LABELS, state_line,
+    };
+    use trace_commons_contributor_ffi::tc_contributor_disclosure_copy_json;
+    let value = json_owned(tc_contributor_disclosure_copy_json());
+    assert_eq!(value, contributor_disclosure_copy());
+    let states = value["private_inference"]["states"].as_object().unwrap();
+    assert_eq!(states.len(), STATE_LABELS.len());
+    assert_eq!(states[LABEL_RUNNING]["working"], true);
+    assert_eq!(states[LABEL_CRASHED]["working"], false);
+    assert_eq!(states[LABEL_CRASHED]["line"], state_line(LABEL_CRASHED));
+}
+
+fn write_config(dir: &std::path::Path, scopes: &[&str], chosen: bool) {
+    let config = serde_json::json!({
+        "schema_version": trace_commons_contributor::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION,
+        "issuer_url": "https://issuer.invalid",
+        "ingest_url": "https://ingest.invalid",
+        "audience": "aud",
+        "tenant_id": "tenant-1",
+        "instance_id": "instance-1",
+        "user_subject": "alice",
+        "device_key_id": "sha256:aa",
+        "consent_scopes": scopes,
+        "consent_scopes_chosen": chosen,
+    });
+    std::fs::write(
+        dir.join("contributor.json"),
+        serde_json::to_vec(&config).unwrap(),
+    )
+    .unwrap();
+}
+
+#[test]
+fn the_grant_precondition_crosses_the_abi_with_its_refusal_labels() {
+    use trace_commons_contributor::flow1::{
+        CONFIG_UNREADABLE, GRANT_CONFIRMATION_REQUIRED, GRANT_NOT_ENROLLED, GRANT_SCOPE_REQUIRED,
+    };
+    use trace_commons_contributor_ffi::tc_grant_precondition_text;
+    let dir = tempfile::tempdir().unwrap();
+    let path = cstr(dir.path());
+    let precondition = |confirmed: i32| {
+        take_owned(unsafe { tc_grant_precondition_text(confirmed, path.as_ptr()) })
+    };
+    // Not enrolled: no configuration at all.
+    assert_eq!(precondition(1), GRANT_NOT_ENROLLED);
+    // The button comes first, and only 1 presses it.
+    assert_eq!(precondition(0), GRANT_CONFIRMATION_REQUIRED);
+    assert_eq!(precondition(2), GRANT_CONFIRMATION_REQUIRED);
+    // A saved floor scope nobody picked is not a choice.
+    write_config(dir.path(), &["debugging_evaluation"], false);
+    assert_eq!(precondition(1), GRANT_SCOPE_REQUIRED);
+    write_config(dir.path(), &["debugging_evaluation"], true);
+    assert_eq!(precondition(1), "");
+    // A configuration that cannot be read is refused, not guessed at.
+    std::fs::write(dir.path().join("contributor.json"), "not json").unwrap();
+    assert_eq!(precondition(1), CONFIG_UNREADABLE);
+    assert!(unsafe { tc_grant_precondition_text(1, std::ptr::null()) }.is_null());
+}
+
+#[test]
+fn the_scope_choice_crosses_the_abi_from_consent_options() {
+    use trace_commons_contributor_ffi::tc_scope_choice_json;
+    let options =
+        serde_json::to_string(&trace_commons_contributor::daemon::enroll::consent_options())
+            .unwrap();
+    let options = cstr_str(&options);
+    let floor = trace_commons_contributor::consent::VALID_SCOPES[0];
+    let choice = |selected: &str| {
+        let selected = cstr_str(selected);
+        json_owned(unsafe { tc_scope_choice_json(options.as_ptr(), selected.as_ptr()) })
+    };
+    let none = choice("[]");
+    assert_eq!(none["can_continue"], false);
+    assert_eq!(none["missing_required"], serde_json::json!([floor]));
+    assert_eq!(choice(&format!("[\"{floor}\"]"))["can_continue"], true);
+    assert_eq!(
+        choice(&format!("[\"{floor}\",\"invented\"]"))["can_continue"],
+        false
+    );
+    // The bare array reads the same as the consent_options object.
+    let array = cstr_str(r#"[{"name":"a","always_on":true}]"#);
+    let selected = cstr_str(r#"["a"]"#);
+    assert_eq!(
+        json_owned(unsafe { tc_scope_choice_json(array.as_ptr(), selected.as_ptr()) })["can_continue"],
+        true
+    );
+    let garbage = cstr_str("not json");
+    assert!(unsafe { tc_scope_choice_json(garbage.as_ptr(), selected.as_ptr()) }.is_null());
+    assert!(unsafe { tc_scope_choice_json(array.as_ptr(), garbage.as_ptr()) }.is_null());
+    assert!(unsafe { tc_scope_choice_json(std::ptr::null(), selected.as_ptr()) }.is_null());
+}
+
+#[test]
+fn the_flow1_steps_cross_the_abi_and_back_undoes_the_disclosures() {
+    use trace_commons_contributor_ffi::{tc_flow1_apply_json, tc_flow1_start_json};
+    let first = json_owned(tc_flow1_start_json(0));
+    assert_eq!(first["step"], "welcome");
+    let regrant = json_owned(tc_flow1_start_json(1));
+    assert_eq!(regrant["step"], "consent");
+    assert_eq!(regrant["progress"]["scopes_saved"], serde_json::Value::Null);
+
+    let apply = |state: &serde_json::Value, event: serde_json::Value| {
+        let state = cstr_str(&state.to_string());
+        let event = cstr_str(&event.to_string());
+        json_owned(unsafe { tc_flow1_apply_json(state.as_ptr(), event.as_ptr()) })
+    };
+    let mut state = regrant;
+    for (event, step) in [
+        (
+            serde_json::json!({"event": "scopes_saved", "scopes": ["debugging_evaluation"]}),
+            "path",
+        ),
+        (
+            serde_json::json!({"event": "choose_path", "path": "automatic", "show_privacy": false}),
+            "inference",
+        ),
+        (
+            serde_json::json!({"event": "inference_finished"}),
+            "disclosure_scrub",
+        ),
+        (
+            serde_json::json!({"event": "scrub_disclosure_read"}),
+            "disclosure_witness",
+        ),
+        (
+            serde_json::json!({"event": "witness_disclosure_read", "signing_address": "0xabc"}),
+            "grant",
+        ),
+    ] {
+        state = apply(&state, event);
+        assert_eq!(state["step"], step);
+    }
+    assert_eq!(state["progress"]["witness_shown"], "0xabc");
+    let back = apply(&state, serde_json::json!({"event": "back"}));
+    assert_eq!(back["step"], "disclosure_witness");
+    assert_eq!(back["progress"]["scrub_disclosure_seen"], false);
+    assert_eq!(back["progress"]["witness_disclosure_seen"], false);
+    assert_eq!(back["progress"]["witness_shown"], serde_json::Value::Null);
+
+    let state_c = cstr_str(&state.to_string());
+    let unknown = cstr_str(r#"{"event": "grant_anyway"}"#);
+    assert!(unsafe { tc_flow1_apply_json(state_c.as_ptr(), unknown.as_ptr()) }.is_null());
+    // A known event the step on screen does not offer moves nothing: the
+    // scrub disclosure "read" from the grant screen, and Back from the
+    // welcome.
+    let scrub = cstr_str(r#"{"event": "scrub_disclosure_read"}"#);
+    assert!(unsafe { tc_flow1_apply_json(state_c.as_ptr(), scrub.as_ptr()) }.is_null());
+    let welcome = cstr_str(&first.to_string());
+    let back_c = cstr_str(r#"{"event": "back"}"#);
+    assert!(unsafe { tc_flow1_apply_json(welcome.as_ptr(), back_c.as_ptr()) }.is_null());
+    assert!(unsafe { tc_flow1_apply_json(std::ptr::null(), unknown.as_ptr()) }.is_null());
+    let garbage = cstr_str("not json");
+    let back_event = cstr_str(r#"{"event": "back"}"#);
+    assert!(unsafe { tc_flow1_apply_json(garbage.as_ptr(), back_event.as_ptr()) }.is_null());
+}
+
+#[test]
+fn the_grant_blockers_and_request_cross_the_abi() {
+    use trace_commons_contributor_ffi::{
+        tc_flow1_grant_blockers_json, tc_flow1_grant_request_json,
+    };
+    let empty = cstr_str("{}");
+    assert_eq!(
+        json_owned(unsafe { tc_flow1_grant_blockers_json(empty.as_ptr()) }),
+        serde_json::json!([
+            "connect",
+            "scope",
+            "path",
+            "scrub_disclosure",
+            "witness_disclosure"
+        ])
+    );
+    let refused = json_owned(unsafe { tc_flow1_grant_request_json(empty.as_ptr()) });
+    assert_eq!(refused["ready"], false);
+    assert_eq!(refused["blockers"].as_array().unwrap().len(), 5);
+    assert_eq!(refused["witness_signing_address"], serde_json::Value::Null);
+
+    let complete = serde_json::json!({
+        "connected": true,
+        "scopes_saved": ["debugging_evaluation"],
+        "path": "automatic",
+        "scrub_disclosure_seen": true,
+        "witness_disclosure_seen": true,
+        "witness_shown": "0xshown",
+    });
+    let complete_c = cstr_str(&complete.to_string());
+    assert_eq!(
+        json_owned(unsafe { tc_flow1_grant_blockers_json(complete_c.as_ptr()) }),
+        serde_json::json!([])
+    );
+    assert_eq!(
+        json_owned(unsafe { tc_flow1_grant_request_json(complete_c.as_ptr()) }),
+        serde_json::json!({"ready": true, "blockers": [], "witness_signing_address": "0xshown"})
+    );
+    // One step undone holds the witness back too.
+    let mut unread = complete.clone();
+    unread["witness_disclosure_seen"] = serde_json::json!(false);
+    let unread = cstr_str(&unread.to_string());
+    assert_eq!(
+        json_owned(unsafe { tc_flow1_grant_request_json(unread.as_ptr()) }),
+        serde_json::json!({
+            "ready": false,
+            "blockers": ["witness_disclosure"],
+            "witness_signing_address": null,
+        })
+    );
+    let garbage = cstr_str("not json");
+    assert!(unsafe { tc_flow1_grant_blockers_json(garbage.as_ptr()) }.is_null());
+    assert!(unsafe { tc_flow1_grant_request_json(std::ptr::null()) }.is_null());
+}
+
+#[test]
+fn the_regrant_void_notice_crosses_the_abi_only_on_the_grants_notice() {
+    use trace_commons_contributor::consent_copy::{
+        VOID_GRANT_REGRANT, VOID_GRANT_REGRANT_ACTION, void_notice_for_wire_with_regrant,
+    };
+    use trace_commons_contributor_ffi::tc_grant_void_notice_regrant_json;
+    let grant = serde_json::json!({
+        "id": 2, "kind": "automatic_grant", "project_id": null, "project_label": null,
+        "reasons": ["witness-changed"], "voided_at": "2026-09-26T00:00:00Z",
+    });
+    let grant_c = cstr_str(&grant.to_string());
+    let notice = json_owned(unsafe { tc_grant_void_notice_regrant_json(grant_c.as_ptr()) });
+    assert_eq!(
+        notice,
+        serde_json::to_value(void_notice_for_wire_with_regrant(&grant).unwrap()).unwrap()
+    );
+    assert_eq!(notice["regrant"], VOID_GRANT_REGRANT);
+    assert_eq!(notice["regrant_action"], VOID_GRANT_REGRANT_ACTION);
+    let project = cstr_str(
+        r#"{"id": 1, "kind": "project", "project_id": "p", "project_label": "api", "reasons": ["witness-changed"]}"#,
+    );
+    let project = json_owned(unsafe { tc_grant_void_notice_regrant_json(project.as_ptr()) });
+    assert!(project["regrant"].is_null());
+    assert!(project["regrant_action"].is_null());
+    let not_an_object = cstr_str(r#""project""#);
+    assert!(unsafe { tc_grant_void_notice_regrant_json(not_an_object.as_ptr()) }.is_null());
+    assert!(unsafe { tc_grant_void_notice_regrant_json(std::ptr::null()) }.is_null());
+}

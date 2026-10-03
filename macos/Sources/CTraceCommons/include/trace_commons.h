@@ -2424,6 +2424,79 @@ char*       tc_withdrawal_confirmation_prompt_text(void);
  */
 char*       tc_privacy_scan_copy_json(void);
 
+/* ------------------------------------------------------------------------
+ * K5 (#1173): the disclosure bundle and the Flow 1 decisions, which were
+ * taken in the Tauri shell and are now core functions. Each export is the
+ * C ABI route to one of them; none chooses or writes anything itself.
+ * Every returned char* is owned; free it with tc_string_free.
+ * ------------------------------------------------------------------------ */
+
+/* The disclosure bundle (disclosure_copy::contributor_disclosure_copy): the
+ * object Tauri's contributor_disclosure_copy command returns.
+ * private_inference.states maps each runtime state label to {line,
+ * working}; a label not in it is private_inference.state_unknown, an absent
+ * one private_inference.state_unreported, neither working. NULL only on a
+ * caught panic.
+ */
+char*       tc_contributor_disclosure_copy_json(void);
+
+/* The check before asking for the Flow 1 grant (flow1::grant_precondition)
+ * for the configuration in config_dir. confirmed is the grant screen's
+ * button: 1 pressed, anything else not. The EMPTY STRING when the grant may
+ * be asked for, otherwise the refusal label:
+ * automatic-grant-confirmation-required, automatic-grant-not-enrolled,
+ * automatic-grant-scope-required or contributor-config-unreadable. NULL for
+ * an unreadable config_dir and on a caught panic.
+ */
+char*       tc_grant_precondition_text(int32_t confirmed, const char* config_dir);
+
+/* Whether the scope picker may continue (flow1::scope_choice):
+ * {can_continue, missing_required}. options_json is consent_options' answer
+ * ({"scopes": [...]} or its array); selected_json a JSON array of the names
+ * ticked. NULL for an unreadable argument and on a caught panic.
+ */
+char*       tc_scope_choice_json(const char* options_json, const char* selected_json);
+
+/* Where the Flow 1 onboarding starts (flow1::start): {step, progress,
+ * privacy_included}. regrant 1 is the re-grant, from the scope picker with
+ * nothing carried over; anything else a first run. NULL only on a caught
+ * panic.
+ */
+char*       tc_flow1_start_json(int32_t regrant);
+
+/* The Flow 1 onboarding's next state (flow1::apply): state_json as last
+ * returned, event_json {"event": <name>, ...}. The step order, Back, and
+ * which events leave the disclosures unread are the core's. Set
+ * progress.connected from the daemon's status before each call. NULL for an
+ * unreadable argument, an unknown event, an event the step on screen does
+ * not offer (Back from the welcome or once done included) and on a caught
+ * panic; a NULL leaves the state the shell holds as it was.
+ */
+char*       tc_flow1_apply_json(const char* state_json, const char* event_json);
+
+/* The steps still standing before the grant (flow1::grant_blockers): a JSON
+ * array of connect, scope, path, scrub_disclosure, witness_disclosure, in
+ * that order; empty when none. A missing progress field reads as not done.
+ * NULL for an unreadable progress_json and on a caught panic.
+ */
+char*       tc_flow1_grant_blockers_json(const char* progress_json);
+
+/* Whether the grant may be asked for now (flow1::grant_request): {ready,
+ * blockers, witness_signing_address}. ready exactly when blockers is empty;
+ * only then is witness_signing_address the witness the disclosure screen
+ * showed (null for none). NULL for an unreadable progress_json and on a
+ * caught panic.
+ */
+char*       tc_flow1_grant_request_json(const char* progress_json);
+
+/* tc_grant_void_notice's object plus regrant and regrant_action, for a shell
+ * that can give the Flow 1 grant (consent_copy::
+ * void_notice_for_wire_with_regrant): present on the automatic grant's
+ * notice, null on a project's. NULL for an unreadable argument, one that is
+ * not an object, and on a caught panic.
+ */
+char*       tc_grant_void_notice_regrant_json(const char* void_json);
+
 /* The "keychain" block of the private-AI credential status
  * (DaemonSettings::keychain_status_json): what the credential store at
  * config_dir holds, as labels and booleans only -- never the inference key,

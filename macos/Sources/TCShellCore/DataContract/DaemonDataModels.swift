@@ -954,11 +954,19 @@ extension DaemonData {
         public let sessionsRoute: String?
         public let folders: FolderCounts?
         public let tools: [ToolDestination]
+        /// The window `counts` cover, in hours (K14): the same 24 hours
+        /// `inference_calls` uses.
+        public let windowHours: Int?
+        /// The window's listed calls no tool can be named for (K14). `nil`
+        /// when no ledger answered -- not zero.
+        public let unattributedCalls: Int?
 
         public enum CodingKeys: String, CodingKey {
             case folders, tools
             case privateAi = "private_ai"
             case sessionsRoute = "sessions_route"
+            case windowHours = "window_hours"
+            case unattributedCalls = "unattributed_calls"
         }
     }
 
@@ -978,12 +986,28 @@ extension DaemonData {
         public let name: String?
         public let sessions: SessionRoute?
         public let modelCalls: ModelCallRoute?
+        /// The map's per-tool node counts over `windowHours` (K14).
+        public let counts: ToolCounts?
 
         public var id: String { tool }
 
         public enum CodingKeys: String, CodingKey {
-            case tool, name, sessions
+            case tool, name, sessions, counts
             case modelCalls = "model_calls"
+        }
+    }
+
+    /// One tool's counts for the window. `nil` is "could not be read",
+    /// never zero.
+    public struct ToolCounts: Codable, Equatable, Sendable {
+        /// Sessions, once per session hash, under the tool each reads as.
+        public let sessions: Int?
+        /// Exactly the `inference_calls` rows naming this tool.
+        public let inferenceCalls: Int?
+
+        public enum CodingKeys: String, CodingKey {
+            case sessions
+            case inferenceCalls = "inference_calls"
         }
     }
 

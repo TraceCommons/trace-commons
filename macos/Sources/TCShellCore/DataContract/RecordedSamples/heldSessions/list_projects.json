@@ -10,6 +10,13 @@
       "is_unresolved_bucket": false,
       "session_count": 22,
       "last_session_at": "2026-09-30T09:00:00Z",
+      "tools": [
+        {
+          "source": "claude-code",
+          "session_count": 22,
+          "answers_at": "Anthropic"
+        }
+      ],
       "pending_count": 2,
       "automatic_disclosure": "patterns_only",
       "from_now": false
@@ -24,6 +31,13 @@
       "is_unresolved_bucket": false,
       "session_count": 9,
       "last_session_at": "2026-09-30T09:00:00Z",
+      "tools": [
+        {
+          "source": "claude-code",
+          "session_count": 9,
+          "answers_at": "Anthropic"
+        }
+      ],
       "pending_count": 2,
       "automatic_disclosure": "patterns_only",
       "from_now": false
