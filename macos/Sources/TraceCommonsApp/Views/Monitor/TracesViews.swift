@@ -72,19 +72,13 @@ struct TracesTreeView: View {
             if let notice = store.folderNotice {
                 GlassNotice(tone: .ask) { Text(notice) }
             }
-            // Why approved sessions are not moving, beside the tree and
-            // before Contribute is reached, in the words the main window uses.
-            ForEach(store.safeguards, id: \.title) { safeguard in
-                GlassNotice(tone: .ask, title: safeguard.title) {
-                    if let body = safeguard.body { Text(body) }
-                }
-            }
-            if case .failed(let error) = store.phase, let line = store.words?.line(for: error) {
-                // The core's line for a core that does not answer, or for a
-                // refused request; never the error's fixed label. The last
-                // good tree stays below it.
-                GlassNotice(tone: .outside, title: line) { EmptyView() }
-            }
+            // Why approved sessions are not moving, or that the core is not
+            // answering, beside the tree and before Contribute is reached.
+            // The last good tree stays below a failed refresh. An unread
+            // status is never drawn as healthy.
+            ForEach(TracesHealth.banners(
+                phase: store.phase, status: store.status, words: store.words, coreDown: TracesHealth.coreDownLine)
+            ) { GlassHealthBanner(banner: $0) }
             if store.phase == .loading && isEmpty {
                 ProgressView().controlSize(.small).frame(maxWidth: .infinity)
             } else if isEmpty && store.phase == .loaded {
