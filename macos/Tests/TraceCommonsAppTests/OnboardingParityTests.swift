@@ -31,10 +31,10 @@ final class OnboardingParityTests: XCTestCase {
         Step(file: "Views/OnboardingRootsView.swift",
              bindings: ["SessionRoots()", "roots.watch(", "roots.isComplete", "roots.settingsJSON()",
                         "TCDiscovery.sourcesJSON()", "SourceCandidate.decodeList(", "model.isStartingDaemon",
-                        "model.startDaemon(at:", "GlassSourceRow(", "TCDaemon.TCError.rootsNotDeclared"],
-             copySources: ["OnboardingRootsWords.heading", "OnboardingRootsWords.readsTranscripts",
-                           "OnboardingRootsWords.answerForBoth", "OnboardingRootsWords.optionalRows",
-                           "OnboardingRootsWords.answerBeforeContinuing"],
+                        "model.startDaemon(at:", "GlassSourceRow(kind:", "Button(OnboardingRootsWords.continueButton)", "TCDaemon.TCError.rootsNotDeclared"],
+             copySources: ["Text(OnboardingRootsWords.heading)", "Text(OnboardingRootsWords.readsTranscripts)",
+                           "Text(OnboardingRootsWords.answerForBoth)", "Text(OnboardingRootsWords.optionalRows)",
+                           "failure = OnboardingRootsWords.answerBeforeContinuing"],
              guards: [".disabled(!roots.isComplete || model.isStartingDaemon)"]),
     ]
 
@@ -53,6 +53,15 @@ final class OnboardingParityTests: XCTestCase {
                 XCTAssertTrue(source.contains(needle), "\(step.file) lacks \(needle)")
             }
         }
+    }
+
+    /// The Folders step scrolls exactly once, whichever host draws it: the
+    /// wrapper owns the only ScrollView and the activation host adds none.
+    func test_foldersStepScrollsOnce() throws {
+        let roots = try Self.text("Views/OnboardingRootsView.swift")
+        XCTAssertEqual(roots.components(separatedBy: "ScrollView {").count - 1, 1)
+        let host = try Self.text("Views/PrivateInferenceActivationView.swift")
+        XCTAssertFalse(host.contains("ScrollView {"), "the activation host nests a second ScrollView")
     }
 
     /// No rebuilt step reads the legacy palette.

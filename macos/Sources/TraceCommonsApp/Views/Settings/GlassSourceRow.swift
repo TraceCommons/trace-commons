@@ -124,6 +124,10 @@ struct GlassSourceRow: View {
                 }
             }
             .accessibilityElement(children: .contain)
+        } else {
+            // No core copy: name the source so the step is not blank. No
+            // control reads as answered, so Continue stays disabled.
+            Text(kind.displayName).glassType(GlassTokens.TypeScale.bodyStrong)
         }
     }
 

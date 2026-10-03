@@ -40,8 +40,6 @@ import TCShellCore
 /// `~/.codex/sessions` -- so the one answer a blank field cannot give is the
 /// one a contributor who does not use that agent needs to give.
 struct OnboardingRootsView: View {
-    @EnvironmentObject private var model: AppModel
-
     /// Where the daemon will be started once the roots are declared. Passed
     /// in rather than re-resolved so the screen and the start agree even if
     /// the environment changes underneath them.
@@ -51,25 +49,61 @@ struct OnboardingRootsView: View {
     /// comes next.
     var onStarted: () -> Void
 
+    /// Which rows this screen offers, in order.
+    ///
+    /// Derived from `allCases` rather than written out, because writing it
+    /// out is exactly how Gemini went missing: the screen listed Claude Code
+    /// and Codex, `gemini-cli` was added to the Rust source registry, and
+    /// nothing connected the two. The Gemini candidate was fetched by
+    /// `discover()` and dropped for want of a row.
+    ///
+    /// Nothing complained, and each silence was by design. `gemini-cli` is
+    /// `Undeclared::Nothing`, so an absent declaration constructs no adapter
+    /// -- that is what stops a shell built before the source existed from
+    /// scanning a contributor's real `~/.gemini`. And `isComplete` is
+    /// deliberately two-conjunct, so an unanswered Gemini row cannot block
+    /// Continue. Correct choices both, and together they meant the screen
+    /// could stop asking about a whole source without anything noticing.
+    ///
+    /// A new adapter now appears here by being added to `SourceKind`; Cline
+    /// arrived that way, with the same optional treatment as Gemini.
+    static let offeredKinds: [SourceKind] = SourceKind.allCases
+
+    /// The one scroll for this step, in the wrapper as on Welcome, so every
+    /// host scrolls exactly once and none nests a second `ScrollView`.
+    var body: some View {
+        ScrollView {
+            OnboardingRootsContent(
+                configDirectory: configDirectory, onStarted: onStarted)
+        }
+    }
+}
+
+/// The step's layout, split out of its `ScrollView` the way
+/// `OnboardingWelcomeContent` is.
+struct OnboardingRootsContent: View {
+    @EnvironmentObject private var model: AppModel
+
+    let configDirectory: String
+    var onStarted: () -> Void
+
     @State private var roots = SessionRoots()
     @State private var candidates: [SourceCandidate] = []
     @State private var failure: String?
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: GlassTokens.Space.s6) {
-                header
-                explanation
-                rows
-                    .disabled(model.isStartingDaemon)
-                if let failure {
-                    GlassNotice(tone: .outside) { Text(failure) }
-                }
-                actions
+        VStack(alignment: .leading, spacing: GlassTokens.Space.s6) {
+            header
+            explanation
+            rows
+                .disabled(model.isStartingDaemon)
+            if let failure {
+                GlassNotice(tone: .outside) { Text(failure) }
             }
-            .padding(GlassTokens.Space.panePadding)
-            .frame(maxWidth: .infinity, alignment: .leading)
+            actions
         }
+        .padding(GlassTokens.Space.panePadding)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .onAppear(perform: discover)
     }
 
@@ -95,37 +129,17 @@ struct OnboardingRootsView: View {
 
     // MARK: - Rows
 
-    /// Which rows this screen offers, in order.
-    ///
-    /// Derived from `allCases` rather than written out, because writing it
-    /// out is exactly how Gemini went missing: the screen listed Claude Code
-    /// and Codex, `gemini-cli` was added to the Rust source registry, and
-    /// nothing connected the two. The Gemini candidate was fetched by
-    /// `discover()` and dropped for want of a row.
-    ///
-    /// Nothing complained, and each silence was by design. `gemini-cli` is
-    /// `Undeclared::Nothing`, so an absent declaration constructs no adapter
-    /// -- that is what stops a shell built before the source existed from
-    /// scanning a contributor's real `~/.gemini`. And `isComplete` is
-    /// deliberately two-conjunct, so an unanswered Gemini row cannot block
-    /// Continue. Correct choices both, and together they meant the screen
-    /// could stop asking about a whole source without anything noticing.
-    ///
-    /// A new adapter now appears here by being added to `SourceKind`; Cline
-    /// arrived that way, with the same optional treatment as Gemini.
-    static let offeredKinds: [SourceKind] = SourceKind.allCases
 
     private var rows: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
-            ForEach(Self.offeredKinds, id: \.self) { kind in
+            ForEach(OnboardingRootsView.offeredKinds, id: \.self) { kind in
                 row(for: kind)
             }
         }
     }
 
     private func row(for kind: SourceKind) -> some View {
-        GlassSourceRow(
-            kind: kind,
+        GlassSourceRow(kind: kind,
             candidate: candidates.first { $0.source == kind },
             choice: roots[kind],
             onWatchCandidate: { roots.watch($0) },
