@@ -427,7 +427,7 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
         quit: "Quit…",
         core_unreachable: MONITOR_CORE_UNREACHABLE,
         request_failed: MONITOR_REQUEST_FAILED,
-        held_for_review: "Held for privacy review",
+        held_for_review: crate::history_copy::HELD_FOR_PRIVACY_REVIEW,
         held_explanation: "Automated checks saw something that might be personal and couldn't decide on their own. It has not been rejected, and it has not been shared with anyone but the reviewer.",
         credit_not_currency: "A credit is a signed record that a contribution was accepted. It is not currency.",
         history_shown_of: "Showing the newest {shown} of {total}",
@@ -437,7 +437,7 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
         projected_note: "Projected credit is an estimate for a contribution that matches a mission. \
             It is not earned until a contribution is accepted and scored.",
         window_last_hours: "Last {hours} hours",
-        history_submitted: "Waiting to be scored",
+        history_submitted: crate::history_copy::WAITING_TO_BE_SCORED,
     }
 }
 
