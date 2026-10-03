@@ -256,6 +256,14 @@ also requires:
 
 - every result to carry the same `code_revision_hash`
   (`qualification_evidence_mixed_revision` otherwise);
+- the 19 results that `qualify` produces to carry the same `run_id`
+  (`qualification_evidence_mixed_run` otherwise). The evidence of a bundle is
+  the output of one `qualify` run plus the three promotion-only results. A set
+  cannot take one result from one `qualify` run and the rest from another run,
+  on the same revision or not. The three promotion-only results can come from
+  other runs: their run ids are not compared. `PROMOTION_ONLY_CHECKS` holds
+  the three ids. The rule applies at the qualification, at the activation, and
+  at the rollback;
 - no result to carry a safe blocker, a passing one included. Each blocker is
   listed as `<label>:<check_id>`. A local restore drill passes with the blocker
   `filesystem_restore_local_only`, so a local result set is never ready;
@@ -293,10 +301,11 @@ hash). Three consequences:
   a second field, `blockers`: the decision's blockers as labels, each
   `<label>:<check_id>` for one check (for example
   `qualification_evidence_stale:pipeline_crash_matrix`), or a label alone for
-  the whole set (`qualification_evidence_mixed_revision`). A ready decision
-  needs each of the 22 ids once, each `pass`, each inside its maximum age, one
-  revision, the package named by the four candidate checks only, and no safe
-  blocker.
+  the whole set (`qualification_evidence_mixed_revision`,
+  `qualification_evidence_mixed_run`). A ready decision needs each of the 22
+  ids once, each `pass`, each inside its maximum age, one revision, one run
+  for the 19 results of `qualify`, the package named by the four candidate
+  checks only, and no safe blocker.
 
 ## Signed check results
 

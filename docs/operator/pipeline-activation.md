@@ -673,7 +673,12 @@ writes nothing.
    `409` `bundle_qualification_evidence_age_above_ceiling`. An attestation for
    a check outside the 22 required checks is `409`
    `qualification_evidence_invalid`. The server then evaluates the promotion
-   over the verified results, now.
+   over the verified results, now. The evidence of a bundle is the output of
+   one `qualify` run plus the three promotion-only results. The 19 results of
+   `qualify` must carry one run id, at `qualifications`, `activate`, and
+   `rollback`: a set that mixes two runs is blocked with
+   `qualification_evidence_mixed_run`. The three promotion-only results can
+   come from other runs.
 5. The package. The tenant must have a stored package of the bundle (`404`
    `bundle_package_missing`). A stored package that no longer validates (an
    altered package) is `409` `bundle_package_missing`. The key that signed the
@@ -738,7 +743,9 @@ the first term that fails:
    (`bundle_activation_promotion_not_ready`). The answer names what blocks it:
    the body has a second field, `blockers`, with the decision's blockers as
    labels, for example `["qualification_evidence_stale:pipeline_crash_matrix"]`.
-   A blocker about one check has the form `<label>:<check_id>`. The
+   A blocker about one check has the form `<label>:<check_id>`. A blocker
+   about the whole set is a label alone, for example
+   `qualification_evidence_mixed_run`. The
    qualification route answers its own refusal of such a decision the same way
    (`bundle_qualification_promotion_not_ready` with `blockers`). No other answer
    has the field. See "The result contract, and what makes a result invalid" in
@@ -855,7 +862,9 @@ each deploy of a new revision B, and for each tenant whose row says `pipeline`:
 1. Run `python3 scripts/operator/pipeline.py revision` on tree B, and build B
    with that value.
 2. Run `pipeline.py qualify` on tree B, and get the three promotion-only
-   results for B. Sign the set shortly before you use it.
+   results for B. Use the 19 results of that one run: do not replace one of
+   them with a result of another run (`qualification_evidence_mixed_run`).
+   Sign the set shortly before you use it.
 3. Start one process of build B with a runtime, both trust stores, and the
    production settings, outside client traffic.
 4. Send one `POST /v1/admin/pipeline/qualifications` for each tenant and for

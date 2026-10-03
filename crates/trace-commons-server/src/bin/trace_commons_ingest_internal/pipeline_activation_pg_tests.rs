@@ -3151,7 +3151,25 @@ impl RouteFixture {
         key_id: &str,
         pkcs8: &[u8],
     ) -> Vec<trace_commons_server::versioned_pipeline_qualification::PipelineCheckAttestation> {
-        self.attestations_with(package, &self.revision, key_id, pkcs8, 3_600, None)
+        self.attestations_with(package, &self.revision, key_id, pkcs8, 3_600, None, &[])
+    }
+
+    /// `attestations`, with the result of each check in `other_run` taken
+    /// from a second run (another run id), on the same revision.
+    fn attestations_from_two_runs(
+        &self,
+        package: &trace_commons_gate_api::pipeline::BundlePackage,
+        other_run: &[&str],
+    ) -> Vec<trace_commons_server::versioned_pipeline_qualification::PipelineCheckAttestation> {
+        self.attestations_with(
+            package,
+            &self.revision,
+            ROUTE_CHECK_KEY_ID,
+            &self.check_pkcs8,
+            3_600,
+            None,
+            other_run,
+        )
     }
 
     /// `attestations` for a build of another revision: what an operator
@@ -3168,6 +3186,7 @@ impl RouteFixture {
             &self.check_pkcs8,
             3_600,
             None,
+            &[],
         )
     }
 
@@ -3188,6 +3207,7 @@ impl RouteFixture {
             &self.check_pkcs8,
             maximum_age_seconds,
             stale_check,
+            &[],
         )
     }
 
@@ -3199,6 +3219,7 @@ impl RouteFixture {
         pkcs8: &[u8],
         maximum_age_seconds: u64,
         stale_check: Option<&str>,
+        other_run: &[&str],
     ) -> Vec<trace_commons_server::versioned_pipeline_qualification::PipelineCheckAttestation> {
         use trace_commons_server::versioned_pipeline_qualification::{
             PROMOTION_PACKAGE_CHECKS, PROMOTION_REQUIRED_CHECKS, PipelineCheckResult,
@@ -3206,11 +3227,20 @@ impl RouteFixture {
         };
 
         let dir = tempfile::tempdir().expect("temp dir");
-        let emitter = PipelineCheckEmitter::new(dir.path().to_path_buf(), "admin_routes", revision)
-            .expect("the emitter's run id and revision are valid");
+        let emitter_of = |run_id: &str| {
+            PipelineCheckEmitter::new(dir.path().to_path_buf(), run_id, revision)
+                .expect("the emitter's run id and revision are valid")
+        };
+        let emitter = emitter_of("admin_routes");
+        let other_emitter = emitter_of("admin_routes_other_run");
         PROMOTION_REQUIRED_CHECKS
             .iter()
             .map(|check_id| {
+                let emitter = if other_run.contains(check_id) {
+                    &other_emitter
+                } else {
+                    &emitter
+                };
                 emitter
                     .emit(
                         check_id,
@@ -5264,6 +5294,123 @@ async fn a_refused_promotion_answers_its_blockers() {
         .await;
     assert_eq!(status, StatusCode::OK, "{view}");
     assert_eq!(view["active_bundle_id"], fixture.b.bundle_id);
+}
+
+/// Review round 1, point 5 (amendment A14): the 19 results that `qualify`
+/// produces must come from one run, wherever the promotion is evaluated. A
+/// set with one of them from a second run on the same revision is refused at
+/// the qualification, the activation, and the rollback, with the route's
+/// `409` label and the blocker `qualification_evidence_mixed_run`; nothing is
+/// written. A set whose three promotion-only results come from the second
+/// run qualifies and activates.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_result_set_from_two_runs_is_refused_at_every_route() {
+    use trace_commons_server::versioned_pipeline_qualification::PROMOTION_ONLY_CHECKS;
+
+    let Some(fixture) = RouteFixture::new().await else {
+        return;
+    };
+    let blockers = serde_json::json!(["qualification_evidence_mixed_run"]);
+    let mixed = |package| fixture.attestations_from_two_runs(package, &["pipeline_crash_matrix"]);
+
+    // The qualification: no row for B.
+    let (status, refused) = fixture
+        .admin_call(
+            "POST",
+            "/v1/admin/pipeline/qualifications",
+            Some(serde_json::json!({
+                "signed_package": fixture.signed(&fixture.b),
+                "attestations": mixed(&fixture.b),
+            })),
+        )
+        .await;
+    assert_eq!(
+        (status, refused),
+        (
+            StatusCode::CONFLICT,
+            serde_json::json!({
+                "error": "bundle_qualification_promotion_not_ready",
+                "blockers": blockers,
+            })
+        )
+    );
+    assert_eq!(
+        fixture.qualification(&fixture.tenant, &fixture.b).await,
+        None
+    );
+
+    // The three promotion-only results from the second run: accepted, at
+    // the qualification and at the activation.
+    for package in [&fixture.a, &fixture.b] {
+        let (status, record) = fixture
+            .admin_call(
+                "POST",
+                "/v1/admin/pipeline/qualifications",
+                Some(serde_json::json!({
+                    "signed_package": fixture.signed(package),
+                    "attestations":
+                        fixture.attestations_from_two_runs(package, PROMOTION_ONLY_CHECKS),
+                })),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{record}");
+    }
+    for (package, reason) in [
+        (&fixture.a, "activate_bundle_a"),
+        (&fixture.b, "activate_bundle_b"),
+    ] {
+        let (status, routing) = fixture
+            .admin_call(
+                "POST",
+                "/v1/admin/pipeline/activate",
+                Some(serde_json::json!({
+                    "bundle_id": package.bundle_id,
+                    "reason_code": reason,
+                    "attestations":
+                        fixture.attestations_from_two_runs(package, PROMOTION_ONLY_CHECKS),
+                    "expected_record_id": fixture.record_id_in_force(&fixture.tenant).await,
+                })),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{routing}");
+    }
+
+    // The activation and the rollback of a qualified bundle with a mixed
+    // set: refused, and no event.
+    let events_before = fixture.store().events(&fixture.tenant, 10).await.unwrap();
+    let expected = fixture.record_id_in_force(&fixture.tenant).await;
+    for (path, reason) in [
+        ("/v1/admin/pipeline/activate", "activate_bundle_a"),
+        ("/v1/admin/pipeline/rollback", "roll_back_to_a"),
+    ] {
+        let (status, refused) = fixture
+            .admin_call(
+                "POST",
+                path,
+                Some(serde_json::json!({
+                    "bundle_id": fixture.a.bundle_id,
+                    "reason_code": reason,
+                    "attestations": mixed(&fixture.a),
+                    "expected_record_id": expected,
+                })),
+            )
+            .await;
+        assert_eq!(
+            (status, refused),
+            (
+                StatusCode::CONFLICT,
+                serde_json::json!({
+                    "error": "bundle_activation_promotion_not_ready",
+                    "blockers": blockers,
+                })
+            ),
+            "{path}"
+        );
+    }
+    assert_eq!(
+        fixture.store().events(&fixture.tenant, 10).await.unwrap(),
+        events_before
+    );
 }
 
 /// Final fix wave (K4): a stored package that no longer validates (a

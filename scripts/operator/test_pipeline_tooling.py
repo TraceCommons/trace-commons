@@ -2549,6 +2549,13 @@ class RequiredCheckTests(unittest.TestCase):
         # promotion check that `qualify` has no step for fails here, as does
         # a `qualify` check the Rust list does not name.
         self.assertTrue(_PROMOTION_ONLY.issubset(promotion))
+        # The Rust constant that `evaluate_promotion` reads for its one-run
+        # rule (review round 1 of #1240, point 5) holds the same three ids:
+        # a check that `qualify` produces and Rust called promotion-only
+        # would escape the rule.
+        promotion_only = _rust_check_list("PROMOTION_ONLY_CHECKS")
+        self.assertEqual(len(promotion_only), len(set(promotion_only)))
+        self.assertEqual(frozenset(promotion_only), _PROMOTION_ONLY)
         self.assertEqual(
             checks.REQUIRED_CHECK_IDS,
             frozenset(promotion) - _PROMOTION_ONLY,

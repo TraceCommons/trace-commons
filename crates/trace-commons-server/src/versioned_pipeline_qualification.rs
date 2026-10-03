@@ -52,6 +52,9 @@ pub const QUALIFICATION_EVIDENCE_INVALID_LABEL: &str = "qualification_evidence_i
 pub const QUALIFICATION_EVIDENCE_MIXED_REVISION_LABEL: &str =
     "qualification_evidence_mixed_revision";
 pub const QUALIFICATION_EVIDENCE_MIXED_PACKAGE_LABEL: &str = "qualification_evidence_mixed_package";
+/// The results of the checks outside [`PROMOTION_ONLY_CHECKS`] carry more
+/// than one run id (review round 1 of #1240, point 5).
+pub const QUALIFICATION_EVIDENCE_MIXED_RUN_LABEL: &str = "qualification_evidence_mixed_run";
 /// A check that tests the candidate ([`PROMOTION_PACKAGE_CHECKS`]) whose
 /// result does not name all three package digests; blocks as
 /// `<label>:<check_id>`.
@@ -150,7 +153,21 @@ pub const PROMOTION_REQUIRED_CHECKS: &[&str] = &[
     "pipeline_activation_containment",
     "pipeline_activation_rollback",
     "pipeline_legacy_drain",
-    // Promotion only: no local or CI run passes these.
+    // Promotion only: no local or CI run passes these
+    // (`PROMOTION_ONLY_CHECKS`).
+    "pipeline_production_adapters",
+    "pipeline_remote_restore",
+    "pipeline_hf_network_canary",
+];
+
+/// The checks, among [`PROMOTION_REQUIRED_CHECKS`], that no local or CI run
+/// passes: they need the production assembly, so their results come from
+/// other runs than the `qualify` run. Every other required check is a check
+/// that one `pipeline.py qualify` run produces, and [`evaluate_promotion`]
+/// requires those results to share one run id.
+/// `scripts/operator/test_pipeline_tooling.py` holds the same three as
+/// `_PROMOTION_ONLY` (a test there requires the two lists to agree).
+pub const PROMOTION_ONLY_CHECKS: &[&str] = &[
     "pipeline_production_adapters",
     "pipeline_remote_restore",
     "pipeline_hf_network_canary",
@@ -520,6 +537,17 @@ pub struct PromotionDecision {
 /// and from more than one package `qualification_evidence_mixed_package`
 /// (a package is its three digests together).
 ///
+/// The results of one qualification are the output of one `qualify` run
+/// (review round 1 of #1240, point 5): every result of a check outside
+/// [`PROMOTION_ONLY_CHECKS`] must carry the same run id, else the decision is
+/// blocked with `qualification_evidence_mixed_run`. So a set cannot take a
+/// mechanics result from one run and a candidate result from another run of
+/// the same revision. The three promotion-only results come from the
+/// production assembly, not from `qualify`, and each may carry its own run
+/// id. The run id is a field of the signed result, so the rule needs no
+/// other field. It holds wherever this function runs: the qualification, the
+/// activation, and the rollback.
+///
 /// A qualification run names exactly one package (P5-D15), and this
 /// function enforces which results name it, in both directions, because the
 /// decision gates `qualify_bundle` and so activation, for evidence that did
@@ -632,6 +660,16 @@ pub fn evaluate_promotion(
         .collect::<BTreeSet<_>>();
     if packages.len() > 1 {
         blockers.push(QUALIFICATION_EVIDENCE_MIXED_PACKAGE_LABEL.to_string());
+    }
+    // One run for every result that `qualify` produces; a promotion-only
+    // result may come from another run.
+    let runs = evidence
+        .iter()
+        .filter(|item| !PROMOTION_ONLY_CHECKS.contains(&item.check.check_id.as_str()))
+        .map(|item| item.check.run_id.as_str())
+        .collect::<BTreeSet<_>>();
+    if runs.len() > 1 {
+        blockers.push(QUALIFICATION_EVIDENCE_MIXED_RUN_LABEL.to_string());
     }
     blockers.sort();
     let checks = evidence
@@ -2415,13 +2453,17 @@ mod tests {
 
         // The control: with the three repaired, the same probe evaluates, so
         // each refusal above came from its malformed field. Its results come
-        // from distinct revisions, so it is not ready, and that is its only
-        // blocker (wave 2: promotion binds one revision).
+        // from distinct revisions and distinct runs, so it is not ready, and
+        // those are its only blockers (wave 2: promotion binds one revision;
+        // review round 1 of #1240, point 5: and one run).
         let control = evaluate_promotion(&probe, now).expect("a well-formed probe evaluates");
         assert!(!control.ready);
         assert_eq!(
             control.safe_blockers,
-            vec![QUALIFICATION_EVIDENCE_MIXED_REVISION_LABEL.to_string()]
+            vec![
+                QUALIFICATION_EVIDENCE_MIXED_REVISION_LABEL.to_string(),
+                QUALIFICATION_EVIDENCE_MIXED_RUN_LABEL.to_string(),
+            ]
         );
 
         // A maximum age that does not fit a duration is refused by id, never
@@ -2521,6 +2563,56 @@ mod tests {
             vec![QUALIFICATION_EVIDENCE_MIXED_REVISION_LABEL.to_string()]
         );
         assert_eq!(decision.code_revision_hash, None);
+    }
+
+    /// Review round 1 of #1240, point 5: the results of the checks that one
+    /// `qualify` run produces (every check outside [`PROMOTION_ONLY_CHECKS`])
+    /// must share one run id. A set that takes one of them from another run
+    /// is not ready, under `qualification_evidence_mixed_run`, whichever
+    /// check it is; the three promotion-only results may each come from a
+    /// run of their own.
+    #[test]
+    fn promotion_binds_one_run() {
+        let now = Utc::now();
+        let evidence = passing_evidence(now);
+        assert!(evaluate_promotion(&evidence, now).unwrap().ready);
+
+        // The constant names three of the required checks, and none of them
+        // tests the candidate package.
+        assert_eq!(PROMOTION_ONLY_CHECKS.len(), 3);
+        for check_id in PROMOTION_ONLY_CHECKS {
+            assert!(PROMOTION_REQUIRED_CHECKS.contains(check_id), "{check_id}");
+            assert!(!PROMOTION_PACKAGE_CHECKS.contains(check_id), "{check_id}");
+        }
+
+        // One run for the other results, and each promotion-only result
+        // from a run of its own: ready.
+        let mut other_runs = evidence.clone();
+        for (index, check_id) in PROMOTION_ONLY_CHECKS.iter().enumerate() {
+            check_mut(&mut other_runs, check_id).run_id = format!("qpromotion{index}");
+        }
+        let decision = evaluate_promotion(&other_runs, now).unwrap();
+        assert!(decision.ready, "{:?}", decision.safe_blockers);
+
+        // Any one of the other results from a second run: blocked, with the
+        // one label, on the set above and on the one-run set.
+        for base in [&evidence, &other_runs] {
+            for check_id in PROMOTION_REQUIRED_CHECKS
+                .iter()
+                .filter(|check_id| !PROMOTION_ONLY_CHECKS.contains(check_id))
+            {
+                let mut mixed = base.clone();
+                check_mut(&mut mixed, check_id).run_id = "q9999abcd".to_string();
+                let decision = evaluate_promotion(&mixed, now).unwrap();
+                assert!(!decision.ready, "{check_id}");
+                assert_eq!(
+                    decision.safe_blockers,
+                    vec![QUALIFICATION_EVIDENCE_MIXED_RUN_LABEL.to_string()],
+                    "{check_id}"
+                );
+            }
+        }
+        assert!(is_safe_label(QUALIFICATION_EVIDENCE_MIXED_RUN_LABEL));
     }
 
     /// Wave 2: among the results that name a package, every one must name
@@ -2826,8 +2918,22 @@ mod tests {
         let evidence = passing_evidence(now);
         let base = evaluate_promotion(&evidence, now).unwrap().evidence_hash;
 
+        // Another run, for every result that one `qualify` run produces:
+        // still ready (review round 1 of #1240, point 5: one run), so the
+        // hash differs by the run id itself, not by a blocker. And another
+        // run for one promotion-only result alone, which may have its own.
         let mut run = evidence.clone();
-        run[0].check.run_id = "q9999abcd".to_string();
+        for item in &mut run {
+            if !PROMOTION_ONLY_CHECKS.contains(&item.check.check_id.as_str()) {
+                item.check.run_id = "q9999abcd".to_string();
+            }
+        }
+        let mut promotion_only_run = evidence.clone();
+        check_mut(&mut promotion_only_run, PROMOTION_ONLY_CHECKS[0]).run_id =
+            "q9999abcd".to_string();
+        for one_run in [&run, &promotion_only_run] {
+            assert!(evaluate_promotion(one_run, now).unwrap().ready);
+        }
         let mut revision = evidence.clone();
         for item in &mut revision {
             item.check.code_revision_hash = sha256_prefixed(b"another-revision");
@@ -2867,6 +2973,7 @@ mod tests {
         let mut hashes = vec![base];
         for changed in [
             run,
+            promotion_only_run,
             revision,
             package,
             package_hash,
