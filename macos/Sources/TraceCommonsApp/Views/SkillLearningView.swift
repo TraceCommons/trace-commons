@@ -648,6 +648,59 @@ private func skillFieldLabel(_ label: String) -> some View {
         .foregroundStyle(GlassColor.textTertiary)
 }
 
+/// When a contribution offers the Skills flow, one rule for every surface
+/// that shows it (the legacy session detail and the Monitor's History
+/// inspector). Learning is offered only on an accepted contribution whose
+/// task outcome is known, which is not withdrawn or closed, and which
+/// carries a human correction; an absent detail offers nothing. An
+/// installed skill (its rollback) shows outside that rule.
+enum SkillLearningGate {
+    /// Closed by status (an unknown status reads closed), or withdrawn from
+    /// this device.
+    static func withdrawalCompleted(recordStatus: String, withdrawal: AppModel.WithdrawalResult?) -> Bool {
+        if ContributionStatusPresentation.isTerminal(recordStatus) { return true }
+        if case .some(.withdrawn) = withdrawal { return true }
+        return false
+    }
+
+    static func contributionIsWithdrawn(_ detail: SessionDetail, recordStatus: String, withdrawalCompleted: Bool) -> Bool {
+        withdrawalCompleted || ContributionStatusPresentation.isTerminal(detail.contributionStatus ?? recordStatus)
+    }
+
+    static func contributionIsActive(_ detail: SessionDetail, recordStatus: String, withdrawalCompleted: Bool) -> Bool {
+        detail.accepted
+            && detail.taskSuccess != nil
+            && !contributionIsWithdrawn(detail, recordStatus: recordStatus, withdrawalCompleted: withdrawalCompleted)
+    }
+
+    /// Learn, review, test and install.
+    static func offersLearning(_ detail: SessionDetail?, recordStatus: String, withdrawalCompleted: Bool) -> Bool {
+        guard let detail else { return false }
+        return contributionIsActive(detail, recordStatus: recordStatus, withdrawalCompleted: withdrawalCompleted)
+            && detail.humanCorrection != nil
+    }
+
+    /// Whether the installed-skill surface (and its status retry) may show:
+    /// whenever the regular flow is not the one on screen, including before
+    /// the detail answers.
+    static func showsInstalledSurface(_ detail: SessionDetail?, withdrawalCompleted: Bool) -> Bool {
+        let regularSurfaceIsVisible = detail?.accepted == true
+            && detail?.humanCorrection != nil
+            && !withdrawalCompleted
+            && !ContributionStatusPresentation.isTerminal(detail?.contributionStatus)
+        return !regularSurfaceIsVisible
+    }
+
+    /// The installed-skill status read failed on a closed or unaccepted
+    /// contribution with nothing installed: offer to read it again.
+    static func offersInstallStatusRetry(
+        _ state: SkillLearningSessionState, detail: SessionDetail?, recordStatus: String
+    ) -> Bool {
+        guard state.installedSkill == nil, case .idle = state.phase, state.failure != nil else { return false }
+        return ContributionStatusPresentation.isTerminal(recordStatus) || detail?.accepted == false
+    }
+}
+
 /// A package, marker or model output shown verbatim in an inset well.
 private func skillCodeBlock(_ text: String) -> some View {
     GlassWell {
