@@ -2560,8 +2560,8 @@ class RequiredCheckTests(unittest.TestCase):
         self.assertNotIn("pipeline_http_corpus_package", checks.REQUIRED_CHECK_IDS)
 
         database_ids = [check.check_id for check in checks.REQUIRED_DATABASE_CHECKS]
-        self.assertEqual(len(database_ids), 12)
-        self.assertEqual(len(set(database_ids)), 12)
+        self.assertEqual(len(database_ids), 15)
+        self.assertEqual(len(set(database_ids)), 15)
         self.assertEqual(
             checks.REQUIRED_CHECK_IDS,
             frozenset(database_ids) | set(checks.REQUIRED_CORPUS_CHECK_IDS) | {checks.RESTORE_CHECK_ID},
@@ -2593,12 +2593,54 @@ class RequiredCheckTests(unittest.TestCase):
         would name a test bundle again."""
         required = {spec.check_id for spec in checks.required_specs().values() if spec.digests_required}
         self.assertEqual(required, set(_CANDIDATE_CHECKS))
-        self.assertEqual(len(checks.required_specs()), 16)
+        self.assertEqual(len(checks.required_specs()), 19)
         # The database checks' own rows agree with `required_specs`.
         self.assertEqual(
             {check.check_id for check in checks.REQUIRED_DATABASE_CHECKS if check.digests},
             {"pipeline_bundle_qualification"},
         )
+
+    def test_the_activation_checks_are_required(self):
+        """PR 5's three checks (containment, rollback, and the legacy drain
+        report) are required in both lists, each run by the one exact test
+        that emits it. They are mechanics checks: none names a package, so a
+        qualification run still names exactly one."""
+        expected = {
+            "pipeline_activation_containment": (
+                checks._INGEST_BIN,
+                checks._HTTP_TESTS + "containment_refuses_new_receipts_and_keeps_pending_work",
+                "pilot",
+            ),
+            "pipeline_activation_rollback": (
+                checks._RUNTIME_SUITE,
+                "rollback_selects_an_earlier_bundle_for_new_runs_only",
+                "runtime",
+            ),
+            "pipeline_legacy_drain": (
+                checks._INGEST_BIN,
+                "tests::pipeline_activation_pg_tests::the_legacy_drain_report_counts_real_pending_work_and_reaches_zero",
+                "pilot",
+            ),
+        }
+        promotion = _promotion_required_checks()
+        rows = {check.check_id: check for check in checks.REQUIRED_DATABASE_CHECKS}
+        specs = checks.required_specs()
+        for check_id, (cargo_args, test_name, database) in expected.items():
+            with self.subTest(check=check_id):
+                self.assertIn(check_id, checks.REQUIRED_CHECK_IDS)
+                self.assertIn(check_id, promotion)
+                self.assertNotIn(check_id, _PROMOTION_ONLY)
+                self.assertNotIn(check_id, _CANDIDATE_CHECKS)
+                self.assertFalse(specs[check_id].digests_required)
+                row = rows[check_id]
+                self.assertEqual(
+                    (row.cargo_args, row.test_name, row.database, row.ignored, row.digests),
+                    (cargo_args, test_name, database, False, False),
+                )
+        # The 15 database rows, the three corpus checks, and the restore
+        # drill: 19 required results, four of them naming the one package.
+        self.assertEqual(len(checks.REQUIRED_CHECK_IDS), 19)
+        self.assertEqual(sum(spec.digests_required for spec in specs.values()), 4)
 
 
 class _QualifyCase(_RestoreDrillCase):
@@ -2929,7 +2971,7 @@ class QualifyTests(_QualifyCase):
                 if item[0] == "invoke" and item[2] and "pg_stat_database" in item[2] and f"'{guarded}'" in item[2]
             ]
             self.assertEqual(len(guards), 1, f"the xact guard runs after {check.check_id}")
-        self.assertEqual(len(databases), 12)
+        self.assertEqual(len(databases), 15)
 
         # The binding checks run first, then migration atomicity in its own
         # scenario, then the database checks in table order, the three
@@ -3083,7 +3125,7 @@ class QualifyTests(_QualifyCase):
                 self.assertNotIn(key, text)
         self.assertEqual((self.run.run_dir / "qualification-report.json").read_bytes(), data)
         lines = [line for line in self.stdout.getvalue().splitlines() if line]
-        self.assertEqual(lines[0], f"PipelineQualificationOK: report={self.report_path.name} checks=16")
+        self.assertEqual(lines[0], f"PipelineQualificationOK: report={self.report_path.name} checks=19")
         self.assertTrue(lines[1].startswith("PipelineQualificationScope: production_promotion_ready=false"))
         self.assertEqual(self.stderr.getvalue(), "")
 
@@ -3182,9 +3224,9 @@ class QualifyTests(_QualifyCase):
         self._fresh_run()
         self.assertEqual(self._qualify("--signing-key", str(self._key()), "--signing-key-id", "ci_key"), 0, self.stderr.getvalue())
         signed = json.loads(self.report_path.read_text())
-        self.assertEqual((signed["attested"], signed["attestation_count"]), (True, 16))
+        self.assertEqual((signed["attested"], signed["attestation_count"]), (True, 19))
         report_module.validate_qualification_report(signed)
-        self.assertEqual(report_module.report_attestation(signed), (True, 16))
+        self.assertEqual(report_module.report_attestation(signed), (True, 19))
         failed = {**signed, "status": "fail", "failure": "check_attestation_invalid"}
         cases = {
             # One key alone, even when it agrees with what the other would read as.
@@ -3194,9 +3236,9 @@ class QualifyTests(_QualifyCase):
             "only attestation_count": {key: value for key, value in signed.items() if key != "attested"},
             "attested with no attestation": {**signed, "attestation_count": 0},
             "attestations that are not attested": {**signed, "attested": False},
-            "fewer attestations than checks": {**signed, "attestation_count": 15},
-            "more attestations than checks": {**signed, "attestation_count": 17},
-            "a count that is not a number": {**signed, "attestation_count": "16"},
+            "fewer attestations than checks": {**signed, "attestation_count": 18},
+            "more attestations than checks": {**signed, "attestation_count": 20},
+            "a count that is not a number": {**signed, "attestation_count": "19"},
             "an attested failed report": failed,
         }
         for label, report in cases.items():
@@ -3367,7 +3409,7 @@ class SignedQualifyTests(_QualifyCase):
         self.assertEqual((value["attested"], value["attestation_count"]), (False, 0))
         report_module.validate_qualification_report(value)
         lines = [line for line in self.stdout.getvalue().splitlines() if line]
-        self.assertEqual(lines[0], f"PipelineQualificationOK: report={self.report_path.name} checks=16")
+        self.assertEqual(lines[0], f"PipelineQualificationOK: report={self.report_path.name} checks=19")
 
         # With it: one more cargo call, the writer, after every check.
         self._fresh_run()
@@ -3394,10 +3436,10 @@ class SignedQualifyTests(_QualifyCase):
             self._attestation_files(), sorted(f"{check_id}.attestation.json" for check_id in checks.REQUIRED_CHECK_IDS)
         )
         value = json.loads(self.report_path.read_text())
-        self.assertEqual((value["status"], value["attested"], value["attestation_count"]), ("pass", True, 16))
+        self.assertEqual((value["status"], value["attested"], value["attestation_count"]), ("pass", True, 19))
         report_module.validate_qualification_report(value)
         lines = [line for line in self.stdout.getvalue().splitlines() if line]
-        self.assertEqual(lines[0], f"PipelineQualificationOK: report={self.report_path.name} checks=16 attested=16")
+        self.assertEqual(lines[0], f"PipelineQualificationOK: report={self.report_path.name} checks=19 attested=19")
         self.assertEqual(self.stderr.getvalue(), "")
         # Only the three corpus checks carry the evidence's two digests.
         carried = {}

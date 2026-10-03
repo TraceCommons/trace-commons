@@ -139,6 +139,11 @@ pub const PROMOTION_REQUIRED_CHECKS: &[&str] = &[
     "pipeline_orphan_sweep",
     "pipeline_bundle_qualification",
     "pipeline_restore_drill",
+    // PR 5's activation checks: mechanics checks, each emitted by one exact
+    // test, that name no package.
+    "pipeline_activation_containment",
+    "pipeline_activation_rollback",
+    "pipeline_legacy_drain",
     // Promotion only: no local or CI run passes these.
     "pipeline_production_adapters",
     "pipeline_remote_restore",

@@ -240,6 +240,25 @@ REQUIRED_DATABASE_CHECKS = (
         False,
         False,
     ),
+    # PR 5's activation checks. Each is a mechanics check: its test passes no
+    # package to `PipelineCheckEmitter`, so its result carries no digests.
+    DatabaseCheck(
+        "pipeline_activation_containment",
+        _INGEST_BIN,
+        _HTTP_TESTS + "containment_refuses_new_receipts_and_keeps_pending_work",
+        "pilot",
+        False,
+        False,
+    ),
+    _runtime("pipeline_activation_rollback", "rollback_selects_an_earlier_bundle_for_new_runs_only"),
+    DatabaseCheck(
+        "pipeline_legacy_drain",
+        _INGEST_BIN,
+        "tests::pipeline_activation_pg_tests::the_legacy_drain_report_counts_real_pending_work_and_reaches_zero",
+        "pilot",
+        False,
+        False,
+    ),
 )
 
 # The corpus checks `qualify` runs through `run`'s own code path, in this
