@@ -108,4 +108,19 @@ final class LegacyShellRetiredTests: XCTestCase {
         let panel = try MonitorNavigationTests.text("Views/Monitor/MenuBarGlassPanel.swift")
         XCTAssertFalse(panel.contains("MainWindowNavigation"), "the panel opens through OpenMonitor")
     }
+
+    /// The legacy palette and design system are gone from the app target: no
+    /// file reads `TC.` or `CommunityBrand`, and none names a
+    /// `DesignSystem.swift` symbol that has no `TC.` prefix.
+    func test_noFileReadsTheLegacyPalette() throws {
+        var offenders: [String] = []
+        let enumerator = try XCTUnwrap(FileManager.default.enumerator(at: Self.root, includingPropertiesForKeys: nil))
+        for case let url as URL in enumerator where url.pathExtension == "swift" {
+            let source = try String(contentsOf: url, encoding: .utf8)
+            let palette = source.range(of: #"\bTC\."#, options: .regularExpression) != nil
+            let symbols = LegacySymbols.banned.contains { source.contains($0) }
+            if palette || symbols { offenders.append(url.lastPathComponent) }
+        }
+        XCTAssertEqual(offenders.sorted(), [], "files still on the legacy design system: \(offenders.sorted())")
+    }
 }

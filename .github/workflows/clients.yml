@@ -128,7 +128,9 @@ jobs:
   # job runs on macos-26, where `GlassMaterial.current` always answers
   # `.liquidGlass`, so the vibrancy branch -- the one every Mac from the
   # macOS 14 floor to 25 draws -- had executed nowhere. This job runs the
-  # TCDesign tests on macOS 15 so that branch runs.
+  # TCDesign tests on macOS 15 so that branch runs, plus the glass shell's
+  # source scans (the surface rules, navigation, retired-shell and parity
+  # tests), which read files and so cost nothing to run here.
   #
   # Advisory: not a required check. It builds with an Xcode 26 SDK, because
   # `NSGlassEffectView` only exists in the 26 SDK even though the code that
