@@ -430,12 +430,21 @@ enum HomeFormat {
         label(status.flatMap { $0.isEmpty ? nil : $0 })
     }
 
+    /// The word for a status, from the core's one table (`PublicRunCopy`).
+    /// A missing or empty status reads the core's unavailable word; with no
+    /// core copy decoded there is no word at all, never the raw token.
+    static func historyStatusLabel(copy: PublicRunCopy?, _ status: String?) -> String? {
+        guard let copy else { return nil }
+        guard let status, !status.isEmpty else { return copy.contributionStatusUnavailable }
+        return copy.historyStatusLabel(for: status)
+    }
+
     /// Accepted reads as done; held for review and submitted as waiting;
     /// withdrawn as neutral. Held is never drawn as rejected.
     static func tone(_ status: String?) -> GlassTag.Tone {
         switch status {
         case "accepted": .on
-        case "submitted", "quarantined": .ask
+        case "submitted", "processing", "quarantined": .ask
         default: .neutral
         }
     }

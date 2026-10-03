@@ -303,7 +303,7 @@ struct MenuBarGlassPanel: View {
     private var recent: some View {
         let rows = MenuPanelData.recent(
             pending: store.pending, history: store.history, calls: store.calls,
-            statusLabel: { model.publicRunCopy?.contributionStatusLabel(for: $0) })
+            statusLabel: { HomeFormat.historyStatusLabel(copy: model.publicRunCopy, $0) })
         if !rows.isEmpty && !store.stale {
             VStack(alignment: .leading, spacing: 0) {
                 Text(MenuWords.recentActivity)
