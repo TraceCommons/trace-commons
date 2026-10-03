@@ -176,7 +176,26 @@ append will fail the same way.
 
 ## Rolling forward after a binary rollback
 
-Builds from before #1043 (the pilot's is `5f239be4`) did not put the file
+> **Disabled by default since 2026-10-02.** The pilot's pre-#1043 rollback
+> target, `5f239be4`, was retired on 2026-10-02, so the legacy-segment resume
+> below is off unless ingest was started with
+> `TRACE_COMMONS_ALLOW_LEGACY_SEGMENT_RESUME=true` (read once at startup;
+> `1`, `true`, `yes` or `on`). While it is off:
+>
+> - the dry run (step 1) works as below and still reports
+>   `file_ahead_through_legacy_rows` with every segment count and time, and
+>   its response carries `legacy_segment_resume_enabled: false`;
+> - every non-dry run that carries `"accept_legacy_segment": true`, or that
+>   meets a legacy segment without it, is refused `409`
+>   `legacy_segment_resume_disabled` before anything is written. The refusal
+>   is logged by that label alone.
+>
+> Turn it on only for an emergency roll-forward after a rollback to a
+> pre-#1043 build: set the variable, restart ingest, run step 2 for each
+> affected tenant, then unset it and restart again. The dry run's
+> `legacy_segment_resume_enabled: true` confirms the restart took.
+
+Builds from before #1043 (the pilot's was `5f239be4`) did not put the file
 log's chain fields on DB audit rows. Under required mirror writes they wrote
 the DB row before chaining the event into the file, so the row has no
 `previous_event_hash` / `event_hash`. Some kinds of event they wrote to the
@@ -241,6 +260,9 @@ segment the old build wrote:
    The second flag is the explicit acceptance of rows the repair cannot
    verify by hash, the unhashed rows the rolled-back build wrote. Without it
    a non-dry run refuses `legacy_segment_not_accepted` and writes nothing.
+   This step needs `TRACE_COMMONS_ALLOW_LEGACY_SEGMENT_RESUME` set (see the
+   note at the top of this section); otherwise it refuses
+   `legacy_segment_resume_disabled`, with or without the flag.
 
    ```bash
    curl -sS -X POST "$INGEST/v1/admin/audit-chain-repair" \
@@ -301,6 +323,7 @@ It refuses anything else with a `409` and writes nothing:
 | `legacy_status_row_missing` | A file-only `review_decision` has no store status row after the DB head. | P0: treat as a deletion. |
 | `legacy_row_unexplained` | A DB row after the DB head is neither a segment event's row nor a store row the old build wrote. | P0: treat as a planted row. |
 | `legacy_segment_not_accepted` | The state is a legacy segment the repair can resume across, but the non-dry run did not carry `"accept_legacy_segment": true`. Nothing was written. | Review the dry run's counts and times, then rerun with the flag. |
+| `legacy_segment_resume_disabled` | The legacy-segment resume is off: ingest was started without `TRACE_COMMONS_ALLOW_LEGACY_SEGMENT_RESUME`. Returned for any non-dry run that carries `"accept_legacy_segment": true`, before the repair reads either log, and for any non-dry run that meets a legacy segment. Takes precedence over `legacy_segment_not_accepted`. Nothing was written. | The dry run still diagnoses the state. Resume only in an emergency: set the variable, restart ingest, rerun, then unset it and restart. |
 | `file_head_not_in_db` | The file is ahead with no DB rows after the DB head. | See the table above. |
 
 How the drills read it afterwards. The DB chain is the hashed rows in order,

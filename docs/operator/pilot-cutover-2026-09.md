@@ -523,6 +523,17 @@ the cutover itself.
 
 ## Rollback
 
+> **2026-10-02: `5f239be4` is retired as a rollback target.** The owner
+> decided that the pilot will not be rolled back to it, or to any other
+> pre-#1043 build. The procedure below is kept as a record of what was
+> rehearsed. The legacy-segment resume it relies on (`accept_legacy_segment`)
+> is now **disabled by default**: the repair refuses it with
+> `legacy_segment_resume_disabled` and writes nothing, and its dry run still
+> reports `file_ahead_through_legacy_rows`. Enable it only in an emergency,
+> by starting ingest with `TRACE_COMMONS_ALLOW_LEGACY_SEGMENT_RESUME=true`
+> for the repair and restarting without it afterwards. See
+> `audit-trail-forensics.md`, "Rolling forward after a binary rollback".
+
 - **What works.** Reinstall the `5f239be4` binaries. Released clients kept
   submitting and reading status against the V91 schema (tested in the
   `5888b8bcd` rehearsal). The schema stays at V91; the old build ignores the
@@ -557,7 +568,10 @@ the cutover itself.
     2. `{"dry_run": false, "accept_legacy_segment": true}`. Without
        `accept_legacy_segment` the repair refuses
        `legacy_segment_not_accepted` and writes nothing. Expect
-       `chain_resumed: true`.
+       `chain_resumed: true`. Since 2026-10-02 this step also needs ingest
+       started with `TRACE_COMMONS_ALLOW_LEGACY_SEGMENT_RESUME=true`; without
+       it the repair refuses `legacy_segment_resume_disabled`, and the dry
+       run reports `legacy_segment_resume_enabled: false`.
     3. Run the dry run once more: `clean`. Then confirm one submission
        succeeds, and run the audit-chain, db-reconciliation and rollback
        drills. The audit-chain drill reports `db_legacy_segment_resume_count:
@@ -660,7 +674,7 @@ refused with 422 rather than read as a dry run.
 | 2 | Re-POSTs 500, and witnessed submissions cannot persist evidence (V76) | every client | V90 (membership in `trace_witness_evidence_runtime`) |
 | 3 | Withdrawal 500; revocation, purge and rescrub hit the token trigger. Pre-existing since V65–V68. | every client using withdraw; operators | V90's column grants on the token tables. Not the table-wide grant from the earlier draft. |
 | 4 | Audit-chain and db-reconciliation drills `ready: false` after the first new event per tenant, so `smoke-gate.sh` fails | operators | Fixed by #1095. The first hashed row may chain from the file history, pre-cutover rows are counted as a legacy prefix, and reader parity compares them without chain fields. db-reconciliation keeps the transitional sample gap until 16 newer events exist; see smoke step 7. |
-| 5 | Rollback, then roll-forward, locks tenants out of submissions | everyone, after a rollback | Fixed by #1100. Run the audit-chain repair per affected tenant: dry run, then `accept_legacy_segment: true`. See [Rollback](#rollback). |
+| 5 | Rollback, then roll-forward, locks tenants out of submissions | everyone, after a rollback | Fixed by #1100. Run the audit-chain repair per affected tenant: dry run, then `accept_legacy_segment: true`. See [Rollback](#rollback). Since 2026-10-02 `5f239be4` is retired as a rollback target, and the resume is disabled by default behind `TRACE_COMMONS_ALLOW_LEGACY_SEGMENT_RESUME`, for an emergency only. |
 | 6 | Account admission refuses 0.12.x NEAR uploads with 422 | NEAR-provisioned clients | Keep it off until a `source_session` client is adopted |
 | 7 | Account admission refuses to boot while the runtime can UPDATE `trace_accounts.account_id` | operators | Done by V90. Pre-check 6 makes sure V90 can do it. |
 | 8 | Witness v2 certificates rejected by 0.12.x | witnessed clients | Keep the witness at `v1` |
@@ -700,7 +714,7 @@ match the pilot as below, with pre-check 0's other branch: it started at V73.
 | `db-reconciliation` drill | not `ready`, with only the smoke step 7 gaps |
 | The same tenant after 17 more audit events | the sample-parity gap cleared; only the vector gap remained |
 | A client built from `main` (#1096): `account login` | printed `/account/login` on the ingest origin; that URL worked unmodified |
-| Rollback to `5f239be4` on V91, then roll forward with the #1100 repair | as in [Rollback](#rollback) |
+| Rollback to `5f239be4` on V91, then roll forward with the #1100 repair | as in [Rollback](#rollback). `5f239be4` was retired as a rollback target on 2026-10-02. |
 
 ### Earlier rehearsal, candidate at V89
 
