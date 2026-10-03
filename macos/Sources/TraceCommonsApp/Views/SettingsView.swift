@@ -474,8 +474,8 @@ struct SettingsContent: View {
 
     private var consent: some View {
         VStack(alignment: .leading, spacing: TC.Space.sm) {
-            TCSectionHeader(title: Self.consentHeading)
-            Text("Applies to traces you send from now on.")
+            TCSectionHeader(title: SettingsLegacyWords.consentHeading)
+            Text(SettingsLegacyWords.appliesFromNow)
                 .font(TC.Font_.meta)
                 .foregroundStyle(.secondary)
 
@@ -484,13 +484,13 @@ struct SettingsContent: View {
             let optional = model.consentScopes.filter { !$0.alwaysOn && $0.grantsDataUse }
 
             if !alwaysOn.isEmpty {
-                TCFieldLabel("Always included")
+                TCFieldLabel(SettingsLegacyWords.alwaysIncluded)
                 ForEach(alwaysOn) { scope in
                     scopeRow(scope, checked: true, alwaysOn: true)
                 }
             }
             if !optional.isEmpty {
-                TCFieldLabel("Optional — each one lets your traces do more")
+                TCFieldLabel(SettingsLegacyWords.optionalEachOne)
                 ForEach(optional) { scope in
                     scopeRow(scope, checked: granted.contains(scope.name), alwaysOn: false)
                 }
@@ -498,7 +498,7 @@ struct SettingsContent: View {
             if !creditScopes.isEmpty {
                 // Visually separated: it grants no data use at all, and
                 // listing it beside four real scopes misleads both ways.
-                TCFieldLabel("Credit")
+                TCFieldLabel(SettingsLegacyWords.credit)
                 ForEach(creditScopes) { scope in
                     scopeRow(scope, checked: granted.contains(scope.name), alwaysOn: false)
                 }
@@ -517,7 +517,7 @@ struct SettingsContent: View {
                     .foregroundStyle(TC.coralText)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            Text("Nothing here is pre-selected on your behalf.")
+            Text(SettingsLegacyWords.nothingPreselected)
                 .font(TC.Font_.caption)
                 .foregroundStyle(.secondary)
         }
@@ -545,7 +545,7 @@ struct SettingsContent: View {
                         Text(ScopeCopy.title(for: scope.name, options: model.consentScopes))
                             .font(TC.Font_.cardTitle)
                         if alwaysOn {
-                            TCTag(text: "always on", tone: .clear, symbol: "lock")
+                            TCTag(text: SettingsLegacyWords.alwaysOn, tone: .clear, symbol: "lock")
                         }
                     }
                     Text(scope.description)
@@ -2181,6 +2181,13 @@ enum SettingsLegacyWords {
     static let updatesOff = "Updates are turned off for this build."
     static let notificationsRenderedHere = "Notifications rendered by this app"
     static let pausedNothingSent = "Paused. Nothing is being queued or sent."
+    static let consentHeading = SettingsContent.consentHeading
+    static let appliesFromNow = "Applies to traces you send from now on."
+    static let alwaysIncluded = "Always included"
+    static let optionalEachOne = "Optional — each one lets your traces do more"
+    static let credit = "Credit"
+    static let alwaysOn = "always on"
+    static let nothingPreselected = "Nothing here is pre-selected on your behalf."
     static let auditHeading = SettingsContent.auditHeading
     static let nothingChanged = "Nothing has been changed."
     static func auditSentence(_ action: String, project: String?) -> String {
