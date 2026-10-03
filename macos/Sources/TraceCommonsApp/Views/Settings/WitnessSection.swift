@@ -73,12 +73,11 @@ struct WitnessSection: View {
                             .disabled(model.witnessBusy)
                         note(copy.clearNote)
                     }
-
-                    note(copy.appliesAtOnce)
                 }
             }
             inferenceEvidence(copy)
             tokenContribution(copy)
+            note(copy.appliesAtOnce)
         }
     }
 
@@ -230,6 +229,7 @@ struct WitnessSection: View {
         }
         .opacity(copy.tokenHeading == nil ? 0 : 1)
         .disabled(copy.tokenHeading == nil)
+        .accessibilityHidden(copy.tokenHeading == nil)
         .confirmationDialog((copy.tokenHeading ?? ""), isPresented: $showingTokenDisclosure, titleVisibility: .visible) {
             Button((copy.tokenConfirm ?? "")) {
                 Task { await model.setTokenContribution(true, disclosureConfirmed: true) }

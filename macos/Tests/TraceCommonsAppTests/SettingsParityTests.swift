@@ -118,7 +118,7 @@ final class SettingsParityTests: XCTestCase {
                 accessibility: ["GlassToggleStyle(.settings)", ".accessibilityLabel(copy.portTitle)",
                                 ".accessibilityLabel(copy.folderTitle)", ".accessibilityElement(children: .combine)"]),
         Section(glass: "Views/Settings/WitnessSection.swift",
-                bindings: ["model.witnessCopy", "model.witnessState", "model.witnessStateCode", "model.witnessStatus?.refusal",
+                bindings: ["model.witnessCopy", "= model.witnessState\n", "model.witnessStateCode", "model.witnessStatus?.refusal",
                            "model.witnessStatus?.pinnedMeasurementLine", "model.witnessLabel", "model.witnessBusy", "model.witnessCalls",
                            "ironwireAttestedBodies", "tokenDistributionsContribution", "tokenStorage",
                            "model.inferenceEvidenceBusy", "model.tokenContributionBusy", "model.tokenStorageNotice",
@@ -128,13 +128,13 @@ final class SettingsParityTests: XCTestCase {
                            "model.refreshWitness()", "WitnessForm.fromStatus(", "form.canConfigure"],
                 copySources: ["WitnessSurface.stateLine(", "WitnessSurface.tone(forState:", "WitnessSurface.lastResultLine(",
                               "WitnessSurface.lastResultTone(", "WitnessSurface.offersConfigure(", "WitnessSurface.offersClear(",
-                              "copy.heading", "copy.intro", "copy.certificateMeans", "copy.clear", "copy.clearNote",
+                              "copy.heading", "copy.intro", "copy.certificateMeans", "Button(copy.clear)", "copy.clearNote",
                               "copy.appliesAtOnce", "copy.urlTitle", "copy.signingAddressTitle", "copy.measurementsTitle",
                               "copy.measurementsNote", "copy.configure", "copy.inferenceHeading", "copy.inferenceDisclosure",
                               "copy.inferenceCaptureNote", "copy.inferenceScopeNote", "copy.inferenceEnabled", "copy.inferenceDisabled",
-                              "copy.inferenceEnable", "copy.inferenceDisable", "copy.inferenceConfirm", "copy.inferenceCancel",
+                              "Button(copy.inferenceEnable)", "Button(copy.inferenceDisable)", "copy.inferenceConfirm", "copy.inferenceCancel",
                               "copy.inferenceSaveFailed", "copy.tokenHeading", "copy.tokenDisclosure", "copy.tokenCaptureNote",
-                              "copy.tokenScopeNote", "copy.tokenEnabled", "copy.tokenDisabled", "copy.tokenEnable", "copy.tokenDisable",
+                              "copy.tokenScopeNote", "copy.tokenEnabled", "copy.tokenDisabled", "Button(copy.tokenEnable ?? \"\")", "Button(copy.tokenDisable ?? \"\")",
                               "copy.tokenConfirm", "copy.tokenCancel", "copy.tokenSaveFailed", "storage.captureLabel",
                               "storage.captureNotice", "storage.captureConfirmation", "storage.cancelLabel", "storage.stateLine",
                               "storage.scopeNote", "storage.cleanupLabel", "storage.discardLabel", "storage.confirmLabel",
@@ -196,7 +196,19 @@ final class SettingsParityTests: XCTestCase {
         let appear = try XCTUnwrap(source.range(of: ".onAppear {"))
         XCTAssertLessThan(unavailable.lowerBound, anchor.lowerBound)
         XCTAssertLessThan(anchor.lowerBound, appear.lowerBound)
+        // Only the anchor's own modifier and closing braces lie between the
+        // anchor and `.onAppear`, so the refresh hangs on the outer container.
+        let between = source[anchor.upperBound..<appear.lowerBound]
+        XCTAssertEqual(
+            between.filter { !$0.isWhitespace },
+            ".accessibilityHidden(true)}}",
+            "something other than closing braces sits between the anchor and .onAppear")
+        let closure = String(source[appear.upperBound...].prefix(while: { $0 != "}" }))
+        XCTAssertTrue(closure.contains("model.refreshWitness()"), "onAppear does not refresh")
         XCTAssertEqual(source.components(separatedBy: "model.refreshWitness()").count - 1, 1)
+        XCTAssertEqual(source.components(separatedBy: "role: .cancel").count - 1, 4)
+        XCTAssertEqual(source.components(separatedBy: "role: .destructive").count - 1, 2)
+        XCTAssertTrue(source.contains(".accessibilityHidden(copy.tokenHeading == nil)"))
         XCTAssertTrue(source.contains(".opacity(copy.tokenHeading == nil ? 0 : 1)"))
         XCTAssertTrue(source.contains(".disabled(copy.tokenHeading == nil)"))
         XCTAssertEqual(source.components(separatedBy: ".confirmationDialog(").count - 1, 4)
