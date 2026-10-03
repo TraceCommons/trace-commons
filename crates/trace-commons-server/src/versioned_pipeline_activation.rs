@@ -754,6 +754,31 @@ pub struct ActivationRequest<'a> {
     pub dependencies: &'a ProductionDependencyProfile,
 }
 
+/// The evidence hash that a routing change which selects a bundle records, in
+/// its routing row and in its event (final fix wave G12). One rule for
+/// `activate` and `rollback`: the canonical hash (`evidence_hash`,
+/// `to_canonical_vec`) of the evidence the change rests on and the bundle it
+/// selects, so the record names the activation and not only a tenant's
+/// quiet state. An activation: `{"readiness": readiness.evidence_hash,
+/// "promotion": promotion.evidence_hash, "bundle_id": bundle_id}`. A rollback
+/// reads no readiness, so it has no `readiness` key: `{"promotion":
+/// promotion.evidence_hash, "bundle_id": bundle_id}`.
+fn bundle_selection_evidence_hash(
+    readiness: Option<&ActivationReadiness>,
+    promotion: &PromotionDecision,
+    bundle_id: &str,
+) -> Result<String, DatabaseError> {
+    let mut evidence = serde_json::json!({
+        "promotion": promotion.evidence_hash,
+        "bundle_id": bundle_id,
+    });
+    if let Some(readiness) = readiness {
+        evidence["readiness"] = serde_json::json!(readiness.evidence_hash);
+    }
+    crate::versioned_pipeline_qualification::evidence_hash(&evidence)
+        .map_err(DatabaseError::Serialization)
+}
+
 /// Takes the tenant's routing lock exclusively for the rest of `tx`. A
 /// receipt's staging and commit transactions take it shared
 /// (`PipelineService`), so a routing change waits for the receipts in those
@@ -1188,9 +1213,11 @@ impl PipelineActivationStore {
     /// the routing row read (an unreadable row refuses); the readiness; the
     /// gate, which locks the bundle's four policy rows `FOR SHARE` and the
     /// active bundle row `FOR UPDATE` and switches the active bundle; then
-    /// the routing row and an `activate` event whose evidence hash is the
-    /// readiness hash. A refusal writes nothing. An actor or a reason that
-    /// is not a label is `activation_actor_invalid`, before any read.
+    /// the routing row and an `activate` event whose evidence hash names
+    /// the activation: the canonical hash of the readiness hash, the
+    /// promotion hash, and the bundle (`bundle_selection_evidence_hash`). A
+    /// refusal writes nothing. An actor or a reason that is not a label is
+    /// `activation_actor_invalid`, before any read.
     pub async fn activate_tenant(
         &self,
         request: ActivationRequest<'_>,
@@ -1219,6 +1246,8 @@ impl PipelineActivationStore {
             now,
         )
         .await?;
+        let evidence_hash =
+            bundle_selection_evidence_hash(Some(readiness), request.promotion, request.bundle_id)?;
         let routing = write_routing_in(
             &tx,
             request.tenant_id,
@@ -1228,7 +1257,7 @@ impl PipelineActivationStore {
             Some(request.bundle_id),
             request.actor_principal_ref,
             request.reason_code,
-            &readiness.evidence_hash,
+            &evidence_hash,
         )
         .await?;
         tx.commit().await?;
@@ -1245,7 +1274,9 @@ impl PipelineActivationStore {
     /// not read, so a rollback is open while the readiness fails. Runs that
     /// already exist keep their bundle. The same transaction and lock order
     /// as `activate_tenant`; the event is `rollback`, and its evidence hash
-    /// is the promotion's. A refusal writes nothing.
+    /// is the canonical hash of the promotion hash and the bundle (the rule
+    /// of `bundle_selection_evidence_hash`, with no readiness). A refusal
+    /// writes nothing.
     pub async fn rollback_bundle(
         &self,
         request: ActivationRequest<'_>,
@@ -1302,6 +1333,8 @@ impl PipelineActivationStore {
             Utc::now(),
         )
         .await?;
+        let evidence_hash =
+            bundle_selection_evidence_hash(None, request.promotion, request.bundle_id)?;
         let routing = write_routing_in(
             &tx,
             tenant_id,
@@ -1311,7 +1344,7 @@ impl PipelineActivationStore {
             Some(request.bundle_id),
             request.actor_principal_ref,
             request.reason_code,
-            &request.promotion.evidence_hash,
+            &evidence_hash,
         )
         .await?;
         tx.commit().await?;

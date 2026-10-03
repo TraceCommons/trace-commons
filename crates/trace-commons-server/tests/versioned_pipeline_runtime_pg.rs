@@ -37409,6 +37409,33 @@ fn other_revision(tag: &str) -> String {
     sha256_prefixed(format!("pr5-activation-gate-revision-{tag}").as_bytes())
 }
 
+/// Final fix wave (G12): the evidence hash an `activate` event and its
+/// routing row record, which names the activation: the canonical hash of the
+/// readiness hash, the promotion hash, and the activated bundle.
+fn activate_evidence_hash(
+    readiness: &ActivationReadiness,
+    promotion: &PromotionDecision,
+    bundle_id: &str,
+) -> String {
+    trace_commons_server::versioned_pipeline_qualification::evidence_hash(&serde_json::json!({
+        "readiness": readiness.evidence_hash,
+        "promotion": promotion.evidence_hash,
+        "bundle_id": bundle_id,
+    }))
+    .expect("the activation's evidence hashes")
+}
+
+/// Final fix wave (G12): the evidence hash a `rollback` event and its
+/// routing row record: the same rule without a readiness (a rollback reads
+/// none), so the canonical hash of the promotion hash and the bundle.
+fn rollback_evidence_hash(promotion: &PromotionDecision, bundle_id: &str) -> String {
+    trace_commons_server::versioned_pipeline_qualification::evidence_hash(&serde_json::json!({
+        "promotion": promotion.evidence_hash,
+        "bundle_id": bundle_id,
+    }))
+    .expect("the rollback's evidence hashes")
+}
+
 const GATE_SIGNING_KEY_ID: &str = "activation-gate-release-key";
 
 /// The fully qualified production service of `qualified_production_service`
@@ -38124,7 +38151,9 @@ async fn activation_requires_every_term_of_the_gate() {
         .await
         .expect("every term of the gate holds");
     assert_eq!(routing.routing_state, RoutingState::Pipeline);
-    assert_eq!(routing.evidence_hash, readiness.evidence_hash);
+    let activated_hash = activate_evidence_hash(&readiness, &promotion, &fixture.a.bundle_id);
+    assert_eq!(routing.evidence_hash, activated_hash);
+    assert_ne!(routing.evidence_hash, readiness.evidence_hash);
     assert_eq!(store.routing(&tenant).await.unwrap(), Some(routing.clone()));
     assert_eq!(
         runs.active_bundle_id(&tenant).await.unwrap().as_deref(),
@@ -38141,7 +38170,7 @@ async fn activation_requires_every_term_of_the_gate() {
         event.resulting_bundle_id.as_deref(),
         Some(fixture.a.bundle_id.as_str())
     );
-    assert_eq!(event.evidence_hash, readiness.evidence_hash);
+    assert_eq!(event.evidence_hash, activated_hash);
     assert_eq!(event.actor_principal_ref, actor);
     assert_eq!(event.reason_code, "activate_qualified_bundle");
 
@@ -38473,7 +38502,10 @@ async fn rollback_selects_an_earlier_bundle_for_new_runs_only() {
         .await
         .expect("A was active before B");
     assert_eq!(rolled_back.routing_state, RoutingState::Pipeline);
-    assert_eq!(rolled_back.evidence_hash, promotion.evidence_hash);
+    assert_eq!(
+        rolled_back.evidence_hash,
+        rollback_evidence_hash(&promotion, &a)
+    );
     assert_eq!(active(tenant.clone()).await, Some(a.clone()));
     let event = store.events(&tenant, 1).await.unwrap().remove(0);
     assert_eq!(event.action, ActivationAction::Rollback);
@@ -38482,8 +38514,9 @@ async fn rollback_selects_an_earlier_bundle_for_new_runs_only() {
     assert_eq!(event.previous_bundle_id.as_deref(), Some(b.as_str()));
     assert_eq!(event.resulting_bundle_id.as_deref(), Some(a.as_str()));
     assert_eq!(
-        event.evidence_hash, promotion.evidence_hash,
-        "a rollback's event records the promotion's evidence hash"
+        event.evidence_hash,
+        rollback_evidence_hash(&promotion, &a),
+        "a rollback's event records the hash of the promotion and the bundle"
     );
     service.register_default_bundle(&tenant).await.unwrap();
     assert_eq!(
@@ -38567,7 +38600,7 @@ async fn rollback_selects_an_earlier_bundle_for_new_runs_only() {
     assert_eq!(event.previous_state, Some(RoutingState::Contained));
     assert_eq!(event.previous_bundle_id.as_deref(), Some(b.as_str()));
     assert_eq!(event.resulting_bundle_id.as_deref(), Some(a.as_str()));
-    assert_eq!(event.evidence_hash, promotion.evidence_hash);
+    assert_eq!(event.evidence_hash, rollback_evidence_hash(&promotion, &a));
 
     // A tenant routed to the legacy path, and one with no routing row.
     store
@@ -38921,7 +38954,10 @@ async fn a_rollback_needs_no_readiness_and_an_activation_does() {
     assert_eq!(rolled_back.routing_state, RoutingState::Pipeline);
     let event = store.events(&tenant, 1).await.unwrap().remove(0);
     assert_eq!(event.action, ActivationAction::Rollback);
-    assert_eq!(event.evidence_hash, promotion.evidence_hash);
+    assert_eq!(
+        event.evidence_hash,
+        rollback_evidence_hash(&promotion, &fixture.a.bundle_id)
+    );
     assert_ne!(
         event.evidence_hash, readiness.evidence_hash,
         "a rollback records the promotion's hash, not a readiness hash"
