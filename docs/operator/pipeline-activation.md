@@ -58,7 +58,11 @@ same body from the recorded principal replays the receipt, a different body
 is refused with `409` (`receipt id reused with different content`), another
 principal with `409` as `main` refuses one, and a tenant on neither list, or
 a build with no pipeline runtime, answers `409`
-(`submission_owned_by_pipeline_run`).
+(`submission_owned_by_pipeline_run`). This holds inside one ingest process:
+while replicas disagree on a tenant's routing (a rolling restart that
+changes its list), a legacy upload and a pipeline receipt of one submission
+id can both commit, so change a tenant's routing only with all replicas
+stopped.
 
 To roll a tenant back from the pipeline, move it from
 `TRACE_COMMONS_PIPELINE_RECEIPTS_TENANT_IDS` to
