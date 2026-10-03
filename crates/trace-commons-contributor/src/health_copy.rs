@@ -104,7 +104,7 @@ impl HealthLineCopy {
 /// a daemon that reported the label without that object.
 pub const DAILY_BUDGET_TITLE: &str = "Today's upload limit is used up.";
 
-/// **DRAFT, NEEDS APPROVAL.** The banner for a daemon that cannot be reached
+/// The banner for a daemon that cannot be reached
 /// at all -- no IPC call is answering, so there is no label to read and
 /// nothing a shell's own liveness probe can do but say so. New wording: no
 /// shell has shown a contributor-facing sentence for this condition before,
