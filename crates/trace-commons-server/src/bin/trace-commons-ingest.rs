@@ -23464,7 +23464,7 @@ async fn review_quarantine_rescrub_batch_handler(
         .as_deref()
         .unwrap_or("operator_quarantine_rescrub_batch");
     let TraceCommonsMetadataView { records, .. } =
-        read_reviewer_metadata_view(state.as_ref(), tenant.auth())
+        read_mains_reviewer_metadata_view(state.as_ref(), tenant.auth())
             .await
             .map_err(internal_error)?;
     let requested: Option<BTreeSet<Uuid>> =
@@ -23715,7 +23715,7 @@ async fn review_routing_summary_handler(
     let tenant = authenticate_ctx_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_reviewer(tenant.auth())?;
     let TraceCommonsMetadataView { records, .. } =
-        read_reviewer_metadata_view(state.as_ref(), tenant.auth())
+        read_mains_reviewer_metadata_view(state.as_ref(), tenant.auth())
             .await
             .map_err(internal_error)?;
     let now = Utc::now();
@@ -61007,12 +61007,18 @@ async fn without_pipeline_submissions(
 }
 
 /// `main`'s reviewer view without the submissions that have a pipeline run
-/// (`without_pipeline_submissions`).
+/// (`without_pipeline_submissions`). Only a view read from the database is
+/// filtered, as in the replay export: the pipeline writes no file record,
+/// so a view read from files holds none of its submissions and needs no
+/// read of the pipeline's tables.
 async fn read_mains_reviewer_metadata_view(
     state: &AppState,
     tenant: &TenantAuth,
 ) -> anyhow::Result<TraceCommonsMetadataView> {
     let view = read_reviewer_metadata_view(state, tenant).await?;
+    if !state.db_reviewer_reads_for_tenant(&tenant.tenant_id) {
+        return Ok(view);
+    }
     without_pipeline_submissions(state, tenant, view).await
 }
 

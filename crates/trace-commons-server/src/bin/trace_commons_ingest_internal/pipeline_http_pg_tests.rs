@@ -5245,10 +5245,10 @@ async fn quarantined_pipeline_run(
 
 /// Zaki review 3, Z3-L8 (ruling RB-32): with `main`'s database reviewer
 /// reads, which reach a quarantined pipeline submission, `main`'s legacy
-/// review queue, active-learning queue and next-lease claim leave it out,
-/// and its decision and lease routes refuse it with
-/// `409 pipeline_run_owns_submission`: the pipeline reviews it through its
-/// own routes (`/v1/review/pipeline/...`).
+/// review queue, active-learning queue, next-lease claim, routing summary
+/// and batch re-scrub leave it out, and its decision and lease routes refuse
+/// it with `409 pipeline_run_owns_submission`: the pipeline reviews it
+/// through its own routes (`/v1/review/pipeline/...`).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mains_legacy_review_routes_leave_pipeline_submissions_out() {
     let Some(mut fixture) = withdrawal_fixture_with(
@@ -5325,6 +5325,29 @@ async fn mains_legacy_review_routes_leave_pipeline_submissions_out() {
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{claimed}");
+
+    // Multi-lens review C19: the routing summary and the batch re-scrub read
+    // the same view, so neither counts nor takes the pipeline's run.
+    let (status, summary) = route_request(
+        state.clone(),
+        "GET",
+        "/v1/review/routing-summary",
+        auth_headers(&reviewer),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{summary}");
+    assert_eq!(summary["queue_count"], 0, "{summary}");
+    let (status, rescrub) = route_request(
+        state.clone(),
+        "POST",
+        "/v1/review/quarantine/rescrub",
+        auth_headers(&reviewer),
+        Some(serde_json::json!({"dry_run": true})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{rescrub}");
+    assert_eq!(rescrub["scanned"], 0, "{rescrub}");
 
     for (path, body) in [
         (

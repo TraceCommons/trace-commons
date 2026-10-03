@@ -97807,6 +97807,42 @@ async fn unreachable_pipeline_product() -> Arc<PipelineProductStore> {
     Arc::new(PipelineProductStore::new(Arc::new(backend)))
 }
 
+/// Multi-lens review C11: `main`'s reviewer routes read the tenant's
+/// pipeline submissions only when the reviewer view comes from the database.
+/// A view read from files holds no pipeline submission, so with file reads
+/// they answer from the files, as on `main`, and do not need the pipeline's
+/// database: the store here cannot reach it, so a read would be a 500.
+#[tokio::test]
+async fn mains_review_routes_from_files_do_not_read_the_pipeline_store() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut state = test_state(temp.path().to_path_buf());
+    let backend = PgBackend::new(&DatabaseConfig::from_postgres_url(
+        "postgres://unused@127.0.0.1:9/unused",
+        1,
+    ))
+    .await
+    .expect("a lazy pool builds without connecting");
+    Arc::make_mut(&mut state).pipeline_store =
+        Some(Arc::new(PgPipelineStore::new(Arc::new(backend))));
+    assert!(!state.db_reviewer_reads_for_tenant("tenant-a"));
+    for uri in [
+        "/v1/review/quarantine",
+        "/v1/review/active-learning",
+        "/v1/review/routing-summary",
+    ] {
+        let (status, body) = pipeline_product_request(
+            state.clone(),
+            "GET",
+            uri,
+            Some("review-token-a"),
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{uri}: {body}");
+    }
+}
+
 /// Sends one request through the router and returns its status and JSON
 /// body (`Null` when the body is empty).
 async fn pipeline_product_request(
