@@ -1,4 +1,5 @@
 import SwiftUI
+import TCDesign
 import XCTest
 import TCShellCore
 @testable import TraceCommonsApp
@@ -81,20 +82,19 @@ final class PrivateInferenceDestinationTests: XCTestCase {
     }
 
     /// Held, attention, refused and anything unknown are drawn differently
-    /// from clear -- in the glyph as well as the colour, so the difference
-    /// survives greyscale.
+    /// from clear. On glass the status is a dot, which is colour alone; the
+    /// difference that survives greyscale is the core's state sentence every
+    /// `GlassStatusLabel` draws beside it, so this pins only that no other
+    /// tone shares clear's status.
     func testEveryNonClearToneIsVisiblyDistinctFromClear() {
-        let clear = PrivateInferenceIndicator.palette(.clear)
+        let clear = PrivateInferenceIndicator.status(.clear)
         for tone: PrivateInferenceTone in [.neutral, .held, .attention, .refused] {
-            XCTAssertNotEqual(
-                PrivateInferenceIndicator.palette(tone).symbol, clear.symbol,
-                "\(tone) shares clear's glyph")
-            XCTAssertFalse(PrivateInferenceIndicator.palette(tone).symbol.isEmpty)
+            XCTAssertNotEqual(PrivateInferenceIndicator.status(tone), clear, "\(tone) shares clear's status")
         }
         for raw: Int32 in [-1, 0, 99, Int32.max, Int32.min] {
             let tone = PrivateInferenceTone.fromABI(raw)
             XCTAssertFalse(tone.readsAsWorking)
-            XCTAssertNotEqual(PrivateInferenceIndicator.palette(tone).symbol, clear.symbol)
+            XCTAssertNotEqual(PrivateInferenceIndicator.status(tone), clear)
         }
     }
 }

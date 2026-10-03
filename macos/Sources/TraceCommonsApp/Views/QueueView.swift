@@ -1330,6 +1330,30 @@ extension ScrubbingCaveat {
     }
 }
 
+extension PrivateInferenceIndicator {
+    /// The private-inference tone onto this shell's palette, for the legacy
+    /// queue and the menu bar until Phase 4 deletes both; the glass surfaces
+    /// read `status(_:)`.
+    ///
+    /// A separate bridge from the routing and witness ones for the reason
+    /// spelled out on `WitnessSection.tone`: the three ABI tone ranges
+    /// are disjoint so a cross-wired mapper is wrong for every value.
+    ///
+    /// Every arm answers a distinct `TC.Tone`, and each of those carries its
+    /// own glyph as well as its own colour -- so held, attention, refused
+    /// and anything a later daemon grows stay distinguishable from clear in
+    /// greyscale and to a colour-blind reader, which is the whole point.
+    static func palette(_ tone: PrivateInferenceTone) -> TC.Tone {
+        switch tone {
+        case .neutral: return .neutral
+        case .held: return .held
+        case .clear: return .clear
+        case .attention: return .attention
+        case .refused: return .refused
+        }
+    }
+}
+
 /// The queue's sentences the glass Traces tab draws too, moved here verbatim
 /// so the legacy queue and `TracesOffersBar` read one literal each. The
 /// legacy views go in Phase 4; this table outlives them.

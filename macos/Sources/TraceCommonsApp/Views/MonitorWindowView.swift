@@ -244,11 +244,7 @@ struct MonitorWindowView: View {
     /// neither on nor off.
     static func inferenceDot(_ state: PrivateInferenceState?, calls: PrivateInferenceCalls) -> GlassStatus? {
         guard let state, !state.label.isEmpty else { return nil }
-        switch PrivateInferenceSurface.tone(state, calls: calls) {
-        case .clear: return .on
-        case .held, .attention, .refused: return .ask
-        case .neutral: return .off
-        }
+        return PrivateInferenceIndicator.status(PrivateInferenceSurface.tone(state, calls: calls))
     }
 
     /// The dot's text equivalent: the core's sentence for the same state.
