@@ -24,7 +24,7 @@ struct InferenceTabView: View {
                 }
                 if let page = store.calls {
                     if page.readable {
-                        totals(page)
+                        totals(page, summary: store.summary)
                         if let summary = store.summary, summary.readable, !summary.models.isEmpty {
                             models(summary)
                         }
@@ -42,13 +42,35 @@ struct InferenceTabView: View {
 
     // MARK: Totals
 
-    private func totals(_ page: DaemonData.InferenceCallPage) -> some View {
-        let verified = page.calls.filter { $0.proofLabel.isProof }.count
+    private func totals(_ page: DaemonData.InferenceCallPage, summary: DaemonData.InferenceSummary?) -> some View {
+        let totals = Self.totals(page, summary: summary)
         return HStack(spacing: GlassTokens.Space.s3) {
-            GlassLegendCell(MonitorWords.calls, value: String(page.calls.count), status: .shared)
-            GlassLegendCell(InferenceWords.proof(.verified), value: String(verified), status: .on)
-            GlassLegendCell(MonitorWords.priced, value: Self.priced(page.calls.map(\.cost)), status: .kept)
+            GlassLegendCell(MonitorWords.calls, value: totals.calls.map(String.init) ?? "—", status: .shared)
+            GlassLegendCell(InferenceWords.proof(.verified), value: totals.verified.map(String.init) ?? "—", status: .on)
+            GlassLegendCell(MonitorWords.priced, value: totals.priced, status: .kept)
         }
+    }
+
+    /// The tab's totals. The core's per-model summary when it answered:
+    /// its counts cover the whole window. Otherwise the page's own calls,
+    /// but only when the page is the whole window (no next cursor): one
+    /// page of a longer ledger is never shown as the total. Unknown is a
+    /// dash.
+    static func totals(
+        _ page: DaemonData.InferenceCallPage, summary: DaemonData.InferenceSummary?
+    ) -> (calls: Int?, verified: Int?, priced: String) {
+        if let summary, summary.readable {
+            let calls = summary.models.map(\.calls)
+            let callTotal = calls.contains(nil) ? nil : calls.compactMap { $0 }.reduce(0, +)
+            let counts = summary.models.map(\.proofCounts)
+            let verified = counts.contains(nil) ? nil
+                : counts.compactMap { $0 }.reduce(0) { $0 + ($1[DaemonData.ProofLabel.verified.rawValue] ?? 0) }
+            let micros = summary.models.map(\.pricedMicros)
+            let priced = micros.contains(nil) ? "—" : money(micros.compactMap { $0 }.reduce(0, +))
+            return (callTotal, verified, priced)
+        }
+        guard page.nextCursor == nil else { return (nil, nil, "—") }
+        return (page.calls.count, page.calls.filter { $0.proofLabel.isProof }.count, priced(page.calls.map(\.cost)))
     }
 
     // MARK: Per model (PROVISIONAL summary)
@@ -126,7 +148,7 @@ struct InferenceTabView: View {
             Text(Self.priced([call.cost]))
                 .glassType(GlassTokens.TypeScale.caption)
                 .foregroundStyle(GlassColor.textSecondary)
-            GlassTag(InferenceWords.proof(call.proofLabel), tone: Self.tone(call.proofLabel))
+            GlassTag(InferenceWords.proof(call.proof), tone: Self.tone(call.proof))
         }
         .accessibilityElement(children: .combine)
     }
@@ -168,13 +190,17 @@ struct InferenceTabView: View {
         switch label {
         case .verified: .on
         case .pending, .gatewayOnly: .ask
-        case .failed, .outside: .outside
+        // A failed check is not the same as a call that left for an
+        // outside model: its own tone.
+        case .failed: .failed
+        case .outside: .outside
         case .unattested, .unavailable, .unrecorded: .neutral
         }
     }
 
+    /// A label this shell does not know is neutral, never a verdict.
     static func tone(_ raw: String) -> GlassTag.Tone {
-        tone(DaemonData.ProofLabel(rawValue: raw) ?? .unrecorded)
+        DaemonData.ProofLabel(rawValue: raw).map(tone) ?? .neutral
     }
 
     /// Proof counts in a fixed order, so the tags do not shuffle on reload.
@@ -253,8 +279,10 @@ enum InferenceWords {
         }
     }
 
+    /// A label from a newer daemon that this shell does not know is a
+    /// dash, never "Unrecorded" or any other verdict.
     static func proof(_ raw: String) -> String {
-        proof(DaemonData.ProofLabel(rawValue: raw) ?? .unrecorded)
+        DaemonData.ProofLabel(rawValue: raw).map(proof) ?? "—"
     }
 }
 

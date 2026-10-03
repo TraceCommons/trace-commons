@@ -15,6 +15,22 @@ final class SettingsSectionsTests: XCTestCase {
         XCTAssertEqual(Set(SettingsSection.allCases.map(\.symbol)).count, SettingsSection.allCases.count)
     }
 
+    /// A section whose copy has not loaded is a disabled placeholder row,
+    /// never a vanished one; a loaded title is the row's text.
+    func test_aSectionWithNoCopyIsAPlaceholderNotAMissingRow() {
+        XCTAssertEqual(SettingsSection.ListRow.row(title: nil), .init(text: "—", enabled: false))
+        XCTAssertEqual(SettingsSection.ListRow.row(title: ""), .init(text: "—", enabled: false))
+        XCTAssertEqual(SettingsSection.ListRow.row(title: "Private AI"), .init(text: "Private AI", enabled: true))
+    }
+
+    /// The list draws a row for every section, whatever its copy: no row is
+    /// behind an `if let` on a title.
+    func test_theListDrawsEverySection() throws {
+        let source = try String(contentsOf: Self.source("Views/MonitorWindowView.swift"), encoding: .utf8)
+        XCTAssertTrue(source.contains("SettingsSection.ListRow.row(title: item.title("))
+        XCTAssertFalse(source.contains("if let title = item.title("))
+    }
+
     /// Every section but Compute (its own view) is drawn by `SettingsContent`
     /// when chosen: a section in the list with nothing behind it would show
     /// an empty pane, which is the selection not matching the content.

@@ -8,8 +8,11 @@ import Foundation
 ///    on screen under the core's line, never drawn as current.
 /// 2. `loading`: nothing has been read yet. Never drawn as empty or zero.
 /// 3. `paused`: watching is paused. Drawn as paused, never as healthy.
-/// 4. `unknown`: the core answered without the signal this screen needs.
-///    Drawn as unknown (a dash), never as healthy and never as off.
+/// 4. `unknown`: the core answered without the signal this screen needs,
+///    or the screen's last read failed for any reason other than the core
+///    being down (it ranks above loading and paused then, because what is
+///    on screen is stale). Drawn as unknown (a dash), never as healthy and
+///    never as off.
 /// 5. `ready`: everything the screen needs was reported.
 ///
 /// A missing signal is never drawn as healthy: every input that is nil
@@ -30,6 +33,10 @@ public enum ScreenState: Equatable, Sendable {
         failure: DaemonDataError?, loaded: Bool, paused: Bool?, known: Bool
     ) -> ScreenState {
         if case .unreachable = failure { return .coreDown }
+        // Any other failed read (undecodable, refused, not available yet)
+        // leaves the last values on screen but no longer current, so they
+        // are unknown: never ready, never paused from a stale status.
+        if failure != nil { return .unknown }
         if !loaded { return .loading }
         if paused == true { return .paused }
         if paused == nil || !known { return .unknown }

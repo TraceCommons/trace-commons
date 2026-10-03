@@ -22,8 +22,21 @@ struct FlowMapScene: Equatable {
             case folder(ProjectMode?)
             /// A tool that can send model calls here.
             case harness(GlassTool?, installed: Bool)
-            /// The Private AI destination tools connect to.
-            case destination(answering: Bool)
+            /// The Private AI destination tools connect to, drawn from the
+            /// core's Private AI state.
+            case destination(Lamp)
+        }
+
+        /// The Private AI destination's state, from `tool_destinations
+        /// .private_ai` (or the status's `private_inference_state`). Unknown
+        /// is drawn apart from off: a missing signal is never "off".
+        enum Lamp: Equatable {
+            /// Running, and the core says some tool's calls are answered.
+            case answering
+            /// Running, with nothing answered.
+            case running
+            case off
+            case unknown
         }
 
         let id: String
@@ -45,6 +58,12 @@ struct FlowMapScene: Equatable {
             case dashed
             /// Carrying sessions or calls: moving dashes, in `statusOn`.
             case flowing
+            /// Calls arrived in this tool's protocol family, but more than
+            /// one connected tool speaks it, so the core cannot say they
+            /// were this tool's: lit, never moving.
+            case shared
+            /// The core could not say: dotted, never solid or moving.
+            case unknown
         }
 
         let from: CGPoint
@@ -77,24 +96,62 @@ struct FlowMapScene: Equatable {
     /// Folders drawn under one tool; the rest are counted.
     static let foldersShown = 4
 
-    /// Tools and their folders, ringed by rule, joined to this computer;
-    /// an arc to the commons for every tool with a folder set to contribute
-    /// automatically.
-    static func traces(_ tree: TracesTree) -> FlowMapScene {
+    /// What decides whether sessions move to the commons, as the core
+    /// reports it. Anything unread is closed: a missing signal never draws
+    /// a flow (#1190).
+    struct CommonsGate: Equatable {
+        var state: ScreenState
+        var status: DaemonData.Status?
+        var destinations: DaemonData.ToolDestinations?
+
+        /// Whether anything at all can move to the commons now: the screen
+        /// is current, nothing is paused, held, voided or over budget, the
+        /// contributor is signed in, and the core names a route for
+        /// sessions.
+        var open: Bool {
+            guard state == .ready, let status, let destinations else { return false }
+            guard status.paused == false, status.loggedIn == true else { return false }
+            guard let held = status.automaticContributionHeld?.heldSessions, held == 0 else { return false }
+            guard let voids = status.grantVoids, voids.isEmpty else { return false }
+            guard status.dailyBudget?.blocked != true else { return false }
+            guard let route = destinations.sessionsRoute, Self.routes.contains(route) else { return false }
+            return true
+        }
+
+        /// The `sessions_route` values with somewhere to send sessions;
+        /// `witness_refusing`, `not_enrolled` and `settings_unreadable` have
+        /// none.
+        static let routes: Set<String> = ["witness", "local"]
+
+        /// Whether the core says this tool's sessions are watched and go to
+        /// the commons.
+        func sendsToCommons(_ kind: SourceKind) -> Bool {
+            guard let route = destinations?.tools.first(where: { $0.tool == kind.rawValue })?.sessions else { return false }
+            return route.watch == "watched" && route.to.contains("commons")
+        }
+    }
+
+    /// Tools and their folders, ringed by rule, joined to this computer.
+    /// A tool with a folder set to contribute automatically is joined to
+    /// the commons: moving only when the gate is open and the core says
+    /// that tool's sessions go there, dashed otherwise, and never for a
+    /// tool that is off.
+    static func traces(_ tree: TracesTree, gate: CommonsGate) -> FlowMapScene {
         var scene = FlowMapScene()
         let tools = tree.tools
         let step = tools.count > 1 ? 460 / CGFloat(tools.count - 1) : 0
-        var automatic = 0
+        var flowing = false
 
         for (index, tool) in tools.enumerated() {
             let at = CGPoint(x: 150, y: tools.count > 1 ? 170 + CGFloat(index) * step : hubPoint.y)
             let off = tool.mode == .off
             let toolDim = off ? 0.4 : 1
-            let sends = tool.folders.contains { $0.mode == .autoUpload }
-            automatic += tool.folders.filter { $0.mode == .autoUpload }.count
+            let armed = tool.folders.contains { $0.mode == .autoUpload }
 
-            if sends {
-                scene.arcs.append(curve(from: CGPoint(x: at.x + 12, y: at.y - 6), to: libraryPoint, style: .flowing, dim: off ? 0.3 : 1))
+            if armed && !off {
+                let moves = gate.open && gate.sendsToCommons(tool.kind)
+                flowing = flowing || moves
+                scene.arcs.append(curve(from: CGPoint(x: at.x + 12, y: at.y - 6), to: libraryPoint, style: moves ? .flowing : .dashed, dim: 1))
             }
             let midX = (hubPoint.x + at.x) / 2
             scene.arcs.append(Arc(
@@ -124,9 +181,12 @@ struct FlowMapScene: Equatable {
         scene.nodes.insert(Node(
             id: "hub", kind: .hub, at: hubPoint, radius: 16,
             label: MonitorWords.computer, detail: pair(MonitorWords.waiting, waiting)), at: 0)
+        // The armed count is the core's (`tool_destinations.folders.armed`),
+        // a dash when it did not say.
         scene.nodes.append(Node(
-            id: "library", kind: .library(active: automatic > 0), at: libraryPoint, radius: 11,
-            label: MonitorWords.commons, detail: pair(ProjectCopy.modeChoiceLabel(.autoUpload), automatic)))
+            id: "library", kind: .library(active: flowing), at: libraryPoint, radius: 11,
+            label: MonitorWords.commons,
+            detail: pair(ProjectCopy.modeChoiceLabel(.autoUpload), gate.destinations?.folders?.armed)))
         return scene
     }
 
@@ -152,42 +212,74 @@ struct FlowMapScene: Equatable {
 
     static let destinationPoint = CGPoint(x: 290, y: 380)
 
-    /// Each tool that can send model calls here, joined to the destination:
-    /// solid when its config sends calls here, flowing only when the core
-    /// says calls are answered, dashed when it is not connected.
+    /// Each tool that can send model calls here, joined to the destination,
+    /// drawn from the core's state for it (`HarnessState`), never from
+    /// `connected`: flowing only when its calls are answered, solid when
+    /// connected with nothing answered, lit but still when its family's
+    /// calls cannot be attributed, dashed when not connected, dotted when
+    /// the core could not say.
     ///
     /// - `destinationLabel` is the core's name for the destination.
-    /// - `sentence` is the core's state sentence for a row, if it has one.
-    /// - `answering` is the core's verdict that a row's calls arrive.
+    /// - `privateAI` is the core's Private AI state label (`running`,
+    ///   `off`, ...), nil when it did not say.
+    /// - `sentence` is the core's sentence for a row (`rowSentence`).
+    /// - `state` is the core's verdict for a row.
     static func privateAI(
         _ harnesses: HarnessList,
         destinationLabel: String,
+        privateAI: String?,
         sentence: (HarnessRow) -> String?,
-        answering: (HarnessRow) -> Bool
+        state: (HarnessRow) -> HarnessState
     ) -> FlowMapScene {
         var scene = FlowMapScene()
         let rows = harnesses.harnesses
         let step = rows.count > 1 ? 420 / CGFloat(rows.count - 1) : 0
         var anyAnswering = false
+        var connected = 0
 
         for (index, row) in rows.enumerated() {
             let y = rows.count > 1 ? 170 + CGFloat(index) * step : destinationPoint.y
-            let answers = row.connected && answering(row)
-            anyAnswering = anyAnswering || answers
+            let style: Arc.Style
+            switch state(row) {
+            case .answering:
+                style = .flowing
+                anyAnswering = true
+                connected += 1
+            case .connectedNoCalls:
+                style = .quiet
+                connected += 1
+            case .activityShared:
+                style = .shared
+                connected += 1
+            case .notConnected: style = .dashed
+            case .unknown: style = .unknown
+            }
             scene.arcs.append(Arc(
                 from: CGPoint(x: 118, y: y), control1: CGPoint(x: 200, y: y),
                 control2: CGPoint(x: 210, y: destinationPoint.y), to: destinationPoint,
-                style: answers ? .flowing : row.connected ? .quiet : .dashed))
+                style: style))
             scene.nodes.append(Node(
                 id: "harness:\(row.id)", kind: .harness(glassTool(harness: row.id), installed: row.installed),
                 at: CGPoint(x: 106, y: y), radius: 13, label: row.name, detail: sentence(row) ?? "—",
                 dim: row.installed ? 1 : 0.5))
         }
-        let connected = rows.filter(\.connected).count
+        let lamp = lamp(privateAI, answering: anyAnswering)
+        var detail = pair(MonitorWords.connected, connected)
+        if lamp == .unknown { detail += " · " + MonitorWords.unknown }
         scene.nodes.insert(Node(
-            id: "destination", kind: .destination(answering: anyAnswering), at: destinationPoint, radius: 26,
-            label: destinationLabel, detail: pair(MonitorWords.connected, connected)), at: 0)
+            id: "destination", kind: .destination(lamp), at: destinationPoint, radius: 26,
+            label: destinationLabel, detail: detail), at: 0)
         return scene
+    }
+
+    /// The destination's lamp from the core's Private AI state label. A
+    /// label this shell does not know is unknown, never off.
+    static func lamp(_ privateAI: String?, answering: Bool) -> Node.Lamp {
+        switch privateAI {
+        case "running": answering ? .answering : .running
+        case "off": .off
+        default: .unknown
+        }
     }
 
     /// IronWire's harness ids to the tools that have artwork.
@@ -207,6 +299,11 @@ struct FlowMapScene: Equatable {
     /// A word and its count, in that order: "Waiting 3".
     static func pair(_ word: String, _ count: Int) -> String {
         "\(word) \(count)"
+    }
+
+    /// A word and a count the core may not have reported: a dash then.
+    static func pair(_ word: String, _ count: Int?) -> String {
+        "\(word) \(count.map(String.init) ?? "—")"
     }
 
     private static func curve(from: CGPoint, to: CGPoint, style: Arc.Style, dim: Double) -> Arc {
