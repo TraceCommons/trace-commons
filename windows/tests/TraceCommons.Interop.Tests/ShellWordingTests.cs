@@ -98,7 +98,9 @@ public class ShellWordingTests
 
             // Window and control code-behind: dialog bodies and one fallback
             // label, written at the call site.
-            { "TraceCommons.App/MainWindow.xaml.cs", 3 },
+            // Lowered from 3: the quit prompt is now the core's
+            // (tc_quit_prompt_json).
+            { "TraceCommons.App/MainWindow.xaml.cs", 1 },
             { "TraceCommons.App/StartupRegistration.cs", 4 },
             { "TraceCommons.App/TrayIcon.cs", 3 },
 
