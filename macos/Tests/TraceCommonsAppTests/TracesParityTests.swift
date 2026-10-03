@@ -230,5 +230,93 @@ final class TracesParityTests: XCTestCase {
         XCTAssertEqual(PrivateInferenceIndicator.status(.refused), .ask)
         XCTAssertEqual(PrivateInferenceIndicator.status(.neutral), .off)
     }
+
+    /// The four tabs keep their searches, their figures, the whole body and
+    /// the copy-all control, and the sheet is off the legacy palette.
+    func test_thePreviewSheetTabsKeepEveryBinding() throws {
+        let sheet = try Self.text("Views/PreviewSheet.swift")
+        for needle in [
+            "preview.search(needle)", "searchOriginal(needle)", "RecentSearches.remember(", "RecentSearches.load()",
+            "OriginalSearchOutcome.classify(", "document.snippet(around:", ".onSubmit(commit)", ".focused($focused)",
+            "TCCoreCopy.redactionSummaryJSON(", "summary.piiLabelsPresent", "summary.residualRisk", "summary.tokenDistributionSummary",
+            "ScrubbingCaveatNote()", "\"transcript-copy-all\"", "document.wholeText()", "RedactionMarks.spoken(",
+            "TranscriptResidentChunks", "TranscriptRowIndex(", "ScopeCopy.title(for:", "summary.consentScopes",
+            "GlassTokens.TypeScale.mono",
+        ] {
+            XCTAssertTrue(sheet.contains(needle), "PreviewSheet.swift lacks \(needle)")
+        }
+        try LegacySymbols.assertClean("Views/PreviewSheet.swift")
+    }
+
+    /// The tabs are drawn with glass parts, each pinned by its exact call:
+    /// the search highlight and the redaction chip on the existing tokens
+    /// (no new token), every outcome a dot with its words, the figures a
+    /// key-value list, and the sheet held to the glass surface rules.
+    func test_thePreviewSheetTabsAreDrawnOnGlass() throws {
+        let sheet = try Self.text("Views/PreviewSheet.swift")
+        for needle in [
+            // Search
+            "attributed[found].backgroundColor = GlassTokens.Color.statusAsk.color.opacity(0.32)\n"
+                + "        attributed[found].foregroundColor = GlassColor.textPrimary\n",
+            "Button(\"Search\", action: commit)\n                    .buttonStyle(GlassButtonStyle(.glass))\n",
+            "Button(term) { needle = term }\n                            .buttonStyle(GlassButtonStyle(.link))\n",
+            "GlassStatusLabel(outcome.sentence, status: Self.status(for: outcome.emphasis))",
+            "GlassStatusLabel(\"0 matches\", status: .on)",
+            "GlassStatusLabel(Self.matchCount(offsets!.count), status: .ask)",
+            ".textFieldStyle(.plain)\n                    .glassType(GlassTokens.TypeScale.label.weight(.regular))\n",
+            ".fill(GlassTokens.Color.fieldFill.color)",
+            "GlassCard(quiet: true) {\n                            Text(highlighting(snippet, term: needle))\n"
+                + "                                .glassType(GlassTokens.TypeScale.mono)\n",
+            // What's in it
+            "GlassKeyValueList(items)",
+            "GlassKeyValueList.Item(\"Agent\", entry.agentName)",
+            "GlassKeyValueList.Item(\"Would send\", Format.bytes(summary.wouldSendBytes))",
+            "GlassSectionRule(\"What scrubbing removed\")",
+            "GlassSectionRule(\"Found, and still in what would be sent\")",
+            "GlassSectionRule(\"Personal-information categories seen\")",
+            "GlassSectionRule(\"Residual risk\")",
+            "GlassStatusLabel(row.description, status: .ask)",
+            "GlassNotice(tone: .ask) {",
+            // Transcript
+            "Text(TranscriptMarkers.chipped(Self.caption, font: GlassTokens.TypeScale.caption.font))\n"
+                + "                .glassType(GlassTokens.TypeScale.caption)\n",
+            "chip.backgroundColor = GlassTokens.Color.controlSelected.color\n"
+                + "            chip.foregroundColor = GlassColor.textPrimary\n",
+            ".glassType(GlassTokens.TypeScale.mono)\n                    .textSelection(.enabled)\n",
+            "TranscriptMarkers.chipped(text, font: GlassTokens.TypeScale.mono.font)",
+            "NSLayoutManager().defaultLineHeight(for: font) + GlassTokens.TypeScale.mono.lineSpacing",
+            "GlassCard(quiet: true, flush: true) {",
+            // Permissions
+            "GlassSectionRule(\"What this upload asks for\")",
+            "Text(ScopeCopy.title(for: scope, options: options))\n                            .glassType(GlassTokens.TypeScale.bodyStrong)\n",
+        ] {
+            XCTAssertTrue(sheet.contains(needle), "PreviewSheet.swift lacks \(needle)")
+        }
+        // The transcript's columns are measured against the very inset the
+        // chunks are drawn inside, or every placeholder is the wrong height.
+        XCTAssertTrue(sheet.contains(".padding(.horizontal, TranscriptTab.inset)"))
+        XCTAssertTrue(sheet.contains("width - 2 * TranscriptTab.inset"))
+        // No sentence is drawn in the uppercased eyebrow inside the tabs.
+        let tabsStart = try XCTUnwrap(sheet.range(of: "// MARK: - Tabs")).lowerBound
+        let tabsEnd = try XCTUnwrap(sheet.range(of: "enum ScopeCopy {")).lowerBound
+        XCTAssertFalse(sheet[tabsStart..<tabsEnd].contains("TypeScale.eyebrow"))
+        XCTAssertTrue(GlassSurfaceRulesTests.files.contains("Views/PreviewSheet.swift"))
+    }
+
+    /// A search outcome onto a glass status: still there is the one to slow
+    /// down on, removed is clear, and a check that did not run is neither.
+    func test_aSearchOutcomeMapsOntoAGlassStatus() {
+        XCTAssertEqual(SearchTab.status(for: .attention), .ask)
+        XCTAssertEqual(SearchTab.status(for: .clear), .on)
+        XCTAssertEqual(SearchTab.status(for: .unchecked), .off)
+    }
+
+    /// The preloaded count is still inflected now that it is a plain string
+    /// on a status label rather than a `Label`'s localized key.
+    func test_thePreloadedMatchCountIsInflected() {
+        XCTAssertEqual(SearchTab.matchCount(1), "1 match")
+        XCTAssertEqual(SearchTab.matchCount(2), "2 matches")
+        XCTAssertEqual(SearchTab.matchCount(20), "20 matches")
+    }
 }
 #endif
