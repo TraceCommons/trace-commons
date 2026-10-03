@@ -921,11 +921,22 @@ impl PipelineActivationStore {
         Self { backend }
     }
 
+    /// A tenant transaction that states its isolation level, READ COMMITTED,
+    /// when it begins (`START TRANSACTION ISOLATION LEVEL READ COMMITTED`),
+    /// whatever `default_transaction_isolation` the database or the role
+    /// sets (final fix wave G14). A routing change reads the routing row
+    /// after it waited for the routing lock, and that read must see what
+    /// committed during the wait; under REPEATABLE READ it would read a
+    /// snapshot taken before the wait, with no error.
     async fn tenant_transaction<'a>(
         client: &'a mut deadpool_postgres::Client,
         tenant_id: &str,
     ) -> Result<Transaction<'a>, DatabaseError> {
-        let tx = client.transaction().await?;
+        let tx = client
+            .build_transaction()
+            .isolation_level(IsolationLevel::ReadCommitted)
+            .start()
+            .await?;
         tx.execute(
             "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
             &[&tenant_id],

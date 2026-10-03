@@ -34673,6 +34673,118 @@ async fn a_receipt_waits_for_a_routing_change_in_progress() {
     assert_eq!(count_files_under(dir.path()), 0);
 }
 
+/// A runtime login whose every session starts with
+/// `default_transaction_isolation = 'repeatable read'` (a connection option,
+/// so no role or database setting changes): the configuration under which a
+/// transaction that does not state its level takes one snapshot at its first
+/// statement.
+async fn repeatable_read_runtime_backend(pool_size: usize) -> Arc<PgBackend> {
+    let url = std::env::var("TRACE_COMMONS_PG_TEST_DATABASE_URL")
+        .expect("runtime_backend already read the variable");
+    let mut runtime_url = reqwest::Url::parse(&url).expect("parse test URL");
+    runtime_url
+        .set_username(RUNTIME_ROLE)
+        .expect("set runtime user");
+    // Percent-encoded by hand: a form encoder writes a space as `+`, which
+    // the PostgreSQL URL parser keeps as a `+`.
+    let query = runtime_url
+        .query()
+        .map(|query| format!("{query}&"))
+        .unwrap_or_default();
+    runtime_url.set_query(Some(&format!(
+        "{query}options=-c%20default_transaction_isolation%3Drepeatable%5C%20read"
+    )));
+    let backend = PgBackend::new(&DatabaseConfig::from_postgres_url(
+        runtime_url.as_str(),
+        pool_size,
+    ))
+    .await
+    .expect("connect as runtime role with a repeatable read default");
+    let level: String = backend
+        .trace_pool_for_test()
+        .get()
+        .await
+        .unwrap()
+        .query_one("SHOW default_transaction_isolation", &[])
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(level, "repeatable read", "the session default took effect");
+    Arc::new(backend)
+}
+
+/// Final fix wave (G14): the routing fence does not rest on the database's
+/// default isolation level. Every session of the receipt's pool defaults to
+/// REPEATABLE READ, and the receipt's commit transaction meets a containment
+/// in progress, as in case (b) of
+/// `a_receipt_waits_for_a_routing_change_in_progress`: the receipt waits and
+/// is refused, because its transactions state READ COMMITTED and so read the
+/// routing row after the lock, not from a snapshot taken before it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_routing_fence_holds_under_a_repeatable_read_default() {
+    let Some(backend) = runtime_backend(6).await else {
+        return;
+    };
+    let repeatable = repeatable_read_runtime_backend(6).await;
+    let dir = tempfile::tempdir().unwrap();
+    let (reached_tx, reached_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let store: Arc<dyn TraceArtifactStore> = Arc::new(PausingArtifactStore {
+        inner: artifact_store(&dir),
+        reached: std::sync::Mutex::new(Some(reached_tx)),
+        release: std::sync::Mutex::new(Some(release_rx)),
+    });
+    let (service, _, _) =
+        test_service(repeatable.clone(), store, minimal_config(false), None).await;
+    let tenant = routing_tenant("repeatable-read");
+    write_routing_as_operator(&tenant, "pipeline").await;
+    service.register_default_bundle(&tenant).await.unwrap();
+    let env = envelope(uuid::Uuid::new_v4()).await;
+    let raw = serde_json::to_vec(&env).unwrap();
+    let key = env.submission_id.to_string();
+    let mut waiting = tokio::spawn({
+        let service = service.clone();
+        let tenant = tenant.clone();
+        let env = env.clone();
+        async move {
+            service
+                .submit(receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+                .await
+        }
+    });
+    tokio::task::spawn_blocking(move || {
+        reached_rx.recv_timeout(std::time::Duration::from_secs(10))
+    })
+    .await
+    .unwrap()
+    .expect("the receipt's object write began");
+
+    let mut holder = backend.trace_pool_for_test().get().await.unwrap();
+    let change = begin_routing_change(&mut holder, &tenant).await;
+    release_tx.send(()).unwrap();
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(500), &mut waiting)
+            .await
+            .is_err(),
+        "the commit transaction must wait for the routing change"
+    );
+    commit_routing_change(change, &tenant, "contained").await;
+    drop(holder);
+    let result = tokio::time::timeout(std::time::Duration::from_secs(10), waiting)
+        .await
+        .expect("the receipt finishes once the routing change commits")
+        .expect("the receipt task does not panic")
+        .expect("the receipt is refused, not an error");
+    assert!(
+        matches!(
+            result,
+            PipelineReceiptResult::NotRouted(RoutingState::Contained)
+        ),
+        "a receipt after a containment is refused under a repeatable read default: {result:?}"
+    );
+    assert_eq!(count_runs(&backend, &tenant).await, 0, "no run");
+}
+
 /// The legacy path's claim of a submission id never takes one that a
 /// pipeline run owns, whether or not the run has an ownership row. (a) A
 /// receipt through the service writes the run and its `pipeline` ownership

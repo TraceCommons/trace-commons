@@ -1388,6 +1388,34 @@ impl PgPipelineStore {
         Ok(tx)
     }
 
+    /// `tenant_transaction` that states its isolation level, READ COMMITTED,
+    /// when it begins (`START TRANSACTION ISOLATION LEVEL READ COMMITTED`),
+    /// whatever `default_transaction_isolation` the database or the role
+    /// sets (final fix wave G14). For a transaction whose correctness rests
+    /// on a statement that reads what committed while an earlier statement
+    /// waited for a lock: the receipt's staging and commit transactions (the
+    /// routing read after the shared routing lock), the index rebuild's
+    /// re-check of a run after it locks the run row, and the invalidation
+    /// claim. Under REPEATABLE READ such a statement would read the snapshot
+    /// of the transaction's first statement, taken before the wait, and no
+    /// error would say so: an advisory lock has no row version.
+    pub(crate) async fn read_committed_tenant_transaction<'a>(
+        client: &'a mut deadpool_postgres::Client,
+        tenant_id: &str,
+    ) -> Result<Transaction<'a>, DatabaseError> {
+        let tx = client
+            .build_transaction()
+            .isolation_level(tokio_postgres::IsolationLevel::ReadCommitted)
+            .start()
+            .await?;
+        tx.execute(
+            "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+            &[&tenant_id],
+        )
+        .await?;
+        Ok(tx)
+    }
+
     pub async fn register_bundle(
         &self,
         tenant_id: &str,
@@ -3569,7 +3597,9 @@ impl PgPipelineStore {
         let limit = i64::try_from(limit.clamp(1, 500)).unwrap_or(500);
         let lease_milliseconds = lease.num_milliseconds().max(1);
         let mut client = self.backend.trace_pool().get().await?;
-        let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
+        // READ COMMITTED, stated (G14): the claim's one statement takes its
+        // snapshot when it runs, not at the transaction's first statement.
+        let tx = Self::read_committed_tenant_transaction(&mut client, tenant_id).await?;
         let rows = tx
             .query(
                 // A materialized CTE, not `IN (SELECT ... LIMIT ...)`: the
@@ -8744,7 +8774,9 @@ impl PipelineService {
     ) -> anyhow::Result<ReceiptStage> {
         let tenant_id = request.tenant_id;
         let mut client = self.backend.trace_pool().get().await?;
-        let tx = PgPipelineStore::tenant_transaction(&mut client, tenant_id).await?;
+        // READ COMMITTED, stated (G14): the routing read below must see a
+        // routing change that committed while this waited for the lock.
+        let tx = PgPipelineStore::read_committed_tenant_transaction(&mut client, tenant_id).await?;
         tx.execute(
             "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
             &[&pipeline_receipt_lock(
@@ -8921,7 +8953,8 @@ impl PipelineService {
         let tenant_id = request.tenant_id;
         let envelope = request.server_envelope;
         let mut client = self.backend.trace_pool().get().await?;
-        let tx = PgPipelineStore::tenant_transaction(&mut client, tenant_id).await?;
+        // READ COMMITTED, stated (G14), as the staging transaction.
+        let tx = PgPipelineStore::read_committed_tenant_transaction(&mut client, tenant_id).await?;
         tx.execute(
             "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
             &[&pipeline_receipt_lock(
@@ -9920,7 +9953,11 @@ impl PipelineService {
         )
         .await
         .map_err(|_| anyhow::anyhow!(PIPELINE_INDEX_REBUILD_FENCE_UNAVAILABLE_LABEL))?;
-        let tx = PgPipelineStore::tenant_transaction(&mut client, &run.tenant_id).await?;
+        // READ COMMITTED, stated (G14): the re-check of the run, a statement
+        // after the lock of the run row, must see an invalidation that
+        // committed before that lock was granted.
+        let tx =
+            PgPipelineStore::read_committed_tenant_transaction(&mut client, &run.tenant_id).await?;
         if !PgPipelineStore::lock_rebuildable_index_run_on_tx(&tx, run).await? {
             tx.commit().await?;
             return Ok(PipelineIndexRebuildRun::Skipped);
