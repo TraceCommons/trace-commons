@@ -23,7 +23,7 @@ import Foundation
 /// Values with no source on main are marked `"_sample": "no source yet"`
 /// in the JSON. That is every PROVISIONAL network method (Zaki's C3):
 /// `inference_summary`, `inference_call_proof`, `model_spend`,
-/// `private_ai`, `mission_catalogue`, `invite_lookup`, `passkey_state` and
+/// `mission_catalogue`, `invite_lookup`, `passkey_state` and
 /// `account_session_status` stay hand-written below, and so does `preview`
 /// / `preview_unsure_spans` (per-entry templates, not a fixed shape -- see
 /// `previewSummary(for:)`) and the write acknowledgements that carry a
@@ -69,7 +69,6 @@ enum SampleDaemonData {
         case "inference_summary": return inferenceSummary(set)
         case "inference_call_proof": return proofDetail
         case "model_spend": return modelSpend(set)
-        case "private_ai": return privateAI(set)
         case "mission_catalogue": return missionCatalogue
         case "invite_lookup": return inviteLookup
         case "passkey_state": return passkeyState(set)
@@ -220,11 +219,6 @@ enum SampleDaemonData {
             return #"{"_sample":"no source yet","known":false,"since":null,"models":[]}"#
         }
         return #"{"_sample":"no source yet","known":true,"since":"2026-09-30T00:00:00Z","models":[{"model":"zai-org/GLM-4.6","billed_micros":820000},{"model":"Qwen/Qwen3.6-27B-FP8","billed_micros":410000}]}"#
-    }
-
-    static func privateAI(_ set: Sample) -> String {
-        let on = set == .normalDay || set == .busyQueue
-        return #"{"_sample":"no source yet","on":\#(on),"state":"\#(on ? "running" : "off")","disclosure":"Sample disclosure text, supplied by the core"}"#
     }
 
     static let missionCatalogue =

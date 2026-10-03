@@ -185,6 +185,16 @@ public final class LiveDaemonClient: DaemonDataClient, @unchecked Sendable {
         try await call("get_settings", as: DaemonData.Settings.self)
     }
 
+    public func privateAI() async throws -> DaemonData.PrivateAISwitch {
+        DaemonData.PrivateAISwitch(settings: try await settings())
+    }
+
+    public func setPrivateAI(on: Bool) async throws -> DaemonData.PrivateAISwitch {
+        DaemonData.PrivateAISwitch(
+            settings: try await call(
+                "set_settings", params: PrivateInferenceSurface.settingsParams(on: on), as: DaemonData.Settings.self))
+    }
+
     public func setScrubCheck(_ mode: DaemonData.ScrubCheckMode) async throws -> DaemonData.Settings {
         try await call("set_settings", params: ["scrub_check": mode.rawValue], as: DaemonData.Settings.self)
     }
@@ -237,14 +247,6 @@ public final class LiveDaemonClient: DaemonDataClient, @unchecked Sendable {
 
     public func modelSpend() async throws -> DaemonData.ModelSpend {
         throw DaemonDataError.notAvailableYet(method: "model_spend")
-    }
-
-    public func privateAI() async throws -> DaemonData.PrivateAISwitch {
-        throw DaemonDataError.notAvailableYet(method: "private_ai")
-    }
-
-    public func setPrivateAI(on: Bool) async throws -> DaemonData.PrivateAISwitch {
-        throw DaemonDataError.notAvailableYet(method: "set_private_ai")
     }
 
     public func missionCatalogue() async throws -> DaemonData.MissionCatalogue {

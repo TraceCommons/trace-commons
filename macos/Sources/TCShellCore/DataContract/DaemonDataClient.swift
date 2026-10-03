@@ -148,6 +148,13 @@ public protocol DaemonDataClient: Sendable {
 
     /// `get_settings`.
     func settings() async throws -> DaemonData.Settings
+    /// Z1.5, the Private AI switch: `get_settings`' `private_inference`,
+    /// its offer marker and the listener's state.
+    func privateAI() async throws -> DaemonData.PrivateAISwitch
+    /// Z1.5, `set_settings` with `private_inference` and the offer marker.
+    /// Answers what the daemon echoed; nothing is confirmed here, the caller
+    /// confirms with the core's rule (`TCPrivateInference.writeConfirmed`).
+    func setPrivateAI(on: Bool) async throws -> DaemonData.PrivateAISwitch
     /// `set_settings` with `scrub_check`.
     func setScrubCheck(_ mode: DaemonData.ScrubCheckMode) async throws -> DaemonData.Settings
     /// `set_settings` with `local_notifications`.
@@ -180,10 +187,6 @@ public protocol DaemonDataClient: Sendable {
     func inferenceCallProof(callId: Int64) async throws -> DaemonData.InferenceProofDetail
     /// Z1.3, billed spend per model. PROVISIONAL.
     func modelSpend() async throws -> DaemonData.ModelSpend
-    /// Z1.5, the Private AI switch's state and disclosure. PROVISIONAL.
-    func privateAI() async throws -> DaemonData.PrivateAISwitch
-    /// Z1.5, turning Private AI on or off. PROVISIONAL.
-    func setPrivateAI(on: Bool) async throws -> DaemonData.PrivateAISwitch
     /// Z2.2, the mission catalogue. PROVISIONAL.
     func missionCatalogue() async throws -> DaemonData.MissionCatalogue
     /// Z3.1, invite lookup. PROVISIONAL.

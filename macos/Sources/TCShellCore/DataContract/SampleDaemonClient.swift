@@ -317,6 +317,32 @@ public final class SampleDaemonClient: DaemonDataClient, @unchecked Sendable {
         try serve("get_settings", as: DaemonData.Settings.self)
     }
 
+    /// The Private AI value last written, as the daemon keeps it; `nil` is
+    /// the recorded `get_settings` value.
+    private var privateAIOn: Bool?
+
+    /// Every Private AI write this client answered, in order. Tests read it
+    /// to prove what was (and was not) sent.
+    public var privateAICalls: [Bool] { lock.withLock { recordedPrivateAICalls } }
+    private var recordedPrivateAICalls: [Bool] = []
+
+    public func privateAI() async throws -> DaemonData.PrivateAISwitch {
+        let recorded = DaemonData.PrivateAISwitch(settings: try serve("get_settings", as: DaemonData.Settings.self))
+        guard let written = lock.withLock({ privateAIOn }) else { return recorded }
+        return DaemonData.PrivateAISwitch(on: written, offerSeen: true, state: recorded.state)
+    }
+
+    public func setPrivateAI(on: Bool) async throws -> DaemonData.PrivateAISwitch {
+        guard set != .coreDown else { throw DaemonDataError.unreachable }
+        lock.withLock {
+            recordedPrivateAICalls.append(on)
+            privateAIOn = on
+        }
+        let answer = try await privateAI()
+        emit(.statusChanged)
+        return answer
+    }
+
     public func setScrubCheck(_ mode: DaemonData.ScrubCheckMode) async throws -> DaemonData.Settings {
         try serve("get_settings", as: DaemonData.Settings.self)
     }
@@ -365,14 +391,6 @@ public final class SampleDaemonClient: DaemonDataClient, @unchecked Sendable {
 
     public func modelSpend() async throws -> DaemonData.ModelSpend {
         try serve("model_spend", as: DaemonData.ModelSpend.self)
-    }
-
-    public func privateAI() async throws -> DaemonData.PrivateAISwitch {
-        try serve("private_ai", as: DaemonData.PrivateAISwitch.self)
-    }
-
-    public func setPrivateAI(on: Bool) async throws -> DaemonData.PrivateAISwitch {
-        try serve("private_ai", as: DaemonData.PrivateAISwitch.self)
     }
 
     public func missionCatalogue() async throws -> DaemonData.MissionCatalogue {
