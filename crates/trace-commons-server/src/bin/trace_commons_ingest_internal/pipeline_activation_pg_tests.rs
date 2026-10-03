@@ -5396,3 +5396,71 @@ async fn a_package_key_no_longer_trusted_stops_activation_and_rollback() {
         .await;
     assert_eq!(status, StatusCode::OK, "{routing}");
 }
+
+/// Final fix wave (A22, the owner's answer to question 8): a rollback of a
+/// contained tenant keeps it contained. The active bundle is the one rolled
+/// back to, a new upload is still `503 pipeline_receipt_intake_contained`, and
+/// the event is a `rollback` from `contained` to `contained`. Uploads reopen
+/// only through `activate` of that bundle, which reads the tenant's
+/// readiness.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_rollback_of_a_contained_tenant_keeps_it_contained() {
+    let Some(fixture) = RouteFixture::new().await else {
+        return;
+    };
+    fixture.qualify(&fixture.a).await;
+    fixture.qualify(&fixture.b).await;
+    for (path, body) in [
+        (
+            "/v1/admin/pipeline/activate",
+            fixture.activate_body(&fixture.a, "activate_bundle_a"),
+        ),
+        (
+            "/v1/admin/pipeline/activate",
+            fixture.activate_body(&fixture.b, "activate_bundle_b"),
+        ),
+        (
+            "/v1/admin/pipeline/contain",
+            serde_json::json!({ "reason_code": "contain_for_incident" }),
+        ),
+    ] {
+        let (status, answer) = fixture.admin_call("POST", path, Some(body)).await;
+        assert_eq!(status, StatusCode::OK, "{path}: {answer}");
+    }
+    let (status, routing) = fixture
+        .admin_call(
+            "POST",
+            "/v1/admin/pipeline/rollback",
+            Some(fixture.activate_body(&fixture.a, "roll_back_to_a")),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{routing}");
+    assert_eq!(routing["routing_state"], "contained");
+    let (status, refused, _) = fixture
+        .upload(&fixture.state, "rolled_back_contained")
+        .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{refused}");
+    assert_eq!(refused["error"], "pipeline_receipt_intake_contained");
+    let (status, view) = fixture
+        .admin_call("GET", "/v1/admin/pipeline/routing", None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{view}");
+    assert_eq!(view["routing_state"], "contained");
+    assert_eq!(view["active_bundle_id"], fixture.a.bundle_id);
+    assert_eq!(view["events"][0]["action"], "rollback");
+    assert_eq!(view["events"][0]["previous_state"], "contained");
+    assert_eq!(view["events"][0]["resulting_state"], "contained");
+
+    let (status, routing) = fixture
+        .admin_call(
+            "POST",
+            "/v1/admin/pipeline/activate",
+            Some(fixture.activate_body(&fixture.a, "reopen_bundle_a")),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{routing}");
+    assert_eq!(routing["routing_state"], "pipeline");
+    let (status, receipt, _) = fixture.upload(&fixture.state, "reopened").await;
+    assert_eq!(status, StatusCode::OK, "{receipt}");
+    assert_eq!(receipt["status"], "processing");
+}

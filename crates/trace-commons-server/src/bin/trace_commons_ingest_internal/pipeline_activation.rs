@@ -888,9 +888,11 @@ pub(crate) async fn pipeline_activate_handler(
     Ok(Json(routing))
 }
 
-/// `POST /v1/admin/pipeline/rollback`: routes a `pipeline` or `contained`
-/// tenant's new receipts to the pipeline with a bundle it selected before.
-/// The same inputs as the activation, without the readiness.
+/// `POST /v1/admin/pipeline/rollback`: selects, for a `pipeline` or
+/// `contained` tenant, a bundle it selected before, for its later runs. The
+/// routing state stays as it is: a contained tenant stays contained, and an
+/// `activate` of that bundle reopens its uploads. The same inputs as the
+/// activation, without the readiness.
 pub(crate) async fn pipeline_rollback_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,

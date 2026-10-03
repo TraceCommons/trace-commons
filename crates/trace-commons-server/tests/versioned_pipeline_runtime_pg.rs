@@ -38848,7 +38848,10 @@ async fn rollback_selects_an_earlier_bundle_for_new_runs_only() {
     assert_eq!(activation_rows(&other).await, before);
     refused_rollbacks += 1;
 
-    // A contained tenant rolls back to the pipeline.
+    // A contained tenant rolls back and stays contained (final fix wave A22,
+    // the owner's answer to question 8): the bundle switches for later runs,
+    // and new receipts stay stopped until an `activate`, which reads the
+    // readiness, reopens them.
     fixture.activate(&other, &fixture.b).await;
     store
         .contain(&other, &routing_actor(), "contain_before_rollback")
@@ -38858,14 +38861,33 @@ async fn rollback_selects_an_earlier_bundle_for_new_runs_only() {
         .roll_back_with(&other, &fixture.a, &promotion)
         .await
         .expect("a contained tenant rolls back");
-    assert_eq!(from_contained.routing_state, RoutingState::Pipeline);
+    assert_eq!(from_contained.routing_state, RoutingState::Contained);
+    assert_eq!(
+        store
+            .routing(&other)
+            .await
+            .unwrap()
+            .map(|row| row.routing_state),
+        Some(RoutingState::Contained)
+    );
     assert_eq!(active(other.clone()).await, Some(a.clone()));
     let event = store.events(&other, 1).await.unwrap().remove(0);
     assert_eq!(event.action, ActivationAction::Rollback);
     assert_eq!(event.previous_state, Some(RoutingState::Contained));
+    assert_eq!(event.resulting_state, RoutingState::Contained);
     assert_eq!(event.previous_bundle_id.as_deref(), Some(b.as_str()));
     assert_eq!(event.resulting_bundle_id.as_deref(), Some(a.as_str()));
     assert_eq!(event.evidence_hash, rollback_evidence_hash(&promotion, &a));
+    // The reopen: an activation of the bundle that is already active.
+    let reopened = fixture.activate(&other, &fixture.a).await;
+    assert_eq!(reopened.routing_state, RoutingState::Pipeline);
+    assert_eq!(active(other.clone()).await, Some(a.clone()));
+    let event = store.events(&other, 1).await.unwrap().remove(0);
+    assert_eq!(event.action, ActivationAction::Activate);
+    assert_eq!(event.previous_state, Some(RoutingState::Contained));
+    assert_eq!(event.resulting_state, RoutingState::Pipeline);
+    assert_eq!(event.previous_bundle_id.as_deref(), Some(a.as_str()));
+    assert_eq!(event.resulting_bundle_id.as_deref(), Some(a.as_str()));
 
     // A tenant routed to the legacy path, and one with no routing row.
     store

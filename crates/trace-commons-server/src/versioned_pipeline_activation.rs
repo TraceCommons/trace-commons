@@ -1312,12 +1312,20 @@ impl PipelineActivationStore {
         .await
     }
 
-    /// Routes a `pipeline` or `contained` tenant's new receipts to the
-    /// pipeline with an earlier bundle (P5-D6): one that an `activate` or a
-    /// `rollback` event of this tenant selected before, and that is not the
-    /// active bundle now (else `earlier_qualified_bundle_required`). A
-    /// tenant routed to `legacy`, or with no routing row, is
-    /// `activation_state_invalid`. The bundle passes the same gate as an
+    /// Selects an earlier bundle for a `pipeline` or `contained` tenant's
+    /// later runs (P5-D6): one that an `activate` or a `rollback` event of
+    /// this tenant selected before, and that is not the active bundle now
+    /// (else `earlier_qualified_bundle_required`). A tenant routed to
+    /// `legacy`, or with no routing row, is `activation_state_invalid`.
+    ///
+    /// The routing state does not change (final fix wave A22, the owner's
+    /// answer to question 8). A `pipeline` tenant stays `pipeline`: its new
+    /// receipts bind the earlier bundle. A `contained` tenant stays
+    /// `contained`: the active bundle switches and its new receipts stay
+    /// stopped, so a rollback never reopens intake that an operator stopped.
+    /// Uploads reopen only through `activate_tenant` of the bundle that is
+    /// then active, which reads the tenant's readiness; the gate accepts the
+    /// active bundle, so that activation changes the state alone. The bundle passes the same gate as an
     /// activation (`activate_qualified_bundle_in`); the tenant's readiness is
     /// not read, so a rollback is open while the readiness fails. Runs that
     /// already exist keep their bundle. The same transaction and lock order
@@ -1396,11 +1404,17 @@ impl PipelineActivationStore {
         .await?;
         let evidence_hash =
             bundle_selection_evidence_hash(None, request.promotion, request.bundle_id)?;
+        // A contained tenant stays contained (A22): the state the read above
+        // found is the state the row keeps.
+        let resulting = match current {
+            Some(RoutingState::Contained) => RoutingState::Contained,
+            _ => RoutingState::Pipeline,
+        };
         write_routing_in(
             tx,
             tenant_id,
             current,
-            RoutingState::Pipeline,
+            resulting,
             ActivationAction::Rollback,
             previous_bundle_id.as_deref(),
             Some(request.bundle_id),
