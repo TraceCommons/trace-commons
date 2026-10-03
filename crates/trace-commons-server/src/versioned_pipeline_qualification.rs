@@ -1384,8 +1384,17 @@ impl PipelineQualificationStore {
     /// infrastructure control (`dependencies.blockers()`'s first label),
     /// evidence that does not back this qualification (below), or a second
     /// call for the same bundle and code revision with different metadata
-    /// (`bundle_qualification_identity_conflict`). No row is left behind by a
-    /// failed call.
+    /// (`bundle_qualification_identity_conflict`).
+    ///
+    /// A refused call leaves no qualification row. It can leave the package:
+    /// when every check above the store passed, `register_bundle` commits the
+    /// package row and its four policy status rows (and the tenant's row in
+    /// `trace_tenants`) in a transaction of its own, before the transaction
+    /// that inserts the qualification. So a call that fails after that point
+    /// (the identity conflict, or a database error in the qualification's
+    /// transaction) leaves those rows, and a refusal before it leaves none. A
+    /// registered package with no qualification row is not activated: the
+    /// gate requires the qualification.
     ///
     /// Two terms are derived here, never taken from the caller (wave 2,
     /// fix round 1; review I1):
@@ -1600,7 +1609,10 @@ impl PipelineQualificationStore {
     /// [`Self::qualify_bundle`]'s, which this calls with the verified digests:
     /// the package trust and production shape, the dependency profile, a
     /// ready promotion for this package, the age ceiling, and the
-    /// append-only record. No row is left behind by a failed call.
+    /// append-only record. A refused call leaves no qualification row; the
+    /// package row and its four policy status rows that `register_bundle`
+    /// committed stay (see [`Self::qualify_bundle`]). A refusal of this
+    /// function's own checks comes before `register_bundle` and leaves none.
     #[allow(clippy::too_many_arguments)]
     pub async fn qualify_bundle_attested(
         &self,
