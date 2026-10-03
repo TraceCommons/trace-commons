@@ -946,17 +946,19 @@ impl Glyph {
     /// inks -- and with the same rule: if one ever drifts from `style.rs`,
     /// `style.rs` is right. They are the text-safe twins (`tc_green_text`,
     /// `tc_blue_icon`, `tc_muted`, `tc_coral_text`), which is what the
-    /// mockup strokes an 11px glyph in.
+    /// mockup strokes an 11px glyph in. The accent and coral twins are the
+    /// generated design tokens themselves, so they cannot drift.
     fn ink(self, scheme: Scheme) -> &'static str {
+        use style::brand_tokens::{dark, light};
         match (self, scheme) {
-            (Glyph::Accepted, Scheme::Light) => "#0F7256",
-            (Glyph::Accepted, Scheme::Dark) => "#5CD3AF",
+            (Glyph::Accepted, Scheme::Light) => light::ACCENT_TEXT,
+            (Glyph::Accepted, Scheme::Dark) => dark::ACCENT_TEXT,
             (Glyph::Held, Scheme::Light) => "#315FBA",
             (Glyph::Held, Scheme::Dark) => "#9DB6F1",
             (Glyph::Waiting, Scheme::Light) => "#5C635B",
             (Glyph::Waiting, Scheme::Dark) => "#A6AC9F",
-            (Glyph::Withdrawn, Scheme::Light) => "#B8483B",
-            (Glyph::Withdrawn, Scheme::Dark) => "#F79C8F",
+            (Glyph::Withdrawn, Scheme::Light) => light::STATUS_OUTSIDE_TEXT,
+            (Glyph::Withdrawn, Scheme::Dark) => dark::STATUS_OUTSIDE_TEXT,
         }
     }
 }
