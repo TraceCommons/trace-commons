@@ -8950,13 +8950,13 @@ impl PipelineService {
         let (object_key, ciphertext_sha256) =
             (object_key.to_string(), ciphertext_sha256.to_string());
         // Not `artifact_store_call`: a stored command that cannot be read
-        // stays the charged `index_command_invalid` (ruling RB-35 on
-        // multi-lens review L2-2). The store's errors carry no type, so a
-        // deleted or corrupt command looks like an outage; a Settle run
-        // suspended on it for good would keep its command in every
-        // compatibility Score's unapplied set, which fails each of them
-        // closed (`index_unavailable`), while a charged failure ends the run
-        // after its Settle budget and the tenant recovers.
+        // stays the charged `index_command_invalid`, whatever the store's
+        // error -- a transport failure too (ruling RB-35 on multi-lens
+        // review L2-2, kept when the store's errors were typed, ZA-2). A
+        // Settle run suspended on an unreadable command for good would keep
+        // it in every compatibility Score's unapplied set, which fails each
+        // of them closed (`index_unavailable`), while a charged failure ends
+        // the run after its Settle budget and the tenant recovers.
         let wrapper = on_blocking_pool(move || {
             store.read_json_by_object_key(
                 tenant.as_str(),
