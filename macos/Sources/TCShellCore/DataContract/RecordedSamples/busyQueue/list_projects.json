@@ -5,11 +5,19 @@
       "project_label": "api",
       "project_path": "/Users/sample/src/api",
       "mode": "notify_only",
+      "folder_mode": "notify_only",
       "added_at": "2026-09-02T10:00:00Z",
       "configured": true,
       "is_unresolved_bucket": false,
       "session_count": 61,
       "last_session_at": "2026-09-30T09:00:00Z",
+      "tools": [
+        {
+          "source": "claude-code",
+          "session_count": 61,
+          "answers_at": "Anthropic"
+        }
+      ],
       "pending_count": 4
     },
     {
@@ -17,11 +25,19 @@
       "project_label": "infra",
       "project_path": "/Users/sample/src/infra",
       "mode": "notify_only",
+      "folder_mode": "notify_only",
       "added_at": "2026-09-02T10:00:00Z",
       "configured": true,
       "is_unresolved_bucket": false,
       "session_count": 17,
       "last_session_at": "2026-09-30T09:00:00Z",
+      "tools": [
+        {
+          "source": "claude-code",
+          "session_count": 17,
+          "answers_at": "Anthropic"
+        }
+      ],
       "pending_count": 5
     },
     {
@@ -29,11 +45,19 @@
       "project_label": "web",
       "project_path": "/Users/sample/src/web",
       "mode": "notify_only",
+      "folder_mode": "notify_only",
       "added_at": "2026-09-02T10:00:00Z",
       "configured": true,
       "is_unresolved_bucket": false,
       "session_count": 38,
       "last_session_at": "2026-09-30T09:00:00Z",
+      "tools": [
+        {
+          "source": "claude-code",
+          "session_count": 38,
+          "answers_at": "Anthropic"
+        }
+      ],
       "pending_count": 5
     }
   ],

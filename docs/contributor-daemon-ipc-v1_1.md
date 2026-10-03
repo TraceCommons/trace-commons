@@ -546,7 +546,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `preview_request` | `entry_id` | `entry_id`, `state`, and the fields that state carries | enqueues and returns immediately; the result arrives as a `preview_ready` event. See "Scheduled previews" below |
 | `preview_visible` | `entry_ids[]` | `visible: <count>` | replaces the on-screen set wholesale; decides preview **order**, never membership |
 | `preview_cancel` | `entry_id` | `entry_id`, `dropped` | drops a queued preview, or discards a running one's result; `dropped: false` is a no-op, not an error |
-| `approve` | `entry_id`, `all: true`, or `project_id`; `outcome` (optional); `correction` (optional, `entry_id` + `partly`/`failed` only) | `approved: <count>`, `hold_secs`, `hold_until`, `flagged`, `redactions`, `skipped[]` | `all: true` no longer requires a terminal; `project_id` approves that project's `Pending` entries and no others, matched by the id `entry_value` publishes (never `project_label`, which is display text and unstable), and is refused with `project-id-unrecognized` if the daemon does not know that project; the three are mutually exclusive and `all` wins over `project_id` wins over `entry_id` when more than one is sent; see "The approval hold", "What `approve` reports" and "The `outcome` verdict" below |
+| `approve` | `entry_id`, `all: true`, or `project_id`; `outcome` (optional); `correction` (optional, `entry_id` + `partly`/`failed` only) | `approved: <count>`, `hold_secs`, `hold_until`, `flagged`, `redactions`, `skipped[]` | `all: true` no longer requires a terminal; `project_id` approves that project's `Pending` entries and no others, matched by the id `entry_value` publishes (never `project_label`, which is display text and unstable), and is refused with `project-id-unrecognized` if the daemon does not know that project; the three are mutually exclusive and `all` wins over `project_id` wins over `entry_id` when more than one is sent; refused with `contribution-override-never` while a Never contribution override is in force (#1208); see "The approval hold", "What `approve` reports" and "The `outcome` verdict" below |
 | `dismiss` | `entry_id` | `ok: true` | declines the **session**, not just this entry: the daemon never offers that session file again, however much it grows afterwards. See "`dismiss` is permanent" below |
 | `keep` | `entry_id` | `kept: true` | "Keep on this Mac": the **reversible** decline. The entry must be `pending`, or `approved` unattended, which the keep revokes (`not-pending` otherwise, `unknown-entry-id` if there is none). See "`keep`: Keep on this Mac" below |
 | `undo_keep` | `entry_id` | `kept: false` | returns a kept entry to `pending`, waiting for a person; `not-kept` for anything that is not kept, a dismissed entry included; `queue-full` at the queue cap; `project-ignored` if its folder is now Never. See "`keep`: Keep on this Mac" below |
@@ -554,8 +554,10 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `cancel` | `entry_id` **or** `project_id` | `ok: true` (`entry_id`) or `canceled: <count>` (`project_id`) | returns matching `approved` entries to `pending` and clears their pin, so the next `approve` rebuilds; guaranteed to succeed for the whole hold; `project_id` undoes that project's `approved` entries and no others -- `pending` entries are left alone, matched by the id `entry_value` publishes (never `project_label`) -- and is refused with `project-id-unrecognized` if the daemon does not know that project; the two selectors are mutually exclusive and `project_id` wins if both are sent; a known project with nothing `approved` succeeds with `canceled: 0`; the single-`entry_id` form errors if that entry is not currently `approved`; see "The approval hold" below |
 | `pause` | `until` (optional RFC 3339 timestamp) | `paused: true`, `paused_until` | see "Pause semantics" below |
 | `resume` | — | `paused: false` | |
-| `list_projects` | — | `projects[]` of `{project_id, project_label, mode, added_at, configured, is_unresolved_bucket}`, plus a top-level `unpurposed_traces` | configured **and** discovered projects; see "`list_projects`" below |
-| `set_project_mode` | `project_id` **or** `project_key`, `mode` (`label` accepted and ignored), `include_backlog` (optional boolean, `auto_upload` only) | `ok: true`, `purged: <count>`, `retracted: <count>`, `from_now` | socket clients send `project_id`; `auto_upload` no longer requires a terminal; see "Naming a project" above, "`set_project_mode` and the ignore purge" and "Arming from now" below |
+| `list_projects` | — | `projects[]` of `{project_id, project_label, mode, folder_mode, added_at, configured, is_unresolved_bucket}`, plus a top-level `unpurposed_traces` | configured **and** discovered projects; see "`list_projects`" below |
+| `set_project_mode` | `project_id` **or** `project_key`, `mode` (`label` accepted and ignored), `include_backlog` (optional boolean, `auto_upload` only) | `ok: true`, `purged: <count>`, `retracted: <count>`, `from_now`, `overridden_by` (`null` or the override's mode) | socket clients send `project_id`; `auto_upload` no longer requires a terminal; see "Naming a project" above, "`set_project_mode` and the ignore purge" and "Arming from now" below |
+| `set_contribution_override` | `mode` (`notify_only`, `auto_upload` or `ignore`), `confirm` (boolean; `true` required for `auto_upload`) | `changed`, `contribution_override: {mode, since}`, `returned: <count>` | the menu-bar pill's global override (#1173); per-folder modes are never written; `auto_upload` is a grant, refused with `arming-terms-unavailable` without terms (#1208); see "The contribution override" below |
+| `clear_contribution_override` | — | `cleared`, `returned: <count>` | every folder back on its own mode; see "The contribution override" below |
 | `list_history` | `limit` (optional, default 50, max 1000) | `history[]`, each row now also carrying `approved_unattended`, `approved_verdict`, `uploaded_bytes`, and `revoked_at` | see "History provenance (K7)", "Sizes in history, and the would-send size (K10)" and "Withdrawal dates on revoked rows (K12)" below |
 | `history_rollup` | — | see below | now also carries `taken_back`, and a `withdrawn` bucket in each window |
 | `commons_credit_summary` | — | `posture_state`, `commons_settlement`, `commons_settlement_explanation`, `commons_graded` (device route); `points_state`, `commons_points_earned_this_period`, `commons_points_lifetime_earned`, `commons_pending_review`, `commons_currency_code`, `commons_currency_earned_this_period`, `commons_period_start`, `commons_period_end` (account route); `observed_at` | always succeeds; see "`commons_credit_summary`" below |
@@ -631,9 +633,16 @@ pins. No account token, device key or PKCE verifier is returned to native views.
   "grant_voids": [],
   "witness_capacity": { "waiting_sessions": 0, "next_retry_at": null },
   "arming_rewordings": [],
-  "automatic_contribution_held": { "held_sessions": 0, "reasons": [], "projects": [] }
+  "automatic_contribution_held": { "held_sessions": 0, "reasons": [], "projects": [] },
+  "contribution_override": null,
+  "contribution_mode": "notify_only",
+  "contribution_mode_partial": false
 }
 ```
+
+`contribution_override`, `contribution_mode` and `contribution_mode_partial`
+are additive; see "The
+contribution override" below.
 
 `grant_voids` is additive; see "Void notices" below. `witness_capacity`,
 `arming_rewordings`, `automatic_contribution_held` and `decisions_owed` are
@@ -646,6 +655,48 @@ invite identity" below.
 `health.last_error_label` is the field a tray renders when something is
 wrong. It is one of the labels in "Health precedence" below, or `null` when
 healthy.
+
+The banner's words -- a title, a sentence stating what is held and the data
+consequence, and an action label where there is a real recovery step -- are
+`health_copy::health_copy_for_label`, across the C ABI as `tc_health_copy_json`
+(R6/R7, #1173). Pass `reachable: 0` instead of a label when the daemon
+cannot be reached at all; that returns the separate core-down sentence
+(`health_copy::core_down_copy`, **DRAFT, NEEDS APPROVAL** -- no shell has
+shown a contributor-facing sentence for a fully unreachable daemon before).
+`reachable` is never derived from this call: it is the caller's own
+liveness fact, from whatever probe or IPC failure told it the daemon is
+down. A reachable daemon with `last_error_label: null` has nothing to show
+and should not call this at all; passed anyway with an empty label it
+answers `NULL`, not a banner. A non-empty label that is not UTF-8 gets the
+on-hold banner, never `NULL`.
+
+The C signature is `tc_health_copy_json(reachable, label,
+max_queue_entries)`: pass `get_settings.max_queue_entries` so `queue-full`
+says how many are waiting, or `0` when unknown and the sentence names no
+number. The JSON is `{title, detail, action, action_kind, severity}`:
+
+- `severity` is `actionable` (the contributor can act on it) or `waiting`
+  (it clears on its own) -- Swift `HealthCopy.Severity`'s two banner kinds.
+  It cannot be derived from `action`: an unsupported OpenCode export is
+  actionable with no button.
+- `action_kind` is a stable kind for the button, present exactly when
+  `action` is: `reconnect`, `privacy_scan_notice` or `review_queue` (Swift's
+  `reviewsQueue`). Switch on it, never on the button's words.
+- `opencode-export-version-unsupported` is answered with the source settings'
+  own version sentence (`source_copy`), not the generic banner.
+
+The core-down detail (draft) says the queue is safe and that sessions from
+while the daemon was down are picked up when it is running again: the queue
+is persisted, and the daemon's first poll after it starts is a full pass over
+every watched source.
+
+Moved into the core from
+`macos/Sources/TraceCommonsApp/HealthCopy.swift`, which has shipped this
+table since before this export existed; Windows
+(`windows/src/TraceCommons.Interop/HealthCopy.cs`) independently wrote the
+same sentences by hand. Neither shell has been switched over to the export
+yet -- that is follow-up work, not part of this change -- so the two Swift
+and C# tables still carry their own copies for now.
 
 `next_digest_at` depends on `digest_schedule` (see `set_settings`). Under
 `interval` it is `null` until a first digest has fired, then that digest's
@@ -748,6 +799,14 @@ It stays until a shell calls `acknowledge_arming_rewordings` with its `id`
 (audited as `arming-rewordings-acknowledged`, no "all") or the contributor
 sets the project's mode, which answers it. A void takes it with it. The
 rewording itself is audited as `arming-reworded` with the project label.
+
+An "Auto contribute" contribution override (#1208) is armed by its own
+words and gets the same notice when they narrow: an element with
+`"kind": "contribution_override"`, `project_id` and `project_label` both
+`null` (no folder; the copy words it as unplaced, with no "Ask me first"
+button), audited as `arming-reworded` with no project label. The override
+stays on. Setting or clearing the override, or its void, answers it.
+Elements for folders carry no `kind`.
 
 For claim narrowings, every shell's arming offer currently says "will be
 scrubbed" whatever R1's disclosure is, so the words in force have not
@@ -1077,6 +1136,16 @@ direction, only that `would_send_bytes` is the number that governs consent.
 in the response ever contains the actual matched text, only counts and
 category labels.
 
+`redactions_distinct` (R7, #1173) is distinct values removed per label,
+beside the occurrence counts in `redactions`: a client renders "185 local
+path (12 distinct)" rather than just the total. It was previously only on
+the full summary (a certificate entry's `preview`, and `tc_preview_summary_json`
+across the C ABI); it is now on the card shape too -- `preview` for every
+other entry, `preview_request`'s cache hit, and the `preview_ready` event --
+since the review screen needs it on a card exactly as much as on the full
+sheet. A count only, like every other field here: no value removed is ever
+named.
+
 **`preview` does not require an enrollment.** It performs no network I/O and
 needs neither the daemon's file lock nor its running loop, so an app can
 show a contributor what would be sent *before* they decide to enrol -- which
@@ -1122,6 +1191,17 @@ in additive fields on every queue entry (`list_pending`, `snapshot`, the
 | `content_marks` | **only when `scrubbed`** | `marks` without the path family (`local_path`). |
 | `unsure_spans` | **only when `scrubbed`** | how many spans `preview_unsure_spans` would report for that build's body. |
 | `second_look` | always, possibly empty | fixed reasons, in this order: `nothing-matched`, `looks-unsure`, `trimmed-to-fit` |
+| `second_look_lines` | always, possibly empty (R6/R7, #1173; **DRAFT, NEEDS APPROVAL**) | `second_look`'s reasons, in the same order, each already turned into the sentence a person reads for it (`preview_copy::second_look_line`) |
+
+`second_look_lines` exists so a card or the review sheet can render the
+explanation without separately asking `tc_second_look_line_text` for each
+reason; it is the same table, inlined. It is exactly as long as
+`second_look` and lines up with it index for index -- never reordered,
+never deduplicated, and never shorter: a reason this build has no sentence
+for gets a generic fallback line rather than being dropped. **DRAFT, NEEDS APPROVAL** because the sentences it
+quotes (`preview_copy::second_look_line`) are themselves unapproved spec
+wording; a client that renders it should expect the words, not the
+presence or absence of the field, to still change.
 
 The reasons:
 
@@ -1539,6 +1619,134 @@ so the picker and the rule compose: the rule covers what comes next, the
 picker what is already there. Unticked sessions stay `pending`; "Keep on this
 Mac" (`keep`) takes one out of the list without deciding it for good.
 
+### The contribution override
+
+The menu-bar Contribution mode pill (R13, #1202; requested on #1173) offers
+three global overrides: **Ask me** (`notify_only`), **Auto contribute**
+(`auto_upload`) and **Never** (`ignore`). `set_contribution_override` sets
+one; `clear_contribution_override` clears it.
+
+**Per-folder modes are never written.** The override is one value in the
+policy file beside the folders' own entries, and the mode in force is read
+over the folder's own mode. Clearing it drops that value, so every folder is
+back on exactly the mode it had. `set_project_mode` still works while an
+override is in force: it sets the folder's own mode (`list_projects`
+`folder_mode`), and the override still decides `mode` until it clears. Its
+reply then carries `overridden_by`: the override's mode when the override
+still decides that folder (for example a folder set to Ask me under Auto
+contribute, whose new sessions are still approved unattended), and `null`
+when the folder now resolves to what was set -- always so with no override,
+and always so for Never, which every override leaves alone. A shell shows
+the change as saved but not yet in effect when `overridden_by` is present.
+
+What each override does, with the stricter rule winning:
+
+| Override | Folder set to Automatic | Folder set to Ask me, or never ruled on | Folder set to Never | Unresolved bucket |
+|---|---|---|---|---|
+| `ignore` | Never | Never | Never | Never |
+| `notify_only` | Ask me | Ask me | **Never** | Ask me (or Never if set) |
+| `auto_upload` | Automatic, under its own holds | **Automatic from now** | **Never** | Ask me (or Never if set) |
+
+- **Never** queues and sends nothing from any folder (#1208). Nothing
+  waiting is refused: entries already `pending` stay `pending` (they leave
+  `decisions_owed` while it is in force), and an unattended approval not yet
+  sent goes back to `pending` rather than being refused, so clearing the
+  override restores both. An entry the **contributor** approved is held,
+  not sent: it stays `approved`, with its pin and hold, and the send path
+  skips it (re-checked when it claims each entry, so a Never set mid-pass
+  stops the next one); clearing the override releases it to send as it
+  was. `approve` is refused while Never is in force (`bad_params` /
+  `contribution-override-never`), before anything is approved or audited.
+  An upload already in flight when Never is set is not recalled. Sessions
+  finished while it is in force are not queued; once it clears, the next
+  pass offers them under each folder's own mode -- an Automatic folder
+  sends them unattended.
+- **Ask me** leaves nothing to go unattended. Every unattended approval not
+  yet sent in a folder that no longer resolves to Automatic goes back to
+  `pending` (counted in `returned`), and the send path returns any that
+  comes back from `uploading`. A folder set to Never stays Never.
+- **Auto contribute** is the consent-sensitive one, and is held to the
+  arming paths' rules:
+  - **It arms nothing already on disk.** For every folder not already armed
+    by its own mode it is an arming from now (see "Arming from now"): what is
+    on disk when it begins, queued or not, is recorded per source by the next
+    full pass and waits for a person; until a source is recorded, nothing
+    from it goes. Only a session that first appears after it is approved
+    unattended. A folder already armed keeps its own holds (an arming from
+    now, the automatic grant's) and nothing more.
+  - **A folder set to Never stays Never.** A global override does not reach
+    into a folder the contributor excluded.
+  - Every other gate still applies: the Scrub check (Manual holds
+    everything), review holds, the settle window, and the
+    automatic-contribution gate.
+  - It is refused without `confirm: true` (`bad_params` /
+    `confirm-required`; a non-boolean `confirm` is `confirm-invalid`). A
+    shell sends it only from the confirmation the core words
+    (`tc_contribution_override_confirm_json`), which carries the arming
+    disclosure.
+  - **It is a grant** (owner decision on #1208), held to everything a
+    per-folder arming is. Without grant terms in force (no config, or one
+    that cannot be read) it is refused, `unavailable` /
+    `arming-terms-unavailable`, before anything is recorded -- the label
+    `set_project_mode` uses. It records the terms in force and the claim its
+    words made. On every pass the grant sweep compares those terms with the
+    terms in force, as it does a folder's (see `auto-upload-voided`): a
+    widening **clears the override**, so every folder is back on its own
+    mode and none resolves to Automatic because of it, and the pill shows the
+    folders' roll-up again. What it approved unattended and has not sent, in
+    folders that then ask first, goes back to `pending`. The void is told
+    like any other: a `grant_voids` element of kind `contribution_override`,
+    the audit row `contribution-override-voided`, and `status_changed`
+    (`queue_changed` too if entries went back). Folders armed by their own
+    mode void exactly as before, with their own notices. An override saved
+    with no recorded terms (only a pre-release build could write one) is
+    voided with the reason `terms-unrecorded` rather than baselined. A K5
+    rewording reaches it too (see `arming_rewordings`). It still creates no
+    `automatic_grant` and no per-folder `armed-auto-upload` row. Folders it
+    arms report the `patterns_only` disclosure.
+- Re-sending the override in force changes nothing (`changed: false`): no
+  audit row, and an Auto contribute override keeps the hold it had.
+- Clearing an Auto contribute override returns what it approved unattended
+  and has not sent, in folders that then ask first, to `pending`.
+
+**Audit.** Label-only, never a folder: `contribution-override-set` with
+`detail` the mode, `contribution-override-cleared` with `detail` the mode
+that was in force, and `contribution-override-voided` with `detail` the
+comma-separated reason labels of `auto-upload-voided` (or
+`terms-unrecorded`). For `auto_upload` the row is written **before** the
+override takes effect, and an audit failure refuses the call
+(`unavailable` / `audit-write-failed`). A stopping override and a clear are
+never refused for want of an audit row, and record after. The "same mode
+again" check and the row are made under the one policy lock that applies
+the change, so two identical concurrent sets write one row.
+
+**Writes and events.** A policy file that cannot be written rolls the
+override back (`unavailable` / `policy-write-failed`) and nothing changes. On
+every change `status_changed` is published, and `queue_changed` too when
+entries were returned to `pending`. A queue file that cannot be written after
+that keeps the in-memory truth, publishes both events exactly as success
+does, and answers `unavailable` / `queue-write-failed`.
+
+**Status.** `status.contribution_override` is `null`, or `{mode, since}`
+while one is in force. `status.contribution_mode` is the pill's roll-up, so
+no shell computes it: the override's mode while one is in force; otherwise
+the one mode every folder shares (`notify_only`, `auto_upload`, `ignore`), or
+`mixed`. "Every folder" is every configured folder and every folder with a
+session in the queue, by its own mode, excluding the unresolved bucket, which
+can never be armed. With no folders it is `notify_only`, the default.
+`status.contribution_mode_partial` (#1208) is `true` when the roll-up is
+`auto_upload` but some of those folders do not upload: one set to Never, or
+the unresolved bucket (whose sessions ask first). It is `false` for every
+other roll-up. A shell shows the copy's `auto_partial` line under the
+label exactly when it is `true`.
+
+**Copy.** `tc_contribution_mode_copy_json` is the pill (title, `Mixed`, the
+three choices with their sub-list lines, the override line, the clear
+action, and `auto_partial`). `tc_contribution_override_confirm_json(mode, config_dir)` is each
+confirmation; for `auto_upload` it carries `arming`, the Flow 1 grant
+screens' disclosure table for the configuration in `config_dir`. Every new
+sentence is DRAFT, NEEDS APPROVAL (`project_copy.rs`).
+
 ### `preview_body`
 
 The redacted body `preview` describes: the envelope's redacted events,
@@ -1842,13 +2050,18 @@ handle with `preview-requires-embedded`.
       "project_id": "proj_9f2c1ab30d4e5f60",
       "project_label": "my-proj",
       "mode": "notify_only",
+      "folder_mode": "notify_only",
       "added_at": null,
       "configured": false,
       "is_unresolved_bucket": false,
       "session_count": 22,
       "last_session_at": "2026-09-12T11:18:00Z",
       "pending_count": 7,
-      "contributable_count": 3
+      "contributable_count": 3,
+      "tools": [
+        { "source": "antigravity", "session_count": 2, "answers_at": "Google" },
+        { "source": "claude-code", "session_count": 20, "answers_at": "Anthropic" }
+      ]
     }
   ]
 }
@@ -1863,6 +2076,51 @@ written, not when it started -- or `null` when none has been observed. Both
 come from the daemon's per-session record of each session's project, recorded
 when the watcher resolves it, so answering reads and canonicalizes nothing. A tool's own totals are in `tc_discover_sources` (`session_count`,
 `most_recent`).
+
+#### `tools` (K11)
+
+Which tool (or tools) this project's sessions came from, each with its own
+`session_count` within this project -- the design's first-run screen says
+"Repos found in Claude Code sessions"; this is what lets a later screen say
+the same thing about any project, for any tool, once more than one has
+contributed to it.
+
+Each row names a `source`: an adapter name (`claude-code`, `codex`,
+`gemini-cli`, `cline`, `opencode`) for a session the daemon watched directly,
+or the declared source a trajectory file names for one that was staged
+(`trajectory`'s own imports carry their vendor's name, e.g. `antigravity` for
+an imported Antigravity conversation -- see "Antigravity" under `harness_list`
+below). This is the same preference a queue entry's own display already
+applies: what a session declares about itself over the adapter that happens
+to store it, so an imported conversation is never attributed to `trajectory`.
+
+For a staged import the `source` is **self-declared**: it is the
+`meta.source` field of a file anyone can drop into the staging directory,
+checked for shape (`validate_source_name`) but not verified. A staged
+trajectory that claims `claude-code` is counted here as Claude Code and
+reads `answers_at: "Anthropic"`. The effect is local display only; nothing
+decides routing, consent or upload on this field.
+
+`answers_at` is the same fixed vendor word `tc_discover_sources` and
+`harness_list` read `answers_at` from, so a project's tool breakdown cannot
+name a vendor differently than either surface does for the same tool.
+`null` for a tool this build has no fixed default for (Cline, OpenCode) or
+does not recognise.
+
+Always an array, empty rather than absent when nothing is known yet -- a
+client tests its length rather than testing for the key, the way `tools`
+being empty and `session_count` being `0` already agree with each other.
+Rows are ordered by `source`, alphabetically, not by count.
+
+**This can undercount `session_count`.** The per-tool breakdown is read from
+the same per-session record `session_count` already comes from, but the tool
+a session came from was not recorded before this field existed, and a cache
+entry whose file has not changed since is never rewritten just to backfill
+it. A project can therefore show `"session_count": 22` with its `tools[]`
+entries summing to fewer than 22 on a daemon upgraded from an older state
+file, until those sessions' files change again. Never read `tools[]` as a
+second, more detailed `session_count` -- read `session_count` for the total
+and `tools[]` for what it can say about the sessions it has re-seen since.
 
 `pending_count` is how many `Pending` entries this project holds.
 `contributable_count` is how many of those a group-level `approve` would act
@@ -1907,10 +2165,17 @@ Every project the daemon knows about, in two kinds:
   seen a session for it and nobody has ruled on it. `mode` is the effective
   mode, which for an unruled project is the `notify_only` default.
 
+`mode` is the mode **in force**, which a contribution override can change;
+`folder_mode` is the folder's own mode, the one `set_project_mode` set and
+clearing the override returns it to. They differ only while an override is
+in force. See "The contribution override" below.
+
 An armed row also carries `from_now`: `true` when it was armed from now,
 the `set_project_mode` default, so its backlog waits for the contributor,
 and `false` when it was armed with `include_backlog: true` or before that
-default existed. Absent on rows that are not armed. See
+default existed. A row armed only by an "Auto contribute" override reports
+`from_now: true` too, since the override holds its backlog the same way.
+Absent on rows that are not armed. See
 "Arming from now" above.
 
 #### `is_unresolved_bucket`
@@ -2368,6 +2633,11 @@ withdrawn; `armed-by-default` records a project it armed, with that project's
 `project_label`; `automatic-grant-voided` records the grant itself voided by
 widened terms, with the same `detail` labels as `auto-upload-voided`.
 
+A `contribution-override-voided` entry records an "Auto contribute"
+contribution override cleared by widened terms (#1208), with no
+`project_label` and the same `detail` labels as `auto-upload-voided` (or
+`terms-unrecorded`); see "The contribution override".
+
 `limit` is optional, defaults to 50, and is capped at 1000 even if a larger
 value is requested. Entries are returned newest first, matching
 `list_history`'s convention. `action` and `detail` are always fixed labels --
@@ -2397,10 +2667,15 @@ yet, oldest first:
 }
 ```
 
-- `kind` is `project` for an `auto-upload-voided` void and `automatic_grant`
-  for an `automatic-grant-voided` one. `project_id` and `project_label` are
-  the ones `list_projects` gives that project, and are `null` for the grant.
-  No path crosses.
+- `kind` is `project` for an `auto-upload-voided` void, `automatic_grant`
+  for an `automatic-grant-voided` one, and `contribution_override` for a
+  `contribution-override-voided` one (#1208; see "The contribution
+  override"). `project_id` and `project_label` are the ones `list_projects`
+  gives that project, and are `null` for the grant and the override. No
+  path crosses. The override's notice has no re-arm button: it is turned
+  back on from the pill's own confirmation, and setting any override
+  answers the notice. Giving the Flow 1 grant again answers only the
+  grant's notice.
 - `reasons` are the same fixed labels as the audit's `detail`.
 - The list is always present, and `[]` when there is nothing to show, so a
   shell can tell that from a daemon too old to report voids.
@@ -2455,18 +2730,31 @@ automatically from projects discovered from now on.
 { "granted": true, "granted_at": "2026-09-25T12:00:00Z", "on_disk_recorded": false }
 ```
 
-`grant_automatic` takes one required param, `witness_signing_address`: the
-signing address of the witness the contributor was shown on the disclosure
-screen, or `null` when that screen showed none. It returns the grant as
-`automatic_grant` reports it. Nothing is granted when it is refused:
+`grant_automatic` takes two required params:
+
+- `confirmed`: JSON `true`, sent only from the grant screen's button, after
+  the contributor has gone through the scope, path and disclosure screens.
+- `witness_signing_address`: the signing address of the witness the
+  contributor was shown on the disclosure screen, or `null` when that screen
+  showed none.
+
+It returns the grant as `automatic_grant` reports it. Nothing is granted when
+it is refused:
 
 - `arming-terms-unavailable` (`ERR_UNAVAILABLE`): there is no config to record
   terms from.
+- `automatic-grant-confirmation-required` (`bad_params`): `confirmed` is
+  absent, `false`, or not a boolean (`"true"` and `1` are refused). The same
+  label `flow1::grant_precondition` gives a shell, so the daemon holds the
+  confirmation for every IPC caller rather than trusting a shell to have
+  asked.
 - `automatic-grant-scopes-not-chosen` (`bad_params`): the config's
-  `consent_scopes_chosen` is false, so nobody chose the saved scopes (R7). A
-  saved scope list is not a choice: every enrollment saves at least the floor
-  scope, which `validate_scopes` adds, and an invite enrollment saves it with
-  nobody having picked it. Only `set_consent_scopes` records a choice.
+  `consent_scopes_chosen` is false, so nobody chose the saved scopes (R7), or
+  the saved `consent_scopes` list is empty, so there is nothing to grant
+  under. A saved scope list is not a choice: every enrollment saves at least
+  the floor scope, which `validate_scopes` adds, and an invite enrollment
+  saves it with nobody having picked it. Only `set_consent_scopes` records a
+  choice.
 - `automatic-grant-witness-required` (`bad_params`): `witness_signing_address`
   is absent, or neither a string nor `null`.
 - `automatic-grant-witness-changed` (`bad_params`): the witness configured now
@@ -2730,6 +3018,51 @@ default either. Like `family`, this is a fixed fact about the tool's own
 released default, never something this daemon checked against the copy
 actually installed.
 
+#### Gemini CLI and Antigravity are not rows here (K13)
+
+`harness_list` is deliberately narrower than "every coding tool this daemon
+knows about". `found` above is `ironwire_agents::tools::all(catalog)`, and
+with no catalog loaded (`catalog_present: false`, the only state this build
+ships in today) that is **exactly** `claude` and `codex` -- the two tools
+IronWire's embedded proxy can redirect, because `Facade::url` only speaks
+the Anthropic and OpenAI wire shapes. Gemini CLI speaks neither, so it has
+never had a row here, and Antigravity -- which is not even a watched
+source; see below -- cannot either. Adding either would mean writing our
+loopback URL into a config key that does not actually redirect that tool's
+calls, which is the exact hazard `owned_agents`'s doc comment refuses to
+guess at. Nothing in K13 changes this list; "Gemini CLI keeps its row"
+refers to its row in `tc_discover_sources` (a watched session store, not a
+redirectable harness), not to this one.
+
+Antigravity's own `answers_at` is `"Google"`, from the same
+`source::source_default_family` table as `gemini-cli`'s -- see `tools` under
+`list_projects` above, and "Antigravity" under `tc_discover_sources`-shaped
+discovery, below.
+
+#### Antigravity has no `tc_discover_sources` row either, and that is also deliberate
+
+Antigravity is not a `TraceSource`: there is no conventional, watchable
+per-user store for it to probe blind, the way `claude-code`, `codex`,
+`gemini-cli` and `cline` are probed. It ships as a one-shot
+`import-antigravity` command that reads the running IDE's local API and
+stages what it finds as `trajectory` files -- see
+`crates/trace-commons-contributor/src/antigravity/mod.rs`'s own doc comment.
+Nothing it stages shares a folder with Gemini CLI's `~/.gemini/tmp` adapter,
+and the two were never actually merged in the shipped code: an earlier,
+abandoned design (`docs/superpowers/specs/2026-08-29-antigravity-source-design.md`)
+would have read Antigravity's own SQLite files from under `~/.gemini/`, but
+it was superseded before it shipped by the API-import design actually in
+place (`docs/superpowers/specs/2026-08-31-antigravity-import-command-design.md`).
+
+What an imported conversation DOES carry, and has carried since that design
+landed, is its own declared source: `meta.source: "antigravity"` on the
+staged file, read back as `SessionRef::declared_source` and shown as
+`"Antigravity"` by every shell's agent label -- never as `"trajectory"`,
+and never merged with a real Gemini CLI session. K11's `tools` field and
+K13's `source_default_family` entry read that same string, so a project
+mixing an Antigravity import with a real Gemini CLI session reports two
+distinct tool rows, not one.
+
 `spend` is what the calls answered **on this computer** have cost since the
 most recent local midnight, in millionths of a dollar. It comes from the
 proxy's own status object, which is why it is metered-only: the ledger rows
@@ -2880,8 +3213,10 @@ ledger -- and make no network call and read no body.
 
 Every value on the wire is a fixed label, a count, a time or a ledger row id,
 with one exception: `model` is free text (see below). No prompt, response,
-body reference, body digest, provider exchange identifier, session id, token
-or URL crosses the socket, and nothing here is logged.
+body reference, body digest, provider exchange identifier, session id, token,
+endpoint or URL crosses the socket, and nothing here is logged. The same holds
+for the `inference_call_added` event (K14), which carries a subset of an
+`inference_calls` row.
 
 #### `tool_destinations`
 
@@ -2889,13 +3224,16 @@ or URL crosses the socket, and nothing here is logged.
 {
   "private_ai": "running",
   "sessions_route": "witness",
+  "window_hours": 24,
+  "unattributed_calls": 2,
   "folders": { "armed": 1, "ask_first": 3, "ignored": 0 },
   "tools": [
     {
       "tool": "claude-code",
       "name": "Claude Code",
       "sessions": { "watch": "watched", "to": ["commons", "witness"] },
-      "model_calls": { "to": "near_ai", "basis": "observed" }
+      "model_calls": { "to": "near_ai", "basis": "observed" },
+      "counts": { "sessions": 4, "inference_calls": 37 }
     }
   ]
 }
@@ -2916,6 +3254,39 @@ does not name; the witness a connected inference offer installs
 (`inference_connection_install`) reaches the map through it. `folders` counts
 the per-repository rules (`auto_upload`, `notify_only`, `ignore`). They are
 per repository across tools, so they say *when* a session goes, not *where*.
+
+`counts` (K14) is the map's per-tool node data over `window_hours`, the same
+24-hour window `inference_calls` uses. Local reads only; nothing new is
+fetched.
+
+- `sessions` counts the sessions this daemon saw in the window, once per
+  session hash: queue entries whose session was last seen written (or, for an
+  entry from before that was recorded, discovered) inside it, and history
+  records submitted inside it. An entry still in the queue and its history
+  record are one session. `null` when the history cache cannot be read; a
+  count from the queue alone would undercount.
+
+  A session counts under the tool it reads as: its declared source when
+  discovery knew one, else the adapter that read it -- the rule
+  `list_projects.tools` and the CLI's session table use. So an imported
+  Antigravity conversation (read by the `trajectory` adapter, declaring
+  `antigravity`) counts as `antigravity`, never as `trajectory`, and never
+  under both. A history record names only the adapter, so it takes its label
+  from the queue entry with the same session hash; one with no queue twin (a
+  CLI `submit`, say) falls back to the adapter. There is no `antigravity`
+  row on this map -- it has no adapter, watch declaration or connection of
+  its own -- so those sessions are not counted on any tool row today.
+- `inference_calls` counts exactly the rows `inference_calls` lists (rows
+  with a ledger id) by the `tool` it names for them, so the map and the
+  Inference tab cannot disagree. `null` when no ledger has answered
+  (`inference_calls.readable: false`), which is not zero.
+- `unattributed_calls` is the window's listed calls whose `tool` is
+  `unknown`. They are counted there and never folded into a tool; `null`
+  under the same condition as `inference_calls`.
+
+A shell that pulses on `inference_call_added` should re-read these counts
+rather than add to them: the event is capped per poll and is a pulse, not a
+ledger.
 
 `model_calls.to` and `basis`:
 
@@ -2977,11 +3348,47 @@ expose an `id` are not listed.
 calls and must not be drawn as an empty table. The window is the ledger's
 own 24 hours.
 
-- `tool` is named only when exactly one tool connected **now** speaks the
-  call's protocol family (the rule `harness_list` applies to `answering`);
-  otherwise `unknown`. It is approximate: a row from before a connection
-  changed can carry the wrong name. `family` is `anthropic`, `openai` or
-  `unknown`.
+- `tool` (K14). IronWire's log rows carry no harness, only the facade that
+  took the call and the endpoint inside it the client called. Each tool this
+  daemon connects is pointed at its own facade and speaks its own API there,
+  so the endpoint names the tool, connected now or not:
+
+  | facade | endpoint | `tool` |
+  |---|---|---|
+  | `anthropic` | `/v1/messages`, `/v1/messages/count_tokens` | `claude-code` |
+  | `openai` | `/v1/responses` (Codex is connected with `wire_api = "responses"`) | `codex` |
+  | any | any other endpoint, e.g. `/v1/chat/completions` | `unknown` |
+
+  An endpoint no connection writes is `unknown` even while a tool of that
+  family is connected: it is not that tool's own wire. A named endpoint is
+  also `unknown` while a *different* connected tool speaks the same family.
+  On a proxy too old to record the endpoint, the fallback is the harness
+  that set the proxy: the one tool connected **now** that speaks the call's
+  family (the rule `harness_list` applies to `answering`), else `unknown`;
+  that fallback is approximate, since a row from before a connection changed
+  can carry the wrong name. A tool pointed at the proxy by hand, speaking the
+  same API at the same facade as a connected one, cannot be told apart in the
+  row and reads as that tool. The endpoint is read for this and never passed
+  through. `family` is `anthropic`, `openai` or `unknown`.
+
+  **Limit: endpoint attribution does not check who set up the proxy.** Any
+  `/anthropic` + `/v1/messages` call reads `claude-code`, and any `/openai`
+  + `/v1/responses` call reads `codex`, whether or not this daemon connected
+  that tool, and whether or not this daemon owns the proxy at all. An agent
+  routed through IronWire's own catalog, or by another program that manages
+  the same proxy, is counted as Claude Code or Codex, and the "different
+  connected tool" check above cannot see it, because only tools this daemon
+  connects are speakers. The label means "called the endpoint Claude Code's
+  connection writes", not "came from Claude Code".
+
+  `/v1/messages/count_tokens` calls are included: they are listed, counted
+  in `tool_destinations.counts.inference_calls` and announced by
+  `inference_call_added` like any other call.
+
+  The "different connected tool speaks the same family" case cannot arise
+  today, since each family has exactly one tool this daemon connects; it is
+  there so a second one in a family turns that family's endpoints
+  `unknown` rather than crediting the first.
 - `model` is **free text, not a fixed label**: the served model as recorded,
   else the requested one, passed through when it is at most 128 characters of
   `[A-Za-z0-9._:/@-]` and names no URL; else `unknown`. It comes from a proxy
@@ -3020,8 +3427,9 @@ routed answer. These are not in the local ledger, and nothing here invents
 them:
 
 - **kind of work** -- no field records it; there is no classifier;
-- **tool** -- the ledger records a facade, so a call is attributable only
-  when one connected tool speaks that family;
+- **tool** -- the ledger records a facade and an endpoint, not a harness,
+  so a call is attributed by the endpoint its tool's connection writes (see
+  `inference_calls.tool`), and is `unknown` otherwise;
 - **billed cost** -- the ledger prices every call; only the day's metered
   total (`harness_list.spend`) is billed spend;
 - **outside calls that bypass the proxy** -- a tool not connected to Private
@@ -5088,6 +5496,27 @@ removed at logout.
 | `digest_due` | batching interval elapsed with pending work | `{pending, text}` |
 | `resync_required` | this client fell behind the event buffer | `{}` |
 | `preview_ready` | a scheduled preview finished and was delivered | the same object `preview_request` returns for a cache hit -- see "Scheduled previews" |
+| `inference_call_added` | the poll tick read a call from IronWire's log that no earlier tick had (K14) | `{id, tool, model, proof}` -- see below |
+
+`inference_call_added` is published where the daemon already reads IronWire's
+`/log`: the poll tick's routing refresh. Nothing is fetched for it and it adds
+no poll of its own, so a call is announced on the first tick after it lands
+(the daemon's poll interval). Its data is label-only and is the same labels
+`inference_calls` puts on that row: `id` (the ledger row id), `tool`,
+`model` (the same free-text rule) and `proof` (IronWire's label, or
+`unrecorded`). No body, URL, endpoint, session id, digest or token.
+
+- Once per call. New is tracked per ledger by the highest row id announced.
+- The first window a ledger reads is the backlog and is not announced; it
+  sets the baseline. A ledger rebuilt for a new endpoint starts over the
+  same way, and so does one whose ids went backwards (a proxy whose own
+  ledger started over). A ledger that started over and climbed past the old
+  highest id within one tick cannot be told from one that only grew: its
+  rows above the old id are announced, and the rest are never announced.
+  Counts on `tool_destinations` are unaffected.
+- Rows without an id (a proxy too old to expose one) are never announced.
+- At most 64 per tick, the newest kept, so a burst cannot push a subscriber
+  into `resync_required`. Re-read `tool_destinations` for exact counts.
 
 `subscribe` sends a full `snapshot` before any delta, so a client never has to
 race `list_pending` against the stream at startup. On `resync_required`, call

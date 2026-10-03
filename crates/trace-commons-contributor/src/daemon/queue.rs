@@ -605,6 +605,19 @@ pub struct QueueEntry {
 }
 
 impl QueueEntry {
+    /// Which tool this session reads as: what the transcript declared
+    /// itself to be when discovery knew it, else the adapter that read it.
+    ///
+    /// The same preference `SessionRef::displayed_source` applies to a
+    /// `SessionRef`, so every surface names an imported Antigravity
+    /// conversation `antigravity` rather than `trajectory`. Display and
+    /// counting only -- never a substitute for `source` when pairing the
+    /// entry back to an adapter that can load it.
+    #[must_use]
+    pub fn displayed_source(&self) -> &str {
+        self.declared_source.as_deref().unwrap_or(&self.source)
+    }
+
     /// Whether the scrubber has run on this entry, and how many marks it
     /// made. See `second_look::Scrub`.
     pub fn scrub(&self) -> super::second_look::Scrub {
