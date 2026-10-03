@@ -384,7 +384,7 @@ final class TracesStore {
             said.insert(GateHeld.label)
         }
         if let label = status.health?.lastErrorLabel, !said.contains(label) {
-            let health = HealthCopy.forLabel(label)
+            let health = HealthCopy.core(label: label, maxQueueEntries: nil)
             out.insert(Safeguard(title: health.title, body: health.detail), at: 0)
         }
         return out

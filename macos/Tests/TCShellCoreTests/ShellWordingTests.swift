@@ -52,7 +52,9 @@ final class ShellWordingTests: XCTestCase {
 
         // The app model and its non-view surfaces.
         "TraceCommonsApp/AppModel.swift": 8,
-        "TraceCommonsApp/HealthCopy.swift": 20,
+        // Lowered from 20: the label sentences moved to the core (`tc_health_copy_json`);
+        // the 10 left are the budget/witness banners, QueueStateCopy and the on-hold fallback.
+        "TraceCommonsApp/HealthCopy.swift": 10,
         "TraceCommonsApp/Notifier.swift": 2,
         "TraceCommonsApp/SelfTest.swift": 15,
 

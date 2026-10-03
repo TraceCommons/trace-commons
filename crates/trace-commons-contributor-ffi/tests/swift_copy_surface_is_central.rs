@@ -468,6 +468,23 @@ fn pinned_sentences() -> Vec<(&'static str, String)> {
         "privacy_scan_copy",
         table(json!(privacy_scan_copy::privacy_scan_copy())),
     );
+    // The health banner (R6/R7, #1173): every label's words and the
+    // core-down banner. `daily-cap-reached` is left out: its title is
+    // `DAILY_BUDGET_TITLE`, which `DailyBudgetCopy.swift` holds as Swift
+    // until the budget banner has an export of its own.
+    {
+        use trace_commons_contributor::{daemon::health::ALL_LABELS, health_copy};
+        let mut lines = table(json!(health_copy::core_down_copy()));
+        for label in ALL_LABELS
+            .iter()
+            .filter(|label| **label != "daily-cap-reached")
+        {
+            lines.extend(table(json!(health_copy::health_copy_for_label(
+                label, None
+            ))));
+        }
+        add("health_copy", lines);
+    }
     add(
         "preview_copy::REDACTION_CATEGORY_*",
         [
@@ -577,6 +594,25 @@ fn pinned_sentences() -> Vec<(&'static str, String)> {
 /// names a file and the fragment, so a NEW file repeating the same words
 /// still fails. Remove an entry when its reason stops being true.
 const ALLOWED: &[(&str, &str, &str)] = &[
+    // The export-failure fallback (`HealthCopy.onHoldFallback`): the core's
+    // `on_hold_copy()`, verbatim, drawn only when `tc_health_copy_json`
+    // returns NULL for a reported label -- a caught panic -- so a reported
+    // condition is never drawn as healthy.
+    (
+        "TraceCommonsApp/HealthCopy.swift",
+        "Contributions are on hold.",
+        "health export-failure fallback",
+    ),
+    (
+        "TraceCommonsApp/HealthCopy.swift",
+        "Something is stopping traces from being sent.",
+        "health export-failure fallback",
+    ),
+    (
+        "TraceCommonsApp/HealthCopy.swift",
+        "Nothing has been lost, and nothing has gone out.",
+        "health export-failure fallback",
+    ),
     // The per-tier withdrawal confirmations (`WithdrawalCopy.canonical*`)
     // reproduce `docs/contributor-daemon-ipc-v1_1.md`'s "Canonical
     // confirmation copy" table, and their credit note is the same two
@@ -835,9 +871,16 @@ const SURFACES: &[(&str, &str, &str, &str, &str)] = &[
     (
         "extra privacy scan recovery",
         "TraceCommonsApp/HealthCopy.swift",
-        "TCCoreCopy.privacyScanCopyJSON",
+        "TCCoreCopy.healthCopyJSON",
         "TCBridge/TCCoreCopy.swift",
-        "tc_privacy_scan_copy_json",
+        "tc_health_copy_json",
+    ),
+    (
+        "health banner in Traces",
+        "TraceCommonsApp/Views/Monitor/TracesStore.swift",
+        "HealthCopy.core(",
+        "TCBridge/TCCoreCopy.swift",
+        "tc_health_copy_json",
     ),
     (
         "withdrawal of an unknown reach",
