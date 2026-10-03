@@ -384,6 +384,9 @@ fn seed_sessions_seen(store: &ConfigStore, projects: &[(&Project, u32)]) {
                     modified_at: dt("2026-09-30T09:00:00Z"),
                     cwd: Some(project.key.to_string()),
                     project_key: Some(project.key.to_string()),
+                    // Claude Code, so `list_projects.tools` (K11) reads as a
+                    // folder the watcher saw that tool's sessions in.
+                    tool: Some("claude-code".to_string()),
                 },
             );
         }

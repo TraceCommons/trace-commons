@@ -49,5 +49,8 @@
     "held_sessions": 0,
     "reasons": [],
     "projects": []
-  }
+  },
+  "contribution_override": null,
+  "contribution_mode": "auto_upload",
+  "contribution_mode_partial": false
 }
