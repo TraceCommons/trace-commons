@@ -1,7 +1,7 @@
 //! "The Turn" -- the adopted product mark, as pure geometry.
 //!
 //! Two corner brackets facing each other inside a hairline frame: the
-//! user's bracket top-left in green, the agent's answer bottom-right in
+//! user's bracket top-left in the accent, the agent's answer bottom-right in
 //! blue, and the session implied in the space between them. No gradients,
 //! no fills other than the frame, no asset file.
 //!
@@ -44,13 +44,14 @@
 //!
 //! ## Colour
 //!
-//! Every ink here is a palette token from [`super::style`], not a new
-//! value: frame fill `tc_surface`, frame stroke `tc_line`, brackets
-//! `tc_green` and `tc_blue`, template ink `tc_ink`. They are repeated as
-//! literals because a cairo path needs floating-point components and GTK
-//! offers no supported way to read a `@define-color` back out of a
-//! provider. If a token below ever drifts from `style.rs`, `style.rs` is
-//! right.
+//! The open bracket in the window is the brand purple,
+//! [`super::style::mark_accent`], which reads the generated design tokens.
+//! The frame, the closing bracket and the template ink come from the
+//! crate's `Scheme`. The crate's own `bracket_open` (and so [`svg`], for
+//! the icon surfaces) still carries the site mint, which the macOS shell
+//! shares; the two converge when the final brand lands. Cairo takes the
+//! values as literals because GTK offers no supported way to read a
+//! `@define-color` back out of a provider.
 
 use std::cell::RefCell;
 
@@ -176,7 +177,7 @@ fn draw_framed(cr: &cairo::Context, scheme: Scheme, width: f64, height: f64) {
     let _ = cr.stroke();
 
     cr.set_line_width(STROKE_FRAMED);
-    set_source(cr, scheme.bracket_open());
+    set_source(cr, super::style::mark_accent(scheme == Scheme::Dark));
     bracket_top_left(cr);
     let _ = cr.stroke();
 
