@@ -1194,6 +1194,30 @@ async fn an_unpreviewed_approval_pins_the_bytes_that_were_persisted() {
 }
 
 #[tokio::test]
+async fn an_unpreviewed_approval_pins_the_measured_size_of_the_persisted_bytes() {
+    // K10: `would_send_bytes` describes the bytes actually pinned, not an
+    // estimate made some other way. Removing the measurement in
+    // `pin_previewed_envelope` (or threading `None` through it) would leave
+    // this `None` even though an envelope was persisted right beside it.
+    let (_dir, store_dir, entry_id) = daemon_with_a_multi_event_entry().await;
+    let store = ConfigStore::open(store_dir.clone()).unwrap();
+    let mut c = connect_to(&store_dir).await;
+    approve_one(&mut c, entry_id).await;
+
+    let queue = Queue::load(&store).unwrap();
+    let entry = queue.get(entry_id).expect("entry");
+    let would_send_bytes = entry.would_send_bytes.expect("a size must be pinned");
+    let saved = trace_commons_contributor::daemon::approved_envelope::load(&store, entry_id)
+        .expect("load")
+        .expect("an envelope must be on disk");
+    assert_eq!(
+        would_send_bytes,
+        trace_commons_contributor::envelope::envelope_size(&saved).expect("size") as u64,
+        "the pinned size must describe the bytes actually persisted"
+    );
+}
+
+#[tokio::test]
 async fn an_approval_whose_envelope_cannot_be_stored_is_not_reported_as_approved() {
     // The hole a build returning `Ok` hides. `pin_previewed_envelope`
     // declines silently when the envelope cannot be written, so the build

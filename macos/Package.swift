@@ -93,6 +93,15 @@ let package = Package(
         // only exist there.
         .target(
             name: "TCShellCore",
+            resources: [
+                // K2 of #1173: replies recorded from the real daemon, one
+                // file per sample set per method (plus `shared/` for the
+                // handful every set answers alike). `SampleDaemonData`
+                // loads these through `Bundle.module`; re-record with
+                // `crates/trace-commons-contributor`'s
+                // `k2_sample_recorder` test (see its module doc).
+                .copy("DataContract/RecordedSamples")
+            ],
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
         .testTarget(

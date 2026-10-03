@@ -195,7 +195,7 @@ final class TracesStore {
     }
 
     /// The event stream ended without this view going: the core went away
-    /// (`LiveDaemonClient.disconnected()`). The badge reads unknown rather
+    /// (`LiveDaemonClient.finishEvents()`). The badge reads unknown rather
     /// than keeping its last count, and the tab says the core is not
     /// answering over the last tree it reported.
     func lost() {

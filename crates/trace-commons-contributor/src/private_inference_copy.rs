@@ -1546,6 +1546,52 @@ pub fn group_control(pending: u64, contributable: Option<u64>) -> ContributionCo
     }
 }
 
+/// A `list_projects` group's whole eligibility picture, computed once from
+/// `pending` and `contributable`.
+///
+/// Before this existed, every caller re-derived `eligible_count` and
+/// `withheld_count` from the same two numbers by hand: Tauri's
+/// `eligibility_group_copy` computed `contributable.unwrap_or(pending).
+/// min(pending)` and `pending.saturating_sub(eligible)` inline, and the
+/// macOS shell computed `pending - contributableCount` itself in Swift, with
+/// no `min` clamp at all -- a second, slightly different arithmetic for the
+/// same fact, safe only because the FFI's `tc_contribution_withheld_line`
+/// clamps a negative input to zero on its side of the ABI. One function now
+/// does this arithmetic, so both numbers are derived exactly once.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GroupEligibility {
+    /// How many of `pending` may actually be sent. Clamped to `pending`:
+    /// `contributable` is documented never to exceed it, but a caller
+    /// reading data from an older or mismatched daemon should not be able to
+    /// turn a clamp failure into a claim of more eligible sessions than
+    /// exist.
+    pub eligible_count: u64,
+    /// `pending` minus `eligible_count`, never negative.
+    pub withheld_count: u64,
+    /// Whether the group's submit control may be offered at all -- exactly
+    /// [`group_control`]'s answer for this `pending`/`contributable` pair.
+    pub can_contribute: bool,
+}
+
+/// Compute [`GroupEligibility`] from a `list_projects` row's `pending_count`
+/// and `contributable_count`.
+///
+/// `contributable`, like [`group_control`]'s parameter of the same name,
+/// must be `None` for an ABSENT `contributable_count` (an invited
+/// contributor, for whom every pending session is sendable) and
+/// `Some(0)` for a present count of zero -- never conflate the two, or an
+/// invited contributor's folder reads as having nothing eligible.
+#[must_use]
+pub fn group_eligibility(pending: u64, contributable: Option<u64>) -> GroupEligibility {
+    let eligible_count = contributable.unwrap_or(pending).min(pending);
+    GroupEligibility {
+        eligible_count,
+        withheld_count: pending.saturating_sub(eligible_count),
+        can_contribute: group_control(pending, contributable.map(|_| eligible_count))
+            == ContributionControl::Contribute,
+    }
+}
+
 /// The sentence for one queue entry's `eligibility` label.
 ///
 /// An unfamiliar or empty label answers [`ELIGIBILITY_UNKNOWN`]. IT MUST NOT
@@ -3695,6 +3741,53 @@ mod tests {
         // An empty group is an empty group either way.
         assert_eq!(group_control(0, None), ContributionControl::None);
         assert_eq!(group_control(0, Some(0)), ContributionControl::None);
+    }
+
+    /// `group_eligibility` is the arithmetic every caller used to do by
+    /// hand: `eligible_count` clamped to `pending`, `withheld_count` the
+    /// non-negative remainder, and `can_contribute` exactly `group_control`'s
+    /// own answer.
+    #[test]
+    fn group_eligibility_computes_the_eligible_and_withheld_counts() {
+        assert_eq!(
+            group_eligibility(7, Some(3)),
+            GroupEligibility {
+                eligible_count: 3,
+                withheld_count: 4,
+                can_contribute: true,
+            }
+        );
+        // The question does not apply: every pending session is eligible,
+        // and nothing is withheld.
+        assert_eq!(
+            group_eligibility(7, None),
+            GroupEligibility {
+                eligible_count: 7,
+                withheld_count: 0,
+                can_contribute: true,
+            }
+        );
+        // Nothing sendable: no control offered, and the whole group is
+        // withheld.
+        assert_eq!(
+            group_eligibility(7, Some(0)),
+            GroupEligibility {
+                eligible_count: 0,
+                withheld_count: 7,
+                can_contribute: false,
+            }
+        );
+        // A `contributable` above `pending` is data this function does not
+        // trust blindly: `eligible_count` is clamped rather than exceeding
+        // `pending`, so `withheld_count` cannot go negative.
+        assert_eq!(
+            group_eligibility(3, Some(9)),
+            GroupEligibility {
+                eligible_count: 3,
+                withheld_count: 0,
+                can_contribute: true,
+            }
+        );
     }
 
     /// The withheld line counts and says nothing else.
