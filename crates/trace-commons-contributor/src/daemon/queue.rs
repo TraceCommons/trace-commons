@@ -608,7 +608,7 @@ impl QueueEntry {
     /// Which tool this session reads as: what the transcript declared
     /// itself to be when discovery knew it, else the adapter that read it.
     ///
-    /// The same preference `commands::displayed_source` applies to a
+    /// The same preference `SessionRef::displayed_source` applies to a
     /// `SessionRef`, so every surface names an imported Antigravity
     /// conversation `antigravity` rather than `trajectory`. Display and
     /// counting only -- never a substitute for `source` when pairing the

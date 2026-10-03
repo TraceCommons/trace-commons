@@ -561,7 +561,7 @@ fn window_sessions(shared: &DaemonShared) -> Option<Vec<SessionMark>> {
 /// Each mark is labelled with the tool the session reads as --
 /// [`QueueEntry::displayed_source`](super::queue::QueueEntry::displayed_source),
 /// the declared source when discovery knew one, else the adapter -- the same
-/// rule `commands::displayed_source` and `list_projects` apply. A history
+/// rule `SessionRef::displayed_source` and `list_projects` apply. A history
 /// record carries only the adapter (`HistoryRecord` has no declared source,
 /// because `Receipt` has none), so it takes its label from the queue entry
 /// with the same session hash, looked up across the whole queue rather than
@@ -1431,7 +1431,7 @@ mod tests {
     /// adapter and declares itself `antigravity`. Its queue entry and its
     /// history record (which carries only the adapter) are one session, so
     /// they must come out under one key -- the declared one, the rule
-    /// `commands::displayed_source` and `list_projects` use -- and never
+    /// `SessionRef::displayed_source` and `list_projects` use -- and never
     /// under two.
     #[test]
     fn an_imported_antigravity_session_counts_under_one_key_never_twice() {
