@@ -976,11 +976,43 @@ fails on a row that the plain count did not show. Apply V110 to V113 as the
 migrator before you install the binary, as for every migration above ("First:
 does this build carry a migration the database does not have?").
 
+**A deploy to a new code revision, and what stops intake.** A process with a
+pipeline runtime refuses the new uploads of a tenant whose routing row says
+`pipeline` while the tenant's active bundle has no qualification on the
+revision that the process was built from (`503`
+`pipeline_bundle_not_qualified`; a build with no revision: `503`
+`bundle_runtime_revision_unknown`). So qualify each such tenant's active bundle
+on the new revision, through a process of the new build that takes no client
+traffic, before you roll the fleet: the procedure is in
+[pipeline-activation.md](pipeline-activation.md), "After a deploy: the
+qualification is read again for each new upload". A rollback to the binary of
+an earlier revision serves the bundles that were qualified on that revision,
+and refuses a tenant whose active bundle was first qualified on the later one.
+
+At start, a process that is not started with
+`TRACE_COMMONS_PIPELINE_ALLOW_TEST_DEPENDENCIES` logs these warnings. None of
+them stops the start:
+
+| Warning | When |
+|---|---|
+| `pipeline_active_bundle_not_qualified` (with the tenant's storage reference) | one for each tenant on the receipts list whose row says `pipeline` and whose active bundle has no qualification on the build's revision: this process refuses that tenant's new uploads |
+| `pipeline_code_revision_unset` | one in all, when the receipts list is not empty and the build has no revision: this process refuses the new uploads of every `pipeline` tenant |
+| `pipeline_qualification_start_check_incomplete` (with the tenant's storage reference) | the read for that tenant failed, or took more than 5 seconds |
+
 **Binary rollback to an older build.** An older binary ignores these
 migrations. What it does with a tenant that has a routing row depends on the
 build:
 
-- A build with no pipeline runtime (the repository binary) reads no routing
+- A build with no pipeline runtime (the repository binary) that has these
+  migrations' code and the rule of review round 1 reads the routing row. It
+  refuses the uploads of a tenant whose row says `pipeline` (`503`
+  `pipeline_tenant_not_served`) or `contained` (`503`
+  `pipeline_receipt_intake_contained`), and serves every other tenant on the
+  legacy path. `POST /v1/admin/pipeline/contain` and `deactivate` work on it
+  (they need only the routing store), so `deactivate` each tenant whose row
+  says `pipeline` to serve it on that build. `activate`, `rollback`,
+  `qualifications`, and the policy routes answer `404` there.
+- A build with no pipeline runtime from before that rule reads no routing
   row. It serves every tenant on the legacy path, a tenant whose row says
   `pipeline` or `contained` included.
 - A build that has a pipeline runtime and is from before these migrations'
@@ -994,7 +1026,8 @@ build:
   runs, and it does not stop a payout dispatch under a suspended Settle
   policy.
 
-Before you install a build of the second kind, do these steps:
+Before you install a build that has a pipeline runtime and is from before
+these migrations' code, do these steps:
 
 1. Read each listed tenant's routing (`GET /v1/admin/pipeline/routing`) and
    suspended policies (`suspended_policy_count` in `GET

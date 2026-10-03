@@ -543,7 +543,11 @@ revision records another row, and a repeat with exactly the same inputs answers
 the row that exists. The call also registers the package for the tenant. So a
 qualification covers one code revision: after a deploy to a new revision, a
 bundle needs a new qualification on it, an earlier bundle included, before an
-activation or a rollback can use it.
+activation or a rollback can use it. A tenant's active bundle needs it too
+before a process of the new revision takes that tenant's new uploads: see
+"After a deploy: the qualification is read again for each new upload" in
+[pipeline-activation.md](pipeline-activation.md), which has the deploy
+procedure.
 
 A recorded qualification covers the signed package and its dependency
 profile, not the deployment's bindings. `main`'s gate configuration

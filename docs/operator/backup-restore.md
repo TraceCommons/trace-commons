@@ -175,8 +175,22 @@ answers `404` there. Do these steps in this order:
    5 would then take that tenant's uploads. Read each tenant's row and events
    (`GET /v1/admin/pipeline/routing`, with the tenant's admin credential; it needs
    only the routing store). Repeat a lost containment first
-   (`POST /v1/admin/pipeline/contain`, which needs a runtime and works in this
-   configuration; it needs no expectation in its body).
+   (`POST /v1/admin/pipeline/contain`, which needs only the routing store and
+   works in this configuration; it needs no expectation in its body).
+
+   Read `active_bundle_qualified_on_revision` in the same answer, for each
+   tenant, whatever its row says. A process refuses the new uploads of a tenant
+   whose row says `pipeline` while the tenant's active bundle has no
+   qualification on the process's revision (`503`
+   `pipeline_bundle_not_qualified`), and the restored database holds only the
+   qualifications from the time of the backup. Both scope lists are unset in
+   this step, so no start warning and no count names these tenants: this field
+   is the only place that shows them. For each tenant where it is `false`,
+   record the qualification again (`POST /v1/admin/pipeline/qualifications`,
+   which works in this step), or contain the tenant, before step 5. Where it
+   is null, the tenant has no active bundle, or the build has no revision; a
+   build with no revision refuses every `pipeline` tenant's new uploads (`503`
+   `bundle_runtime_revision_unknown`).
 
    Check each tenant's policy suspensions too, also before step 5. Step 5
    resumes Settle, credit, and the NEAR payout dispatch for every listed
