@@ -149,9 +149,7 @@ struct MonitorWindowView: View {
                 case .traces:
                     SessionInspectorView(store: traces, entry: selectedEntry)
                 case .inference:
-                    PrivateAIInspectorView(
-                        store: inference, destinationLabel: model.privateInferenceCopy?.destination,
-                        sentence: { Self.rowSentence($0, copy: model.privateInferenceCopy, calls: model.harnessCalls) })
+                    PrivateAIInspectorView(store: inference, destinationLabel: model.privateInferenceCopy?.destination)
                 case .home:
                     // History's selected row, while it is still listed; the
                     // record as a whole otherwise.

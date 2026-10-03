@@ -320,10 +320,9 @@ final class InferenceParityTests: XCTestCase {
     /// only for a committable plan.
     func test_theSheetsCarryTheCoresWordsAndEveryGate() throws {
         let source = try Self.text("Views/HarnessListView.swift")
-        for needle in ["GlassSheet(title: copy.offerTitle) {\n"
-                           + "            Text(copy.offerWhat)",
-                       "Text(copy.offerExposure)", "Text(copy.offerNoRepoint)",
-                       "Button(copy.offerDecline) { model.answerHarnessExposure(accepted: false) }\n"
+        // The exposure body is pinned whole, in order, in
+        // `test_theExposureBodyAndTheToolDetailsArePinnedWhole`.
+        for needle in ["Button(copy.offerDecline) { model.answerHarnessExposure(accepted: false) }\n"
                            + "                    .buttonStyle(GlassButtonStyle(.glass))\n"
                            + "                    .keyboardShortcut(.cancelAction)\n",
                        "Button(copy.offerAccept) { model.answerHarnessExposure(accepted: true) }\n"
@@ -405,6 +404,126 @@ final class InferenceParityTests: XCTestCase {
             + "            } else if model.harnesses.harnesses.isEmpty {\n"
             + "                Text(copy.harnessesNoneFound)"),
                       "an unanswered list must not read as an empty one")
+    }
+
+    func test_theInspectorCarriesTheAccountTheSwitchAndTheTools() throws {
+        let views = try Self.text("Views/Monitor/InferenceViews.swift")
+        XCTAssertTrue(views.contains("InferenceAccountSection(store: store)"))
+        for needle in ["case .needsRoots", "OnboardingRootsView(configDirectory: model.configDirectory", "case .refused(let",
+                       "GlassHealthBanner(banner:", "model.refreshAll()"] {
+            XCTAssertTrue(views.contains(needle), "InferenceViews.swift lacks \(needle)")
+        }
+        let account = try Self.text("Views/Monitor/InferenceAccount.swift")
+        for needle in ["CredentialSection(copy: copy, prominent: true)", "HarnessListSection(copy: copy)",
+                       "PrivateAISwitchCard(", "store.setPrivateAI(on:", "copy.writeUnconfirmed", "model.refreshSettings()",
+                       "store.privateAI?.on", "model.privateInferenceCopy"] {
+            XCTAssertTrue(account.contains(needle), "InferenceAccount.swift lacks \(needle)")
+        }
+        XCTAssertFalse(account.contains("applyPrivateInference("), "the glass switch writes through the data contract")
+    }
+
+    /// The glass switch is the legacy card on the store: drawn only under
+    /// the core's copy (no destination without its exposure sentence), its
+    /// write refused in the core's decoded words (never nil), the model's
+    /// settings re-read after, and its refusal dismissable.
+    func test_theGlassSwitchIsTheCardOnTheStore() throws {
+        let account = try Self.text("Views/Monitor/InferenceAccount.swift")
+        for needle in ["        if let copy = model.privateInferenceCopy {\n"
+                           + "            VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {\n"
+                           + "                GlassCard { CredentialSection(copy: copy, prominent: true) }\n"
+                           + "                GlassCard { HarnessListSection(copy: copy) }\n"
+                           + "                PrivateAISwitchCard(\n",
+                       "isOn: store.privateAI?.on,\n",
+                       "state: Self.surfaceState(store.privateAI?.state),\n",
+                       "calls: model.privateInferenceCalls,\n",
+                       "busy: store.privateAIBusy,\n",
+                       "refusal: store.privateAIRefusal,\n",
+                       "await store.setPrivateAI(on: on, unconfirmed: copy.writeUnconfirmed)\n"
+                           + "                            model.refreshSettings()\n",
+                       "onDismiss: { store.dismissPrivateAIRefusal() })"] {
+            XCTAssertTrue(account.contains(needle), "InferenceAccount.swift lacks \(needle)")
+        }
+        XCTAssertFalse(account.contains("truncatingIfNeeded"), "a port out of range is unknown, never another port")
+        XCTAssertEqual(account.components(separatedBy: "PrivateAISwitchCard(").count - 1, 1)
+        try LegacySymbols.assertClean("Views/Monitor/InferenceAccount.swift")
+        XCTAssertTrue(account.hasPrefix("#if DEBUG\n") && account.hasSuffix("#endif\n"), "a Monitor file is debug-only")
+    }
+
+    /// The daemon's listener report onto the card's state: the label as
+    /// the daemon sent it, unreported as the empty label, and a port that
+    /// is not a port as no port (truncating would name a wrong one).
+    func test_theListenerReportConvertsWithoutInventingAPort() {
+        let running = InferenceAccountSection.surfaceState(.init(state: "running", port: 4100))
+        XCTAssertEqual(running, PrivateInferenceState(label: "running", port: 4100))
+        XCTAssertEqual(InferenceAccountSection.surfaceState(.init(state: "running", port: 70_000)),
+                       PrivateInferenceState(label: "running", port: nil))
+        XCTAssertEqual(InferenceAccountSection.surfaceState(.init(state: "running", port: -1)),
+                       PrivateInferenceState(label: "running", port: nil))
+        XCTAssertEqual(InferenceAccountSection.surfaceState(.init(state: "port_in_use", port: nil)),
+                       PrivateInferenceState(label: "port_in_use", port: nil))
+        XCTAssertEqual(InferenceAccountSection.surfaceState(nil), PrivateInferenceState(label: "", port: nil))
+    }
+
+    /// The tab reads the daemon's startup as the legacy destination did:
+    /// the roots screen when folders are owed (outside the ledger's scroll,
+    /// so it never nests one), a spinner while starting, the core's down
+    /// title over the refusal's sentence, the ledger only while running;
+    /// and the refresh sits on the always-present stack. The inspector's
+    /// account, whose controls need the daemon, is drawn only while running.
+    func test_theTabGatesOnTheDaemonsStartup() throws {
+        let views = try Self.text("Views/Monitor/InferenceViews.swift")
+        for needle in ["        VStack(alignment: .leading, spacing: 0) {\n"
+                           + "            switch model.startup {\n"
+                           + "            case .needsRoots:\n"
+                           + "                OnboardingRootsView(configDirectory: model.configDirectory, onStarted: {})\n"
+                           + "            case .starting:\n"
+                           + "                SettingsAwaiting().frame(maxWidth: .infinity)\n"
+                           + "            case .refused(let sentence):\n"
+                           + "                GlassHealthBanner(banner: .init(\n"
+                           + "                    title: TracesHealth.coreDownLine?.title ?? TracesHealth.unknownWord ?? \"\",\n"
+                           + "                    detail: sentence, tone: .outside))\n"
+                           + "            case .running:\n"
+                           + "                ledger\n"
+                           + "            }\n"
+                           + "        }\n"
+                           + "        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)\n"
+                           + "        .onAppear { model.refreshAll() }\n",
+                       "                if case .running = model.startup {\n"
+                           + "                    InferenceAccountSection(store: store)\n"
+                           + "                }\n"] {
+            XCTAssertTrue(views.contains(needle), "InferenceViews.swift lacks \(needle)")
+        }
+        XCTAssertEqual(views.components(separatedBy: ".onAppear").count - 1, 1)
+        XCTAssertEqual(views.components(separatedBy: "OnboardingRootsView(").count - 1, 1)
+        // The read-only tool cards are gone: the section's list is the one
+        // with the connect action.
+        XCTAssertFalse(views.contains("sentence(row)"), "the inspector draws one tools list, the section's")
+        XCTAssertFalse(views.contains("TCCoreCopy.healthCopyJSON("), "the core-down words are decoded once, in TracesHealth")
+    }
+
+    /// The exposure sheet's paragraph runs whole, in order, inside its own
+    /// sheet; and the tool's details hold its config path and its connect
+    /// command, both selectable.
+    func test_theExposureBodyAndTheToolDetailsArePinnedWhole() throws {
+        let source = try Self.text("Views/HarnessListView.swift")
+        for needle in ["GlassSheet(title: copy.offerTitle) {\n"
+                           + "            Text(copy.offerWhat)\n"
+                           + "                .glassType(GlassTokens.TypeScale.body)\n"
+                           + "                .foregroundStyle(GlassColor.textPrimary)\n"
+                           + "                .fixedSize(horizontal: false, vertical: true)\n"
+                           + "            Text(copy.offerExposure)\n"
+                           + "                .glassType(GlassTokens.TypeScale.body)\n"
+                           + "                .foregroundStyle(GlassColor.textPrimary)\n"
+                           + "                .fixedSize(horizontal: false, vertical: true)\n"
+                           + "            Text(copy.offerNoRepoint)\n",
+                       "if let path = row.configPath {\n"
+                           + "                            Label(path, systemImage: \"doc.text\")\n"
+                           + "                                .textSelection(.enabled)\n"
+                           + "                        }\n"
+                           + "                        Label(row.connectCommand, systemImage: \"terminal\")\n"
+                           + "                            .textSelection(.enabled)\n"] {
+            XCTAssertTrue(source.contains(needle), "HarnessListView.swift lacks \(needle)")
+        }
     }
 }
 #endif
