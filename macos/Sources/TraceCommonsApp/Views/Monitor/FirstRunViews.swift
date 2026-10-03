@@ -6,7 +6,8 @@ import TCShellCore
 /// First run in the glass system (R12 of #1173): a single pane over the
 /// painted scene, with step progress above the step (spec, "Screens").
 ///
-/// The steps are the existing onboarding screens, sequenced by
+/// The steps are glass from Phase 2: the existing onboarding screens,
+/// rebuilt in place on TCDesign and sequenced by
 /// `OnboardingCoordinatorView` exactly as the shipping window sequences
 /// them: the same daemon calls, the same consent order, the same resume
 /// rules. This view draws the frame and the progress, and nothing else.
@@ -82,6 +83,10 @@ struct FirstRunWindowView: View {
 
 /// The step progress for one onboarding step: which steps it shows and
 /// where the person is. Pure, so the mapping is tested.
+///
+/// The order is Folders, Join, Uses, Scan, Projects on a fresh install: the
+/// folders come before Join because the daemon cannot start without them and
+/// Join needs the daemon (D-3). It is not the concept's Join-first order.
 struct FirstRunProgress: Equatable {
     let labels: [String]
     let current: Int

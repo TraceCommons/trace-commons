@@ -806,7 +806,7 @@ const SURFACES: &[(&str, &str, &str, &str, &str)] = &[
     ),
     (
         "arming confirmation",
-        "TraceCommonsApp/Views/SettingsView.swift",
+        "TraceCommonsApp/Views/Settings/ProjectsSection.swift",
         "TCCoreCopy.armingOfferCopyJSON",
         "TCBridge/TCCoreCopy.swift",
         "tc_arming_offer_copy_json",
