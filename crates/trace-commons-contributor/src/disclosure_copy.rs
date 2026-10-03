@@ -71,6 +71,7 @@ pub fn contributor_disclosure_copy() -> Value {
         "history_ui": {
             "held_row_body": crate::history_copy::HELD_ROW_BODY,
             "status_awaiting_pii_backstop": awaiting_pii_backstop,
+            "status_unavailable": crate::history_copy::STATUS_UNAVAILABLE,
         },
         "outcome": crate::outcome_copy::outcome_copy(),
         "private_inference": {
@@ -242,6 +243,18 @@ mod tests {
         assert_eq!(
             copy["history_ui"]["held_row_body"],
             crate::history_copy::HELD_ROW_BODY
+        );
+    }
+
+    /// A status the shell does not recognise reads as the history table's
+    /// one sentence for it, carried whole rather than spelled per shell.
+    #[test]
+    fn history_copy_carries_the_unrecognised_status_label() {
+        let copy = contributor_disclosure_copy();
+        assert_eq!(
+            copy.pointer("/history_ui/status_unavailable")
+                .and_then(Value::as_str),
+            Some(crate::history_copy::STATUS_UNAVAILABLE)
         );
     }
 
