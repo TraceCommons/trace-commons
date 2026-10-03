@@ -5264,6 +5264,31 @@ fn the_contribution_override_confirmation_crosses_the_abi() {
 }
 
 #[test]
+fn the_contribution_override_refusal_line_crosses_the_abi() {
+    use trace_commons_contributor::project_copy::{
+        CONTRIBUTION_OVERRIDE_REFUSED, CONTRIBUTION_OVERRIDE_REFUSED_NO_TERMS,
+    };
+    use trace_commons_contributor_ffi::tc_contribution_override_refusal_text;
+    let line = |label: Option<&str>| {
+        let owned = label.map(cstr_str);
+        take_owned(unsafe {
+            tc_contribution_override_refusal_text(
+                owned.as_ref().map_or(std::ptr::null(), |c| c.as_ptr()),
+            )
+        })
+    };
+    assert_eq!(
+        line(Some("arming-terms-unavailable")),
+        CONTRIBUTION_OVERRIDE_REFUSED_NO_TERMS
+    );
+    assert_eq!(
+        line(Some("policy-write-failed")),
+        CONTRIBUTION_OVERRIDE_REFUSED
+    );
+    assert_eq!(line(None), CONTRIBUTION_OVERRIDE_REFUSED);
+}
+
+#[test]
 fn the_legacy_migration_offer_and_refusal_cross_the_abi() {
     use trace_commons_contributor::consent_copy::{
         legacy_migration_offer, legacy_migration_refusal_line,

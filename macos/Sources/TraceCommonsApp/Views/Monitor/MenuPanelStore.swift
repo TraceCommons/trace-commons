@@ -1,13 +1,15 @@
 #if DEBUG
 import Foundation
 import Observation
+import TCBridge
 import TCDesign
 import TCShellCore
 
 /// The menu-bar popover's data (R13 of #1173), read through
-/// `DaemonDataClient` like the other glass screens. The popover's actions
-/// (pause, resume, Private AI off) stay on `AppModel`, which the shipping
-/// menu already uses for them.
+/// `DaemonDataClient` like the other glass screens. The contribution
+/// override (#1208) is written here, through the same client, after its
+/// core confirmation; the popover's other actions (pause, resume, Private
+/// AI off) stay on `AppModel`, which the shipping menu already uses.
 ///
 /// The client is the app's live one (`AppModel.daemonData`), attached by
 /// the menu-bar label when the daemon starts and detached when it stops;
@@ -32,15 +34,95 @@ final class MenuPanelStore {
 
     private(set) var client: (any DaemonDataClient)?
 
+    /// The contributor configuration directory, for the Auto contribute
+    /// confirmation's arming disclosure, which the core words for it.
+    var configDirectory: String?
+
+    /// The override confirmation on screen, in the core's words; nil when
+    /// none is.
+    private(set) var confirming: ContributionOverrideConfirmCopy?
+    /// The core's line for the last refused override write, until the next
+    /// choice.
+    private(set) var overrideRefusal: String?
+    /// An override write is in flight.
+    private(set) var writingOverride = false
+
     init(client: (any DaemonDataClient)?) {
         self.client = client
     }
 
     /// Follows a new client (or none): the old data is stale until the
     /// new one has been read.
-    func attach(_ client: (any DaemonDataClient)?) {
+    func attach(_ client: (any DaemonDataClient)?, configDirectory: String? = nil) {
         self.client = client
+        if let configDirectory { self.configDirectory = configDirectory }
         stale = true
+    }
+
+    // MARK: The contribution override (#1208)
+
+    /// Whether the pill's choices can be used: only on positive evidence
+    /// that the core is up and its status was read. Core-down, loading,
+    /// stale and a write in flight all keep them disabled, so an absent
+    /// signal never lets a write through.
+    var canChooseOverride: Bool {
+        client != nil && !stale && status != nil && !writingOverride && confirming == nil
+    }
+
+    /// A choice was pressed: show that override's confirmation, in the
+    /// core's words. Nothing is sent until it is confirmed. Without the
+    /// core's confirmation (for Auto contribute, a configuration whose
+    /// arming disclosure cannot be read) nothing can be confirmed, and the
+    /// refusal the daemon would give is shown instead.
+    func choose(_ mode: String) {
+        guard canChooseOverride else { return }
+        overrideRefusal = nil
+        let copy = ContributionOverrideConfirmCopy.decode(
+            fromJSON: TCCoreCopy.contributionOverrideConfirmJSON(mode: mode, configDir: configDirectory))
+        guard let copy, copy.mode == mode else {
+            overrideRefusal = TCCoreCopy.contributionOverrideRefusalLine(
+                label: mode == ProjectMode.autoUpload.rawValue ? "arming-terms-unavailable" : "")
+            return
+        }
+        confirming = copy
+    }
+
+    /// The confirmation was answered. Cancel sends nothing; confirm sends
+    /// `set_contribution_override`, with `confirm: true` for Auto
+    /// contribute (the core's arming disclosure was just shown), then
+    /// re-reads `status`: the pill shows what the daemon says, never a guess.
+    func resolveConfirmation(confirmed: Bool) async {
+        guard let copy = confirming else { return }
+        confirming = nil
+        guard confirmed else { return }
+        guard let mode = ProjectMode(rawValue: copy.mode) else { return }
+        await writeOverride { try await $0.setContributionOverride(mode: mode, confirm: mode == .autoUpload) }
+    }
+
+    /// The core's clear action: every folder back on its own setting.
+    func clearOverride() async {
+        guard canChooseOverride else { return }
+        overrideRefusal = nil
+        await writeOverride { _ = try await $0.clearContributionOverride() }
+    }
+
+    private func writeOverride(_ write: (any DaemonDataClient) async throws -> Void) async {
+        guard let client else { return }
+        writingOverride = true
+        defer { writingOverride = false }
+        do {
+            try await write(client)
+        } catch {
+            overrideRefusal = TCCoreCopy.contributionOverrideRefusalLine(label: Self.refusalLabel(error))
+        }
+        await load()
+    }
+
+    /// The daemon's label for a refused write, for the core's line; never
+    /// `error.description`. Anything without one gets the core's fallback.
+    static func refusalLabel(_ error: any Error) -> String {
+        if case .daemon(_, let message)? = error as? DaemonDataError { return message }
+        return ""
     }
 
     func run() async {

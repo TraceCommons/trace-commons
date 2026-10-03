@@ -155,7 +155,7 @@ final class MenuBarGlassPanelTests: XCTestCase {
         XCTAssertTrue(main.contains("MenuPanelStore(client: nil)"))
         XCTAssertFalse(main.contains("MenuPanelStore(client: MonitorWindowView.dataClient())"))
         let panel = try String(contentsOf: root.appendingPathComponent("Views/Monitor/MenuBarGlassPanel.swift"), encoding: .utf8)
-        XCTAssertTrue(panel.contains("store.attach(model.daemonData)"))
+        XCTAssertTrue(panel.contains("store.attach(model.daemonData, configDirectory: model.configDirectory)"))
     }
 
     // MARK: Badge
@@ -168,9 +168,10 @@ final class MenuBarGlassPanelTests: XCTestCase {
 
     // MARK: Rules
 
-    /// Nothing is sent from the popover, and nothing is armed or turned on
-    /// from it: its only writes are the shipping menu's pause, resume and
-    /// Private AI off; the mode overrides are disabled.
+    /// Nothing is sent from the popover, and nothing is turned on from it:
+    /// its only writes are the shipping menu's pause, resume and Private AI
+    /// off, and the contribution override, which goes through the store
+    /// after its core confirmation and only while the store allows it.
     func test_thePopoverMakesOnlyTheShippingMenusWrites() throws {
         let url = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
@@ -178,11 +179,127 @@ final class MenuBarGlassPanelTests: XCTestCase {
         let source = try String(contentsOf: url, encoding: .utf8)
         // No credit figure of any kind: no projected or pending credit.
         for forbidden in ["setProjectMode", "approve(", "applyPrivateInference(true)", "setPrivateAI(",
+                          "setContributionOverride(", "clearContributionOverride(", ".disabled(true)",
                           "creditPoints", "creditPending", "creditFinal", "creditRange", "commonsCreditSummary"] {
             XCTAssertFalse(source.contains(forbidden), "the popover contains \(forbidden)")
         }
         XCTAssertTrue(source.contains("modeOptions"))
-        XCTAssertTrue(source.contains(".disabled(true)"), "the mode overrides must stay disabled until the core has them")
+        XCTAssertTrue(source.contains(".disabled(!store.canChooseOverride)"),
+                      "the choices are disabled unless the store has positive evidence the core is up")
+        XCTAssertTrue(source.contains("store.resolveConfirmation(confirmed:"))
+    }
+
+    // MARK: Contribution override (#1208)
+
+    private func loadedStore(_ set: SampleDaemonClient.SampleSet) async -> (MenuPanelStore, SampleDaemonClient) {
+        let client = SampleDaemonClient(set)
+        let store = MenuPanelStore(client: client)
+        // A fresh contributor directory with no configuration yet: the core
+        // words Auto contribute's arming disclosure for it.
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("tc-pill-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: dir) }
+        store.configDirectory = dir.path
+        await store.load()
+        return (store, client)
+    }
+
+    /// Choose shows the core's confirmation and sends nothing; confirm sends
+    /// the override and the pill reads it back from `status`.
+    func test_chooseThenConfirmSetsTheOverrideFromStatus() async throws {
+        let (store, client) = await loadedStore(.normalDay)
+        XCTAssertTrue(store.canChooseOverride)
+        store.choose("ignore")
+        let confirming = try XCTUnwrap(store.confirming)
+        XCTAssertEqual(confirming, ContributionOverrideConfirmCopy.decode(
+            fromJSON: TCCoreCopy.contributionOverrideConfirmJSON(mode: "ignore", configDir: nil)))
+        XCTAssertEqual(client.overrideCalls, [], "choosing sends nothing")
+        XCTAssertFalse(store.canChooseOverride, "no second choice while one is being confirmed")
+
+        await store.resolveConfirmation(confirmed: true)
+        XCTAssertNil(store.confirming)
+        XCTAssertEqual(client.overrideCalls, ["set_contribution_override ignore"])
+        XCTAssertEqual(store.status?.contributionMode, "ignore")
+        XCTAssertEqual(store.status?.contributionOverride?.mode, "ignore")
+        XCTAssertNil(store.overrideRefusal)
+
+        await store.clearOverride()
+        XCTAssertEqual(client.overrideCalls.last, "clear_contribution_override")
+        XCTAssertNil(store.status?.contributionOverride)
+    }
+
+    /// Auto contribute's confirmation carries the arming disclosure, and its
+    /// confirm sends `confirm: true`.
+    func test_autoContributeConfirmsWithTheArmingDisclosure() async throws {
+        let (store, client) = await loadedStore(.normalDay)
+        store.choose("auto_upload")
+        let confirming = try XCTUnwrap(store.confirming)
+        let arming = try XCTUnwrap(confirming.arming)
+        XCTAssertFalse(arming.lines.isEmpty)
+        XCTAssertTrue(confirming.paragraphs.contains(arming.lines[0]))
+        await store.resolveConfirmation(confirmed: true)
+        XCTAssertEqual(client.overrideCalls, ["set_contribution_override auto_upload confirm"])
+        XCTAssertEqual(store.status?.contributionOverride?.mode, "auto_upload")
+    }
+
+    /// Cancel sends nothing and changes nothing.
+    func test_cancelSendsNothing() async throws {
+        let (store, client) = await loadedStore(.normalDay)
+        let before = store.status
+        for mode in ["notify_only", "auto_upload", "ignore"] {
+            store.choose(mode)
+            XCTAssertNotNil(store.confirming, mode)
+            await store.resolveConfirmation(confirmed: false)
+            XCTAssertNil(store.confirming, mode)
+        }
+        XCTAssertEqual(client.overrideCalls, [], "a cancelled confirmation sent a write")
+        XCTAssertEqual(store.status, before)
+    }
+
+    /// A refusal shows the core's line for its label, never the error's
+    /// description, and the pill keeps reading `status`.
+    func test_aRefusalShowsItsCoreLine() async throws {
+        let (store, client) = await loadedStore(.empty)
+        store.choose("auto_upload")
+        await store.resolveConfirmation(confirmed: true)
+        XCTAssertEqual(client.overrideCalls, ["set_contribution_override auto_upload confirm"])
+        let line = try XCTUnwrap(store.overrideRefusal)
+        XCTAssertEqual(line, TCCoreCopy.contributionOverrideRefusalLine(label: "arming-terms-unavailable"))
+        XCTAssertFalse(line.contains("arming-terms-unavailable"))
+        XCTAssertNil(store.status?.contributionOverride)
+        // The next choice clears it.
+        store.choose("ignore")
+        XCTAssertNil(store.overrideRefusal)
+    }
+
+    /// Without a configuration the core can word the arming disclosure for,
+    /// Auto contribute shows no confirmation and so cannot be confirmed: the
+    /// refusal's line instead, and nothing is sent.
+    func test_autoContributeWithoutItsDisclosureCannotBeConfirmed() async throws {
+        let (store, client) = await loadedStore(.normalDay)
+        store.configDirectory = nil
+        store.choose("auto_upload")
+        XCTAssertNil(store.confirming)
+        XCTAssertEqual(store.overrideRefusal, TCCoreCopy.contributionOverrideRefusalLine(label: "arming-terms-unavailable"))
+        await store.resolveConfirmation(confirmed: true)
+        XCTAssertEqual(client.overrideCalls, [])
+    }
+
+    /// Core-down, never-loaded and no-client stores never let a write
+    /// through.
+    func test_theChoicesAreDisabledWithoutACurrentStatus() async {
+        let none = MenuPanelStore(client: nil)
+        XCTAssertFalse(none.canChooseOverride)
+        let unloaded = MenuPanelStore(client: SampleDaemonClient(.normalDay))
+        XCTAssertFalse(unloaded.canChooseOverride, "nothing read yet")
+        unloaded.choose("ignore")
+        XCTAssertNil(unloaded.confirming)
+        let (down, client) = await loadedStore(.coreDown)
+        XCTAssertFalse(down.canChooseOverride)
+        down.choose("ignore")
+        XCTAssertNil(down.confirming)
+        await down.clearOverride()
+        XCTAssertEqual(client.overrideCalls, [])
     }
 
     /// The popover's words come from the core's table, not from Swift.
