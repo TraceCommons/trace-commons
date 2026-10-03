@@ -47,6 +47,14 @@ struct SettingsView: View {
 struct SettingsContent: View {
     /// See `SettingsView.navigation`.
     var navigation: MainWindowNavigation?
+    /// One section alone, for the Settings window's section list (R11 of
+    /// #1173); nil draws every section in order, as the main window does.
+    var section: SettingsSection?
+
+    /// Section headings the section list shows too. Held once here so the
+    /// list and the section say the same words.
+    static let consentHeading = "How may your traces be used?"
+    static let auditHeading = "What has been changed on this machine"
 
     @EnvironmentObject private var model: AppModel
     @ObservedObject private var updates = UpdateController.shared
@@ -130,20 +138,24 @@ struct SettingsContent: View {
         // Spec §5.4 gap: 18 between sections (`TC.Space.lg`), not the
         // 28 this screen used before.
         VStack(alignment: .leading, spacing: TC.Space.lg) {
-            connection
-            loginItem
-            notifications
-            updatesSection
-            consent
-            publicProfile
-            watching
-            watchedFolders
-            routing
-            privateInference
-            RouteDisclosureSection()
-            witness
-            projects
-            audit
+            if shows(.connection) { connection }
+            if shows(.startup) {
+                loginItem
+                notifications
+                updatesSection
+            }
+            if shows(.consent) { consent }
+            if shows(.publicProfile) { publicProfile }
+            if shows(.watching) { watching }
+            if shows(.watchedFolders) { watchedFolders }
+            if shows(.tools) { routing }
+            if shows(.privateAI) {
+                privateInference
+                RouteDisclosureSection()
+            }
+            if shows(.witness) { witness }
+            if shows(.projects) { projects }
+            if shows(.changes) { audit }
         }
         .padding(.top, TC.Space.Content.top)
         .padding(.horizontal, TC.Space.Content.horizontal)
@@ -168,6 +180,10 @@ struct SettingsContent: View {
             GoPublicDialog(onDismiss: { showingGoPublic = false })
                 .environmentObject(model)
         }
+    }
+
+    private func shows(_ candidate: SettingsSection) -> Bool {
+        section == nil || section == candidate
     }
 
     // MARK: - Connection (spec §5.4)
@@ -252,7 +268,7 @@ struct SettingsContent: View {
     private func startupToggle(isOn: Binding<Bool>) -> some View {
         Toggle("Start Trace Commons when you log in", isOn: isOn)
             .toggleStyle(.switch)
-            .tint(TC.green)
+            .tint(TC.accent)
             .font(TC.Font_.body)
     }
 
@@ -297,6 +313,7 @@ struct SettingsContent: View {
                     checkRow(Notifier.copy?.notificationDenied ?? "", false)
                     Link(Notifier.copy?.systemSettings ?? "", destination: Notifier.systemSettingsURL)
                         .font(TC.Font_.body)
+                        .tint(TC.accentText)
                 case .notDetermined:
                     checkRow(Notifier.copy?.notificationNotAsked ?? "", false)
                     Button(Notifier.copy?.notificationAllow ?? "") {
@@ -313,6 +330,7 @@ struct SettingsContent: View {
                 @unknown default:
                     Text(Notifier.copy?.notificationUnknown ?? "")
                     Link(Notifier.copy?.systemSettings ?? "", destination: Notifier.systemSettingsURL)
+                        .tint(TC.accentText)
                 }
             }
         }
@@ -441,7 +459,7 @@ struct SettingsContent: View {
 
     private var consent: some View {
         VStack(alignment: .leading, spacing: TC.Space.sm) {
-            TCSectionHeader(title: "How may your traces be used?")
+            TCSectionHeader(title: Self.consentHeading)
             Text("Applies to traces you send from now on.")
                 .font(TC.Font_.meta)
                 .foregroundStyle(.secondary)
@@ -965,7 +983,7 @@ struct SettingsContent: View {
                     }
                 ))
                 .toggleStyle(.switch)
-                .tint(TC.green)
+                .tint(TC.accent)
                 .font(TC.Font_.body)
 
                 routingState(copy: copy)
@@ -1003,6 +1021,7 @@ struct SettingsContent: View {
                     // way to say so.
                     Button(copy.lookAgain) { model.discoverRouting() }
                         .buttonStyle(.borderless)
+                        .tint(TC.accentText)
                 }
 
                 // The port and folder are the override, and they are live
@@ -1079,6 +1098,7 @@ struct SettingsContent: View {
                             }
                         }
                         .buttonStyle(.borderless)
+                        .tint(TC.accentText)
                         .accessibilityLabel(copy.folderTitle)
                         // The chosen folder, shown so the answer is
                         // visible. Empty until one is chosen, which is the
@@ -1268,6 +1288,7 @@ struct SettingsContent: View {
                 if let state, WitnessSurface.offersClear(state) {
                     Button(copy.clear) { model.clearWitness() }
                         .buttonStyle(.borderless)
+                        .tint(TC.accentText)
                         .disabled(model.witnessBusy)
                     Text(copy.clearNote)
                         .font(TC.Font_.meta)
@@ -1737,7 +1758,7 @@ struct SettingsContent: View {
     /// decides anything on the strength of what is listed here.
     private var audit: some View {
         VStack(alignment: .leading, spacing: TC.Space.sm) {
-            TCSectionHeader(title: "What has been changed on this machine")
+            TCSectionHeader(title: Self.auditHeading)
             if model.audit.isEmpty {
                 Text("Nothing has been changed.")
                     .font(TC.Font_.meta)
@@ -1823,7 +1844,7 @@ struct SettingsContent: View {
             Image(systemName: value ? "checkmark.circle.fill" : "circle")
                 .font(.system(size: 12))
                 .symbolRenderingMode(value ? .palette : .monochrome)
-                .foregroundStyle(value ? TC.onAccent : Color.secondary, TC.green)
+                .foregroundStyle(value ? TC.onAccent : Color.secondary, TC.accent)
             Text(title).font(TC.Font_.body)
         }
         .accessibilityElement(children: .combine)

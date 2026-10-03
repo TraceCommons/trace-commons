@@ -111,7 +111,7 @@ struct PrivateInferenceContent: View {
                     )
                     .disabled(model.privateInferenceBusy || model.daemonSettings?.privateInference == nil)
                     .toggleStyle(.switch)
-                    .tint(TC.green)
+                    .tint(TC.accent)
                     .font(TC.Font_.body)
                     // The switch above says what was asked for. This says what
                     // happened, and it is drawn from the tone -- never from the
