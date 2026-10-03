@@ -52,10 +52,10 @@ use trace_commons_server::versioned_pipeline_activation::{
 use trace_commons_server::versioned_pipeline_bundle::PIPELINE_BUNDLE_INVALID_LABEL;
 use trace_commons_server::versioned_pipeline_qualification::{
     ACTIVATION_PROMOTION_NOT_READY_LABEL, BundleQualificationRecord,
-    PACKAGE_RUNTIME_REVISION_UNKNOWN_LABEL, PipelineCheckAttestation, ProductionAdapterKind,
-    ProductionDependencyProfile, ProductionInfrastructureProfile, PromotionDecision,
-    QUALIFICATION_PROMOTION_NOT_READY_LABEL, SignedBundlePackage, TrustedBundleKey,
-    evaluate_promotion, is_safe_label,
+    PACKAGE_RUNTIME_REVISION_UNKNOWN_LABEL, PACKAGE_SIGNER_UNTRUSTED_LABEL,
+    PipelineCheckAttestation, ProductionAdapterKind, ProductionDependencyProfile,
+    ProductionInfrastructureProfile, PromotionDecision, QUALIFICATION_PROMOTION_NOT_READY_LABEL,
+    SignedBundlePackage, TrustedBundleKey, evaluate_promotion, is_safe_label,
 };
 
 /// The JSON file of the keys whose signatures make a bundle package trusted:
@@ -94,6 +94,9 @@ pub(crate) const LEGACY_DRAIN_RECORDS_NOT_AUTHORITATIVE_LABEL: &str =
     "legacy_drain_records_not_authoritative";
 /// `404`: a process without the database mirror holds no routing store.
 pub(crate) const PIPELINE_ROUTING_STORE_MISSING_LABEL: &str = "pipeline_routing_store_missing";
+/// `409`: an activation or a rollback of a tenant that this process does not
+/// list on its receipts list (`TRACE_COMMONS_PIPELINE_RECEIPTS_TENANT_IDS`).
+pub(crate) const PIPELINE_TENANT_NOT_IN_SCOPE_LABEL: &str = "pipeline_tenant_not_in_scope";
 /// `404`: the tenant has no stored package of the bundle the request names
 /// (the activation gate's own label for it). `409` with the same label: the
 /// stored package no longer validates (a tampered package, BND-002).
@@ -604,13 +607,27 @@ impl GateInputs<'_> {
 }
 
 /// The activation and the rollback, in order, up to the store call: the
-/// bundle id's shape and the attestation count; the two
-/// trust stores and the revision; the attestations verified against the
-/// check store; the promotion evaluated over them now (an `Err` is refused
-/// here, a decision that is not ready by the gate); the tenant's stored
-/// package (`404` when none); the startup checks of a tenant bundle on it;
-/// and its dependency profile with this process's infrastructure. Nothing in
-/// it comes from the request but the bundle id and the attestations.
+/// bundle id's shape and the attestation count; the scope of this process
+/// (`409 pipeline_tenant_not_in_scope` for a tenant that is not on its
+/// receipts list, final fix wave G8: every new upload of an activated tenant
+/// is `503 pipeline_tenant_not_served` on a process that does not list it);
+/// the two trust stores and the revision; the attestations verified against
+/// the check store; the promotion evaluated over them now (an `Err` is
+/// refused here, a decision that is not ready by the gate); the tenant's
+/// stored package (`404` when none); the package trust store (final fix wave
+/// G11, below); the startup checks of a tenant bundle on it; and its
+/// dependency profile with this process's infrastructure. Nothing in it comes
+/// from the request but the bundle id and the attestations.
+///
+/// The package trust store. A stored package carries no signature: the
+/// qualification verified it and recorded the id of the key that signed it
+/// (`signing_key_id`). So the check here is that the package trust store of
+/// this process still holds the key id that the bundle's qualification on
+/// the deployed revision recorded; a key that an operator removed from the
+/// store stops activating and rolling back to every bundle it signed, with
+/// the label the package verification gives an unknown signer
+/// (`bundle_package_signer_untrusted`). A bundle with no qualification on
+/// this revision is left to the gate, which refuses it with its own labels.
 async fn gate_inputs<'a>(
     state: &'a AppState,
     service: &PipelineService,
@@ -619,6 +636,16 @@ async fn gate_inputs<'a>(
 ) -> ApiResult<GateInputs<'a>> {
     require_bundle_id(&body.bundle_id)?;
     bound_attestations(&body.attestations)?;
+    if !state.tenant_rollout_gates.enabled_for(
+        TraceTenantRolloutFeature::PipelineReceipts,
+        false,
+        &tenant.tenant_id,
+    ) {
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            PIPELINE_TENANT_NOT_IN_SCOPE_LABEL,
+        ));
+    }
     let trust = trust_and_revision(state)?;
     let verified = trust
         .check
@@ -640,6 +667,16 @@ async fn gate_inputs<'a>(
             other => activation_error(other),
         })?
         .ok_or_else(|| api_error(StatusCode::NOT_FOUND, BUNDLE_PACKAGE_MISSING_LABEL))?;
+    let qualification = state
+        .pipeline_qualification
+        .as_deref()
+        .ok_or_else(|| api_error(StatusCode::NOT_FOUND, PIPELINE_ROUTING_STORE_MISSING_LABEL))?
+        .qualification(&tenant.tenant_id, &body.bundle_id, trust.revision)
+        .await
+        .map_err(activation_error)?;
+    if qualification.is_some_and(|record| !trust.package.holds_key_id(&record.signing_key_id)) {
+        return Err(refusal(PACKAGE_SIGNER_UNTRUSTED_LABEL));
+    }
     service
         .check_runnable_package(&package, &state.pipeline_main_gate, true)
         .map_err(refusal)?;
@@ -1347,6 +1384,7 @@ mod tests {
             PIPELINE_REQUEST_TOO_LARGE_LABEL,
             LEGACY_DRAIN_RECORDS_NOT_AUTHORITATIVE_LABEL,
             PIPELINE_ROUTING_STORE_MISSING_LABEL,
+            PIPELINE_TENANT_NOT_IN_SCOPE_LABEL,
             BUNDLE_PACKAGE_MISSING_LABEL,
             PACKAGE_RUNTIME_REVISION_UNKNOWN_LABEL,
             ROUTING_READ_SURFACE,

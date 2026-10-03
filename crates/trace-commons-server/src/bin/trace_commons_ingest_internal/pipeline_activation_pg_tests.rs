@@ -5235,3 +5235,164 @@ async fn an_altered_stored_package_is_refused_as_missing() {
             .is_empty()
     );
 }
+
+/// Final fix wave (G8): `activate` and `rollback` refuse a tenant that this
+/// process does not list on its receipts list, with `409
+/// pipeline_tenant_not_in_scope`, before the store call: the activated
+/// tenant's every new upload would otherwise be `503
+/// pipeline_tenant_not_served` here. A tenant on the drain list only is out
+/// of scope too. Nothing is written.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_activation_or_rollback_out_of_scope_is_refused() {
+    let Some(fixture) = RouteFixture::new().await else {
+        return;
+    };
+    let tenant = fixture.tenant.as_str();
+    fixture.qualify(&fixture.a).await;
+    fixture.qualify(&fixture.b).await;
+    for (package, reason) in [
+        (&fixture.a, "activate_bundle_a"),
+        (&fixture.b, "activate_bundle_b"),
+    ] {
+        let (status, routing) = fixture
+            .admin_call(
+                "POST",
+                "/v1/admin/pipeline/activate",
+                Some(fixture.activate_body(package, reason)),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{routing}");
+    }
+    let before = fixture.store().routing(tenant).await.unwrap();
+    let events_before = fixture.store().events(tenant, 10).await.unwrap();
+    let only_the_bystander = || {
+        TraceTenantRolloutGates::for_feature(
+            TraceTenantRolloutFeature::PipelineReceipts,
+            &[fixture.other_tenant.as_str()],
+        )
+    };
+    for (what, state) in [
+        (
+            "not listed",
+            fixture.with(|state| state.tenant_rollout_gates = only_the_bystander()),
+        ),
+        (
+            "on the drain list only",
+            fixture.with(|state| {
+                state.tenant_rollout_gates = only_the_bystander();
+                state.pipeline_drain_tenant_ids = Arc::new(BTreeSet::from([tenant.to_string()]));
+            }),
+        ),
+    ] {
+        for (path, body) in [
+            (
+                "/v1/admin/pipeline/activate",
+                fixture.activate_body(&fixture.a, "activate_bundle_a"),
+            ),
+            (
+                "/v1/admin/pipeline/rollback",
+                fixture.activate_body(&fixture.a, "roll_back_to_a"),
+            ),
+        ] {
+            let (status, refused) = fixture
+                .call(&state, "POST", path, Some(&fixture.admin), Some(body))
+                .await;
+            assert_eq!(
+                (status, refused),
+                (
+                    StatusCode::CONFLICT,
+                    serde_json::json!({ "error": "pipeline_tenant_not_in_scope" })
+                ),
+                "{what}: {path}"
+            );
+        }
+    }
+    assert_eq!(fixture.store().routing(tenant).await.unwrap(), before);
+    assert_eq!(
+        fixture.store().events(tenant, 10).await.unwrap(),
+        events_before
+    );
+}
+
+/// Final fix wave (G11): the activation and the rollback check the package
+/// trust store this process holds, as the qualification does: a bundle
+/// whose qualification records a signing key that the store no longer holds
+/// (the key was removed after the qualification) is refused with the
+/// package verification's label, `409 bundle_package_signer_untrusted`, and
+/// nothing is written. With the key back, the rollback goes through.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_package_key_no_longer_trusted_stops_activation_and_rollback() {
+    use trace_commons_server::versioned_pipeline_qualification::{
+        PACKAGE_SIGNER_UNTRUSTED_LABEL, trusted_key_for_pkcs8,
+    };
+
+    let Some(fixture) = RouteFixture::new().await else {
+        return;
+    };
+    let tenant = fixture.tenant.as_str();
+    fixture.qualify(&fixture.a).await;
+    fixture.qualify(&fixture.b).await;
+    for (package, reason) in [
+        (&fixture.a, "activate_bundle_a"),
+        (&fixture.b, "activate_bundle_b"),
+    ] {
+        let (status, routing) = fixture
+            .admin_call(
+                "POST",
+                "/v1/admin/pipeline/activate",
+                Some(fixture.activate_body(package, reason)),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{routing}");
+    }
+    let before = fixture.store().routing(tenant).await.unwrap();
+    let events_before = fixture.store().events(tenant, 10).await.unwrap();
+    let other_pkcs8 =
+        ring::signature::Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new())
+            .expect("a key pair");
+    let key_removed = fixture.with(|state| {
+        state.pipeline_package_trust = Some(Arc::new(
+            BundlePackageTrustStore::new([trusted_key_for_pkcs8(
+                "another-package-release-key",
+                other_pkcs8.as_ref(),
+            )
+            .expect("the key")])
+            .expect("the package trust store"),
+        ))
+    });
+    for (path, body) in [
+        (
+            "/v1/admin/pipeline/activate",
+            fixture.activate_body(&fixture.a, "activate_bundle_a"),
+        ),
+        (
+            "/v1/admin/pipeline/rollback",
+            fixture.activate_body(&fixture.a, "roll_back_to_a"),
+        ),
+    ] {
+        let (status, refused) = fixture
+            .call(&key_removed, "POST", path, Some(&fixture.admin), Some(body))
+            .await;
+        assert_eq!(
+            (status, refused),
+            (
+                StatusCode::CONFLICT,
+                serde_json::json!({ "error": PACKAGE_SIGNER_UNTRUSTED_LABEL })
+            ),
+            "{path}"
+        );
+    }
+    assert_eq!(fixture.store().routing(tenant).await.unwrap(), before);
+    assert_eq!(
+        fixture.store().events(tenant, 10).await.unwrap(),
+        events_before
+    );
+    let (status, routing) = fixture
+        .admin_call(
+            "POST",
+            "/v1/admin/pipeline/rollback",
+            Some(fixture.activate_body(&fixture.a, "roll_back_to_a")),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{routing}");
+}

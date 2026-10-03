@@ -735,6 +735,15 @@ impl BundlePackageTrustStore {
         })
     }
 
+    /// Whether this store holds a key under `key_id`: what a route asks of a
+    /// stored package, which carries no signature to verify again, with the
+    /// signing key id its qualification recorded (final fix wave G11). A key
+    /// id that the store no longer holds is the unknown signer of `verify`
+    /// (`bundle_package_signer_untrusted`).
+    pub fn holds_key_id(&self, key_id: &str) -> bool {
+        self.keys.contains_key(key_id)
+    }
+
     pub fn verify(&self, signed: &SignedBundlePackage) -> Result<(), String> {
         signed
             .package
