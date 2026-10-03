@@ -42,7 +42,7 @@ struct SkillLearningView: View {
                             Text(message)
                                 .fixedSize(horizontal: false, vertical: true)
                                 .frame(maxWidth: .infinity, alignment: .leading)
-                            Button(Self.dismissLabel ?? ActionMessageBanner.dismissWord) { dismissedFailure = message }
+                            Button(ActionMessageBanner.coreDismissWord ?? ActionMessageBanner.dismissWord) { dismissedFailure = message }
                                 .buttonStyle(GlassButtonStyle(.glass))
                                 .frame(minHeight: 44)
                         }
@@ -60,9 +60,6 @@ struct SkillLearningView: View {
         .onChange(of: state.failure) { _, _ in dismissedFailure = nil }
         .onChange(of: state.isWorking) { _, working in if working { dismissedFailure = nil } }
     }
-
-    /// The core's word for dismissing a notice.
-    private static let dismissLabel = MonitorTracesCopy.decode(fromJSON: TCCoreCopy.monitorTracesCopyJSON())?.dismiss
 
     @ViewBuilder
     private func stage(for state: SkillLearningSessionState) -> some View {

@@ -111,7 +111,7 @@ final class ActionNoticeDismissTests: XCTestCase {
         let text = try XCTUnwrap(sources["Views/Settings/ProjectsSection.swift"])
         XCTAssertTrue(text.contains("if let error = model.lastActionError {"))
         XCTAssertTrue(
-            text.contains("Button(Self.dismissLabel ?? ActionMessageBanner.dismissWord) { model.lastActionError = nil }"),
+            text.contains("Button(ActionMessageBanner.coreDismissWord ?? ActionMessageBanner.dismissWord) { model.lastActionError = nil }"),
             "the dismiss button must not depend on the core's word loading")
         XCTAssertFalse(text.contains("if let label = Self.dismissLabel"))
     }

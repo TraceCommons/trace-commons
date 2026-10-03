@@ -27,7 +27,6 @@ struct ProjectsSection: View {
     @State private var armingCandidate: ProjectRow?
 
     private static let modeCopy = ContributionModeCopy.decode(fromJSON: TCCoreCopy.contributionModeCopyJSON())
-    private static let dismissLabel = MonitorTracesCopy.decode(fromJSON: TCCoreCopy.monitorTracesCopyJSON())?.dismiss
 
     var body: some View {
         // The container is always present, so the dialog is attached
@@ -41,7 +40,7 @@ struct ProjectsSection: View {
                             .frame(maxWidth: .infinity, alignment: .leading)
                         // An error is never undismissable: without the
                         // core's word the banner's own word names it.
-                        Button(Self.dismissLabel ?? ActionMessageBanner.dismissWord) { model.lastActionError = nil }
+                        Button(ActionMessageBanner.coreDismissWord ?? ActionMessageBanner.dismissWord) { model.lastActionError = nil }
                             .buttonStyle(GlassButtonStyle(.glass))
                     }
                 }

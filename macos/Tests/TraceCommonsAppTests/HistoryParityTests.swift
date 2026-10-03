@@ -133,8 +133,12 @@ final class HistoryParityTests: XCTestCase {
             // The reloads hang on a container that is always there.
             "VStack(alignment: .leading, spacing: GlassTokens.Space.s6) { if let copy = model.publicRunCopy "
                 + "{ content(copy) } } .frame(maxWidth: .infinity, alignment: .leading) .onAppear {",
-            "if let onBack { GlassBreadcrumb([GlassCrumb(copy.allContributions, action: onBack)], "
-                + "backLabel: copy.allContributions, onBack: onBack)",
+            // One heading: the trail's current crumb, or the title when there
+            // is no trail (ruling R-31).
+            "if let onBack { GlassBreadcrumb([GlassCrumb(copy.allContributions, action: onBack), "
+                + "GlassCrumb(copy.sessionDetail)], backLabel: copy.allContributions, onBack: onBack) "
+                + ".frame(minHeight: 44, alignment: .leading) } else { Text(copy.sessionDetail) "
+                + ".glassType(GlassTokens.TypeScale.title)",
             "GlassNotice(tone: .outside, title: message) { Button(copy.retryRead) { model.loadSessionDetail(record) } "
                 + ".buttonStyle(GlassButtonStyle(.glass)) .frame(minHeight: 44) }",
             "GlassEyebrowCard(copy.publicWorkflow) {",
@@ -145,7 +149,8 @@ final class HistoryParityTests: XCTestCase {
             "Text(\"\\(count)/\\(maximum)\") .glassType(GlassTokens.TypeScale.mono)",
             ".toggleStyle(GlassCheckboxStyle()) .disabled( selectedEvidence.count >= 4 "
                 + "&& !selectedEvidence.contains(evidence.eventID) ) .frame(minHeight: 44, alignment: .leading)",
-            "Toggle(copy.publishCorrection, isOn: $includeCorrection) .toggleStyle(GlassCheckboxStyle()) .frame(minHeight: 44",
+            "Toggle(copy.publishCorrection, isOn: $includeCorrection) .toggleStyle(GlassCheckboxStyle()) "
+                + ".frame(minHeight: 44, alignment: .leading)",
             "GlassCheckMark(checked: selected)",
             ".accessibilityAddTraits(selected ? [.isSelected, .isButton] : .isButton)",
             "GlassStatusLabel(problem, status: .outside)",
@@ -153,17 +158,59 @@ final class HistoryParityTests: XCTestCase {
                 + ".frame(minHeight: 44) .disabled(makeDraft() == nil)",
             "Button(copy.cancelEdit) { editingPublished = false } .buttonStyle(GlassButtonStyle(.glass))",
             "Button(copy.editDraft) { reviewDraft = nil } .buttonStyle(GlassButtonStyle(.glass))",
-            "{ model.publishPublicRun(record, draft: draft) } .buttonStyle(GlassButtonStyle(.primary)) "
+            "Button(working ? copy.publishing : detail.publication == nil ? copy.publishPage : copy.updatePage) "
+                + "{ model.publishPublicRun(record, draft: draft) } .buttonStyle(GlassButtonStyle(.primary)) "
                 + ".frame(minHeight: 44) .disabled(working)",
             // Fields carry their names for VoiceOver.
             "TextField(copy.pageTitle, text: $title)", ".accessibilityLabel(copy.publicOutcome)",
             ".accessibilityLabel(copy.reusableInstructions)", "TextField(copy.sourcePlaceholder, text: $source)",
             // A publication error can be put away; the next attempt shows it again.
-            "Button(Self.dismissLabel ?? ActionMessageBanner.dismissWord) { dismissedError = message }",
+            "Button(ActionMessageBanner.coreDismissWord ?? ActionMessageBanner.dismissWord) { dismissedError = message }",
         ] {
             XCTAssertTrue(flat.contains(needle), "SessionDetailView.swift lacks \(needle)")
         }
         XCTAssertTrue(GlassSurfaceRulesTests.files.contains("Views/SessionDetailView.swift"))
+    }
+
+    /// One implementation of the core's dismiss word: the notices that can
+    /// be put away read it from the banner, beside its fallback.
+    func test_theDismissWordIsDecodedOnce() throws {
+        let decode = "MonitorTracesCopy.decode(fromJSON: TCCoreCopy.monitorTracesCopyJSON())?.dismiss"
+        let banner = try Self.text("Views/ActionMessageBanner.swift")
+        XCTAssertTrue(banner.contains("static let coreDismissWord = \(decode)"))
+        for rel in ["Views/SessionDetailView.swift", "Views/SkillLearningView.swift", "Views/Settings/ProjectsSection.swift"] {
+            let source = try Self.text(rel)
+            XCTAssertFalse(source.contains(decode), "\(rel) decodes the dismiss word again")
+            XCTAssertTrue(source.contains("Button(ActionMessageBanner.coreDismissWord ?? ActionMessageBanner.dismissWord) {"),
+                          "\(rel) lacks the shared dismiss word")
+        }
+    }
+
+    /// Publishing a public page always passes the exact preview: the only
+    /// publish call is in the review state, which only a validated draft
+    /// reaches, and a published page shows itself until Edit is chosen.
+    func test_publishingRequiresTheExactPreview() throws {
+        let source = try Self.text("Views/SessionDetailView.swift")
+        let flat = source.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        XCTAssertEqual(source.components(separatedBy: "model.publishPublicRun(").count - 1, 1,
+                       "only the review state publishes")
+        XCTAssertEqual(source.components(separatedBy: "model.unpublishPublicRun(").count - 1, 1,
+                       "only the published state unpublishes")
+        let review = try XCTUnwrap(source.range(of: "private func review(_ draft: PublicRunDraftInput)"))
+        let after = try XCTUnwrap(source.range(of: "private func previewField(", range: review.upperBound..<source.endIndex))
+        let publish = try XCTUnwrap(source.range(of: "model.publishPublicRun("))
+        XCTAssertTrue(review.upperBound <= publish.lowerBound && publish.upperBound <= after.lowerBound,
+                      "the publish call lies inside review(_:)")
+        for needle in [
+            "if let publication = detail.publication, !editingPublished { published(publication) } "
+                + "else if let reviewDraft { review(reviewDraft) } else { editor }",
+            // Fail closed: an unreadable validation is a problem, never a pass,
+            // and the binding refuses a fifth item even if the box is reached.
+            "guard let editorValidation else { return copy.publicationUnavailable }",
+            "if selected { guard selectedEvidence.count < 4 else { return } selectedEvidence.insert(id) }",
+        ] {
+            XCTAssertTrue(flat.contains(needle), "SessionDetailView.swift lacks \(needle)")
+        }
     }
 
     /// The legacy window passes Back as a trailing closure; the inspector

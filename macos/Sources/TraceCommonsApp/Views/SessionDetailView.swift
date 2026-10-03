@@ -50,17 +50,19 @@ struct SessionDetailView: View {
 
     @ViewBuilder
     private func content(_ copy: PublicRunCopy) -> some View {
-        if let onBack {
-            GlassBreadcrumb([GlassCrumb(copy.allContributions, action: onBack)],
-                            backLabel: copy.allContributions, onBack: onBack)
-                .frame(minHeight: 44, alignment: .leading)
-        }
-
         VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
-            Text(copy.sessionDetail)
-                .glassType(GlassTokens.TypeScale.title)
-                .foregroundStyle(GlassColor.textPrimary)
-                .accessibilityAddTraits(.isHeader)
+            // The trail's last crumb is the heading; without a trail the
+            // title is.
+            if let onBack {
+                GlassBreadcrumb([GlassCrumb(copy.allContributions, action: onBack), GlassCrumb(copy.sessionDetail)],
+                                backLabel: copy.allContributions, onBack: onBack)
+                    .frame(minHeight: 44, alignment: .leading)
+            } else {
+                Text(copy.sessionDetail)
+                    .glassType(GlassTokens.TypeScale.title)
+                    .foregroundStyle(GlassColor.textPrimary)
+                    .accessibilityAddTraits(.isHeader)
+            }
             Text("\(record.projectLabel) · \(Format.when(record.submittedAt))")
                 .glassType(GlassTokens.TypeScale.caption)
                 .foregroundStyle(GlassColor.textSecondary)
@@ -187,7 +189,7 @@ private struct PublicRunEditor: View {
                             Text(message)
                                 .fixedSize(horizontal: false, vertical: true)
                                 .frame(maxWidth: .infinity, alignment: .leading)
-                            Button(Self.dismissLabel ?? ActionMessageBanner.dismissWord) { dismissedError = message }
+                            Button(ActionMessageBanner.coreDismissWord ?? ActionMessageBanner.dismissWord) { dismissedError = message }
                                 .buttonStyle(GlassButtonStyle(.glass))
                                 .frame(minHeight: 44)
                         }
@@ -206,9 +208,6 @@ private struct PublicRunEditor: View {
             if working { dismissedError = nil }
         }
     }
-
-    /// The core's word for dismissing a notice.
-    private static let dismissLabel = MonitorTracesCopy.decode(fromJSON: TCCoreCopy.monitorTracesCopyJSON())?.dismiss
 
     private func published(_ publication: PublicRunPage) -> some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
