@@ -8881,9 +8881,11 @@ async fn a_runtime_less_build_queues_the_pipeline_follow_up_through_the_database
 // ---------------------------------------------------------------------------
 
 /// Writes `tenant_id`'s routing row as an operator, through an owner
-/// connection, with the statement of `write_routing_in` and no event: these
-/// tests need a routing state, not the history of how a tenant came to it. A
-/// copy of the runtime suite's helper of the same name
+/// connection, with the statement of `write_routing_in`, and the event that
+/// V110 requires for it: the same id, the state, and the row's generation,
+/// in the same transaction. These tests need a routing state, not the
+/// history of how a tenant came to it, so the event names no earlier state
+/// and no bundle. A copy of the runtime suite's helper of the same name
 /// (`tests/versioned_pipeline_runtime_pg.rs`), which a binary's test module
 /// cannot import. `state` is `legacy`, `pipeline`, or `contained`.
 pub(super) async fn write_routing_as_operator(tenant_id: &str, state: &str) {
@@ -8910,29 +8912,57 @@ pub(super) async fn write_routing_as_operator(tenant_id: &str, state: &str) {
     )
     .await
     .expect("seed the tenant for a routing row");
+    let event_id = Uuid::new_v4();
+    let actor = format!("principal_sha256:{}", "ab".repeat(32));
+    let evidence_hash = sha256_prefixed("test-routing-state");
+    let generation: i64 = tx
+        .query_one(
+            "INSERT INTO pipeline_tenant_routing (
+                tenant_id, routing_state, activation_record_id,
+                actor_principal_ref, reason_code, evidence_hash, recorded_at
+             ) VALUES ($1, $2, $3, $4, $5, $6, clock_timestamp())
+             ON CONFLICT (tenant_id) DO UPDATE
+             SET routing_state = EXCLUDED.routing_state,
+                 activation_record_id = EXCLUDED.activation_record_id,
+                 actor_principal_ref = EXCLUDED.actor_principal_ref,
+                 reason_code = EXCLUDED.reason_code,
+                 evidence_hash = EXCLUDED.evidence_hash,
+                 recorded_at = EXCLUDED.recorded_at
+             RETURNING routing_generation",
+            &[
+                &tenant_id,
+                &state,
+                &event_id,
+                &actor,
+                &"test_routing_state",
+                &evidence_hash,
+            ],
+        )
+        .await
+        .expect("write the routing row as the operator")
+        .get(0);
+    let action = match state {
+        "pipeline" => "activate",
+        "contained" => "contain",
+        _ => "deactivate",
+    };
     tx.execute(
-        "INSERT INTO pipeline_tenant_routing (
-            tenant_id, routing_state, activation_record_id,
-            actor_principal_ref, reason_code, evidence_hash, recorded_at
-         ) VALUES ($1, $2, $3, $4, $5, $6, clock_timestamp())
-         ON CONFLICT (tenant_id) DO UPDATE
-         SET routing_state = EXCLUDED.routing_state,
-             activation_record_id = EXCLUDED.activation_record_id,
-             actor_principal_ref = EXCLUDED.actor_principal_ref,
-             reason_code = EXCLUDED.reason_code,
-             evidence_hash = EXCLUDED.evidence_hash,
-             recorded_at = EXCLUDED.recorded_at",
+        "INSERT INTO pipeline_activation_events (
+            tenant_id, event_id, action, previous_state, resulting_state,
+            actor_principal_ref, reason_code, evidence_hash, routing_generation
+         ) VALUES ($1, $2, $3, 'unselected', $4, $5, 'test_routing_state', $6, $7)",
         &[
             &tenant_id,
+            &event_id,
+            &action,
             &state,
-            &Uuid::new_v4(),
-            &format!("principal_sha256:{}", "ab".repeat(32)),
-            &"test_routing_state",
-            &sha256_prefixed("test-routing-state"),
+            &actor,
+            &evidence_hash,
+            &generation,
         ],
     )
     .await
-    .expect("write the routing row as the operator");
+    .expect("write the routing row's event as the operator");
     tx.commit().await.expect("commit the routing row");
 }
 

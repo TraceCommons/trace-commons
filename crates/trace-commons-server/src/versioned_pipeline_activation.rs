@@ -228,7 +228,8 @@ pub fn decide_new_receipt_route(
 }
 
 /// A tenant's committed routing row. The selected bundle is not here: it
-/// stays in `pipeline_active_bundles`.
+/// stays in `pipeline_active_bundles`. `activation_record_id` is the
+/// `event_id` of the event that wrote this version of the row.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TenantRouting {
     pub routing_state: RoutingState,
@@ -909,6 +910,14 @@ async fn routing_state_in(
 /// checked and the row is not read a second time. The row has no bundle
 /// column; the two bundle ids belong to the event only.
 ///
+/// The row and its event share one id (`activation_record_id` is the event's
+/// `event_id`) and one generation: V110's row trigger sets the row's
+/// `routing_generation` (1 on the insert, the old value plus 1 on an update),
+/// the upsert returns it, and the event insert passes it. The database
+/// refuses a row without that event at the commit (a deferred foreign key,
+/// and a deferred trigger that compares the state and the generation), so
+/// the order here (the row, then its event) holds inside one transaction.
+///
 /// The row's and the event's `recorded_at` are the database clock at the
 /// write (`clock_timestamp()`), not the transaction's start. The lock orders
 /// writers by when they get it, and a transaction that waited for it began
@@ -949,7 +958,7 @@ pub(crate) async fn write_routing_in(
                  evidence_hash = EXCLUDED.evidence_hash,
                  recorded_at = EXCLUDED.recorded_at
              RETURNING routing_state, activation_record_id, actor_principal_ref,
-                       reason_code, evidence_hash, recorded_at",
+                       reason_code, evidence_hash, recorded_at, routing_generation",
             &[
                 &tenant_id,
                 &resulting.as_db(),
@@ -961,15 +970,16 @@ pub(crate) async fn write_routing_in(
         )
         .await?;
     let routing = routing_from_row(&row)?;
+    let routing_generation: i64 = row.get("routing_generation");
     tx.execute(
         "INSERT INTO pipeline_activation_events (
             tenant_id, event_id, action, previous_state, resulting_state,
             previous_bundle_id, resulting_bundle_id, actor_principal_ref,
-            reason_code, evidence_hash, recorded_at
-         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+            reason_code, evidence_hash, recorded_at, routing_generation
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
         &[
             &tenant_id,
-            &Uuid::new_v4(),
+            &routing.activation_record_id,
             &action.as_db(),
             &previous_state,
             &resulting.as_db(),
@@ -979,6 +989,7 @@ pub(crate) async fn write_routing_in(
             &reason_code,
             &evidence_hash,
             &routing.recorded_at,
+            &routing_generation,
         ],
     )
     .await?;

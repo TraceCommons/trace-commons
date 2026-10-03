@@ -8160,7 +8160,13 @@ mod tests {
     /// with the tenant policy, the two immutable tables carry the V107-shaped
     /// triggers and an append-only grant, and the migration holds no
     /// `SECURITY DEFINER` function, no role attribute change, and nothing
-    /// that a later PR 5 migration adds.
+    /// that a later PR 5 migration adds. The routing row is bound to its
+    /// event (review round 1): a deferred foreign key to the event, a
+    /// generation column on both tables that a row trigger assigns, and a
+    /// deferred constraint trigger that compares the state and the
+    /// generation. The events come first, the runtime gets no grant on the
+    /// row's generation, the events' generation is not unique, and no
+    /// function sets a parameter of its own.
     #[test]
     fn v110_defines_routing_events_and_ownership() {
         let activation =
@@ -8173,12 +8179,31 @@ mod tests {
             "CREATE TRIGGER pipeline_receipt_ownership_reject_update",
             "GRANT SELECT, INSERT ON pipeline_activation_events TO trace_ingest_runtime;",
             "GRANT SELECT, INSERT ON pipeline_receipt_ownership TO trace_ingest_runtime;",
+            "GRANT SELECT, INSERT ON pipeline_tenant_routing TO trace_ingest_runtime;",
+            "GRANT UPDATE (routing_state, activation_record_id, actor_principal_ref,\n              reason_code, evidence_hash, recorded_at)\n    ON pipeline_tenant_routing TO trace_ingest_runtime;",
+            "routing_generation BIGINT NOT NULL CHECK (routing_generation >= 1),",
+            "routing_generation BIGINT NOT NULL DEFAULT 1,",
+            "FOREIGN KEY (tenant_id, activation_record_id)\n        REFERENCES pipeline_activation_events (tenant_id, event_id)\n        DEFERRABLE INITIALLY DEFERRED",
+            "CREATE FUNCTION assign_pipeline_routing_generation()",
+            "NEW.routing_generation := 1;",
+            "IF NEW.activation_record_id = OLD.activation_record_id THEN\n            RAISE EXCEPTION 'pipeline routing change needs a new activation event';",
+            "NEW.routing_generation := OLD.routing_generation + 1;",
+            "CREATE TRIGGER pipeline_tenant_routing_assign_generation\n    BEFORE INSERT OR UPDATE ON pipeline_tenant_routing\n    FOR EACH ROW EXECUTE FUNCTION assign_pipeline_routing_generation();",
+            "CREATE FUNCTION check_pipeline_routing_event()",
+            "WHERE e.tenant_id = NEW.tenant_id\n           AND e.event_id = NEW.activation_record_id\n           AND e.resulting_state = NEW.routing_state\n           AND e.routing_generation = NEW.routing_generation",
+            "RAISE EXCEPTION 'pipeline routing row does not match its activation event';",
+            "CREATE CONSTRAINT TRIGGER pipeline_tenant_routing_event_match\n    AFTER INSERT OR UPDATE ON pipeline_tenant_routing\n    DEFERRABLE INITIALLY DEFERRED\n    FOR EACH ROW EXECUTE FUNCTION check_pipeline_routing_event();",
         ] {
             assert!(
                 activation.contains(required),
                 "V110 is missing `{required}`"
             );
         }
+        assert!(
+            activation.find("CREATE TABLE pipeline_activation_events")
+                < activation.find("CREATE TABLE pipeline_tenant_routing"),
+            "V110 creates the events before the routing row that names one"
+        );
         for table in [
             "pipeline_tenant_routing",
             "pipeline_activation_events",
@@ -8205,12 +8230,42 @@ mod tests {
             "pipeline_legacy_owned_work",
             "pipeline_legacy_writer_status",
             "ledger_source_key",
+            // The routing binding: no function-level parameter (#974), no
+            // schema-qualified name in a function body, no rule on a time,
+            // no unique generation on the events (an event that no row
+            // names would then block the next change), and no grant that
+            // lets a writer choose the generation.
+            "SET search_path",
+            "public.",
+            "UNIQUE",
+            "GRANT UPDATE ON",
+            "GRANT DELETE",
+            "GRANT ALL",
         ] {
             assert!(
                 !activation.contains(forbidden),
                 "V110 must not contain `{forbidden}`"
             );
         }
+        // No trigger function reads a time, and the only UPDATE grant is the
+        // six columns above.
+        for function in [
+            "assign_pipeline_routing_generation",
+            "check_pipeline_routing_event",
+        ] {
+            let start = activation
+                .find(&format!("CREATE FUNCTION {function}()"))
+                .expect("the function is defined");
+            let body = &activation[start..start + activation[start..].find("$$;").unwrap()];
+            for time in ["recorded_at", "NOW()", "clock_timestamp", "SET "] {
+                assert!(!body.contains(time), "{function} must not contain `{time}`");
+            }
+        }
+        assert_eq!(
+            activation.matches("GRANT UPDATE").count(),
+            1,
+            "V110 grants the runtime one UPDATE, on six columns of the routing row"
+        );
     }
 
     /// V111 (delivery PR 5) adds the operator's policy interventions: the

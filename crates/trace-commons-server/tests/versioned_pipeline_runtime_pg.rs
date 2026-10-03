@@ -17518,11 +17518,13 @@ async fn activate_bundle_as_operator(tenant_id: &str, bundle_id: &str) {
 }
 
 /// Writes `tenant_id`'s routing row as an operator, through an owner
-/// connection, with the statement of `write_routing_in` and no event: the
-/// receipt tests need a routing state, not the history of how a tenant came
-/// to it. The row satisfies V110's checks (an activation record id, an actor
-/// reference, a reason code, an evidence hash). `state` is `legacy`,
-/// `pipeline`, or `contained`.
+/// connection, with the statement of `write_routing_in`, and the event that
+/// V110 requires for it: the same id, the state, and the row's generation,
+/// in the same transaction (`insert_routing_event`). The receipt tests need
+/// a routing state, not the history of how a tenant came to it, so the event
+/// names no earlier state and no bundle. The row satisfies V110's checks (an
+/// activation record id, an actor reference, a reason code, an evidence
+/// hash). `state` is `legacy`, `pipeline`, or `contained`.
 async fn write_routing_as_operator(tenant_id: &str, state: &str) {
     let mut owner = owner_client().await;
     let tx = owner_tenant_tx(&mut owner, tenant_id).await;
@@ -17533,29 +17535,36 @@ async fn write_routing_as_operator(tenant_id: &str, state: &str) {
     )
     .await
     .expect("seed the tenant for a routing row");
-    tx.execute(
-        "INSERT INTO pipeline_tenant_routing (
-            tenant_id, routing_state, activation_record_id,
-            actor_principal_ref, reason_code, evidence_hash, recorded_at
-         ) VALUES ($1, $2, $3, $4, $5, $6, clock_timestamp())
-         ON CONFLICT (tenant_id) DO UPDATE
-         SET routing_state = EXCLUDED.routing_state,
-             activation_record_id = EXCLUDED.activation_record_id,
-             actor_principal_ref = EXCLUDED.actor_principal_ref,
-             reason_code = EXCLUDED.reason_code,
-             evidence_hash = EXCLUDED.evidence_hash,
-             recorded_at = EXCLUDED.recorded_at",
-        &[
-            &tenant_id,
-            &state,
-            &uuid::Uuid::new_v4(),
-            &routing_actor(),
-            &"test_routing_state",
-            &sha256_prefixed(b"test-routing-state"),
-        ],
-    )
-    .await
-    .expect("write the routing row as the operator");
+    let event_id = uuid::Uuid::new_v4();
+    let generation: i64 = tx
+        .query_one(
+            "INSERT INTO pipeline_tenant_routing (
+                tenant_id, routing_state, activation_record_id,
+                actor_principal_ref, reason_code, evidence_hash, recorded_at
+             ) VALUES ($1, $2, $3, $4, $5, $6, clock_timestamp())
+             ON CONFLICT (tenant_id) DO UPDATE
+             SET routing_state = EXCLUDED.routing_state,
+                 activation_record_id = EXCLUDED.activation_record_id,
+                 actor_principal_ref = EXCLUDED.actor_principal_ref,
+                 reason_code = EXCLUDED.reason_code,
+                 evidence_hash = EXCLUDED.evidence_hash,
+                 recorded_at = EXCLUDED.recorded_at
+             RETURNING routing_generation",
+            &[
+                &tenant_id,
+                &state,
+                &event_id,
+                &routing_actor(),
+                &"test_routing_state",
+                &sha256_prefixed(b"test-routing-state"),
+            ],
+        )
+        .await
+        .expect("write the routing row as the operator")
+        .get(0);
+    insert_routing_event(&tx, tenant_id, event_id, state, generation, 0)
+        .await
+        .expect("write the routing row's event as the operator");
     tx.commit().await.expect("commit the routing row");
 }
 
@@ -33199,6 +33208,466 @@ async fn routing_is_tenant_scoped() {
     }
 }
 
+// The routing row is bound to its event in the database (review round 1,
+// point 1; V110). The tests below write the two tables with direct
+// statements, as the runtime login where a refusal is tested: its grants
+// allow each statement, so only the foreign key and the two triggers refuse.
+
+/// V110's message for an update that keeps the row's event.
+const ROUTING_NEEDS_NEW_EVENT: &str = "pipeline routing change needs a new activation event";
+/// V110's message for a row whose event has another state or generation.
+const ROUTING_EVENT_MISMATCH: &str = "pipeline routing row does not match its activation event";
+
+/// The event's action that leaves a tenant in `state`.
+fn routing_event_action(state: &str) -> &'static str {
+    match state {
+        "pipeline" => "activate",
+        "contained" => "contain",
+        _ => "deactivate",
+    }
+}
+
+/// Appends one event to `tenant_id`'s history inside `tx` with a direct
+/// statement: `event_id`, the resulting state `state`, and the generation
+/// `generation`. `days_ahead` moves its `recorded_at` into the future.
+async fn insert_routing_event(
+    tx: &tokio_postgres::Transaction<'_>,
+    tenant_id: &str,
+    event_id: uuid::Uuid,
+    state: &str,
+    generation: i64,
+    days_ahead: i32,
+) -> Result<u64, tokio_postgres::Error> {
+    tx.execute(
+        "INSERT INTO pipeline_activation_events (
+            tenant_id, event_id, action, previous_state, resulting_state,
+            actor_principal_ref, reason_code, evidence_hash, routing_generation,
+            recorded_at
+         ) VALUES ($1, $2, $3, 'unselected', $4, $5, 'test_routing_state', $6, $7,
+                   clock_timestamp() + make_interval(days => $8))",
+        &[
+            &tenant_id,
+            &event_id,
+            &routing_event_action(state),
+            &state,
+            &routing_actor(),
+            &sha256_prefixed(b"test-routing-state"),
+            &generation,
+            &days_ahead,
+        ],
+    )
+    .await
+}
+
+/// Points `tenant_id`'s routing row at `event_id` with the state `state`,
+/// inside `tx`, with a direct statement.
+async fn name_routing_event(
+    tx: &tokio_postgres::Transaction<'_>,
+    tenant_id: &str,
+    event_id: uuid::Uuid,
+    state: &str,
+) -> Result<u64, tokio_postgres::Error> {
+    tx.execute(
+        "UPDATE pipeline_tenant_routing
+            SET routing_state = $2, activation_record_id = $3
+          WHERE tenant_id = $1",
+        &[&tenant_id, &state, &event_id],
+    )
+    .await
+}
+
+/// The message of the database error in `error`.
+fn database_message(error: &tokio_postgres::Error) -> Option<&str> {
+    error.as_db_error().map(|error| error.message())
+}
+
+/// The generation of `tenant_id`'s routing row and of the event that the row
+/// names, read through an owner connection.
+async fn routing_generations(tenant_id: &str) -> (i64, i64) {
+    let mut owner = owner_client().await;
+    let tx = owner_tenant_tx(&mut owner, tenant_id).await;
+    let row = tx
+        .query_one(
+            "SELECT routing.routing_generation, event.routing_generation
+               FROM pipeline_tenant_routing routing
+               JOIN pipeline_activation_events event
+                 ON event.tenant_id = routing.tenant_id
+                AND event.event_id = routing.activation_record_id
+              WHERE routing.tenant_id = $1",
+            &[&tenant_id],
+        )
+        .await
+        .expect("the routing row names an event of the tenant");
+    tx.commit().await.expect("commit routing_generations");
+    (row.get(0), row.get(1))
+}
+
+/// A routing row with no event of its id does not commit: the foreign key to
+/// the events is checked at the commit, and the row is not stored.
+#[tokio::test]
+async fn a_routing_row_without_its_event_is_refused_at_commit() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let store = PipelineActivationStore::new(backend.clone());
+    let tenant = routing_tenant("no-event");
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, &tenant).await;
+    tx.execute(
+        "INSERT INTO trace_tenants (tenant_id) VALUES ($1)
+         ON CONFLICT (tenant_id) DO NOTHING",
+        &[&tenant],
+    )
+    .await
+    .unwrap();
+    tx.execute(
+        "INSERT INTO pipeline_tenant_routing (
+            tenant_id, routing_state, activation_record_id,
+            actor_principal_ref, reason_code, evidence_hash
+         ) VALUES ($1, 'pipeline', $2, $3, 'test_routing_state', $4)",
+        &[
+            &tenant,
+            &uuid::Uuid::new_v4(),
+            &routing_actor(),
+            &sha256_prefixed(b"test-routing-state"),
+        ],
+    )
+    .await
+    .expect("the runtime login may insert the row; the checks run at the commit");
+    let refused = tx
+        .commit()
+        .await
+        .expect_err("a routing row with no event must not commit");
+    assert_eq!(
+        refused.code(),
+        Some(&tokio_postgres::error::SqlState::FOREIGN_KEY_VIOLATION),
+        "{refused}"
+    );
+    assert_eq!(store.routing(&tenant).await.unwrap(), None);
+}
+
+/// An update of the routing row that keeps `activation_record_id` is refused
+/// by the row trigger, at the statement: a change of the state needs a new
+/// event.
+#[tokio::test]
+async fn a_routing_update_that_keeps_its_event_is_refused() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let store = PipelineActivationStore::new(backend.clone());
+    let tenant = routing_tenant("keeps-event");
+    let contained = store
+        .contain(&tenant, &routing_actor(), "contain_first_rollout")
+        .await
+        .unwrap();
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, &tenant).await;
+    let refused = tx
+        .execute(
+            "UPDATE pipeline_tenant_routing SET routing_state = 'pipeline' WHERE tenant_id = $1",
+            &[&tenant],
+        )
+        .await
+        .expect_err("an update that keeps the event must fail");
+    assert_eq!(
+        database_message(&refused),
+        Some(ROUTING_NEEDS_NEW_EVENT),
+        "{refused}"
+    );
+    drop(tx);
+    assert_eq!(store.routing(&tenant).await.unwrap(), Some(contained));
+}
+
+/// A routing row cannot name an event that records another state: the
+/// commit check compares the row's state with the event's resulting state.
+#[tokio::test]
+async fn a_routing_row_that_names_an_event_of_another_state_is_refused() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let store = PipelineActivationStore::new(backend.clone());
+    let tenant = routing_tenant("other-state");
+    let contained = store
+        .contain(&tenant, &routing_actor(), "contain_first_rollout")
+        .await
+        .unwrap();
+    // The new event has the generation that the update gets (2) and says
+    // `contained`; the row says `pipeline`.
+    let event_id = uuid::Uuid::new_v4();
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, &tenant).await;
+    insert_routing_event(&tx, &tenant, event_id, "contained", 2, 0)
+        .await
+        .expect("the runtime login may append an event");
+    assert_eq!(
+        name_routing_event(&tx, &tenant, event_id, "pipeline")
+            .await
+            .expect("the update names a new event; the check runs at the commit"),
+        1
+    );
+    let refused = tx
+        .commit()
+        .await
+        .expect_err("a row whose event has another state must not commit");
+    assert_eq!(
+        database_message(&refused),
+        Some(ROUTING_EVENT_MISMATCH),
+        "{refused}"
+    );
+    assert_eq!(store.routing(&tenant).await.unwrap(), Some(contained));
+    assert_eq!(store.events(&tenant, 10).await.unwrap().len(), 1);
+}
+
+/// An event is used one time. Each version of the routing row has a higher
+/// generation than every version before it, and the commit check wants an
+/// event of the row's own generation, so the row cannot go back to an
+/// earlier event of the right state, and a new event with an earlier
+/// generation does not pass either. A new event with the row's state and
+/// generation commits: that is the record the database enforces, not the
+/// gate.
+#[tokio::test]
+async fn a_routing_row_that_names_an_old_event_is_refused() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let store = PipelineActivationStore::new(backend.clone());
+    let tenant = routing_tenant("old-event");
+    let actor = routing_actor();
+    let contained = store
+        .contain(&tenant, &actor, "contain_first_rollout")
+        .await
+        .unwrap();
+    let legacy = store
+        .deactivate(&tenant, &actor, "return_to_legacy")
+        .await
+        .unwrap();
+    assert_eq!(routing_generations(&tenant).await, (2, 2));
+
+    // Back to the first event, whose state is `contained` (generation 1).
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, &tenant).await;
+    assert_eq!(
+        name_routing_event(&tx, &tenant, contained.activation_record_id, "contained")
+            .await
+            .expect("the update names another event; the check runs at the commit"),
+        1
+    );
+    let refused = tx
+        .commit()
+        .await
+        .expect_err("a row that names an earlier event must not commit");
+    assert_eq!(
+        database_message(&refused),
+        Some(ROUTING_EVENT_MISMATCH),
+        "{refused}"
+    );
+    assert_eq!(
+        store.routing(&tenant).await.unwrap(),
+        Some(legacy.clone()),
+        "the row is as the deactivation left it"
+    );
+
+    // A new event with the right state and an earlier generation.
+    let stale = uuid::Uuid::new_v4();
+    let tx = tenant_tx(&mut client, &tenant).await;
+    insert_routing_event(&tx, &tenant, stale, "contained", 2, 0)
+        .await
+        .unwrap();
+    name_routing_event(&tx, &tenant, stale, "contained")
+        .await
+        .unwrap();
+    let refused = tx
+        .commit()
+        .await
+        .expect_err("a row whose event has an earlier generation must not commit");
+    assert_eq!(
+        database_message(&refused),
+        Some(ROUTING_EVENT_MISMATCH),
+        "{refused}"
+    );
+    assert_eq!(store.routing(&tenant).await.unwrap(), Some(legacy));
+    assert_eq!(store.events(&tenant, 10).await.unwrap().len(), 2);
+
+    // The control: an event of the row's state and its next generation.
+    let matching = uuid::Uuid::new_v4();
+    let tx = tenant_tx(&mut client, &tenant).await;
+    insert_routing_event(&tx, &tenant, matching, "contained", 3, 0)
+        .await
+        .unwrap();
+    name_routing_event(&tx, &tenant, matching, "contained")
+        .await
+        .unwrap();
+    tx.commit()
+        .await
+        .expect("a row with its own new event commits");
+    assert_eq!(routing_generations(&tenant).await, (3, 3));
+    let routing = store.routing(&tenant).await.unwrap().unwrap();
+    assert_eq!(routing.routing_state, RoutingState::Contained);
+    assert_eq!(routing.activation_record_id, matching);
+}
+
+/// No time and no other event of the tenant takes part in the check (plan
+/// review G1). An event that no row names, dated in the future and with the
+/// generation that the tenant's next change gets, blocks nothing: `contain`
+/// and `deactivate` through the store still commit, and the row names the
+/// store's own event.
+#[tokio::test]
+async fn a_routing_change_commits_when_an_event_has_a_later_recorded_at() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let store = PipelineActivationStore::new(backend.clone());
+    let tenant = routing_tenant("later-event");
+    let actor = routing_actor();
+    let orphans = [uuid::Uuid::new_v4(), uuid::Uuid::new_v4()];
+    {
+        let mut owner = owner_client().await;
+        let tx = owner_tenant_tx(&mut owner, &tenant).await;
+        tx.execute(
+            "INSERT INTO trace_tenants (tenant_id) VALUES ($1)
+             ON CONFLICT (tenant_id) DO NOTHING",
+            &[&tenant],
+        )
+        .await
+        .unwrap();
+        insert_routing_event(&tx, &tenant, orphans[0], "pipeline", 1, 365)
+            .await
+            .expect("an event that no row names is accepted");
+        insert_routing_event(&tx, &tenant, orphans[1], "pipeline", 2, 730)
+            .await
+            .expect("a second event that no row names is accepted");
+        tx.commit().await.unwrap();
+    }
+
+    let contained = store
+        .contain(&tenant, &actor, "contain_first_rollout")
+        .await
+        .expect("a containment commits beside an event dated in the future");
+    assert_eq!(contained.routing_state, RoutingState::Contained);
+    assert!(!orphans.contains(&contained.activation_record_id));
+    assert_eq!(routing_generations(&tenant).await, (1, 1));
+
+    let legacy = store
+        .deactivate(&tenant, &actor, "return_to_legacy")
+        .await
+        .expect("a deactivation commits beside an event of its own generation");
+    assert_eq!(legacy.routing_state, RoutingState::Legacy);
+    assert!(!orphans.contains(&legacy.activation_record_id));
+    assert_eq!(routing_generations(&tenant).await, (2, 2));
+    assert_eq!(store.routing(&tenant).await.unwrap(), Some(legacy.clone()));
+
+    // The history lists the two future events first; the row's id says which
+    // event is in force.
+    let events = store.events(&tenant, 10).await.unwrap();
+    assert_eq!(events.len(), 4);
+    assert_eq!(
+        events
+            .iter()
+            .map(|event| event.event_id)
+            .collect::<Vec<_>>()[..2],
+        [orphans[1], orphans[0]]
+    );
+    let in_force = events
+        .iter()
+        .find(|event| event.event_id == legacy.activation_record_id)
+        .expect("the row names an event of the tenant");
+    assert_eq!(in_force.action, ActivationAction::Deactivate);
+    assert_eq!(in_force.resulting_state, RoutingState::Legacy);
+}
+
+/// Each of the four changes through the store writes one event, and the row
+/// carries that event's id, its resulting state, and its generation.
+#[tokio::test]
+async fn every_routing_change_shares_its_id_with_its_event() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let fixture = two_qualified_bundles(backend.clone(), &dir).await;
+    let store = fixture.activation_store();
+    let tenant = routing_tenant("shared-id");
+    let actor = routing_actor();
+    let revision = gate_revision();
+    fixture.qualify(&tenant, &fixture.a, &revision).await;
+    fixture.qualify(&tenant, &fixture.b, &revision).await;
+
+    let mut changes: Vec<(TenantRouting, ActivationAction)> = Vec::new();
+    changes.push((
+        fixture.activate(&tenant, &fixture.a).await,
+        ActivationAction::Activate,
+    ));
+    check_routing_change(&store, &tenant, &changes).await;
+    changes.push((
+        fixture.activate(&tenant, &fixture.b).await,
+        ActivationAction::Activate,
+    ));
+    check_routing_change(&store, &tenant, &changes).await;
+    changes.push((
+        store
+            .contain(&tenant, &actor, "contain_first_rollout")
+            .await
+            .unwrap(),
+        ActivationAction::Contain,
+    ));
+    check_routing_change(&store, &tenant, &changes).await;
+    changes.push((
+        fixture
+            .roll_back(&tenant, &fixture.a)
+            .await
+            .expect("A was active before B"),
+        ActivationAction::Rollback,
+    ));
+    check_routing_change(&store, &tenant, &changes).await;
+    changes.push((
+        store
+            .deactivate(&tenant, &actor, "return_to_legacy")
+            .await
+            .unwrap(),
+        ActivationAction::Deactivate,
+    ));
+    check_routing_change(&store, &tenant, &changes).await;
+
+    let ids: std::collections::BTreeSet<uuid::Uuid> = changes
+        .iter()
+        .map(|(routing, _)| routing.activation_record_id)
+        .collect();
+    assert_eq!(ids.len(), changes.len(), "each change has an id of its own");
+}
+
+/// The newest of `changes` is in force for `tenant`: the stored row is the
+/// one the change returned, the newest event has the row's id, the change's
+/// action, and the row's state, the row and the event have the generation
+/// `changes.len()`, and the tenant has one event for each change.
+async fn check_routing_change(
+    store: &PipelineActivationStore,
+    tenant: &str,
+    changes: &[(TenantRouting, ActivationAction)],
+) {
+    let (routing, action) = changes.last().expect("at least one change");
+    assert_eq!(
+        store.routing(tenant).await.unwrap().as_ref(),
+        Some(routing),
+        "{action:?}"
+    );
+    let events = store.events(tenant, 10).await.unwrap();
+    assert_eq!(events.len(), changes.len(), "{action:?}");
+    assert_eq!(
+        events[0].event_id, routing.activation_record_id,
+        "{action:?}: the row and its event share one id"
+    );
+    assert_eq!(&events[0].action, action);
+    assert_eq!(
+        events[0].resulting_state, routing.routing_state,
+        "{action:?}"
+    );
+    let generation = i64::try_from(changes.len()).unwrap();
+    assert_eq!(
+        routing_generations(tenant).await,
+        (generation, generation),
+        "{action:?}"
+    );
+}
+
 #[tokio::test]
 async fn a_legacy_claim_is_permanent_and_idempotent() {
     let Some(backend) = runtime_backend(4).await else {
@@ -34517,19 +34986,29 @@ async fn begin_routing_change<'a>(
     tx
 }
 
-/// Writes `state` into the routing row inside `change` and commits it.
+/// Writes `state` into the routing row inside `change`, with the new event
+/// that V110 requires for the update (the same id, the state, and the row's
+/// new generation), and commits both.
 async fn commit_routing_change(
     change: deadpool_postgres::Transaction<'_>,
     tenant_id: &str,
     state: &str,
 ) {
-    change
-        .execute(
-            "UPDATE pipeline_tenant_routing SET routing_state = $2 WHERE tenant_id = $1",
-            &[&tenant_id, &state],
+    let event_id = uuid::Uuid::new_v4();
+    let generation: i64 = change
+        .query_one(
+            "UPDATE pipeline_tenant_routing
+                SET routing_state = $2, activation_record_id = $3
+              WHERE tenant_id = $1
+              RETURNING routing_generation",
+            &[&tenant_id, &state, &event_id],
         )
         .await
-        .expect("write the routing state");
+        .expect("write the routing state")
+        .get(0);
+    insert_routing_event(&change, tenant_id, event_id, state, generation, 0)
+        .await
+        .expect("write the routing change's event");
     change.commit().await.expect("commit the routing change");
 }
 
@@ -34898,7 +35377,10 @@ async fn an_admin_operation_behind_a_held_lock_fails_busy_and_the_receipt_comple
         Some(RoutingState::Pipeline),
         "the busy containment wrote nothing"
     );
-    assert!(activation.events(&tenant, 10).await.unwrap().is_empty());
+    // The one event is the helper's own, for the row it wrote.
+    let events = activation.events(&tenant, 10).await.unwrap();
+    assert_eq!(events.len(), 1, "the busy containment appended no event");
+    assert_eq!(events[0].action, ActivationAction::Activate);
 
     let started = std::time::Instant::now();
     let refused = tokio::time::timeout(

@@ -252,8 +252,9 @@ const RUNTIME_PIPELINE_GRANTS: &[(&str, &str, &[&str])] = &[
         &["state", "committed_at", "ciphertext_sha256"],
     ),
     // V110: the routing row is read by every upload and written by an
-    // operator action (every column but the key); the event and ownership
-    // tables are append-only, no UPDATE or DELETE.
+    // operator action (every column but the key and `routing_generation`,
+    // which the row trigger sets, so it needs no grant); the event and
+    // ownership tables are append-only, no UPDATE or DELETE.
     ("pipeline_tenant_routing", "SELECT", &[]),
     ("pipeline_tenant_routing", "INSERT", &[]),
     (
@@ -433,9 +434,11 @@ async fn pipeline_upgrade_from_v91_installs_forced_rls_storage() {
 
     // The pipeline's row-guard triggers, as the upgrade leaves them: present,
     // on their tables, and enabled. V108's guard is what keeps a committed
-    // attempt artifact from going back to `staged` (final review M6). V110's
-    // four triggers keep an activation event and a receipt owner immutable,
-    // and V111's two keep a policy intervention immutable.
+    // attempt artifact from going back to `staged` (final review M6). Four
+    // of V110's triggers keep an activation event and a receipt owner
+    // immutable, and its other two bind the routing row to its event (the
+    // generation and the commit check). V111's two keep a policy
+    // intervention immutable.
     for (table, trigger) in [
         ("phase_outcomes", "phase_outcomes_reject_update"),
         ("phase_outcomes", "phase_outcomes_reject_delete"),
@@ -466,6 +469,14 @@ async fn pipeline_upgrade_from_v91_installs_forced_rls_storage() {
         (
             "pipeline_activation_events",
             "pipeline_activation_events_reject_delete",
+        ),
+        (
+            "pipeline_tenant_routing",
+            "pipeline_tenant_routing_assign_generation",
+        ),
+        (
+            "pipeline_tenant_routing",
+            "pipeline_tenant_routing_event_match",
         ),
         (
             "pipeline_receipt_ownership",
@@ -641,34 +652,146 @@ async fn pipeline_upgrade_from_v91_installs_forced_rls_storage() {
     assert_eq!(unscoped, 0, "no tenant context sees nothing");
     admin.batch_execute("RESET ROLE").await.unwrap();
 
+    // V110: the routing row is bound to its event. The key from the row to
+    // the event exists and is deferred, the row's generation and the commit
+    // check are triggers of the two functions, and neither function has
+    // definer rights or a setting of its own (#974).
+    let routing_key = admin
+        .query_one(
+            "SELECT condeferrable, condeferred, confrelid::regclass::text,
+                    pg_get_constraintdef(oid)
+               FROM pg_constraint
+              WHERE conrelid = 'pipeline_tenant_routing'::regclass
+                AND conname = 'pipeline_tenant_routing_activation_event_fkey'
+                AND contype = 'f'",
+            &[],
+        )
+        .await
+        .expect("the routing row has its foreign key to the events");
+    assert!(
+        routing_key.get::<_, bool>(0) && routing_key.get::<_, bool>(1),
+        "the routing row's key to its event is DEFERRABLE INITIALLY DEFERRED"
+    );
+    assert_eq!(
+        routing_key.get::<_, String>(2),
+        "pipeline_activation_events"
+    );
+    assert!(
+        routing_key.get::<_, String>(3).starts_with(
+            "FOREIGN KEY (tenant_id, activation_record_id) \
+             REFERENCES pipeline_activation_events(tenant_id, event_id)"
+        ),
+        "{}",
+        routing_key.get::<_, String>(3)
+    );
+    for (trigger, function, deferred) in [
+        (
+            "pipeline_tenant_routing_assign_generation",
+            "assign_pipeline_routing_generation",
+            false,
+        ),
+        (
+            "pipeline_tenant_routing_event_match",
+            "check_pipeline_routing_event",
+            true,
+        ),
+    ] {
+        let row = admin
+            .query_one(
+                "SELECT p.proname, t.tgdeferrable AND t.tginitdeferred,
+                        p.prosecdef, p.proconfig IS NULL
+                   FROM pg_trigger t JOIN pg_proc p ON p.oid = t.tgfoid
+                  WHERE t.tgrelid = 'pipeline_tenant_routing'::regclass
+                    AND t.tgname = $1 AND NOT t.tgisinternal",
+                &[&trigger],
+            )
+            .await
+            .unwrap();
+        assert_eq!(row.get::<_, String>(0), function, "{trigger}");
+        assert_eq!(row.get::<_, bool>(1), deferred, "{trigger}");
+        assert!(
+            !row.get::<_, bool>(2) && row.get::<_, bool>(3),
+            "{function} has invoker rights and no settings"
+        );
+    }
+    for table in ["pipeline_tenant_routing", "pipeline_activation_events"] {
+        let column = admin
+            .query_one(
+                "SELECT data_type, is_nullable FROM information_schema.columns
+                  WHERE table_name = $1 AND column_name = 'routing_generation'",
+                &[&table],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            (column.get::<_, String>(0), column.get::<_, String>(1)),
+            ("bigint".to_string(), "NO".to_string()),
+            "{table}.routing_generation"
+        );
+    }
+
     // V110: an ownership row is unique for each submission id, an event and
     // an ownership row are never updated or deleted directly, and deleting
     // the tenant removes its routing, event, and ownership rows (the cascade
-    // is let through by the triggers' `pg_trigger_depth() > 1` rule).
+    // is let through by the triggers' `pg_trigger_depth() > 1` rule, and the
+    // routing row's deferred key to its event holds when both rows go). The
+    // routing row and its event share one id, and the event has the
+    // generation that the row trigger gives an inserted row (1): without
+    // that event the batch does not commit.
     let owner_tenant = "upgrade-v110";
     let owner_hash = format!("sha256:{}", "c".repeat(64));
+    let owner_event = "00000000-0000-0000-0000-0000000000e1";
     admin
         .batch_execute(&format!(
-            "INSERT INTO trace_tenants (tenant_id) VALUES ('{owner_tenant}')
+            "BEGIN;
+             INSERT INTO trace_tenants (tenant_id) VALUES ('{owner_tenant}')
                  ON CONFLICT DO NOTHING;
              INSERT INTO pipeline_tenant_routing
                  (tenant_id, routing_state, activation_record_id, actor_principal_ref,
                   reason_code, evidence_hash)
-                 VALUES ('{owner_tenant}', 'pipeline', gen_random_uuid(),
+                 VALUES ('{owner_tenant}', 'pipeline', '{owner_event}',
                          'principal:operator', 'activation_recorded', '{owner_hash}');
              INSERT INTO pipeline_activation_events
                  (tenant_id, event_id, action, previous_state, resulting_state,
                   previous_bundle_id, resulting_bundle_id, actor_principal_ref,
-                  reason_code, evidence_hash)
-                 VALUES ('{owner_tenant}', gen_random_uuid(), 'activate', 'unselected',
+                  reason_code, evidence_hash, routing_generation)
+                 VALUES ('{owner_tenant}', '{owner_event}', 'activate', 'unselected',
                          'pipeline', NULL, '{owner_hash}', 'principal:operator',
-                         'activation_recorded', '{owner_hash}');
+                         'activation_recorded', '{owner_hash}', 1);
              INSERT INTO pipeline_receipt_ownership (tenant_id, submission_id, owner)
-                 VALUES ('{owner_tenant}', '00000000-0000-0000-0000-0000000000a1', 'legacy');"
+                 VALUES ('{owner_tenant}', '00000000-0000-0000-0000-0000000000a1', 'legacy');
+             COMMIT;"
         ))
         .await
         .expect("insert one routing, event, and ownership row");
     set_tenant(&admin, owner_tenant).await;
+    // A change of the row that keeps its event is refused at the statement,
+    // and a row that names no event is refused at the commit.
+    let kept = admin
+        .batch_execute(&format!(
+            "UPDATE pipeline_tenant_routing SET routing_state = 'legacy'
+              WHERE tenant_id = '{owner_tenant}';"
+        ))
+        .await
+        .expect_err("a routing update that keeps its event must fail");
+    assert_eq!(
+        kept.as_db_error().map(|error| error.message()),
+        Some("pipeline routing change needs a new activation event"),
+        "{kept}"
+    );
+    let unnamed = admin
+        .batch_execute(&format!(
+            "UPDATE pipeline_tenant_routing
+                SET routing_state = 'legacy', activation_record_id = gen_random_uuid()
+              WHERE tenant_id = '{owner_tenant}';"
+        ))
+        .await
+        .expect_err("a routing row that names no event must fail at the commit");
+    assert_eq!(
+        unnamed.code(),
+        Some(&SqlState::FOREIGN_KEY_VIOLATION),
+        "{unnamed}"
+    );
     let duplicate = admin
         .batch_execute(&format!(
             "INSERT INTO pipeline_receipt_ownership (tenant_id, submission_id, owner)

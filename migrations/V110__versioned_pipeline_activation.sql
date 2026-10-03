@@ -4,21 +4,9 @@
 -- The selected bundle stays in the active bundle table (V93); the routing row
 -- holds only the state.
 
-CREATE TABLE pipeline_tenant_routing (
-    tenant_id TEXT NOT NULL REFERENCES trace_tenants(tenant_id) ON DELETE CASCADE,
-    routing_state TEXT NOT NULL CHECK (
-        routing_state IN ('legacy', 'pipeline', 'contained')
-    ),
-    activation_record_id UUID NOT NULL,
-    actor_principal_ref TEXT NOT NULL CHECK (
-        actor_principal_ref ~ '^[A-Za-z0-9_:.-]{1,160}$'
-    ),
-    reason_code TEXT NOT NULL CHECK (reason_code ~ '^[a-z0-9_]{1,64}$'),
-    evidence_hash TEXT NOT NULL CHECK (evidence_hash ~ '^sha256:[0-9a-f]{64}$'),
-    recorded_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    PRIMARY KEY (tenant_id)
-);
-
+-- The history of routing changes. It is created first, because the routing
+-- row names one of its rows. `routing_generation` is the generation of the
+-- routing row that the event belongs to (see the routing table).
 CREATE TABLE pipeline_activation_events (
     tenant_id TEXT NOT NULL REFERENCES trace_tenants(tenant_id) ON DELETE CASCADE,
     event_id UUID NOT NULL,
@@ -42,8 +30,35 @@ CREATE TABLE pipeline_activation_events (
     ),
     reason_code TEXT NOT NULL CHECK (reason_code ~ '^[a-z0-9_]{1,64}$'),
     evidence_hash TEXT NOT NULL CHECK (evidence_hash ~ '^sha256:[0-9a-f]{64}$'),
+    routing_generation BIGINT NOT NULL CHECK (routing_generation >= 1),
     recorded_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (tenant_id, event_id)
+);
+
+-- The routing row is bound to one event (review round 1, point 1): no routing
+-- state without an immutable event of the same tenant, state, and generation.
+-- `activation_record_id` is the event's id. The key is deferred, because a
+-- routing change writes the row first and its event after it, in one
+-- transaction. `routing_generation` counts the versions of the row; the row
+-- trigger below sets it, a writer does not.
+CREATE TABLE pipeline_tenant_routing (
+    tenant_id TEXT NOT NULL REFERENCES trace_tenants(tenant_id) ON DELETE CASCADE,
+    routing_state TEXT NOT NULL CHECK (
+        routing_state IN ('legacy', 'pipeline', 'contained')
+    ),
+    activation_record_id UUID NOT NULL,
+    actor_principal_ref TEXT NOT NULL CHECK (
+        actor_principal_ref ~ '^[A-Za-z0-9_:.-]{1,160}$'
+    ),
+    reason_code TEXT NOT NULL CHECK (reason_code ~ '^[a-z0-9_]{1,64}$'),
+    evidence_hash TEXT NOT NULL CHECK (evidence_hash ~ '^sha256:[0-9a-f]{64}$'),
+    routing_generation BIGINT NOT NULL DEFAULT 1,
+    recorded_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (tenant_id),
+    CONSTRAINT pipeline_tenant_routing_activation_event_fkey
+        FOREIGN KEY (tenant_id, activation_record_id)
+        REFERENCES pipeline_activation_events (tenant_id, event_id)
+        DEFERRABLE INITIALLY DEFERRED
 );
 
 CREATE INDEX idx_pipeline_activation_events_recorded
@@ -84,6 +99,73 @@ BEGIN
     RAISE EXCEPTION 'pipeline activation records are immutable';
 END;
 $$;
+
+-- Sets the generation of each version of the routing row: 1 on an insert, the
+-- old value plus 1 on an update. It assigns the value and checks none: an
+-- upsert of an existing row fires it for the proposed insert and then for the
+-- update, so a check of an insert's value would refuse every upsert. Because
+-- the trigger assigns, the runtime needs no UPDATE grant on the column. An
+-- update that keeps `activation_record_id` is refused: every change of the
+-- row names a new event. The function reads only OLD and NEW, so no other row
+-- and no clock can make it refuse a change.
+CREATE FUNCTION assign_pipeline_routing_generation()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF TG_OP = 'INSERT' THEN
+        NEW.routing_generation := 1;
+    ELSE
+        IF NEW.activation_record_id = OLD.activation_record_id THEN
+            RAISE EXCEPTION 'pipeline routing change needs a new activation event';
+        END IF;
+        NEW.routing_generation := OLD.routing_generation + 1;
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER pipeline_tenant_routing_assign_generation
+    BEFORE INSERT OR UPDATE ON pipeline_tenant_routing
+    FOR EACH ROW EXECUTE FUNCTION assign_pipeline_routing_generation();
+
+-- At the commit, the event that a routing row names must have the row's state
+-- and the row's generation. Each version of the row has a higher generation
+-- than the versions before it, and an event is immutable, so an event matches
+-- one version only: an earlier event cannot be named again. The check reads
+-- the one event that NEW names, by its primary key. No time and no other
+-- event of the tenant takes part (timestamps select nothing, as the header
+-- says), and the events have no unique generation, so an event that no row
+-- names cannot block a later change. The query names the tenant itself: an
+-- owner session is not bound by the tenant policy. Table names carry no
+-- schema; the function has invoker rights and no settings of its own, and
+-- the tenant setting of the transaction is still in force at the commit.
+--
+-- What this does not check: that a qualified gate decided the change. A role
+-- that may write the row may also write a matching event, so the gate stays
+-- in the code.
+CREATE FUNCTION check_pipeline_routing_event()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pipeline_activation_events e
+         WHERE e.tenant_id = NEW.tenant_id
+           AND e.event_id = NEW.activation_record_id
+           AND e.resulting_state = NEW.routing_state
+           AND e.routing_generation = NEW.routing_generation
+    ) THEN
+        RAISE EXCEPTION 'pipeline routing row does not match its activation event';
+    END IF;
+    RETURN NULL;
+END;
+$$;
+
+CREATE CONSTRAINT TRIGGER pipeline_tenant_routing_event_match
+    AFTER INSERT OR UPDATE ON pipeline_tenant_routing
+    DEFERRABLE INITIALLY DEFERRED
+    FOR EACH ROW EXECUTE FUNCTION check_pipeline_routing_event();
 
 CREATE TRIGGER pipeline_activation_events_reject_update
     BEFORE UPDATE ON pipeline_activation_events
@@ -126,7 +208,8 @@ DO $$ BEGIN
 END $$;
 
 -- pipeline_tenant_routing: each upload reads it; an operator action writes
--- it through an admin route (insert, or update of every column but the key).
+-- it through an admin route (insert, or update of every column but the key
+-- and routing_generation, which the row trigger sets).
 GRANT SELECT, INSERT ON pipeline_tenant_routing TO trace_ingest_runtime;
 GRANT UPDATE (routing_state, activation_record_id, actor_principal_ref,
               reason_code, evidence_hash, recorded_at)
