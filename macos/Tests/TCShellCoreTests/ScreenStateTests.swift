@@ -36,4 +36,23 @@ final class ScreenStateTests: XCTestCase {
             ScreenState.resolve(failure: .daemon(code: "c", message: "m"), loaded: true, paused: false, known: true),
             .coreDown)
     }
+
+    /// A failed or undecodable read leaves the last values on screen, but
+    /// they are no longer current: the screen is unknown, never ready.
+    func test_aFailedReadIsUnknownNeverReady() {
+        let failures: [DaemonDataError] = [
+            .undecodable(method: "status"), .daemon(code: "c", message: "m"),
+            .notAvailableYet(method: "status"), .notApproved(reasonLabel: nil),
+        ]
+        for failure in failures {
+            for paused in [nil, true, false] as [Bool?] {
+                XCTAssertEqual(
+                    ScreenState.resolve(failure: failure, loaded: true, paused: paused, known: true), .unknown,
+                    "\(failure) paused=\(String(describing: paused))")
+                XCTAssertEqual(
+                    ScreenState.resolve(failure: failure, loaded: false, paused: paused, known: false), .unknown,
+                    "\(failure) before anything loaded")
+            }
+        }
+    }
 }

@@ -81,20 +81,26 @@ private struct HomeOverview: View {
     /// the core did not say whether watching is paused, Paused, or
     /// watching N tools. A missing signal is never drawn as watching.
     private var state: ScreenState {
-        ScreenState.resolve(
-            failure: store.failures["status"], loaded: store.status != nil || store.failures["status"] != nil,
-            paused: store.status?.paused, known: store.status != nil)
+        HomeFormat.watchingState(store)
     }
 
     private var watching: some View {
-        let tools = traces.tree.tools.filter { $0.mode == .watch }.count
         let state = state
         return GlassCard {
             HStack(spacing: GlassTokens.Space.s4) {
                 switch state {
                 case .ready:
-                    GlassStatusDot(.on, ring: true)
-                    Text(FlowMapScene.pair(MonitorWords.watching, tools))
+                    switch HomeFormat.watching(store.status, destinations: store.destinations) {
+                    case .signedOut:
+                        GlassStatusDot(.ask, ring: true)
+                        Text(MonitorWords.signedOut)
+                    case .unhealthy(let label):
+                        GlassStatusDot(.outside, ring: true)
+                        Text(HealthCopy.forLabel(label).title)
+                    case .watching(let tools):
+                        GlassStatusDot(.on, ring: true)
+                        Text(FlowMapScene.pair(MonitorWords.watching, tools))
+                    }
                 case .paused:
                     GlassStatusDot(.ask, ring: true)
                     Text(MonitorWords.paused)
@@ -149,6 +155,11 @@ private struct HistoryPage: View {
                         GlassNotice(tone: .outside, title: MonitorWords.table?.line(for: failure) ?? "") { EmptyView() }
                     }
                     if let rows = store.history {
+                        if let cap = HomeFormat.cap(rows.count, rollup: store.rollup) {
+                            Text(cap)
+                                .glassType(GlassTokens.TypeScale.caption)
+                                .foregroundStyle(GlassColor.textTertiary)
+                        }
                         if rows.isEmpty {
                             Text("0")
                                 .glassType(GlassTokens.TypeScale.number)
@@ -233,9 +244,17 @@ struct HomeSummaryInspector: View {
                         .init(MonitorWords.week, HomeFormat.count(store.rollup?.week?.accepted)),
                         .init(MonitorWords.month, HomeFormat.count(store.rollup?.month?.accepted)),
                         .init(MonitorWords.allTime, HomeFormat.count(store.rollup?.allTime?.accepted)),
-                        .init(MonitorWords.held, HomeFormat.count(store.rollup?.quarantined)),
+                        .init(MonitorWords.heldForReview, HomeFormat.count(store.rollup?.quarantined)),
                         .init(MonitorWords.withdrawn, HomeFormat.count(store.rollup?.takenBack)),
                     ])
+                    // Held is never rejected: the core's sentence for it, beside
+                    // the count, whenever something is held.
+                    if (store.rollup?.quarantined ?? 0) > 0 {
+                        Text(MonitorWords.heldExplanation)
+                            .glassType(GlassTokens.TypeScale.caption)
+                            .foregroundStyle(GlassColor.textTertiary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
                 credit
                 if let community = store.rollup?.community {
@@ -268,6 +287,12 @@ struct HomeSummaryInspector: View {
                         .foregroundStyle(GlassColor.textTertiary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
+                // Credit is a record, not currency: the core's sentence,
+                // beside every figure.
+                Text(MonitorWords.creditNotCurrency)
+                    .glassType(GlassTokens.TypeScale.caption)
+                    .foregroundStyle(GlassColor.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
     }
@@ -293,14 +318,71 @@ enum HomeFormat {
         return explanation
     }
 
-    /// Day and tool. How it was approved is a line of its own.
+    /// Day and tool, then (in full) the size uploaded and when a
+    /// withdrawal was seen. Month and day even when compact: a weekday
+    /// alone reads a months-old row as this week. How it was approved is a
+    /// line of its own.
     static func meta(_ row: DaemonData.HistoryRow, compact: Bool) -> String {
         var parts: [String] = []
-        if let date = row.submittedAt {
-            parts.append(compact ? date.formatted(.dateTime.weekday(.abbreviated)) : date.formatted(.dateTime.month(.abbreviated).day()))
-        }
+        if let date = row.submittedAt { parts.append(day(date)) }
         if let source = row.source { parts.append(InferenceTabView.toolName(source)) }
+        if !compact {
+            if let bytes = row.uploadedBytes {
+                parts.append(ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file))
+            }
+            if let withdrawn = row.revokedAt ?? row.withdrawnAt {
+                parts.append("\(MonitorWords.withdrawn) \(day(withdrawn))")
+            }
+        }
         return parts.isEmpty ? "—" : parts.joined(separator: " · ")
+    }
+
+    static func day(_ date: Date) -> String {
+        date.formatted(.dateTime.month(.abbreviated).day())
+    }
+
+    /// What Home's watching row says when the screen is ready.
+    enum Watching: Equatable {
+        /// The core says the contributor is not signed in.
+        case signedOut
+        /// The core reports a health label.
+        case unhealthy(String)
+        /// Watching this many tools, as the core counts them.
+        case watching(Int)
+    }
+
+    /// The watching row's state (the stack-wide ScreenState): the core's
+    /// line when it does not answer, a dash before the first read, when a
+    /// read failed, or when the core did not say whether watching is
+    /// paused, whether the contributor is signed in, or which tools it
+    /// reads. A missing signal is never drawn as watching.
+    @MainActor
+    static func watchingState(_ store: HomeStore) -> ScreenState {
+        let failure = store.failures["status"] ?? store.failures["tool_destinations"]
+        return ScreenState.resolve(
+            failure: failure, loaded: store.status != nil || failure != nil,
+            paused: store.status?.paused,
+            known: store.status?.loggedIn != nil && store.destinations != nil)
+    }
+
+    /// Signed out, then unhealthy, then watching N: the order
+    /// `MenuBarStatus.state` uses. N counts the tools the core reads, unset
+    /// ones included (`watchedCount`).
+    static func watching(_ status: DaemonData.Status?, destinations: DaemonData.ToolDestinations?) -> Watching {
+        if status?.loggedIn == false { return .signedOut }
+        if let label = status?.health?.lastErrorLabel, !label.isEmpty { return .unhealthy(label) }
+        return .watching(destinations?.watchedCount ?? 0)
+    }
+
+    /// History reads one page. When the page is full it says how many of
+    /// the total it shows, in the core's words; the total is the rollup's
+    /// all-time count, unknown when any part of it is.
+    static func cap(_ shown: Int, rollup: DaemonData.HistoryRollup?) -> String? {
+        guard shown >= HomeStore.historyLimit else { return nil }
+        let all = rollup?.allTime
+        let parts = [all?.submitted, all?.accepted, all?.quarantined, all?.withdrawn, all?.other]
+        let total = parts.contains(nil) ? nil : parts.compactMap { $0 }.reduce(0, +)
+        return MonitorWords.table?.historyCap(shown: shown, total: total)
     }
 
     /// How a contribution was approved. Not recorded is said as such, never
@@ -313,11 +395,11 @@ enum HomeFormat {
         }
     }
 
-    /// The row's own credit: final when scored, otherwise nothing. A pending
-    /// figure needs its condition, which lives in the summary, not per row.
+    /// The row's own credit: final when scored, zero included, otherwise
+    /// nothing. A pending figure needs its condition, which lives in the
+    /// summary, not per row.
     static func credit(_ row: DaemonData.HistoryRow) -> String? {
-        guard let final = row.creditPointsFinal, final > 0 else { return nil }
-        return points(final)
+        row.creditPointsFinal.map(points)
     }
 
     /// Accepted reads as done; held for review and submitted as waiting;
@@ -342,6 +424,10 @@ extension MonitorWords {
     static var month: String { table?.month ?? "" }
     static var allTime: String { table?.total ?? "" }
     static var held: String { table?.held ?? "" }
+    static var heldForReview: String { table?.heldForReview ?? "" }
+    static var heldExplanation: String { table?.heldExplanation ?? "" }
+    static var creditNotCurrency: String { table?.creditNotCurrency ?? "" }
+    static var signedOut: String { table?.signedOut ?? "" }
     static var withdrawn: String { table?.withdrawn ?? "" }
     static var credit: String { table?.credit ?? "" }
     static var final: String { table?.creditFinal ?? "" }
