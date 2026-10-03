@@ -44,7 +44,9 @@ final class TracesStore {
     /// being down.
     private(set) var writeErrors: [String: DaemonDataError] = [:]
 
-    let client: any DaemonDataClient
+    /// The app's live client (`AppModel.daemonData`), attached by the
+    /// window when the daemon starts; nil while it is not running.
+    private(set) var client: (any DaemonDataClient)?
     /// The last folder change whose result differed from what the
     /// confirmation promised, in the core's words
     /// (`tc_project_ignore_reconciled_text`).
@@ -75,13 +77,38 @@ final class TracesStore {
     /// The sample set drawn, in a debug build over sample data; nil over
     /// the daemon. `sampleUnknown` is a `TRACE_COMMONS_SAMPLE` that named no
     /// set, so the fallback is never silent.
-    let sample: String?
-    let sampleUnknown: Bool
+    private(set) var sample: String?
+    private(set) var sampleUnknown: Bool
 
-    init(client: any DaemonDataClient, sample: String? = nil, sampleUnknown: Bool = false) {
+    init(client: (any DaemonDataClient)?, sample: String? = nil, sampleUnknown: Bool = false) {
         self.client = client
         self.sample = sample
         self.sampleUnknown = sampleUnknown
+    }
+
+    /// Follows a new client (or none). The tree stays as the last one
+    /// reported, but loading, and the badge and routes read unknown until
+    /// the new client answers; a load still in flight from the old one is
+    /// dropped.
+    func attach(_ client: (any DaemonDataClient)?) {
+        self.client = client
+        generation += 1
+        phase = .loading
+        status = nil
+        destinations = nil
+    }
+
+    /// Marks the data as a sample set in a debug build; nil over the daemon.
+    func markSample(_ sample: String?, unknown: Bool) {
+        self.sample = sample
+        sampleUnknown = unknown
+    }
+
+    /// The attached client, or the core-down error when there is none, so
+    /// every read and write without a daemon fails as an unreachable core.
+    func attached() throws -> any DaemonDataClient {
+        guard let client else { throw DaemonDataError.unreachable }
+        return client
     }
 
     // MARK: The core's words for a row
@@ -182,9 +209,11 @@ final class TracesStore {
 
     /// Loads, then follows the event stream for as long as the calling task
     /// runs. Call it from a view's `.task`: when the view goes, the task is
-    /// cancelled and the stream with it.
+    /// cancelled and the stream with it. With no client the load fails as
+    /// an unreachable core, and there is no stream to follow.
     func run() async {
         await load()
+        guard let client else { return }
         for await event in client.events() {
             if Task.isCancelled { return }
             switch event {
@@ -213,6 +242,7 @@ final class TracesStore {
         generation += 1
         let mine = generation
         do {
+            let client = try attached()
             async let entries = client.listPending(projectId: nil)
             async let projects = client.listProjects()
             // Settings only decide the tool switches. Unreadable settings
@@ -277,6 +307,7 @@ final class TracesStore {
         defer { acting.remove(entryId) }
         actionError = nil
         do {
+            let client = try attached()
             switch action {
             case .contribute:
                 // The core's answer is kept, not thrown away: its toast, and
@@ -386,7 +417,7 @@ final class TracesStore {
         defer { writing.remove(kind.rawValue) }
         writeErrors[kind.rawValue] = nil
         do {
-            _ = try await client.setSource(kind, choice)
+            _ = try await attached().setSource(kind, choice)
         } catch {
             refused(kind.rawValue, error, method: "set_settings")
             return
@@ -405,7 +436,7 @@ final class TracesStore {
         folderNotice = nil
         writeErrors[folder.id] = nil
         do {
-            let result = try await client.setProjectMode(projectId: folder.id, mode: mode, includeBacklog: nil)
+            let result = try await attached().setProjectMode(projectId: folder.id, mode: mode, includeBacklog: nil)
             if mode == .ignore {
                 folderNotice = TCCoreCopy.projectIgnoreReconciled(
                     project: folder.label, promised: promised, purged: result.purged ?? promised)

@@ -32,17 +32,34 @@ final class HomeStore {
     /// History rows read at once: the page, not the whole record.
     static let historyLimit = 100
 
-    let client: any DaemonDataClient
+    /// The app's live client (`AppModel.daemonData`), attached by the
+    /// window when the daemon starts; nil while it is not running.
+    private(set) var client: (any DaemonDataClient)?
 
-    init(client: any DaemonDataClient) {
+    init(client: (any DaemonDataClient)?) {
         self.client = client
+    }
+
+    /// Follows a new client (or none): nothing read from the old one is
+    /// drawn as current, so Home is loading until the new one is read.
+    func attach(_ client: (any DaemonDataClient)?) {
+        self.client = client
+        status = nil
+        destinations = nil
+        history = nil
+        rollup = nil
+        credit = nil
+        missions = nil
+        failures = [:]
     }
 
     /// Loads, then follows the event stream for as long as the calling task
     /// runs (a view's `.task`). History changes when the queue or the
-    /// status does, so either rereads it all.
+    /// status does, so either rereads it all. With no client the core is
+    /// down: every read says so.
     func run() async {
         await load()
+        guard let client else { return }
         for await event in client.events() {
             if Task.isCancelled { break }
             switch event {
@@ -98,6 +115,10 @@ final class HomeStore {
     private func read<T: Sendable>(
         _ method: String, _ call: @Sendable (any DaemonDataClient) async throws -> T
     ) async -> T? {
+        guard let client else {
+            failures[method] = .unreachable
+            return nil
+        }
         do {
             let value = try await call(client)
             failures[method] = nil

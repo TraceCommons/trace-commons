@@ -681,7 +681,7 @@ struct SessionInspectorView: View {
         }
         let result: Result<DaemonData.PreviewSummary, DaemonDataError>
         do {
-            result = .success(try await store.client.preview(entryId: entryId))
+            result = .success(try await store.attached().preview(entryId: entryId))
         } catch {
             result = .failure(error as? DaemonDataError ?? .undecodable(method: "preview"))
         }
