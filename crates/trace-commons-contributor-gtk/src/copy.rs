@@ -560,10 +560,10 @@ pub const NOT_SYNCED_YET: &str = "Not synced yet";
 
 // --- History -----------------------------------------------------------
 
-pub const HISTORY_IN_THE_COMMONS: &str = "In the commons";
-pub const HISTORY_WAITING_TO_BE_SCORED: &str = "Waiting to be scored";
-/// A status this build has no label for. The core's, read by every shell.
-pub use trace_commons_contributor::history_copy::STATUS_UNAVAILABLE as HISTORY_STATUS_UNAVAILABLE;
+// The status words are the core's (`history_copy::STATUS_LABELS`), the
+// table every shell reads; the tallies and headings here reuse them.
+pub use trace_commons_contributor::history_copy::IN_THE_COMMONS as HISTORY_IN_THE_COMMONS;
+pub use trace_commons_contributor::history_copy::WAITING_TO_BE_SCORED as HISTORY_WAITING_TO_BE_SCORED;
 
 /// §5.3's section heading over the record rows.
 pub const EVERYTHING_CONTRIBUTED: &str = "Everything you've contributed";
@@ -571,14 +571,14 @@ pub const EVERYTHING_CONTRIBUTED: &str = "Everything you've contributed";
 /// §5.3's chip on a withdrawn record. The record stays on the list and
 /// reads as withdrawn (§7.3); it is never dropped and never re-labelled as
 /// something that failed.
-pub const WITHDRAWN_BY_YOU: &str = "Withdrawn by you";
+pub use trace_commons_contributor::history_copy::WITHDRAWN_BY_YOU;
 
+pub use trace_commons_contributor::history_copy::HELD_FOR_PRIVACY_REVIEW as QUARANTINE_HEADING;
 /// §5.3's row-level explanation on a held record, used only when the server
 /// sent no explanation of its own. It says the same three things
 /// [`QUARANTINE_BODY`] says -- automated, not rejected, not shared -- at row
 /// length rather than at section length.
 pub use trace_commons_contributor::history_copy::HELD_ROW_BODY;
-pub const QUARANTINE_HEADING: &str = "Held for privacy review";
 pub const QUARANTINE_BODY: &str = "An agent inspects these before they enter the commons. It \
      happens when automated checks see something that might be personal or sensitive and can't \
      decide on its own.\n\nThese have not been rejected, and they have not been shared with \
