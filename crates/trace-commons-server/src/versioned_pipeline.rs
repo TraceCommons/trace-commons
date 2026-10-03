@@ -707,6 +707,16 @@ pub(crate) fn sha256_prefixed(bytes: &[u8]) -> String {
     format!("sha256:{:x}", Sha256::digest(bytes))
 }
 
+/// Whether `value` has the shape of a bundle id: `sha256:` and 64 lowercase
+/// hex digits, the shape the tables check. An operator action checks it
+/// before the id reaches a query or an error string (`intervene_policy`,
+/// ingest's admin routes).
+pub fn is_bundle_id(value: &str) -> bool {
+    value.strip_prefix("sha256:").is_some_and(|hex| {
+        hex.len() == 64 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+    })
+}
+
 /// The rule for who an operator action is recorded under and why, shared by
 /// every operator action of the pipeline (a routing change in
 /// `versioned_pipeline_activation.rs`, a policy intervention here). The actor
@@ -1622,9 +1632,7 @@ impl PgPipelineStore {
         )?;
         // The shape the table checks, refused before the id can reach a
         // query or an error string (`NotFound` names the bundle).
-        if !bundle_id.strip_prefix("sha256:").is_some_and(|hex| {
-            hex.len() == 64 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
-        }) {
+        if !is_bundle_id(bundle_id) {
             return Err(DatabaseError::Constraint(
                 PIPELINE_POLICY_INTERVENTION_INVALID_LABEL.to_string(),
             ));

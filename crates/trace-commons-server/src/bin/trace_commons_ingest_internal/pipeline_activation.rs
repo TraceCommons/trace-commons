@@ -43,7 +43,7 @@ use super::*;
 use axum::extract::rejection::QueryRejection;
 use trace_commons_gate_api::pipeline::Phase;
 use trace_commons_server::versioned_pipeline::{
-    PipelinePolicyInterventionRecord, PolicyOperationalStatus,
+    PipelinePolicyInterventionRecord, PolicyOperationalStatus, is_bundle_id,
 };
 use trace_commons_server::versioned_pipeline_activation::{
     ActivationEvent, ActivationReadiness, ActivationRequest, LegacyDrainReport, RoutingState,
@@ -100,6 +100,26 @@ pub(crate) const PIPELINE_MAX_ATTESTATIONS: usize = 64;
 /// The most routing events `GET /v1/admin/pipeline/routing` answers, newest
 /// first.
 pub(crate) const PIPELINE_ROUTING_EVENT_LIMIT: usize = 100;
+/// The request body limit of the nine routes (fix round 1): 1 MiB, far above
+/// a full qualification set (19 attestations and a signed package, about
+/// 21 KB in the tests), and far below the router-wide `MAX_INGEST_BODY_BYTES`
+/// that an envelope upload needs. Above it a route answers `413`
+/// `pipeline_request_too_large`.
+pub(crate) const PIPELINE_ADMIN_BODY_MAX_BYTES: usize = 1024 * 1024;
+
+/// The control-plane read audit surfaces of the three read routes, in the
+/// form of their siblings' (`pipeline_operational_summary`,
+/// `pipeline_forensic_trace`).
+const ROUTING_READ_SURFACE: &str = "pipeline_routing";
+const POLICY_INTERVENTIONS_READ_SURFACE: &str = "pipeline_policy_interventions";
+const LEGACY_DRAIN_READ_SURFACE: &str = "pipeline_legacy_drain";
+
+/// The body limit layer each of the nine routes is registered with
+/// (`PIPELINE_ADMIN_BODY_MAX_BYTES`); the router-wide limit stays for every
+/// other route.
+pub(crate) fn pipeline_admin_body_limit() -> DefaultBodyLimit {
+    DefaultBodyLimit::max(PIPELINE_ADMIN_BODY_MAX_BYTES)
+}
 
 /// The provider label of the one artifact store that counts as production.
 const GCS_PROVIDER_LABEL: &str = "gcs";
@@ -381,6 +401,19 @@ fn request_refusal(status: StatusCode) -> (StatusCode, Json<ApiError>) {
     }
 }
 
+/// `422` `pipeline_request_invalid` for a bundle id that is not `sha256:`
+/// and 64 lowercase hex digits (`is_bundle_id`, the rule `intervene_policy`
+/// applies), before the id reaches any store call.
+fn require_bundle_id(bundle_id: &str) -> ApiResult<()> {
+    if !is_bundle_id(bundle_id) {
+        return Err(api_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            PIPELINE_REQUEST_INVALID_LABEL,
+        ));
+    }
+    Ok(())
+}
+
 /// `413` `pipeline_evidence_too_large` above `PIPELINE_MAX_ATTESTATIONS`.
 fn bound_attestations(attestations: &[PipelineCheckAttestation]) -> ApiResult<()> {
     if attestations.len() > PIPELINE_MAX_ATTESTATIONS {
@@ -522,7 +555,8 @@ impl GateInputs<'_> {
     }
 }
 
-/// The activation and the rollback, in order, up to the store call: the two
+/// The activation and the rollback, in order, up to the store call: the
+/// bundle id's shape and the attestation count; the two
 /// trust stores and the revision; the attestations verified against the
 /// check store; the promotion evaluated over them now (an `Err` is refused
 /// here, a decision that is not ready by the gate); the tenant's stored
@@ -535,6 +569,7 @@ async fn gate_inputs<'a>(
     tenant: &TenantAuth,
     body: &ActivateBody,
 ) -> ApiResult<GateInputs<'a>> {
+    require_bundle_id(&body.bundle_id)?;
     bound_attestations(&body.attestations)?;
     let trust = trust_and_revision(state)?;
     let verified = trust
@@ -564,34 +599,32 @@ async fn gate_inputs<'a>(
     })
 }
 
-/// `GET /v1/admin/pipeline/routing`. Needs the routing store, not a runtime.
+/// `GET /v1/admin/pipeline/routing`: the routing state, the active bundle,
+/// and the newest events, read at one instant
+/// (`PipelineActivationStore::routing_view`). Needs the routing store, not a
+/// runtime. Records the read, as the operational summary does.
 pub(crate) async fn pipeline_routing_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> ApiResult<Json<PipelineRoutingView>> {
     let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_admin(&tenant)?;
-    let store = require_activation_store(state.as_ref())?;
-    let packages = state
-        .pipeline_store
-        .as_deref()
-        .ok_or_else(|| api_error(StatusCode::NOT_FOUND, PIPELINE_ROUTING_STORE_MISSING_LABEL))?;
-    let routing = store
-        .routing(&tenant.tenant_id)
+    let view = require_activation_store(state.as_ref())?
+        .routing_view(&tenant.tenant_id, PIPELINE_ROUTING_EVENT_LIMIT)
         .await
         .map_err(activation_error)?;
-    let active_bundle_id = packages
-        .active_bundle_id(&tenant.tenant_id)
-        .await
-        .map_err(activation_error)?;
-    let events = store
-        .events(&tenant.tenant_id, PIPELINE_ROUTING_EVENT_LIMIT)
-        .await
-        .map_err(activation_error)?;
+    append_control_plane_read_audit(
+        state.as_ref(),
+        &tenant,
+        ROUTING_READ_SURFACE,
+        view.events.len(),
+    )
+    .await
+    .map_err(internal_error)?;
     Ok(Json(PipelineRoutingView {
-        routing_state: routing.map(|routing| routing.routing_state),
-        active_bundle_id,
-        events,
+        routing_state: view.routing.map(|routing| routing.routing_state),
+        active_bundle_id: view.active_bundle_id,
+        events: view.events,
     }))
 }
 
@@ -615,6 +648,12 @@ pub(crate) async fn pipeline_qualify_handler(
         .pipeline_qualification
         .as_deref()
         .ok_or_else(|| api_error(StatusCode::NOT_FOUND, PIPELINE_ROUTING_STORE_MISSING_LABEL))?;
+    // The package's signature first, before any work on the package (fix
+    // round 1); `qualify_bundle_attested` verifies it again.
+    trust
+        .package
+        .verify(&body.signed_package)
+        .map_err(refusal)?;
     let dependencies = ProductionDependencyProfile::for_bundle(
         service,
         &body.signed_package.package,
@@ -756,7 +795,8 @@ pub(crate) async fn pipeline_policy_intervention_handler(
 }
 
 /// `GET /v1/admin/pipeline/policy-interventions?bundle_id=...`: the
-/// interventions on one of the tenant's bundles, oldest first.
+/// interventions on one of the tenant's bundles, oldest first. A bundle id
+/// that is not one is `422` before any read. Records the read.
 pub(crate) async fn pipeline_policy_interventions_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -766,11 +806,20 @@ pub(crate) async fn pipeline_policy_interventions_handler(
     require_admin(&tenant)?;
     let service = require_pipeline_service(state.as_ref())?;
     let query = request_query(query)?;
+    require_bundle_id(&query.bundle_id)?;
     let interventions = service
         .store()
         .list_policy_interventions(&tenant.tenant_id, &query.bundle_id)
         .await
         .map_err(activation_error)?;
+    append_control_plane_read_audit(
+        state.as_ref(),
+        &tenant,
+        POLICY_INTERVENTIONS_READ_SURFACE,
+        interventions.len(),
+    )
+    .await
+    .map_err(internal_error)?;
     Ok(Json(PipelinePolicyInterventions { interventions }))
 }
 
@@ -779,7 +828,7 @@ pub(crate) async fn pipeline_policy_interventions_handler(
 /// driver and with its legal-hold retention policies. Refused with `409`
 /// `legacy_drain_records_not_authoritative` unless the tenant's legacy
 /// records in the database are authoritative. Needs the routing store, not a
-/// runtime.
+/// runtime. Records the read.
 pub(crate) async fn pipeline_legacy_drain_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -806,6 +855,10 @@ pub(crate) async fn pipeline_legacy_drain_handler(
         )
         .await
         .map_err(activation_error)?;
+    // One report.
+    append_control_plane_read_audit(state.as_ref(), &tenant, LEGACY_DRAIN_READ_SURFACE, 1)
+        .await
+        .map_err(internal_error)?;
     Ok(Json(report))
 }
 
@@ -1170,9 +1223,9 @@ mod tests {
         assert!(stores.package.is_some() && stores.check.is_some());
     }
 
-    /// Every label this module answers or logs is a safe label: each refusal,
-    /// the start refusals, the runtime assembly's new refusal, and the action
-    /// labels of the log lines.
+    /// Every label this module answers, logs, or records is a safe label: each
+    /// refusal, the start refusals, the runtime assembly's new refusal, the
+    /// read audit surfaces, and the action labels of the log lines.
     #[test]
     fn the_route_labels_are_safe_labels() {
         for label in [
@@ -1186,6 +1239,9 @@ mod tests {
             PIPELINE_ROUTING_STORE_MISSING_LABEL,
             BUNDLE_PACKAGE_MISSING_LABEL,
             PACKAGE_RUNTIME_REVISION_UNKNOWN_LABEL,
+            ROUTING_READ_SURFACE,
+            POLICY_INTERVENTIONS_READ_SURFACE,
+            LEGACY_DRAIN_READ_SURFACE,
             "pipeline_unqualified_routing_not_allowed_when_required",
             "qualify",
             "activate",

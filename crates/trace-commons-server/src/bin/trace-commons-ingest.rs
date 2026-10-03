@@ -8411,32 +8411,41 @@ fn app(state: Arc<AppState>) -> Router {
         )
         // PR 5 (P5-D11): qualification, routing, and policy interventions,
         // each behind an admin credential, for the credential's tenant only
-        // (`pipeline_activation`).
-        .route("/v1/admin/pipeline/routing", get(pipeline_routing_handler))
+        // (`pipeline_activation`). Each carries its own 1 MiB body limit
+        // (`pipeline_admin_body_limit`), inside the router-wide one below.
+        .route(
+            "/v1/admin/pipeline/routing",
+            get(pipeline_routing_handler).layer(pipeline_admin_body_limit()),
+        )
         .route(
             "/v1/admin/pipeline/qualifications",
-            post(pipeline_qualify_handler),
+            post(pipeline_qualify_handler).layer(pipeline_admin_body_limit()),
         )
         .route(
             "/v1/admin/pipeline/activate",
-            post(pipeline_activate_handler),
+            post(pipeline_activate_handler).layer(pipeline_admin_body_limit()),
         )
         .route(
             "/v1/admin/pipeline/rollback",
-            post(pipeline_rollback_handler),
+            post(pipeline_rollback_handler).layer(pipeline_admin_body_limit()),
         )
-        .route("/v1/admin/pipeline/contain", post(pipeline_contain_handler))
+        .route(
+            "/v1/admin/pipeline/contain",
+            post(pipeline_contain_handler).layer(pipeline_admin_body_limit()),
+        )
         .route(
             "/v1/admin/pipeline/deactivate",
-            post(pipeline_deactivate_handler),
+            post(pipeline_deactivate_handler).layer(pipeline_admin_body_limit()),
         )
         .route(
             "/v1/admin/pipeline/policy-interventions",
-            get(pipeline_policy_interventions_handler).post(pipeline_policy_intervention_handler),
+            get(pipeline_policy_interventions_handler)
+                .post(pipeline_policy_intervention_handler)
+                .layer(pipeline_admin_body_limit()),
         )
         .route(
             "/v1/admin/pipeline/legacy-drain",
-            get(pipeline_legacy_drain_handler),
+            get(pipeline_legacy_drain_handler).layer(pipeline_admin_body_limit()),
         )
         .route(
             "/v1/admin/pipeline/runs/{run_id}/forensic",
@@ -20105,10 +20114,10 @@ use pipeline_runtime::{
 #[path = "trace_commons_ingest_internal/pipeline_activation.rs"]
 mod pipeline_activation;
 use pipeline_activation::{
-    pipeline_activate_handler, pipeline_contain_handler, pipeline_deactivate_handler,
-    pipeline_legacy_drain_handler, pipeline_policy_intervention_handler,
-    pipeline_policy_interventions_handler, pipeline_qualify_handler, pipeline_rollback_handler,
-    pipeline_routing_handler,
+    pipeline_activate_handler, pipeline_admin_body_limit, pipeline_contain_handler,
+    pipeline_deactivate_handler, pipeline_legacy_drain_handler,
+    pipeline_policy_intervention_handler, pipeline_policy_interventions_handler,
+    pipeline_qualify_handler, pipeline_rollback_handler, pipeline_routing_handler,
 };
 
 /// Complete the native half of a browser redeem: mint the one-time code and

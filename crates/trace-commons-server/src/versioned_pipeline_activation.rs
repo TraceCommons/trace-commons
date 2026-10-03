@@ -193,6 +193,16 @@ pub struct ActivationEvent {
     pub recorded_at: DateTime<Utc>,
 }
 
+/// A tenant's routing at one instant (`PipelineActivationStore::routing_view`):
+/// its routing row (`None` for a tenant with none), its active bundle (`None`
+/// for a tenant with none), and its newest routing changes, newest first.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TenantRoutingView {
+    pub routing: Option<TenantRouting>,
+    pub active_bundle_id: Option<String>,
+    pub events: Vec<ActivationEvent>,
+}
+
 /// A receipt's permanent owner. A pipeline-owned receipt carries its run.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ReceiptOwnership {
@@ -939,6 +949,58 @@ impl PipelineActivationStore {
             .await?;
         tx.commit().await?;
         rows.iter().map(event_from_row).collect()
+    }
+
+    /// The tenant's routing row, its active bundle, and its newest `limit`
+    /// routing changes (newest first), all read at one instant: one
+    /// read-only, single-snapshot transaction (`REPEATABLE READ`), as
+    /// `legacy_drain_report` reads, so a change that commits meanwhile is in
+    /// all three or in none. Three statements, no row lock.
+    pub async fn routing_view(
+        &self,
+        tenant_id: &str,
+        limit: usize,
+    ) -> Result<TenantRoutingView, DatabaseError> {
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = Self::read_only_tenant_transaction(&mut client, tenant_id).await?;
+        let routing = tx
+            .query_opt(
+                "SELECT routing_state, activation_record_id, actor_principal_ref,
+                        reason_code, evidence_hash, recorded_at
+                   FROM pipeline_tenant_routing
+                  WHERE tenant_id = $1",
+                &[&tenant_id],
+            )
+            .await?;
+        let active_bundle_id: Option<String> = tx
+            .query_opt(
+                "SELECT bundle_id FROM pipeline_active_bundles WHERE tenant_id = $1",
+                &[&tenant_id],
+            )
+            .await?
+            .map(|row| row.get("bundle_id"));
+        let events = tx
+            .query(
+                "SELECT event_id, action, previous_state, resulting_state,
+                        previous_bundle_id, resulting_bundle_id, actor_principal_ref,
+                        reason_code, evidence_hash, recorded_at
+                   FROM pipeline_activation_events
+                  WHERE tenant_id = $1
+                  ORDER BY recorded_at DESC, event_id
+                  LIMIT $2",
+                &[&tenant_id, &limit],
+            )
+            .await?;
+        tx.commit().await?;
+        Ok(TenantRoutingView {
+            routing: routing.as_ref().map(routing_from_row).transpose()?,
+            active_bundle_id,
+            events: events
+                .iter()
+                .map(event_from_row)
+                .collect::<Result<_, _>>()?,
+        })
     }
 
     /// The permanent owner of a receipt; `None` for a submission id no path

@@ -2977,7 +2977,7 @@ struct RouteFixture {
     package_pkcs8: Vec<u8>,
     check_pkcs8: Vec<u8>,
     bodies: std::sync::Mutex<Vec<String>>,
-    _dir: tempfile::TempDir,
+    dir: tempfile::TempDir,
 }
 
 impl RouteFixture {
@@ -3079,7 +3079,7 @@ impl RouteFixture {
             package_pkcs8,
             check_pkcs8,
             bodies: std::sync::Mutex::new(Vec::new()),
-            _dir: dir,
+            dir,
         })
     }
 
@@ -3480,6 +3480,68 @@ impl RouteFixture {
                 "{event}"
             );
         }
+    }
+
+    /// The tenant's control-plane read audit reasons for `surface`, from the
+    /// file audit log (`read_all_audit_events`), oldest first.
+    fn read_audits(&self, tenant: &str, surface: &str) -> Vec<String> {
+        let prefix = format!("surface={surface};");
+        read_all_audit_events(self.dir.path(), tenant)
+            .expect("the audit log reads")
+            .into_iter()
+            .filter(|event| event.kind == "read")
+            .filter_map(|event| event.reason)
+            .filter(|reason| reason.starts_with(&prefix))
+            .collect()
+    }
+
+    /// After the flow (A qualified): a suspension and a resumption of A's
+    /// Score policy, the list of both, the drain report (with reviewer reads
+    /// from the database), and the routing view, for a test that reads every
+    /// answer and log line.
+    async fn intervene_and_read(&self) {
+        for (action, resulting) in [("suspend", "suspended"), ("resume", "runnable")] {
+            let (status, record) = self
+                .admin_call(
+                    "POST",
+                    "/v1/admin/pipeline/policy-interventions",
+                    Some(serde_json::json!({
+                        "bundle_id": self.a.bundle_id,
+                        "phase": "score",
+                        "action": action,
+                        "reason_code": format!("{action}_score_for_hygiene"),
+                    })),
+                )
+                .await;
+            assert_eq!(status, StatusCode::OK, "{record}");
+            assert_eq!(record["resulting_status"], resulting);
+        }
+        let (status, listed) = self
+            .admin_call(
+                "GET",
+                &format!(
+                    "/v1/admin/pipeline/policy-interventions?bundle_id={}",
+                    self.a.bundle_id
+                ),
+                None,
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{listed}");
+        assert_eq!(listed["interventions"].as_array().map(Vec::len), Some(2));
+        let (status, report) = self
+            .call(
+                &self.with(|state| state.db_reviewer_reads = true),
+                "GET",
+                "/v1/admin/pipeline/legacy-drain",
+                Some(&self.admin),
+                None,
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{report}");
+        let (status, view) = self
+            .admin_call("GET", "/v1/admin/pipeline/routing", None)
+            .await;
+        assert_eq!(status, StatusCode::OK, "{view}");
     }
 
     /// One call of each refusal the routes have, for a test that reads every
@@ -4308,9 +4370,18 @@ async fn no_route_response_or_log_line_holds_a_token_or_a_tenant_id() {
     fixture
         .qualify_activate_roll_back_contain_and_deactivate()
         .await;
+    fixture.intervene_and_read().await;
     fixture.refuse_every_way().await;
     let lines = logs.lines();
     drop(logs);
+    for action in ["policy_suspend", "policy_resume"] {
+        assert!(
+            lines.iter().any(
+                |line| line.contains("pipeline admin action recorded") && line.contains(action)
+            ),
+            "the {action} line is logged"
+        );
+    }
     let bodies = fixture
         .bodies
         .lock()
@@ -4321,9 +4392,9 @@ async fn no_route_response_or_log_line_holds_a_token_or_a_tenant_id() {
         .filter(|line| line.contains("pipeline admin action recorded"))
         .count();
     assert!(
-        actions >= 8,
-        "the qualifications, activations, rollback, containments, and deactivation \
-         are logged ({actions} lines)"
+        actions >= 10,
+        "the qualifications, activations, rollback, containments, deactivation, \
+         suspension, and resumption are logged ({actions} lines)"
     );
     assert!(bodies.len() >= 20, "{} answers", bodies.len());
     for (what, secret) in [
@@ -4579,4 +4650,314 @@ async fn an_activation_through_the_route_reads_the_tenants_readiness() {
         .await;
     assert_eq!(status, StatusCode::OK, "{view}");
     assert_eq!(view["active_bundle_id"], fixture.a.bundle_id);
+}
+
+/// Fix round 1: each of the three read routes records one control-plane read
+/// audit, as its siblings `operational-summary` and `forensic` do, under its
+/// own surface and with the number of items it answered (never an id); a
+/// refused read records none.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_read_routes_record_a_control_plane_read() {
+    let Some(fixture) = RouteFixture::new().await else {
+        return;
+    };
+    let tenant = fixture.tenant.as_str();
+    fixture.qualify(&fixture.a).await;
+    let (status, record) = fixture
+        .admin_call(
+            "POST",
+            "/v1/admin/pipeline/policy-interventions",
+            Some(serde_json::json!({
+                "bundle_id": fixture.a.bundle_id,
+                "phase": "score",
+                "action": "suspend",
+                "reason_code": "suspend_score_for_audit",
+            })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{record}");
+    let (status, _) = fixture
+        .admin_call(
+            "POST",
+            "/v1/admin/pipeline/contain",
+            Some(serde_json::json!({ "reason_code": "contain_for_audit" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    for surface in [
+        "pipeline_routing",
+        "pipeline_policy_interventions",
+        "pipeline_legacy_drain",
+    ] {
+        assert!(
+            fixture.read_audits(tenant, surface).is_empty(),
+            "{surface}: no read yet; the actions record none"
+        );
+    }
+
+    // Refused reads record nothing.
+    let (status, _) = fixture
+        .admin_call("GET", "/v1/admin/pipeline/legacy-drain", None)
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "the drain precondition");
+    let (status, _) = fixture
+        .admin_call(
+            "GET",
+            "/v1/admin/pipeline/policy-interventions?bundle_id=not-a-bundle",
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    for surface in ["pipeline_policy_interventions", "pipeline_legacy_drain"] {
+        assert!(
+            fixture.read_audits(tenant, surface).is_empty(),
+            "{surface}: a refused read records nothing"
+        );
+    }
+
+    let (status, view) = fixture
+        .admin_call("GET", "/v1/admin/pipeline/routing", None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{view}");
+    assert_eq!(view["events"].as_array().map(Vec::len), Some(1));
+    let (status, listed) = fixture
+        .admin_call(
+            "GET",
+            &format!(
+                "/v1/admin/pipeline/policy-interventions?bundle_id={}",
+                fixture.a.bundle_id
+            ),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{listed}");
+    let (status, report) = fixture
+        .call(
+            &fixture.with(|state| state.db_reviewer_reads = true),
+            "GET",
+            "/v1/admin/pipeline/legacy-drain",
+            Some(&fixture.admin),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{report}");
+    for (surface, reason) in [
+        ("pipeline_routing", "surface=pipeline_routing;item_count=1"),
+        (
+            "pipeline_policy_interventions",
+            "surface=pipeline_policy_interventions;item_count=1",
+        ),
+        (
+            "pipeline_legacy_drain",
+            "surface=pipeline_legacy_drain;item_count=1",
+        ),
+    ] {
+        assert_eq!(
+            fixture.read_audits(tenant, surface),
+            vec![reason.to_string()],
+            "{surface}: one read, one audit row"
+        );
+    }
+    assert!(
+        fixture
+            .read_audits(&fixture.other_tenant, "pipeline_routing")
+            .is_empty(),
+        "the bystander's audit log has no row of the tenant's read"
+    );
+}
+
+/// Fix round 1: a bundle id that is not `sha256:` and 64 lowercase hex digits
+/// is `422 pipeline_request_invalid` before any store call: in an activation,
+/// a rollback, and the intervention list. A NUL byte in the id, which
+/// PostgreSQL refuses as text, never reaches it. Nothing is read or written.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_malformed_bundle_id_is_refused_before_any_store_call() {
+    let Some(fixture) = RouteFixture::new().await else {
+        return;
+    };
+    let tenant = fixture.tenant.as_str();
+    let attestations = fixture.attestations(&fixture.a);
+    let malformed = [
+        ("a word", "not-a-bundle".to_string()),
+        ("upper-case hex", format!("sha256:{}", "A".repeat(64))),
+        ("63 digits", format!("sha256:{}", "0".repeat(63))),
+        ("a NUL byte", format!("sha256:\u{0}{}", "0".repeat(63))),
+    ];
+    for (what, bundle_id) in &malformed {
+        for path in ["/v1/admin/pipeline/activate", "/v1/admin/pipeline/rollback"] {
+            let (status, refused) = fixture
+                .admin_call(
+                    "POST",
+                    path,
+                    Some(serde_json::json!({
+                        "bundle_id": bundle_id,
+                        "reason_code": "malformed_bundle_id",
+                        "attestations": attestations,
+                    })),
+                )
+                .await;
+            assert_eq!(
+                (status, refused),
+                (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    serde_json::json!({ "error": "pipeline_request_invalid" })
+                ),
+                "{path}: {what}"
+            );
+        }
+    }
+    for (what, query) in [
+        ("a word", "not-a-bundle".to_string()),
+        ("a NUL byte", format!("sha256%3A%00{}", "0".repeat(63))),
+    ] {
+        let (status, refused) = fixture
+            .admin_call(
+                "GET",
+                &format!("/v1/admin/pipeline/policy-interventions?bundle_id={query}"),
+                None,
+            )
+            .await;
+        assert_eq!(
+            (status, refused),
+            (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                serde_json::json!({ "error": "pipeline_request_invalid" })
+            ),
+            "the intervention list: {what}"
+        );
+    }
+    fixture
+        .assert_untouched(tenant, "malformed bundle ids")
+        .await;
+    assert!(
+        fixture
+            .read_audits(tenant, "pipeline_policy_interventions")
+            .is_empty(),
+        "no list was read"
+    );
+}
+
+/// Fix round 1: the qualification verifies the signed package against the
+/// package trust store before any work on the package. A package whose
+/// signature is broken is refused with the verification's label even when
+/// it names dependencies this runtime does not hold; the same package
+/// correctly signed reaches the dependency profile, which refuses it
+/// (`bundle_dependency_missing`), so the label shows which ran first.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_qualification_verifies_the_package_before_it_reads_it() {
+    use trace_commons_server::versioned_pipeline_qualification::PACKAGE_SIGNATURE_INVALID_LABEL;
+
+    let Some(fixture) = RouteFixture::new().await else {
+        return;
+    };
+    let unknown_dependencies = MinimalPolicyBundle::compatibility_package(
+        &route_config(ROUTE_INDEX_A),
+        &trace_commons_gate_api::ReferencePerplexityScorer::new(),
+        &trace_commons_gate_api::ReferenceEmbedder::new(),
+    )
+    .expect("the package builds");
+    let signed = fixture.signed(&unknown_dependencies);
+    let mut broken = signed.clone();
+    broken.signature.signature_base64url =
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([7u8; 64]);
+    for (what, signed_package, label) in [
+        (
+            "a broken signature",
+            broken,
+            PACKAGE_SIGNATURE_INVALID_LABEL,
+        ),
+        (
+            "a good signature",
+            signed,
+            trace_commons_server::versioned_pipeline_bundle::PIPELINE_DEPENDENCY_MISSING_LABEL,
+        ),
+    ] {
+        let (status, refused) = fixture
+            .admin_call(
+                "POST",
+                "/v1/admin/pipeline/qualifications",
+                Some(serde_json::json!({
+                    "signed_package": signed_package,
+                    "attestations": fixture.attestations(&unknown_dependencies),
+                })),
+            )
+            .await;
+        assert_eq!(
+            (status, refused),
+            (StatusCode::CONFLICT, serde_json::json!({ "error": label })),
+            "{what}"
+        );
+    }
+    fixture
+        .assert_untouched(&fixture.tenant, "refused qualifications")
+        .await;
+}
+
+/// Fix round 1: the nine routes take a body of at most 1 MiB
+/// (`PIPELINE_ADMIN_BODY_MAX_BYTES`), their own limit inside the router-wide
+/// one: a body of exactly 1 MiB reaches the handler, one byte more is `413`
+/// `pipeline_request_too_large`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_routes_take_a_body_of_at_most_one_mebibyte() {
+    let Some(fixture) = RouteFixture::new().await else {
+        return;
+    };
+    assert_eq!(
+        pipeline_activation::PIPELINE_ADMIN_BODY_MAX_BYTES,
+        1_048_576
+    );
+    let body_of = |length: usize| {
+        let empty = serde_json::json!({
+            "bundle_id": fixture.a.bundle_id,
+            "reason_code": "",
+            "attestations": [],
+        });
+        let padding = length - empty.to_string().len();
+        let body = serde_json::json!({
+            "bundle_id": fixture.a.bundle_id,
+            "reason_code": "a".repeat(padding),
+            "attestations": [],
+        });
+        assert_eq!(body.to_string().len(), length);
+        body
+    };
+    let (status, answer) = fixture
+        .admin_call(
+            "POST",
+            "/v1/admin/pipeline/activate",
+            Some(body_of(pipeline_activation::PIPELINE_ADMIN_BODY_MAX_BYTES)),
+        )
+        .await;
+    assert_ne!(
+        status,
+        StatusCode::PAYLOAD_TOO_LARGE,
+        "a body of exactly the limit reaches the handler: {answer}"
+    );
+    assert_eq!(
+        (status, answer),
+        (
+            StatusCode::NOT_FOUND,
+            serde_json::json!({ "error": "bundle_package_missing" })
+        ),
+        "the tenant has no package A yet"
+    );
+    let (status, refused) = fixture
+        .admin_call(
+            "POST",
+            "/v1/admin/pipeline/activate",
+            Some(body_of(
+                pipeline_activation::PIPELINE_ADMIN_BODY_MAX_BYTES + 1,
+            )),
+        )
+        .await;
+    assert_eq!(
+        (status, refused),
+        (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            serde_json::json!({ "error": "pipeline_request_too_large" })
+        )
+    );
+    fixture
+        .assert_untouched(&fixture.tenant, "the two large bodies")
+        .await;
 }
