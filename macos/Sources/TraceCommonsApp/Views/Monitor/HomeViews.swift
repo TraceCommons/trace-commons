@@ -99,7 +99,7 @@ private struct HomeOverview: View {
                         Text(MonitorWords.signedOut)
                     case .unhealthy(let label):
                         GlassStatusDot(.outside, ring: true)
-                        Text(HealthCopy.forLabel(label).title)
+                        Text(HealthCopy.core(label: label, maxQueueEntries: nil).title)
                     case .watching(let tools):
                         GlassStatusDot(.on, ring: true)
                         Text(FlowMapScene.pair(MonitorWords.watching, tools))

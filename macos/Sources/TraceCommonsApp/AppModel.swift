@@ -966,14 +966,14 @@ final class AppModel: ObservableObject {
         // And the held-folder notice, which names the folders and says why --
         // again only when it is going to be drawn.
         if label == GateHeld.label && gateHeldNotice != nil { return nil }
-        return HealthCopy.forLabel(label)
+        return HealthCopy.core(label: label, maxQueueEntries: daemonSettings?.maxQueueEntries)
     }
 
     /// The notice for armed folders the automatic-contribution gate is
     /// holding, in the Rust's words, when there are any. Independent of
     /// `health` for the reason `witnessCapacityHealth` is. Nil when nothing
     /// is held or the notice cannot be read; the label, if it holds the
-    /// slot, then falls back to `forLabel`'s on-hold line.
+    /// slot, then falls back to the core's on-hold line.
     var gateHeldNotice: GateHeldNotice? {
         guard status.gateHeld.held else { return nil }
         return TCConsentCopy.gateHeldNoticeJSON(forHeld: status.gateHeld.json)

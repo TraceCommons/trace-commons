@@ -506,7 +506,7 @@ final class TracesQueueStateTests: XCTestCase {
     /// and not twice when the budget does.
     func test_theHealthLabelIsNotSaidTwice() async throws {
         let full = try await status { $0["health"] = ["last_error_label": "queue-full"] }
-        XCTAssertEqual(TracesStore.safeguards(full).map(\.title), [HealthCopy.forLabel("queue-full").title])
+        XCTAssertEqual(TracesStore.safeguards(full).map(\.title), [HealthCopy.core(label: "queue-full", maxQueueEntries: nil).title])
         let capped = try await status {
             $0["health"] = ["last_error_label": "daily-cap-reached"]
             Self.spend(&$0)
