@@ -387,7 +387,8 @@ What each action does:
   already says `legacy`, is `409` `activation_state_invalid`.
 
 Every action writes one row to `pipeline_activation_events`, in the same
-transaction as the routing row. The event holds the action, the previous and the
+transaction as the routing row. The row's `activation_record_id` is the event's
+`event_id`. The event holds the action, the previous and the
 resulting state, the previous and the resulting bundle, the actor's
 `principal_ref`, the reason, an evidence hash, and the time. For a tenant that
 had no row, the previous state is `unselected` in the table and null in the
@@ -419,9 +420,18 @@ appends none. A reason that is not a label is `409` `activation_actor_invalid`.
 
 The ingest login's grants would let a direct statement write
 `pipeline_tenant_routing` and append events (V110) and update the active bundle
-(V112). Only the code limits this: it changes routing through these routes, and
-the bundle through the gate. A direct write skips the gate and writes no event.
-Change routing only through the routes.
+(V112). The database enforces the record of such a write (V110): the routing
+row must name an event of its tenant, each change of the row must name a new
+event, and at the commit that event must have the row's state and the row's
+generation (`routing_generation`, a counter that a trigger sets). An event
+matches one version of the row and cannot be named again. So every change of
+the routing row, a direct one too, appends one matching event. The database
+does not enforce the gate: a direct write can append an event and a matching
+row with no qualification and no evidence, and it can append an event that no
+row names. The row's `activation_record_id` says which event is in force. Only
+the code runs the gate: it changes routing through these routes, and the bundle
+through the gate. Change routing only through the routes. The details are in
+[deployment.md](deployment.md), "V110 to V113".
 
 ### What the process needs
 

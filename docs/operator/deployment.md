@@ -852,7 +852,9 @@ SELECT has_column_privilege('<ingest runtime login>', 'public.pipeline_attempt_a
 
 V110 adds `pipeline_tenant_routing` (one row for each tenant: its routing state),
 `pipeline_activation_events` (the history of routing changes), and
-`pipeline_receipt_ownership` (the permanent owner of each submission id).
+`pipeline_receipt_ownership` (the permanent owner of each submission id). It
+binds each routing row to one event (a deferred foreign key, a
+`routing_generation` column on both tables, and two triggers; see below).
 V111 adds `operational_status` to `pipeline_bundle_policy_status` and the table
 `pipeline_policy_interventions`. V112 widens the primary key of
 `pipeline_bundle_qualifications` to `(tenant_id, bundle_id, code_revision_hash)`
@@ -867,7 +869,7 @@ grants are these:
 
 | Table | Grant | Why |
 |---|---|---|
-| `pipeline_tenant_routing` | `SELECT, INSERT`; `UPDATE` on `routing_state`, `activation_record_id`, `actor_principal_ref`, `reason_code`, `evidence_hash`, `recorded_at` | each new upload reads the row; an activation, a rollback, a containment, or a deactivation inserts it or updates every column but the key |
+| `pipeline_tenant_routing` | `SELECT, INSERT`; `UPDATE` on `routing_state`, `activation_record_id`, `actor_principal_ref`, `reason_code`, `evidence_hash`, `recorded_at` | each new upload reads the row; an activation, a rollback, a containment, or a deactivation inserts it or updates every column but the key and `routing_generation`, which a trigger sets |
 | `pipeline_activation_events` | `SELECT, INSERT` | each routing change appends its event; `GET /v1/admin/pipeline/routing` reads them |
 | `pipeline_receipt_ownership` | `SELECT, INSERT` | the legacy path claims a submission id, and the pipeline's receipt commits its own row |
 | `pipeline_bundle_policy_status` | `UPDATE (runnable, operational_status, error_label, updated_at)`, added to V93's `SELECT, INSERT` | a policy intervention updates the row, and each phase commit locks it `FOR SHARE`, which needs `UPDATE` on a column |
@@ -888,12 +890,56 @@ runtime login still has no `DELETE` on `pipeline_active_bundles`.
 The grants do not make the routes the only way to change routing. V110 lets the
 ingest login `INSERT` and `UPDATE` `pipeline_tenant_routing` and `INSERT` events,
 and V112 lets it `UPDATE (bundle_id, selected_at)` on `pipeline_active_bundles`.
-Any statement under that login can use them, skip the activation gate, and write
-no event. Only the code limits this: it changes routing through the routes
-(`POST /v1/admin/pipeline/...`, see
-[pipeline-activation.md](pipeline-activation.md)), and the active bundle only
-through the gate. Change routing only through the routes. Do not run a direct
-statement of the ingest login against these tables.
+Any statement under that login can use them.
+
+The database enforces the record of a routing change, for a direct statement
+too. V110 binds the routing row to its event:
+
+- `activation_record_id` is a foreign key to the event's `event_id`, for the
+  same tenant. A row that names no event does not commit.
+- A row trigger (`pipeline_tenant_routing_assign_generation`) sets
+  `routing_generation`: 1 on an insert, and the old value plus 1 on each
+  update. A statement cannot choose the value, and the ingest login has no
+  `UPDATE` grant on the column. The same trigger refuses an update that keeps
+  `activation_record_id` (`pipeline routing change needs a new activation
+  event`).
+- A constraint trigger (`pipeline_tenant_routing_event_match`) runs at the
+  commit. The event that the row names must have the row's `routing_state` as
+  its `resulting_state`, and the row's `routing_generation`. If it does not,
+  the commit fails (`pipeline routing row does not match its activation
+  event`).
+
+Events are immutable, and each version of the row has a higher generation than
+the versions before it. So an event matches one version of the row and cannot
+be named again: every change of the routing row appends one matching event.
+The two messages are not labels. The routes never cause them, because the code
+writes the row and its event with one id and one generation. Only a direct
+statement can get them.
+
+The database does not enforce the activation gate. The ingest login can append
+an event and write a matching row in one transaction, and it can update the
+active bundle, with no qualification and no evidence. It can also append an
+event that no row names: such an event is in the history, and the row's
+`activation_record_id` says which event is in force. Only the code runs the
+gate: it changes routing through the routes (`POST /v1/admin/pipeline/...`,
+see [pipeline-activation.md](pipeline-activation.md)), and the active bundle
+only through the gate. Change routing only through the routes. Do not run a
+direct statement of the ingest login against these tables.
+
+V110 changed on the branch `vp/pipeline-activation` before it merged: the key,
+the two triggers, and the `routing_generation` columns came later. The
+migration runner records only a migration's version and name, so it does not
+see the change. A database that applied a draft of V110 from that branch keeps
+the draft's tables, and each routing change fails there. Create that database
+again.
+
+A restore must bring `pipeline_tenant_routing` and `pipeline_activation_events`
+back from one snapshot, as a `pg_dump` and `pg_restore` of the whole database
+does (the triggers are created after the rows). Do not load the rows of
+`pipeline_tenant_routing` into a migrated database with `INSERT` or `COPY`
+(`pg_restore --data-only`): the row trigger sets each inserted row's
+generation to 1, and the commit then refuses a row whose event has a higher
+generation.
 
 V111 adds a check that requires `runnable` to equal `operational_status =
 'runnable'`, and every existing row gets the status `runnable`. V93 gave the
