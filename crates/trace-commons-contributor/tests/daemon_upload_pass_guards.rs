@@ -886,7 +886,7 @@ async fn an_approval_whose_previewed_bytes_are_gone_is_not_uploaded() {
     let entry_id = h.only_entry().entry_id;
     {
         let mut q = h.shared.queue.lock().unwrap();
-        assert!(q.record_previewed_envelope(entry_id, "sha256:never-stored", None));
+        assert!(q.record_previewed_envelope(entry_id, "sha256:never-stored", None, None));
     }
     let resp = ipc::handle_local(
         &h.shared,
