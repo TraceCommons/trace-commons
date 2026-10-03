@@ -350,6 +350,9 @@ final class TracesStore {
     struct Safeguard: Equatable {
         let title: String
         let body: String?
+        /// The core's severity for a label line; budget, witness and
+        /// gate-held lines are `.waiting`.
+        let severity: HealthCopy.Severity
     }
 
     /// What the queue's safeguards say right now: a spent daily budget, a
@@ -366,26 +369,27 @@ final class TracesStore {
         if let budget = status.dailyBudget, budget.blocked == true {
             out.append(Safeguard(
                 title: DailyBudgetCopy.title,
-                body: DailyBudgetCopy.detail(blockedEntries: budget.blockedEntries ?? 0, resetsAt: budget.resetsAt)))
+                body: DailyBudgetCopy.detail(blockedEntries: budget.blockedEntries ?? 0, resetsAt: budget.resetsAt),
+                severity: .waiting))
             said.insert("daily-cap-reached")
         }
         if let capacity = status.witnessCapacity, (capacity.waitingSessions ?? 0) > 0,
             let wire = Self.wire(capacity),
             let notice = TCConsentCopy.witnessCapacityNoticeJSON(forCapacity: wire).flatMap(WitnessCapacityNotice.decode(fromJSON:))
         {
-            out.append(Safeguard(title: notice.title, body: notice.body))
+            out.append(Safeguard(title: notice.title, body: notice.body, severity: .waiting))
             said.insert("witness-saturated")
         }
         if let held = status.automaticContributionHeld, (held.heldSessions ?? 0) > 0,
             let wire = Self.wire(held),
             let notice = TCConsentCopy.gateHeldNoticeJSON(forHeld: wire).flatMap(GateHeldNotice.decode(fromJSON:))
         {
-            out.append(Safeguard(title: notice.title, body: notice.body))
+            out.append(Safeguard(title: notice.title, body: notice.body, severity: .waiting))
             said.insert(GateHeld.label)
         }
         if let label = status.health?.lastErrorLabel, !said.contains(label) {
             let health = HealthCopy.core(label: label, maxQueueEntries: nil)
-            out.insert(Safeguard(title: health.title, body: health.detail), at: 0)
+            out.insert(Safeguard(title: health.title, body: health.detail, severity: health.severity), at: 0)
         }
         return out
     }
