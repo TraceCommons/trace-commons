@@ -440,7 +440,12 @@ struct MonitorSettingsWindow: View {
             Group {
                 switch section {
                 case .compute:
-                    ComputeView(model: compute)
+                    ScrollView {
+                        ComputeView(model: compute)
+                            .padding(GlassTokens.Space.panePadding)
+                            .frame(maxWidth: 560, alignment: .leading)
+                            .frame(maxWidth: .infinity, alignment: .topLeading)
+                    }
                 default:
                     ScrollView {
                         GlassSettingsContent(navigation: navigation, section: section)

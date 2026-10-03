@@ -164,7 +164,9 @@ struct MainWindowView: View {
             VStack(spacing: 0) {
                 if navigation.displaysCompute {
                     contentHeader
-                    ComputeView(model: compute)
+                    ScrollView {
+                        ComputeView(model: compute).padding(TC.Space.lg)
+                    }
                 } else if section == .insights {
                     contentHeader
                     InsightsView(storeSelection: insightsStoreSelection)
