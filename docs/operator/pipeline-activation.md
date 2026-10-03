@@ -861,9 +861,21 @@ waits the same way. The read never selects a run whose command was removed on
 purpose (its submission withdrawn, revoked, purged or expired, its revision's
 invalidation queued, or the run failed for good). The worker logs
 `pipeline_unapplied_index_command_unreadable` with `run_ref_hash`, the
-SHA-256 of the run id's text; find the run with
-`SELECT run_id FROM pipeline_runs WHERE tenant_id = '<tenant>' AND
-'sha256:' || encode(sha256(run_id::text::bytea), 'hex') = '<run_ref_hash>'`.
+SHA-256 of the run id's text, and the tenant's `tenant_storage_ref`. Find
+the run in one session. Set the tenant first: `pipeline_runs` forces row
+security, so without it a role that is not a superuser gets no row and no
+error.
+
+```sql
+SELECT set_config('trace_commons.trace_tenant_id', '<tenant>', false);
+SELECT run_id FROM pipeline_runs
+ WHERE tenant_id = '<tenant>'
+   AND 'sha256:' || encode(sha256(run_id::text::bytea), 'hex') = '<run_ref_hash>';
+```
+
+`<tenant>` is the routed or drained tenant for which
+`'tenant_sha256:' || left(encode(sha256('<tenant>'::bytea), 'hex'), 32)`
+equals the logged `tenant_storage_ref`.
 
 The Score holds its transaction (and the lock) open while the scorer and the
 embedder run, so the ingest login must not have an
