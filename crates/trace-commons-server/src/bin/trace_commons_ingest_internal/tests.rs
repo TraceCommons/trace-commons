@@ -12166,12 +12166,13 @@ impl trace_commons_server::versioned_pipeline_credit::NearPayoutAdapter
 }
 
 /// A qualified pipeline service over a backend that never connects, with its
-/// payout enabled on `TEST_PAYOUT_NEAR_CONTRACT` when `payout` is true. For
-/// the unit tests of `pipeline_activation` (a sibling of this module), which
-/// read only what the service reports of itself (`payout_enabled`).
+/// payout enabled on `TEST_PAYOUT_NEAR_CONTRACT` in `settlement_mode` when one
+/// is given. For the unit tests of `pipeline_activation` (a sibling of this
+/// module), which read only what the service reports of itself
+/// (`payout_enabled`, `payout_controls`).
 pub(super) async fn qualified_test_service_with_payout(
     dir: &tempfile::TempDir,
-    payout: bool,
+    settlement_mode: Option<PipelineNearSettlementMode>,
 ) -> Arc<PipelineService> {
     qualified_pipeline_service(
         pg_backend_without_a_database().await,
@@ -12179,13 +12180,15 @@ pub(super) async fn qualified_test_service_with_payout(
         None,
         true,
         true,
-        payout.then(|| {
+        settlement_mode.map(|settlement_mode| {
+            let mut config = payout_test_config(Some(TEST_PAYOUT_NEAR_CONTRACT));
+            config.controls.settlement_mode = settlement_mode;
             (
                 Arc::new(QualifiedTestNearAdapter(
                     trace_commons_server::versioned_pipeline_credit::RecordingNearAdapter::authenticated(),
                 ))
                     as Arc<dyn trace_commons_server::versioned_pipeline_credit::NearPayoutAdapter>,
-                payout_test_config(Some(TEST_PAYOUT_NEAR_CONTRACT)),
+                config,
             )
         }),
         None,

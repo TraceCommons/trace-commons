@@ -270,7 +270,12 @@ pub(crate) fn pipeline_trust_stores_from_env() -> anyhow::Result<PipelineTrustSt
 /// - `unversioned_policy_dependencies`: `false`; the qualification fails
 ///   closed on a dependency without a content hash
 ///   (`bundle_dependency_missing`).
-/// - `live_external_payout_enabled`: the pipeline runtime's payout is on.
+/// - `live_external_payout_enabled`: the pipeline runtime holds a payout
+///   whose settlement mode moves real money, `PipelineNearSettlementMode::Http`
+///   (`TRACE_COMMONS_NEAR_SETTLEMENT_MODE=http`: the injected adapter pays).
+///   A payout in the `Disabled` mode (nothing advances) or the `DryRun` mode
+///   (an in-process adapter, no network and no funds) is not live, and a
+///   runtime with no payout is not either (final fix wave G4).
 pub(crate) fn infrastructure_profile_from_state(
     state: &AppState,
 ) -> ProductionInfrastructureProfile {
@@ -324,7 +329,8 @@ pub(crate) fn infrastructure_profile_from_state(
         live_external_payout_enabled: state
             .pipeline_service
             .as_ref()
-            .is_some_and(|service| service.payout_enabled()),
+            .and_then(|service| service.payout_controls())
+            .is_some_and(|controls| controls.settlement_mode == PipelineNearSettlementMode::Http),
     }
 }
 
@@ -1009,9 +1015,14 @@ mod tests {
         use ProductionAdapterKind::{Development, Missing, Production};
 
         let dir = tempfile::tempdir().unwrap();
-        let unpaid = crate::tests::qualified_test_service_with_payout(&dir, false).await;
-        let paid = crate::tests::qualified_test_service_with_payout(&dir, true).await;
+        let service_paying_in =
+            |mode| crate::tests::qualified_test_service_with_payout(&dir, Some(mode));
+        let unpaid = crate::tests::qualified_test_service_with_payout(&dir, None).await;
+        let paid = service_paying_in(PipelineNearSettlementMode::Http).await;
+        let dry_run = service_paying_in(PipelineNearSettlementMode::DryRun).await;
+        let disabled = service_paying_in(PipelineNearSettlementMode::Disabled).await;
         assert!(!unpaid.payout_enabled() && paid.payout_enabled());
+        assert!(dry_run.payout_enabled() && disabled.payout_enabled());
         let unused_port = std::net::TcpListener::bind("127.0.0.1:0")
             .unwrap()
             .local_addr()
@@ -1204,12 +1215,23 @@ mod tests {
                 },
             ),
             (
-                "live_external_payout_enabled: a runtime whose payout is enabled",
+                "live_external_payout_enabled: a runtime whose payout pays (settlement mode http)",
                 with(&|state| state.pipeline_service = Some(paid.clone())),
                 ProductionInfrastructureProfile {
                     live_external_payout_enabled: true,
                     ..production.clone()
                 },
+            ),
+            // Final fix wave (G4): a payout that moves no money is not live.
+            (
+                "live_external_payout_enabled: a payout in the dry_run settlement mode",
+                with(&|state| state.pipeline_service = Some(dry_run.clone())),
+                production.clone(),
+            ),
+            (
+                "live_external_payout_enabled: a payout in the disabled settlement mode",
+                with(&|state| state.pipeline_service = Some(disabled.clone())),
+                production.clone(),
             ),
             (
                 "live_external_payout_enabled: no runtime",
