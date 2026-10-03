@@ -111,7 +111,7 @@ struct TraceCommonsShell: App {
         // in debug builds until the screens they frame match the design.
         // TRACE_COMMONS_MONITOR=1 opens the monitor at launch.
         Window("Monitor", id: WindowID.monitor) {
-            MonitorWindowView(navigation: navigation)
+            MonitorWindowView(navigation: navigation, insightsStoreSelection: insightsStoreSelection, missionDrafts: missionDrafts)
                 .environmentObject(model)
                 // The monitor reads the daemon, so it starts services on
                 // appear (D-11).
