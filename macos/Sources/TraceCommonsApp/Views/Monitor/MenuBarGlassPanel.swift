@@ -1,5 +1,6 @@
 #if DEBUG
 import SwiftUI
+import TCBridge
 import TCDesign
 import TCShellCore
 
@@ -119,19 +120,17 @@ struct MenuBarGlassPanel: View {
         }
     }
 
+    /// The core's roll-up, never one worked out here from the folders.
     private var rollup: MenuPanelData.ModeRollup {
-        guard !store.stale, let projects = store.projects else { return .none }
-        return MenuPanelData.rollup(projects.map(\.mode))
+        guard !store.stale else { return .none }
+        return MenuPanelData.rollup(store.status?.contributionMode)
     }
 
+    /// The pill's words, from the core (`tc_contribution_mode_copy_json`).
+    private static let modeCopy = ContributionModeCopy.decode(fromJSON: TCCoreCopy.contributionModeCopyJSON())
+
     private var modeValue: String {
-        switch rollup {
-        case .ask: ProjectCopy.modeChoiceLabel(.ask)
-        case .armed: ProjectCopy.modeChoiceLabel(.autoUpload)
-        case .never: ProjectCopy.modeChoiceLabel(.ignore)
-        case .mixed: MenuWords.mixed
-        case .none: "—"
-        }
+        MenuPanelData.modeValue(rollup, mode: store.status?.contributionMode, copy: Self.modeCopy)
     }
 
     private var modeFill: GlassPillFill {
@@ -172,18 +171,41 @@ struct MenuBarGlassPanel: View {
         }
     }
 
-    /// The overrides, shown with the current roll-up checked. Disabled: the
-    /// core has no override yet, and arming is never done from a menu press.
+    /// The overrides, in the core's words, with the core's roll-up checked,
+    /// its partial line under Auto contribute, and its override line while
+    /// one is in force. Disabled: setting an override needs its
+    /// confirmation (`tc_contribution_override_confirm_json`, with the
+    /// arming disclosure for Auto contribute) and a client write the data
+    /// contract does not carry yet, and arming is never done from a menu
+    /// press.
+    @ViewBuilder
     private var modeOptions: some View {
-        Group {
-            GlassOptionRow(ProjectCopy.modeChoiceLabel(.ask), fill: .solid(GlassTokens.Color.menuModeAsk),
-                           checked: rollup == .ask) {}
-            GlassOptionRow(ProjectCopy.modeChoiceLabel(.autoUpload), fill: .solid(GlassTokens.Color.menuModeArmed),
-                           checked: rollup == .armed) {}
-            GlassOptionRow(ProjectCopy.modeChoiceLabel(.ignore), fill: .solid(GlassTokens.Color.menuModeNever),
-                           checked: rollup == .never) {}
+        if let copy = Self.modeCopy {
+            if store.status?.contributionOverride != nil {
+                Text(copy.overrideActive)
+                    .glassType(GlassTokens.TypeScale.caption)
+                    .foregroundStyle(GlassColor.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Group {
+                ForEach(copy.choices, id: \.mode) { choice in
+                    GlassOptionRow(
+                        choice.label,
+                        sub: MenuPanelData.partialLine(choice.mode, status: store.status, copy: copy) ?? choice.line,
+                        fill: .solid(Self.modeFill(choice.mode)),
+                        checked: MenuPanelData.rollup(choice.mode) == rollup) {}
+                }
+            }
+            .disabled(true)
         }
-        .disabled(true)
+    }
+
+    private static func modeFill(_ mode: String) -> GlassRGBA {
+        switch MenuPanelData.rollup(mode) {
+        case .armed: GlassTokens.Color.menuModeArmed
+        case .never: GlassTokens.Color.menuModeNever
+        default: GlassTokens.Color.menuModeAsk
+        }
     }
 
     /// The shipping menu's pause choices, in its words, or resume.

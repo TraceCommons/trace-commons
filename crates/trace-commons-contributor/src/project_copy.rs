@@ -198,56 +198,56 @@ pub fn arming_offer_copy(project_label: &str, count: u32) -> ArmingOfferCopy {
 // The menu-bar Contribution mode pill and its global override (#1173, R13)
 // ---------------------------------------------------------------------------
 //
-// Every sentence in this section is **DRAFT, NEEDS APPROVAL**. Each is held to
+// Every sentence in this section was approved on 2026-10-02. Each is held to
 // what the daemon does under `policy::ContributionOverride`; see "The
 // contribution override" in `docs/contributor-daemon-ipc-v1_1.md`.
 
-/// **DRAFT, NEEDS APPROVAL.** The pill's heading.
+/// The pill's heading.
 pub const CONTRIBUTION_MODE_TITLE: &str = "Contribution mode";
 
-/// **DRAFT, NEEDS APPROVAL.** The pill when folders differ and no override
+/// The pill when folders differ and no override
 /// is in force (`status.contribution_mode: "mixed"`).
 pub const CONTRIBUTION_MODE_MIXED: &str = "Mixed";
 
-/// **DRAFT, NEEDS APPROVAL.** The `notify_only` choice's label.
+/// The `notify_only` choice's label.
 pub const CONTRIBUTION_MODE_ASK_LABEL: &str = "Ask me";
-/// **DRAFT, NEEDS APPROVAL.** The `auto_upload` choice's label.
+/// The `auto_upload` choice's label.
 pub const CONTRIBUTION_MODE_AUTO_LABEL: &str = "Auto contribute";
-/// **DRAFT, NEEDS APPROVAL.** The `ignore` choice's label.
+/// The `ignore` choice's label.
 pub const CONTRIBUTION_MODE_NEVER_LABEL: &str = "Never";
 
-/// **DRAFT, NEEDS APPROVAL.** The `notify_only` sub-list line, from the
+/// The `notify_only` sub-list line, from the
 /// menu-bar handoff. True under an "Ask me" override: no folder sends
 /// unattended, and a folder set to Never stays off.
 pub const CONTRIBUTION_MODE_ASK_LINE: &str = "Every finished session waits for you.";
 
-/// **DRAFT, NEEDS APPROVAL.** The `auto_upload` sub-list line, from the
+/// The `auto_upload` sub-list line, from the
 /// handoff. It is a summary, not the disclosure: the confirmation
 /// ([`contribution_override_confirm_copy`]) carries that, including that
 /// sessions already on this Mac keep waiting and Never folders stay off.
 pub const CONTRIBUTION_MODE_AUTO_LINE: &str = "Scrubbed sessions go; the digest tells you.";
 
-/// **DRAFT, NEEDS APPROVAL.** The `ignore` sub-list line, from the handoff.
+/// The `ignore` sub-list line, from the handoff.
 pub const CONTRIBUTION_MODE_NEVER_LINE: &str = "Nothing is queued or sent.";
 
-/// **DRAFT, NEEDS APPROVAL.** Under the pill's `auto_upload` label when
+/// Under the pill's `auto_upload` label when
 /// `status.contribution_mode_partial` is true (#1208): a folder set to Never,
 /// or sessions from a folder the app could not identify, do not upload.
 pub const CONTRIBUTION_MODE_AUTO_PARTIAL: &str = "Except folders set to Never. Sessions from a folder the app can't identify still wait for you.";
 
-/// **DRAFT, NEEDS APPROVAL.** Shown under the pill while an override is in
+/// Shown under the pill while an override is in
 /// force (`status.contribution_override` not null), so it reads "override"
 /// rather than a folder roll-up.
 pub const CONTRIBUTION_OVERRIDE_ACTIVE: &str =
     "This setting is overriding each folder's own setting.";
 
-/// **DRAFT, NEEDS APPROVAL.** The action that clears the override
+/// The action that clears the override
 /// (`clear_contribution_override`).
 pub const CONTRIBUTION_OVERRIDE_CLEAR: &str = "Use each folder's own setting";
 
-/// **DRAFT, NEEDS APPROVAL.** The "Ask me" override's confirmation.
+/// The "Ask me" override's confirmation.
 pub const CONTRIBUTION_OVERRIDE_ASK_TITLE: &str = "Ask before contributing from every folder?";
-/// **DRAFT, NEEDS APPROVAL.** Held to `set_contribution_override`
+/// Held to `set_contribution_override`
 /// `notify_only`: every folder resolves to ask-first, what was approved
 /// without you and not yet sent goes back to waiting, Never folders stay off,
 /// and clearing restores each folder's own mode.
@@ -256,12 +256,11 @@ pub const CONTRIBUTION_OVERRIDE_ASK_BODY: &str = "Every folder asks you first un
      own, and anything approved without you that hasn't been sent goes back to waiting for \
      you. Folders set to Never stay off.\n\nTurning this off puts each folder back on its own \
      setting.";
-/// **DRAFT, NEEDS APPROVAL.**
 pub const CONTRIBUTION_OVERRIDE_ASK_CONFIRM: &str = "Ask me everywhere";
 
-/// **DRAFT, NEEDS APPROVAL.** The "Never" override's confirmation.
+/// The "Never" override's confirmation.
 pub const CONTRIBUTION_OVERRIDE_NEVER_TITLE: &str = "Stop contributing from every folder?";
-/// **DRAFT, NEEDS APPROVAL.** Held to `set_contribution_override` `ignore`:
+/// Held to `set_contribution_override` `ignore`:
 /// nothing is queued or sent -- `drain_approved` holds even what the
 /// contributor approved, and `approve` is refused
 /// (`contribution-override-never`) -- nothing waiting is refused, a held
@@ -273,12 +272,11 @@ pub const CONTRIBUTION_OVERRIDE_NEVER_BODY: &str = "Nothing is queued or sent fr
      puts each folder back on its own setting, and sessions you approved are sent. Sessions you \
      finish in the meantime are then treated by that setting, so a folder set to contribute \
      automatically sends them without asking.";
-/// **DRAFT, NEEDS APPROVAL.**
 pub const CONTRIBUTION_OVERRIDE_NEVER_CONFIRM: &str = "Stop everywhere";
 
-/// **DRAFT, NEEDS APPROVAL.** The "Auto contribute" override's confirmation.
+/// The "Auto contribute" override's confirmation.
 pub const CONTRIBUTION_OVERRIDE_AUTO_TITLE: &str = "Contribute automatically from every folder?";
-/// **DRAFT, NEEDS APPROVAL.** The arming body ([`ARMING_BODY`]) for every
+/// The arming body ([`ARMING_BODY`]) for every
 /// folder at once, held to `set_contribution_override` `auto_upload`: from
 /// now (nothing already on disk is sent unattended), Never folders stay off,
 /// the settle window, and what turning it off does. Its second paragraph is
@@ -292,7 +290,7 @@ pub const CONTRIBUTION_OVERRIDE_AUTO_BODY: &str = "Sessions from every folder wi
 /// The confirm button: the arming offer's own ([`ARMING_OFFER_CONFIRM`]).
 pub const CONTRIBUTION_OVERRIDE_AUTO_CONFIRM: &str = ARMING_OFFER_CONFIRM;
 
-/// **DRAFT, NEEDS APPROVAL.** Every confirmation's cancel.
+/// Every confirmation's cancel.
 pub const CONTRIBUTION_OVERRIDE_CANCEL: &str = "Cancel";
 
 /// One choice in the pill's sub-list.
@@ -304,8 +302,7 @@ pub struct ContributionModeChoice {
     pub line: &'static str,
 }
 
-/// Every word of the Contribution mode pill (#1173). **DRAFT, NEEDS
-/// APPROVAL**, every sentence.
+/// Every word of the Contribution mode pill (#1173). Approved 2026-10-02.
 #[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
 pub struct ContributionModeCopy {
     pub title: &'static str,

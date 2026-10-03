@@ -18,6 +18,9 @@ import TCShellCore
 @Observable
 final class MenuPanelStore {
     private(set) var projects: [ProjectRow]?
+    /// `status`: the core's pill roll-up (`contribution_mode`), whether an
+    /// override is in force, and whether Auto contribute is partial (#1208).
+    private(set) var status: DaemonData.Status?
     private(set) var pending: [DaemonData.QueueEntry] = []
     private(set) var kept: [DaemonData.QueueEntry] = []
     private(set) var history: [DaemonData.HistoryRow] = []
@@ -73,6 +76,7 @@ final class MenuPanelStore {
                 return nil
             }
         }
+        if let value = await read({ try await client.status() }) { status = value }
         if let value = await read({ try await client.listProjects() }) { projects = value.projects }
         if let value = await read({ try await client.listPending(projectId: nil) }) { pending = value }
         if let value = await read({ try await client.listKept() }) { kept = value }
@@ -103,14 +107,35 @@ enum MenuPanelData {
         case none
     }
 
-    static func rollup(_ modes: [ProjectMode]) -> ModeRollup {
-        guard let first = modes.first else { return .none }
-        guard modes.allSatisfy({ $0 == first }) else { return .mixed }
-        switch first {
-        case .ask: return .ask
-        case .autoUpload: return .armed
-        case .ignore: return .never
+    /// The pill's roll-up as the daemon computed it (`status
+    /// .contribution_mode`, #1208); a shell never derives it from the
+    /// folders. Unknown or absent is `none`, drawn as a dash.
+    static func rollup(_ contributionMode: String?) -> ModeRollup {
+        switch contributionMode {
+        case "notify_only": .ask
+        case "auto_upload": .armed
+        case "ignore": .never
+        case "mixed": .mixed
+        default: .none
         }
+    }
+
+    /// The pill's value: the core's label for its mode, its Mixed word,
+    /// or a dash when the core did not say.
+    static func modeValue(_ rollup: ModeRollup, mode: String?, copy: ContributionModeCopy?) -> String {
+        guard let copy else { return "—" }
+        switch rollup {
+        case .mixed: return copy.mixed
+        case .none: return "—"
+        case .ask, .armed, .never: return copy.choice(for: mode)?.label ?? "—"
+        }
+    }
+
+    /// The core's partial line, under Auto contribute exactly when the
+    /// status says it is partial (#1208).
+    static func partialLine(_ mode: String, status: DaemonData.Status?, copy: ContributionModeCopy) -> String? {
+        guard mode == "auto_upload", status?.contributionModePartial == true else { return nil }
+        return copy.autoPartial
     }
 
     /// The graph's span in days, and so its number of columns.

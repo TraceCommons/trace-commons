@@ -79,7 +79,7 @@ pub fn second_look_line(reason: &str) -> Option<&'static str> {
     }
 }
 
-/// **DRAFT, NEEDS APPROVAL.** The line for a `second_look` reason
+/// The line for a `second_look` reason
 /// [`second_look_line`] has no sentence for. Only reachable if a reason is
 /// added without one, which `every_second_look_reason_has_its_own_line`
 /// fails on; it exists so `second_look_lines` stays index-for-index with
