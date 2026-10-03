@@ -195,8 +195,7 @@ pub fn second_look_reasons(scrub: Scrub, subagents_dropped: u32) -> Vec<&'static
 /// The fields every surface publishes, inserted into a JSON object:
 /// `scrub` (always), `marks`, `content_marks` and `unsure_spans` (only when
 /// scrubbed -- ABSENT, never `0` or `null`, before), `second_look` (always,
-/// possibly empty) and `second_look_lines` (R6/R7, #1173; **DRAFT, NEEDS
-/// APPROVAL**, since `preview_copy::second_look_line` is itself draft):
+/// possibly empty) and `second_look_lines` (R6/R7, #1173):
 /// `second_look`'s reasons, in the same order, each turned into the
 /// sentence a person reads for it.
 ///

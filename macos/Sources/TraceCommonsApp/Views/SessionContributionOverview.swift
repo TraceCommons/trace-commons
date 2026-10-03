@@ -212,7 +212,7 @@ struct SessionWithdrawalAction: View {
     }
 
     private var isWithdrawable: Bool {
-        !ContributionStatusPresentation.isTerminal(currentStatus)
+        ContributionStatusPresentation.offersWithdraw(currentStatus)
     }
 
     private func shouldOfferRetry(_ result: AppModel.WithdrawalResult) -> Bool {
