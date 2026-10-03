@@ -6080,12 +6080,91 @@ async fn a_rollback_prepared_before_another_operators_rollback_is_refused() {
     );
 }
 
+/// A `deactivate` prepared in one incident does not reopen intake in the next
+/// one (review of the fix wave, C4). The tenant is contained, opened again,
+/// and contained again. A `deactivate` that names the first containment's
+/// record id is `409 pipeline_routing_state_changed`; one that names only
+/// `expected_state = contained`, which holds in both incidents, is `409
+/// pipeline_routing_expectation_required`; the tenant stays contained after
+/// each. The record id in force passes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_deactivate_prepared_for_an_earlier_containment_is_refused() {
+    let Some(fixture) = RouteFixture::new().await else {
+        return;
+    };
+    fixture.qualify(&fixture.a).await;
+    let contain = serde_json::json!({ "reason_code": "contain_for_incident" });
+    let body = fixture.activate_body(&fixture.a, "activate_bundle_a").await;
+    fixture.change_routing(ACTIVATE, body).await;
+    let first = fixture.change_routing(CONTAIN, contain.clone()).await;
+    let body = fixture.activate_body(&fixture.a, "reopen_bundle_a").await;
+    fixture.change_routing(ACTIVATE, body).await;
+    let second = fixture.change_routing(CONTAIN, contain).await;
+    assert_ne!(
+        first["activation_record_id"],
+        second["activation_record_id"]
+    );
+
+    for (what, expectation, label) in [
+        (
+            "the first containment's record id",
+            serde_json::json!({ "expected_record_id": first["activation_record_id"] }),
+            "pipeline_routing_state_changed",
+        ),
+        (
+            "the first containment's record id beside the state",
+            serde_json::json!({
+                "expected_state": "contained",
+                "expected_record_id": first["activation_record_id"],
+            }),
+            "pipeline_routing_state_changed",
+        ),
+        (
+            "the state alone",
+            serde_json::json!({ "expected_state": "contained" }),
+            "pipeline_routing_expectation_required",
+        ),
+    ] {
+        let mut body = expectation;
+        body["reason_code"] = serde_json::json!("deactivate_prepared_earlier");
+        fixture
+            .assert_change_refused(DEACTIVATE, body, StatusCode::CONFLICT, label, what)
+            .await;
+        let (status, refused, _) = fixture.upload(&fixture.state, "still_contained").await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{what}: {refused}");
+        assert_eq!(
+            refused["error"], "pipeline_receipt_intake_contained",
+            "{what}"
+        );
+    }
+    let (status, view) = fixture
+        .admin_call("GET", "/v1/admin/pipeline/routing", None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{view}");
+    assert_eq!(view["routing_state"], "contained");
+    assert_eq!(view["activation_record_id"], second["activation_record_id"]);
+
+    let legacy = fixture
+        .change_routing(
+            DEACTIVATE,
+            serde_json::json!({
+                "reason_code": "deactivate_to_legacy",
+                "expected_record_id": second["activation_record_id"],
+            }),
+        )
+        .await;
+    assert_eq!(legacy["routing_state"], "legacy");
+}
+
 /// A `deactivate` of a contained tenant needs an expectation (plan review
 /// G11): with none it is `409 pipeline_routing_expectation_required` and the
 /// tenant stays contained, so a request prepared for a `pipeline` tenant
 /// cannot reopen intake on the legacy path after an incident's `contain`.
-/// With `expected_state = contained`, or with the record id in force, it
-/// passes. An expectation that does not hold is `409
+/// The expectation it needs is the record id in force (review of the fix
+/// wave, C4): `expected_state = contained` alone is `409
+/// pipeline_routing_expectation_required` too, because the state does not
+/// tell two containments apart. With the record id in force it passes, alone
+/// or beside the state. An expectation that does not hold is `409
 /// pipeline_routing_state_changed`. A `deactivate` of a `pipeline` tenant
 /// needs none.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -6166,18 +6245,24 @@ async fn a_deactivate_of_a_contained_tenant_needs_an_expectation() {
         }
     }
 
-    // Each form of the expectation passes from `contained`.
-    let legacy = fixture
-        .change_routing(
+    // The state alone is not enough from `contained`, although it holds.
+    fixture
+        .assert_change_refused(
             DEACTIVATE,
             serde_json::json!({
                 "reason_code": "deactivate_to_legacy",
                 "expected_state": "contained",
             }),
+            StatusCode::CONFLICT,
+            "pipeline_routing_expectation_required",
+            "the state alone for a contained tenant",
         )
         .await;
-    assert_eq!(legacy["routing_state"], "legacy");
-    let contained = fixture.change_routing(CONTAIN, contain.clone()).await;
+    let (status, refused, _) = fixture.upload(&fixture.state, "state_alone").await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{refused}");
+    assert_eq!(refused["error"], "pipeline_receipt_intake_contained");
+
+    // The record id in force passes, alone and beside the state.
     let legacy = fixture
         .change_routing(
             DEACTIVATE,
@@ -6791,6 +6876,72 @@ async fn the_start_check_warns_for_each_pipeline_tenant_not_qualified() {
     assert_eq!(incomplete, expected);
 }
 
+/// The start check has one time limit for the whole loop, not one for each
+/// tenant (review of the fix wave, C3): the process must not wait N times the
+/// limit before it listens. Here the store's pool has one connection and the
+/// test holds it, so each read waits for a connection. The check returns at
+/// the limit with one warning that carries the count of the listed tenants it
+/// did not read, and no warning for a tenant.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_start_check_stops_at_its_time_limit_with_one_warning() {
+    use pipeline_activation::{
+        PIPELINE_QUALIFICATION_START_CHECK_INCOMPLETE_LABEL,
+        warn_pipeline_tenants_not_qualified_within,
+    };
+
+    let Some(fixture) = RouteFixture::new().await else {
+        return;
+    };
+    let gates = &fixture.state.tenant_rollout_gates;
+    let listed = gates
+        .tenant_ids(TraceTenantRolloutFeature::PipelineReceipts)
+        .len();
+    assert!(listed >= 2, "the fixture lists {listed} tenants");
+    let backend = runtime_backend(1)
+        .await
+        .expect("the suite's database variable is set");
+    let held = backend
+        .trace_pool_for_test()
+        .get()
+        .await
+        .expect("the pool's one connection");
+    let waiting = PipelineActivationStore::new(backend.clone());
+    let limit = StdDuration::from_millis(300);
+
+    let logs = CapturedLogs::start();
+    let started = std::time::Instant::now();
+    let warnings =
+        warn_pipeline_tenants_not_qualified_within(&waiting, gates, Some(&fixture.revision), limit)
+            .await;
+    let elapsed = started.elapsed();
+    let lines = logs.lines();
+    drop(logs);
+    drop(held);
+
+    assert_eq!(
+        warnings,
+        vec![(
+            String::new(),
+            PIPELINE_QUALIFICATION_START_CHECK_INCOMPLETE_LABEL
+        )],
+        "one warning for the whole check"
+    );
+    assert!(
+        elapsed >= limit && elapsed < limit * 2,
+        "one limit for {listed} tenants, not one each: {elapsed:?}"
+    );
+    let incomplete = lines
+        .iter()
+        .filter(|line| line.contains(PIPELINE_QUALIFICATION_START_CHECK_INCOMPLETE_LABEL))
+        .collect::<Vec<_>>();
+    assert_eq!(incomplete.len(), 1, "{lines:?}");
+    assert!(
+        incomplete[0].contains(&format!("tenants_not_read={listed}"))
+            && incomplete[0].contains("timed_out=true"),
+        "{incomplete:?}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Review round 1, point 8 (amendment A12, owner answer O4): each write route
 // appends one row to `main`'s audit log after its change committed.
@@ -7177,7 +7328,10 @@ async fn a_failed_audit_append_after_a_committed_change_answers_its_label() {
     );
 
     fail_next_audit_file_append(fixture.dir.path(), tenant);
+    let logs = CapturedLogs::start();
     assert_eq!(contain().await, committed_audit_failed);
+    let lines = logs.lines();
+    drop(logs);
 
     // The change is in place: the row, its event, and the upload refusal.
     let routing = fixture
@@ -7187,6 +7341,34 @@ async fn a_failed_audit_append_after_a_committed_change_answers_its_label() {
         .expect("the routing reads")
         .expect("the tenant has a routing row");
     assert_eq!(routing.routing_state, RoutingState::Contained);
+    // The info line is written before the append, so a change whose append
+    // failed (or whose request was dropped during it) still has its line.
+    // The error line names the record id in force, which `GET routing` cannot
+    // show until the repair and the next `activate` needs.
+    assert_eq!(
+        lines
+            .iter()
+            .filter(
+                |line| line.contains("pipeline admin action recorded") && line.contains("contain")
+            )
+            .count(),
+        1,
+        "{lines:?}"
+    );
+    let record_id = routing.activation_record_id.to_string();
+    let failed = lines
+        .iter()
+        .filter(|line| line.contains("its audit row was not appended"))
+        .collect::<Vec<_>>();
+    assert_eq!(failed.len(), 1, "{lines:?}");
+    assert!(
+        failed[0].contains(&format!("activation_record_id={record_id}")),
+        "{failed:?}"
+    );
+    assert!(
+        !lines.iter().any(|line| line.contains(tenant)),
+        "no line holds the tenant id"
+    );
     assert_ne!(serde_json::json!(routing.activation_record_id), activated);
     assert_eq!(
         fixture.store().events(tenant, 10).await.unwrap().len(),
@@ -7246,5 +7428,161 @@ async fn a_failed_audit_append_after_a_committed_change_answers_its_label() {
     assert_eq!(fixture.activation_audits(tenant), expected);
     fixture
         .assert_audit_chain_verifies(tenant, "after the repair")
+        .await;
+}
+
+/// `backup-restore.md`, step 3 (review of the fix wave, D1): after a database
+/// restore the tenant's audit file can hold events that the restored
+/// database lost, so the file's chain is ahead of the database's. With a
+/// required mirror, `GET routing` then answers `500` (its read audit row is
+/// refused as stale), a `contain` commits and answers `500
+/// pipeline_change_committed_audit_failed` with the record id in its error
+/// line, and the chain repair answers `409 file_head_not_in_db`. `main`'s
+/// mirror backfill (`POST /v1/admin/maintenance` with `backfill_db_mirror`)
+/// writes the database rows of the file's events in file order, and its own
+/// audit row after them. After it the routing read answers, shows the
+/// containment with the id from the error line, and an `activate` that names
+/// that id passes with its audit row.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_mirror_backfill_levels_an_audit_file_that_is_ahead_of_the_database() {
+    let Some(fixture) = RouteFixture::new().await else {
+        return;
+    };
+    let tenant = fixture.tenant.as_str();
+    fixture.qualify_and_activate_a().await;
+    fixture
+        .assert_audit_chain_verifies(tenant, "before the file moves ahead")
+        .await;
+
+    // The state after a restore: two events in the file that the database
+    // does not have. A state with no database mirror appends to the file
+    // only.
+    let file_only = fixture.with(|state| {
+        state.db_mirror = None;
+        state.require_db_mirror_writes = false;
+    });
+    let auth = TenantAuth {
+        principal_ref: static_token_principal_ref(&fixture.admin),
+        ..test_admin_auth(tenant)
+    };
+    for label in ["pipeline_contain", "pipeline_deactivate"] {
+        append_audit_event_with_db_mirror(
+            file_only.as_ref(),
+            &auth,
+            TraceCommonsAuditEvent::pipeline_activation(&auth, label),
+            StorageTraceAuditAction::PolicyUpdate,
+            StorageTraceAuditSafeMetadata::Maintenance {
+                surface: Some(PIPELINE_ACTIVATION_AUDIT_KIND.to_string()),
+                purpose_hash: Some(sha256_prefixed(label)),
+                dry_run: false,
+                action_counts: BTreeMap::from([(label.to_string(), 1)]),
+            },
+        )
+        .await
+        .expect("the file-only append");
+    }
+    let rows_before = fixture.audit_rows(tenant).await.len();
+    let file_before = read_all_audit_events(fixture.dir.path(), tenant)
+        .expect("the audit log reads")
+        .len();
+    assert_eq!(file_before, rows_before + 2, "the file is two events ahead");
+
+    // The routing read, a containment, and the chain repair in that state.
+    let routing_read = || fixture.admin_call("GET", "/v1/admin/pipeline/routing", None);
+    let (status, view) = routing_read().await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{view}");
+    let logs = CapturedLogs::start();
+    let (status, answer) = fixture
+        .admin_call(
+            "POST",
+            CONTAIN,
+            Some(serde_json::json!({ "reason_code": "contain_after_restore" })),
+        )
+        .await;
+    let lines = logs.lines();
+    drop(logs);
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{answer}");
+    assert_eq!(
+        answer,
+        serde_json::json!({ "error": "pipeline_change_committed_audit_failed" })
+    );
+    let contained = fixture
+        .store()
+        .routing(tenant)
+        .await
+        .expect("the routing reads")
+        .expect("the tenant has a routing row");
+    assert_eq!(contained.routing_state, RoutingState::Contained);
+    let record_id = contained.activation_record_id.to_string();
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("its audit row was not appended")
+                && line.contains(&format!("activation_record_id={record_id}"))),
+        "{lines:?}"
+    );
+    let (status, refused) = fixture
+        .admin_call(
+            "POST",
+            "/v1/admin/audit-chain-repair",
+            Some(serde_json::json!({ "dry_run": false, "purpose": "pr5 restore test" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{refused}");
+    assert_eq!(
+        refused["error"],
+        "Trace Commons audit chain repair refused: file_head_not_in_db"
+    );
+    assert_eq!(fixture.audit_rows(tenant).await.len(), rows_before);
+
+    // The backfill: the two rows, then the maintenance call's own row.
+    let (status, report) = fixture
+        .admin_call(
+            "POST",
+            "/v1/admin/maintenance",
+            Some(serde_json::json!({
+                "backfill_db_mirror": true,
+                "prune_export_cache": false,
+                "purpose": "pr5 restore test",
+            })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{report}");
+    assert_eq!(report["db_mirror_backfill_failed"], 0, "{report}");
+    assert!(
+        report["db_mirror_backfilled"].as_u64().unwrap_or(0) >= 2,
+        "{report}"
+    );
+    assert_eq!(
+        fixture.audit_rows(tenant).await.len(),
+        rows_before + 3,
+        "the two lost rows and the maintenance row"
+    );
+    fixture
+        .assert_audit_chain_verifies(tenant, "after the backfill")
+        .await;
+
+    // The routing read answers, and the tenant can be opened with the id.
+    let (status, view) = routing_read().await;
+    assert_eq!(status, StatusCode::OK, "{view}");
+    assert_eq!(view["routing_state"], "contained");
+    assert_eq!(view["activation_record_id"], record_id.as_str());
+    let audits_before = fixture.activation_audits(tenant);
+    let reopened = fixture
+        .change_routing(
+            ACTIVATE,
+            fixture.activate_body_expecting(
+                &fixture.a,
+                "activate_after_restore",
+                &view["activation_record_id"],
+            ),
+        )
+        .await;
+    assert_eq!(reopened["routing_state"], "pipeline");
+    let mut expected = audits_before;
+    expected.push("pipeline_activate".to_string());
+    assert_eq!(fixture.activation_audits(tenant), expected);
+    fixture
+        .assert_audit_chain_verifies(tenant, "after the activation")
         .await;
 }

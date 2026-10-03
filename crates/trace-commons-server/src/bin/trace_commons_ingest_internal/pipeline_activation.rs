@@ -53,10 +53,11 @@
 //! Each of the six write routes appends one row to `main`'s audit log after
 //! its store call committed (review round 1, point 8): an event of the kind
 //! `pipeline_activation` whose one count is the action's label
-//! (`record_action`). The row is appended after the change, never inside its
-//! transaction, so a failed append does not undo the change: the route then
-//! answers `500` `pipeline_change_committed_audit_failed`. A refused request
-//! appends no row.
+//! (`record_action`). The row is appended after the change and after the
+//! change's log line, never inside its transaction, so a failed append does
+//! not undo the change: the route then answers `500`
+//! `pipeline_change_committed_audit_failed`. A refused request appends no
+//! row.
 //!
 //! Four of the nine routes need the routing store and no runtime: `GET
 //! routing`, `GET legacy-drain`, `POST contain`, and `POST deactivate`
@@ -574,14 +575,20 @@ pub(crate) const PIPELINE_ACTIVE_BUNDLE_NOT_QUALIFIED_LABEL: &str =
 /// `pipeline` tenant (`503 bundle_runtime_revision_unknown`), and no
 /// qualification can be recorded on it.
 pub(crate) const PIPELINE_CODE_REVISION_UNSET_LABEL: &str = "pipeline_code_revision_unset";
-/// The start warning for a listed tenant whose routing could not be read in
-/// `PIPELINE_START_CHECK_READ_TIMEOUT` (a failed read, or one that ran out of
-/// time): nothing is known about that tenant, and the start goes on.
+/// The start warning for a start check that did not read every listed tenant:
+/// one for each tenant whose read failed (with its `tenant_storage_ref`), and
+/// one in all when the check ran out of `PIPELINE_START_CHECK_TIMEOUT` (with
+/// `tenants_not_read`, the count of the listed tenants it did not read).
+/// Nothing is known about those tenants, and the start goes on.
 pub(crate) const PIPELINE_QUALIFICATION_START_CHECK_INCOMPLETE_LABEL: &str =
     "pipeline_qualification_start_check_incomplete";
-/// The time limit of each read of the start check: 5 seconds, the wait an
-/// operator's routing change allows itself (`PIPELINE_ADMIN_LOCK_TIMEOUT_SQL`).
-const PIPELINE_START_CHECK_READ_TIMEOUT: StdDuration = StdDuration::from_secs(5);
+/// The time limit of the whole start check, for all its reads together: 5
+/// seconds, the wait an operator's routing change allows itself
+/// (`PIPELINE_ADMIN_LOCK_TIMEOUT_SQL`). The process does not listen before
+/// the check returns, so the limit is not one for each tenant: a long
+/// receipts list and a slow database would then hold the start for the
+/// product of the two.
+const PIPELINE_START_CHECK_TIMEOUT: StdDuration = StdDuration::from_secs(5);
 
 /// At start, for a process that is not started for unqualified routing
 /// (review round 1, point 3; amendment A9): says which tenants on this
@@ -596,16 +603,37 @@ const PIPELINE_START_CHECK_READ_TIMEOUT: StdDuration = StdDuration::from_secs(5)
 /// (`pipeline_code_revision_unset`) and reads nothing: no bundle is qualified
 /// on no revision. An empty list logs nothing.
 ///
-/// It only logs. Each read has `PIPELINE_START_CHECK_READ_TIMEOUT`; a read
-/// that fails or runs out of time is one warning for its tenant
+/// It only logs. A read that fails is one warning for its tenant
 /// (`pipeline_qualification_start_check_incomplete`) and the next tenant is
-/// read. It never refuses the start: the upload path makes the same read and
-/// is what refuses. Returns each warning it logged, as `(tenant_storage_ref,
-/// label)` with an empty reference for the revision warning, for the tests.
+/// read. All the reads together have `PIPELINE_START_CHECK_TIMEOUT`: when it
+/// ends, the check stops with one warning of the same label that carries the
+/// count of the tenants it did not read (the one whose read was waiting, and
+/// each one after it), so no tenant is left out without a line. It never
+/// refuses the start: the upload path makes the same read and is what
+/// refuses. Returns each warning it logged, as `(tenant_storage_ref, label)`
+/// with an empty reference for the revision warning and for the time limit's
+/// warning, for the tests.
 pub(crate) async fn warn_pipeline_tenants_not_qualified(
     activation: &PipelineActivationStore,
     tenant_rollout_gates: &TraceTenantRolloutGates,
     deployed_revision: Option<&str>,
+) -> Vec<(String, &'static str)> {
+    warn_pipeline_tenants_not_qualified_within(
+        activation,
+        tenant_rollout_gates,
+        deployed_revision,
+        PIPELINE_START_CHECK_TIMEOUT,
+    )
+    .await
+}
+
+/// `warn_pipeline_tenants_not_qualified` with the time limit of the whole
+/// check as `limit`, for the tests.
+pub(crate) async fn warn_pipeline_tenants_not_qualified_within(
+    activation: &PipelineActivationStore,
+    tenant_rollout_gates: &TraceTenantRolloutGates,
+    deployed_revision: Option<&str>,
+    limit: StdDuration,
 ) -> Vec<(String, &'static str)> {
     let tenant_ids = tenant_rollout_gates.tenant_ids(TraceTenantRolloutFeature::PipelineReceipts);
     let mut warnings = Vec::new();
@@ -620,10 +648,12 @@ pub(crate) async fn warn_pipeline_tenants_not_qualified(
         warnings.push((String::new(), PIPELINE_CODE_REVISION_UNSET_LABEL));
         return warnings;
     };
-    for tenant_id in tenant_ids {
+    let deadline = tokio::time::Instant::now() + limit;
+    let listed = tenant_ids.len();
+    for (read_before, tenant_id) in tenant_ids.into_iter().enumerate() {
         let storage_ref = tenant_storage_ref(&tenant_id);
-        let read = tokio::time::timeout(
-            PIPELINE_START_CHECK_READ_TIMEOUT,
+        let read = tokio::time::timeout_at(
+            deadline,
             activation.routing_for_new_receipt(&tenant_id, Some(revision)),
         )
         .await;
@@ -650,12 +680,19 @@ pub(crate) async fn warn_pipeline_tenants_not_qualified(
                 PIPELINE_QUALIFICATION_START_CHECK_INCOMPLETE_LABEL
             }
             Err(_) => {
+                // The time limit of the whole check: this tenant and each
+                // one after it were not read.
                 tracing::warn!(
-                    tenant_storage_ref = %storage_ref,
+                    tenants_not_read = listed - read_before,
+                    listed_tenant_count = listed,
                     timed_out = true,
                     "{PIPELINE_QUALIFICATION_START_CHECK_INCOMPLETE_LABEL}"
                 );
-                PIPELINE_QUALIFICATION_START_CHECK_INCOMPLETE_LABEL
+                warnings.push((
+                    String::new(),
+                    PIPELINE_QUALIFICATION_START_CHECK_INCOMPLETE_LABEL,
+                ));
+                break;
             }
         };
         warnings.push((storage_ref, label));
@@ -708,8 +745,15 @@ fn audit_action_label(action: &str) -> String {
     format!("pipeline_{action}")
 }
 
-/// Records one successful action, after its store call committed: one row in
-/// `main`'s audit log, then one log line.
+/// Records one successful action, after its store call committed: one log
+/// line, then one row in `main`'s audit log.
+///
+/// The log line: the tenant's storage reference, the action label, and the
+/// evidence hash of what the change recorded. Never the package, a token, or
+/// the tenant id. It is written before the append, with no await between the
+/// store call's return and the line: a request that is dropped while the
+/// append waits (a client that closed the connection) still leaves the line
+/// of its committed change.
 ///
 /// The audit row is a control-plane row of the kind `pipeline_activation`
 /// (`TraceCommonsAuditEvent::pipeline_activation`): the actor, the time, and
@@ -718,18 +762,23 @@ fn audit_action_label(action: &str) -> String {
 /// `pipeline_activation_events`, `pipeline_bundle_qualifications`, or
 /// `pipeline_policy_interventions`. It needs no runtime.
 ///
-/// The log line: the tenant's storage reference, the action label, and the
-/// evidence hash of what the change recorded. Never the package, a token, or
-/// the tenant id.
-///
 /// A failed append answers `committed_change_audit_failure`: the change is in
-/// place and the request is not to be repeated.
+/// place and the request is not to be repeated. `activation_record_id` is the
+/// id of the routing event that the change wrote, for a routing change, and
+/// goes into that failure's error line.
 async fn record_action(
     state: &AppState,
     tenant: &TenantAuth,
     action: &'static str,
     evidence_hash: &str,
+    activation_record_id: Option<Uuid>,
 ) -> ApiResult<()> {
+    tracing::info!(
+        tenant_storage_ref = %tenant_storage_ref(&tenant.tenant_id),
+        action,
+        evidence_hash,
+        "pipeline admin action recorded"
+    );
     let action_label = audit_action_label(action);
     let appended = append_audit_event_with_db_mirror(
         state,
@@ -749,38 +798,52 @@ async fn record_action(
             tenant,
             action,
             evidence_hash,
+            activation_record_id,
             &error,
         ));
     }
-    tracing::info!(
-        tenant_storage_ref = %tenant_storage_ref(&tenant.tenant_id),
-        action,
-        evidence_hash,
-        "pipeline admin action recorded"
-    );
     Ok(())
 }
 
 /// The answer of a write route whose change committed and whose audit append
 /// failed (owner answer O4): `500` `pipeline_change_committed_audit_failed`,
 /// and one error line with the tenant's storage reference, the action label,
-/// the change's evidence hash, and the hash of the error. The label says that
-/// the change is in place, so that an operator reads the routing and does not
-/// send the request again (a second `contain` would append a second event,
-/// and a second `activate` would answer `pipeline_routing_state_changed`).
+/// the change's evidence hash, the hash of the error, and, for a routing
+/// change, the `activation_record_id` that the change put in force. That id
+/// is the id of an event in `pipeline_activation_events`, a random UUID that
+/// names no tenant, principal, or trace (`main`'s error lines name a
+/// submission id or an audit event id in the same way). The answer has no
+/// routing row, and `GET /v1/admin/pipeline/routing` cannot answer while the
+/// tenant's audit chain refuses a row, so the line is where an operator
+/// reads the id that the next `activate`, `rollback`, or `deactivate` must
+/// name. The label says that the change is in place, so that an operator
+/// reads the routing and does not send the request again (a second `contain`
+/// would append a second event, and a second `activate` would answer
+/// `pipeline_routing_state_changed`).
 fn committed_change_audit_failure(
     tenant: &TenantAuth,
     action: &'static str,
     evidence_hash: &str,
+    activation_record_id: Option<Uuid>,
     error: &anyhow::Error,
 ) -> (StatusCode, Json<ApiError>) {
-    tracing::error!(
-        tenant_storage_ref = %tenant_storage_ref(&tenant.tenant_id),
-        action,
-        evidence_hash,
-        error_hash = %safe_display_error_hash(error),
-        "pipeline admin action committed and its audit row was not appended"
-    );
+    match activation_record_id {
+        Some(activation_record_id) => tracing::error!(
+            tenant_storage_ref = %tenant_storage_ref(&tenant.tenant_id),
+            action,
+            evidence_hash,
+            activation_record_id = %activation_record_id,
+            error_hash = %safe_display_error_hash(error),
+            "pipeline admin action committed and its audit row was not appended"
+        ),
+        None => tracing::error!(
+            tenant_storage_ref = %tenant_storage_ref(&tenant.tenant_id),
+            action,
+            evidence_hash,
+            error_hash = %safe_display_error_hash(error),
+            "pipeline admin action committed and its audit row was not appended"
+        ),
+    }
     api_error(
         StatusCode::INTERNAL_SERVER_ERROR,
         PIPELINE_CHANGE_COMMITTED_AUDIT_FAILED_LABEL,
@@ -845,9 +908,11 @@ where
 /// store checks each one that the body has under the routing lock (`409
 /// pipeline_routing_state_changed`); when both are sent, both must hold. A
 /// `contain` in an emergency needs none. A `deactivate` of a contained tenant
-/// needs one (`409 pipeline_routing_expectation_required`, the store's
-/// refusal). Only an absent field means "no expectation": an explicit `null`
-/// is `422 pipeline_request_invalid` (`present_expectation`).
+/// needs `expected_record_id` (`409 pipeline_routing_expectation_required`,
+/// the store's refusal, without it; `expected_state` alone is not enough
+/// there, because the state does not tell two containments apart). Only an
+/// absent field means "no expectation": an explicit `null` is `422
+/// pipeline_request_invalid` (`present_expectation`).
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ReasonBody {
@@ -1134,6 +1199,7 @@ pub(crate) async fn pipeline_qualify_handler(
         &tenant,
         "qualify",
         &record.metadata.evidence_hash,
+        None,
     )
     .await?;
     Ok(Json(record))
@@ -1167,7 +1233,14 @@ pub(crate) async fn pipeline_activate_handler(
                 &inputs.promotion,
             )
         })?;
-    record_action(state.as_ref(), &tenant, "activate", &routing.evidence_hash).await?;
+    record_action(
+        state.as_ref(),
+        &tenant,
+        "activate",
+        &routing.evidence_hash,
+        Some(routing.activation_record_id),
+    )
+    .await?;
     Ok(Json(routing))
 }
 
@@ -1196,7 +1269,14 @@ pub(crate) async fn pipeline_rollback_handler(
                 &inputs.promotion,
             )
         })?;
-    record_action(state.as_ref(), &tenant, "rollback", &routing.evidence_hash).await?;
+    record_action(
+        state.as_ref(),
+        &tenant,
+        "rollback",
+        &routing.evidence_hash,
+        Some(routing.activation_record_id),
+    )
+    .await?;
     Ok(Json(routing))
 }
 
@@ -1221,7 +1301,14 @@ pub(crate) async fn pipeline_contain_handler(
         )
         .await
         .map_err(activation_error)?;
-    record_action(state.as_ref(), &tenant, "contain", &routing.evidence_hash).await?;
+    record_action(
+        state.as_ref(),
+        &tenant,
+        "contain",
+        &routing.evidence_hash,
+        Some(routing.activation_record_id),
+    )
+    .await?;
     Ok(Json(routing))
 }
 
@@ -1251,6 +1338,7 @@ pub(crate) async fn pipeline_deactivate_handler(
         &tenant,
         "deactivate",
         &routing.evidence_hash,
+        Some(routing.activation_record_id),
     )
     .await?;
     Ok(Json(routing))
@@ -1286,7 +1374,7 @@ pub(crate) async fn pipeline_policy_intervention_handler(
         PolicyOperationalStatus::Runnable => "policy_resume",
         PolicyOperationalStatus::Terminated => "policy_terminate",
     };
-    record_action(state.as_ref(), &tenant, action, &record.evidence_hash).await?;
+    record_action(state.as_ref(), &tenant, action, &record.evidence_hash, None).await?;
     Ok(Json(record))
 }
 
@@ -1913,6 +2001,7 @@ mod tests {
             &tenant,
             "contain",
             "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            Some(Uuid::nil()),
             &error,
         );
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
