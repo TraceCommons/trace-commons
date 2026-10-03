@@ -72,6 +72,13 @@ pub fn contributor_disclosure_copy() -> Value {
             "held_row_body": crate::history_copy::HELD_ROW_BODY,
             "status_awaiting_pii_backstop": awaiting_pii_backstop,
             "status_unavailable": crate::history_copy::STATUS_UNAVAILABLE,
+            // History's word for each status (`history_copy::STATUS_LABELS`),
+            // keyed by wire status. A status not in it is
+            // `status_unavailable`.
+            "status_labels": crate::history_copy::STATUS_LABELS
+                .iter()
+                .map(|row| (row.status.to_owned(), Value::from(row.label)))
+                .collect::<serde_json::Map<String, Value>>(),
         },
         "outcome": crate::outcome_copy::outcome_copy(),
         "private_inference": {
@@ -256,6 +263,26 @@ mod tests {
                 .and_then(Value::as_str),
             Some(crate::history_copy::STATUS_UNAVAILABLE)
         );
+    }
+
+    /// History's status table is carried whole, keyed by wire status, so
+    /// Windows and Tauri look a status up rather than typing its word.
+    #[test]
+    fn history_copy_carries_the_status_label_table() {
+        let copy = contributor_disclosure_copy();
+        let labels = copy
+            .pointer("/history_ui/status_labels")
+            .and_then(Value::as_object)
+            .expect("history_ui carries status_labels");
+        assert_eq!(labels.len(), crate::history_copy::STATUS_LABELS.len());
+        for row in crate::history_copy::STATUS_LABELS {
+            assert_eq!(
+                labels.get(row.status).and_then(Value::as_str),
+                Some(row.label),
+                "{}",
+                row.status
+            );
+        }
     }
 
     /// Each source tool's three check lines are the source table's.

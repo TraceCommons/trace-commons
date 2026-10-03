@@ -1068,6 +1068,36 @@ fn copy_commands_reach_the_frontend_through_tauri_and_render_at_safety_surfaces(
     );
     assert!(history_model.contains("still being scored"));
 
+    // History's status words are the core's table
+    // (`history_copy::STATUS_LABELS`, carried as `history_ui.status_labels`),
+    // looked up rather than typed: no word in it, and not the unavailable
+    // label, is a literal in the shell's status function.
+    let eligibility_source = read(
+        &root,
+        "tauri-desktop/frontend/src/features/history/withdrawal-eligibility.ts",
+    );
+    let eligibility_code = code_only(&eligibility_source);
+    assert!(eligibility_code.contains("shared.status_labels"));
+    assert!(eligibility_code.contains("shared.status_unavailable"));
+    for word in trace_commons_contributor::history_copy::STATUS_LABELS
+        .iter()
+        .map(|row| row.label)
+        .chain([trace_commons_contributor::history_copy::STATUS_UNAVAILABLE])
+    {
+        // The raw source: `code_only` blanks string literals.
+        for quoted in [format!("\"{word}\""), format!("'{word}'")] {
+            assert!(
+                !eligibility_source.contains(&quoted),
+                "withdrawal-eligibility.ts types the core's status word {word:?}"
+            );
+        }
+    }
+    let copy_api = read(
+        &root,
+        "tauri-desktop/frontend/src/lib/tauri/contributor-copy-api.ts",
+    );
+    assert!(copy_api.contains("stringTable(historyUi, \"status_labels\")"));
+
     let eligibility = read(
         &root,
         "tauri-desktop/frontend/src/features/waiting/components/waiting-review.tsx",

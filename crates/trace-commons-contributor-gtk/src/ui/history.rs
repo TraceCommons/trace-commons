@@ -900,16 +900,12 @@ fn explanation_is_contributor_facing(explanation: &str) -> bool {
     !explanation.contains("sha256:")
 }
 
+/// The core's word for a status (`history_copy::STATUS_LABELS`), the table
+/// every shell reads. A status it has no word for reads as
+/// `STATUS_UNAVAILABLE`, never "Waiting to be scored": that would render an
+/// absent signal as a healthy in-flight state.
 fn status_word(status: &str) -> &'static str {
-    match status {
-        "accepted" => copy::HISTORY_IN_THE_COMMONS,
-        "quarantined" => copy::QUARANTINE_HEADING,
-        "withdrawn" => copy::WITHDRAWN_BY_YOU,
-        "submitted" => copy::HISTORY_WAITING_TO_BE_SCORED,
-        // Not "Waiting to be scored": a status this screen has no word for
-        // is an absent signal, not a healthy in-flight state.
-        _ => copy::HISTORY_STATUS_UNAVAILABLE,
-    }
+    trace_commons_contributor::history_copy::status_label(status)
 }
 
 fn status_tone(status: &str) -> Tone {
@@ -1449,6 +1445,34 @@ mod tests {
         assert!(!offers_withdrawal(&record("accepted", "")));
     }
 
+    /// Every status the core knows reads as the core's word for it -- not a
+    /// word typed here, and not "Status unavailable". `rejected` and
+    /// `revoked` read "Status unavailable" before the core had a table.
+    #[test]
+    fn a_known_status_reads_as_the_cores_label() {
+        use trace_commons_contributor::history_copy::{STATUS_LABELS, STATUS_UNAVAILABLE};
+        for row in STATUS_LABELS {
+            assert_eq!(status_word(row.status), row.label, "{}", row.status);
+            assert_ne!(status_word(row.status), STATUS_UNAVAILABLE);
+        }
+        assert_eq!(status_word("rejected"), "Rejected");
+        assert_eq!(status_word("received"), "Received");
+        assert_eq!(status_word("revoked"), "Withdrawn");
+    }
+
+    /// The withdraw allowlist names only statuses the core has a word for:
+    /// a Withdraw button never sits beside "Status unavailable".
+    #[test]
+    fn every_withdrawable_status_has_a_label() {
+        for status in WITHDRAWABLE_STATUSES {
+            assert_ne!(
+                status_word(status),
+                trace_commons_contributor::history_copy::STATUS_UNAVAILABLE,
+                "{status}"
+            );
+        }
+    }
+
     #[test]
     fn a_submitted_record_is_waiting_to_be_scored() {
         assert_eq!(status_word("submitted"), copy::HISTORY_WAITING_TO_BE_SCORED);
@@ -1464,6 +1488,8 @@ mod tests {
                 trace_commons_contributor::history_copy::STATUS_UNAVAILABLE
             );
             assert!(matches!(status_tone(status), Tone::Neutral));
+            // And it is terminal: no Withdraw beside it.
+            assert!(!offers_withdrawal(&record(status, "sub-1")));
         }
     }
 
