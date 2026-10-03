@@ -2686,11 +2686,14 @@ impl PgPipelineStore {
             None => (None, None),
         };
         let row = tx
-            .query_one(
+            .query_opt(
                 // Multi-lens review L2-5: `clock_timestamp()`, not `NOW()`.
                 // A compatibility Score commits on the transaction it opened
                 // before its scorer ran, whose `NOW()` is that start: the
                 // stamps and the lease check must read the commit's time.
+                // The lease can therefore end after `ensure_current_lease`
+                // above; no row is then a stale lease, as for Settle's
+                // selection, and the caller deletes the attempt's objects.
                 "UPDATE pipeline_runs
                  SET next_phase = 'settle', state = 'pending', attempt_count = 0,
                      index_command_ref = $3, index_command_hash = $4,
@@ -2712,7 +2715,8 @@ impl PgPipelineStore {
                     &lease_token,
                 ],
             )
-            .await?;
+            .await?
+            .ok_or_else(stale_lease_error)?;
         let updated = pipeline_run_from_row(&row)?;
         // PR 4: the attempt's staged objects -- `index-command` and/or
         // `score-neighbors`, whichever this commit wrote -- move to

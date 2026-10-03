@@ -28430,6 +28430,115 @@ async fn a_slow_score_commit_stamps_the_commit_time() {
     );
 }
 
+/// A test-only trigger that delays the Score outcome insert of one tenant,
+/// so a Score commit runs past a short lease after its lease check. The
+/// commit holds the run row from that check on, so the lease renewal cannot
+/// extend the lease meanwhile. Created and dropped as the owner; scoped to
+/// one tenant, so tests running beside it are untouched.
+struct ScoreOutcomeDelay {
+    name: String,
+}
+
+impl ScoreOutcomeDelay {
+    async fn install(tenant_id: &str, seconds: f64) -> Self {
+        let name = format!("c12_delay_{}", uuid::Uuid::new_v4().simple());
+        owner_client()
+            .await
+            .batch_execute(&format!(
+                "CREATE FUNCTION {name}() RETURNS TRIGGER LANGUAGE plpgsql AS $$
+                 BEGIN
+                     PERFORM pg_sleep({seconds});
+                     RETURN NEW;
+                 END;
+                 $$;
+                 CREATE TRIGGER {name}
+                     BEFORE INSERT ON phase_outcomes
+                     FOR EACH ROW
+                     WHEN (NEW.tenant_id = '{tenant_id}' AND NEW.phase = 'score')
+                     EXECUTE FUNCTION {name}();"
+            ))
+            .await
+            .expect("install the Score outcome delay");
+        Self { name }
+    }
+
+    /// `DROP TRIGGER` takes a weak table lock and then ACCESS EXCLUSIVE, and
+    /// the control-health test drops triggers of this table too
+    /// (`rewrite_stored_bundle_package` says how two such drops deadlock),
+    /// so this takes ACCESS EXCLUSIVE first.
+    async fn remove(self) {
+        let name = self.name;
+        owner_client()
+            .await
+            .batch_execute(&format!(
+                "BEGIN;
+                 LOCK TABLE phase_outcomes IN ACCESS EXCLUSIVE MODE;
+                 DROP TRIGGER {name} ON phase_outcomes;
+                 DROP FUNCTION {name}();
+                 COMMIT;"
+            ))
+            .await
+            .expect("remove the Score outcome delay");
+    }
+}
+
+/// Multi-lens review C12: a Score commit whose lease ends by the database
+/// clock after its lease check and before its run update is refused as a
+/// stale lease, as the Settle selection is, so the attempt's objects are
+/// deleted at once and not left for the attempt sweep. Here the outcome
+/// insert, between the two, takes longer than the one-second lease.
+#[tokio::test]
+async fn a_score_commit_whose_lease_ends_before_its_run_update_deletes_its_objects() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let service = score_lease_test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        PipelineLeaseConfig::new(
+            chrono::Duration::seconds(300),
+            chrono::Duration::seconds(1),
+            chrono::Duration::seconds(300),
+        )
+        .unwrap(),
+        Arc::new(ReferenceEmbedder::new()),
+    )
+    .await;
+    let tenant = format!("score-lease-at-update-{}", uuid::Uuid::new_v4());
+    let env = envelope(uuid::Uuid::new_v4()).await;
+    let run_id = receive_envelope(&service, &tenant, RECEIPT_PRINCIPAL, &env).await;
+    let reviewed = service
+        .process_run(&tenant, run_id)
+        .await
+        .unwrap()
+        .expect("Review runs");
+    assert_eq!(reviewed.next_phase, Some(Phase::Score));
+    assert_eq!(
+        count_files_under(dir.path()),
+        2,
+        "before Score, the source and the approved revision are stored"
+    );
+
+    let delay = ScoreOutcomeDelay::install(&tenant, 1.5).await;
+    let attempt = service.process_run(&tenant, run_id).await;
+    delay.remove().await;
+    attempt.expect("a stale lease is recorded, not raised");
+    let expired = service
+        .store()
+        .get_run(&tenant, run_id)
+        .await
+        .unwrap()
+        .expect("the run");
+
+    assert_eq!(expired.next_phase, Some(Phase::Score), "nothing committed");
+    assert_eq!(
+        count_files_under(dir.path()),
+        2,
+        "the object the stale Score attempt wrote is deleted at once"
+    );
+}
+
 /// Finding 12 on a pool of one: a compatibility Score reads its approved
 /// bytes before it opens the transaction that holds the tenant's Score
 /// lock, reads the unapplied index commands and commits on that same
