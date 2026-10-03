@@ -17,6 +17,27 @@ final class FlowMapSceneTests: XCTestCase {
             scansWhenUnset: TracesTreeTests.scansWhenUnset)
     }
 
+    /// The gate as the core reports it for `set`, with `edit` applied to
+    /// the status's JSON object (the K2 recordings, edited, never a sample
+    /// set of this file's own).
+    private func gate(
+        _ set: SampleDaemonClient.SampleSet, state: ScreenState = .ready,
+        edit: (inout [String: Any]) -> Void = { _ in }
+    ) async throws -> FlowMapScene.CommonsGate {
+        let client = SampleDaemonClient(set)
+        let read = try await client.status()
+        let wire = try XCTUnwrap(TracesStore.wire(read))
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(wire.utf8)) as? [String: Any])
+        edit(&object)
+        let status = try DaemonDataDecoding.decoder().decode(
+            DaemonData.Status.self, from: JSONSerialization.data(withJSONObject: object))
+        return .init(state: state, status: status, destinations: try await client.toolDestinations())
+    }
+
+    private func flowing(_ scene: FlowMapScene) -> Int {
+        scene.arcs.filter { $0.style == .flowing }.count
+    }
+
     // MARK: Traces
 
     /// One node per tool and per drawn folder, plus this computer and the
@@ -24,7 +45,7 @@ final class FlowMapSceneTests: XCTestCase {
     func test_theTracesSceneDrawsEveryToolAndFolder() async throws {
         for set in SampleDaemonClient.SampleSet.allCases where set != .coreDown {
             let tree = try await tree(set)
-            let scene = FlowMapScene.traces(tree)
+            let scene = FlowMapScene.traces(tree, gate: try await gate(set))
             let folders = tree.tools.reduce(0) { $0 + min($1.folders.count, FlowMapScene.foldersShown) }
             XCTAssertEqual(scene.nodes.count, tree.tools.count + folders + 2, "\(set)")
             let space = CGRect(origin: .zero, size: FlowMapScene.size)
@@ -37,7 +58,7 @@ final class FlowMapSceneTests: XCTestCase {
     /// Every node has a name and a detail, so inspecting it never needs a
     /// pointer, and ids are unique so selection is unambiguous.
     func test_everyNodeIsNamedAndDescribed() async throws {
-        let scene = FlowMapScene.traces(try await tree(.normalDay))
+        let scene = FlowMapScene.traces(try await tree(.normalDay), gate: try await gate(.normalDay))
         XCTAssertEqual(Set(scene.nodes.map(\.id)).count, scene.nodes.count)
         for node in scene.nodes {
             XCTAssertFalse(node.label.isEmpty, node.id)
@@ -45,27 +66,89 @@ final class FlowMapSceneTests: XCTestCase {
         }
     }
 
-    /// The arc to the commons is drawn for a tool with a folder set to
-    /// contribute automatically, and only then; it is the only thing moving.
+    /// The arc to the commons moves for a tool with a folder set to
+    /// contribute automatically, when the core says that tool's sessions go
+    /// there and nothing stops them; it is the only thing moving.
     func test_onlyAutomaticFoldersReachTheCommons() async throws {
-        let quiet = FlowMapScene.traces(try await tree(.normalDay))
+        let quiet = FlowMapScene.traces(try await tree(.normalDay), gate: try await gate(.normalDay))
         XCTAssertFalse(quiet.flows)
         XCTAssertEqual(quiet.nodes.first { $0.id == "library" }?.kind, .library(active: false))
 
         let armed = try await tree(.armedFolder)
-        let automatic = armed.tools.filter { $0.folders.contains { $0.mode == .autoUpload } }
-        let scene = FlowMapScene.traces(armed)
-        XCTAssertEqual(scene.arcs.filter { $0.style == .flowing }.count, automatic.count)
-        XCTAssertEqual(scene.flows, !automatic.isEmpty)
-        if !automatic.isEmpty {
-            XCTAssertEqual(scene.nodes.first { $0.id == "library" }?.kind, .library(active: true))
+        let open = try await gate(.armedFolder)
+        XCTAssertTrue(open.open, "the recorded armedFolder day has nothing stopping a flow")
+        let automatic = armed.tools.filter { $0.mode != .off && $0.folders.contains { $0.mode == .autoUpload } }
+        XCTAssertFalse(automatic.isEmpty, "the recorded armedFolder day arms a folder under a tool")
+        let scene = FlowMapScene.traces(armed, gate: open)
+        XCTAssertEqual(flowing(scene), automatic.filter { open.sendsToCommons($0.kind) }.count)
+        XCTAssertTrue(scene.flows)
+        XCTAssertEqual(scene.nodes.first { $0.id == "library" }?.kind, .library(active: true))
+        // The armed count is the core's.
+        XCTAssertEqual(scene.nodes.first { $0.id == "library" }?.detail,
+                       FlowMapScene.pair(ProjectCopy.modeChoiceLabel(.autoUpload), open.destinations?.folders?.armed))
+    }
+
+    /// Nothing moves to the commons while the core says something stops it:
+    /// paused, held for review, a voided grant, a spent budget, signed out,
+    /// no route for sessions, or any of those unread. Each still draws the
+    /// armed tool's arc, dashed.
+    func test_nothingFlowsWhileTheCoreSaysItIsStopped() async throws {
+        let armed = try await tree(.armedFolder)
+        let stops: [(String, (inout [String: Any]) -> Void)] = [
+            ("paused", { $0["paused"] = true }),
+            ("held", { $0["automatic_contribution_held"] = ["held_sessions": 2, "reasons": [], "projects": []] }),
+            ("held unread", { $0["automatic_contribution_held"] = NSNull() }),
+            ("grant voided", { $0["grant_voids"] = [["id": 1, "kind": "project", "project_id": "p"]] }),
+            ("voids unread", { $0["grant_voids"] = NSNull() }),
+            ("budget spent", { object in
+                var budget = object["daily_budget"] as? [String: Any] ?? [:]
+                budget["blocked"] = true
+                object["daily_budget"] = budget
+            }),
+            ("signed out", { $0["logged_in"] = false }),
+        ]
+        for (name, edit) in stops {
+            let stopped = try await gate(.armedFolder, edit: edit)
+            let scene = FlowMapScene.traces(armed, gate: stopped)
+            XCTAssertFalse(scene.flows, name)
+            XCTAssertFalse(scene.arcs.filter { $0.style == .dashed }.isEmpty, "\(name): the armed arc is still drawn, dashed")
+            XCTAssertEqual(scene.nodes.first { $0.id == "library" }?.kind, .library(active: false), name)
         }
+    }
+
+    /// A screen that is not current never draws a flow: core down, loading,
+    /// paused, unknown, or a status or route the core did not answer.
+    func test_nothingFlowsUnlessTheScreenIsReady() async throws {
+        let armed = try await tree(.armedFolder)
+        for state in [ScreenState.coreDown, .loading, .paused, .unknown] {
+            let stale = try await gate(.armedFolder, state: state)
+            XCTAssertFalse(FlowMapScene.traces(armed, gate: stale).flows, "\(state)")
+        }
+        var unread = try await gate(.armedFolder)
+        unread.status = nil
+        XCTAssertFalse(FlowMapScene.traces(armed, gate: unread).flows, "no status")
+        unread = try await gate(.armedFolder)
+        unread.destinations = nil
+        XCTAssertFalse(FlowMapScene.traces(armed, gate: unread).flows, "no tool_destinations")
+        let nothing = FlowMapScene.traces(armed, gate: .init(state: .coreDown, status: nil, destinations: nil))
+        XCTAssertEqual(nothing.nodes.first { $0.id == "library" }?.detail,
+                       FlowMapScene.pair(ProjectCopy.modeChoiceLabel(.autoUpload), nil as Int?))
+    }
+
+    /// An off tool never flows, even with an armed folder under it.
+    func test_anOffToolNeverFlows() async throws {
+        let open = try await gate(.armedFolder)
+        let folder = TracesTree.FolderNode(id: "f", label: "f", mode: .autoUpload, sessions: [])
+        let off = TracesTree(tools: [.init(kind: .claudeCode, mode: .off, folders: [folder])], unplaced: [])
+        let scene = FlowMapScene.traces(off, gate: open)
+        XCTAssertFalse(scene.flows)
+        XCTAssertTrue(scene.arcs.allSatisfy { $0.style != .flowing && $0.style != .dashed })
     }
 
     /// An off tool is crossed out and dimmed; an unset one is never off.
     func test_offToolsAreCrossedOutAndUnsetIsNot() async throws {
         let tree = try await tree(.normalDay)
-        let scene = FlowMapScene.traces(tree)
+        let scene = FlowMapScene.traces(tree, gate: try await gate(.normalDay))
         for tool in tree.tools {
             let node = try XCTUnwrap(scene.nodes.first { $0.id == "tool:\(tool.id)" })
             guard case .tool(_, let off) = node.kind else { return XCTFail("\(node.id) is not a tool") }
@@ -79,36 +162,70 @@ final class FlowMapSceneTests: XCTestCase {
             TracesTree.FolderNode(id: "f\($0)", label: "f\($0)", mode: .ask, sessions: [])
         }
         let tree = TracesTree(tools: [.init(kind: .claudeCode, mode: .watch, folders: folders)], unplaced: [])
-        let scene = FlowMapScene.traces(tree)
+        let scene = FlowMapScene.traces(tree, gate: .init(state: .loading))
         XCTAssertEqual(scene.nodes.filter { if case .folder = $0.kind { true } else { false } }.count, FlowMapScene.foldersShown)
         XCTAssertEqual(scene.overflows.map(\.count), [2])
     }
 
     // MARK: Private AI
 
-    /// Each tool joins the destination: flowing only when the core says its
-    /// calls are answered, dashed when it is not connected.
+    /// Each tool's arc follows the core's state for it, never `connected`:
+    /// every state has its own look, and only answering moves.
     func test_thePrivateAISceneFollowsTheCoresVerdict() async throws {
         let harnesses = try await SampleDaemonClient(.normalDay).harnessList()
-        let scene = FlowMapScene.privateAI(
-            harnesses, destinationLabel: "D", sentence: { _ in nil }, answering: { $0.id == "claude" })
-        XCTAssertEqual(scene.nodes.count, harnesses.harnesses.count + 1)
-        XCTAssertEqual(scene.nodes.first?.label, "D")
-        for (row, arc) in zip(harnesses.harnesses, scene.arcs) {
-            let expected: FlowMapScene.Arc.Style =
-                row.connected && row.id == "claude" ? .flowing : row.connected ? .quiet : .dashed
-            XCTAssertEqual(arc.style, expected, row.id)
+        let states: [HarnessState] = [.answering, .connectedNoCalls, .activityShared, .notConnected, .unknown]
+        let expected: [HarnessState: FlowMapScene.Arc.Style] = [
+            .answering: .flowing, .connectedNoCalls: .quiet, .activityShared: .shared,
+            .notConnected: .dashed, .unknown: .unknown,
+        ]
+        XCTAssertEqual(Set(expected.values).count, states.count, "every state draws differently")
+        for state in states {
+            let scene = FlowMapScene.privateAI(
+                harnesses, destinationLabel: "D", privateAI: "running", sentence: { _ in nil }, state: { _ in state })
+            XCTAssertEqual(scene.nodes.count, harnesses.harnesses.count + 1)
+            XCTAssertEqual(scene.nodes.first?.label, "D")
+            XCTAssertTrue(scene.arcs.allSatisfy { $0.style == expected[state] }, "\(state)")
+            XCTAssertEqual(scene.flows, state == .answering, "\(state)")
+            XCTAssertEqual(scene.nodes.first?.kind, .destination(state == .answering ? .answering : .running), "\(state)")
         }
         // No sentence from the core: a dash, never words of the shell's own.
+        let scene = FlowMapScene.privateAI(
+            harnesses, destinationLabel: "D", privateAI: nil, sentence: { _ in nil }, state: { _ in .unknown })
         XCTAssertTrue(scene.nodes.dropFirst().allSatisfy { $0.detail == "—" })
+    }
+
+    /// The destination paints from the core's Private AI state, and unknown
+    /// is kept apart from off.
+    func test_theDestinationPaintsFromThePrivateAIState() {
+        XCTAssertEqual(FlowMapScene.lamp("running", answering: true), .answering)
+        XCTAssertEqual(FlowMapScene.lamp("running", answering: false), .running)
+        XCTAssertEqual(FlowMapScene.lamp("off", answering: false), .off)
+        XCTAssertEqual(FlowMapScene.lamp(nil, answering: false), .unknown)
+        XCTAssertEqual(FlowMapScene.lamp("a-state-from-a-later-daemon", answering: false), .unknown)
+        // Calls are never answered by a destination the core says is off.
+        XCTAssertEqual(FlowMapScene.lamp("off", answering: true), .off)
     }
 
     /// Nothing answering: nothing moves and the destination is not lit.
     func test_nothingAnsweringIsDrawnStill() async throws {
         let harnesses = try await SampleDaemonClient(.empty).harnessList()
-        let scene = FlowMapScene.privateAI(harnesses, destinationLabel: "D", sentence: { _ in nil }, answering: { _ in false })
+        let scene = FlowMapScene.privateAI(
+            harnesses, destinationLabel: "D", privateAI: "off", sentence: { _ in nil }, state: { _ in .notConnected })
         XCTAssertFalse(scene.flows)
-        XCTAssertEqual(scene.nodes.first?.kind, .destination(answering: false))
+        XCTAssertEqual(scene.nodes.first?.kind, .destination(.off))
+    }
+
+    /// A tool that is not on this Mac gets the missing-tool sentence, never
+    /// the not-connected one (`rowSentence`), and says nothing without the
+    /// core's copy.
+    func test_aMissingToolNeverSaysItIsNotConnected() throws {
+        let row = try JSONDecoder().decode(HarnessRow.self, from: Data(
+            #"{"id":"gemini","name":"Gemini CLI","installed":false,"connected":false,"connect_command":"c","state":"not_connected","can_connect":false,"can_disconnect":false}"#.utf8))
+        let calls = HarnessCalls(
+            stateCode: { _ in 31 }, planOutcomeCode: { _ in 40 }, actionAvailable: { _, _, _ in false },
+            stateLine: { _ in "NOT CONNECTED" }, lastCallLine: { _ in "" }, outcomeLine: { _ in "" },
+            spendLine: { _ in "" })
+        XCTAssertNil(MonitorWindowView.rowSentence(row, copy: nil, calls: calls))
     }
 
     func test_harnessIdsMapToTheToolsWithArtwork() {
@@ -156,14 +273,17 @@ final class FlowMapSceneTests: XCTestCase {
     /// rest; every label has a word.
     func test_onlyVerifiedReadsAsProof() {
         XCTAssertEqual(InferenceTabView.tone(.verified), .on)
-        XCTAssertEqual(InferenceTabView.tone(.failed), .outside)
+        XCTAssertEqual(InferenceTabView.tone(.failed), .failed)
+        XCTAssertNotEqual(InferenceTabView.tone(.failed), InferenceTabView.tone(.outside))
         for label in DaemonData.ProofLabel.allCases where label != .verified {
             XCTAssertNotEqual(InferenceTabView.tone(label), .on, "\(label)")
         }
         for label in DaemonData.ProofLabel.allCases {
             XCTAssertFalse(InferenceWords.proof(label).isEmpty)
         }
-        XCTAssertEqual(InferenceWords.proof("a-label-from-a-later-daemon"), InferenceWords.proof(.unrecorded))
+        // A label from a newer daemon is a dash, never a verdict.
+        XCTAssertEqual(InferenceWords.proof("a-label-from-a-later-daemon"), "—")
+        XCTAssertEqual(InferenceTabView.tone("a-label-from-a-later-daemon"), .neutral)
     }
 
     func test_toolNamesComeFromTheAdapterOrStayRaw() {
@@ -185,5 +305,47 @@ final class FlowMapSceneTests: XCTestCase {
         await busy.load()
         XCTAssertEqual(busy.calls?.readable, true)
         XCTAssertFalse(busy.calls?.calls.isEmpty ?? true)
+    }
+
+    /// Totals cover the whole window: the core's summary when it answered,
+    /// the page only when it is the whole ledger, and a dash for one page
+    /// of a longer one.
+    func test_totalsAreNeverOnePageOfMany() throws {
+        let decoder = DaemonDataDecoding.decoder()
+        let call = #"{"id":1,"at":"2026-09-30T09:00:00Z","tool":"claude-code","family":"anthropic","model":"m","route":"routed","cost":{"known":true,"priced_micros":1000},"proof":"verified"}"#
+        let whole = try decoder.decode(DaemonData.InferenceCallPage.self, from: Data(
+            #"{"readable":true,"window_hours":24,"calls":[\#(call)],"next_cursor":null}"#.utf8))
+        let partial = try decoder.decode(DaemonData.InferenceCallPage.self, from: Data(
+            #"{"readable":true,"window_hours":24,"calls":[\#(call)],"next_cursor":"c2"}"#.utf8))
+        let one = InferenceTabView.totals(whole, summary: nil)
+        XCTAssertEqual(one.calls, 1)
+        XCTAssertEqual(one.verified, 1)
+        let cut = InferenceTabView.totals(partial, summary: nil)
+        XCTAssertNil(cut.calls)
+        XCTAssertNil(cut.verified)
+        XCTAssertEqual(cut.priced, "—")
+
+        let summary = try decoder.decode(DaemonData.InferenceSummary.self, from: Data(
+            #"{"readable":true,"window_hours":24,"models":[{"model":"a","calls":120,"priced_micros":5000,"proof_counts":{"verified":70,"failed":2}},{"model":"b","calls":30,"priced_micros":1000,"proof_counts":{"pending":30}}]}"#.utf8))
+        let core = InferenceTabView.totals(partial, summary: summary)
+        XCTAssertEqual(core.calls, 150)
+        XCTAssertEqual(core.verified, 70)
+        XCTAssertEqual(core.priced, InferenceTabView.money(6000))
+
+        let unknownCalls = try decoder.decode(DaemonData.InferenceSummary.self, from: Data(
+            #"{"readable":true,"window_hours":24,"models":[{"model":"a","calls":null,"priced_micros":null,"proof_counts":null}]}"#.utf8))
+        let dashed = InferenceTabView.totals(partial, summary: unknownCalls)
+        XCTAssertNil(dashed.calls)
+        XCTAssertNil(dashed.verified)
+        XCTAssertEqual(dashed.priced, "—")
+    }
+
+    /// The Inference tab's state on a core that is down: nothing read is
+    /// drawn as a count, and the failure is recorded.
+    func test_aCoreDownInferenceStoreDrawsNoCounts() async {
+        let store = InferenceStore(client: SampleDaemonClient(.coreDown))
+        await store.load()
+        XCTAssertNil(store.calls)
+        XCTAssertNotNil(store.failures["inference_calls"])
     }
 }

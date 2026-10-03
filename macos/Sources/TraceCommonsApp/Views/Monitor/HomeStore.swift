@@ -7,11 +7,16 @@ import TCShellCore
 /// `DaemonDataClient`.
 ///
 /// Each read stands alone, as in `InferenceStore`: unreadable credit
-/// leaves the history standing. A failed read keeps the last good value.
+/// leaves the history standing. A failed read keeps the last good value
+/// under its failure notice, except the status and the tool routes: those
+/// drive what Home says is happening now, so a failed read clears them and
+/// Home says unknown rather than the last state.
 @MainActor
 @Observable
 final class HomeStore {
     private(set) var status: DaemonData.Status?
+    /// `tool_destinations`: which tools the core reads now.
+    private(set) var destinations: DaemonData.ToolDestinations?
     /// `list_history`, newest first.
     private(set) var history: [DaemonData.HistoryRow]?
     private(set) var rollup: DaemonData.HistoryRollup?
@@ -55,11 +60,16 @@ final class HomeStore {
         async let rollup: Void = loadRollup()
         async let credit: Void = loadCredit()
         async let missions: Void = loadMissions()
-        _ = await (status, history, rollup, credit, missions)
+        async let destinations: Void = loadDestinations()
+        _ = await (status, history, rollup, credit, missions, destinations)
     }
 
     private func loadStatus() async {
-        if let value = await read("status", { try await $0.status() }) { status = value }
+        status = await read("status", { try await $0.status() })
+    }
+
+    private func loadDestinations() async {
+        destinations = await read("tool_destinations", { try await $0.toolDestinations() })
     }
 
     private func loadHistory() async {
