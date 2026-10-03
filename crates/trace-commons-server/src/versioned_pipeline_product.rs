@@ -86,8 +86,8 @@ pub const PIPELINE_EXPORT_SOURCE_INVALIDATED: &str =
 /// (the Tauri app) cannot hold an integer above `2^53` exactly. `AtomicUnits`
 /// already serializes this way on its own; these two
 /// helpers give the same wire shape to the plain-`u64` amount fields in this
-/// module's product record types (`score_microcredits`, `scored_microcredits`,
-/// and `PipelineContributorCredit`'s totals) via `#[serde(with = "...")]`.
+/// module's product record types (`score_microcredits` and
+/// `scored_microcredits`) via `#[serde(with = "...")]`.
 mod decimal_amount {
     use serde::{Deserialize, Deserializer, Serializer};
 
@@ -249,7 +249,7 @@ pub struct PipelineScoreAttestationEntry {
     /// Score decided, not credit that was issued: Settle can still withhold
     /// the award (one of `main`'s credit checks refused it) or forfeit it (a
     /// withdrawal came first), and the contributor status says which
-    /// (Ruling F-M7). The same name as `PipelineContributorCredit`'s total.
+    /// (Ruling F-M7).
     #[serde(with = "decimal_amount")]
     pub scored_microcredits: u64,
     pub decision: serde_json::Value,
@@ -382,19 +382,6 @@ pub struct PipelineForensicTrace {
     pub payout_state: String,
     pub instruments: Vec<PipelineInstrumentStatus>,
     pub index_invalidation_state: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct PipelineContributorCredit {
-    #[serde(with = "decimal_amount")]
-    pub scored_microcredits: u64,
-    #[serde(with = "decimal_amount")]
-    pub finalized_microcredits: u64,
-    #[serde(with = "decimal_amount")]
-    pub pending_microcredits: u64,
-    #[serde(with = "decimal_amount")]
-    pub held_microcredits: u64,
-    pub submission_count: usize,
 }
 
 /// Shared by `contributor_statuses_for_principals` and `forensic_trace`
@@ -629,104 +616,6 @@ impl PipelineProductStore {
             .await?;
         tx.commit().await?;
         rows.iter().map(status_from_row).collect()
-    }
-
-    pub async fn own_contributor_statuses(
-        &self,
-        tenant_id: &str,
-        principal_ref: &str,
-    ) -> Result<Vec<PipelineContributorStatus>, DatabaseError> {
-        self.own_contributor_statuses_page(
-            tenant_id,
-            principal_ref,
-            None,
-            PIPELINE_STATUS_BATCH_MAX,
-        )
-        .await
-    }
-
-    pub async fn own_contributor_statuses_page(
-        &self,
-        tenant_id: &str,
-        principal_ref: &str,
-        after: Option<(DateTime<Utc>, Uuid)>,
-        limit: usize,
-    ) -> Result<Vec<PipelineContributorStatus>, DatabaseError> {
-        if limit == 0 || limit > PIPELINE_STATUS_BATCH_MAX {
-            return Err(DatabaseError::Constraint(
-                "submission status page limit is invalid".to_string(),
-            ));
-        }
-        let mut client = self.backend.trace_pool().get().await?;
-        let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
-        let (after_received_at, after_submission_id) = after
-            .map(|(received_at, submission_id)| (Some(received_at), Some(submission_id)))
-            .unwrap_or((None, None));
-        let limit = i64::try_from(limit).map_err(|_| {
-            DatabaseError::Constraint("submission status page limit is invalid".to_string())
-        })?;
-        let rows = tx
-            .query(
-                "SELECT submission_id
-                   FROM trace_submissions
-                  WHERE tenant_id = $1 AND auth_principal_ref = $2
-                    AND (
-                        $3::timestamptz IS NULL
-                        OR (received_at, submission_id) < ($3, $4)
-                    )
-                    AND EXISTS (
-                        SELECT 1 FROM pipeline_runs r
-                         WHERE r.tenant_id = trace_submissions.tenant_id
-                           AND r.submission_id = trace_submissions.submission_id
-                    )
-                  ORDER BY received_at DESC, submission_id DESC
-                  LIMIT $5",
-                &[
-                    &tenant_id,
-                    &principal_ref,
-                    &after_received_at,
-                    &after_submission_id,
-                    &limit,
-                ],
-            )
-            .await?;
-        tx.commit().await?;
-        let submission_ids = rows
-            .iter()
-            .map(|row| row.get::<_, Uuid>("submission_id"))
-            .collect::<Vec<_>>();
-        self.contributor_statuses(tenant_id, principal_ref, &submission_ids)
-            .await
-    }
-
-    pub async fn contributor_credit(
-        &self,
-        tenant_id: &str,
-        principal_ref: &str,
-    ) -> Result<PipelineContributorCredit, DatabaseError> {
-        let statuses = self
-            .own_contributor_statuses(tenant_id, principal_ref)
-            .await?;
-        let scored_microcredits = sum_trace_credit_atomic_units(&statuses, |_| true)?;
-        let finalized_microcredits = sum_trace_credit_atomic_units(&statuses, |instrument| {
-            instrument.internal_settlement_state == "finalized"
-        })?;
-        let pending_microcredits = sum_trace_credit_atomic_units(&statuses, |instrument| {
-            matches!(
-                instrument.internal_settlement_state.as_str(),
-                "pending" | "approved"
-            )
-        })?;
-        let held_microcredits = sum_trace_credit_atomic_units(&statuses, |instrument| {
-            instrument.operation_state == "held"
-        })?;
-        Ok(PipelineContributorCredit {
-            scored_microcredits,
-            finalized_microcredits,
-            pending_microcredits,
-            held_microcredits,
-            submission_count: statuses.len(),
-        })
     }
 
     pub async fn score_attestation_entries(
@@ -1466,36 +1355,6 @@ impl PipelineProductStore {
             index_invalidation_state: run.get("index_invalidation_state"),
         }))
     }
-}
-
-/// Sums `trace_credit` amounts across `statuses`' instruments matching
-/// `predicate`. `PipelineContributorCredit`'s totals stay `u64` (they mirror
-/// the Trace Credit ledger's own signed 64-bit column, bounded by
-/// `pipeline_run_settlements_trace_credit_bound`), while
-/// `PipelineInstrumentStatus.atomic_units` is `AtomicUnits` (a `u128`, #971)
-/// -- this helper is the boundary between the two, and fails closed rather
-/// than truncating if a total somehow will not fit.
-fn sum_trace_credit_atomic_units(
-    statuses: &[PipelineContributorStatus],
-    predicate: impl Fn(&PipelineInstrumentStatus) -> bool,
-) -> Result<u64, DatabaseError> {
-    statuses
-        .iter()
-        .flat_map(|status| status.instruments.iter())
-        .filter(|instrument| instrument.instrument_id == "trace_credit")
-        .filter(|instrument| predicate(instrument))
-        .try_fold(0u64, |total, instrument| {
-            let units = u64::try_from(instrument.atomic_units.get()).map_err(|_| {
-                DatabaseError::Serialization(
-                    "trace credit settlement amount exceeds the ledger's range".to_string(),
-                )
-            })?;
-            total.checked_add(units).ok_or_else(|| {
-                DatabaseError::Serialization(
-                    "trace credit total overflowed the ledger's range".to_string(),
-                )
-            })
-        })
 }
 
 /// What `PipelineProductStore::reconciliation_rows` found: the identifiers
@@ -2255,27 +2114,5 @@ mod tests {
         let entry_round_tripped: PipelineScoreAttestationEntry =
             serde_json::from_value(entry_value).unwrap();
         assert_eq!(entry_round_tripped, entry);
-
-        let credit = PipelineContributorCredit {
-            scored_microcredits: UNSAFE_FOR_JS_NUMBER,
-            finalized_microcredits: UNSAFE_FOR_JS_NUMBER,
-            pending_microcredits: 0,
-            held_microcredits: 0,
-            submission_count: 1,
-        };
-        let credit_value = serde_json::to_value(&credit).unwrap();
-        assert_eq!(
-            credit_value["scored_microcredits"],
-            serde_json::json!(UNSAFE_FOR_JS_NUMBER.to_string())
-        );
-        assert_eq!(credit_value["pending_microcredits"], serde_json::json!("0"));
-        assert_eq!(
-            credit_value["submission_count"],
-            serde_json::json!(1),
-            "submission_count is a count, not an amount, and stays a JSON number"
-        );
-        let credit_round_tripped: PipelineContributorCredit =
-            serde_json::from_value(credit_value).unwrap();
-        assert_eq!(credit_round_tripped, credit);
     }
 }

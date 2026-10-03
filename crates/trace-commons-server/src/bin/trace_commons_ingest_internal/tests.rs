@@ -12073,6 +12073,147 @@ async fn pipeline_runtime_requires_a_qualified_payout_adapter_only_when_payout_i
     ));
 }
 
+/// poldsam P-12: the pipeline's test doubles are compiled into the library
+/// (the integration tests and these tests link it built without
+/// `cfg(test)`), so what keeps one out of production is the qualification
+/// gate. An otherwise fully qualified service fails the gate with any one of
+/// them in place: `IsolatedPipelineIndex` as the index,
+/// `RecordingSettlementAdapter` as a settlement adapter, or
+/// `StaticPipelineAuthorityProvider::test_only` as the authority.
+/// (`RecordingNearAdapter`:
+/// `pipeline_runtime_requires_a_qualified_payout_adapter_only_when_payout_is_enabled`.)
+#[tokio::test]
+async fn each_pipeline_test_double_fails_the_qualification_gate() {
+    use trace_commons_gate_api::SettlementAdapter;
+    use trace_commons_gate_api::pipeline::InstrumentId;
+    use trace_commons_server::trace_authority::{SubmissionAllowlists, SubmissionAuthority};
+    use trace_commons_server::versioned_pipeline::{PipelineCaps, PipelineServiceBuilder};
+    use trace_commons_server::versioned_pipeline_authority::{
+        PipelineAuthorityProvider, StaticPipelineAuthorityProvider,
+    };
+    use trace_commons_server::versioned_pipeline_bundle::{
+        MinimalPolicyBundle, PipelineBundleConfig,
+    };
+    use trace_commons_server::versioned_pipeline_credit::{
+        RecordingSettlementAdapter, SettlementAdapterRegistry,
+    };
+    use trace_commons_server::versioned_pipeline_index::IsolatedPipelineIndex;
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Double {
+        None,
+        Index,
+        SettlementAdapter,
+        Authority,
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let backend = pg_backend_without_a_database().await;
+    let build = |double: Double| -> Arc<PipelineService> {
+        let scorer = Arc::new(QualifiedTestScorer(
+            trace_commons_gate_api::ReferencePerplexityScorer::new(),
+        ));
+        let embedder = Arc::new(QualifiedTestEmbedder(
+            trace_commons_gate_api::ReferenceEmbedder::new(),
+        ));
+        let package = MinimalPolicyBundle::minimal_package(
+            &PipelineBundleConfig {
+                instrument_awards: vec![],
+                include_index: false,
+                variant: None,
+            },
+            scorer.as_ref(),
+            embedder.as_ref(),
+        )
+        .unwrap();
+        let instrument_id = InstrumentId::new("qualified_test_instrument").unwrap();
+        let adapter: Arc<dyn SettlementAdapter> = if double == Double::SettlementAdapter {
+            RecordingSettlementAdapter::new(instrument_id, "recording_test_only", "none")
+        } else {
+            Arc::new(QualifiedTestSettlementAdapter { instrument_id })
+        };
+        let registry = SettlementAdapterRegistry::new(vec![adapter]).unwrap();
+        let caps = PipelineCaps {
+            per_instrument_atomic_units: BTreeMap::new(),
+        };
+        let builder = if double == Double::Index {
+            let index = IsolatedPipelineIndex::new();
+            PipelineServiceBuilder::new(
+                backend.clone(),
+                test_artifact_store(dir.path()),
+                package,
+                index.clone(),
+                index,
+                registry,
+                caps,
+            )
+        } else {
+            let index = Arc::new(QualifiedTestIndex(IsolatedPipelineIndex::new()));
+            PipelineServiceBuilder::new(
+                backend.clone(),
+                test_artifact_store(dir.path()),
+                package,
+                index.clone(),
+                index,
+                registry,
+                caps,
+            )
+        };
+        let authority: Arc<dyn PipelineAuthorityProvider> = if double == Double::Authority {
+            Arc::new(StaticPipelineAuthorityProvider::test_only(
+                SubmissionAuthority {
+                    tenant: SubmissionAllowlists::default(),
+                    policy: None,
+                    require_policy: false,
+                },
+            ))
+        } else {
+            Arc::new(QualifiedTestAuthority)
+        };
+        Arc::new(
+            builder
+                .with_scorer(scorer)
+                .with_embedder(embedder)
+                .with_authority(authority)
+                .with_privacy(Arc::new(QualifiedTestPrivacy))
+                .build()
+                .expect("build the pipeline service"),
+        )
+    };
+
+    assert!(
+        pipeline_runtime_is_production_qualified(&build(Double::None)),
+        "with no test double the service is qualified"
+    );
+    // (the double, its own qualification, the gate's answer)
+    let refused = [Double::Index, Double::SettlementAdapter, Double::Authority].map(|double| {
+        let service = build(double);
+        let qualification = service.dependency_qualification();
+        let own = match double {
+            Double::Index => qualification.index_reader || qualification.index_writer,
+            Double::SettlementAdapter => qualification
+                .settlement_adapters
+                .values()
+                .any(|qualified| *qualified),
+            Double::Authority => qualification.authority,
+            Double::None => true,
+        };
+        (
+            double,
+            own,
+            pipeline_runtime_is_production_qualified(&service),
+        )
+    });
+    assert_eq!(
+        refused,
+        [
+            (Double::Index, false, false),
+            (Double::SettlementAdapter, false, false),
+            (Double::Authority, false, false),
+        ]
+    );
+}
+
 /// No routed tenants, no required flag, an unqualified
 /// runtime -- starts, because no receipt can reach it.
 #[tokio::test]

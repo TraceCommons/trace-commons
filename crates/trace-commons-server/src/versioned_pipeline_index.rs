@@ -50,6 +50,13 @@ pub fn called_on_a_runtime_worker() -> bool {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handle.block_on(async {}))).is_err()
 }
 
+/// An in-memory index for tests: nothing it holds outlives the process. It
+/// is in the library, not behind `#[cfg(test)]`, because the integration
+/// tests and the ingest binary's tests link the library built without
+/// `cfg(test)`. It is never production-qualified as a reader or a writer,
+/// so the qualification gate refuses a runtime that routes or drains a
+/// tenant through it (`each_pipeline_test_double_fails_the_qualification_gate`
+/// in the ingest binary's tests).
 #[derive(Debug)]
 pub struct IsolatedPipelineIndex {
     state: Mutex<IsolatedIndexState>,

@@ -9215,13 +9215,17 @@ async fn a_forfeited_trace_credit_leg_reads_as_forfeited_not_pending() {
         "a forfeited trace_credit leg must not read as Pending"
     );
 
-    let credit_summary = product
-        .contributor_credit(&tenant, principal)
-        .await
-        .unwrap();
-    assert_eq!(
-        credit_summary.pending_microcredits, 0,
-        "a forfeited leg must not count toward pending credit"
+    let trace_credit = status
+        .instruments
+        .iter()
+        .find(|instrument| instrument.instrument_id == InstrumentId::trace_credit().as_str())
+        .expect("the trace_credit instrument");
+    assert!(
+        !matches!(
+            trace_credit.internal_settlement_state.as_str(),
+            "pending" | "approved"
+        ),
+        "a forfeited leg must not read as credit still pending: {trace_credit:?}"
     );
 }
 
@@ -13783,22 +13787,29 @@ async fn product_reads_are_tenant_and_principal_scoped() {
 
     let product = PipelineProductStore::new(backend.clone());
 
+    // Every submission id of both tenants, asked by each owner: a
+    // contributor gets its own and nothing else.
+    let every_submission = [
+        run_a1.submission_id,
+        run_a2.submission_id,
+        run_b1.submission_id,
+    ];
     let p1_statuses = product
-        .own_contributor_statuses(&tenant_a, principal_1)
+        .contributor_statuses(&tenant_a, principal_1, &every_submission)
         .await
         .unwrap();
     assert_eq!(p1_statuses.len(), 1);
     assert_eq!(p1_statuses[0].submission_id, run_a1.submission_id);
 
     let p2_statuses = product
-        .own_contributor_statuses(&tenant_a, principal_2)
+        .contributor_statuses(&tenant_a, principal_2, &every_submission)
         .await
         .unwrap();
     assert_eq!(p2_statuses.len(), 1);
     assert_eq!(p2_statuses[0].submission_id, run_a2.submission_id);
 
     let b1_statuses = product
-        .own_contributor_statuses(&tenant_b, principal_1)
+        .contributor_statuses(&tenant_b, principal_1, &every_submission)
         .await
         .unwrap();
     assert_eq!(b1_statuses.len(), 1);
@@ -13862,18 +13873,7 @@ async fn product_reads_are_tenant_and_principal_scoped() {
             .all(|status| status.submission_id != run_b1.submission_id)
     );
 
-    // Credit and attestation reads are scoped the same way.
-    let credit_a1 = product
-        .contributor_credit(&tenant_a, principal_1)
-        .await
-        .unwrap();
-    assert_eq!(credit_a1.submission_count, 1);
-    let credit_b1 = product
-        .contributor_credit(&tenant_b, principal_1)
-        .await
-        .unwrap();
-    assert_eq!(credit_b1.submission_count, 1);
-
+    // Attestation reads are scoped the same way.
     let attestations_a1 = product
         .own_score_attestation_entries(&tenant_a, principal_1)
         .await
