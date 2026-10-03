@@ -579,6 +579,25 @@ final class TracesFolderSubmitTests: XCTestCase {
         XCTAssertNil(store.lastContributedFolder)
     }
 
+    /// One undo slot, as the legacy queue had: a session contributed after a
+    /// folder ends the folder's undo, so its cancel cannot reach that session.
+    func test_aSessionContributeEndsTheFoldersUndo() async throws {
+        let (store, folder) = try await loaded()
+        await store.contributeFolder(folder, verdict: nil)
+        XCTAssertNotNil(store.lastContributedFolder)
+        let id = try XCTUnwrap(store.tree.allSessions.first?.entryId)
+        await store.perform(.contribute, on: id)
+        XCTAssertNil(store.lastContributedFolder)
+        XCTAssertNotNil(store.lastContributed)
+    }
+
+    func test_attachClearsTheFolderNotice() async throws {
+        let (store, _) = try await loaded()
+        store.attach(nil)
+        XCTAssertNil(store.folderNotice)
+        XCTAssertNil(store.lastContributedFolder)
+    }
+
     func test_aFolderRefusalIsKeptBesideTheFolder() async throws {
         let (store, _) = try await loaded()
         let ghost = TracesTree.FolderNode(id: "proj_does_not_exist", label: "ghost", mode: nil, sessions: [])

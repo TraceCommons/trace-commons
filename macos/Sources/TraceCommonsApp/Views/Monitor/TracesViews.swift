@@ -408,7 +408,9 @@ struct TracesTreeView: View {
             .padding(.leading, 8 + 16 + GlassTokens.Space.s4 + CGFloat(GlassListRow.Depth.folder.rawValue) * 18)
             .padding(.bottom, GlassTokens.Space.s2)
         }
-        notes(folderNotes(folder) + (offer.withheldLine.map { [$0] } ?? []), depth: .folder)
+        // The withheld line is drawn once: the tab's notice may already say it.
+        let withheld: [String] = offer.withheldLine.flatMap { $0 == store.folderNotice ? nil : [$0] } ?? []
+        notes(folderNotes(folder) + withheld, depth: .folder)
         if isOpen(folder.id) {
             ForEach(folder.sessions) { sessionRow($0) }
         }
