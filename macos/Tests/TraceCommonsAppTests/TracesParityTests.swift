@@ -491,13 +491,20 @@ final class TracesParityTests: XCTestCase {
                        "ScrubbingCaveat.rowLine(redactionCount: removed)",
                        "ScrubbingCaveat.status(redactionCount: removed)",
                        "SubagentCopy.line(count: entry.subagentCount ?? 0, dropped: entry.subagentsDropped ?? 0)",
-                       "QueueEntryBridge.legacyEntry(for: entry.entryId, in: model.awaitingDecision)",
-                       "Button(QueueLegacyWords.lookInside)", ".sheet(item: $previewing)",
+                       ".sheet(item: $previewing)",
                        "PreviewSheet(entry: $0)", "@EnvironmentObject private var model: AppModel",
                        #"ProcessInfo.processInfo.environment["TRACE_COMMONS_DEMO_PREVIEW"] == "1","#,
                        ".onChange(of: model.awaitingDecision.count)", "previewing == nil,"] {
             XCTAssertTrue(body.contains(needle), "SessionInspectorView lacks \(needle)")
         }
+        // Look inside is absent, not disabled, when the legacy queue does not
+        // hold this session: the guard and the button are one needle.
+        XCTAssertTrue(body.contains("""
+                                if let legacy = QueueEntryBridge.legacyEntry(for: entry.entryId, in: model.awaitingDecision) {
+                                    Button(QueueLegacyWords.lookInside) { previewing = legacy }
+                                        .buttonStyle(GlassButtonStyle(.glass))
+                                }
+        """), "Look inside must be drawn only inside the legacyEntry guard")
         // The sheet and the demo hook hang off the always-present container,
         // not the selected-session branch.
         XCTAssertTrue(body.contains("""
