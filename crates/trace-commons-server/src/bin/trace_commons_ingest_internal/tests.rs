@@ -6139,6 +6139,7 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         community_analytics_publication_basis:
             CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism,
         accept_medium_risk_submissions: false,
+        allow_legacy_segment_resume: false,
         community_tenant_ids: Arc::new(Vec::new()),
         tenant_rollout_gates: TraceTenantRolloutGates::default(),
         max_export_items_per_request: DEFAULT_TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST,
@@ -28566,6 +28567,7 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
         community_analytics_publication_basis:
             CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism,
         accept_medium_risk_submissions: false,
+        allow_legacy_segment_resume: false,
         community_tenant_ids: Arc::new(Vec::new()),
         tenant_rollout_gates: TraceTenantRolloutGates::default(),
         max_export_items_per_request: DEFAULT_TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST,
@@ -30951,6 +30953,9 @@ async fn roll_back_and_forward(backend: &Arc<PgBackend>, root: &Path) -> RolledB
         false,
     );
     Arc::make_mut(&mut state).require_db_mirror_writes = true;
+    // The legacy-segment resume is off by default; these tests exercise the
+    // emergency path with `TRACE_COMMONS_ALLOW_LEGACY_SEGMENT_RESUME` set.
+    Arc::make_mut(&mut state).allow_legacy_segment_resume = true;
     let re_posted_submission = submit_low_risk_trace(state.clone())
         .await
         .expect("submission on the new build");
@@ -31113,6 +31118,7 @@ async fn audit_chain_repair_resumes_the_chain_after_a_binary_rollback() {
     assert_eq!(dry_run["legacy_segment_unhashed_db_rows"], 3);
     assert_eq!(dry_run["legacy_segment_file_only_events"], 3);
     assert_eq!(dry_run["legacy_segment_resume_interrupted"], false);
+    assert_eq!(dry_run["legacy_segment_resume_enabled"], true);
     assert!(
         dry_run["legacy_segment_earliest_at"].is_string()
             && dry_run["legacy_segment_latest_at"].is_string(),
@@ -31279,6 +31285,144 @@ async fn audit_chain_repair_resumes_the_chain_after_a_binary_rollback() {
             row.audit_event_id
         );
     }
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+fn audit_chain_file_hashes(root: &Path, tenant_id: &str) -> Vec<Option<String>> {
+    read_audit_events_in_file_order(root, tenant_id)
+        .expect("file log")
+        .into_iter()
+        .map(|event| event.event_hash)
+        .collect()
+}
+
+/// The legacy-segment resume is off unless the operator set
+/// `TRACE_COMMONS_ALLOW_LEGACY_SEGMENT_RESUME` at startup. A request that
+/// asks for it is refused by a fixed label before the repair reads or writes
+/// anything -- here, before it even looks for the DB mirror -- and the file
+/// chain is unchanged.
+#[tokio::test]
+async fn legacy_segment_resume_is_refused_while_the_switch_is_off() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        None,
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+    assert!(
+        !state.allow_legacy_segment_resume,
+        "the switch is off by default"
+    );
+    let reviewer = test_reviewer_auth("tenant-a");
+    for index in 0..3 {
+        append_audit_event(
+            temp.path(),
+            "tenant-a",
+            TraceCommonsAuditEvent::read(&reviewer, "review_queue", index),
+        )
+        .expect("appends");
+    }
+    let chain_before = audit_chain_file_hashes(temp.path(), "tenant-a");
+
+    let (status, refused) = post_audit_chain_repair(
+        state.clone(),
+        serde_json::json!({
+            "dry_run": false,
+            "accept_legacy_segment": true,
+            "purpose": "operator free text rollback"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{refused}");
+    assert!(
+        refused
+            .to_string()
+            .contains("legacy_segment_resume_disabled"),
+        "{refused}"
+    );
+    assert!(
+        !refused.to_string().contains("free text"),
+        "the refusal is label-only: {refused}"
+    );
+    assert_eq!(
+        audit_chain_file_hashes(temp.path(), "tenant-a"),
+        chain_before,
+        "a refused resume leaves the file chain unchanged"
+    );
+}
+
+/// With the switch off, a tenant a rollback left behind a legacy segment is
+/// still diagnosed by the dry run -- the operator can see the state -- but
+/// every non-dry run is refused `legacy_segment_resume_disabled`, with or
+/// without `accept_legacy_segment`, and neither the file nor the DB changes.
+#[tokio::test]
+async fn legacy_segment_resume_switch_off_diagnoses_but_never_writes() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let RolledBackTenant { mut state, .. } = roll_back_and_forward(&backend, temp.path()).await;
+    Arc::make_mut(&mut state).allow_legacy_segment_resume = false;
+    let db_rows = |rows: Vec<StorageTraceAuditEventRecord>| {
+        rows.into_iter()
+            .map(|row| (row.audit_event_id, row.event_hash))
+            .collect::<Vec<_>>()
+    };
+    let file_before = audit_chain_file_hashes(temp.path(), "tenant-a");
+    let db_before = db_rows(
+        backend
+            .list_trace_audit_events("tenant-a")
+            .await
+            .expect("DB rows"),
+    );
+
+    let (status, dry_run) =
+        post_audit_chain_repair(state.clone(), serde_json::json!({"dry_run": true})).await;
+    assert_eq!(status, StatusCode::OK, "{dry_run}");
+    assert_eq!(dry_run["divergence"], "file_ahead_through_legacy_rows");
+    assert_eq!(dry_run["legacy_segment_file_events"], 4);
+    assert_eq!(dry_run["legacy_segment_resume_enabled"], false);
+    assert_eq!(dry_run["chain_resumed"], false);
+
+    for body in [
+        serde_json::json!({"dry_run": false, "accept_legacy_segment": true}),
+        serde_json::json!({"dry_run": false, "accept_legacy_segment": false}),
+        serde_json::json!({"dry_run": false}),
+    ] {
+        let (status, refused) = post_audit_chain_repair(state.clone(), body).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{refused}");
+        assert!(
+            refused
+                .to_string()
+                .contains("legacy_segment_resume_disabled"),
+            "{refused}"
+        );
+        assert_eq!(
+            audit_chain_file_hashes(temp.path(), "tenant-a"),
+            file_before,
+            "a refused resume leaves the file chain unchanged"
+        );
+        assert_eq!(
+            db_rows(
+                backend
+                    .list_trace_audit_events("tenant-a")
+                    .await
+                    .expect("DB rows")
+            ),
+            db_before,
+            "a refused resume leaves the DB chain unchanged"
+        );
+    }
+    // Still locked out: nothing resumed the chain.
+    let (status, _) = submit_low_risk_trace(state.clone())
+        .await
+        .expect_err("the tenant stays locked out while the switch is off");
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
     cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
 }
 
