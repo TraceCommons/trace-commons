@@ -82,8 +82,16 @@ def doc(note: str | None, indent: str) -> list[str]:
     return [f"{indent}/// {note}"] if note else []
 
 
+def light_expr(entry: dict, where: str) -> str:
+    """The `light:` argument for an entry with a light appearance value."""
+    light = entry.get("light")
+    if light is None:
+        return ""
+    return f", light: GlassRGBA({rgb(light['hex'], where + '.light')}, alpha: {alpha(light, where + '.light')})"
+
+
 def color_expr(entry: dict, where: str) -> str:
-    return f"GlassRGBA({rgb(entry['hex'], where)}, alpha: {alpha(entry, where)})"
+    return f"GlassRGBA({rgb(entry['hex'], where)}, alpha: {alpha(entry, where)}{light_expr(entry, where)})"
 
 
 def render(tokens: dict) -> str:
@@ -98,7 +106,8 @@ def render(tokens: dict) -> str:
         "",
         "// swiftlint:disable all",
         "",
-        "/// The glass design system's values: dark only, purple brand, SF Pro.",
+        "/// The glass design system's values: light and dark (each colour follows",
+        "/// the person's system appearance), purple brand, SF Pro.",
         "public enum GlassTokens {",
     ]
 
@@ -126,7 +135,7 @@ def render(tokens: dict) -> str:
     for key, entry in tokens["gradient"].items():
         where = f"gradient.{key}"
         stops = ", ".join(
-            f"GlassStop({rgb(stop['hex'], where)}, alpha: {alpha(stop, where)}, at: {number(stop['at'], where)})"
+            f"GlassStop({rgb(stop['hex'], where)}, alpha: {alpha(stop, where)}, at: {number(stop['at'], where)}{light_expr(stop, where)})"
             for stop in entry["stops"]
         )
         gradients.append(
@@ -144,7 +153,7 @@ def render(tokens: dict) -> str:
                 f"x: {number(layer.get('x', 0), where)}, "
                 f"y: {number(layer.get('y', 0), where)}, "
                 f"blur: {number(layer.get('blur', 0), where)}, "
-                f"color: GlassRGBA({rgb(layer['hex'], where)}, alpha: {alpha(layer, where)}), "
+                f"color: GlassRGBA({rgb(layer['hex'], where)}, alpha: {alpha(layer, where)}{light_expr(layer, where)}), "
                 f"inset: {'true' if layer.get('inset') else 'false'})"
             )
         shadows.append((identifier(key, where), "[" + ", ".join(parts) + "]", None))

@@ -170,7 +170,7 @@ public struct GlassOptionRow: View {
             .padding(.horizontal, GlassTokens.Space.s5)
             .background(
                 RoundedRectangle(cornerRadius: GlassTokens.Radius.control, style: .continuous)
-                    .fill(hovering && isEnabled ? Color.white.opacity(0.1) : .clear)
+                    .fill(hovering && isEnabled ? GlassColor.ink(0.1) : .clear)
                     .glassPressedFill()
             )
             .contentShape(Rectangle())
@@ -204,14 +204,21 @@ public struct GlassDayColumn: Identifiable, Sendable, Equatable {
 public struct GlassDayGraph: View {
     private let columns: [GlassDayColumn]
     private let paused: Bool
+    private let summary: String
     private let sharedChip: String
     private let keptChip: String
     private let leading: String
     private let trailing: String
 
-    public init(columns: [GlassDayColumn], paused: Bool, sharedChip: String, keptChip: String, leading: String, trailing: String) {
+    /// `summary` is what VoiceOver reads for the plot, from the caller: the
+    /// bars are a picture, and a picture needs its words (R14).
+    public init(
+        columns: [GlassDayColumn], paused: Bool, summary: String,
+        sharedChip: String, keptChip: String, leading: String, trailing: String
+    ) {
         self.columns = columns
         self.paused = paused
+        self.summary = summary
         self.sharedChip = sharedChip
         self.keptChip = keptChip
         self.leading = leading
@@ -242,7 +249,7 @@ public struct GlassDayGraph: View {
                         }
                     }
                     .frame(height: Self.plotHeight / 2, alignment: .bottom)
-                    Rectangle().fill(Color.white.opacity(0.14)).frame(height: 1)
+                    Rectangle().fill(GlassColor.ink(0.14)).frame(height: 1)
                     HStack(alignment: .top, spacing: 2) {
                         ForEach(columns) { column in
                             UnevenRoundedRectangle(bottomLeadingRadius: 2, bottomTrailingRadius: 2)
@@ -259,7 +266,8 @@ public struct GlassDayGraph: View {
                     .frame(maxHeight: .infinity, alignment: .bottom)
             }
             .frame(height: Self.plotHeight)
-            .accessibilityHidden(true)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(summary)
             HStack {
                 Text(leading)
                 Spacer(minLength: 0)
@@ -410,7 +418,7 @@ public struct GlassActivityRow: View {
         Button(action: action) {
             HStack(spacing: GlassTokens.Space.s5) {
                 ZStack {
-                    RoundedRectangle(cornerRadius: 5, style: .continuous).fill(Color.white.opacity(0.12))
+                    RoundedRectangle(cornerRadius: 5, style: .continuous).fill(GlassColor.ink(0.12))
                     if let logo = tool?.logo, let tool {
                         GlassToolLogoShape(logo).fill(hovering ? Color.white : tool.tint.color).frame(width: 12, height: 12)
                     } else if let tool {

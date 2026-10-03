@@ -26,6 +26,10 @@ struct MenuBarGlassPanel: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let navigation: MainWindowNavigation
     let store: MenuPanelStore
+    /// Whether the panel draws its own glass. Inside `MenuBarExtra` the
+    /// system window already carries its material, and a second layer of
+    /// glass on it is glass on glass (R14); the preview window has none.
+    var ownsSurface = false
 
     enum Pill: Equatable { case mode, watch, privateAI }
 
@@ -50,7 +54,7 @@ struct MenuBarGlassPanel: View {
         }
         .padding(GlassTokens.Space.s5)
         .frame(width: Self.width)
-        .glassSurface(.popover, radius: GlassTokens.Radius.menuPanel, floating: true)
+        .modifier(PanelSurface(owns: ownsSurface))
         .animation(reduceMotion ? nil : GlassMotion.curve(GlassTokens.Motion.slide), value: sub)
         // A fresh read on opening; the label follows the event stream.
         .task { await store.load() }
@@ -262,6 +266,7 @@ struct MenuBarGlassPanel: View {
         let stale = store.stale
         return GlassDayGraph(
             columns: columns, paused: paused || stale,
+            summary: "\(FlowMapScene.pair(MenuWords.shared, stale ? nil : columns.reduce(0) { $0 + $1.up })) · \(FlowMapScene.pair(MenuWords.kept, stale ? nil : columns.reduce(0) { $0 + $1.down }))",
             sharedChip: stale ? "—" : String(columns.reduce(0) { $0 + $1.up }),
             keptChip: stale ? "—" : String(columns.reduce(0) { $0 + $1.down }),
             leading: start.formatted(.dateTime.month(.abbreviated).day()),
@@ -319,7 +324,7 @@ struct MenuBarGlassPanel: View {
     }
 
     private var hairline: some View {
-        Rectangle().fill(Color.white.opacity(0.12)).frame(height: 1)
+        Rectangle().fill(GlassColor.ink(0.12)).frame(height: 1)
             .padding(.vertical, GlassTokens.Space.s2)
             .accessibilityHidden(true)
     }
@@ -328,6 +333,19 @@ struct MenuBarGlassPanel: View {
         navigation.section = section
         NSApp.activate(ignoringOtherApps: true)
         openWindow(id: WindowID.main)
+    }
+}
+
+/// The popover's own glass, only where nothing else provides a material.
+private struct PanelSurface: ViewModifier {
+    let owns: Bool
+
+    func body(content: Content) -> some View {
+        if owns {
+            content.glassSurface(.popover, radius: GlassTokens.Radius.menuPanel, floating: true)
+        } else {
+            content
+        }
     }
 }
 
@@ -406,8 +424,8 @@ struct MenuBarPreviewWindow: View {
         VStack(alignment: .trailing, spacing: GlassTokens.Space.s4) {
             MenuBarStripLabel(model: model, store: store)
                 .padding(.horizontal, GlassTokens.Space.s4)
-                .background(Capsule().fill(Color.white.opacity(0.12)))
-            MenuBarGlassPanel(navigation: navigation, store: store)
+                .background(Capsule().fill(GlassColor.ink(0.12)))
+            MenuBarGlassPanel(navigation: navigation, store: store, ownsSurface: true)
         }
         .padding(GlassTokens.Space.s10)
         .background(LinearGradient(colors: [GlassTokens.Color.sceneWarm.color, GlassTokens.Color.sceneBase.color], startPoint: .top, endPoint: .bottom))

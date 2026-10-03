@@ -46,7 +46,19 @@ final class TokenDriftTests: XCTestCase {
             let generated = GlassTokens.Color.all[name]
             XCTAssertTrue(generated?.rgb == Self.rgb(entry["hex"]), "color.\(name)")
             XCTAssertTrue(generated?.alpha == Self.number(entry["alpha"], default: 1), "color.\(name) alpha")
+            Self.checkLight(generated, entry, "color.\(name)")
         }
+    }
+
+    /// A token's light appearance value matches the JSON's `light`, or is
+    /// absent when the JSON has none.
+    private static func checkLight(_ generated: GlassRGBA?, _ entry: [String: Any], _ name: String) {
+        guard let light = entry["light"] as? [String: Any] else {
+            XCTAssertTrue(generated?.lightRGB == nil && generated?.lightAlpha == nil, "\(name) has no light value")
+            return
+        }
+        XCTAssertTrue(generated?.lightRGB == rgb(light["hex"]), "\(name).light")
+        XCTAssertTrue(generated?.lightAlpha == number(light["alpha"], default: 1), "\(name).light alpha")
     }
 
     func test_gradientsMatchTheSource() {
@@ -62,6 +74,7 @@ final class TokenDriftTests: XCTestCase {
                 let made = generated!.stops[index]
                 XCTAssertTrue(made.color.rgb == Self.rgb(stop["hex"]), "gradient.\(name)[\(index)]")
                 XCTAssertTrue(made.color.alpha == Self.number(stop["alpha"], default: 1), "gradient.\(name)[\(index)] alpha")
+                Self.checkLight(made.color, stop, "gradient.\(name)[\(index)]")
                 XCTAssertTrue(Double(made.location) == Self.number(stop["at"]), "gradient.\(name)[\(index)] at")
             }
         }
@@ -81,6 +94,7 @@ final class TokenDriftTests: XCTestCase {
                 XCTAssertTrue(Double(made.blur) == Self.number(layer["blur"]), "shadow.\(name)[\(index)] blur")
                 XCTAssertTrue(made.color.rgb == Self.rgb(layer["hex"]), "shadow.\(name)[\(index)] colour")
                 XCTAssertTrue(made.color.alpha == Self.number(layer["alpha"], default: 1), "shadow.\(name)[\(index)] alpha")
+                Self.checkLight(made.color, layer, "shadow.\(name)[\(index)]")
                 XCTAssertTrue(made.inset == ((layer["inset"] as? Bool) ?? false), "shadow.\(name)[\(index)] inset")
             }
         }
