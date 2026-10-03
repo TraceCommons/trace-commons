@@ -20,30 +20,43 @@
 //! ## Family resemblance to the community site
 //!
 //! `community/public/styles.css` is the other face of this product. What is
-//! carried across is the palette and, more importantly, the ROLES each
-//! colour plays: green is primary and means "good standing", gold means
-//! "weigh this", coral means "refused", blue means "held or ranked". Also
-//! the warm off-white ground rather than a neutral grey, 6-8px radii with
-//! pill badges, hairlines instead of shadows, and heavy uppercase micro
-//! labels over data.
+//! carried across is the ROLES each colour plays: the accent is primary and
+//! means "good standing", gold means "weigh this", coral means "refused",
+//! blue means "held or ranked". Also the warm off-white ground rather than a
+//! neutral grey, 6-8px radii with pill badges, hairlines instead of shadows,
+//! and heavy uppercase micro labels over data. The accent is no longer the
+//! site's green; see below.
 //!
 //! What is deliberately not carried across: Inter is not bundled. A font
 //! file is a real download and packaging cost for a brand cue, and the
 //! site's 680/760/800 weights are reproduced on the system face, which is
 //! what a Linux desktop's user has already calibrated their eye against.
 //!
-//! ## Overriding the GNOME accent, on purpose
+//! ## Overriding the GNOME accent, on purpose: purple
 //!
 //! GNOME convention is that applications follow the user's chosen system
-//! accent colour. This one does not: it pins the Trace Commons green. That
-//! is a deliberate product decision, ruled on explicitly -- this window and
-//! the community site are two faces of the same thing and a contributor
-//! moving between them should not have to work out that they are, and the
-//! accent here is also a role marker ("good standing"), not decoration.
+//! accent colour. This one does not: it pins the Trace Commons brand
+//! purple. That is a deliberate product decision -- the owner ruled
+//! "purple everywhere" on 2026-10-02, so this window wears the same accent
+//! as the macOS and Windows apps, and the accent is also a role marker
+//! ("good standing", the one action), not decoration. It replaces the site
+//! green this file used to pin. The decision is provisional until the
+//! designer's final brand lands; when it does, the tokens change and this
+//! file does not.
 //!
 //! **This is not a bug. Please do not "fix" it back to
 //! `AdwStyleManager`'s accent.** If it is ever reverted, it should be
 //! reverted as a product decision, not as a theming cleanup.
+//!
+//! ## The accent and status colours are generated
+//!
+//! The accent and the status hues are not written here. They come from
+//! `design-tokens/glass.tokens.json`, the macOS glass system's tokens, via
+//! `scripts/design-tokens/generate.py`, which writes [`brand_tokens`]: one
+//! `@define-color` sheet per scheme, loaded ahead of the palette below,
+//! which maps this shell's `tc_*` names onto them. Edit the JSON and
+//! regenerate; `generate.py --check` fails CI on a hand edit. The grounds,
+//! ink, blue and the redaction wash stay this shell's own.
 //!
 //! ## Dark comes from the design spec, not from an inversion
 //!
@@ -64,58 +77,63 @@
 //!
 //! ## Where the tokens come from
 //!
-//! Every `tc_*` colour below is one row of §2.1's native-palette table, and
-//! the mapping is recorded inline. Two rows are deliberately absent:
+//! Every `tc_*` ground, ink, blue and redaction colour below is one row of
+//! §2.1's native-palette table, and the mapping is recorded inline; the
+//! accent and status rows are the generated tokens instead (above). Two
+//! rows are deliberately absent:
 //! `bg.sidebar.macos` and `bg.chrome.windows` are other platforms' chrome
 //! and have no surface in this shell.
 //!
 //! ## Contrast is measured, never eyeballed
 //!
 //! Every ratio quoted below is a computed WCAG 2.1 relative-luminance
-//! figure, not a judgement. The one that matters most is the filled primary
-//! action. `--green` is tuned to be read ON the ground, not to be a fill
-//! with a label on top of it: white on the site green measures 4.04:1
-//! (below the 4.5:1 body-text floor) and white on the dark mint measures
-//! 2.32:1 (below even the 3:1 large-text floor). That failure sits on
-//! `Contribute` -- the one irreversible control in the product. So the fill
-//! carries its own measured pair, and because libadwaita derives
-//! `.suggested-action` from `accent_bg_color`/`accent_fg_color`, setting
-//! that pair here fixes every suggested action in the window at once rather
-//! than only the ones this pass happened to touch.
+//! figure, not a judgement, and `tests::` below recomputes them from the
+//! values this file actually loads. The one that matters most is the filled
+//! primary action, `Contribute` -- the one irreversible control in the
+//! product. The accent fill carries a white label at 6.90:1 light and
+//! 5.01:1 dark, and because libadwaita derives `.suggested-action` from
+//! `accent_bg_color`/`accent_fg_color`, setting that pair here fixes every
+//! suggested action in the window at once.
+//!
+//! The dark fill purple (`#8A3DFF`) is a fill, not a line: it clears 3:1 on
+//! the window ground and a card but measures 2.76:1 on the inset well. So
+//! a border or rule drawn straight on a ground (`tc_green`, below) takes
+//! `tc_accent_line`, which is the text purple in dark.
 
 use adw::prelude::*;
 use gtk::gdk;
 
+#[path = "brand_tokens.rs"]
+pub mod brand_tokens;
+
 /// Light tokens.
 ///
 /// The first block is the design spec's native palette, §2.1's light
-/// column. The second is the text-safe darkened twins: the brand accents
-/// are tuned for fills, meter bars and borders where 3:1 is the bar, and
-/// several of them do not clear 4.5:1 as small type on white. Only the
-/// lightness moves, so the family resemblance survives and the sentence is
-/// legible.
+/// column. The accent and status values are the generated
+/// [`brand_tokens::LIGHT_CSS`], each in a fill/rule weight and a text-safe
+/// twin that clears 4.5:1 as small type.
 ///
 /// Measured (WCAG 2.1, computed not estimated):
 ///
 /// ```text
-///  14.64:1  ink        #20241F on bg         #F6F7F4
-///  15.75:1  ink        #20241F on surface    #FFFFFF
-///   5.76:1  muted      #5C635B on bg         #F6F7F4
-///   6.19:1  muted      #5C635B on surface    #FFFFFF
-///   5.48:1  muted      #5C635B on surface-2  #EEF2F0
-///   4.58:1  tertiary   #6D7269 on bg         #F6F7F4   (see the note below)
-///   4.93:1  tertiary   #6D7269 on surface    #FFFFFF
-///   5.90:1  green text #0F7256 on surface    #FFFFFF
-///   5.48:1  green text #0F7256 on bg         #F6F7F4
-///   5.64:1  gold text  #8A5F12 on surface    #FFFFFF
-///   4.99:1  gold text  #8A5F12 on surface-2  #EEF2F0
-///   5.21:1  coral text #B8483B on surface    #FFFFFF
-///   6.04:1  blue text  #315FBA on surface    #FFFFFF
-///   5.10:1  PRIMARY    #FEFEFE on fill       #137C61   <- the consent action
-///   4.04:1  (rejected) #FFFFFF on brand green #178F70
-///   3.35:1  gold rule  #B9821F on surface    #FFFFFF   (non-text, >= 3:1)
-///  12.34:1  redaction  #202426 on gold wash  #F3E3C0
-///   3.27:1  (rejected) spec ink.tertiary #8A9086 on surface #FFFFFF
+///  14.64:1  ink         #20241F on bg         #F6F7F4
+///  15.75:1  ink         #20241F on surface    #FFFFFF
+///   5.76:1  muted       #5C635B on bg         #F6F7F4
+///   6.19:1  muted       #5C635B on surface    #FFFFFF
+///   5.48:1  muted       #5C635B on surface-2  #EEF2F0
+///   4.58:1  tertiary    #6D7269 on bg         #F6F7F4   (see the note below)
+///   4.93:1  tertiary    #6D7269 on surface    #FFFFFF
+///   8.17:1  accent text #5B10CC on bg         #F6F7F4
+///   7.78:1  accent text #5B10CC on surface-2  #EEF2F0
+///   6.95:1  gold text   #7A4A06 on bg         #F6F7F4
+///   6.62:1  gold text   #7A4A06 on surface-2  #EEF2F0
+///   6.97:1  coral text  #A3221C on bg         #F6F7F4
+///   6.04:1  blue text   #315FBA on surface    #FFFFFF
+///   6.90:1  PRIMARY     #FFFFFF on accent     #6D14F3   <- the consent action
+///   6.11:1  accent rule #6D14F3 on surface-2  #EEF2F0   (non-text, >= 3:1)
+///   3.96:1  gold rule   #A8690F on surface-2  #EEF2F0   (non-text, >= 3:1)
+///  12.34:1  redaction   #202426 on gold wash  #F3E3C0
+///   3.27:1  (rejected)  spec ink.tertiary #8A9086 on surface #FFFFFF
 /// ```
 ///
 /// **The one deviation from §2.1.** The spec's `ink.tertiary` is `#8A9086`
@@ -142,26 +160,28 @@ const LIGHT_TOKENS: &str = r#"
 @define-color tc_line      #D9DFDC;   /* hairline */
 @define-color tc_line_divider #DDDFD8;   /* hairline.divider */
 
-/* --- Brand accents. Fills, rules and glyph strokes only. ---------- */
-@define-color tc_green     #178F70;   /* green.brand */
+/* --- Accent and status. Fills, rules and glyph strokes only. The
+       accent and status values are the generated brand_tokens sheet,
+       loaded ahead of this one. tc_green keeps its name for the
+       stylesheet's sake; it is the purple accent. ------------------- */
+@define-color tc_green     @tc_accent_line;   /* purple */
 @define-color tc_blue      #315FBA;   /* blue.brand */
-@define-color tc_coral     #D65D4F;   /* coral.brand */
-@define-color tc_gold      #B9821F;   /* gold.brand */
+@define-color tc_coral     @tc_status_outside;
+@define-color tc_gold      @tc_status_ask;
 @define-color tc_gold_highlight rgba(185, 130, 31, 0.28);   /* gold.highlight */
 
 /* --- Text-safe twins. Type only; fills and rules keep the values
        above. See the note on this constant. ------------------------ */
-@define-color tc_green_text #0F7256;
+@define-color tc_green_text @tc_accent_text;
 @define-color tc_blue_text  #315FBA;
 /* §2.1 lists blue.brand as #315FBA and blue.icon as #315FBB, one digit
    apart; standardised on #315FBA, which is the mark's own blue. */
 @define-color tc_blue_icon  #315FBA;
-@define-color tc_coral_text #B8483B;
-@define-color tc_gold_text  #8A5F12;
+@define-color tc_coral_text @tc_status_outside_text;
+@define-color tc_gold_text  @tc_status_ask_text;
 
 /* --- The filled primary action, as a measured pair ---------------- */
-@define-color tc_primary_fill  #137C61;   /* green.fill */
-@define-color tc_on_accent     #FEFEFE;   /* on.accent */
+@define-color tc_primary_fill  @tc_accent;
 @define-color tc_primary_label @tc_on_accent;
 
 /* --- Where scrubbing fired, in the transcript --------------------- */
@@ -190,15 +210,19 @@ const LIGHT_TOKENS: &str = r#"
 @define-color popover_fg_color     @tc_ink;
 @define-color dialog_bg_color      @tc_surface;
 @define-color dialog_fg_color      @tc_ink;
-@define-color warning_bg_color     @tc_gold;
+/* A status fill carries a label, so in light it takes the text-safe
+   twin under white rather than the rule weight. */
+@define-color warning_bg_color     @tc_status_ask_text;
+@define-color warning_fg_color     #FFFFFF;
 @define-color warning_color        @tc_gold_text;
-@define-color error_bg_color       @tc_coral;
+@define-color error_bg_color       @tc_status_outside_text;
+@define-color error_fg_color       #FFFFFF;
 @define-color error_color          @tc_coral_text;
-@define-color destructive_bg_color #B8483B;
-@define-color destructive_fg_color #ffffff;
-@define-color success_bg_color     @tc_primary_fill;
-@define-color success_fg_color     @tc_primary_label;
-@define-color success_color        @tc_green_text;
+@define-color destructive_bg_color @tc_status_outside_text;
+@define-color destructive_fg_color #FFFFFF;
+@define-color success_bg_color     @tc_status_on_text;
+@define-color success_fg_color     #FFFFFF;
+@define-color success_color        @tc_status_on_text;
 @define-color theme_bg_color       @tc_bg;
 @define-color theme_fg_color       @tc_ink;
 @define-color theme_base_color     @tc_surface;
@@ -211,29 +235,28 @@ const LIGHT_TOKENS: &str = r#"
 /// Measured (WCAG 2.1, computed not estimated):
 ///
 /// ```text
-///  12.79:1  ink        #E8EAE3 on bg         #23251D
-///  12.96:1  ink        #E8EAE3 on surface    #21241E
-///   6.75:1  muted      #A6AC9F on surface    #21241E
-///   6.66:1  muted      #A6AC9F on bg         #23251D
-///   5.94:1  muted      #A6AC9F on surface-2  #2A2E27
-///   4.55:1  tertiary   #878D81 on bg         #23251D   (see the light note)
-///   4.61:1  tertiary   #878D81 on surface    #21241E
-///   8.53:1  green text #5CD3AF on surface    #21241E
-///   8.36:1  gold text  #E2B75C on surface    #21241E
-///   7.35:1  gold text  #E2B75C on surface-2  #2A2E27
-///   7.57:1  coral text #F79C8F on surface    #21241E
-///   7.78:1  blue text  #9DB6F1 on surface    #21241E
-///   7.68:1  blue icon  #9DB6F1 on bg         #23251D
-///   7.39:1  PRIMARY    #0B1F19 on fill       #3FBE9A   <- the consent action
-///   2.32:1  (rejected) #FFFFFF on mint       #3FBE9A
-///   7.39:1  gold rule  #DCAA43 on surface    #21241E
-///   9.04:1  redaction  #F0EBDD on gold wash  #4A3C18
-///   4.26:1  (rejected) spec ink.tertiary #82887C on bg #23251D
+///  12.79:1  ink         #E8EAE3 on bg         #23251D
+///  12.96:1  ink         #E8EAE3 on surface    #21241E
+///   6.75:1  muted       #A6AC9F on surface    #21241E
+///   6.66:1  muted       #A6AC9F on bg         #23251D
+///   5.94:1  muted       #A6AC9F on surface-2  #2A2E27
+///   4.55:1  tertiary    #878D81 on bg         #23251D   (see the light note)
+///   4.61:1  tertiary    #878D81 on surface    #21241E
+///   7.49:1  accent text #C9B3FF on surface-2  #2A2E27
+///   8.29:1  gold text   #F5C142 on surface-2  #2A2E27
+///   4.98:1  coral text  #FF6B6B on surface-2  #2A2E27
+///   7.78:1  blue text   #9DB6F1 on surface    #21241E
+///   7.68:1  blue icon   #9DB6F1 on bg         #23251D
+///   5.01:1  PRIMARY     #FFFFFF on accent     #8A3DFF   <- the consent action
+///   3.10:1  accent fill #8A3DFF on bg         #23251D   (non-text, >= 3:1)
+///   2.76:1  (not drawn) accent fill #8A3DFF on surface-2 #2A2E27
+///   7.49:1  accent rule #C9B3FF on surface-2  #2A2E27
+///   9.04:1  redaction   #F0EBDD on gold wash  #4A3C18
+///   4.26:1  (rejected)  spec ink.tertiary #82887C on bg #23251D
 /// ```
 ///
-/// Dark flips the primary label rather than dulling the mint: the mint is
-/// what makes the dark scheme feel like the same product, and a duller
-/// green that could carry white would not.
+/// Dark keeps the white primary label: the brighter purple carries it at
+/// 5:1, where the old dark mint had to flip its label to near-black.
 const DARK_TOKENS: &str = r#"
 /* --- Ground and ink, from DESIGN-SPEC §2.1 (dark column). Warm
        near-black carrying the light ground's green cast, not the
@@ -251,23 +274,19 @@ const DARK_TOKENS: &str = r#"
 @define-color tc_line_divider #373A33;
 
 /* --- Same hue, same role, lifted until it clears the dark ground -- */
-@define-color tc_green     #3FBE9A;
+@define-color tc_green     @tc_accent_line;   /* purple, see LIGHT */
 @define-color tc_blue      #7FA0EC;
-/* §2.1 does not draw coral in dark ("not drawn"). These two are this
-   file's lift of the light coral, kept so a withdrawn trace still reads
-   as withdrawn in the dark scheme. */
-@define-color tc_coral     #F2887A;
-@define-color tc_gold      #DCAA43;
+@define-color tc_coral     @tc_status_outside;
+@define-color tc_gold      @tc_status_ask;
 @define-color tc_gold_highlight rgba(220, 170, 67, 0.32);
 
-@define-color tc_green_text #5CD3AF;
+@define-color tc_green_text @tc_accent_text;
 @define-color tc_blue_text  #9DB6F1;
 @define-color tc_blue_icon  #9DB6F1;
-@define-color tc_coral_text #F79C8F;
-@define-color tc_gold_text  #E2B75C;
+@define-color tc_coral_text @tc_status_outside_text;
+@define-color tc_gold_text  @tc_status_ask_text;
 
-@define-color tc_primary_fill  #3FBE9A;
-@define-color tc_on_accent     #0B1F19;
+@define-color tc_primary_fill  @tc_accent;
 @define-color tc_primary_label @tc_on_accent;
 
 @define-color tc_redaction_bg  #4A3C18;
@@ -290,15 +309,19 @@ const DARK_TOKENS: &str = r#"
 @define-color popover_fg_color     @tc_ink;
 @define-color dialog_bg_color      @tc_surface;
 @define-color dialog_fg_color      @tc_ink;
-@define-color warning_bg_color     @tc_gold;
+/* In dark the status hues are light, so a fill takes the near-black
+   label instead of white. */
+@define-color warning_bg_color     @tc_status_ask;
+@define-color warning_fg_color     @tc_on_status;
 @define-color warning_color        @tc_gold_text;
-@define-color error_bg_color       @tc_coral;
+@define-color error_bg_color       @tc_status_outside;
+@define-color error_fg_color       @tc_on_status;
 @define-color error_color          @tc_coral_text;
-@define-color destructive_bg_color #F79C8F;
-@define-color destructive_fg_color #2A0F0B;
-@define-color success_bg_color     @tc_primary_fill;
-@define-color success_fg_color     @tc_primary_label;
-@define-color success_color        @tc_green_text;
+@define-color destructive_bg_color @tc_status_outside;
+@define-color destructive_fg_color @tc_on_status;
+@define-color success_bg_color     @tc_status_on;
+@define-color success_fg_color     @tc_on_status;
+@define-color success_color        @tc_status_on_text;
 @define-color theme_bg_color       @tc_bg;
 @define-color theme_fg_color       @tc_ink;
 @define-color theme_base_color     @tc_surface;
@@ -413,8 +436,32 @@ pub fn install() {
 }
 
 fn load(provider: &gtk::CssProvider, dark: bool) {
-    let tokens = if dark { DARK_TOKENS } else { LIGHT_TOKENS };
-    provider.load_from_data(&format!("{tokens}\n{}", include_str!("style.css")));
+    provider.load_from_data(&stylesheet(dark));
+}
+
+/// The whole stylesheet for one scheme: the generated accent and status
+/// roles first, since the palette refers to them by name, then the palette,
+/// then the rules.
+fn stylesheet(dark: bool) -> String {
+    let (brand, tokens) = if dark {
+        (brand_tokens::DARK_CSS, DARK_TOKENS)
+    } else {
+        (brand_tokens::LIGHT_CSS, LIGHT_TOKENS)
+    };
+    format!("{brand}\n{tokens}\n{}", include_str!("style.css"))
+}
+
+/// The accent the mark's open bracket is stroked in, for `scheme`.
+///
+/// The `trace-commons-mark` crate still carries the site mint for the macOS
+/// shell and the icon pipeline; this window's mark wears the brand purple
+/// with the rest of the window.
+pub fn mark_accent(dark: bool) -> &'static str {
+    if dark {
+        brand_tokens::dark::ACCENT
+    } else {
+        brand_tokens::light::ACCENT
+    }
 }
 
 // The gradient-square mark that used to live here is gone. It was a
@@ -567,4 +614,171 @@ pub fn card(orientation: gtk::Orientation, spacing: i32) -> gtk::Box {
         .build();
     card.add_css_class("tc-card");
     card
+}
+
+#[cfg(test)]
+mod tests {
+    //! Contrast, measured from the values this file actually loads.
+    //!
+    //! The generated accent and status roles come from the design tokens;
+    //! the grounds they sit on are this shell's own, so only this shell can
+    //! say whether a pairing holds. Every ratio is WCAG 2.1 relative
+    //! luminance: 4.5:1 for text, 3:1 for a fill, rule or border.
+
+    use std::collections::HashMap;
+
+    use super::{brand_tokens, stylesheet};
+
+    const GROUNDS: [&str; 3] = ["tc_bg", "tc_surface", "tc_surface2"];
+
+    /// Every `@define-color` in the stylesheet, references resolved, opaque
+    /// hex values only.
+    fn palette(dark: bool) -> HashMap<String, String> {
+        let css = stylesheet(dark);
+        let mut raw = HashMap::new();
+        for line in css.lines() {
+            let Some(rest) = line.trim().strip_prefix("@define-color ") else {
+                continue;
+            };
+            let (name, value) = rest.split_once(char::is_whitespace).unwrap();
+            let value = value.split(';').next().unwrap().trim();
+            raw.insert(name.to_string(), value.to_string());
+        }
+        let mut resolved = HashMap::new();
+        for name in raw.keys() {
+            let mut value = raw[name].as_str();
+            while let Some(reference) = value.strip_prefix('@') {
+                value = raw
+                    .get(reference)
+                    .unwrap_or_else(|| panic!("{name} refers to undefined @{reference}"));
+            }
+            if value.len() == 7 && value.starts_with('#') {
+                resolved.insert(name.clone(), value.to_ascii_uppercase());
+            }
+        }
+        resolved
+    }
+
+    fn luminance(hex: &str) -> f64 {
+        let channel = |i: usize| {
+            let v = f64::from(u8::from_str_radix(&hex[i..i + 2], 16).unwrap()) / 255.0;
+            if v <= 0.04045 {
+                v / 12.92
+            } else {
+                ((v + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * channel(1) + 0.7152 * channel(3) + 0.0722 * channel(5)
+    }
+
+    fn contrast(a: &str, b: &str) -> f64 {
+        let (la, lb) = (luminance(a), luminance(b));
+        (la.max(lb) + 0.05) / (la.min(lb) + 0.05)
+    }
+
+    fn check(dark: bool, pairs: &[(&str, &str)], floor: f64) -> Vec<String> {
+        let colours = palette(dark);
+        let get = |name: &str| {
+            colours
+                .get(name)
+                .unwrap_or_else(|| panic!("{name} is not an opaque colour"))
+                .clone()
+        };
+        pairs
+            .iter()
+            .filter_map(|(fg, bg)| {
+                let ratio = contrast(&get(fg), &get(bg));
+                (ratio < floor).then(|| format!("dark={dark}: {fg} on {bg} is {ratio:.2}:1"))
+            })
+            .collect()
+    }
+
+    fn on_every_ground<'a>(inks: &[&'a str]) -> Vec<(&'a str, &'static str)> {
+        inks.iter()
+            .flat_map(|ink| GROUNDS.iter().map(move |ground| (*ink, *ground)))
+            .collect()
+    }
+
+    #[test]
+    fn every_status_and_accent_text_clears_4_5_on_every_ground() {
+        let text = on_every_ground(&[
+            "accent_color",
+            "tc_green_text",
+            "tc_gold_text",
+            "tc_coral_text",
+            "success_color",
+            "warning_color",
+            "error_color",
+        ]);
+        for dark in [false, true] {
+            assert_eq!(check(dark, &text, 4.5), Vec::<String>::new());
+        }
+    }
+
+    #[test]
+    fn every_accent_and_status_rule_clears_3_on_every_ground() {
+        let rules = on_every_ground(&["tc_green", "tc_gold", "tc_coral"]);
+        for dark in [false, true] {
+            assert_eq!(check(dark, &rules, 3.0), Vec::<String>::new());
+        }
+    }
+
+    /// The fills libadwaita draws controls in (switches, checks, the
+    /// suggested action) sit on the window ground and on cards.
+    #[test]
+    fn the_accent_fill_clears_3_on_the_window_and_a_card() {
+        let fills = [
+            ("accent_bg_color", "tc_bg"),
+            ("accent_bg_color", "tc_surface"),
+        ];
+        for dark in [false, true] {
+            assert_eq!(check(dark, &fills, 3.0), Vec::<String>::new());
+        }
+    }
+
+    #[test]
+    fn every_label_on_a_fill_clears_4_5() {
+        let labels = [
+            ("accent_fg_color", "accent_bg_color"),
+            ("tc_primary_label", "tc_primary_fill"),
+            ("success_fg_color", "success_bg_color"),
+            ("warning_fg_color", "warning_bg_color"),
+            ("error_fg_color", "error_bg_color"),
+            ("destructive_fg_color", "destructive_bg_color"),
+        ];
+        for dark in [false, true] {
+            assert_eq!(check(dark, &labels, 4.5), Vec::<String>::new());
+        }
+    }
+
+    /// The mark's open bracket on the mark's own frame fill.
+    #[test]
+    fn the_mark_accent_clears_3_on_the_mark_frame() {
+        use trace_commons_mark::Scheme;
+        for (dark, scheme) in [(false, Scheme::Light), (true, Scheme::Dark)] {
+            let ratio = contrast(super::mark_accent(dark), scheme.surface());
+            assert!(ratio >= 3.0, "dark={dark}: {ratio:.2}:1");
+        }
+    }
+
+    /// Purple everywhere: the accent is the brand purple and its dark twin,
+    /// and the green and mint this file used to pin are gone.
+    #[test]
+    fn the_accent_is_the_brand_purple() {
+        assert_eq!(palette(false)["accent_bg_color"], "#6D14F3");
+        assert_eq!(palette(true)["accent_bg_color"], "#8A3DFF");
+        assert_eq!(brand_tokens::light::ACCENT, "#6D14F3");
+        assert_eq!(brand_tokens::dark::ACCENT, "#8A3DFF");
+        for dark in [false, true] {
+            let css = stylesheet(dark).to_ascii_uppercase();
+            for retired in [
+                "#178F70", "#137C61", "#0F7256", "#3FBE9A", "#5CD3AF", "#00D4AA",
+            ] {
+                assert!(
+                    !css.contains(retired),
+                    "dark={dark}: {retired} is still loaded"
+                );
+            }
+        }
+    }
 }
