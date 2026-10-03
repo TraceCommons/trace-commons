@@ -8283,7 +8283,10 @@ pub struct TraceInstrumentStatusUpdate {
     /// The amount in the instrument's smallest unit. `Readable` is written
     /// as a decimal string (it can exceed what a JSON number, and a
     /// JavaScript client, holds exactly); `Unreadable` is written as `null`.
-    /// A missing key or any other value reads as `Unreadable`.
+    /// A missing key, `null`, and any other value the JSON parser accepts
+    /// that is not a canonical decimal string read as `Unreadable`. Text the
+    /// parser itself refuses (JSON that is not well formed, or a number out
+    /// of its range such as `1e999`) still fails the document.
     #[serde(default = "unreadable_instrument_amount")]
     pub atomic_units: InstrumentAmount,
     pub operation_state: String,
@@ -8297,69 +8300,77 @@ fn unreadable_instrument_amount() -> InstrumentAmount {
     InstrumentAmount::Unreadable
 }
 
-/// An unsigned 128-bit amount in its canonical decimal form: ASCII digits, no
-/// sign, no leading zero except the value `0`, at most `u128::MAX`. The field
-/// is private, so every value of this type holds that form.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(try_from = "String", into = "String")]
-pub struct DecimalAtomicUnits(String);
+pub use decimal_atomic_units::{DecimalAtomicUnits, NonCanonicalAtomicUnits};
 
-/// The text is not the canonical decimal form of an unsigned 128-bit amount.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct NonCanonicalAtomicUnits;
+mod decimal_atomic_units {
+    use serde::{Deserialize, Serialize};
 
-impl std::fmt::Display for NonCanonicalAtomicUnits {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("atomic_units must be a canonical unsigned decimal string")
-    }
-}
+    /// An unsigned 128-bit amount in its canonical decimal form: ASCII
+    /// digits, no sign, no leading zero except the value `0`, at most
+    /// `u128::MAX`. The field is private to this module, which holds nothing
+    /// else, so every value of this type holds that form.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(try_from = "String", into = "String")]
+    pub struct DecimalAtomicUnits(String);
 
-impl std::error::Error for NonCanonicalAtomicUnits {}
+    /// The text is not the canonical decimal form of an unsigned 128-bit
+    /// amount.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct NonCanonicalAtomicUnits;
 
-impl DecimalAtomicUnits {
-    /// The one place that holds the canonical rule.
-    pub fn parse(value: &str) -> Result<Self, NonCanonicalAtomicUnits> {
-        let canonical = !value.is_empty()
-            && value.bytes().all(|byte| byte.is_ascii_digit())
-            && (value == "0" || !value.starts_with('0'))
-            && value.parse::<u128>().is_ok();
-        if canonical {
-            Ok(Self(value.to_string()))
-        } else {
-            Err(NonCanonicalAtomicUnits)
+    impl std::fmt::Display for NonCanonicalAtomicUnits {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("atomic_units must be a canonical unsigned decimal string")
         }
     }
 
-    pub fn as_str(&self) -> &str {
-        &self.0
+    impl std::error::Error for NonCanonicalAtomicUnits {}
+
+    impl DecimalAtomicUnits {
+        /// The one place that holds the canonical rule.
+        pub fn parse(value: &str) -> Result<Self, NonCanonicalAtomicUnits> {
+            let canonical = !value.is_empty()
+                && value.bytes().all(|byte| byte.is_ascii_digit())
+                && (value == "0" || !value.starts_with('0'))
+                && value.parse::<u128>().is_ok();
+            if canonical {
+                Ok(Self(value.to_string()))
+            } else {
+                Err(NonCanonicalAtomicUnits)
+            }
+        }
+
+        pub fn as_str(&self) -> &str {
+            &self.0
+        }
+
+        /// The amount as a number. The text was checked at construction,
+        /// so the parse cannot fail.
+        pub fn as_u128(&self) -> u128 {
+            self.0
+                .parse()
+                .expect("DecimalAtomicUnits holds a checked u128 decimal")
+        }
     }
 
-    /// The amount as a number. The text was checked at construction, so the
-    /// parse cannot fail.
-    pub fn as_u128(&self) -> u128 {
-        self.0
-            .parse()
-            .expect("DecimalAtomicUnits holds a checked u128 decimal")
+    impl From<u128> for DecimalAtomicUnits {
+        fn from(value: u128) -> Self {
+            Self(value.to_string())
+        }
     }
-}
 
-impl From<u128> for DecimalAtomicUnits {
-    fn from(value: u128) -> Self {
-        Self(value.to_string())
+    impl TryFrom<String> for DecimalAtomicUnits {
+        type Error = NonCanonicalAtomicUnits;
+
+        fn try_from(value: String) -> Result<Self, Self::Error> {
+            Self::parse(&value)
+        }
     }
-}
 
-impl TryFrom<String> for DecimalAtomicUnits {
-    type Error = NonCanonicalAtomicUnits;
-
-    fn try_from(value: String) -> Result<Self, Self::Error> {
-        Self::parse(&value)
-    }
-}
-
-impl From<DecimalAtomicUnits> for String {
-    fn from(units: DecimalAtomicUnits) -> Self {
-        units.0
+    impl From<DecimalAtomicUnits> for String {
+        fn from(units: DecimalAtomicUnits) -> Self {
+            units.0
+        }
     }
 }
 
@@ -8396,17 +8407,76 @@ impl Serialize for InstrumentAmount {
     }
 }
 
+/// Reads an amount without building the value it is given: a string (owned
+/// or borrowed; both arrive at `visit_str`) is checked, and every other
+/// value is `Unreadable`. A sequence or a map is drained with `IgnoredAny`,
+/// which allocates nothing and does not recurse, so a deeply nested value
+/// cannot fail the document with the parser's recursion limit.
+struct InstrumentAmountVisitor;
+
+impl<'de> serde::de::Visitor<'de> for InstrumentAmountVisitor {
+    type Value = InstrumentAmount;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("an instrument amount")
+    }
+
+    fn visit_str<E>(self, text: &str) -> Result<Self::Value, E> {
+        Ok(DecimalAtomicUnits::parse(text)
+            .map(InstrumentAmount::Readable)
+            .unwrap_or(InstrumentAmount::Unreadable))
+    }
+
+    fn visit_bool<E>(self, _: bool) -> Result<Self::Value, E> {
+        Ok(InstrumentAmount::Unreadable)
+    }
+
+    fn visit_i64<E>(self, _: i64) -> Result<Self::Value, E> {
+        Ok(InstrumentAmount::Unreadable)
+    }
+
+    fn visit_u64<E>(self, _: u64) -> Result<Self::Value, E> {
+        Ok(InstrumentAmount::Unreadable)
+    }
+
+    fn visit_f64<E>(self, _: f64) -> Result<Self::Value, E> {
+        Ok(InstrumentAmount::Unreadable)
+    }
+
+    fn visit_unit<E>(self) -> Result<Self::Value, E> {
+        Ok(InstrumentAmount::Unreadable)
+    }
+
+    fn visit_none<E>(self) -> Result<Self::Value, E> {
+        Ok(InstrumentAmount::Unreadable)
+    }
+
+    fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+    where
+        A: serde::de::SeqAccess<'de>,
+    {
+        while seq.next_element::<serde::de::IgnoredAny>()?.is_some() {}
+        Ok(InstrumentAmount::Unreadable)
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: serde::de::MapAccess<'de>,
+    {
+        while map
+            .next_entry::<serde::de::IgnoredAny, serde::de::IgnoredAny>()?
+            .is_some()
+        {}
+        Ok(InstrumentAmount::Unreadable)
+    }
+}
+
 impl<'de> Deserialize<'de> for InstrumentAmount {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
     {
-        Ok(match Value::deserialize(deserializer)? {
-            Value::String(text) => DecimalAtomicUnits::parse(&text)
-                .map(Self::Readable)
-                .unwrap_or(Self::Unreadable),
-            _ => Self::Unreadable,
-        })
+        deserializer.deserialize_any(InstrumentAmountVisitor)
     }
 }
 
@@ -8599,6 +8669,63 @@ mod pipeline_status_wire_tests {
         let read: TraceInstrumentStatusUpdate = serde_json::from_value(without_key).unwrap();
         assert_eq!(read.atomic_units, InstrumentAmount::Unreadable);
         assert_eq!(read.reason_label.as_deref(), Some("kept"));
+    }
+
+    /// Multi-lens review C25: a client reads a chunk with
+    /// `serde_json::from_str`, so the JSON parser runs while the amount is
+    /// read. An amount nested deeper than the parser's recursion limit is
+    /// ignored without recursion and reads as `Unreadable`; the other fields
+    /// and the other documents of the chunk are read. A number the parser
+    /// itself refuses still fails the document.
+    #[test]
+    fn a_deeply_nested_amount_read_from_text_is_unreadable_and_keeps_the_chunk() {
+        let nested = format!("{}{}", "[".repeat(200), "]".repeat(200));
+        let chunk = serde_json::json!([
+            status_json(vec![instrument_json(serde_json::json!("NESTED"))]),
+            status_json(vec![instrument_json(serde_json::json!("9"))]),
+        ])
+        .to_string()
+        .replace("\"NESTED\"", &nested);
+        let updates: Vec<TraceSubmissionStatusUpdate> = serde_json::from_str(&chunk)
+            .expect("a chunk with one deeply nested amount still deserializes");
+        assert_eq!(updates.len(), 2);
+        let first = &updates[0].pipeline.as_ref().unwrap().instruments[0];
+        assert_eq!(first.atomic_units, InstrumentAmount::Unreadable);
+        assert_eq!(first.instrument_id, "trace_credit");
+        assert_eq!(first.payout_state, "disabled");
+        assert_eq!(first.reason_label.as_deref(), Some("kept"));
+        let second = &updates[1].pipeline.as_ref().unwrap().instruments[0];
+        assert_eq!(second.atomic_units.readable().unwrap().as_str(), "9");
+
+        for malformed in [
+            "42",
+            "4.2",
+            "-1",
+            "null",
+            "true",
+            "\"01\"",
+            "{\"units\":[\"1\"]}",
+        ] {
+            let text = instrument_json(serde_json::json!("AMOUNT"))
+                .to_string()
+                .replace("\"AMOUNT\"", malformed);
+            let read: TraceInstrumentStatusUpdate = serde_json::from_str(&text)
+                .unwrap_or_else(|error| panic!("{malformed} must not fail: {error}"));
+            assert_eq!(
+                read.atomic_units,
+                InstrumentAmount::Unreadable,
+                "{malformed}"
+            );
+            assert_eq!(read.reason_label.as_deref(), Some("kept"));
+        }
+
+        let out_of_range = instrument_json(serde_json::json!("AMOUNT"))
+            .to_string()
+            .replace("\"AMOUNT\"", "1e999");
+        assert!(
+            serde_json::from_str::<TraceInstrumentStatusUpdate>(&out_of_range).is_err(),
+            "the JSON parser refuses the number, which fails the document"
+        );
     }
 
     #[test]
