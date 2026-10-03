@@ -48,6 +48,10 @@ struct TracesTree: Equatable {
         var disclosure: String? = nil
         /// The unresolvable bucket, which says why it can never be armed.
         var isBucket = false
+        /// The daemon's counts from `list_projects`, for Submit all; nil for
+        /// a folder it does not list, and nil is never read as zero.
+        var pendingCount: Int? = nil
+        var contributableCount: Int? = nil
     }
 
     /// A tool's source declaration in `get_settings`. `unknown` is settings
@@ -107,7 +111,8 @@ struct TracesTree: Equatable {
                 id: project.projectId, label: project.displayLabel, mode: project.mode,
                 offerableModes: project.offerableModes, sessions: [],
                 disclosure: project.mode == .autoUpload ? project.automaticDisclosure : nil,
-                isBucket: project.isUnresolvedBucket))
+                isBucket: project.isUnresolvedBucket,
+                pendingCount: project.pendingCount, contributableCount: project.contributableCount))
         }
         for entry in entries {
             add(FolderNode(id: entry.projectId, label: entry.projectLabel, mode: nil, sessions: []))

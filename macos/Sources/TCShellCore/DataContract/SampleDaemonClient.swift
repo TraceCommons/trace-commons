@@ -222,7 +222,7 @@ public final class SampleDaemonClient: DaemonDataClient, @unchecked Sendable {
     /// Approves every pending entry of that folder in this set, except
     /// those held for a person (`heldForReview`), as the daemon's group
     /// selector does. A Manual Scrub check hold is approved with the rest.
-    public func approveFolder(projectId: String) async throws -> ApproveResponse {
+    public func approveFolder(projectId: String, verdict: ContributorVerdict?) async throws -> ApproveResponse {
         let pending = try await listPending(projectId: projectId)
         let held = pending.filter(\.heldForReview).count
         let json = SampleDaemonData.approvedGroup(approved: pending.count - held, excludedHeld: held)

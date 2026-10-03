@@ -428,5 +428,24 @@ final class TracesParityTests: XCTestCase {
         let privateAI = try XCTUnwrap(offers.range(of: "struct PrivateAIOfferGlassCard"))
         XCTAssertFalse(offers[privateAI.lowerBound..<arming.lowerBound].contains("GlassButtonStyle(.primary"))
     }
+
+    /// The folder row offers Submit all and Submit all as only when the
+    /// shared table offers Contribute, with the daemon's counts, and says
+    /// what it withheld.
+    func test_theFolderRowSubmitsAllAsTheQueueDid() throws {
+        let tree = try Self.text("Views/Monitor/TracesViews.swift")
+        for needle in ["store.groupOffer(", "offer.offersContribute", "QueueFolderWords.submitAll(offer.count)",
+                       "QueueFolderWords.submitAllHelp(", "store.contributeFolder(", "VerdictCopy.submitAllAs",
+                       "ContributorVerdict.allCases", "offer.withheldLine"] {
+            XCTAssertTrue(tree.contains(needle), "TracesViews.swift lacks \(needle)")
+        }
+        let store = try Self.text("Views/Monitor/TracesStore.swift")
+        for needle in ["approveFolder(projectId:", "verdict:", "excludedIneligible", "withheldLine(", "cancelFolder(projectId:",
+                       "EligibilitySurface.groupSubmit("] {
+            XCTAssertTrue(store.contains(needle), "TracesStore.swift lacks \(needle)")
+        }
+        XCTAssertTrue(try Self.text("Views/Monitor/TracesOffers.swift").contains("store.lastContributedFolder"))
+        XCTAssertTrue(try Self.text("Views/QueueFolderRow.swift").contains("enum QueueFolderWords"))
+    }
 }
 #endif

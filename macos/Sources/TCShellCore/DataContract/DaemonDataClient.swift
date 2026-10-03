@@ -93,8 +93,9 @@ public protocol DaemonDataClient: Sendable {
     /// of the rest -- `skipped[]` per entry, `excludedHeld` (held for a
     /// person's review) and `excludedIneligible` (cannot be contributed),
     /// neither of which is part of `skipped`. An id the daemon does not
-    /// know is refused with `project-id-unrecognized`.
-    func approveFolder(projectId: String) async throws -> ApproveResponse
+    /// know is refused with `project-id-unrecognized`. A `verdict` is the
+    /// opt-in "Submit all as" answer, sent as `outcome`; `nil` sends none.
+    func approveFolder(projectId: String, verdict: ContributorVerdict?) async throws -> ApproveResponse
     /// `cancel` for one entry: Undo inside the hold window (R7). Only an
     /// entry still `approved` can be cancelled, which the hold guarantees
     /// until it ends; any other is refused with `not-cancelable`. The entry
@@ -212,6 +213,11 @@ extension DaemonDataClient {
     /// `approve` for one entry with no verdict.
     public func approve(entryId: String) async throws -> ApproveResponse {
         try await approve(entryId: entryId, verdict: nil, correction: nil)
+    }
+
+    /// `approveFolder` with no verdict.
+    public func approveFolder(projectId: String) async throws -> ApproveResponse {
+        try await approveFolder(projectId: projectId, verdict: nil)
     }
 }
 

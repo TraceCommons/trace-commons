@@ -25,6 +25,8 @@ struct TracesTreeView: View {
     /// A tool switch change waiting on the core's explanation of what the
     /// source declaration does.
     @State private var sourceChange: SourceChange?
+    /// The folder whose "Submit all as" menu is open.
+    @State private var verdictMenu: String?
     /// VoiceOver's focus, which follows the selection the arrow keys move,
     /// so a person hearing the tree hears where it went.
     @AccessibilityFocusState private var spoken: String?
@@ -367,6 +369,11 @@ struct TracesTreeView: View {
 
     @ViewBuilder
     private func folderRows(_ folder: TracesTree.FolderNode) -> some View {
+        // Submit all and Submit all as are a consent action: drawn only when
+        // the shared table offers Contribute for the daemon's counts, never
+        // for a folder that is not sent, and removed rather than disabled.
+        let offer = store.groupOffer(folder)
+        let submits = offer.offersContribute && store.mayContributeFolder(folder)
         GlassListRow(
             depth: .folder,
             tile: .folder,
@@ -374,14 +381,34 @@ struct TracesTreeView: View {
             // The mode is the picker's; the sub-line counts what is waiting.
             sub: folder.sessions.isEmpty ? nil : String(folder.sessions.count),
             expanded: folder.sessions.isEmpty ? nil : isOpen(folder.id),
+            submitTitle: submits ? QueueFolderWords.submitAll(offer.count) : nil,
             // The folder's mode: the three-way choice, with the core's
             // confirmations. A folder the core has not listed has no mode.
             accessory: modePicker(folder),
             expandLabel: folder.label,
-            onToggleExpand: { toggle(folder.id) }
+            menuLabel: submits ? VerdictCopy.submitAllAs : "",
+            menuOpen: verdictMenu == folder.id,
+            onToggleExpand: { toggle(folder.id) },
+            onSubmit: submits ? { Task { await store.contributeFolder(folder, verdict: nil) } } : nil,
+            onMenu: submits ? { verdictMenu = verdictMenu == folder.id ? nil : folder.id } : nil
         )
+        .help(submits ? QueueFolderWords.submitAllHelp(folder.label) : "")
         .disabled(store.writing.contains(folder.id))
-        notes(folderNotes(folder), depth: .folder)
+        if submits, verdictMenu == folder.id {
+            GlassMenu(onDismiss: { verdictMenu = nil }) {
+                ForEach(ContributorVerdict.allCases, id: \.rawValue) { option in
+                    GlassMenuItem(option.label) {
+                        verdictMenu = nil
+                        Task { await store.contributeFolder(folder, verdict: option) }
+                    }
+                }
+            }
+            .help(VerdictCopy.submitAllAsTooltip)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.leading, 8 + 16 + GlassTokens.Space.s4 + CGFloat(GlassListRow.Depth.folder.rawValue) * 18)
+            .padding(.bottom, GlassTokens.Space.s2)
+        }
+        notes(folderNotes(folder) + (offer.withheldLine.map { [$0] } ?? []), depth: .folder)
         if isOpen(folder.id) {
             ForEach(folder.sessions) { sessionRow($0) }
         }

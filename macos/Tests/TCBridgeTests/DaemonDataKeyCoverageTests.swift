@@ -433,6 +433,9 @@ final class DaemonDataKeyCoverageTests: XCTestCase {
         XCTAssertNotNil(group.excludedHeld, "a group call always reports what it held back")
         XCTAssertEqual(group.skipped.map(\.reasonLabel), ["not-enrolled"])
         assertDeclared(ApproveResponse.self, try result(daemon, "approve", ["project_id": projectId]), method: "approve")
+        let withVerdict = try await client.approveFolder(projectId: projectId, verdict: .worked)
+        XCTAssertEqual(withVerdict.approved, 0)
+        XCTAssertEqual(withVerdict.skipped.map(\.reasonLabel), ["not-enrolled"])
         do {
             _ = try await client.approveFolder(projectId: "proj_does_not_exist")
             XCTFail("an unknown project answered")
