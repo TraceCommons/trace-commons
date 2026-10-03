@@ -2384,7 +2384,7 @@ char*       tc_arming_offer_copy_json(const char* project_label, uint32_t count)
 /* The menu-bar Contribution mode pill (#1173, project_copy::
  * contribution_mode_copy): {title, mixed, choices, override_active, clear},
  * choices being [{mode, label, line}] for Ask me, Auto contribute and Never.
- * DRAFT, NEEDS APPROVAL. NULL only on a caught panic.
+ * NULL only on a caught panic.
  */
 char*       tc_contribution_mode_copy_json(void);
 
@@ -2518,11 +2518,13 @@ char*       tc_grant_void_notice_regrant_json(const char* void_json);
  * (DaemonSettings::keychain_status_json): what the credential store at
  * config_dir holds, as labels and booleans only -- never the inference key,
  * never the session's refresh token. MAY PROMPT FOR OS STORAGE; call off a
- * blocking worker. NULL for a NULL or non-UTF-8 config_dir, and on a caught
- * panic; an unreadable config_dir or an unloadable settings document answers
- * the unavailable fallback instead of NULL.
+ * blocking worker. NULL for a NULL or non-UTF-8 config_dir. A config_dir
+ * that cannot be opened fails the call: NULL with *err set to
+ * credential-storage-unavailable, as Tauri does. A settings document that
+ * opens but cannot be loaded answers the unavailable fallback. *err is owned;
+ * free it with tc_string_free. On a caught panic, NULL and *err = "panic".
  */
-char*       tc_private_ai_keychain_status_json(const char* config_dir);
+char*       tc_private_ai_keychain_status_json(const char* config_dir, char** err);
 
 /* Parse one deep link or launch argument (deep_link::parse_deep_link): a
  * JSON object naming exactly one action -- enroll, public_run, credential,
@@ -2554,8 +2556,7 @@ int32_t     tc_external_url_is_allowed(const char* url);
 char*       tc_health_copy_json(int32_t reachable, const char* label,
                                 int64_t max_queue_entries);
 
-/* The explanatory line under a second_look reason (R6/R7, #1173; DRAFT,
- * NEEDS APPROVAL -- preview_copy::second_look_line is itself unapproved):
+/* The explanatory line under a second_look reason (R6/R7, #1173):
  * why one scrubbed session waits for a person instead of moving on its own.
  * reason is one of the fixed second_look labels (nothing-matched,
  * looks-unsure, trimmed-to-fit). NULL for a NULL, non-UTF-8 or unrecognised
