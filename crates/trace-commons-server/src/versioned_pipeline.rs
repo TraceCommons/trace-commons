@@ -5435,7 +5435,8 @@ async fn receipt_key_refusal(
 ///
 /// A caller asks only after it found no run for the receipt's key, so a retry
 /// of an existing receipt is answered from its run in every routing state.
-/// Two single-row reads by primary key, and one lock request with `lock`.
+/// One statement of single-row reads by primary key (the owner and the
+/// routing state together), and one lock request with `lock`.
 async fn new_receipt_refusal_in(
     tx: &Transaction<'_>,
     tenant_id: &str,
@@ -5455,8 +5456,12 @@ async fn new_receipt_refusal_in(
     }
     // The legacy path owns the id when its ownership row says so, or when a
     // submission row holds the id and no pipeline run does (a legacy receipt
-    // from before ownership rows). A pipeline-owned id has a run.
-    let legacy_owned: bool = tx
+    // from before ownership rows). A pipeline-owned id has a run. The owner
+    // and the routing state are one statement (final fix wave G26): the
+    // staging transaction runs it inside the tenant's quota lock, and the
+    // statement is after the routing lock, so it reads what a routing change
+    // committed before the lock was granted.
+    let row = tx
         .query_one(
             "SELECT EXISTS (
                  SELECT 1 FROM pipeline_receipt_ownership
@@ -5469,21 +5474,18 @@ async fn new_receipt_refusal_in(
                          WHERE r.tenant_id = s.tenant_id
                            AND r.submission_id = s.submission_id
                     )
-             )",
+             ) AS legacy_owned,
+             (SELECT routing_state FROM pipeline_tenant_routing
+               WHERE tenant_id = $1) AS routing_state",
             &[&tenant_id, &submission_id],
         )
-        .await?
-        .get(0);
-    if legacy_owned {
+        .await?;
+    if row.get::<_, bool>("legacy_owned") {
         return Ok(Some(PipelineReceiptResult::LegacyOwned));
     }
-    let state = tx
-        .query_opt(
-            "SELECT routing_state FROM pipeline_tenant_routing WHERE tenant_id = $1",
-            &[&tenant_id],
-        )
-        .await?
-        .map(|row| RoutingState::from_db(row.get::<_, String>(0).as_str()))
+    let state = row
+        .get::<_, Option<String>>("routing_state")
+        .map(|state| RoutingState::from_db(state.as_str()))
         .transpose()?;
     Ok(match state {
         Some(RoutingState::Pipeline) => None,
@@ -8799,8 +8801,15 @@ impl PipelineService {
     /// a receipt staged after the change reads it. The quota is counted here
     /// (`pipeline_admission_usage`, once per key), so a receipt that fails
     /// after its write stays counted, and a retry of that key is neither
-    /// counted again nor refused for its own earlier count; a receipt the
-    /// routing refuses is not counted. Last, the attempt's `staged` row.
+    /// counted again nor refused for its own earlier count; a receipt that
+    /// this transaction's routing check refuses is not counted. A receipt
+    /// that the commit transaction refuses afterwards (`NotRouted`,
+    /// `LegacyOwned`, `PolicyNotRunnable`: a routing change, a legacy claim,
+    /// or a suspension that committed while the object was written) keeps
+    /// the usage row this transaction inserted, so the hourly quota counts
+    /// it, as it counts every receipt that fails after its write: the
+    /// runtime role has no `DELETE` on the table (V95). Last, the attempt's
+    /// `staged` row.
     async fn stage_receipt_attempt(
         &self,
         request: &PipelineReceiptRequest<'_>,
@@ -8947,7 +8956,10 @@ impl PipelineService {
     /// exclusive) waits for this transaction, so no receipt commits after it.
     /// The routing lock comes after the receipt lock and the session row
     /// lock, and it is held to the commit. A refusal commits nothing, and
-    /// `submit` discards the attempt's object and row. Then it re-checks the
+    /// `submit` discards the attempt's object and row; the
+    /// `pipeline_admission_usage` row that the staging transaction inserted
+    /// stays, so a receipt refused here is counted by the hourly quota. Then
+    /// it re-checks the
     /// tombstones (one can arrive while the object is written), locks the
     /// attempt's row, which must still be `staged` and not due
     /// (`lock_committable_receipt_artifact`), takes the Admission policy row
