@@ -60,6 +60,11 @@ pub(crate) async fn configure_witness(
 
 /// `configure_witness` against a store, recording the witness as entered in
 /// Settings (K11: the disclosure screen says where a witness came from).
+///
+/// The validation itself -- the URL's shape, the signing address, the pin
+/// list -- is `WitnessSettings::configure`, the one implementation the C
+/// ABI's `tc_witness_configure` also calls; this is a thin pass of the
+/// store's current witness (for `admission_evidence`) and this call's inputs.
 fn configure_witness_in(
     store: &ConfigStore,
     url: String,
@@ -70,37 +75,17 @@ fn configure_witness_in(
         .load_config()
         .map_err(|_| "witness-config-unreadable".to_owned())?
         .ok_or_else(|| "witness-not-enrolled".to_owned())?;
-    let url = url.trim();
-    let url_has_scheme = url.starts_with("https://") || url.starts_with("http://");
-    let url_host = url.split(['/', '?', '#']).nth(2).unwrap_or("");
-    if !url_has_scheme || url_host.is_empty() || url_host.chars().any(char::is_whitespace) {
-        return Err("witness-url-invalid".to_owned());
-    }
-    let signing_address = signing_address.trim();
-    if signing_address.is_empty() {
-        return Err("witness-signing-address-invalid".to_owned());
-    }
-    let measurements: Vec<String> = measurements
-        .into_iter()
-        .map(|entry| entry.trim().to_owned())
-        .filter(|entry| !entry.is_empty())
-        .collect();
-    if measurements.is_empty() {
-        return Err("witness-pin-required".to_owned());
-    }
-    let settings = trace_commons_contributor::config::WitnessSettings {
-        admission_evidence: config
-            .witness
-            .as_ref()
-            .is_some_and(|w| w.admission_evidence),
-        url: url.to_owned(),
-        signing_address: signing_address.to_owned(),
-        expected_measurements: measurements,
-    };
-    match settings.trust() {
-        Ok(trust) if trust.is_pinned() => {}
-        _ => return Err("witness-pin-malformed".to_owned()),
-    }
+    let admission_evidence = config
+        .witness
+        .as_ref()
+        .is_some_and(|w| w.admission_evidence);
+    let settings = trace_commons_contributor::config::WitnessSettings::configure(
+        admission_evidence,
+        &url,
+        &signing_address,
+        measurements,
+    )
+    .map_err(str::to_owned)?;
     config.set_witness(settings, WitnessOrigin::Settings);
     store
         .save_config(&config)
