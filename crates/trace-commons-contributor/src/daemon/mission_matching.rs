@@ -15,11 +15,18 @@
 //! sees only what it let through.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use crate::contribution_missions::{LANGUAGE_MARKERS, LocalFacts, SessionFact};
+use crate::contribution_missions::{
+    ContributionMissionCatalogue, LANGUAGE_MARKERS, LocalFacts, SessionFact, match_missions,
+};
 
+use super::ipc::{DaemonShared, ERR_BAD_PARAMS, Request, Response};
 use super::policy::{ProjectMode, ProjectPolicy, UNKNOWN_PROJECT_KEY};
+
+/// The one log line matching writes: a label, nothing about what was read
+/// or found (M1).
+pub const LOG_LABEL: &str = "mission-matches-answered";
 
 /// A session the daemon has seen, as its cwd cache records it: the tool,
 /// if one was recorded, and the folder's project key.
@@ -107,6 +114,85 @@ pub fn languages_at(root: &Path) -> BTreeSet<String> {
         })
         .map(|(_, language)| (*language).to_string())
         .collect()
+}
+
+/// `mission_matches {catalogue}`: the ids of the catalogue's missions that
+/// this contributor's local work fits, and how many tools and folders
+/// matching was allowed to read -- counts only.
+///
+/// The catalogue is a parameter until Z7/Z8's server catalogue exists; the
+/// daemon fetches nothing here. Every input is read under its own lock and
+/// released, none mutably: no policy, queue, state or file is written, no
+/// audit row is appended, and the log gets [`LOG_LABEL`] and nothing else
+/// (M1, M2). The answer goes back over the local socket only.
+pub fn handle_mission_matches(shared: &DaemonShared, req: &Request) -> Response {
+    let Some(raw) = req.params.get("catalogue") else {
+        return Response::err(req.id, ERR_BAD_PARAMS, "catalogue-required");
+    };
+    let catalogue = match ContributionMissionCatalogue::from_value(raw) {
+        Ok(catalogue) => catalogue,
+        Err(e) => return Response::err(req.id, ERR_BAD_PARAMS, e.label()),
+    };
+    let tools_on: BTreeSet<String> = {
+        let settings = shared.settings.lock().expect("settings lock");
+        settings
+            .source_roots(&shared.store)
+            .source_identities()
+            .into_keys()
+            .map(str::to_string)
+            .collect()
+    };
+    let cached: Vec<(String, Option<String>, Option<String>)> = {
+        let state = shared.state.lock().expect("state lock");
+        state
+            .cwd_cache
+            .values()
+            .filter_map(|e| {
+                let tool = e.tool.clone().filter(|t| tool_is_on(t, &tools_on))?;
+                Some((tool, e.project_key.clone(), e.cwd.clone()))
+            })
+            .collect()
+    };
+    // A key the cache has not filled in yet is worked out here and not
+    // written back: matching leaves the cache as it found it.
+    let seen: Vec<SeenSession> = cached
+        .into_iter()
+        .map(|(tool, key, cwd)| SeenSession {
+            tool: Some(tool),
+            folder: key.unwrap_or_else(|| super::policy::project_for(cwd.as_deref()).0),
+        })
+        .collect();
+    let (sessions, roots) = {
+        let policy = shared.policy.lock().expect("policy lock");
+        let sessions = readable_sessions(&policy, &tools_on, &seen);
+        let roots: BTreeMap<String, PathBuf> = sessions
+            .iter()
+            .map(|s| {
+                let shown = policy
+                    .projects
+                    .get(&s.folder)
+                    .and_then(|e| e.display_path.clone())
+                    .unwrap_or_else(|| s.folder.clone());
+                (s.folder.clone(), PathBuf::from(shown))
+            })
+            .collect();
+        (sessions, roots)
+    };
+    let facts = local_facts(sessions, catalogue.needs_languages(), |folder| {
+        roots
+            .get(folder)
+            .map(|root| languages_at(root))
+            .unwrap_or_default()
+    });
+    let matches = match_missions(&catalogue, &facts);
+    tracing::debug!("{LOG_LABEL}");
+    Response::ok(
+        req.id,
+        serde_json::json!({
+            "matches": matches,
+            "read": {"tools": facts.tools_read(), "folders": facts.folders_read()},
+        }),
+    )
 }
 
 #[cfg(test)]
@@ -229,5 +315,292 @@ mod tests {
             BTreeSet::from(["rust".to_string()])
         );
         assert!(languages_at(&dir.path().join("missing")).is_empty());
+    }
+    // ---- mission_matches over IPC ----
+
+    use super::super::ipc::handle_request;
+    use super::super::settings::SourceDeclaration;
+    use super::super::state::CwdCacheEntry;
+
+    fn shared() -> (tempfile::TempDir, DaemonShared) {
+        let (dir, store) = crate::config::tests_support::temp_store();
+        (dir, DaemonShared::load(store).unwrap())
+    }
+
+    fn ask(s: &DaemonShared, params: serde_json::Value) -> Response {
+        handle_request(
+            s,
+            &Request {
+                id: 7,
+                method: "mission_matches".to_string(),
+                params,
+            },
+        )
+    }
+
+    /// A daemon with Claude Code on and Codex off, an Ask me folder that is
+    /// a Rust repository, a Never folder that is a Python one, and sessions
+    /// in both from both tools -- one with its project key not yet cached.
+    fn seeded() -> (tempfile::TempDir, DaemonShared, tempfile::TempDir) {
+        let (dir, s) = shared();
+        let work = tempfile::tempdir().unwrap();
+        let ask_dir = work.path().join("ask-repo");
+        let never_dir = work.path().join("never-repo");
+        std::fs::create_dir_all(&ask_dir).unwrap();
+        std::fs::create_dir_all(&never_dir).unwrap();
+        std::fs::write(ask_dir.join("Cargo.toml"), "").unwrap();
+        std::fs::write(never_dir.join("pyproject.toml"), "").unwrap();
+        {
+            let mut settings = s.settings.lock().unwrap();
+            settings.claude_source = Some(SourceDeclaration::Watch {
+                path: work.path().join("claude-root"),
+            });
+            settings.codex_source = Some(SourceDeclaration::Off);
+        }
+        let key = |p: &Path| super::super::policy::project_for(Some(p.to_str().unwrap())).0;
+        let (ask_key, never_key) = (key(&ask_dir), key(&never_dir));
+        s.policy
+            .lock()
+            .unwrap()
+            .set_mode(&never_key, ProjectMode::Ignore, Utc::now())
+            .unwrap();
+        let mut state = s.state.lock().unwrap();
+        let mut put = |path: &str, tool: &str, cwd: &Path, cached_key: Option<&str>| {
+            state.cwd_cache.insert(
+                path.to_string(),
+                CwdCacheEntry {
+                    size_bytes: 1,
+                    modified_at: Utc::now(),
+                    cwd: Some(cwd.to_str().unwrap().to_string()),
+                    project_key: cached_key.map(str::to_string),
+                    tool: Some(tool.to_string()),
+                },
+            );
+        };
+        put(
+            "/s/claude-ask-1.jsonl",
+            "claude-code",
+            &ask_dir,
+            Some(&ask_key),
+        );
+        put("/s/claude-ask-2.jsonl", "claude-code", &ask_dir, None);
+        put(
+            "/s/claude-never.jsonl",
+            "claude-code",
+            &never_dir,
+            Some(&never_key),
+        );
+        put("/s/codex-ask.jsonl", "codex", &ask_dir, Some(&ask_key));
+        drop(state);
+        (dir, s, work)
+    }
+
+    fn catalogue() -> serde_json::Value {
+        json!({
+            "schema_version": 1,
+            "missions": [
+                {"mission_id": "rust-claude", "title": "Rust with Claude",
+                 "criteria": {"tools": ["claude-code"], "languages": ["rust"], "min_sessions": 2}},
+                {"mission_id": "python", "title": "Python work",
+                 "criteria": {"languages": ["python"]}},
+                {"mission_id": "codex", "title": "Codex work",
+                 "criteria": {"tools": ["codex"]}},
+                {"mission_id": "claude-3", "title": "Three Claude sessions",
+                 "criteria": {"tools": ["claude-code"], "min_sessions": 3}},
+            ],
+        })
+    }
+
+    /// Over IPC: the Never folder's sessions and the switched-off tool's
+    /// are not read, so only the mission the Ask me folder's Claude Code
+    /// sessions fit matches, and the counts say one tool, one folder.
+    #[test]
+    fn mission_matches_reads_only_tools_on_in_folders_not_never() {
+        let (_dir, s, _work) = seeded();
+        let result = ask(&s, json!({"catalogue": catalogue()})).result.unwrap();
+        assert_eq!(
+            result,
+            json!({"matches": ["rust-claude"], "read": {"tools": 1, "folders": 1}})
+        );
+    }
+
+    /// Under a Never contribution override, nothing is read and nothing
+    /// matches.
+    #[test]
+    fn mission_matches_under_a_never_override_reads_nothing() {
+        let (_dir, s, _work) = seeded();
+        s.policy
+            .lock()
+            .unwrap()
+            .set_contribution_override(ProjectMode::Ignore, Utc::now(), None)
+            .unwrap();
+        let result = ask(
+            &s,
+            json!({"catalogue": {"schema_version": 1, "missions": [{"mission_id": "any"}]}}),
+        )
+        .result
+        .unwrap();
+        assert_eq!(
+            result,
+            json!({"matches": [], "read": {"tools": 0, "folders": 0}})
+        );
+    }
+
+    /// Every file in the store directory, by name.
+    fn files(dir: &Path) -> BTreeMap<String, Vec<u8>> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|e| e.path().is_file())
+            .map(|e| {
+                (
+                    e.file_name().to_string_lossy().to_string(),
+                    std::fs::read(e.path()).unwrap(),
+                )
+            })
+            .collect()
+    }
+
+    /// M2: matching changes no policy, queue or daemon state, in memory or
+    /// on disk -- not even the cache key it had to work out.
+    #[test]
+    fn mission_matches_changes_no_policy_or_queue_state() {
+        let (_dir, s, _work) = seeded();
+        s.queue
+            .lock()
+            .unwrap()
+            .upsert(
+                super::super::queue::QueueEntry {
+                    entry_id: uuid::Uuid::new_v4(),
+                    session_hash: "sha256:seed".to_string(),
+                    source: "claude-code".to_string(),
+                    project_key: "/seed".to_string(),
+                    project_label: "seed".to_string(),
+                    path: PathBuf::from("/s/claude-ask-1.jsonl"),
+                    size_bytes: 1,
+                    discovered_at: Utc::now(),
+                    ..Default::default()
+                },
+                500,
+            )
+            .unwrap();
+        s.policy.lock().unwrap().save(&s.store).unwrap();
+        let snapshot = |s: &DaemonShared| {
+            (
+                s.policy.lock().unwrap().clone(),
+                s.queue.lock().unwrap().all().to_vec(),
+                serde_json::to_value(&s.state.lock().unwrap().cwd_cache).unwrap(),
+                files(s.store.dir()),
+            )
+        };
+        let before = snapshot(&s);
+        let reply = ask(&s, json!({"catalogue": catalogue()}));
+        assert!(reply.result.is_some(), "{reply:?}");
+        assert!(
+            before == snapshot(&s),
+            "matching changed policy, queue or state"
+        );
+    }
+
+    /// Records every event and span field a test's code emits.
+    #[derive(Clone, Default)]
+    struct Capture(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+
+    struct Fields(String);
+
+    impl tracing::field::Visit for Fields {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            use std::fmt::Write;
+            let _ = write!(self.0, " {}={value:?}", field.name());
+        }
+    }
+
+    impl tracing::Subscriber for Capture {
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            let mut fields = Fields(span.metadata().name().to_string());
+            span.record(&mut fields);
+            self.0.lock().unwrap().push(fields.0);
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::span::Id, values: &tracing::span::Record<'_>) {
+            let mut fields = Fields(String::new());
+            values.record(&mut fields);
+            self.0.lock().unwrap().push(fields.0);
+        }
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn event(&self, event: &tracing::Event<'_>) {
+            let mut fields = Fields(event.metadata().target().to_string());
+            event.record(&mut fields);
+            self.0.lock().unwrap().push(fields.0);
+        }
+        fn enter(&self, _: &tracing::span::Id) {}
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+
+    /// M1: what matching writes to the log is its label, and to the audit
+    /// log nothing -- no folder, tool, mission or count.
+    #[test]
+    fn mission_matching_logs_labels_only_and_audits_nothing() {
+        let (_dir, s, work) = seeded();
+        let audit_before = super::super::audit::load(&s.store).unwrap();
+        let capture = Capture::default();
+        // With a single scoped subscriber alive, tracing works out a
+        // callsite's interest from whichever thread registers it first --
+        // another test's, which has none, so the handler's line would be
+        // cached as unwanted. A second, silent dispatcher makes it ask every
+        // live subscriber instead; then every callsite is asked again.
+        let _second = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+        let reply = tracing::subscriber::with_default(capture.clone(), || {
+            tracing::callsite::rebuild_interest_cache();
+            ask(&s, json!({"catalogue": catalogue()}))
+        });
+        assert_eq!(reply.result.unwrap()["matches"], json!(["rust-claude"]));
+        let lines = capture.0.lock().unwrap().clone();
+        assert!(
+            lines.iter().any(|l| l.contains(LOG_LABEL)),
+            "the label is logged: {lines:?}"
+        );
+        let logged = lines.join("\n");
+        let work = work.path().to_string_lossy().to_string();
+        for secret in [
+            work.as_str(),
+            "ask-repo",
+            "never-repo",
+            "claude-code",
+            "codex",
+            "rust",
+            "python",
+            "Rust with Claude",
+            "/s/",
+        ] {
+            assert!(
+                !logged.contains(secret),
+                "the log names {secret:?}: {lines:?}"
+            );
+        }
+        assert!(
+            lines.iter().all(|l| l.trim_end().ends_with(LOG_LABEL)),
+            "nothing but the label: {lines:?}"
+        );
+        assert_eq!(super::super::audit::load(&s.store).unwrap(), audit_before);
+    }
+
+    /// The catalogue is required and read strictly about its version.
+    #[test]
+    fn mission_matches_refuses_a_missing_or_newer_catalogue() {
+        let (_dir, s) = shared();
+        let label = |r: Response| r.error.unwrap().message;
+        assert_eq!(label(ask(&s, json!({}))), "catalogue-required");
+        assert_eq!(
+            label(ask(&s, json!({"catalogue": {"schema_version": 2}}))),
+            "catalogue-schema-unsupported"
+        );
+        assert_eq!(
+            label(ask(&s, json!({"catalogue": "missions"}))),
+            "catalogue-invalid"
+        );
     }
 }

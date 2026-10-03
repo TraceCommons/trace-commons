@@ -353,6 +353,7 @@ pub const METHODS: &[&str] = &[
     "keep",
     "undo_keep",
     "list_projects",
+    "mission_matches",
     "project_automatic_copy",
     "pause",
     "preview",
@@ -2519,6 +2520,9 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
         "keep" => handle_keep(shared, req),
         "undo_keep" => handle_undo_keep(shared, req),
         "list_projects" => handle_list_projects(shared, req),
+        // K16: which contribution missions fit this Mac's work. Read-only,
+        // and answered here only (M1, M2); see `mission_matching`.
+        "mission_matches" => super::mission_matching::handle_mission_matches(shared, req),
         "project_automatic_copy" => handle_project_automatic_copy(shared, req),
         // The one project worth offering to arm right now, or nothing.
         //
@@ -14295,7 +14299,7 @@ mod tests {
             src,
             "pub async fn handle_request_async(shared",
         ));
-        assert_eq!(sync.len(), 57, "synchronous dispatcher arms: {sync:?}");
+        assert_eq!(sync.len(), 58, "synchronous dispatcher arms: {sync:?}");
         assert_eq!(asy.len(), 43, "asynchronous dispatcher arms: {asy:?}");
 
         let dispatched: std::collections::BTreeSet<String> = sync.union(&asy).cloned().collect();
