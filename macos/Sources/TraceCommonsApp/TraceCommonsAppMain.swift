@@ -21,7 +21,9 @@ struct TraceCommonsShell: App {
     @State private var missionDrafts = MissionDraftsModel()
     #if DEBUG
     /// The glass menu-bar popover's data (R13), shared by its item and panel.
-    @State private var menuPanel = MenuPanelStore(client: MonitorWindowView.dataClient())
+    /// No client until the daemon runs: the menu-bar label attaches the
+    /// app's live one (`AppModel.daemonData`), never sample data.
+    @State private var menuPanel = MenuPanelStore(client: nil)
     #endif
     /// Quit confirmation, Dock reopen and invite links all arrive outside
     /// SwiftUI's reach. See `AppDelegate`.

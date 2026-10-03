@@ -51,7 +51,8 @@ struct MenuBarGlassPanel: View {
         .frame(width: Self.width)
         .glassSurface(.popover, radius: GlassTokens.Radius.menuPanel, floating: true)
         .animation(reduceMotion ? nil : GlassMotion.curve(GlassTokens.Motion.slide), value: sub)
-        .task { await store.run() }
+        // A fresh read on opening; the label follows the event stream.
+        .task { await store.load() }
     }
 
     // MARK: Pills
@@ -115,7 +116,7 @@ struct MenuBarGlassPanel: View {
     }
 
     private var rollup: MenuPanelData.ModeRollup {
-        guard let projects = store.projects else { return .none }
+        guard !store.stale, let projects = store.projects else { return .none }
         return MenuPanelData.rollup(projects.map(\.mode))
     }
 
@@ -225,19 +226,22 @@ struct MenuBarGlassPanel: View {
 
     private var legend: some View {
         let columns = store.columns
+        // Stale data is a dash, never the last counts.
+        let stale = store.stale
         return HStack(spacing: GlassTokens.Space.s3) {
-            GlassLegendCell(MenuWords.shared, value: String(columns.reduce(0) { $0 + $1.up }), status: .shared)
-            GlassLegendCell(MenuWords.kept, value: String(columns.reduce(0) { $0 + $1.down }), status: .kept)
+            GlassLegendCell(MenuWords.shared, value: stale ? "—" : String(columns.reduce(0) { $0 + $1.up }), status: .shared)
+            GlassLegendCell(MenuWords.kept, value: stale ? "—" : String(columns.reduce(0) { $0 + $1.down }), status: .kept)
         }
     }
 
     private var graph: some View {
         let columns = store.columns
         let start = Calendar.current.date(byAdding: .day, value: -(MenuPanelData.days - 1), to: Date()) ?? Date()
+        let stale = store.stale
         return GlassDayGraph(
-            columns: columns, paused: paused,
-            sharedChip: String(columns.reduce(0) { $0 + $1.up }),
-            keptChip: String(columns.reduce(0) { $0 + $1.down }),
+            columns: columns, paused: paused || stale,
+            sharedChip: stale ? "—" : String(columns.reduce(0) { $0 + $1.up }),
+            keptChip: stale ? "—" : String(columns.reduce(0) { $0 + $1.down }),
             leading: start.formatted(.dateTime.month(.abbreviated).day()),
             trailing: Date().formatted(.dateTime.month(.abbreviated).day()))
     }
@@ -249,7 +253,7 @@ struct MenuBarGlassPanel: View {
         let rows = MenuPanelData.recent(
             pending: store.pending, history: store.history, calls: store.calls,
             statusLabel: { model.publicRunCopy?.contributionStatusLabel(for: $0) })
-        if !rows.isEmpty {
+        if !rows.isEmpty && !store.stale {
             VStack(alignment: .leading, spacing: 0) {
                 Text(MenuWords.recentActivity)
                     .glassType(GlassTokens.TypeScale.label.weight(.regular))
@@ -276,7 +280,7 @@ struct MenuBarGlassPanel: View {
             hairline
             Button { openMain(.queue) } label: {
                 HStack {
-                    Text(FlowMapScene.pair(MenuWords.flagged, MenuPanelData.flagged(store.pending)))
+                    Text(FlowMapScene.pair(MenuWords.flagged, store.stale ? nil : MenuPanelData.flagged(store.pending)))
                     Spacer(minLength: 0)
                     Image(systemName: "chevron.right").glassGlyph(10, weight: .semibold)
                 }
@@ -313,13 +317,21 @@ struct MenuBarStripLabel: View {
 
     var body: some View {
         GlassMenuBarStrip(
-            columns: store.columns, paused: model.status.paused,
+            columns: store.columns,
+            condition: MenuPanelStatus.condition(
+                decisionsOwed: model.decisionsOwed, unhealthy: model.health != nil,
+                paused: model.status.paused, available: model.startup == .running, stale: store.stale),
             badge: MenuPanelStatus.badge(model.decisionsOwed))
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(MenuBarStatus.accessibilityLabel(
                 decisionsOwed: model.decisionsOwed, unhealthy: model.health != nil,
                 paused: model.status.paused, available: model.startup == .running))
-            .task { await store.load() }
+            // The label is always alive, so it owns the subscription: the
+            // app's live client, re-attached whenever the daemon restarts.
+            .task(id: model.liveData.map(ObjectIdentifier.init)) {
+                store.attach(model.daemonData)
+                await store.run()
+            }
     }
 }
 
@@ -329,6 +341,18 @@ enum MenuPanelStatus {
     static func badge(_ decisionsOwed: Int?) -> Int? {
         guard let decisionsOwed, decisionsOwed > 0 else { return nil }
         return decisionsOwed
+    }
+
+    /// What the strip says, in `MenuBarStatus.state`'s spirit: a daemon
+    /// that is not running, or data that could not be read, is
+    /// unavailable; trouble or an unknown count needs attention; then
+    /// paused; then live. Never live unless everything is.
+    static func condition(
+        decisionsOwed: Int?, unhealthy: Bool, paused: Bool, available: Bool, stale: Bool
+    ) -> GlassMenuBarStrip.Condition {
+        guard available, !stale else { return .unavailable }
+        if unhealthy || decisionsOwed == nil { return .attention }
+        return paused ? .paused : .live
     }
 }
 

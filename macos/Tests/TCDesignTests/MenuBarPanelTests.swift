@@ -19,4 +19,26 @@ final class MenuBarPanelTests: XCTestCase {
         XCTAssertEqual(GlassMenuBarStrip.height(0, max: 4), 2)
         XCTAssertEqual(GlassMenuBarStrip.height(4, max: 4), 9)
     }
+
+    /// A core that is down or unread draws flat grey bars, no badge and the
+    /// attention mark, never the last activity; trouble keeps the bars and
+    /// adds the mark; live data draws as recorded.
+    func test_anUnavailableCoreIsNeverDrawnAsActivity() {
+        let columns = (0 ..< 7).map { GlassDayColumn(id: String($0), up: $0, down: 7 - $0) }
+        let down = GlassMenuBarStrip.bars(columns, condition: .unavailable)
+        XCTAssertTrue(down.allSatisfy { $0.up == 2 && $0.down == 2 })
+        XCTAssertNil(GlassMenuBarStrip.shownBadge(4, condition: .unavailable))
+        XCTAssertTrue(GlassMenuBarStrip.showsAttention(.unavailable))
+        XCTAssertTrue(GlassMenuBarStrip.grey(.unavailable))
+
+        let live = GlassMenuBarStrip.bars(columns, condition: .live)
+        XCTAssertTrue(live.contains { $0.up > 2 })
+        XCTAssertEqual(GlassMenuBarStrip.shownBadge(4, condition: .live), 4)
+        XCTAssertFalse(GlassMenuBarStrip.showsAttention(.live))
+        XCTAssertFalse(GlassMenuBarStrip.grey(.live))
+
+        XCTAssertEqual(GlassMenuBarStrip.bars(columns, condition: .attention).map(\.up), live.map(\.up))
+        XCTAssertTrue(GlassMenuBarStrip.showsAttention(.attention))
+        XCTAssertTrue(GlassMenuBarStrip.grey(.paused))
+    }
 }
