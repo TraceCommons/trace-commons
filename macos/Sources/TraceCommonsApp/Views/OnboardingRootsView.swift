@@ -1,6 +1,7 @@
 import AppKit
 import SwiftUI
 import TCBridge
+import TCDesign
 import TCShellCore
 
 /// The roots screen: which session folders this app may watch.
@@ -55,52 +56,41 @@ struct OnboardingRootsView: View {
     @State private var failure: String?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: TC.Space.xl) {
-            header
-            explanation
-            rows
-                .disabled(model.isStartingDaemon)
-            if let failure {
-                Text(failure).font(TC.Font_.body).foregroundStyle(.red)
+        ScrollView {
+            VStack(alignment: .leading, spacing: GlassTokens.Space.s6) {
+                header
+                explanation
+                rows
+                    .disabled(model.isStartingDaemon)
+                if let failure {
+                    GlassNotice(tone: .outside) { Text(failure) }
+                }
+                actions
             }
-            actions
+            .padding(GlassTokens.Space.panePadding)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .padding(TC.Space.xxl)
-        .tcColumn(TC.Measure.prose)
-        .tcScreen()
         .onAppear(perform: discover)
     }
 
     private var header: some View {
-        Text("Which folders may this app watch?").font(TC.Font_.sectionTitle)
+        Text(OnboardingRootsWords.heading)
+            .glassType(GlassTokens.TypeScale.heading)
+            .foregroundStyle(GlassColor.textPrimary)
     }
 
     private var explanation: some View {
-        VStack(alignment: .leading, spacing: TC.Space.m) {
-            Text("""
-                This app reads coding-session transcripts. It will not guess where they \
-                are, and it will not watch anything until you say.
-                """)
-                .font(.body)
-
-            Text("""
-                Answer for Claude Code and Codex. Declining is an answer — leaving one \
-                blank is not, and the watcher would fall back to the standard location \
-                for it, which is probably your real work.
-                """)
-                .font(.body)
-
+        VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
+            Text(OnboardingRootsWords.readsTranscripts)
+            Text(OnboardingRootsWords.answerForBoth)
             // Gemini and Cline are the rows where a blank genuinely reads as
             // "nothing", so they are the rows where the warning above does
-            // not apply -- saying "answer for all four" would be false, and
-            // leaving the old "answer for both" in place would have made the
-            // sentence above silently wrong about rows now on the screen.
-            Text("""
-                Gemini CLI and Cline are optional. Left blank they are not read at all — \
-                unlike the other two, there is no fallback to a standard location.
-                """)
-                .font(.body)
+            // not apply -- saying "answer for all four" would be false.
+            Text(OnboardingRootsWords.optionalRows)
         }
+        .glassType(GlassTokens.TypeScale.body)
+        .foregroundStyle(GlassColor.textPrimary)
+        .fixedSize(horizontal: false, vertical: true)
     }
 
     // MARK: - Rows
@@ -126,7 +116,7 @@ struct OnboardingRootsView: View {
     static let offeredKinds: [SourceKind] = SourceKind.allCases
 
     private var rows: some View {
-        VStack(alignment: .leading, spacing: TC.Space.m) {
+        VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
             ForEach(Self.offeredKinds, id: \.self) { kind in
                 row(for: kind)
             }
@@ -134,7 +124,7 @@ struct OnboardingRootsView: View {
     }
 
     private func row(for kind: SourceKind) -> some View {
-        SourceRootRow(
+        GlassSourceRow(
             kind: kind,
             candidate: candidates.first { $0.source == kind },
             choice: roots[kind],
@@ -145,10 +135,10 @@ struct OnboardingRootsView: View {
     }
 
     private var actions: some View {
-        HStack(spacing: TC.Space.m) {
+        HStack(spacing: GlassTokens.Space.s4) {
             Spacer(minLength: 0)
-            Button("Continue") { start() }
-                .tcPrimaryAction()
+            Button(OnboardingRootsWords.continueButton) { start() }
+                .buttonStyle(GlassButtonStyle(.primary))
                 .disabled(!roots.isComplete || model.isStartingDaemon)
         }
     }
@@ -170,7 +160,7 @@ struct OnboardingRootsView: View {
             // an optional Gemini row, and "each" would now promise that a
             // blank Gemini or Cline row is what is blocking, which it never is --
             // `isComplete` is claude && codex by design.
-            failure = "Answer for Claude Code and Codex before continuing."
+            failure = OnboardingRootsWords.answerBeforeContinuing
             return
         }
         failure = nil
@@ -187,4 +177,24 @@ struct OnboardingRootsView: View {
             }
         }
     }
+}
+
+/// This screen's sentences, moved here unchanged from the view body.
+enum OnboardingRootsWords {
+    static let heading = "Which folders may this app watch?"
+    static let readsTranscripts = """
+        This app reads coding-session transcripts. It will not guess where they \
+        are, and it will not watch anything until you say.
+        """
+    static let answerForBoth = """
+        Answer for Claude Code and Codex. Declining is an answer — leaving one \
+        blank is not, and the watcher would fall back to the standard location \
+        for it, which is probably your real work.
+        """
+    static let optionalRows = """
+        Gemini CLI and Cline are optional. Left blank they are not read at all — \
+        unlike the other two, there is no fallback to a standard location.
+        """
+    static let answerBeforeContinuing = "Answer for Claude Code and Codex before continuing."
+    static let continueButton = "Continue"
 }

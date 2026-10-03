@@ -14,7 +14,7 @@ struct SourceRowAnswer: Equatable {
     let selectedPath: String?
 }
 
-/// `SourceRootRow.answerLine`'s branching, pure. A reported MODE is
+/// The old source row's branching, pure. A reported MODE is
 /// authoritative: `get_settings` says that a folder is watched and never
 /// which, so a watched or declined source shows the core's mode sentence and
 /// no path, and candidate evidence never replaces it.

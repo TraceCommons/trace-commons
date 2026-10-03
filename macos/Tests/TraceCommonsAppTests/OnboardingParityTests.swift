@@ -28,11 +28,19 @@ final class OnboardingParityTests: XCTestCase {
                            "Text(OnboardingWelcomeWords.footer)"],
              guards: [".buttonStyle(GlassButtonStyle(.primary))", ".buttonStyle(GlassButtonStyle(.link))",
                       ".keyboardShortcut(.defaultAction)"]),
+        Step(file: "Views/OnboardingRootsView.swift",
+             bindings: ["SessionRoots()", "roots.watch(", "roots.isComplete", "roots.settingsJSON()",
+                        "TCDiscovery.sourcesJSON()", "SourceCandidate.decodeList(", "model.isStartingDaemon",
+                        "model.startDaemon(at:", "GlassSourceRow(", "TCDaemon.TCError.rootsNotDeclared"],
+             copySources: ["OnboardingRootsWords.heading", "OnboardingRootsWords.readsTranscripts",
+                           "OnboardingRootsWords.answerForBoth", "OnboardingRootsWords.optionalRows",
+                           "OnboardingRootsWords.answerBeforeContinuing"],
+             guards: [".disabled(!roots.isComplete || model.isStartingDaemon)"]),
     ]
 
     /// Rows the table must hold; each task that adds a step raises it, so a
     /// dropped row fails here instead of passing silently.
-    static let minimumSteps = 1
+    static let minimumSteps = 2
 
     func test_theTableKeepsEveryRowAdded() {
         XCTAssertGreaterThanOrEqual(Self.steps.count, Self.minimumSteps)
