@@ -4976,7 +4976,13 @@ async fn pipeline_status_route_reports_the_pipeline_block_to_the_owner() {
     );
     let document: TraceSubmissionStatusUpdate =
         serde_json::from_value(document.clone()).expect("the protocol type reads the document");
-    assert_eq!(document.pipeline.unwrap().instruments[0].atomic_units, "5");
+    assert_eq!(
+        document.pipeline.unwrap().instruments[0]
+            .atomic_units
+            .readable()
+            .map(DecimalAtomicUnits::as_str),
+        Some("5")
+    );
 
     let (status, other) = status_for(state.clone(), fixture.base.other_token.clone()).await;
     assert_eq!(status, StatusCode::OK);

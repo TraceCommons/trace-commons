@@ -1867,7 +1867,9 @@ fn fixture_report_hashes_run_ids_and_names_each_mismatch() {
     };
     let instrument = trace_commons_protocol::trace_contribution::TraceInstrumentStatusUpdate {
         instrument_id: "storage_rebate".into(),
-        atomic_units: "5".into(),
+        atomic_units: trace_commons_protocol::trace_contribution::InstrumentAmount::Readable(
+            trace_commons_protocol::trace_contribution::DecimalAtomicUnits::from(5),
+        ),
         operation_state: "complete".into(),
         internal_settlement_state: "not_applicable".into(),
         payout_rail: "none".into(),

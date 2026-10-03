@@ -60,15 +60,15 @@ use tokio::net::TcpListener;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use trace_commons_gate_api::pipeline::{ReasonCode, ReviewRecommendation};
 use trace_commons_protocol::trace_contribution::{
-    ConsentMetadata, ConsentScope, EmbeddingAnalysisMetadata, PiiClassifyPolicy,
-    PrivacyFilterBackendTag, ProcessEvalRating, ProcessEvaluationLabels, ResidualPiiRisk,
-    ResidualRiskCondition, SourceSessionIdentity, TRACE_CONTRIBUTION_SCHEMA_VERSION,
-    TraceAllowedUse, TraceContributionEnvelope, TraceInstrumentStatusUpdate,
-    TracePipelineStatusUpdate, TraceSubmissionReceipt, TraceSubmissionStatusRequest,
-    TraceSubmissionStatusUpdate, TraceValueScorecard, apply_credit_estimate_to_envelope,
-    canonical_summary_for_embedding, privacy_filter_backend_from_env,
-    rescrub_envelope_prose_pii_with, rescrub_trace_envelope, retention_policy_for_allowed_use,
-    retention_policy_for_trace, run_privacy_filter_canary,
+    ConsentMetadata, ConsentScope, DecimalAtomicUnits, EmbeddingAnalysisMetadata, InstrumentAmount,
+    PiiClassifyPolicy, PrivacyFilterBackendTag, ProcessEvalRating, ProcessEvaluationLabels,
+    ResidualPiiRisk, ResidualRiskCondition, SourceSessionIdentity,
+    TRACE_CONTRIBUTION_SCHEMA_VERSION, TraceAllowedUse, TraceContributionEnvelope,
+    TraceInstrumentStatusUpdate, TracePipelineStatusUpdate, TraceSubmissionReceipt,
+    TraceSubmissionStatusRequest, TraceSubmissionStatusUpdate, TraceValueScorecard,
+    apply_credit_estimate_to_envelope, canonical_summary_for_embedding,
+    privacy_filter_backend_from_env, rescrub_envelope_prose_pii_with, rescrub_trace_envelope,
+    retention_policy_for_allowed_use, retention_policy_for_trace, run_privacy_filter_canary,
 };
 use trace_commons_server::account_native_auth::{
     IssuedNativeCode, NATIVE_AUTH_CODE_TTL, NATIVE_AUTH_REQUEST_TTL, NATIVE_CODE_CHALLENGE_METHOD,
@@ -16610,7 +16610,9 @@ fn pipeline_status_for_protocol(status: &PipelineContributorStatus) -> TracePipe
             .iter()
             .map(|instrument| TraceInstrumentStatusUpdate {
                 instrument_id: instrument.instrument_id.clone(),
-                atomic_units: instrument.atomic_units.to_string(),
+                atomic_units: InstrumentAmount::Readable(DecimalAtomicUnits::from(
+                    instrument.atomic_units.get(),
+                )),
                 operation_state: instrument.operation_state.clone(),
                 internal_settlement_state: instrument.internal_settlement_state.clone(),
                 payout_rail: instrument.payout_rail.clone(),

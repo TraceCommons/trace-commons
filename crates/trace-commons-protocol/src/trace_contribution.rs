@@ -8280,10 +8280,12 @@ pub struct TracePipelineStatusUpdate {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TraceInstrumentStatusUpdate {
     pub instrument_id: String,
-    /// The amount in the instrument's smallest unit, as a decimal string: it
-    /// can exceed what a JSON number (and a JavaScript client) holds exactly.
-    #[serde(deserialize_with = "deserialize_decimal_atomic_units")]
-    pub atomic_units: String,
+    /// The amount in the instrument's smallest unit. `Readable` is written
+    /// as a decimal string (it can exceed what a JSON number, and a
+    /// JavaScript client, holds exactly); `Unreadable` is written as `null`.
+    /// A missing key or any other value reads as `Unreadable`.
+    #[serde(default = "unreadable_instrument_amount")]
+    pub atomic_units: InstrumentAmount,
     pub operation_state: String,
     pub internal_settlement_state: String,
     pub payout_rail: String,
@@ -8291,24 +8293,120 @@ pub struct TraceInstrumentStatusUpdate {
     pub reason_label: Option<String>,
 }
 
-/// Accepts only the canonical decimal string of an unsigned 128-bit amount:
-/// ASCII digits, no sign, no leading zero, at most `u128::MAX`. A JSON
-/// number is refused, since it may already have lost precision.
-fn deserialize_decimal_atomic_units<'de, D>(deserializer: D) -> Result<String, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let value = String::deserialize(deserializer)?;
-    let canonical = !value.is_empty()
-        && value.bytes().all(|byte| byte.is_ascii_digit())
-        && (value == "0" || !value.starts_with('0'))
-        && value.parse::<u128>().is_ok();
-    if canonical {
-        Ok(value)
-    } else {
-        Err(serde::de::Error::custom(
-            "atomic_units must be a canonical unsigned decimal string",
-        ))
+fn unreadable_instrument_amount() -> InstrumentAmount {
+    InstrumentAmount::Unreadable
+}
+
+/// An unsigned 128-bit amount in its canonical decimal form: ASCII digits, no
+/// sign, no leading zero except the value `0`, at most `u128::MAX`. The field
+/// is private, so every value of this type holds that form.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct DecimalAtomicUnits(String);
+
+/// The text is not the canonical decimal form of an unsigned 128-bit amount.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NonCanonicalAtomicUnits;
+
+impl std::fmt::Display for NonCanonicalAtomicUnits {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("atomic_units must be a canonical unsigned decimal string")
+    }
+}
+
+impl std::error::Error for NonCanonicalAtomicUnits {}
+
+impl DecimalAtomicUnits {
+    /// The one place that holds the canonical rule.
+    pub fn parse(value: &str) -> Result<Self, NonCanonicalAtomicUnits> {
+        let canonical = !value.is_empty()
+            && value.bytes().all(|byte| byte.is_ascii_digit())
+            && (value == "0" || !value.starts_with('0'))
+            && value.parse::<u128>().is_ok();
+        if canonical {
+            Ok(Self(value.to_string()))
+        } else {
+            Err(NonCanonicalAtomicUnits)
+        }
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// The amount as a number. The text was checked at construction, so the
+    /// parse cannot fail.
+    pub fn as_u128(&self) -> u128 {
+        self.0
+            .parse()
+            .expect("DecimalAtomicUnits holds a checked u128 decimal")
+    }
+}
+
+impl From<u128> for DecimalAtomicUnits {
+    fn from(value: u128) -> Self {
+        Self(value.to_string())
+    }
+}
+
+impl TryFrom<String> for DecimalAtomicUnits {
+    type Error = NonCanonicalAtomicUnits;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::parse(&value)
+    }
+}
+
+impl From<DecimalAtomicUnits> for String {
+    fn from(units: DecimalAtomicUnits) -> Self {
+        units.0
+    }
+}
+
+/// An instrument amount a client can read, or one it cannot. A status
+/// document carries many instruments, so one malformed amount must not
+/// lose the rest: it reads as `Unreadable`, never as zero and never as text.
+///
+/// There is no `Default` and no conversion of `Unreadable` to a number or a
+/// string. A caller that wants the value matches `Readable`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InstrumentAmount {
+    Readable(DecimalAtomicUnits),
+    Unreadable,
+}
+
+impl InstrumentAmount {
+    pub fn readable(&self) -> Option<&DecimalAtomicUnits> {
+        match self {
+            Self::Readable(units) => Some(units),
+            Self::Unreadable => None,
+        }
+    }
+}
+
+impl Serialize for InstrumentAmount {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            Self::Readable(units) => units.serialize(serializer),
+            Self::Unreadable => serializer.serialize_none(),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for InstrumentAmount {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Ok(match Value::deserialize(deserializer)? {
+            Value::String(text) => DecimalAtomicUnits::parse(&text)
+                .map(Self::Readable)
+                .unwrap_or(Self::Unreadable),
+            _ => Self::Unreadable,
+        })
     }
 }
 
@@ -8341,7 +8439,9 @@ mod pipeline_status_wire_tests {
     fn instrument_atomic_units_round_trip_as_a_decimal_string() {
         let instrument = TraceInstrumentStatusUpdate {
             instrument_id: "trace_credit".to_string(),
-            atomic_units: "340282366920938463463374607431768211455".to_string(),
+            atomic_units: InstrumentAmount::Readable(
+                DecimalAtomicUnits::parse("340282366920938463463374607431768211455").unwrap(),
+            ),
             operation_state: "complete".to_string(),
             internal_settlement_state: "finalized".to_string(),
             payout_rail: "near".to_string(),
@@ -8357,38 +8457,184 @@ mod pipeline_status_wire_tests {
         assert_eq!(read, instrument);
     }
 
+    fn instrument_json(atomic_units: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "instrument_id": "trace_credit",
+            "atomic_units": atomic_units,
+            "operation_state": "complete",
+            "internal_settlement_state": "finalized",
+            "payout_rail": "near",
+            "payout_state": "disabled",
+            "reason_label": "kept"
+        })
+    }
+
+    fn status_json(instruments: Vec<serde_json::Value>) -> serde_json::Value {
+        serde_json::json!({
+            "submission_id": Uuid::nil(),
+            "trace_id": Uuid::nil(),
+            "status": "accepted",
+            "credit_points_pending": 1.5,
+            "pipeline": {
+                "run_id": Uuid::nil(),
+                "bundle_id": "sha256:bundle",
+                "processing_state": "complete",
+                "current_phase": null,
+                "responsible_phase": null,
+                "reason_label": null,
+                "instruments": instruments
+            }
+        })
+    }
+
+    /// poldsam P-10: one malformed amount must not lose the status of every
+    /// submission in the chunk.
     #[test]
-    fn instrument_atomic_units_refuse_a_json_number_and_a_non_decimal_string() {
-        let with_units = |atomic_units: serde_json::Value| {
-            serde_json::from_value::<TraceInstrumentStatusUpdate>(serde_json::json!({
-                "instrument_id": "trace_credit",
-                "atomic_units": atomic_units,
-                "operation_state": "complete",
-                "internal_settlement_state": "finalized",
-                "payout_rail": "near",
-                "payout_state": "disabled",
-                "reason_label": null
-            }))
-        };
-        assert!(
-            with_units(serde_json::json!(42)).is_err(),
-            "a JSON number is refused"
+    fn one_malformed_amount_does_not_fail_the_chunk() {
+        let chunk = serde_json::json!([
+            status_json(vec![
+                instrument_json(serde_json::json!("7")),
+                instrument_json(serde_json::json!(42)),
+            ]),
+            status_json(vec![instrument_json(serde_json::json!("9"))]),
+        ]);
+        let updates: Vec<TraceSubmissionStatusUpdate> = serde_json::from_str(&chunk.to_string())
+            .expect("a chunk with one malformed amount still deserializes");
+        assert_eq!(updates.len(), 2);
+        let first = updates[0].pipeline.as_ref().unwrap();
+        assert_eq!(first.instruments.len(), 2);
+        for instrument in &first.instruments {
+            assert_eq!(instrument.reason_label.as_deref(), Some("kept"));
+            assert_eq!(instrument.instrument_id, "trace_credit");
+        }
+        assert_eq!(
+            first.instruments[0]
+                .atomic_units
+                .readable()
+                .unwrap()
+                .as_str(),
+            "7"
         );
+        assert_eq!(
+            first.instruments[1].atomic_units,
+            InstrumentAmount::Unreadable
+        );
+        let second = updates[1].pipeline.as_ref().unwrap();
+        assert_eq!(
+            second.instruments[0]
+                .atomic_units
+                .readable()
+                .unwrap()
+                .as_str(),
+            "9"
+        );
+    }
+
+    #[test]
+    fn the_checked_constructor_holds_the_canonical_rule() {
         for refused in [
             "",
+            "01",
             "-1",
-            "4.2",
-            "0042",
-            " 42",
+            "+1",
+            "1.0",
+            " 1",
+            // an Arabic-Indic digit
+            "\u{0661}",
             // u128::MAX + 1
             "340282366920938463463374607431768211456",
         ] {
             assert!(
-                with_units(serde_json::json!(refused)).is_err(),
+                DecimalAtomicUnits::parse(refused).is_err(),
                 "{refused:?} is refused"
             );
+            assert!(DecimalAtomicUnits::try_from(refused.to_string()).is_err());
+            assert!(
+                serde_json::from_value::<DecimalAtomicUnits>(serde_json::json!(refused)).is_err(),
+                "{refused:?} is refused by the strict Deserialize"
+            );
         }
-        assert!(with_units(serde_json::json!("0")).is_ok());
+        assert!(serde_json::from_value::<DecimalAtomicUnits>(serde_json::json!(1)).is_err());
+        for accepted in ["0", "7", "340282366920938463463374607431768211455"] {
+            let units = DecimalAtomicUnits::parse(accepted).expect(accepted);
+            assert_eq!(units.as_str(), accepted);
+            assert_eq!(units.as_u128().to_string(), accepted);
+        }
+        assert_eq!(DecimalAtomicUnits::from(u128::MAX).as_u128(), u128::MAX);
+        assert_eq!(DecimalAtomicUnits::from(0u128).as_str(), "0");
+    }
+
+    #[test]
+    fn a_malformed_amount_reads_as_unreadable_and_keeps_the_other_fields() {
+        for malformed in [
+            serde_json::json!(42),
+            serde_json::json!(4.2),
+            serde_json::Value::Null,
+            serde_json::json!(""),
+            serde_json::json!("01"),
+            serde_json::json!("-1"),
+            serde_json::json!("1.0"),
+            serde_json::json!("340282366920938463463374607431768211456"),
+            serde_json::json!({"units": "1"}),
+            serde_json::json!(["1"]),
+            serde_json::json!(true),
+        ] {
+            let read: TraceInstrumentStatusUpdate =
+                serde_json::from_value(instrument_json(malformed.clone()))
+                    .unwrap_or_else(|error| panic!("{malformed} must not fail: {error}"));
+            assert_eq!(
+                read.atomic_units,
+                InstrumentAmount::Unreadable,
+                "{malformed}"
+            );
+            assert_eq!(read.instrument_id, "trace_credit");
+            assert_eq!(read.operation_state, "complete");
+            assert_eq!(read.internal_settlement_state, "finalized");
+            assert_eq!(read.payout_rail, "near");
+            assert_eq!(read.payout_state, "disabled");
+            assert_eq!(read.reason_label.as_deref(), Some("kept"));
+        }
+        let mut without_key = instrument_json(serde_json::Value::Null);
+        without_key.as_object_mut().unwrap().remove("atomic_units");
+        let read: TraceInstrumentStatusUpdate = serde_json::from_value(without_key).unwrap();
+        assert_eq!(read.atomic_units, InstrumentAmount::Unreadable);
+        assert_eq!(read.reason_label.as_deref(), Some("kept"));
+    }
+
+    #[test]
+    fn an_unreadable_amount_is_written_as_null_and_reads_back_unreadable() {
+        let instrument = TraceInstrumentStatusUpdate {
+            instrument_id: "trace_credit".to_string(),
+            atomic_units: InstrumentAmount::Unreadable,
+            operation_state: "complete".to_string(),
+            internal_settlement_state: "finalized".to_string(),
+            payout_rail: "near".to_string(),
+            payout_state: "disabled".to_string(),
+            reason_label: Some("kept".to_string()),
+        };
+        let value = serde_json::to_value(&instrument).unwrap();
+        assert!(value["atomic_units"].is_null(), "{value}");
+        assert!(value.as_object().unwrap().contains_key("atomic_units"));
+        let read: TraceInstrumentStatusUpdate = serde_json::from_value(value).unwrap();
+        assert_eq!(read, instrument);
+        assert!(read.atomic_units.readable().is_none());
+    }
+
+    #[test]
+    fn a_readable_amount_is_written_as_the_decimal_string_of_today() {
+        let instrument = TraceInstrumentStatusUpdate {
+            instrument_id: "trace_credit".to_string(),
+            atomic_units: InstrumentAmount::Readable(DecimalAtomicUnits::from(7u128)),
+            operation_state: "complete".to_string(),
+            internal_settlement_state: "finalized".to_string(),
+            payout_rail: "near".to_string(),
+            payout_state: "disabled".to_string(),
+            reason_label: Some("kept".to_string()),
+        };
+        assert_eq!(
+            serde_json::to_string(&instrument).unwrap(),
+            r#"{"instrument_id":"trace_credit","atomic_units":"7","operation_state":"complete","internal_settlement_state":"finalized","payout_rail":"near","payout_state":"disabled","reason_label":"kept"}"#
+        );
     }
 }
 

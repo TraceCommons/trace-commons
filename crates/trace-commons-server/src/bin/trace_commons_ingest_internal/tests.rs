@@ -97518,13 +97518,19 @@ fn pipeline_status_protocol_projection_keeps_instrument_states_separate_and_hash
     assert_eq!(pipeline.responsible_phase.as_deref(), Some("settle"));
     assert_eq!(pipeline.instruments.len(), 2);
     assert_eq!(pipeline.instruments[0].instrument_id, "storage_rebate");
-    assert_eq!(pipeline.instruments[0].atomic_units, u128::MAX.to_string());
+    assert_eq!(
+        pipeline.instruments[0].atomic_units,
+        InstrumentAmount::Readable(DecimalAtomicUnits::from(u128::MAX))
+    );
     assert_eq!(
         pipeline.instruments[0].internal_settlement_state,
         "not_applicable"
     );
     assert_eq!(pipeline.instruments[0].payout_state, "disabled");
-    assert_eq!(pipeline.instruments[1].atomic_units, "2500000");
+    assert_eq!(
+        pipeline.instruments[1].atomic_units,
+        InstrumentAmount::Readable(DecimalAtomicUnits::from(2_500_000))
+    );
     assert_eq!(pipeline.instruments[1].operation_state, "complete");
     assert_eq!(
         pipeline.instruments[1].internal_settlement_state,
@@ -97597,7 +97603,7 @@ fn a_withheld_or_never_settled_leg_reports_no_pending_points() {
         assert_eq!(projected.credit_points_final, None);
         assert_eq!(
             projected.pipeline.unwrap().instruments[1].atomic_units,
-            "2500000",
+            InstrumentAmount::Readable(DecimalAtomicUnits::from(2_500_000)),
             "the pipeline block still carries the award"
         );
     }
@@ -97729,7 +97735,10 @@ fn a_forfeited_or_failed_leg_reports_no_pending_points() {
         );
         assert_eq!(projected.credit_points_final, None, "{operation_state}");
         let pipeline = projected.pipeline.expect("the pipeline block");
-        assert_eq!(pipeline.instruments[1].atomic_units, "2500000");
+        assert_eq!(
+            pipeline.instruments[1].atomic_units,
+            InstrumentAmount::Readable(DecimalAtomicUnits::from(2_500_000))
+        );
         assert_eq!(pipeline.instruments[1].operation_state, operation_state);
     }
 }
@@ -97764,7 +97773,7 @@ fn legacy_and_pipeline_status_documents_remain_wire_compatible() {
         reason_label: None,
         instruments: vec![TraceInstrumentStatusUpdate {
             instrument_id: "trace_credit".to_string(),
-            atomic_units: "7".to_string(),
+            atomic_units: InstrumentAmount::Readable(DecimalAtomicUnits::from(7)),
             operation_state: "pending".to_string(),
             internal_settlement_state: "pending".to_string(),
             payout_rail: "near".to_string(),
