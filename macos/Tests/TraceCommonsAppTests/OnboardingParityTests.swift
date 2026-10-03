@@ -100,11 +100,30 @@ final class OnboardingParityTests: XCTestCase {
                       "GlassStatusLabel(OnboardingDoneWords.setUpNothingSent, status: .on)",
                       ".buttonStyle(GlassButtonStyle(.primary))", ".buttonStyle(GlassButtonStyle(.glass))",
                       ".keyboardShortcut(.defaultAction)"]),
+        Step(file: "Views/OnboardingCoordinatorView.swift",
+             bindings: ["OnboardingNavigation(step: startAt)", "navigation.beginConsentSave(", "navigation.finishConsentSave(",
+                        "model.setConsentScopes(scopes)", "navigation.enrolled(visit: visit)",
+                        "OnboardingDoneView(onFinish: onComplete)", "WhatGetsRemovedSheet()",
+                        "GlassBreadcrumb([GlassCrumb(OnboardingCoordinatorWords.back)]"],
+             copySources: ["OnboardingCoordinatorWords.back,", "Text(OnboardingCoordinatorWords.settingsLoading)",
+                           "Text(OnboardingCoordinatorWords.couldNotSave)",
+                           "Text(OnboardingCoordinatorWords.scanNoLongerAvailable)",
+                           "Text(OnboardingCoordinatorWords.scanNotIncluded)"],
+             guards: [".disabled(navigation.consentSaveInProgress)", "case .failed:", "consentSaveFailed = true",
+                      "GlassNotice(tone: .ask)", "GlassNotice(tone: .outside)",
+                      "Button(OnboardingPrivacyScanWords.continueButton)", ".buttonStyle(GlassButtonStyle(.glass))"]),
+        Step(file: "Views/WhatGetsRemovedSheet.swift",
+             bindings: ["TCScrubInfo.detectorNamesJSON()", "ScrubDetectors.labels(fromJSON:"],
+             copySources: ["WhatGetsRemovedWords.title", "WhatGetsRemovedWords.couldNotRead",
+                           "WhatGetsRemovedWords.foundAndReplaced", "WhatGetsRemovedWords.patternBased",
+                           "Button(WhatGetsRemovedWords.close)"],
+             guards: ["GlassSheet(title: WhatGetsRemovedWords.title)", ".buttonStyle(GlassButtonStyle(.glass))",
+                      "if labels.isEmpty {", ".keyboardShortcut(.defaultAction)"]),
     ]
 
     /// Rows the table must hold; each task that adds a step raises it, so a
     /// dropped row fails here instead of passing silently.
-    static let minimumSteps = 7
+    static let minimumSteps = 9
 
     func test_theTableKeepsEveryRowAdded() {
         XCTAssertGreaterThanOrEqual(Self.steps.count, Self.minimumSteps)

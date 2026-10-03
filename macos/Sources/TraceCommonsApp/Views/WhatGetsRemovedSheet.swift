@@ -1,5 +1,6 @@
 import SwiftUI
 import TCBridge
+import TCDesign
 import TCShellCore
 
 /// The answer to "what gets removed?", asked from the welcome screen.
@@ -38,46 +39,57 @@ struct WhatGetsRemovedSheet: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: TC.Space.l) {
-            Text("What gets removed").font(TC.Font_.sectionTitle)
-
+        GlassSheet(title: WhatGetsRemovedWords.title) {
             if labels.isEmpty {
                 // The honest fallback. The concession below still applies and
                 // is arguably the more important half, so the sheet is not
                 // empty even when the list cannot be produced.
-                Text("The list of detectors could not be read from this build.")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
+                Text(WhatGetsRemovedWords.couldNotRead)
+                    .glassType(GlassTokens.TypeScale.body)
+                    .foregroundStyle(GlassColor.textSecondary)
             } else {
-                Text("Before a trace leaves this machine, these are found and replaced:")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
+                Text(WhatGetsRemovedWords.foundAndReplaced)
+                    .glassType(GlassTokens.TypeScale.body)
+                    .foregroundStyle(GlassColor.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
 
-                VStack(alignment: .leading, spacing: TC.Space.xs) {
+                VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
                     ForEach(labels, id: \.self) { label in
-                        HStack(alignment: .firstTextBaseline, spacing: TC.Space.xs) {
+                        HStack(alignment: .firstTextBaseline, spacing: GlassTokens.Space.s1) {
                             Image(systemName: "checkmark")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                            Text(label).font(TC.Font_.body)
+                                .glassType(GlassTokens.TypeScale.caption)
+                                .foregroundStyle(GlassColor.textTertiary)
+                                .accessibilityHidden(true)
+                            Text(label)
+                                .glassType(GlassTokens.TypeScale.body)
+                                .foregroundStyle(GlassColor.textPrimary)
                         }
+                        .accessibilityElement(children: .combine)
                     }
                 }
             }
 
-            Text("Scrubbing is pattern-based. It misses things it hasn't seen before.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            Text(WhatGetsRemovedWords.patternBased)
+                .glassType(GlassTokens.TypeScale.caption)
+                .foregroundStyle(GlassColor.textTertiary)
                 .fixedSize(horizontal: false, vertical: true)
 
             HStack {
                 Spacer()
-                Button("Close") { dismiss() }
+                Button(WhatGetsRemovedWords.close) { dismiss() }
+                    .buttonStyle(GlassButtonStyle(.glass))
                     .keyboardShortcut(.defaultAction)
             }
         }
-        .padding(TC.Space.xxl)
         .frame(minWidth: 380, maxWidth: 460, alignment: .leading)
     }
+}
+
+/// This sheet's sentences, held verbatim from the legacy sheet.
+enum WhatGetsRemovedWords {
+    static let title = "What gets removed"
+    static let couldNotRead = "The list of detectors could not be read from this build."
+    static let foundAndReplaced = "Before a trace leaves this machine, these are found and replaced:"
+    static let patternBased = "Scrubbing is pattern-based. It misses things it hasn't seen before."
+    static let close = "Close"
 }

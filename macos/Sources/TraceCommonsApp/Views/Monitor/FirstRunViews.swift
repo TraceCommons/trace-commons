@@ -6,7 +6,8 @@ import TCShellCore
 /// First run in the glass system (R12 of #1173): a single pane over the
 /// painted scene, with step progress above the step (spec, "Screens").
 ///
-/// The steps are the existing onboarding screens, sequenced by
+/// The steps are glass from Phase 2: the existing onboarding screens,
+/// rebuilt in place on TCDesign and sequenced by
 /// `OnboardingCoordinatorView` exactly as the shipping window sequences
 /// them: the same daemon calls, the same consent order, the same resume
 /// rules. This view draws the frame and the progress, and nothing else.
