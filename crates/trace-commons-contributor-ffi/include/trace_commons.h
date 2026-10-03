@@ -2384,7 +2384,7 @@ char*       tc_arming_offer_copy_json(const char* project_label, uint32_t count)
 /* The menu-bar Contribution mode pill (#1173, project_copy::
  * contribution_mode_copy): {title, mixed, choices, override_active, clear},
  * choices being [{mode, label, line}] for Ask me, Auto contribute and Never.
- * DRAFT, NEEDS APPROVAL. NULL only on a caught panic.
+ * NULL only on a caught panic.
  */
 char*       tc_contribution_mode_copy_json(void);
 
@@ -2554,8 +2554,7 @@ int32_t     tc_external_url_is_allowed(const char* url);
 char*       tc_health_copy_json(int32_t reachable, const char* label,
                                 int64_t max_queue_entries);
 
-/* The explanatory line under a second_look reason (R6/R7, #1173; DRAFT,
- * NEEDS APPROVAL -- preview_copy::second_look_line is itself unapproved):
+/* The explanatory line under a second_look reason (R6/R7, #1173):
  * why one scrubbed session waits for a person instead of moving on its own.
  * reason is one of the fixed second_look labels (nothing-matched,
  * looks-unsure, trimmed-to-fit). NULL for a NULL, non-UTF-8 or unrecognised
