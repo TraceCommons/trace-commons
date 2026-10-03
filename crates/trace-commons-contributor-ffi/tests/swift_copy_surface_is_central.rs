@@ -37,8 +37,11 @@ fn swift_root() -> PathBuf {
 
 fn read(rel: &str) -> String {
     let path = swift_root().join(rel);
+    // Normalised to LF: the Windows runner checks sources out with CRLF,
+    // and the checks below search for "\n"-delimited text.
     std::fs::read_to_string(&path)
         .unwrap_or_else(|error| panic!("{} is unreadable: {error}", path.display()))
+        .replace("\r\n", "\n")
 }
 
 fn visit_swift(dir: &Path, found: &mut Vec<PathBuf>) {
@@ -345,8 +348,8 @@ macro_rules! json {
 /// The core sentences no Swift literal may hold, by where they come from.
 fn pinned_sentences() -> Vec<(&'static str, String)> {
     use trace_commons_contributor::{
-        consent_copy as consent, daemon::automatic_gate::Disclosure, preview_copy,
-        privacy_scan_copy, project_copy, quit_copy, withdraw,
+        consent_copy as consent, daemon::automatic_gate::Disclosure, daemon::policy::ProjectMode,
+        preview_copy, privacy_scan_copy, project_copy, quit_copy, withdraw,
     };
     let counted = |text: String| text.replace(&COUNT.to_string(), HOLE);
     let mut pinned: Vec<(&'static str, String)> = Vec::new();
@@ -412,6 +415,36 @@ fn pinned_sentences() -> Vec<(&'static str, String)> {
             .map(counted)
             .collect(),
     );
+    // The menu-bar Contribution mode pill, its override confirmations and
+    // their refusal lines (#1173).
+    add(
+        "project_copy::contribution_mode_copy",
+        table(json!(project_copy::contribution_mode_copy())),
+    );
+    add(
+        "project_copy::contribution_override_confirm_copy",
+        [
+            ProjectMode::NotifyOnly,
+            ProjectMode::AutoUpload,
+            ProjectMode::Ignore,
+        ]
+        .into_iter()
+        .flat_map(|m| {
+            table(json!(project_copy::contribution_override_confirm_copy(
+                m, None
+            )))
+        })
+        .collect(),
+    );
+    add(
+        "project_copy::CONTRIBUTION_OVERRIDE_REFUSED*",
+        [
+            project_copy::CONTRIBUTION_OVERRIDE_REFUSED,
+            project_copy::CONTRIBUTION_OVERRIDE_REFUSED_NO_TERMS,
+        ]
+        .map(str::to_owned)
+        .to_vec(),
+    );
     add(
         "project_copy::ignore_project_copy",
         table(json!(project_copy::ignore_project_copy(
@@ -455,6 +488,17 @@ fn pinned_sentences() -> Vec<(&'static str, String)> {
             preview_copy::residual_secret_line(1, &[]),
             counted(preview_copy::residual_secret_line(COUNT, &[])),
         ],
+    );
+
+    // History's word for each contribution status, the one table every
+    // shell reads (`tc_public_run_copy`'s `history_status_labels`).
+    add(
+        "history_copy::STATUS_LABELS",
+        trace_commons_contributor::history_copy::STATUS_LABELS
+            .iter()
+            .map(|row| row.label.to_owned())
+            .chain([trace_commons_contributor::history_copy::STATUS_UNAVAILABLE.to_owned()])
+            .collect(),
     );
 
     // Withdrawal and quitting.
@@ -550,6 +594,26 @@ const ALLOWED: &[(&str, &str, &str)] = &[
         "Credit still pending is forfeited.",
         "per-tier withdrawal credit note; no core export yet",
     ),
+    // The rollup tallies over History and the queue's week figures name a
+    // count of rows in a state, in the same words as the row's status tag.
+    // The core exports the row label (`history_status_labels`) but no tally
+    // heading yet, so these headings stay Swift's until it does. The row
+    // tag itself reads the core (see `history_rows_read_the_cores_status_words`).
+    (
+        "TraceCommonsApp/Views/HistoryView.swift",
+        "Held for privacy review",
+        "rollup tally heading; no core tally export yet",
+    ),
+    (
+        "TraceCommonsApp/Views/HistoryView.swift",
+        "Waiting to be scored",
+        "rollup tally heading; no core tally export yet",
+    ),
+    (
+        "TraceCommonsApp/Views/QueueView.swift",
+        "Held for privacy review",
+        "week tally heading; no core tally export yet",
+    ),
 ];
 
 #[test]
@@ -607,6 +671,34 @@ fn no_pinned_core_sentence_is_a_swift_literal() {
 /// call that screen must make, the bridge file, and the export that call
 /// must reach.
 const SURFACES: &[(&str, &str, &str, &str, &str)] = &[
+    (
+        "armed folder disclosure in Traces",
+        "TraceCommonsApp/Views/Monitor/TracesStore.swift",
+        "TCCoreCopy.automaticGrantCopyJSON",
+        "TCBridge/TCCoreCopy.swift",
+        "tc_automatic_grant_copy_json",
+    ),
+    (
+        "monitor Traces words",
+        "TraceCommonsApp/Views/Monitor/TracesStore.swift",
+        "TCCoreCopy.monitorTracesCopyJSON",
+        "TCBridge/TCCoreCopy.swift",
+        "tc_monitor_traces_copy_json",
+    ),
+    (
+        "monitor screens words",
+        "TraceCommonsApp/Views/Monitor/InferenceViews.swift",
+        "TCCoreCopy.monitorScreensCopyJSON",
+        "TCBridge/TCCoreCopy.swift",
+        "tc_monitor_screens_copy_json",
+    ),
+    (
+        "monitor Traces badge words",
+        "TraceCommonsApp/Views/MonitorWindowView.swift",
+        "TCCoreCopy.decisionsOwedText",
+        "TCBridge/TCCoreCopy.swift",
+        "tc_decisions_owed_text",
+    ),
     (
         "consent gate",
         "TraceCommonsApp/Views/PreviewSheet.swift",
@@ -683,6 +775,27 @@ const SURFACES: &[(&str, &str, &str, &str, &str)] = &[
         "TCCoreCopy.projectIgnoreReconciled",
         "TCBridge/TCCoreCopy.swift",
         "tc_project_ignore_reconciled_text",
+    ),
+    (
+        "contribution mode pill",
+        "TraceCommonsApp/Views/Monitor/MenuBarGlassPanel.swift",
+        "TCCoreCopy.contributionModeCopyJSON",
+        "TCBridge/TCCoreCopy.swift",
+        "tc_contribution_mode_copy_json",
+    ),
+    (
+        "contribution override confirmation",
+        "TraceCommonsApp/Views/Monitor/MenuPanelStore.swift",
+        "TCCoreCopy.contributionOverrideConfirmJSON",
+        "TCBridge/TCCoreCopy.swift",
+        "tc_contribution_override_confirm_json",
+    ),
+    (
+        "contribution override refusal",
+        "TraceCommonsApp/Views/Monitor/MenuPanelStore.swift",
+        "TCCoreCopy.contributionOverrideRefusalLine",
+        "TCBridge/TCCoreCopy.swift",
+        "tc_contribution_override_refusal_text",
     ),
     (
         "arming offer",
@@ -810,6 +923,101 @@ fn swift_screens_render_core_copy_at_every_safety_surface() {
                 .contains(&rendered.replace(char::is_whitespace, "")),
             "the quit alert must use `{rendered}`"
         );
+    }
+}
+
+/// A History row's status tag is the core's word for the status
+/// (`history_copy::STATUS_LABELS`, decoded as
+/// `PublicRunCopy.historyStatusLabels`), never a switch of Swift literals.
+/// The sentence ratchet above cannot see the three-word labels ("In the
+/// commons", "Withdrawn by you"), so the row function is checked directly.
+#[test]
+fn history_rows_read_the_cores_status_words() {
+    let models =
+        swift_code(&read("TraceCommonsApp/PublicRunModels.swift")).replace(char::is_whitespace, "");
+    assert!(
+        models.contains("funchistoryStatusLabel(forvalue:String)->String{historyStatusLabels."),
+        "PublicRunCopy.historyStatusLabel(for:) no longer reads historyStatusLabels"
+    );
+
+    let history = read("TraceCommonsApp/Views/HistoryView.swift");
+    let start = history
+        .find("static func statusSentence(")
+        .expect("HistoryRow.statusSentence exists");
+    let end = history[start..]
+        .find("\n    }\n")
+        .map(|at| start + at)
+        .expect("statusSentence has a body");
+    let body = &history[start..end];
+    assert!(
+        swift_code(body).contains("historyStatusLabel(for:"),
+        "HistoryRow.statusSentence must read the core's table"
+    );
+    let literals = swift_literals(body);
+    for row in trace_commons_contributor::history_copy::STATUS_LABELS {
+        assert!(
+            !literals.iter().any(|lit| lit.contains(row.label)),
+            "HistoryRow.statusSentence types the core's word {:?} for {}",
+            row.label,
+            row.status
+        );
+    }
+}
+
+/// A project mode reads by the core's one name (owner decision,
+/// 2026-10-02): `ProjectCopy.modeChoiceLabel(_:)` looks the mode up in the
+/// pill's table (`project_copy::FOLDER_MODE_LABELS`, decoded as
+/// `ContributionModeCopy`) and no Swift literal in the shared label sources
+/// spells a mode -- neither the core's names nor the retired ones. The
+/// sentence ratchet above cannot see one- and two-word labels, so the
+/// sources are checked directly. Scoped to the shared label sources: the
+/// glass screens and onboarding views are being rebuilt separately.
+#[test]
+fn project_mode_names_are_the_cores() {
+    let words = swift_code(&read("TraceCommonsApp/ProjectModeWords.swift"))
+        .replace(char::is_whitespace, "");
+    assert!(
+        words.contains(
+            "ContributionModeCopy.decode(fromJSON:TCCoreCopy.contributionModeCopyJSON())"
+        ),
+        "ProjectModeWords must decode the core's pill table"
+    );
+    assert!(
+        words.contains("staticfuncmodeChoiceLabel(_mode:ProjectMode)->String{"),
+        "ProjectCopy.modeChoiceLabel(_:) must be defined beside the core's table"
+    );
+    assert!(words.contains(".label(for:mode)"));
+    let copy = swift_code(&read("TCShellCore/ContributionModeCopy.swift"))
+        .replace(char::is_whitespace, "");
+    assert!(
+        copy.contains("funclabel(formode:ProjectMode)->String?{choice(for:mode.rawValue)?.label")
+    );
+
+    let retired = [
+        "Ask me first",
+        "Contribute automatically",
+        "Never offer this one",
+        "Auto contribute",
+        "Ignored",
+    ];
+    for rel in [
+        "TCShellCore/ProjectRow.swift",
+        "TCShellCore/ContributionModeCopy.swift",
+        "TraceCommonsApp/ProjectModeWords.swift",
+    ] {
+        let literals = swift_literals(&read(rel));
+        for (mode, label) in trace_commons_contributor::project_copy::FOLDER_MODE_LABELS {
+            assert!(
+                !literals.iter().any(|lit| lit == label),
+                "{rel} types the core's name {label:?} for {mode}"
+            );
+        }
+        for word in retired {
+            assert!(
+                !literals.iter().any(|lit| lit.contains(word)),
+                "{rel} still says the retired mode name {word:?}"
+            );
+        }
     }
 }
 

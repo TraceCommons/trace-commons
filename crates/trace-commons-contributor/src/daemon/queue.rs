@@ -135,6 +135,45 @@ impl SessionShape {
     }
 }
 
+/// The session's title, built at the same moment [`SessionShape::of`] is:
+/// when the watcher queues the session, from the raw transcript rather than
+/// a built envelope.
+///
+/// K1's `preview::title_of` is the first non-empty line of the *redacted*
+/// opening prompt, cut and truncated the same way; this calls that same
+/// function so the two can never drift. The only difference is where the
+/// redaction comes from. A preview builds a whole envelope -- optionally
+/// through a configured prose privacy filter, which calls out over the
+/// network -- and the watcher's poll loop is synchronous and runs on every
+/// discovered session, so it cannot pay for that here. It runs the
+/// deterministic pass alone (`envelope::build_deterministic_preview_redactor`
+/// together with `redact_text`: secret-leak patterns, known and generic
+/// local paths, private emails, PEM blocks), which is the same floor every
+/// preview's redaction starts from and an unenrolled preview's title never
+/// goes past.
+/// So a queued title is never LESS redacted than an equivalent preview's;
+/// an enrolled contributor's preview may additionally scrub prose PII that
+/// only a configured filter catches, which this cannot.
+///
+/// `None` when the opening prompt is empty, is only harness-injected setup,
+/// or the task names no description -- the same cases `preview::title_of`
+/// already returns `None` for.
+pub fn title_of(transcript: &crate::source::SessionTranscript) -> Option<String> {
+    let opening = transcript
+        .events
+        .iter()
+        .take_while(|e| !is_delegated_boundary(e))
+        .filter(|e| e.kind == crate::source::SessionEventKind::User)
+        .find_map(|e| {
+            e.content
+                .as_deref()
+                .and_then(crate::daemon::preview::task_prompt)
+        })?;
+    let redactor = crate::envelope::build_deterministic_preview_redactor(transcript.cwd.as_deref());
+    let (redacted, _report) = redactor.redact_text(opening);
+    crate::daemon::preview::title_of(&redacted)
+}
+
 /// One session offered to the contributor.
 ///
 /// `Default` supports focused test fixtures, which spell
@@ -330,6 +369,26 @@ pub struct QueueEntry {
     /// fingerprint is what covers them.
     #[serde(default)]
     pub previewed_envelope_digest: Option<String>,
+    /// The serialized size, in bytes, of the redacted envelope
+    /// `previewed_envelope_digest` pins (K10), mirrored here for the same
+    /// reason as `attested_inference`: so a queue listing can say what an
+    /// upload of this entry would actually send without opening the stored
+    /// file for every row. Set only by `record_previewed_envelope`, from the
+    /// bytes being pinned, cleared wherever the pin is.
+    ///
+    /// Raw session bytes (`size_bytes`) are what is on disk before
+    /// redaction; this is what redaction leaves, which can be smaller or
+    /// larger and is the number that matters for consent.
+    ///
+    /// `None` whenever there is no pinned preview to describe -- an armed
+    /// auto-upload, an approve-all, or an entry written before this field
+    /// existed -- and also on a handful of paths that re-pin an already
+    /// -certified review without re-measuring it (see
+    /// `Uploader::upload_entry`'s witness re-affirmation), which carry the
+    /// previously recorded figure forward instead of reporting `None` for a
+    /// bound that has not actually changed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub would_send_bytes: Option<u64>,
     /// The stored review's attested-inference record, mirrored here so a
     /// queue listing can say it without opening the file. Set only by
     /// `record_previewed_envelope` from the artifact being pinned, cleared
@@ -411,6 +470,20 @@ pub struct QueueEntry {
     /// word of what was said. `None` on an entry written before this existed.
     #[serde(default)]
     pub shape: Option<SessionShape>,
+    /// The session's title (K9): the first non-empty line of the redacted
+    /// opening prompt, cut and truncated exactly as the K1 preview title is.
+    /// See [`title_of`] for what "redacted" means on this path.
+    ///
+    /// `None` when the task named no description, and on every entry
+    /// written before this field existed -- it is not backfilled, exactly
+    /// like `shape`: an older entry gets a title the next time its session
+    /// is loaded (it grows, or is re-offered).
+    ///
+    /// `#[serde(default)]` because `daemon-queue.jsonl` written before this
+    /// field existed must still load; a required field here would make the
+    /// daemon refuse its own queue after an upgrade.
+    #[serde(default)]
+    pub title: Option<String>,
     /// The `modified_at` of the observation this entry was built from --
     /// the group mtime for a claude-code session, the file's own mtime for
     /// every single-file source. Pairs with `size_bytes`, which is the
@@ -532,6 +605,19 @@ pub struct QueueEntry {
 }
 
 impl QueueEntry {
+    /// Which tool this session reads as: what the transcript declared
+    /// itself to be when discovery knew it, else the adapter that read it.
+    ///
+    /// The same preference `SessionRef::displayed_source` applies to a
+    /// `SessionRef`, so every surface names an imported Antigravity
+    /// conversation `antigravity` rather than `trajectory`. Display and
+    /// counting only -- never a substitute for `source` when pairing the
+    /// entry back to an adapter that can load it.
+    #[must_use]
+    pub fn displayed_source(&self) -> &str {
+        self.declared_source.as_deref().unwrap_or(&self.source)
+    }
+
     /// Whether the scrubber has run on this entry, and how many marks it
     /// made. See `second_look::Scrub`.
     pub fn scrub(&self) -> super::second_look::Scrub {
@@ -1087,6 +1173,7 @@ impl Queue {
         e.approved_unattended = false;
         e.previewed_envelope_digest = None;
         e.attested_inference = None;
+        e.would_send_bytes = None;
         Ok(())
     }
 
@@ -1141,6 +1228,7 @@ impl Queue {
         e.approved_unattended = false;
         e.previewed_envelope_digest = None;
         e.attested_inference = None;
+        e.would_send_bytes = None;
         Ok(())
     }
 
@@ -1582,6 +1670,7 @@ impl Queue {
         entry_id: Uuid,
         digest: &str,
         attested_inference: Option<crate::witness::inference_record::InferenceAttestationRecord>,
+        would_send_bytes: Option<u64>,
     ) -> bool {
         let Some(e) = self.entries.iter_mut().find(|e| e.entry_id == entry_id) else {
             return false;
@@ -1594,6 +1683,11 @@ impl Queue {
         // being pinned, and a local preview (no record) pinned over an
         // earlier witnessed one must not keep the earlier answer.
         e.attested_inference = attested_inference;
+        // Same rule as `attested_inference` above, and for the same reason
+        // (K10): this describes exactly the bytes being pinned, so a caller
+        // with no fresh measurement passes `None` rather than leaving a
+        // stale figure in place that no longer describes what is pinned now.
+        e.would_send_bytes = would_send_bytes;
         true
     }
 
@@ -1656,6 +1750,7 @@ impl Queue {
         }
         e.previewed_envelope_digest = None;
         e.attested_inference = None;
+        e.would_send_bytes = None;
         true
     }
 
@@ -1713,11 +1808,12 @@ impl Queue {
         reason_label: &str,
         pin: &str,
         attested_inference: Option<crate::witness::inference_record::InferenceAttestationRecord>,
+        would_send_bytes: Option<u64>,
     ) -> bool {
         if !self.revoke_approval(entry_id, reason_label) {
             return false;
         }
-        self.record_previewed_envelope(entry_id, pin, attested_inference)
+        self.record_previewed_envelope(entry_id, pin, attested_inference, would_send_bytes)
     }
 
     /// Return every unsent approval made on the contributor's behalf to
@@ -1758,8 +1854,9 @@ impl Queue {
         entry_id: Uuid,
         reason_label: &str,
         pin: Option<(&str, super::second_look::ScrubCounts)>,
+        would_send_bytes: Option<u64>,
     ) -> bool {
-        self.hold_with_scrub_pin_at(entry_id, reason_label, pin, Utc::now())
+        self.hold_with_scrub_pin_at(entry_id, reason_label, pin, would_send_bytes, Utc::now())
     }
 
     /// The upload pass supplies its own clock, so the review deadline and
@@ -1769,13 +1866,14 @@ impl Queue {
         entry_id: Uuid,
         reason_label: &str,
         pin: Option<(&str, super::second_look::ScrubCounts)>,
+        would_send_bytes: Option<u64>,
         now: DateTime<Utc>,
     ) -> bool {
         if !self.revoke_approval_at(entry_id, reason_label, now) {
             return false;
         }
         if let Some((digest, counts)) = pin {
-            if self.record_previewed_envelope(entry_id, digest, None) {
+            if self.record_previewed_envelope(entry_id, digest, None, would_send_bytes) {
                 self.record_scrub(entry_id, digest, counts);
             }
         }
@@ -1819,6 +1917,7 @@ impl Queue {
         // would be sent, so the re-offer must be previewed afresh.
         e.previewed_envelope_digest = None;
         e.attested_inference = None;
+        e.would_send_bytes = None;
         true
     }
 
@@ -2186,6 +2285,7 @@ impl Queue {
         // envelope.
         e.previewed_envelope_digest = None;
         e.attested_inference = None;
+        e.would_send_bytes = None;
         Ok(())
     }
 
@@ -2455,6 +2555,7 @@ mod tests {
             id,
             crate::submit::REASON_WITNESS_RISK_REVIEW_REQUIRED,
             &pin,
+            None,
             None
         ));
         let e = q.get(id).unwrap().clone();
@@ -2951,6 +3052,7 @@ mod tests {
             id,
             super::super::second_look::REASON_SECOND_LOOK_REVIEW_REQUIRED,
             None,
+            None,
             now,
         ));
         assert_eq!(q.get(id).unwrap().discovered_at, discovered);
@@ -2984,12 +3086,12 @@ mod tests {
             };
             let id = e.entry_id;
             q.push_for_test(e);
-            assert!(q.hold_with_scrub_pin_at(id, reason, None, now));
+            assert!(q.hold_with_scrub_pin_at(id, reason, None, None, now));
             q.save(&store).unwrap();
             let mut loaded = Queue::load(&store).unwrap();
             assert_eq!(loaded.get(id).unwrap().review_started_at, Some(now));
             let repeated = now + Duration::days(13);
-            assert!(loaded.hold_with_scrub_pin_at(id, reason, None, repeated));
+            assert!(loaded.hold_with_scrub_pin_at(id, reason, None, None, repeated));
             assert_eq!(loaded.get(id).unwrap().review_started_at, Some(now));
             assert_eq!(loaded.expire(repeated, 14, false), 0);
             assert_eq!(
@@ -3211,6 +3313,62 @@ mod tests {
         let loaded = Queue::load(&store).unwrap();
         assert_eq!(loaded.all().len(), 1, "the entry must survive the upgrade");
         assert_eq!(loaded.all()[0].shape, None);
+    }
+
+    /// K9: a line queued before `title` existed still loads, with no title.
+    /// Not backfilled, for the same reason `shape` is not: the entry gets a
+    /// title the next time its session is loaded.
+    #[test]
+    fn a_queue_line_written_before_the_title_existed_still_loads() {
+        let (_d, store) = temp_store();
+        let mut value = serde_json::to_value(entry("sha256:aa", "2026-08-08T12:00:00Z")).unwrap();
+        value.as_object_mut().unwrap().remove("title");
+        store
+            .write_daemon_file(DAEMON_QUEUE_FILE, format!("{value}\n").as_bytes())
+            .unwrap();
+
+        let loaded = Queue::load(&store).unwrap();
+        assert_eq!(loaded.all().len(), 1, "the entry must survive the upgrade");
+        assert_eq!(loaded.all()[0].title, None);
+    }
+
+    /// K9: the queued title is built from the same source as the K1 preview
+    /// title, and must survive the same redaction requirement -- a
+    /// redactable first line (an email address, a local path) must never
+    /// reach it.
+    #[test]
+    fn a_redactable_first_line_does_not_survive_into_the_queued_title() {
+        use crate::source::SessionEventKind::User;
+        let transcript = crate::source::SessionTranscript {
+            cwd: Some("/Users/testuser/code/myproj".to_string()),
+            events: vec![event(
+                User,
+                Some("2026-09-12T10:00:00Z"),
+                Some("mail alice.smith@example.org about /Users/testuser/code/myproj/secret.txt"),
+            )],
+            ..Default::default()
+        };
+        let title = title_of(&transcript).expect("the prompt names a task");
+        assert!(!title.contains("alice.smith@example.org"), "{title}");
+        assert!(!title.contains("/Users/testuser"), "{title}");
+        assert!(title.starts_with("mail "), "{title}");
+    }
+
+    /// K9: the title stops at the delegated-transcript boundary, exactly
+    /// like `SessionShape::of`'s turn count -- a subagent's own opening
+    /// prompt is not the person's task.
+    #[test]
+    fn the_queued_title_never_crosses_into_delegated_work() {
+        use crate::source::SessionEventKind::User;
+        let transcript = crate::source::SessionTranscript {
+            events: vec![
+                marker("subagent_group"),
+                marker("subagent_transcript"),
+                event(User, Some("2026-09-12T11:10:00Z"), Some("do the subtask")),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(title_of(&transcript), None);
     }
 
     #[test]
@@ -3589,7 +3747,7 @@ mod tests {
         assert!(!q.record_scrub(id, "sha256:envelope", counts));
         assert_eq!(q.get(id).unwrap().scrub(), Scrub::NotYetScrubbed);
 
-        assert!(q.record_previewed_envelope(id, "sha256:envelope", None));
+        assert!(q.record_previewed_envelope(id, "sha256:envelope", None, None));
         // A count for other bytes than the pin is refused.
         assert!(!q.record_scrub(id, "sha256:other", counts));
         assert!(q.record_scrub(id, "sha256:envelope", counts));
@@ -3597,7 +3755,7 @@ mod tests {
 
         // Re-pinned to a new build (a filter change, a re-enrolment): the
         // old count no longer describes what would be sent.
-        assert!(q.record_previewed_envelope(id, "sha256:rebuilt", None));
+        assert!(q.record_previewed_envelope(id, "sha256:rebuilt", None, None));
         assert_eq!(q.get(id).unwrap().scrub(), Scrub::NotYetScrubbed);
 
         // Released: likewise.
@@ -3618,7 +3776,7 @@ mod tests {
         q.upsert(entry("sha256:aa", "2026-08-08T12:00:00Z"), 500)
             .unwrap();
         let id = entry_id_for("sha256:aa");
-        assert!(q.record_previewed_envelope(id, "sha256:envelope", None));
+        assert!(q.record_previewed_envelope(id, "sha256:envelope", None, None));
         assert!(q.approve(id, &[], None, None, None, Some(at("2026-08-08T12:00:00Z"))));
         assert!(
             q.get(id).unwrap().previewed_envelope_digest.is_some(),
@@ -3650,7 +3808,8 @@ mod tests {
         assert!(q.record_previewed_envelope(
             id,
             "witness-sha256:envelope",
-            Some(InferenceAttestationRecord::certified())
+            Some(InferenceAttestationRecord::certified()),
+            None
         ));
         assert_eq!(
             q.get(id).unwrap().attested_inference,
@@ -3662,7 +3821,8 @@ mod tests {
         assert!(q.record_previewed_envelope(
             id,
             "witness-sha256:envelope",
-            Some(InferenceAttestationRecord::certified())
+            Some(InferenceAttestationRecord::certified()),
+            None
         ));
         assert!(q.approve(id, &[], None, None, None, Some(at("2026-08-08T12:00:00Z"))));
         q.cancel(id).unwrap();
@@ -3673,10 +3833,48 @@ mod tests {
         assert!(q.record_previewed_envelope(
             id,
             "witness-sha256:envelope",
-            Some(InferenceAttestationRecord::certified())
+            Some(InferenceAttestationRecord::certified()),
+            None
         ));
-        assert!(q.record_previewed_envelope(id, "sha256:local", None));
+        assert!(q.record_previewed_envelope(id, "sha256:local", None, None));
         assert_eq!(q.get(id).unwrap().attested_inference, None);
+    }
+
+    /// K10: `would_send_bytes` measures the pinned envelope, so it goes
+    /// wherever the pin goes. A size left behind would tell a queue list
+    /// "this is what would be sent" with nothing pinned behind it.
+    #[test]
+    fn the_would_send_size_lives_and_dies_with_the_pin() {
+        let mut q = Queue::new();
+        q.upsert(entry("sha256:aa", "2026-08-08T12:00:00Z"), 500)
+            .unwrap();
+        let id = entry_id_for("sha256:aa");
+        let pin = |q: &mut Queue| {
+            assert!(q.record_previewed_envelope(id, "sha256:local", None, Some(1234)));
+            assert_eq!(q.get(id).unwrap().would_send_bytes, Some(1234));
+        };
+
+        pin(&mut q);
+        assert!(q.release_preview_pin(id));
+        assert_eq!(
+            q.get(id).unwrap().would_send_bytes,
+            None,
+            "release_preview_pin"
+        );
+
+        pin(&mut q);
+        assert!(q.approve(id, &[], None, None, None, Some(at("2026-08-08T12:00:00Z"))));
+        q.cancel(id).unwrap();
+        assert_eq!(q.get(id).unwrap().would_send_bytes, None, "cancel");
+
+        pin(&mut q);
+        assert!(q.approve(id, &[], None, None, None, Some(at("2026-08-08T12:00:00Z"))));
+        assert!(q.revoke_approval(id, "approval-inputs-changed"));
+        assert_eq!(q.get(id).unwrap().would_send_bytes, None, "revoke_approval");
+
+        pin(&mut q);
+        q.keep(id).unwrap();
+        assert_eq!(q.get(id).unwrap().would_send_bytes, None, "keep");
     }
 
     #[test]
@@ -3688,7 +3886,7 @@ mod tests {
         q.upsert(entry("sha256:aa", "2026-08-08T12:00:00Z"), 500)
             .unwrap();
         let id = entry_id_for("sha256:aa");
-        assert!(q.record_previewed_envelope(id, "sha256:envelope", None));
+        assert!(q.record_previewed_envelope(id, "sha256:envelope", None, None));
         assert!(q.release_preview_pin(id));
         assert_eq!(q.get(id).unwrap().previewed_envelope_digest, None);
         assert!(!q.pinned_entry_ids().contains(&id));
@@ -3703,7 +3901,7 @@ mod tests {
         q.upsert(entry("sha256:aa", "2026-08-08T12:00:00Z"), 500)
             .unwrap();
         let id = entry_id_for("sha256:aa");
-        assert!(q.record_previewed_envelope(id, "sha256:envelope", None));
+        assert!(q.record_previewed_envelope(id, "sha256:envelope", None, None));
         assert!(q.approve(id, &[], None, None, None, None));
         assert!(!q.release_preview_pin(id));
         assert!(q.get(id).unwrap().previewed_envelope_digest.is_some());
@@ -4434,6 +4632,7 @@ mod tests {
         assert!(q.hold_with_scrub_pin(
             id,
             super::super::second_look::REASON_SECOND_LOOK_REVIEW_REQUIRED,
+            None,
             None
         ));
         assert_eq!(q.get(id).unwrap().state, QueueState::Pending);

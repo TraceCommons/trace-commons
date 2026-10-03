@@ -1061,10 +1061,10 @@ fn watch_page(app: &Rc<App>, onboarding: &Rc<Onboarding>) -> gtk::Box {
                         // Greying an ignored row is a colour change, not a
                         // size change, so `tc-neutral` rather than `tc-meta`.
                         row_label.add_css_class("tc-neutral");
-                        // The state line says what the row now is. The button
-                        // that produced it said "Ignore", so this says
-                        // "Ignored" -- one name for the mode, through the
-                        // whole flow.
+                        // The state line says what the row now is: the
+                        // mode's one name, the word the button that produced
+                        // it said -- one name for the mode, through the whole
+                        // flow.
                         row_state.set_label(copy::ONBOARD_WATCH_IGNORED);
                         app.call(
                             "set_project_mode",

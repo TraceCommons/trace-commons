@@ -98,11 +98,53 @@ fn tauri_commands_project_shared_contributor_copy() {
     let daemon = read(&root, "tauri-desktop/src-tauri/src/commands/daemon.rs");
     let history = read(&root, "tauri-desktop/src-tauri/src/commands/history.rs");
 
-    let disclosure = rust_function(&native_flows, "fn contributor_disclosure_copy");
+    // K5 (#1173) moved the disclosure bundle into the core so the C ABI
+    // reaches it too: the core's `disclosure_copy::contributor_disclosure_copy`
+    // assembles it from the shared tables, and Tauri's command and the FFI
+    // export both return it whole. Neither assembles a table of its own.
+    let core_disclosure_source = read(
+        &root,
+        "crates/trace-commons-contributor/src/disclosure_copy.rs",
+    );
+    let disclosure = rust_function(&core_disclosure_source, "fn contributor_disclosure_copy");
     assert!(disclosure.contains("witness_copy::witness_copy"));
     assert!(disclosure.contains("private_inference_copy::private_inference_copy"));
     assert!(disclosure.contains("privacy_scan_copy::privacy_scan_copy"));
     assert!(disclosure.contains("onboarding_copy::onboarding_copy"));
+    // #1146's state map: each label's line and whether it reads as working
+    // are the core's state table, never a shell's comparison of sentences.
+    assert!(disclosure.contains("private_inference_copy::state_copies"));
+    let state_copies = rust_function(
+        &read(
+            &root,
+            "crates/trace-commons-contributor/src/private_inference_copy.rs",
+        ),
+        "fn state_copies",
+    );
+    assert!(state_copies.contains("state_line(label)"));
+    assert!(state_copies.contains("state_tone(label).reads_as_working()"));
+    let tauri_disclosure = rust_function(&native_flows, "fn contributor_disclosure_copy");
+    let ffi_source = read(&root, "crates/trace-commons-contributor-ffi/src/lib.rs");
+    let ffi_disclosure = rust_function(&ffi_source, "fn tc_contributor_disclosure_copy_json");
+    for (who, body) in [("Tauri", &tauri_disclosure), ("the FFI", &ffi_disclosure)] {
+        assert!(
+            body.contains("disclosure_copy::contributor_disclosure_copy()"),
+            "{who} must return the core's disclosure bundle"
+        );
+        for assembled in [
+            "json!",
+            "witness_copy",
+            "private_inference_copy",
+            "state_line",
+            "state_tone",
+            "source_check_line",
+        ] {
+            assert!(
+                !body.contains(assembled),
+                "{who} must not assemble the disclosure bundle itself (`{assembled}`)"
+            );
+        }
+    }
 
     // The automatic-contribution sentences come from the contributor core,
     // and so does the choice between the model-scrub and patterns-only
@@ -149,8 +191,35 @@ fn tauri_commands_project_shared_contributor_copy() {
     let grant = rust_function(&consent, "fn grant_automatic");
     assert!(grant.contains("grant_precondition(confirmed"));
     assert!(grant.contains("witness_signing_address"));
+    // The daemon refuses without `confirmed: true`, so the shell forwards
+    // the confirmation it was given rather than dropping or forging it.
+    // String literals are blanked, so this matches the forwarded value.
+    assert!(
+        grant.contains(": confirmed,"),
+        "Tauri must pass the grant screen's confirmation on to the daemon"
+    );
+    // K5 (#1173) moved the precondition into the core (`flow1::
+    // grant_precondition`) so the C ABI reaches it too: Tauri and the FFI
+    // ask it, and only the core reads `consent_scopes_chosen`.
     let precondition = rust_function(&consent, "fn grant_precondition");
-    assert!(precondition.contains("consent_scopes_chosen"));
+    assert!(precondition.contains("flow1::grant_precondition(confirmed, config)"));
+    let core_flow1 = read(&root, "crates/trace-commons-contributor/src/flow1.rs");
+    let core_precondition = rust_function(&core_flow1, "fn grant_precondition");
+    assert!(core_precondition.contains("consent_scopes_chosen"));
+    assert!(core_precondition.contains("consent_scopes.is_empty()"));
+    let ffi_precondition = rust_function(
+        &read(&root, "crates/trace-commons-contributor-ffi/src/lib.rs"),
+        "fn tc_grant_precondition_text",
+    );
+    assert!(ffi_precondition.contains("flow1::grant_precondition("));
+    for (who, body) in [("Tauri", &precondition), ("the FFI", &ffi_precondition)] {
+        for field in ["consent_scopes_chosen", "consent_scopes"] {
+            assert!(
+                !body.contains(field),
+                "{who} must not decide the grant precondition itself (`{field}`)"
+            );
+        }
+    }
 
     let witness = rust_function(&native_flows, "fn witness_review_copy");
     assert!(witness.contains("witness_copy::witness_copy"));
@@ -169,7 +238,10 @@ fn tauri_commands_project_shared_contributor_copy() {
     }
 
     let eligibility_group = rust_function(&daemon, "fn eligibility_group_copy");
-    assert!(eligibility_group.contains("group_control"));
+    // The eligible/withheld arithmetic itself (K6 of #1173) moved into the
+    // core's `group_eligibility`, which already calls `group_control`
+    // internally; Tauri no longer computes `min`/`saturating_sub` itself.
+    assert!(eligibility_group.contains("group_eligibility"));
     assert!(eligibility_group.contains("group_withheld_line"));
 
     let withdrawal = rust_function(&history, "fn withdrawal_confirmation_prompt");
@@ -664,12 +736,14 @@ fn copy_commands_reach_the_frontend_through_tauri_and_render_at_safety_surfaces(
         "the project disclosure's failure line must come from the core"
     );
     assert!(!project_disclosure.contains("could not be loaded"));
-    let native_flows_source = read(
+    // K5: the bundle that serves it is the core's own.
+    let core_disclosure_source = read(
         &root,
-        "tauri-desktop/src-tauri/src/commands/native_flows.rs",
+        "crates/trace-commons-contributor/src/disclosure_copy.rs",
     );
     assert!(
-        native_flows_source.contains("consent_copy::AUTO_PROJECT_DISCLOSURE_UNAVAILABLE"),
+        rust_function(&core_disclosure_source, "fn contributor_disclosure_copy")
+            .contains("consent_copy::AUTO_PROJECT_DISCLOSURE_UNAVAILABLE"),
         "contributor_disclosure_copy must serve the core's failure line"
     );
     assert!(api.contains("\"project_automatic_unavailable\""));
@@ -994,6 +1068,80 @@ fn copy_commands_reach_the_frontend_through_tauri_and_render_at_safety_surfaces(
     );
     assert!(history_model.contains("still being scored"));
 
+    // History's status words are the core's table
+    // (`history_copy::STATUS_LABELS`, carried as `history_ui.status_labels`),
+    // looked up rather than typed: no word in it, and not the unavailable
+    // label, is a literal in the shell's status function.
+    let eligibility_source = read(
+        &root,
+        "tauri-desktop/frontend/src/features/history/withdrawal-eligibility.ts",
+    );
+    let eligibility_code = code_only(&eligibility_source);
+    assert!(eligibility_code.contains("shared.status_labels"));
+    assert!(eligibility_code.contains("shared.status_unavailable"));
+    for word in trace_commons_contributor::history_copy::STATUS_LABELS
+        .iter()
+        .map(|row| row.label)
+        .chain([trace_commons_contributor::history_copy::STATUS_UNAVAILABLE])
+    {
+        // The raw source: `code_only` blanks string literals.
+        for quoted in [format!("\"{word}\""), format!("'{word}'")] {
+            assert!(
+                !eligibility_source.contains(&quoted),
+                "withdrawal-eligibility.ts types the core's status word {word:?}"
+            );
+        }
+    }
+    let copy_api = read(
+        &root,
+        "tauri-desktop/frontend/src/lib/tauri/contributor-copy-api.ts",
+    );
+    assert!(copy_api.contains("stringTable(historyUi, \"status_labels\")"));
+
+    // Owner decision, 2026-10-02: a folder mode has one name on every
+    // surface (`project_copy::FOLDER_MODE_LABELS`, carried as the bundle's
+    // `folder_mode_labels`). The Settings field and the arming disclosure
+    // that name a mode look it up; neither types the core's name nor a
+    // retired one.
+    assert!(copy_api.contains("stringTable(value, \"folder_mode_labels\")"));
+    for path in [
+        "tauri-desktop/frontend/src/features/settings/components/project-mode-field.tsx",
+        "tauri-desktop/frontend/src/components/project-auto-upload-disclosure.tsx",
+    ] {
+        let source = read(&root, path);
+        assert!(
+            code_only(&source).contains("folder_mode_labels"),
+            "{path} must read the core's folder_mode_labels"
+        );
+        let core = trace_commons_contributor::project_copy::FOLDER_MODE_LABELS
+            .iter()
+            .map(|(_, label)| *label);
+        let retired = [
+            "Ask me first",
+            "Contribute automatically",
+            "Never offer this one",
+            "Auto contribute",
+        ];
+        for word in core {
+            for quoted in [
+                format!("\"{word}\""),
+                format!("'{word}'"),
+                format!(">{word}<"),
+            ] {
+                assert!(
+                    !source.contains(&quoted),
+                    "{path} types the core's mode name {word:?}"
+                );
+            }
+        }
+        for word in retired {
+            assert!(
+                !source.contains(word),
+                "{path} still says the retired mode name {word:?}"
+            );
+        }
+    }
+
     let eligibility = read(
         &root,
         "tauri-desktop/frontend/src/features/waiting/components/waiting-review.tsx",
@@ -1155,4 +1303,85 @@ fn legacy_migration_copy_is_central_and_the_shell_holds_no_literal() {
     let consent = read(&root, "tauri-desktop/src-tauri/src/commands/consent.rs");
     let serve = rust_function(&consent, "fn legacy_migration_copy");
     assert!(serve.contains("legacy_migration_offer"));
+}
+
+/// K5 (#1173): the Flow 1 decisions are the core's (`flow1`), and the C ABI
+/// exports reach them rather than taking any themselves. Tauri's React
+/// onboarding is frozen (D1) and keeps `flow1.ts`; it must still name every
+/// step and blocker the core does, so the two cannot drift apart unseen.
+#[test]
+fn the_flow1_decisions_are_the_cores_and_the_abi_takes_none_itself() {
+    let root = repo_root();
+    let ffi = read(&root, "crates/trace-commons-contributor-ffi/src/lib.rs");
+    for (export, core_call) in [
+        (
+            "fn tc_scope_choice_json",
+            "scope_choice(&options, &selected)",
+        ),
+        ("fn tc_flow1_start_json", "flow1::start("),
+        ("fn tc_flow1_apply_json", "apply("),
+        ("fn tc_flow1_grant_blockers_json", "grant_blockers("),
+        ("fn tc_flow1_grant_request_json", "grant_request(&progress)"),
+        (
+            "fn tc_grant_void_notice_regrant_json",
+            "consent_copy::void_notice_for_wire_with_regrant(&value)",
+        ),
+    ] {
+        let body = rust_function(&ffi, export);
+        assert!(
+            body.contains(core_call),
+            "`{export}` must ask the core (`{core_call}`)"
+        );
+        for decided in [
+            "OnboardingStep::",
+            "GrantBlocker::",
+            "always_on",
+            "scrub_disclosure_seen",
+            "witness_disclosure_seen",
+        ] {
+            assert!(
+                !body.contains(decided),
+                "`{export}` must not take a Flow 1 decision itself (`{decided}`)"
+            );
+        }
+    }
+
+    let flow1_ts = read(
+        &root,
+        "tauri-desktop/frontend/src/features/onboarding/flow1.ts",
+    );
+    // The labels come from the table both implementations run
+    // (`flow1_table.json`): the core's unit test pins it to the core's
+    // enums, and `flow1.test.mjs` runs flow1.ts's Back, after-inference and
+    // blockers against it. This only checks flow1.ts still names them.
+    let table: serde_json::Value = serde_json::from_str(&read(
+        &root,
+        "crates/trace-commons-contributor/src/flow1_table.json",
+    ))
+    .expect("the shared Flow 1 table");
+    let tauri_test = read(
+        &root,
+        "tauri-desktop/frontend/src/features/onboarding/flow1.test.mjs",
+    );
+    assert!(
+        tauri_test.contains("crates/trace-commons-contributor/src/flow1_table.json"),
+        "flow1.test.mjs must run the shared Flow 1 table"
+    );
+    let package = read(&root, "tauri-desktop/frontend/package.json");
+    assert!(
+        package.contains("src/features/onboarding/flow1.test.mjs"),
+        "`pnpm test` must run flow1.test.mjs"
+    );
+    let labels = table["steps"]
+        .as_array()
+        .expect("steps")
+        .iter()
+        .chain(table["blockers"].as_array().expect("blockers"));
+    for label in labels {
+        let label = label.as_str().expect("a label").to_owned();
+        assert!(
+            flow1_ts.contains(&format!("\"{label}\"")),
+            "flow1.ts no longer names the core's Flow 1 label `{label}`"
+        );
+    }
 }
