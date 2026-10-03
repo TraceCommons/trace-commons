@@ -1,3 +1,4 @@
+import TCBridge
 @testable import TCShellCore
 import XCTest
 
@@ -7,19 +8,39 @@ import XCTest
 /// C1's sample sets.
 @MainActor
 final class HomeTests: XCTestCase {
-    /// History says a submission in its own core words, waiting to be
-    /// scored, and not the shared "Submitted" label; every other status
-    /// keeps the shared label, and an unlabelled one gets no tag.
-    func test_historySaysASubmissionAsWaitingToBeScored() throws {
-        let words = try XCTUnwrap(MonitorWords.table)
-        let shared: (String) -> String? = { $0 == "submitted" ? "Submitted" : ($0 == "accepted" ? "Accepted into the commons" : nil) }
-        XCTAssertEqual(HomeFormat.statusWord("submitted", table: words, fallback: shared), words.historySubmitted)
-        XCTAssertNotEqual(words.historySubmitted, "Submitted")
-        XCTAssertEqual(HomeFormat.statusWord("accepted", table: words, fallback: shared), "Accepted into the commons")
-        // A status with no label gets no tag, never its raw wire value.
-        XCTAssertNil(HomeFormat.statusWord("purged", table: words, fallback: shared))
-        // Before the core's words load, the shared label stands in.
-        XCTAssertEqual(HomeFormat.statusWord("submitted", table: nil, fallback: shared), "Submitted")
+    /// History reads every status through the core's one table
+    /// (`historyStatusLabel`): a submission is "Waiting to be scored", and a
+    /// missing, empty or unnamed status reads the core's unavailable word,
+    /// never the raw wire token.
+    func test_statusWordsComeFromTheCoresOneTable() throws {
+        let copy = try XCTUnwrap(PublicRunCopy.decode(fromJSON: TCPublicRun.copyJSON() ?? ""))
+        let label: (String?) -> String? = { status in
+            copy.historyStatusLabel(for: status ?? "")
+        }
+        XCTAssertEqual(HomeFormat.statusWord("submitted", label: label), "Waiting to be scored")
+        XCTAssertEqual(HomeFormat.statusWord("accepted", label: label), "In the commons")
+        XCTAssertEqual(HomeFormat.statusWord("future_state", label: label), "Status unavailable")
+        XCTAssertEqual(HomeFormat.statusWord(nil, label: label), "Status unavailable")
+        XCTAssertEqual(HomeFormat.statusWord("", label: label), "Status unavailable")
+        // With no core copy decoded there is no tag at all.
+        XCTAssertNil(HomeFormat.statusWord("submitted", label: { _ in nil }))
+        XCTAssertNil(HomeFormat.statusWord(nil, label: { _ in nil }))
+    }
+
+    /// An unknown or missing status is neutral, never a failure tone.
+    func test_unknownStatusToneIsNeutral() {
+        XCTAssertEqual(HomeFormat.tone(nil), .neutral)
+        XCTAssertEqual(HomeFormat.tone("future_state"), .neutral)
+    }
+
+    func test_monitorWindowReadsTheHistoryTable() throws {
+        let src = try String(
+            contentsOfFile: #filePath.replacingOccurrences(
+                of: "Tests/TraceCommonsAppTests/HomeTests.swift",
+                with: "Sources/TraceCommonsApp/Views/MonitorWindowView.swift"),
+            encoding: .utf8)
+        XCTAssertTrue(src.contains("historyStatusLabel(for:"))
+        XCTAssertFalse(src.contains("contributionStatusLabel(for:"))
     }
 
     private func store(_ set: SampleDaemonClient.SampleSet) async -> HomeStore {

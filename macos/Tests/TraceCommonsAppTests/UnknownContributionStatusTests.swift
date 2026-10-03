@@ -79,19 +79,6 @@ final class UnknownContributionStatusTests: XCTestCase {
         XCTAssertNil(HistoryRow.statusSentence(for: "accepted", copy: nil))
     }
 
-    func testGlassHomeLabelsAnUnknownStatusFromTheCore() throws {
-        let copy = try sharedCopy()
-        XCTAssertEqual(
-            HomeFormat.statusWord(
-                "future_state", table: nil, fallback: { copy.contributionStatusLabel(for: $0) }),
-            "Status unavailable")
-    }
-
-    func testGlassHomeNeverShowsTheRawToken() {
-        // With no core copy decoded, the row draws no tag at all.
-        XCTAssertNil(HomeFormat.statusWord("future_state", table: nil, fallback: { _ in nil }))
-    }
-
     func testAnUnknownStatusOffersNoWithdraw() {
         XCTAssertFalse(ContributionStatusPresentation.offersWithdraw("future_state"))
         XCTAssertTrue(ContributionStatusPresentation.offersWithdraw("received"))
