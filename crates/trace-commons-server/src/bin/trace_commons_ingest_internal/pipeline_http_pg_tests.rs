@@ -9113,6 +9113,336 @@ async fn a_credit_audit_event_already_in_the_file_log_is_not_appended_again() {
     );
 }
 
+/// Whether `run_id`'s Trace Credit leg is marked audited.
+async fn credit_leg_is_audited(owner: &PgBackend, tenant: &str, run_id: Uuid) -> bool {
+    let mut client = owner.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, tenant).await;
+    let audited = tx
+        .query_one(
+            "SELECT credit_audited_at IS NOT NULL FROM pipeline_run_settlements
+              WHERE tenant_id = $1 AND run_id = $2 AND instrument_id = 'trace_credit'",
+            &[&tenant, &run_id],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    tx.commit().await.unwrap();
+    audited
+}
+
+/// How many `CreditMutate` rows the database audit log holds for
+/// `submission_id`.
+async fn credit_mutate_audit_rows(owner: &PgBackend, tenant: &str, submission_id: Uuid) -> i64 {
+    let mut client = owner.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, tenant).await;
+    let rows = tx
+        .query_one(
+            "SELECT COUNT(*) FROM trace_audit_events
+              WHERE tenant_id = $1 AND submission_id = $2 AND action = 'credit_mutate'",
+            &[&tenant, &submission_id],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    tx.commit().await.unwrap();
+    rows
+}
+
+/// How many `CreditMutate` lines the tenant's file audit log holds. It
+/// counts lines, so it also reads a log with a line that does not parse.
+fn credit_mutate_file_lines(root: &Path, tenant: &str) -> usize {
+    std::fs::read_to_string(audit_events_path(root, tenant))
+        .unwrap()
+        .lines()
+        .filter(|line| line.contains("\"credit_mutate\""))
+        .count()
+}
+
+/// Multi-lens review C9 (a): with a required database mirror the audit row
+/// is written before the file line, so an event with no database row has no
+/// file line and the worker does not read the tenant's file log for it. A
+/// middle line that does not parse (`main`'s own append parses the last line
+/// only) therefore does not stop the tenant's `CreditMutate` event.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_credit_audit_append_with_a_required_mirror_does_not_read_the_file_log() {
+    let Some(runtime) = runtime_backend(4).await else {
+        return;
+    };
+    let owner = account_owner_backend()
+        .await
+        .expect("the same variable runtime_backend read is set");
+    let suffix = Uuid::new_v4().simple().to_string();
+    let tenant = format!("tenant-compat-audit-required-{suffix}");
+    let dir = tempfile::tempdir().expect("temp dir");
+    let artifacts = local_artifacts(&dir);
+    let service = assemble_compatibility_pipeline_service(
+        runtime.clone(),
+        &ConfiguredTraceArtifactStore::legacy(artifacts.clone()),
+        IsolatedPipelineIndex::new(),
+        2_500_000,
+        Arc::new(PassThroughPipelinePrivacyBoundary),
+    );
+    let mut state = test_state_with_options(
+        dir.path().to_path_buf(),
+        Some(mains_database().await),
+        Some(artifacts),
+        false,
+        false,
+        false,
+        false,
+    );
+    Arc::make_mut(&mut state).require_db_mirror_writes = true;
+    let principal = static_token_principal_ref(&format!("token-compat-audit-required-{suffix}"));
+    let run = completed_run_of(
+        &service,
+        &tenant,
+        &principal,
+        &model_training_envelope().await,
+    )
+    .await;
+    // Two of `main`'s events, in the file log and the database, with a
+    // damaged line between them in the file.
+    let actor = system_audit_tenant(&tenant, "pipeline_test");
+    for _ in 0..2 {
+        append_control_plane_read_audit(state.as_ref(), &actor, "pipeline_test", 0)
+            .await
+            .expect("append one of main's audit events");
+    }
+    let path = audit_events_path(dir.path(), &tenant);
+    let body = std::fs::read_to_string(&path).unwrap();
+    let mut lines = body.lines().collect::<Vec<_>>();
+    assert_eq!(lines.len(), 2);
+    lines.insert(1, "{\"damaged");
+    std::fs::write(&path, format!("{}\n", lines.join("\n"))).unwrap();
+
+    let appended = pipeline_runtime::append_pipeline_credit_audit_events(
+        state.as_ref(),
+        service.as_ref(),
+        &tenant,
+        32,
+    )
+    .await
+    .expect("the damaged line is not read");
+    assert_eq!(appended, 1);
+    assert!(credit_leg_is_audited(&owner, &tenant, run.run_id).await);
+    assert_eq!(
+        credit_mutate_audit_rows(&owner, &tenant, run.submission_id).await,
+        1
+    );
+    assert_eq!(credit_mutate_file_lines(dir.path(), &tenant), 1);
+}
+
+/// Multi-lens review C9 (b): where the worker does read the file log (no
+/// required mirror), it skips a line that does not parse; such a line
+/// cannot be matched by id. The event the log already holds is still found
+/// and not appended again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_credit_audit_pass_skips_a_file_line_that_does_not_parse() {
+    let Some(runtime) = runtime_backend(4).await else {
+        return;
+    };
+    let owner = account_owner_backend()
+        .await
+        .expect("the same variable runtime_backend read is set");
+    let suffix = Uuid::new_v4().simple().to_string();
+    let tenant = format!("tenant-compat-audit-damaged-{suffix}");
+    let dir = tempfile::tempdir().expect("temp dir");
+    let artifacts = local_artifacts(&dir);
+    let service = assemble_compatibility_pipeline_service(
+        runtime.clone(),
+        &ConfiguredTraceArtifactStore::legacy(artifacts.clone()),
+        IsolatedPipelineIndex::new(),
+        2_500_000,
+        Arc::new(PassThroughPipelinePrivacyBoundary),
+    );
+    let state = test_state_with_options(
+        dir.path().to_path_buf(),
+        None,
+        Some(artifacts),
+        false,
+        false,
+        false,
+        false,
+    );
+    let principal = static_token_principal_ref(&format!("token-compat-audit-damaged-{suffix}"));
+    let run = completed_run_of(
+        &service,
+        &tenant,
+        &principal,
+        &model_training_envelope().await,
+    )
+    .await;
+    let append = || async {
+        pipeline_runtime::append_pipeline_credit_audit_events(
+            state.as_ref(),
+            service.as_ref(),
+            &tenant,
+            32,
+        )
+        .await
+    };
+    assert_eq!(append().await.unwrap(), 1);
+    // The crash, as in the test above, and a damaged line before the event.
+    let mut client = owner.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, &tenant).await;
+    tx.execute(
+        "UPDATE pipeline_run_settlements SET credit_audited_at = NULL
+          WHERE tenant_id = $1 AND run_id = $2 AND instrument_id = 'trace_credit'",
+        &[&tenant, &run.run_id],
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    drop(client);
+    let path = audit_events_path(dir.path(), &tenant);
+    let body = std::fs::read_to_string(&path).unwrap();
+    std::fs::write(&path, format!("{{\"damaged\n{body}")).unwrap();
+
+    assert_eq!(
+        append().await.expect("the damaged line is skipped"),
+        1,
+        "the next pass finds the leg again"
+    );
+    assert!(credit_leg_is_audited(&owner, &tenant, run.run_id).await);
+    assert_eq!(
+        credit_mutate_file_lines(dir.path(), &tenant),
+        1,
+        "one CreditMutate event in the file log"
+    );
+}
+
+/// A test-only trigger that refuses each audit row of one tenant, so the
+/// database mirror of that tenant's audit events fails. Created and dropped
+/// as the owner; scoped to one tenant, so tests running beside it are
+/// untouched.
+struct AuditMirrorFault {
+    name: String,
+}
+
+impl AuditMirrorFault {
+    async fn install(owner: &PgBackend, tenant: &str) -> Self {
+        let name = format!("c9_fault_{}", Uuid::new_v4().simple());
+        owner
+            .trace_pool_for_test()
+            .get()
+            .await
+            .unwrap()
+            .batch_execute(&format!(
+                "CREATE FUNCTION {name}() RETURNS TRIGGER LANGUAGE plpgsql AS $$
+                 BEGIN
+                     RAISE EXCEPTION 'injected audit mirror failure';
+                 END;
+                 $$;
+                 CREATE TRIGGER {name}
+                     BEFORE INSERT ON trace_audit_events
+                     FOR EACH ROW
+                     WHEN (NEW.tenant_id = '{tenant}')
+                     EXECUTE FUNCTION {name}();"
+            ))
+            .await
+            .expect("install the audit mirror fault");
+        Self { name }
+    }
+
+    async fn remove(self, owner: &PgBackend) {
+        let name = self.name;
+        owner
+            .trace_pool_for_test()
+            .get()
+            .await
+            .unwrap()
+            .batch_execute(&format!(
+                "DROP TRIGGER {name} ON trace_audit_events;
+                 DROP FUNCTION {name}();"
+            ))
+            .await
+            .expect("remove the audit mirror fault");
+    }
+}
+
+/// Multi-lens review C9 (d): with a database mirror that is not required,
+/// a pass whose mirror fails leaves the event in the file log only and does
+/// not mark the leg. The next pass mirrors that file event; when the mirror
+/// fails again the leg stays unmarked, as after the first pass, and is
+/// marked only once the database holds the event.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_file_only_credit_audit_event_is_not_marked_until_its_mirror_is_written() {
+    let Some(runtime) = runtime_backend(4).await else {
+        return;
+    };
+    let owner = account_owner_backend()
+        .await
+        .expect("the same variable runtime_backend read is set");
+    let suffix = Uuid::new_v4().simple().to_string();
+    let tenant = format!("tenant-compat-audit-mirror-{suffix}");
+    let dir = tempfile::tempdir().expect("temp dir");
+    let artifacts = local_artifacts(&dir);
+    let service = assemble_compatibility_pipeline_service(
+        runtime.clone(),
+        &ConfiguredTraceArtifactStore::legacy(artifacts.clone()),
+        IsolatedPipelineIndex::new(),
+        2_500_000,
+        Arc::new(PassThroughPipelinePrivacyBoundary),
+    );
+    let state = test_state_with_options(
+        dir.path().to_path_buf(),
+        Some(mains_database().await),
+        Some(artifacts),
+        false,
+        false,
+        false,
+        false,
+    );
+    assert!(!state.require_db_mirror_writes);
+    let principal = static_token_principal_ref(&format!("token-compat-audit-mirror-{suffix}"));
+    let run = completed_run_of(
+        &service,
+        &tenant,
+        &principal,
+        &model_training_envelope().await,
+    )
+    .await;
+    let append = || async {
+        pipeline_runtime::append_pipeline_credit_audit_events(
+            state.as_ref(),
+            service.as_ref(),
+            &tenant,
+            32,
+        )
+        .await
+    };
+
+    let fault = AuditMirrorFault::install(&owner, &tenant).await;
+    let first = append().await;
+    let audited_after_first = credit_leg_is_audited(&owner, &tenant, run.run_id).await;
+    let second = append().await;
+    let audited_after_second = credit_leg_is_audited(&owner, &tenant, run.run_id).await;
+    fault.remove(&owner).await;
+    assert!(first.is_err(), "the first pass has no database row");
+    assert!(!audited_after_first);
+    assert_eq!(credit_mutate_file_lines(dir.path(), &tenant), 1);
+    assert!(
+        second.is_err(),
+        "the second pass mirrors the file event, and that fails again"
+    );
+    assert!(
+        !audited_after_second,
+        "a leg with no database audit row is not marked"
+    );
+
+    assert_eq!(append().await.expect("the mirror works again"), 1);
+    assert!(credit_leg_is_audited(&owner, &tenant, run.run_id).await);
+    assert_eq!(
+        credit_mutate_audit_rows(&owner, &tenant, run.submission_id).await,
+        1
+    );
+    assert_eq!(
+        credit_mutate_file_lines(dir.path(), &tenant),
+        1,
+        "the file event is mirrored, not appended again"
+    );
+}
+
 /// Zaki review 1, round 2, N-8: under `main`'s database contributor reads,
 /// a minimal-family run's Trace Credit award is reported with its points,
 /// as under file reads and in the pipeline block: the status route answers

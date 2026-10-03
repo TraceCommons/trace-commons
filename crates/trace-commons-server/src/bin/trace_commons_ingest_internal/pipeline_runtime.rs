@@ -1139,12 +1139,19 @@ pub(crate) async fn append_pipeline_credit_audit_events(
         .store()
         .list_unaudited_credit_events(tenant_id, limit)
         .await?;
+    // The pass's one read of the file log, made for the first item that
+    // needs it.
+    let mut file_events: Option<BTreeMap<Uuid, TraceCommonsAuditEvent>> = None;
     for item in &items {
         // Zaki review 3, Z3-L6: the append is idempotent. The event's id is
         // the credit event's, so an event a crashed pass already appended --
         // to the database mirror, or to the file log before the mirror or
         // the audited mark -- is found again and not appended twice; one in
-        // the file log only is mirrored, as it was written.
+        // the file log only is mirrored, as it was written. One in the
+        // database only (a required mirror writes the row first, and a pass
+        // can stop before the file line) gets no file line here: the leg is
+        // marked and the event stays in the database only, as an event of
+        // `main` does after the same stop.
         let in_database = match state.db_mirror.as_ref() {
             Some(db) => db
                 .get_trace_audit_event_by_id(tenant_id, item.credit_event_id)
@@ -1152,12 +1159,18 @@ pub(crate) async fn append_pipeline_credit_audit_events(
                 .is_some(),
             None => false,
         };
-        let in_file = if in_database {
+        // Multi-lens review C9: with a required mirror the database row is
+        // written before the file line (`append_audit_event_mirrored`), so
+        // an event with no row has no line and the file is not read.
+        let in_file = if in_database || state.require_db_mirror_writes {
             None
         } else {
-            read_audit_events_in_file_order(&state.root, tenant_id)?
-                .into_iter()
-                .find(|event| event.event_id == item.credit_event_id)
+            if file_events.is_none() {
+                file_events = Some(credit_audit_events_in_file(state, tenant_id, &items).await?);
+            }
+            file_events
+                .as_mut()
+                .and_then(|events| events.remove(&item.credit_event_id))
         };
         if !in_database {
             let points = item
@@ -1195,6 +1208,10 @@ pub(crate) async fn append_pipeline_credit_audit_events(
                 Some(event) => {
                     let mirrored = mirror_audit_event_row_to_db(state, &actor, &event, row).await;
                     enforce_db_mirror_write_result(state, "pipeline credit audit event", mirrored)?;
+                    // A mirror that is not required can fail with no error
+                    // here; the leg is marked only when the database holds
+                    // the event, as after the first append.
+                    verify_mirrored_audit_event_after_file_append(state, &actor, &event).await?;
                 }
                 None => {
                     let mut event = TraceCommonsAuditEvent::credit_mutation(
@@ -1218,6 +1235,54 @@ pub(crate) async fn append_pipeline_credit_audit_events(
         service.store().mark_credit_audited(tenant_id, item).await?;
     }
     Ok(items.len())
+}
+
+/// The tenant's file audit events whose id is the credit event id of one of
+/// `items`, by id: one read of the file log for a worker pass, off the async
+/// threads. A line that does not parse is skipped, because it cannot be
+/// matched by id (`main`'s own append parses the last line only), and the
+/// pass logs how many it skipped, with no content.
+async fn credit_audit_events_in_file(
+    state: &AppState,
+    tenant_id: &str,
+    items: &[trace_commons_server::versioned_pipeline::PipelineCreditAuditItem],
+) -> anyhow::Result<BTreeMap<Uuid, TraceCommonsAuditEvent>> {
+    let path = audit_events_path(&state.root, tenant_id);
+    let event_ids = items
+        .iter()
+        .map(|item| item.credit_event_id)
+        .collect::<BTreeSet<_>>();
+    let tenant = tenant_id.to_string();
+    let (events, skipped_lines) = tokio::task::spawn_blocking(move || {
+        let mut events = BTreeMap::new();
+        let mut skipped_lines = 0usize;
+        if !path.exists() {
+            return Ok((events, skipped_lines));
+        }
+        let body = std::fs::read_to_string(&path).context("failed to read the audit log")?;
+        for line in body.lines().map(str::trim).filter(|line| !line.is_empty()) {
+            let Ok(event) = serde_json::from_str::<TraceCommonsAuditEvent>(line) else {
+                skipped_lines += 1;
+                continue;
+            };
+            if event_ids.contains(&event.event_id) {
+                ensure_audit_event_tenant(&event, &tenant)?;
+                events.insert(event.event_id, event);
+            }
+        }
+        anyhow::Ok((events, skipped_lines))
+    })
+    .await
+    .context("the audit log read did not finish")??;
+    if skipped_lines > 0 {
+        tracing::warn!(
+            error_class = "pipeline_worker_credit_audit_file_lines_unreadable",
+            tenant_storage_ref = %tenant_storage_ref(tenant_id),
+            skipped_lines,
+            "pipeline worker credit audit skipped audit log lines that do not parse"
+        );
+    }
+    Ok(events)
 }
 
 /// The actor label of an audit event the pipeline worker appends as an
