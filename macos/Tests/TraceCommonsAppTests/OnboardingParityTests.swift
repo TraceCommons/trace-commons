@@ -237,7 +237,7 @@ final class OnboardingParityTests: XCTestCase {
         let source = try Self.text("Views/Settings/ProjectsSection.swift")
         XCTAssertTrue(source.contains("struct ProjectErrorNotice: View {"))
         XCTAssertTrue(source.contains(
-            "Button(Self.dismissLabel ?? ActionMessageBanner.dismissWord) { model.lastActionError = nil }"))
+            "Button(ActionMessageBanner.coreDismissWord ?? ActionMessageBanner.dismissWord) { model.lastActionError = nil }"))
     }
 
     /// Done is the only place onboarding is marked complete, and the only

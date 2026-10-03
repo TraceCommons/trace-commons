@@ -21,8 +21,6 @@ enum ProjectModeChoices {
 struct ProjectErrorNotice: View {
     @EnvironmentObject private var model: AppModel
 
-    private static let dismissLabel = MonitorTracesCopy.decode(fromJSON: TCCoreCopy.monitorTracesCopyJSON())?.dismiss
-
     var body: some View {
         if let error = model.lastActionError {
             GlassNotice(tone: .outside) {
@@ -30,7 +28,7 @@ struct ProjectErrorNotice: View {
                     Text(error)
                         .fixedSize(horizontal: false, vertical: true)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                    Button(Self.dismissLabel ?? ActionMessageBanner.dismissWord) { model.lastActionError = nil }
+                    Button(ActionMessageBanner.coreDismissWord ?? ActionMessageBanner.dismissWord) { model.lastActionError = nil }
                         .buttonStyle(GlassButtonStyle(.glass))
                 }
             }

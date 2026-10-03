@@ -223,7 +223,8 @@ final class ComputeSkillsParityTests: XCTestCase {
         // A failure is never undismissable; the word is the core's, with the
         // banner's as the fallback by reference.
         XCTAssertTrue(source.contains(
-            "Button(Self.dismissLabel ?? ActionMessageBanner.dismissWord) { dismissedFailure = message }"))
-        XCTAssertTrue(source.contains("MonitorTracesCopy.decode(fromJSON: TCCoreCopy.monitorTracesCopyJSON())?.dismiss"))
+            "Button(ActionMessageBanner.coreDismissWord ?? ActionMessageBanner.dismissWord) { dismissedFailure = message }"))
+        XCTAssertTrue(try Self.text("Views/ActionMessageBanner.swift").contains(
+            "static let coreDismissWord = MonitorTracesCopy.decode(fromJSON: TCCoreCopy.monitorTracesCopyJSON())?.dismiss"))
     }
 }
