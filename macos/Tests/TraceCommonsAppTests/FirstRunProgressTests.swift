@@ -44,6 +44,34 @@ final class FirstRunProgressTests: XCTestCase {
         }
     }
 
+    /// Whether the folders step shows is read only once the core's startup
+    /// is known: never decided while it is still starting.
+    func test_theFoldersQuestionWaitsForStartup() {
+        XCTAssertNil(FirstRunProgress.asksForFolders(.starting))
+        XCTAssertEqual(FirstRunProgress.asksForFolders(.needsRoots), true)
+        XCTAssertEqual(FirstRunProgress.asksForFolders(.running), false)
+    }
+
+    /// The window is gated as the main window gates onboarding: the flow
+    /// is drawn only while onboarding is required, the window closes when
+    /// it is not, and completing never closes it by itself.
+    func test_theWindowIsGatedOnRequiresOnboarding() throws {
+        let source = try String(contentsOf: Self.source("Views/Monitor/FirstRunViews.swift"), encoding: .utf8)
+        XCTAssertTrue(source.contains("if model.requiresOnboarding {"))
+        XCTAssertTrue(source.contains("onChange(of: model.requiresOnboarding, initial: true)"))
+        XCTAssertEqual(source.components(separatedBy: "dismissWindow(id:").count - 1, 1,
+                       "the window closes only from the requiresOnboarding gate")
+    }
+
+    private static func source(_ path: String) -> URL {
+        URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Sources/TraceCommonsApp")
+            .appendingPathComponent(path)
+    }
+
     /// A daemon that already has its folders skips the roots step, so the
     /// progress starts at Join rather than showing Folders as done.
     func test_theFoldersStepShowsOnlyWhenAsked() throws {
