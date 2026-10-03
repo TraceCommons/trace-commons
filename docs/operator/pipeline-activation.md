@@ -386,12 +386,14 @@ not the trace's fault:
   configuration fault (a root that is not mounted, a wrong
   `TRACE_COMMONS_ARTIFACT_KEY_HEX`, a wrong bucket) looks like an integrity
   failure, so correct the store within that time; a run that fails is not
-  put back.
+  put back. This time holds for a run in Review or Score only.
   Any other Google Cloud Storage fetch failure (credentials, network, 429,
   5xx) and a KMS unwrap failure wait here, uncharged, retried at most once
   an hour.
   Settle's read of the stored index command is always charged
-  (`index_command_invalid`).
+  (`index_command_invalid`), a store failure of that read included, with
+  the short backoff: a run in Settle can fail about one second after such a
+  fault, and its open legs are then forfeited.
 - `serialized_json_object_key_unavailable` and
   `pipeline_attempt_object_key_mismatch` (compatibility Score): the same
   rule, under the store's own label -- a store that cannot derive an object

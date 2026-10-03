@@ -859,12 +859,16 @@ describes each). For the first of these it lifts forced row security on
 migration's transaction.
 
 The ingest migration runner applies each migration in one transaction. To
-apply V109 by hand (the second route above, which also records the version
-in `_trace_commons_migrations`), use one transaction too:
+apply V109 by hand (the second route above), use one transaction too:
 
 ```sh
 psql --single-transaction -v ON_ERROR_STOP=1 -f migrations/V109__versioned_pipeline_followups.sql
 ```
+
+This command applies the file and records nothing. Then record version 109,
+with the name `versioned_pipeline_followups`, in `_trace_commons_migrations`,
+as that route says; if it is not recorded, the next boot with the migrator
+URL applies V109 again and stops at its first `ADD CONSTRAINT`.
 
 Without `--single-transaction`, a failure after the first statement leaves
 `pipeline_run_settlements` without forced row security, and a second run of
