@@ -281,18 +281,18 @@ pub const VOID_REARM_FAILED: &str =
 /// [`VOID_GRANT_REGRANT`] and its button beside this sentence.
 pub const VOID_GRANT_PROJECTS: &str = "Projects still set to contribute automatically carry on. Any project that stopped has its own notice.";
 
-/// **DRAFT, NEEDS APPROVAL.** The title of the "Auto contribute" override's
+/// The title of the "Auto contribute" override's
 /// void notice (`grant_voids` element of kind `contribution_override`).
 pub const VOID_OVERRIDE_TITLE: &str = "Auto contribute turned off";
 
-/// **DRAFT, NEEDS APPROVAL.** What happened. Held to `sweep_grants`: the
+/// What happened. Held to `sweep_grants`: the
 /// override is cleared, so every folder is back on its own setting, and a
 /// folder that asks first waits for you again.
 pub const VOID_OVERRIDE_BODY: &str = "Settings it was turned on under have since changed, so \
      Auto contribute is off and each folder is back on its own setting. Sessions from folders \
      that ask first wait for you again.";
 
-/// **DRAFT, NEEDS APPROVAL.** How it is turned back on.
+/// How it is turned back on.
 pub const VOID_OVERRIDE_REARM: &str = "You can turn Auto contribute back on from Contribution \
      mode. Doing so agrees to the new settings.";
 
@@ -353,7 +353,7 @@ pub fn void_reason_line(label: &str) -> &'static str {
         "attested-bodies-on" => {
             "The full text of your attested AI calls would now be sent with your sessions."
         }
-        // **DRAFT, NEEDS APPROVAL.** `policy::OVERRIDE_TERMS_UNRECORDED`:
+        // `policy::OVERRIDE_TERMS_UNRECORDED`:
         // only an "Auto contribute" override saved by a pre-release build.
         "terms-unrecorded" => {
             "It was turned on before this app recorded the settings it was turned on under."

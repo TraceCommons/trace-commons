@@ -223,6 +223,68 @@ final class CoreCopyExportTests: XCTestCase {
         XCTAssertFalse(prompt.body.contains("stays waiting"), prompt.body)
     }
 
+    /// The other two roles (K8, #1173), the counterpart of the Tauri
+    /// frontend's `quit-confirmation-copy.test.mjs`: "each watcher role
+    /// keeps the sentence Rust chose for it". Exercised against a real
+    /// daemon, hosting and then attached to, rather than hand-built JSON --
+    /// `tc_quit_prompt_json` reads the role off the handle itself, and that
+    /// reading is exactly what this pins.
+    func testEveryQuitRoleKeepsItsOwnSentenceAgainstARealDaemon() throws {
+        let settings = #"{"claude_source":{"mode":"off"},"codex_source":{"mode":"off"}}"#
+        let directory = URL(fileURLWithPath: "/private/tmp/tc-quit-\(UUID().uuidString.prefix(8))")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let hosting = try TCDaemon(configDir: directory.path, settingsJSON: settings)
+        defer { hosting.shutdown() }
+        let hostingPrompt = try XCTUnwrap(QuitPrompt.decode(fromJSON: hosting.quitPromptJSON()))
+        XCTAssertEqual(hostingPrompt.role, "hosting")
+        XCTAssertTrue(hostingPrompt.body.contains("Quitting stops"), hostingPrompt.body)
+
+        let attached = try TCDaemon(attachingTo: directory.path)
+        defer { attached.shutdown() }
+        let attachedPrompt = try XCTUnwrap(QuitPrompt.decode(fromJSON: attached.quitPromptJSON()))
+        XCTAssertEqual(attachedPrompt.role, "attached")
+        XCTAssertFalse(attachedPrompt.body.contains("Quitting stops"), attachedPrompt.body)
+        XCTAssertTrue(attachedPrompt.body.contains("keeps running"), attachedPrompt.body)
+
+        // The heading and the two buttons do not depend on the role.
+        XCTAssertEqual(hostingPrompt.title, attachedPrompt.title)
+        XCTAssertEqual(hostingPrompt.confirm, attachedPrompt.confirm)
+        XCTAssertEqual(hostingPrompt.cancel, attachedPrompt.cancel)
+    }
+
+    /// All three roles from the real export (moved here from
+    /// `TCShellCoreTests/QuitPromptTests`, which cannot link the core and
+    /// only round-tripped hand-built JSON): each decodes with the role the
+    /// handle implies and a body of its own, and the heading and buttons are
+    /// shared.
+    func testEachRoleDecodesWithItsOwnBody() throws {
+        let settings = #"{"claude_source":{"mode":"off"},"codex_source":{"mode":"off"}}"#
+        let directory = URL(fileURLWithPath: "/private/tmp/tc-roles-\(UUID().uuidString.prefix(8))")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let hosting = try TCDaemon(configDir: directory.path, settingsJSON: settings)
+        defer { hosting.shutdown() }
+        let attached = try TCDaemon(attachingTo: directory.path)
+        defer { attached.shutdown() }
+
+        let prompts = try [
+            ("hosting", hosting.quitPromptJSON()),
+            ("attached", attached.quitPromptJSON()),
+            ("unavailable", TCCoreCopy.quitPromptWithoutWatcherJSON()),
+        ].map { role, json -> QuitPrompt in
+            let prompt = try XCTUnwrap(QuitPrompt.decode(fromJSON: json), role)
+            XCTAssertEqual(prompt.role, role)
+            return prompt
+        }
+        XCTAssertEqual(Set(prompts.map(\.body)).count, 3, "each role keeps its own body")
+        XCTAssertEqual(Set(prompts.map(\.title)).count, 1)
+        XCTAssertEqual(Set(prompts.map(\.confirm)).count, 1)
+        XCTAssertEqual(Set(prompts.map(\.cancel)).count, 1)
+    }
+
     // MARK: - Withdrawal, and the copy no macOS screen renders yet
 
     func testTheUnknownReachWithdrawalPromptWarnsAboutDistributedCopies() throws {
@@ -252,5 +314,46 @@ final class CoreCopyExportTests: XCTestCase {
         let object = try XCTUnwrap(
             JSONSerialization.jsonObject(with: Data(grant.utf8)) as? [String: Any])
         XCTAssertEqual(object["disclosure"] as? String, "patterns_only")
+    }
+
+    // MARK: - The Flow 1 grant screens' words (K8, #1173)
+
+    /// The counterpart of the Tauri frontend's
+    /// `automatic-grant-copy.test.mjs`: "a patterns-only disclosure shows the
+    /// patterns wording and never the model wording".
+    ///
+    /// `automatic_contribution_copy` (`tc_automatic_contribution_copy_json`)
+    /// reads configuration only, so it can only ever answer `patterns_only`
+    /// here -- `automatic_gate::folder_disclosure` is what can answer
+    /// `model_scrubbed`, over a folder's certificates, and nothing exports
+    /// that over the ABI yet. That half of the Tauri test (the model-scrub
+    /// wording, earned only after a certified pipeline ran) belongs to the
+    /// Flow 1 re-grant screens K5 (#1207) is moving into the core; it is not
+    /// reachable from any shell today and so is not pinned here.
+    func testThePatternsOnlyGrantCopyNeverCarriesTheModelScrubWording() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tc-k8-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let json = try XCTUnwrap(TCCoreCopy.automaticContributionCopyJSON(configDir: dir.path))
+        let object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])
+
+        XCTAssertEqual(object["disclosure"] as? String, "patterns_only")
+        if let modelScrubbed = object["model_scrubbed"] {
+            XCTAssertTrue(modelScrubbed is NSNull, "carries the model-scrub wording: \(modelScrubbed)")
+        }
+        let patterns = try XCTUnwrap(object["patterns_only"] as? [String: Any])
+        let scope = try XCTUnwrap(patterns["scope"] as? String)
+        let limit = try XCTUnwrap(patterns["limit"] as? String)
+        XCTAssertFalse(scope.isEmpty)
+        XCTAssertFalse(limit.isEmpty)
+
+        // Every other sentence a Flow 1 grant screen needs, present and
+        // non-empty -- the fields `scrubDisclosureLines` and the rest of the
+        // Tauri screen read beside the scrub block.
+        for key in ["no_review", "scope_required", "path_automatic", "path_ask_first", "raw_send"] {
+            let sentence = try XCTUnwrap(object[key] as? String, key)
+            XCTAssertFalse(sentence.isEmpty, key)
+        }
     }
 }
