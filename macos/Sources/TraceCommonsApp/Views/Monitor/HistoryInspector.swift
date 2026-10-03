@@ -4,16 +4,17 @@ import SwiftUI
 import TCDesign
 import TCShellCore
 
-/// The selected History row's details (D-7). Skills first; Phase 4 adds
-/// Withdraw and the public-run editor beside it.
+/// The selected History row's details (D-7): its status in the core's
+/// words, then the session detail the legacy History opens (`SessionDetailView`:
+/// reading and read-failure with Retry, the contribution overview with
+/// Withdraw and its confirmation, Skills behind `SkillLearningGate`, and
+/// the public-run editor), composed rather than drawn a second time.
 ///
-/// Skills runs on the app's own record of the contribution
-/// (`AppModel.history`) and its session detail, under the same rule the
-/// session detail screen uses (`SkillLearningGate`): nothing is offered
-/// until the detail answers, and only an active, corrected contribution
-/// offers learning. An installed skill shows outside that rule. A row the
-/// record does not hold yet, or Skills copy the core has not given, draws
-/// no panel rather than a broken one.
+/// Everything below the status runs on the app's own record of the
+/// contribution (`AppModel.history`). A row the record does not hold yet
+/// draws its status alone: no Withdraw, no editor, no Skills (fail closed).
+/// Withdraw asks the detail's status, else the record's, never the list
+/// row's optional one.
 struct HistoryDetailInspector: View {
     let row: DaemonData.HistoryRow
     @EnvironmentObject private var model: AppModel
@@ -29,11 +30,14 @@ struct HistoryDetailInspector: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
+                summary
+                defects
+                // A new row is a new detail: its editor draft, withdrawal
+                // confirmation and Skills panel are the record's, and the
+                // pane outlives the selection.
                 if let record {
-                    detailState(record)
-                    if let copy = model.skillLearningCopy {
-                        skills(record, copy: copy)
-                    }
+                    SessionDetailView(record: record)
+                        .id(record.submissionID)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -45,60 +49,36 @@ struct HistoryDetailInspector: View {
         }
     }
 
-    /// Reading the detail, or why it could not be read with a way to read it
-    /// again: the session detail screen's own words, never a blank pane.
-    @ViewBuilder
-    private func detailState(_ record: HistoryRecord) -> some View {
-        let id = record.submissionID
-        if model.loadingSessionDetails.contains(id) {
-            if let reading = model.publicRunCopy?.readingRecord {
-                Text(reading)
-                    .glassType(GlassTokens.TypeScale.body)
-                    .foregroundStyle(GlassColor.textSecondary)
-            } else {
-                ProgressView().controlSize(.small)
-            }
-        } else if let message = model.sessionDetailErrors[id] {
-            GlassNotice(tone: .outside) {
-                VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
-                    Text(message).fixedSize(horizontal: false, vertical: true)
-                    if let copy = model.publicRunCopy {
-                        Button(copy.retryRead) { model.loadSessionDetail(record) }
-                            .buttonStyle(GlassButtonStyle(.glass))
-                            .frame(minHeight: 44)
-                    }
-                }
+    /// The row's folder, day and tool, and its status from the core's one
+    /// table, the same word its list row shows. An unknown status reads the
+    /// core's unavailable word; with no core copy there is no tag at all.
+    private var summary: some View {
+        VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
+            Text(row.projectLabel ?? "—")
+                .glassType(GlassTokens.TypeScale.label.weight(.semibold))
+                .foregroundStyle(GlassColor.textPrimary)
+            Text(HomeFormat.meta(row, compact: false))
+                .glassType(GlassTokens.TypeScale.caption)
+                .foregroundStyle(GlassColor.textTertiary)
+            if let tag = HomeFormat.statusWord(row.status, label: { HomeFormat.historyStatusLabel(copy: model.publicRunCopy, $0) }) {
+                GlassTag(tag, tone: HomeFormat.tone(row.status))
+                    .fixedSize()
             }
         }
+        .accessibilityElement(children: .combine)
     }
 
+    /// The withdrawal wording's own checks, where Withdraw is offered: a
+    /// screen that admits its withdrawal wording has stopped being
+    /// trustworthy, rather than one that quietly keeps showing it. Empty in
+    /// every healthy build.
     @ViewBuilder
-    private func skills(_ record: HistoryRecord, copy: SkillLearningCopy) -> some View {
-        let id = record.submissionID
-        let detail = model.sessionDetails[id]
-        let state = model.skillLearningState(for: id)
-        let withdrawn = SkillLearningGate.withdrawalCompleted(
-            recordStatus: record.status, withdrawal: model.withdrawals[id])
-        if SkillLearningGate.offersLearning(detail, recordStatus: record.status, withdrawalCompleted: withdrawn)
-            || (SkillLearningGate.showsInstalledSurface(detail, withdrawalCompleted: withdrawn)
-                && state.installedSkill != nil)
-        {
-            // A new row is a new panel: its draft and install status are the
-            // record's, and the pane outlives the selection.
-            SkillLearningView(record: record, copy: copy)
-                .id(record.submissionID)
-        } else if SkillLearningGate.showsInstalledSurface(detail, withdrawalCompleted: withdrawn),
-                  SkillLearningGate.offersInstallStatusRetry(state, detail: detail, recordStatus: record.status),
-                  let message = state.failure,
-                  let retry = model.publicRunCopy?.retryRead
-        {
-            GlassNotice(tone: .outside) {
-                VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
-                    Text(message).fixedSize(horizontal: false, vertical: true)
-                    Button(retry) { model.ensureLocalInstalledSkillStatus(for: record) }
-                        .buttonStyle(GlassButtonStyle(.glass))
-                        .frame(minHeight: 44)
-                        .disabled(state.isWorking)
+    private var defects: some View {
+        let failures = WithdrawalCopyCheck.failures()
+        if !failures.isEmpty {
+            GlassNotice(tone: .outside, title: HistoryLegacyWords.withdrawalWordingDefect) {
+                VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
+                    ForEach(failures, id: \.self) { Text($0).fixedSize(horizontal: false, vertical: true) }
                 }
             }
         }

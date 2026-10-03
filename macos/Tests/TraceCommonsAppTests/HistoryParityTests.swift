@@ -224,5 +224,68 @@ final class HistoryParityTests: XCTestCase {
         XCTAssertNil(SessionDetailView(record: record).onBack)
         XCTAssertNotNil(SessionDetailView(record: record) {}.onBack)
     }
+
+    func test_heldExplanationsAreDistinctAndCarryNoDigest() {
+        let lines = HeldExplanations.lines(in: [
+            ["Held for a closer look.", "Attributed to tenant tenant_sha256:abc"],
+            ["Held for a closer look.", "A second reason."],
+        ])
+        XCTAssertEqual(lines, ["Held for a closer look.", "A second reason."])
+    }
+
+    /// The selected row's inspector offers Withdraw only through the
+    /// resolved record and its rule, shows the status in the core's words,
+    /// and draws the session detail (public run, Skills) beneath. A row
+    /// whose record does not resolve draws its status alone.
+    func test_theInspectorHostsWithdrawTheDetailAndTheStatus() throws {
+        let inspector = try Self.text("Views/Monitor/HistoryInspector.swift")
+        let flat = inspector.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        for needle in [
+            "HistorySelection.record(for: row.submissionId, in: model.history)",
+            "if let record { SessionDetailView(record: record) .id(record.submissionID) }",
+            "if let tag = HomeFormat.statusWord(row.status, label: { HomeFormat.historyStatusLabel(copy: model.publicRunCopy, $0) }) "
+                + "{ GlassTag(tag, tone: HomeFormat.tone(row.status))",
+            "Text(HomeFormat.meta(row, compact: false))",
+            "let failures = WithdrawalCopyCheck.failures()",
+            "if !failures.isEmpty { GlassNotice(tone: .outside, title: HistoryLegacyWords.withdrawalWordingDefect) "
+                + "{ VStack(alignment: .leading, spacing: GlassTokens.Space.s2) { ForEach(failures, id: \\.self) { Text($0)",
+        ] {
+            XCTAssertTrue(flat.contains(needle), "HistoryInspector.swift lacks \(needle)")
+        }
+        // One Withdraw, one Skills panel, one reading state: the session
+        // detail's, never a second copy drawn beside it.
+        for absent in ["SessionWithdrawalAction(", "SkillLearningView(", "SkillLearningGate.", "readingRecord",
+                       "sessionDetailErrors"] {
+            XCTAssertFalse(inspector.contains(absent), "HistoryInspector.swift draws its own \(absent)")
+        }
+        let detail = try Self.text("Views/SessionDetailView.swift")
+        XCTAssertTrue(detail.contains("let currentStatus = detail.contributionStatus ?? record.status\n"),
+                      "Withdraw goes through the resolved record's status, never the list row's optional one")
+        XCTAssertTrue(detail.contains("SessionWithdrawalAction(record: record, currentStatus: currentStatus, copy: copy)\n"))
+
+        let home = try Self.text("Views/Monitor/HomeViews.swift")
+        let homeFlat = home.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        for needle in [
+            "if (store.rollup?.quarantined ?? 0) > 0 { GlassNotice(tone: .ask, title: MonitorWords.heldForReview) {",
+            "Text(MonitorWords.heldExplanation)", "Text(HistoryLegacyWords.typicalWait)",
+            "ForEach(HeldExplanations.lines(in: (store.history ?? []).filter { $0.status == \"quarantined\" } "
+                + ".map { $0.explanations ?? [] }), id: \\.self)",
+            "Text(WithdrawalCopy.noBulkAction)",
+            // The daemon's view on every visit, on the always-present container.
+            ".scrollIndicators(.never) } .onAppear { model.refreshHistory() }",
+        ] {
+            XCTAssertTrue(homeFlat.contains(needle), "HomeViews.swift lacks \(needle)")
+        }
+
+        let legacy = try Self.text("Views/HistoryView.swift")
+        for needle in ["HeldExplanations.lines(in: records.map(\\.explanations))", "Text(HistoryLegacyWords.typicalWait)",
+                       "Text(HistoryLegacyWords.withdrawalWordingDefect)"] {
+            XCTAssertTrue(legacy.contains(needle), "HistoryView.swift lacks \(needle)")
+        }
+        for sentence in ["Typical wait: we don't have a reliable number yet.",
+                         "Do not trust the withdrawal wording on this screen."] {
+            XCTAssertEqual(legacy.components(separatedBy: sentence).count - 1, 1, "\(sentence) is held once, in the table")
+        }
+    }
 }
 #endif

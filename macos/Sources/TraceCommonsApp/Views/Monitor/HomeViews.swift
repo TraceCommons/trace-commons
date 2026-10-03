@@ -140,14 +140,19 @@ private struct HomeOverview: View {
 }
 
 /// History: every contribution from this machine, newest first, with its
-/// status and how it was approved. Withdrawing a contribution stays in the
-/// shipping window until C1 carries the withdrawal call.
+/// status and how it was approved, and what is held for review, explained
+/// apart. Withdraw, the session detail and Skills are in the selected
+/// row's inspector (`HistoryDetailInspector`).
 private struct HistoryPage: View {
     let store: HomeStore
     let statusLabel: (String?) -> String?
     @Binding var selection: String
     let back: () -> Void
+    @EnvironmentObject private var model: AppModel
 
+    // The app's own records, which the inspector's Withdraw and session
+    // detail resolve against, are read again on every visit: the daemon's
+    // view, not the one it had at launch (the legacy screen's rule).
     var body: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
             GlassBreadcrumb(
@@ -158,6 +163,7 @@ private struct HistoryPage: View {
                     if let failure = store.failures["list_history"] {
                         GlassNotice(tone: .outside, title: MonitorWords.table?.line(for: failure) ?? "") { EmptyView() }
                     }
+                    held
                     if let rows = store.history {
                         if let cap = HomeFormat.cap(rows.count, rollup: store.rollup) {
                             Text(cap)
@@ -183,6 +189,28 @@ private struct HistoryPage: View {
                 }
             }
             .scrollIndicators(.never)
+        }
+        .onAppear { model.refreshHistory() }
+    }
+
+    /// Held for review, never as rejected: the core's sentence, no promised
+    /// wait, the server's distinct reasons without digests, and why there is
+    /// no bulk action. Only when the rollup counts something held.
+    @ViewBuilder
+    private var held: some View {
+        if (store.rollup?.quarantined ?? 0) > 0 {
+            GlassNotice(tone: .ask, title: MonitorWords.heldForReview) {
+                VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
+                    Text(MonitorWords.heldExplanation)
+                    Text(HistoryLegacyWords.typicalWait)
+                    ForEach(HeldExplanations.lines(in: (store.history ?? []).filter { $0.status == "quarantined" }
+                        .map { $0.explanations ?? [] }), id: \.self) { line in
+                        Text(line)
+                    }
+                    Text(WithdrawalCopy.noBulkAction)
+                }
+                .fixedSize(horizontal: false, vertical: true)
+            }
         }
     }
 
