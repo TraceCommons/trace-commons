@@ -91,7 +91,7 @@ struct OnboardingPrivacyScanContent: View {
     }
 
     private func header(_ copy: PrivacyScanCopy) -> some View {
-        Text(copy.title)
+        Text(verbatim: copy.title)
             .glassType(GlassTokens.TypeScale.heading)
             .foregroundStyle(GlassColor.textPrimary)
     }

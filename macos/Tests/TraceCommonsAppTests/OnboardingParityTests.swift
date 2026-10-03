@@ -61,7 +61,7 @@ final class OnboardingParityTests: XCTestCase {
         Step(file: "Views/OnboardingPrivacyScanView.swift",
              bindings: ["model.daemonSettings?.nearAIConfigured == true", "model.acknowledgeNearAINotice()",
                         "if choice == .localPlusScan", "Button(OnboardingPrivacyScanWords.continueButton)"],
-             copySources: ["TCCoreCopy.privacyScanCopyJSON()", "Text(copy.title)", "Text(verbatim: copy.localAlways)",
+             copySources: ["TCCoreCopy.privacyScanCopyJSON()", "Text(verbatim: copy.title)", "Text(verbatim: copy.localAlways)",
                            "Text(verbatim: copy.offer)", "Text(verbatim: copy.disclosure)",
                            "GlassPickerOption(copy.localOnly,", "GlassPickerOption(copy.withNear,"],
              guards: ["if let copy {", "GlassPicker(copy.title,", ".buttonStyle(GlassButtonStyle(.primary))",
@@ -92,6 +92,21 @@ final class OnboardingParityTests: XCTestCase {
         XCTAssertEqual(roots.components(separatedBy: "ScrollView {").count - 1, 1)
         let host = try Self.text("Views/PrivateInferenceActivationView.swift")
         XCTAssertFalse(host.contains("ScrollView {"), "the activation host nests a second ScrollView")
+    }
+
+    /// The Scan step acknowledges the third-party notice only when the scan
+    /// is chosen: the call sits inside the `.localPlusScan` block, and it is
+    /// the file's only call.
+    func test_scanAcknowledgesOnlyWhenTheScanIsChosen() throws {
+        let source = try Self.text("Views/OnboardingPrivacyScanView.swift")
+            .split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        let call = "model.acknowledgeNearAINotice()"
+        XCTAssertEqual(source.components(separatedBy: call).count - 1, 1, "the call must appear exactly once")
+        let opener = "if choice == .localPlusScan {"
+        let start = try XCTUnwrap(source.range(of: opener))
+        let block = try XCTUnwrap(source[start.upperBound...].firstIndex(of: "}")).self
+        XCTAssertTrue(source[start.upperBound..<block].contains(call),
+                      "the acknowledgement left the .localPlusScan block")
     }
 
     /// No rebuilt step reads the legacy palette.
