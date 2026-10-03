@@ -11,8 +11,8 @@ struct WatchingSection: View {
                     line(SettingsLegacyWords.sessionFinishedAfter(settings.quiescenceSecs))
                     line(SettingsLegacyWords.atMostOneNotification(settings.digestIntervalSecs / 3600))
                     line(SettingsLegacyWords.undecidedDropped(settings.queueTtlDays))
-                    GlassStatusLabel(SettingsLegacyWords.notificationsRenderedHere,
-                                     status: settings.localNotifications ? .off : .on)
+                    SettingsStateRow(title: SettingsLegacyWords.notificationsRenderedHere,
+                                     isOn: !settings.localNotifications)
                 }
                 if model.status.paused {
                     line(SettingsLegacyWords.pausedNothingSent)

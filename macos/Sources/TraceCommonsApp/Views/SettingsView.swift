@@ -1878,7 +1878,7 @@ struct SettingsContent: View {
             Text(title).font(TC.Font_.body)
         }
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(title): \(value ? "yes" : "no")")
+        .accessibilityLabel(SettingsLegacyWords.stateLabel(title, value))
     }
 }
 
@@ -2138,7 +2138,6 @@ private struct GoPublicDialog: View {
     }
 }
 
-
 // MARK: - Words the glass sections read
 
 /// Every sentence this file authors, in one place, so the glass sections
@@ -2158,6 +2157,9 @@ enum SettingsLegacyWords {
     }
     static func undecidedDropped(_ days: Int) -> String {
         "Undecided sessions are dropped after \(days) days. Dropped means never sent."
+    }
+    static func stateLabel(_ title: String, _ value: Bool) -> String {
+        "\(title): \(value ? "yes" : "no")"
     }
     static let notificationsRenderedHere = "Notifications rendered by this app"
     static let pausedNothingSent = "Paused. Nothing is being queued or sent."

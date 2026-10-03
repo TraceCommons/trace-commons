@@ -29,15 +29,17 @@ final class SettingsParityTests: XCTestCase {
                 copySources: ["TCSourceChecks.checkLine(", "TCSourceChecks.claude", "TCSourceChecks.codex",
                               "TCSourceChecks.gemini", "TCSourceChecks.cline",
                               "SettingsLegacyWords.queuedNothingSent", "SettingsLegacyWords.connected",
-                              "SettingsLegacyWords.notConnected", "SettingsLegacyWords.extraScanConfigured"],
+                              "SettingsLegacyWords.notConnected", "SettingsLegacyWords.extraScanConfigured",
+                              "SettingsStateRow(title: SettingsLegacyWords.extraScanConfigured"],
                 confirmations: [],
-                accessibility: [".accessibilityElement(children: .combine)"]),
+                accessibility: []),
         Section(glass: "Views/Settings/WatchingSection.swift",
                 bindings: ["quiescenceSecs", "digestIntervalSecs", "queueTtlDays", "localNotifications",
                            "model.status.paused"],
                 copySources: ["SettingsLegacyWords.sessionFinishedAfter(", "SettingsLegacyWords.atMostOneNotification(",
                               "SettingsLegacyWords.undecidedDropped(", "SettingsLegacyWords.notificationsRenderedHere",
-                              "SettingsLegacyWords.pausedNothingSent"],
+                              "SettingsLegacyWords.pausedNothingSent",
+                              "SettingsStateRow(title: SettingsLegacyWords.notificationsRenderedHere"],
                 confirmations: [],
                 accessibility: []),
         Section(glass: "Views/Settings/ChangesSection.swift",
@@ -58,6 +60,15 @@ final class SettingsParityTests: XCTestCase {
     }
 
     /// The switch draws every section the list offers, by its own case.
+    /// The yes/no state of a check row is words and a glyph, not a colour.
+    func test_stateRowCarriesItsStateInWords() throws {
+        let source = try Self.text("Views/Settings/SettingsStateRow.swift")
+        XCTAssertTrue(source.contains(".accessibilityLabel(SettingsLegacyWords.stateLabel(title, isOn))"))
+        XCTAssertTrue(source.contains("checkmark.circle.fill"))
+        XCTAssertEqual(SettingsLegacyWords.stateLabel("X", true), "X: yes")
+        XCTAssertEqual(SettingsLegacyWords.stateLabel("X", false), "X: no")
+    }
+
     func test_theGlassContentDrawsEverySection() throws {
         let source = try Self.text("Views/Settings/GlassSettingsContent.swift")
         for section in SettingsSection.allCases where section != .compute {

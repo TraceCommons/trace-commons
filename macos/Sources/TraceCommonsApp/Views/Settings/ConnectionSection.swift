@@ -21,20 +21,20 @@ struct ConnectionSection: View {
                     sourceLine(TCSourceChecks.codex, settings.routingSourceModes.codex)
                     sourceLine(TCSourceChecks.gemini, settings.routingSourceModes.gemini)
                     sourceLine(TCSourceChecks.cline, settings.routingSourceModes.cline)
-                    GlassStatusLabel(SettingsLegacyWords.extraScanConfigured,
-                                     status: settings.nearAIConfigured ? .on : .off)
+                    SettingsStateRow(title: SettingsLegacyWords.extraScanConfigured,
+                                     isOn: settings.nearAIConfigured)
                 }
             }
         }
     }
 
-    /// The core's sentence for one source's MODE; nothing when the ABI
+    /// The core's sentence for one source's MODE (it words watch and off
+    /// differently, so the line carries the state); nothing when the ABI
     /// refused, as the legacy row does.
     @ViewBuilder
     private func sourceLine(_ tool: String, _ mode: String) -> some View {
         if let line = TCSourceChecks.checkLine(tool: tool, sourceMode: mode) {
             GlassStatusLabel(line, status: mode == "watch" ? .on : .off)
-                .accessibilityElement(children: .combine)
         }
     }
 }

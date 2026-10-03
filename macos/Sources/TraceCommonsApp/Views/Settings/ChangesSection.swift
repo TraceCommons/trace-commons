@@ -23,6 +23,7 @@ struct ChangesSection: View {
                                 .glassType(GlassTokens.TypeScale.mono)
                                 .foregroundStyle(GlassColor.textSecondary)
                             Text(SettingsLegacyWords.auditSentence(entry.action, project: entry.projectLabel))
+                                .glassType(GlassTokens.TypeScale.body)
                                 .fixedSize(horizontal: false, vertical: true)
                             Spacer(minLength: 0)
                         }
