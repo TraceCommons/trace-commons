@@ -82,6 +82,10 @@ struct FirstRunWindowView: View {
 
 /// The step progress for one onboarding step: which steps it shows and
 /// where the person is. Pure, so the mapping is tested.
+///
+/// The order is Folders, Join, Uses, Scan, Projects on a fresh install: the
+/// folders come before Join because the daemon cannot start without them and
+/// Join needs the daemon (D-3). It is not the concept's Join-first order.
 struct FirstRunProgress: Equatable {
     let labels: [String]
     let current: Int

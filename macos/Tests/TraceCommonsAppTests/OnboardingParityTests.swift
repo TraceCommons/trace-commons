@@ -16,6 +16,14 @@ final class OnboardingParityTests: XCTestCase {
 
     static let steps: [Step] = []
 
+    /// Rows the table must hold; each task that adds a step raises it, so a
+    /// dropped row fails here instead of passing silently.
+    static let minimumSteps = 0
+
+    func test_theTableKeepsEveryRowAdded() {
+        XCTAssertGreaterThanOrEqual(Self.steps.count, Self.minimumSteps)
+    }
+
     func test_everyStepKeepsItsBindingsGuardsAndCopy() throws {
         for step in Self.steps {
             let source = try Self.text(step.file)
