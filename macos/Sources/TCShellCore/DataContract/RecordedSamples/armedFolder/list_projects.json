@@ -5,6 +5,7 @@
       "project_label": "infra",
       "project_path": "/Users/sample/src/infra",
       "mode": "auto_upload",
+      "folder_mode": "auto_upload",
       "added_at": "2026-09-30T08:00:00Z",
       "configured": true,
       "is_unresolved_bucket": false,
