@@ -67,6 +67,8 @@ public struct MonitorScreensCopy: Decodable, Equatable, Sendable {
     public let historyShownOf: String
     public let historyShown: String
     public let signedOut: String
+    public let projected: String
+    public let projectedNote: String
 
     enum CodingKeys: String, CodingKey {
         case computer
@@ -127,6 +129,8 @@ public struct MonitorScreensCopy: Decodable, Equatable, Sendable {
         case historyShownOf = "history_shown_of"
         case historyShown = "history_shown"
         case signedOut = "signed_out"
+        case projected
+        case projectedNote = "projected_note"
     }
 
     /// The payload fields this shell decodes, by wire name.
@@ -189,6 +193,8 @@ public struct MonitorScreensCopy: Decodable, Equatable, Sendable {
         "history_shown_of",
         "history_shown",
         "signed_out",
+        "projected",
+        "projected_note",
     ]
 
     /// Decode the payload, or nil if it will not parse or a field is empty.
@@ -198,7 +204,7 @@ public struct MonitorScreensCopy: Decodable, Equatable, Sendable {
         else {
             return nil
         }
-        let words = [copy.computer, copy.commons, copy.waiting, copy.folders, copy.watched, copy.off, copy.on, copy.connected, copy.reduce, copy.enlarge, copy.calls, copy.models, copy.priced, copy.unknown, copy.proofVerified, copy.proofGatewayOnly, copy.proofUnattested, copy.proofPending, copy.proofUnavailable, copy.proofFailed, copy.proofOutside, copy.proofUnrecorded, copy.history, copy.contributed, copy.watching, copy.paused, copy.summary, copy.week, copy.month, copy.total, copy.held, copy.withdrawn, copy.credit, copy.creditFinal, copy.pending, copy.community, copy.rank, copy.window, copy.approved, copy.unrecorded, copy.missions, copy.contributionMode, copy.mixed, copy.shared, copy.kept, copy.recentActivity, copy.flagged, copy.manageRules, copy.settings, copy.quit, copy.coreUnreachable, copy.requestFailed, copy.heldForReview, copy.heldExplanation, copy.creditNotCurrency, copy.historyShownOf, copy.historyShown, copy.signedOut]
+        let words = [copy.computer, copy.commons, copy.waiting, copy.folders, copy.watched, copy.off, copy.on, copy.connected, copy.reduce, copy.enlarge, copy.calls, copy.models, copy.priced, copy.unknown, copy.proofVerified, copy.proofGatewayOnly, copy.proofUnattested, copy.proofPending, copy.proofUnavailable, copy.proofFailed, copy.proofOutside, copy.proofUnrecorded, copy.history, copy.contributed, copy.watching, copy.paused, copy.summary, copy.week, copy.month, copy.total, copy.held, copy.withdrawn, copy.credit, copy.creditFinal, copy.pending, copy.community, copy.rank, copy.window, copy.approved, copy.unrecorded, copy.missions, copy.contributionMode, copy.mixed, copy.shared, copy.kept, copy.recentActivity, copy.flagged, copy.manageRules, copy.settings, copy.quit, copy.coreUnreachable, copy.requestFailed, copy.heldForReview, copy.heldExplanation, copy.creditNotCurrency, copy.historyShownOf, copy.historyShown, copy.signedOut, copy.projected, copy.projectedNote]
         return words.contains(where: \.isEmpty) ? nil : copy
     }
 
