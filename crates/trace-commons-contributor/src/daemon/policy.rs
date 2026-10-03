@@ -160,7 +160,7 @@ pub struct GrantSweep {
     pub automatic_grant_voided: Option<Vec<&'static str>>,
     /// Armed projects that had no recorded terms and now do.
     pub baselined: usize,
-    /// Why an "Auto contribute" contribution override was voided, if it was.
+    /// Why an "Automatic" contribution override was voided, if it was.
     /// The override is cleared: every folder is back on its own mode.
     pub contribution_override_voided: Option<Vec<&'static str>>,
 }
@@ -175,7 +175,7 @@ impl GrantSweep {
     }
 }
 
-/// The reason label an "Auto contribute" override is voided with when it
+/// The reason label an "Automatic" override is voided with when it
 /// has no recorded terms to compare. Only a policy file written by an
 /// unreleased build can hold one; it is voided rather than baselined (as a
 /// legacy armed folder is) because there is no shipped state to protect.
@@ -213,7 +213,7 @@ pub struct GrantVoidNotice {
     pub project_key: Option<String>,
     /// Fixed reason labels, as `grant_terms::widening_from` gives them.
     pub reasons: Vec<String>,
-    /// The "Auto contribute" contribution override was voided (#1173), not a
+    /// The "Automatic" contribution override was voided (#1173), not a
     /// project or the Flow 1 grant. `project_key` is `None`.
     /// `#[serde(default)]` so an older policy file still loads.
     #[serde(default)]
@@ -367,7 +367,7 @@ pub const OVERRIDE_ARMING_KEY: &str = "contribution-override";
 ///   releases them as they were.
 /// - `NotifyOnly` ("Ask me"): every folder resolves to `NotifyOnly`, except
 ///   a folder set to `Ignore`, which stays `Ignore`. Nothing goes unattended.
-/// - `AutoUpload` ("Auto contribute"): every folder resolves to
+/// - `AutoUpload` ("Automatic"): every folder resolves to
 ///   `AutoUpload`, **except a folder set to `Ignore`, which stays `Ignore`**
 ///   (a global override never reaches into a folder the contributor
 ///   excluded), and the unknown bucket, which stays `NotifyOnly`. It **arms
@@ -633,8 +633,8 @@ impl ProjectPolicy {
     /// Whether an `AutoUpload` roll-up ([`Self::contribution_mode`]) leaves
     /// some folders out (#1208): a folder whose own mode is Never, or the
     /// unknown bucket, among the configured folders and `discovered`. Under
-    /// an "Auto contribute" override neither uploads, so the pill says
-    /// "Auto contribute" with a sub-line rather than overstating it. False
+    /// an "Automatic" override neither uploads, so the pill says
+    /// "Automatic" with a sub-line rather than overstating it. False
     /// for any other roll-up.
     pub fn contribution_mode_partial<'a>(
         &self,
@@ -1302,7 +1302,7 @@ impl ProjectPolicy {
                 sweep.automatic_grant_voided = Some(reasons);
             }
         }
-        // An "Auto contribute" override is a grant too (#1208): a widening
+        // An "Automatic" override is a grant too (#1208): a widening
         // clears it, so no folder resolves to `AutoUpload` because of it,
         // and the pill falls back to the folders' own modes. One with no
         // recorded terms is voided rather than baselined -- see
@@ -1341,7 +1341,7 @@ impl ProjectPolicy {
         sweep
     }
 
-    /// K5 for the "Auto contribute" contribution override: leave a notice
+    /// K5 for the "Automatic" contribution override: leave a notice
     /// when the words in force (`in_force`, what the arming offer would say
     /// now) no longer claim what the override was set under. It stays on;
     /// the recorded claim moves to the one in force in the same save, so a
@@ -3225,7 +3225,7 @@ mod tests {
         assert_eq!(p.folder_mode("/w/auto"), AutoUpload);
     }
 
-    /// "Auto contribute" reaches every folder but one set to Never, which a
+    /// "Automatic" reaches every folder but one set to Never, which a
     /// global override must not reach into, and the unknown bucket, which can
     /// never be armed.
     #[test]
@@ -3239,7 +3239,7 @@ mod tests {
         );
     }
 
-    /// "Auto contribute" arms nothing already on disk: in every folder not
+    /// "Automatic" arms nothing already on disk: in every folder not
     /// armed by its own mode it is an arming from now, so the backlog -- and
     /// everything, before a source is recorded -- waits for a person. What
     /// appears afterwards goes. A folder already armed keeps its own rules.
@@ -3377,7 +3377,7 @@ mod tests {
         p.set_contribution_override(mode, at, grant).unwrap()
     }
 
-    /// Owner decision on #1208: an "Auto contribute" override is a grant,
+    /// Owner decision on #1208: an "Automatic" override is a grant,
     /// so it fails closed exactly as per-folder arming does. Without terms
     /// to be a grant of, it is refused and nothing changes.
     #[test]
@@ -3499,7 +3499,7 @@ mod tests {
     }
 
     /// #1208: an `auto_upload` roll-up does not overstate itself. Under an
-    /// "Auto contribute" override, a Never folder or the unknown bucket does
+    /// "Automatic" override, a Never folder or the unknown bucket does
     /// not upload, and `contribution_mode_partial` says so; with neither,
     /// or with any other roll-up, it is false.
     #[test]

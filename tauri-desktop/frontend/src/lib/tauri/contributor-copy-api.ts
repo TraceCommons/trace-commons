@@ -179,6 +179,11 @@ export type ContributorDisclosureCopy = {
   credential_wallet_notice: string;
   /** Under an armed project whose disclosure could not be read (K6). */
   project_automatic_unavailable: string;
+  /**
+   * Each folder mode's one name, by wire mode
+   * (`project_copy::FOLDER_MODE_LABELS`): "Ask me", "Automatic", "Never".
+   */
+  folder_mode_labels: Record<string, string>;
   near_ai_enroll: {
     title: string;
     what: string;
@@ -378,6 +383,7 @@ export async function getContributorDisclosureCopy(): Promise<ContributorDisclos
     },
     credential_cost: string(value, "credential_cost"),
     project_automatic_unavailable: string(value, "project_automatic_unavailable"),
+    folder_mode_labels: stringTable(value, "folder_mode_labels"),
     credential_wallet_notice: string(value, "credential_wallet_notice"),
     near_ai_enroll: {
       title: string(value, "near_ai_enroll_title"),

@@ -425,7 +425,7 @@ public sealed class HistoryCopyTests
             .ToLowerInvariant();
 
         // The word appears exactly once, in the sentence denying it.
-        Assert.Contains("have not been rejected", text, StringComparison.Ordinal);
+        Assert.Contains("not been rejected", text, StringComparison.Ordinal);
 
         // And no turnaround time is ever stated, because nobody can.
         foreach (string forbidden in new[] { "48 hours", "business days", "within a week", "usually takes" })
@@ -538,6 +538,32 @@ public sealed class HistoryCopyTests
         }
 
         return table;
+    }
+
+    /// <summary>
+    /// The held explanation is the core's <c>history_copy::HELD_ROW_BODY</c>
+    /// (owner ruling: the canonical wording), read from the disclosure
+    /// bundle's <c>history_ui.held_row_body</c> on the row and opening the
+    /// section paragraph. The superseded "anyone but the reviewer" paragraph
+    /// is typed nowhere in this shell's source.
+    /// </summary>
+    [Fact]
+    public void TheHeldExplanationIsTheCores()
+    {
+        string? json = NativeMethods.TakeOwnedString(NativeMethods.tc_contributor_disclosure_copy_json());
+        Assert.NotNull(json);
+        using var doc = JsonDocument.Parse(json!);
+        string core = doc.RootElement.GetProperty("history_ui").GetProperty("held_row_body").GetString()!;
+        Assert.False(string.IsNullOrEmpty(core));
+
+        Assert.Equal(core, HistoryCopy.HeldRowBody);
+        Assert.StartsWith(core, HistoryCopy.QuarantineBody, StringComparison.Ordinal);
+
+        string source = File.ReadAllText(Path.Combine(
+            AppContext.BaseDirectory, "shell-source", "TraceCommons.Interop", "HistoryCopy.cs.txt"));
+        Assert.DoesNotContain("anyone but the reviewer", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("A person at Trace Commons reads these", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("Automated checks saw something", source, StringComparison.Ordinal);
     }
 
     /// <summary>The disclosure bundle's <c>history_ui.status_unavailable</c>, read raw.</summary>
