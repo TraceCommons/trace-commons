@@ -72,8 +72,11 @@ node_modules/
 # exclude hides enters the revision on that host. No tracked file lives
 # under `.claude/`.
 #
-# `.cargo/` is not listed: a line here would hide a checked-in
-# `.cargo/config.toml` from `git status`. The code revision leaves out an
+# `.cargo/` is not listed. An ignore rule does not apply to a tracked file,
+# so a line here would not hide a `.cargo/config.toml` that is checked in. It
+# would keep a new one, not yet added, out of `git status` and out of
+# `git add`, so a cargo configuration that was meant to be checked in could
+# be left out of a commit unseen. The code revision leaves out an
 # untracked `.cargo/` directory itself (`_code_revision_hash` in
 # `scripts/operator/pipeline_tooling/environment.py`), and includes a tracked
 # one. A host with a local `.cargo/config.toml` in its checkout hides it with

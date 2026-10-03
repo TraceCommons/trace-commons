@@ -4317,7 +4317,8 @@ class CodeRevisionExcludeTests(unittest.TestCase):
 
     def test_an_untracked_cargo_config_is_not_part_of_the_revision(self):
         """Review round 1 of #1240, point 11: the repository's `.gitignore`
-        has no `.cargo/` line (it would hide a checked-in cargo config), and
+        has no `.cargo/` line (it would keep a new cargo config, not yet
+        added, out of `git status`), and
         the revision leaves out an untracked `.cargo/` directory itself, at
         the root and nested, as that line did."""
         base = environment._code_revision_hash()

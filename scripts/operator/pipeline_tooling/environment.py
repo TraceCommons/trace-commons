@@ -146,11 +146,14 @@ def _code_revision_hash():
     One exception: an untracked `.cargo/` directory, at any depth, is left
     out (`--exclude=.cargo/`). It holds a developer's local cargo
     configuration (a job count, a target directory), and the repository's
-    `.gitignore` does not list it, because a line there would hide a
-    checked-in `.cargo/config.toml` from `git status`. `--exclude` applies to
-    untracked files only: a tracked file under `.cargo/` is listed by
-    `--cached` and is part of the revision, so a checked-in cargo
-    configuration, which changes how the code builds, changes the revision.
+    `.gitignore` does not list it. An ignore rule does not apply to a
+    tracked file; a line there would keep a new `.cargo/config.toml`, not
+    yet added, out of `git status` and out of `git add`, so a cargo
+    configuration that was meant to be checked in could be left out of a
+    commit unseen. `--exclude` applies to untracked files only: a tracked
+    file under `.cargo/` is listed by `--cached` and is part of the revision,
+    so a checked-in cargo configuration, which changes how the code builds,
+    changes the revision.
     With no `.cargo` directory in the checkout the revision is what it was
     before this exception."""
     listing = subprocess.run(
