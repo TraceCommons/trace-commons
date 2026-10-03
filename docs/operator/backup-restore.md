@@ -170,6 +170,54 @@ answers `404` there. Do these steps in this order:
    `pipeline_receipt_intake_contained`. A tenant with no row, or whose row says
    `legacy`, takes the legacy path.
 
+   Bring each tenant's audit rows level with its audit file first, before
+   any other request of this step. The audit file
+   (`tenants/<key>/audit/events.jsonl` under the ingest root) is not in the
+   database. It still holds the tenant's events from after the backup, and the
+   restored database does not: the file's chain is ahead of the database's.
+   In a deployment that requires the database mirror
+   (`TRACE_COMMONS_REQUIRE_DB_MIRROR_WRITES`, or account admission is on), the
+   database then refuses each new audit row of that tenant, because the row
+   does not chain from the database's own latest row. Until the two are level:
+
+   - `GET /v1/admin/pipeline/routing` answers `500`, so you cannot read the
+     state, the record id, or `active_bundle_qualified_on_revision`.
+   - `contain`, `deactivate`, and a policy intervention commit their change
+     and answer `500` `pipeline_change_committed_audit_failed`, with no
+     routing row in the answer. `qualifications` does the same.
+   - `POST /v1/admin/audit-chain-repair` does not repair this case. It
+     restores a file that is behind the database. Here the file is ahead, and
+     it answers `409` with the label `file_head_not_in_db`.
+
+   The database mirror backfill makes the two level. Send it for each tenant,
+   with that tenant's admin credential:
+
+   ```sh
+   curl -sS -X POST "$BASE/v1/admin/maintenance" \
+     -H "Authorization: Bearer $ADMIN" -H 'Content-Type: application/json' \
+     -d '{"backfill_db_mirror": true, "prune_export_cache": false, "purpose": "restore: audit rows from the file"}'
+   ```
+
+   It writes a database row for each event of the file that the database does
+   not have, in the file's order, and then appends its own audit row. In the
+   answer, `db_mirror_backfill_failed` must be 0. Then
+   `POST /v1/admin/audit-chain-drill` verifies the chain, and the routes of
+   this step answer. The call is `main`'s retention call, and the backfill is
+   one of its effects: it also writes the database rows of the tenant's other
+   file records that the database lost, and it marks expired and revoked
+   records. [pipeline-activation.md](pipeline-activation.md), "Legacy drain
+   report", lists the effects, the dry run, and the body that a deployment
+   with `TRACE_COMMONS_REQUIRE_DB_RECONCILIATION_CLEAN` needs. A tenant with
+   no audit event after the backup needs no backfill.
+
+   If a tenant must be stopped before its backfill, send `contain`. It
+   commits and stops the tenant's uploads, although it answers the `500`
+   label. The record id of that containment is in the log's error line
+   (`pipeline admin action committed and its audit row was not appended`, the
+   field `activation_record_id`), and `GET /v1/admin/pipeline/routing` shows
+   it after the backfill. A change that committed before the backfill gets no
+   audit row: its record is its routing event and its two log lines.
+
    Check each tenant's routing before step 5 puts the processes back into client
    traffic. A containment made after the backup comes back as `pipeline`, and step
    5 would then take that tenant's uploads. Read each tenant's row and events
@@ -275,8 +323,9 @@ answers `404` there. Do these steps in this order:
    `deactivate` can be repeated in this step. Send it with the
    `activation_record_id` that `GET /v1/admin/pipeline/routing` shows as
    `expected_record_id`. For a tenant that you contained in this step, the
-   `deactivate` is refused without an expectation (`409`
-   `pipeline_routing_expectation_required`).
+   `deactivate` is refused without that id (`409`
+   `pipeline_routing_expectation_required`); `expected_state` alone is not
+   enough.
 4. For each tenant, call `POST /v1/workers/pipeline/index-rebuild` with that
    tenant's vector worker bearer token or an admin token -- the same gate
    as `main`'s vector index worker route (see

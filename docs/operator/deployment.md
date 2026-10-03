@@ -1000,7 +1000,8 @@ them stops the start:
 |---|---|
 | `pipeline_active_bundle_not_qualified` (with the tenant's storage reference) | one for each tenant on the receipts list whose row says `pipeline` and whose active bundle has no qualification on the build's revision: this process refuses that tenant's new uploads |
 | `pipeline_code_revision_unset` | one in all, when the receipts list is not empty and the build has no revision: this process refuses the new uploads of every `pipeline` tenant |
-| `pipeline_qualification_start_check_incomplete` (with the tenant's storage reference) | the read for that tenant failed, or took more than 5 seconds |
+| `pipeline_qualification_start_check_incomplete` (with the tenant's storage reference) | the read for that tenant failed |
+| `pipeline_qualification_start_check_incomplete` (with `tenants_not_read`, a count) | one in all, when the reads together took more than 5 seconds: the check stopped, and it did not read that many of the listed tenants |
 
 **Binary rollback to an older build.** An older binary ignores these
 migrations. What it does with a tenant that has a routing row depends on the

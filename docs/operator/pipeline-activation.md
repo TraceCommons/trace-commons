@@ -32,8 +32,10 @@ The pipeline now has these properties:
 - Rollback selects an earlier bundle that was active for the tenant, for later
   runs only. It runs the same gate as an activation, without the readiness
   check.
-- Containment refuses a tenant's new uploads with `503` and keeps the worker:
-  runs in flight, invalidations, and payouts still finish.
+- Containment refuses each new upload of the tenant whose route is decided
+  after it, with `503`, and keeps the worker: runs in flight, invalidations,
+  and payouts still finish. An upload that is in flight on the legacy path can
+  still finish ("Scope lists and the routing row").
 - A suspended policy keeps its run. The run waits, uncharged, under the same
   bundle, and goes on after the resume.
 - The legacy drain report shows what the legacy path still owes a tenant. It
@@ -130,7 +132,8 @@ process reads the row for it first. A contained tenant's remediation is
 refused (`503` `pipeline_receipt_intake_contained`), and so is the remediation
 of a tenant whose row says `pipeline` on a process that does not serve the
 tenant (`503` `pipeline_tenant_not_served`), and one whose row cannot be read
-(`503` `pipeline_routing_unavailable`). In every other case a remediation
+(`503` `pipeline_routing_unavailable` on a process with a runtime, `500` on
+one with none, as for a new upload). In every other case a remediation
 stays on the legacy path, which owns the id, also for a `pipeline` tenant that
 the process serves; the qualification and the Admission policy are not read
 for it. So the remediations of a contained tenant wait until its intake opens
@@ -144,11 +147,15 @@ without one. It does not stop an upload whose route was decided before it:
 - An upload that was decided for the legacy path before the `contain` can still
   write its legacy record after the `contain` returned. The legacy claim reads
   no routing row. The window is the time of one request in flight.
-- An upload that was decided for the pipeline is checked again in its receipt
-  transactions, which wait for the `contain`. It is refused. This includes an
-  upload whose submission id the legacy path already owns (a legacy claim
-  whose write failed): the receipt transaction answers the containment before
-  it reads the owner, so that upload does not go on to the legacy path.
+- An upload that was decided for the pipeline is checked again for its
+  receipt: one read before the receipt's transactions, which waits for
+  nothing, and one in each of the two transactions, which wait for the
+  `contain`. It is refused when the `contain` commits before the check reads
+  the routing. This includes an upload whose submission id the legacy path
+  already owns (a legacy claim whose write failed): the check answers the
+  containment before the owner. If the first check answered the legacy owner
+  before the `contain` committed, the upload is on the legacy path, and the
+  first case applies to it.
 
 Each submission id still has one owner in both cases.
 
@@ -377,7 +384,7 @@ lowercase hex digits. A malformed one is `422` `pipeline_request_invalid` on
 | `POST /v1/admin/pipeline/activate` | `{bundle_id, reason_code, attestations, expected_record_id}` | the routing row |
 | `POST /v1/admin/pipeline/rollback` | `{bundle_id, reason_code, attestations, expected_record_id}` | the routing row |
 | `POST /v1/admin/pipeline/contain` | `{reason_code, expected_record_id?, expected_state?}` | the routing row |
-| `POST /v1/admin/pipeline/deactivate` | `{reason_code, expected_record_id?, expected_state?}`; an expectation is required for a contained tenant | the routing row |
+| `POST /v1/admin/pipeline/deactivate` | `{reason_code, expected_record_id?, expected_state?}`; `expected_record_id` is required for a contained tenant | the routing row |
 | `POST /v1/admin/pipeline/policy-interventions` | `{bundle_id, phase, action, reason_code}` | the intervention record ("Suspend a policy") |
 | `GET /v1/admin/pipeline/policy-interventions?bundle_id=...` | none | `{interventions: [...]}`, oldest first |
 | `GET /v1/admin/pipeline/routing` | none | `{routing_state, activation_record_id, active_bundle_id, active_bundle_qualified_on_revision, events}`: `routing_state` and `activation_record_id` are null for a tenant with no row, `activation_record_id` is the record id of the routing row in force, `active_bundle_qualified_on_revision` says whether the active bundle has a qualification on the revision of the process that answers (null with no active bundle, and on a build with no revision), and `events` are the newest 100, newest first, read in one snapshot |
@@ -417,12 +424,17 @@ no bundle change, no event. Read the routing again and decide again.
   both. When both are sent, both must hold. A value that does not parse, a
   `null` too, is `422` `pipeline_request_invalid`.
 - `deactivate` takes the same two optional fields. For a tenant whose row says
-  `contained`, it needs one of them: `expected_record_id`, or
-  `"expected_state": "contained"`. Without one the answer is `409`
-  `pipeline_routing_expectation_required`, and nothing is written. So a
-  `deactivate` that you prepared for a `pipeline` tenant cannot send a tenant
-  that was contained in the meantime back to the legacy path. For a `pipeline`
-  tenant the expectation is optional. Send it on every planned change.
+  `contained`, it needs `expected_record_id`: send the record id; the state
+  alone is refused. Without the id the answer is `409`
+  `pipeline_routing_expectation_required`, and nothing is written, also when
+  the body says `"expected_state": "contained"`. `expected_state` compares the
+  state only, and the state is the same in every containment: a request that
+  you prepared for one containment would also pass after the tenant was opened
+  and contained again. When both fields are sent, both must hold. So a
+  `deactivate` that you prepared for a `pipeline` tenant, or in an earlier
+  incident, cannot send a contained tenant back to the legacy path. For a
+  `pipeline` tenant the expectation is optional. Send `expected_record_id` on
+  every planned change.
 
 Five routes need a pipeline runtime in the build (`404` `pipeline runtime not
 configured` without one): `qualifications`, `activate`, `rollback`, and the two
@@ -468,8 +480,8 @@ What each action does:
 - `deactivate` returns a tenant that has a row to the legacy path: the row
   says `legacy`. It changes no bundle. A tenant with no row, or whose row
   already says `legacy`, is `409` `activation_state_invalid`. A contained
-  tenant needs an expectation in the body (`409`
-  `pipeline_routing_expectation_required` without one, see above).
+  tenant needs `expected_record_id` in the body (`409`
+  `pipeline_routing_expectation_required` without it, see above).
 
 Every action writes one row to `pipeline_activation_events`, in the same
 transaction as the routing row. The row's `activation_record_id` is the event's
@@ -500,7 +512,8 @@ written. Send the request again. A receipt has no such limit: it never fails
 because an admin action waits.
 
 Each action also logs one line, `pipeline admin action recorded`, with the
-tenant's storage reference, an action label, and the evidence hash. Each `GET`
+tenant's storage reference, an action label, and the evidence hash. The line
+is written when the change committed, before the audit row below. Each `GET`
 route appends one control-plane read audit row (the surfaces `pipeline_routing`,
 `pipeline_policy_interventions`, and `pipeline_legacy_drain`). A refused read
 appends none. A reason that is not a label is `409` `activation_actor_invalid`.
@@ -524,21 +537,28 @@ The row is appended after the change, not in its transaction. If the change
 committed and the append failed, the answer is `500`
 `pipeline_change_committed_audit_failed`, and the log has one error line
 (`pipeline admin action committed and its audit row was not appended`) with
-the tenant's storage reference, the action label, the evidence hash, and the
-hash of the error. The change is in place. Do not send the request again: a
-second `contain` or `deactivate` appends a second event, and a second
-`activate` or `rollback` answers `409` `pipeline_routing_state_changed`. Read
-the routing (`GET /v1/admin/pipeline/routing`) to see the state and the record
-id in force. If that read answers `500` too, the tenant's audit chain cannot
-take a row: each audited request of the tenant fails until the chain is
-repaired. Do the repair in
-[audit-trail-forensics.md](audit-trail-forensics.md) (`POST
-/v1/admin/audit-chain-repair`), and then read the routing. A change that
-committed while the chain could not take a row gets no audit row later, unless
-the repair restores it from the database. Its record is its routing event (or
-its qualification or intervention row) and the error line in the log. The
-uploads of the tenant follow the routing row at all times: a containment that
-answered this label stops intake.
+the tenant's storage reference, the action label, the evidence hash, the hash
+of the error, and, for a routing change, `activation_record_id`: the record id
+that the change put in force. The change is in place. Do not send the request
+again: a second `contain` appends a second event, a second `deactivate`
+answers `409` `activation_state_invalid` (or `pipeline_routing_state_changed`
+when it names the record id), and a second `activate` or `rollback` answers
+`409` `pipeline_routing_state_changed`. Read the routing (`GET
+/v1/admin/pipeline/routing`) to see the state and the record id in force. If
+that read answers `500` too, the tenant's audit chain cannot take a row: each
+audited request of the tenant fails until the chain is repaired. Do the repair
+in [audit-trail-forensics.md](audit-trail-forensics.md) (`POST
+/v1/admin/audit-chain-repair`), and then read the routing. The repair restores
+a file that is behind the database. After a database restore the file is
+ahead, and the repair refuses (`409`, the label `file_head_not_in_db`): the
+database mirror backfill makes the two level, see
+[backup-restore.md](backup-restore.md), step 3. Until the routing read
+answers, the record id in force is in the error line. A change that committed
+while the chain could not take a row gets no audit row later, unless the
+repair restores it from the database. Its record is its routing event (or its
+qualification or intervention row), its `pipeline admin action recorded` line,
+and the error line in the log. The uploads of the tenant follow the routing
+row at all times: a containment that answered this label stops intake.
 
 The ingest login's grants would let a direct statement write
 `pipeline_tenant_routing` and append events (V110) and update the active bundle
@@ -633,7 +653,9 @@ for a production distribution's own build, which injects a pipeline runtime.
 The binary that this repository builds, `cloudbuild.yaml` included, has no
 runtime: `qualifications`, `activate`, and `rollback` answer `404` `pipeline
 runtime not configured` there, before the revision is read, so a revision
-changes nothing for it. A distribution's build must pass
+changes no upload and no change route there. It changes one field of `GET
+/v1/admin/pipeline/routing`: `active_bundle_qualified_on_revision` is null
+without a revision. A distribution's build must pass
 `TRACE_COMMONS_BUILD_CODE_REVISION_HASH` itself, with the value that
 `pipeline.py revision` printed in a checkout of the tree it compiles. (This
 repository's `.gcloudignore` drops `.git/` from the uploaded source, so a Cloud
@@ -888,10 +910,13 @@ How to see it:
   for each listed tenant whose row says `pipeline` and whose active bundle has
   no qualification on the build's revision. A build with no revision and a
   receipts list that is not empty logs one warning in all,
-  `pipeline_code_revision_unset`. Each read has a limit of 5 seconds. A read
-  that fails or runs out of time logs `pipeline_qualification_start_check_incomplete`
-  for its tenant. None of these stops the start: the upload path makes the
-  refusal.
+  `pipeline_code_revision_unset`. A read that fails logs
+  `pipeline_qualification_start_check_incomplete` for its tenant. All the
+  reads together have a limit of 5 seconds, so the check holds the start for
+  5 seconds at most: when the limit ends, the check stops and logs
+  `pipeline_qualification_start_check_incomplete` one time, with
+  `tenants_not_read`, the count of the listed tenants that it did not read.
+  None of these stops the start: the upload path makes the refusal.
 
 The deploy procedure. `qualifications` records a qualification for the revision
 of the process that answers it, and a request cannot name another revision. So
@@ -900,20 +925,32 @@ each deploy of a new revision B, and for each tenant whose row says `pipeline`:
 
 1. Run `python3 scripts/operator/pipeline.py revision` on tree B, and build B
    with that value.
-2. Run `pipeline.py qualify` on tree B, and get the three promotion-only
-   results for B. Use the 19 results of that one run: do not replace one of
-   them with a result of another run (`qualification_evidence_mixed_run`).
-   Sign the set shortly before you use it.
+2. Run `pipeline.py qualify` on tree B for the package of the tenant's active
+   bundle, and get the three promotion-only results for B. One run covers one
+   package: a tenant on another bundle, and each earlier bundle of step 4,
+   needs its own run (a set for another package is `409`
+   `bundle_qualification_package_mismatch`). Use the 19 results of that one
+   run: do not replace one of them with a result of another run
+   (`qualification_evidence_mixed_run`). Sign the set shortly before you use
+   it.
 3. Start one process of build B with a runtime, both trust stores, and the
-   production settings, outside client traffic.
+   production settings, outside client traffic. Leave both scope lists unset
+   on it (`TRACE_COMMONS_PIPELINE_RECEIPTS_TENANT_IDS` and
+   `TRACE_COMMONS_PIPELINE_DRAIN_TENANT_IDS`): `qualifications` and `GET
+   routing` check no list, and with no list the worker of this process drains
+   no tenant. With the fleet's lists its worker would process the listed
+   tenants' runs on build B before the roll (the worker reads no
+   qualification).
 4. Send one `POST /v1/admin/pipeline/qualifications` for each tenant and for
    its active bundle to that process, with that tenant's admin credential.
    Make sure that `metadata.code_revision_hash` in the answer is the revision
-   of B. A request that reaches a process of revision A answers `200` with A's
-   row and records nothing for B. Then read `GET /v1/admin/pipeline/routing`
-   on that process: `active_bundle_qualified_on_revision` must be `true`.
-   Qualify each earlier bundle that you want to be able to roll back to in the
-   same way.
+   of B. A request that reaches a process of revision A is refused with `409`
+   `bundle_qualification_code_revision_mismatch` and records nothing: the
+   results name revision B, and a process records a qualification for its own
+   revision only. Then read `GET /v1/admin/pipeline/routing` on that process:
+   `active_bundle_qualified_on_revision` must be `true`. Qualify each earlier
+   bundle that you want to be able to roll back to with steps 2 and 4 for
+   that bundle.
 5. Roll the fleet to build B.
 
 If you cannot do steps 2 to 4 before the roll, contain the tenant before the
@@ -1024,8 +1061,8 @@ change came first: read the routing again before you decide. If the answer is
    routing state: a contained tenant stays contained. To open it again,
    `activate` the bundle that is now active, with the record id that the
    rollback answered. `deactivate` returns the tenant to the legacy path. A
-   `deactivate` of a contained tenant with no expectation is refused (`409`
-   `pipeline_routing_expectation_required`). Then move it to the
+   `deactivate` of a contained tenant without `expected_record_id` is refused
+   (`409` `pipeline_routing_expectation_required`). Then move it to the
    drain list as "Scope lists and the routing row" says.
 
 A fix-forward is an activation of a new bundle (steps 2 and 3 for that bundle).
