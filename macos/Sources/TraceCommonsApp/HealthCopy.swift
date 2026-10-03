@@ -116,24 +116,3 @@ extension HealthCopy {
         return HealthCopy(line: line)
     }
 }
-
-/// Plain-English names for the queue states a contributor sees. Four of them
-/// mean nothing left the machine, and each says so in words.
-enum QueueStateCopy {
-    static func sentence(for state: QueueState) -> String {
-        switch state {
-        case .pending: return "Waiting for your decision. Nothing has been sent."
-        case .approved: return "You said yes. Not sent yet."
-        case .uploading: return "Being sent now."
-        case .uploaded: return "In the commons."
-        case .refused: return "The system declined to send this. Nothing was sent."
-        case .failed: return "Sending didn't work. Nothing was sent; it will retry."
-        case .expired: return "Dropped after waiting too long for a decision. Never sent."
-        case .superseded:
-            return """
-            This session changed after you approved it, so it was not sent. A \
-            fresh copy is waiting for a new decision.
-            """
-        }
-    }
-}
