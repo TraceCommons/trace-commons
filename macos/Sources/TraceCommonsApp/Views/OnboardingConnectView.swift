@@ -105,7 +105,11 @@ struct OnboardingConnectContent: View {
         .onChange(of: pendingInvite.value) { _, _ in consumePendingInvite() }
     }
 
-    /// Takes the parked invite and shows what it resolves to, then stops.
+    /// Takes the parked invite, if there is one, and shows what it resolves
+    /// to. It deliberately stops there: filling the field and naming the
+    /// issuer is as far as a link may go, because which commons to enrol
+    /// with is the decision this screen exists to ask. Both other clients
+    /// say the same thing at their own registration sites.
     private func consumePendingInvite() {
         guard let invite = pendingInvite.take() else { return }
         inviteText = invite
@@ -126,8 +130,7 @@ struct OnboardingConnectContent: View {
 
     private var pasteField: some View {
         HStack(alignment: .bottom, spacing: GlassTokens.Space.s4) {
-            GlassTextField(OnboardingConnectWords.linkLabel, text: $inviteText,
-                           prompt: OnboardingConnectWords.linkPrompt)
+            GlassTextField(OnboardingConnectWords.linkPrompt, text: $inviteText)
                 .onSubmit(resolve)
                 .disabled(isEnrolling || nearBusy)
             Button(OnboardingConnectWords.lookUp, action: resolve)
@@ -213,10 +216,18 @@ enum OnboardingConnectWords {
     static let pasteTheLink = "Paste the invite link someone sent you, or click it from your email."
     static let deadInvite = "This invite link is no longer valid. Ask whoever sent it for a new one."
     static let alreadyConnected = "This device is already connected."
-    static func inviteIsFor(_ host: String) -> String { "This invite is for \(host)." }
+    /// The sentence with the issuer host emphasised: the one thing to know
+    /// before enrolling. The host stays inside the sentence, so no fragment
+    /// is authored separately.
+    static func inviteIsFor(_ host: String) -> AttributedString {
+        var sentence = AttributedString("This invite is for \(host).")
+        if let range = sentence.range(of: host, options: .backwards) {
+            sentence[range].inlinePresentationIntent = .stronglyEmphasized
+        }
+        return sentence
+    }
     static func connectingTo(_ host: String) -> String { "Connecting to \(host)…" }
     static func join(_ host: String) -> String { "Join \(host)" }
-    static let linkLabel = "Invite link"
     static let linkPrompt = "https://…/onboard#…"
     static let lookUp = "Look up"
     static let continueButton = "Continue"

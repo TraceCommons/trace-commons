@@ -15,7 +15,7 @@ struct NearAccountConnectView: View {
     var onEnrolled: () -> Void
     private var busy: Bool { pending || flow?.busy == true }
     var body: some View {
-        Group {
+        VStack(alignment: .leading, spacing: 0) {
             if let copy = model.witnessCopy?.wallet, let flow, flow.state != "Unsupported" {
                 GlassCard {
                     VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
