@@ -46,7 +46,7 @@ final class WriteSurfacesBeforeOnboardingTests: XCTestCase {
     func test_manageRulesOpensFirstRunBeforeOnboarding() throws {
         XCTAssertNil(MenuPanelData.manageRules(requiresOnboarding: true))
         XCTAssertEqual(MenuPanelData.manageRules(requiresOnboarding: false), .settings(.watchedFolders))
-        let routed = LaunchRouting.opening(MenuPanelData.manageRules(requiresOnboarding: true), requiresOnboarding: true)
+        let routed = LaunchRouting.opening(MenuPanelData.manageRules(requiresOnboarding: true), requiresOnboarding: true, onboardingKnown: true)
         XCTAssertEqual(routed.window, .firstRun)
         XCTAssertNil(routed.settings)
         let panel = try MonitorNavigationTests.text("Views/Monitor/MenuBarGlassPanel.swift")

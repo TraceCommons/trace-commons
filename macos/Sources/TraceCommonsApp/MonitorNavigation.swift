@@ -34,36 +34,40 @@ enum MonitorDestination: Equatable, Sendable {
 /// those would make exactly the cold-start cases fail while every warm test
 /// passed.
 enum OpenMonitor {
-    @MainActor static var handler: ((MonitorDestination?) -> Void)? {
+    /// Opens a destination; the flag says whether to activate the app.
+    @MainActor static var handler: ((MonitorDestination?, Bool) -> Void)? {
         didSet { replayIfPending() }
     }
 
-    /// Whether a request is held, and its destination. A held request with
-    /// no destination (a Dock click) is still a request.
-    @MainActor private static var pending: (held: Bool, destination: MonitorDestination?) = (false, nil)
+    /// Whether a request is held, its destination, and whether it
+    /// activates. A held request with no destination (a Dock click) is
+    /// still a request.
+    @MainActor private static var pending: (held: Bool, destination: MonitorDestination?, activate: Bool) = (false, nil, true)
 
+    /// Every opener activates the app, as a click does; only the launch's
+    /// own request may stay quiet (R-44).
     @MainActor
-    static func request(_ destination: MonitorDestination? = nil) {
+    static func request(_ destination: MonitorDestination? = nil, activate: Bool = true) {
         guard let handler else {
-            pending = (true, destination)
+            pending = (true, destination, activate)
             return
         }
-        handler(destination)
+        handler(destination, activate)
     }
 
     /// Tests only: no handler and nothing held.
     @MainActor
     static func reset() {
-        pending = (false, nil)
+        pending = (false, nil, true)
         handler = nil
     }
 
     @MainActor
     private static func replayIfPending() {
         guard let handler, pending.held else { return }
-        let destination = pending.destination
-        pending = (false, nil)
-        handler(destination)
+        let held = pending
+        pending = (false, nil, true)
+        handler(held.destination, held.activate)
     }
 }
 
@@ -74,9 +78,24 @@ enum OpenMonitor {
 enum LaunchRouting {
     enum Window: Equatable { case firstRun, monitor }
 
-    static func window(for destination: MonitorDestination?, requiresOnboarding: Bool) -> Window {
-        guard requiresOnboarding else { return .monitor }
+    /// Before the core has said whether onboarding is required, the
+    /// Monitor: it waits on the core and then applies its own gate, so a
+    /// cold-start request is never routed from the placeholder status.
+    static func window(for destination: MonitorDestination?, requiresOnboarding: Bool, onboardingKnown: Bool) -> Window {
+        guard onboardingKnown, requiresOnboarding else { return .monitor }
         return destination == .inference ? .monitor : .firstRun
+    }
+
+    /// Where finishing first run goes: the destination an earlier opener
+    /// left waiting, else Home.
+    static func handOff(pending: MonitorDestination?) -> MonitorDestination {
+        pending ?? .home(.overview)
+    }
+
+    /// Whether the launch's own request activates the app: only for first
+    /// run (R-44). Every other opener activates.
+    static func launchActivates(requiresOnboarding: Bool) -> Bool {
+        requiresOnboarding
     }
 
     /// What one request opens: its window, and the Settings section it
@@ -87,8 +106,8 @@ enum LaunchRouting {
         let settings: SettingsSection?
     }
 
-    static func opening(_ destination: MonitorDestination?, requiresOnboarding: Bool) -> Opening {
-        Opening(window: window(for: destination, requiresOnboarding: requiresOnboarding),
+    static func opening(_ destination: MonitorDestination?, requiresOnboarding: Bool, onboardingKnown: Bool) -> Opening {
+        Opening(window: window(for: destination, requiresOnboarding: requiresOnboarding, onboardingKnown: onboardingKnown),
                 settings: destination?.settingsSection)
     }
 

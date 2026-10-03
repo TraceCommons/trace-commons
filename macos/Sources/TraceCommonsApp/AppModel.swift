@@ -1860,6 +1860,13 @@ final class AppModel: ObservableObject {
     /// onboarding, not straight to the main window with whatever scopes
     /// `enroll`'s floor-only default happened to leave in place -- see the
     /// coordinator's atomicity note.
+    /// Whether the core has said enough to know if onboarding is required
+    /// (`LaunchRouting.onboardingKnown`), in one spelling for the launch,
+    /// the Monitor's gates and every request's routing.
+    var onboardingKnown: Bool {
+        LaunchRouting.onboardingKnown(startup: startup, statusAnswered: status.answered, statusFailed: statusReadFailed)
+    }
+
     var requiresOnboarding: Bool {
         startup == .needsRoots || !status.loggedIn || !isOnboardingComplete
     }
