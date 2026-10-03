@@ -42,6 +42,15 @@ final class LegacyShellRetiredTests: XCTestCase {
         }
         XCTAssertFalse(main.contains("#else"), "a release build has no branch of its own")
         XCTAssertTrue(main.contains("TRACE_COMMONS_MENU_PREVIEW"))
+        // The menu preview window and its env read stay inside #if DEBUG
+        // (D-18): more gates open than closed before each.
+        for debugOnly in ["MenuBarPreviewWindow(", "\"TRACE_COMMONS_MENU_PREVIEW\""] {
+            let at = try XCTUnwrap(main.range(of: debugOnly)).lowerBound
+            let before = main[..<at]
+            let opens = before.components(separatedBy: "#if DEBUG").count - 1
+            let closes = before.components(separatedBy: "#endif").count - 1
+            XCTAssertEqual(opens, closes + 1, "\(debugOnly) is outside #if DEBUG")
+        }
         for file in ["Views/MonitorWindowView.swift", "Views/Monitor/TracesViews.swift", "Views/Monitor/HomeViews.swift",
                      "Views/Monitor/InferenceViews.swift", "Views/Monitor/FirstRunViews.swift", "Views/Monitor/MenuBarGlassPanel.swift",
                      "Views/Monitor/MissionsViews.swift", "Views/Monitor/FlowMapView.swift", "Views/Monitor/FlowMapScene.swift",

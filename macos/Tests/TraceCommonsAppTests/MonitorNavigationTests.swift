@@ -215,9 +215,40 @@ final class MonitorNavigationTests: XCTestCase {
         XCTAssertEqual(opened, 0)
     }
 
-    func test_firstRunWinsWhileOnboardingIsRequired() {
-        XCTAssertEqual(LaunchRouting.window(requiresOnboarding: true), .firstRun)
-        XCTAssertEqual(LaunchRouting.window(requiresOnboarding: false), .monitor)
+    /// First run wins while onboarding is required, for every destination
+    /// but Inference: Private AI sign-in is reachable before Commons
+    /// enrollment, as the legacy window allowed (R-38). Home, Traces,
+    /// Settings and a plain request still open first run.
+    func test_firstRunWinsWhileOnboardingIsRequiredExceptForInference() {
+        let table: [(MonitorDestination?, LaunchRouting.Window)] = [
+            (nil, .firstRun),
+            (.inference, .monitor),
+            (.home(.overview), .firstRun),
+            (.home(.history), .firstRun),
+            (.home(.insights), .firstRun),
+            (.traces(entryId: nil), .firstRun),
+            (.traces(entryId: "entry-7"), .firstRun),
+            (.settings(.compute), .firstRun),
+        ]
+        for (destination, window) in table {
+            XCTAssertEqual(LaunchRouting.window(for: destination, requiresOnboarding: true), window,
+                           String(describing: destination))
+            XCTAssertEqual(LaunchRouting.opening(destination, requiresOnboarding: true).window, window,
+                           String(describing: destination))
+            XCTAssertEqual(LaunchRouting.window(for: destination, requiresOnboarding: false), .monitor,
+                           String(describing: destination))
+        }
+    }
+
+    /// While onboarding is required the Monitor shows the Inference tab
+    /// and nothing else, whatever tab was restored.
+    func test_onlyInferenceIsShownWhileOnboardingIsRequired() {
+        XCTAssertEqual(MonitorWindowView.Tab.shown(requiresOnboarding: true), [.inference])
+        XCTAssertEqual(MonitorWindowView.Tab.shown(requiresOnboarding: false), MonitorWindowView.Tab.allCases)
+        for tab in MonitorWindowView.Tab.allCases {
+            XCTAssertEqual(MonitorWindowView.shownTab(tab, requiresOnboarding: true), .inference)
+            XCTAssertEqual(MonitorWindowView.shownTab(tab, requiresOnboarding: false), tab)
+        }
     }
 
     /// A quit refusal lands on Compute whatever onboarding says: the
@@ -226,7 +257,7 @@ final class MonitorNavigationTests: XCTestCase {
         for requires in [true, false] {
             let opening = LaunchRouting.opening(.settings(.compute), requiresOnboarding: requires)
             XCTAssertEqual(opening.settings, .compute, "requiresOnboarding \(requires)")
-            XCTAssertEqual(opening.window, LaunchRouting.window(requiresOnboarding: requires))
+            XCTAssertEqual(opening.window, LaunchRouting.window(for: .settings(.compute), requiresOnboarding: requires))
         }
         for destination: MonitorDestination? in [nil, .inference, .traces(entryId: nil), .home(.history)] {
             XCTAssertNil(LaunchRouting.opening(destination, requiresOnboarding: false).settings,
@@ -385,46 +416,53 @@ final class MonitorNavigationTests: XCTestCase {
                       "Settings already open must still move to the asked-for section")
     }
 
-    /// While onboarding is required the Monitor draws the notices and the
-    /// signed-out notice, whose button routes to first run, in place of the
-    /// tabs; the inspector, where the write controls are, draws nothing.
-    /// Before the core has said whether onboarding is required, the
-    /// placeholder status is not read as "signed out": the pane waits.
-    func test_theMonitorNeverShowsTabsWhileOnboardingIsRequired() throws {
+    /// While onboarding is required the Monitor draws the notices, the
+    /// signed-out notice (whose button routes to first run) and a tab strip
+    /// of Inference alone (R-38): Home and Traces act on consent that has
+    /// not been given. Every tab switch and the inspector draw the shown
+    /// tab, so a restored Home or Traces never reaches the screen; the
+    /// inspector admits the Private AI one alone. Before the core has said
+    /// whether onboarding is required, the placeholder status is not read
+    /// as "signed out": the pane waits and the inspector draws nothing.
+    func test_onlyInferenceIsDrawnWhileOnboardingIsRequired() throws {
         let window = try Self.text("Views/MonitorWindowView.swift")
-        XCTAssertTrue(window.contains("if model.requiresOnboarding {"), "the Monitor must gate on requiresOnboarding")
         XCTAssertTrue(window.contains("MonitorWords.signedOut"))
         XCTAssertTrue(window.contains("""
-                        ShellNotices()
-                        // No tab before onboarding is done: its screens act on
-                        // consent that has not been given. The button opens first
-                        // run, which is where every request goes until then. Before
-                        // the core says, the placeholder status is not "signed out".
                         if !LaunchRouting.onboardingKnown(startup: model.startup, statusAnswered: model.status.answered, statusFailed: model.statusReadFailed) {
                             SettingsAwaiting()
                                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        } else if model.requiresOnboarding {
-                            GlassNotice(tone: .ask, title: MonitorWords.signedOut) {
-                                Button(MonitorWindowView.openFirstRun) { OpenMonitor.request() }
-                            }
-                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
                         } else {
+                            if model.requiresOnboarding {
+                                GlassNotice(tone: .ask, title: MonitorWords.signedOut) {
+                                    Button(MonitorWindowView.openFirstRun) { OpenMonitor.request() }
+                                }
+                            }
                             GlassSegmentedTabs(
-        """), "the tabs must be the gate's last branch, under the notices")
+                                String(localized: "Monitor", comment: "Monitor tabs name"),
+                                selection: Binding(
+                                    get: { MonitorWindowView.shownTab(tab, requiresOnboarding: model.requiresOnboarding) },
+                                    set: { tab = $0 }),
+                                segments: MonitorWindowView.Tab.shown(requiresOnboarding: model.requiresOnboarding).map { item in
+        """), "the strip must show the onboarding-filtered tabs, under the notices")
         let pane = try XCTUnwrap(window.range(of: "private struct MonitorMainPane"))
         let map = try XCTUnwrap(window.range(of: "private struct MonitorMapPane"))
         XCTAssertEqual(window[pane.lowerBound ..< map.lowerBound].components(separatedBy: "GlassSegmentedTabs(").count - 1, 1,
                        "a second tab strip in the main pane would escape the gate")
+        // Both tab switches (the main pane's content and the inspector)
+        // switch on the shown tab, never the restored one.
+        XCTAssertEqual(window.components(separatedBy: "switch Self.shownTab(tab, requiresOnboarding: model.requiresOnboarding) {").count - 1, 2)
+        XCTAssertFalse(window.contains("switch tab {"), "a switch on the restored tab would draw Home or Traces during onboarding")
         XCTAssertTrue(window.contains("""
                     GlassPane {
                         // An empty branch would leave the pane nothing to draw, and
                         // it would vanish while the layout still reserved its width.
-                        if !LaunchRouting.onboardingKnown(startup: model.startup, statusAnswered: model.status.answered, statusFailed: model.statusReadFailed)
-                            || model.requiresOnboarding {
+                        // While onboarding is required only Inference is shown, so
+                        // the Private AI inspector is the only one admitted (R-38).
+                        if !LaunchRouting.onboardingKnown(startup: model.startup, statusAnswered: model.status.answered, statusFailed: model.statusReadFailed) {
                             Color.clear
                         } else {
-                            switch tab {
-        """), "the inspector's write controls must not show until onboarding is known to be done")
+                            switch Self.shownTab(tab, requiresOnboarding: model.requiresOnboarding) {
+        """), "the inspector must draw nothing until onboarding is known, and the shown tab's after")
     }
 
     /// Finishing first run closes it and opens the Monitor on Home.
