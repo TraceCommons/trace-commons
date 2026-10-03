@@ -95,6 +95,13 @@ final class SettingsParityTests: XCTestCase {
                               "SettingsLegacyWords.doNotTrustProfileWording"],
                 confirmations: ["GlassSheet("],
                 accessibility: [".accessibilityLabel(", "GlassCheckboxStyle()"]),
+        Section(glass: "Views/Settings/WatchedFoldersSection.swift",
+                bindings: ["TCSourceChecks.settingsCopy()", "SourceKind.allCases", "TCDiscovery.sourcesJSON()",
+                           "SourceCandidate.decodeList(", "model.setSourceRoot(", "model.refreshSettings()",
+                           "routingSourceModes", "opencodeSourceMode", "GlassSourceRow("],
+                copySources: ["copy.heading", "copy.explanation", "copy.saveFailed", "copy.unavailable", "copy.retry"],
+                confirmations: ["GlassSourceRow.chooseFolder()"],
+                accessibility: []),
     ]
 
     func test_everyLegacyBindingAndCopySourceHasAGlassHome() throws {
