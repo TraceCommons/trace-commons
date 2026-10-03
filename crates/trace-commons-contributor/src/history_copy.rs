@@ -74,8 +74,9 @@ pub struct StatusLabel {
 ///
 /// - `submitted`, `withdrawn`: the daemon's own stamps
 ///   (`daemon::history::STATUS_SUBMITTED`, `STATUS_WITHDRAWN`).
-/// - `processing`: the versioned pipeline's upload receipt. It is
-///   `submitted` -- uploaded, no verdict yet (#1169) -- and reads the same.
+/// - `processing`: the versioned pipeline's upload receipt
+///   (`daemon::history::STATUS_PROCESSING`). The daemon reads it as
+///   `submitted` -- uploaded, no verdict yet (#1169) -- and so does History.
 /// - `received`, `accepted`, `quarantined`, `awaiting_pii_backstop`,
 ///   `rejected`, `revoked`, `expired`, `purged`: the server's
 ///   submission-status read-back (`TraceCorpusStatus` in
@@ -198,7 +199,8 @@ mod tests {
     #[test]
     fn every_known_status_has_a_label() {
         use crate::daemon::history::{
-            STATUS_ACCEPTED, STATUS_QUARANTINED, STATUS_REVOKED, STATUS_SUBMITTED, STATUS_WITHDRAWN,
+            STATUS_ACCEPTED, STATUS_PROCESSING, STATUS_QUARANTINED, STATUS_REVOKED,
+            STATUS_SUBMITTED, STATUS_WITHDRAWN,
         };
         let daemon = [
             STATUS_SUBMITTED,
@@ -207,7 +209,7 @@ mod tests {
             STATUS_WITHDRAWN,
             STATUS_REVOKED,
             // The versioned pipeline's receipt (#1169).
-            "processing",
+            STATUS_PROCESSING,
         ];
         let public_run = crate::public_run::public_run_copy()
             .contribution_status_choices
