@@ -173,12 +173,26 @@ struct PublicRunCopy: Decodable, Equatable {
 }
 
 enum ContributionStatusPresentation {
-    private static let terminalValues: Set<String> = [
-        "withdrawn", "revoked", "purged", "expired",
+    /// The core's statuses a contribution can still be withdrawn from. The
+    /// other four it names -- withdrawn, revoked, purged, expired -- are
+    /// closed.
+    private static let openValues: Set<String> = [
+        "submitted", "received", "accepted", "quarantined",
+        "awaiting_pii_backstop", "rejected",
     ]
 
+    /// Closed, or not a status this build recognizes. Fails closed, as
+    /// Tauri's `canWithdrawStatus` allowlist does: a status from a newer
+    /// daemon is treated as terminal, so Withdraw is not offered on it.
+    /// `nil` (no status reported yet) is not terminal.
     static func isTerminal(_ value: String?) -> Bool {
-        value.map(terminalValues.contains) ?? false
+        guard let value else { return false }
+        return !openValues.contains(value)
+    }
+
+    /// Whether Withdraw is offered on a contribution in this status.
+    static func offersWithdraw(_ value: String?) -> Bool {
+        !isTerminal(value)
     }
 }
 
