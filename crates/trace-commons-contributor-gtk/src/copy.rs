@@ -562,6 +562,8 @@ pub const NOT_SYNCED_YET: &str = "Not synced yet";
 
 pub const HISTORY_IN_THE_COMMONS: &str = "In the commons";
 pub const HISTORY_WAITING_TO_BE_SCORED: &str = "Waiting to be scored";
+/// A status this build has no label for. The core's, read by every shell.
+pub use trace_commons_contributor::history_copy::STATUS_UNAVAILABLE as HISTORY_STATUS_UNAVAILABLE;
 
 /// §5.3's section heading over the record rows.
 pub const EVERYTHING_CONTRIBUTED: &str = "Everything you've contributed";
