@@ -210,6 +210,17 @@ public class TrayModelTests
     }
 
     [Fact]
+    public void PausedSaysNothingIsQueuedOrSentAsMacOsDoes()
+    {
+        // macOS MainWindowView and SettingsView, and GTK ui/settings.rs, all
+        // say "or sent": pause holds uploads as well as the queue, and a
+        // sentence that drops it lets a contributor believe approved
+        // sessions are still going out.
+        TrayModel model = TrayModel.Compute(0, isPaused: true, isHealthy: true);
+        Assert.Equal("Trace Commons — Paused. Nothing is being queued or sent.", model.Tooltip);
+    }
+
+    [Fact]
     public void NothingOwedAndAllWellIsIdle()
     {
         TrayModel model = TrayModel.Compute(0, isPaused: false, isHealthy: true);

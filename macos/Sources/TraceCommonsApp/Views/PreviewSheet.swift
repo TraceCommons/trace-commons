@@ -437,7 +437,7 @@ struct PreviewSheet: View {
                         RoundedRectangle(cornerRadius: TC.Radius.control)
                             .strokeBorder(
                                 tab == item
-                                    ? TC.green.opacity(TC.Border.activeTabAlpha)
+                                    ? TC.accent.opacity(TC.Border.activeTabAlpha)
                                     : Color.clear,
                                 lineWidth: TC.Border.hairline
                             )
@@ -805,7 +805,7 @@ struct PreviewSheet: View {
                 .overlay {
                     RoundedRectangle(cornerRadius: TC.Radius.control)
                         .strokeBorder(
-                            selected ? TC.green.opacity(TC.Border.activeTabAlpha) : Color.clear,
+                            selected ? TC.accent.opacity(TC.Border.activeTabAlpha) : Color.clear,
                             lineWidth: TC.Border.hairline
                         )
                 }
@@ -1043,7 +1043,7 @@ struct SearchTab: View {
                         Button(term) { needle = term }
                             .buttonStyle(.plain)
                             .font(TC.Font_.caption)
-                            .foregroundStyle(TC.greenText)
+                            .foregroundStyle(TC.accentText)
                     }
                 }
             }

@@ -1,6 +1,7 @@
 # Connect-and-Forget Contribution Consent — Design
 
-Date: 2026-09-23 (rev 8, 2026-09-25; Flow 3 amended 2026-09-27)
+Date: 2026-09-23 (rev 8, 2026-09-25; Flow 3 amended 2026-09-27; Missions
+added 2026-10-01, amended 2026-10-02)
 Status: draft for review
 Extends: [`2026-08-31-contributor-trust-by-default-design.md`](2026-08-31-contributor-trust-by-default-design.md) (#507)
 Source: [`../../contributor-ux-review.md`](../../contributor-ux-review.md)
@@ -8,6 +9,11 @@ Scope: `trace-commons-contributor` (`daemon/policy.rs`, `daemon/watcher.rs`,
 `daemon/queue.rs`, `daemon/uploader.rs`, `consent_copy.rs`), the onboarding
 surface in the Tauri client, named the main client for the MVP in #1003 and
 merged in #963. No production code in this PR.
+
+> **Superseded 2026-09-28** by #1173 D1 (decided 2026-09-28, recorded in
+> #1173 on 2026-10-01): native SwiftUI (`macos/`) is now the main client on
+> macOS; the Tauri app is retired there once the native screens match, and
+> stays the client on Windows and Linux (D13).
 
 > **Amended 2026-09-27** (decision 6 of
 > [`2026-09-26-earned-account-trust-design.md`](2026-09-26-earned-account-trust-design.md)):
@@ -904,6 +910,92 @@ Three further sentences are required and not yet written:
 Separately, each receipt fetch tells the provider that an exchange is being
 contributed, and no sentence covers that.
 
+## Missions
+
+> **Added 2026-10-01** (Kristi, for the native app's Missions tab, #1173).
+> Missions follow the mechanism draft from Michael: a daily mission with a
+> bonus factor, Trace Activity that accrues monthly, levels, streaks and
+> badges, and missions matched to vendor requests from what a contributor
+> works on. Those mechanics are still open. These rules are not, and every
+> shell and server change for Missions must meet them.
+>
+> **These are contribution missions, a new concept.** They are not the
+> published mission packages already on main (`GET /v1/missions`,
+> `mission_catalog.rs`, `mission_attempt.rs`, and the operator runbooks
+> `docs/operator/mission-packages.md` and
+> `docs/operator/mission-insight-rewards.md`). Those are skill-evaluation
+> tasks: an issuer submits evidence, an independent reviewer accepts it, and
+> they pay fixed units through the reward ledger. A contribution mission is
+> completed by contributing sessions (M2). The one pattern the two share is
+> an anonymous catalogue read that is the same for every contributor (M1).
+> Whether contribution missions reuse that catalogue endpoint is a mechanic.
+
+### M1. Matching stays on this Mac
+
+Choosing which missions fit a contributor reads local sessions, tools and
+folders. **That matching runs only on the device.**
+
+- The server publishes a mission catalogue, the vendor requests. The daemon
+  downloads it and decides which missions match, locally.
+- No activity profile, match result, folder or tool list, or "missions shown"
+  record leaves the Mac because of matching.
+- A catalogue request carries no per-contributor matching input. It is the
+  same request for every contributor of the commons.
+- Matching reads only sessions from tools the contributor has left on, in
+  folders not set to `Never`. A folder set to `Never` and a tool switched off
+  are not read for matching, even though nothing from the read would leave
+  the device. Folders that are not armed and not shared may be read, on that
+  same condition that nothing leaves the device.
+
+### M2. A mission sends nothing by itself
+
+Accepting, starting or completing a mission **never arms a folder, never
+approves a session and never widens a scope**. A session counts toward a
+mission only when it is contributed through one of the existing paths in
+"The three paths": Flow 1 (automatic from the grant), Flow 2 (the
+contributor's per-folder choice), or Flow 3 (earned allowance). The consent
+and holds it went through are the ones it would have gone through anyway.
+
+- A mission may *suggest* arming or reviewing. The suggestion is an offer
+  with the usual disclosure, never a default.
+- Completion is worked out from what was actually contributed, which the
+  server already has. It is never worked out from a separate report of local
+  activity.
+
+### M3. Mission credit is projected, then pending, never earned early
+
+What a mission is worth (a bonus, a level step or a streak) may be shown
+before the work is done, as **projected credit**. The label says so and
+attaches the condition, for example "+20 projected, if the commons accepts
+it". Projected credit is never called earned or pending, and never shown in
+the same place or style as settled credit.
+
+Once the server records a mission bonus it is pending, under the same rule
+as all credit: pending until the commons settles, never "earned" before
+then. Which ledger records it is a mechanic (see "Open"). A per-submission
+field such as `credit_points_pending` cannot hold a streak bonus, because a
+streak has no single submission to sit on.
+
+Standing and ranking ("Top 8%") may be computed from pending and projected
+credit, and say that they are.
+
+> Owner ruling 2026-10-02 (on #1174): projected mission credit is allowed
+> when it is clearly labelled, and rankings may use pending credit. This
+> reverses the "projected credit is off-limits" entry in #1146's Gaps.
+
+### M4. The disclosure says so
+
+The first time Missions is opened, and in Settings, the core's copy states
+three things:
+- matching happens on this Mac;
+- nothing is sent because of a mission;
+- a mission's credit is projected until the commons records it, then
+  pending until it settles.
+
+Like every consent string, this copy lives in Rust (`consent_copy.rs`) and
+is pinned by the shell copy tests. Until it is approved, it is marked
+**DRAFT, NEEDS APPROVAL** there.
+
 ## Open
 
 Settled since rev 7 and removed from this list: where the earned-trust
@@ -938,6 +1030,11 @@ approving").
   enforcement switch-on list; and the migration notice is part of the client
   migration step (R6). What is open is the wording and which PR carries each
   shell's notice.
+- **Missions mechanics.** One mission a day, or missions generated from the
+  kind of work. The bonus factor, level thresholds and badge set. Which
+  ledger records mission credit: the existing reward ledger, or a new one.
+  Whether the catalogue reuses `GET /v1/missions`. The rules in M1-M4 are
+  settled; the mechanics are not.
 - **Legal posture**, unchanged: a one-time grant is a different consent basis,
   and review established that withdrawing it is currently much harder than
   giving it.

@@ -118,6 +118,59 @@ public enum TCCoreCopy {
         take(tc_privacy_scan_copy_json())
     }
 
+    /// `tc_monitor_traces_copy_json`: the monitor's Traces words. Decoded by
+    /// `TCShellCore.MonitorTracesCopy`.
+    public static func monitorTracesCopyJSON() -> String? {
+        take(tc_monitor_traces_copy_json())
+    }
+
+    /// `tc_contribution_mode_copy_json`: the menu-bar Contribution mode
+    /// pill's words (#1208). Decoded by `TCShellCore.ContributionModeCopy`.
+    public static func contributionModeCopyJSON() -> String? {
+        take(tc_contribution_mode_copy_json())
+    }
+
+    /// `tc_contribution_override_confirm_json`: one override's confirmation
+    /// (`mode` as `set_contribution_override` takes it). For `auto_upload` it
+    /// carries the arming disclosure for the configuration in `configDir`,
+    /// and is nil without a readable one. Decoded by
+    /// `TCShellCore.ContributionOverrideConfirmCopy`.
+    public static func contributionOverrideConfirmJSON(mode: String, configDir: String?) -> String? {
+        mode.withCString { modePointer in
+            guard let configDir else {
+                return take(tc_contribution_override_confirm_json(modePointer, nil))
+            }
+            return take(configDir.withCString { tc_contribution_override_confirm_json(modePointer, $0) })
+        }
+    }
+
+    /// `tc_contribution_override_refusal_text`: the sentence for a refused
+    /// override write, from the IPC error's label.
+    public static func contributionOverrideRefusalLine(label: String) -> String? {
+        take(label.withCString { tc_contribution_override_refusal_text($0) })
+    }
+
+    /// `tc_monitor_screens_copy_json`: the monitor's other screens' words.
+    /// Decoded by `TCShellCore.MonitorScreensCopy`.
+    public static func monitorScreensCopyJSON() -> String? {
+        take(tc_monitor_screens_copy_json())
+    }
+
+    /// `tc_automatic_grant_copy_json`: the words for the disclosure an armed
+    /// folder's `list_projects` row names (`automatic_disclosure`). Decoded
+    /// by `TCShellCore.AutomaticGrantCopy`. Nil for a name the core does
+    /// not know.
+    public static func automaticGrantCopyJSON(disclosure: String) -> String? {
+        take(disclosure.withCString { tc_automatic_grant_copy_json($0) })
+    }
+
+    /// `tc_decisions_owed_text`: the Traces badge's text equivalent. Nil
+    /// `decisionsOwed` is an unknown count, which the core never words as
+    /// zero; the empty string is zero (no badge).
+    public static func decisionsOwedText(_ decisionsOwed: Int?) -> String? {
+        take(tc_decisions_owed_text(decisionsOwed.map(Int64.init) ?? -1))
+    }
+
     /// `tc_quit_prompt_json` with no handle: the prompt for a process with no
     /// watcher to stop. `TCDaemon.quitPromptJSON()` is the one to use while
     /// a daemon handle exists.

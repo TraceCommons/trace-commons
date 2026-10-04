@@ -41,7 +41,7 @@ final class ShellWordingTests: XCTestCase {
         "TCShellCore/DailyBudgetCopy.swift": 6,
         "TCShellCore/MenuBarStatus.swift": 4,
         "TCShellCore/OriginalSearchOutcome.swift": 4,
-        "TCShellCore/ProjectRow.swift": 3,
+        "TCShellCore/ProjectRow.swift": 2,
         "TCShellCore/RedactionLabels.swift": 1,
         "TCShellCore/RedactionMarks.swift": 2,
         "TCShellCore/ScrubDetectors.swift": 2,
@@ -52,7 +52,7 @@ final class ShellWordingTests: XCTestCase {
 
         // The app model and its non-view surfaces.
         "TraceCommonsApp/AppModel.swift": 8,
-        "TraceCommonsApp/HealthCopy.swift": 23,
+        "TraceCommonsApp/HealthCopy.swift": 20,
         "TraceCommonsApp/Notifier.swift": 2,
         "TraceCommonsApp/SelfTest.swift": 15,
 
@@ -61,7 +61,8 @@ final class ShellWordingTests: XCTestCase {
         "TraceCommonsApp/Views/BrandMark.swift": 1,
         "TraceCommonsApp/Views/ConsentScopesView.swift": 7,
         "TraceCommonsApp/Views/CreditRecordView.swift": 9,
-        "TraceCommonsApp/Views/HistoryView.swift": 26,
+        // Lowered from 26: an unrecognised status reads the core's label.
+        "TraceCommonsApp/Views/HistoryView.swift": 21,
         "TraceCommonsApp/Views/MainWindowView.swift": 14,
         "TraceCommonsApp/Views/MenuBarView.swift": 11,
         "TraceCommonsApp/Views/OnboardingConnectView.swift": 7,
@@ -90,6 +91,7 @@ final class ShellWordingTests: XCTestCase {
         "TCBridge/TCConsentCopy.swift",
         // K3 (#1173): the copy tables that used to be written here.
         "TCBridge/TCCoreCopy.swift",
+        "TCShellCore/AutomaticGrantCopy.swift",
         "TCShellCore/PrivacyScanCopy.swift",
         "TCShellCore/ProjectArmingCopy.swift",
         "TCShellCore/ProjectIgnoreCopy.swift",

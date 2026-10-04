@@ -383,6 +383,57 @@ pub fn state_tone(label: &str) -> PrivateInferenceTone {
     }
 }
 
+/// Every runtime state label a daemon reports in
+/// `private_inference_state.state`, in the order a shell lists them.
+///
+/// Each one has its own sentence in [`state_line`]; the empty label
+/// (unreported) and a label this build does not know are not in the list,
+/// and are answered by [`STATE_UNREPORTED`] and [`STATE_UNKNOWN`].
+pub const STATE_LABELS: [&str; 10] = [
+    LABEL_OFF,
+    LABEL_STOPPING,
+    LABEL_RUNNING,
+    LABEL_RUNNING_NO_BACKENDS,
+    LABEL_RUNNING_ANSWERED_ELSEWHERE,
+    LABEL_RUNNING_DESTINATION_UNKNOWN,
+    LABEL_RUNNING_ELSEWHERE,
+    LABEL_PORT_IN_USE,
+    LABEL_START_FAILED,
+    LABEL_CRASHED,
+];
+
+/// One state label's sentence, and whether an indicator may paint that
+/// state as working: [`state_line`] and [`state_tone`]'s
+/// [`PrivateInferenceTone::reads_as_working`], carried together so a shell
+/// that renders a table looks the label up and never compares sentences.
+#[derive(Clone, Copy, Debug, serde::Serialize, PartialEq, Eq)]
+pub struct StateCopy {
+    pub line: &'static str,
+    pub working: bool,
+}
+
+/// [`StateCopy`] for every label in [`STATE_LABELS`], keyed by label.
+///
+/// A shell that holds this table answers a label it does not find with
+/// [`STATE_UNKNOWN`], not working, and an empty one with
+/// [`STATE_UNREPORTED`], not working -- what [`state_line`] and
+/// [`state_tone`] answer for both.
+#[must_use]
+pub fn state_copies() -> std::collections::BTreeMap<&'static str, StateCopy> {
+    STATE_LABELS
+        .into_iter()
+        .map(|label| {
+            (
+                label,
+                StateCopy {
+                    line: state_line(label),
+                    working: state_tone(label).reads_as_working(),
+                },
+            )
+        })
+        .collect()
+}
+
 /// Whether a shell should put the offer in front of the contributor.
 ///
 /// Two inputs and one rule, crossing the ABI for the reason the tone table
@@ -1543,6 +1594,52 @@ pub fn group_control(pending: u64, contributable: Option<u64>) -> ContributionCo
         ContributionControl::None
     } else {
         ContributionControl::Contribute
+    }
+}
+
+/// A `list_projects` group's whole eligibility picture, computed once from
+/// `pending` and `contributable`.
+///
+/// Before this existed, every caller re-derived `eligible_count` and
+/// `withheld_count` from the same two numbers by hand: Tauri's
+/// `eligibility_group_copy` computed `contributable.unwrap_or(pending).
+/// min(pending)` and `pending.saturating_sub(eligible)` inline, and the
+/// macOS shell computed `pending - contributableCount` itself in Swift, with
+/// no `min` clamp at all -- a second, slightly different arithmetic for the
+/// same fact, safe only because the FFI's `tc_contribution_withheld_line`
+/// clamps a negative input to zero on its side of the ABI. One function now
+/// does this arithmetic, so both numbers are derived exactly once.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GroupEligibility {
+    /// How many of `pending` may actually be sent. Clamped to `pending`:
+    /// `contributable` is documented never to exceed it, but a caller
+    /// reading data from an older or mismatched daemon should not be able to
+    /// turn a clamp failure into a claim of more eligible sessions than
+    /// exist.
+    pub eligible_count: u64,
+    /// `pending` minus `eligible_count`, never negative.
+    pub withheld_count: u64,
+    /// Whether the group's submit control may be offered at all -- exactly
+    /// [`group_control`]'s answer for this `pending`/`contributable` pair.
+    pub can_contribute: bool,
+}
+
+/// Compute [`GroupEligibility`] from a `list_projects` row's `pending_count`
+/// and `contributable_count`.
+///
+/// `contributable`, like [`group_control`]'s parameter of the same name,
+/// must be `None` for an ABSENT `contributable_count` (an invited
+/// contributor, for whom every pending session is sendable) and
+/// `Some(0)` for a present count of zero -- never conflate the two, or an
+/// invited contributor's folder reads as having nothing eligible.
+#[must_use]
+pub fn group_eligibility(pending: u64, contributable: Option<u64>) -> GroupEligibility {
+    let eligible_count = contributable.unwrap_or(pending).min(pending);
+    GroupEligibility {
+        eligible_count,
+        withheld_count: pending.saturating_sub(eligible_count),
+        can_contribute: group_control(pending, contributable.map(|_| eligible_count))
+            == ContributionControl::Contribute,
     }
 }
 
@@ -3697,6 +3794,53 @@ mod tests {
         assert_eq!(group_control(0, Some(0)), ContributionControl::None);
     }
 
+    /// `group_eligibility` is the arithmetic every caller used to do by
+    /// hand: `eligible_count` clamped to `pending`, `withheld_count` the
+    /// non-negative remainder, and `can_contribute` exactly `group_control`'s
+    /// own answer.
+    #[test]
+    fn group_eligibility_computes_the_eligible_and_withheld_counts() {
+        assert_eq!(
+            group_eligibility(7, Some(3)),
+            GroupEligibility {
+                eligible_count: 3,
+                withheld_count: 4,
+                can_contribute: true,
+            }
+        );
+        // The question does not apply: every pending session is eligible,
+        // and nothing is withheld.
+        assert_eq!(
+            group_eligibility(7, None),
+            GroupEligibility {
+                eligible_count: 7,
+                withheld_count: 0,
+                can_contribute: true,
+            }
+        );
+        // Nothing sendable: no control offered, and the whole group is
+        // withheld.
+        assert_eq!(
+            group_eligibility(7, Some(0)),
+            GroupEligibility {
+                eligible_count: 0,
+                withheld_count: 7,
+                can_contribute: false,
+            }
+        );
+        // A `contributable` above `pending` is data this function does not
+        // trust blindly: `eligible_count` is clamped rather than exceeding
+        // `pending`, so `withheld_count` cannot go negative.
+        assert_eq!(
+            group_eligibility(3, Some(9)),
+            GroupEligibility {
+                eligible_count: 3,
+                withheld_count: 0,
+                can_contribute: true,
+            }
+        );
+    }
+
     /// The withheld line counts and says nothing else.
     ///
     /// Zero renders nothing -- there is no gap to explain -- and the sentence
@@ -4839,5 +4983,64 @@ mod tests {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod state_table_tests {
+    use super::*;
+
+    /// Every label a daemon can report is in the table, once, with its own
+    /// sentence: none falls through to the unknown or unreported line.
+    #[test]
+    fn the_state_table_names_every_reported_label_with_its_own_line() {
+        let table = state_copies();
+        assert_eq!(table.len(), STATE_LABELS.len());
+        assert_eq!(table.len(), 10);
+        for label in STATE_LABELS {
+            let copy = table[label];
+            assert_eq!(copy.line, state_line(label), "{label}");
+            assert_ne!(copy.line, STATE_UNKNOWN, "{label}");
+            assert_ne!(copy.line, STATE_UNREPORTED, "{label}");
+        }
+        // The states the daemon's own state machine reports are all here.
+        use crate::daemon::private_inference::PrivateInferenceState as State;
+        let running = State::Running { port: 1 };
+        let mut reported: Vec<&str> = [
+            State::Off,
+            State::Stopping { port: None },
+            State::RunningWithoutBackends { port: 1 },
+            State::RunningElsewhere { port: 1 },
+        ]
+        .iter()
+        .map(State::label)
+        .collect();
+        for authenticated in [Some(true), Some(false), None] {
+            reported.push(running.label_for(authenticated));
+        }
+        reported.extend([LABEL_PORT_IN_USE, LABEL_START_FAILED, LABEL_CRASHED]);
+        reported.sort_unstable();
+        let mut listed = STATE_LABELS.to_vec();
+        listed.sort_unstable();
+        assert_eq!(reported, listed);
+    }
+
+    /// Only `running` may be painted as working; the table says so for each
+    /// label rather than leaving a shell to infer it.
+    #[test]
+    fn only_running_is_working_in_the_state_table() {
+        for (label, copy) in state_copies() {
+            assert_eq!(copy.working, label == LABEL_RUNNING, "{label}");
+            assert_eq!(
+                copy.working,
+                state_tone(label).reads_as_working(),
+                "{label}"
+            );
+        }
+        let wire = serde_json::to_value(state_copies()[LABEL_RUNNING]).unwrap();
+        assert_eq!(
+            wire,
+            serde_json::json!({"line": STATE_RUNNING, "working": true})
+        );
     }
 }
