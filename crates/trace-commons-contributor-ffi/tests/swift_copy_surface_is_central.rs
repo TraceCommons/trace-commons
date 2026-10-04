@@ -37,8 +37,11 @@ fn swift_root() -> PathBuf {
 
 fn read(rel: &str) -> String {
     let path = swift_root().join(rel);
+    // Normalised to LF: the Windows runner checks sources out with CRLF,
+    // and the checks below search for "\n"-delimited text.
     std::fs::read_to_string(&path)
         .unwrap_or_else(|error| panic!("{} is unreadable: {error}", path.display()))
+        .replace("\r\n", "\n")
 }
 
 fn visit_swift(dir: &Path, found: &mut Vec<PathBuf>) {
@@ -487,6 +490,17 @@ fn pinned_sentences() -> Vec<(&'static str, String)> {
         ],
     );
 
+    // History's word for each contribution status, the one table every
+    // shell reads (`tc_public_run_copy`'s `history_status_labels`).
+    add(
+        "history_copy::STATUS_LABELS",
+        trace_commons_contributor::history_copy::STATUS_LABELS
+            .iter()
+            .map(|row| row.label.to_owned())
+            .chain([trace_commons_contributor::history_copy::STATUS_UNAVAILABLE.to_owned()])
+            .collect(),
+    );
+
     // Withdrawal and quitting.
     add(
         "withdraw::confirmation_prompt_unknown",
@@ -579,6 +593,26 @@ const ALLOWED: &[(&str, &str, &str)] = &[
         "TraceCommonsApp/Views/WithdrawalCopy.swift",
         "Credit still pending is forfeited.",
         "per-tier withdrawal credit note; no core export yet",
+    ),
+    // The rollup tallies over History and the queue's week figures name a
+    // count of rows in a state, in the same words as the row's status tag.
+    // The core exports the row label (`history_status_labels`) but no tally
+    // heading yet, so these headings stay Swift's until it does. The row
+    // tag itself reads the core (see `history_rows_read_the_cores_status_words`).
+    (
+        "TraceCommonsApp/Views/HistoryView.swift",
+        "Held for privacy review",
+        "rollup tally heading; no core tally export yet",
+    ),
+    (
+        "TraceCommonsApp/Views/HistoryView.swift",
+        "Waiting to be scored",
+        "rollup tally heading; no core tally export yet",
+    ),
+    (
+        "TraceCommonsApp/Views/QueueView.swift",
+        "Held for privacy review",
+        "week tally heading; no core tally export yet",
     ),
 ];
 
@@ -889,6 +923,101 @@ fn swift_screens_render_core_copy_at_every_safety_surface() {
                 .contains(&rendered.replace(char::is_whitespace, "")),
             "the quit alert must use `{rendered}`"
         );
+    }
+}
+
+/// A History row's status tag is the core's word for the status
+/// (`history_copy::STATUS_LABELS`, decoded as
+/// `PublicRunCopy.historyStatusLabels`), never a switch of Swift literals.
+/// The sentence ratchet above cannot see the three-word labels ("In the
+/// commons", "Withdrawn by you"), so the row function is checked directly.
+#[test]
+fn history_rows_read_the_cores_status_words() {
+    let models =
+        swift_code(&read("TraceCommonsApp/PublicRunModels.swift")).replace(char::is_whitespace, "");
+    assert!(
+        models.contains("funchistoryStatusLabel(forvalue:String)->String{historyStatusLabels."),
+        "PublicRunCopy.historyStatusLabel(for:) no longer reads historyStatusLabels"
+    );
+
+    let history = read("TraceCommonsApp/Views/HistoryView.swift");
+    let start = history
+        .find("static func statusSentence(")
+        .expect("HistoryRow.statusSentence exists");
+    let end = history[start..]
+        .find("\n    }\n")
+        .map(|at| start + at)
+        .expect("statusSentence has a body");
+    let body = &history[start..end];
+    assert!(
+        swift_code(body).contains("historyStatusLabel(for:"),
+        "HistoryRow.statusSentence must read the core's table"
+    );
+    let literals = swift_literals(body);
+    for row in trace_commons_contributor::history_copy::STATUS_LABELS {
+        assert!(
+            !literals.iter().any(|lit| lit.contains(row.label)),
+            "HistoryRow.statusSentence types the core's word {:?} for {}",
+            row.label,
+            row.status
+        );
+    }
+}
+
+/// A project mode reads by the core's one name (owner decision,
+/// 2026-10-02): `ProjectCopy.modeChoiceLabel(_:)` looks the mode up in the
+/// pill's table (`project_copy::FOLDER_MODE_LABELS`, decoded as
+/// `ContributionModeCopy`) and no Swift literal in the shared label sources
+/// spells a mode -- neither the core's names nor the retired ones. The
+/// sentence ratchet above cannot see one- and two-word labels, so the
+/// sources are checked directly. Scoped to the shared label sources: the
+/// glass screens and onboarding views are being rebuilt separately.
+#[test]
+fn project_mode_names_are_the_cores() {
+    let words = swift_code(&read("TraceCommonsApp/ProjectModeWords.swift"))
+        .replace(char::is_whitespace, "");
+    assert!(
+        words.contains(
+            "ContributionModeCopy.decode(fromJSON:TCCoreCopy.contributionModeCopyJSON())"
+        ),
+        "ProjectModeWords must decode the core's pill table"
+    );
+    assert!(
+        words.contains("staticfuncmodeChoiceLabel(_mode:ProjectMode)->String{"),
+        "ProjectCopy.modeChoiceLabel(_:) must be defined beside the core's table"
+    );
+    assert!(words.contains(".label(for:mode)"));
+    let copy = swift_code(&read("TCShellCore/ContributionModeCopy.swift"))
+        .replace(char::is_whitespace, "");
+    assert!(
+        copy.contains("funclabel(formode:ProjectMode)->String?{choice(for:mode.rawValue)?.label")
+    );
+
+    let retired = [
+        "Ask me first",
+        "Contribute automatically",
+        "Never offer this one",
+        "Auto contribute",
+        "Ignored",
+    ];
+    for rel in [
+        "TCShellCore/ProjectRow.swift",
+        "TCShellCore/ContributionModeCopy.swift",
+        "TraceCommonsApp/ProjectModeWords.swift",
+    ] {
+        let literals = swift_literals(&read(rel));
+        for (mode, label) in trace_commons_contributor::project_copy::FOLDER_MODE_LABELS {
+            assert!(
+                !literals.iter().any(|lit| lit == label),
+                "{rel} types the core's name {label:?} for {mode}"
+            );
+        }
+        for word in retired {
+            assert!(
+                !literals.iter().any(|lit| lit.contains(word)),
+                "{rel} still says the retired mode name {word:?}"
+            );
+        }
     }
 }
 

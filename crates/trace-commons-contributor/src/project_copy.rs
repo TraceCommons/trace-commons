@@ -209,12 +209,54 @@ pub const CONTRIBUTION_MODE_TITLE: &str = "Contribution mode";
 /// is in force (`status.contribution_mode: "mixed"`).
 pub const CONTRIBUTION_MODE_MIXED: &str = "Mixed";
 
-/// The `notify_only` choice's label.
-pub const CONTRIBUTION_MODE_ASK_LABEL: &str = "Ask me";
-/// The `auto_upload` choice's label.
-pub const CONTRIBUTION_MODE_AUTO_LABEL: &str = "Auto contribute";
-/// The `ignore` choice's label.
+// The three folder-mode names. Owner decision, 2026-10-02: a folder mode
+// reads "Ask me", "Automatic" or "Never" on every surface -- this pill,
+// Settings, onboarding, the arming and override words -- in every shell.
+// These constants are the only spelling; every other place that names a
+// mode reads them, here or through [`FOLDER_MODE_LABELS`], which crosses
+// the C ABI as this pill's `choices` (macOS) and as the disclosure bundle's
+// `folder_mode_labels` (Windows, Tauri). Wire values do not change.
+
+/// The `auto_upload` name as a literal, so a sentence that names the mode
+/// can be built with `concat!` and still have one spelling.
+macro_rules! folder_mode_auto_label {
+    () => {
+        "Automatic"
+    };
+}
+pub(crate) use folder_mode_auto_label;
+
+/// The `notify_only` name as a literal, for the same reason.
+macro_rules! folder_mode_ask_label {
+    () => {
+        "Ask me"
+    };
+}
+pub(crate) use folder_mode_ask_label;
+
+/// The `notify_only` mode's name.
+pub const CONTRIBUTION_MODE_ASK_LABEL: &str = folder_mode_ask_label!();
+/// The `auto_upload` mode's name.
+pub const CONTRIBUTION_MODE_AUTO_LABEL: &str = folder_mode_auto_label!();
+/// The `ignore` mode's name.
 pub const CONTRIBUTION_MODE_NEVER_LABEL: &str = "Never";
+
+/// Each folder mode's name, keyed by the wire mode `set_project_mode` and
+/// `set_contribution_override` take, in the pill's order.
+pub const FOLDER_MODE_LABELS: [(&str, &str); 3] = [
+    ("notify_only", CONTRIBUTION_MODE_ASK_LABEL),
+    ("auto_upload", CONTRIBUTION_MODE_AUTO_LABEL),
+    ("ignore", CONTRIBUTION_MODE_NEVER_LABEL),
+];
+
+/// The name of a wire mode, or `None` for a mode this build does not know.
+#[must_use]
+pub fn folder_mode_label(mode: &str) -> Option<&'static str> {
+    FOLDER_MODE_LABELS
+        .iter()
+        .find(|(wire, _)| *wire == mode)
+        .map(|(_, label)| *label)
+}
 
 /// The `notify_only` sub-list line, from the
 /// menu-bar handoff. True under an "Ask me" override: no folder sends
@@ -274,7 +316,7 @@ pub const CONTRIBUTION_OVERRIDE_NEVER_BODY: &str = "Nothing is queued or sent fr
      automatically sends them without asking.";
 pub const CONTRIBUTION_OVERRIDE_NEVER_CONFIRM: &str = "Stop everywhere";
 
-/// The "Auto contribute" override's confirmation.
+/// The "Automatic" override's confirmation.
 pub const CONTRIBUTION_OVERRIDE_AUTO_TITLE: &str = "Contribute automatically from every folder?";
 /// The arming body ([`ARMING_BODY`]) for every
 /// folder at once, held to `set_contribution_override` `auto_upload`: from
@@ -307,7 +349,7 @@ pub struct ContributionModeChoice {
 pub struct ContributionModeCopy {
     pub title: &'static str,
     pub mixed: &'static str,
-    /// Ask me, Auto contribute, Never, in that order.
+    /// Ask me, Automatic, Never, in that order.
     pub choices: Vec<ContributionModeChoice>,
     pub override_active: &'static str,
     pub clear: &'static str,
@@ -399,12 +441,14 @@ pub fn contribution_override_confirm_copy(
     }
 }
 
-/// **DRAFT, NEEDS APPROVAL.** A refused Auto contribute override with no
+/// **DRAFT, NEEDS APPROVAL.** A refused Automatic override with no
 /// grant terms in force (`arming-terms-unavailable`: no contributor
 /// configuration on this Mac yet, or one that cannot be read). Nothing was
 /// recorded and no folder changed.
-pub const CONTRIBUTION_OVERRIDE_REFUSED_NO_TERMS: &str = "Auto contribute can't be turned on \
-     until this Mac is set up to contribute. Nothing changed.";
+pub const CONTRIBUTION_OVERRIDE_REFUSED_NO_TERMS: &str = concat!(
+    folder_mode_auto_label!(),
+    " can't be turned on until this Mac is set up to contribute. Nothing changed."
+);
 
 /// **DRAFT, NEEDS APPROVAL.** Every other refused or failed override write:
 /// a policy or audit write that failed (nothing changed), a queue write that
@@ -456,6 +500,84 @@ mod contribution_override_copy_tests {
         // `queue-write-failed` follows an override that took effect, so the
         // fallback must not say nothing changed.
         assert!(!CONTRIBUTION_OVERRIDE_REFUSED.contains("Nothing changed"));
+    }
+
+    /// Owner decision, 2026-10-02: a folder mode has one name on every
+    /// surface -- the pill, Settings, onboarding, the arming and override
+    /// words, in every shell -- and it is this table's. One constant per
+    /// mode, each distinct, and each reused rather than retyped.
+    #[test]
+    fn each_folder_mode_has_one_label_reused_everywhere() {
+        assert_eq!(
+            [
+                CONTRIBUTION_MODE_ASK_LABEL,
+                CONTRIBUTION_MODE_AUTO_LABEL,
+                CONTRIBUTION_MODE_NEVER_LABEL,
+            ],
+            ["Ask me", "Automatic", "Never"]
+        );
+        assert_eq!(
+            FOLDER_MODE_LABELS,
+            [
+                ("notify_only", CONTRIBUTION_MODE_ASK_LABEL),
+                ("auto_upload", CONTRIBUTION_MODE_AUTO_LABEL),
+                ("ignore", CONTRIBUTION_MODE_NEVER_LABEL),
+            ]
+        );
+        let mut labels: Vec<&str> = FOLDER_MODE_LABELS.iter().map(|(_, l)| *l).collect();
+        labels.sort_unstable();
+        labels.dedup();
+        assert_eq!(labels.len(), 3, "two modes share a label");
+        for (mode, label) in FOLDER_MODE_LABELS {
+            assert_eq!(folder_mode_label(mode), Some(label), "{mode}");
+            serde_json::from_value::<ProjectMode>(serde_json::json!(mode)).unwrap();
+        }
+        assert_eq!(folder_mode_label("ask"), None);
+        assert_eq!(folder_mode_label(""), None);
+        // The pill reads the same table.
+        let pill: Vec<(&str, &str)> = contribution_mode_copy()
+            .choices
+            .iter()
+            .map(|c| (c.mode, c.label))
+            .collect();
+        assert_eq!(pill, FOLDER_MODE_LABELS);
+        // The rewording notice's button sets ask-first, so it is the mode's
+        // name; the override's void notice names the mode it turned off.
+        assert_eq!(
+            crate::consent_copy::ASK_ME_FIRST_ACTION,
+            CONTRIBUTION_MODE_ASK_LABEL
+        );
+        assert!(crate::consent_copy::VOID_OVERRIDE_TITLE.starts_with(CONTRIBUTION_MODE_AUTO_LABEL));
+        for sentence in [
+            crate::consent_copy::VOID_OVERRIDE_TITLE,
+            crate::consent_copy::VOID_OVERRIDE_BODY,
+            crate::consent_copy::VOID_OVERRIDE_REARM,
+        ] {
+            assert!(
+                sentence.contains(CONTRIBUTION_MODE_AUTO_LABEL),
+                "{sentence}"
+            );
+        }
+        // The retired names are gone from every sentence that names a mode.
+        for sentence in [
+            crate::consent_copy::ASK_ME_FIRST_ACTION,
+            crate::consent_copy::VOID_OVERRIDE_TITLE,
+            crate::consent_copy::VOID_OVERRIDE_BODY,
+            crate::consent_copy::VOID_OVERRIDE_REARM,
+            CONTRIBUTION_MODE_ASK_LABEL,
+            CONTRIBUTION_MODE_AUTO_LABEL,
+            CONTRIBUTION_MODE_NEVER_LABEL,
+        ] {
+            for retired in [
+                "Ask me first",
+                "Auto contribute",
+                "Contribute automatically",
+                "Never offer this one",
+                "Ignored",
+            ] {
+                assert!(!sentence.contains(retired), "{sentence:?} says {retired:?}");
+            }
+        }
     }
 
     #[test]

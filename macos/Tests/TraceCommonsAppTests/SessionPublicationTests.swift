@@ -210,7 +210,11 @@ final class SessionPublicationTests: XCTestCase {
         XCTAssertEqual(copy.contributionStatusLabel(for: "quarantined"), "Held for privacy review")
         XCTAssertEqual(
             copy.contributionStatusLabel(for: "awaiting_pii_backstop"), "Waiting for privacy review")
-        XCTAssertEqual(copy.contributionStatusLabel(for: "future_state"), copy.unrecognizedValue)
+        // An unrecognised status reads as the core's history label, the same
+        // words GTK, Windows and Tauri show -- not "Unrecognized".
+        XCTAssertEqual(copy.contributionStatusUnavailable, "Status unavailable")
+        XCTAssertEqual(
+            copy.contributionStatusLabel(for: "future_state"), copy.contributionStatusUnavailable)
         XCTAssertEqual(copy.permittedUseChoices.count, 6)
         XCTAssertEqual(copy.permittedUseLabel(for: "model_training"), "Model training")
         XCTAssertEqual(copy.permittedUseLabel(for: "future_use"), copy.unrecognizedValue)

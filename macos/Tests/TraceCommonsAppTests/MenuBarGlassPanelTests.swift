@@ -195,7 +195,7 @@ final class MenuBarGlassPanelTests: XCTestCase {
         let client = SampleDaemonClient(set)
         let store = MenuPanelStore(client: client)
         // A fresh contributor directory with no configuration yet: the core
-        // words Auto contribute's arming disclosure for it.
+        // words Automatic's arming disclosure for it.
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("tc-pill-\(UUID().uuidString)")
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: dir) }
@@ -228,7 +228,7 @@ final class MenuBarGlassPanelTests: XCTestCase {
         XCTAssertNil(store.status?.contributionOverride)
     }
 
-    /// Auto contribute's confirmation carries the arming disclosure, and its
+    /// Automatic's confirmation carries the arming disclosure, and its
     /// confirm sends `confirm: true`.
     func test_autoContributeConfirmsWithTheArmingDisclosure() async throws {
         let (store, client) = await loadedStore(.normalDay)
@@ -273,7 +273,7 @@ final class MenuBarGlassPanelTests: XCTestCase {
     }
 
     /// Without a configuration the core can word the arming disclosure for,
-    /// Auto contribute shows no confirmation and so cannot be confirmed: the
+    /// Automatic shows no confirmation and so cannot be confirmed: the
     /// refusal's line instead, and nothing is sent.
     func test_autoContributeWithoutItsDisclosureCannotBeConfirmed() async throws {
         let (store, client) = await loadedStore(.normalDay)

@@ -58,7 +58,7 @@ public class ShellWordingTests
             { "TraceCommons.Interop/ArmingOffer.cs", 4 },
             { "TraceCommons.Interop/CorrectionCopy.cs", 4 },
             { "TraceCommons.Interop/HealthCopy.cs", 22 },
-            { "TraceCommons.Interop/HistoryCopy.cs", 30 },
+            { "TraceCommons.Interop/HistoryCopy.cs", 24 },
             { "TraceCommons.Interop/OriginalSearchOutcome.cs", 4 },
             // PendingInviteActivation.cs predates this guard: it merged to
             // main before the baseline landed, so its three notice sentences
@@ -79,7 +79,7 @@ public class ShellWordingTests
             { "TraceCommons.Interop/UnresolvedBucketCopy.cs", 3 },
             { "TraceCommons.Interop/UpdateProtocol.cs", 10 },
             { "TraceCommons.Interop/VerdictCopy.cs", 4 },
-            { "TraceCommons.Interop/WatchCopy.cs", 8 },
+            { "TraceCommons.Interop/WatchCopy.cs", 7 },
             { "TraceCommons.Interop/WeekBandCopy.cs", 1 },
             { "TraceCommons.Interop/WithdrawCopy.cs", 29 },
 
@@ -88,7 +88,7 @@ public class ShellWordingTests
             // guard already watches for the witness row specifically; the rest
             // of its wording is unmoved. Four of its sentences moved into
             // WatchCopy.cs, which is why this entry ratcheted down.
-            { "TraceCommons.App/ViewModels/ContributorSettingsViewModel.cs", 18 },
+            { "TraceCommons.App/ViewModels/ContributorSettingsViewModel.cs", 15 },
             { "TraceCommons.App/ViewModels/HistoryViewModel.cs", 4 },
             { "TraceCommons.App/ViewModels/MainViewModel.cs", 18 },
             { "TraceCommons.App/ViewModels/OnboardingViewModel.cs", 6 },
@@ -98,7 +98,9 @@ public class ShellWordingTests
 
             // Window and control code-behind: dialog bodies and one fallback
             // label, written at the call site.
-            { "TraceCommons.App/MainWindow.xaml.cs", 3 },
+            // Lowered from 3: the quit prompt is now the core's
+            // (tc_quit_prompt_json).
+            { "TraceCommons.App/MainWindow.xaml.cs", 1 },
             { "TraceCommons.App/StartupRegistration.cs", 4 },
             { "TraceCommons.App/TrayIcon.cs", 3 },
 

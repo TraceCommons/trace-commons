@@ -291,18 +291,33 @@ public static class WithdrawCopy
     }
 
     /// <summary>
+    /// The statuses a contribution can still be withdrawn from: the macOS
+    /// app's allowlist (<c>ContributionStatusPresentation.openValues</c> in
+    /// <c>PublicRunModels.swift</c>), which is the parity target.
+    /// </summary>
+    private static readonly string[] WithdrawableStatuses =
+    {
+        "submitted", "received", "accepted", "quarantined", "awaiting_pii_backstop", "rejected",
+    };
+
+    /// <summary>
     /// Whether a record gets a withdraw button.
     /// </summary>
     /// <remarks>
-    /// An already-withdrawn record does not: there is nothing left to
-    /// withdraw, and it stays on the list reading as withdrawn rather than
-    /// being dropped or re-labelled. A record carrying no
-    /// <c>submission_id</c> does not either -- <c>withdraw</c> takes exactly
-    /// that id and nothing else, so the button would have nothing to send and
-    /// would fail for a reason the contributor could do nothing about.
+    /// Only a record in one of <see cref="WithdrawableStatuses"/> does, or
+    /// one with no status reported yet, which macOS also treats as open. The
+    /// other statuses the core names -- withdrawn, revoked, purged, expired --
+    /// are closed: an already-withdrawn record stays on the list reading as
+    /// withdrawn rather than being dropped or re-labelled. A status this build
+    /// does not recognise is closed too, as on macOS: it may come from a
+    /// newer daemon, and offering an action on a state nobody here
+    /// understands is failing open. A record carrying no <c>submission_id</c>
+    /// gets no button either -- <c>withdraw</c> takes exactly that id and
+    /// nothing else, so the button would have nothing to send and would fail
+    /// for a reason the contributor could do nothing about.
     /// </remarks>
     public static bool OffersWithdrawal(string? status, string? submissionId) =>
-        !string.Equals(status, HistoryCopy.StatusWithdrawn, StringComparison.Ordinal)
+        (status is null || Array.IndexOf(WithdrawableStatuses, status) >= 0)
         && !string.IsNullOrWhiteSpace(submissionId);
 }
 
