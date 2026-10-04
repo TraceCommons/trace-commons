@@ -77,6 +77,7 @@ final class SettingsSectionsTests: XCTestCase {
 
     /// Startup no longer hides Notifications and Updates behind its row.
     func test_notificationsAndUpdatesAreTheirOwnSections() {
+        XCTAssertEqual(SettingsContent.parts(for: .connection), [.connection, .contributionAccount])
         XCTAssertEqual(SettingsContent.parts(for: .startup), [.loginItem])
         XCTAssertEqual(SettingsContent.parts(for: .notifications), [.notifications])
         XCTAssertEqual(SettingsContent.parts(for: .updates), [.updates])

@@ -17,6 +17,18 @@ namespace TraceCommons.Interop;
 /// </summary>
 public sealed record PrivateInferenceCopy
 {
+    [JsonPropertyName("account_contribution_refresh")]
+    public string AccountContributionRefresh { get; init; } = string.Empty;
+
+    [JsonPropertyName("account_contribution_checking")]
+    public string AccountContributionChecking { get; init; } = string.Empty;
+
+    [JsonPropertyName("account_contribution_unavailable")]
+    public string AccountContributionUnavailable { get; init; } = string.Empty;
+
+    [JsonPropertyName("account_contribution_pending_credit")]
+    public string AccountContributionPendingCredit { get; init; } = string.Empty;
+
     [JsonPropertyName("offer_title")]
     public string OfferTitle { get; init; } = string.Empty;
 

@@ -13,8 +13,15 @@ DO $$ BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='trace_account_trust_evaluator') THEN
         CREATE ROLE trace_account_trust_evaluator NOLOGIN NOSUPERUSER NOBYPASSRLS;
     END IF;
+    -- CREATEROLE cannot restate NOSUPERUSER or NOBYPASSRLS in ALTER ROLE.
+    -- Refuse an elevated existing role instead of relying on a superuser to
+    -- normalize it: these roles must never bypass the tenant policies.
+    IF EXISTS (SELECT 1 FROM pg_roles
+               WHERE rolname = 'trace_account_trust_evaluator' AND (rolsuper OR rolbypassrls)) THEN
+        RAISE EXCEPTION 'trace_account_trust_evaluator must be NOSUPERUSER NOBYPASSRLS';
+    END IF;
 END $$;
-ALTER ROLE trace_account_trust_evaluator NOLOGIN NOSUPERUSER NOBYPASSRLS;
+ALTER ROLE trace_account_trust_evaluator NOLOGIN;
 GRANT USAGE ON SCHEMA public TO trace_account_trust_evaluator;
 -- Read seams only: this role is deliberately not a trust worker or fact recorder.
 GRANT EXECUTE ON FUNCTION trace_account_trust_worker_accounts(TEXT,UUID,BIGINT),
@@ -179,8 +186,15 @@ DO $$ BEGIN
     IF NOT EXISTS(SELECT 1 FROM pg_roles WHERE rolname='trace_account_trust_input_guard') THEN
         CREATE ROLE trace_account_trust_input_guard NOLOGIN NOSUPERUSER NOBYPASSRLS;
     END IF;
+    -- CREATEROLE cannot restate NOSUPERUSER or NOBYPASSRLS in ALTER ROLE.
+    -- Refuse an elevated existing role instead of relying on a superuser to
+    -- normalize it: these roles must never bypass the tenant policies.
+    IF EXISTS (SELECT 1 FROM pg_roles
+               WHERE rolname = 'trace_account_trust_input_guard' AND (rolsuper OR rolbypassrls)) THEN
+        RAISE EXCEPTION 'trace_account_trust_input_guard must be NOSUPERUSER NOBYPASSRLS';
+    END IF;
 END $$;
-ALTER ROLE trace_account_trust_input_guard NOLOGIN NOSUPERUSER NOBYPASSRLS;
+ALTER ROLE trace_account_trust_input_guard NOLOGIN;
 GRANT trace_account_trust_input_guard,trace_account_trust_evaluation_guard TO CURRENT_USER;
 GRANT USAGE ON SCHEMA public TO trace_account_trust_input_guard;
 CREATE TABLE trace_account_trust_dependency_locks (
