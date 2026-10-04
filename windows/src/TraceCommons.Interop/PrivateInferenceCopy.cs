@@ -662,6 +662,10 @@ public sealed record PrivateInferenceCopy
     public string[] Sentences =>
         new[]
         {
+            AccountContributionRefresh,
+            AccountContributionChecking,
+            AccountContributionUnavailable,
+            AccountContributionPendingCredit,
             OfferTitle,
             OfferWhat,
             OfferExposure,

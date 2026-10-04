@@ -298,6 +298,8 @@ extension DaemonData {
         public let schemaVersion: String?
         public let loggedIn: Bool?
         public let tenantId: String?
+        /// Opaque account binding supplied by the daemon; absent before account admission.
+        public let accountScope: String?
         public let consentScopes: [String]?
         public let paused: Bool?
         /// Every `Pending` entry. NOT the badge: never draw a count from it.
@@ -336,6 +338,7 @@ extension DaemonData {
             case schemaVersion = "schema_version"
             case loggedIn = "logged_in"
             case tenantId = "tenant_id"
+            case accountScope = "account_scope"
             case consentScopes = "consent_scopes"
             case paused
             case queueDepth = "queue_depth"
