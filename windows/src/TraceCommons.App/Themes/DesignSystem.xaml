@@ -9,6 +9,13 @@
     invented; where the spec is silent the deviation is called out in a comment
     at the point it occurs.
 
+    The brand accent and the status colours are the exception: they are
+    generated into BrandTokens.xaml from design-tokens/glass.tokens.json by
+    scripts/design-tokens/generate.py, and merged below. Purple everywhere is
+    the owner's decision of 2026-10-02, provisional until the designer's final
+    brand lands; it replaces the green and the mint this file used to pin.
+    Edit the JSON and regenerate rather than writing a brand hex here.
+
     Two conventions worth knowing before editing:
 
     1. WinUI names the dark theme dictionary "Default", not "Dark". A
@@ -22,6 +29,12 @@
 <ResourceDictionary
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <!-- Merged here rather than in App.xaml so that every style below resolves
+         the brand keys from this dictionary, whatever merges it. -->
+    <ResourceDictionary.MergedDictionaries>
+        <ResourceDictionary Source="ms-appx:///Themes/BrandTokens.xaml" />
+    </ResourceDictionary.MergedDictionaries>
 
     <ResourceDictionary.ThemeDictionaries>
 
@@ -48,15 +61,16 @@
             <SolidColorBrush x:Key="TcInkSecondaryBrush" Color="#A6AC9F" />
             <!-- Contrast-corrected; see the note in the light dictionary. -->
             <SolidColorBrush x:Key="TcInkTertiaryBrush" Color="#878D81" />
-            <SolidColorBrush x:Key="TcOnAccentBrush" Color="#0B1F19" />
 
-            <!-- Green: "good standing". A deliberate three-step ramp - brand,
-                 darkened for fills, darkened again for small text. -->
-            <SolidColorBrush x:Key="TcGreenBrandBrush" Color="#3FBE9A" />
-            <SolidColorBrush x:Key="TcGreenFillBrush" Color="#3FBE9A" />
-            <SolidColorBrush x:Key="TcGreenTextBrush" Color="#5CD3AF" />
-            <SolidColorBrush x:Key="TcGreenChipBorderBrush" Color="#803FBE9A" />
-            <SolidColorBrush x:Key="TcActiveTabBorderBrush" Color="#993FBE9A" />
+            <!-- The accent (TcAccent*, TcGreen*, TcOnAccentBrush,
+                 TcActiveTabBorderBrush, TcMarkAccentBrush) and the status
+                 colours (TcStatus*, TcGold*, TcCoral*) are in BrandTokens.xaml,
+                 generated from the design tokens. Purple, where this used to
+                 pin the green. The TcGreen names predate the purple and are
+                 kept because the views bind to them. In dark the fill purple
+                 (#8A3DFF) carries the primary button's white label; a bar or
+                 border drawn straight on the chrome takes the lighter line
+                 purple instead, since the fill measures under 3:1 there. -->
 
             <!--
                 Blue: "held for privacy review". The mockups carry both
@@ -67,13 +81,11 @@
             -->
             <SolidColorBrush x:Key="TcBlueBrandBrush" Color="#7FA0EC" />
 
-            <!-- The mark's own palette, deliberately not the semantic accents.
-                 The mark converged on the site's single accent over ink; green
-                 and blue did not move with it and still mean "good standing"
-                 and "held or ranked" everywhere else. Mirrors
-                 Scheme::bracket_open/bracket_close/surface in the
-                 trace-commons-mark crate. Change them together. -->
-            <SolidColorBrush x:Key="TcMarkAccentBrush" Color="#00D4AA" />
+            <!-- The mark's ink and field. Its accent bracket is the brand purple,
+                 TcMarkAccentBrush in BrandTokens.xaml. That no longer mirrors
+                 Scheme::bracket_open in the trace-commons-mark crate, which
+                 still carries the site mint for the macOS shell and the icon
+                 pipeline; the two converge when the final brand lands. -->
             <SolidColorBrush x:Key="TcMarkInkBrush" Color="#FFFFFF" />
             <SolidColorBrush x:Key="TcMarkFieldBrush" Color="#000000" />
             <SolidColorBrush x:Key="TcBlueIconBrush" Color="#9DB6F1" />
@@ -81,24 +93,14 @@
                  45% alpha the light palette uses, over the dark blue. -->
             <SolidColorBrush x:Key="TcBlueChipBorderBrush" Color="#737FA0EC" />
 
-            <!-- Gold: "weigh this". -->
-            <SolidColorBrush x:Key="TcGoldBrandBrush" Color="#DCAA43" />
-            <SolidColorBrush x:Key="TcGoldTextBrush" Color="#E2B75C" />
+            <!-- Gold: "weigh this". The brand, text and attention-border
+                 golds are the statusAsk tokens, in BrandTokens.xaml; the
+                 highlight wash stays here with the redaction chip it sits
+                 beside. -->
             <SolidColorBrush x:Key="TcGoldHighlightBrush" Color="#52DCAA43" />
-            <SolidColorBrush x:Key="TcGoldAttentionBorderBrush" Color="#99DCAA43" />
 
-            <!-- Coral: "refused". Spec 7.2 records that no dark values were
-                 ever drawn, because History has no dark frame. Carrying the
-                 LIGHT hues through unchanged was the first instinct here and
-                 it was wrong: #B8483B on the dark card measures 3.02:1, under
-                 the 4.5:1 floor every other ink in this file clears, and it
-                 disagreed with the other two clients, which both derived a
-                 lifted dark coral rather than reusing the light one.
-                 These are macOS's and Linux's values, so the three agree:
-                 #F79C8F measures 7.57:1 on the card and 7.47:1 on the ground,
-                 and the brand hue clears the 3:1 bar a border needs. -->
-            <SolidColorBrush x:Key="TcCoralBrandBrush" Color="#F2887A" />
-            <SolidColorBrush x:Key="TcCoralTextBrush" Color="#F79C8F" />
+            <!-- Coral: "refused". The statusOutside tokens, in
+                 BrandTokens.xaml. -->
 
             <!-- Redaction marker chip in the transcript renderer. -->
             <SolidColorBrush x:Key="TcRedactionChipBackgroundBrush" Color="#4A3C18" />
@@ -136,36 +138,19 @@
                 strip stays on ink.secondary rather than this token.
             -->
             <SolidColorBrush x:Key="TcInkTertiaryBrush" Color="#6D7269" />
-            <SolidColorBrush x:Key="TcOnAccentBrush" Color="#FEFEFE" />
 
-            <SolidColorBrush x:Key="TcGreenBrandBrush" Color="#178F70" />
-            <SolidColorBrush x:Key="TcGreenFillBrush" Color="#137C61" />
-            <SolidColorBrush x:Key="TcGreenTextBrush" Color="#0F7256" />
-            <SolidColorBrush x:Key="TcGreenChipBorderBrush" Color="#73178F70" />
-            <SolidColorBrush x:Key="TcActiveTabBorderBrush" Color="#8C178F70" />
+            <!-- Accent and status colours: BrandTokens.xaml. -->
 
             <!-- #315FBA, not #315FBB. See the note in the dark dictionary. -->
             <SolidColorBrush x:Key="TcBlueBrandBrush" Color="#315FBA" />
 
-            <!-- The mark's own palette, deliberately not the semantic accents.
-                 The mark converged on the site's single accent over ink; green
-                 and blue did not move with it and still mean "good standing"
-                 and "held or ranked" everywhere else. Mirrors
-                 Scheme::bracket_open/bracket_close/surface in the
-                 trace-commons-mark crate. Change them together. -->
-            <SolidColorBrush x:Key="TcMarkAccentBrush" Color="#00D4AA" />
+            <!-- The mark's ink and field; see the note in the dark dictionary. -->
             <SolidColorBrush x:Key="TcMarkInkBrush" Color="#000000" />
             <SolidColorBrush x:Key="TcMarkFieldBrush" Color="#FFFFFF" />
             <SolidColorBrush x:Key="TcBlueIconBrush" Color="#315FBA" />
             <SolidColorBrush x:Key="TcBlueChipBorderBrush" Color="#73315FBA" />
 
-            <SolidColorBrush x:Key="TcGoldBrandBrush" Color="#B9821F" />
-            <SolidColorBrush x:Key="TcGoldTextBrush" Color="#8A5F12" />
             <SolidColorBrush x:Key="TcGoldHighlightBrush" Color="#47B9821F" />
-            <SolidColorBrush x:Key="TcGoldAttentionBorderBrush" Color="#8CB9821F" />
-
-            <SolidColorBrush x:Key="TcCoralBrandBrush" Color="#D65D4F" />
-            <SolidColorBrush x:Key="TcCoralTextBrush" Color="#B8483B" />
 
             <SolidColorBrush x:Key="TcRedactionChipBackgroundBrush" Color="#f3e3c0" />
             <SolidColorBrush x:Key="TcRedactionChipForegroundBrush" Color="#202426" />
@@ -207,28 +192,17 @@
             <StaticResource x:Key="TcInkPrimaryBrush" ResourceKey="TextFillColorPrimaryBrush" />
             <StaticResource x:Key="TcInkSecondaryBrush" ResourceKey="TextFillColorSecondaryBrush" />
             <StaticResource x:Key="TcInkTertiaryBrush" ResourceKey="TextFillColorTertiaryBrush" />
-            <StaticResource x:Key="TcOnAccentBrush" ResourceKey="ApplicationPageBackgroundThemeBrush" />
 
-            <StaticResource x:Key="TcGreenBrandBrush" ResourceKey="TextFillColorPrimaryBrush" />
-            <StaticResource x:Key="TcGreenFillBrush" ResourceKey="TextFillColorPrimaryBrush" />
-            <StaticResource x:Key="TcGreenTextBrush" ResourceKey="TextFillColorPrimaryBrush" />
-            <StaticResource x:Key="TcGreenChipBorderBrush" ResourceKey="TextFillColorPrimaryBrush" />
-            <StaticResource x:Key="TcActiveTabBorderBrush" ResourceKey="TextFillColorPrimaryBrush" />
+            <!-- The accent and status keys alias the same system brushes in
+                 BrandTokens.xaml. -->
 
             <StaticResource x:Key="TcBlueBrandBrush" ResourceKey="TextFillColorPrimaryBrush" />
-            <StaticResource x:Key="TcMarkAccentBrush" ResourceKey="TextFillColorPrimaryBrush" />
             <StaticResource x:Key="TcMarkInkBrush" ResourceKey="TextFillColorPrimaryBrush" />
             <StaticResource x:Key="TcMarkFieldBrush" ResourceKey="ApplicationPageBackgroundThemeBrush" />
             <StaticResource x:Key="TcBlueIconBrush" ResourceKey="TextFillColorPrimaryBrush" />
             <StaticResource x:Key="TcBlueChipBorderBrush" ResourceKey="TextFillColorPrimaryBrush" />
 
-            <StaticResource x:Key="TcGoldBrandBrush" ResourceKey="TextFillColorPrimaryBrush" />
-            <StaticResource x:Key="TcGoldTextBrush" ResourceKey="TextFillColorPrimaryBrush" />
             <StaticResource x:Key="TcGoldHighlightBrush" ResourceKey="TextFillColorPrimaryBrush" />
-            <StaticResource x:Key="TcGoldAttentionBorderBrush" ResourceKey="TextFillColorPrimaryBrush" />
-
-            <StaticResource x:Key="TcCoralBrandBrush" ResourceKey="TextFillColorPrimaryBrush" />
-            <StaticResource x:Key="TcCoralTextBrush" ResourceKey="TextFillColorPrimaryBrush" />
 
             <StaticResource x:Key="TcRedactionChipBackgroundBrush" ResourceKey="ApplicationPageBackgroundThemeBrush" />
             <StaticResource x:Key="TcRedactionChipForegroundBrush" ResourceKey="TextFillColorPrimaryBrush" />
@@ -472,8 +446,10 @@
         <Setter Property="Foreground" Value="{ThemeResource TcInkPrimaryBrush}" />
     </Style>
 
+    <!-- The filled primary action: the brand purple under a white label, a
+         measured pair (6.9:1 light, 5.0:1 dark; BrandTokensTests). -->
     <Style x:Key="TcPrimaryButtonStyle" TargetType="Button" BasedOn="{StaticResource DefaultButtonStyle}">
-        <Setter Property="Background" Value="{ThemeResource TcGreenFillBrush}" />
+        <Setter Property="Background" Value="{ThemeResource TcAccentBrush}" />
         <Setter Property="BorderThickness" Value="0" />
         <Setter Property="CornerRadius" Value="{StaticResource TcControlCornerRadius}" />
         <Setter Property="Padding" Value="11,4,11,4" />

@@ -25,7 +25,7 @@ final class SwitchOnNoticesTests: XCTestCase {
     private let rewordedNotice = """
     {"title":"t","body":"b","now_heading":"h","scope":"s","limit":"l",
      "no_review":"n","acknowledge":"Got it",
-     "ask_first_action":"Ask me first","ask_first_failed":"f"}
+     "ask_first_action":"Ask me","ask_first_failed":"f"}
     """
 
     func testTheRewordedNoticeDecodesWholeAndTargetsTheElementsProject() throws {
@@ -33,7 +33,7 @@ final class SwitchOnNoticesTests: XCTestCase {
         let wire = try JSONDecoder().decode(ArmingRewordingWire.self, from: Data(rewordingElement.utf8))
         XCTAssertEqual(notice.askFirstTarget(for: wire), "3f1c")
         let noButton = rewordedNotice
-            .replacingOccurrences(of: #""ask_first_action":"Ask me first""#, with: #""ask_first_action":null"#)
+            .replacingOccurrences(of: #""ask_first_action":"Ask me""#, with: #""ask_first_action":null"#)
             .replacingOccurrences(of: #""ask_first_failed":"f""#, with: #""ask_first_failed":null"#)
         let withheld = try XCTUnwrap(ArmingRewordedNotice.decode(fromJSON: noButton))
         XCTAssertNil(withheld.askFirstTarget(for: wire))
@@ -71,13 +71,13 @@ final class SwitchOnNoticesTests: XCTestCase {
     private let heldNotice = """
     {"title":"t","body":"b","reasons":["r"],"release":"r2","ask_first":"a",
      "projects":[{"project_id":"3f1c","line":"api: 3 sessions waiting",
-                  "ask_first_action":"Ask me first","ask_first_failed":"f"}]}
+                  "ask_first_action":"Ask me","ask_first_failed":"f"}]}
     """
 
     func testTheHeldNoticeDecodesWhole() throws {
         let notice = try XCTUnwrap(GateHeldNotice.decode(fromJSON: heldNotice))
         XCTAssertEqual(notice.projects.first?.projectId, "3f1c")
-        XCTAssertEqual(notice.projects.first?.askFirstAction, "Ask me first")
+        XCTAssertEqual(notice.projects.first?.askFirstAction, "Ask me")
     }
 
     func testAHeldNoticeMissingASentenceIsRefused() throws {

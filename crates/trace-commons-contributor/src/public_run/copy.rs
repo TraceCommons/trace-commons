@@ -123,6 +123,12 @@ pub struct PublicRunCopy {
     /// (`history_copy::STATUS_UNAVAILABLE`), never `unrecognized_value` and
     /// never the raw status.
     pub contribution_status_unavailable: &'static str,
+    /// History's word for each contribution status
+    /// (`history_copy::STATUS_LABELS`): the label a History row or a
+    /// monitor row shows, where `contribution_status_choices` is the
+    /// session-detail table. A status not in it is
+    /// `contribution_status_unavailable`.
+    pub history_status_labels: [PublicRunValueLabel; 11],
     pub permitted_use_choices: [PublicRunValueLabel; 6],
     pub reuse_permissions: [PublicRunReuseChoice; 2],
 }
@@ -280,7 +286,7 @@ pub fn public_run_copy() -> PublicRunCopy {
             },
             PublicRunValueLabel {
                 value: "received",
-                label: "Received",
+                label: crate::history_copy::RECEIVED,
             },
             PublicRunValueLabel {
                 value: "accepted",
@@ -288,34 +294,38 @@ pub fn public_run_copy() -> PublicRunCopy {
             },
             PublicRunValueLabel {
                 value: "quarantined",
-                label: "Held for privacy review",
+                label: crate::history_copy::HELD_FOR_PRIVACY_REVIEW,
             },
             PublicRunValueLabel {
                 value: "awaiting_pii_backstop",
-                label: "Waiting for privacy review",
+                label: crate::history_copy::WAITING_FOR_PRIVACY_REVIEW,
             },
             PublicRunValueLabel {
                 value: "rejected",
-                label: "Rejected",
+                label: crate::history_copy::REJECTED,
             },
             PublicRunValueLabel {
                 value: "revoked",
-                label: "Withdrawn",
+                label: crate::history_copy::WITHDRAWN,
             },
             PublicRunValueLabel {
                 value: "withdrawn",
-                label: "Withdrawn",
+                label: crate::history_copy::WITHDRAWN,
             },
             PublicRunValueLabel {
                 value: "expired",
-                label: "Expired",
+                label: crate::history_copy::EXPIRED,
             },
             PublicRunValueLabel {
                 value: "purged",
-                label: "Purged",
+                label: crate::history_copy::PURGED,
             },
         ],
         contribution_status_unavailable: crate::history_copy::STATUS_UNAVAILABLE,
+        history_status_labels: crate::history_copy::STATUS_LABELS.map(|row| PublicRunValueLabel {
+            value: row.status,
+            label: row.label,
+        }),
         permitted_use_choices: [
             PublicRunValueLabel {
                 value: "debugging",
@@ -491,6 +501,14 @@ mod tests {
             crate::history_copy::STATUS_UNAVAILABLE
         );
         assert_eq!(copy.permitted_use_choices.len(), 6);
+        // History's table is the core's, row for row.
+        for (exported, row) in copy
+            .history_status_labels
+            .iter()
+            .zip(crate::history_copy::STATUS_LABELS)
+        {
+            assert_eq!((exported.value, exported.label), (row.status, row.label));
+        }
         assert!(
             copy.contribution_status_choices
                 .iter()

@@ -13,7 +13,7 @@ final class ContributionModeCopyExportTests: XCTestCase {
         XCTAssertEqual(copy.choices.map(\.mode), ["notify_only", "auto_upload", "ignore"])
     }
 
-    /// Each choice's confirmation crosses whole; Auto contribute's carries
+    /// Each choice's confirmation crosses whole; Automatic's carries
     /// the arming disclosure, and is not given without a configuration
     /// directory to read it for.
     func testEveryChoiceHasItsCoreConfirmation() throws {

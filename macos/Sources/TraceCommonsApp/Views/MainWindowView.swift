@@ -983,7 +983,7 @@ struct ArmingRewordedNoticeCard: View {
     let notice: ArmingRewordedNotice
     let refused: Bool
     let onAcknowledge: () -> Void
-    /// Present only when the Rust offered "Ask me first" and the element
+    /// Present only when the Rust offered "Ask me" and the element
     /// names a project.
     let onAskFirst: (() -> Void)?
 

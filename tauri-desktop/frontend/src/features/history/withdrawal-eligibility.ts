@@ -22,26 +22,24 @@ export function canWithdrawStatus(status: string) {
 export type SharedHistoryStatusCopy = {
   status_awaiting_pii_backstop: string;
   status_unavailable: string;
+  /** The core's word for each wire status (`history_copy::STATUS_LABELS`). */
+  status_labels: Record<string, string>;
 };
 
+// History's word for a status is the core's (`history_copy::STATUS_LABELS`,
+// carried as the disclosure bundle's `history_ui.status_labels`), the table
+// every shell reads. A status it does not name reads as the core's
+// `history_copy::STATUS_UNAVAILABLE`. Until the shared copy arrives there is
+// no label, rather than a typed one.
 export function historyStatusLabel(
   status: string,
   shared?: SharedHistoryStatusCopy | null,
 ) {
-  const labels: Record<string, string> = {
-    accepted: "In the commons",
-    submitted: "Waiting to be scored",
-    quarantined: "Held for privacy review",
-    withdrawn: "Withdrawn by you",
-    revoked: "No longer available",
-    purged: "Removed",
-    expired: "Expired",
-  };
-  if (status === "awaiting_pii_backstop" && shared) {
-    return shared.status_awaiting_pii_backstop;
+  if (!shared) {
+    return null;
   }
-  // An unrecognised status reads as the core's label
-  // (`history_copy::STATUS_UNAVAILABLE`), the words every shell shows. Until
-  // the shared copy arrives there is no label, rather than a typed one.
-  return labels[status] ?? shared?.status_unavailable ?? null;
+  // Own keys only: "constructor" is not a status.
+  return Object.prototype.hasOwnProperty.call(shared.status_labels, status)
+    ? shared.status_labels[status]
+    : shared.status_unavailable;
 }
