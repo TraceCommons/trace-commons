@@ -10,6 +10,10 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug, Error)]
 pub enum Error {
+    /// Body exceeded the caller's opt-in byte limit.
+    #[error("response body exceeds the configured byte limit")]
+    ResponseTooLarge { limit: usize },
+
     /// Bearer-token env var not set or empty.
     #[error("{env_var} is not set; refusing to call trace-commons API without credentials")]
     BearerMissing { env_var: String },
@@ -112,6 +116,7 @@ impl Error {
     /// Convenience for tests + diagnostics: short kind tag.
     pub fn kind(&self) -> &'static str {
         match self {
+            Error::ResponseTooLarge { .. } => "response-too-large",
             Error::BearerMissing { .. } => "bearer-missing",
             Error::InvalidEndpoint { .. } => "invalid-endpoint",
             Error::HostNotAllowed { .. } => "host-not-allowed",
@@ -131,6 +136,9 @@ impl Error {
     /// the full Debug form is for verbose logging only.
     pub fn user_diagnostic(&self) -> String {
         match self {
+            Error::ResponseTooLarge { .. } => {
+                "response body exceeds the configured byte limit".into()
+            }
             Error::BearerMissing { env_var } => format!("credential refused: ${env_var} not set"),
             Error::InvalidEndpoint { endpoint, .. } => format!(
                 "endpoint URL is malformed: {}",

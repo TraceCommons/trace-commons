@@ -528,17 +528,58 @@ pub fn handle_destinations(shared: &DaemonShared, req: &Request) -> Response {
                 ProjectMode::Ignore => (a, n, i + 1),
             })
     };
+    let rows = ledger_rows(shared);
+    let ledger_readable = rows.is_some();
     let facts = DestinationFacts {
         route,
         private_ai: shared.private_inference_label(),
         watched,
         declarations,
         harness,
-        rows: ledger_rows(shared),
+        rows,
         sessions: window_sessions(shared),
         folders,
     };
-    Response::ok(req.id, destinations(&facts))
+    let mut result = destinations(&facts);
+    result["ledger_readable"] = serde_json::json!(ledger_readable);
+    let mut observed_destinations = Vec::new();
+    if ledger_readable {
+        for route in [ROUTE_ROUTED, ROUTE_OUTSIDE, UNKNOWN] {
+            if facts
+                .rows
+                .iter()
+                .flatten()
+                .any(|row| route_label(row) == route)
+            {
+                observed_destinations.push(serde_json::json!({
+                    "route": route,
+                    "to": if route == ROUTE_ROUTED { PARTY_NEAR_AI } else { UNKNOWN },
+                    "via": "local_proxy", "basis": BASIS_OBSERVED,
+                }));
+            }
+        }
+    }
+    result["observed_destinations"] = serde_json::json!(observed_destinations);
+    let hosting = super::network_data::handle_private_ai(shared, req)
+        .result
+        .expect("private AI read returns a result");
+    let state = hosting["state"].as_str();
+    let owned = match state {
+        Some(
+            super::private_inference::LABEL_RUNNING
+            | super::private_inference::LABEL_RUNNING_NO_BACKENDS
+            | super::private_inference::LABEL_RUNNING_ANSWERED_ELSEWHERE
+            | super::private_inference::LABEL_RUNNING_DESTINATION_UNKNOWN,
+        ) => Some(true),
+        Some(super::private_inference::LABEL_OFF) => Some(false),
+        _ => None,
+    };
+    result["hub"] = serde_json::json!({
+        "kind": "owned_loopback", "state": hosting["state"], "port": hosting["port"],
+        "owned": owned,
+        "basis": if owned == Some(true) { BASIS_CONFIGURED } else { UNKNOWN },
+    });
+    Response::ok(req.id, result)
 }
 
 /// The sessions the window saw, from the queue and the history cache.
@@ -1658,7 +1699,7 @@ mod tests {
                 .contains(&serde_json::json!("inference_call_added")),
             "hello must list the event a shell subscribes for"
         );
-        assert!(!super::super::ipc::METHODS.contains(&"inference_call_proof"));
+        assert!(super::super::ipc::METHODS.contains(&"inference_call_proof"));
         let (_dir, s) = shared();
         let r = super::super::ipc::handle_request(
             &s,
@@ -1760,6 +1801,106 @@ mod tests {
         let value = r.result.expect("destinations");
         assert_eq!(tool(&value, "claude-code")["counts"]["sessions"], 1);
         assert_eq!(tool(&value, "codex")["counts"]["sessions"], 0);
+    }
+
+    #[test]
+    fn stored_call_proof_lookup_preserves_every_label_without_body_reads() {
+        let (_dir, s) = shared();
+        let mut rows: Vec<_> = ProofStatus::ALL
+            .into_iter()
+            .enumerate()
+            .map(|(i, proof)| {
+                let mut r = recent(i as i64 + 1);
+                r.proof = Some(proof);
+                r
+            })
+            .collect();
+        let mut unknown = recent(100);
+        unknown.proof = None;
+        rows.push(unknown);
+        s.install_routing_ledger_for_test(
+            crate::routing::ironwire::IronWireLedger::with_rows_for_test(rows),
+        );
+        for (i, proof) in ProofStatus::ALL.into_iter().enumerate() {
+            let response = super::super::ipc::handle_local(
+                &s,
+                "inference_call_proof",
+                serde_json::json!({"call_id":i + 1}),
+            );
+            let value = response.result.unwrap();
+            assert_eq!(value["proof"], proof.as_str());
+            assert_eq!(value["found"], true);
+            assert_eq!(value["readable"], true);
+            assert!(value["checked_at"].is_null());
+            assert!(value["checks"].is_null());
+            assert!(!value.to_string().contains(BODY_REF));
+        }
+        let value = super::super::ipc::handle_local(
+            &s,
+            "inference_call_proof",
+            serde_json::json!({"call_id":100}),
+        )
+        .result
+        .unwrap();
+        assert_eq!(value["proof"], "unrecorded");
+        let missing = super::super::ipc::handle_local(
+            &s,
+            "inference_call_proof",
+            serde_json::json!({"call_id":999}),
+        )
+        .result
+        .unwrap();
+        assert_eq!(missing["found"], false);
+        assert_eq!(missing["proof"], "unrecorded");
+        for id in [
+            serde_json::json!(0),
+            serde_json::json!(-1),
+            serde_json::json!(1.5),
+            serde_json::json!("1"),
+            serde_json::Value::Null,
+        ] {
+            assert!(
+                super::super::ipc::handle_local(
+                    &s,
+                    "inference_call_proof",
+                    serde_json::json!({"call_id":id})
+                )
+                .error
+                .is_some()
+            );
+        }
+    }
+
+    #[test]
+    fn destinations_expose_observed_outside_through_proxy_with_unknown_provider() {
+        let (_dir, s) = shared();
+        let mut outside = recent(1);
+        outside.proof = Some(ProofStatus::Outside);
+        outside.backend = "SECRET-PROVIDER".to_string();
+        s.install_routing_ledger_for_test(
+            crate::routing::ironwire::IronWireLedger::with_rows_for_test(vec![outside]),
+        );
+        let value = super::super::ipc::handle_local(&s, "tool_destinations", serde_json::json!({}))
+            .result
+            .unwrap();
+        assert_eq!(value["ledger_readable"], true);
+        assert_eq!(
+            value["observed_destinations"],
+            serde_json::json!([{"route":"outside","to":"unknown","via":"local_proxy","basis":"observed"}])
+        );
+        assert_eq!(value["hub"]["state"], "off");
+        assert_eq!(value["hub"]["owned"], false);
+        assert!(!value.to_string().contains("SECRET-PROVIDER"));
+        let (_dir, unreadable) = shared();
+        let value = super::super::ipc::handle_local(
+            &unreadable,
+            "tool_destinations",
+            serde_json::json!({}),
+        )
+        .result
+        .unwrap();
+        assert_eq!(value["ledger_readable"], false);
+        assert_eq!(value["observed_destinations"], serde_json::json!([]));
     }
 
     #[test]

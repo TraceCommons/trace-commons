@@ -14,6 +14,7 @@ import argparse
 import contextlib
 import hashlib
 import io
+import importlib.util
 import json
 import os
 import re
@@ -2763,6 +2764,30 @@ class CodeRevisionChangedTests(_QualifyCase):
         self._fresh_run()
         self.assertEqual(self._drill(), 0, self.stderr.getvalue())
         self.assertEqual(self.tree_hash_calls, 2)
+
+
+class ActivityMissionInventoryTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        path = Path(__file__).with_name("pipeline-deployment-inventory.py")
+        spec = importlib.util.spec_from_file_location("deployment_inventory", path)
+        cls.inventory = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.inventory)
+
+    def test_catalogue_and_account_status_keep_their_distinct_contract_families(self):
+        self.assertEqual(self.inventory.classify_route("/v1/activity-missions"), ("EXP-004", "CRD-004"))
+        self.assertEqual(self.inventory.classify_route("/v1/account/activity-missions/status"), ("AUTH-001", "AUTH-004"))
+        for path in ("/v1/activity-missions-extra", "/v1/activity-missions/status", "/v1/activity-missions/"):
+            self.assertIsNone(self.inventory.classify_route(path), path)
+
+    def test_new_catalogue_is_in_inventory_and_unknown_interfaces_still_fail_closed(self):
+        inventory = self.inventory.build_inventory()
+        catalogue = [row for row in inventory["routes"] if row["path"] == "/v1/activity-missions"]
+        self.assertEqual(len(catalogue), 1)
+        self.assertEqual(catalogue[0]["contracts"], ["EXP-004", "CRD-004"])
+        with mock.patch.object(self.inventory, "source_routes", return_value=["/v1/activity-missions-future"]):
+            with self.assertRaisesRegex(ValueError, "unclassified deployment interface"):
+                self.inventory.build_inventory()
 
 
 if __name__ == "__main__":
