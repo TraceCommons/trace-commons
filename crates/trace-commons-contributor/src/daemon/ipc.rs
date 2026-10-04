@@ -1750,7 +1750,7 @@ impl DaemonShared {
             .iter()
             .map(|notice| {
                 let key = notice.project_key.as_str();
-                // The "Auto contribute" override's rewording (#1208) names no
+                // The "Automatic" override's rewording (#1208) names no
                 // folder: its key is not a path, so no id or label is derived
                 // from it, and the shared copy words it as unplaced.
                 if key == super::policy::OVERRIDE_ARMING_KEY {
@@ -1844,7 +1844,7 @@ impl DaemonShared {
             .grant_voids
             .iter()
             .map(|notice| match notice.project_key.as_deref() {
-                // The "Auto contribute" override (#1208): no project, and not
+                // The "Automatic" override (#1208): no project, and not
                 // the Flow 1 grant either.
                 None if notice.contribution_override => serde_json::json!({
                     "id": notice.id,
@@ -3243,7 +3243,7 @@ fn handle_list_projects(shared: &DaemonShared, req: &Request) -> Response {
                 // K5: whether the arming left the backlog waiting
                 // (`set_project_mode` with `from_now: true`). Armed rows
                 // only, like the disclosure.
-                // Also true for a folder an "Auto contribute" override
+                // Also true for a folder an "Automatic" override
                 // arms: its backlog waits the same way (#1173).
                 row["from_now"] = serde_json::Value::Bool(policy.armed_from_now_at(&key).is_some());
             }
@@ -4118,7 +4118,7 @@ fn handle_clear_contribution_override(shared: &DaemonShared, req: &Request) -> R
             policy.sessions_on_disk_at_arming = previous_record;
             return Response::err(req.id, ERR_UNAVAILABLE, "policy-write-failed");
         }
-        // Clearing an "Auto contribute" override takes a folder that asks
+        // Clearing an "Automatic" override takes a folder that asks
         // back to asking: what the override approved unattended there and
         // has not sent goes back to waiting.
         let mut queue = shared.queue.lock().expect("queue lock");
@@ -15164,7 +15164,7 @@ mod tests {
         id
     }
 
-    /// "Auto contribute" arms every folder at once, so it is refused unless
+    /// "Automatic" arms every folder at once, so it is refused unless
     /// the shell says it showed the confirmation -- and a refusal records
     /// and changes nothing.
     #[test]
@@ -15216,7 +15216,7 @@ mod tests {
         assert_eq!(audit::load(&s.store).unwrap().len(), 1);
     }
 
-    /// #1208, owner decision: "Auto contribute" is a grant, so it fails
+    /// #1208, owner decision: "Automatic" is a grant, so it fails
     /// closed without terms, exactly as `set_project_mode` arming does: the
     /// same label, nothing recorded, nothing changed. With terms it records
     /// them, and the claim its words made.
@@ -15387,7 +15387,7 @@ mod tests {
     /// is saved -- it is what clearing the override returns the folder to --
     /// and the reply says when the override still governs that folder
     /// (`overridden_by`). Never is never overridden, so setting a folder to
-    /// Never under "Auto contribute" takes effect and says so with `null`.
+    /// Never under "Automatic" takes effect and says so with `null`.
     #[test]
     fn set_project_mode_reports_when_the_override_still_governs_the_folder() {
         let s = enrolled_shared();
@@ -15471,7 +15471,7 @@ mod tests {
         );
     }
 
-    /// The backlog an "Auto contribute" override found waiting in an Ask me
+    /// The backlog an "Automatic" override found waiting in an Ask me
     /// folder still needs a person: the badge does not drop.
     #[test]
     fn an_auto_override_leaves_the_backlog_on_the_badge() {
@@ -15529,7 +15529,7 @@ mod tests {
         assert_eq!(status["contribution_mode"], "mixed");
         assert_eq!(status["contribution_mode_partial"], false);
 
-        // #1208: "Auto contribute" with a folder set to Never still rolls up
+        // #1208: "Automatic" with a folder set to Never still rolls up
         // to auto, and says some folders are left out.
         s.policy
             .lock()

@@ -281,20 +281,30 @@ pub const VOID_REARM_FAILED: &str =
 /// [`VOID_GRANT_REGRANT`] and its button beside this sentence.
 pub const VOID_GRANT_PROJECTS: &str = "Projects still set to contribute automatically carry on. Any project that stopped has its own notice.";
 
-/// The title of the "Auto contribute" override's
-/// void notice (`grant_voids` element of kind `contribution_override`).
-pub const VOID_OVERRIDE_TITLE: &str = "Auto contribute turned off";
+/// The title of the "Automatic" override's
+/// void notice (`grant_voids` element of kind `contribution_override`). It
+/// names the mode by its one name (`project_copy::CONTRIBUTION_MODE_AUTO_LABEL`).
+pub const VOID_OVERRIDE_TITLE: &str = concat!(
+    crate::project_copy::folder_mode_auto_label!(),
+    " turned off"
+);
 
 /// What happened. Held to `sweep_grants`: the
 /// override is cleared, so every folder is back on its own setting, and a
 /// folder that asks first waits for you again.
-pub const VOID_OVERRIDE_BODY: &str = "Settings it was turned on under have since changed, so \
-     Auto contribute is off and each folder is back on its own setting. Sessions from folders \
-     that ask first wait for you again.";
+pub const VOID_OVERRIDE_BODY: &str = concat!(
+    "Settings it was turned on under have since changed, so ",
+    crate::project_copy::folder_mode_auto_label!(),
+    " is off and each folder is back on its own setting. Sessions from folders that ask first \
+     wait for you again."
+);
 
 /// How it is turned back on.
-pub const VOID_OVERRIDE_REARM: &str = "You can turn Auto contribute back on from Contribution \
-     mode. Doing so agrees to the new settings.";
+pub const VOID_OVERRIDE_REARM: &str = concat!(
+    "You can turn ",
+    crate::project_copy::folder_mode_auto_label!(),
+    " back on from Contribution mode. Doing so agrees to the new settings."
+);
 
 /// The title of a void this build cannot place: a `kind` it does not know,
 /// or a project void without a label. It says what is certain -- automatic
@@ -354,7 +364,7 @@ pub fn void_reason_line(label: &str) -> &'static str {
             "The full text of your attested AI calls would now be sent with your sessions."
         }
         // `policy::OVERRIDE_TERMS_UNRECORDED`:
-        // only an "Auto contribute" override saved by a pre-release build.
+        // only an "Automatic" override saved by a pre-release build.
         "terms-unrecorded" => {
             "It was turned on before this app recorded the settings it was turned on under."
         }
@@ -453,7 +463,7 @@ pub fn void_notice_for_wire(void: &serde_json::Value) -> Option<VoidNoticeCopy> 
         label,
     ) {
         (Some("automatic_grant"), _) => Some(void_notice(None, &reasons)),
-        // The "Auto contribute" override (#1208): the pill is back on each
+        // The "Automatic" override (#1208): the pill is back on each
         // folder's own setting. No button: turning it back on is the pill's
         // own confirmation, not a one-tap re-arm.
         (Some("contribution_override"), _) => {
@@ -1057,10 +1067,11 @@ pub const REWORDED_NOW_HEADING: &str = "What happens to its sessions";
 
 /// The button that switches a reworded folder to ask-first. A shell sends it
 /// as `set_project_mode` with the element's `project_id` and `notify_only`,
-/// which also answers the notice.
+/// which also answers the notice. It names the mode it sets, by the mode's
+/// one name (`project_copy::CONTRIBUTION_MODE_ASK_LABEL`).
 ///
 /// **DRAFT, NEEDS APPROVAL.**
-pub const ASK_ME_FIRST_ACTION: &str = "Ask me first";
+pub const ASK_ME_FIRST_ACTION: &str = crate::project_copy::CONTRIBUTION_MODE_ASK_LABEL;
 
 /// Shown when the daemon refuses that switch. The notice stays.
 ///
@@ -1135,7 +1146,11 @@ pub fn arming_reworded_notice_for_wire(
             body: "Your Scrub check was previously unset. This update makes it Automatic. This folder stays set to share automatically, but more sessions may now wait for your review.",
             now_heading: "What happens now",
             scope: SCRUB_CHECK_AUTOMATIC_HELP,
-            limit: "Choose Ask me first for this folder if you want to review every session from it.",
+            limit: concat!(
+                "Choose ",
+                crate::project_copy::folder_mode_ask_label!(),
+                " for this folder if you want to review every session from it."
+            ),
             no_review: "Held sessions are not sent until you decide.",
             acknowledge: VOID_ACKNOWLEDGE,
             ask_first_action: has_id.then_some(ASK_ME_FIRST_ACTION),
@@ -1172,8 +1187,11 @@ pub const GATE_HELD_RELEASE: &str = "Nothing from these projects is sent while t
 /// [`ASK_ME_FIRST_ACTION`].
 ///
 /// **DRAFT, NEEDS APPROVAL.**
-pub const GATE_HELD_ASK_FIRST: &str =
-    "To review a project's sessions yourself instead, switch it to Ask me first.";
+pub const GATE_HELD_ASK_FIRST: &str = concat!(
+    "To review a project's sessions yourself instead, switch it to ",
+    crate::project_copy::folder_mode_ask_label!(),
+    "."
+);
 
 /// One of the gate's reason labels (`automatic_gate::REASON_*`), as a
 /// sentence. A label this build does not know still gets one.
@@ -2378,7 +2396,7 @@ mod tests {
         assert!(arming_reworded_notice_for_wire(&serde_json::json!("x")).is_none());
     }
 
-    /// #1208: the "Auto contribute" override's void gets its own words --
+    /// #1208: the "Automatic" override's void gets its own words --
     /// not the Flow 1 grant's, not the unplaced fallback -- and no button,
     /// since turning it back on is the pill's own confirmation.
     #[test]

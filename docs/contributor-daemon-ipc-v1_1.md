@@ -4621,6 +4621,28 @@ a trace that has just gone out is counted as `submitted` within seconds
 rather than at the next `history_poll_secs` boundary. Those rows carry
 `last_refreshed_at: null`, because nothing has been read back for them yet.
 
+The bucket also counts `processing`, the status the versioned pipeline's
+receipt carries: uploaded, no verdict **reported** yet. That is not the same
+as no verdict. Admission runs inside the upload request, so a trace it
+quarantined or rejected gets the same `processing` receipt, and receipts are
+never rewritten. Render and offer a `processing` row exactly as `submitted`:
+same words, same withdrawal stage.
+
+A `list_history` row keeps the raw `processing` until a status read-back
+reports something for that submission. A server with the pipeline's product
+layer (#1143) reads a pipeline submission back in `main`'s vocabulary:
+`quarantined` or `rejected` when Admission decided so, and `accepted` for an
+admitted trace, before Review has decided it. On such a server the first
+read-back after the upload replaces `processing`. An older server leaves a
+submission whose stored status is still `received` out of the read-back
+altogether, so there an admitted trace's row stays `processing` until Review
+promotes it, and only a quarantined or rejected one changes sooner.
+
+The CLI's submit short-circuit and its picker's SUBMITTED marker read a
+`processing` receipt through that read-back: once the history cache holds
+`rejected` for the submission, the session is no longer already submitted,
+and `quarantined` is reported as `quarantined`.
+
 The daemon then asks the server for verdicts about ninety seconds after an
 upload pass, rather than waiting out the full `history_poll_secs` interval
 (1800 by default). A burst of uploads produces one such read-back, not one
@@ -5300,7 +5322,8 @@ export membership. A client holds only the local `status`. So:
 
 - local status `submitted` or `quarantined` maps to `not_distributed`
   reliably -- that is the server's own rule, and its copy can be shown before
-  the action.
+  the action. `processing` is `submitted` (see `history_rollup`) and maps the
+  same way.
 - local status `accepted` may resolve to EITHER `commons_not_distributed` or
   `commons_distributed`, and the client cannot tell which. It must show
   **both** bodies before the action, with the `commons_distributed` one given
@@ -5353,7 +5376,9 @@ Rules that bind every application:
 `withdraw_bulk` withdraws every submission currently at `status` in the
 local history cache (one of `submitted`, `quarantined`, or `accepted`; not
 `withdrawn` itself, and not the `other` bucket `history_rollup` reports,
-which covers statuses this client has no stable name for). It reports
+which covers statuses this client has no stable name for). A `submitted`
+selector also takes in `processing` rows, which `history_rollup` counts as
+`submitted`; `processing` is not a selector of its own. It reports
 `withdrawn` and `failed` counts rather than per-submission detail -- a
 partial failure does not fail the whole call, and a contributor can retry
 individual traces with `withdraw` if some did not go through.

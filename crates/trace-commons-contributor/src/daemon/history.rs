@@ -30,6 +30,20 @@ use crate::config::{ConfigStore, DAEMON_HISTORY_FILE, Receipt};
 pub const STATUS_QUARANTINED: &str = "quarantined";
 pub const STATUS_ACCEPTED: &str = "accepted";
 pub const STATUS_SUBMITTED: &str = "submitted";
+/// Server-side status for a submission the server will not take.
+pub const STATUS_REJECTED: &str = "rejected";
+/// Receipt status from the versioned pipeline (`route_pipeline_receipt` on
+/// the server): the upload is in. To a contributor that is
+/// [`STATUS_SUBMITTED`] -- uploaded, no verdict reported yet -- and every
+/// client surface reads it as such through [`status_bucket`].
+///
+/// "No verdict reported", not "no verdict": Admission runs inside the
+/// request that returns this receipt, and a trace it quarantined or
+/// rejected gets the same `processing` receipt. Receipts are append-only,
+/// so that receipt is never rewritten; the verdict arrives only through
+/// the status read-back. Code deciding whether a session is already
+/// submitted reads the read-back first, through [`reported_verdicts`].
+pub const STATUS_PROCESSING: &str = "processing";
 /// Local status this cache stamps onto a record once `daemon::withdraw` has
 /// had the server confirm a withdrawal. Not a status the server itself ever
 /// returns from submission-status read-back -- `join` only ever writes the
@@ -40,6 +54,54 @@ pub const STATUS_WITHDRAWN: &str = "withdrawn";
 /// server's own read-back of a withdrawal this daemon never saw. Counted as
 /// taken back exactly like a local [`STATUS_WITHDRAWN`] row.
 pub const STATUS_REVOKED: &str = "revoked";
+
+/// The status a row is counted, selected and short-circuited under:
+/// [`STATUS_PROCESSING`] is [`STATUS_SUBMITTED`], and every other status is
+/// itself. The one mapping the rollup, `withdraw_bulk` and the submit
+/// short-circuit all read, so they cannot disagree about a `processing` row.
+pub fn status_bucket(status: &str) -> &str {
+    if status == STATUS_PROCESSING {
+        STATUS_SUBMITTED
+    } else {
+        status
+    }
+}
+
+/// The verdicts the server has read back, by submission id: rows a status
+/// read-back refreshed (`last_refreshed_at` set; `merge_new_receipts` never
+/// sets it), not taken back, whose status is `accepted`, `quarantined` or
+/// `rejected`.
+///
+/// For a [`STATUS_PROCESSING`] receipt only; see [`receipt_status`]. A
+/// withdrawn or revoked row is deliberately absent: it is not a verdict,
+/// and reading it as one would make a `processing` receipt look not
+/// submitted, and a re-run would upload a trace the contributor took back.
+pub fn reported_verdicts(records: &[HistoryRecord]) -> BTreeMap<Uuid, String> {
+    records
+        .iter()
+        .filter(|r| r.last_refreshed_at.is_some() && !is_taken_back(r))
+        .filter(|r| {
+            [STATUS_ACCEPTED, STATUS_QUARANTINED, STATUS_REJECTED].contains(&r.status.as_str())
+        })
+        .map(|r| (r.submission_id, r.status.clone()))
+        .collect()
+}
+
+/// The status a receipt is judged by: the receipt's own, except that a
+/// [`STATUS_PROCESSING`] receipt takes the verdict the server has since
+/// read back for that submission, when [`reported_verdicts`] holds one.
+///
+/// Only `processing` is overridden. Every other receipt status already came
+/// from the server's answer to the upload, and a cache row must not
+/// overrule it.
+pub fn receipt_status<'a>(receipt: &'a Receipt, verdicts: &'a BTreeMap<Uuid, String>) -> &'a str {
+    if receipt.status == STATUS_PROCESSING {
+        if let Some(verdict) = verdicts.get(&receipt.submission_id) {
+            return verdict;
+        }
+    }
+    &receipt.status
+}
 
 /// Whether a row has been taken back: withdrawn here (`withdrawn_at`, or the
 /// local [`STATUS_WITHDRAWN`] stamp), or reported `revoked` by the server
@@ -161,7 +223,7 @@ impl HistoryCounts {
             self.withdrawn += 1;
             return;
         }
-        match rec.status.as_str() {
+        match status_bucket(&rec.status) {
             STATUS_ACCEPTED => self.accepted += 1,
             STATUS_QUARANTINED => self.quarantined += 1,
             STATUS_SUBMITTED => self.submitted += 1,
@@ -333,7 +395,8 @@ pub fn join(
 }
 
 /// Add a record for every receipt the cache does not already know about,
-/// carrying the receipt's own locally recorded status (`submitted`).
+/// carrying the receipt's own locally recorded status (`submitted`, or the
+/// versioned pipeline's `processing`).
 ///
 /// This exists because "uploaded, no verdict yet" is a real state that was
 /// invisible for up to a full `history_poll_secs` -- half an hour on the
@@ -1186,6 +1249,28 @@ mod tests {
             .find(|r| r.submission_id == sent_unattended)
             .unwrap();
         assert_eq!(unattended.approved_unattended, Some(true));
+    }
+
+    /// The versioned pipeline answers an upload with a `processing` receipt:
+    /// uploaded, no verdict yet. That is the `submitted` bucket, never
+    /// `other`. Built from a receipt through `merge_new_receipts`, the path
+    /// an upload pass takes.
+    #[test]
+    fn rollup_counts_a_processing_receipt_as_submitted() {
+        let mut recs = vec![record(STATUS_SUBMITTED, "2026-08-08T10:00:00Z")];
+        let receipts = [receipt(
+            Uuid::new_v4(),
+            "sha256:bb",
+            "processing",
+            "2026-08-08T11:00:00Z",
+        )];
+        assert!(merge_new_receipts(&mut recs, &receipts, &BTreeMap::new()));
+
+        let r = rollup(&recs, at("2026-08-08T12:00:00Z"));
+        assert_eq!(r.all_time.submitted, 2);
+        assert_eq!(r.week.submitted, 2);
+        assert_eq!(r.all_time.other, 0, "processing is not an 'other' status");
+        assert_eq!(r.all_time.total(), 2);
     }
 
     /// K10: a row written before `uploaded_bytes` existed must still parse.

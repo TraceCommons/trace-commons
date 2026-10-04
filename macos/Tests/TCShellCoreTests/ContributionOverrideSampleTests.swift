@@ -9,7 +9,7 @@ final class ContributionOverrideSampleTests: XCTestCase {
         let before = try await client.status()
         do {
             _ = try await client.setContributionOverride(mode: .autoUpload, confirm: false)
-            XCTFail("an unconfirmed Auto contribute answered")
+            XCTFail("an unconfirmed Automatic answered")
         } catch {
             XCTAssertEqual(error as? DaemonDataError, .daemon(code: "bad_params", message: "confirm-required"))
         }
@@ -19,14 +19,14 @@ final class ContributionOverrideSampleTests: XCTestCase {
     }
 
     /// The fail-closed path: a store with no grant terms (not enrolled)
-    /// refuses Auto contribute even when confirmed, and nothing changes.
+    /// refuses Automatic even when confirmed, and nothing changes.
     func testAutoContributeWithoutGrantTermsIsRefused() async throws {
         let client = SampleDaemonClient(.empty)
         let enrolled = try await client.status()
         XCTAssertEqual(enrolled.loggedIn, false, "the empty set is the unenrolled one")
         do {
             _ = try await client.setContributionOverride(mode: .autoUpload, confirm: true)
-            XCTFail("Auto contribute without terms answered")
+            XCTFail("Automatic without terms answered")
         } catch {
             XCTAssertEqual(error as? DaemonDataError, .daemon(code: "unavailable", message: "arming-terms-unavailable"))
         }
@@ -100,7 +100,7 @@ final class ContributionOverrideSampleTests: XCTestCase {
         XCTAssertEqual(client.overrideCalls, [], "nothing reached a core that is down")
     }
 
-    /// Decoding the core's confirmation: Auto contribute is never accepted
+    /// Decoding the core's confirmation: Automatic is never accepted
     /// without its arming disclosure.
     func testAnAutoConfirmationWithoutTheArmingDisclosureDoesNotDecode() {
         let ask = #"{"mode":"notify_only","title":"T","body":"B","confirm":"C","cancel":"X","arming":null}"#

@@ -5443,7 +5443,7 @@ pub unsafe extern "C" fn tc_arming_offer_copy_json(
 /// The menu-bar Contribution mode pill (#1173,
 /// `project_copy::contribution_mode_copy`): a JSON object `{title, mixed,
 /// choices, override_active, clear}`, `choices` being `[{mode, label,
-/// line}]` for Ask me, Auto contribute and Never, in that order. `mode` is
+/// line}]` for Ask me, Automatic and Never, in that order. `mode` is
 /// what `set_contribution_override` takes.
 ///
 /// Returns an owned JSON string; free it with [`tc_string_free`]. NULL only
