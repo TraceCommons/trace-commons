@@ -19,6 +19,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import tempfile
 import unittest
 import uuid
@@ -469,6 +470,147 @@ class ResultFileNamingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             run = self._run_with_result(tmp)
             self.assertEqual(set(results.load_results(run)), {"pipeline_crash_matrix"})
+
+
+class OnePackageTests(unittest.TestCase):
+    """P5-D15: a qualification run names exactly one package. The results
+    that name a package agree on all three digests; a mechanics result
+    names none."""
+
+    def _result(self, check_id, *, package=None, **overrides):
+        if package is not None:
+            digests = {
+                "package_hash": _fake_hash(f"{package}-package"),
+                "configuration_digest": _fake_hash(f"{package}-configuration"),
+                "dependency_digest": _fake_hash(f"{package}-dependency"),
+            }
+        else:
+            digests = {"package_hash": None, "configuration_digest": None, "dependency_digest": None}
+        fields = {
+            "schema": results.SCHEMA,
+            "run_id": "qcafebabe",
+            "check_id": check_id,
+            "status": "pass",
+            "code_revision_hash": _fake_hash("code-revision"),
+            "observed_at": datetime.now(timezone.utc),
+            "evidence_hash": _fake_hash(check_id),
+            "safe_blockers": (),
+            **digests,
+        }
+        fields.update(overrides)
+        return results.CheckResult(**fields)
+
+    def _keyed(self, *items):
+        return {item.check_id: item for item in items}
+
+    def test_a_result_set_with_two_packages_is_reported_mixed(self):
+        with self.subTest("two package hashes"):
+            mixed = self._keyed(
+                self._result("pipeline_bundle_qualification", package="candidate"),
+                self._result("pipeline_http_corpus_compatibility", package="other"),
+            )
+            with self.assertRaises(errors.ToolingError) as ctx:
+                results.require_one_package(mixed)
+            self.assertEqual(str(ctx.exception), "qualification_evidence_mixed_package")
+
+        with self.subTest("one digest that differs is a different package"):
+            same_hash = self._result("pipeline_http_corpus_hf_local", package="candidate")
+            other_configuration = self._result(
+                "pipeline_restore_drill",
+                package="candidate",
+                configuration_digest=_fake_hash("other-configuration"),
+            )
+            with self.assertRaises(errors.ToolingError) as ctx:
+                results.require_one_package(self._keyed(same_hash, other_configuration))
+            self.assertEqual(str(ctx.exception), "qualification_evidence_mixed_package")
+
+        with self.subTest("a lone configuration digest names a package, as in evaluate_promotion"):
+            partial = self._result("pipeline_crash_matrix", configuration_digest=_fake_hash("candidate-configuration"))
+            with self.assertRaises(errors.ToolingError) as ctx:
+                results.require_one_package(
+                    self._keyed(partial, self._result("pipeline_restore_drill", package="candidate"))
+                )
+            self.assertEqual(str(ctx.exception), "qualification_evidence_mixed_package")
+
+        with self.subTest("package-bearing results agree and the others carry none"):
+            results.require_one_package(
+                self._keyed(
+                    *(self._result(check_id, package="candidate") for check_id in _CANDIDATE_CHECKS),
+                    self._result("pipeline_crash_matrix"),
+                    self._result("pipeline_http_corpus_minimal"),
+                )
+            )  # must not raise
+
+        with self.subTest("no result names a package"):
+            results.require_one_package(self._keyed(self._result("pipeline_crash_matrix")))
+            results.require_one_package({})
+
+    def test_a_mechanics_result_may_not_name_a_package(self):
+        """The tooling refuses a mechanics check that carries a digest (any
+        one of the three), so a later check cannot name a test bundle again
+        without a test failing."""
+        for key in ("package_hash", "configuration_digest", "dependency_digest"):
+            with self.subTest(key), tempfile.TemporaryDirectory() as tmp:
+                run = _make_run(Path(tmp))
+                digests = {"package_hash": None, "configuration_digest": None, "dependency_digest": None}
+                digests[key] = _fake_hash("a-test-bundle")
+                _write_check_files(
+                    run.results_dir, "pipeline_crash_matrix", {"a": 1},
+                    run_id=run.run_id, code_revision_hash=run.code_revision_hash, **digests,
+                )
+                loaded = results.load_results(run)
+                required = {"pipeline_crash_matrix": checks.CheckSpec("pipeline_crash_matrix", digests_required=False)}
+                with self.assertRaises(errors.ToolingError) as ctx:
+                    results.require_current_pass_results(run, loaded, required)
+                self.assertEqual(str(ctx.exception), "pipeline_check_digests_unexpected:pipeline_crash_matrix")
+
+        with self.subTest("none carried passes"), tempfile.TemporaryDirectory() as tmp:
+            run = _make_run(Path(tmp))
+            _write_check_files(
+                run.results_dir, "pipeline_crash_matrix", {"a": 1},
+                run_id=run.run_id, code_revision_hash=run.code_revision_hash,
+                package_hash=None, configuration_digest=None, dependency_digest=None,
+            )
+            required = {"pipeline_crash_matrix": checks.CheckSpec("pipeline_crash_matrix", digests_required=False)}
+            results.require_current_pass_results(run, results.load_results(run), required)  # must not raise
+
+    def test_a_candidate_check_still_needs_all_three_digests(self):
+        """The other direction, for each of the four checks that test the
+        candidate: a result without a digest is refused, whichever digest it
+        lacks."""
+        specs = checks.required_specs()
+        for check_id in _CANDIDATE_CHECKS:
+            for missing in ("package_hash", "configuration_digest", "dependency_digest"):
+                with self.subTest(check_id=check_id, missing=missing), tempfile.TemporaryDirectory() as tmp:
+                    run = _make_run(Path(tmp))
+                    _write_check_files(
+                        run.results_dir, check_id, {"a": 1},
+                        run_id=run.run_id, code_revision_hash=run.code_revision_hash, **{missing: None},
+                    )
+                    with self.assertRaises(errors.ToolingError) as ctx:
+                        results.require_current_pass_results(
+                            run, results.load_results(run), {check_id: specs[check_id]}
+                        )
+                    self.assertEqual(str(ctx.exception), f"check_result_digest_missing:{check_id}")
+
+    def test_require_current_pass_results_refuses_a_mixed_run(self):
+        """`require_current_pass_results` applies the one-package rule to
+        every result it is given, not only the ones it requires."""
+        with tempfile.TemporaryDirectory() as tmp:
+            run = _make_run(Path(tmp))
+            for check_id, package in (
+                ("pipeline_bundle_qualification", "candidate"),
+                ("pipeline_http_corpus_compatibility", "other"),
+            ):
+                _write_check_files(
+                    run.results_dir, check_id, {"a": 1},
+                    run_id=run.run_id, code_revision_hash=run.code_revision_hash,
+                    package_hash=_fake_hash(f"{package}-package"),
+                )
+            required = {"pipeline_bundle_qualification": checks.required_specs()["pipeline_bundle_qualification"]}
+            with self.assertRaises(errors.ToolingError) as ctx:
+                results.require_current_pass_results(run, results.load_results(run), required)
+            self.assertEqual(str(ctx.exception), "qualification_evidence_mixed_package")
 
 
 class EvidenceValidatorTests(unittest.TestCase):
@@ -1169,6 +1311,8 @@ class HfCorpusTests(unittest.TestCase):
 _ADMIN_URL = "postgres://trace@127.0.0.1:55431/postgres"
 _HARNESS = "tests::pipeline_corpus_pg_tests::pipeline_corpus_run"
 _PACKAGE_WRITER = "tests::pipeline_corpus_pg_tests::pipeline_package_write"
+_ATTESTATION_WRITER = "tests::pipeline_corpus_pg_tests::pipeline_check_attestations_write"
+_KEY_WRITER = "tests::pipeline_corpus_pg_tests::pipeline_signing_key_write"
 _INGEST_ARGS = ("-p", "trace-commons-server", "--bin", "trace-commons-ingest")
 
 
@@ -1278,6 +1422,25 @@ def _policy_manifest():
     }
 
 
+_NO_DIGESTS = {"package_hash": None, "configuration_digest": None, "dependency_digest": None}
+
+
+def _candidate_digests():
+    """The three digests of the fake candidate package. Every fake that
+    stands for a check that tests the candidate (the corpus harness, the
+    restore resume, the runtime and HTTP database tests) names these, so a
+    qualification run of the fakes has one package. The corpus report's
+    configuration digest is derived from its manifest, so this one is too."""
+    manifest = _policy_manifest()
+    return {
+        "package_hash": _fake_hash("package"),
+        "configuration_digest": _digest(
+            results.canonical({phase: manifest[phase]["configuration_hash"] for phase in corpus.PHASES})
+        ),
+        "dependency_digest": _fake_hash("dependency"),
+    }
+
+
 def _corpus_report(check_id, partitions):
     """`partitions` is a list of `(name, corpus_digest, [fixture reports])`."""
     manifest = _policy_manifest()
@@ -1305,11 +1468,7 @@ def _corpus_report(check_id, partitions):
         "safe_blockers": list(corpus.LOCAL_BLOCKERS),
         "check_id": check_id,
         "bundle_id": bundle_id,
-        "package_hash": _fake_hash("package"),
-        "configuration_digest": _digest(
-            results.canonical({phase: manifest[phase]["configuration_hash"] for phase in corpus.PHASES})
-        ),
-        "dependency_digest": _fake_hash("dependency"),
+        **_candidate_digests(),
         "policy_manifest": manifest,
         "fixture_count": len(every),
         "completed_fixture_count": sum(section["completed_fixture_count"] for section in sections),
@@ -1329,10 +1488,30 @@ def _resigned(report):
     return {**unsigned, "report_digest": _digest(results.canonical(unsigned))}
 
 
-def _write_harness_outputs(env, fixtures_by_partition=None, emit=True):
+_DROP = object()
+
+
+def _harness_evidence_digests(partitions):
+    """`(corpus_digest, input_digest)` as the corpus harness's evidence
+    carries them: the one partition's corpus digest (or, for two, the
+    canonical hash of the list of both), and the canonical hash of the list
+    of every fixture's request-content hash, in order."""
+    corpus_digests = [digest for _, digest, _ in partitions]
+    corpus_digest = corpus_digests[0] if len(corpus_digests) == 1 else _digest(results.canonical(corpus_digests))
+    requests = [item["request_content_hash"] for _, _, fixtures in partitions for item in fixtures]
+    return corpus_digest, _digest(results.canonical(requests))
+
+
+def _write_harness_outputs(
+    env, fixtures_by_partition=None, emit=True, digests=None, result_overrides=None, evidence_overrides=None
+):
     """What `pipeline_corpus_run` leaves behind: the report at
     `TRACE_COMMONS_PIPELINE_CORPUS_REPORT_PATH` and, when every fixture
-    passed, one check result and its evidence in the result directory."""
+    passed, one check result and its evidence in the result directory. The
+    result names the corpus report's package (`digests=True`) or none
+    (`digests=False`); by default only `pipeline_http_corpus_minimal`, which
+    serves a test bundle, names none (P5-D15). `result_overrides` replaces
+    fields of the result (a digest that differs from the report's)."""
     paths = [("corpus", env["TRACE_COMMONS_PIPELINE_CORPUS_PATH"])]
     if "TRACE_COMMONS_PIPELINE_CORPUS_HOLDOUT_PATH" in env:
         paths = [
@@ -1351,6 +1530,7 @@ def _write_harness_outputs(env, fixtures_by_partition=None, emit=True):
     Path(env["TRACE_COMMONS_PIPELINE_CORPUS_REPORT_PATH"]).write_bytes(report_bytes)
     if not emit:
         return report
+    corpus_digest, input_digest = _harness_evidence_digests(partitions)
     evidence = {
         "fixtures": report["fixture_count"],
         "completed": report["completed_fixture_count"],
@@ -1358,7 +1538,16 @@ def _write_harness_outputs(env, fixtures_by_partition=None, emit=True):
         "changed_content_refused": report["changed_content_refused_count"],
         "tenant_isolation": report["tenant_isolation"],
         "report_hash": _digest(report_bytes),
+        "corpus_digest": corpus_digest,
+        "input_digest": input_digest,
     }
+    for key, value in (evidence_overrides or {}).items():
+        if value is _DROP:
+            del evidence[key]
+        else:
+            evidence[key] = value
+    if digests is None:
+        digests = check_id != "pipeline_http_corpus_minimal"
     result_dir = Path(env["TRACE_COMMONS_PIPELINE_CHECK_RESULT_DIR"])
     raw = {
         "schema": results.SCHEMA,
@@ -1366,13 +1555,14 @@ def _write_harness_outputs(env, fixtures_by_partition=None, emit=True):
         "check_id": check_id,
         "status": "pass",
         "code_revision_hash": env["TRACE_COMMONS_PIPELINE_CHECK_CODE_REVISION_HASH"],
-        "package_hash": report["package_hash"],
-        "configuration_digest": report["configuration_digest"],
-        "dependency_digest": report["dependency_digest"],
+        "package_hash": report["package_hash"] if digests else None,
+        "configuration_digest": report["configuration_digest"] if digests else None,
+        "dependency_digest": report["dependency_digest"] if digests else None,
         "observed_at": _iso(datetime.now(timezone.utc)),
         "evidence_hash": _digest(results.canonical(evidence)),
         "safe_blockers": [],
     }
+    raw.update(result_overrides or {})
     (result_dir / f"{check_id}.result.json").write_text(json.dumps(raw))
     (result_dir / f"{check_id}.evidence.json").write_text(json.dumps(evidence))
     return report
@@ -1650,6 +1840,64 @@ class CorpusRunTests(_CorpusRunCase):
         self.assertEqual(record["status"], "pass")
         self.assertTrue((catalog_path.parent / record["report"]).is_file())
 
+    def test_run_names_a_package_only_for_a_candidate_check(self):
+        """The minimal bundle is a test bundle, so its check result names no
+        package (P5-D15); the compatibility check names the report's. The
+        corpus report keeps its own digests either way."""
+        corpus_path = self.tmp / "corpus.json"
+        corpus_path.write_text(json.dumps(_direct_corpus(["alpha_fixture"])))
+        for bundle, named in (("minimal", False), ("compatibility", True)):
+            with self.subTest(bundle=bundle):
+                shutil.rmtree(self.run.run_dir)
+                self.run = _scratch_run("corpus")
+                self.stdout, self.stderr = io.StringIO(), io.StringIO()
+                argv = ["run", "--bundle", bundle, "--corpus", str(corpus_path), "--postgres-admin-url", _ADMIN_URL]
+                self.assertEqual(self._main(argv, cargo=self._fake_cargo()), 0, self.stderr.getvalue())
+                result = results.load_results(self.run)[f"pipeline_http_corpus_{bundle}"]
+                report = json.loads((self.tmp / "local" / f"pipeline-{bundle}-corpus-report.json").read_text())
+                self.assertEqual(report["package_hash"], _fake_hash("package"))
+                self.assertIsNotNone(report["configuration_digest"])
+                self.assertEqual(
+                    (result.package_hash, result.configuration_digest, result.dependency_digest),
+                    (report["package_hash"], report["configuration_digest"], report["dependency_digest"])
+                    if named
+                    else (None, None, None),
+                )
+
+    def test_run_refuses_a_result_whose_package_differs_from_its_report(self):
+        """A check that names the package must name the one its corpus
+        report says the run served: a result with another digest (one,
+        whichever) fails with `corpus_report_package_mismatch`."""
+        corpus_path = self.tmp / "corpus.json"
+        corpus_path.write_text(json.dumps(_direct_corpus(["alpha_fixture"])))
+        for key in ("package_hash", "configuration_digest", "dependency_digest"):
+            with self.subTest(key):
+                shutil.rmtree(self.run.run_dir)
+                self.run = _scratch_run("corpus")
+                self.stdout, self.stderr = io.StringIO(), io.StringIO()
+                argv = [
+                    "run", "--bundle", "compatibility", "--corpus", str(corpus_path),
+                    "--postgres-admin-url", _ADMIN_URL,
+                ]
+                cargo = self._fake_cargo(result_overrides={key: _fake_hash(f"another-{key}")})
+                self.assertEqual(self._main(argv, cargo=cargo), 1)
+                self.assertEqual(self.stderr.getvalue().strip(), "PipelineFailure: corpus_report_package_mismatch")
+
+    def test_run_refuses_digests_on_the_minimal_check_and_their_absence_elsewhere(self):
+        corpus_path = self.tmp / "corpus.json"
+        corpus_path.write_text(json.dumps(_direct_corpus(["alpha_fixture"])))
+        for bundle, digests, label in (
+            ("minimal", True, "pipeline_check_digests_unexpected:pipeline_http_corpus_minimal"),
+            ("compatibility", False, "check_result_digest_missing:pipeline_http_corpus_compatibility"),
+        ):
+            with self.subTest(bundle=bundle):
+                shutil.rmtree(self.run.run_dir)
+                self.run = _scratch_run("corpus")
+                self.stdout, self.stderr = io.StringIO(), io.StringIO()
+                argv = ["run", "--bundle", bundle, "--corpus", str(corpus_path), "--postgres-admin-url", _ADMIN_URL]
+                self.assertEqual(self._main(argv, cargo=self._fake_cargo(digests=digests)), 1)
+                self.assertEqual(self.stderr.getvalue().strip(), f"PipelineFailure: {label}")
+
     def test_run_refuses_a_report_that_does_not_match_its_evidence(self):
         corpus_path = self.tmp / "corpus.json"
         corpus_path.write_text(json.dumps(_direct_corpus(["alpha_fixture"])))
@@ -1891,9 +2139,7 @@ class _RestoreDrillCase(_CorpusRunCase):
                     "check_id": _RESTORE_CHECK,
                     "status": "pass",
                     "code_revision_hash": env["TRACE_COMMONS_PIPELINE_CHECK_CODE_REVISION_HASH"],
-                    "package_hash": _fake_hash("package"),
-                    "configuration_digest": _fake_hash("configuration"),
-                    "dependency_digest": _fake_hash("dependency"),
+                    **_candidate_digests(),
                     "observed_at": _iso(datetime.now(timezone.utc)),
                     "evidence_hash": _digest(results.canonical(evidence)),
                     "safe_blockers": overrides.get("safe_blockers", ["filesystem_restore_local_only"]),
@@ -2223,15 +2469,28 @@ _CONTRACT_MANIFEST = (
     environment.ROOT / "docs/superpowers/specs/2026-09-11-versioned-pipeline-contract-test-manifest.json"
 )
 _INVENTORY_SCRIPT = "pipeline-deployment-inventory.py"
+# The checks that test the candidate package, and so carry its digests
+# (P5-D15); every other required check carries none.
+_CANDIDATE_CHECKS = (
+    "pipeline_bundle_qualification",
+    "pipeline_http_corpus_compatibility",
+    "pipeline_http_corpus_hf_local",
+    "pipeline_restore_drill",
+)
+
+
+def _rust_check_list(name):
+    """The check ids of the Rust constant `name`, read out of the source."""
+    source = _PROMOTION_SOURCE.read_text()
+    match = re.search(rf"pub const {name}: &\[&str\] = &\[(.*?)\];", source, re.S)
+    if match is None:
+        raise AssertionError(f"{name} not found")
+    return re.findall(r'"([a-z0-9_]+)"', match.group(1))
 
 
 def _promotion_required_checks():
     """`PROMOTION_REQUIRED_CHECKS`, read out of the Rust source."""
-    source = _PROMOTION_SOURCE.read_text()
-    match = re.search(r"pub const PROMOTION_REQUIRED_CHECKS: &\[&str\] = &\[(.*?)\];", source, re.S)
-    if match is None:
-        raise AssertionError("PROMOTION_REQUIRED_CHECKS not found")
-    return re.findall(r'"([a-z0-9_]+)"', match.group(1))
+    return _rust_check_list("PROMOTION_REQUIRED_CHECKS")
 
 
 def _emit_check(env, check_id, *, digests=True, evidence=None, **overrides):
@@ -2244,9 +2503,7 @@ def _emit_check(env, check_id, *, digests=True, evidence=None, **overrides):
         "check_id": check_id,
         "status": "pass",
         "code_revision_hash": env["TRACE_COMMONS_PIPELINE_CHECK_CODE_REVISION_HASH"],
-        "package_hash": _fake_hash("package") if digests else None,
-        "configuration_digest": _fake_hash("configuration") if digests else None,
-        "dependency_digest": _fake_hash("dependency") if digests else None,
+        **(_candidate_digests() if digests else _NO_DIGESTS),
         "observed_at": _iso(datetime.now(timezone.utc)),
         "evidence_hash": _digest(results.canonical(evidence)),
         "safe_blockers": [],
@@ -2293,6 +2550,13 @@ class RequiredCheckTests(unittest.TestCase):
         # promotion check that `qualify` has no step for fails here, as does
         # a `qualify` check the Rust list does not name.
         self.assertTrue(_PROMOTION_ONLY.issubset(promotion))
+        # The Rust constant that `evaluate_promotion` reads for its one-run
+        # rule (review round 1 of #1240, point 5) holds the same three ids:
+        # a check that `qualify` produces and Rust called promotion-only
+        # would escape the rule.
+        promotion_only = _rust_check_list("PROMOTION_ONLY_CHECKS")
+        self.assertEqual(len(promotion_only), len(set(promotion_only)))
+        self.assertEqual(frozenset(promotion_only), _PROMOTION_ONLY)
         self.assertEqual(
             checks.REQUIRED_CHECK_IDS,
             frozenset(promotion) - _PROMOTION_ONLY,
@@ -2305,8 +2569,8 @@ class RequiredCheckTests(unittest.TestCase):
         self.assertNotIn("pipeline_http_corpus_package", checks.REQUIRED_CHECK_IDS)
 
         database_ids = [check.check_id for check in checks.REQUIRED_DATABASE_CHECKS]
-        self.assertEqual(len(database_ids), 12)
-        self.assertEqual(len(set(database_ids)), 12)
+        self.assertEqual(len(database_ids), 15)
+        self.assertEqual(len(set(database_ids)), 15)
         self.assertEqual(
             checks.REQUIRED_CHECK_IDS,
             frozenset(database_ids) | set(checks.REQUIRED_CORPUS_CHECK_IDS) | {checks.RESTORE_CHECK_ID},
@@ -2315,7 +2579,77 @@ class RequiredCheckTests(unittest.TestCase):
             with self.subTest(check=check.check_id):
                 self.assertRegex(check.check_id, r"^[a-z0-9_]{1,64}$")
                 self.assertIn(check.database, ("upgrade", "runtime", "pilot"))
-                self.assertEqual(check.digests, check.database != "upgrade")
+                self.assertEqual(check.digests, check.check_id in _CANDIDATE_CHECKS)
+
+    def test_rust_package_checks_are_the_checks_that_require_digests(self):
+        """`evaluate_promotion` enforces which checks name the package
+        (`PROMOTION_PACKAGE_CHECKS`) and this tooling enforces the same
+        (`digests_required`): the two lists are one set."""
+        rust = _rust_check_list("PROMOTION_PACKAGE_CHECKS")
+        self.assertEqual(len(rust), len(set(rust)), "no duplicate package check id")
+        self.assertEqual(set(rust), set(_CANDIDATE_CHECKS))
+        self.assertTrue(set(rust).issubset(_promotion_required_checks()))
+        self.assertEqual(
+            set(rust),
+            {spec.check_id for spec in checks.required_specs().values() if spec.digests_required},
+        )
+
+    def test_only_candidate_checks_require_package_digests(self):
+        """P5-D15: a qualification run names exactly one package. The four
+        checks that test the candidate carry its three digests, and every
+        mechanics check carries none, so `evaluate_promotion` finds one
+        package among the results. A fifth check that asked for digests
+        would name a test bundle again."""
+        required = {spec.check_id for spec in checks.required_specs().values() if spec.digests_required}
+        self.assertEqual(required, set(_CANDIDATE_CHECKS))
+        self.assertEqual(len(checks.required_specs()), 19)
+        # The database checks' own rows agree with `required_specs`.
+        self.assertEqual(
+            {check.check_id for check in checks.REQUIRED_DATABASE_CHECKS if check.digests},
+            {"pipeline_bundle_qualification"},
+        )
+
+    def test_the_activation_checks_are_required(self):
+        """PR 5's three checks (containment, rollback, and the legacy drain
+        report) are required in both lists, each run by the one exact test
+        that emits it. They are mechanics checks: none names a package, so a
+        qualification run still names exactly one."""
+        expected = {
+            "pipeline_activation_containment": (
+                checks._INGEST_BIN,
+                checks._HTTP_TESTS + "containment_refuses_new_receipts_and_keeps_pending_work",
+                "pilot",
+            ),
+            "pipeline_activation_rollback": (
+                checks._RUNTIME_SUITE,
+                "rollback_selects_an_earlier_bundle_for_new_runs_only",
+                "runtime",
+            ),
+            "pipeline_legacy_drain": (
+                checks._INGEST_BIN,
+                "tests::pipeline_activation_pg_tests::the_legacy_drain_report_counts_real_pending_work_and_reaches_zero",
+                "pilot",
+            ),
+        }
+        promotion = _promotion_required_checks()
+        rows = {check.check_id: check for check in checks.REQUIRED_DATABASE_CHECKS}
+        specs = checks.required_specs()
+        for check_id, (cargo_args, test_name, database) in expected.items():
+            with self.subTest(check=check_id):
+                self.assertIn(check_id, checks.REQUIRED_CHECK_IDS)
+                self.assertIn(check_id, promotion)
+                self.assertNotIn(check_id, _PROMOTION_ONLY)
+                self.assertNotIn(check_id, _CANDIDATE_CHECKS)
+                self.assertFalse(specs[check_id].digests_required)
+                row = rows[check_id]
+                self.assertEqual(
+                    (row.cargo_args, row.test_name, row.database, row.ignored, row.digests),
+                    (cargo_args, test_name, database, False, False),
+                )
+        # The 15 database rows, the three corpus checks, and the restore
+        # drill: 19 required results, four of them naming the one package.
+        self.assertEqual(len(checks.REQUIRED_CHECK_IDS), 19)
+        self.assertEqual(sum(spec.digests_required for spec in specs.values()), 4)
 
 
 class _QualifyCase(_RestoreDrillCase):
@@ -2334,6 +2668,33 @@ class _QualifyCase(_RestoreDrillCase):
         self.interrupt = None
         self.harness_emits = True
         self.fail_lock_drop = False
+        # Check ids whose result names another package than the candidate's,
+        # and check ids whose result names a package (True) or none (False)
+        # whatever their row says.
+        self.other_package = set()
+        self.digest_override = {}
+        # The corpus harness's result names the report's package (True) or
+        # none (False) for a check id here; the others follow the default.
+        self.harness_digests = {}
+        # The attestation writer's fake: check ids it writes no file for, a
+        # key id it writes instead of the one it was given, per-check fields
+        # it replaces, and whether the step itself fails.
+        self.attestation_skip = set()
+        self.attestation_key_id = None
+        self.attestation_edits = {}
+        self.attestation_fails = False
+        # Called with the restore resume's environment once it has written
+        # its result, the last check `qualify` runs: a late change to what an
+        # earlier check left behind.
+        self.after_last_check = None
+        # Called with the signing step's environment before the fake signer
+        # reads the results (a change between the check and the signer), and
+        # after it wrote its files (a change between the signer and the tool's
+        # final checks).
+        self.before_signing = None
+        self.during_signing = None
+        # Whether the fake signer refuses result files off the list it is given.
+        self.signer_honors_ids = True
 
     def _invoke(self, command, *, env, capture=False, input_text=None, log_path=None):
         if any(str(part).endswith(_INVENTORY_SCRIPT) for part in command) and "--output" in command:
@@ -2357,10 +2718,24 @@ class _QualifyCase(_RestoreDrillCase):
         def fake_cargo_test(run, step, cargo_args, test_filter, env, *, exact=False, ignored=False):
             if test_filter in (_RESTORE_SEED, _RESTORE_RESUME):
                 restore(run, step, cargo_args, test_filter, env, exact=exact, ignored=ignored)
+                if test_filter == _RESTORE_RESUME and self.after_last_check is not None:
+                    self.after_last_check(env)
                 return
             self.calls.append(("cargo", step, tuple(cargo_args), test_filter, dict(env), exact, ignored))
             if test_filter == _HARNESS:
-                _write_harness_outputs(env, emit=self.harness_emits)
+                _write_harness_outputs(
+                    env,
+                    emit=self.harness_emits,
+                    digests=self.harness_digests.get(env["TRACE_COMMONS_PIPELINE_CORPUS_CHECK_ID"]),
+                )
+            elif test_filter == _ATTESTATION_WRITER:
+                if self.attestation_fails:
+                    raise errors.StepFailed(step, 101, run.log_path(step))
+                if self.before_signing is not None:
+                    self.before_signing(env)
+                self._write_attestations(env)
+                if self.during_signing is not None:
+                    self.during_signing(env)
             elif test_filter in by_test and "TRACE_COMMONS_PIPELINE_CHECK_RESULT_DIR" in env:
                 check = by_test[test_filter]
                 if check.check_id == self.interrupt:
@@ -2373,9 +2748,50 @@ class _QualifyCase(_RestoreDrillCase):
                 elif check.check_id in self.foreign:
                     _emit_check(env, check.check_id, digests=check.digests, run_id="qforeign0")
                 elif check.check_id not in self.silent:
-                    _emit_check(env, check.check_id, digests=check.digests)
+                    named = self.digest_override.get(check.check_id, check.digests)
+                    other = {"package_hash": _fake_hash("other-package")} if check.check_id in self.other_package else {}
+                    _emit_check(env, check.check_id, digests=named, **other)
 
         return fake_cargo_test
+
+    def _write_attestations(self, env):
+        """What `pipeline_check_attestations_write` leaves behind: for each
+        result file, an attestation that wraps the result as it is, carries
+        the evidence's two digests when it holds both, and names the key id
+        it was given. The signature bytes are fake: only the Rust writer
+        verifies them."""
+        result_dir = Path(env["TRACE_COMMONS_PIPELINE_CHECK_RESULT_DIR"])
+        output_dir = Path(env.get("TRACE_COMMONS_PIPELINE_CHECK_ATTESTATION_DIR", result_dir))
+        accepted = set(env["TRACE_COMMONS_PIPELINE_CHECK_IDS"].split(",")) if self.signer_honors_ids else None
+        result_paths = sorted(result_dir.glob("*.result.json"))
+        if accepted is not None:
+            # The real signer refuses a result file that is not on the list,
+            # and a listed check without one, before it signs anything.
+            found = {json.loads(path.read_bytes())["check_id"] for path in result_paths}
+            if found != accepted:
+                raise errors.StepFailed("check_attestations", 101, self.run.log_path("check_attestations"))
+        for result_path in result_paths:
+            result = json.loads(result_path.read_bytes())
+            check_id = result["check_id"]
+            if check_id in self.attestation_skip:
+                continue
+            evidence = json.loads((result_dir / f"{check_id}.evidence.json").read_bytes())
+            both = isinstance(evidence, dict) and "corpus_digest" in evidence and "input_digest" in evidence
+            attestation = {
+                "schema": "trace_commons.pipeline_check_attestation.v1",
+                "result": result,
+                "maximum_age_seconds": int(env["TRACE_COMMONS_PIPELINE_CHECK_MAX_AGE_SECONDS"]),
+                "corpus_digest": evidence["corpus_digest"] if both else None,
+                "input_digest": evidence["input_digest"] if both else None,
+                "signature": {
+                    "algorithm": "Ed25519",
+                    "key_id": self.attestation_key_id or env["TRACE_COMMONS_PIPELINE_CHECK_SIGNING_KEY_ID"],
+                    "attestation_hash": _fake_hash(f"attestation:{check_id}"),
+                    "signature_base64url": "A" * 86,
+                },
+            }
+            attestation.update(self.attestation_edits.get(check_id, {}))
+            (output_dir / f"{check_id}.attestation.json").write_text(json.dumps(attestation))
 
     def _fake_export(self, run, path, env, *, local_dir=None):
         self.calls.append(("export", Path(path), local_dir))
@@ -2457,6 +2873,70 @@ class QualifyTests(_QualifyCase):
             self.assertEqual(value["failure"], "check_result_missing:pipeline_http_corpus_minimal")
             self.assertFalse(self.catalog_path.exists(), "a failed qualify archives nothing")
 
+    def test_qualify_names_one_package_on_exactly_the_four_candidate_checks(self):
+        self.assertEqual(self._qualify(), 0, self.stderr.getvalue())
+        loaded = results.load_results(self.run)
+        named = {check_id for check_id, result in loaded.items() if result.package_hash is not None}
+        self.assertEqual(named, set(_CANDIDATE_CHECKS))
+        self.assertEqual(
+            {(result.package_hash, result.configuration_digest, result.dependency_digest) for result in loaded.values()}
+            - {(None, None, None)},
+            {tuple(_candidate_digests().values())},
+        )
+        self.assertEqual(
+            (loaded["pipeline_http_corpus_minimal"].package_hash, loaded["pipeline_crash_matrix"].package_hash),
+            (None, None),
+        )
+        # The report's checks say the same.
+        value = json.loads(self.report_path.read_text())
+        self.assertEqual(
+            {item["check_id"] for item in value["checks"] if item["package_hash"] is not None},
+            set(_CANDIDATE_CHECKS),
+        )
+
+    def test_qualify_refuses_a_candidate_check_that_names_another_package(self):
+        self.other_package = {"pipeline_bundle_qualification"}
+        self.assertEqual(self._qualify(), 1)
+        self.assertEqual(self.stderr.getvalue().strip(), "PipelineFailure: qualification_evidence_mixed_package")
+        value = json.loads(self.report_path.read_text())
+        self.assertEqual((value["status"], value["failure"]), ("fail", "qualification_evidence_mixed_package"))
+        self.assertNotIn("PipelineQualificationOK", self.stdout.getvalue())
+
+    def test_qualify_refuses_a_mechanics_check_that_names_a_package(self):
+        self.digest_override = {"pipeline_crash_matrix": True}
+        self.assertEqual(self._qualify(), 1)
+        label = "pipeline_check_digests_unexpected:pipeline_crash_matrix"
+        self.assertEqual(self.stderr.getvalue().strip(), f"PipelineFailure: {label}")
+        value = json.loads(self.report_path.read_text())
+        self.assertEqual((value["status"], value["failure"]), ("fail", label))
+
+        with self.subTest("the minimal corpus check names no package either"):
+            self._fresh_run()
+            self.digest_override = {}
+            self.harness_digests = {"pipeline_http_corpus_minimal": True}
+            self.assertEqual(self._qualify(), 1)
+            self.assertEqual(
+                self.stderr.getvalue().strip(),
+                "PipelineFailure: pipeline_check_digests_unexpected:pipeline_http_corpus_minimal",
+            )
+
+    def test_qualify_refuses_a_candidate_check_without_its_digests(self):
+        self.digest_override = {"pipeline_bundle_qualification": False}
+        self.assertEqual(self._qualify(), 1)
+        self.assertEqual(
+            self.stderr.getvalue().strip(), "PipelineFailure: check_result_digest_missing:pipeline_bundle_qualification"
+        )
+
+        with self.subTest("a compatibility corpus result without its digests"):
+            self._fresh_run()
+            self.digest_override = {}
+            self.harness_digests = {"pipeline_http_corpus_compatibility": False}
+            self.assertEqual(self._qualify(), 1)
+            self.assertEqual(
+                self.stderr.getvalue().strip(),
+                "PipelineFailure: check_result_digest_missing:pipeline_http_corpus_compatibility",
+            )
+
     def test_qualify_runs_each_check_in_a_fresh_scenario(self):
         code = self._qualify()
         self.assertEqual(code, 0, self.stderr.getvalue())
@@ -2500,7 +2980,7 @@ class QualifyTests(_QualifyCase):
                 if item[0] == "invoke" and item[2] and "pg_stat_database" in item[2] and f"'{guarded}'" in item[2]
             ]
             self.assertEqual(len(guards), 1, f"the xact guard runs after {check.check_id}")
-        self.assertEqual(len(databases), 12)
+        self.assertEqual(len(databases), 15)
 
         # The binding checks run first, then migration atomicity in its own
         # scenario, then the database checks in table order, the three
@@ -2654,7 +3134,7 @@ class QualifyTests(_QualifyCase):
                 self.assertNotIn(key, text)
         self.assertEqual((self.run.run_dir / "qualification-report.json").read_bytes(), data)
         lines = [line for line in self.stdout.getvalue().splitlines() if line]
-        self.assertEqual(lines[0], f"PipelineQualificationOK: report={self.report_path.name} checks=16")
+        self.assertEqual(lines[0], f"PipelineQualificationOK: report={self.report_path.name} checks=19")
         self.assertTrue(lines[1].startswith("PipelineQualificationScope: production_promotion_ready=false"))
         self.assertEqual(self.stderr.getvalue(), "")
 
@@ -2673,6 +3153,177 @@ class QualifyTests(_QualifyCase):
             with self.subTest(label=label):
                 with self.assertRaises(errors.ToolingError):
                     report_module.validate_qualification_report(tampered)
+
+    def test_a_pass_report_names_one_package_on_the_candidate_checks_only(self):
+        """The pass branch of the report validator applies the rules of the
+        results (P5-D15), for a report that `catalog.py` reads from disk:
+        one package among the checks, digests exactly on the four candidate
+        checks. Each direction is refused, and the correct report passes."""
+        self.assertEqual(self._qualify(), 0, self.stderr.getvalue())
+        value = json.loads(self.report_path.read_text())
+        report_module.validate_qualification_report(value)  # the correct one passes
+        named = {
+            item["check_id"] for item in value["checks"] if item["package_hash"] is not None
+        }
+        self.assertEqual(named, set(_CANDIDATE_CHECKS))
+
+        def changed(check_id, **fields):
+            checks_ = [
+                {**item, **fields} if item["check_id"] == check_id else item for item in value["checks"]
+            ]
+            report = {**value, "checks": checks_}
+            report["evidence_hash"] = _digest(
+                results.canonical({"inputs": report["inputs"], "checks": report["checks"]})
+            )
+            return report
+
+        cases = (
+            (
+                "two packages",
+                changed("pipeline_http_corpus_hf_local", package_hash=_fake_hash("another-package")),
+                "qualification_evidence_mixed_package",
+            ),
+            (
+                "a mechanics check with a digest",
+                changed("pipeline_crash_matrix", **_candidate_digests()),
+                "pipeline_check_digests_unexpected:pipeline_crash_matrix",
+            ),
+            (
+                "a candidate check without its digests",
+                changed("pipeline_restore_drill", **_NO_DIGESTS),
+                "check_result_digest_missing:pipeline_restore_drill",
+            ),
+        )
+        for label, report, expected in cases:
+            with self.subTest(label):
+                with self.assertRaises(errors.ToolingError) as ctx:
+                    report_module.validate_qualification_report(report)
+                self.assertEqual(str(ctx.exception), expected)
+
+        with self.subTest("the catalog refuses a pass report that breaks a rule"):
+            self.report_path.write_text(json.dumps(cases[1][1]))
+            with self.assertRaises(errors.ToolingError) as ctx:
+                catalog.update_catalog(self.catalog_path, self.report_path)
+            self.assertEqual(str(ctx.exception), cases[1][2])
+            self.assertFalse(self.catalog_path.exists())
+
+    def test_a_v1_report_without_the_attestation_keys_validates_and_is_archived(self):
+        """The report keeps schema `v1`. A `v1` report without `attested` and
+        `attestation_count` (here: this tool's own pass report with the two
+        keys taken out) validates, reads as unsigned (`attested: false`,
+        `attestation_count: 0`), and `qualify --archive` archives it. A report
+        with one of the two keys must have both, and they must agree. That a
+        key-less report is valid does not make every report of `main`'s tool
+        valid: see `test_a_pass_report_shaped_as_mains_tool_writes_it_...`."""
+        self.assertEqual(self._qualify(), 0, self.stderr.getvalue())
+        written = json.loads(self.report_path.read_text())
+        self.assertEqual((written["attested"], written["attestation_count"]), (False, 0), "the tool writes both keys")
+        main_style = {key: value for key, value in written.items() if key not in ("attested", "attestation_count")}
+        self.assertEqual(main_style["schema"], "trace_commons.pipeline_qualification_report.v1")
+        report_module.validate_qualification_report(main_style)
+        self.assertEqual(report_module.report_attestation(main_style), (False, 0))
+        self.assertEqual(report_module.report_attestation(written), (False, 0))
+        archived_source = self.tmp / "main-style-report.json"
+        archived_source.write_text(json.dumps(main_style))
+        catalog.update_catalog(self.catalog_path, archived_source)
+        [entry] = json.loads(self.catalog_path.read_text())["qualifications"]
+        self.assertEqual(entry["status"], "pass")
+
+        # A signed pass report, then each way a report can contradict itself.
+        self._fresh_run()
+        self.assertEqual(self._qualify("--signing-key", str(self._key()), "--signing-key-id", "ci_key"), 0, self.stderr.getvalue())
+        signed = json.loads(self.report_path.read_text())
+        self.assertEqual((signed["attested"], signed["attestation_count"]), (True, 19))
+        report_module.validate_qualification_report(signed)
+        self.assertEqual(report_module.report_attestation(signed), (True, 19))
+        failed = {**signed, "status": "fail", "failure": "check_attestation_invalid"}
+        cases = {
+            # One key alone, even when it agrees with what the other would read as.
+            "only attested, false": {**main_style, "attested": False},
+            "only attestation_count, zero": {**main_style, "attestation_count": 0},
+            "only attested": {key: value for key, value in signed.items() if key != "attestation_count"},
+            "only attestation_count": {key: value for key, value in signed.items() if key != "attested"},
+            "attested with no attestation": {**signed, "attestation_count": 0},
+            "attestations that are not attested": {**signed, "attested": False},
+            "fewer attestations than checks": {**signed, "attestation_count": 18},
+            "more attestations than checks": {**signed, "attestation_count": 20},
+            "a count that is not a number": {**signed, "attestation_count": "19"},
+            "an attested failed report": failed,
+        }
+        for label, report in cases.items():
+            with self.subTest(label):
+                with self.assertRaises(errors.ToolingError) as ctx:
+                    report_module.validate_qualification_report(report)
+                self.assertEqual(str(ctx.exception), "qualification_report_invalid")
+        # An unattested failed report is valid, and any other key is not.
+        report_module.validate_qualification_report({**failed, "attested": False, "attestation_count": 0})
+        with self.assertRaises(errors.ToolingError):
+            report_module.validate_qualification_report({**main_style, "unknown_key": 1})
+
+    def test_a_pass_report_shaped_as_mains_tool_writes_it_is_refused_and_its_fail_report_validates(self):
+        """A `v1` report without the two keys validates and reads as unsigned.
+        That holds for a FAIL report of `main`'s tool. It does not hold for a
+        PASS report of `main`'s tool: its evidence names more than one package
+        (the minimal corpus check carries a package, and so does each
+        mechanics check: a run names many), which `_require_one_package`
+        refuses, because such a result set could never back a promotion."""
+        self.assertEqual(self._qualify(), 0, self.stderr.getvalue())
+        written = json.loads(self.report_path.read_text())
+
+        def main_shaped(candidate_only=False, **changes):
+            """`written` as `main`'s tool writes a report: no attestation keys,
+            and each check (every one, or only the four candidate checks)
+            naming a package of its own."""
+            shaped_checks = []
+            for item in written["checks"]:
+                own = candidate_only is False or item["check_id"] in _CANDIDATE_CHECKS
+                shaped_checks.append(
+                    {
+                        **item,
+                        "package_hash": _fake_hash(f"package:{item['check_id']}") if own else None,
+                        "configuration_digest": _fake_hash(f"configuration:{item['check_id']}") if own else None,
+                        "dependency_digest": _fake_hash(f"dependency:{item['check_id']}") if own else None,
+                    }
+                )
+            shaped = {key: value for key, value in written.items() if key not in ("attested", "attestation_count")}
+            shaped.update(changes)
+            shaped["checks"] = shaped_checks
+            shaped["evidence_hash"] = _digest(results.canonical({"inputs": shaped["inputs"], "checks": shaped_checks}))
+            return shaped
+
+        everything_named = main_shaped()
+        packages = {item["package_hash"] for item in everything_named["checks"]}
+        self.assertGreater(len(packages), 11, "a run of `main`'s tool names many packages")
+        first_mechanics = next(item["check_id"] for item in everything_named["checks"] if item["check_id"] not in _CANDIDATE_CHECKS)
+        for label, report, expected in (
+            (
+                "each check names its own package",
+                everything_named,
+                f"pipeline_check_digests_unexpected:{first_mechanics}",
+            ),
+            (
+                "the four candidate checks name four packages",
+                main_shaped(candidate_only=True),
+                "qualification_evidence_mixed_package",
+            ),
+        ):
+            with self.subTest(label):
+                self.assertNotIn("attested", report)
+                with self.assertRaises(errors.ToolingError) as ctx:
+                    report_module.validate_qualification_report(report)
+                self.assertEqual(str(ctx.exception), expected)
+
+        failed = main_shaped(status="fail", failure="check_result_failed:pipeline_crash_matrix")
+        report_module.validate_qualification_report(failed)  # a fail report of the same shape validates
+        self.assertEqual(report_module.report_attestation(failed), (False, 0))
+        failed_path = self.tmp / "main-style-fail-report.json"
+        failed_path.write_text(json.dumps(failed))
+        catalog.update_catalog(self.catalog_path, failed_path)
+
+    def _key(self):
+        key = self.tmp / "tcsecretkey-report-test.pk8"
+        key.write_bytes(b"a disposable test key, not a real one")
+        return key
 
     def test_qualify_reports_an_empty_result_file_with_a_label(self):
         """Final review M1: an empty (or malformed) result file fails with
@@ -2718,6 +3369,850 @@ class QualifyTests(_QualifyCase):
         value = json.loads(self.report_path.read_text())
         self.assertEqual((value["status"], value["failure"]), ("fail", "cleanup_failed"))
         self.assertFalse(self.catalog_path.exists())
+
+
+# ---------------------------------------------------------------------------
+# PR 5, Task 8: signed check results (`qualify --signing-key`, `keygen`,
+# `revision`).
+# ---------------------------------------------------------------------------
+
+_ATTESTATION_VARS = (
+    "TRACE_COMMONS_PIPELINE_CHECK_RESULT_DIR",
+    "TRACE_COMMONS_PIPELINE_CHECK_ATTESTATION_DIR",
+    "TRACE_COMMONS_PIPELINE_CHECK_IDS",
+    "TRACE_COMMONS_PIPELINE_CHECK_SIGNING_KEY_PATH",
+    "TRACE_COMMONS_PIPELINE_CHECK_SIGNING_KEY_ID",
+    "TRACE_COMMONS_PIPELINE_CHECK_MAX_AGE_SECONDS",
+)
+_KEYGEN_VARS = (
+    "TRACE_COMMONS_PIPELINE_CHECK_KEYGEN_OUTPUT",
+    "TRACE_COMMONS_PIPELINE_CHECK_KEYGEN_KEY_ID",
+    "TRACE_COMMONS_PIPELINE_CHECK_KEYGEN_TRUSTED_KEY_OUTPUT",
+)
+
+
+class SignedQualifyTests(_QualifyCase):
+    KEY_NAME = "tcsecretkey-7f3a91.pk8"
+
+    def setUp(self):
+        super().setUp()
+        self.key = self.tmp / self.KEY_NAME
+        self.key.write_bytes(b"a disposable test key, not a real one")
+
+    def _signed(self, *extra):
+        return self._qualify("--signing-key", str(self.key), "--signing-key-id", "ci_key", *extra)
+
+    def _attestation_calls(self):
+        return [call for call in self._cargo_calls() if call[3] == _ATTESTATION_WRITER]
+
+    def _attestation_files(self):
+        return sorted(path.name for path in self.run.results_dir.glob("*.attestation.json"))
+
+    def test_qualify_with_a_signing_key_runs_the_attestation_step(self):
+        # Without the key: no attestation step, no files, an unattested report.
+        self.assertEqual(self._qualify(), 0, self.stderr.getvalue())
+        unsigned_calls = len(self._cargo_calls())
+        self.assertEqual(self._attestation_calls(), [])
+        self.assertEqual(self._attestation_files(), [])
+        value = json.loads(self.report_path.read_text())
+        self.assertEqual((value["attested"], value["attestation_count"]), (False, 0))
+        report_module.validate_qualification_report(value)
+        lines = [line for line in self.stdout.getvalue().splitlines() if line]
+        self.assertEqual(lines[0], f"PipelineQualificationOK: report={self.report_path.name} checks=19")
+
+        # With it: one more cargo call, the writer, after every check.
+        self._fresh_run()
+        self.assertEqual(self._signed(), 0, self.stderr.getvalue())
+        calls = self._cargo_calls()
+        self.assertEqual(len(calls), unsigned_calls + 1)
+        [attestation_call] = self._attestation_calls()
+        self.assertIs(calls[-1], attestation_call, "the writer runs after every check")
+        _, step, cargo_args, test_filter, env, exact, ignored = attestation_call
+        self.assertRegex(step, r"^[a-z0-9_]{1,64}$")
+        self.assertEqual((cargo_args, test_filter, exact, ignored), (_INGEST_ARGS, _ATTESTATION_WRITER, True, True))
+        self.assertEqual({key for key in env if key.startswith("TRACE_COMMONS_")}, set(_ATTESTATION_VARS))
+        self.assertEqual(env["TRACE_COMMONS_PIPELINE_CHECK_RESULT_DIR"], str(self.run.results_dir))
+        # The signer writes into a staging directory of the run directory, and
+        # signs exactly the required checks.
+        self.assertEqual(env["TRACE_COMMONS_PIPELINE_CHECK_ATTESTATION_DIR"], str(self.run.run_dir / "attestations-staging"))
+        self.assertEqual(
+            env["TRACE_COMMONS_PIPELINE_CHECK_IDS"].split(","), sorted(checks.REQUIRED_CHECK_IDS)
+        )
+        self.assertEqual(env["TRACE_COMMONS_PIPELINE_CHECK_SIGNING_KEY_PATH"], str(self.key.resolve()))
+        self.assertEqual(env["TRACE_COMMONS_PIPELINE_CHECK_SIGNING_KEY_ID"], "ci_key")
+        self.assertEqual(env["TRACE_COMMONS_PIPELINE_CHECK_MAX_AGE_SECONDS"], "86400")
+        self.assertEqual(
+            self._attestation_files(), sorted(f"{check_id}.attestation.json" for check_id in checks.REQUIRED_CHECK_IDS)
+        )
+        value = json.loads(self.report_path.read_text())
+        self.assertEqual((value["status"], value["attested"], value["attestation_count"]), ("pass", True, 19))
+        report_module.validate_qualification_report(value)
+        lines = [line for line in self.stdout.getvalue().splitlines() if line]
+        self.assertEqual(lines[0], f"PipelineQualificationOK: report={self.report_path.name} checks=19 attested=19")
+        self.assertEqual(self.stderr.getvalue(), "")
+        # Only the three corpus checks carry the evidence's two digests.
+        carried = {}
+        for check_id in checks.REQUIRED_CHECK_IDS:
+            raw = json.loads((self.run.results_dir / f"{check_id}.attestation.json").read_text())
+            carried[check_id] = (raw["corpus_digest"], raw["input_digest"])
+        self.assertEqual(
+            {check_id for check_id, pair in carried.items() if pair != (None, None)},
+            set(checks.REQUIRED_CORPUS_CHECK_IDS),
+        )
+
+        # The age flag reaches the writer.
+        self._fresh_run()
+        self.assertEqual(self._signed("--evidence-max-age-seconds", "3600"), 0, self.stderr.getvalue())
+        [attestation_call] = self._attestation_calls()
+        self.assertEqual(attestation_call[4]["TRACE_COMMONS_PIPELINE_CHECK_MAX_AGE_SECONDS"], "3600")
+
+    def test_the_attestation_step_never_runs_for_a_result_set_that_does_not_pass(self):
+        """The step runs only after `require_current_pass_results` passed: a
+        missing, foreign, or package-breaking result stops the run first, so
+        nothing is signed and the report says so."""
+        cases = {
+            "a missing result": ({"silent": {"pipeline_payout_recovery"}}, "check_result_missing:pipeline_payout_recovery"),
+            "a result from another run": ({"foreign": {"pipeline_receipt_replay_exact"}}, "check_result_foreign_run"),
+            "a mechanics result that names a package": (
+                {"digest_override": {"pipeline_crash_matrix": True}},
+                "pipeline_check_digests_unexpected:pipeline_crash_matrix",
+            ),
+            "a candidate result without its digests": (
+                {"digest_override": {"pipeline_bundle_qualification": False}},
+                "check_result_digest_missing:pipeline_bundle_qualification",
+            ),
+        }
+        for label, (knobs, failure) in cases.items():
+            with self.subTest(label):
+                self._fresh_run()
+                self.silent, self.foreign, self.digest_override = set(), set(), {}
+                for name, value in knobs.items():
+                    setattr(self, name, value)
+                self.assertEqual(self._signed(), 1)
+                self.assertEqual(self.stderr.getvalue().strip(), f"PipelineFailure: {failure}")
+                self.assertEqual(self._attestation_calls(), [])
+                self.assertEqual(self._attestation_files(), [])
+                value = json.loads(self.report_path.read_text())
+                self.assertEqual((value["status"], value["failure"]), ("fail", failure))
+                self.assertEqual((value["attested"], value["attestation_count"]), (False, 0))
+                self.assertNotIn("PipelineQualificationOK", self.stdout.getvalue())
+
+    def test_a_result_that_changes_after_its_own_check_is_never_signed(self):
+        """Each check requires its own result when it runs, and the whole set
+        is required again once every check is done. A result that a later step
+        removed or changed after its own check passed is caught by that last
+        requirement, before anything is signed."""
+
+        def remove(check_id):
+            def tamper(env):
+                result_dir = Path(env["TRACE_COMMONS_PIPELINE_CHECK_RESULT_DIR"])
+                (result_dir / f"{check_id}.result.json").unlink()
+                (result_dir / f"{check_id}.evidence.json").unlink()
+
+            return tamper
+
+        def fail(check_id):
+            def tamper(env):
+                path = Path(env["TRACE_COMMONS_PIPELINE_CHECK_RESULT_DIR"]) / f"{check_id}.result.json"
+                path.write_text(json.dumps({**json.loads(path.read_text()), "status": "fail"}))
+
+            return tamper
+
+        cases = (
+            ("a result removed late", remove("pipeline_crash_matrix"), "check_result_missing:pipeline_crash_matrix"),
+            ("a result failed late", fail("pipeline_crash_matrix"), "check_result_failed:pipeline_crash_matrix"),
+        )
+        for label, tamper, failure in cases:
+            with self.subTest(label):
+                self._fresh_run()
+                self.after_last_check = tamper
+                self.assertEqual(self._signed(), 1)
+                self.assertEqual(self.stderr.getvalue().strip(), f"PipelineFailure: {failure}")
+                self.assertEqual(self._attestation_calls(), [], "nothing was signed")
+                self.assertEqual(self._attestation_files(), [])
+                value = json.loads(self.report_path.read_text())
+                self.assertEqual((value["status"], value["failure"]), ("fail", failure))
+                self.assertEqual((value["attested"], value["attestation_count"]), (False, 0))
+        self.after_last_check = None
+
+    def _assert_no_attestation_anywhere(self):
+        self.assertEqual(
+            sorted(path.name for path in self.run.run_dir.rglob("*.attestation.json")), [],
+            "a failed run leaves no attestation file anywhere in its directory",
+        )
+        self.assertFalse((self.run.run_dir / "attestations-staging").exists(), "no staging directory is left")
+
+    def _assert_failed_unattested(self, failure):
+        value = json.loads(self.report_path.read_text())
+        self.assertEqual((value["status"], value["failure"]), ("fail", failure))
+        self.assertEqual((value["attested"], value["attestation_count"]), (False, 0))
+        self.assertNotIn("PipelineQualificationOK", self.stdout.getvalue())
+
+    def test_a_signed_run_whose_tree_changed_leaves_no_attestation(self):
+        """The tree check of PR 4 exists so that evidence from a mixed tree is
+        never credited to the starting revision. Attestations name that
+        revision and the server accepts them when it is deployed, so a run
+        that fails the tree check leaves none, whenever the tree changed."""
+        # Changed during the checks: the tree is checked before anything is
+        # signed, so nothing is signed.
+        self.tree_edited = True
+        self.assertEqual(self._signed("--archive"), 1)
+        self.assertEqual(self.stderr.getvalue().strip(), "PipelineFailure: code_revision_changed")
+        self.assertEqual(self._attestation_calls(), [], "the tree is checked before the signing step")
+        self._assert_no_attestation_anywhere()
+        self._assert_failed_unattested("code_revision_changed")
+        self.assertEqual(self.tree_hash_calls, 1)
+        self.assertFalse(self.catalog_path.exists(), "nothing is archived")
+
+    def test_a_tree_that_changes_while_the_results_are_signed_leaves_no_attestation(self):
+        def edit_the_tree(env):
+            self.tree_edited = True
+
+        self.during_signing = edit_the_tree
+        self.assertEqual(self._signed("--archive"), 1)
+        self.assertEqual(self.stderr.getvalue().strip(), "PipelineFailure: code_revision_changed")
+        self.assertEqual(len(self._attestation_calls()), 1, "the results were signed, then the second check failed")
+        self._assert_no_attestation_anywhere()
+        self._assert_failed_unattested("code_revision_changed")
+        self.assertEqual(self.tree_hash_calls, 2, "once before the signing step, once after it")
+        self.assertFalse(self.catalog_path.exists(), "nothing is archived")
+
+    def test_a_failure_while_the_attestations_are_published_leaves_none(self):
+        published = []
+        real = pipeline._publish_file
+
+        def failing(source, destination):
+            published.append(destination.name)
+            if len(published) == 5:
+                raise OSError("disk full")
+            real(source, destination)
+
+        with mock.patch.object(pipeline, "_publish_file", failing):
+            self.assertEqual(self._signed("--archive"), 1)
+        self.assertEqual(len(published), 5, "four files were already in place when the fifth failed")
+        self.assertEqual(self.stderr.getvalue().strip(), "PipelineFailure: check_attestation_publish_failed")
+        self._assert_no_attestation_anywhere()
+        self._assert_failed_unattested("check_attestation_publish_failed")
+        self.assertFalse(self.catalog_path.exists(), "nothing is archived")
+
+    def test_a_signed_run_that_passes_leaves_its_files_in_place_and_no_staging_directory(self):
+        self.assertEqual(self._signed(), 0, self.stderr.getvalue())
+        self.assertEqual(
+            sorted(path.name for path in self.run.results_dir.glob("*.attestation.json")),
+            sorted(f"{check_id}.attestation.json" for check_id in checks.REQUIRED_CHECK_IDS),
+        )
+        self.assertEqual(
+            sorted(path.name for path in self.run.run_dir.rglob("*.attestation.json")),
+            sorted(path.name for path in self.run.results_dir.glob("*.attestation.json")),
+            "the only attestation files are the final ones",
+        )
+        self.assertFalse((self.run.run_dir / "attestations-staging").exists())
+        self.assertEqual(self.tree_hash_calls, 2, "checked before the signing step and again after it")
+
+    def test_a_failed_run_that_cannot_remove_its_attestations_says_so(self):
+        """`discard_attestations` looks again after it removed: anything left
+        (the staging directory, or an attestation file) is
+        `check_attestation_discard_failed`, shown on the terminal and carried
+        by the failure report beside the original label."""
+
+        class ShutilWithoutRmtree:
+            def __getattr__(self, name):
+                return getattr(shutil, name)
+
+            @staticmethod
+            def rmtree(path, ignore_errors=False):
+                return None
+
+        real_unlink = Path.unlink
+
+        def stubborn_unlink(path, missing_ok=False):
+            if path.name.endswith(".attestation.json"):
+                raise PermissionError("denied")
+            return real_unlink(path, missing_ok=missing_ok)
+
+        def edit_the_tree(env):
+            self.tree_edited = True
+
+        def conflicting_archive(*args, **kwargs):
+            raise errors.ToolingError("immutable_record_conflict")
+
+        discard_failed = "check_attestation_discard_failed"
+        cases = (
+            # The tree changes while the results are signed: the files are in
+            # the staging directory, which cannot be removed.
+            ("a staging directory that stays", "code_revision_changed", {"during_signing": edit_the_tree},
+             [("shutil", ShutilWithoutRmtree())], True),
+            # The archive fails after the files were published: they cannot be
+            # unlinked.
+            ("published files that stay", "immutable_record_conflict", {},
+             [("update_catalog", conflicting_archive)], False),
+        )
+        for label, original, hooks, replaced, staged in cases:
+            with self.subTest(label):
+                self._fresh_run()
+                self.during_signing = hooks.get("during_signing")
+                self.tree_edited = False
+                with contextlib.ExitStack() as stack:
+                    for name, replacement in replaced:
+                        stack.enter_context(mock.patch.object(pipeline, name, replacement))
+                    stack.enter_context(mock.patch.object(Path, "unlink", stubborn_unlink))
+                    self.assertEqual(self._signed("--archive"), 1)
+                lines = self.stderr.getvalue().splitlines()
+                self.assertIn(f"PipelineFailure: {original}", lines, "the original label is still shown")
+                self.assertIn(f"PipelineFailure: {discard_failed}", lines)
+                value = json.loads(self.report_path.read_text())
+                self.assertEqual((value["status"], value["failure"]), ("fail", f"{original}.{discard_failed}"))
+                self.assertEqual((value["attested"], value["attestation_count"]), (False, 0))
+                report_module.validate_qualification_report(value)
+                # The premise: what could not be removed is really still there.
+                self.assertEqual((self.run.run_dir / "attestations-staging").exists(), staged)
+                self.assertEqual(
+                    bool(list(self.run.run_dir.rglob("*.attestation.json"))), True, "an attestation file remains"
+                )
+        self.during_signing = None
+
+    def test_a_failure_that_cannot_write_its_failed_report_leaves_no_pass_report(self):
+        """An attested pass report is written before the files are published
+        and the archive is made. If a later step fails and the failed report
+        cannot be written either, this run's pass report must not stay, in
+        either place it was written."""
+        real_write = pipeline.write_report
+
+        def pass_reports_only(*args, **kwargs):
+            if kwargs.get("failure") is not None:
+                raise OSError("disk full")
+            return real_write(*args, **kwargs)
+
+        published = []
+        real_publish = pipeline._publish_file
+
+        def failing_publish(source, destination):
+            published.append(destination.name)
+            if len(published) == 5:
+                raise OSError("disk full")
+            real_publish(source, destination)
+
+        def conflicting_archive(*args, **kwargs):
+            raise errors.ToolingError("immutable_record_conflict")
+
+        cases = (
+            ("the publish fails", "check_attestation_publish_failed", True, ("_publish_file", failing_publish)),
+            ("the archive fails", "immutable_record_conflict", True, ("update_catalog", conflicting_archive)),
+            ("the archive fails without a signing key", "immutable_record_conflict", False,
+             ("update_catalog", conflicting_archive)),
+        )
+        for label, original, signed, (name, replacement) in cases:
+            with self.subTest(label):
+                self._fresh_run()
+                published.clear()
+                with mock.patch.object(pipeline, name, replacement), mock.patch.object(
+                    pipeline, "write_report", pass_reports_only
+                ):
+                    code = self._signed("--archive") if signed else self._qualify("--archive")
+                self.assertEqual(code, 1)
+                self.assertIn(f"PipelineFailure: {original}", self.stderr.getvalue())
+                self.assertFalse(self.report_path.exists(), "no pass report in the latest-report place")
+                self.assertFalse((self.run.run_dir / "qualification-report.json").exists(), "none in the run directory")
+                self._assert_no_attestation_anywhere()
+
+    def test_a_result_file_changed_before_the_signer_reads_it_is_not_signed(self):
+        """The attestations are compared with the results that
+        `require_current_pass_results` accepted, not with the files on disk, so
+        a result file changed between the check and the signer cannot be signed
+        and pass."""
+
+        def changing(**fields):
+            def tamper(env):
+                path = Path(env["TRACE_COMMONS_PIPELINE_CHECK_RESULT_DIR"]) / "pipeline_crash_matrix.result.json"
+                path.write_text(json.dumps({**json.loads(path.read_text()), **fields}))
+
+            return tamper
+
+        for label, tamper in (
+            ("a status changed", changing(status="fail")),
+            ("a time moved", changing(observed_at=_iso(datetime.now(timezone.utc) + timedelta(seconds=30)))),
+            ("a safe blocker added", changing(safe_blockers=["extra_blocker"])),
+        ):
+            with self.subTest(label):
+                self._fresh_run()
+                self.before_signing = tamper
+                self.assertEqual(self._signed(), 1)
+                self.assertEqual(self.stderr.getvalue().strip(), "PipelineFailure: check_attestation_invalid")
+                self._assert_no_attestation_anywhere()
+                self._assert_failed_unattested("check_attestation_invalid")
+        self.before_signing = None
+
+    def test_a_failed_attestation_step_fails_the_qualification(self):
+        cases = {
+            "no file for one result": ({"attestation_skip": {"pipeline_crash_matrix"}}, 1, "check_attestation_count_mismatch"),
+            "a file for another key": ({"attestation_key_id": "other_key"}, 1, "check_attestation_invalid"),
+            "another maximum age": (
+                {"attestation_edits": {"pipeline_crash_matrix": {"maximum_age_seconds": 5}}},
+                1,
+                "check_attestation_invalid",
+            ),
+            "another schema": (
+                {"attestation_edits": {"pipeline_crash_matrix": {"schema": "trace_commons.other.v1"}}},
+                1,
+                "check_attestation_invalid",
+            ),
+            "a digest the evidence does not hold": (
+                {"attestation_edits": {"pipeline_crash_matrix": {"corpus_digest": _fake_hash("c")}}},
+                1,
+                "check_attestation_invalid",
+            ),
+            "a digest the evidence holds, left out": (
+                {"attestation_edits": {"pipeline_http_corpus_minimal": {"input_digest": None}}},
+                1,
+                "check_attestation_invalid",
+            ),
+            "a result that is not the result file": (
+                {"attestation_edits": {"pipeline_crash_matrix": {"result": {"check_id": "pipeline_crash_matrix"}}}},
+                1,
+                "check_attestation_invalid",
+            ),
+            "an unknown field": (
+                {"attestation_edits": {"pipeline_crash_matrix": {"note": "x"}}},
+                1,
+                "check_attestation_invalid",
+            ),
+            "a step that fails": ({"attestation_fails": True}, 101, "step_failed:check_attestations"),
+        }
+        for label, (knobs, exit_code, failure) in cases.items():
+            with self.subTest(label):
+                self._fresh_run()
+                self.attestation_skip, self.attestation_key_id = set(), None
+                self.attestation_edits, self.attestation_fails = {}, False
+                for name, value in knobs.items():
+                    setattr(self, name, value)
+                self.assertEqual(self._signed("--archive"), exit_code, self.stderr.getvalue())
+                self.assertTrue(self.stderr.getvalue().startswith(f"PipelineFailure: {failure}"), self.stderr.getvalue())
+                self.assertNotIn("PipelineQualificationOK", self.stdout.getvalue())
+                value = json.loads(self.report_path.read_text())
+                self.assertEqual((value["status"], value["failure"]), ("fail", failure))
+                self.assertEqual((value["attested"], value["attestation_count"]), (False, 0))
+                self.assertFalse(self.catalog_path.exists(), "a failed qualify archives nothing")
+
+    def test_a_result_file_that_is_not_a_required_check_is_never_signed(self):
+        """`require_current_pass_results` checks only the required ids, so a
+        result file of another id is not accepted. The signer is told the
+        accepted ids and refuses the extra file; if a signer signed it anyway,
+        the tool refuses the attestation set. Either way the run fails with a
+        label and leaves no attestation."""
+
+        def add_an_extra_result(env):
+            _emit_check(env, "pipeline_extra_check", digests=False)
+
+        for label, honors, failure, exit_code in (
+            ("the signer refuses it", True, "step_failed:check_attestations", 101),
+            ("a signer that signs it anyway", False, "check_attestation_count_mismatch", 1),
+        ):
+            with self.subTest(label):
+                self._fresh_run()
+                self.signer_honors_ids = honors
+                self.after_last_check = add_an_extra_result
+                self.assertEqual(self._signed("--archive"), exit_code, self.stderr.getvalue())
+                self.assertTrue(self.stderr.getvalue().startswith(f"PipelineFailure: {failure}"), self.stderr.getvalue())
+                self.assertEqual(len(self._attestation_calls()), 1)
+                self._assert_no_attestation_anywhere()
+                self._assert_failed_unattested(failure)
+                self.assertFalse(self.catalog_path.exists())
+        self.signer_honors_ids = True
+        self.after_last_check = None
+
+        with self.subTest("without a signing key the extra result file changes nothing"):
+            self._fresh_run()
+            self.after_last_check = add_an_extra_result
+            self.assertEqual(self._qualify(), 0, self.stderr.getvalue())
+            self.assertIn("pipeline_extra_check", {item["check_id"] for item in json.loads(self.report_path.read_text())["checks"]})
+            self.after_last_check = None
+
+    def test_the_attestation_signature_has_exactly_its_own_fields(self):
+        """The signature of an attestation is its own type: it names the hash
+        it signed `attestation_hash` (not `package_hash`) and holds no other
+        field."""
+        good = {"algorithm": "Ed25519", "key_id": "ci_key", "attestation_hash": _fake_hash("a"), "signature_base64url": "A" * 86}
+        cases = (
+            (
+                "the package field name",
+                {**{k: v for k, v in good.items() if k != "attestation_hash"}, "package_hash": _fake_hash("a")},
+            ),
+            ("an unknown field", {**good, "note": "x"}),
+            ("a missing field", {k: v for k, v in good.items() if k != "key_id"}),
+            ("another algorithm", {**good, "algorithm": "HS256"}),
+            ("a hash that is not a hash", {**good, "attestation_hash": "not-a-hash"}),
+            ("a signature of the wrong length", {**good, "signature_base64url": "A" * 85}),
+        )
+        for label, signature in cases:
+            with self.subTest(label):
+                self._fresh_run()
+                self.attestation_edits = {"pipeline_crash_matrix": {"signature": signature}}
+                self.assertEqual(self._signed(), 1)
+                self.assertEqual(self.stderr.getvalue().strip(), "PipelineFailure: check_attestation_invalid")
+                self._assert_no_attestation_anywhere()
+        self.attestation_edits = {}
+
+    def test_the_signing_key_path_never_reaches_output(self):
+        """The key path goes to the writer's environment and nowhere else:
+        not the terminal, not either copy of the report, not a failure line."""
+
+        def reached(text):
+            return self.KEY_NAME in text or str(self.key.parent) in text
+
+        outputs = []
+
+        def collect():
+            outputs.append(self.stdout.getvalue() + self.stderr.getvalue())
+            for path in (self.report_path, self.run.run_dir / "qualification-report.json"):
+                if path.exists():
+                    outputs.append(path.read_text())
+
+        self.assertEqual(self._signed("--archive"), 0, self.stderr.getvalue())
+        collect()
+        self.assertTrue(self.report_path.is_file())
+        self.assertTrue(self.catalog_path.is_file())
+        outputs.append(self.catalog_path.read_text())
+        for archived in self.catalog_path.parent.glob("lab-records/*.json"):
+            outputs.append(archived.read_text())
+
+        for label, knobs in {
+            "a missing result": {"silent": {"pipeline_payout_recovery"}},
+            "a step that fails": {"attestation_fails": True},
+            "a file for another key": {"attestation_key_id": "other_key"},
+        }.items():
+            self._fresh_run()
+            self.silent, self.attestation_fails, self.attestation_key_id = set(), False, None
+            for name, value in knobs.items():
+                setattr(self, name, value)
+            self.assertNotEqual(self._signed(), 0, label)
+            collect()
+        self._fresh_run()
+        self.silent, self.attestation_fails, self.attestation_key_id = set(), False, None
+        # A key file that is not there is refused by label, not by path.
+        missing = self.tmp / "tcsecretmissing-key.pk8"
+        with mock.patch.object(environment, "_invoke", self._invoke):
+            self.assertEqual(
+                self._main(
+                    ["qualify", "--postgres-admin-url", _ADMIN_URL, "--signing-key", str(missing),
+                     "--signing-key-id", "ci_key"],
+                    cargo=self._fake_cargo(),
+                ),
+                1,
+            )
+        self.assertEqual(self.stderr.getvalue().strip(), "PipelineFailure: signing_key_unreadable")
+        collect()
+        self.assertIn("PipelineQualificationOK", outputs[0], "the first output is the signed run's")
+        for output in outputs:
+            self.assertFalse(reached(output), "the key path is in an output")
+            self.assertNotIn("tcsecretmissing", output)
+
+    def test_qualify_refuses_incomplete_or_out_of_range_signing_flags(self):
+        cases = (
+            (["--signing-key", str(self.key)], "signing_key_incomplete"),
+            (["--signing-key-id", "ci_key"], "signing_key_incomplete"),
+            (["--signing-key", str(self.key), "--signing-key-id", "bad key id"], "signing_key_id_invalid"),
+            (["--signing-key", str(self.key), "--signing-key-id", "ci_key", "--evidence-max-age-seconds", "604801"],
+             "evidence_max_age_above_ceiling"),
+            (["--evidence-max-age-seconds", "604801"], "evidence_max_age_above_ceiling"),
+            (["--signing-key", str(self.key), "--signing-key-id", "ci_key", "--evidence-max-age-seconds", "0"],
+             "evidence_max_age_invalid"),
+            (["--signing-key", str(self.tmp / "absent.pk8"), "--signing-key-id", "ci_key"], "signing_key_unreadable"),
+            (["--signing-key", str(self.tmp), "--signing-key-id", "ci_key"], "signing_key_unreadable"),
+        )
+        for extra, label in cases:
+            with self.subTest(label=label, extra=[part for part in extra if part != str(self.key)]):
+                self._fresh_run()
+                self.assertEqual(self._qualify(*extra), 1)
+                self.assertEqual(self.stderr.getvalue().strip(), f"PipelineFailure: {label}")
+                self.assertEqual(self._cargo_calls(), [], "refused before any step ran")
+        # The ceiling itself is allowed.
+        self._fresh_run()
+        self.assertEqual(
+            self._signed("--evidence-max-age-seconds", "604800"), 0, self.stderr.getvalue()
+        )
+        [attestation_call] = self._attestation_calls()
+        self.assertEqual(attestation_call[4]["TRACE_COMMONS_PIPELINE_CHECK_MAX_AGE_SECONDS"], "604800")
+
+    def test_the_age_flags_match_the_rust_constants(self):
+        source = _PROMOTION_SOURCE.read_text()
+
+        def seconds(name):
+            match = re.search(rf"pub const {name}: u64 = ([0-9 *]+);", source)
+            self.assertIsNotNone(match, name)
+            product = 1
+            for factor in match.group(1).split("*"):
+                product *= int(factor)
+            return product
+
+        self.assertEqual(pipeline.DEFAULT_EVIDENCE_AGE_SECONDS, seconds("QUALIFICATION_EVIDENCE_DEFAULT_MAX_AGE_SECONDS"))
+        self.assertEqual(pipeline.EVIDENCE_AGE_CEILING_SECONDS, seconds("QUALIFICATION_EVIDENCE_AGE_CEILING_SECONDS"))
+        self.assertEqual(
+            pipeline.parse_args(["qualify"]).evidence_max_age_seconds, pipeline.DEFAULT_EVIDENCE_AGE_SECONDS
+        )
+
+    def test_the_corpus_evidence_carries_the_two_digests_the_attestation_reads(self):
+        self.assertEqual(self._signed(), 0, self.stderr.getvalue())
+        for check_id in checks.REQUIRED_CORPUS_CHECK_IDS:
+            evidence = json.loads((self.run.results_dir / f"{check_id}.evidence.json").read_text())
+            self.assertRegex(evidence["corpus_digest"], r"^sha256:[0-9a-f]{64}$")
+            self.assertRegex(evidence["input_digest"], r"^sha256:[0-9a-f]{64}$")
+        hf = json.loads((self.run.results_dir / "pipeline_http_corpus_hf_local.evidence.json").read_text())
+        minimal = json.loads((self.run.results_dir / "pipeline_http_corpus_minimal.evidence.json").read_text())
+        self.assertNotEqual(hf["corpus_digest"], minimal["corpus_digest"])
+        self.assertNotEqual(hf["input_digest"], minimal["input_digest"])
+
+
+class CorpusEvidenceDigestTests(_CorpusRunCase):
+    """The corpus harness's evidence names the corpus it loaded and the
+    requests it sent (`corpus_digest`, `input_digest`); `run` and `qualify`
+    recompute both from the report and refuse any other value."""
+
+    def _run(self, **harness):
+        corpus_path = self.tmp / "corpus.json"
+        corpus_path.write_text(json.dumps(_direct_corpus(["alpha_fixture", "beta_fixture"])))
+        shutil.rmtree(self.run.run_dir)
+        self.run = _scratch_run("corpus")
+        self.stdout, self.stderr = io.StringIO(), io.StringIO()
+        argv = ["run", "--bundle", "minimal", "--corpus", str(corpus_path), "--postgres-admin-url", _ADMIN_URL]
+        return self._main(argv, cargo=self._fake_cargo(**harness)), corpus_path
+
+    def test_the_evidence_digests_are_the_corpus_bytes_and_the_request_hashes(self):
+        code, corpus_path = self._run()
+        self.assertEqual(code, 0, self.stderr.getvalue())
+        evidence = json.loads((self.run.results_dir / "pipeline_http_corpus_minimal.evidence.json").read_text())
+        self.assertEqual(evidence["corpus_digest"], _digest(corpus_path.read_bytes()), "one partition: its own digest")
+        self.assertEqual(
+            evidence["input_digest"],
+            _digest(
+                results.canonical([_fake_hash("request:alpha_fixture"), _fake_hash("request:beta_fixture")])
+            ),
+        )
+
+    def test_run_refuses_evidence_whose_digests_differ_from_its_report(self):
+        for label, overrides in (
+            ("another corpus digest", {"corpus_digest": _fake_hash("another-corpus")}),
+            ("another input digest", {"input_digest": _fake_hash("another-input")}),
+            ("no corpus digest", {"corpus_digest": _DROP}),
+            ("no input digest", {"input_digest": _DROP}),
+            ("an extra field", {"another_digest": _fake_hash("x")}),
+        ):
+            with self.subTest(label):
+                code, _ = self._run(evidence_overrides=overrides)
+                self.assertEqual(code, 1)
+                self.assertEqual(self.stderr.getvalue().strip(), "PipelineFailure: corpus_evidence_mismatch")
+
+    def test_the_digest_formulas_match_the_rust_unit_test(self):
+        """`corpus_evidence_digests_name_the_corpus_and_the_requests` in
+        `pipeline_corpus_pg_tests.rs` pins the same three literals."""
+
+        def report(corpus_digests, requests):
+            return {
+                "partitions": [
+                    {"corpus_digest": digest, "fixtures": [{"request_content_hash": item} for item in fixtures]}
+                    for digest, fixtures in zip(corpus_digests, requests)
+                ]
+            }
+
+        one, two = "sha256:" + "1" * 64, "sha256:" + "2" * 64
+        a, b, c = ("sha256:" + letter * 64 for letter in "abc")
+        self.assertEqual(corpus.evidence_digests(report([one], [[a, b]])), (one, "sha256:b7cc444b1f09d1e380d2a82f6ae10447932ce3b91f31b0ab2e659f7a7fdea15f"))
+        self.assertEqual(
+            corpus.evidence_digests(report([one, two], [[a, b], [c]])),
+            (
+                "sha256:636d591478be5cb76f2025a46b17a229fa29ef91724891793005baa9eef2100e",
+                "sha256:208dcba10edb6eea7324c3be4765e976cb578c1d9715d91e60d4042df6650461",
+            ),
+        )
+
+
+class KeygenTests(_CorpusRunCase):
+    def setUp(self):
+        super().setUp()
+        self.out = self.tmp / "tcsecretdir-91b2" / "tcsecretkey-1c0f.pk8"
+        self.trusted = self.tmp / "tcsecretdir-91b2" / "trusted-check-key.json"
+        self.mode = 0o600
+        self.key_id_in_file = None
+
+    def _fake_cargo(self, **overrides):
+        def fake_cargo_test(run, step, cargo_args, test_filter, env, *, exact=False, ignored=False):
+            self.calls.append(("cargo", step, tuple(cargo_args), test_filter, dict(env), exact, ignored))
+            key = Path(env["TRACE_COMMONS_PIPELINE_CHECK_KEYGEN_OUTPUT"])
+            key.write_bytes(b"fake pkcs8 bytes")
+            key.chmod(self.mode)
+            Path(env["TRACE_COMMONS_PIPELINE_CHECK_KEYGEN_TRUSTED_KEY_OUTPUT"]).write_text(
+                json.dumps(
+                    {
+                        "key_id": self.key_id_in_file or env["TRACE_COMMONS_PIPELINE_CHECK_KEYGEN_KEY_ID"],
+                        "public_key_base64url": "A" * 43,
+                    }
+                )
+            )
+
+        return fake_cargo_test
+
+    def _keygen(self, *extra, output=None, trusted=None, key_id="local_check_key"):
+        argv = ["keygen", "--output", str(output or self.out), "--key-id", key_id,
+                "--trusted-key-output", str(trusted or self.trusted), *extra]
+        return self._main(argv, cargo=self._fake_cargo())
+
+    def test_keygen_runs_the_key_writer_and_prints_no_path(self):
+        self.assertEqual(self._keygen(), 0, self.stderr.getvalue())
+        [(_, step, cargo_args, test_filter, env, exact, ignored)] = self._cargo_calls()
+        self.assertRegex(step, r"^[a-z0-9_]{1,64}$")
+        self.assertEqual((cargo_args, test_filter, exact, ignored), (_INGEST_ARGS, _KEY_WRITER, True, True))
+        self.assertEqual(
+            {key: value for key, value in env.items() if key.startswith("TRACE_COMMONS_")},
+            {
+                "TRACE_COMMONS_PIPELINE_CHECK_KEYGEN_OUTPUT": str(self.out.resolve()),
+                "TRACE_COMMONS_PIPELINE_CHECK_KEYGEN_KEY_ID": "local_check_key",
+                "TRACE_COMMONS_PIPELINE_CHECK_KEYGEN_TRUSTED_KEY_OUTPUT": str(self.trusted.resolve()),
+            },
+        )
+        self.assertEqual(self.stdout.getvalue().strip(), "PipelineKeygenOK: key_id=local_check_key")
+        self.assertEqual(self.stderr.getvalue(), "")
+        for output in (self.stdout.getvalue(), self.stderr.getvalue()):
+            self.assertNotIn("tcsecret", output)
+            self.assertNotIn(str(self.tmp), output)
+        self.assertEqual(self.out.stat().st_mode & 0o777, 0o600)
+
+    def test_keygen_refuses_what_it_could_overwrite_or_leave_readable(self):
+        self.out.parent.mkdir(parents=True)
+        for label, setup, expected in (
+            ("an existing key file", lambda: self.out.write_bytes(b"older key"), "signing_key_output_exists"),
+            ("an existing trusted key file", lambda: self.trusted.write_text("{}"), "signing_key_output_exists"),
+        ):
+            with self.subTest(label):
+                for path in (self.out, self.trusted):
+                    path.unlink(missing_ok=True)
+                self.calls.clear()
+                self.stdout, self.stderr = io.StringIO(), io.StringIO()
+                setup()
+                existing = {path: path.read_bytes() for path in (self.out, self.trusted) if path.exists()}
+                self.assertEqual(self._keygen(), 1)
+                self.assertEqual(self.stderr.getvalue().strip(), f"PipelineFailure: {expected}")
+                self.assertEqual(self._cargo_calls(), [], "refused before the key writer starts")
+                self.assertEqual({path: path.read_bytes() for path in existing}, existing, "nothing was changed")
+                self.assertNotIn("tcsecret", self.stderr.getvalue())
+        for path in (self.out, self.trusted):
+            path.unlink(missing_ok=True)
+
+        for label, kwargs, expected in (
+            ("one path for both files", {"output": self.out, "trusted": self.out}, "keygen_outputs_must_differ"),
+            ("a key id that is not an identifier", {"key_id": "bad key id"}, "signing_key_id_invalid"),
+        ):
+            with self.subTest(label):
+                self.calls.clear()
+                self.stdout, self.stderr = io.StringIO(), io.StringIO()
+                self.assertEqual(self._keygen(**kwargs), 1)
+                self.assertEqual(self.stderr.getvalue().strip(), f"PipelineFailure: {expected}")
+                self.assertEqual(self._cargo_calls(), [])
+
+        with self.subTest("a key file that others can read"):
+            self.calls.clear()
+            self.stdout, self.stderr = io.StringIO(), io.StringIO()
+            self.mode = 0o644
+            self.assertEqual(self._keygen(), 1)
+            self.assertEqual(self.stderr.getvalue().strip(), "PipelineFailure: signing_key_mode_invalid")
+            self.assertNotIn("PipelineKeygenOK", self.stdout.getvalue())
+            self.mode = 0o600
+
+        with self.subTest("a trusted key that names another key id"):
+            for path in (self.out, self.trusted):
+                path.unlink(missing_ok=True)
+            self.stdout, self.stderr = io.StringIO(), io.StringIO()
+            self.key_id_in_file = "another_key"
+            self.assertEqual(self._keygen(), 1)
+            self.assertEqual(self.stderr.getvalue().strip(), "PipelineFailure: trusted_key_invalid")
+            self.assertNotIn("tcsecret", self.stderr.getvalue() + self.stdout.getvalue())
+
+
+class RevisionTests(_CorpusRunCase):
+    def test_revision_prints_the_tree_hash(self):
+        self.assertEqual(self._main(["revision"]), 0, self.stderr.getvalue())
+        self.assertEqual(self.stdout.getvalue(), self.run.code_revision_hash + "\n")
+        self.assertEqual(self.stderr.getvalue(), "")
+        self.assertEqual(self.calls, [], "no child process")
+        self.assertRegex(self.stdout.getvalue(), r"^sha256:[0-9a-f]{64}\n\Z")
+
+
+class EphemeralCommandTests(unittest.TestCase):
+    """`revision` and `keygen` keep nothing, so they leave no run directory
+    (the real `Run`, in a scratch root): not when they succeed, and not when
+    they are refused before they ran anything. A failed step keeps its log in
+    the run directory and the failure line names it."""
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp())
+        self.stdout, self.stderr = io.StringIO(), io.StringIO()
+        self.out = self.root / "keys" / "check-key.pk8"
+        self.trusted = self.root / "keys" / "check-key.json"
+
+    def tearDown(self):
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def _runs(self):
+        directory = self.root / ".local" / "pipeline" / "runs"
+        return sorted(path.name for path in directory.iterdir()) if directory.exists() else []
+
+    def _main(self, argv, cargo=None):
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.object(environment, "ROOT", self.root))
+            stack.enter_context(mock.patch.object(pipeline, "ROOT", self.root))
+            stack.enter_context(mock.patch.object(environment, "_code_revision_hash", lambda: _fake_hash("tree")))
+            if cargo is not None:
+                stack.enter_context(mock.patch.object(pipeline, "cargo_test", cargo))
+            stack.enter_context(contextlib.redirect_stdout(self.stdout))
+            stack.enter_context(contextlib.redirect_stderr(self.stderr))
+            return pipeline.main(argv)
+
+    def _keygen_argv(self):
+        return ["keygen", "--output", str(self.out), "--key-id", "local_check_key", "--trusted-key-output", str(self.trusted)]
+
+    def _writing_cargo(self, run, step, cargo_args, test_filter, env, *, exact=False, ignored=False):
+        key = Path(env["TRACE_COMMONS_PIPELINE_CHECK_KEYGEN_OUTPUT"])
+        key.write_bytes(b"fake pkcs8 bytes")
+        key.chmod(0o600)
+        Path(env["TRACE_COMMONS_PIPELINE_CHECK_KEYGEN_TRUSTED_KEY_OUTPUT"]).write_text(
+            json.dumps({"key_id": "local_check_key", "public_key_base64url": "A" * 43})
+        )
+        # What a real step leaves: its log, in the run directory.
+        run.log_path(step).write_text("cargo output")
+
+    def test_revision_leaves_no_run_directory(self):
+        self.assertEqual(self._main(["revision"]), 0, self.stderr.getvalue())
+        self.assertEqual(self.stdout.getvalue(), _fake_hash("tree") + "\n")
+        self.assertEqual(self._runs(), [])
+
+    def test_a_keygen_that_succeeds_leaves_no_run_directory(self):
+        self.assertEqual(self._main(self._keygen_argv(), cargo=self._writing_cargo), 0, self.stderr.getvalue())
+        self.assertEqual(self.stdout.getvalue().strip(), "PipelineKeygenOK: key_id=local_check_key")
+        self.assertEqual(self._runs(), [])
+        self.assertTrue(self.out.is_file() and self.trusted.is_file(), "the keys it wrote are kept")
+
+    def test_a_keygen_that_is_refused_before_it_ran_leaves_no_run_directory(self):
+        self.out.parent.mkdir(parents=True)
+        self.out.write_bytes(b"an older key")
+        self.assertEqual(self._main(self._keygen_argv(), cargo=self._writing_cargo), 1)
+        self.assertEqual(self.stderr.getvalue().strip(), "PipelineFailure: signing_key_output_exists")
+        self.assertEqual(self._runs(), [])
+        self.assertEqual(self.out.read_bytes(), b"an older key")
+
+    def test_a_keygen_whose_step_failed_keeps_the_log_the_failure_names(self):
+        def failing(run, step, cargo_args, test_filter, env, *, exact=False, ignored=False):
+            log = run.log_path(step)
+            log.write_text("cargo output")
+            raise errors.StepFailed(step, 101, log)
+
+        self.assertEqual(self._main(self._keygen_argv(), cargo=failing), 101)
+        [name] = self._runs()
+        self.assertIn(f".local/pipeline/runs/{name}/logs/keygen.log", self.stderr.getvalue())
+        self.assertTrue((self.root / ".local" / "pipeline" / "runs" / name / "logs" / "keygen.log").is_file())
+
+    def test_other_commands_keep_their_run_directory(self):
+        corpus_path = self.root / "corpus.json"
+        corpus_path.write_text("{}")
+        self.assertEqual(self._main(["run", "--bundle", "minimal", "--corpus", str(corpus_path)]), 1)
+        self.assertEqual(len(self._runs()), 1, "only revision and keygen remove theirs")
 
 
 class CodeRevisionChangedTests(_QualifyCase):
@@ -2766,6 +4261,112 @@ class CodeRevisionChangedTests(_QualifyCase):
         self.assertEqual(self.tree_hash_calls, 2)
 
 
+
+class CodeRevisionExcludeTests(unittest.TestCase):
+    """Final fix wave (G22): the code revision hashes the tracked files and
+    the untracked files that the repository's own `.gitignore` files do not
+    ignore. A host's `.git/info/exclude` and a user's global excludes file
+    hide nothing, so one checkout gives one revision on every host. An
+    untracked `.cargo` directory is the one thing it leaves out by itself.
+    These tests run the real `git` in a temporary repository."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="revision-excludes-"))
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.repo = self.tmp / "repo"
+        self.repo.mkdir()
+        global_ignore = self.tmp / "global-ignore"
+        global_ignore.write_text("globally_ignored.txt\n")
+        global_config = self.tmp / "gitconfig"
+        global_config.write_text(f"[core]\n\texcludesFile = {global_ignore}\n")
+        env = mock.patch.dict(
+            os.environ,
+            {"GIT_CONFIG_GLOBAL": str(global_config), "GIT_CONFIG_NOSYSTEM": "1"},
+        )
+        env.start()
+        self.addCleanup(env.stop)
+        self._git("init", "-q")
+        (self.repo / ".gitignore").write_text("ignored.txt\n")
+        (self.repo / "tracked.txt").write_text("tracked\n")
+        self._git("add", ".gitignore", "tracked.txt")
+        info = self.repo / ".git" / "info"
+        info.mkdir(exist_ok=True)
+        (info / "exclude").write_text("locally_excluded.txt\n")
+        root = mock.patch.object(environment, "ROOT", self.repo)
+        root.start()
+        self.addCleanup(root.stop)
+
+    def _git(self, *args):
+        subprocess.run(["git", *args], cwd=self.repo, check=True, capture_output=True)
+
+    def _revision_after_writing(self, name, content):
+        (self.repo / name).write_text(content)
+        return environment._code_revision_hash()
+
+    def test_local_and_global_excludes_hide_no_file(self):
+        for name in ("locally_excluded.txt", "globally_ignored.txt"):
+            first = self._revision_after_writing(name, "one\n")
+            second = self._revision_after_writing(name, "two\n")
+            self.assertNotEqual(first, second, name)
+
+    def test_the_repository_gitignore_still_applies(self):
+        first = self._revision_after_writing("ignored.txt", "one\n")
+        second = self._revision_after_writing("ignored.txt", "two\n")
+        self.assertEqual(first, second)
+        third = self._revision_after_writing("untracked.txt", "new\n")
+        self.assertNotEqual(second, third)
+
+    def test_an_untracked_cargo_config_is_not_part_of_the_revision(self):
+        """Review round 1 of #1240, point 11: the repository's `.gitignore`
+        has no `.cargo/` line (it would keep a new cargo config, not yet
+        added, out of `git status`), and
+        the revision leaves out an untracked `.cargo/` directory itself, at
+        the root and nested, as that line did."""
+        base = environment._code_revision_hash()
+        (self.repo / "crates" / "one").mkdir(parents=True)
+        (self.repo / "crates" / "one" / "lib.rs").write_text("// one\n")
+        with_crate = environment._code_revision_hash()
+        self.assertNotEqual(base, with_crate)
+        for directory in (self.repo / ".cargo", self.repo / "crates" / "one" / ".cargo"):
+            directory.mkdir()
+            for content in ("[build]\njobs = 5\n", "[build]\njobs = 6\n"):
+                (directory / "config.toml").write_text(content)
+                self.assertEqual(environment._code_revision_hash(), with_crate, directory)
+        # Only a directory of that name: a file named like it elsewhere, and
+        # a file whose name only starts with it, are part of the tree.
+        first = self._revision_after_writing(".cargo-notes.txt", "one\n")
+        second = self._revision_after_writing(".cargo-notes.txt", "two\n")
+        self.assertNotEqual(first, second)
+
+    def test_a_tracked_cargo_config_is_part_of_the_revision(self):
+        """A checked-in `.cargo/config.toml` is visible to git (no ignore
+        line hides it) and changes the revision with each edit, at the root
+        and nested."""
+        (self.repo / "crates" / "one").mkdir(parents=True)
+        for directory in (self.repo / ".cargo", self.repo / "crates" / "one" / ".cargo"):
+            directory.mkdir()
+            config = directory / "config.toml"
+            config.write_text("[build]\njobs = 5\n")
+            untracked = environment._code_revision_hash()
+            status = subprocess.run(
+                ["git", "status", "--porcelain", "--untracked-files=all"],
+                cwd=self.repo,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout
+            self.assertIn(str(config.relative_to(self.repo)), status, "git shows the file")
+            self._git("add", str(config.relative_to(self.repo)))
+            tracked = environment._code_revision_hash()
+            self.assertNotEqual(untracked, tracked, directory)
+            config.write_text("[build]\njobs = 6\n")
+            self.assertNotEqual(environment._code_revision_hash(), tracked, directory)
+
+    def test_the_repository_gitignore_has_no_cargo_line(self):
+        """The real `.gitignore`: no line hides `.cargo`, so a checked-in
+        cargo config shows in `git status`."""
+        lines = (Path(__file__).resolve().parents[2] / ".gitignore").read_text().splitlines()
+        self.assertEqual([line for line in lines if line.strip().strip("/") == ".cargo"], [])
 class ActivityMissionInventoryTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
