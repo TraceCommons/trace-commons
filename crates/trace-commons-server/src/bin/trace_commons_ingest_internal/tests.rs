@@ -78893,6 +78893,108 @@ fn account_rate_limiter_caps_per_key() {
     assert!(limiter.check("other-key", CONFIRM_PER_CODE_LIMIT));
 }
 
+/// The pilot edge overwrites X-Forwarded-For, so the last value Caddy wrote is
+/// the only rate-limit identity the application may use. Caller-supplied hops
+/// to its left must not create fresh buckets.
+#[test]
+fn account_rate_limit_client_key_uses_the_rightmost_valid_proxy_hop() {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "x-forwarded-for",
+        HeaderValue::from_static("attacker-chosen, 192.0.2.44"),
+    );
+    assert_eq!(client_ip_for_rate_limit(&headers), "192.0.2.44");
+
+    headers.append("x-forwarded-for", HeaderValue::from_static("198.51.100.17"));
+    assert_eq!(client_ip_for_rate_limit(&headers), "198.51.100.17");
+}
+
+/// One IPv6 subscriber can rotate interface identifiers cheaply. Every
+/// address in its /64 must therefore spend the same bucket, while malformed
+/// and absent proxy values share one conservative unattributed bucket.
+#[test]
+fn account_rate_limit_client_key_coarsens_ipv6_and_rejects_non_addresses() {
+    let mut first = HeaderMap::new();
+    first.insert(
+        "x-forwarded-for",
+        HeaderValue::from_static("2001:db8:1234:5678::1"),
+    );
+    let mut second = HeaderMap::new();
+    second.insert(
+        "x-forwarded-for",
+        HeaderValue::from_static("2001:db8:1234:5678:ffff::abcd"),
+    );
+    assert_eq!(client_ip_for_rate_limit(&first), "2001:db8:1234:5678::/64");
+    assert_eq!(
+        client_ip_for_rate_limit(&first),
+        client_ip_for_rate_limit(&second)
+    );
+
+    let mut malformed = HeaderMap::new();
+    malformed.insert(
+        "x-forwarded-for",
+        HeaderValue::from_static("not-an-address"),
+    );
+    assert_eq!(client_ip_for_rate_limit(&malformed), "unattributed");
+    assert_eq!(
+        client_ip_for_rate_limit(&malformed),
+        client_ip_for_rate_limit(&HeaderMap::new())
+    );
+}
+
+/// Rotating rate-limit keys must not grow the process table without bound.
+/// Excess callers share one deliberately stricter overflow bucket.
+#[test]
+fn account_rate_limiter_bounds_distinct_keys_and_overflow_fails_closed() {
+    let limiter = AccountRateLimiter::with_max_windows_for_test(2);
+    let now = std::time::Instant::now();
+    assert!(limiter.check_at("surface:one", 30, now));
+    assert!(limiter.check_at("surface:two", 30, now));
+    for index in 0..ACCOUNT_RATE_OVERFLOW_LIMIT {
+        assert!(
+            limiter.check_at(&format!("surface:rotated-{index}"), 30, now),
+            "the shared overflow bucket admits only its small fixed allowance"
+        );
+    }
+    assert!(!limiter.check_at("surface:another", 30, now));
+    assert_eq!(limiter.tracked_windows_for_test(), 3);
+}
+
+/// Filling the table repeatedly may prune at most once per cadence, rather
+/// than rescanning every bucket for every attacker-controlled key.
+#[test]
+fn account_rate_limiter_prunes_at_most_once_per_cadence() {
+    let limiter = AccountRateLimiter::with_max_windows_for_test(1);
+    let start = std::time::Instant::now();
+    assert!(limiter.check_at("surface:first", 30, start));
+    assert!(limiter.check_at("surface:overflow-a", 30, start));
+    assert_eq!(limiter.prune_runs_for_test(), 1);
+
+    assert!(limiter.check_at(
+        "surface:overflow-b",
+        30,
+        start + StdDuration::from_millis(999)
+    ));
+    assert_eq!(limiter.prune_runs_for_test(), 1);
+
+    assert!(limiter.check_at("surface:overflow-c", 30, start + StdDuration::from_secs(1)));
+    assert_eq!(limiter.prune_runs_for_test(), 2);
+}
+
+/// The public login interstitial needs a header-independent ceiling in
+/// addition to its per-client bucket, just like the confirm endpoint.
+#[test]
+fn interstitial_rate_limit_has_a_global_blast_radius_ceiling() {
+    let limiter = AccountRateLimiter::new();
+    for index in 0..INTERSTITIAL_GLOBAL_LIMIT {
+        assert!(interstitial_rate_limit_allows(
+            &limiter,
+            &format!("192.0.2.{index}")
+        ));
+    }
+    assert!(!interstitial_rate_limit_allows(&limiter, "198.51.100.1"));
+}
+
 /// The concurrency guard caps in-flight slots and releases on drop.
 #[test]
 fn account_rate_limiter_concurrency_cap_and_release() {
