@@ -26,10 +26,12 @@ GRANT USAGE ON SCHEMA public TO trace_account_trust_evaluator;
 -- Read seams only: this role is deliberately not a trust worker or fact recorder.
 -- V85/V86 relinquish the function owners after setup. Reacquire them only
 -- while granting the evaluator its two bounded read seams.
-GRANT trace_account_trust_enumeration_guard,trace_account_admission_guard TO CURRENT_USER;
+GRANT trace_account_trust_enumeration_guard TO CURRENT_USER;
+GRANT trace_account_admission_guard TO CURRENT_USER;
 GRANT EXECUTE ON FUNCTION trace_account_trust_worker_accounts(TEXT,UUID,BIGINT),
     trace_account_trust_evaluation_inputs(TEXT,UUID) TO trace_account_trust_evaluator;
-REVOKE trace_account_trust_enumeration_guard,trace_account_admission_guard FROM CURRENT_USER;
+REVOKE trace_account_trust_enumeration_guard FROM CURRENT_USER;
+REVOKE trace_account_admission_guard FROM CURRENT_USER;
 
 GRANT trace_account_trust_evaluation_guard TO CURRENT_USER;
 
@@ -199,7 +201,8 @@ DO $$ BEGIN
     END IF;
 END $$;
 ALTER ROLE trace_account_trust_input_guard NOLOGIN;
-GRANT trace_account_trust_input_guard,trace_account_trust_evaluation_guard TO CURRENT_USER;
+GRANT trace_account_trust_input_guard TO CURRENT_USER;
+GRANT trace_account_trust_evaluation_guard TO CURRENT_USER;
 GRANT USAGE ON SCHEMA public TO trace_account_trust_input_guard;
 CREATE TABLE trace_account_trust_dependency_locks (
     dependency_key TEXT PRIMARY KEY,
@@ -306,7 +309,8 @@ REVOKE ALL ON FUNCTION trace_account_trust_lock_dependencies(TEXT[]),
     trace_account_trust_advance_gate_frontiers() FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION trace_account_trust_lock_fact_dependencies(TEXT,UUID,TEXT,UUID)
     TO trace_account_trust_evaluation_guard;
-REVOKE trace_account_trust_input_guard,trace_account_trust_evaluation_guard FROM CURRENT_USER;
+REVOKE trace_account_trust_input_guard FROM CURRENT_USER;
+REVOKE trace_account_trust_evaluation_guard FROM CURRENT_USER;
 
 -- Current cluster projection is bounded by the same transaction clock used
 -- by external batch snapshots. This is not a historical replay interface.
