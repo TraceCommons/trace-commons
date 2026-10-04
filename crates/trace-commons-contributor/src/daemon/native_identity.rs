@@ -81,6 +81,17 @@ fn canonical_origin(input: &str) -> Result<String> {
     Ok(url.origin().ascii_serialization())
 }
 
+// The native app RP is tracecommons.ai; its account API is deployed here.
+// An IPC URL or a retained credential cannot establish a new trust root.
+const NATIVE_ACCOUNT_ORIGIN: &str = "https://ingest.tracecommons.ai";
+
+fn unconfigured_origin(origin: &str) -> Result<()> {
+    if canonical_origin(origin)? != NATIVE_ACCOUNT_ORIGIN {
+        bail!("account-origin-refused");
+    }
+    Ok(())
+}
+
 pub(super) fn resolve_origin(store: &ConfigStore, params: &Value) -> Result<String> {
     let configured = store.load_config()?.map(|c| c.ingest_url);
     let retained = commons_credentials::load(store, Kind::Account)?
@@ -92,11 +103,10 @@ pub(super) fn resolve_origin(store: &ConfigStore, params: &Value) -> Result<Stri
         });
     let requested = params.get("ingest_url").and_then(Value::as_str);
     let pinned = configured.as_deref().or(retained.as_deref());
-    let origin = canonical_origin(
-        pinned
-            .or(requested)
-            .ok_or_else(|| anyhow!("account-origin-required"))?,
-    )?;
+    let origin = canonical_origin(pinned.or(requested).unwrap_or(NATIVE_ACCOUNT_ORIGIN))?;
+    if configured.is_none() {
+        unconfigured_origin(&origin)?;
+    }
     if let Some(requested) = requested {
         if canonical_origin(requested)? != origin {
             bail!("account-origin-refused");
@@ -140,6 +150,8 @@ fn scoped_client(
             .build()
             .map_err(|_| anyhow!("account-origin-refused"))?
     } else {
+        // Public entry points resolve this origin against the compiled trust
+        // root before any ceremony or account request reaches this helper.
         client(origin, token)?
     };
     if commons_credentials::snapshot(store, Kind::Account)? != *expected {
@@ -496,6 +508,25 @@ fn persist_session(
     commons_credentials::replace(store, snapshot, &serde_json::to_vec(&payload)?, None)
         .map_err(|_| anyhow!("account-session-changed"))
 }
+/// Permit record-only token rotations while the user is in the platform sheet.
+/// Reload authority, but never cross sign-out, configuration or account changes.
+fn refresh_pending_session(store: &ConfigStore, pending: &mut Pending) -> Result<()> {
+    if let Some(previous) = &pending.session {
+        let current = account_auth::try_load_session_with_snapshot(store)?
+            .ok_or_else(|| anyhow!("account-session-changed"))?;
+        if !pending.snapshot.same_lifecycle(&current.snapshot)
+            || previous.session.account_id != current.session.account_id
+        {
+            bail!("account-session-changed");
+        }
+        pending.snapshot = current.snapshot.clone();
+        pending.session = Some(current);
+    } else if commons_credentials::snapshot(store, Kind::Account)? != pending.snapshot {
+        bail!("account-session-changed");
+    }
+    Ok(())
+}
+
 async fn complete(shared: &DaemonShared, action: Action, params: &Value) -> Result<Value> {
     let id = string(params, "ceremony")?;
     let mut pending = shared
@@ -507,9 +538,7 @@ async fn complete(shared: &DaemonShared, action: Action, params: &Value) -> Resu
     if pending.action != action || pending.expires <= Instant::now() {
         bail!("passkey-ceremony-expired");
     }
-    if commons_credentials::snapshot(&shared.store, Kind::Account)? != pending.snapshot {
-        bail!("account-session-changed");
-    }
+    refresh_pending_session(&shared.store, &mut pending)?;
     validate_client_data(&pending, params)?;
     let mut body = json!({"ceremony_id":pending.server_id,"credential":credential(action,params)?});
     if let Some(session) = &mut pending.session {
@@ -551,10 +580,10 @@ async fn complete(shared: &DaemonShared, action: Action, params: &Value) -> Resu
 fn status(store: &ConfigStore) -> Value {
     match account_auth::try_load_session_with_snapshot(store) {
         Ok(Some(loaded)) => {
-            json!({"state":"known","signed_in":true,"account_id":loaded.session.account_id,"expires_at":loaded.session.expires_at})
+            json!({"state":"known","signed_in":true,"expires_at":loaded.session.expires_at})
         }
-        Ok(None) => json!({"state":"known","signed_in":false,"account_id":null,"expires_at":null}),
-        Err(_) => json!({"state":"unknown","signed_in":null,"account_id":null,"expires_at":null}),
+        Ok(None) => json!({"state":"known","signed_in":false,"expires_at":null}),
+        Err(_) => json!({"state":"unknown","signed_in":null,"expires_at":null}),
     }
 }
 async fn sign_out(shared: &DaemonShared) -> Result<Value> {
@@ -595,7 +624,10 @@ async fn sign_out(shared: &DaemonShared) -> Result<Value> {
                 .as_ref()
                 .map(crate::config::config_allowlist)
                 .map(Ok)
-                .unwrap_or_else(|| super::account_onboarding::signup_allowlist(&origin, &[]));
+                .unwrap_or_else(|| {
+                    unconfigured_origin(&origin)?;
+                    super::account_onboarding::signup_allowlist(&origin, &[])
+                });
             if let Ok(allowed) = allowed {
                 if let Ok(client) =
                     Client::builder(&origin, "TRACE_COMMONS_CONTRIBUTOR_UNUSED_BEARER_ENV")
@@ -641,9 +673,7 @@ async fn handle_inner(shared: &DaemonShared, req: &Request) -> Result<Value> {
             let result = account_auth::sign_in(&shared.store, &cfg, true, |_| {})
                 .await
                 .map_err(|_| anyhow!("account-sign-in-refused"))?;
-            Ok(
-                json!({"signed_in":true,"account_id":result.account_id,"expires_at":result.expires_at}),
-            )
+            Ok(json!({"signed_in":true,"expires_at":result.expires_at}))
         }
         "account_bind" => super::nearai_onboarding::bind(shared).await,
         "account_binding" | "passkey_state" => {

@@ -5574,8 +5574,9 @@ it does not rewrite the upstream DTO into one row per model. The contributor
 validates bounds, counter consistency, finite nonnegative prices and safe
 labels before exposing it. Arbitrary backend text is not a verified provider
 identity. `route` and proof counts come from stored proof statuses; no inference
-from the backend's spelling. `work_kind` remains `null` until a true source
-exists. The summary contains no protocol family; do not invent `family`.
+from the backend's spelling. A future bounded upstream `work_kind` string
+contributes to the opaque group identity, but is not displayed: this client
+returns `work_kind: null` until classification has an approved display contract. The summary contains no protocol family; do not invent `family`.
 
 `cost_usd` is **registry-priced cost, not billed spend**, including for an
 `api_key` backend. `priced_calls < calls` means incomplete pricing. Only
@@ -5653,8 +5654,10 @@ returned from the core, not authored by Swift. Enabling requires the person's
 explicit answer after the core disclosure; a missing/false `confirmed` is
 `bad_params` / `confirmation-required`. Disabling requires `on:false` and
 may omit `confirmed`. The wrapper uses the existing async `set_settings`
-validation/persistence/reconciliation for `private_inference` and explicit
-`private_inference_offer_seen`; it does not create another proxy lifecycle.
+validation/persistence/reconciliation for `private_inference`. Only confirmed
+enabling marks `private_inference_offer_seen`; disabling preserves its prior
+value, so writing off cannot suppress an offer that was never shown. The
+wrapper does not create another proxy lifecycle.
 Enabling does not repoint tools, select a provider, grant body/contribution
 consent, or enroll an account. Turning off stops only the owned instance.
 
@@ -5722,7 +5725,9 @@ SAMPLE `invite_lookup` request:
 Despite C1's argument name `code`, it carries a **full invite URL**, parsed by
 the existing `commands::parse_invite`; a bare code has no issuer and is refused.
 Use the configured host allowlist (`allowlist_for(None)` when unenrolled),
-never a caller-supplied host override. The issuer request is the existing
+never a caller-supplied host override. HTTPS is required except for literal
+loopback IP addresses; a hostname such as `localhost` does not grant that
+exception. The issuer request is the existing
 `POST /v1/invite/lookup` with
 `{schema_version:"trace_commons.invite_lookup_request.v1",invite_code}` in its
 body, never its URL. This read neither consumes an invite nor enrolls/writes
@@ -5758,16 +5763,21 @@ key, tenant identity or secret-store reference.
 | `account_bind` | none | `{outcome,binding_state}` |
 | `account_binding` | none | `{binding_state}` |
 | `passkey_state` | none | `{state,passkey_count,near_ai_connected}` |
-| `account_sign_in` | `ingest_url?` | `{signed_in:true,account_id,expires_at}` |
-| `account_session_status` | none | `{state,signed_in,account_id,expires_at}` |
+| `account_sign_in` | `ingest_url?` | `{signed_in:true,expires_at}` |
+| `account_session_status` | none | `{state,signed_in,expires_at}` |
 | `account_sign_out` | none | `{signed_out:true}` |
 
 `label` is optional, at most 64 characters. A no-config create/login may name
-an `ingest_url` validated by the same trusted HTTPS/host rules as enrollment.
-Once a config or pre-enrollment session pins an origin, a caller cannot
-substitute another one. Begin stores the server ceremony privately and returns
+an `ingest_url` only when its canonical origin equals the compiled production
+API origin `https://ingest.tracecommons.ai`; omitting it selects that origin.
+A retained unconfigured session must satisfy the same trust root. Explicit
+operator configuration retains its host policy. Once a config or pre-enrollment
+session pins an origin, a caller cannot substitute another one. The native
+Swift adapter exposes no caller-supplied ingest URL. Begin stores the server ceremony privately and returns
 an opaque local `ceremony` handle pinned to action, origin, expiry and current
-credential/config snapshot. Complete consumes it once; cancel invalidates it.
+credential/config lifecycle. Adding a passkey reloads the current token and
+permits ordinary rotation only within the same lifecycle and account. Complete
+consumes the ceremony once; cancel invalidates it.
 Sign-out, wipe or identity/config replacement invalidates stale finishes.
 Complete accepts no origin, account or tenant parameters.
 
@@ -5830,12 +5840,12 @@ handle is an incomplete credential and must not reach login completion.
 SAMPLE account status:
 
 ```json
-{"state":"known","signed_in":true,"account_id":"00000000-0000-4000-8000-000000000003","expires_at":"2026-10-02T00:00:00Z"}
+{"state":"known","signed_in":true,"expires_at":"2026-10-02T00:00:00Z"}
 ```
 
-Signed-out status has `state:"known", signed_in:false` and null account/expiry;
+Signed-out status has `state:"known", signed_in:false` and null expiry;
 unreadable OS storage has `state:"unknown", signed_in:null` and null
-account/expiry. It must not become signed out merely because Keychain refused
+expiry. Raw account identifiers do not cross this status surface. It must not become signed out merely because Keychain refused
 a read. Status and sign-out support a pre-enrollment account without creating a
 fake config. `account_sign_in` reuses existing browser/PKCE machinery where
 its enrollment prerequisites hold; without real enrollment configuration it
@@ -6162,7 +6172,8 @@ Each newly returned `inference_summary.summary.groups` row also carries mandator
 `group_id`, formatted `sha256:<64 lowercase hexadecimal digits>`. This is SHA-256
 of the canonical JSON array `[original_model, original_backend, original_route,
 original_work_kind]` before content-free label normalization. It is an opaque row
-identity, not a verified provider identity. Backend labels continue to retain only
+identity, not a verified provider identity or an anonymization guarantee.
+These unsalted digests can be guessed from a dictionary of likely inputs. Backend labels continue to retain only
 the vetted `nearai` label or an opaque digest. Original model labels that normalize
 to the same display value therefore remain separate rows with separate stable IDs;
 no group counts, costs, or proof totals are merged or lost. Older daemons may omit
@@ -6202,6 +6213,12 @@ irrevocable award. Account-token rotation is retained on success and refusal;
 rotation persistence failure refuses the result. Account/config snapshot checks
 before sending and after HTTP also refuse late progress from an account that
 signed out or changed while the request was in flight.
+
+Response envelopes and progress rows tolerate additive unknown fields and
+omit them from IPC. Known schema versions, policy digests, reward flags and
+credit conditions remain enforced. Policy and nested rule objects remain strict
+and digest-covered; changing their shape requires a supported schema-version
+change rather than an unversioned extension.
 
 Both replies carry `consent_copy::ACTIVITY_MISSIONS_DISCLOSURE` assembled in Rust.
 Neither read changes capture, contribution consent, project modes, scopes,

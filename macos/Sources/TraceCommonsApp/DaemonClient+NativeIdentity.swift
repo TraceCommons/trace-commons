@@ -3,15 +3,13 @@ import Foundation
 import TCShellCore
 
 extension DaemonClient {
-    func passkeyBegin(_ action: NativePasskeyAction, label: String? = nil,
-                      ingestURL: String? = nil) throws -> NativePasskeyBegin {
-        guard (label?.count ?? 0) <= 64, action != .add || ingestURL == nil
+    func passkeyBegin(_ action: NativePasskeyAction, label: String? = nil) throws -> NativePasskeyBegin {
+        guard (label?.count ?? 0) <= 64
         else { throw NativePasskeyFailure.invalidOptions }
         let prefix = "passkey_\(action.rawValue)"
         try requireIdentityMethods(["\(prefix)_begin", "\(prefix)_complete", "passkey_cancel"])
         var params: [String: Any] = [:]
         if let label, action != .login { params["label"] = label }
-        if let ingestURL { params["ingest_url"] = ingestURL }
         return try call("\(prefix)_begin", params: params, as: NativePasskeyBegin.self)
     }
 
@@ -39,8 +37,8 @@ extension DaemonClient {
     func accountSessionStatus() throws -> NativeAccountSession { try identityCall("account_session_status") }
 
     /// The enrolled browser/PKCE path. Rust owns URL validation, opening and tokens.
-    func accountSignIn(ingestURL: String? = nil) throws -> NativeAccountSession {
-        try identityCall("account_sign_in", params: ingestURL.map { ["ingest_url": $0] } ?? [:])
+    func accountSignIn() throws -> NativeAccountSession {
+        try identityCall("account_sign_in")
     }
 
     func accountSignOut() throws {
@@ -62,6 +60,8 @@ extension DaemonClient {
         return try call(method, params: params, as: T.self)
     }
 
+    // Calls may reconnect to a restarted/replaced daemon. Re-check capabilities
+    // until the transport exposes a connection generation for safe caching.
     private func requireIdentityMethods(_ required: [String]) throws {
         struct Hello: Decodable { let methods: [String] }
         let hello = try call("hello", as: Hello.self)
@@ -76,8 +76,8 @@ extension DaemonClient {
 final class NativeIdentityTransport: NativePasskeyDaemonCalling, @unchecked Sendable {
     private let client: DaemonClient
     init(client: DaemonClient) { self.client = client }
-    func begin(_ action: NativePasskeyAction, label: String?, ingestURL: String?) async throws -> NativePasskeyBegin {
-        try await Task.detached { [self] in try client.passkeyBegin(action, label: label, ingestURL: ingestURL) }.value
+    func begin(_ action: NativePasskeyAction, label: String?) async throws -> NativePasskeyBegin {
+        try await Task.detached { [self] in try client.passkeyBegin(action, label: label) }.value
     }
     func complete(_ action: NativePasskeyAction, ceremony: String, credential: NativePasskeyCredential) async throws -> NativeAccountBinding {
         try await Task.detached { [self] in try client.passkeyComplete(action, ceremony: ceremony, credential: credential) }.value
@@ -97,8 +97,8 @@ final class NativeIdentityTransport: NativePasskeyDaemonCalling, @unchecked Send
     func passkeys() async throws -> NativePasskeyState {
         try await Task.detached { [self] in try client.passkeyState() }.value
     }
-    func signInWithBrowser(ingestURL: String? = nil) async throws -> NativeAccountSession {
-        try await Task.detached { [self] in try client.accountSignIn(ingestURL: ingestURL) }.value
+    func signInWithBrowser() async throws -> NativeAccountSession {
+        try await Task.detached { [self] in try client.accountSignIn() }.value
     }
     func signOut() async throws {
         try await Task.detached { [self] in try client.accountSignOut() }.value

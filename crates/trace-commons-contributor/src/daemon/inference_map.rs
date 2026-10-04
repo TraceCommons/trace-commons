@@ -536,7 +536,7 @@ pub fn handle_destinations(shared: &DaemonShared, req: &Request) -> Response {
         watched,
         declarations,
         harness,
-        rows: rows.unwrap_or_default(),
+        rows,
         sessions: window_sessions(shared),
         folders,
     };
@@ -545,7 +545,12 @@ pub fn handle_destinations(shared: &DaemonShared, req: &Request) -> Response {
     let mut observed_destinations = Vec::new();
     if ledger_readable {
         for route in [ROUTE_ROUTED, ROUTE_OUTSIDE, UNKNOWN] {
-            if facts.rows.iter().any(|row| route_label(row) == route) {
+            if facts
+                .rows
+                .iter()
+                .flatten()
+                .any(|row| route_label(row) == route)
+            {
                 observed_destinations.push(serde_json::json!({
                     "route": route,
                     "to": if route == ROUTE_ROUTED { PARTY_NEAR_AI } else { UNKNOWN },

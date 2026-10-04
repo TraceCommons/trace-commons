@@ -42,18 +42,13 @@ pub(super) async fn handle_catalogue(shared: &DaemonShared, req: &Request) -> Re
     };
     let call = fetch::<ActivityCatalogue>(&config, "/v1/activity-missions", None).await;
     match call.result {
-        Ok(catalogue)
-            if ActivityCatalogue::new(catalogue.policy.clone())
-                .is_ok_and(|expected| expected == catalogue) =>
-        {
-            Response::ok(
-                req.id,
-                serde_json::json!({
-                    "catalogue":catalogue,
-                    "disclosure":crate::consent_copy::ACTIVITY_MISSIONS_DISCLOSURE,
-                }),
-            )
-        }
+        Ok(catalogue) if valid_catalogue(&catalogue) => Response::ok(
+            req.id,
+            serde_json::json!({
+                "catalogue":catalogue,
+                "disclosure":crate::consent_copy::ACTIVITY_MISSIONS_DISCLOSURE,
+            }),
+        ),
         _ => Response::err(req.id, ERR_UNAVAILABLE, UNAVAILABLE),
     }
 }
@@ -140,6 +135,28 @@ fn valid_label(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+}
+
+// Validate the known semantic contract independently of additive response
+// metadata, which deserialization discards. The policy itself stays strict.
+fn valid_catalogue(catalogue: &ActivityCatalogue) -> bool {
+    if catalogue.schema_version != 1
+        || catalogue.kind != "trace_activity"
+        || catalogue.rewards_enabled
+        || catalogue.credit_points_pending.is_some()
+        || catalogue.credit_condition != "mission_credit_ledger_unavailable"
+    {
+        return false;
+    }
+    match &catalogue.policy {
+        Some(policy) => {
+            catalogue.state == "configured"
+                && policy
+                    .digest()
+                    .is_ok_and(|digest| catalogue.policy_sha256.as_deref() == Some(digest.as_str()))
+        }
+        None => catalogue.state == "unconfigured" && catalogue.policy_sha256.is_none(),
+    }
 }
 
 fn valid_progress(status: &ActivityProgress) -> bool {

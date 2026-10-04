@@ -49,11 +49,15 @@ fn normalize_summary(summary: &mut crate::routing::ironwire::SummaryView) {
             serde_json::to_vec(&(&group.model, &group.backend, &group.route, &group.work_kind))
                 .expect("summary tuple serializes");
         group.group_id = format!("sha256:{:x}", Sha256::digest(key));
+        // Preserve future work classifications in opaque identity only.
+        group.work_kind = None;
         group.model = group
             .model
             .as_deref()
             .map(|model| super::inference_map::model_label(Some(model)));
         if group.backend != "nearai" {
+            // An opaque identifier, not anonymization: this unsalted digest
+            // can still be matched against guessed backend labels.
             group.backend = format!("sha256:{:x}", Sha256::digest(group.backend.as_bytes()));
         }
     }
@@ -135,10 +139,15 @@ pub(crate) async fn handle_set_private_ai(shared: &DaemonShared, req: &Request) 
     {
         return Response::err(req.id, ERR_BAD_PARAMS, "confirmation-required");
     }
+    let mut params = serde_json::json!({"private_inference": on});
+    if on {
+        // The enable confirmation above is the only offer acknowledgement.
+        params["private_inference_offer_seen"] = serde_json::json!(true);
+    }
     let settings = Request {
         id: req.id,
         method: "set_settings".to_string(),
-        params: serde_json::json!({"private_inference": on,"private_inference_offer_seen":true}),
+        params,
     };
     let result = super::ipc::handle_set_settings_async(shared, &settings).await;
     if result.error.is_some() {
@@ -163,7 +172,13 @@ pub(crate) async fn handle_invite_lookup(shared: &DaemonShared, req: &Request) -
     let Ok(url) = reqwest::Url::parse(&parsed.issuer_url) else {
         return Response::err(req.id, ERR_BAD_PARAMS, "invite-invalid");
     };
-    if !url.username().is_empty()
+    let literal_loopback = match url.host() {
+        Some(url::Host::Ipv4(address)) => address.is_loopback(),
+        Some(url::Host::Ipv6(address)) => address.is_loopback(),
+        _ => false,
+    };
+    if !(url.scheme() == "https" || (url.scheme() == "http" && literal_loopback))
+        || !url.username().is_empty()
         || url.password().is_some()
         || parsed.code.len() > 256
         || parsed.code.chars().any(char::is_control)
@@ -278,6 +293,28 @@ mod tests {
         assert_eq!(same.groups.len() + 1, summary.groups.len());
     }
 
+    #[test]
+    fn summary_work_kind_is_opaque_but_preserves_group_identity() {
+        let mut body = sample();
+        let mut second = body["groups"][0].clone();
+        body["groups"][0]["work_kind"] = serde_json::json!("PRIVATE-WORK-ONE");
+        second["work_kind"] = serde_json::json!("PRIVATE-WORK-TWO");
+        body["groups"].as_array_mut().unwrap().push(second);
+        let mut summary: crate::routing::ironwire::SummaryView =
+            serde_json::from_value(body).unwrap();
+        normalize_summary(&mut summary);
+        assert!(summary.groups.iter().all(|group| group.work_kind.is_none()));
+        assert_ne!(
+            summary.groups[0].group_id,
+            summary.groups.last().unwrap().group_id
+        );
+        assert!(
+            !serde_json::to_string(&summary)
+                .unwrap()
+                .contains("PRIVATE-WORK")
+        );
+    }
+
     const SINCE: &str = "2026-10-01T00:00:00+02:00";
 
     #[tokio::test]
@@ -286,6 +323,7 @@ mod tests {
         body["since"] = serde_json::json!(SINCE);
         body["groups"][0]["model"] = serde_json::json!("https://evil.example/PROMPT-SECRET");
         body["groups"][0]["backend"] = serde_json::json!("ACCOUNT-SECRET");
+        body["groups"][0]["work_kind"] = serde_json::json!("FUTURE-WORK-SECRET");
         let router = Router::new().route(
             "/_ironwire/summary",
             get(
@@ -322,6 +360,7 @@ mod tests {
         assert!(result["window_hours"].is_null());
         assert!(result["observed_at"].is_string());
         assert_eq!(result["summary"]["groups"][0]["model"], "unknown");
+        assert!(result["summary"]["groups"][0]["work_kind"].is_null());
         assert_eq!(
             result["summary"]["groups"][0]["backend"],
             format!("sha256:{:x}", Sha256::digest(b"ACCOUNT-SECRET"))
@@ -438,14 +477,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn summary_rejects_inconsistent_counts_costs_unknown_routes_and_future_work() {
+    async fn summary_rejects_inconsistent_counts_costs_and_unknown_routes() {
         for (field, value) in [
             ("calls", serde_json::json!(-1)),
             ("priced_calls", serde_json::json!(4)),
             ("cost_usd", serde_json::json!(-0.1)),
             ("cost_usd", serde_json::json!(1e100)),
             ("route", serde_json::json!("SECRET")),
-            ("work_kind", serde_json::json!("SECRET")),
         ] {
             let mut body = sample();
             body["since"] = serde_json::json!(SINCE);
@@ -501,15 +539,93 @@ mod tests {
         .unwrap();
         assert_eq!(value["on"], false);
         assert_eq!(value["state"], "off");
-        let mut after = serde_json::to_value(s.settings.lock().unwrap().clone()).unwrap();
-        assert_eq!(after["private_inference_offer_seen"], true);
-        after["private_inference_offer_seen"] = before["private_inference_offer_seen"].clone();
+        let after = serde_json::to_value(s.settings.lock().unwrap().clone()).unwrap();
+        assert_eq!(after["private_inference_offer_seen"], false);
+        assert!(
+            !super::super::settings::DaemonSettings::load(&s.store)
+                .unwrap()
+                .private_inference_offer_seen
+        );
         assert_eq!(after, before);
         assert!(s.store.load_config().unwrap().is_none());
         assert_eq!(
             value["disclosure"],
             crate::private_inference_copy::OFFER_EXPOSURE
         );
+    }
+
+    #[tokio::test]
+    async fn invite_lookup_rejects_plaintext_hostname_without_sending_code() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = calls.clone();
+        let (port, task) = serve(Router::new().route(
+            "/v1/invite/lookup",
+            post(move || {
+                let calls = observed.clone();
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Json(serde_json::json!({"valid":true}))
+                }
+            }),
+        ))
+        .await;
+        let (_dir, s) = shared();
+        assert!(s.store.load_config().unwrap().is_none());
+        let response = handle_invite_lookup(
+            &s,
+            &request(
+                "invite_lookup",
+                serde_json::json!({
+                    "code":format!("http://localhost:{port}/onboard#SECRET-CODE")
+                }),
+            ),
+        )
+        .await;
+        task.abort();
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(response.error.unwrap().message, "invite-invalid");
+    }
+
+    #[tokio::test]
+    async fn invite_lookup_rejects_remote_plaintext_before_loading_config() {
+        let (_dir, s) = shared();
+        std::fs::write(s.store.dir().join("contributor.json"), "malformed").unwrap();
+        for host in ["issuer.example", "192.0.2.1", "[2001:db8::1]"] {
+            let response = handle_invite_lookup(
+                &s,
+                &request(
+                    "invite_lookup",
+                    serde_json::json!({
+                        "code":format!("http://{host}/onboard#SECRET-CODE")
+                    }),
+                ),
+            )
+            .await;
+            assert_eq!(response.error.unwrap().message, "invite-invalid", "{host}");
+        }
+    }
+
+    #[tokio::test]
+    async fn invite_lookup_accepts_https_and_literal_loopback_transport_before_config() {
+        let (_dir, s) = shared();
+        std::fs::write(s.store.dir().join("contributor.json"), "malformed").unwrap();
+        for origin in ["https://issuer.example", "http://127.0.0.1", "http://[::1]"] {
+            let response = handle_invite_lookup(
+                &s,
+                &request(
+                    "invite_lookup",
+                    serde_json::json!({
+                        "code":format!("{origin}/onboard#SECRET-CODE")
+                    }),
+                ),
+            )
+            .await;
+            assert_eq!(
+                response.error.unwrap().message,
+                "invite-lookup-unavailable",
+                "{origin}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -660,6 +776,7 @@ mod tests {
             before.ironwire_attested_bodies
         );
         assert_eq!(after.token_capture_enabled, before.token_capture_enabled);
+        assert!(after.private_inference_offer_seen);
         assert!(s.store.load_config().unwrap().is_none());
         let result = super::super::ipc::handle_request_async(
             &s,
@@ -669,6 +786,12 @@ mod tests {
         .result
         .unwrap();
         assert_eq!(result["on"], false);
+        assert!(s.settings.lock().unwrap().private_inference_offer_seen);
+        assert!(
+            super::super::settings::DaemonSettings::load(&s.store)
+                .unwrap()
+                .private_inference_offer_seen
+        );
         assert!(matches!(result["state"].as_str(), Some("off" | "stopping")));
         s.stop_private_inference().await;
     }

@@ -24,7 +24,7 @@ final class NativePasskeyClientTests: XCTestCase {
         let daemon = NativeIdentityWireFixture()
         daemon.methods = []
         let client = DaemonClient(daemon: daemon)
-        XCTAssertThrowsError(try client.passkeyBegin(.create, label: nil, ingestURL: nil)) { error in
+        XCTAssertThrowsError(try client.passkeyBegin(.create, label: nil)) { error in
             XCTAssertEqual((error as? DaemonClient.Failure)?.code, "unknown_method")
         }
         XCTAssertEqual(daemon.calls.map { $0.0 }, ["hello"])
@@ -35,7 +35,17 @@ final class NativePasskeyClientTests: XCTestCase {
         let status = try client.accountSessionStatus()
         XCTAssertEqual(status.state, "unknown")
         XCTAssertNil(status.signedIn)
-        XCTAssertNil(status.accountID)
+    }
+
+    func testCapabilityChangeAfterReconnectIsCheckedAgain() throws {
+        let daemon = NativeIdentityWireFixture()
+        let client = DaemonClient(daemon: daemon)
+        _ = try client.accountSessionStatus()
+        daemon.methods = []
+        XCTAssertThrowsError(try client.accountSessionStatus()) { error in
+            XCTAssertEqual((error as? DaemonClient.Failure)?.code, "unknown_method")
+        }
+        XCTAssertEqual(daemon.calls.map { $0.0 }, ["hello", "account_session_status", "hello"])
     }
 
     func testCoreDownRefusesWithoutManufacturingAccountState() {
@@ -59,7 +69,7 @@ private final class NativeIdentityWireFixture: DaemonCalling {
         let result: [String: Any]
         switch method {
         case "hello": result = ["methods": methods]
-        case "account_session_status": result = ["state": "unknown", "signed_in": NSNull(), "account_id": NSNull(), "expires_at": NSNull()]
+        case "account_session_status": result = ["state": "unknown", "signed_in": NSNull(), "expires_at": NSNull()]
         default: result = ["binding_state": "unbound"]
         }
         return String(decoding: try! JSONSerialization.data(withJSONObject: ["result": result]), as: UTF8.self)

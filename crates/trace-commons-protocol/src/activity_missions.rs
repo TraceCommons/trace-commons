@@ -1,4 +1,9 @@
 //! Read-only trace-activity missions. Separate from skill-evaluation rewards.
+//!
+//! Response envelopes and progress details ignore additive fields, which are
+//! discarded rather than forwarded to clients. Policy and rule schemas remain
+//! strict: every field affects interpretation or the canonical policy digest,
+//! so their evolution requires an explicitly supported schema version.
 use chrono::{DateTime, Datelike, Days, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -67,7 +72,6 @@ pub struct ActivityDay {
     pub contributions: u64,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct DailyProgress {
     pub day: NaiveDate,
     pub mission_id: String,
@@ -76,13 +80,11 @@ pub struct DailyProgress {
     pub complete: bool,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct BadgeProgress {
     pub id: String,
     pub achieved: Option<bool>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct ActivityProgress {
     pub schema_version: u32,
     pub kind: String,
@@ -108,7 +110,6 @@ pub struct ActivityProgress {
 pub struct InvalidActivityPolicy;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct ActivityCatalogue {
     pub schema_version: u32,
     pub kind: String,
@@ -357,6 +358,49 @@ mod tests {
             contributions,
         }
     }
+    #[test]
+    fn activity_missions_response_extensions_are_ignored() {
+        let catalogue = ActivityCatalogue::new(Some(policy())).unwrap();
+        let mut value = serde_json::to_value(&catalogue).unwrap();
+        value["display_hint"] = serde_json::json!({"future": "ignored"});
+        assert_eq!(
+            serde_json::from_value::<ActivityCatalogue>(value).unwrap(),
+            catalogue
+        );
+
+        let progress = policy()
+            .evaluate(&[], "2026-10-02T12:00:00Z".parse().unwrap())
+            .unwrap();
+        let mut value = serde_json::to_value(&progress).unwrap();
+        value["display_hint"] = serde_json::json!({"future": "ignored"});
+        value["daily"]["display_hint"] = true.into();
+        value["badges"][0]["display_hint"] = true.into();
+        assert_eq!(
+            serde_json::from_value::<ActivityProgress>(value).unwrap(),
+            progress
+        );
+    }
+
+    #[test]
+    fn activity_missions_policy_extensions_remain_fail_closed() {
+        let catalogue = ActivityCatalogue::new(Some(policy())).unwrap();
+        let original = serde_json::to_value(catalogue).unwrap();
+        for path in [
+            "/policy",
+            "/policy/missions/0",
+            "/policy/daily",
+            "/policy/levels/0",
+            "/policy/badges/0",
+        ] {
+            let mut value = original.clone();
+            value.pointer_mut(path).unwrap()["future_rule"] = true.into();
+            assert!(
+                serde_json::from_value::<ActivityCatalogue>(value).is_err(),
+                "{path}"
+            );
+        }
+    }
+
     #[test]
     fn activity_missions_month_reset_and_global_rotation_use_real_counts() {
         let p = policy();

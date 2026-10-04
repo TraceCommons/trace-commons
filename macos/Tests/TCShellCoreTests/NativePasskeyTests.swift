@@ -158,7 +158,7 @@ private actor IdentityDaemonFixture: NativePasskeyDaemonCalling {
     var events: [String] = []
     var modification: String?
     func setModification(_ value: String) { modification = value }
-    func begin(_ action: NativePasskeyAction, label: String?, ingestURL: String?) async throws -> NativePasskeyBegin {
+    func begin(_ action: NativePasskeyAction, label: String?) async throws -> NativePasskeyBegin {
         events.append("begin:\(action.rawValue)")
         var json = #"{"ceremony":"local-handle","rp_id":"tracecommons.ai","challenge":"AQID","user_id":"BAUG","user_name":"My Mac","expires_in_secs":180,"exclude_credentials":["BwgJ"],"allowed_credentials":["BwgJ"],"user_verification":"required","authenticator_attachment":"platform","resident_key":"preferred","algorithms":[-7]}"#
         if let modification {

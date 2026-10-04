@@ -69,6 +69,8 @@ pub(crate) struct SummaryGroup {
     pub model: Option<String>,
     pub backend: String,
     pub route: String,
+    /// Untrusted future classification, used only for opaque group identity.
+    /// The daemon clears this before returning the normalized summary over IPC.
     pub work_kind: Option<String>,
     #[serde(flatten)]
     pub total: SummaryTotal,
@@ -168,7 +170,6 @@ impl SummaryView {
         self.groups.iter().all(|g| {
             g.total.valid()
                 && matches!(g.route.as_str(), "routed" | "outside" | "unknown")
-                && g.work_kind.is_none()
                 && match g.route.as_str() {
                     "routed" => g.total.proof.outside == 0 && g.total.proof.unrecorded == 0,
                     "outside" => g.total.proof.outside == g.total.calls,
@@ -834,6 +835,21 @@ mod tests {
         }));
         assert_eq!(spend_micros(&routing_only), None);
         assert_eq!(nearai_authenticated(&routing_only), Some(true));
+    }
+
+    #[test]
+    fn summary_future_work_classification_preserves_count_validation() {
+        let mut value: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/ironwire/sample-summary.json"
+        ))
+        .unwrap();
+        value["groups"][0]["work_kind"] = "future-classification".into();
+        let view: SummaryView = serde_json::from_value(value.clone()).unwrap();
+        assert!(view.valid(view.since));
+        assert_eq!(view.routed.proof.verified, 1);
+        value["groups"][0]["calls"] = 4.into();
+        let invalid: SummaryView = serde_json::from_value(value).unwrap();
+        assert!(!invalid.valid(invalid.since));
     }
 
     /// An unknown field must not make the object unreadable: upstream owns

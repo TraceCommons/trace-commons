@@ -158,6 +158,44 @@ async fn activity_missions_refuse_malformed_reward_activation_and_untrusted_or_r
             v["state"] = "configured".into();
             v
         }),
+        ("activity_missions_catalogue", "/v1/activity-missions", {
+            let mut v = activity_empty_catalogue();
+            v["schema_version"] = 2.into();
+            v
+        }),
+        ("activity_missions_catalogue", "/v1/activity-missions", {
+            let mut v = activity_empty_catalogue();
+            v["policy_sha256"] = "0".repeat(64).into();
+            v
+        }),
+        ("activity_missions_catalogue", "/v1/activity-missions", {
+            let mut v = activity_empty_catalogue();
+            v["credit_points_pending"] = 100.into();
+            v
+        }),
+        ("activity_missions_catalogue", "/v1/activity-missions", {
+            let mut v = activity_empty_catalogue();
+            v["credit_condition"] = "active".into();
+            v
+        }),
+        (
+            "activity_missions_status",
+            "/v1/account/activity-missions/status",
+            {
+                let mut v = activity_status();
+                v["schema_version"] = 2.into();
+                v
+            },
+        ),
+        (
+            "activity_missions_status",
+            "/v1/account/activity-missions/status",
+            {
+                let mut v = activity_status();
+                v["rewards_enabled"] = true.into();
+                v
+            },
+        ),
         (
             "activity_missions_status",
             "/v1/account/activity-missions/status",
@@ -256,7 +294,7 @@ async fn activity_missions_configured_catalogue_and_daily_progress_are_preserved
     status["levels_configured"] = true.into();
     status["level"] = "starter".into();
     status["badges"] = serde_json::json!([{"id":"daily","achieved":true}]);
-    for (method, path, body, key) in [
+    for (method, path, mut body, key) in [
         (
             "activity_missions_catalogue",
             "/v1/activity-missions",
@@ -271,6 +309,11 @@ async fn activity_missions_configured_catalogue_and_daily_progress_are_preserved
         ),
     ] {
         let expected = body.clone();
+        body["display_hint"] = serde_json::json!({"future": "RESPONSE-EXTENSION-SECRET"});
+        if key == "status" {
+            body["daily"]["display_hint"] = "DAILY-EXTENSION-SECRET".into();
+            body["badges"][0]["display_hint"] = "BADGE-EXTENSION-SECRET".into();
+        }
         let app = Router::new().route(
             path,
             get(move || {

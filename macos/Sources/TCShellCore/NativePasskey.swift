@@ -162,10 +162,9 @@ public struct NativeAccountBindResult: Decodable, Sendable, Equatable {
 public struct NativeAccountSession: Decodable, Sendable, Equatable {
     public let state: String?
     public let signedIn: Bool?
-    public let accountID: String?
     public let expiresAt: Date?
     enum CodingKeys: String, CodingKey {
-        case state, signedIn = "signed_in", accountID = "account_id", expiresAt = "expires_at"
+        case state, signedIn = "signed_in", expiresAt = "expires_at"
     }
 }
 
@@ -179,7 +178,7 @@ public struct NativePasskeyState: Decodable, Sendable, Equatable {
 }
 
 public protocol NativePasskeyDaemonCalling: Sendable {
-    func begin(_ action: NativePasskeyAction, label: String?, ingestURL: String?) async throws -> NativePasskeyBegin
+    func begin(_ action: NativePasskeyAction, label: String?) async throws -> NativePasskeyBegin
     func complete(_ action: NativePasskeyAction, ceremony: String, credential: NativePasskeyCredential) async throws -> NativeAccountBinding
     func cancel(ceremony: String) async throws
 }
@@ -210,17 +209,16 @@ public final class NativePasskeyCoordinator {
         provider.cancel()
     }
 
-    public func perform(_ action: NativePasskeyAction, label: String? = nil,
-                        ingestURL: String? = nil) async throws -> NativeAccountBinding {
+    public func perform(_ action: NativePasskeyAction, label: String? = nil) async throws -> NativeAccountBinding {
         guard !isRunning else { throw NativePasskeyFailure.busy }
-        guard (label?.count ?? 0) <= 64, action != .add || ingestURL == nil
+        guard (label?.count ?? 0) <= 64
         else { throw NativePasskeyFailure.invalidOptions }
         isRunning = true
         explicitlyCancelled = false
         let thisRun = UUID()
         runID = thisRun
         defer { isRunning = false; runID = nil }
-        let begin = try await daemon.begin(action, label: label, ingestURL: ingestURL)
+        let begin = try await daemon.begin(action, label: label)
         do {
             try checkCancellation()
             let request = try begin.validated(for: action)

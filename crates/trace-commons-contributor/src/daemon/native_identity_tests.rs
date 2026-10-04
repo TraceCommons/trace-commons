@@ -119,11 +119,11 @@ async fn no_config_origin_is_pinned_and_completion_never_grants_consent() {
     let (_dir, shared) = shared();
     let before = commons_credentials::snapshot(&shared.store, Kind::Account).unwrap();
     let reply = json!({"access_token":"tcn1_synthetic", "token_type":"Bearer", "expires_in_secs":43200,"account_id":uuid::Uuid::new_v4().to_string(),"binding_state":"unbound"});
-    persist_session(&shared.store, &before, "https://commons.example", &reply).unwrap();
+    persist_session(&shared.store, &before, NATIVE_ACCOUNT_ORIGIN, &reply).unwrap();
     assert!(shared.store.load_config().unwrap().is_none());
     assert_eq!(
         resolve_origin(&shared.store, &json!({})).unwrap(),
-        "https://commons.example"
+        NATIVE_ACCOUNT_ORIGIN
     );
     assert!(
         resolve_origin(
@@ -135,6 +135,7 @@ async fn no_config_origin_is_pinned_and_completion_never_grants_consent() {
     let status = handle(&shared, &request("account_session_status", json!({}))).await;
     let encoded = serde_json::to_string(&status).unwrap();
     assert!(!encoded.contains("tcn1_"));
+    assert!(!encoded.contains("account_id"));
     assert_eq!(status.result.unwrap()["signed_in"], true);
     commons_credentials::clear(&shared.store, &[Kind::Account]).unwrap();
     let logout = handle(&shared, &request("account_sign_out", json!({}))).await;
@@ -144,7 +145,7 @@ async fn no_config_origin_is_pinned_and_completion_never_grants_consent() {
             .unwrap()
             .is_none()
     );
-    assert!(persist_session(&shared.store, &before, "https://commons.example", &reply).is_err());
+    assert!(persist_session(&shared.store, &before, NATIVE_ACCOUNT_ORIGIN, &reply).is_err());
 }
 
 #[test]
@@ -350,7 +351,7 @@ async fn expiration_wrong_action_wrong_challenge_and_signout_refuse_before_netwo
 async fn authenticated_http_refusal_still_retains_rotated_token_and_origin() {
     let (_dir, shared) = shared();
     let expected = commons_credentials::snapshot(&shared.store, Kind::Account).unwrap();
-    persist_session(&shared.store,&expected,"https://commons.example",&json!({"access_token":"tcn1_original","token_type":"Bearer","expires_in_secs":43200,"account_id":uuid::Uuid::new_v4().to_string(),"binding_state":"bound"})).unwrap();
+    persist_session(&shared.store,&expected,NATIVE_ACCOUNT_ORIGIN,&json!({"access_token":"tcn1_original","token_type":"Bearer","expires_in_secs":43200,"account_id":uuid::Uuid::new_v4().to_string(),"binding_state":"bound"})).unwrap();
     let mut session = account_auth::try_load_session_with_snapshot(&shared.store)
         .unwrap()
         .unwrap();
@@ -386,7 +387,7 @@ async fn authenticated_http_refusal_still_retains_rotated_token_and_origin() {
     );
     assert_eq!(
         resolve_origin(&shared.store, &json!({})).unwrap(),
-        "https://commons.example"
+        NATIVE_ACCOUNT_ORIGIN
     );
 }
 
@@ -588,12 +589,164 @@ fn explicit_enrollment_host_policy_wins_over_environment_without_bypassing_signu
     assert!(scoped_client(&shared.store, &snapshot, &origin, "synthetic").is_ok());
     let (_other, store) = crate::config::tests_support::temp_store();
     let snapshot = commons_credentials::snapshot(&store, Kind::Account).unwrap();
-    let origin = resolve_origin(&store, &json!({"ingest_url":"https://commons.example"})).unwrap();
+    let origin = resolve_origin(&store, &json!({})).unwrap();
     assert!(scoped_client(&store, &snapshot, &origin, "synthetic").is_err());
-    let allowed = resolve_origin(
-        &store,
-        &json!({"ingest_url":"https://environment-only.example"}),
-    )
+    assert!(
+        resolve_origin(
+            &store,
+            &json!({"ingest_url":"https://environment-only.example"})
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn unconfigured_identity_refuses_ipc_and_retained_untrusted_origins() {
+    let (_dir, shared) = shared();
+    for origin in [
+        "https://attacker.example",
+        "https://ingest.tracecommons.ai.attacker.example",
+        "https://ingest.tracecommons.ai:8443",
+        "https://tracecommons.ai",
+    ] {
+        assert!(resolve_origin(&shared.store, &json!({"ingest_url":origin})).is_err());
+    }
+    assert_eq!(
+        resolve_origin(&shared.store, &json!({})).unwrap(),
+        "https://ingest.tracecommons.ai"
+    );
+    let snapshot = commons_credentials::snapshot(&shared.store, Kind::Account).unwrap();
+    persist_session(&shared.store, &snapshot, "https://attacker.example", &json!({"access_token":"tcn1_secret","token_type":"Bearer","expires_in_secs":43200,"account_id":uuid::Uuid::new_v4().to_string(),"binding_state":"unbound"})).unwrap();
+    assert!(resolve_origin(&shared.store, &json!({})).is_err());
+}
+
+fn configure_test_origin(shared: &DaemonShared, origin: &str) {
+    let cfg: crate::config::ContributorConfig = serde_json::from_value(json!({
+        "schema_version":crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION,
+        "issuer_url":"https://issuer.example","ingest_url":origin,"audience":"upload",
+        "tenant_id":"tenant-a","instance_id":"instance-a","user_subject":"device-a",
+        "device_key_id":"device-a","consent_scopes":[],"allowed_hosts":"127.0.0.1"
+    }))
     .unwrap();
-    assert!(scoped_client(&store, &snapshot, &allowed, "synthetic").is_ok());
+    shared.store.save_config(&cfg).unwrap();
+}
+
+#[test]
+fn add_ceremony_reloads_rotations_but_refuses_authority_changes() {
+    for change in ["rotation", "account", "signout", "config"] {
+        let (_dir, shared) = shared();
+        let snapshot = commons_credentials::snapshot(&shared.store, Kind::Account).unwrap();
+        let mut reply = json!({"access_token":"tcn1_original","token_type":"Bearer","expires_in_secs":43200,"account_id":uuid::Uuid::new_v4().to_string(),"binding_state":"unbound"});
+        persist_session(&shared.store, &snapshot, NATIVE_ACCOUNT_ORIGIN, &reply).unwrap();
+        let session = account_auth::try_load_session_with_snapshot(&shared.store)
+            .unwrap()
+            .unwrap();
+        let mut pending = Pending {
+            action: Action::Add,
+            origin: NATIVE_ACCOUNT_ORIGIN.into(),
+            server_id: "s".into(),
+            challenge: "AQID".into(),
+            expires: Instant::now() + Duration::from_secs(600),
+            snapshot: session.snapshot.clone(),
+            label: None,
+            session: Some(session.clone()),
+        };
+        match change {
+            "rotation" => {
+                account_auth::store_rotated_token(&shared.store, &session, "tcn1_rotated".into())
+                    .unwrap()
+            }
+            "account" => {
+                reply["account_id"] = json!(uuid::Uuid::new_v4().to_string());
+                persist_session(
+                    &shared.store,
+                    &session.snapshot,
+                    NATIVE_ACCOUNT_ORIGIN,
+                    &reply,
+                )
+                .unwrap();
+            }
+            "signout" => {
+                commons_credentials::clear(&shared.store, &[Kind::Account]).unwrap();
+                let next = commons_credentials::snapshot(&shared.store, Kind::Account).unwrap();
+                persist_session(&shared.store, &next, NATIVE_ACCOUNT_ORIGIN, &reply).unwrap();
+            }
+            "config" => configure_test_origin(&shared, NATIVE_ACCOUNT_ORIGIN),
+            _ => unreachable!(),
+        }
+        let result = refresh_pending_session(&shared.store, &mut pending);
+        if change == "rotation" {
+            result.unwrap();
+            assert_eq!(
+                pending.session.unwrap().session.access_token,
+                "tcn1_rotated"
+            );
+            assert!(
+                pending.snapshot
+                    == commons_credentials::snapshot(&shared.store, Kind::Account).unwrap()
+            );
+        } else {
+            assert!(result.is_err(), "{change}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn add_completion_sends_current_token_after_sheet_time_rotation() {
+    let (_dir, shared) = shared();
+    let (origin, worker) = server_once("403 Forbidden", json!({"error":"step up"}), None).await;
+    configure_test_origin(&shared, &origin);
+    let snapshot = commons_credentials::snapshot(&shared.store, Kind::Account).unwrap();
+    persist_session(&shared.store, &snapshot, &origin, &json!({"access_token":format!("tcn1_{}.original", URL_SAFE_NO_PAD.encode("tenant-a")),"token_type":"Bearer","expires_in_secs":43200,"account_id":uuid::Uuid::new_v4().to_string(),"binding_state":"bound"})).unwrap();
+    let session = account_auth::try_load_session_with_snapshot(&shared.store)
+        .unwrap()
+        .unwrap();
+    put_pending(
+        &shared,
+        &origin,
+        Action::Add,
+        Instant::now() + Duration::from_secs(600),
+    );
+    shared
+        .native_identity
+        .lock()
+        .unwrap()
+        .get_mut("local")
+        .unwrap()
+        .session = Some(session.clone());
+    account_auth::store_rotated_token(&shared.store, &session, "tcn1_rotated".into()).unwrap();
+    let response = handle(
+        &shared,
+        &request("passkey_add_complete", registration_params()),
+    )
+    .await;
+    assert_eq!(response.error.unwrap().message, "account-request-refused");
+    let sent = worker.await.unwrap();
+    assert!(sent.starts_with("POST /v1/account/passkeys/native/register/finish "));
+    assert!(
+        sent.to_lowercase()
+            .contains("authorization: bearer tcn1_rotated")
+    );
+    assert!(!shared.native_identity.lock().unwrap().contains_key("local"));
+}
+
+#[tokio::test]
+async fn unconfigured_logout_never_sends_retained_token_to_untrusted_origin() {
+    let (_dir, shared) = shared();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("https://{}", listener.local_addr().unwrap());
+    let snapshot = commons_credentials::snapshot(&shared.store, Kind::Account).unwrap();
+    persist_session(&shared.store, &snapshot, &origin, &json!({"access_token":"tcn1_secret","token_type":"Bearer","expires_in_secs":43200,"account_id":uuid::Uuid::new_v4().to_string(),"binding_state":"unbound"})).unwrap();
+    let response = handle(&shared, &request("account_sign_out", json!({}))).await;
+    assert_eq!(response.result.unwrap()["signed_out"], true);
+    assert!(
+        account_auth::try_load_token(&shared.store)
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), listener.accept())
+            .await
+            .is_err()
+    );
 }

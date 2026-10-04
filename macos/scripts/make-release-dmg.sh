@@ -220,7 +220,8 @@ codesign --force --timestamp --options runtime \
 codesign --verify --deep --strict --verbose=2 "$APP"
 # Inspect the actual signed metadata and embedded grant before packaging.
 # The release workflow separately runs the real launch/Keychain probe.
-TC_VERIFY_STATIC_ONLY=1 "$PACKAGE_DIR/../scripts/ci/verify-macos-entitlements.sh" "$APP"
+TC_REQUIRE_NATIVE_PASSKEYS=1 TC_VERIFY_STATIC_ONLY=1 \
+  "$PACKAGE_DIR/../scripts/ci/verify-macos-entitlements.sh" "$APP"
 
 echo "--- packaging the DMG"
 rm -f "$DMG"
