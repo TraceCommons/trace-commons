@@ -72,7 +72,20 @@ pub fn contributor_disclosure_copy() -> Value {
             "held_row_body": crate::history_copy::HELD_ROW_BODY,
             "status_awaiting_pii_backstop": awaiting_pii_backstop,
             "status_unavailable": crate::history_copy::STATUS_UNAVAILABLE,
+            // History's word for each status (`history_copy::STATUS_LABELS`),
+            // keyed by wire status. A status not in it is
+            // `status_unavailable`.
+            "status_labels": crate::history_copy::STATUS_LABELS
+                .iter()
+                .map(|row| (row.status.to_owned(), Value::from(row.label)))
+                .collect::<serde_json::Map<String, Value>>(),
         },
+        // Each folder mode's one name (`project_copy::FOLDER_MODE_LABELS`),
+        // keyed by wire mode: Settings, onboarding and the pill read it.
+        "folder_mode_labels": crate::project_copy::FOLDER_MODE_LABELS
+            .iter()
+            .map(|(mode, label)| ((*mode).to_owned(), Value::from(*label)))
+            .collect::<serde_json::Map<String, Value>>(),
         "outcome": crate::outcome_copy::outcome_copy(),
         "private_inference": {
             "destination": inference.destination,
@@ -135,6 +148,7 @@ mod tests {
             "insights_ui",
             "mission_drafts_ui",
             "history_ui",
+            "folder_mode_labels",
             "outcome",
             "private_inference",
             "project_automatic_unavailable",
@@ -256,6 +270,44 @@ mod tests {
                 .and_then(Value::as_str),
             Some(crate::history_copy::STATUS_UNAVAILABLE)
         );
+    }
+
+    /// History's status table is carried whole, keyed by wire status, so
+    /// Windows and Tauri look a status up rather than typing its word.
+    #[test]
+    fn history_copy_carries_the_status_label_table() {
+        let copy = contributor_disclosure_copy();
+        let labels = copy
+            .pointer("/history_ui/status_labels")
+            .and_then(Value::as_object)
+            .expect("history_ui carries status_labels");
+        assert_eq!(labels.len(), crate::history_copy::STATUS_LABELS.len());
+        for row in crate::history_copy::STATUS_LABELS {
+            assert_eq!(
+                labels.get(row.status).and_then(Value::as_str),
+                Some(row.label),
+                "{}",
+                row.status
+            );
+        }
+    }
+
+    /// The folder modes' names are carried whole, keyed by wire mode, so
+    /// Windows and Tauri look a mode up rather than typing its name.
+    #[test]
+    fn the_bundle_carries_the_folder_mode_labels() {
+        let copy = contributor_disclosure_copy();
+        let labels = copy["folder_mode_labels"]
+            .as_object()
+            .expect("the bundle carries folder_mode_labels");
+        assert_eq!(labels.len(), crate::project_copy::FOLDER_MODE_LABELS.len());
+        for (mode, label) in crate::project_copy::FOLDER_MODE_LABELS {
+            assert_eq!(
+                labels.get(mode).and_then(Value::as_str),
+                Some(label),
+                "{mode}"
+            );
+        }
     }
 
     /// Each source tool's three check lines are the source table's.

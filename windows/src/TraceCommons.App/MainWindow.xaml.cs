@@ -989,7 +989,7 @@ public sealed partial class MainWindow : Window
         await ViewModel.AcknowledgeArmingRewordingAsync(card);
     }
 
-    /// <summary>"Ask me first" on a rewording notice.</summary>
+    /// <summary>"Ask me" on a rewording notice.</summary>
     private async void OnAskFirstArmingRewording(object sender, RoutedEventArgs e)
     {
         ArmingRewordingCard? card = sender is FrameworkElement element
@@ -1013,7 +1013,7 @@ public sealed partial class MainWindow : Window
         }
     }
 
-    /// <summary>"Ask me first" on one folder of the held notice.</summary>
+    /// <summary>"Ask me" on one folder of the held notice.</summary>
     private async void OnAskFirstHeldProject(object sender, RoutedEventArgs e)
     {
         GateHeldProjectNotice? project = sender is FrameworkElement element

@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Text.Json;
 
 namespace TraceCommons.Interop;
@@ -63,23 +64,41 @@ public static class HistoryCopy
 
     public const string QuarantineHeading = "Held for privacy review";
 
-    public const string QuarantineBody =
-        "A person at Trace Commons reads these before they enter the commons. It happens when "
-        + "automated checks see something that might be personal or sensitive and can't decide "
-        + "on its own.\n\nThese have not been rejected, and they have not been shared with "
-        + "anyone but the reviewer. They are sitting still.\n\nTypical wait: we don't have a "
-        + "reliable number yet.";
+    /// <summary>
+    /// The section paragraph under <see cref="QuarantineHeading"/>: the core's
+    /// held explanation (<see cref="HeldRowBody"/>), then two sentences only
+    /// this shell has.
+    /// </summary>
+    /// <remarks>
+    /// COPY BYPASS (Batch B part 2): "They are sitting still." and the
+    /// typical-wait line have no core equivalent yet, so they are still typed
+    /// here. They go when the core owns the section paragraph.
+    /// </remarks>
+    public static string QuarantineBody =>
+        HeldRowBody
+        + "\n\nThey are sitting still.\n\nTypical wait: we don't have a reliable number yet.";
 
     /// <summary>
     /// The row-level explanation on a held record, used only when the server
-    /// sent no explanation of its own. It says the same three things
-    /// <see cref="QuarantineBody"/> says -- automated, not rejected, not
-    /// shared -- at row length rather than at section length.
+    /// sent no explanation of its own: the core's
+    /// <c>history_copy::HELD_ROW_BODY</c> (the canonical wording, by owner
+    /// ruling), read from the disclosure bundle's
+    /// <c>history_ui.held_row_body</c>. Empty only if the core could not
+    /// produce the bundle.
     /// </summary>
-    public const string HeldRowBody =
-        "Automated checks saw something that might be personal and couldn't decide on their "
-        + "own. It has not been rejected, and it has not been shared with anyone but the "
-        + "reviewer.";
+    public static string HeldRowBody => HeldRowBodyFromCore.Value;
+
+    private static readonly Lazy<string> HeldRowBodyFromCore = new(ReadHeldRowBody);
+
+    private static string ReadHeldRowBody()
+    {
+        using JsonDocument? doc = ReadHistoryUi(out JsonElement history);
+        return doc is not null
+            && history.TryGetProperty("held_row_body", out JsonElement body)
+            && body.ValueKind == JsonValueKind.String
+            ? body.GetString() ?? string.Empty
+            : string.Empty;
+    }
 
     public const string CreditSection = "Credit";
 
@@ -146,27 +165,27 @@ public static class HistoryCopy
         + "not counted here.";
 
     /// <summary>
-    /// The four states a record can be in, in the same words the stat cards
-    /// and the chips use, so a badge on a record and a card at the top of the
-    /// screen cannot say different things about one state.
+    /// The word a record's status reads as: the core's
+    /// <c>history_copy::STATUS_LABELS</c>, the table every shell reads, so a
+    /// badge on a record and a card at the top of the screen cannot say
+    /// different things about one state.
     /// </summary>
     /// <remarks>
-    /// No status reported yet (<c>null</c>) reads as waiting, as macOS treats
-    /// it as open. Any other status this build has no word for reads as
-    /// <see cref="StatusUnavailable"/>, never as "Waiting to be scored":
-    /// that would render an absent signal as a healthy in-flight state.
+    /// No status reported yet (<c>null</c>) reads as the core's word for
+    /// <c>submitted</c>, as macOS treats it as open. Any other status the
+    /// table has no word for reads as <see cref="StatusUnavailable"/>, never
+    /// as "Waiting to be scored": that would render an absent signal as a
+    /// healthy in-flight state.
     /// </remarks>
-    public static string StatusWord(string? status) => status switch
-    {
-        null => WaitingToBeScored,
-        StatusSubmitted => WaitingToBeScored,
-        StatusAccepted => InTheCommons,
-        StatusQuarantined => QuarantineHeading,
-        StatusWithdrawn => WithdrawnByYou,
-        _ => StatusUnavailable,
-    };
+    public static string StatusWord(string? status) =>
+        StatusLabelsFromCore.Value.TryGetValue(status ?? StatusSubmitted, out string? label)
+            ? label
+            : StatusUnavailable;
 
     private static readonly Lazy<string> StatusUnavailableFromCore = new(ReadStatusUnavailable);
+
+    private static readonly Lazy<Dictionary<string, string>> StatusLabelsFromCore =
+        new(ReadStatusLabels);
 
     /// <summary>
     /// The label on a status this build does not recognise: the core's
@@ -180,21 +199,70 @@ public static class HistoryCopy
 
     private static string ReadStatusUnavailable()
     {
+        using JsonDocument? doc = ReadHistoryUi(out JsonElement history);
+        return doc is not null
+            && history.TryGetProperty("status_unavailable", out JsonElement label)
+            && label.ValueKind == JsonValueKind.String
+            ? label.GetString() ?? string.Empty
+            : string.Empty;
+    }
+
+    /// <summary>
+    /// The disclosure bundle's <c>history_ui.status_labels</c>: wire status
+    /// to the core's word for it. Empty if the core could not produce the
+    /// bundle, so every status then reads as <see cref="StatusUnavailable"/>
+    /// (itself empty) rather than as a word typed here.
+    /// </summary>
+    private static Dictionary<string, string> ReadStatusLabels()
+    {
+        var table = new Dictionary<string, string>(StringComparer.Ordinal);
+        using JsonDocument? doc = ReadHistoryUi(out JsonElement history);
+        if (doc is null
+            || !history.TryGetProperty("status_labels", out JsonElement labels)
+            || labels.ValueKind != JsonValueKind.Object)
+        {
+            return table;
+        }
+
+        foreach (JsonProperty row in labels.EnumerateObject())
+        {
+            if (row.Value.ValueKind == JsonValueKind.String && row.Value.GetString() is { } word)
+            {
+                table[row.Name] = word;
+            }
+        }
+
+        return table;
+    }
+
+    /// <summary>
+    /// The disclosure bundle (<c>tc_contributor_disclosure_copy_json</c>)
+    /// and its <c>history_ui</c> object, or null if either is missing.
+    /// </summary>
+    private static JsonDocument? ReadHistoryUi(out JsonElement history)
+    {
+        history = default;
         string? json = NativeMethods.TakeOwnedString(NativeMethods.tc_contributor_disclosure_copy_json());
-        if (string.IsNullOrEmpty(json)) return string.Empty;
+        if (string.IsNullOrEmpty(json)) return null;
+        JsonDocument doc;
         try
         {
-            using JsonDocument doc = JsonDocument.Parse(json);
-            return doc.RootElement.TryGetProperty("history_ui", out JsonElement history)
-                && history.TryGetProperty("status_unavailable", out JsonElement label)
-                && label.ValueKind == JsonValueKind.String
-                ? label.GetString() ?? string.Empty
-                : string.Empty;
+            doc = JsonDocument.Parse(json);
         }
         catch (JsonException)
         {
-            return string.Empty;
+            return null;
         }
+
+        if (doc.RootElement.ValueKind == JsonValueKind.Object
+            && doc.RootElement.TryGetProperty("history_ui", out history)
+            && history.ValueKind == JsonValueKind.Object)
+        {
+            return doc;
+        }
+
+        doc.Dispose();
+        return null;
     }
 
     /// <summary>

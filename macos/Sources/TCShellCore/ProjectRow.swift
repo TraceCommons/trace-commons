@@ -269,21 +269,10 @@ public struct ProjectTool: Decodable, Equatable, Sendable {
 public enum ProjectCopy {
     public static let unresolvedBucketLabel = "Sessions with no project"
 
-    /// The label for one option in a mode picker.
-    ///
-    /// These are *actions* -- what selecting this does -- and are not the
-    /// state sentences Settings prints beside a row to say what the mode
-    /// currently is ("Contributed without asking"). Both exist and they are
-    /// not interchangeable: a picker of state sentences reads as a report,
-    /// and a row labelled with an action reads as a button that has not been
-    /// pressed. The words are the Linux shell's `mode_choices`.
-    public static func modeChoiceLabel(_ mode: ProjectMode) -> String {
-        switch mode {
-        case .ask: return "Ask me first"
-        case .autoUpload: return "Contribute automatically"
-        case .ignore: return "Never offer this one"
-        }
-    }
+    // A mode's name is not here. It is the core's
+    // (`project_copy::FOLDER_MODE_LABELS`), read through the pill's table:
+    // `ContributionModeCopy.label(for:)`, and `ProjectCopy.modeChoiceLabel(_:)`
+    // in `TraceCommonsApp/ProjectModeWords.swift`, which reaches the dylib.
 
 
     /// A statement of what the daemon does, not an apology. Nothing in it is

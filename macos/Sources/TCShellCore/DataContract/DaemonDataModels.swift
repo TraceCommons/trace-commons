@@ -726,7 +726,7 @@ extension DaemonData {
     /// `set_contribution_override` (#1173, #1208).
     public struct ContributionOverrideResult: Codable, Equatable, Sendable {
         /// `false` when that override was already in force: nothing was
-        /// recorded, and an Auto contribute override kept its hold.
+        /// recorded, and an Automatic override kept its hold.
         public let changed: Bool
         /// The override now in force, `{mode, since}`.
         public let contributionOverride: ContributionOverride?

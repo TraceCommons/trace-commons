@@ -3373,6 +3373,7 @@ fn the_public_run_payload_and_error_tables_cross_whole_and_finished() {
             "feedback_choices" => Some(3),
             "evidence_kind_choices" => Some(9),
             "contribution_status_choices" => Some(10),
+            "history_status_labels" => Some(11),
             "permitted_use_choices" => Some(6),
             "reuse_permissions" => Some(2),
             _ => None,

@@ -60,6 +60,16 @@ function string(value: RecordValue, key: string): string {
   return value[key] as string;
 }
 
+/** An object of non-empty strings, such as a status-to-label table. */
+function stringTable(value: RecordValue, key: string): Record<string, string> {
+  const table = record(value[key], key);
+  const out: Record<string, string> = {};
+  for (const name of Object.keys(table)) {
+    out[name] = string(table, name);
+  }
+  return out;
+}
+
 export type WitnessReviewCopy = {
   heading: string;
   disclosure: string;
@@ -169,6 +179,11 @@ export type ContributorDisclosureCopy = {
   credential_wallet_notice: string;
   /** Under an armed project whose disclosure could not be read (K6). */
   project_automatic_unavailable: string;
+  /**
+   * Each folder mode's one name, by wire mode
+   * (`project_copy::FOLDER_MODE_LABELS`): "Ask me", "Automatic", "Never".
+   */
+  folder_mode_labels: Record<string, string>;
   near_ai_enroll: {
     title: string;
     what: string;
@@ -259,6 +274,7 @@ export type ContributorDisclosureCopy = {
     held_row_body: string;
     status_awaiting_pii_backstop: string;
     status_unavailable: string;
+    status_labels: Record<string, string>;
   };
   outcome: OutcomeCopy;
 };
@@ -367,6 +383,7 @@ export async function getContributorDisclosureCopy(): Promise<ContributorDisclos
     },
     credential_cost: string(value, "credential_cost"),
     project_automatic_unavailable: string(value, "project_automatic_unavailable"),
+    folder_mode_labels: stringTable(value, "folder_mode_labels"),
     credential_wallet_notice: string(value, "credential_wallet_notice"),
     near_ai_enroll: {
       title: string(value, "near_ai_enroll_title"),
@@ -479,6 +496,7 @@ export async function getContributorDisclosureCopy(): Promise<ContributorDisclos
       held_row_body: string(historyUi, "held_row_body"),
       status_awaiting_pii_backstop: string(historyUi, "status_awaiting_pii_backstop"),
       status_unavailable: string(historyUi, "status_unavailable"),
+      status_labels: stringTable(historyUi, "status_labels"),
     },
     outcome: {
       verdict_question: string(outcome, "verdict_question"),
