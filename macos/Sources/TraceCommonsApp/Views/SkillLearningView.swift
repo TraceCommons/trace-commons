@@ -438,6 +438,7 @@ private struct SkillTrialRow: View {
                 .foregroundStyle(TC.inkSecondary)
             Link(copy.openFixtureSource, destination: trial.sourceURL)
                 .font(TC.Font_.footnote)
+                .tint(TC.accentText)
                 .frame(minHeight: 44, alignment: .leading)
                 .contentShape(Rectangle())
                 .accessibilityLabel("\(copy.openFixtureSource): \(trial.taskID)")

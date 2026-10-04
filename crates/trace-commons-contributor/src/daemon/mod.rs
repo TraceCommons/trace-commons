@@ -694,10 +694,26 @@ async fn drain_approved(
     // entries are refused; an ask-first project's go back to waiting. A key
     // policy cannot resolve falls back to ask-first, so a lookup miss now
     // asks rather than sends -- the safe direction.
-    let (ignored_ids, returned_ids): (Vec<uuid::Uuid>, Vec<uuid::Uuid>) = {
+    //
+    // A "Never" contribution override holds every send (#1208), the
+    // contributor's own approvals included, so its "Nothing is queued or
+    // sent" is true. Those are left exactly as they are -- `Approved`, pin
+    // and hold intact -- and simply not sent, so clearing the override
+    // releases them as they were. Unattended ones take the `Ignore` arm
+    // below, back to waiting.
+    let (ignored_ids, returned_ids, held_ids): (Vec<uuid::Uuid>, Vec<uuid::Uuid>, Vec<uuid::Uuid>) = {
         let policy = shared.policy.lock().expect("policy lock");
         let mut ignored = Vec::new();
         let mut returned = Vec::new();
+        let held: Vec<uuid::Uuid> = if policy.holds_every_send() {
+            candidates
+                .iter()
+                .filter(|e| !e.approved_unattended)
+                .map(|e| e.entry_id)
+                .collect()
+        } else {
+            Vec::new()
+        };
         for e in candidates.iter().filter(|e| e.approved_unattended) {
             match policy.resolve(&e.project_key) {
                 // A session that must wait for a person although its
@@ -715,11 +731,19 @@ async fn drain_approved(
                     returned.push(e.entry_id)
                 }
                 policy::ProjectMode::AutoUpload => {}
+                // Ignored by a contribution override, not by the folder's
+                // own mode: back to waiting rather than refused, so clearing
+                // the override restores it (#1173).
+                policy::ProjectMode::Ignore
+                    if policy.folder_mode(&e.project_key) != policy::ProjectMode::Ignore =>
+                {
+                    returned.push(e.entry_id)
+                }
                 policy::ProjectMode::Ignore => ignored.push(e.entry_id),
                 policy::ProjectMode::NotifyOnly => returned.push(e.entry_id),
             }
         }
-        (ignored, returned)
+        (ignored, returned, held)
     };
     if !ignored_ids.is_empty() || !returned_ids.is_empty() {
         {
@@ -766,7 +790,11 @@ async fn drain_approved(
     }
     let approved: Vec<queue::QueueEntry> = candidates
         .into_iter()
-        .filter(|e| !ignored_ids.contains(&e.entry_id) && !returned_ids.contains(&e.entry_id))
+        .filter(|e| {
+            !ignored_ids.contains(&e.entry_id)
+                && !returned_ids.contains(&e.entry_id)
+                && !held_ids.contains(&e.entry_id)
+        })
         .collect();
     if approved.is_empty() {
         // Re-check enrollment when the queue is empty, so a stale not-logged-in
@@ -873,7 +901,16 @@ async fn drain_approved(
         // because the upload really is in flight. See
         // `Queue::claim_for_upload`.
         {
+            // Policy before queue, as everywhere. Held across the claim so a
+            // "Never" override set since the snapshot above stops this entry
+            // before it is in flight (#1208); it stays `Approved`, as the
+            // snapshot's hold leaves it.
+            let policy = shared.policy.lock().expect("policy lock");
             let mut q = shared.queue.lock().expect("queue lock");
+            if policy.holds_every_send() {
+                continue;
+            }
+            drop(policy);
             let Some(current) = q.get(entry.entry_id).cloned() else {
                 continue;
             };
@@ -1078,16 +1115,24 @@ async fn drain_approved(
                 reason_label,
                 pin,
                 attested_inference,
+                would_send_bytes,
             } => {
                 // Held with the witness's certified bytes pinned. Nothing
                 // re-approves it: the reason is one of
                 // `REASONS_NEEDING_A_PERSON`.
-                q.hold_with_witness_pin(entry.entry_id, &reason_label, &pin, attested_inference);
+                q.hold_with_witness_pin(
+                    entry.entry_id,
+                    &reason_label,
+                    &pin,
+                    attested_inference,
+                    would_send_bytes,
+                );
             }
             uploader::UploadDecision::HeldForSecondLook {
                 reason_label,
                 reasons,
                 pin,
+                would_send_bytes,
             } => {
                 // The Scrub check (K4 of #1118). Under Automatic the reason
                 // is one of `REASONS_NEEDING_A_PERSON`, so nothing
@@ -1104,6 +1149,7 @@ async fn drain_approved(
                     &reason_label,
                     pin.as_ref()
                         .map(|(digest, counts)| (digest.as_str(), *counts)),
+                    would_send_bytes,
                     now,
                 );
             }
@@ -2391,6 +2437,125 @@ mod tests {
         assert_eq!(e.reason_label, None);
         let published = events.try_recv().expect("a queue-changed event");
         assert_eq!(published.event, ipc::EVENT_QUEUE_CHANGED);
+    }
+
+    /// #1173: a "Never" override stops an unattended send in a folder whose
+    /// own mode is not Never by putting it back to waiting -- not refusing
+    /// it -- so clearing the override restores it.
+    #[tokio::test]
+    async fn a_never_override_returns_an_unattended_approval_to_waiting() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::config::ConfigStore::open(dir.path().join("state")).unwrap();
+        let shared = Arc::new(ipc::DaemonShared::load(store).unwrap());
+        {
+            let mut q = shared.queue.lock().expect("queue lock");
+            let e = queue::QueueEntry {
+                entry_id: uuid::Uuid::new_v4(),
+                session_hash: "sha256:never-override".to_string(),
+                project_key: "/w/armed".to_string(),
+                ..Default::default()
+            };
+            let id = e.entry_id;
+            q.upsert(e, 100).unwrap();
+            assert!(q.approve_unattended(id, &[], None));
+        }
+        {
+            let mut policy = shared.policy.lock().expect("policy lock");
+            policy
+                .set_mode(
+                    "/w/armed",
+                    policy::ProjectMode::AutoUpload,
+                    at("2026-08-08T12:00:00Z"),
+                )
+                .unwrap();
+            policy
+                .set_contribution_override(
+                    policy::ProjectMode::Ignore,
+                    at("2026-08-08T12:00:00Z"),
+                    None,
+                )
+                .unwrap();
+        }
+
+        drain_approved_for_test(&shared, at("2026-08-08T13:00:00Z"))
+            .await
+            .unwrap();
+
+        let e = shared.queue.lock().expect("queue lock").all()[0].clone();
+        assert_eq!(
+            e.state,
+            queue::QueueState::Pending,
+            "held by the override, not refused by the folder"
+        );
+    }
+
+    /// An entry the contributor approved that `drain_approved` would try to
+    /// send: approved under the config's scopes, past its hold, and for a
+    /// session no source lists -- so a pass that reaches the send marks it
+    /// `session-file-vanished`, which is how these tests see that it did.
+    fn seed_contributor_approval(shared: &ipc::DaemonShared) -> uuid::Uuid {
+        let cfg = crate::commands::unenrolled_preview_config();
+        shared.store.save_config(&cfg).unwrap();
+        let mut q = shared.queue.lock().expect("queue lock");
+        let e = queue::QueueEntry {
+            entry_id: uuid::Uuid::new_v4(),
+            session_hash: "sha256:held-by-never".to_string(),
+            project_key: "/w/approved".to_string(),
+            path: std::path::PathBuf::from("/nowhere/held-by-never.jsonl"),
+            state: queue::QueueState::Approved,
+            approved_scopes: Some(cfg.consent_scopes.clone()),
+            ..Default::default()
+        };
+        let id = e.entry_id;
+        q.upsert(e, 100).unwrap();
+        id
+    }
+
+    /// #1208: while a "Never" override is in force nothing is sent, not even
+    /// what the contributor approved: it is held exactly as it was, and
+    /// clearing the override releases it to the send path.
+    #[tokio::test]
+    async fn a_never_override_holds_contributor_approvals_until_it_clears() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::config::ConfigStore::open(dir.path().join("state")).unwrap();
+        let shared = Arc::new(ipc::DaemonShared::load(store).unwrap());
+        let id = seed_contributor_approval(&shared);
+        shared
+            .policy
+            .lock()
+            .expect("policy lock")
+            .set_contribution_override(
+                policy::ProjectMode::Ignore,
+                at("2026-08-08T12:00:00Z"),
+                None,
+            )
+            .unwrap();
+        let before = shared.queue.lock().expect("queue lock").get(id).cloned();
+
+        drain_approved_for_test(&shared, at("2026-08-08T13:00:00Z"))
+            .await
+            .unwrap();
+
+        let held = shared.queue.lock().expect("queue lock").get(id).cloned();
+        assert_eq!(held, before, "held exactly as it was, not sent");
+
+        shared
+            .policy
+            .lock()
+            .expect("policy lock")
+            .clear_contribution_override();
+        drain_approved_for_test(&shared, at("2026-08-08T13:00:00Z"))
+            .await
+            .unwrap();
+        let released = shared.queue.lock().expect("queue lock").get(id).cloned();
+        assert_eq!(
+            released.map(|e| (e.state, e.reason_label)),
+            Some((
+                queue::QueueState::Failed,
+                Some("session-file-vanished".to_string())
+            )),
+            "released: the pass reached the send"
+        );
     }
 
     #[tokio::test]

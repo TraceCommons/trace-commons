@@ -89,7 +89,7 @@ pub struct ArmingRewordingCard {
     pub id: Option<u64>,
     /// The core's words.
     pub notice: trace_commons_contributor::consent_copy::ArmingRewordedNoticeCopy,
-    /// The project "Ask me first" switches, present only when the core
+    /// The project "Ask me" switches, present only when the core
     /// offered the button.
     pub ask_first_project_id: Option<String>,
 }

@@ -15,7 +15,7 @@ public struct ArmingRewordingWire: Decodable, Equatable, Sendable {
     public let id: UInt64
     /// The element as the daemon sent it, re-encoded.
     public let json: String
-    /// The project "Ask me first" switches. Read only through
+    /// The project "Ask me" switches. Read only through
     /// `ArmingRewordedNotice.askFirstTarget(for:)`.
     public let projectId: String?
 
@@ -50,7 +50,7 @@ public struct ArmingRewordedNotice: Decodable, Equatable, Sendable {
     public let noReview: String
     /// Records that the notice was shown, and does nothing else.
     public let acknowledge: String
-    /// "Ask me first", or nil when the element names no project.
+    /// "Ask me", or nil when the element names no project.
     public let askFirstAction: String?
     /// Shown when the daemon refuses the switch; nil exactly when
     /// `askFirstAction` is.
@@ -73,7 +73,7 @@ public struct ArmingRewordedNotice: Decodable, Equatable, Sendable {
         "ask_first_action", "ask_first_failed",
     ]
 
-    /// The project "Ask me first" switches to ask-first, or nil when there is
+    /// The project "Ask me" switches to ask-first, or nil when there is
     /// no button. The button sends `set_project_mode` with this id and
     /// `notify_only`, the same call as Settings.
     public func askFirstTarget(for rewording: ArmingRewordingWire) -> String? {
@@ -139,7 +139,7 @@ public struct GateHeld: Decodable, Equatable, Sendable {
 
 /// One held folder in the Rust's notice.
 public struct GateHeldProjectNotice: Decodable, Equatable, Sendable {
-    /// For the "Ask me first" button's `set_project_mode`. Never shown.
+    /// For the "Ask me" button's `set_project_mode`. Never shown.
     public let projectId: String?
     public let line: String
     public let askFirstAction: String?

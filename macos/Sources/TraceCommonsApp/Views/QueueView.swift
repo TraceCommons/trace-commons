@@ -926,7 +926,7 @@ struct WeekBand: View {
         VStack(alignment: .leading, spacing: TC.Space.m) {
             TCSectionHeader(title: "This week")
             HStack(alignment: .top, spacing: TC.Space.m) {
-                figure("Contributed", week.submitted, TC.greenText, .checkCircle)
+                figure("Contributed", week.submitted, TC.accentText, .checkCircle)
                 figure("Held for privacy review", quarantined, TC.blueIcon, .clock)
                 figure("In the commons", week.accepted, TC.inkSecondary, .columns)
             }

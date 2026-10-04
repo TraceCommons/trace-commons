@@ -1,0 +1,28 @@
+{
+  "week": {
+    "submitted": 1,
+    "accepted": 1,
+    "quarantined": 1,
+    "withdrawn": 1,
+    "other": 0
+  },
+  "month": {
+    "submitted": 1,
+    "accepted": 2,
+    "quarantined": 1,
+    "withdrawn": 1,
+    "other": 0
+  },
+  "all_time": {
+    "submitted": 1,
+    "accepted": 2,
+    "quarantined": 1,
+    "withdrawn": 1,
+    "other": 0
+  },
+  "credit_pending": 5.5,
+  "credit_final": 10.0,
+  "quarantined": 1,
+  "taken_back": 1,
+  "last_refreshed_at": "2026-09-30T08:00:00Z"
+}

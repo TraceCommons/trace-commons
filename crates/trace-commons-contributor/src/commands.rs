@@ -946,18 +946,10 @@ fn format_size(bytes: u64) -> String {
     }
 }
 
-/// What to call this session's origin in a table: what it declares itself
-/// to be when discovery knows, and otherwise the adapter that found it.
-///
-/// See `SessionRef::declared_source` for why the two differ at all.
-fn displayed_source(r: &SessionRef) -> &str {
-    r.declared_source.as_deref().unwrap_or(r.source)
-}
-
 fn session_row(idx: usize, r: &SessionRef) -> Vec<String> {
     vec![
         (idx + 1).to_string(),
-        displayed_source(r).to_string(),
+        r.displayed_source().to_string(),
         r.project.clone().unwrap_or_else(|| "-".to_string()),
         format_age(r.started_at),
         format_size(r.size_bytes),
@@ -968,15 +960,23 @@ fn session_row(idx: usize, r: &SessionRef) -> Vec<String> {
 /// receipt with an already-submitted status matches this session's hash,
 /// `Some(false)` when not, `None` when the transcript failed to load (the
 /// session stays selectable; `submit_sessions` will classify it).
+///
+/// A receipt's status is read through
+/// [`crate::daemon::history::receipt_status`], so a `processing` receipt
+/// whose submission the server has since read back as `rejected` is not
+/// marked -- the same rule the submit short-circuit applies.
 fn submitted_marker(
     source: &dyn TraceSource,
     r: &SessionRef,
     receipts: &[crate::config::Receipt],
+    verdicts: &std::collections::BTreeMap<uuid::Uuid, String>,
 ) -> Option<bool> {
     let transcript = source.load(r).ok()?;
     Some(receipts.iter().any(|rec| {
         rec.session_hash == transcript.session_hash
-            && crate::submit::ALREADY_SUBMITTED_STATUSES.contains(&rec.status.as_str())
+            && crate::submit::is_already_submitted(crate::daemon::history::receipt_status(
+                rec, verdicts,
+            ))
     }))
 }
 
@@ -1421,12 +1421,17 @@ pub async fn submit(store: &ConfigStore, sel: &SubmitSelection<'_>) -> Result<()
         (0..refs.len()).collect()
     } else {
         let receipts = store.load_receipts().context("loading receipts")?;
+        // A cache that cannot be read leaves every receipt's own status in
+        // force, which is what the picker showed before the cache was read.
+        let verdicts = crate::daemon::history::reported_verdicts(
+            &crate::daemon::history::HistoryCache::load(store).unwrap_or_default(),
+        );
         let rows: Vec<Vec<String>> = refs
             .iter()
             .enumerate()
             .map(|(i, r)| {
                 let marker = source_for(r.source, sel.trajectory)
-                    .and_then(|src| submitted_marker(src.as_ref(), r, &receipts));
+                    .and_then(|src| submitted_marker(src.as_ref(), r, &receipts, &verdicts));
                 submit_picker_row(i, r, marker)
             })
             .collect();
@@ -2069,8 +2074,10 @@ mod tests {
         let r = src.discover().unwrap().remove(0);
         let transcript = src.load(&r).unwrap();
 
+        let no_verdicts = std::collections::BTreeMap::new();
+
         // No receipts: not submitted, cell renders "-".
-        assert_eq!(submitted_marker(&src, &r, &[]), Some(false));
+        assert_eq!(submitted_marker(&src, &r, &[], &no_verdicts), Some(false));
         let row = submit_picker_row(0, &r, Some(false));
         assert_eq!(row.last().unwrap(), "-");
 
@@ -2083,18 +2090,57 @@ mod tests {
             status: "accepted".into(),
             approved_unattended: None,
             approved_verdict: None,
+            uploaded_bytes: None,
         };
         assert_eq!(
-            submitted_marker(&src, &r, std::slice::from_ref(&receipt)),
+            submitted_marker(&src, &r, std::slice::from_ref(&receipt), &no_verdicts),
             Some(true)
         );
         let row = submit_picker_row(0, &r, Some(true));
         assert_eq!(row.last().unwrap(), "yes");
 
+        // The versioned pipeline's receipt status: uploaded, no verdict
+        // reported yet.
+        let mut processing = receipt.clone();
+        processing.status = "processing".into();
+        assert_eq!(
+            submitted_marker(&src, &r, std::slice::from_ref(&processing), &no_verdicts),
+            Some(true)
+        );
+
+        // poldsam's review of #1169: Admission can reject a trace inside
+        // the request that returned `processing`. A refreshed read-back of
+        // `rejected` wins over that receipt, so the session is selectable
+        // again; `quarantined` still marks it.
+        let read_back = |status: &str| {
+            std::collections::BTreeMap::from([(processing.submission_id, status.to_string())])
+        };
+        assert_eq!(
+            submitted_marker(
+                &src,
+                &r,
+                std::slice::from_ref(&processing),
+                &read_back("rejected")
+            ),
+            Some(false)
+        );
+        assert_eq!(
+            submitted_marker(
+                &src,
+                &r,
+                std::slice::from_ref(&processing),
+                &read_back("quarantined")
+            ),
+            Some(true)
+        );
+
         // Receipt with a non-terminal status does not mark the session.
         let mut rejected = receipt;
         rejected.status = "rejected".into();
-        assert_eq!(submitted_marker(&src, &r, &[rejected]), Some(false));
+        assert_eq!(
+            submitted_marker(&src, &r, &[rejected], &no_verdicts),
+            Some(false)
+        );
 
         // Load failure renders "?" and stays selectable.
         let row = submit_picker_row(0, &r, None);
@@ -4673,6 +4719,7 @@ mod logout_tests {
                     status: "accepted".to_string(),
                     approved_unattended: None,
                     approved_verdict: None,
+                    uploaded_bytes: None,
                 })
                 .unwrap();
         }

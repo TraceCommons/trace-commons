@@ -32,7 +32,7 @@ public sealed record ArmingRewordedNotice
     /// <summary>Records that the notice was shown, and does nothing else.</summary>
     [JsonPropertyName("acknowledge")] public string Acknowledge { get; init; } = string.Empty;
 
-    /// <summary>"Ask me first", or null when the element names no project.</summary>
+    /// <summary>"Ask me", or null when the element names no project.</summary>
     [JsonPropertyName("ask_first_action")] public string? AskFirstAction { get; init; }
 
     /// <summary>Shown when the daemon refuses the switch; null exactly when the button is.</summary>
@@ -49,20 +49,20 @@ public sealed record ArmingRewordedNotice
 /// <summary>
 /// One rewording notice as the window draws it: the id
 /// <c>acknowledge_arming_rewordings</c> takes, the notice, and the project
-/// "Ask me first" switches.
+/// "Ask me" switches.
 /// </summary>
 public sealed record ArmingRewordingCard(ulong? Id, ArmingRewordedNotice Notice, string? AskFirstProjectId = null)
 {
     public bool CanAcknowledge => Id.HasValue;
 
-    /// <summary>Whether to draw "Ask me first": the core offered it and the element names a project.</summary>
+    /// <summary>Whether to draw "Ask me": the core offered it and the element names a project.</summary>
     public bool CanAskFirst => AskFirstProjectId is not null && Notice.AskFirstAction is not null;
 }
 
 /// <summary>One held folder in the Rust's held notice.</summary>
 public sealed record GateHeldProjectNotice
 {
-    /// <summary>For the "Ask me first" button's <c>set_project_mode</c>. Never shown.</summary>
+    /// <summary>For the "Ask me" button's <c>set_project_mode</c>. Never shown.</summary>
     [JsonPropertyName("project_id")] public string? ProjectId { get; init; }
 
     [JsonPropertyName("line")] public string Line { get; init; } = string.Empty;
@@ -166,7 +166,7 @@ public static class SwitchOnNotices
     public static GateHeldNotice? Held(JsonElement? held) => Held(held, WordHeld);
 
     /// <summary>
-    /// The <c>set_project_mode</c> params "Ask me first" sends: the same
+    /// The <c>set_project_mode</c> params "Ask me" sends: the same
     /// request Settings sends to set a project to ask first.
     /// </summary>
     public static string AskFirstParams(string projectId) =>

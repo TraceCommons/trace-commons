@@ -1121,6 +1121,27 @@ internal static class NativeMethods
     internal static extern IntPtr tc_onboarding_copy();
 
     /// <summary>
+    /// The disclosure bundle (<c>disclosure_copy::contributor_disclosure_copy</c>)
+    /// as an owned JSON object: every table of shared copy the onboarding,
+    /// settings, history and Private AI screens read. This shell reads only
+    /// <c>history_ui</c> from it today. NULL only on a caught panic.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_contributor_disclosure_copy_json();
+
+    /// <summary>
+    /// The quit prompt true for the process holding <paramref name="handle"/>
+    /// (<c>quit_copy::quit_prompt</c>), as an owned JSON object
+    /// <c>{role, title, body, confirm, cancel}</c>. The role is read off the
+    /// handle: <c>hosting</c> for a daemon run in this process,
+    /// <c>attached</c> for one another process runs, <c>unavailable</c> for
+    /// NULL, a handle that is not live, or a stopped daemon. NULL only on a
+    /// caught panic.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_quit_prompt_json(IntPtr handle);
+
+    /// <summary>
     /// The sentence for a <c>TC_WITNESS_STATE_*</c> value, as an owned char*.
     ///
     /// NULL, with the fixed label <c>witness-state-unknown</c> recorded, for a

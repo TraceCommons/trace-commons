@@ -100,6 +100,19 @@ pub const SOURCE_GEMINI_CLI: &str = "gemini-cli";
 pub const SOURCE_CLINE: &str = "cline";
 pub const SOURCE_OPENCODE: &str = "opencode";
 
+/// What an imported Antigravity conversation calls itself: `meta.source` on
+/// the staged trajectory file, and `SessionRef::declared_source` once
+/// discovery has read that file (K13).
+///
+/// Deliberately not a `SOURCE_*` constant beside the ones above: those name
+/// adapters registered in [`NATIVE_SOURCES`], and Antigravity has none --
+/// `crate::antigravity` is a one-shot import command, not a `TraceSource`,
+/// and its conversations are staged into and read back by the `trajectory`
+/// adapter (see [`SOURCE_TRAJECTORY`] and `SessionRef::declared_source`'s own
+/// doc). This constant exists only so [`source_default_family`] and this
+/// crate's tests spell the string once rather than repeating the literal.
+pub const DECLARED_SOURCE_ANTIGRAVITY: &str = "antigravity";
+
 /// The protocol family a native source's own tool answers with by default,
 /// before any Private AI redirection changes where a call actually goes.
 ///
@@ -116,6 +129,14 @@ pub const SOURCE_OPENCODE: &str = "opencode";
 /// configuration to answer somewhere else is not contradicted by this
 /// table, because the table never claimed to have looked.
 ///
+/// `DECLARED_SOURCE_ANTIGRAVITY` is keyed here too (K13), alongside the
+/// adapter names: this function is reached by `declared_source` as well as
+/// by `source` wherever a session's tool is displayed (see
+/// `daemon::watcher::resolve_cwd` and `daemon::ipc::sessions_seen_per_project`),
+/// and Antigravity's own documented default is the same Google family
+/// Gemini CLI's is -- the two tools are still told apart by the distinct
+/// string each one answers to, never merged into one row.
+///
 /// See [`vendor_label`] for the word this turns into, and
 /// [`crate::harness_state::built_in_family`] for the same question asked
 /// about the two tools this daemon can also connect -- kept as a separate
@@ -127,6 +148,7 @@ pub fn source_default_family(source: &str) -> Option<&'static str> {
         SOURCE_CLAUDE_CODE => Some("anthropic"),
         SOURCE_CODEX => Some("openai"),
         SOURCE_GEMINI_CLI => Some("google"),
+        DECLARED_SOURCE_ANTIGRAVITY => Some("google"),
         _ => None,
     }
 }
@@ -203,6 +225,29 @@ pub struct SessionRef {
     /// entry so a card covering a hundred delegated transcripts can say so
     /// -- that is material to the consent decision, not decoration.
     pub group_member_count: u32,
+}
+
+impl SessionRef {
+    /// Which tool this session reads as: what it declares itself to be when
+    /// discovery knows, and otherwise the adapter that found it.
+    ///
+    /// The one rule every display and per-tool count uses -- the CLI's
+    /// session table, `list_projects.tools` (via the watcher's cwd cache)
+    /// and the queue's `QueueEntry` label -- so an imported Antigravity
+    /// conversation is `antigravity` everywhere, never `trajectory` on one
+    /// surface. Never a substitute for `source` when pairing a ref back to
+    /// an adapter.
+    ///
+    /// For a staged import this is self-declared: `meta.source` in a file
+    /// anyone can drop into the staging directory, bounded by
+    /// `validate_source_name` but not verified. A trajectory claiming
+    /// `claude-code` is counted, and shown as answering at Anthropic, as
+    /// Claude Code. The effect is local display only; nothing here decides
+    /// routing, consent or upload on it.
+    #[must_use]
+    pub fn displayed_source(&self) -> &str {
+        self.declared_source.as_deref().unwrap_or(self.source)
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -1337,6 +1382,27 @@ mod tests {
                 staging_dir: None,
             }
         )));
+    }
+
+    /// K13: Antigravity's declared source answers at its own vendor word,
+    /// distinct from the adapter that happens to store an imported
+    /// conversation.
+    #[test]
+    fn antigravity_answers_at_google_under_its_own_declared_source() {
+        assert_eq!(
+            source_answers_at(DECLARED_SOURCE_ANTIGRAVITY),
+            Some("Google"),
+            "an imported Antigravity conversation must name its own vendor, \
+             not fall through to None"
+        );
+        // Sharing a vendor family with gemini-cli must not collapse the two
+        // into one tool: each is still looked up by its own distinct string.
+        assert_eq!(source_answers_at(SOURCE_GEMINI_CLI), Some("Google"));
+        assert_ne!(
+            DECLARED_SOURCE_ANTIGRAVITY, SOURCE_GEMINI_CLI,
+            "the two tools must remain distinct strings even though they \
+             answer at the same vendor"
+        );
     }
 
     #[test]

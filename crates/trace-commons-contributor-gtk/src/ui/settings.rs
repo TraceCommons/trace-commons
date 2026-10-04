@@ -1931,21 +1931,24 @@ fn audit_sentence(action: &str) -> &'static str {
 ///
 /// `auto_upload` is absent for the unresolvable bucket. `Policy` refuses it
 /// there in two independent places, so offering it invited a contributor to
-/// select "Contribute automatically" and have the daemon silently decline --
-/// believing they had armed something that cannot be armed. Silencing still
-/// works, so `ignore` stays.
+/// select "Automatic" and have the daemon silently decline -- believing they
+/// had armed something that cannot be armed. Silencing still works, so
+/// `ignore` stays.
+///
+/// Each display name is the core's one name for the mode
+/// (`project_copy::FOLDER_MODE_LABELS`), the word the pill and onboarding
+/// use too.
 ///
 /// Paired rather than positional, and lifted out here so the pairing is
 /// testable without a display. The old code carried the mapping twice, as
 /// hardcoded indices into a list assumed to be the same length for every
 /// row; one shorter row turns that into a control that sets the wrong mode.
 fn mode_choices(is_unresolved_bucket: bool) -> Vec<(&'static str, &'static str)> {
-    let mut choices: Vec<(&'static str, &'static str)> = vec![("Ask me first", "notify_only")];
-    if !is_unresolved_bucket {
-        choices.push(("Contribute automatically", "auto_upload"));
-    }
-    choices.push(("Never offer this one", "ignore"));
-    choices
+    trace_commons_contributor::project_copy::FOLDER_MODE_LABELS
+        .iter()
+        .filter(|(wire, _)| !(is_unresolved_bucket && *wire == "auto_upload"))
+        .map(|(wire, label)| (*label, *wire))
+        .collect()
 }
 
 fn render_projects(app: &Rc<App>, projects: &[Project]) {
@@ -2022,7 +2025,7 @@ fn render_projects(app: &Rc<App>, projects: &[Project]) {
         //
         // `auto_upload` is omitted for the unresolvable bucket. `Policy`
         // refuses it there in two independent places, so offering it invited
-        // a contributor to select "Contribute automatically" and have the
+        // a contributor to select "Automatic" and have the
         // daemon silently decline -- believing they had armed something that
         // cannot be armed. Silencing still works, so `Ignore` stays.
         //
@@ -4394,6 +4397,22 @@ mod tests {
         let choices = mode_choices(false);
         let wires: Vec<&str> = choices.iter().map(|(_, wire)| *wire).collect();
         assert_eq!(wires, vec!["notify_only", "auto_upload", "ignore"]);
+    }
+
+    /// Owner decision, 2026-10-02: each mode reads by the core's one name
+    /// (`project_copy::FOLDER_MODE_LABELS`), the same words the pill and
+    /// onboarding use, never a spelling typed here.
+    #[test]
+    fn each_mode_reads_by_the_cores_name() {
+        use trace_commons_contributor::project_copy::{FOLDER_MODE_LABELS, folder_mode_label};
+        let core: Vec<(&str, &str)> = FOLDER_MODE_LABELS
+            .iter()
+            .map(|(wire, label)| (*label, *wire))
+            .collect();
+        assert_eq!(mode_choices(false), core);
+        for (shown, wire) in mode_choices(true) {
+            assert_eq!(Some(shown), folder_mode_label(wire), "{wire}");
+        }
     }
 
     #[test]

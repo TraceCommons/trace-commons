@@ -127,14 +127,18 @@ pub(crate) fn eligibility_group_copy(
     contributable: Option<u64>,
 ) -> serde_json::Value {
     use trace_commons_contributor::private_inference_copy::{
-        ContributionControl, group_control, group_withheld_line,
+        group_eligibility, group_withheld_line,
     };
 
-    let eligible = contributable.unwrap_or(pending).min(pending);
+    // The eligible/withheld arithmetic itself -- `min`-clamping `contributable`
+    // to `pending`, then the non-negative remainder -- used to live here.
+    // `group_eligibility` is now the one place it is computed; this file only
+    // chooses the words for its answer.
+    let eligibility = group_eligibility(pending, contributable);
     serde_json::json!({
-        "can_contribute": group_control(pending, contributable.map(|_| eligible)) == ContributionControl::Contribute,
-        "eligible_count": eligible,
-        "withheld_line": group_withheld_line(pending.saturating_sub(eligible)),
+        "can_contribute": eligibility.can_contribute,
+        "eligible_count": eligibility.eligible_count,
+        "withheld_line": group_withheld_line(eligibility.withheld_count),
     })
 }
 
@@ -356,5 +360,38 @@ mod account_limit_tests {
             )
         );
         assert!(!line.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::eligibility_group_copy;
+
+    /// The eligible/withheld arithmetic itself now lives in the core's
+    /// `private_inference_copy::group_eligibility`; this pins that this
+    /// command's JSON shape (and the clamp/remainder values it reports)
+    /// did not change when the arithmetic moved out of this file.
+    #[test]
+    fn eligibility_group_copy_clamps_and_reports_the_withheld_line() {
+        let value = eligibility_group_copy(7, Some(3));
+        assert_eq!(value["can_contribute"], true);
+        assert_eq!(value["eligible_count"], 3);
+        assert_eq!(
+            value["withheld_line"],
+            "4 sessions here cannot be sent, so they are not included."
+        );
+
+        // An absent `contributable_count`: every pending session is
+        // sendable, and nothing is withheld.
+        let value = eligibility_group_copy(7, None);
+        assert_eq!(value["can_contribute"], true);
+        assert_eq!(value["eligible_count"], 7);
+        assert_eq!(value["withheld_line"], "");
+
+        // `contributable` above `pending` is clamped rather than producing
+        // a negative withheld count.
+        let value = eligibility_group_copy(3, Some(9));
+        assert_eq!(value["eligible_count"], 3);
+        assert_eq!(value["withheld_line"], "");
     }
 }
