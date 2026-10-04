@@ -88,6 +88,12 @@ fn parse_submission_id(params: &serde_json::Value) -> Result<Uuid, &'static str>
 /// not accepted -- withdrawing what is already withdrawn is a no-op with
 /// nothing to bulk, and `other` covers statuses this client has no stable
 /// name for.
+///
+/// Each selector names a rollup bucket and matches the rows in it by
+/// [`history::status_bucket`], so `submitted` also takes in `processing`
+/// rows. `processing` is not a selector of its own: the rollup has no such
+/// bucket, and a selector that withdrew only part of `submitted` would
+/// withdraw less than the contributor was shown.
 fn valid_bulk_status(s: &str) -> bool {
     matches!(s, STATUS_SUBMITTED | STATUS_QUARANTINED | STATUS_ACCEPTED)
 }
@@ -187,7 +193,7 @@ pub(super) async fn handle_withdraw_bulk(shared: &DaemonShared, req: &Request) -
     };
     let targets: Vec<Uuid> = records
         .iter()
-        .filter(|r| r.status == status)
+        .filter(|r| history::status_bucket(&r.status) == status)
         .map(|r| r.submission_id)
         .collect();
 
@@ -431,6 +437,14 @@ mod tests {
     /// Signed in against `base`, with `records` quarantined in the history
     /// cache.
     fn signed_in(base: &str, records: &[Uuid]) -> DaemonShared {
+        let records: Vec<(Uuid, &str)> =
+            records.iter().map(|id| (*id, STATUS_QUARANTINED)).collect();
+        signed_in_with(base, &records)
+    }
+
+    /// Signed in against `base`, with each `(id, status)` in the history
+    /// cache.
+    fn signed_in_with(base: &str, records: &[(Uuid, &str)]) -> DaemonShared {
         let s = shared();
         let mut cfg = crate::commands::unenrolled_preview_config();
         cfg.ingest_url = base.to_string();
@@ -448,22 +462,24 @@ mod tests {
             .unwrap();
         let records: Vec<history::HistoryRecord> = records
             .iter()
-            .map(|id| history::HistoryRecord {
+            .map(|(id, status)| history::HistoryRecord {
                 submission_id: *id,
                 submitted_at: Utc::now(),
                 project_id: String::new(),
                 project_label: "proj".into(),
                 source: "claude".into(),
                 session_hash: "sha256:test".into(),
-                status: STATUS_QUARANTINED.into(),
+                status: (*status).into(),
                 consent_scopes: Vec::new(),
                 credit_points_pending: 0.0,
                 credit_points_final: None,
                 explanations: Vec::new(),
                 last_refreshed_at: None,
                 withdrawn_at: None,
+                revoked_at: None,
                 approved_unattended: None,
                 approved_verdict: None,
+                uploaded_bytes: None,
             })
             .collect();
         HistoryCache::save(&s.store, &records).unwrap();
@@ -536,5 +552,59 @@ mod tests {
             ]
         );
         assert_eq!(stored_token(&s), Some(rotated));
+    }
+
+    /// A `processing` row (the versioned pipeline's receipt status) is
+    /// uploaded with no verdict yet, so taking back everything `submitted`
+    /// takes it back too. A row in another bucket is left alone.
+    #[tokio::test]
+    async fn withdraw_bulk_submitted_also_withdraws_processing_rows() {
+        let (base, seen) =
+            rotating_ingest(axum::http::StatusCode::OK, "tcn1_dGVuYW50.r".to_string()).await;
+        let submitted = Uuid::new_v4();
+        let processing = Uuid::new_v4();
+        let held = Uuid::new_v4();
+        let s = signed_in_with(
+            &base,
+            &[
+                (submitted, STATUS_SUBMITTED),
+                (processing, "processing"),
+                (held, STATUS_QUARANTINED),
+            ],
+        );
+        let r = handle_withdraw_bulk(
+            &s,
+            &req("withdraw_bulk", serde_json::json!({"status": "submitted"})),
+        )
+        .await;
+        assert_eq!(r.result.unwrap()["withdrawn"], 2);
+        assert_eq!(seen.lock().unwrap().len(), 2);
+        let status_of = |id: Uuid| {
+            HistoryCache::load(&s.store)
+                .unwrap()
+                .into_iter()
+                .find(|r| r.submission_id == id)
+                .unwrap()
+                .status
+        };
+        assert_eq!(status_of(submitted), history::STATUS_WITHDRAWN);
+        assert_eq!(status_of(processing), history::STATUS_WITHDRAWN);
+        assert_eq!(status_of(held), STATUS_QUARANTINED);
+    }
+
+    /// `processing` is not a selector of its own: the rollup has no
+    /// `processing` bucket, and a selector naming it would either mean
+    /// `submitted` or withdraw less than the `submitted` bucket shows.
+    #[tokio::test]
+    async fn withdraw_bulk_rejects_processing_as_a_selector() {
+        let s = shared();
+        let r = handle_withdraw_bulk(
+            &s,
+            &req("withdraw_bulk", serde_json::json!({"status": "processing"})),
+        )
+        .await;
+        let err = r.error.unwrap();
+        assert_eq!(err.code, ERR_BAD_PARAMS);
+        assert_eq!(err.message, "status-invalid");
     }
 }

@@ -108,8 +108,30 @@ pub(crate) fn witness_input_for_profile(
 
 /// Statuses that mean a session has already been accepted by the server;
 /// re-encountering a receipt with one of these statuses short-circuits the
-/// per-session flow instead of re-uploading.
-pub(crate) const ALREADY_SUBMITTED_STATUSES: [&str; 3] = ["submitted", "accepted", "quarantined"];
+/// per-session flow instead of re-uploading. Read through
+/// [`is_already_submitted`], never directly.
+const ALREADY_SUBMITTED_STATUSES: [&str; 3] = [
+    crate::daemon::history::STATUS_SUBMITTED,
+    crate::daemon::history::STATUS_ACCEPTED,
+    crate::daemon::history::STATUS_QUARANTINED,
+];
+
+/// Whether a receipt's status means its session is already submitted.
+///
+/// Through [`crate::daemon::history::status_bucket`], so the versioned
+/// pipeline's `processing` receipt -- uploaded, no verdict reported yet --
+/// counts as `submitted` here exactly as it does in the history rollup.
+/// Receipts are append-only and that receipt is never rewritten, so without
+/// this a re-run would upload again, under the same submission id with a
+/// new `trace_id`, and get a 409.
+///
+/// Callers pass the status from [`crate::daemon::history::receipt_status`],
+/// not the receipt's raw one: Admission can quarantine or reject a trace
+/// inside the request that returned `processing`, and once the server has
+/// read that verdict back it wins over the receipt.
+pub(crate) fn is_already_submitted(status: &str) -> bool {
+    ALREADY_SUBMITTED_STATUSES.contains(&crate::daemon::history::status_bucket(status))
+}
 
 /// A fail-closed precondition that aborts the whole submit pass rather than
 /// producing an outcome for one session.
@@ -219,6 +241,14 @@ pub enum SubmitOutcome {
 
 /// The label an unattended witnessed session is held under when its
 /// certificate's residual-risk verdict is not `low`.
+/// The label `--remediate-quarantined` is refused under for a session whose
+/// receipt came from the versioned pipeline (`processing`). The server's
+/// quarantine remediation works on a legacy submission record, not a
+/// pipeline run, so a re-upload would only meet the stored submission.
+/// Refusing says so, where falling through to "already submitted
+/// (processing)" said nothing.
+pub const REASON_REMEDIATION_UNSUPPORTED_FOR_TENANT: &str = "remediation-unsupported-for-tenant";
+
 pub const REASON_WITNESS_RISK_REVIEW_REQUIRED: &str = "witness-risk-review-required";
 
 /// The R5 hold, decided: `Some` when the caller asked for it, this call ran
@@ -381,6 +411,30 @@ fn refused_for_size(session_ref: &str, size_bytes: usize) -> SubmitOutcome {
         session_ref: session_ref.to_string(),
         size_bytes: Some(size_bytes),
         limit_bytes: Some(MAX_ENVELOPE_BYTES),
+    }
+}
+
+/// The serialized size, in bytes, of what an upload actually sends (K10).
+///
+/// A witnessed submission sends `witnessed.envelope_bytes` verbatim over
+/// `call_bytes` -- see `upload_with_retry` -- so that length IS the wire
+/// size; re-serializing the parsed envelope would not be measuring the same
+/// bytes. An ordinary submission has no such fixed byte string: `call_json`
+/// serializes `envelope` itself, after scope-stamping, so
+/// `envelope::envelope_size` on that same value is the number `call_json`
+/// is about to produce.
+///
+/// `None` only when the local measurement fails, which is the same
+/// serializer `envelope_size_ok` already required to succeed earlier in
+/// this function -- so in practice this is `None` only for a witnessed
+/// response whose certified bytes this device never parses back out.
+fn sent_envelope_bytes(
+    envelope: &TraceContributionEnvelope,
+    witnessed: Option<&WitnessedEnvelope>,
+) -> Option<u64> {
+    match witnessed {
+        Some(w) => Some(w.envelope_bytes.len() as u64),
+        None => envelope_size(envelope).ok().map(|n| n as u64),
     }
 }
 
@@ -567,6 +621,12 @@ pub struct SubmitContext<'a> {
     near_ai_notice_recorded: bool,
     near_ai: Option<NearAiSettings>,
     receipts: Vec<Receipt>,
+    /// The server verdicts the history cache holds, read once here like
+    /// `receipts` (see [`crate::daemon::history::reported_verdicts`]). Only a
+    /// `processing` receipt consults it. A verdict read back after this
+    /// context was built is not seen, and the receipt's own `processing`
+    /// then applies, which is what a re-run did before the cache was read.
+    verdicts: std::collections::BTreeMap<Uuid, String>,
     canary_runs: u32,
     approved_envelope: Option<TraceContributionEnvelope>,
     approved_witness: Option<WitnessedEnvelope>,
@@ -664,6 +724,15 @@ impl<'a> SubmitContext<'a> {
         } else {
             store.load_receipts().context("loading receipts")?
         };
+        // The same guard as `receipts`. A cache that cannot be read leaves
+        // every receipt's own status in force.
+        let verdicts = if opts.unenrolled_preview {
+            std::collections::BTreeMap::new()
+        } else {
+            crate::daemon::history::reported_verdicts(
+                &crate::daemon::history::HistoryCache::load(store).unwrap_or_default(),
+            )
+        };
         Ok(Self {
             store,
             cfg,
@@ -676,6 +745,7 @@ impl<'a> SubmitContext<'a> {
             near_ai_notice_recorded: false,
             near_ai,
             receipts,
+            verdicts,
             canary_runs: 0,
             approved_envelope: None,
             approved_witness: None,
@@ -1418,24 +1488,38 @@ impl<'a> SubmitContext<'a> {
 
         // Take the most recent matching receipt, so a session that was
         // delivered and later accepted reports "accepted" rather than the
-        // first status it ever had.
+        // first status it ever had. A `processing` receipt is judged by the
+        // verdict the server has read back since, when there is one.
         let prior = self
             .receipts
             .iter()
-            .filter(|r| {
-                r.session_hash == transcript.session_hash
-                    && ALREADY_SUBMITTED_STATUSES.contains(&r.status.as_str())
+            .map(|r| (r, crate::daemon::history::receipt_status(r, &self.verdicts)))
+            .filter(|(r, status)| {
+                r.session_hash == transcript.session_hash && is_already_submitted(status)
             })
-            .max_by_key(|r| r.submitted_at);
-        if let Some(prior) = prior
+            .max_by_key(|(r, _)| r.submitted_at);
+        if let Some((prior, prior_status)) = prior
             && self.approved_token_bundle.is_none()
         {
-            let remediating_quarantined =
-                opts.remediate_quarantined && prior.status == "quarantined";
+            if opts.remediate_quarantined
+                && prior.status == crate::daemon::history::STATUS_PROCESSING
+                && [
+                    crate::daemon::history::STATUS_PROCESSING,
+                    crate::daemon::history::STATUS_QUARANTINED,
+                ]
+                .contains(&prior_status)
+            {
+                return Ok(refused(
+                    REASON_REMEDIATION_UNSUPPORTED_FOR_TENANT,
+                    &transcript.session_hash,
+                ));
+            }
+            let remediating_quarantined = opts.remediate_quarantined
+                && prior_status == crate::daemon::history::STATUS_QUARANTINED;
             if !remediating_quarantined {
                 return Ok(SubmitOutcome::AlreadySubmitted {
                     submission_id: prior.submission_id,
-                    prior_status: prior.status.clone(),
+                    prior_status: prior_status.to_string(),
                 });
             }
         }
@@ -1771,6 +1855,7 @@ impl<'a> SubmitContext<'a> {
                 .as_ref()
                 .ok_or_else(|| anyhow::anyhow!("bundle-review-stale"))?;
             journal.validate_review(&bundle, &response.envelope_bytes)?;
+            let uploaded_bytes = sent_envelope_bytes(&envelope, Some(response));
             let client = build_ingest_client(self.cfg, &token)?;
             match journal.upload_approved(bundle.journal_id, &client).await {
                 Ok(_) => {
@@ -1782,6 +1867,7 @@ impl<'a> SubmitContext<'a> {
                         status: "submitted".into(),
                         approved_unattended: provenance_unattended,
                         approved_verdict: provenance_verdict.clone(),
+                        uploaded_bytes,
                     };
                     self.store.append_receipt(&receipt)?;
                     self.receipts.push(receipt);
@@ -1821,6 +1907,7 @@ impl<'a> SubmitContext<'a> {
                     status: receipt.status.clone(),
                     approved_unattended: provenance_unattended,
                     approved_verdict: provenance_verdict.clone(),
+                    uploaded_bytes: sent_envelope_bytes(&envelope, witnessed.as_ref()),
                 };
                 match self.store.append_receipt(&r) {
                     Ok(()) => {
@@ -3236,6 +3323,25 @@ mod tests {
 
     /// The hosted admission gate's refusal shape: a status, an
     /// `{"error": ...}` label, and no receipt.
+    /// An ingest that records the exact byte length of each request body it
+    /// receives, before any parsing.
+    fn stub_ingest_body_lengths(lengths: Arc<Mutex<Vec<usize>>>) -> Router {
+        Router::new().route(
+            "/v1/traces",
+            post(move |body: axum::body::Bytes| {
+                let lengths = lengths.clone();
+                async move {
+                    lengths.lock().unwrap().push(body.len());
+                    Json(serde_json::json!({
+                        "status": "accepted",
+                        "credit_points_pending": 0.0,
+                        "explanation": []
+                    }))
+                }
+            }),
+        )
+    }
+
     fn stub_ingest_refuses(status: u16, label: &'static str) -> Router {
         Router::new().route(
             "/v1/traces",
@@ -4009,6 +4115,44 @@ mod tests {
         assert_eq!(receipts[1].approved_verdict, None);
     }
 
+    /// K10: the receipt's `uploaded_bytes` describes the exact bytes the
+    /// server received, not an estimate made some other way. The stub
+    /// measures the raw request body before parsing it, so the comparison
+    /// does not depend on how a re-serialization would escape the JSON.
+    #[tokio::test]
+    async fn uploaded_bytes_lands_on_the_written_receipt_and_matches_what_was_sent() {
+        let issuer = spawn(stub_issuer()).await;
+        let lengths = Arc::new(Mutex::new(Vec::new()));
+        let ingest = spawn(stub_ingest_body_lengths(lengths.clone())).await;
+        let (_dir, store) = crate::config::tests_support::temp_store();
+        let device = DeviceIdentity::load_or_generate(&store).unwrap();
+        let cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
+        let opts = SubmitOptions {
+            machine_readable: true,
+            ..Default::default()
+        };
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let (source, session_ref) = fixture_selection().remove(0);
+
+        let outcome = ctx.submit_one(source.as_ref(), &session_ref).await.unwrap();
+        assert!(
+            matches!(outcome, SubmitOutcome::Submitted { .. }),
+            "got {outcome:?}"
+        );
+
+        let receipts = store.load_receipts().unwrap();
+        assert_eq!(receipts.len(), 1);
+        let uploaded_bytes = receipts[0].uploaded_bytes.expect("a size must be recorded");
+
+        let lengths = lengths.lock().unwrap();
+        assert_eq!(lengths.len(), 1);
+        let sent_bytes = lengths[0] as u64;
+        assert_eq!(
+            uploaded_bytes, sent_bytes,
+            "the recorded size must match the bytes the server actually received"
+        );
+    }
+
     /// K7 review: the CLI's `submit --verdict` is a person approving, and
     /// the verdict they passed is recorded on the receipt rather than
     /// dropped.
@@ -4113,6 +4257,219 @@ mod tests {
             SubmitOutcome::AlreadySubmitted { .. }
         ));
         assert_eq!(received.lock().unwrap().len(), 1);
+    }
+
+    /// The versioned pipeline answers with a `processing` receipt, and
+    /// receipts are append-only, so that receipt is never rewritten. A re-run
+    /// must read it as already submitted rather than upload again: the second
+    /// upload builds a new `trace_id` under the same submission id and the
+    /// server answers 409.
+    #[tokio::test]
+    async fn processing_receipt_short_circuits_a_rerun() {
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let issuer = spawn(stub_issuer()).await;
+        let ingest = spawn(stub_ingest_status(received.clone(), "processing")).await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
+        let cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
+        let opts = SubmitOptions {
+            ..Default::default()
+        };
+
+        let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
+            .await
+            .unwrap();
+        assert!(matches!(
+            &outcomes[0],
+            SubmitOutcome::Submitted { status, .. } if status == "processing"
+        ));
+        assert_eq!(received.lock().unwrap().len(), 1);
+
+        let rerun = submit_sessions(&store, &cfg, fixture_selection(), &opts)
+            .await
+            .unwrap();
+        assert!(
+            matches!(
+                &rerun[0],
+                SubmitOutcome::AlreadySubmitted { prior_status, .. }
+                    if prior_status == "processing"
+            ),
+            "{:?}",
+            rerun[0]
+        );
+        assert_eq!(received.lock().unwrap().len(), 1, "no second upload");
+    }
+
+    /// What a history refresh leaves in the cache once the server has read
+    /// a submission back: every receipt's row, now carrying `status` and
+    /// stamped as refreshed.
+    fn record_read_back(store: &crate::config::ConfigStore, status: &str) {
+        use crate::daemon::history::{HistoryCache, merge_new_receipts};
+        let receipts = store.load_receipts().unwrap();
+        let mut records = HistoryCache::load(store).unwrap();
+        merge_new_receipts(&mut records, &receipts, &std::collections::BTreeMap::new());
+        for rec in &mut records {
+            rec.status = status.to_string();
+            rec.last_refreshed_at = Some(Utc::now());
+        }
+        HistoryCache::save(store, &records).unwrap();
+    }
+
+    /// poldsam's review of #1169: Admission runs inside `submit`, so a trace
+    /// it rejected still got a `processing` receipt, and receipts are never
+    /// rewritten. Once the history read-back says `rejected`, a re-run must
+    /// not report the stale `already-submitted (processing)`: `rejected` is
+    /// not an already-submitted status, so the session goes the way any
+    /// rejected session goes and is built and uploaded again.
+    #[tokio::test]
+    async fn rejected_read_back_overrides_a_processing_receipt_on_rerun() {
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let issuer = spawn(stub_issuer()).await;
+        let ingest = spawn(stub_ingest_status(received.clone(), "processing")).await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
+        let cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
+        let opts = SubmitOptions::default();
+
+        submit_sessions(&store, &cfg, fixture_selection(), &opts)
+            .await
+            .unwrap();
+        assert_eq!(received.lock().unwrap().len(), 1);
+        record_read_back(&store, "rejected");
+
+        let rerun = submit_sessions(&store, &cfg, fixture_selection(), &opts)
+            .await
+            .unwrap();
+        assert!(
+            !matches!(&rerun[0], SubmitOutcome::AlreadySubmitted { .. }),
+            "a rejected read-back is not already submitted: {:?}",
+            rerun[0]
+        );
+        assert_eq!(received.lock().unwrap().len(), 2, "the re-run uploads");
+    }
+
+    /// The quarantined variant: still already submitted, but reported under
+    /// the status the server read back, not the receipt's `processing`.
+    #[tokio::test]
+    async fn quarantined_read_back_overrides_a_processing_receipt_on_rerun() {
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let issuer = spawn(stub_issuer()).await;
+        let ingest = spawn(stub_ingest_status(received.clone(), "processing")).await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
+        let cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
+        let opts = SubmitOptions::default();
+
+        submit_sessions(&store, &cfg, fixture_selection(), &opts)
+            .await
+            .unwrap();
+        record_read_back(&store, "quarantined");
+
+        let rerun = submit_sessions(&store, &cfg, fixture_selection(), &opts)
+            .await
+            .unwrap();
+        assert!(
+            matches!(
+                &rerun[0],
+                SubmitOutcome::AlreadySubmitted { prior_status, .. }
+                    if prior_status == "quarantined"
+            ),
+            "{:?}",
+            rerun[0]
+        );
+        assert_eq!(received.lock().unwrap().len(), 1, "no second upload");
+    }
+
+    /// A row this device withdrew is not a server verdict, and must never
+    /// turn a `processing` receipt into "not submitted": that would upload
+    /// a trace the contributor took back.
+    #[tokio::test]
+    async fn withdrawn_row_does_not_override_a_processing_receipt() {
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let issuer = spawn(stub_issuer()).await;
+        let ingest = spawn(stub_ingest_status(received.clone(), "processing")).await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
+        let cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
+        let opts = SubmitOptions::default();
+
+        submit_sessions(&store, &cfg, fixture_selection(), &opts)
+            .await
+            .unwrap();
+        record_read_back(&store, crate::daemon::history::STATUS_WITHDRAWN);
+
+        let rerun = submit_sessions(&store, &cfg, fixture_selection(), &opts)
+            .await
+            .unwrap();
+        assert!(
+            matches!(
+                &rerun[0],
+                SubmitOutcome::AlreadySubmitted { prior_status, .. }
+                    if prior_status == "processing"
+            ),
+            "{:?}",
+            rerun[0]
+        );
+        assert_eq!(received.lock().unwrap().len(), 1, "no second upload");
+    }
+
+    /// poldsam's review of #1169, finding 2: the versioned pipeline has no
+    /// remediation, and its receipt is always `processing`, so
+    /// `--remediate-quarantined` used to fall through to a silent
+    /// `AlreadySubmitted { prior_status: "processing" }`. It is now refused
+    /// under a fixed label, and nothing is uploaded.
+    #[tokio::test]
+    async fn remediate_quarantined_is_refused_for_a_pipeline_receipt() {
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let issuer = spawn(stub_issuer()).await;
+        let ingest = spawn(stub_ingest_status(received.clone(), "processing")).await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
+        let cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
+
+        submit_sessions(&store, &cfg, fixture_selection(), &SubmitOptions::default())
+            .await
+            .unwrap();
+        let remediate = SubmitOptions {
+            remediate_quarantined: true,
+            ..Default::default()
+        };
+
+        // No verdict read back yet: the receipt alone says this is a
+        // pipeline tenant, and remediation does not exist there.
+        let unknown = submit_sessions(&store, &cfg, fixture_selection(), &remediate)
+            .await
+            .unwrap();
+        assert!(
+            matches!(
+                &unknown[0],
+                SubmitOutcome::Refused { reason_label, .. }
+                    if reason_label == REASON_REMEDIATION_UNSUPPORTED_FOR_TENANT
+            ),
+            "{:?}",
+            unknown[0]
+        );
+
+        // Read back as quarantined: the case the flag is for.
+        record_read_back(&store, "quarantined");
+        let quarantined = submit_sessions(&store, &cfg, fixture_selection(), &remediate)
+            .await
+            .unwrap();
+        assert!(
+            matches!(
+                &quarantined[0],
+                SubmitOutcome::Refused { reason_label, .. }
+                    if reason_label == REASON_REMEDIATION_UNSUPPORTED_FOR_TENANT
+            ),
+            "{:?}",
+            quarantined[0]
+        );
+        assert_eq!(received.lock().unwrap().len(), 1, "nothing re-uploaded");
     }
 
     #[tokio::test]
@@ -4872,6 +5229,7 @@ mod tests {
                 status: "submitted".to_string(),
                 approved_unattended: None,
                 approved_verdict: None,
+                uploaded_bytes: None,
             })
             .unwrap();
 
@@ -6184,6 +6542,7 @@ mod tests {
             reason_label,
             reasons,
             pin,
+            ..
         } = &decision
         else {
             panic!("expected a hold, got {decision:?}");
@@ -6253,6 +6612,7 @@ mod tests {
             reason_label,
             pin,
             attested_inference,
+            ..
         } = decision
         else {
             panic!("expected a hold, got {decision:?}");
@@ -6266,7 +6626,13 @@ mod tests {
         // What `drain_approved` does with that decision, then a person.
         let mut q = crate::daemon::queue::Queue::default();
         q.upsert(entry.clone(), 10).unwrap();
-        assert!(q.hold_with_witness_pin(entry.entry_id, &reason_label, &pin, attested_inference));
+        assert!(q.hold_with_witness_pin(
+            entry.entry_id,
+            &reason_label,
+            &pin,
+            attested_inference,
+            None
+        ));
         assert!(q.get(entry.entry_id).unwrap().held_for_review());
         assert!(q.approve(
             entry.entry_id,

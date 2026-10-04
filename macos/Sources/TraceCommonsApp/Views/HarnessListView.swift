@@ -167,7 +167,7 @@ private struct HarnessRowView: View {
         HStack(spacing: TC.Space.m) {
             Image(systemName: "terminal")
                 .font(TC.Font_.sectionTitle)
-                .foregroundStyle(TC.greenText)
+                .foregroundStyle(TC.accentText)
                 .padding(TC.Space.m)
                 .background(TC.surface, in: RoundedRectangle(cornerRadius: TC.Radius.inset))
                 .accessibilityHidden(true)
