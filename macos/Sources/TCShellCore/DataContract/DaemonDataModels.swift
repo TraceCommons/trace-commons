@@ -1019,14 +1019,41 @@ extension DaemonData {
         /// The window's listed calls no tool can be named for (K14). `nil`
         /// when no ledger answered -- not zero.
         public let unattributedCalls: Int?
+        /// Whether the ledger answered. Missing on older daemons is unknown,
+        /// not a readable ledger with zero destinations.
+        public let ledgerReadable: Bool?
+        public let observedDestinations: [ObservedDestination]?
+        public let hub: InferenceHub?
 
         public enum CodingKeys: String, CodingKey {
-            case folders, tools
+            case folders, tools, hub
             case privateAi = "private_ai"
             case sessionsRoute = "sessions_route"
             case windowHours = "window_hours"
             case unattributedCalls = "unattributed_calls"
+            case ledgerReadable = "ledger_readable"
+            case observedDestinations = "observed_destinations"
         }
+    }
+
+    /// A route observed in the ledger. `to` can remain `unknown` even when
+    /// the route and local proxy are known; never infer a provider from it.
+    public struct ObservedDestination: Codable, Equatable, Sendable {
+        public let route: String
+        public let to: String
+        public let via: String
+        public let basis: String
+    }
+
+    /// The local proxy's reported state. Configuration is not proof that a
+    /// provider answered a call, and nullable ownership remains unknown.
+    public struct InferenceHub: Codable, Equatable, Sendable {
+        public let kind: String
+        /// Missing or null when settings could not be read.
+        public let state: String?
+        public let port: Int?
+        public let owned: Bool?
+        public let basis: String
     }
 
     public struct FolderCounts: Codable, Equatable, Sendable {

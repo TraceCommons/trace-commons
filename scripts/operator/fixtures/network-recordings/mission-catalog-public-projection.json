@@ -1,0 +1,12 @@
+{
+  "capture_date": "2026-10-02",
+  "payload": {
+    "http_status": 503,
+    "readable": false
+  },
+  "payload_sha256": "877cda86423cfbb0c8bf0fc19f729a9c4aa26688189038c49f71b127b513ae0b",
+  "representation": "allowlisted_projection",
+  "schema_version": "trace_commons.anonymized_network_projection.v1",
+  "source_kind": "authorized_recording",
+  "source_surface": "mission_catalog"
+}
