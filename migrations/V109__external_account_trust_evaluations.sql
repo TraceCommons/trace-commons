@@ -24,8 +24,12 @@ END $$;
 ALTER ROLE trace_account_trust_evaluator NOLOGIN;
 GRANT USAGE ON SCHEMA public TO trace_account_trust_evaluator;
 -- Read seams only: this role is deliberately not a trust worker or fact recorder.
+-- V85/V86 relinquish the function owners after setup. Reacquire them only
+-- while granting the evaluator its two bounded read seams.
+GRANT trace_account_trust_enumeration_guard,trace_account_admission_guard TO CURRENT_USER;
 GRANT EXECUTE ON FUNCTION trace_account_trust_worker_accounts(TEXT,UUID,BIGINT),
     trace_account_trust_evaluation_inputs(TEXT,UUID) TO trace_account_trust_evaluator;
+REVOKE trace_account_trust_enumeration_guard,trace_account_admission_guard FROM CURRENT_USER;
 
 GRANT trace_account_trust_evaluation_guard TO CURRENT_USER;
 
@@ -158,9 +162,9 @@ REVOKE trace_account_trust_evaluation_guard FROM CURRENT_USER;
 
 -- Consume-proposal invalidation must run after the existing merge locks, not
 -- from a proposal trigger: execute_merge consumes before acquiring anchor/account locks.
+GRANT trace_account_trust_merge_guard TO CURRENT_USER;
 ALTER FUNCTION trace_account_trust_merge(TEXT,UUID,UUID,UUID) RENAME TO trace_account_trust_merge_before_external;
 REVOKE ALL ON FUNCTION trace_account_trust_merge_before_external(TEXT,UUID,UUID,UUID) FROM PUBLIC;
-GRANT trace_account_trust_merge_guard TO CURRENT_USER;
 GRANT SELECT,UPDATE ON trace_account_trust_frontiers TO trace_account_trust_merge_guard;
 CREATE FUNCTION trace_account_trust_merge(p_tenant TEXT,p_surviving_account UUID,p_absorbed_account UUID,p_proposal UUID)
 RETURNS BIGINT LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $$
