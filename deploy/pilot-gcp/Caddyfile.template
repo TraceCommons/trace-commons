@@ -15,6 +15,17 @@
 # endpoints (e.g. issuer's :8081) stay loopback and are not exposed.
 {
 	email ${TC_LE_EMAIL}
+	# Reverse-proxy failures use the default/error logger rather than either
+	# site access logger. Filter it too, or an ordinary upstream restart can
+	# persist a login code to stderr/journald even while access logs are safe.
+	log default {
+		format filter {
+			request>uri query {
+				replace code REDACTED
+			}
+			wrap json
+		}
+	}
 	servers {
 		max_header_size 32KB
 		timeouts {

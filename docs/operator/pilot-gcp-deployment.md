@@ -136,9 +136,12 @@ envsubst < deploy/pilot-gcp/systemd/cloud-sql-proxy.service > /tmp/cloud-sql-pro
 
 The Caddy template contains two load-bearing security controls. Its global
 `read_body 60s` deadline prevents a slow request body from holding an ingest
-connection indefinitely, and both access-log encoders replace the `code`
-query value before JSON is written. That query parameter carries a one-time
-account login credential; do not simplify either logger back to `format json`.
+connection indefinitely, and the default/error logger plus both access-log
+encoders replace the `code` query value before JSON is written. Error-log
+filtering is necessary because a reverse-proxy 502 includes the request URI in
+stderr/journald even when the access logger is safe. That query parameter
+carries a one-time account login credential; do not simplify any of the three
+loggers back to `format json`.
 The services bind loopback, and each proxy block also overwrites
 `X-Forwarded-For` with `{remote_host}` so application rate limits never key on
 a caller-supplied leftmost hop.
