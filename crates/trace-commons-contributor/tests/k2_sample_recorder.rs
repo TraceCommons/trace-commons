@@ -246,14 +246,90 @@ impl EntryPlan {
     }
 }
 
+/// The instant the committed history rows are written relative to. Every
+/// history timestamp in `RecordedSamples/` reads as an offset from this.
+const HISTORY_RECORDED_AT: &str = "2026-09-30T09:00:00Z";
+
+/// The real instant the history rows are actually authored relative to,
+/// captured once per process and truncated to whole seconds.
+///
+/// Unlike every other timestamp this file authors, the history rows cannot
+/// sit at a fixed date: `history_rollup` buckets them into `week` and
+/// `month` against the daemon's own `Utc::now()` (there is no clock seam to
+/// pin), so a fixed date ages out of those windows and the drift test fails
+/// on a calendar date rather than on a daemon change. Authoring them
+/// relative to the real clock keeps every row's age -- and so every bucket
+/// -- constant; `rebase_history_timestamps` then shifts the timestamps the
+/// rows themselves carry back onto `HISTORY_RECORDED_AT`, so the recordings
+/// stay byte-for-byte deterministic.
+fn history_anchor() -> DateTime<Utc> {
+    static ANCHOR: OnceLock<DateTime<Utc>> = OnceLock::new();
+    *ANCHOR.get_or_init(|| {
+        DateTime::from_timestamp(Utc::now().timestamp(), 0).expect("current time is representable")
+    })
+}
+
+/// The keys a `HistoryRecord` serializes a timestamp under.
+const HISTORY_TIMESTAMP_KEYS: &[&str] = &[
+    "submitted_at",
+    "last_refreshed_at",
+    "withdrawn_at",
+    "revoked_at",
+];
+
+/// Moves one history timestamp from `history_anchor()`'s frame onto
+/// `HISTORY_RECORDED_AT`'s. A null (never withdrawn, never revoked) stays
+/// null; anything that is not a timestamp is a daemon change the drift
+/// test should see, so it is left exactly as the daemon sent it.
+fn rebase_history_timestamp(value: &mut Value) {
+    let Value::String(s) = value else { return };
+    let Ok(t) = DateTime::parse_from_rfc3339(s) else {
+        return;
+    };
+    let shift = history_anchor() - dt(HISTORY_RECORDED_AT);
+    *s = (t.with_timezone(&Utc) - shift).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+}
+
+/// Applies `rebase_history_timestamp` to the history-derived timestamps of
+/// the two replies built from the history cache: each row of
+/// `list_history.history`, and `history_rollup.last_refreshed_at`. Confined
+/// to those paths rather than matched by key name anywhere, so a same-named
+/// field elsewhere is never moved.
+fn rebase_history_timestamps(method: &str, reply: &mut Value) {
+    match method {
+        "list_history" => {
+            if let Some(rows) = reply.get_mut("history").and_then(Value::as_array_mut) {
+                for row in rows {
+                    for key in HISTORY_TIMESTAMP_KEYS {
+                        if let Some(v) = row.get_mut(*key) {
+                            rebase_history_timestamp(v);
+                        }
+                    }
+                }
+            }
+        }
+        "history_rollup" => {
+            if let Some(v) = reply.get_mut("last_refreshed_at") {
+                rebase_history_timestamp(v);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// The five history rows every non-empty sample set shares: one of each
 /// provenance (approved, unattended, not recorded) and one withdrawn, so
-/// `history_rollup`'s `taken_back` is never zero. Anchored to a fixed date
-/// close to when this was recorded, like every other timestamp this file
-/// authors (see the module doc on `VOLATILE_KEYS`) -- not the real wall
-/// clock, which would make every recording differ from the last.
+/// `history_rollup`'s `taken_back` is never zero. Written relative to
+/// `history_anchor()` -- the real clock -- so `history_rollup`'s `week` and
+/// `month` windows see the same ages on every run; see `history_anchor` for
+/// why, and for how the recordings stay deterministic anyway.
+///
+/// The ages are 1, 2, 4, 6 and 20 days, against cutoffs of 7 and 30 days
+/// from the daemon's `Utc::now()` (which trails the anchor by the length of
+/// one test run): the tightest margin is the 6-day row, a full day inside
+/// the week.
 fn sample_history_records() -> Vec<HistoryRecord> {
-    let now = dt("2026-09-30T09:00:00Z");
+    let now = history_anchor();
     let row = |n: u32,
                project: &Project,
                status: &str,
@@ -518,7 +594,9 @@ fn default_settings() -> DaemonSettings {
 /// time (`Utc::now()` inside the handler) rather than from anything this
 /// file authored, and so differs on every run. Everything else either comes
 /// from a literal this file chose or is derived from one by a pure function
-/// (`entry_id_for`, `project_id_for`), and is therefore already stable.
+/// (`entry_id_for`, `project_id_for`), and is therefore already stable --
+/// except the history rows, which are authored against the real clock and
+/// shifted back by `rebase_history_timestamps` (see `history_anchor`).
 const VOLATILE_KEYS: &[&str] = &[
     "next_digest_at",
     "resets_at",
@@ -578,10 +656,12 @@ async fn record_all() -> BTreeMap<String, Value> {
         ("unknownCounts", record_unknown_counts().await),
     ] {
         for (method, mut reply) in value.per_method {
+            rebase_history_timestamps(method, &mut reply);
             normalize(&mut reply, None);
             out.insert(format!("{state}/{method}"), reply);
         }
         for (method, mut reply) in value.shared {
+            rebase_history_timestamps(method, &mut reply);
             normalize(&mut reply, None);
             out.entry(format!("shared/{method}")).or_insert(reply);
         }
