@@ -134,6 +134,21 @@ envsubst < deploy/pilot-gcp/Caddyfile.template      > /tmp/Caddyfile
 envsubst < deploy/pilot-gcp/systemd/cloud-sql-proxy.service > /tmp/cloud-sql-proxy.service
 ```
 
+The Caddy template contains two load-bearing security controls. Its global
+`read_body 60s` deadline prevents a slow request body from holding an ingest
+connection indefinitely, and both access-log encoders replace the `code`
+query value before JSON is written. That query parameter carries a one-time
+account login credential; do not simplify either logger back to `format json`.
+The services bind loopback, and each proxy block also overwrites
+`X-Forwarded-For` with `{remote_host}` so application rate limits never key on
+a caller-supplied leftmost hop.
+
+Validate the rendered artifact before installation:
+
+```bash
+caddy adapt --config /tmp/Caddyfile --adapter caddyfile >/dev/null
+```
+
 Copy rendered files plus the two `*.service` units that have no
 placeholders into `~/deploy/` on the host, then run `deploy.sh`.
 

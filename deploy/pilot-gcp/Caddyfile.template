@@ -13,11 +13,14 @@
 #
 # Both daemons bind loopback only; Caddy is the public TLS edge. Admin
 # endpoints (e.g. issuer's :8081) stay loopback and are not exposed.
-
 {
 	email ${TC_LE_EMAIL}
 	servers {
 		max_header_size 32KB
+		timeouts {
+			# Bounds slow request bodies before they can hold an ingest slot.
+			read_body 60s
+		}
 	}
 }
 
@@ -30,7 +33,14 @@ ingest.${TC_PUBLIC_HOST} {
 	}
 	log {
 		output file /var/log/caddy/ingest-access.log
-		format json
+		# Login codes arrive only on the legacy browser hand-off query. Keep
+		# the route observable without persisting the single-use credential.
+		format filter {
+			request>uri query {
+				replace code REDACTED
+			}
+			wrap json
+		}
 	}
 }
 
@@ -55,6 +65,13 @@ issuer.${TC_PUBLIC_HOST} {
 	}
 	log {
 		output file /var/log/caddy/issuer-access.log
-		format json
+		# Defensive parity with ingest: no public access log may retain a
+		# parameter named `code`, even if routing changes later.
+		format filter {
+			request>uri query {
+				replace code REDACTED
+			}
+			wrap json
+		}
 	}
 }
