@@ -78995,6 +78995,111 @@ fn interstitial_rate_limit_has_a_global_blast_radius_ceiling() {
     assert!(!interstitial_rate_limit_allows(&limiter, "198.51.100.1"));
 }
 
+/// Large upload endpoints must authenticate before `Bytes`/`SubmitBody`
+/// extraction. A malformed anonymous body therefore gets the uniform auth
+/// refusal, never an extractor error that proves the server buffered it.
+#[tokio::test]
+async fn large_upload_routes_authenticate_before_body_extraction() {
+    use axum::body::Body;
+    use tower::ServiceExt;
+
+    for (method, path) in [
+        ("POST", "/v1/traces"),
+        ("POST", "/v1/token-bundles"),
+        (
+            "PUT",
+            "/v1/token-bundles/00000000-0000-0000-0000-000000000001/rev/artifact",
+        ),
+        (
+            "POST",
+            "/v1/token-bundles/00000000-0000-0000-0000-000000000001/rev",
+        ),
+    ] {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let response = app(test_state(temp.path().to_path_buf()))
+            .oneshot(
+                axum::http::Request::builder()
+                    .method(method)
+                    .uri(path)
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from("{"))
+                    .expect("request builds"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "{method} {path} must reject auth before reading the body"
+        );
+    }
+}
+
+/// Only the explicit upload methods receive the envelope-sized body limit.
+/// Ordinary JSON routes retain a small ceiling even though one upload may be
+/// much larger.
+#[tokio::test]
+async fn ordinary_api_routes_keep_the_small_body_ceiling() {
+    use axum::body::Body;
+    use tower::ServiceExt;
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let response = app(test_state(temp.path().to_path_buf()))
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/v1/token-bundles/query")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(vec![b' '; 2 * 1024 * 1024 + 1]))
+                .expect("request builds"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+}
+
+/// The small router default must not override the explicit envelope-sized cap
+/// on upload methods. A body just above 2 MiB reaches each extractor/handler
+/// (and fails there for fixture-specific reasons) rather than being refused by
+/// the ordinary API ceiling.
+#[tokio::test]
+async fn large_upload_routes_retain_the_envelope_sized_body_ceiling() {
+    use axum::body::Body;
+    use tower::ServiceExt;
+
+    for (method, path) in [
+        ("POST", "/v1/traces"),
+        ("POST", "/v1/token-bundles"),
+        (
+            "PUT",
+            "/v1/token-bundles/00000000-0000-0000-0000-000000000001/rev/artifact",
+        ),
+        (
+            "POST",
+            "/v1/token-bundles/00000000-0000-0000-0000-000000000001/rev",
+        ),
+    ] {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let response = app(test_state(temp.path().to_path_buf()))
+            .oneshot(
+                axum::http::Request::builder()
+                    .method(method)
+                    .uri(path)
+                    .header(AUTHORIZATION, "Bearer token-a")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(vec![b' '; 2 * 1024 * 1024 + 1]))
+                    .expect("request builds"),
+            )
+            .await
+            .expect("response");
+        assert_ne!(
+            response.status(),
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "{method} {path} must retain the upload-specific body ceiling"
+        );
+    }
+}
+
 /// The concurrency guard caps in-flight slots and releases on drop.
 #[test]
 fn account_rate_limiter_concurrency_cap_and_release() {

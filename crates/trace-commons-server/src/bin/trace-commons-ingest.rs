@@ -299,6 +299,9 @@ const DEFAULT_BIND: &str = "127.0.0.1:3907";
 /// contributor was willing to build; see `MAX_TRACE_ENVELOPE_BYTES`.
 const MAX_INGEST_BODY_BYTES: usize =
     trace_commons_protocol::trace_contribution::MAX_TRACE_ENVELOPE_BYTES + 4 * 1024 * 1024;
+/// Ordinary API requests do not need envelope-sized buffering. Large bodies
+/// are enabled only on the authenticated upload method routers below.
+const DEFAULT_API_BODY_BYTES: usize = 2 * 1024 * 1024;
 /// Ingest must accept every envelope the contributor is willing to build.
 /// These were independent constants once and they drifted -- the client
 /// refused at 1.5 MB while ingest capped the body at 2 MiB -- so raising the
@@ -8369,6 +8372,8 @@ fn community_cors_origins() -> Vec<HeaderValue> {
 }
 
 fn app(state: Arc<AppState>) -> Router {
+    let large_body_auth =
+        axum::middleware::from_fn_with_state(state.clone(), authenticate_large_body_request);
     Router::new()
         .route("/v1/reward-offers/{program_id}", get(rewards::offer))
         .route("/v1/missions", get(rewards::mission_catalog))
@@ -8388,15 +8393,27 @@ fn app(state: Arc<AppState>) -> Router {
         )
         .route(
             "/v1/token-bundles",
-            post(token_bundles::begin).get(token_bundles::capabilities),
+            get(token_bundles::capabilities).merge(
+                post(token_bundles::begin)
+                    .layer(DefaultBodyLimit::max(MAX_INGEST_BODY_BYTES))
+                    .layer(large_body_auth.clone()),
+            ),
         )
         .route(
             "/v1/token-bundles/{submission}/{revision}",
-            get(token_bundles::status).post(token_bundles::finalize),
+            get(token_bundles::status).merge(
+                post(token_bundles::finalize)
+                    .layer(DefaultBodyLimit::max(MAX_INGEST_BODY_BYTES))
+                    .layer(large_body_auth.clone()),
+            ),
         )
         .route(
             "/v1/token-bundles/{submission}/{revision}/{artifact}",
-            axum::routing::put(token_bundles::put).get(token_bundles::read),
+            get(token_bundles::read).merge(
+                axum::routing::put(token_bundles::put)
+                    .layer(DefaultBodyLimit::max(MAX_INGEST_BODY_BYTES))
+                    .layer(large_body_auth.clone()),
+            ),
         )
         .route("/health", get(health_handler))
         .route("/v1/pipeline/readiness", get(pipeline_readiness_handler))
@@ -8407,8 +8424,12 @@ fn app(state: Arc<AppState>) -> Router {
         .route(
             "/v1/traces",
             get(list_traces_handler)
-                .post(submit_trace_handler)
-                .delete(revoke_trace_body_handler),
+                .delete(revoke_trace_body_handler)
+                .merge(
+                    post(submit_trace_handler)
+                        .layer(DefaultBodyLimit::max(MAX_INGEST_BODY_BYTES))
+                        .layer(large_body_auth),
+                ),
         )
         .route(
             "/v1/admission/challenge",
@@ -9146,7 +9167,23 @@ fn app(state: Arc<AppState>) -> Router {
         // trust anything, so it cannot sit behind enrollment.
         .merge(attestation_collateral_routes())
         .with_state(state)
-        .layer(DefaultBodyLimit::max(MAX_INGEST_BODY_BYTES))
+        .layer(DefaultBodyLimit::max(DEFAULT_API_BODY_BYTES))
+}
+
+/// Reject a missing or invalid bearer before a large upload extractor is
+/// allowed to poll the body. Handlers authenticate again on purpose: their
+/// existing rate-limit, tenant-access-grant, and admission ordering remains
+/// the authoritative authorization path, while this middleware is only the
+/// cheap pre-body gate.
+async fn authenticate_large_body_request(
+    State(state): State<Arc<AppState>>,
+    request: Request,
+    next: Next,
+) -> axum::response::Response {
+    if let Err(error) = authenticate_ctx(state.as_ref(), request.headers()) {
+        return error.into_response();
+    }
+    next.run(request).await
 }
 
 fn default_data_dir() -> PathBuf {
