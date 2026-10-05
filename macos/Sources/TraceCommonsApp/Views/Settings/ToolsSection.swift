@@ -98,7 +98,7 @@ struct ToolsSection: View {
                 .disabled(model.daemonSettings == nil)
 
                 if model.daemonSettings == nil {
-                    SettingsAwaiting()
+                    SettingsReadNotice(model.settingsRead, retry: model.refreshSettings)
                 } else {
                     routingState(copy)
                 }

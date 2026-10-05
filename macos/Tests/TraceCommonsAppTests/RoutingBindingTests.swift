@@ -449,7 +449,7 @@ final class RoutingBindingTests: XCTestCase {
         }
         XCTAssertTrue(
             body.contains(
-                "if model.daemonSettings == nil {\n                    SettingsAwaiting()\n"
+                "if model.daemonSettings == nil {\n                    SettingsReadNotice(model.settingsRead, retry: model.refreshSettings)\n"
                     + "                } else {\n                    routingState(copy)\n                }"),
             "the status line is drawn before the daemon answers: \(body)")
         XCTAssertEqual(

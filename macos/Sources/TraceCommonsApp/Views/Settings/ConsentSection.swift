@@ -60,8 +60,8 @@ struct ConsentSection: View {
                 caption(SettingsLegacyWords.appliesFromNow)
                 // Until the daemon answers, the rows below are disabled and
                 // read off (R-15); this says they are waiting, not refused.
-                if !model.status.answered {
-                    SettingsAwaiting()
+                if model.statusRead != .answered {
+                    SettingsReadNotice(model.statusRead, retry: model.refreshStatus)
                 }
                 group(SettingsLegacyWords.alwaysIncluded, alwaysOn, granted: granted)
                 group(SettingsLegacyWords.optionalEachOne, optional, granted: granted)

@@ -10,8 +10,8 @@ struct ConnectionSection: View {
             VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
                 // Before the first answer the status is a placeholder, and
                 // "Not connected" would be an answer nothing gave.
-                if !model.status.answered {
-                    SettingsAwaiting()
+                if model.statusRead != .answered {
+                    SettingsReadNotice(model.statusRead, retry: model.refreshStatus)
                 } else if model.status.loggedIn {
                     GlassStatusLabel(SettingsLegacyWords.connected, status: .on)
                 } else {
@@ -22,7 +22,9 @@ struct ConnectionSection: View {
                 }
                 if model.daemonSettings == nil {
                     // One indicator for the card while neither has answered.
-                    if model.status.answered { SettingsAwaiting() }
+                    if model.statusRead == .answered {
+                        SettingsReadNotice(model.settingsRead, retry: model.refreshSettings)
+                    }
                 } else if let settings = model.daemonSettings {
                     sourceLine(TCSourceChecks.claude, settings.routingSourceModes.claude)
                     sourceLine(TCSourceChecks.codex, settings.routingSourceModes.codex)

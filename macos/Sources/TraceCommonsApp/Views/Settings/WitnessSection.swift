@@ -46,8 +46,12 @@ struct WitnessSection: View {
         return VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
             GlassEyebrowCard(copy.heading) {
                 VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
-                    // What the witness is doing comes first.
-                    if let code = model.witnessStateCode {
+                    // What the witness is doing comes first. Before it has
+                    // been read, the card says it is waiting rather than
+                    // drawing its prose as if there were nothing to say.
+                    if model.witnessRead != .answered {
+                        SettingsReadNotice(model.witnessRead, retry: model.refreshWitness)
+                    } else if let code = model.witnessStateCode {
                         stateBlock(code)
                     }
                     prose(copy.intro)
@@ -167,7 +171,7 @@ struct WitnessSection: View {
                 prose(copy.inferenceScopeNote)
                 // Absent is absent: no sentence and a disabled Enable.
                 if model.daemonSettings == nil {
-                    SettingsAwaiting()
+                    SettingsReadNotice(model.settingsRead, retry: model.refreshSettings)
                 } else if let enabled = model.daemonSettings?.ironwireAttestedBodies {
                     GlassStatusLabel(
                         enabled ? copy.inferenceEnabled : copy.inferenceDisabled,
@@ -206,7 +210,7 @@ struct WitnessSection: View {
                 prose(copy.tokenCaptureNote ?? "")
                 prose(copy.tokenScopeNote ?? "")
                 if model.daemonSettings == nil {
-                    SettingsAwaiting()
+                    SettingsReadNotice(model.settingsRead, retry: model.refreshSettings)
                 } else if let enabled = model.daemonSettings?.tokenDistributionsContribution {
                     GlassStatusLabel(
                         enabled ? (copy.tokenEnabled ?? "") : (copy.tokenDisabled ?? ""),

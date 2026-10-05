@@ -1090,6 +1090,7 @@ final class AppModel: ObservableObject {
         switch event {
         case .snapshot(let pending, let status):
             applyPendingUpdate(pending)
+            recordRead("status", answered: true)
             publishIfChanged(\.status, status)
         case .previewReady(let result):
             applyPreviewOutcome(result)
@@ -1744,6 +1745,7 @@ final class AppModel: ObservableObject {
             refreshStatus()
             refreshAudit()
         } else if let confirmed = await Task.detached(operation: { try? client.status() }).value {
+            recordRead("status", answered: true)
             publishIfChanged(\.status, confirmed)
         }
         return outcome
@@ -1943,6 +1945,7 @@ final class AppModel: ObservableObject {
     func setStartupForTesting(_ startup: Startup) { self.startup = startup }
 
     func setStatusForTesting(_ status: DaemonStatus) {
+        recordRead("status", answered: true)
         publishIfChanged(\.status, status)
     }
     #endif
@@ -2344,8 +2347,10 @@ final class AppModel: ObservableObject {
             let outcome = try? client.publicProfile()
             await MainActor.run {
                 // A failure -- `not-logged-in` above all -- is the
-                // off-the-roster state, not an error worth a banner.
+                // off-the-roster state, not an error worth a banner. Whether
+                // it may be drawn as one is `publicProfileRead`'s call.
                 self.publicProfile = (outcome?.onRoster ?? false) ? outcome : nil
+                self.recordRead("get_public_profile", answered: outcome != nil)
             }
         }
     }
@@ -2792,6 +2797,58 @@ final class AppModel: ObservableObject {
         case failed(String)
     }
 
+    // MARK: - Where each Settings read stands
+
+    /// Labels of the reads that have answered at least once. Kept apart from
+    /// the data: a list that answered empty and one that never answered are
+    /// both `[]`, and only this tells them apart.
+    @Published private(set) var answeredReads: Set<String> = []
+    /// Labels of the reads whose last call failed. A later success clears it.
+    @Published private(set) var failedReads: Set<String> = []
+
+    private func recordRead(_ label: String, answered: Bool) {
+        if answered {
+            if !answeredReads.contains(label) { answeredReads.insert(label) }
+            if failedReads.contains(label) { failedReads.remove(label) }
+        } else if !failedReads.contains(label) {
+            failedReads.insert(label)
+        }
+    }
+
+    private func read(_ label: String, answered: Bool = false) -> SettingsRead {
+        SettingsRead.resolve(
+            answered: answered || answeredReads.contains(label),
+            failed: failedReads.contains(label),
+            startup: startup)
+    }
+
+    /// `status`. The placeholder comparison stays for answers that reach the
+    /// model some other way; the recorded answer covers a signed-out status
+    /// that decodes equal to the placeholder.
+    var statusRead: SettingsRead { read("status", answered: status.answered) }
+    /// `get_settings`, or any write that handed back the settings.
+    var settingsRead: SettingsRead { read("get_settings", answered: daemonSettings != nil) }
+    /// `list_audit`: what "Nothing has been changed." waits on.
+    var auditRead: SettingsRead { read("list_audit") }
+    /// `list_projects`: what "No projects seen yet." waits on.
+    var projectsRead: SettingsRead { read("list_projects") }
+    /// The cached public profile. A failed read while signed in may be
+    /// hiding a roster entry, so it is a failure; signed out (by the
+    /// daemon's own answer) it is the daemon saying nothing is claimed.
+    var publicProfileRead: SettingsRead {
+        let signedOutRefusal = failedReads.contains("get_public_profile")
+            && statusRead == .answered && !status.loggedIn
+        return read("get_public_profile", answered: publicProfile != nil || signedOutRefusal)
+    }
+    /// The witness state. It is read from the config directory, not the
+    /// daemon, so it answers even when the daemon refused -- unless the
+    /// directory never resolved, when no read can ever run.
+    var witnessRead: SettingsRead {
+        if witnessStateCode != nil { return .answered }
+        if configDirectory.isEmpty, read("witness") == .coreDown { return .coreDown }
+        return .awaiting
+    }
+
     // MARK: - Plumbing
 
     private func perform<T>(
@@ -2805,8 +2862,10 @@ final class AppModel: ObservableObject {
             await MainActor.run {
                 switch outcome {
                 case .success(let value):
+                    self.recordRead(label, answered: true)
                     onSuccess(value)
                 case .failure(let error):
+                    self.recordRead(label, answered: false)
                     // `error.message` is a fixed label by contract, never a
                     // path, a token, or a server response body.
                     if let failure = error as? DaemonClient.Failure {
