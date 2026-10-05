@@ -1,4 +1,5 @@
 import Foundation
+import TCBridge
 import TCShellCore
 import XCTest
 @testable import TraceCommonsApp
@@ -161,6 +162,29 @@ final class FirstRunRunnerTests: XCTestCase {
             "setup still finishes")
         XCTAssertEqual(runner.state.sharing, .askMe, "never reported as automatic")
         XCTAssertEqual(runner.failure, .grantRefused(label: "automatic-grant-witness-changed"))
+    }
+
+    /// Every way Start can end with a failure gives the Uses screen a
+    /// notice to show, with and without the Private AI copy.
+    func test_everyStartFailureHasANotice() async throws {
+        let uses = try XCTUnwrap(FirstRunCopy.decode(try XCTUnwrap(TCCoreCopy.firstRunCopyJSON()))).uses
+        let privateAI = PrivateInferenceCopy.decode(fromJSON: TCPrivateInference.copyJSON() ?? "")
+        XCTAssertNotNil(privateAI)
+        let plan = FirstRunPlan.calls(for: onUses(), at: .start)
+        for call in plan {
+            if case .markComplete = call { continue }
+            let daemon = RecordingDaemon()
+            if case .grantAutomatic = call {
+                daemon.grant = .refused(label: "arming-terms-unavailable")
+            } else {
+                daemon.failing = { $0 == call }
+            }
+            let runner = FirstRunRunner(state: onUses(), daemon: daemon)
+            await runner.commit(.start)
+            XCTAssertNotNil(runner.failure, "\(call)")
+            XCTAssertNotNil(UsesScreenLayout.notice(for: runner.failure, uses: uses, privateAI: privateAI), "\(call)")
+            XCTAssertNotNil(UsesScreenLayout.notice(for: runner.failure, uses: uses, privateAI: nil), "\(call)")
+        }
     }
 
     func test_callsRunInPlanOrderAndStopAtTheFirstFailure() async {

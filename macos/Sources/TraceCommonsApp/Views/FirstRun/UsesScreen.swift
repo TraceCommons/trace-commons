@@ -68,9 +68,19 @@ enum UsesScreenLayout {
         return nil
     }
 
-    /// The Sharing card's line: the core's words for the path chosen, or
-    /// the fallback that disables Start.
-    static func sharingLine(_ uses: FirstRunCopy.Uses, path: SharingPath, grant: AutomaticGrantCopy?) -> String {
+    /// The path the screen shows: Automatic only for an account that can
+    /// choose it, so a watch-only state never reads Automatic's words.
+    static func effectiveSharing(_ state: FirstRunState) -> SharingPath {
+        FirstRunNavigation.canChooseAutomatic(state.account) ? state.sharing : .askMe
+    }
+
+    /// The Sharing card's line: the core's words for the path chosen, the
+    /// loading line until they are read, or the fallback that disables
+    /// Start.
+    static func sharingLine(
+        _ uses: FirstRunCopy.Uses, path: SharingPath, grant: AutomaticGrantCopy?, isLoading: Bool = false
+    ) -> String {
+        if isLoading { return uses.sharingLoading }
         guard let grant else { return uses.sharingUnavailable }
         switch path {
         case .askMe:
@@ -101,12 +111,31 @@ enum UsesScreenLayout {
         state.tier == .custom
     }
 
-    /// The notice for the runner's failure on this screen. A refused grant
-    /// reads the core's refusal sentence for the daemon's label; setup has
-    /// finished on Ask me, which the Sharing line then says.
-    static func notice(for failure: FirstRunFailure?) -> String? {
-        guard case .grantRefused(let label) = failure else { return nil }
-        return TCCoreCopy.contributionOverrideRefusalLine(label: label)
+    /// The notice for the runner's failure on this screen, one for each
+    /// way Start can end. A refused grant comes after setup finished, so it
+    /// reads the first run's own line whatever the label; the Private AI
+    /// failure reads the Private AI copy's, or the first run's without it.
+    static func notice(
+        for failure: FirstRunFailure?, uses: FirstRunCopy.Uses, privateAI: PrivateInferenceCopy?
+    ) -> String? {
+        switch failure {
+        case .none: return nil
+        case .grantRefused: return uses.sharingRefused
+        case .scopesFailed: return uses.scopesFailed
+        case .rulesFailed: return uses.rulesFailed
+        case .privateAIFailed: return privateAI?.writeUnconfirmed ?? uses.privateAiFailed
+        case .startFailed, .inviteDead, .enrollFailed, .signInFailed: return nil
+        }
+    }
+
+    /// After a Start: the failure to show, and a refusal decided before it
+    /// that is still to be shown. A Start that failed keeps the refusal for
+    /// the retry, which goes through on Ask me; one that succeeded shows it.
+    static func afterStart(
+        failure: FirstRunFailure?, pending: FirstRunFailure?
+    ) -> (shown: FirstRunFailure?, pending: FirstRunFailure?) {
+        guard failure == nil else { return (failure, pending) }
+        return (pending, nil)
     }
 }
 
@@ -121,24 +150,25 @@ struct UsesScreen: View {
 
     @State private var optionalOpen = false
     @State private var disclosure: SharingDisclosureFlow?
-
-    /// The core's sharing words for this configuration; nil disables Start.
-    private var grant: AutomaticGrantCopy? {
-        AutomaticGrantCopy.decode(
-            fromJSON: TCCoreCopy.automaticContributionCopyJSON(configDir: model.configDirectory))
-    }
+    /// The core's sharing words for this configuration, read once on
+    /// appear; nil disables Start. Start writes the configuration they
+    /// depend on, so they cannot change while this screen is up.
+    @State private var grant: AutomaticGrantCopy?
+    @State private var grantRead = false
+    /// A refusal decided before a Start that then failed, shown after the
+    /// Start that succeeds.
+    @State private var pendingRefusal: FirstRunFailure?
 
     private var privateAI: PrivateInferenceCopy? { model.privateInferenceCopy }
 
     var body: some View {
         let options = model.consentScopes
         let required = UsesScreenLayout.requiredScope(options)
-        let grant = grant
         FirstRunFrame(
             copy: copy,
             state: $runner.state,
             onBack: runner.isCommitting ? nil : { runner.state = FirstRunNavigation.back(runner.state) },
-            notice: UsesScreenLayout.notice(for: runner.failure),
+            notice: UsesScreenLayout.notice(for: runner.failure, uses: copy.uses, privateAI: privateAI),
             footer: FirstRunFooter(
                 title: copy.uses.start,
                 isEnabled: UsesScreenLayout.canStart(
@@ -165,6 +195,11 @@ struct UsesScreen: View {
             model.refreshStatus()
             model.refreshConsentOptions()
             model.refreshWitness()
+            if !grantRead {
+                grant = AutomaticGrantCopy.decode(
+                    fromJSON: TCCoreCopy.automaticContributionCopyJSON(configDir: model.configDirectory))
+                grantRead = true
+            }
         }
         .sheet(isPresented: Binding(get: { disclosure != nil }, set: { if !$0 { disclosure = nil } })) {
             if let grant {
@@ -244,13 +279,16 @@ struct UsesScreen: View {
                     Text(copy.uses.sharing)
                         .glassType(GlassTokens.TypeScale.bodyStrong)
                         .foregroundStyle(GlassColor.textPrimary)
-                    caption(UsesScreenLayout.sharingLine(copy.uses, path: runner.state.sharing, grant: grant))
+                    caption(
+                        UsesScreenLayout.sharingLine(
+                            copy.uses, path: UsesScreenLayout.effectiveSharing(runner.state), grant: grant,
+                            isLoading: !grantRead))
                 }
                 Spacer(minLength: 0)
                 GlassPicker(
                     copy.uses.sharing,
                     selection: Binding(
-                        get: { runner.state.sharing },
+                        get: { UsesScreenLayout.effectiveSharing(runner.state) },
                         set: { if let path = $0 { runner.state.sharing = path } }),
                     options: UsesScreenLayout.sharingOptions(for: runner.state.account, modes: ProjectModeWords.table),
                     placeholder: copy.uses.sharing)
@@ -298,7 +336,7 @@ struct UsesScreen: View {
             disclosure = SharingDisclosureFlow()
             return
         }
-        Task { await runner.commit(.start) }
+        Task { await commitStart(refused: nil) }
     }
 
     /// Both disclosures seen: the core decides the grant, then Start runs.
@@ -309,12 +347,16 @@ struct UsesScreen: View {
             flow.progress(connected: model.status.loggedIn, scopes: runner.state.scopes))
         let (next, refused) = SharingDisclosureFlow.resolve(runner.state, request: request)
         runner.state = next
-        Task {
-            await runner.commit(.start)
-            if let refused, runner.failure == nil {
-                runner.failure = refused
-            }
-        }
+        Task { await commitStart(refused: refused) }
+    }
+
+    /// The one Start path. A refusal is kept past a failed Start and shown
+    /// once one succeeds.
+    private func commitStart(refused: FirstRunFailure?) async {
+        await runner.commit(.start)
+        let after = UsesScreenLayout.afterStart(failure: runner.failure, pending: refused ?? pendingRefusal)
+        runner.failure = after.shown
+        pendingRefusal = after.pending
     }
 
     private func caption(_ text: String) -> some View {

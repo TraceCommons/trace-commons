@@ -115,6 +115,12 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
         public let sharingUnavailable: String
         public let baseUseNote: String
         public let start: String
+        /// Start's failures, one per call that can stop it, and the refused
+        /// grant, which finishes on Ask me.
+        public let sharingRefused: String
+        public let scopesFailed: String
+        public let rulesFailed: String
+        public let privateAiFailed: String
     }
 
     public struct Passkey: Decodable, Equatable, Sendable {

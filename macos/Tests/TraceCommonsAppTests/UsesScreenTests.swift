@@ -138,24 +138,96 @@ final class UsesScreenTests: XCTestCase {
         XCTAssertTrue(source.contains(".disabled(privateAI == nil)"))
     }
 
-    /// Review Focus 3, on the screen: a refused grant is said in the core's
-    /// refusal sentence, and the Sharing line reads Ask me's, never
-    /// Automatic's.
-    func test_aRefusedGrantFinishesOnAskMe() throws {
-        let uses = try copy().uses
-        let grant = try grant()
-        for label in ["automatic-grant-witness-changed", "arming-terms-unavailable"] {
-            let line = try XCTUnwrap(UsesScreenLayout.notice(for: .grantRefused(label: label)), label)
-            XCTAssertEqual(line, TCCoreCopy.contributionOverrideRefusalLine(label: label))
-        }
-        XCTAssertNil(UsesScreenLayout.notice(for: nil))
+    private func privateAI() throws -> PrivateInferenceCopy {
+        try XCTUnwrap(PrivateInferenceCopy.decode(fromJSON: TCPrivateInference.copyJSON() ?? ""))
+    }
 
-        // The runner leaves the state on Ask me; the line follows it.
-        var state = FirstRunState(tier: .quick, step: .uses, account: .nearAI, sharing: .automatic)
-        state.sharing = .askMe
-        XCTAssertEqual(UsesScreenLayout.sharingLine(uses, path: state.sharing, grant: grant), grant.pathAskFirst)
+    /// Review Focus 3, on the screen: a refused grant comes after setup
+    /// finished, so whatever the label, the notice is the first run's own
+    /// line saying Automatic was not turned on and sharing is on Ask me. It
+    /// is never the folder-override refusal, which says nothing changed or
+    /// points at a pill this screen does not have.
+    func test_aRefusedGrantSaysSetupFinishedOnAskMe() throws {
+        let uses = try copy().uses
+        let privateAI = try privateAI()
+        let labels = [
+            "automatic-grant-witness-changed", "arming-terms-unavailable", "connect", "scrub_disclosure",
+            SharingDisclosureFlow.unreadableLabel,
+        ]
+        for label in labels {
+            let line = try XCTUnwrap(
+                UsesScreenLayout.notice(for: .grantRefused(label: label), uses: uses, privateAI: privateAI), label)
+            XCTAssertEqual(line, uses.sharingRefused, label)
+            XCTAssertNotEqual(line, TCCoreCopy.contributionOverrideRefusalLine(label: label), label)
+            XCTAssertFalse(line.contains("Nothing changed"), label)
+            XCTAssertFalse(line.contains("pill"), label)
+        }
+        XCTAssertNil(UsesScreenLayout.notice(for: nil, uses: uses, privateAI: privateAI))
 
         let source = try Self.source()
-        XCTAssertTrue(source.contains("UsesScreenLayout.notice(for: runner.failure)"))
+        XCTAssertTrue(source.contains("UsesScreenLayout.notice(for: runner.failure"))
+    }
+
+    /// Each failure that stops Start reads its own line; Private AI's is
+    /// the Private AI copy's, and the first run's when that copy is missing.
+    func test_eachStartFailureReadsItsOwnLine() throws {
+        let uses = try copy().uses
+        let privateAI = try privateAI()
+        XCTAssertEqual(UsesScreenLayout.notice(for: .scopesFailed, uses: uses, privateAI: privateAI), uses.scopesFailed)
+        XCTAssertEqual(UsesScreenLayout.notice(for: .rulesFailed, uses: uses, privateAI: privateAI), uses.rulesFailed)
+        XCTAssertEqual(
+            UsesScreenLayout.notice(for: .privateAIFailed, uses: uses, privateAI: privateAI), privateAI.writeUnconfirmed)
+        XCTAssertEqual(UsesScreenLayout.notice(for: .privateAIFailed, uses: uses, privateAI: nil), uses.privateAiFailed)
+    }
+
+    /// A refusal the core decided before Start is kept while a later call
+    /// fails, and shown once a Start finally succeeds, so the retry that
+    /// goes through on Ask me still says why.
+    func test_aRefusalOutlivesAFailedStart() {
+        let refused = FirstRunFailure.grantRefused(label: "connect")
+        let failed = UsesScreenLayout.afterStart(failure: .rulesFailed, pending: refused)
+        XCTAssertEqual(failed.shown, .rulesFailed)
+        XCTAssertEqual(failed.pending, refused)
+
+        let retried = UsesScreenLayout.afterStart(failure: nil, pending: failed.pending)
+        XCTAssertEqual(retried.shown, refused)
+        XCTAssertNil(retried.pending)
+
+        let plain = UsesScreenLayout.afterStart(failure: nil, pending: nil)
+        XCTAssertNil(plain.shown)
+        XCTAssertNil(plain.pending)
+
+        // Both Start paths go through that decision.
+        let source = try? Self.source()
+        XCTAssertEqual(source?.components(separatedBy: "await runner.commit(.start)").count, 2)
+        XCTAssertTrue(source?.contains("UsesScreenLayout.afterStart(") ?? false)
+    }
+
+    /// An account that cannot choose Automatic reads Ask me's line and
+    /// selection, whatever `sharing` holds.
+    func test_watchingOnlyNeverReadsAutomatic() throws {
+        let uses = try copy().uses
+        let grant = try grant()
+        let watching = FirstRunState(tier: .quick, step: .uses, account: .watchOnly, sharing: .automatic)
+        XCTAssertEqual(UsesScreenLayout.effectiveSharing(watching), .askMe)
+        XCTAssertEqual(
+            UsesScreenLayout.sharingLine(uses, path: UsesScreenLayout.effectiveSharing(watching), grant: grant),
+            grant.pathAskFirst)
+        let joined = FirstRunState(tier: .quick, step: .uses, account: .nearAI, sharing: .automatic)
+        XCTAssertEqual(UsesScreenLayout.effectiveSharing(joined), .automatic)
+
+        let source = try Self.source()
+        XCTAssertFalse(source.contains("path: runner.state.sharing"))
+        XCTAssertFalse(source.contains("get: { runner.state.sharing }"))
+    }
+
+    /// The grant copy is read once; until then the line is the loading one
+    /// and Start is held.
+    func test_theSharingLineLoadsOnce() throws {
+        let uses = try copy().uses
+        XCTAssertEqual(UsesScreenLayout.sharingLine(uses, path: .askMe, grant: nil, isLoading: true), uses.sharingLoading)
+        XCTAssertEqual(UsesScreenLayout.sharingLine(uses, path: .askMe, grant: nil, isLoading: false), uses.sharingUnavailable)
+        let source = try Self.source()
+        XCTAssertFalse(source.contains("private var grant: AutomaticGrantCopy? {"))
     }
 }
