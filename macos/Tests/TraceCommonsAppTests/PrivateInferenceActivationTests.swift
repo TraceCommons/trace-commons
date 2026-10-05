@@ -91,6 +91,12 @@ final class PrivateInferenceActivationTests: XCTestCase {
         XCTAssertFalse(model.status.loggedIn)
         XCTAssertTrue(model.status.consentScopes.isEmpty)
         XCTAssertFalse(model.isOnboardingComplete)
+        // The Folders step's list grows the borderless window past the
+        // height it was made at, and Vision misses most of the glass
+        // text on a page that tall; Private AI is read at the original
+        // size, where every line of it fits.
+        window.setFrame(NSRect(x: 0, y: 0, width: 1000, height: 1600), display: true)
+        hosting.frame = NSRect(x: 0, y: 0, width: 1000, height: 1600)
         let words = try recognizedWords(await snapshot(hosting))
         let copy = try XCTUnwrap(model.privateInferenceCopy)
         let action = CredentialSurface.action(model.credentialStatus, calls: model.credentialCalls)
