@@ -57,10 +57,14 @@ final class SettingsParityTests: XCTestCase {
                 accessibility: ["GlassToggleStyle(.settings)"]),
         Section(glass: "Views/Settings/ConsentSection.swift",
                 bindings: ["model.consentScopes", "model.status.consentScopes", "model.status.loggedIn",
-                           "model.setConsentScopes(", "ConsentScopeRows.nextScopes(",
+                           // The write and its `nextScopes` list are the model's
+                           // (`AppModel.toggleConsentScope`), so a section switch
+                           // cannot drop them; `SettingsSectionStateTests` pins it.
+                           "model.toggleConsentScope(", "model.consentWriteRefused",
                            "ConsentScopeRows.isOn(scope: scope, granted: granted, unavailable: unavailable)",
-                           "ConsentScopeRows.isEnabled(scope: scope, busy: busy, unavailable: unavailable)"],
+                           "ConsentScopeRows.isEnabled(scope: scope, busy: model.consentWriteBusy, unavailable: unavailable)"],
                 copySources: ["ScopeCopy.title(for:", "scope.description", "settingsCopy()?.consentSaveFailed",
+                              "ConsentScopeRows.refusalLine(", "MonitorScreensCopy.decode(",
                               "SettingsLegacyWords.consentHeading", "SettingsLegacyWords.appliesFromNow",
                               "SettingsLegacyWords.alwaysIncluded", "SettingsLegacyWords.optionalEachOne",
                               "SettingsLegacyWords.credit", "SettingsLegacyWords.nothingPreselected"],
@@ -111,7 +115,8 @@ final class SettingsParityTests: XCTestCase {
                 accessibility: [".accessibilityLabel(", "GlassCheckboxStyle()"]),
         Section(glass: "Views/Settings/WatchedFoldersSection.swift",
                 bindings: ["TCSourceChecks.settingsCopy()", "SourceKind.allCases", "TCDiscovery.sourcesJSON()",
-                           "SourceCandidate.decodeList(", "model.setSourceRoot(", "model.refreshSettings()",
+                           "SourceCandidate.decodeList(", "model.saveSourceRoot(", "model.sourceRootBusy",
+                           "model.sourceRootSaveFailed", "model.refreshSettings()",
                            "routingSourceModes", "opencodeSourceMode", "GlassSourceRow("],
                 copySources: ["copy.heading", "copy.explanation", "copy.saveFailed", "copy.unavailable", "copy.retry"],
                 confirmations: [],

@@ -34,8 +34,10 @@ import XCTest
 ///   surface saying nothing about a state that still holds.
 /// - `AppModel.summaryErrors[id]`, `credentialAttempt` and
 ///   `harnessExposureRequest` are each cleared on their own completion path.
-/// - `StartupSection.loginItemActionError`, `ConsentSection.saveError`,
-///   `OnboardingRootsView.failure` and `PreviewSheet.failure` are view-local
+/// - `AppModel.loginItemActionError` and `AppModel.consentWriteRefused` are
+///   cleared at the top of each attempt, like the readouts above; they live
+///   on the model only so that switching Settings section cannot drop them.
+/// - `OnboardingRootsView.failure` and `PreviewSheet.failure` are view-local
 ///   `@State`, cleared at the top of each attempt and gone with the view.
 ///
 /// What made the notice different is that only two actions ever assign it and

@@ -9,8 +9,10 @@ import UserNotifications
 /// window is open, so it is read fresh on appear. `.requiresApproval` is
 /// guidance, not an error -- retrying `register()` would not change it.
 struct StartupSection: View {
+    /// The login item's last refusal is the model's (`loginItemActionError`):
+    /// this view is thrown away when the section changes (G8 of #1229).
+    @EnvironmentObject private var model: AppModel
     @State private var loginItemState: LoginItemManager.State = LoginItemManager.currentState
-    @State private var loginItemActionError: String?
 
     var body: some View {
         GlassEyebrowCard(SettingsWords.startup) {
@@ -29,7 +31,7 @@ struct StartupSection: View {
                     Text(SettingsLegacyWords.turnOnInSystemSettings)
                         .glassType(GlassTokens.TypeScale.caption).foregroundStyle(GlassColor.textSecondary)
                 }
-                if let loginItemActionError {
+                if let loginItemActionError = model.loginItemActionError {
                     GlassNotice(tone: .outside) { Text(loginItemActionError) }
                 }
             }
@@ -38,17 +40,17 @@ struct StartupSection: View {
     }
 
     private func setLoginItem(enabled: Bool) {
-        loginItemActionError = nil
+        model.loginItemActionError = nil
         if enabled {
             switch LoginItemManager.register() {
             case .enabled, .requiresApproval:
                 break
             case .failed(let message):
-                loginItemActionError = SettingsLegacyWords.couldNotTurnOn(message)
+                model.loginItemActionError = SettingsLegacyWords.couldNotTurnOn(message)
             }
         } else {
             if case .failed(let message) = LoginItemManager.unregister() {
-                loginItemActionError = SettingsLegacyWords.couldNotTurnOff(message)
+                model.loginItemActionError = SettingsLegacyWords.couldNotTurnOff(message)
             }
         }
         loginItemState = LoginItemManager.currentState

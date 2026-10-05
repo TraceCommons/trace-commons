@@ -1746,6 +1746,60 @@ final class AppModel: ObservableObject {
         return outcome
     }
 
+    // MARK: - Settings section state
+    //
+    // The Settings window draws a fresh section view per section
+    // (`.id(section)`), so a section's `@State` is thrown away by switching
+    // section. What must survive that -- a write in flight, its refusal, a
+    // half-typed draft -- lives here, where every section view reads it and
+    // none owns it (G8 of #1229).
+
+    /// A Settings consent write is in flight. While it is, every consent row
+    /// is disabled, wherever it is drawn.
+    @Published private(set) var consentWriteBusy = false
+    /// The last Settings consent write was refused. The words are the core's,
+    /// chosen when drawn (`ConsentScopeRows.refusalLine`).
+    @Published private(set) var consentWriteRefused = false
+
+    /// Adds or removes one optional scope from Settings, sending the daemon's
+    /// own list with this one changed. The list is built when the write
+    /// starts, from what the daemon reported, and no second write starts
+    /// until the first has answered: a list built while one is in flight
+    /// would still hold the scope that write withdraws.
+    func toggleConsentScope(_ scope: ConsentScope, granted: Bool, options: [ConsentScope]) async {
+        guard !consentWriteBusy, status.loggedIn, !scope.alwaysOn else { return }
+        let scopes = ConsentScopeRows.nextScopes(
+            reported: status.consentScopes, options: options, toggling: scope, granted: granted)
+        consentWriteRefused = false
+        consentWriteBusy = true
+        if case .failed = await setConsentScopes(Array(scopes)) {
+            consentWriteRefused = true
+        }
+        consentWriteBusy = false
+    }
+
+    /// A Watched folders write is in flight; the card is disabled until it
+    /// answers.
+    @Published private(set) var sourceRootBusy = false
+    /// The last Watched folders write was refused.
+    @Published private(set) var sourceRootSaveFailed = false
+
+    func saveSourceRoot(_ kind: SourceKind, _ choice: SourceChoice) async {
+        guard !sourceRootBusy else { return }
+        sourceRootBusy = true
+        sourceRootSaveFailed = false
+        sourceRootSaveFailed = !(await setSourceRoot(kind, choice))
+        sourceRootBusy = false
+    }
+
+    /// The login item's last refusal, in the words it was drawn with.
+    @Published var loginItemActionError: String?
+    /// The routing card's edited form; `nil` means nothing has been edited
+    /// and the card reads the daemon's answer.
+    @Published var routingDraft: RoutingForm?
+    /// The witness card's edited fields; `nil` means nothing has been edited.
+    @Published var witnessDraft: WitnessForm?
+
     @Published private(set) var inferenceEvidenceBusy = false
     @Published private(set) var inferenceEvidenceSaveFailed = false
 

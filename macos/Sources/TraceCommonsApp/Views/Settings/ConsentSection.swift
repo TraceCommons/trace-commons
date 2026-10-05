@@ -1,6 +1,7 @@
 import SwiftUI
 import TCBridge
 import TCDesign
+import TCShellCore
 
 /// The list `set_consent_scopes` is sent. Pure so the rule is testable: it
 /// is built from what the daemon reports, never from the ticks on screen.
@@ -28,12 +29,20 @@ enum ConsentScopeRows {
     static func isEnabled(scope: ConsentScope, busy: Bool, unavailable: Bool) -> Bool {
         !scope.alwaysOn && !busy && !unavailable
     }
+
+    /// The line a refused consent write draws, all of it the core's: the
+    /// settings table's sentence, else the monitor table's request-failed
+    /// sentence, else the dash every surface uses for "the core said
+    /// nothing". A refusal never draws nothing.
+    static func refusalLine(settings: String?, screens: MonitorScreensCopy?) -> String {
+        settings ?? screens?.requestFailed ?? "\u{2014}"
+    }
 }
 
 struct ConsentSection: View {
+    /// The write's in-flight flag and refusal live on the model, not here:
+    /// this view is thrown away when the section changes (G8 of #1229).
     @EnvironmentObject private var model: AppModel
-    @State private var saveError: String?
-    @State private var busy = false
 
     var body: some View {
         let granted = Set(model.status.consentScopes)
@@ -54,8 +63,12 @@ struct ConsentSection: View {
                 group(SettingsLegacyWords.alwaysIncluded, alwaysOn, granted: granted)
                 group(SettingsLegacyWords.optionalEachOne, optional, granted: granted)
                 group(SettingsLegacyWords.credit, credit, granted: granted)
-                if let saveError {
-                    GlassNotice(tone: .outside) { Text(saveError) }
+                if model.consentWriteRefused {
+                    GlassNotice(tone: .outside) {
+                        Text(ConsentScopeRows.refusalLine(
+                            settings: TCSourceChecks.settingsCopy()?.consentSaveFailed,
+                            screens: MonitorScreensCopy.decode(fromJSON: TCCoreCopy.monitorScreensCopyJSON())))
+                    }
                 }
                 caption(SettingsLegacyWords.nothingPreselected)
             }
@@ -105,24 +118,13 @@ struct ConsentSection: View {
             }
         }
         .toggleStyle(GlassCheckboxStyle())
-        .disabled(!ConsentScopeRows.isEnabled(scope: scope, busy: busy, unavailable: unavailable))
+        .disabled(!ConsentScopeRows.isEnabled(scope: scope, busy: model.consentWriteBusy, unavailable: unavailable))
         .accessibilityElement(children: .combine)
     }
 
-    /// Adds or removes one optional scope, sending the daemon's own list with
-    /// this one changed, so two quick presses cannot drop a scope neither
-    /// touched.
+    /// Adds or removes one optional scope through the model, which builds
+    /// the list from the daemon's own and holds the write's state.
     private func setScope(_ scope: ConsentScope, granted: Bool) {
-        guard !busy, model.status.loggedIn, !scope.alwaysOn else { return }
-        let scopes = ConsentScopeRows.nextScopes(
-            reported: model.status.consentScopes, options: model.consentScopes, toggling: scope, granted: granted)
-        saveError = nil
-        busy = true
-        Task {
-            if case .failed = await model.setConsentScopes(Array(scopes)) {
-                saveError = TCSourceChecks.settingsCopy()?.consentSaveFailed
-            }
-            busy = false
-        }
+        Task { await model.toggleConsentScope(scope, granted: granted, options: model.consentScopes) }
     }
 }

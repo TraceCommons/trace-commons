@@ -20,11 +20,11 @@ enum RoutingPortInput {
 /// wording of its own, and never a healthy-looking row.
 struct ToolsSection: View {
     @EnvironmentObject private var model: AppModel
-    /// The card's controls, held here so a background refresh landing
-    /// mid-edit cannot replace a half-typed port. `nil` means nothing has
-    /// been edited and the card reads the daemon's answer, which is what
-    /// lets a port discovery supplies after appearing reach the field.
-    @State private var routingDraft: RoutingForm?
+    // The card's controls are the model's `routingDraft`, so a background
+    // refresh landing mid-edit cannot replace a half-typed port and a
+    // section switch cannot drop one (G8 of #1229). `nil` means nothing has
+    // been edited and the card reads the daemon's answer, which is what
+    // lets a port discovery supplies after appearing reach the field.
     /// Whether the override is open, once the contributor has said. `nil`
     /// follows discovery: closed where the machine supplied the port.
     @State private var routingOverrideOpen: Bool?
@@ -34,7 +34,7 @@ struct ToolsSection: View {
         // core's copy is missing and the card draws nothing.
         VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
             if let copy = model.routingCopy {
-                card(copy, form: routingDraft ?? model.routingForm)
+                card(copy, form: model.routingDraft ?? model.routingForm)
             } else {
                 // The unavailable branch; test_refreshIsOnAnAlwaysPresentContainer pins that
                 // `.onAppear` follows this container's closing brace directly.
@@ -88,7 +88,7 @@ struct ToolsSection: View {
                     set: { on in
                         var next = form
                         next.on = on
-                        routingDraft = next
+                        model.routingDraft = next
                         model.applyIronWire(next)
                     }
                 ))
@@ -115,7 +115,7 @@ struct ToolsSection: View {
                     if model.routingDiscovery.found, !form.on {
                         Button(copy.connect) {
                             let next = RoutingSurface.connecting(form)
-                            routingDraft = next
+                            model.routingDraft = next
                             model.applyIronWire(next)
                         }
                         .buttonStyle(GlassButtonStyle(.primary))
@@ -168,7 +168,7 @@ struct ToolsSection: View {
                     copy.portTitle,
                     value: Binding(
                         get: { Int(form.port) },
-                        set: { routingDraft = RoutingPortInput.accept($0, into: form) }
+                        set: { model.routingDraft = RoutingPortInput.accept($0, into: form) }
                     ),
                     format: .number.grouping(.never)
                 )
@@ -197,7 +197,7 @@ struct ToolsSection: View {
                         if let path = GlassSourceRow.chooseFolder() {
                             var next = form
                             next.tokenDir = path
-                            routingDraft = next
+                            model.routingDraft = next
                         }
                     }
                     .accessibilityLabel(copy.folderTitle)

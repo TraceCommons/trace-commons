@@ -14,9 +14,9 @@ import TCShellCore
 /// a total upload outage cannot look alike.
 struct WitnessSection: View {
     @EnvironmentObject private var model: AppModel
-    /// The three fields, held here so a refresh landing mid-edit cannot
-    /// replace a half-typed address. `nil` means nothing has been edited.
-    @State private var witnessDraft: WitnessForm?
+    // The three fields are the model's `witnessDraft`, so a refresh landing
+    // mid-edit cannot replace a half-typed address and a section switch
+    // cannot drop one (G8 of #1229). `nil` means nothing has been edited.
     @State private var showingInferenceDisclosure = false
     @State private var showingTokenDisclosure = false
     @State private var showingTokenCapture = false
@@ -97,14 +97,14 @@ struct WitnessSection: View {
     }
 
     private func fields(_ copy: WitnessCopy) -> some View {
-        let form = witnessDraft ?? WitnessForm.fromStatus(model.witnessStatus)
+        let form = model.witnessDraft ?? WitnessForm.fromStatus(model.witnessStatus)
         return VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
             GlassTextField(copy.urlTitle, text: Binding(
                 get: { form.url },
                 set: { value in
                     var next = form
                     next.url = value
-                    witnessDraft = next
+                    model.witnessDraft = next
                 }
             ))
             .accessibilityLabel(copy.urlTitle)
@@ -114,7 +114,7 @@ struct WitnessSection: View {
                 set: { value in
                     var next = form
                     next.signingAddress = value
-                    witnessDraft = next
+                    model.witnessDraft = next
                 }
             ))
             .accessibilityLabel(copy.signingAddressTitle)
@@ -136,7 +136,7 @@ struct WitnessSection: View {
                         set: { value in
                             var next = form
                             next.measurements = value
-                            witnessDraft = next
+                            model.witnessDraft = next
                         }
                     ))
                     .glassType(GlassTokens.TypeScale.mono)
@@ -152,7 +152,7 @@ struct WitnessSection: View {
             // Disabled until there is something pinnable to write.
             Button(copy.configure) {
                 model.configureWitness(form)
-                witnessDraft = nil
+                model.witnessDraft = nil
             }
             .buttonStyle(GlassButtonStyle(.glass))
             .disabled(!form.canConfigure || model.witnessBusy)
