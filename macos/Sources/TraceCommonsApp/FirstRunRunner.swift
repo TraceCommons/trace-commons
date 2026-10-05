@@ -2,10 +2,13 @@ import Foundation
 import TCShellCore
 
 /// What `invite_lookup` answered: the issuer and pay range for Join's joined
-/// line, or the daemon's refusal label for the core's invite error.
+/// line, the daemon's refusal label for the core's invite error, or that the
+/// lookup never reached an answer (no daemon, an unreadable reply, the
+/// issuer unreachable), which says nothing about the invite.
 enum FirstRunLookup: Equatable {
     case found(DaemonData.InviteLookup)
     case refused(label: String)
+    case unavailable
 }
 
 /// What `grant_automatic` answered.
@@ -31,7 +34,9 @@ protocol FirstRunDaemon: AnyObject {
     func includePastSessions(projectID: String, sessionIDs: [String]) async -> Bool
     func setPrivateAI(_ on: Bool) async -> Bool
     func grantAutomatic(witness: String?) async -> FirstRunGrantAnswer
-    func markComplete()
+    /// True only once the completion marker is actually written. The marker
+    /// is keyed by tenant, so with no tenant known this answers false.
+    func markComplete() async -> Bool
 }
 
 /// Why a commit stopped. The screens map each case to a core sentence; the
@@ -42,6 +47,9 @@ enum FirstRunFailure: Equatable {
     /// The invite was refused when it was looked up; the person is back on
     /// Join.
     case inviteDead(label: String)
+    /// The invite could not be looked up just now; the step stays and a
+    /// retry looks it up again.
+    case lookupUnavailable
     case enrollFailed
     case signInFailed
     case scopesFailed
@@ -50,11 +58,16 @@ enum FirstRunFailure: Equatable {
     case privateAIFailed
     /// Automatic was refused; setup finished on Ask me.
     case grantRefused(label: String)
+    /// Every call succeeded but the completion marker was not written, so
+    /// the first run is not over. Outranks `grantRefused`.
+    case completeFailed
 }
 
 /// Executes `FirstRunPlan`'s calls in order and records what the daemon now
 /// holds back into the state. The plan is recomputed from the state at every
-/// commit, so a retry after a failure repeats only what did not succeed.
+/// commit. At `.leaveRoots` a retry after a failure repeats only what did not
+/// succeed; at `.start` it re-sends every call, each of which is idempotent
+/// on the daemon, except that a refused grant is not asked for again.
 @MainActor
 final class FirstRunRunner: ObservableObject {
     @Published var state: FirstRunState
@@ -73,14 +86,20 @@ final class FirstRunRunner: ObservableObject {
     /// Run the calls for `point`. Leaving the roots moves on to the next step
     /// only when every call succeeded; a dead invite goes back to Join; any
     /// other failure leaves the step where it is. Start always ends in
-    /// `markComplete` unless a call before the grant failed.
+    /// `markComplete` unless a call before the grant failed, and reports
+    /// `completeFailed` when the marker was not written.
     func commit(_ point: CommitPoint) async {
         guard !isCommitting else { return }
         isCommitting = true
         defer { isCommitting = false }
         failure = nil
 
-        if point == .leaveRoots, state.sessionRoots.settingsJSON() == nil { return }
+        // Continue is disabled without a declaration; should it be pressed
+        // anyway, nothing can start, and that is said rather than swallowed.
+        if point == .leaveRoots, state.sessionRoots.settingsJSON() == nil {
+            failure = .startFailed
+            return
+        }
         for call in FirstRunPlan.calls(for: state, at: point) {
             guard await run(call) else { return }
         }
@@ -109,6 +128,9 @@ final class FirstRunRunner: ObservableObject {
                 lookup = nil
                 state = FirstRunNavigation.returnToJoin(afterDeadInvite: state)
                 return fail(.inviteDead(label: label))
+            case .unavailable:
+                lookup = nil
+                return fail(.lookupUnavailable)
             }
         case .enroll(let invite):
             guard await daemon.enrollInvite(invite) else { return fail(.enrollFailed) }
@@ -133,7 +155,7 @@ final class FirstRunRunner: ObservableObject {
                 failure = .grantRefused(label: label)
             }
         case .markComplete:
-            daemon.markComplete()
+            guard await daemon.markComplete() else { return fail(.completeFailed) }
         }
         return true
     }

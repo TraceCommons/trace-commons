@@ -56,7 +56,22 @@ private final class RecordingDaemon: FirstRunDaemon {
         return grant
     }
 
-    func markComplete() { log.append(.markComplete) }
+    func markComplete() async -> Bool { record(.markComplete) }
+}
+
+/// The failure each call reports when the daemon refuses it.
+private func expectedFailure(for call: FirstRunCall) -> FirstRunFailure? {
+    switch call {
+    case .startDaemon, .setSourceSettings: return .startFailed
+    case .lookupInvite: return .inviteDead(label: "invite-invalid")
+    case .enroll: return .enrollFailed
+    case .signInNearAI: return .signInFailed
+    case .setConsentScopes: return .scopesFailed
+    case .setProjectMode, .includePastSessions: return .rulesFailed
+    case .setPrivateAI: return .privateAIFailed
+    case .grantAutomatic: return nil
+    case .markComplete: return .completeFailed
+    }
 }
 
 @MainActor
@@ -172,19 +187,20 @@ final class FirstRunRunnerTests: XCTestCase {
         XCTAssertNil(runner.failure)
         XCTAssertEqual(runner.state.sharing, .automatic)
 
-        // Every call that can fail stops the run where it failed. The grant
-        // is the one exception (`test_aRefusedGrantFinishesOnAskMe`), and
-        // `markComplete` cannot fail.
+        // Every call that can fail stops the run where it failed, with its
+        // own failure. The grant is the one exception
+        // (`test_aRefusedGrantFinishesOnAskMe`).
         for (index, call) in plan.enumerated() {
             if case .grantAutomatic = call { continue }
-            if case .markComplete = call { continue }
             let daemon = RecordingDaemon()
             daemon.failing = { $0 == call }
             let failed = FirstRunRunner(state: onUses(), daemon: daemon)
             await failed.commit(.start)
             XCTAssertEqual(daemon.log, Array(plan.prefix(index + 1)), "\(call)")
-            XCTAssertNotNil(failed.failure, "\(call) failed silently")
-            XCTAssertFalse(daemon.log.contains(.markComplete), "\(call)")
+            XCTAssertEqual(failed.failure, expectedFailure(for: call), "\(call)")
+            if call != .markComplete {
+                XCTAssertFalse(daemon.log.contains(.markComplete), "\(call)")
+            }
         }
 
         var roots = onFolders()
@@ -201,9 +217,65 @@ final class FirstRunRunnerTests: XCTestCase {
             let failed = FirstRunRunner(state: roots, daemon: daemon)
             await failed.commit(.leaveRoots)
             XCTAssertEqual(daemon.log, Array(rootsPlan.prefix(index + 1)), "\(call)")
-            XCTAssertNotNil(failed.failure, "\(call) failed silently")
+            XCTAssertEqual(failed.failure, expectedFailure(for: call), "\(call)")
             XCTAssertNotEqual(failed.state.step, .uses, "\(call) moved on after failing")
         }
+    }
+
+    func test_anUnavailableLookupKeepsTheStep() async {
+        let daemon = RecordingDaemon()
+        daemon.lookup = .unavailable
+        let state = onFolders()
+        let runner = FirstRunRunner(state: state, daemon: daemon)
+
+        await runner.commit(.leaveRoots)
+
+        let json = state.sessionRoots.settingsJSON()!
+        XCTAssertEqual(daemon.log, [.startDaemon(settingsJSON: json), .lookupInvite("INVITE-1")])
+        XCTAssertEqual(runner.failure, .lookupUnavailable)
+        XCTAssertEqual(runner.state.step, .folders, "a daemon hiccup is not a dead invite")
+        XCTAssertNil(runner.lookup)
+        XCTAssertNil(runner.state.enrolledInvite)
+
+        // The retry looks the same invite up again; nothing starts twice.
+        daemon.lookup = .found(RecordingDaemon.validLookup)
+        daemon.log = []
+        await runner.commit(.leaveRoots)
+        XCTAssertEqual(daemon.log, [.lookupInvite("INVITE-1"), .enroll("INVITE-1"), .signInNearAI])
+        XCTAssertNil(runner.failure)
+        XCTAssertEqual(runner.state.step, .uses)
+    }
+
+    func test_anUnfinishedCompleteIsReportedAndRetriedWithoutTheGrant() async {
+        let daemon = RecordingDaemon()
+        daemon.grant = .refused(label: "automatic-grant-witness-changed")
+        daemon.failing = { $0 == .markComplete }
+        let runner = FirstRunRunner(state: onUses(), daemon: daemon)
+
+        await runner.commit(.start)
+
+        XCTAssertEqual(daemon.log.last, .markComplete)
+        XCTAssertEqual(runner.failure, .completeFailed, "Start did not finish, whatever the grant said")
+        XCTAssertEqual(runner.state.sharing, .askMe)
+
+        daemon.failing = { _ in false }
+        daemon.log = []
+        await runner.commit(.start)
+        XCTAssertFalse(daemon.log.contains { if case .grantAutomatic = $0 { return true }; return false },
+            "a retry after a refused grant does not ask for Automatic again")
+        XCTAssertEqual(daemon.log.last, .markComplete)
+        XCTAssertNil(runner.failure)
+    }
+
+    func test_leavingWithoutADeclarationFailsClosed() async {
+        let daemon = RecordingDaemon()
+        let runner = FirstRunRunner(state: FirstRunState(tier: .quick, step: .folders), daemon: daemon)
+
+        await runner.commit(.leaveRoots)
+
+        XCTAssertEqual(daemon.log, [])
+        XCTAssertEqual(runner.failure, .startFailed, "an undeclared start is never silent")
+        XCTAssertEqual(runner.state.step, .folders)
     }
 
     func test_aSuccessfulLeaveRecordsTheDaemonFactsAndMovesOn() async {

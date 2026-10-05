@@ -2802,12 +2802,21 @@ extension AppModel: FirstRunDaemon {
             return .found(lookup)
         case .success(let lookup):
             return .refused(label: lookup.reasonLabel ?? "invite-invalid")
-        case .failure(let failure as DaemonClient.Failure) where !failure.message.isEmpty:
+        case .failure(let failure as DaemonClient.Failure)
+        where !failure.message.isEmpty && !Self.transientLookupLabels.contains(failure.message):
+            // Includes `invite-host-not-allowed`, which the daemon sends with
+            // the `unavailable` code but which no retry can change.
             return .refused(label: failure.message)
         case .failure, nil:
-            return .refused(label: "invite-lookup-unavailable")
+            return .unavailable
         }
     }
+
+    /// Lookup failures that say nothing about the invite: the daemon could
+    /// not reach the issuer, or its reply could not be read.
+    private static let transientLookupLabels: Set<String> = [
+        "invite-lookup-unavailable", "unparseable-response", "missing-result",
+    ]
 
     func enrollInvite(_ invite: String) async -> Bool {
         if case .succeeded = await enroll(invite: invite, scopes: []) { return true }
@@ -2851,17 +2860,24 @@ extension AppModel: FirstRunDaemon {
         case .success(let grant) where grant.granted:
             refreshStatus()
             return .granted
-        case .success:
-            return .refused(label: "grant_automatic")
         case .failure(let failure as DaemonClient.Failure) where !failure.message.isEmpty:
             return .refused(label: failure.message)
-        case .failure, nil:
-            return .refused(label: "grant_automatic")
+        case .success, .failure, nil:
+            // Not granted, and no daemon label to say why.
+            return .refused(label: "automatic-grant-unavailable")
         }
     }
 
-    func markComplete() {
+    /// Reads status first: right after enrolling, the tenant the marker is
+    /// keyed by may not have reached `status` yet. Without a tenant nothing
+    /// is marked, and that is reported rather than passed off as done.
+    func markComplete() async -> Bool {
+        if case .success(let fresh) = await firstRunCall({ try $0.status() }) {
+            publishIfChanged(\.status, fresh)
+        }
+        guard status.tenantID != nil else { return false }
         markOnboardingComplete()
+        return isOnboardingComplete
     }
 
     /// One blocking client call off the main actor. Nil without a daemon.
