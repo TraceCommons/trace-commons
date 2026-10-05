@@ -13,6 +13,15 @@ final class MonitorNavigationTests: XCTestCase {
         try String(contentsOf: root.appendingPathComponent(rel), encoding: .utf8)
     }
 
+    /// The whole file is debug-only, so a nested `#if DEBUG` with a
+    /// `#else return nil` branch describes a Release path that never compiles.
+    func test_theMonitorWindowHasOneDebugGuardAndNoReleaseBranch() throws {
+        let window = try Self.text("Views/MonitorWindowView.swift")
+        XCTAssertTrue(window.hasPrefix("#if DEBUG\n"), "the file-level guard moved")
+        XCTAssertEqual(window.components(separatedBy: "#if DEBUG").count - 1, 1, "a nested #if DEBUG is redundant")
+        XCTAssertEqual(window.components(separatedBy: "#else").count - 1, 0, "an #else under the file guard never compiles")
+    }
+
     /// The Monitor's three stores read the app's live client, re-attached
     /// whenever the daemon restarts; sample data is debug-only and opt-in.
     func test_theMonitorUsesTheLiveClient() throws {
@@ -28,15 +37,18 @@ final class MonitorNavigationTests: XCTestCase {
         XCTAssertTrue(window.contains(".task(id: Attachment(model)) {"))
         XCTAssertTrue(window.contains("live = model.liveData.map(ObjectIdentifier.init)"))
         XCTAssertTrue(window.contains("awaiting = MonitorWindowView.awaitingDaemon(model.startup)"))
-        // The function's body: from its signature to the `#endif` that
-        // closes its debug-only branch.
+        // The function's body: from its signature to the next declaration.
+        // Sample data is debug-only because the whole file is: it opens with
+        // `#if DEBUG` and its only `#endif` is the last line.
         let sample = try XCTUnwrap(window.range(of: "static func sampleClient()"))
-        let end = try XCTUnwrap(window.range(of: "#endif", range: sample.upperBound ..< window.endIndex))
-        let body = window[sample.lowerBound ..< end.upperBound]
-        XCTAssertFalse(body.dropFirst().contains("static func"), "the scan ran past sampleClient()")
-        XCTAssertTrue(body.contains("#if DEBUG"), "sample data must be debug-only")
+        let end = try XCTUnwrap(window.range(of: "static func", range: sample.upperBound ..< window.endIndex))
+        let body = window[sample.lowerBound ..< end.lowerBound]
         XCTAssertTrue(body.contains("TRACE_COMMONS_SAMPLE"))
-        XCTAssertTrue(body.contains("#else\n        return nil"), "a release build has no sample client")
+        XCTAssertTrue(body.contains("DaemonDataWiring.sample(set)"))
+        XCTAssertTrue(window.hasPrefix("#if DEBUG\n"), "sample data must be debug-only")
+        XCTAssertEqual(window.components(separatedBy: "#endif").count - 1, 1)
+        XCTAssertTrue(window.trimmingCharacters(in: .whitespacesAndNewlines).hasSuffix("#endif"),
+                      "a release build has no sample client")
     }
 
     // MARK: No client: the core is down, never empty and healthy

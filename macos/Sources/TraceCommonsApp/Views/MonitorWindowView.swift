@@ -65,27 +65,19 @@ struct MonitorWindowView: View {
     /// name that is not a set falls back to `normalDay`, and says so in the
     /// log and in the Traces tab's sample marker.
     static func sampleClient() -> (any DaemonDataClient)? {
-        #if DEBUG
         let choice = sampleChoice(ProcessInfo.processInfo.environment["TRACE_COMMONS_SAMPLE"])
         guard ProcessInfo.processInfo.environment["TRACE_COMMONS_SAMPLE"] != nil else { return nil }
         if choice.unknown { NSLog("TRACE_COMMONS_SAMPLE unrecognised; fallback %@", choice.set.rawValue) }
         let set = choice.set
         return DaemonDataWiring.sample(set)
-        #else
-        return nil
-        #endif
     }
 
     /// The Traces tab's sample marker for `sampleClient()`'s set: its name,
     /// and whether `TRACE_COMMONS_SAMPLE` named no set. Nil over the daemon.
     static func sampleMarker() -> (set: String, unknown: Bool)? {
-        #if DEBUG
         guard let name = ProcessInfo.processInfo.environment["TRACE_COMMONS_SAMPLE"] else { return nil }
         let choice = sampleChoice(name)
         return (choice.set.rawValue, choice.unknown)
-        #else
-        return nil
-        #endif
     }
 
     /// Whether a nil client means the daemon has not started yet, rather
