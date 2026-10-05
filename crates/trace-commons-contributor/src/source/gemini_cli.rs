@@ -35,7 +35,7 @@ pub const GEMINI_CLI_HOME_ENV: &str = "GEMINI_CLI_HOME";
 pub const GEMINI_SESSION_SUBDIR: &str = "tmp";
 
 /// The per-project subdirectory holding session documents.
-const CHATS_DIR: &str = "chats";
+pub(crate) const CHATS_DIR: &str = "chats";
 
 /// The sibling file naming the project's true working directory. Older
 /// hash-named project directories do not have one.
@@ -74,7 +74,7 @@ impl GeminiCliSource {
 }
 
 /// The session naming rule, in one place: `session-<...>.json`.
-fn is_session_file_name(file_name: &str) -> bool {
+pub(crate) fn is_session_file_name(file_name: &str) -> bool {
     file_name.starts_with("session-") && file_name.ends_with(".json")
 }
 

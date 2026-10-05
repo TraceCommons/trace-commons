@@ -158,4 +158,30 @@ final class SourceCandidateTests: XCTestCase {
             """
         XCTAssertEqual(try SourceCandidate.decodeList(from: json).count, 0)
     }
+
+    /// What `tc_describe_folder` returns for a flat folder of `.json`
+    /// exports: an OpenCode row and a trajectory row, both naming the picked
+    /// folder. `SourceKind` has no trajectory case, so that row is dropped
+    /// here and the OpenCode row survives.
+    func testADescribedFolderDecodesAndDropsTheTrajectoryRow() throws {
+        let json = """
+            [{"source":"opencode","path":"/Users/someone/exports","exists":true,
+              "session_count":2,"most_recent":"2026-10-04T09:00:00.123456789Z",
+              "relocated_by_env":false,"answers_at":null},
+             {"source":"trajectory","path":"/Users/someone/exports","exists":true,
+              "session_count":2,"most_recent":"2026-10-04T09:00:00.123456789Z",
+              "relocated_by_env":false,"answers_at":null}]
+            """
+        let candidates = try SourceCandidate.decodeList(from: json)
+        XCTAssertEqual(candidates.map(\.source), [.opencode])
+        XCTAssertEqual(candidates[0].path, "/Users/someone/exports")
+        XCTAssertEqual(candidates[0].sessionCount, 2)
+        XCTAssertNotNil(candidates[0].mostRecent)
+    }
+
+    /// A folder that matches no layout is an empty array, and decodes to no
+    /// rows rather than failing.
+    func testAnUnrecognisedFolderDecodesToNoRows() throws {
+        XCTAssertEqual(try SourceCandidate.decodeList(from: "[]"), [])
+    }
 }
