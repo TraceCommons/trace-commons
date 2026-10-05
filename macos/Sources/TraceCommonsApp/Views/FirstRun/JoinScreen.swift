@@ -43,11 +43,35 @@ enum JoinLayout {
     }
 
     /// near.ai is chosen here and signed in after the daemon starts
-    /// (`FirstRunPlan`), so choosing it is all the button does.
-    static func chooseNearAI(_ state: FirstRunState) -> FirstRunState {
-        var chosen = state
-        chosen.account = .nearAI
-        return chosen
+    /// (`FirstRunPlan`), so the button only chooses it, and pressed again
+    /// undoes the choice until the sign-in happened. A held account -- a
+    /// signed-in near.ai or a passkey the daemon bound -- is not replaced.
+    static func toggleNearAI(_ state: FirstRunState) -> FirstRunState {
+        guard canToggleNearAI(state) else { return state }
+        var toggled = state
+        toggled.account = nearAIChosen(state) ? .none : .nearAI
+        return toggled
+    }
+
+    static func canToggleNearAI(_ state: FirstRunState) -> Bool {
+        switch state.account {
+        case .none, .watchOnly: return true
+        case .nearAI: return !state.signedIn
+        case .passkey: return false
+        }
+    }
+
+    /// near.ai chosen and not yet signed in: the choice is still undoable.
+    static func nearAIChosen(_ state: FirstRunState) -> Bool {
+        state.account == .nearAI && !state.signedIn
+    }
+
+    static func nearAILine(_ state: FirstRunState, copy: FirstRunCopy.Join) -> String {
+        nearAIChosen(state) ? copy.nearAiChosen : copy.nearAiText
+    }
+
+    static func nearAIAction(_ state: FirstRunState, copy: FirstRunCopy.Join) -> String {
+        nearAIChosen(state) ? copy.nearAiUndo : copy.nearAiSignIn
     }
 
     /// "Signed in" is the daemon's fact, never the choice.
@@ -58,19 +82,22 @@ enum JoinLayout {
     /// "Look up": the host is read locally (`TCInvite.issuerHost`), since the
     /// daemon that would look the invite up does not run yet. Something that
     /// is not an invite is refused and not kept, so it can never be enrolled.
+    /// A found invite replaces the one the daemon refused, so that refusal
+    /// (`.inviteDead`) is cleared; any other failure is kept.
     static func lookUp(
-        _ draft: String, in state: FirstRunState, host: (String) -> String?
-    ) -> (state: FirstRunState, found: Bool) {
+        _ draft: String, in state: FirstRunState, failure: FirstRunFailure?, host: (String) -> String?
+    ) -> (state: FirstRunState, found: Bool, failure: FirstRunFailure?) {
         let invite = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         var looked = state
         guard let issuerHost = host(invite) else {
             looked.invite = ""
             looked.issuerHost = nil
-            return (looked, false)
+            return (looked, false, failure)
         }
         looked.invite = invite
         looked.issuerHost = issuerHost
-        return (looked, true)
+        if case .inviteDead = failure { return (looked, true, nil) }
+        return (looked, true, failure)
     }
 
     /// Once the daemon enrolled an invite the field is read-only, so an
@@ -94,6 +121,9 @@ enum JoinLayout {
         }
         if refused { return .error(copy.inviteError) }
         if case .inviteDead = failure { return .error(copy.inviteError) }
+        // Watch only joins no invite (`FirstRunPlan`), so none is shown as
+        // if it would be.
+        if state.account == .watchOnly { return .hidden }
         if let host = state.issuerHost, !state.invite.isEmpty { return .host(host) }
         return .hidden
     }
@@ -104,6 +134,12 @@ enum JoinLayout {
         guard let range = lookup?.creditRange else { return dash }
         let span = range.min == range.max ? "\(range.min)" : "\(range.min)–\(range.max)"
         return "\(span) \(range.unit)"
+    }
+
+    /// The passkey ceremony completes with the daemon, which runs only once
+    /// Folders or Tools commits, so before then creating one is unavailable.
+    static func passkeyAvailable(_ state: FirstRunState, hasPasskeyAccount: Bool) -> Bool {
+        hasPasskeyAccount && state.daemonStarted
     }
 
     static func passkeyDone(_ state: FirstRunState) -> Bool {
@@ -148,10 +184,12 @@ enum JoinLayout {
 /// the passkey and near.ai cards, the quiet no-sharing card, and "Skip:
 /// watch only" until an account exists.
 ///
-/// Nothing here reaches the daemon: it is not running yet. The invite is
-/// looked up and enrolled, and near.ai signed in, when Folders or Tools
-/// commits (`FirstRunPlan`). The passkey sheets run on `passkeyAccount`;
-/// without one, creating a passkey is unavailable.
+/// Join holds no daemon client: on a first pass the daemon is not running.
+/// The invite is looked up and enrolled, and a chosen near.ai signed in,
+/// when Folders or Tools commits (`FirstRunPlan`). The one daemon path here
+/// is `passkeyAccount`, whose ceremony completes with the daemon, so
+/// creating a passkey is available only once the daemon started (back on
+/// Join after Folders or Tools) and a `passkeyAccount` was given.
 struct JoinScreen: View {
     let copy: FirstRunCopy
     @ObservedObject var runner: FirstRunRunner
@@ -259,23 +297,27 @@ struct JoinScreen: View {
         ) {
             Button(copy.join.passkeyCreate, action: openPasskey)
                 .buttonStyle(GlassButtonStyle(.glass))
-                .disabled(passkeyAccount == nil)
+                .disabled(!JoinLayout.passkeyAvailable(runner.state, hasPasskeyAccount: passkeyAccount != nil))
         }
     }
 
     private var nearAICard: some View {
         accountCard(
             eyebrow: copy.join.nearAiEyebrow,
-            text: copy.join.nearAiText,
+            text: JoinLayout.nearAILine(runner.state, copy: copy.join),
             done: JoinLayout.showsSignedIn(runner.state) ? copy.join.signedIn : nil
         ) {
             Button {
-                runner.state = JoinLayout.chooseNearAI(runner.state)
+                runner.state = JoinLayout.toggleNearAI(runner.state)
             } label: {
-                Label(copy.join.nearAiSignIn, systemImage: "arrow.up.right.square")
-                    .labelStyle(.titleAndIcon)
+                Label(
+                    JoinLayout.nearAIAction(runner.state, copy: copy.join),
+                    systemImage: JoinLayout.nearAIChosen(runner.state)
+                        ? "arrow.uturn.backward" : "arrow.up.right.square")
+                .labelStyle(.titleAndIcon)
             }
             .buttonStyle(GlassButtonStyle(.glass))
+            .disabled(!JoinLayout.canToggleNearAI(runner.state))
         }
     }
 
@@ -326,13 +368,11 @@ struct JoinScreen: View {
     }
 
     private func lookUp() {
-        let looked = JoinLayout.lookUp(currentDraft, in: runner.state, host: issuerHost)
+        let looked = JoinLayout.lookUp(currentDraft, in: runner.state, failure: runner.failure, host: issuerHost)
         runner.state = looked.state
+        runner.failure = looked.failure
         refused = !looked.found
-        guard looked.found else { return }
-        draft = nil
-        // A new invite replaces the one the daemon refused; its error goes.
-        if case .inviteDead = runner.failure { runner.failure = nil }
+        if looked.found { draft = nil }
     }
 
     /// A fresh model each time: a model's outcome is set once, so a reused

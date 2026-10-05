@@ -40,13 +40,15 @@ final class JoinScreenTests: XCTestCase {
         XCTAssertEqual(JoinLayout.inviteLine(state, lookup: nil, failure: nil, copy: copy.join), .hidden)
 
         // Look up reads the host locally; nothing reaches the daemon, which
-        // does not run yet.
-        let looked = JoinLayout.lookUp("  invite:issuer.example  ", in: state, host: Self.host)
+        // does not run yet: Join holds no daemon to reach.
+        let source = try Self.source()
+        XCTAssertFalse(source.contains("DaemonClient"))
+        XCTAssertFalse(source.contains("FirstRunDaemon"))
+        let looked = JoinLayout.lookUp("  invite:issuer.example  ", in: state, failure: nil, host: Self.host)
         XCTAssertTrue(looked.found)
         state = looked.state
         XCTAssertEqual(state.invite, "invite:issuer.example")
         XCTAssertEqual(state.issuerHost, "issuer.example")
-        XCTAssertFalse(state.daemonStarted)
         XCTAssertEqual(
             JoinLayout.inviteLine(state, lookup: nil, failure: nil, copy: copy.join), .host("issuer.example"))
         XCTAssertTrue(JoinLayout.inviteIsEditable(state))
@@ -87,13 +89,109 @@ final class JoinScreenTests: XCTestCase {
 
         // Something that is not an invite is refused locally with the same
         // line, and is not kept, so it can never be enrolled.
-        let refused = JoinLayout.lookUp("not an invite", in: state, host: Self.host)
+        let dead = FirstRunFailure.inviteDead(label: "exhausted")
+        let refused = JoinLayout.lookUp("not an invite", in: state, failure: dead, host: Self.host)
         XCTAssertFalse(refused.found)
         XCTAssertEqual(refused.state.invite, "")
         XCTAssertNil(refused.state.issuerHost)
+        XCTAssertEqual(refused.failure, dead)
         XCTAssertEqual(
             JoinLayout.inviteLine(refused.state, lookup: nil, failure: nil, copy: copy.join, refused: true),
             .error(copy.join.inviteError))
+
+        // A new invite replaces the one the daemon refused, so its error goes.
+        let replaced = JoinLayout.lookUp("invite:other.example", in: state, failure: dead, host: Self.host)
+        XCTAssertTrue(replaced.found)
+        XCTAssertNil(replaced.failure)
+        XCTAssertEqual(
+            JoinLayout.inviteLine(replaced.state, lookup: nil, failure: replaced.failure, copy: copy.join),
+            .host("other.example"))
+    }
+
+    /// Skip answers watch only, and a watch-only setup joins no invite
+    /// (`FirstRunPlan`), so the looked-up host is not shown as if it would be.
+    func test_watchOnlyHidesTheInviteItWillNotJoin() throws {
+        let copy = try coreCopy()
+        let looked = JoinLayout.lookUp(
+            "invite:issuer.example", in: FirstRunState(toolAnswers: [.claudeCode: .off, .codex: .off]),
+            failure: nil, host: Self.host
+        ).state
+        XCTAssertEqual(
+            JoinLayout.inviteLine(looked, lookup: nil, failure: nil, copy: copy.join), .host("issuer.example"))
+        let skipped = JoinLayout.forward(looked)
+        XCTAssertEqual(skipped.account, .watchOnly)
+        let plan = FirstRunPlan.calls(for: skipped, at: .leaveRoots)
+        XCTAssertFalse(plan.isEmpty)
+        XCTAssertFalse(plan.contains(.enroll("invite:issuer.example")))
+        XCTAssertEqual(JoinLayout.inviteLine(skipped, lookup: nil, failure: nil, copy: copy.join), .hidden)
+
+        // An invite the daemon already enrolled stays shown: that is a fact.
+        var enrolled = skipped
+        enrolled.enrolledInvite = enrolled.invite
+        guard case .joined = JoinLayout.inviteLine(enrolled, lookup: nil, failure: nil, copy: copy.join) else {
+            return XCTFail("an enrolled invite reads as joined")
+        }
+    }
+
+    /// near.ai is chosen on Join and signed in after the daemon starts, so a
+    /// choice not yet signed in can be undone, and Skip then reaches watch
+    /// only with no sign-in planned.
+    func test_aChosenNearAICanBeUndoneUntilItIsSignedIn() throws {
+        let copy = try coreCopy()
+        let start = FirstRunState(toolAnswers: [.claudeCode: .off, .codex: .off])
+        XCTAssertEqual(JoinLayout.nearAILine(start, copy: copy.join), copy.join.nearAiText)
+        XCTAssertEqual(JoinLayout.nearAIAction(start, copy: copy.join), copy.join.nearAiSignIn)
+        XCTAssertTrue(JoinLayout.canToggleNearAI(start))
+
+        let chosen = JoinLayout.toggleNearAI(start)
+        XCTAssertEqual(chosen.account, .nearAI)
+        XCTAssertEqual(JoinLayout.nearAILine(chosen, copy: copy.join), copy.join.nearAiChosen)
+        XCTAssertEqual(JoinLayout.nearAIAction(chosen, copy: copy.join), copy.join.nearAiUndo)
+        XCTAssertTrue(JoinLayout.canToggleNearAI(chosen))
+        XCTAssertEqual(FirstRunPlan.calls(for: chosen, at: .leaveRoots).last, .signInNearAI)
+
+        let undone = JoinLayout.toggleNearAI(chosen)
+        XCTAssertEqual(undone.account, AccountAnswer.none)
+        XCTAssertEqual(JoinLayout.footerTitle(undone, copy: copy), copy.join.skip)
+        let skipped = JoinLayout.forward(undone)
+        XCTAssertEqual(skipped.account, .watchOnly)
+        let plan = FirstRunPlan.calls(for: skipped, at: .leaveRoots)
+        XCTAssertTrue(plan.contains { if case .startDaemon = $0 { return true } else { return false } })
+        XCTAssertFalse(plan.contains(.signInNearAI))
+
+        // Back on Join after a failed sign-in, the choice still undoes.
+        var failed = JoinLayout.forward(chosen)
+        failed.daemonStarted = true
+        failed.step = .join
+        XCTAssertEqual(JoinLayout.toggleNearAI(failed).account, AccountAnswer.none)
+
+        // A signed-in near.ai is the daemon's fact: the card shows it and the
+        // action does nothing.
+        let signedIn = FirstRunState(account: .nearAI, daemonStarted: true, signedIn: true)
+        XCTAssertFalse(JoinLayout.canToggleNearAI(signedIn))
+        XCTAssertEqual(JoinLayout.toggleNearAI(signedIn), signedIn)
+    }
+
+    /// A passkey bound in the daemon is an account; near.ai cannot be chosen
+    /// over it, which would plan a near.ai sign-in on top of that session.
+    func test_aPasskeyAccountKeepsNearAIFromReplacingIt() throws {
+        for name in ["Mac", ""] {
+            let held = FirstRunState(
+                account: .passkey(name: name), toolAnswers: [.claudeCode: .off, .codex: .off], daemonStarted: true)
+            XCTAssertFalse(JoinLayout.canToggleNearAI(held))
+            let after = JoinLayout.toggleNearAI(held)
+            XCTAssertEqual(after, held)
+            XCTAssertTrue(JoinLayout.passkeyDone(after))
+            XCTAssertFalse(FirstRunPlan.calls(for: after, at: .leaveRoots).contains(.signInNearAI))
+        }
+    }
+
+    /// The passkey ceremony completes with the daemon, which runs only once
+    /// Folders or Tools commits; before then the action is unavailable.
+    func test_creatingAPasskeyWaitsForTheDaemon() {
+        XCTAssertFalse(JoinLayout.passkeyAvailable(FirstRunState(), hasPasskeyAccount: true))
+        XCTAssertFalse(JoinLayout.passkeyAvailable(FirstRunState(daemonStarted: true), hasPasskeyAccount: false))
+        XCTAssertTrue(JoinLayout.passkeyAvailable(FirstRunState(daemonStarted: true), hasPasskeyAccount: true))
     }
 
     func test_skipReadsWatchOnlyUntilAnAccountExists() throws {
@@ -115,7 +213,7 @@ final class JoinScreenTests: XCTestCase {
         let skipped = JoinLayout.forward(FirstRunState())
         XCTAssertEqual(skipped.account, .watchOnly)
         XCTAssertEqual(skipped.step, .folders)
-        let continued = JoinLayout.forward(JoinLayout.chooseNearAI(FirstRunState(tier: .custom)))
+        let continued = JoinLayout.forward(JoinLayout.toggleNearAI(FirstRunState(tier: .custom)))
         XCTAssertEqual(continued.account, .nearAI)
         XCTAssertEqual(continued.step, .tools)
 
@@ -186,7 +284,7 @@ final class JoinScreenTests: XCTestCase {
             "copy.join.titleLight", "copy.join.titleBold", "copy.join.body", "copy.join.bodyEmphasis",
             "copy.join.inviteEyebrow", "copy.join.invitePlaceholder", "copy.join.lookUp",
             "copy.join.passkeyEyebrow", "copy.join.passkeyCreate", "copy.join.passkeyDone",
-            "copy.join.nearAiEyebrow", "copy.join.nearAiText", "copy.join.nearAiSignIn", "copy.join.signedIn",
+            "copy.join.nearAiEyebrow", "copy.join.signedIn",
             "copy.join.noSharing",
         ] {
             XCTAssertTrue(source.contains(field), "missing \(field)")
