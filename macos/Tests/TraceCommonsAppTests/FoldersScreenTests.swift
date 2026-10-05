@@ -104,10 +104,104 @@ final class FoldersScreenTests: XCTestCase {
     /// `watcher_start_failed` on the step.
     func test_aFailedStartShowsTheCoresWatcherLine() throws {
         let onboarding = try XCTUnwrap(TCOnboardingCopy.load())
+        let firstRun: FirstRunCopy = try copy()
         XCTAssertEqual(
-            FoldersScreenLayout.notice(for: .startFailed, onboarding: onboarding), onboarding.watcherStartFailed)
-        XCTAssertNil(FoldersScreenLayout.notice(for: nil, onboarding: onboarding))
-        XCTAssertNil(FoldersScreenLayout.notice(for: .startFailed, onboarding: nil))
+            FoldersScreenLayout.notice(for: .startFailed, copy: firstRun, onboarding: onboarding),
+            onboarding.watcherStartFailed)
+        XCTAssertNil(FoldersScreenLayout.notice(for: nil, copy: firstRun, onboarding: onboarding))
+        XCTAssertNil(FoldersScreenLayout.notice(for: .startFailed, copy: firstRun, onboarding: nil))
+    }
+
+    /// Every way `.leaveRoots` can stop while the person stays on Folders
+    /// shows a core line, except a failed near.ai sign-in, which is silent
+    /// by decision: Continue reopens the sheet, and a cancelled sheet is the
+    /// person's own act. A failed enroll reads the invite path's one
+    /// sentence (`OnboardingConnectView`: the daemon never echoes why).
+    @MainActor
+    func test_everyFailureThatStaysOnFoldersShowsACoreLine() async throws {
+        let onboarding = try XCTUnwrap(TCOnboardingCopy.load())
+        let firstRun: FirstRunCopy = try copy()
+        XCTAssertEqual(
+            FoldersScreenLayout.notice(for: .enrollFailed, copy: firstRun, onboarding: onboarding),
+            firstRun.join.inviteError)
+
+        var state = FirstRunState(tier: .quick, step: .folders)
+        state.invite = "INVITE-1"
+        state.issuerHost = "issuer.example"
+        state.account = .nearAI
+        state.answer(.claudeCode, .watch(path: "/Users/someone/.claude/projects"))
+        state.answer(.codex, .off)
+        let plan = FirstRunPlan.calls(for: state, at: .leaveRoots)
+        XCTAssertTrue(plan.contains(.enroll("INVITE-1")))
+        XCTAssertTrue(plan.contains(.signInNearAI))
+
+        var seen: [FirstRunFailure] = []
+        for failing in plan {
+            let daemon = RecordingFirstRunDaemon()
+            if case .lookupInvite = failing {
+                daemon.lookup = .refused(label: "invite-invalid")
+            } else {
+                daemon.failing = { $0 == failing }
+            }
+            let runner = FirstRunRunner(state: state, daemon: daemon)
+            await runner.commit(.leaveRoots)
+            let failure = try XCTUnwrap(runner.failure, "\(failing)")
+            seen.append(failure)
+            guard runner.state.step == .folders else { continue }
+            let notice = FoldersScreenLayout.notice(for: failure, copy: firstRun, onboarding: onboarding)
+            switch failure {
+            case .signInFailed:
+                XCTAssertNil(notice)
+            case .startFailed, .inviteDead, .enrollFailed, .scopesFailed, .rulesFailed, .privateAIFailed,
+                .grantRefused:
+                XCTAssertNotNil(notice, "\(failure)")
+            }
+        }
+        XCTAssertTrue(seen.contains(.startFailed))
+        XCTAssertTrue(seen.contains(.enrollFailed))
+        XCTAssertTrue(seen.contains(.signInFailed))
+
+        // The frame is handed that notice.
+        let screen = try Self.source("FoldersScreen.swift")
+        XCTAssertTrue(screen.contains("notice: FoldersScreenLayout.notice("))
+    }
+
+    /// Back is withdrawn while a commit runs: the runner moves the step on
+    /// from wherever the state is when the calls finish.
+    func test_backIsWithdrawnWhileCommitting() throws {
+        let screen = try Self.source("FoldersScreen.swift")
+        XCTAssertTrue(screen.contains("onBack: runner.isCommitting ? nil :"))
+    }
+
+    /// A missing tool the state already watches (restored, or added on
+    /// Custom's Tools) offers Watch, so the picker shows what Continue reads.
+    func test_aWatchedMissingToolOffersWatch() {
+        let missing = Self.candidate(.codex, exists: false)
+        var state = FirstRunState(step: .folders)
+        XCTAssertEqual(ToolAnswerRowLayout.options(for: missing, in: state), [.dontUse])
+
+        state.answer(.codex, .watch(path: "/Volumes/work/codex"))
+        XCTAssertEqual(ToolAnswerRowLayout.answer(in: state, for: missing), .watch)
+        XCTAssertEqual(ToolAnswerRowLayout.options(for: missing, in: state), [.watch, .dontUse])
+        XCTAssertEqual(ToolAnswerRowLayout.shownPath(in: state, for: missing), "/Volumes/work/codex")
+
+        let row = (try? Self.source("ToolAnswerRow.swift")) ?? ""
+        XCTAssertTrue(row.contains("ToolAnswerRowLayout.options(for: candidate, in: state)"))
+    }
+
+    /// A chosen folder survives "I don't use it" and back to Watch.
+    func test_aChosenFolderSurvivesDontUseAndBack() {
+        let claude = Self.candidate(.claudeCode, exists: true)
+        var state = FirstRunState(step: .folders)
+
+        ToolAnswerRowLayout.choose(folder: "/Volumes/work/claude", for: claude, in: &state)
+        ToolAnswerRowLayout.select(.dontUse, for: claude, in: &state, chosenFolder: "/Volumes/work/claude")
+        XCTAssertEqual(state.toolAnswers[.claudeCode], .off)
+        ToolAnswerRowLayout.select(.watch, for: claude, in: &state, chosenFolder: "/Volumes/work/claude")
+        XCTAssertEqual(state.toolAnswers[.claudeCode], .watch(path: "/Volumes/work/claude"))
+
+        let row = (try? Self.source("ToolAnswerRow.swift")) ?? ""
+        XCTAssertTrue(row.contains("chosenFolder: chosenFolder"))
     }
 
     func test_choosingAFolderWatchesThatPath() {

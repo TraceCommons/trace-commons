@@ -14,11 +14,20 @@ enum FoldersScreenLayout {
     }
 
     /// The core's sentence for a failure this step can show. A failed start
-    /// reads `watcher_start_failed` and the step stays; a dead invite has
-    /// already returned the person to Join, which shows its own line.
-    static func notice(for failure: FirstRunFailure?, onboarding: TCOnboardingCopy?) -> String? {
+    /// reads `watcher_start_failed` and the step stays. A failed enroll reads
+    /// the invite path's one sentence, `invite_error`: the daemon never
+    /// echoes why enroll refused (see `OnboardingConnectView`). A dead invite
+    /// has already returned the person to Join, which shows its own line.
+    static func notice(
+        for failure: FirstRunFailure?, copy: FirstRunCopy, onboarding: TCOnboardingCopy?
+    ) -> String? {
         switch failure {
         case .startFailed?: return onboarding?.watcherStartFailed
+        case .enrollFailed?: return copy.join.inviteError
+        // Silent by decision: the step stays and Continue reopens near.ai's
+        // sheet, and a cancelled sheet is the person's own act. No core line
+        // tells a cancel from a refusal.
+        case .signInFailed?: return nil
         default: return nil
         }
     }
@@ -41,8 +50,10 @@ struct FoldersScreen: View {
         FirstRunFrame(
             copy: copy,
             state: $runner.state,
-            onBack: { runner.state = FirstRunNavigation.back(runner.state) },
-            notice: FoldersScreenLayout.notice(for: runner.failure, onboarding: onboarding),
+            // Withdrawn while a commit runs: the runner moves the step on
+            // from wherever the state is when its calls finish.
+            onBack: runner.isCommitting ? nil : { runner.state = FirstRunNavigation.back(runner.state) },
+            notice: FoldersScreenLayout.notice(for: runner.failure, copy: copy, onboarding: onboarding),
             footer: FirstRunFooter(
                 title: copy.frame.continueButton,
                 isEnabled: canContinue,

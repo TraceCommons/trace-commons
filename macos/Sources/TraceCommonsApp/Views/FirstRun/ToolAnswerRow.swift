@@ -21,6 +21,16 @@ enum ToolAnswerRowLayout {
         candidate.exists ? [.watch, .dontUse] : [.dontUse]
     }
 
+    /// The options as the row offers them: a missing tool the state already
+    /// watches (a restored state, or a folder added on Custom's Tools) also
+    /// offers Watch, so the picker can show the answer Continue counts.
+    static func options(for candidate: SourceCandidate, in state: FirstRunState) -> [ToolAnswer] {
+        let base = options(for: candidate)
+        if base.contains(.watch) { return base }
+        if case .watch = state.sessionRoots[candidate.source] { return [.watch] + base }
+        return base
+    }
+
     /// Ron's folder button sits on a found tool's row only.
     static func offersFolderChoice(_ candidate: SourceCandidate) -> Bool {
         candidate.exists
@@ -32,7 +42,8 @@ enum ToolAnswerRowLayout {
     }
 
     /// What the row shows as answered, read from the same declaration
-    /// Continue reads, so the two cannot disagree.
+    /// Continue reads. The picker can show it because
+    /// `options(for:in:)` offers every answer this can return.
     static func answer(in state: FirstRunState, for candidate: SourceCandidate) -> ToolAnswer? {
         switch state.sessionRoots[candidate.source] {
         case .undecided: return nil
@@ -47,10 +58,15 @@ enum ToolAnswerRowLayout {
         return candidate.path
     }
 
-    static func select(_ answer: ToolAnswer?, for candidate: SourceCandidate, in state: inout FirstRunState) {
+    /// `chosenFolder` is the row's last "Choose a different folder", kept
+    /// so "I don't use it" and back to Watch returns to it, not discovery's.
+    static func select(
+        _ answer: ToolAnswer?, for candidate: SourceCandidate, in state: inout FirstRunState,
+        chosenFolder: String? = nil
+    ) {
         switch answer {
         case .watch?:
-            state.answer(candidate.source, .watch(path: shownPath(in: state, for: candidate)))
+            state.answer(candidate.source, .watch(path: chosenFolder ?? shownPath(in: state, for: candidate)))
         case .dontUse?:
             state.answer(candidate.source, .off)
         case nil:
@@ -82,6 +98,8 @@ struct ToolAnswerRow: View {
     let meta: String
     @Binding var state: FirstRunState
     var installURL: URL? = nil
+
+    @State private var chosenFolder: String?
 
     var body: some View {
         GlassCard {
@@ -129,6 +147,7 @@ struct ToolAnswerRow: View {
                     if ToolAnswerRowLayout.offersFolderChoice(candidate) {
                         GlassFolderButton(ToolAnswerRowLayout.fill(copy.chooseFolder, tool: candidate.source)) {
                             if let path = Self.pickFolder() {
+                                chosenFolder = path
                                 ToolAnswerRowLayout.choose(folder: path, for: candidate, in: &state)
                             }
                         }
@@ -141,12 +160,12 @@ struct ToolAnswerRow: View {
     private var answer: Binding<ToolAnswer?> {
         Binding(
             get: { ToolAnswerRowLayout.answer(in: state, for: candidate) },
-            set: { ToolAnswerRowLayout.select($0, for: candidate, in: &state) }
+            set: { ToolAnswerRowLayout.select($0, for: candidate, in: &state, chosenFolder: chosenFolder) }
         )
     }
 
     private var options: [GlassPickerOption<ToolAnswer>] {
-        ToolAnswerRowLayout.options(for: candidate).map { option in
+        ToolAnswerRowLayout.options(for: candidate, in: state).map { option in
             switch option {
             case .watch: return GlassPickerOption(copy.watch, value: .watch, dot: .on)
             case .dontUse: return GlassPickerOption(copy.dontUse, value: .dontUse, dot: .off)
