@@ -88,6 +88,28 @@ struct MonitorWindowView: View {
         #endif
     }
 
+    /// Whether a nil client means the daemon has not started yet, rather
+    /// than that it is down: only while start-up is still under way.
+    /// Refused, waiting on its folders, or gone is down, and is said.
+    static func awaitingDaemon(_ startup: AppModel.Startup) -> Bool {
+        startup == .starting
+    }
+
+    /// What the stores are attached to: the live client, and whether the
+    /// daemon is still starting. Both are the task's id, so the stores are
+    /// re-attached when start-up ends without a client, and a daemon that
+    /// never starts is said to be down rather than awaited for good.
+    struct Attachment: Hashable {
+        let live: ObjectIdentifier?
+        let awaiting: Bool
+
+        @MainActor
+        init(_ model: AppModel) {
+            live = model.liveData.map(ObjectIdentifier.init)
+            awaiting = MonitorWindowView.awaitingDaemon(model.startup)
+        }
+    }
+
     /// The set a `TRACE_COMMONS_SAMPLE` value names, and whether it named
     /// none (unset or empty is the default, not unknown).
     static func sampleChoice(_ name: String?) -> (set: SampleDaemonClient.SampleSet, unknown: Bool) {
@@ -151,15 +173,17 @@ struct MonitorWindowView: View {
             }
         }
         .glassWindow()
-        // The app's live client, re-attached whenever the daemon restarts;
-        // with none, each store draws the core as down.
-        .task(id: model.liveData.map(ObjectIdentifier.init)) {
+        // The app's live client, re-attached whenever the daemon restarts
+        // or start-up ends; with none, each store draws the core as down,
+        // except while the daemon is still starting, when it is loading.
+        .task(id: Attachment(model)) {
+            let attachment = Attachment(model)
             let client = Self.sampleClient() ?? model.daemonData
-            traces.attach(client)
+            traces.attach(client, awaiting: attachment.awaiting)
             let marker = Self.sampleMarker()
             traces.markSample(marker?.set, unknown: marker?.unknown ?? false)
-            inference.attach(client)
-            home.attach(client)
+            inference.attach(client, awaiting: attachment.awaiting)
+            home.attach(client, awaiting: attachment.awaiting)
             async let a: () = traces.run()
             async let b: () = inference.run()
             async let c: () = home.run()

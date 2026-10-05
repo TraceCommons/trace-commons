@@ -19,9 +19,15 @@ final class MonitorNavigationTests: XCTestCase {
         let window = try Self.text("Views/MonitorWindowView.swift")
         XCTAssertFalse(window.contains("DaemonDataWiring.sample(choice.set)"), "a store is built on sample data")
         for store in ["traces", "inference", "home"] {
-            XCTAssertTrue(window.contains("\(store).attach(client)"), "\(store) is never attached to the live client")
+            XCTAssertTrue(
+                window.contains("\(store).attach(client, awaiting: attachment.awaiting)"),
+                "\(store) is never attached to the live client")
         }
-        XCTAssertTrue(window.contains(".task(id: model.liveData.map(ObjectIdentifier.init))"))
+        // Re-attached when the client changes AND when start-up ends, so a
+        // daemon that never starts is said to be down rather than awaited.
+        XCTAssertTrue(window.contains(".task(id: Attachment(model)) {"))
+        XCTAssertTrue(window.contains("live = model.liveData.map(ObjectIdentifier.init)"))
+        XCTAssertTrue(window.contains("awaiting = MonitorWindowView.awaitingDaemon(model.startup)"))
         // The function's body: from its signature to the `#endif` that
         // closes its debug-only branch.
         let sample = try XCTUnwrap(window.range(of: "static func sampleClient()"))
@@ -57,6 +63,39 @@ final class MonitorNavigationTests: XCTestCase {
         XCTAssertEqual(store.failures["inference_calls"], .unreachable)
         XCTAssertEqual(store.failures["harness_list"], .unreachable)
         XCTAssertNil(store.calls)
+    }
+
+    // MARK: At launch, before the daemon has started: loading, not down (G26)
+
+    /// The Monitor opened before the daemon is up is normal start-up, not a
+    /// fault: each store is loading, never "the watcher isn't answering".
+    func test_whileTheDaemonStartsEachStoreIsLoadingNotDown() async {
+        let traces = TracesStore(client: nil)
+        traces.attach(nil, awaiting: true)
+        await traces.run()
+        XCTAssertEqual(traces.phase, .loading, "start-up is drawn as the core being down")
+        XCTAssertNil(traces.decisionsOwed)
+
+        let home = HomeStore(client: nil)
+        home.attach(nil, awaiting: true)
+        await home.run()
+        XCTAssertTrue(home.failures.isEmpty, "start-up is drawn as the core being down")
+        XCTAssertEqual(HomeFormat.watchingState(home), .loading)
+
+        let inference = InferenceStore(client: nil)
+        inference.attach(nil, awaiting: true)
+        await inference.run()
+        XCTAssertTrue(inference.failures.isEmpty, "start-up is drawn as the core being down")
+        XCTAssertNil(inference.calls)
+    }
+
+    /// Only a daemon still starting is awaited. One that was refused, needs
+    /// its folders, or has gone is down, and says so.
+    func test_onlyAStartingDaemonIsAwaited() {
+        XCTAssertTrue(MonitorWindowView.awaitingDaemon(.starting))
+        XCTAssertFalse(MonitorWindowView.awaitingDaemon(.running))
+        XCTAssertFalse(MonitorWindowView.awaitingDaemon(.needsRoots))
+        XCTAssertFalse(MonitorWindowView.awaitingDaemon(.refused("no")))
     }
 
     // MARK: Attaching a new client: loading again, nothing from the old one as current

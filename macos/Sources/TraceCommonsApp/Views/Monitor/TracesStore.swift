@@ -59,6 +59,11 @@ final class TracesStore {
     /// refusal, notice or undo is never drawn on the new client's tab. (A
     /// load on the same client must not drop a write's answer.)
     private var attachment = 0
+    /// True while no client is attached because the daemon is still
+    /// starting (set by `attach`). `run` then reads nothing and the screen
+    /// stays loading: start-up is not the core being down. Any other nil
+    /// client fails as an unreachable core.
+    private(set) var awaiting = false
 
     /// The tab's words, from the core (`tc_monitor_traces_copy_json`),
     /// decoded once rather than on every redraw. Nil leaves a label out
@@ -98,8 +103,9 @@ final class TracesStore {
     /// notices and undo offers go too: Undo would otherwise send `cancel` to
     /// the new daemon. (A failed read from the same client still keeps the
     /// last tree.)
-    func attach(_ client: (any DaemonDataClient)?) {
+    func attach(_ client: (any DaemonDataClient)?, awaiting: Bool = false) {
         self.client = client
+        self.awaiting = awaiting && client == nil
         generation += 1
         attachment += 1
         phase = .loading
@@ -227,8 +233,10 @@ final class TracesStore {
     /// Loads, then follows the event stream for as long as the calling task
     /// runs. Call it from a view's `.task`: when the view goes, the task is
     /// cancelled and the stream with it. With no client the load fails as
-    /// an unreachable core, and there is no stream to follow.
+    /// an unreachable core, and there is no stream to follow -- unless the
+    /// daemon is still starting (`awaiting`), when the tab stays loading.
     func run() async {
+        guard !awaiting else { return }
         await load()
         guard let client else { return }
         for await event in client.events() {

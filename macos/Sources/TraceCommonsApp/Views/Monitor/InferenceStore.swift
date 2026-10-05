@@ -34,6 +34,11 @@ final class InferenceStore {
     /// Bumped by each attach; a read that started against an older client
     /// is dropped when it answers, so it never writes over the new one.
     private var generation = 0
+    /// True while no client is attached because the daemon is still
+    /// starting (set by `attach`). `run` then reads nothing and the screen
+    /// stays loading: start-up is not the core being down. Any other nil
+    /// client fails as an unreachable core.
+    private(set) var awaiting = false
 
     init(client: (any DaemonDataClient)?) {
         self.client = client
@@ -41,8 +46,9 @@ final class InferenceStore {
 
     /// Follows a new client (or none): nothing read from the old one is
     /// drawn as current, so the tab is loading until the new one is read.
-    func attach(_ client: (any DaemonDataClient)?) {
+    func attach(_ client: (any DaemonDataClient)?, awaiting: Bool = false) {
         self.client = client
+        self.awaiting = awaiting && client == nil
         generation += 1
         harnesses = nil
         calls = nil
@@ -56,6 +62,8 @@ final class InferenceStore {
     /// rereads the calls page; a status change or resync rereads it all.
     /// With no client the core is down: every read says so.
     func run() async {
+        // The daemon is still starting: nothing to read yet, and not down.
+        guard !awaiting else { return }
         await load()
         guard let client else { return }
         for await event in client.events() {
