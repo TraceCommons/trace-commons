@@ -20,4 +20,15 @@ public enum TCDiscovery {
         defer { tc_string_free(raw) }
         return String(cString: raw)
     }
+
+    /// `tc_describe_folder`: the kinds whose layout a picked folder matches,
+    /// as a JSON array of rows shaped like `sourcesJSON()`'s, decoded with
+    /// `SourceCandidate.decodeList(from:)`. Empty for a folder that matches
+    /// none. Nil only when the ABI reported an error, which for a Swift
+    /// string argument means a caught panic.
+    public static func describeFolderJSON(_ path: String) -> String? {
+        guard let raw = path.withCString({ tc_describe_folder($0) }) else { return nil }
+        defer { tc_string_free(raw) }
+        return String(cString: raw)
+    }
 }

@@ -45,10 +45,10 @@
  * this library returns -- fixed labels only, the same discipline the
  * daemon's socket already applies.
  *
- * FOUR NAMED EXEMPTIONS, and no others: tc_discover_sources and
- * tc_discover_opencode_export return filesystem paths, tc_preview_body
- * returns post-redaction trace content, and tc_witness_status_json returns
- * the witness URL and signing address. Each is documented where it is
+ * FIVE NAMED EXEMPTIONS, and no others: tc_discover_sources,
+ * tc_discover_opencode_export and tc_describe_folder return filesystem
+ * paths, tc_preview_body returns post-redaction trace content, and
+ * tc_witness_status_json returns the witness URL and signing address. Each is documented where it is
  * declared, and each is a value the contributor is being asked to make a
  * decision about -- a consent prompt that will not name what it is asking
  * about is not a consent prompt.
@@ -434,6 +434,25 @@ char*       tc_discover_sources(void);
  * Returns NULL for a NULL or non-UTF-8 path, and NULL on a caught panic.
  */
 char*       tc_discover_opencode_export(const char* path);
+
+/* Recognise a folder the contributor picked, by its layout alone, so "add
+ * your tool" can say which tool's sessions it holds.
+ *
+ * Takes no handle, like tc_discover_sources. Returns an owned JSON array
+ * whose elements have the shape of one row of tc_discover_sources: source
+ * ("claude-code" | "codex" | "gemini-cli" | "cline" | "opencode" |
+ * "trajectory"), path (the picked folder itself), exists, session_count,
+ * most_recent, relocated_by_env (always false) and answers_at. One element
+ * per kind whose layout matches; a folder that fits two kinds (a flat
+ * folder of .json files is both an OpenCode and a trajectory export)
+ * reports both, and one that fits none, or is not there, is []. Free it
+ * with tc_string_free.
+ *
+ * Reads directory entries and metadata only, follows no symlink, and never
+ * opens a file. Returns NULL for a NULL or non-UTF-8 path, and NULL on a
+ * caught panic.
+ */
+char*       tc_describe_folder(const char* path);
 
 /* Every fixed word on the routing surface, in one call.
  *
