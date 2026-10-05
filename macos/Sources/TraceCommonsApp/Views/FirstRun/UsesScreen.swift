@@ -128,6 +128,14 @@ enum UsesScreenLayout {
         }
     }
 
+    /// The refusal a Start carries. A fresh pass through the disclosures
+    /// supersedes any earlier verdict; a plain Start keeps the earlier one.
+    static func refusalToCarry(
+        decidedNow: Bool, refused: FirstRunFailure?, pending: FirstRunFailure?
+    ) -> FirstRunFailure? {
+        decidedNow ? refused : pending
+    }
+
     /// After a Start: the failure to show, and a refusal decided before it
     /// that is still to be shown. A Start that failed keeps the refusal for
     /// the retry, which goes through on Ask me; one that succeeded shows it.
@@ -336,7 +344,8 @@ struct UsesScreen: View {
             disclosure = SharingDisclosureFlow()
             return
         }
-        Task { await commitStart(refused: nil) }
+        let carried = UsesScreenLayout.refusalToCarry(decidedNow: false, refused: nil, pending: pendingRefusal)
+        Task { await commitStart(carrying: carried) }
     }
 
     /// Both disclosures seen: the core decides the grant, then Start runs.
@@ -347,14 +356,15 @@ struct UsesScreen: View {
             flow.progress(connected: model.status.loggedIn, scopes: runner.state.scopes))
         let (next, refused) = SharingDisclosureFlow.resolve(runner.state, request: request)
         runner.state = next
-        Task { await commitStart(refused: refused) }
+        let carried = UsesScreenLayout.refusalToCarry(decidedNow: true, refused: refused, pending: pendingRefusal)
+        Task { await commitStart(carrying: carried) }
     }
 
     /// The one Start path. A refusal is kept past a failed Start and shown
     /// once one succeeds.
-    private func commitStart(refused: FirstRunFailure?) async {
+    private func commitStart(carrying refusal: FirstRunFailure?) async {
         await runner.commit(.start)
-        let after = UsesScreenLayout.afterStart(failure: runner.failure, pending: refused ?? pendingRefusal)
+        let after = UsesScreenLayout.afterStart(failure: runner.failure, pending: refusal)
         runner.failure = after.shown
         pendingRefusal = after.pending
     }

@@ -197,10 +197,24 @@ final class UsesScreenTests: XCTestCase {
         XCTAssertNil(plain.shown)
         XCTAssertNil(plain.pending)
 
+        // A fresh pass through the disclosures supersedes the earlier
+        // verdict: granted this time, nothing stale is shown after it.
+        XCTAssertNil(UsesScreenLayout.refusalToCarry(decidedNow: true, refused: nil, pending: refused))
+        XCTAssertEqual(
+            UsesScreenLayout.refusalToCarry(decidedNow: true, refused: refused, pending: nil), refused)
+        // A plain Start (Ask me) carries the earlier one.
+        XCTAssertEqual(UsesScreenLayout.refusalToCarry(decidedNow: false, refused: nil, pending: refused), refused)
+        let regranted = UsesScreenLayout.afterStart(
+            failure: nil, pending: UsesScreenLayout.refusalToCarry(decidedNow: true, refused: nil, pending: refused))
+        XCTAssertNil(regranted.shown)
+        XCTAssertNil(regranted.pending)
+
         // Both Start paths go through that decision.
         let source = try? Self.source()
         XCTAssertEqual(source?.components(separatedBy: "await runner.commit(.start)").count, 2)
         XCTAssertTrue(source?.contains("UsesScreenLayout.afterStart(") ?? false)
+        XCTAssertEqual(source?.components(separatedBy: "UsesScreenLayout.refusalToCarry(").count, 3)
+        XCTAssertFalse(source?.contains("?? pendingRefusal") ?? true)
     }
 
     /// An account that cannot choose Automatic reads Ask me's line and
