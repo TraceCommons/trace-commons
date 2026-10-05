@@ -3006,10 +3006,15 @@ fn handle_list_pending(shared: &DaemonShared, req: &Request) -> Response {
 /// refused, never answered with an empty list.
 fn handle_list_past_sessions(shared: &DaemonShared, req: &Request) -> Response {
     let Some(project_id) = req.params.get("project_id").and_then(|v| v.as_str()) else {
-        return Response::err(req.id, ERR_BAD_PARAMS, "project_id-invalid");
+        return Response::err(
+            req.id,
+            ERR_BAD_PARAMS,
+            super::past_sessions::LABEL_PROJECT_ID_INVALID,
+        );
     };
-    // The walk first, with no lock held; see `past_sessions::discover_sessions`.
-    let discovered = super::past_sessions::discover_sessions(shared);
+    // The walk first, with no lock held and off the async worker, as the
+    // include takes it; see `past_sessions::discover_sessions`.
+    let discovered = super::run_blocking(|| super::past_sessions::discover_sessions(shared));
     let known = super::past_sessions::known_project_keys(shared, &discovered);
     let Some(project_key) = project_key_for_id(project_id, &known) else {
         return Response::err(req.id, ERR_BAD_PARAMS, ERR_PROJECT_ID_UNRECOGNIZED);
@@ -3040,7 +3045,11 @@ fn handle_list_past_sessions(shared: &DaemonShared, req: &Request) -> Response {
 async fn handle_include_past_sessions(shared: &DaemonShared, req: &Request) -> Response {
     use super::past_sessions::{LABEL_SESSION_IDS_INVALID, LABEL_TOO_MANY_SESSIONS};
     let Some(project_id) = req.params.get("project_id").and_then(|v| v.as_str()) else {
-        return Response::err(req.id, ERR_BAD_PARAMS, "project_id-invalid");
+        return Response::err(
+            req.id,
+            ERR_BAD_PARAMS,
+            super::past_sessions::LABEL_PROJECT_ID_INVALID,
+        );
     };
     let Some(ids) = req.params.get("session_ids").and_then(|v| v.as_array()) else {
         return Response::err(req.id, ERR_BAD_PARAMS, LABEL_SESSION_IDS_INVALID);
