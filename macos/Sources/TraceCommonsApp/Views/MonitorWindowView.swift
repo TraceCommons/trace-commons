@@ -538,7 +538,7 @@ struct MonitorSettingsWindow: View {
                 // opens first run.
                 if model.requiresOnboarding && !section.availableBeforeOnboarding {
                     GlassNotice(tone: .ask, title: MonitorWords.signedOut) {
-                        Button(OnboardingWelcomeWords.getStarted) { OpenMonitor.request() }
+                        Button(MonitorWindowView.openFirstRun) { OpenMonitor.request() }
                     }
                     .padding(GlassTokens.Space.panePadding)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)

@@ -22,14 +22,14 @@ final class WriteSurfacesBeforeOnboardingTests: XCTestCase {
     }
 
     /// The Settings window draws an unavailable section as the Monitor's
-    /// onboarding notice (the core's signed-out word and Get started, which
+    /// onboarding notice (the core's signed-out word and first run's Continue, which
     /// opens first run), never the section itself. No new sentence.
     func test_theSettingsWindowDrawsWriteSectionsAsUnavailable() throws {
         let window = try MonitorNavigationTests.text("Views/MonitorWindowView.swift")
         XCTAssertTrue(window.contains("""
                         if model.requiresOnboarding && !section.availableBeforeOnboarding {
                             GlassNotice(tone: .ask, title: MonitorWords.signedOut) {
-                                Button(OnboardingWelcomeWords.getStarted) { OpenMonitor.request() }
+                                Button(MonitorWindowView.openFirstRun) { OpenMonitor.request() }
                             }
         """), "a write section must not draw before onboarding")
     }
