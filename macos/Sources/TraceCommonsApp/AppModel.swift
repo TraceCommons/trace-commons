@@ -2971,17 +2971,17 @@ extension AppModel: FirstRunDaemon {
         UserDefaults.standard.removeObject(forKey: key)
     }
 
-    /// Watching only: the marker is keyed by the config directory, since
-    /// there is no tenant. Status is read first, and an enrolled daemon is
-    /// not marked: its Start is the tenant's (`markComplete`). As with that
-    /// marker, the write is announced, because `requiresOnboarding` is
-    /// computed from `UserDefaults` and nothing else would tell the hosts.
     /// The first run finished; keep what it must still say for the main
     /// window (`ShellNotices`), which outlives the first-run host.
     func firstRunFinished(notice: String?) {
         firstRunNotice = notice
     }
 
+    /// Watching only: the marker is keyed by the config directory, since
+    /// there is no tenant. Status is read first, and an enrolled daemon is
+    /// not marked: its Start is the tenant's (`markComplete`). As with that
+    /// marker, the write is announced, because `requiresOnboarding` is
+    /// computed from `UserDefaults` and nothing else would tell the hosts.
     func markWatchOnlyComplete() async -> Bool {
         if case .success(let fresh) = await firstRunCall({ try $0.status() }) {
             publishIfChanged(\.status, fresh)
