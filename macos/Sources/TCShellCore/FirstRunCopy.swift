@@ -19,6 +19,10 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
         public let customSetupInstead: String
         public let continueButton: String
         public let answerEveryTool: String
+        /// `{count}`: a tool's or a repo's sessions.
+        public let sessionCount: String
+        /// Takes back a choice not yet acted on.
+        public let undo: String
     }
 
     public struct Join: Decodable, Equatable, Sendable {
@@ -40,13 +44,15 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
         public let passkeyDone: String
         /// Create passkey chosen, created once the daemon starts.
         public let passkeyChosen: String
-        public let passkeyUndo: String
         public let nearAiEyebrow: String
         public let nearAiText: String
         public let nearAiSignIn: String
         /// near.ai chosen, signed in once the daemon starts.
         public let nearAiChosen: String
-        public let nearAiUndo: String
+        /// near.ai waits for an invite to sign in to.
+        public let nearAiNeedsInvite: String
+        /// An invite and a new passkey are not combined.
+        public let inviteOrPasskey: String
         public let signedIn: String
         public let noSharing: String
         public let skipNote: String
@@ -72,6 +78,10 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
         public let retry: String
         /// Enroll was refused after the invite's lookup accepted it.
         public let enrollRefused: String
+        /// The invite could not be looked up just now.
+        public let lookupUnavailable: String
+        /// The near.ai sign-in did not finish.
+        public let signInFailed: String
     }
 
     public struct Tools: Decodable, Equatable, Sendable {
@@ -85,8 +95,6 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
         public let whichKind: String
         /// A folder of exported traces, as an option and as its row's name.
         public let trajectoryLabel: String
-        /// `{count}`.
-        public let sessionCount: String
     }
 
     public struct Rules: Decodable, Equatable, Sendable {
@@ -96,8 +104,6 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
         public let empty: String
         /// `{tools}`.
         public let reposFound: String
-        /// `{count}`.
-        public let sessionCount: String
         /// `{folder}`.
         public let ruleFor: String
         public let pastSessions: String
@@ -140,6 +146,8 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
         public let scopesFailed: String
         public let rulesFailed: String
         public let privateAiFailed: String
+        /// Every call succeeded but setup could not be marked finished.
+        public let completeFailed: String
     }
 
     public struct Passkey: Decodable, Equatable, Sendable {
@@ -166,6 +174,8 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
         public let welcomeBody: String
         public let welcomeSignIn: String
         public let otherOptions: String
+        /// A refused ceremony; its label is never shown.
+        public let refused: String
     }
 
     public struct PrivateAi: Decodable, Equatable, Sendable {

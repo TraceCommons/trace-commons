@@ -20,7 +20,17 @@
 //! - Folders adds three lines Ron's preview had no need for, since its data
 //!   was mocked: `discovery_failed` and `retry` for a discovery that returns
 //!   nothing readable, and `enroll_refused` for an enroll refused after the
-//!   invite was accepted.
+//!   invite was accepted. It also carries `lookup_unavailable` and
+//!   `sign_in_failed` (the core's existing sign-in line), so leaving Folders
+//!   or Tools never stops in silence.
+//! - Join adds `near_ai_needs_invite` and `invite_or_passkey`: near.ai signs
+//!   in to the account an invite enrolls, and a new passkey creates an
+//!   account of its own, so the two are not combined.
+//! - Uses adds Start's failures (`sharing_refused`, `scopes_failed`,
+//!   `rules_failed`, `private_ai_failed`, `complete_failed`), and the passkey
+//!   sheets add `refused`, so no daemon label is ever shown.
+//! - One string has one key: the session count and Undo, shared by more than
+//!   one screen, live in `frame`.
 //! - Preview-only strings (the mock-data tag, the simulated system sheets
 //!   P-3, P-4 and P-6, the preview's automatic-sharing refusal) are absent.
 //!
@@ -56,6 +66,11 @@ pub struct FrameCopy {
     pub continue_button: &'static str,
     /// Why Continue is off while a found tool is unanswered.
     pub answer_every_tool: &'static str,
+    /// `{count}`: sessions found for a tool (Tools) or a repo (Rules).
+    pub session_count: &'static str,
+    /// Takes back a choice not yet acted on (a passkey or near.ai on Join).
+    /// Not Ron's words.
+    pub undo: &'static str,
 }
 
 /// Join: the invite, the account cards and skipping (`join-screen.tsx`).
@@ -82,16 +97,18 @@ pub struct JoinCopy {
     /// Create passkey chosen but not yet created: the passkey sheets open
     /// once the daemon starts, after Folders or Tools. Not Ron's words.
     pub passkey_chosen: &'static str,
-    /// Undoes a passkey choice not yet created. Not Ron's words.
-    pub passkey_undo: &'static str,
     pub near_ai_eyebrow: &'static str,
     pub near_ai_text: &'static str,
     pub near_ai_sign_in: &'static str,
     /// near.ai chosen but not yet signed in: the sign-in runs once the
     /// daemon starts, after Folders or Tools. Not Ron's words.
     pub near_ai_chosen: &'static str,
-    /// Undoes a near.ai choice not yet signed in. Not Ron's words.
-    pub near_ai_undo: &'static str,
+    /// near.ai signs in to the account an invite enrolls, so it waits for
+    /// one. Not Ron's words.
+    pub near_ai_needs_invite: &'static str,
+    /// A new passkey creates an account of its own, so it is not combined
+    /// with an invite. Not Ron's words.
+    pub invite_or_passkey: &'static str,
     pub signed_in: &'static str,
     pub no_sharing: &'static str,
     pub skip_note: &'static str,
@@ -122,6 +139,12 @@ pub struct FoldersCopy {
     /// Enroll was refused after the invite was looked up and accepted. The
     /// daemon does not say why, so this names no cause.
     pub enroll_refused: &'static str,
+    /// The invite could not be looked up just now (no answer from the
+    /// issuer); nothing is said about the invite itself.
+    pub lookup_unavailable: &'static str,
+    /// The near.ai sign-in did not finish: the core's existing sign-in line
+    /// (`consent_copy::INFERENCE_SIGN_IN_FAILED`), not a second wording.
+    pub sign_in_failed: &'static str,
 }
 
 /// Tools, Custom setup's tool list and the add tile (`tool-screens.tsx`).
@@ -139,8 +162,6 @@ pub struct ToolsCopy {
     pub which_kind: &'static str,
     /// A folder of exported traces, as an option and as its row's name.
     pub trajectory_label: &'static str,
-    /// `{count}`: sessions found for a tool.
-    pub session_count: &'static str,
 }
 
 /// Rules and the past-session picker (`rules-screen.tsx`).
@@ -152,7 +173,6 @@ pub struct RulesCopy {
     pub empty: &'static str,
     /// `{tools}`: the watched tools' names, joined by the shell's list rule.
     pub repos_found: &'static str,
-    pub session_count: &'static str,
     pub rule_for: &'static str,
     pub past_sessions: &'static str,
     pub selected_summary: &'static str,
@@ -196,6 +216,8 @@ pub struct UsesCopy {
     /// Start stopped on the Private AI setting while the Private AI copy,
     /// whose `write_unconfirmed` a shell shows first, is unavailable.
     pub private_ai_failed: &'static str,
+    /// Every call succeeded but setup could not be marked finished.
+    pub complete_failed: &'static str,
 }
 
 /// The passkey popups P-1, P-2, P-5 and P-7 (`passkey-flow.tsx`). P-3, P-4
@@ -225,6 +247,9 @@ pub struct PasskeyCopy {
     pub welcome_body: &'static str,
     pub welcome_sign_in: &'static str,
     pub other_options: &'static str,
+    /// A passkey ceremony the daemon or the system refused; its label is
+    /// never shown.
+    pub refused: &'static str,
 }
 
 /// The Private AI card's fallbacks only; its words are
@@ -263,6 +288,8 @@ pub fn first_run_copy() -> FirstRunCopy {
             custom_setup_instead: "Custom setup instead",
             continue_button: "Continue",
             answer_every_tool: "Answer every tool above to continue",
+            session_count: "{count} sessions",
+            undo: "Undo",
         },
         join: JoinCopy {
             title_light: "Get started on ",
@@ -280,12 +307,12 @@ pub fn first_run_copy() -> FirstRunCopy {
             passkey_create: "Create passkey",
             passkey_done: "Done",
             passkey_chosen: "You'll create your passkey once watching starts.",
-            passkey_undo: "Undo",
             near_ai_eyebrow: "Sign in with near.ai",
             near_ai_text: "Use the login you already have. Credits land in that account.",
             near_ai_sign_in: "Sign in",
             near_ai_chosen: "You'll sign in once watching starts.",
-            near_ai_undo: "Undo",
+            near_ai_needs_invite: "Paste an invite above to sign in with near.ai.",
+            invite_or_passkey: "An invite and a new passkey can't be combined. Use one or the other.",
             signed_in: "Signed in",
             no_sharing: "Connecting or creating an account doesn't authorize any data sharing.",
             skip_note: "Skipping sets up watching only. Contributing needs a near.ai account; sign in any time.",
@@ -307,6 +334,8 @@ pub fn first_run_copy() -> FirstRunCopy {
             discovery_failed: "Could not look for coding tools on this Mac.",
             retry: "Look again",
             enroll_refused: "Your invite was found, but joining with it did not go through. Press Continue to try again.",
+            lookup_unavailable: "Your invite couldn't be checked just now. Press Continue to try again.",
+            sign_in_failed: crate::consent_copy::INFERENCE_SIGN_IN_FAILED,
         },
         tools: ToolsCopy {
             title_light: "Connect your ",
@@ -317,7 +346,6 @@ pub fn first_run_copy() -> FirstRunCopy {
             added_by_you: "Added by you",
             which_kind: "What does {folder} hold?",
             trajectory_label: "Exported traces",
-            session_count: "{count} sessions",
         },
         rules: RulesCopy {
             title_light: "Set your ",
@@ -325,7 +353,6 @@ pub fn first_run_copy() -> FirstRunCopy {
             loading: "Reading repos from your sessions…",
             empty: "No repos to set rules for yet. Rules appear for repos found in the sessions of a tool you watch.",
             repos_found: "Repos found in {tools} sessions",
-            session_count: "{count} sessions",
             rule_for: "Rule for {folder}",
             past_sessions: "Past sessions, by folder",
             selected_summary: "{selected} of {total} selected",
@@ -356,6 +383,7 @@ pub fn first_run_copy() -> FirstRunCopy {
             scopes_failed: "How your traces may be used couldn't be saved. Setup hasn't finished; try Start sharing again.",
             rules_failed: "A folder rule or past-session choice couldn't be saved. Setup hasn't finished; try Start sharing again.",
             private_ai_failed: "The Private AI setting couldn't be saved. Setup hasn't finished; try Start sharing again.",
+            complete_failed: "Your choices were saved, but setup couldn't be marked done. Setup hasn't finished; try Start sharing again.",
         },
         passkey: PasskeyCopy {
             back: "Back",
@@ -380,6 +408,7 @@ pub fn first_run_copy() -> FirstRunCopy {
             welcome_body: "Sign in with your passkey.",
             welcome_sign_in: "Sign in with passkey",
             other_options: "Other sign-in options",
+            refused: "The passkey step didn't go through. Try again, or close this and choose another way to join.",
         },
         private_ai: PrivateAiCopy {
             loading: "Loading disclosure…",
@@ -492,9 +521,87 @@ mod tests {
             uses.scopes_failed,
             uses.rules_failed,
             uses.private_ai_failed,
+            uses.complete_failed,
         ] {
             assert!(line.contains("Setup hasn't finished"), "{line}");
         }
+        // The marker was not written, so setup did not finish: never the
+        // refused grant's "Setup finished".
+        assert!(!uses.complete_failed.contains("Setup finished"));
+    }
+
+    /// Every way leaving Folders or Tools can stop has a sentence, so
+    /// Continue never does nothing in silence. A sign-in that did not finish
+    /// reads the core's existing sign-in line rather than a second wording.
+    #[test]
+    fn leaving_the_roots_says_why_it_stopped() {
+        let copy = first_run_copy();
+        assert_eq!(
+            copy.folders.sign_in_failed,
+            crate::consent_copy::INFERENCE_SIGN_IN_FAILED
+        );
+        // Lookup never reached an answer: nothing is said about the invite.
+        assert_ne!(copy.folders.lookup_unavailable, copy.join.invite_error);
+        assert_ne!(copy.folders.lookup_unavailable, copy.folders.enroll_refused);
+        assert!(!copy.folders.lookup_unavailable.contains("not an invite"));
+    }
+
+    /// near.ai signs in to the account an invite enrolls, and a new passkey
+    /// creates an account of its own, so Join says why each is held back.
+    #[test]
+    fn join_says_why_an_account_choice_is_held_back() {
+        let join = first_run_copy().join;
+        assert_ne!(join.near_ai_needs_invite, join.near_ai_text);
+        assert_ne!(join.invite_or_passkey, join.passkey_text);
+        assert_ne!(join.near_ai_needs_invite, join.invite_or_passkey);
+    }
+
+    /// A refused passkey ceremony is worded here: the daemon's label never
+    /// reaches the sheet.
+    #[test]
+    fn a_refused_passkey_has_a_sentence() {
+        let passkey = first_run_copy().passkey;
+        assert!(!passkey.refused.contains('-'), "{}", passkey.refused);
+    }
+
+    /// One string, one key. A pair that must be able to diverge is listed
+    /// with its reason.
+    #[test]
+    fn no_two_keys_carry_the_same_string() {
+        // P-1's button and P-2's title are two of Ron's strings that read
+        // the same today; one is an action, the other names a sheet.
+        const MAY_DIVERGE: &[&[&str]] = &[&[".passkey.create_new", ".passkey.name_title"]];
+        fn leaves(value: &serde_json::Value, path: &str, out: &mut Vec<(String, String)>) {
+            match value {
+                serde_json::Value::String(text) => out.push((text.clone(), path.to_owned())),
+                serde_json::Value::Object(map) => {
+                    for (key, child) in map {
+                        leaves(child, &format!("{path}.{key}"), out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut all = Vec::new();
+        leaves(
+            &serde_json::to_value(first_run_copy()).unwrap(),
+            "",
+            &mut all,
+        );
+        let mut by_text: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+        for (text, path) in all {
+            by_text.entry(text).or_default().push(path);
+        }
+        let shared: Vec<Vec<String>> = by_text
+            .into_values()
+            .filter(|paths| paths.len() > 1)
+            .map(|mut paths| {
+                paths.sort();
+                paths
+            })
+            .filter(|paths| !MAY_DIVERGE.iter().any(|allowed| paths == allowed))
+            .collect();
+        assert!(shared.is_empty(), "keys sharing one string: {shared:?}");
     }
 
     fn empty_leaves(value: &serde_json::Value, path: &str, out: &mut Vec<String>) {

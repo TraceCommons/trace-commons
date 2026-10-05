@@ -83,8 +83,8 @@ enum JoinLayout {
         return nearAIChosen(state) ? copy.nearAiChosen : copy.nearAiText
     }
 
-    static func nearAIAction(_ state: FirstRunState, copy: FirstRunCopy.Join) -> String {
-        nearAIChosen(state) ? copy.nearAiUndo : copy.nearAiSignIn
+    static func nearAIAction(_ state: FirstRunState, copy: FirstRunCopy) -> String {
+        nearAIChosen(state) ? copy.frame.undo : copy.join.nearAiSignIn
     }
 
     /// "Signed in" is the daemon's fact, never the choice.
@@ -203,8 +203,8 @@ enum JoinLayout {
         return toggled
     }
 
-    static func passkeyAction(_ state: FirstRunState, copy: FirstRunCopy.Join) -> String {
-        passkeyChosen(state) ? copy.passkeyUndo : copy.passkeyCreate
+    static func passkeyAction(_ state: FirstRunState, copy: FirstRunCopy) -> String {
+        passkeyChosen(state) ? copy.frame.undo : copy.join.passkeyCreate
     }
 
     /// A signed-in near.ai is held, and a passkey is never created over it,
@@ -378,10 +378,10 @@ struct JoinScreen: View {
                 // Choosing opens nothing until the daemon runs, so only the
                 // undo carries a glyph, as on the near.ai card.
                 if JoinLayout.passkeyChosen(runner.state) {
-                    Label(JoinLayout.passkeyAction(runner.state, copy: copy.join), systemImage: "arrow.uturn.backward")
+                    Label(JoinLayout.passkeyAction(runner.state, copy: copy), systemImage: "arrow.uturn.backward")
                         .labelStyle(.titleAndIcon)
                 } else {
-                    Text(JoinLayout.passkeyAction(runner.state, copy: copy.join))
+                    Text(JoinLayout.passkeyAction(runner.state, copy: copy))
                 }
             }
             .buttonStyle(GlassButtonStyle(.glass))
@@ -401,10 +401,10 @@ struct JoinScreen: View {
                 // Choosing near.ai opens nothing (the sign-in comes after the
                 // daemon starts), so only the undo carries a glyph.
                 if JoinLayout.nearAIChosen(runner.state) {
-                    Label(JoinLayout.nearAIAction(runner.state, copy: copy.join), systemImage: "arrow.uturn.backward")
+                    Label(JoinLayout.nearAIAction(runner.state, copy: copy), systemImage: "arrow.uturn.backward")
                         .labelStyle(.titleAndIcon)
                 } else {
-                    Text(JoinLayout.nearAIAction(runner.state, copy: copy.join))
+                    Text(JoinLayout.nearAIAction(runner.state, copy: copy))
                 }
             }
             .buttonStyle(GlassButtonStyle(.glass))

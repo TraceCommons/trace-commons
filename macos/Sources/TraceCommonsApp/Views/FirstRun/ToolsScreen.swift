@@ -138,13 +138,13 @@ enum ToolsScreenLayout {
     /// session count alone for a found tool, discovery's evidence otherwise.
     static func meta(
         for candidate: SourceCandidate, in state: FirstRunState, discovered: [SourceCandidate],
-        copy: FirstRunCopy.Tools, now: Date
+        copy: FirstRunCopy, now: Date
     ) -> String {
         if personalPath(for: candidate.source, discovered: discovered, in: state) != nil {
-            return copy.addedByYou
+            return copy.tools.addedByYou
         }
         if candidate.exists {
-            return copy.sessionCount.replacingOccurrences(of: "{count}", with: String(candidate.sessionCount))
+            return copy.frame.sessionCount.replacingOccurrences(of: "{count}", with: String(candidate.sessionCount))
         }
         return candidate.evidence(now: now)
     }
@@ -220,7 +220,7 @@ struct ToolsScreen: View {
                                     candidate: candidate,
                                     meta: ToolsScreenLayout.meta(
                                         for: candidate, in: runner.state, discovered: discovered,
-                                        copy: copy.tools, now: Date()),
+                                        copy: copy, now: Date()),
                                     state: $runner.state,
                                     installURL: installURL(candidate.source)
                                 )

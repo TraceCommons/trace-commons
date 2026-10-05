@@ -340,7 +340,7 @@ struct RulesScreen: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
                 if let count = sessionCount(project) {
-                    Text(FirstRunRulesLayout.fill(copy.rules.sessionCount, ["count": String(count)]))
+                    Text(FirstRunRulesLayout.fill(copy.frame.sessionCount, ["count": String(count)]))
                         .glassType(GlassTokens.TypeScale.caption)
                         .foregroundStyle(GlassColor.textTertiary)
                 }

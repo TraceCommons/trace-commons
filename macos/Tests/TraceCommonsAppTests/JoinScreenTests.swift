@@ -259,13 +259,13 @@ final class JoinScreenTests: XCTestCase {
         let copy = try coreCopy()
         let start = FirstRunState(toolAnswers: [.claudeCode: .off, .codex: .off])
         XCTAssertEqual(JoinLayout.nearAILine(start, copy: copy.join), copy.join.nearAiText)
-        XCTAssertEqual(JoinLayout.nearAIAction(start, copy: copy.join), copy.join.nearAiSignIn)
+        XCTAssertEqual(JoinLayout.nearAIAction(start, copy: copy), copy.join.nearAiSignIn)
         XCTAssertTrue(JoinLayout.canToggleNearAI(start))
 
         let chosen = JoinLayout.toggleNearAI(start)
         XCTAssertEqual(chosen.account, .nearAI)
         XCTAssertEqual(JoinLayout.nearAILine(chosen, copy: copy.join), copy.join.nearAiChosen)
-        XCTAssertEqual(JoinLayout.nearAIAction(chosen, copy: copy.join), copy.join.nearAiUndo)
+        XCTAssertEqual(JoinLayout.nearAIAction(chosen, copy: copy), copy.frame.undo)
         XCTAssertTrue(JoinLayout.canToggleNearAI(chosen))
         XCTAssertEqual(FirstRunPlan.calls(for: chosen, at: .leaveRoots).last, .signInNearAI)
 
@@ -343,12 +343,12 @@ final class JoinScreenTests: XCTestCase {
         let copy = try coreCopy()
         let start = FirstRunState(toolAnswers: [.claudeCode: .off, .codex: .off])
         XCTAssertFalse(JoinLayout.passkeyOpensNow(start, hasPasskeyAccount: true))
-        XCTAssertEqual(JoinLayout.passkeyAction(start, copy: copy.join), copy.join.passkeyCreate)
+        XCTAssertEqual(JoinLayout.passkeyAction(start, copy: copy), copy.join.passkeyCreate)
 
         let chosen = JoinLayout.togglePasskey(start)
         XCTAssertEqual(chosen.account, .passkeyChosen)
         XCTAssertEqual(JoinLayout.passkeyLine(chosen, copy: copy.join), copy.join.passkeyChosen)
-        XCTAssertEqual(JoinLayout.passkeyAction(chosen, copy: copy.join), copy.join.passkeyUndo)
+        XCTAssertEqual(JoinLayout.passkeyAction(chosen, copy: copy), copy.frame.undo)
         XCTAssertFalse(JoinLayout.passkeyDone(chosen), "chosen is not created")
         XCTAssertTrue(JoinLayout.hasAccount(chosen))
         XCTAssertEqual(JoinLayout.footerTitle(chosen, copy: copy), copy.frame.continueButton)
@@ -521,8 +521,8 @@ final class JoinScreenTests: XCTestCase {
         for field in [
             "copy.join.titleLight", "copy.join.titleBold", "copy.join.body", "copy.join.bodyEmphasis",
             "copy.join.inviteEyebrow", "copy.join.invitePlaceholder", "copy.join.lookUp",
-            "copy.join.passkeyEyebrow", "copy.passkeyCreate", "copy.join.passkeyDone",
-            "copy.passkeyChosen", "copy.passkeyUndo",
+            "copy.join.passkeyEyebrow", "copy.join.passkeyCreate", "copy.join.passkeyDone",
+            "copy.passkeyChosen", "copy.frame.undo",
             "copy.join.nearAiEyebrow", "copy.join.signedIn",
             "copy.join.noSharing",
         ] {

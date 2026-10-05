@@ -68,13 +68,13 @@ final class ToolsScreenTests: XCTestCase {
         XCTAssertEqual(codex.path, path)
         XCTAssertFalse(ToolAnswerRowLayout.offersGetTool(codex))
         XCTAssertEqual(ToolAnswerRowLayout.answer(in: state, for: codex), .watch)
-        XCTAssertEqual(ToolsScreenLayout.meta(for: codex, in: state, discovered: discovered, copy: copy.tools, now: Date()), copy.tools.addedByYou)
+        XCTAssertEqual(ToolsScreenLayout.meta(for: codex, in: state, discovered: discovered, copy: copy, now: Date()), copy.tools.addedByYou)
 
         // A found, un-added row is compact: the session count alone.
         let claude = try XCTUnwrap(rows.first { $0.source == .claudeCode })
         XCTAssertEqual(
-            ToolsScreenLayout.meta(for: claude, in: state, discovered: discovered, copy: copy.tools, now: Date()),
-            copy.tools.sessionCount.replacingOccurrences(of: "{count}", with: "12"))
+            ToolsScreenLayout.meta(for: claude, in: state, discovered: discovered, copy: copy, now: Date()),
+            copy.frame.sessionCount.replacingOccurrences(of: "{count}", with: "12"))
 
         // A kind discovery did not offer still gets its row once added.
         let opencode = "/Users/someone/exports"
@@ -246,7 +246,7 @@ final class ToolsScreenTests: XCTestCase {
         XCTAssertEqual(rows.map(\.source), [.opencode])
         XCTAssertEqual(rows.first?.path, "/b")
         XCTAssertEqual(
-            ToolsScreenLayout.meta(for: rows[0], in: state, discovered: [], copy: copy.tools, now: Date()),
+            ToolsScreenLayout.meta(for: rows[0], in: state, discovered: [], copy: copy, now: Date()),
             copy.tools.addedByYou)
 
         // Discovered as missing: the row stays found at the watched path, with

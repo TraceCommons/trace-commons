@@ -11,6 +11,18 @@ final class FirstRunCopyExportTests: XCTestCase {
         XCTAssertEqual(copy.frame.quickSetup, "Quick setup")
     }
 
+    /// Folders' sign-in line is the core's existing one, read through the
+    /// first-run table rather than a second bridge call.
+    func testTheSignInLineIsTheInferenceCopys() throws {
+        let copy = try XCTUnwrap(FirstRunCopy.decode(try XCTUnwrap(TCCoreCopy.firstRunCopyJSON())))
+        let inference = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(try XCTUnwrap(TCCoreCopy.inferenceConnectionCopyJSON()).utf8))
+                as? [String: Any])
+        XCTAssertEqual(copy.folders.signInFailed, inference["sign_in_failed"] as? String)
+        XCTAssertNotEqual(copy.folders.lookupUnavailable, copy.join.inviteError)
+        XCTAssertNotEqual(copy.uses.completeFailed, copy.uses.sharingRefused)
+    }
+
     func testATableWithAnEmptyStringIsRefused() throws {
         let json = try XCTUnwrap(TCCoreCopy.firstRunCopyJSON())
         let blanked = json.replacingOccurrences(of: "\"Quick setup\"", with: "\"\"")
