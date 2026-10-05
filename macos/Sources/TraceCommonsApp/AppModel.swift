@@ -714,9 +714,7 @@ final class AppModel: ObservableObject {
     ///
     /// `clearsDraft`: a clear that succeeds leaves nothing for an edited
     /// field to describe, so the fields read the daemon again.
-    private func writeWitness(
-        clearsDraft: Bool = false, _ work: @escaping @Sendable (String) -> TCWitness.Outcome
-    ) {
+    private func writeWitness(clearsDraft: Bool = false, _ work: @escaping @Sendable (String) -> TCWitness.Outcome) {
         let dir = configDirectory
         guard !dir.isEmpty else { return }
         witnessBusy = true

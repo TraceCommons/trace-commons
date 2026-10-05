@@ -548,7 +548,7 @@ final class WitnessBindingTests: XCTestCase {
     func testAWriteRepublishesWhatWasReadBack() throws {
         let write = try XCTUnwrap(
             WitnessCard.modelDeclaration(
-                "private func writeWitness(_ work: @escaping @Sendable (String) -> TCWitness.Outcome) {"
+                "private func writeWitness(clearsDraft: Bool = false, _ work: @escaping @Sendable (String) -> TCWitness.Outcome) {"
             ))
         XCTAssertTrue(
             write.contains("TCWitness.trustState(configDir: dir)"),
