@@ -197,7 +197,10 @@ enum UsesStart {
     /// once one succeeds; the commit clears failures when it begins.
     private static func commit(runner: FirstRunRunner, carrying refusal: FirstRunFailure?) async -> FirstRunFailure? {
         await runner.commit(.start)
-        let after = UsesScreenLayout.afterStart(failure: runner.failure, pending: refusal)
+        // `completeFailed` outranks a refusal the daemon gave in this same
+        // Start; that refusal is kept for the retry, like one decided before.
+        let kept = runner.failure == .completeFailed ? runner.refusedGrant ?? refusal : refusal
+        let after = UsesScreenLayout.afterStart(failure: runner.failure, pending: kept)
         runner.failure = after.shown
         return after.pending
     }

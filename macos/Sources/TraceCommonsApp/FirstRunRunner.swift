@@ -90,6 +90,11 @@ final class FirstRunRunner: ObservableObject {
     /// sheet that ends afterwards does not reopen Join.
     @Published private(set) var completed = false
 
+    /// The daemon refused the grant during the last commit. `failure` says
+    /// so too, unless `completeFailed` outranked it; this keeps the refusal
+    /// for the retry that finishes on Ask me.
+    @Published private(set) var refusedGrant: FirstRunFailure?
+
     private let daemon: FirstRunDaemon
 
     init(state: FirstRunState, daemon: FirstRunDaemon) {
@@ -107,6 +112,7 @@ final class FirstRunRunner: ObservableObject {
         isCommitting = true
         defer { isCommitting = false }
         failure = nil
+        refusedGrant = nil
 
         // Continue is disabled without a declaration; should it be pressed
         // anyway, nothing can start, and that is said rather than swallowed.
@@ -171,6 +177,7 @@ final class FirstRunRunner: ObservableObject {
             if case .refused(let label) = await daemon.grantAutomatic(witness: witness) {
                 state.sharing = .askMe
                 failure = .grantRefused(label: label)
+                refusedGrant = failure
             }
         case .markComplete:
             guard await daemon.markComplete() else { return fail(.completeFailed) }

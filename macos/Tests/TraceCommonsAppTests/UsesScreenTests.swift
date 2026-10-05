@@ -350,6 +350,30 @@ final class UsesScreenTests: XCTestCase {
         XCTAssertNil(pending)
     }
 
+    /// Review Focus 3 when the daemon refuses the grant and the completion
+    /// marker is then not written: `completeFailed` is shown first, and the
+    /// daemon's refusal is kept for the retry that finishes on Ask me, so
+    /// setup never ends without saying Automatic was not turned on.
+    @MainActor
+    func test_aDaemonRefusalOutlivesAnUnfinishedStart() async throws {
+        let daemon = RecordingFirstRunDaemon()
+        daemon.grant = .refused(label: "automatic-grant-witness-changed")
+        daemon.failing = { $0 == .markComplete }
+        let runner = FirstRunRunner(state: onUses(.automatic), daemon: daemon)
+
+        let pending = await UsesStart.finish(
+            runner: runner, request: try readyRequest(connected: true), pending: nil)
+        XCTAssertEqual(runner.failure, .completeFailed)
+        XCTAssertEqual(runner.state.sharing, .askMe)
+        XCTAssertEqual(pending, .grantRefused(label: "automatic-grant-witness-changed"))
+
+        daemon.failing = { _ in false }
+        let after = await UsesStart.plainStart(runner: runner, pending: pending)
+        XCTAssertEqual(daemon.log.last, .markComplete)
+        XCTAssertEqual(runner.failure, .grantRefused(label: "automatic-grant-witness-changed"))
+        XCTAssertNil(after)
+    }
+
     /// Start that skips the disclosures on Automatic grants nothing: without
     /// the core's ready answer there is no grant to send.
     @MainActor
