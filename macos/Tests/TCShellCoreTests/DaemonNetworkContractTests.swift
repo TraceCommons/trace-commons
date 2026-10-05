@@ -79,26 +79,50 @@ final class DaemonNetworkContractTests: XCTestCase {
         XCTAssertEqual(transport.method, "account_session_status")
     }
 
-    func testPrivateAIWritePassesExplicitAcknowledgementUnchanged() async throws {
-        for confirmed in [false, true] {
+    func testPrivateAIWriteSendsConfirmedOnlyWithAConsent() async throws {
+        let consent = try XCTUnwrap(DaemonData.PrivateAIConsent(acknowledging: privateAISwitch("SAMPLE core disclosure")))
+        for given in [nil, consent] {
             let transport = NetworkTransport(#"{"on":false,"state":"off","port":null,"disclosure":"SAMPLE core disclosure"}"#)
-            _ = try await LiveDaemonClient(transport: transport).setPrivateAI(on: false, confirmed: confirmed)
+            _ = try await LiveDaemonClient(transport: transport).setPrivateAI(on: false, consent: given)
             XCTAssertEqual(transport.method, "set_private_ai")
             XCTAssertEqual(try transport.parameters()["on"] as? Bool, false)
-            XCTAssertEqual(try transport.parameters()["confirmed"] as? Bool, confirmed)
+            XCTAssertEqual(try transport.parameters()["confirmed"] as? Bool, given != nil)
         }
         let refusal = NetworkTransport(error: #"{"code":"bad_params","message":"confirmation-required"}"#)
         do {
-            _ = try await LiveDaemonClient(transport: refusal).setPrivateAI(on: true, confirmed: false)
-            XCTFail("unacknowledged enabling succeeded")
+            _ = try await LiveDaemonClient(transport: refusal).setPrivateAI(on: true, consent: consent)
+            XCTFail("a daemon refusal succeeded")
         } catch {
             XCTAssertEqual(error as? DaemonDataError, .daemon(code: "bad_params", message: "confirmation-required"))
         }
-        XCTAssertEqual(try refusal.parameters()["confirmed"] as? Bool, false)
         let accepted = NetworkTransport(#"{"on":true,"state":"running","port":3128,"disclosure":"SAMPLE core disclosure"}"#)
-        let result = try await LiveDaemonClient(transport: accepted).setPrivateAI(on: true, confirmed: true)
+        let result = try await LiveDaemonClient(transport: accepted).setPrivateAI(on: true, consent: consent)
         XCTAssertEqual(result.port, 3128)
         XCTAssertEqual(try accepted.parameters()["confirmed"] as? Bool, true)
+    }
+
+    /// Enabling Private AI needs a consent, and a consent can only be built
+    /// from a `PrivateAISwitch` the core answered: nothing reaches `tc_call`
+    /// without one, so a future toggle cannot enable without first holding
+    /// the switch whose disclosure it shows.
+    func testEnablingWithoutConsentIsRefusedBeforeTheDaemonIsAsked() async {
+        let transport = NetworkTransport(#"{"on":true,"state":"running","port":3128,"disclosure":"SAMPLE core disclosure"}"#)
+        do {
+            _ = try await LiveDaemonClient(transport: transport).setPrivateAI(on: true, consent: nil)
+            XCTFail("enabled with no consent")
+        } catch {
+            XCTAssertEqual(error as? DaemonDataError, .daemon(code: "bad_params", message: "confirmation-required"))
+        }
+        XCTAssertNil(transport.method, "an unconsented enable reached the daemon")
+    }
+
+    func testConsentCarriesTheDigestOfTheCoreDisclosureAndNeedsOne() throws {
+        let consent = try XCTUnwrap(DaemonData.PrivateAIConsent(acknowledging: privateAISwitch("SAMPLE core disclosure")))
+        XCTAssertEqual(consent.disclosureSHA256, "41865ed6f1624a37db9345f6bf74d75df6abc9fea511b18be07c2f97416fc96d")
+        for blank in ["", "  \n"] {
+            XCTAssertNil(DaemonData.PrivateAIConsent(acknowledging: try privateAISwitch(blank)),
+                         "a consent was built from a switch with no disclosure")
+        }
     }
 
     func testEverySampleIsMarkedAndSpendIsUnknown() async throws {
@@ -139,7 +163,7 @@ final class DaemonNetworkContractTests: XCTestCase {
 
     func testSampleEnablingNeedsAcknowledgement() async {
         do {
-            _ = try await SampleDaemonClient(.normalDay).setPrivateAI(on: true, confirmed: false)
+            _ = try await SampleDaemonClient(.normalDay).setPrivateAI(on: true, consent: nil)
             XCTFail("sample implied consent")
         } catch {
             XCTAssertEqual(error as? DaemonDataError, .daemon(code: "bad_params", message: "confirmation-required"))
@@ -237,6 +261,29 @@ final class DaemonNetworkContractTests: XCTestCase {
         } catch {
             XCTAssertEqual(error as? DaemonDataError, .unreachable)
         }
+    }
+
+    /// The sample answers what was asked: turning Private AI off answers
+    /// off, even in a set whose switch reads on.
+    func testSampleTurningOffAnswersOff() async throws {
+        for set in [SampleDaemonClient.SampleSet.normalDay, .busyQueue, .empty] {
+            let result = try await SampleDaemonClient(set).setPrivateAI(on: false, consent: nil)
+            XCTAssertEqual(result.on, false, "\(set)")
+            XCTAssertEqual(result.state, "off", "\(set)")
+            XCTAssertNil(result.port, "\(set)")
+            XCTAssertFalse(result.disclosure.isEmpty, "\(set)")
+        }
+        let shown = try await SampleDaemonClient(.empty).privateAI()
+        let consent = try XCTUnwrap(DaemonData.PrivateAIConsent(acknowledging: shown))
+        let on = try await SampleDaemonClient(.empty).setPrivateAI(on: true, consent: consent)
+        XCTAssertEqual(on.on, true)
+        XCTAssertEqual(on.state, "running")
+        XCTAssertNotNil(on.port)
+    }
+
+    private func privateAISwitch(_ disclosure: String) throws -> DaemonData.PrivateAISwitch {
+        let json = try JSONSerialization.data(withJSONObject: ["on": false, "state": "off", "port": NSNull(), "disclosure": disclosure])
+        return try DaemonDataDecoding.decoder().decode(DaemonData.PrivateAISwitch.self, from: json)
     }
 
     private func wire<T: Encodable>(_ value: T) throws -> [String: Any] {

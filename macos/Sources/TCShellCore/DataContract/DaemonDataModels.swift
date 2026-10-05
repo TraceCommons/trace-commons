@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 /// C1 of #1173: the typed models every screen reads through
@@ -1024,6 +1025,25 @@ extension DaemonData {
         public let port: Int?
         /// Supplied by the Rust core; Swift does not author release consent copy.
         public let disclosure: String
+    }
+
+    /// What `setPrivateAI(on: true, ...)` needs: an acknowledgement that
+    /// can only be built from a `PrivateAISwitch` the core answered, so a
+    /// caller cannot enable Private AI without first holding the switch
+    /// whose `disclosure` it shows. Carries the SHA-256 of that disclosure,
+    /// lowercase hex. The daemon does not check the digest yet (#1187's
+    /// `set_private_ai` takes `confirmed` only); binding it there is a
+    /// protocol change left to a follow-up.
+    public struct PrivateAIConsent: Equatable, Sendable {
+        public let disclosureSHA256: String
+
+        /// `nil` for a switch with no disclosure: there is nothing to
+        /// acknowledge, so there is no consent.
+        public init?(acknowledging shown: PrivateAISwitch) {
+            guard !shown.disclosure.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+            disclosureSHA256 = SHA256.hash(data: Data(shown.disclosure.utf8))
+                .map { String(format: "%02x", $0) }.joined()
+        }
     }
 
     /// `mission_catalogue`: public skill-evaluation packages, with no daily rewards.

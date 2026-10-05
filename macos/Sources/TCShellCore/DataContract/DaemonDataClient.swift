@@ -88,9 +88,11 @@ public protocol DaemonDataClient: Sendable {
     /// Z1.5, the Private AI switch's state and disclosure.
     func privateAI() async throws -> DaemonData.PrivateAISwitch
     /// Z1.5, turning Private AI on or off.
-    /// `confirmed` is the caller's explicit answer after the core disclosure.
-    /// Enabling with false is refused; no implicit acknowledgement is supplied.
-    func setPrivateAI(on: Bool, confirmed: Bool) async throws -> DaemonData.PrivateAISwitch
+    /// `consent` is built only from the `PrivateAISwitch` whose disclosure the
+    /// caller showed (`PrivateAIConsent(acknowledging:)`). Enabling with `nil`
+    /// is refused before anything is sent; the daemon gets `confirmed: true`
+    /// only when a consent is held. Turning off needs none.
+    func setPrivateAI(on: Bool, consent: DaemonData.PrivateAIConsent?) async throws -> DaemonData.PrivateAISwitch
     /// Z2.2, the mission catalogue.
     func missionCatalogue() async throws -> DaemonData.MissionCatalogue
     /// Z3.1, invite lookup. `code` carries the full invite URL.

@@ -40,8 +40,8 @@ final class DaemonDataContractTests: XCTestCase {
                 _ = try await client.inferenceSummary()
                 _ = try await client.inferenceCallProof(callId: 414)
                 _ = try await client.modelSpend()
-                _ = try await client.privateAI()
-                _ = try await client.setPrivateAI(on: true, confirmed: true)
+                let shown = try await client.privateAI()
+                _ = try await client.setPrivateAI(on: true, consent: DaemonData.PrivateAIConsent(acknowledging: shown))
                 _ = try await client.missionCatalogue()
                 _ = try await client.lookupInvite(code: "c")
                 _ = try await client.passkeyState()
@@ -207,7 +207,7 @@ final class DaemonDataContractTests: XCTestCase {
             ("inferenceCallProof", { _ = try await client.inferenceCallProof(callId: 1) }),
             ("modelSpend", { _ = try await client.modelSpend() }),
             ("privateAI", { _ = try await client.privateAI() }),
-            ("setPrivateAI", { _ = try await client.setPrivateAI(on: false, confirmed: false) }),
+            ("setPrivateAI", { _ = try await client.setPrivateAI(on: false, consent: nil) }),
             ("missionCatalogue", { _ = try await client.missionCatalogue() }),
             ("lookupInvite", { _ = try await client.lookupInvite(code: "c") }),
             ("passkeyState", { _ = try await client.passkeyState() }),

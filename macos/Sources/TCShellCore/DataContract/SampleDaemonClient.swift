@@ -188,12 +188,26 @@ public final class SampleDaemonClient: DaemonDataClient, @unchecked Sendable {
         try serve("private_ai", as: DaemonData.PrivateAISwitch.self)
     }
 
-    public func setPrivateAI(on: Bool, confirmed: Bool) async throws -> DaemonData.PrivateAISwitch {
+    /// Answers the switch as asked -- off with no port, or running on the
+    /// sample port -- keeping the set's disclosure. Not remembered: a later
+    /// `privateAI()` still reads the set's own state.
+    public func setPrivateAI(on: Bool, consent: DaemonData.PrivateAIConsent?) async throws
+        -> DaemonData.PrivateAISwitch
+    {
         guard set != .coreDown else { throw DaemonDataError.unreachable }
-        guard !on || confirmed else {
+        guard !on || consent != nil else {
             throw DaemonDataError.daemon(code: "bad_params", message: "confirmation-required")
         }
-        return try serve("private_ai", as: DaemonData.PrivateAISwitch.self)
+        let shown = try serve("private_ai", as: DaemonData.PrivateAISwitch.self)
+        let answer: [String: Any] = [
+            "on": on, "state": on ? "running" : "off", "port": on ? 3128 : NSNull(), "disclosure": shown.disclosure,
+        ]
+        do {
+            let data = try JSONSerialization.data(withJSONObject: answer)
+            return try DaemonDataDecoding.decoder().decode(DaemonData.PrivateAISwitch.self, from: data)
+        } catch {
+            throw DaemonDataError.undecodable(method: "set_private_ai")
+        }
     }
 
     public func missionCatalogue() async throws -> DaemonData.MissionCatalogue {

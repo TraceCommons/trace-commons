@@ -153,8 +153,16 @@ public final class LiveDaemonClient: DaemonDataClient, @unchecked Sendable {
         try call("private_ai", as: DaemonData.PrivateAISwitch.self)
     }
 
-    public func setPrivateAI(on: Bool, confirmed: Bool) async throws -> DaemonData.PrivateAISwitch {
-        try call("set_private_ai", params: ["on": on, "confirmed": confirmed], as: DaemonData.PrivateAISwitch.self)
+    public func setPrivateAI(on: Bool, consent: DaemonData.PrivateAIConsent?) async throws
+        -> DaemonData.PrivateAISwitch
+    {
+        // Refused here, before `tc_call`: an enable with no consent never
+        // reaches the daemon. The label is the daemon's own refusal.
+        guard !on || consent != nil else {
+            throw DaemonDataError.daemon(code: "bad_params", message: "confirmation-required")
+        }
+        return try call(
+            "set_private_ai", params: ["on": on, "confirmed": consent != nil], as: DaemonData.PrivateAISwitch.self)
     }
 
     public func missionCatalogue() async throws -> DaemonData.MissionCatalogue {
