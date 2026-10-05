@@ -551,6 +551,8 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `keep` | `entry_id` | `kept: true` | "Keep on this Mac": the **reversible** decline. The entry must be `pending`, or `approved` unattended, which the keep revokes (`not-pending` otherwise, `unknown-entry-id` if there is none). See "`keep`: Keep on this Mac" below |
 | `undo_keep` | `entry_id` | `kept: false` | returns a kept entry to `pending`, waiting for a person; `not-kept` for anything that is not kept, a dismissed entry included; `queue-full` at the queue cap; `project-ignored` if its folder is now Never. See "`keep`: Keep on this Mac" below |
 | `list_kept` | — | `kept[]` of queue entries | every kept entry, in the `list_pending` shape, so a shell can show them and offer the undo |
+| `list_past_sessions` | `project_id` (required) | `sessions[]` of past-session rows, `total`, `project_mode` | the first-run past-session picker: one folder's past sessions, queued or never offered, each named by an opaque `session_id`, never a path; nothing is read before the person chooses; `project_id-invalid` / `project-id-unrecognized`, never an empty list for an unknown folder. See "`list_past_sessions`" below |
+| `include_past_sessions` | `project_id`, `session_ids[]` (1 to 500 distinct) | `approved`, `skipped[]` of `{session_id, label}` | the picker's Continue: a person's `approve` of exactly the sessions named, never `include_backlog`; the whole call is refused on one foreign id (`session-id-unrecognized`), a Never folder (`project-mode-never`) or the Never override; writes `past-sessions-included` first. Async entry point only, as `approve`. See "`include_past_sessions`" below |
 | `cancel` | `entry_id` **or** `project_id` | `ok: true` (`entry_id`) or `canceled: <count>` (`project_id`) | returns matching `approved` entries to `pending` and clears their pin, so the next `approve` rebuilds; guaranteed to succeed for the whole hold; `project_id` undoes that project's `approved` entries and no others -- `pending` entries are left alone, matched by the id `entry_value` publishes (never `project_label`) -- and is refused with `project-id-unrecognized` if the daemon does not know that project; the two selectors are mutually exclusive and `project_id` wins if both are sent; a known project with nothing `approved` succeeds with `canceled: 0`; the single-`entry_id` form errors if that entry is not currently `approved`; see "The approval hold" below |
 | `pause` | `until` (optional RFC 3339 timestamp) | `paused: true`, `paused_until` | see "Pause semantics" below |
 | `resume` | — | `paused: false` | |
@@ -581,7 +583,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `harness_commit` | `plan_id` (required) | `id`, `action`, `committed: true`, `path`, `backup_path` | makes an edit that was already shown; takes a plan id and **nothing else**, so a shell cannot ask for a write it did not preview |
 | `quiesce` | `timeout_secs` (optional, default 60, max 300) | `quiesced: true`, `waited_ms` | parks uploads for an update swap; `busy` / `quiesce-timeout` if in-flight work does not finish in time |
 | `get_settings` | — | settings; credential presence as booleans, source declarations as `*_source_mode` (`unset`/`off`/`watch`), never local paths | |
-| `set_settings` | any of `quiescence_secs`, `digest_interval_secs`, `digest_schedule`, `approval_hold_secs`, `local_notifications`, `claude_root`, `codex_root`, `claude_source`, `codex_source`, `gemini_source`, `cline_source`, `opencode_source`, `ironwire`, `ironwire_attested_bodies`, `token_distributions_contribution`, `token_capture_enabled`, `private_inference`, `private_inference_offer_seen`, `scrub_check`, `max_uploads_per_day`, `max_bytes_per_day` | updated settings | see "`set_settings`" below |
+| `set_settings` | any of `quiescence_secs`, `digest_interval_secs`, `digest_schedule`, `approval_hold_secs`, `local_notifications`, `claude_root`, `codex_root`, `claude_source`, `codex_source`, `gemini_source`, `cline_source`, `opencode_source`, `trajectory_source`, `ironwire`, `ironwire_attested_bodies`, `token_distributions_contribution`, `token_capture_enabled`, `private_inference`, `private_inference_offer_seen`, `scrub_check`, `max_uploads_per_day`, `max_bytes_per_day` | updated settings | see "`set_settings`" below |
 | `consent_options` | — | `scopes[]` of `{name, description, always_on, grants_data_use}` | |
 | `set_consent_scopes` | `scopes[]` (wire-name strings; omitted means floor scope only) | `consent_scopes[]` | requires an existing enrollment |
 | `enroll` | `grant` xor `invite`, `scopes[]` (optional) | `enrolled: bool`, and on success `tenant_id`, `device_key_id`, `consent_scopes[]` | performs real network I/O |
@@ -1619,6 +1621,190 @@ so the picker and the rule compose: the rule covers what comes next, the
 picker what is already there. Unticked sessions stay `pending`; "Keep on this
 Mac" (`keep`) takes one out of the list without deciding it for good.
 
+The first run's picker (#1030's Rules step) needs more than the queue holds:
+on a first run nothing has been offered yet, and a session the watcher never
+visited is not in the queue at all. It uses `list_past_sessions` and
+`include_past_sessions`, below, which walk the declared sources themselves.
+
+### `list_past_sessions`
+
+```json
+{ "method": "list_past_sessions", "params": { "project_id": "proj_..." } }
+```
+
+```json
+{
+  "sessions": [
+    {
+      "session_id": "sess_0123456789abcdef0123456789abcdef",
+      "entry_id": "5f0c...-uuid",
+      "state": "pending",
+      "selectable": true,
+      "started_at": "2026-10-01T09:12:00Z",
+      "duration_secs": 1840,
+      "title": "Fix the flaky upload test",
+      "size_bytes": 482113,
+      "source": "claude-code"
+    },
+    {
+      "session_id": "sess_fedcba9876543210fedcba9876543210",
+      "entry_id": null,
+      "state": "not_queued",
+      "selectable": true,
+      "started_at": "2026-09-14T16:40:00Z",
+      "duration_secs": null,
+      "title": null,
+      "size_bytes": 90211,
+      "source": "codex"
+    }
+  ],
+  "total": 2,
+  "project_mode": "notify_only"
+}
+```
+
+One folder's past sessions, newest first, whatever the queue knows of them.
+The listing walks every declared source's discovery itself rather than the
+watcher's cwd cache, so it is complete before the first discovery pass has
+run (a Rules step shown seconds after Folders started the daemon) and it
+includes sessions no pass has ever visited. It never loads a session: a row
+the queue has not offered is described by its date and size alone.
+
+`project_id` is required. A missing or non-string one is `bad_params` /
+`project_id-invalid`; an id that resolves to no project the daemon knows --
+the usual known set plus every project a declared source lists now -- is
+`bad_params` / `project-id-unrecognized`. An unknown folder is refused, never
+answered with an empty list. `project_mode` is the folder's resolved rule
+(`notify_only`, `auto_upload` or `ignore`).
+
+Each row's `state`:
+
+| `state` | `selectable` | Meaning |
+|---|---|---|
+| `pending` | true | queued and waiting on a person |
+| `approved` | false | already approved |
+| `expired` | true | aged out of the queue without a decision; including it revives it |
+| `not_queued` | true | on disk, never offered |
+| `never` | false | the folder's rule is Never; every row it would list is `never` |
+| `still_active` | false | still being written: modified within `quiescence_secs` |
+
+A queued row (`pending`, `approved`, `expired`) carries its queue entry's
+`entry_id`, `started_at`, `duration_secs`, `title`, `size_bytes` and `source`
+(the declared source where the entry has one). A `not_queued` row carries
+`entry_id: null`, `title: null`, `duration_secs: null`, the discovery's
+`started_at` (else the file's modification time) and the file's
+`size_bytes`: nothing is read before the person chooses. `title` is `null`
+on a queued entry that has none, as on `list_pending`.
+
+Kept and dismissed sessions are not listed. Outside a Never folder, neither
+is a session whose latest offer was decided some other way (uploading,
+uploaded, refused, failed): the picker is for sessions still open to a
+choice. A Never folder lists those too, as `never`. `total` is the number of rows
+returned.
+
+**No path crosses the socket.** `session_id` is `sess_` and the first 32 hex
+characters of sha256 over the session path's bytes: one-way, and
+deterministic, so the id a listing gave is the id `include_past_sessions`
+re-derives from its own walk. No row carries a path, a cwd or a project
+path; the folder is named only by `project_id`.
+
+### `include_past_sessions`
+
+```json
+{
+  "method": "include_past_sessions",
+  "params": {
+    "project_id": "proj_...",
+    "session_ids": ["sess_0123456789abcdef0123456789abcdef"]
+  }
+}
+```
+
+```json
+{
+  "approved": 1,
+  "skipped": [
+    { "session_id": "sess_fedcba9876543210fedcba9876543210", "label": "session-still-active" }
+  ]
+}
+```
+
+The picker's Continue: approve exactly the sessions named, as a person's
+approval. Each one is pinned to a preview and held for the undo window
+exactly as a click on a card is (`approve` and this method share one
+implementation), and it is recorded as the person's own, so a later change
+of the folder's rule -- back to Ask me, say -- does not take it back.
+"Include every past session in {folder}" is a selection of every id the
+listing returned, never `include_backlog`.
+
+Dispatched on the async entry point only, as `approve` is; the synchronous
+entry point answers `unknown_method`.
+
+**The whole call is validated before anything changes.** Each of these
+refuses every session and records nothing:
+
+| Code / label | When |
+|---|---|
+| `bad_params` / `project_id-invalid` | `project_id` missing or not a string |
+| `bad_params` / `session_ids-invalid` | `session_ids` missing, not an array, holding a non-string, or empty once duplicates are dropped |
+| `bad_params` / `too-many-sessions` | more than 500 ids, checked before any id is read |
+| `bad_params` / `project-id-unrecognized` | the project resolves as for `list_past_sessions` and does not |
+| `bad_params` / `contribution-override-never` | the global Never contribution override is on, as `approve` refuses it |
+| `bad_params` / `project-mode-never` | the folder's rule is Never |
+| `bad_params` / `session-id-unrecognized` | any one id is not one of this folder's sessions in the daemon's own walk -- another folder's id, a path, an empty string, a made-up id |
+| `unavailable` / `audit-write-failed` | the `past-sessions-included` audit row could not be written |
+
+Duplicate ids are counted once, in the order first named. A session the
+walk can no longer find is `session-id-unrecognized`, not a skip: the call
+names what the person saw, and a vanished session refuses the selection.
+
+**The audit row comes first.** Once the call validates, a
+`past-sessions-included` row is appended to the audit log (`list_audit`)
+before anything is revived, queued or approved: `project_label` is the
+folder's derived label (from the key the daemon holds, never the caller's
+string) and `detail` the number of sessions chosen. No session id, path or
+title is in it. A log that refuses the write refuses the call, under the
+same rollback-cannot-record guarantee as `bulk-approved`.
+
+**One refusal comes after the audit row.** If the queue cannot be saved once
+the approvals are made, the call is `unavailable` / `queue-write-failed`:
+every approval it made is cancelled again (back to `pending`, its pin
+dropped, as `cancel` leaves an entry), so nothing it named is sent. The
+`past-sessions-included` row stands, as `bulk-approved`'s does after a
+failed save. Sessions it revived from `expired` or queued for the first time
+are left `pending`, waiting for a person, and a retry with the same ids
+approves them.
+
+**Per session**, every distinct id is counted in `approved` or listed in
+`skipped` exactly once, with a fixed label:
+
+| `label` | Meaning |
+|---|---|
+| `session-dismissed` | the session was dismissed; it is never revived |
+| `session-kept` | the session is kept on this Mac; `undo_keep` first |
+| `session-still-active` | still being written (judged at the walk, and again at the read); never queued half-written |
+| `held-for-review` | its offer is held for a person's review, or was when it aged out, as a group `approve` leaves it |
+| `not-pending` | already decided (approved, uploading, uploaded) by the time the include reached it |
+| `session-project-changed` | read now, the session resolves to another folder than the one named |
+| `project-mode-never` | the folder turned Never between the validation and the read |
+| `session-unreadable` | the session file could not be read or parsed |
+| `session-file-vanished` | the session file was gone by the read |
+| `envelope-too-large` | over the size limit, at the read or at the pin |
+| `queue-full` | the queue refused the offer outright |
+| `not-enrolled`, and `approve`'s other per-entry labels | the approval itself was refused, as `approve` reports it |
+
+An `expired` session is revived to `pending` (its `discovered_at` set to
+now, as `undo_keep` dates a return) and approved. A `not_queued` session is
+read and queued now, then approved; an explicit selection lands past the
+queue's entry cap, because it is a person's choice rather than the watcher's
+offer, but never past the quiescence check. A session queued by a discovery
+pass that ran between the listing and the include is approved through that
+offer if it still waits.
+
+A session read here for a folder armed from now, with content older than
+that arming, is recorded on the arming as the watcher records it, so if the
+approval does not land the offer it leaves still waits for a person.
+
 ### The contribution override
 
 The menu-bar Contribution mode pill (R13, #1202; requested on #1173) offers
@@ -2613,6 +2799,11 @@ one entry -- a `cancel` against a project with nothing `approved` appends
 nothing. The single-`entry_id` form of `cancel` stays unaudited, the same
 as the single-`entry_id` form of `approve`.
 
+A `past-sessions-included` entry is `include_past_sessions`'s: `detail`
+carries the number of sessions chosen and `project_label` the folder's
+derived label. It is written once the call validates and before anything is
+revived, queued or approved; no session id, path or title is in it.
+
 An `auto-upload-voided` entry records a standing `auto_upload` grant that the
 daemon voided because the terms in force widened past what it was armed under
 -- a new recipient (destination, identity, witness, classifier host or model,
@@ -3444,7 +3635,8 @@ Takes a JSON object whose top-level keys must come from
 `quiescence_secs`, `digest_interval_secs`, `digest_schedule`,
 `approval_hold_secs`,
 `local_notifications`, `claude_root`, `codex_root`, `claude_source`,
-`codex_source`, `gemini_source`, `cline_source`, `opencode_source`, `ironwire`,
+`codex_source`, `gemini_source`, `cline_source`, `opencode_source`,
+`trajectory_source`, `ironwire`,
 `ironwire_attested_bodies`, `private_inference`,
 `private_inference_offer_seen`, `scrub_check`, `max_uploads_per_day`,
 `max_bytes_per_day` --
@@ -3483,6 +3675,16 @@ when older settings load. Watch reads direct `.json` children exported with
 [qualification report](superpowers/reports/2026-09-07-opencode-export-qualification.md)
 records version support and routing limits, and the declaration grants neither
 body capture nor remote submission.
+
+`trajectory_source` takes the same three values for a folder of exported
+trajectory files (a Letta Trajectory export, for example). Absent, null and
+Off add no folder; Watch reads its direct `.json`/`.jsonl` children with the
+strict trajectory reader alongside the staging folder. It is not part of the
+claude/codex start gate, `get_settings` reports only
+`trajectory_source_mode`, never the path, and a session found there is never
+armed for automatic upload: it always waits for a person.
+
+See "The `trajectory_source` declaration", below.
 
 `approval_hold_secs` takes a non-negative integer no greater than 300
 (five minutes): how long an approval is
@@ -3717,6 +3919,40 @@ in `trace-commons-contributor`, whose `every_sentence_arrives_finished` pins
 the payload's field count and is what a shell's decoder is checked against.
 This document deliberately does not repeat that number: a count copied into
 prose goes stale in silence, and the test does not.
+
+### The `trajectory_source` declaration
+
+```json
+{ "method": "set_settings", "params": { "trajectory_source": { "mode": "watch", "path": "/chosen/exports" } } }
+```
+
+"Add your tool" (#1030's Tools step) lets a person point at a folder of
+exported traces -- a Letta Trajectory export, for example -- that no parsed
+tool's layout matches. `trajectory_source` declares it:
+
+- `{"mode":"watch","path":"..."}` reads the folder's direct `.json` and
+  `.jsonl` children with the strict trajectory reader, the one that reads the
+  staging folder, as one `trajectory` source covering both. No new parser is
+  involved.
+- `{"mode":"off"}`, `null`, or the key absent add no folder. Settings
+  written before this key existed load as absent, so an upgrade reads no new
+  folder.
+- Any other value -- a bare path string, an unknown mode -- is `bad_params`
+  / `settings-invalid-value`, as for the other `*_source` keys.
+
+`get_settings` reports `trajectory_source_mode` (`unset`, `off` or `watch`)
+and never the path; no response, log line or audit row carries it.
+
+The declaration is not part of the claude/codex start gate: a daemon with
+only a trajectory folder declared has not declared its roots.
+
+**A session found there is never armed for automatic upload.** It always
+waits for a person, in a folder on Automatic too, under the same rule as a
+staged trajectory: a trajectory there is an export somebody added, not a
+watched agent store, and sending it on first sight could send something the
+person does not remember adding. The rule is on the adapter, so it holds for
+a file dropped in by hand as well as for one that names its own source. It
+can be approved one by one, or chosen in `include_past_sessions`.
 
 ### Contribution eligibility
 

@@ -65,6 +65,7 @@ pub(crate) mod test_credential_store;
 // round-trip tests constructs the OS store, by design.
 #[cfg_attr(all(feature = "test-credential-store", not(test)), allow(dead_code))]
 pub(crate) mod os_secret_store;
+pub mod past_sessions;
 pub mod policy;
 pub mod preview;
 pub mod preview_scheduler;

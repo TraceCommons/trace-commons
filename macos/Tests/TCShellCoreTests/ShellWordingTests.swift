@@ -102,6 +102,7 @@ final class ShellWordingTests: XCTestCase {
         "TCBridge/TCSkillLearning.swift",
         "TCShellCore/ConsentCopy.swift",
         "TCShellCore/EligibilitySurface.swift",
+        "TCShellCore/FirstRunCopy.swift",
         "TCShellCore/ReadGate.swift",
         "TCShellCore/RoutingCopy.swift",
         "TCShellCore/RoutingSurface.swift",

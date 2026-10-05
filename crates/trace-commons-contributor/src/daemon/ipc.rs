@@ -371,6 +371,8 @@ pub const METHODS: &[&str] = &[
     "list_audit",
     "list_history",
     "list_pending",
+    "list_past_sessions",
+    "include_past_sessions",
     "list_kept",
     "keep",
     "undo_keep",
@@ -2567,6 +2569,7 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
         "inference_call_proof" => super::network_data::handle_proof(shared, req),
         "private_ai" => super::network_data::handle_private_ai(shared, req),
         "list_pending" => handle_list_pending(shared, req),
+        "list_past_sessions" => handle_list_past_sessions(shared, req),
         "list_kept" => handle_list_kept(shared, req),
         "keep" => handle_keep(shared, req),
         "undo_keep" => handle_undo_keep(shared, req),
@@ -2992,6 +2995,88 @@ fn handle_list_pending(shared: &DaemonShared, req: &Request) -> Response {
         .map(|e| entry_value(e, admission_evidence))
         .collect();
     Response::ok(req.id, serde_json::json!({ "pending": entries }))
+}
+
+/// The first-run past-session picker: one folder's past sessions, queued or
+/// not, each named by an opaque session id. See `past_sessions`.
+///
+/// `project_id` is required and resolved against the known projects plus
+/// every project a declared source lists now, so a folder is answerable
+/// before the first discovery pass. An id that resolves to nothing is
+/// refused, never answered with an empty list.
+fn handle_list_past_sessions(shared: &DaemonShared, req: &Request) -> Response {
+    let Some(project_id) = req.params.get("project_id").and_then(|v| v.as_str()) else {
+        return Response::err(req.id, ERR_BAD_PARAMS, "project_id-invalid");
+    };
+    // The walk first, with no lock held; see `past_sessions::discover_sessions`.
+    let discovered = super::past_sessions::discover_sessions(shared);
+    let known = super::past_sessions::known_project_keys(shared, &discovered);
+    let Some(project_key) = project_key_for_id(project_id, &known) else {
+        return Response::err(req.id, ERR_BAD_PARAMS, ERR_PROJECT_ID_UNRECOGNIZED);
+    };
+    let rows = super::past_sessions::rows_for(shared, &discovered, &project_key, Utc::now());
+    let mode = shared
+        .policy
+        .lock()
+        .expect("policy lock")
+        .resolve(&project_key);
+    Response::ok(
+        req.id,
+        serde_json::json!({
+            "total": rows.len(),
+            "sessions": rows,
+            "project_mode": mode,
+        }),
+    )
+}
+
+/// The first-run picker's Continue: approve a chosen subset of one
+/// folder's past sessions, each named by the opaque id `list_past_sessions`
+/// gave it. See `past_sessions::include_past_sessions` for the rules.
+///
+/// `project_id` resolves as it does for the listing. `session_ids` is a
+/// non-empty array of strings, at most `MAX_SESSIONS_PER_INCLUDE` distinct
+/// ones; anything else is refused before the walk.
+async fn handle_include_past_sessions(shared: &DaemonShared, req: &Request) -> Response {
+    use super::past_sessions::{LABEL_SESSION_IDS_INVALID, LABEL_TOO_MANY_SESSIONS};
+    let Some(project_id) = req.params.get("project_id").and_then(|v| v.as_str()) else {
+        return Response::err(req.id, ERR_BAD_PARAMS, "project_id-invalid");
+    };
+    let Some(ids) = req.params.get("session_ids").and_then(|v| v.as_array()) else {
+        return Response::err(req.id, ERR_BAD_PARAMS, LABEL_SESSION_IDS_INVALID);
+    };
+    // Refused before any string is copied or the sources are walked.
+    if ids.len() > super::past_sessions::MAX_SESSIONS_PER_INCLUDE {
+        return Response::err(req.id, ERR_BAD_PARAMS, LABEL_TOO_MANY_SESSIONS);
+    }
+    let Some(ids) = ids
+        .iter()
+        .map(|v| v.as_str().map(str::to_string))
+        .collect::<Option<Vec<String>>>()
+    else {
+        return Response::err(req.id, ERR_BAD_PARAMS, LABEL_SESSION_IDS_INVALID);
+    };
+    // The walk with no lock held, as the listing takes it.
+    let discovered = super::run_blocking(|| super::past_sessions::discover_sessions(shared));
+    let known = super::past_sessions::known_project_keys(shared, &discovered);
+    let Some(project_key) = project_key_for_id(project_id, &known) else {
+        return Response::err(req.id, ERR_BAD_PARAMS, ERR_PROJECT_ID_UNRECOGNIZED);
+    };
+    match super::past_sessions::include_past_sessions(
+        shared,
+        &discovered,
+        &project_key,
+        &ids,
+        Utc::now(),
+    )
+    .await
+    {
+        Ok(outcome) => Response::ok(
+            req.id,
+            serde_json::to_value(outcome).unwrap_or(serde_json::Value::Null),
+        ),
+        Err((code, label)) => Response::err(req.id, code, label),
+    }
 }
 
 /// K5: every session kept on this Mac, in the `list_pending` entry shape,
@@ -4535,6 +4620,7 @@ pub async fn handle_request_async(shared: &DaemonShared, req: &Request) -> Respo
             witness_review_response(handle_witness_preview_request(shared, req).await)
         }
         "approve" => handle_approve(shared, req).await,
+        "include_past_sessions" => handle_include_past_sessions(shared, req).await,
         "preview" => handle_preview(shared, req).await,
         "preview_body" => handle_preview_body(shared, req).await,
         "quiesce" => handle_quiesce(shared, req).await,
@@ -4916,6 +5002,107 @@ async fn handle_approve(shared: &DaemonShared, req: &Request) -> Response {
             return Response::err(req.id, ERR_UNAVAILABLE, "audit-write-failed");
         }
     }
+    let terms = ApprovalTerms {
+        cfg: cfg.as_ref(),
+        scopes: &scopes,
+        inputs: inputs.as_deref(),
+        verdict: verdict.as_deref(),
+        correction: correction.as_deref(),
+        approved_at,
+        approval_hold_secs,
+    };
+    let ApprovedBatch {
+        approved_ids,
+        skipped,
+        redactions,
+        flagged,
+        hold_until,
+    } = match approve_as_a_person(shared, &ids, &terms).await {
+        Ok(batch) => batch,
+        Err(label) => return Response::err(req.id, ERR_UNAVAILABLE, label),
+    };
+    let approved = approved_ids.len();
+    // The signal the contributor sees instead of a preview: "Sent --
+    // scrubbing removed N things, M flagged." Counts and labels only -- a
+    // redaction count names a category, never the text it removed, and a
+    // skip reason is a fixed label, never a path or trace content.
+    let mut result = serde_json::json!({
+            "approved": approved,
+            "hold_secs": approval_hold_secs,
+            "hold_until": hold_until,
+            "flagged": flagged,
+            "redactions": redactions,
+            "skipped": skipped
+                .iter()
+                .map(|(id, label)| serde_json::json!({
+                    "entry_id": id,
+                    "reason_label": label,
+                }))
+                .collect::<Vec<_>>(),
+    });
+    // Absent, not zero, for an invited contributor and for a single-entry
+    // approve. Zero would read as "nothing was left out", which is a claim
+    // about a filter that did not run.
+    if group_filters && (all || project_id.is_some()) {
+        result["excluded_ineligible"] = serde_json::Value::from(excluded_ineligible);
+    }
+    // Present on every group call, because the held filter always runs on
+    // one; absent on a single-entry call, where it does not. Kept apart from
+    // `approved` and from `excluded_ineligible` so neither count changes
+    // what it has always meant.
+    if all || project_id.is_some() {
+        result["excluded_held"] = serde_json::Value::from(excluded_held);
+    }
+    Response::ok(req.id, result)
+}
+
+/// The terms a person's approval is given under, read once for a whole
+/// call. See `handle_approve`, which reads them, and
+/// `approve_as_a_person`, which records them on every entry it approves.
+pub(super) struct ApprovalTerms<'a> {
+    pub cfg: Option<&'a crate::config::ContributorConfig>,
+    pub scopes: &'a [String],
+    pub inputs: Option<&'a str>,
+    pub verdict: Option<&'a str>,
+    pub correction: Option<&'a str>,
+    /// One instant for the whole call; see `handle_approve`.
+    pub approved_at: chrono::DateTime<Utc>,
+    pub approval_hold_secs: u64,
+}
+
+/// What one batch of a person's approvals came to. Every id the batch was
+/// asked to act on is in exactly one of `approved_ids` and `skipped`.
+pub(super) struct ApprovedBatch {
+    pub approved_ids: Vec<Uuid>,
+    /// Fixed labels only.
+    pub skipped: Vec<(Uuid, &'static str)>,
+    pub redactions: std::collections::BTreeMap<String, u32>,
+    pub flagged: u64,
+    pub hold_until: Option<chrono::DateTime<Utc>>,
+}
+
+/// Pin and approve `ids` as a person's approval: build the artifact for any
+/// entry nobody previewed, re-check the pin under the lock that approves,
+/// approve, and save. One implementation for `approve` and for the
+/// first-run picker's `include_past_sessions`, so a selection made there is
+/// pinned and held exactly as a click on a card is.
+///
+/// `Err` is a fixed label (`queue-write-failed`); every approval this call
+/// made has then been cancelled again.
+pub(super) async fn approve_as_a_person(
+    shared: &DaemonShared,
+    ids: &[Uuid],
+    terms: &ApprovalTerms<'_>,
+) -> std::result::Result<ApprovedBatch, &'static str> {
+    let ApprovalTerms {
+        cfg,
+        scopes,
+        inputs,
+        verdict,
+        correction,
+        approved_at,
+        approval_hold_secs,
+    } = *terms;
     // Entries nobody previewed have no artifact behind them. Build one now.
     //
     // What is at stake if this is not done, or is done and does not stick:
@@ -4978,7 +5165,7 @@ async fn handle_approve(shared: &DaemonShared, req: &Request) -> Response {
             skipped.push((id, "not-enrolled"));
             continue;
         }
-        match build_and_pin_preview(shared, id, &entry, cfg.as_ref(), correction.as_deref()).await {
+        match build_and_pin_preview(shared, id, &entry, cfg, correction).await {
             Ok((summary, _body, _envelope)) => {
                 // `build_preview` does not size-check the raw contribution
                 // (only `submit`'s path does); `approved_envelope::save`
@@ -5043,7 +5230,7 @@ async fn handle_approve(shared: &DaemonShared, req: &Request) -> Response {
         }
     }
     let mut approved_ids = Vec::new();
-    for id in &ids {
+    for id in ids {
         let id = *id;
         if skipped_ids.contains(&id) {
             continue;
@@ -5101,40 +5288,30 @@ async fn handle_approve(shared: &DaemonShared, req: &Request) -> Response {
             .get(id)
             .filter(|entry| entry.holds_witness_certificate())
         {
-            let valid = cfg
-                .as_ref()
-                .zip(inputs.as_deref())
-                .is_some_and(|(cfg, fingerprint)| {
-                    super::approved_envelope::load_witnessed(&shared.store, id)
-                        .ok()
-                        .flatten()
-                        .is_some_and(|artifact| {
-                            artifact.digest().ok().as_deref()
-                                == entry.previewed_envelope_digest.as_deref()
-                                && artifact
-                                    .validate(
-                                        cfg,
-                                        &entry.session_hash,
-                                        fingerprint,
-                                        verdict.as_deref(),
-                                        correction.as_deref(),
-                                    )
-                                    .is_ok()
-                        })
-                });
+            let valid = cfg.zip(inputs).is_some_and(|(cfg, fingerprint)| {
+                super::approved_envelope::load_witnessed(&shared.store, id)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|artifact| {
+                        artifact.digest().ok().as_deref()
+                            == entry.previewed_envelope_digest.as_deref()
+                            && artifact
+                                .validate(
+                                    cfg,
+                                    &entry.session_hash,
+                                    fingerprint,
+                                    verdict,
+                                    correction,
+                                )
+                                .is_ok()
+                    })
+            });
             if !valid {
                 skipped.push((id, "witness-review-stale"));
                 continue;
             }
         }
-        if queue.approve(
-            id,
-            &scopes,
-            inputs.as_deref(),
-            verdict.as_deref(),
-            correction.as_deref(),
-            Some(approved_at),
-        ) {
+        if queue.approve(id, scopes, inputs, verdict, correction, Some(approved_at)) {
             approved_ids.push(id);
         } else {
             // `Queue::approve` refuses anything not `Pending`, and this
@@ -5153,7 +5330,6 @@ async fn handle_approve(shared: &DaemonShared, req: &Request) -> Response {
             skipped.push((id, "not-pending"));
         }
     }
-    let approved = approved_ids.len();
     // The deadline the daemon will actually honour, taken from an
     // entry it just wrote rather than recomputed here, so a client
     // counting down against it is counting down against the same
@@ -5171,45 +5347,20 @@ async fn handle_approve(shared: &DaemonShared, req: &Request) -> Response {
         // `Approved`, and these were set `Approved` a few lines ago
         // under this same lock, so no upload pass can have claimed
         // one.
-        for id in approved_ids {
-            let _ = queue.cancel(id);
+        for id in &approved_ids {
+            let _ = queue.cancel(*id);
         }
-        return Response::err(req.id, ERR_UNAVAILABLE, "queue-write-failed");
+        return Err("queue-write-failed");
     }
     drop(queue);
     shared.publish(EVENT_QUEUE_CHANGED, serde_json::json!({}));
-    // The signal the contributor sees instead of a preview: "Sent --
-    // scrubbing removed N things, M flagged." Counts and labels only -- a
-    // redaction count names a category, never the text it removed, and a
-    // skip reason is a fixed label, never a path or trace content.
-    let mut result = serde_json::json!({
-            "approved": approved,
-            "hold_secs": approval_hold_secs,
-            "hold_until": hold_until,
-            "flagged": flagged,
-            "redactions": redactions,
-            "skipped": skipped
-                .iter()
-                .map(|(id, label)| serde_json::json!({
-                    "entry_id": id,
-                    "reason_label": label,
-                }))
-                .collect::<Vec<_>>(),
-    });
-    // Absent, not zero, for an invited contributor and for a single-entry
-    // approve. Zero would read as "nothing was left out", which is a claim
-    // about a filter that did not run.
-    if group_filters && (all || project_id.is_some()) {
-        result["excluded_ineligible"] = serde_json::Value::from(excluded_ineligible);
-    }
-    // Present on every group call, because the held filter always runs on
-    // one; absent on a single-entry call, where it does not. Kept apart from
-    // `approved` and from `excluded_ineligible` so neither count changes
-    // what it has always meant.
-    if all || project_id.is_some() {
-        result["excluded_held"] = serde_json::Value::from(excluded_held);
-    }
-    Response::ok(req.id, result)
+    Ok(ApprovedBatch {
+        approved_ids,
+        skipped,
+        redactions,
+        flagged,
+        hold_until,
+    })
 }
 
 /// The entries a group selector acts on, and how many it left out.
@@ -6588,7 +6739,7 @@ fn redacted_settings(s: &DaemonSettings) -> serde_json::Value {
         // not use. The mode carries that distinction, and carries no path.
         obj.remove("claude_root");
         obj.remove("codex_root");
-        for source in crate::source::registered_source_names() {
+        for source in crate::source::declarable_source_names() {
             let Some(key) = crate::daemon::settings::source_settings_key(source) else {
                 continue;
             };
@@ -8035,7 +8186,7 @@ mod tests {
     /// without a matching removal here would put that path on the wire.
     #[test]
     fn the_settings_blob_reports_source_modes_and_never_a_source_path() {
-        for source in crate::source::registered_source_names() {
+        for source in crate::source::declarable_source_names() {
             let key = crate::daemon::settings::source_settings_key(source)
                 .expect("every registered source has a settings key");
             for (declaration, expected) in [
@@ -8058,6 +8209,22 @@ mod tests {
                 assert_eq!(v[format!("{key}_mode")], expected);
             }
         }
+
+        // The declared trajectory folder by name: not a registered native
+        // adapter, so a loop over those alone would never have asked.
+        let mut settings = DaemonSettings::default();
+        crate::daemon::settings::apply_settings_object(
+            &mut settings,
+            &serde_json::json!({"trajectory_source": {
+                "mode": "watch",
+                "path": "/private/trajectory-folder-sentinel"
+            }}),
+        )
+        .unwrap();
+        let v = redacted_settings(&settings);
+        assert!(!v.to_string().contains("trajectory-folder-sentinel"));
+        assert!(v.get("trajectory_source").is_none());
+        assert_eq!(v["trajectory_source_mode"], "watch");
     }
 
     fn req(method: &str, params: serde_json::Value) -> Request {
@@ -14425,8 +14592,8 @@ mod tests {
             src,
             "pub async fn handle_request_async(shared",
         ));
-        assert_eq!(sync.len(), 59, "synchronous dispatcher arms: {sync:?}");
-        assert_eq!(asy.len(), 63, "asynchronous dispatcher arms: {asy:?}");
+        assert_eq!(sync.len(), 60, "synchronous dispatcher arms: {sync:?}");
+        assert_eq!(asy.len(), 64, "asynchronous dispatcher arms: {asy:?}");
 
         let dispatched: std::collections::BTreeSet<String> = sync.union(&asy).cloned().collect();
         let advertised: std::collections::BTreeSet<String> =

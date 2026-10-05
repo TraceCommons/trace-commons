@@ -124,6 +124,12 @@ public enum TCCoreCopy {
         take(tc_monitor_traces_copy_json())
     }
 
+    /// `tc_first_run_copy_json`: the #1030 first run's words, grouped by
+    /// screen. Decoded by `TCShellCore.FirstRunCopy`.
+    public static func firstRunCopyJSON() -> String? {
+        take(tc_first_run_copy_json())
+    }
+
     /// `tc_contribution_mode_copy_json`: the menu-bar Contribution mode
     /// pill's words (#1208). Decoded by `TCShellCore.ContributionModeCopy`.
     public static func contributionModeCopyJSON() -> String? {

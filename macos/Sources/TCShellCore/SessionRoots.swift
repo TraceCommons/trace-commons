@@ -83,19 +83,28 @@ public struct SessionRoots: Equatable, Sendable {
     public var gemini: SourceChoice
     public var cline: SourceChoice
     public var opencode: SourceChoice
+    /// A declared folder of exported trajectory files. Not a `SourceKind`:
+    /// it is no agent store, discovery never offers it, and the daemon never
+    /// arms what it finds there. Optional like Gemini and Cline.
+    public var trajectory: SourceChoice
+
+    /// The `set_settings` / `daemon-settings.json` key for `trajectory`.
+    public static let trajectorySettingsKey = "trajectory_source"
 
     public init(
         claude: SourceChoice = .undecided,
         codex: SourceChoice = .undecided,
         gemini: SourceChoice = .undecided,
         cline: SourceChoice = .undecided,
-        opencode: SourceChoice = .undecided
+        opencode: SourceChoice = .undecided,
+        trajectory: SourceChoice = .undecided
     ) {
         self.claude = claude
         self.codex = codex
         self.gemini = gemini
         self.cline = cline
         self.opencode = opencode
+        self.trajectory = trajectory
     }
 
     /// Exhaustive on purpose. The binary form this replaced -- `kind ==
@@ -179,6 +188,9 @@ public struct SessionRoots: Equatable, Sendable {
         }
         if let declaration = opencode.declaration {
             object[SourceKind.opencode.settingsKey] = declaration
+        }
+        if let declaration = trajectory.declaration {
+            object[Self.trajectorySettingsKey] = declaration
         }
 
         guard let data = try? JSONSerialization.data(withJSONObject: object),

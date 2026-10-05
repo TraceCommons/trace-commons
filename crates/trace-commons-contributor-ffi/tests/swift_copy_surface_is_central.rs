@@ -345,6 +345,16 @@ macro_rules! json {
     };
 }
 
+/// A first-run sentence with each `{name}` placeholder replaced by [`HOLE`],
+/// so it compares equal to the Swift literal that interpolates the argument.
+fn holed(text: String) -> String {
+    trace_commons_contributor::first_run_copy::PLACEHOLDERS
+        .iter()
+        .fold(text, |text, name| {
+            text.replace(&format!("{{{name}}}"), HOLE)
+        })
+}
+
 /// The core sentences no Swift literal may hold, by where they come from.
 fn pinned_sentences() -> Vec<(&'static str, String)> {
     use trace_commons_contributor::{
@@ -414,6 +424,16 @@ fn pinned_sentences() -> Vec<(&'static str, String)> {
             .into_iter()
             .map(counted)
             .collect(),
+    );
+    // The first-run wording of #1030.
+    add(
+        "first_run_copy::first_run_copy",
+        table(json!(
+            trace_commons_contributor::first_run_copy::first_run_copy()
+        ))
+        .into_iter()
+        .map(holed)
+        .collect(),
     );
     // The menu-bar Contribution mode pill, its override confirmations and
     // their refusal lines (#1173).
@@ -614,6 +634,15 @@ const ALLOWED: &[(&str, &str, &str)] = &[
         "Held for privacy review",
         "week tally heading; no core tally export yet",
     ),
+    // The current onboarding's roots screen already titles itself with the
+    // #1030 Folders title. The first-run port replaces that screen with one
+    // that reads `first_run_copy` (plan 2026-10-04-native-first-run-port.md);
+    // remove this entry with it.
+    (
+        "TraceCommonsApp/Views/OnboardingRootsView.swift",
+        "Which folders may this",
+        "pre-port onboarding title; the first-run port reads first_run_copy",
+    ),
 ];
 
 #[test]
@@ -665,6 +694,35 @@ fn no_pinned_core_sentence_is_a_swift_literal() {
             ALLOWED[at].0
         );
     }
+}
+
+/// A core sentence that carries a `{name}` placeholder is pinned with a
+/// [`HOLE`] in its place, the way the scanner reads a Swift interpolation.
+/// Pinned with the braces, `"Include every past session in \(folder)"`
+/// would never match it.
+#[test]
+fn a_placeholder_sentence_is_pinned_the_way_swift_interpolates_it() {
+    let pinned = pinned_sentences();
+    let braced: Vec<&String> = pinned
+        .iter()
+        .map(|(_, sentence)| sentence)
+        .filter(|sentence| {
+            trace_commons_contributor::first_run_copy::PLACEHOLDERS
+                .iter()
+                .any(|name| sentence.contains(&format!("{{{name}}}")))
+        })
+        .collect();
+    assert!(
+        braced.is_empty(),
+        "pinned sentences still carry a brace placeholder: {braced:?}"
+    );
+    let probe = swift_literals(r#"let t = "Include every past session in \(folder)""#);
+    assert!(
+        pinned.iter().any(|(_, sentence)| fragments(sentence)
+            .iter()
+            .any(|fragment| probe.iter().any(|lit| lit.contains(fragment)))),
+        "a Swift re-authoring of a placeholder sentence is not caught: {probe:?}"
+    );
 }
 
 /// Each safety surface a macOS screen shows, the screen's file, the bridge
@@ -881,6 +939,8 @@ const BRIDGE_ONLY: &[(&str, &str)] = &[
         "TCBridge/TCCoreCopy.swift",
         "tc_automatic_contribution_copy_json",
     ),
+    // The first-run port moves this to SURFACES with the screen that reads it.
+    ("TCBridge/TCCoreCopy.swift", "tc_first_run_copy_json"),
 ];
 
 #[test]
