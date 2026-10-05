@@ -54,9 +54,11 @@ enum FirstRunFrameLayout {
 
     /// "Custom setup instead" sits on Quick's Folders only (#1030
     /// `tool-screens.tsx`): it is the one place Quick asks something Custom
-    /// asks differently.
-    static func offersCustomSetupInstead(_ state: FirstRunState) -> Bool {
-        state.tier == .quick && state.step == .folders
+    /// asks differently. It is withdrawn while a commit runs: the runner
+    /// moves the step on from wherever the state is when its calls finish,
+    /// so a switch mid-commit would skip Custom's Tools.
+    static func offersCustomSetupInstead(_ state: FirstRunState, isCommitting: Bool = false) -> Bool {
+        !isCommitting && state.tier == .quick && state.step == .folders
     }
 
     /// The disabled Continue explains itself only on the tool screens, where
@@ -72,11 +74,13 @@ enum FirstRunFrameLayout {
 /// failure as a notice, the screen, and its footer.
 ///
 /// `notice` is the sentence a screen maps the runner's failure to; the
-/// frame shows it and decides nothing about it.
+/// frame shows it and decides nothing about it. `isCommitting` withdraws
+/// the tier switch while the runner's calls are in flight.
 struct FirstRunFrame<Content: View>: View {
     private let copy: FirstRunCopy
     @Binding private var state: FirstRunState
     private let onBack: (() -> Void)?
+    private let isCommitting: Bool
     private let notice: String?
     private let footer: FirstRunFooter
     private let content: Content
@@ -85,6 +89,7 @@ struct FirstRunFrame<Content: View>: View {
         copy: FirstRunCopy,
         state: Binding<FirstRunState>,
         onBack: (() -> Void)?,
+        isCommitting: Bool = false,
         notice: String? = nil,
         footer: FirstRunFooter,
         @ViewBuilder content: () -> Content
@@ -92,6 +97,7 @@ struct FirstRunFrame<Content: View>: View {
         self.copy = copy
         self._state = state
         self.onBack = onBack
+        self.isCommitting = isCommitting
         self.notice = notice
         self.footer = footer
         self.content = content()
@@ -132,7 +138,7 @@ struct FirstRunFrame<Content: View>: View {
 
     private var footerRow: some View {
         HStack(spacing: GlassTokens.Space.s6) {
-            if FirstRunFrameLayout.offersCustomSetupInstead(state) {
+            if FirstRunFrameLayout.offersCustomSetupInstead(state, isCommitting: isCommitting) {
                 Button(copy.frame.customSetupInstead) {
                     state = FirstRunNavigation.switchTier(state, to: .custom)
                 }

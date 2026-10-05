@@ -14,6 +14,10 @@
 //!   tools it used to name are not read (owner decision, 2026-10-04), and a
 //!   folder that matches nothing is refused with `tools.add_tool_refused`.
 //! - The invite placeholder carries no code: Ron's preview showed a mock one.
+//! - Folders adds three lines Ron's preview had no need for, since its data
+//!   was mocked: `discovery_failed` and `retry` for a discovery that returns
+//!   nothing readable, and `enroll_refused` for an enroll refused after the
+//!   invite was accepted.
 //! - Preview-only strings (the mock-data tag, the simulated system sheets
 //!   P-3, P-4 and P-6, the preview's automatic-sharing refusal) are absent.
 //!
@@ -98,6 +102,13 @@ pub struct FoldersCopy {
     pub get_tool: &'static str,
     pub download_tool: &'static str,
     pub not_installed: &'static str,
+    /// Discovery returned no row the shell could read.
+    pub discovery_failed: &'static str,
+    /// Runs discovery again after `discovery_failed`.
+    pub retry: &'static str,
+    /// Enroll was refused after the invite was looked up and accepted. The
+    /// daemon does not say why, so this names no cause.
+    pub enroll_refused: &'static str,
 }
 
 /// Tools, Custom setup's tool list and the add tile (`tool-screens.tsx`).
@@ -257,6 +268,9 @@ pub fn first_run_copy() -> FirstRunCopy {
             get_tool: "Get {tool}",
             download_tool: "Download {tool}",
             not_installed: "Install it, then this row asks again.",
+            discovery_failed: "Could not look for coding tools on this Mac.",
+            retry: "Look again",
+            enroll_refused: "Your invite was found, but joining with it did not go through. Press Continue to try again.",
         },
         tools: ToolsCopy {
             title_light: "Connect your ",
@@ -378,6 +392,24 @@ mod tests {
                 "{{{name}}} is documented but no string carries it"
             );
         }
+    }
+
+    /// Enroll runs only after the invite was looked up and accepted, so its
+    /// refusal must not read as the Join screen's "not an invite link".
+    #[test]
+    fn a_refused_enroll_does_not_call_a_valid_invite_malformed() {
+        let copy = first_run_copy();
+        assert_ne!(copy.folders.enroll_refused, copy.join.invite_error);
+        assert!(!copy.folders.enroll_refused.contains("not an invite link"));
+    }
+
+    /// Discovery that returns nothing usable says so and offers a retry, so
+    /// Folders is never an empty list with a closed Continue.
+    #[test]
+    fn a_failed_discovery_has_a_line_and_a_retry() {
+        let copy = first_run_copy();
+        assert_ne!(copy.folders.discovery_failed, copy.folders.loading);
+        assert!(!copy.folders.retry.is_empty());
     }
 
     fn empty_leaves(value: &serde_json::Value, path: &str, out: &mut Vec<String>) {

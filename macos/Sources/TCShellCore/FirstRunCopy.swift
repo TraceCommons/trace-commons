@@ -61,6 +61,11 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
         public let getTool: String
         public let downloadTool: String
         public let notInstalled: String
+        /// Discovery returned no row the shell could read.
+        public let discoveryFailed: String
+        public let retry: String
+        /// Enroll was refused after the invite's lookup accepted it.
+        public let enrollRefused: String
     }
 
     public struct Tools: Decodable, Equatable, Sendable {

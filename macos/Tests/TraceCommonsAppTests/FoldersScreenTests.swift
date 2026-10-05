@@ -115,13 +115,17 @@ final class FoldersScreenTests: XCTestCase {
     /// Every way `.leaveRoots` can stop while the person stays on Folders
     /// shows a core line, except a failed near.ai sign-in, which is silent
     /// by decision: Continue reopens the sheet, and a cancelled sheet is the
-    /// person's own act. A failed enroll reads the invite path's one
-    /// sentence (`OnboardingConnectView`: the daemon never echoes why).
+    /// person's own act. A failed enroll reads the core's `enroll_refused`:
+    /// the invite was already accepted by lookup, so Join's "not an invite
+    /// link" would be false.
     @MainActor
     func test_everyFailureThatStaysOnFoldersShowsACoreLine() async throws {
         let onboarding = try XCTUnwrap(TCOnboardingCopy.load())
         let firstRun: FirstRunCopy = try copy()
         XCTAssertEqual(
+            FoldersScreenLayout.notice(for: .enrollFailed, copy: firstRun, onboarding: onboarding),
+            firstRun.folders.enrollRefused)
+        XCTAssertNotEqual(
             FoldersScreenLayout.notice(for: .enrollFailed, copy: firstRun, onboarding: onboarding),
             firstRun.join.inviteError)
 
@@ -169,8 +173,60 @@ final class FoldersScreenTests: XCTestCase {
     /// Back is withdrawn while a commit runs: the runner moves the step on
     /// from wherever the state is when the calls finish.
     func test_backIsWithdrawnWhileCommitting() throws {
+        var pressed = 0
+        XCTAssertNil(FoldersScreenLayout.backAction(isCommitting: true, back: { pressed += 1 }))
+        let back = try XCTUnwrap(FoldersScreenLayout.backAction(isCommitting: false, back: { pressed += 1 }))
+        back()
+        XCTAssertEqual(pressed, 1)
+
         let screen = try Self.source("FoldersScreen.swift")
-        XCTAssertTrue(screen.contains("onBack: runner.isCommitting ? nil :"))
+        XCTAssertTrue(screen.contains("onBack: FoldersScreenLayout.backAction(isCommitting: runner.isCommitting"))
+    }
+
+    /// While a commit runs, nothing on the screen can change the plan being
+    /// committed: the rows are disabled and the frame offers no tier switch.
+    /// A row flipped mid-commit would otherwise show "I don't use it" while
+    /// the daemon keeps watching the folder (`.start` sends no roots).
+    func test_rowsAndTierSwitchAreHeldWhileCommitting() throws {
+        XCTAssertFalse(FoldersScreenLayout.rowsEnabled(isCommitting: true))
+        XCTAssertTrue(FoldersScreenLayout.rowsEnabled(isCommitting: false))
+
+        let quickFolders = FirstRunState(tier: .quick, step: .folders)
+        XCTAssertTrue(FirstRunFrameLayout.offersCustomSetupInstead(quickFolders, isCommitting: false))
+        XCTAssertFalse(FirstRunFrameLayout.offersCustomSetupInstead(quickFolders, isCommitting: true))
+
+        let screen = try Self.source("FoldersScreen.swift")
+        XCTAssertTrue(screen.contains(".disabled(!FoldersScreenLayout.rowsEnabled(isCommitting: runner.isCommitting))"))
+        XCTAssertTrue(screen.contains("isCommitting: runner.isCommitting,"))
+    }
+
+    /// Discovery that returns nothing readable is a failure with the core's
+    /// line and a retry, never an empty list behind a closed Continue. A
+    /// later refresh that fails keeps the rows already shown.
+    func test_discoveryFailureShowsALineAndRefreshKeepsRows() throws {
+        let rowsJSON = """
+            [{"source":"claude-code","path":"/Users/someone/.claude/projects","exists":true,\
+            "session_count":3,"most_recent":null,"relocated_by_env":false}]
+            """
+        let found = FoldersScreenLayout.discovered(rowsJSON, keeping: .loading)
+        guard case .found(let rows) = found else { return XCTFail("\(found)") }
+        XCTAssertEqual(rows.map(\.source), [.claudeCode])
+
+        for bad in [nil, "not json", "[]"] as [String?] {
+            XCTAssertEqual(FoldersScreenLayout.discovered(bad, keeping: .loading), .failed, "\(String(describing: bad))")
+            XCTAssertEqual(FoldersScreenLayout.discovered(bad, keeping: .failed), .failed)
+            XCTAssertEqual(FoldersScreenLayout.discovered(bad, keeping: found), found)
+        }
+        XCTAssertNil(FoldersScreenLayout.discovered(rowsJSON, keeping: .loading).failureLine(try copy().folders))
+        XCTAssertEqual(DiscoveredRows.failed.failureLine(try copy().folders), try copy().folders.discoveryFailed)
+
+        // Discovery runs again when the app comes back to the front, so an
+        // install made meanwhile shows ("Install it, then this row asks
+        // again."), and on the failure's retry.
+        let screen = try Self.source("FoldersScreen.swift")
+        XCTAssertTrue(screen.contains("NSApplication.didBecomeActiveNotification"))
+        XCTAssertTrue(screen.contains("copy.folders.retry"))
+        XCTAssertFalse(screen.contains("TCDiscovery.sourcesJSON()) ?? []"))
     }
 
     /// A missing tool the state already watches (restored, or added on
