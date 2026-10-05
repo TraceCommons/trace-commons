@@ -110,7 +110,7 @@ pub(super) async fn account_public_run_session_detail_handler(
     let contribution_status = public_run_contribution_status(stored.status);
     let permitted_uses = public_run_permitted_uses(&stored.allowed_uses).map_err(internal_error)?;
     let account_key = ctx.account_id.as_uuid().to_string();
-    if !ACCOUNT_RATE_LIMITER.check(
+    if !ACCOUNT_RATE_LIMITER.check_principal(
         &format!("content-account:{account_key}"),
         CONTENT_PER_ACCOUNT_LIMIT,
     ) {
@@ -465,7 +465,7 @@ pub(super) async fn account_public_run_publish_handler(
         .map_err(internal_error)?;
 
     let account_key = ctx.account_id.as_uuid().to_string();
-    if !ACCOUNT_RATE_LIMITER.check(
+    if !ACCOUNT_RATE_LIMITER.check_principal(
         &format!("content-account:{account_key}"),
         CONTENT_PER_ACCOUNT_LIMIT,
     ) {

@@ -473,7 +473,7 @@ pub(crate) async fn account_passkey_native_register_start_handler(
     require_native_session(&ctx)?;
     // Before the gate, which reads the database and may write an audit row:
     // a start that is going to be refused anyway costs nothing past here.
-    if !ACCOUNT_RATE_LIMITER.check(
+    if !ACCOUNT_RATE_LIMITER.check_principal(
         &format!(
             "native-passkey-register-start-account:{}",
             ctx.account_id.as_uuid()

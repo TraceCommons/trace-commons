@@ -150,7 +150,7 @@ fn account_slot_in(
         ctx.account_id.as_uuid()
     );
     if !ACCOUNT_RATE_LIMITER.check_global("reward-account-global", 1_200)
-        || !ACCOUNT_RATE_LIMITER.check(&key, 120)
+        || !ACCOUNT_RATE_LIMITER.check_principal(&key, 120)
     {
         return None;
     }

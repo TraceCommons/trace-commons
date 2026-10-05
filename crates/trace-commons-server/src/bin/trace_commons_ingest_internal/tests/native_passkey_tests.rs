@@ -435,6 +435,9 @@ async fn finish_refusals_hold_the_timing_floor() {
 /// The start routes are rate limited per IP, with the uniform deny.
 #[tokio::test]
 async fn native_starts_are_rate_limited_per_ip() {
+    // The focused submit rate-limit tests reset the shared limiter under this
+    // lock; without it, one of their resets can land inside this loop.
+    let _lock = submit_rate_limit_test_lock().lock().await;
     reset_account_rate_limiter_for_test();
     let state = native_state(None, None);
     let mut last = None;

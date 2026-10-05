@@ -15019,7 +15019,7 @@ async fn submit_trace_handler(
         authenticated_tenant.principal_ref(),
     );
     let (submit_rate_limit, submit_concurrency_limit) = submit_rate_limits(&submit_key);
-    if !ACCOUNT_RATE_LIMITER.check(&submit_key, submit_rate_limit) {
+    if !ACCOUNT_RATE_LIMITER.check_principal(&submit_key, submit_rate_limit) {
         return Err(api_error(StatusCode::TOO_MANY_REQUESTS, "rate limited"));
     }
     let _submit_slot = match ACCOUNT_RATE_LIMITER.acquire(&submit_key, submit_concurrency_limit) {
@@ -18890,7 +18890,7 @@ async fn account_credit_summary_handler(
     // often this new route can trigger it is not. Collapses to a generic 429,
     // like every other account surface: no enumeration, no size signal.
     let account_key = ctx.account_id.as_uuid().to_string();
-    if !ACCOUNT_RATE_LIMITER.check(
+    if !ACCOUNT_RATE_LIMITER.check_principal(
         &format!("credit-summary-account:{account_key}"),
         CREDIT_SUMMARY_PER_ACCOUNT_LIMIT,
     ) {
@@ -19188,7 +19188,7 @@ async fn account_trace_content_handler(
     // `_content_slot` drops at function return, on every path including the
     // fail-closed error returns below.
     let account_key = ctx.account_id.as_uuid().to_string();
-    if !ACCOUNT_RATE_LIMITER.check(
+    if !ACCOUNT_RATE_LIMITER.check_principal(
         &format!("content-account:{account_key}"),
         CONTENT_PER_ACCOUNT_LIMIT,
     ) {
@@ -20836,12 +20836,38 @@ struct AccountRateWindows {
     prune_runs: u64,
 }
 
+impl AccountRateWindows {
+    fn new() -> Self {
+        Self {
+            entries: std::collections::HashMap::new(),
+            last_prune: None,
+            #[cfg(test)]
+            prune_runs: 0,
+        }
+    }
+
+    #[cfg(test)]
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.last_prune = None;
+        self.prune_runs = 0;
+    }
+}
+
 /// In-process fixed-window rate limiter keyed by an opaque string (IP / account
 /// id / code_hash / a fixed global key). Single-instance only (see the module
 /// note above). The map keys hold NO cleartext secrets: IPs, account ids, and
 /// `code_hash` (already a sha256) are all non-secret or pre-hashed.
+///
+/// Two independently bounded tables: `windows` holds keys an anonymous caller
+/// can mint (per-IP, per-code-hash, per-credential) plus the fixed global
+/// ceilings; `principal_windows` holds keys derived from an authenticated
+/// principal or account. A key-cardinality flood on the public surfaces fills
+/// only the first, so it cannot fold a contributor into the anonymous overflow
+/// bucket.
 struct AccountRateLimiter {
     windows: std::sync::Mutex<AccountRateWindows>,
+    principal_windows: std::sync::Mutex<AccountRateWindows>,
     concurrency: std::sync::Mutex<std::collections::HashMap<String, u32>>,
     max_windows: usize,
 }
@@ -20853,12 +20879,8 @@ impl AccountRateLimiter {
 
     fn with_max_windows(max_windows: usize) -> Self {
         Self {
-            windows: std::sync::Mutex::new(AccountRateWindows {
-                entries: std::collections::HashMap::new(),
-                last_prune: None,
-                #[cfg(test)]
-                prune_runs: 0,
-            }),
+            windows: std::sync::Mutex::new(AccountRateWindows::new()),
+            principal_windows: std::sync::Mutex::new(AccountRateWindows::new()),
             concurrency: std::sync::Mutex::new(std::collections::HashMap::new()),
             max_windows,
         }
@@ -20887,21 +20909,48 @@ impl AccountRateLimiter {
         self.check_global_at(key, limit, std::time::Instant::now())
     }
 
+    /// Like [`Self::check`], for a key derived from an AUTHENTICATED principal
+    /// or account (`submit-principal:…`, `content-account:{uuid}`). Such keys
+    /// live in their own bounded table, so an anonymous key flood cannot push
+    /// a contributor into the anonymous overflow bucket. Never pass a key an
+    /// unauthenticated caller can choose.
+    fn check_principal(&self, key: &str, limit: u32) -> bool {
+        self.check_principal_at(key, limit, std::time::Instant::now())
+    }
+
+    fn check_principal_at(&self, key: &str, limit: u32, now: std::time::Instant) -> bool {
+        Self::record_at(
+            &self.principal_windows,
+            self.max_windows,
+            key,
+            limit,
+            now,
+            false,
+        )
+    }
+
     fn check_at(&self, key: &str, limit: u32, now: std::time::Instant) -> bool {
-        self.record_at(key, limit, now, false)
+        Self::record_at(&self.windows, self.max_windows, key, limit, now, false)
     }
 
     fn check_global_at(&self, key: &str, limit: u32, now: std::time::Instant) -> bool {
-        self.record_at(key, limit, now, true)
+        Self::record_at(&self.windows, self.max_windows, key, limit, now, true)
     }
 
-    fn record_at(&self, key: &str, limit: u32, now: std::time::Instant, global: bool) -> bool {
-        let mut table = match self.windows.lock() {
+    fn record_at(
+        windows: &std::sync::Mutex<AccountRateWindows>,
+        max_windows: usize,
+        key: &str,
+        limit: u32,
+        now: std::time::Instant,
+        global: bool,
+    ) -> bool {
+        let mut table = match windows.lock() {
             Ok(guard) => guard,
             Err(_) => return false,
         };
         let new_key_at_capacity =
-            !global && !table.entries.contains_key(key) && table.entries.len() >= self.max_windows;
+            !global && !table.entries.contains_key(key) && table.entries.len() >= max_windows;
         if new_key_at_capacity
             && table.last_prune.is_none_or(|last| {
                 now.saturating_duration_since(last) >= ACCOUNT_RATE_PRUNE_INTERVAL
@@ -20916,17 +20965,15 @@ impl AccountRateLimiter {
                 now.saturating_duration_since(window.window_start) < ACCOUNT_RATE_WINDOW
             });
         }
-        let (key, limit) = if !global
-            && !table.entries.contains_key(key)
-            && table.entries.len() >= self.max_windows
-        {
-            (
-                ACCOUNT_RATE_OVERFLOW_KEY,
-                limit.min(ACCOUNT_RATE_OVERFLOW_LIMIT),
-            )
-        } else {
-            (key, limit)
-        };
+        let (key, limit) =
+            if !global && !table.entries.contains_key(key) && table.entries.len() >= max_windows {
+                (
+                    ACCOUNT_RATE_OVERFLOW_KEY,
+                    limit.min(ACCOUNT_RATE_OVERFLOW_LIMIT),
+                )
+            } else {
+                (key, limit)
+            };
         let entry = table
             .entries
             .entry(key.to_string())
@@ -20979,18 +21026,11 @@ impl AccountRateLimiter {
     /// into a fresh map so a panic in one test cannot wedge the limiter for the rest.
     #[cfg(test)]
     pub fn reset_for_test(&self) {
-        match self.windows.lock() {
-            Ok(mut windows) => {
-                windows.entries.clear();
-                windows.last_prune = None;
-                windows.prune_runs = 0;
-            }
-            Err(poisoned) => {
-                let mut windows = poisoned.into_inner();
-                windows.entries.clear();
-                windows.last_prune = None;
-                windows.prune_runs = 0;
-            }
+        for table in [&self.windows, &self.principal_windows] {
+            table
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clear();
         }
         match self.concurrency.lock() {
             Ok(mut concurrency) => concurrency.clear(),
@@ -21007,14 +21047,17 @@ impl AccountRateLimiter {
 
     #[cfg(test)]
     fn count_for_test(&self, key: &str) -> u32 {
-        match self.windows.lock() {
-            Ok(windows) => windows.entries.get(key).map_or(0, |window| window.count),
-            Err(poisoned) => poisoned
-                .into_inner()
-                .entries
-                .get(key)
-                .map_or(0, |window| window.count),
-        }
+        [&self.windows, &self.principal_windows]
+            .into_iter()
+            .map(|table| {
+                table
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .entries
+                    .get(key)
+                    .map_or(0, |window| window.count)
+            })
+            .sum()
     }
 
     #[cfg(test)]

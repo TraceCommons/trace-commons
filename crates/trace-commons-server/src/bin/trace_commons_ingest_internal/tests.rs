@@ -78981,6 +78981,56 @@ fn account_rate_limiter_keeps_global_ceilings_out_of_the_overflow_bucket() {
     assert_eq!(limiter.count_for_test("surface-global"), 31);
 }
 
+/// Anonymous callers can mint per-IP keys; they cannot mint authenticated
+/// principals. A key-cardinality flood on the public surfaces must therefore
+/// not push an authenticated principal into the anonymous overflow bucket,
+/// or it throttles trace submission for every contributor not already in the
+/// table.
+#[test]
+fn account_rate_limiter_keeps_principal_keys_out_of_the_anonymous_overflow() {
+    let limiter = AccountRateLimiter::with_max_windows_for_test(4);
+    let now = std::time::Instant::now();
+    for index in 0..64 {
+        limiter.check_at(
+            &format!("interstitial-ip:192.0.2.{index}"),
+            INTERSTITIAL_PER_IP_LIMIT,
+            now,
+        );
+    }
+    let submit_key =
+        submit_principal_rate_limit_key("tenant-a", TraceAuthMethod::StaticToken, "principal-a");
+    for hit in 0..SUBMIT_PER_PRINCIPAL_LIMIT {
+        assert!(
+            limiter.check_principal_at(&submit_key, SUBMIT_PER_PRINCIPAL_LIMIT, now),
+            "submission {hit} keeps the principal's own budget during an anonymous key flood"
+        );
+    }
+    assert!(!limiter.check_principal_at(&submit_key, SUBMIT_PER_PRINCIPAL_LIMIT, now));
+    assert_eq!(
+        limiter.count_for_test(&submit_key),
+        SUBMIT_PER_PRINCIPAL_LIMIT + 1
+    );
+}
+
+/// The principal table is still bounded: enrollment is cheap enough that
+/// principals are not a fixed population, so new principals past the table
+/// size share their own overflow bucket rather than growing memory.
+#[test]
+fn account_rate_limiter_bounds_the_principal_table_separately() {
+    let limiter = AccountRateLimiter::with_max_windows_for_test(2);
+    let now = std::time::Instant::now();
+    assert!(limiter.check_principal_at("submit-principal:one", 30, now));
+    assert!(limiter.check_principal_at("submit-principal:two", 30, now));
+    for index in 0..ACCOUNT_RATE_OVERFLOW_LIMIT {
+        assert!(limiter.check_principal_at(&format!("submit-principal:rotated-{index}"), 30, now));
+    }
+    assert!(!limiter.check_principal_at("submit-principal:another", 30, now));
+    assert!(
+        limiter.check_at("interstitial-ip:192.0.2.1", 30, now),
+        "principal overflow does not spend the anonymous table"
+    );
+}
+
 /// Filling the table repeatedly may prune at most once per cadence, rather
 /// than rescanning every bucket for every attacker-controlled key.
 #[test]
