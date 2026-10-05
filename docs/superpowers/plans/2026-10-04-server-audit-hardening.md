@@ -1,11 +1,9 @@
 # Server audit hardening implementation plan
 
 > **Spec:** `docs/superpowers/specs/2026-10-04-server-audit-hardening-design.md`
-> **Execution:** native inline
 
 ## Global constraints
 
-- Preserve the dirty primary checkout; work only on the isolated branch.
 - Follow strict RED-GREEN TDD for Rust behavior.
 - Keep auth, tenant grants, `/v1/source`, and split-license boundaries intact.
 
