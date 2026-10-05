@@ -106,6 +106,20 @@ claim to revoke remote sessions unless the provider confirms revocation.
 
 ## Managed-launch UI inside Trace Commons
 
+Managed sessions may run concurrently with standard native sessions. Each tool
+card offers two explicit actions: **Launch managed session** (isolated profile,
+only this new session) and **Change global settings** (the native tool's
+default configuration). Global changes use a separate preview/commit flow and
+state that standard sessions may need restart. They do not rewrite an active
+managed profile. Managed launch must leave default native configuration and
+credentials untouched. Standard sessions are not relabeled as managed.
+
+Global subscription selection uses the native tool's normal login/configuration
+flow. A saved managed account is not copied into a global credential slot;
+show that sign-in is needed if the chosen global identity is not already
+available. Global API-key/NEAR routing edits follow the same secret handling
+and exact configuration preview rules as other external config edits.
+
 Model calls includes a prominent **New session** action and a **Managed
 sessions** list beside the connection/account cards. A tool card's New session
 action opens the same launch sheet with that tool preselected. Keep this in
@@ -419,6 +433,9 @@ No hosted schema or contributor-identity change is needed.
 - Test default/global config restoration separately from managed-session
   isolation, including occupied slots, non-UTF-8 input, stale preimages, and
   crash recovery without overwriting subsequent edits.
+- Run a standard session alongside two managed sessions. Verify that managed
+  launches never alter its default config/credentials, and a subsequent global
+  settings change leaves both managed sessions' captured profiles unchanged.
 - Verify secrets do not enter IPC responses, logs, previews, argv, or ordinary
   account metadata. Assert restrictive profile permissions/ACLs per platform.
 - Test every shell's selection, keyboard navigation, pending/error states, and

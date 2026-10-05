@@ -15,6 +15,7 @@
 - CLI brand is **NEAR AI** and executable is `near-ai`; retain `trace-commons-contributor` as a compatible entry point using the same implementation.
 - Every `near-ai launch` must register with the daemon and appear in the Trace Commons UI. No daemon means an actionable refusal, not an untracked launch.
 - Selection changes apply to new sessions only. No fallback between accounts/providers; no daemon-global environment mutation.
+- Standard native sessions and managed sessions coexist. UI exposes separate Launch managed session and Change global settings actions; preview global edits, never copy managed login tokens into default profiles.
 - Subscription tokens remain in native storage and refresh through native tools. Persistent API keys require an OS secret store; unavailable storage fails closed.
 - No new dependency without explicit human approval. No AGPL dependency in a permissive crate; leave the license-boundary expected sets unchanged.
 - Managed launches do not grant contribution consent, arm folders, or collect terminal transcripts.
@@ -96,6 +97,7 @@ IPC methods: `managed_snapshot`, `managed_account_add`, `managed_account_rename`
 - [ ] Implement profile-root selection and native-login adapters with child-only environment overrides. Use fixture native tools for automated tests. Inspect actual supported native-tool status/version interfaces before defining the minimum-version capability table; unknown versions do not gain a Ready label.
 - [ ] Implement OS secret-store adapters using available platform capabilities with secrets on protected input, never argv. If a new dependency is necessary, present the exact dependency and reason for the repository-required approval before adding it. Do not substitute plaintext persistence.
 - [ ] Run tests plus controlled native-version compatibility checks with user-driven login. Record independently verified profile/Keychain isolation; leave unverified adapters explicitly unavailable. Commit.
+- [ ] Add coexistence tests: fixture default-home files and a standard running child remain unchanged after managed launches; global config edits never affect either managed profile. Use a separate global-settings preview/commit adapter, native login for global subscription changes, and the existing harness config safety guards.
 
 ## Task 4: IronWire profile targets and NEAR route isolation
 
@@ -157,6 +159,7 @@ IPC methods: `managed_snapshot`, `managed_account_add`, `managed_account_rename`
 - [ ] Write app tests `cliSessionAppearsWithoutUILaunch`, `accountSwitchDoesNotRelabelRunningSession`, `reopenLoadsRunningSessions`, `launchUnknownDoesNotOfferBlindRetry`, and `addAccountReturnsToLaunchSheet`. Use real Rust-produced contract fixtures and an injected daemon client.
 - [ ] Run `swift test --package-path macos --filter ManagedSessions` red after building the existing FFI dependency. Implement New session, native folder picker, connection/account picker, one-launch/default distinction, inline errors, and shared account management.
 - [ ] Render Managed sessions with project/tool/account/connection/state, empty and unknown states, Show terminal and Launch another. Integrate event and reconnect refresh; UI launch is not a prerequisite for displaying a row.
+- [ ] Render separate Launch managed session and Change global settings actions. The global-settings sheet previews the exact default-config edits and restart scope; no saved managed credential is copied into the standard profile. Test cancelling the preview and standard/managed coexistence. Carry these same controls into Tasks 8 and 9.
 - [ ] Run focused Swift and FFI tests; render and inspect launch sheet/session-list screenshots and keyboard accessibility. Verify a real fixture `near-ai launch` enters and exits the displayed list; commit.
 
 ## Task 8: Windows managed launch and session UI

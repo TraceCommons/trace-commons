@@ -1,9 +1,9 @@
 use std::path::PathBuf;
 
+use crate::mission_draft::MissionDraftInbox;
+use crate::mission_draft_service::ui_copy;
 use anyhow::Result;
 use clap::{Args, Subcommand};
-use trace_commons_contributor::mission_draft::MissionDraftInbox;
-use trace_commons_contributor::mission_draft_service::ui_copy;
 
 #[derive(Args)]
 pub(super) struct MissionDraftsArgs {

@@ -115,7 +115,7 @@
 //! - The socket connection loop (`serve_connection`), already async, calls
 //!   `handle_request_async` directly.
 //! - `handle_local` (the in-process CLI path, wired in
-//!   `src/bin/trace-commons-contributor.rs`) is itself synchronous, so it
+//!   `src/cli.rs`) is itself synchronous, so it
 //!   runs `handle_request_async` to completion via `block_on_ipc`, a
 //!   scoped-OS-thread blocking wrapper. It does this for *every* method, not
 //!   only the async ones -- a per-method special case here was tried once
