@@ -9,6 +9,8 @@ subscription, and an API key, and retain multiple named subscription accounts
 for later use. The user confirmed multiple saved accounts and approved the
 proposed UI and the rule that switching applies to newly opened sessions.
 The user additionally authorized changes to IronWire as needed for this feature.
+The user explicitly requires a managed-launch UI inside Trace Commons. A
+matching CLI workflow is proposed below, using the existing contributor binary.
 
 Each tool has an independent selected connection and account. Subscription
 sign-in and refresh remain owned by the native tool. A running session keeps
@@ -73,7 +75,7 @@ Account      [Personal            v]
              + Add account
 
 Ready for new sessions
-[Open Claude Code]  [Manage accounts]
+[New session]  [Manage accounts]
 ```
 
 Claude Code's connections are NEAR AI, Claude subscription, and Anthropic API
@@ -99,12 +101,129 @@ choice; it never selects another account automatically. Removal deletes the
 local managed credentials/profile through the supported adapter, and does not
 claim to revoke remote sessions unless the provider confirms revocation.
 
+## Managed-launch UI inside Trace Commons
+
+Model calls includes a prominent **New session** action and a **Managed
+sessions** list beside the connection/account cards. A tool card's New session
+action opens the same launch sheet with that tool preselected. Keep this in
+Model calls; no new sidebar destination is needed. This is a required product
+surface, not a follow-up to the backend.
+
+```text
+New managed session
+
+Project      [Choose folder...]
+Tool         [Claude Code                 v]
+Connection   [Claude subscription         v]
+Account      [Personal                    v]  Ready
+
+Opens Claude Code in a terminal using Personal.
+Other running sessions keep their current accounts.
+
+[Cancel]                              [Launch session]
+```
+
+Use a native folder picker and verify the selected directory is still
+accessible at launch. Choices start from the per-tool defaults, but changes
+inside the sheet apply only to this launch. An explicit, initially unchecked
+**Use as default for new sessions** option updates the default. Add account
+returns to this sheet with the project/tool selection intact.
+
+Show actionable inline states for missing tool, unsupported version, sign-in
+required, missing API key, unavailable terminal, and configuration conflict.
+Disable Launch while prerequisites are missing or a request is pending. Errors
+retain non-secret selections for Retry. The daemon independently validates
+every prerequisite; the UI is not the authority for credential or route choice.
+
+For the first delivery, launch the native interactive CLI in a supported
+external terminal. Trace Commons owns selection, launch, and lifecycle UI; the
+native tool owns coding interaction. An embedded terminal and chat composer
+are outside this slice. Show the external-terminal behavior before launch.
+The platform adapter starts a contributor launch helper with only an opaque,
+short-lived, single-use launch reference in its arguments. It never places
+keys, login tokens, a secret-bearing environment, or user-composed shell code
+in a terminal command. The helper redeems the reference over authenticated
+local IPC and starts the native process in the selected directory.
+
+Use idempotent launch requests to prevent double clicks and transport retries
+from creating duplicate sessions. A terminal opening is not proof the native
+tool started: wait for the helper's process-start acknowledgement. An ambiguous
+outcome shows **Launch status unknown** and reconciles before allowing retry.
+
+Managed sessions shows project, tool, connection, account label, start time,
+and Starting/Running/Exited/Failed/Status unknown. Resolve the account from the
+session's captured reference, never from today's default. Running indicates a
+live native process; account verification is separate and does not imply a
+successful model request. An empty list explains managed sessions and offers
+New session.
+
+Rows offer **Show terminal** where the platform can focus that specific window
+and **Launch another** to prefill a new sheet. An unsupported focus operation
+explains where the session runs; it must not start a replacement. Users end
+sessions in the native terminal. Exited/failed rows can be dismissed without
+removing the account. A force-stop control is outside this slice.
+
+The daemon/helper owns lifecycle independently of the UI window. Helpers report
+exit and reconnect after daemon restart using authenticated ownership plus
+process-start identity, not PID alone. Uncertain ownership/liveness yields
+Status unknown and blocks destructive profile changes until resolved. Closing
+Trace Commons must not terminate sessions.
+
+Project paths and terminal references are local, access-restricted session
+metadata, excluded from telemetry and audit logs. This UI does not collect
+terminal output or transcripts or automatically arm folders for contribution.
+
+## Managed-launch CLI
+
+Extend `crates/trace-commons-contributor/src/bin/trace-commons-contributor.rs`.
+Use the same account service, launch validation, selection generations, and
+session registry as the UI. No second account database or standalone CLI
+application is needed. Proposed commands are:
+
+```sh
+trace-commons-contributor launch claude --account personal --cwd .
+trace-commons-contributor launch codex --account work --cwd /path/to/project
+trace-commons-contributor launch claude --connection near-ai --cwd .
+trace-commons-contributor accounts list
+trace-commons-contributor accounts add --tool codex --connection subscription --label Work
+trace-commons-contributor sessions list
+```
+
+Connection values are `near-ai`, `subscription`, and `api-key`, resolved against
+the chosen tool. An account argument accepts an opaque ID or a unique label;
+ambiguous labels fail with a selection error. If the account determines a
+connection and none was supplied, infer that connection. Explicit incompatible
+account/connection choices fail. With neither supplied, use the per-tool
+default; explicit connection changes use that connection's remembered account
+or ask for one interactively. Non-interactive ambiguity fails without launch.
+
+CLI launches use the current terminal and inherit its working directory unless
+`--cwd` is given. They participate in Managed sessions in the UI. A supervised
+child retains terminal interaction, receives interrupts correctly, and returns
+the native tool's exit status. Lack of a usable terminal is an actionable
+error for this interactive launch command. The native binary is resolved
+explicitly to avoid recursively invoking the launcher.
+
+Account lifecycle commands also cover rename, reconnect, remove, and per-tool
+default selection. Adding an API key uses hidden interactive input or a
+dedicated stdin mode, never a command-line secret flag. Machine-readable
+account/session output excludes secrets. Login uses the same native profile
+flow as the UI. UI-started terminal sessions use an internal redeem-launch
+mode of this binary, reusing the supervisor and validation instead of a second
+launcher implementation.
+
+Both entry points require the local daemon/session service. If it is absent,
+report how to start it; do not silently bypass it or launch an unmanaged tool
+while claiming managed isolation. Native argument passthrough is deferred
+until account/provider/home overrides can be constrained without weakening
+the managed-selection guarantees.
+
 ## Session and launch semantics
 
 The selection is the default for the next session launched through Trace
 Commons or its explicit launcher command. It does not silently alter arbitrary
 terminal shells, IDE integrations, or an already-running Claude/Codex desktop
-application. The UI states this scope beside Open and Switch controls.
+application. The UI states this scope beside Launch and Switch controls.
 
 The launcher passes a session-specific environment to a child process. It never
 changes the daemon's process-global environment. Profile paths are generated
@@ -263,6 +382,7 @@ an enabled control.
 
 Likely change areas are new contributor account and launch modules, daemon IPC,
 contributor FFI, shared UI copy/state, and each shell's Model calls surface.
+The existing contributor CLI also gains launch, account, and session commands.
 Extend existing modules through focused helpers; avoid unrelated refactoring.
 No hosted schema or contributor-identity change is needed.
 
@@ -285,6 +405,13 @@ No hosted schema or contributor-identity change is needed.
   account metadata. Assert restrictive profile permissions/ACLs per platform.
 - Test every shell's selection, keyboard navigation, pending/error states, and
   distinction between Selected, Ready, and Active. Render and inspect the UI.
+- Launch from the UI using a chosen project and from the CLI using the current
+  directory and an explicit directory; verify both appear in Managed sessions
+  with the captured account, provider, and correct native working directory.
+- Exercise double-submit, lost acknowledgements, terminal failure, paths with
+  spaces/metacharacters, unavailable daemon, native exit/interrupt propagation,
+  UI close/reopen, and daemon/helper reconnection. Uncertain sessions must not
+  be duplicated, shown as successfully running, or treated as safe to delete.
 - Run focused Rust/FFI/shell suites plus relevant repository CI gates with
   `RUSTFLAGS=-D warnings`; run the license-boundary test unchanged. If
   dependencies change, obtain approval and run all four license-check variants.
