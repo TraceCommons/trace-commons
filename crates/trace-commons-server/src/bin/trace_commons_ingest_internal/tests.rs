@@ -5754,6 +5754,8 @@ fn configure_unbounded_submit_limits_for_test(tokens: &BTreeMap<String, TenantAu
         let key =
             submit_principal_rate_limit_key(&auth.tenant_id, auth.auth_method, &auth.principal_ref);
         configure_submit_rate_limits_for_test(&key, u32::MAX, u32::MAX);
+        let key = large_body_principal_key(&auth.tenant_id, auth.auth_method, &auth.principal_ref);
+        configure_submit_rate_limits_for_test(&key, u32::MAX, u32::MAX);
     }
 }
 
@@ -79129,46 +79131,291 @@ async fn ordinary_api_routes_keep_the_small_body_ceiling() {
     assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
 }
 
-/// The small router default must not override the explicit envelope-sized cap
-/// on upload methods. A body just above 2 MiB reaches each extractor/handler
-/// (and fails there for fixture-specific reasons) rather than being refused by
-/// the ordinary API ceiling.
-#[tokio::test]
-async fn large_upload_routes_retain_the_envelope_sized_body_ceiling() {
-    use axum::body::Body;
-    use tower::ServiceExt;
-
-    for (method, path) in [
-        ("POST", "/v1/traces"),
-        ("POST", "/v1/token-bundles"),
+/// Each upload method keeps its own explicit body ceiling instead of the
+/// small router default: envelope-sized for `POST /v1/traces` and bundle
+/// `finalize`, which both carry a whole envelope, and attachment-sized for
+/// bundle `begin` and `put`, whose handlers refuse anything larger anyway.
+fn large_upload_route_ceilings() -> [(&'static str, &'static str, usize); 4] {
+    let attachment = trace_commons_protocol::token_distribution::MAX_ATTACHMENT_BYTES;
+    [
+        ("POST", "/v1/traces", MAX_INGEST_BODY_BYTES),
+        ("POST", "/v1/token-bundles", attachment),
         (
             "PUT",
             "/v1/token-bundles/00000000-0000-0000-0000-000000000001/rev/artifact",
+            attachment,
         ),
         (
             "POST",
             "/v1/token-bundles/00000000-0000-0000-0000-000000000001/rev",
+            MAX_INGEST_BODY_BYTES,
         ),
-    ] {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let response = app(test_state(temp.path().to_path_buf()))
-            .oneshot(
-                axum::http::Request::builder()
-                    .method(method)
-                    .uri(path)
-                    .header(AUTHORIZATION, "Bearer token-a")
-                    .header(CONTENT_TYPE, "application/json")
-                    .body(Body::from(vec![b' '; 2 * 1024 * 1024 + 1]))
-                    .expect("request builds"),
-            )
-            .await
-            .expect("response");
-        assert_ne!(
-            response.status(),
-            StatusCode::PAYLOAD_TOO_LARGE,
-            "{method} {path} must retain the upload-specific body ceiling"
+    ]
+}
+
+async fn authenticated_upload_status(method: &str, path: &str, body_bytes: usize) -> StatusCode {
+    use axum::body::Body;
+    use tower::ServiceExt;
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    app(test_state(temp.path().to_path_buf()))
+        .oneshot(
+            axum::http::Request::builder()
+                .method(method)
+                .uri(path)
+                .header(AUTHORIZATION, "Bearer token-a")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(vec![b' '; body_bytes]))
+                .expect("request builds"),
+        )
+        .await
+        .expect("response")
+        .status()
+}
+
+/// The small router default must not override the explicit cap on upload
+/// methods. A body just above 2 MiB reaches each extractor/handler (and fails
+/// there for fixture-specific reasons) rather than being refused by the
+/// ordinary API ceiling -- or by the pre-body gate, which would make a
+/// non-413 status prove nothing.
+#[tokio::test]
+async fn large_upload_routes_retain_the_upload_body_ceiling() {
+    for (method, path, _) in large_upload_route_ceilings() {
+        let status = authenticated_upload_status(method, path, 2 * 1024 * 1024 + 1).await;
+        assert!(
+            ![
+                StatusCode::UNAUTHORIZED,
+                StatusCode::FORBIDDEN,
+                StatusCode::PAYLOAD_TOO_LARGE,
+                StatusCode::TOO_MANY_REQUESTS,
+            ]
+            .contains(&status),
+            "{method} {path} must pass the gate and retain its upload body ceiling, got {status}"
         );
     }
+}
+
+/// The documented maximum is admitted and one byte more is refused, per
+/// route.
+#[tokio::test]
+async fn large_upload_routes_admit_exactly_their_ceiling() {
+    for (method, path, ceiling) in large_upload_route_ceilings() {
+        let at_ceiling = authenticated_upload_status(method, path, ceiling).await;
+        assert!(
+            ![
+                StatusCode::UNAUTHORIZED,
+                StatusCode::FORBIDDEN,
+                StatusCode::PAYLOAD_TOO_LARGE,
+                StatusCode::TOO_MANY_REQUESTS,
+            ]
+            .contains(&at_ceiling),
+            "{method} {path} must admit a body of exactly {ceiling} bytes, got {at_ceiling}"
+        );
+        assert_eq!(
+            authenticated_upload_status(method, path, ceiling + 1).await,
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "{method} {path} must refuse a body of {} bytes",
+            ceiling + 1
+        );
+    }
+}
+
+/// Serve the real router on a loopback port, for probes that must control
+/// exactly which request bytes reach the server.
+async fn serve_ingest_for_test(
+    state: Arc<AppState>,
+) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("loopback listener binds");
+    let addr = listener.local_addr().expect("listener address");
+    let server = tokio::spawn(async move {
+        let _ = axum::serve(listener, app(state)).await;
+    });
+    (addr, server)
+}
+
+/// Send an upload's headers, declaring a body that is never sent. A handler
+/// that polls the body waits on it; one that answers first does so without it.
+async fn send_upload_headers_without_body(
+    addr: std::net::SocketAddr,
+    method: &str,
+    path: &str,
+    bearer: Option<&str>,
+) -> tokio::net::TcpStream {
+    use tokio::io::AsyncWriteExt;
+
+    let mut stream = tokio::net::TcpStream::connect(addr)
+        .await
+        .expect("connects to the test server");
+    let authorization = bearer
+        .map(|token| format!("Authorization: Bearer {token}\r\n"))
+        .unwrap_or_default();
+    stream
+        .write_all(
+            format!(
+                "{method} {path} HTTP/1.1\r\nHost: ingest.test\r\n{authorization}\
+                 Content-Type: application/json\r\nContent-Length: 1024\r\n\r\n"
+            )
+            .as_bytes(),
+        )
+        .await
+        .expect("request headers write");
+    stream
+}
+
+/// The status line of the response, or `None` if the server has not answered
+/// within `wait`.
+async fn response_status_within(
+    stream: &mut tokio::net::TcpStream,
+    wait: StdDuration,
+) -> Option<String> {
+    use tokio::io::AsyncReadExt;
+
+    let mut buffer = vec![0u8; 64];
+    let read = tokio::time::timeout(wait, stream.read(&mut buffer))
+        .await
+        .ok()?
+        .expect("response reads");
+    let text = String::from_utf8_lossy(&buffer[..read]).into_owned();
+    text.lines().next().map(str::to_owned)
+}
+
+/// Large upload endpoints must authenticate before `Bytes`/`SubmitBody`
+/// extraction. An anonymous upload whose body is never sent is answered
+/// anyway, so the refusal cannot have waited on the body; the authenticated
+/// control proves the probe would notice if it had.
+#[tokio::test]
+async fn large_upload_routes_authenticate_before_polling_the_body() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let (addr, server) = serve_ingest_for_test(test_state(temp.path().to_path_buf())).await;
+    for (method, path, _) in large_upload_route_ceilings() {
+        let mut anonymous = send_upload_headers_without_body(addr, method, path, None).await;
+        assert_eq!(
+            response_status_within(&mut anonymous, StdDuration::from_secs(5))
+                .await
+                .as_deref(),
+            Some("HTTP/1.1 401 Unauthorized"),
+            "{method} {path} must refuse an anonymous upload without reading its body"
+        );
+    }
+    let mut control =
+        send_upload_headers_without_body(addr, "POST", "/v1/traces", Some("token-a")).await;
+    assert_eq!(
+        response_status_within(&mut control, StdDuration::from_millis(500)).await,
+        None,
+        "an authenticated upload waits for its body, so the probe can see a body read"
+    );
+    server.abort();
+}
+
+/// A valid token must not be able to buffer unbounded upload bodies: past the
+/// per-principal in-flight cap the next upload is refused before its body is
+/// read, and finished uploads give their slots back.
+#[tokio::test]
+async fn large_upload_gate_caps_in_flight_bodies_per_principal() {
+    const TOKEN: &str = "large-body-gate-token";
+    let temp = tempfile::tempdir().expect("temp dir");
+    let mut tokens = BTreeMap::new();
+    insert_token(&mut tokens, "tenant-a", TOKEN, TokenRole::Contributor);
+    let mut state = test_state(temp.path().to_path_buf());
+    Arc::make_mut(&mut state).tokens = Arc::new(tokens);
+    let key = large_body_principal_key(
+        "tenant-a",
+        TraceAuthMethod::StaticToken,
+        &static_token_principal_ref(TOKEN),
+    );
+    let (addr, server) = serve_ingest_for_test(state).await;
+
+    let mut stalled = Vec::new();
+    for _ in 0..LARGE_BODY_PER_PRINCIPAL_CONCURRENCY {
+        stalled
+            .push(send_upload_headers_without_body(addr, "POST", "/v1/traces", Some(TOKEN)).await);
+    }
+    tokio::time::timeout(StdDuration::from_secs(5), async {
+        while ACCOUNT_RATE_LIMITER.in_flight_for_test(&key) < LARGE_BODY_PER_PRINCIPAL_CONCURRENCY {
+            tokio::time::sleep(StdDuration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("every stalled upload holds a principal slot");
+
+    let mut refused = send_upload_headers_without_body(
+        addr,
+        "PUT",
+        "/v1/token-bundles/00000000-0000-0000-0000-000000000001/rev/artifact",
+        Some(TOKEN),
+    )
+    .await;
+    assert_eq!(
+        response_status_within(&mut refused, StdDuration::from_secs(5))
+            .await
+            .as_deref(),
+        Some("HTTP/1.1 429 Too Many Requests"),
+        "an upload past the principal's in-flight cap is refused before its body is read"
+    );
+
+    drop(stalled);
+    tokio::time::timeout(StdDuration::from_secs(5), async {
+        while ACCOUNT_RATE_LIMITER.in_flight_for_test(&key) > 0 {
+            tokio::time::sleep(StdDuration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("abandoned uploads release their principal slots");
+    server.abort();
+}
+
+/// The deployment-wide in-flight bound holds across principals, and each
+/// principal's own bound holds before it.
+#[test]
+fn large_upload_slots_bound_each_principal_and_the_deployment() {
+    let limiter = AccountRateLimiter::new();
+    let mut held = Vec::new();
+    for _ in 0..LARGE_BODY_PER_PRINCIPAL_CONCURRENCY {
+        held.push(large_body_slots_for(&limiter, "large-body:first").expect("within the cap"));
+    }
+    assert!(
+        large_body_slots_for(&limiter, "large-body:first").is_none(),
+        "one principal is held to its own in-flight cap"
+    );
+    let mut principal = 0;
+    while (held.len() as u32) < LARGE_BODY_GLOBAL_CONCURRENCY {
+        principal += 1;
+        if let Some(slots) = large_body_slots_for(&limiter, &format!("large-body:p{principal}")) {
+            held.push(slots);
+        }
+    }
+    assert!(
+        large_body_slots_for(&limiter, "large-body:fresh").is_none(),
+        "a fresh principal is refused once the deployment-wide bound is full"
+    );
+    assert_eq!(limiter.in_flight_for_test("large-body:fresh"), 0);
+    held.pop();
+    assert!(large_body_slots_for(&limiter, "large-body:fresh").is_some());
+}
+
+/// Accepted: on the merged upload routes an anonymous request with a method
+/// the route does not serve reaches the pre-body gate (axum layers the merged
+/// fallback too) and gets 401, not 405. That discloses less about routing,
+/// not more; pinned so it is not later read as a regression.
+#[tokio::test]
+async fn anonymous_unknown_methods_on_upload_routes_get_the_auth_refusal() {
+    use axum::body::Body;
+    use tower::ServiceExt;
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let response = app(test_state(temp.path().to_path_buf()))
+        .oneshot(
+            axum::http::Request::builder()
+                .method("PATCH")
+                .uri("/v1/traces")
+                .body(Body::empty())
+                .expect("request builds"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
 /// The concurrency guard caps in-flight slots and releases on drop.
