@@ -17,12 +17,12 @@ struct PrivateInferenceActivationView: View {
             DaemonStartupNotice(startup: model.startup)
         case .needsRoots:
             // The first run's Folders step, which starts the daemon with
-            // the person's answers. Its commit joins nothing unless Join
-            // was visited and answered, and once the daemon runs this view
+            // the person's answers, and once the daemon runs this view
             // shows Private AI, never the rest of the first run. This
             // runner ends with this section, so invite links stay parked
-            // for the main window's first run.
-            OnboardingCoordinatorView(startAt: .folders, takesInvites: false, onComplete: {})
+            // for the main window's first run, and Join is not offered:
+            // its commit is the start alone, joining nothing.
+            OnboardingCoordinatorView(startAt: .folders, takesInvites: false, offersJoin: false, onComplete: {})
         case .running:
             PrivateInferenceView()
         }

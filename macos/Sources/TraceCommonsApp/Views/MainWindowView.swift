@@ -108,17 +108,23 @@ struct MainWindowView: View {
         // reports itself), and Start writes the completion marker. A branch
         // per state would be a view identity per state, and the
         // coordinator's runner -- every answer, the deferred invite
-        // included -- would be thrown away at exactly those flips.
+        // included -- would be thrown away at exactly those flips. That
+        // covers startup flips only: the runner lives in this section's
+        // content, so switching to another section (Insights, Compute,
+        // Missions, Private AI) mid-run still drops it and every answer.
         //
         // First-run detection: `status.logged_in` from the daemon's own
         // `status`, never a local file probe -- see `AppModel.start()`.
-        // `status` defaults to not-logged-in until the first real answer
-        // arrives, so an already enrolled contributor may see one brief
-        // first-run frame -- the fail-closed direction, never the reverse.
         // `isOnboardingComplete` is the second half: `logged_in` alone
         // cannot tell "set up" from "enrolled, Start never pressed".
         // Without an enrolment, the watch-only marker is
-        // (`AppModel.requiresOnboarding`).
+        // (`AppModel.requiresOnboarding`). `status` defaults to
+        // not-logged-in until the first real answer arrives, so the
+        // switch can go either way on that answer: an enrolled, finished
+        // contributor may see one brief first-run frame, and a config
+        // directory holding a watch-only marker shows this section's
+        // content until a status reporting an unfinished enrolment
+        // switches the window back into the first run.
         if OnboardingNavigation.hostsFirstRun(
             startup: model.startup, requiresOnboarding: model.requiresOnboarding, entered: firstRunEntered)
         {

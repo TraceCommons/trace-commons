@@ -30,10 +30,17 @@ enum OnboardingNavigation {
     /// account chosen here (or watch only) the account is the enrolment, so
     /// Join reads Continue and Automatic is offered. An account Join chose is
     /// kept, as is an enrolment this first run made.
+    ///
+    /// An invite Join holds when the enrolment is reported (a parked link
+    /// applied before the daemon's first status) is dropped with its host:
+    /// the daemon never joined it, so Join's line does not name it, and it
+    /// is not looked up or joined over the enrolment.
     static func recordEnrolment(_ state: FirstRunState) -> FirstRunState {
         guard state.enrolledInvite == nil else { return state }
         var recorded = state
         recorded.enrolledInvite = ""
+        recorded.invite = ""
+        recorded.issuerHost = nil
         if recorded.account == .none || recorded.account == .watchOnly {
             recorded.account = .enrolled
         }

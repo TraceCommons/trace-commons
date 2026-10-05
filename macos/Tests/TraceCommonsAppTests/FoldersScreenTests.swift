@@ -187,6 +187,29 @@ final class FoldersScreenTests: XCTestCase {
         XCTAssertTrue(screen.contains("onBack: FoldersScreenLayout.backAction(isCommitting: runner.isCommitting"))
     }
 
+    /// A host whose runner does not last the whole first run (Private AI's)
+    /// offers no Back to Join from Folders or Tools: what Join would take
+    /// (an invite, an account) would be committed after that host is gone,
+    /// with nowhere to show a refusal and no passkey sheets to open. Its
+    /// commit is the start alone.
+    func test_aHostWithoutJoinOffersNoBackAndCommitsOnlyTheStart() throws {
+        XCTAssertNil(FoldersScreenLayout.backAction(isCommitting: false, offersJoin: false, back: {}))
+        XCTAssertNotNil(FoldersScreenLayout.backAction(isCommitting: false, offersJoin: true, back: {}))
+
+        for name in ["FoldersScreen.swift", "ToolsScreen.swift"] {
+            let screen = try Self.source(name)
+            XCTAssertTrue(screen.contains("backAction(isCommitting: runner.isCommitting, offersJoin: offersJoin)"), name)
+        }
+        let host = try Self.source("../PrivateInferenceActivationView.swift")
+        XCTAssertTrue(host.contains("OnboardingCoordinatorView(startAt: .folders, takesInvites: false, offersJoin: false"))
+
+        var state = OnboardingNavigation.initialState(startAt: .folders, daemonRunning: false, enrolled: false)
+        state.answer(.claudeCode, .off)
+        state.answer(.codex, .off)
+        let json = try XCTUnwrap(state.sessionRoots.settingsJSON())
+        XCTAssertEqual(FirstRunPlan.calls(for: state, at: .leaveRoots), [.startDaemon(settingsJSON: json)])
+    }
+
     /// While a commit runs, nothing on the screen can change the plan being
     /// committed: the rows are disabled and the frame offers no tier switch.
     /// A row flipped mid-commit would otherwise show "I don't use it" while

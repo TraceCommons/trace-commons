@@ -39,9 +39,12 @@ enum FoldersScreenLayout {
     }
 
     /// Back, withdrawn while a commit runs: the runner moves the step on
-    /// from wherever the state is when its calls finish.
-    static func backAction(isCommitting: Bool, back: @escaping () -> Void) -> (() -> Void)? {
-        isCommitting ? nil : back
+    /// from wherever the state is when its calls finish. Never offered by a
+    /// host without Join (`offersJoin` false): Back from Folders or Tools
+    /// lands on Join, and what Join takes would be committed after that
+    /// host's runner is gone.
+    static func backAction(isCommitting: Bool, offersJoin: Bool = true, back: @escaping () -> Void) -> (() -> Void)? {
+        isCommitting || !offersJoin ? nil : back
     }
 
     /// The rows take no answer while a commit runs: `.start` sends no roots,
@@ -81,6 +84,8 @@ struct FoldersScreen: View {
     @ObservedObject var runner: FirstRunRunner
     /// Where each tool's "Get {tool}" leads; none is known yet.
     var installURL: (SourceKind) -> URL? = { _ in nil }
+    /// Whether Back to Join is offered (`FoldersScreenLayout.backAction`).
+    var offersJoin = true
 
     @State private var discovery: DiscoveredRows = .loading
     @State private var onboarding = TCOnboardingCopy.load()
@@ -91,7 +96,7 @@ struct FoldersScreen: View {
             state: $runner.state,
             // Withdrawn while a commit runs: the runner moves the step on
             // from wherever the state is when its calls finish.
-            onBack: FoldersScreenLayout.backAction(isCommitting: runner.isCommitting) {
+            onBack: FoldersScreenLayout.backAction(isCommitting: runner.isCommitting, offersJoin: offersJoin) {
                 runner.state = FirstRunNavigation.back(runner.state)
             },
             isCommitting: runner.isCommitting,

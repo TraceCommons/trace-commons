@@ -193,6 +193,26 @@ final class FirstRunRunnerTests: XCTestCase {
         XCTAssertEqual(runner.state.step, .uses, "a finished first run is not reopened")
     }
 
+    /// A daemon-reported enrolment recorded over an invite still in Join's
+    /// field: the commit asks the daemon about no invite, so a refusal it
+    /// would give cannot send the person back to Join, and nothing is
+    /// enrolled a second time.
+    func test_aLateEnrolmentOverAFilledFieldAsksNothingOfTheInvite() async {
+        let daemon = RecordingFirstRunDaemon()
+        daemon.lookup = .refused(label: "invite-exhausted")
+        var state = onFolders()
+        state.account = .none
+        state = OnboardingNavigation.recordEnrolment(state)
+        let runner = FirstRunRunner(state: state, daemon: daemon)
+
+        await runner.commit(.leaveRoots)
+
+        XCTAssertEqual(daemon.log, [.startDaemon(settingsJSON: state.sessionRoots.settingsJSON()!)])
+        XCTAssertNil(runner.failure)
+        XCTAssertNotEqual(runner.state.step, .join)
+        XCTAssertEqual(runner.state.enrolledInvite, "")
+    }
+
     func test_aDeadInviteReturnsToJoinWithAnswersKept() async {
         let daemon = RecordingFirstRunDaemon()
         daemon.lookup = .refused(label: "invite-exhausted")

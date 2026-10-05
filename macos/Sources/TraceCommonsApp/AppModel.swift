@@ -1854,7 +1854,9 @@ final class AppModel: ObservableObject {
     /// enrolment there is no tenant, so its marker is
     /// `isWatchOnlyComplete`. It counts only while the daemon holds no
     /// enrolment; an enrolled person confirms on Start whatever an earlier
-    /// watch-only run wrote.
+    /// watch-only run wrote. Before the first status arrives `loggedIn`
+    /// reads false, so that marker alone decides until then: the main
+    /// window may show its content, then switch back into the first run.
     var requiresOnboarding: Bool {
         if startup == .needsRoots { return true }
         return status.loggedIn ? !isOnboardingComplete : !isWatchOnlyComplete

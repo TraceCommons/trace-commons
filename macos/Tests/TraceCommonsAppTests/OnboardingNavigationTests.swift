@@ -104,6 +104,37 @@ final class OnboardingNavigationTests: XCTestCase {
         XCTAssertEqual(OnboardingNavigation.recordEnrolment(joined), joined)
     }
 
+    /// The realistic late enrolment: a parked link filled Join before the
+    /// daemon's first status said it was enrolled. Recording that enrolment
+    /// drops the held invite, so it is neither looked up nor joined again
+    /// (Review Focus 4), and Join's line names no host the daemon was not
+    /// shown to have joined (Review Focus 1), refusal or not.
+    func test_aLateEnrolmentOverAFilledJoinJoinsNothingAgain() throws {
+        let copy = try XCTUnwrap(FirstRunCopy.decode(try XCTUnwrap(TCCoreCopy.firstRunCopyJSON())))
+        let fresh = OnboardingNavigation.initialState(startAt: .join, daemonRunning: true, enrolled: false)
+        guard case .apply(var filled, _) = OnboardingNavigation.receive(
+            invite: "https://issuer.example/i#CODE", in: fresh, failure: nil, isCommitting: false,
+            host: { _ in "issuer.example" })
+        else { return XCTFail("the parked link is applied first") }
+        filled.answer(.claudeCode, .off)
+        filled.answer(.codex, .off)
+        filled.step = .folders
+
+        let recorded = OnboardingNavigation.recordEnrolment(filled)
+        XCTAssertEqual(recorded.account, .enrolled)
+        XCTAssertFalse(JoinLayout.inviteIsEditable(recorded))
+        let calls = FirstRunPlan.calls(for: recorded, at: .leaveRoots)
+        XCTAssertFalse(calls.contains { if case .lookupInvite = $0 { return true } else { return false } })
+        XCTAssertFalse(calls.contains { if case .enroll = $0 { return true } else { return false } })
+
+        for failure: FirstRunFailure? in [nil, .inviteDead(label: "invite-exhausted")] {
+            let line = JoinLayout.inviteLine(recorded, lookup: nil, failure: failure, copy: copy.join)
+            if case .joined(let text) = line {
+                XCTAssertFalse(text.contains("issuer.example"), "the held invite was never joined")
+            }
+        }
+    }
+
     /// Review Focus 1 at the host: a start that fails from inside the first
     /// run flips the core's startup to refused, and the first run stays on
     /// screen (where Folders shows the core's watcher line, the invite
