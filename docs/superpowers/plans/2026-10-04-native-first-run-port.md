@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - Ron's order and screens are the design. Quick: Join, Folders, Uses. Custom: Join, Tools, Rules, Uses. No chooser screen: Quick is the default and "Custom setup instead" switches (`ftux-page.tsx:89`, `ftux-model.ts:12-23`).
-- Join collects the invite and shows its host (`TCInvite.issuerHost`); the real `enroll`, `invite_lookup` and near.ai sign-in run after Folders (Quick) or Tools (Custom) has started the daemon, because the daemon refuses to start until Claude Code and Codex are answered (`settings.rs:1363`).
+- Join collects the invite and shows its host (`TCInvite.issuerHost`); the real `enroll`, `invite_lookup` and near.ai sign-in run after Folders (Quick) or Tools (Custom) has started the daemon, because the daemon refuses to start until Claude Code and Codex are answered (`settings.rs:1363`). Passkey creation is deferred the same way (owner, 2026-10-05): choosing Create passkey on Join records the choice and shows a core line saying it happens when you continue; the passkey sheets open as soon as the Folders or Tools commit has started the daemon.
 - A tool that is not installed still needs an answer: its row shows "Get {tool}" and "I don’t use it", and Continue waits (owner, 2026-10-04). Never write `off` for a question nobody answered.
 - Uses: the always-on use is shown unticked and required; Start stays disabled until it is ticked (owner, 2026-09-28 point 4). The daemon's floor is unchanged; the box gates the button only.
 - Uses comes before the sharing decision; Automatic leads through the scrub disclosure and the witness disclosure, then `grant_automatic` (points 2 and 4). The core chooses the sharing wording (`tc_automatic_contribution_copy_json`).
