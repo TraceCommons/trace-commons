@@ -129,10 +129,18 @@ enum MissionFormat {
     /// range, or when the commons has not said what the credit waits on: a
     /// bare range would read as owed (M3).
     static func credit(_ mission: DaemonData.Mission, in catalogue: DaemonData.MissionCatalogue) -> String {
-        guard condition(catalogue) != nil, let range = mission.creditRange else { return "—" }
-        let span = range.min == range.max ? "\(range.min)" : "\(range.min)–\(range.max)"
-        return "\(span) \(range.unit)"
+        guard condition(catalogue) != nil, let range = mission.creditRange,
+            range.unit == missionCreditUnit, let words = MonitorWords.table
+        else { return "—" }
+        if range.min == range.max {
+            return words.missionCreditPointsOne.replacingOccurrences(of: "{min}", with: "\(range.min)")
+        }
+        return words.missionCreditPoints.replacingOccurrences(of: "{min}", with: "\(range.min)")
+            .replacingOccurrences(of: "{max}", with: "\(range.max)")
     }
+
+    /// The one unit the data contract names for a mission's range.
+    static let missionCreditUnit = "points"
 
     /// Home's count: the catalogue's size, or a dash when it was not read.
     static func count(_ catalogue: DaemonData.MissionCatalogue?) -> String {

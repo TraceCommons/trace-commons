@@ -360,6 +360,12 @@ pub struct MonitorScreensCopy {
     /// Beside projected mission credit: what it is,
     /// and that it is not yet earned.
     pub projected_note: &'static str,
+    /// A mission's projected credit range, `{min}` and `{max}`, in the one
+    /// unit the data contract names for missions, `points`. A shell shows a
+    /// dash for any other unit, never the wire label.
+    pub mission_credit_points: &'static str,
+    /// The same, when the range is a single figure: `{min}`.
+    pub mission_credit_points_one: &'static str,
     /// DRAFT, NEEDS APPROVAL. The window the Inference tab's counts
     /// cover, from `window_hours` on `inference_calls` and
     /// `tool_destinations`. `{hours}` is replaced with a number.
@@ -436,6 +442,8 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
         projected: "Projected",
         projected_note: "Projected credit is an estimate for a contribution that matches a mission. \
             It is not earned until a contribution is accepted and scored.",
+        mission_credit_points: "{min}–{max} points",
+        mission_credit_points_one: "{min} points",
         window_last_hours: "Last {hours} hours",
         history_submitted: crate::history_copy::WAITING_TO_BE_SCORED,
     }
