@@ -1,6 +1,6 @@
 # Saved model accounts and per-tool connection switching
 
-Status: proposed specification, awaiting written-spec review.
+Status: design approved for implementation planning; implementation plan review pending.
 
 ## Intent and approved product direction
 
@@ -18,8 +18,10 @@ sign-in and refresh remain owned by the native tool. A running session keeps
 its original account. A saved account is local to this computer; it is separate
 from the contributor's Trace Commons identity.
 
-The implementation is not authorized by this document's existence. The next
-stage is written-spec review, followed by an implementation plan.
+The user requested implementation and explicitly reaffirmed that a session
+managed through `near-ai` must appear in the Trace Commons UI. CLI-originated
+session visibility is a required end-to-end acceptance condition, not an
+optional UI enhancement. The implementation plan carries the task breakdown.
 
 ## Existing implementation and boundaries
 
