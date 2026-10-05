@@ -40,9 +40,10 @@
 //!   of writes a day, for bytes identical to the ones already on disk. That
 //!   one is now elided when nothing moved; see `DaemonState::save`.
 //!
-//! The trajectory source is not watched: trajectory files have no
-//! conventional local store to poll, so they stay a deliberate `submit
-//! --trajectory` action.
+//! Trajectory files have no conventional local store. The daemon reads
+//! only the staging folder and a folder the contributor declared
+//! (`trajectory_source`), and never arms a session found in either: it
+//! always waits for a person.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -1258,6 +1259,24 @@ fn visit_session(
             .unwrap_or_else(|| DateTime::<Utc>::from(modified)),
     };
 
+    // A trajectory session is never armed, whatever the project mode says --
+    // on first sight (`would_arm` below) or on any later pass that re-applies
+    // a standing opt-in to an entry already queued (the skip-load path).
+    //
+    // The daemon's trajectory scopes are the staging directory and the
+    // folder of exports a contributor may declare (`trajectory_source`; see
+    // `DaemonSettings::source_roots`), so a trajectory ref reaching this
+    // function IS an import or an export somebody added. Auto-uploading on
+    // first sight would send something the contributor may not remember
+    // adding, with no prompt. They armed a watched agent store; this is not
+    // one, so every such session waits for a person.
+    //
+    // The check is on the adapter rather than on `declared_source` on
+    // purpose: it must hold for every trajectory, including one a
+    // contributor dropped in by hand, not only for the ones that name
+    // themselves.
+    let from_trajectory = session_ref.source == crate::source::SOURCE_TRAJECTORY;
+
     let (previous_size, prior) = {
         let state = shared.state.lock().expect("state lock");
         (
@@ -1381,9 +1400,11 @@ fn visit_session(
         // the grant holds back would not be approved either way, so it is
         // not counted as one the gate holds; nor is one held for a person.
         // Nor under the Manual Scrub check, where everything waits for a
-        // person (K4 of #1118).
+        // person (K4 of #1118). Nor for a trajectory session, which always
+        // waits for a person (see `from_trajectory`).
         let would_approve = mode == ProjectMode::AutoUpload
             && !ctx.scrub_check_manual
+            && !from_trajectory
             && state == QueueState::Pending
             && !held_for_review
             && !waits_for_a_person(shared, ctx, source, &project_key, &obs.path);
@@ -1522,30 +1543,18 @@ fn visit_session(
     // one dropped is a session sent unattended that should not have been, so
     // they are ANDed rather than either replacing the other.
 
-    // A staged trajectory is never armed, whatever the project mode says.
-    //
-    // The daemon's only trajectory scope is the staging directory (see
-    // `DaemonSettings::source_roots`), so a trajectory ref reaching this
-    // point IS an import. It was invisible to this daemon until the staging
-    // scope existed, and auto-uploading on first sight would send something
-    // the contributor may not remember importing, with no prompt. They
-    // armed a watched source they had declared; this is not one.
-    //
-    // The check is on the adapter rather than on `declared_source` on
-    // purpose: it must hold for every staged trajectory, including one a
-    // contributor dropped in by hand, not only for the ones that name
-    // themselves.
-    let from_staging = session_ref.source == crate::source::SOURCE_TRAJECTORY;
-
     // A fresh entry from an armed project is queued `Pending` until it has
     // settled, not `Approved` on sight. The next poll promotes it once the
     // window has elapsed (site above), and a session that grows in the
     // meantime supersedes this entry -- free, where the same growth after an
     // upload would cost one of three re-uploads and a duplicate penalty.
-    // Through the automatic-contribution gate. `armed` decides both paths
+    // Through the automatic-contribution gate. `armed` decides the two paths
     // below that approve on the contributor's behalf -- a fresh entry created
     // `Approved`, and an already-queued one re-approved -- so gating it here
-    // gates both. See `automatic_gate`.
+    // gates both. It does not cover the skip-load path above, which re-applies
+    // a standing opt-in to an unchanged entry without reaching this point and
+    // so applies its own holds (`from_trajectory`, the Manual Scrub check,
+    // `waits_for_a_person`) and the gate itself. See `automatic_gate`.
     // Defence in depth for an arming from now (K5), whose record reads "on
     // disk at the arming" by path: content that predates the arming but
     // turns up at a new path -- a resumed conversation in a fresh file, a
@@ -1567,7 +1576,7 @@ fn visit_session(
     // is queued `Pending` for a person, like any in an Ask me folder.
     let would_arm = mode == ProjectMode::AutoUpload
         && !ctx.scrub_check_manual
-        && !from_staging
+        && !from_trajectory
         && !returned_from_keep
         && armed_settle_elapsed(obs.modified_at, ctx.now)
         && !waits_for_a_person(shared, ctx, source, &project_key, &obs.path);
@@ -2480,6 +2489,73 @@ mod tests {
         assert_eq!(report.auto_ready, 1, "{report:?}");
         assert_eq!(report.queued, 0);
         assert_eq!(f.states(), vec![QueueState::Approved]);
+    }
+
+    /// A session in a declared trajectory folder waits for a person even
+    /// when its project is armed -- the same rule as a staged import. The
+    /// folder holds exports somebody added, not an agent store they armed.
+    /// Paired with the test above: the same arming approves a Claude Code
+    /// session in the same pass, so what holds this one is the rule.
+    #[tokio::test]
+    async fn a_declared_trajectory_session_is_never_armed() {
+        let f = WatcherFixture::new();
+        let exports = f._dir.path().join("exports");
+        std::fs::create_dir_all(&exports).unwrap();
+        f.shared.settings.lock().unwrap().trajectory_source =
+            Some(crate::daemon::settings::SourceDeclaration::Watch {
+                path: exports.clone(),
+            });
+        let cwd = abs("Users/testuser/code/proj");
+        std::fs::write(
+            exports.join("exported.json"),
+            serde_json::json!([
+                {"role": "meta", "source": "letta", "cwd": cwd},
+                {"role": "user", "content": "hello", "timestamp": "2026-08-08T10:00:00Z"},
+                {"role": "assistant", "content": "hi", "timestamp": "2026-08-08T10:00:05Z"}
+            ])
+            .to_string(),
+        )
+        .unwrap();
+        f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
+        f.set_mode("proj", ProjectMode::AutoUpload);
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+
+        let entries = f.shared.queue.lock().unwrap().all().to_vec();
+        let state_of = |source: &str| {
+            entries
+                .iter()
+                .filter(|e| e.source == source)
+                .map(|e| e.state)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            state_of(crate::source::SOURCE_CLAUDE_CODE),
+            vec![QueueState::Approved],
+            "the arming itself works: {entries:?}"
+        );
+        assert_eq!(
+            state_of(crate::source::SOURCE_TRAJECTORY),
+            vec![QueueState::Pending],
+            "an armed project must not arm a declared trajectory session: {entries:?}"
+        );
+
+        // A later pass sees the same file unchanged and takes the skip-load
+        // path, which re-applies a standing opt-in to a `Pending` entry. That
+        // path must hold a trajectory session too, on every later pass.
+        for now in ["2030-01-02T00:00:00Z", "2030-01-03T00:00:00Z"] {
+            f.settle(at(now)).await;
+            let entries = f.shared.queue.lock().unwrap().all().to_vec();
+            let trajectory = entries
+                .iter()
+                .filter(|e| e.source == crate::source::SOURCE_TRAJECTORY)
+                .map(|e| e.state)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                trajectory,
+                vec![QueueState::Pending],
+                "a later pass must not re-approve a trajectory session at {now}: {entries:?}"
+            );
+        }
     }
 
     /// Arming is a standing yes to sending *finished* work unattended, not

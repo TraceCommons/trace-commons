@@ -581,7 +581,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `harness_commit` | `plan_id` (required) | `id`, `action`, `committed: true`, `path`, `backup_path` | makes an edit that was already shown; takes a plan id and **nothing else**, so a shell cannot ask for a write it did not preview |
 | `quiesce` | `timeout_secs` (optional, default 60, max 300) | `quiesced: true`, `waited_ms` | parks uploads for an update swap; `busy` / `quiesce-timeout` if in-flight work does not finish in time |
 | `get_settings` | — | settings; credential presence as booleans, source declarations as `*_source_mode` (`unset`/`off`/`watch`), never local paths | |
-| `set_settings` | any of `quiescence_secs`, `digest_interval_secs`, `digest_schedule`, `approval_hold_secs`, `local_notifications`, `claude_root`, `codex_root`, `claude_source`, `codex_source`, `gemini_source`, `cline_source`, `opencode_source`, `ironwire`, `ironwire_attested_bodies`, `token_distributions_contribution`, `token_capture_enabled`, `private_inference`, `private_inference_offer_seen`, `scrub_check`, `max_uploads_per_day`, `max_bytes_per_day` | updated settings | see "`set_settings`" below |
+| `set_settings` | any of `quiescence_secs`, `digest_interval_secs`, `digest_schedule`, `approval_hold_secs`, `local_notifications`, `claude_root`, `codex_root`, `claude_source`, `codex_source`, `gemini_source`, `cline_source`, `opencode_source`, `trajectory_source`, `ironwire`, `ironwire_attested_bodies`, `token_distributions_contribution`, `token_capture_enabled`, `private_inference`, `private_inference_offer_seen`, `scrub_check`, `max_uploads_per_day`, `max_bytes_per_day` | updated settings | see "`set_settings`" below |
 | `consent_options` | — | `scopes[]` of `{name, description, always_on, grants_data_use}` | |
 | `set_consent_scopes` | `scopes[]` (wire-name strings; omitted means floor scope only) | `consent_scopes[]` | requires an existing enrollment |
 | `enroll` | `grant` xor `invite`, `scopes[]` (optional) | `enrolled: bool`, and on success `tenant_id`, `device_key_id`, `consent_scopes[]` | performs real network I/O |
@@ -3444,7 +3444,8 @@ Takes a JSON object whose top-level keys must come from
 `quiescence_secs`, `digest_interval_secs`, `digest_schedule`,
 `approval_hold_secs`,
 `local_notifications`, `claude_root`, `codex_root`, `claude_source`,
-`codex_source`, `gemini_source`, `cline_source`, `opencode_source`, `ironwire`,
+`codex_source`, `gemini_source`, `cline_source`, `opencode_source`,
+`trajectory_source`, `ironwire`,
 `ironwire_attested_bodies`, `private_inference`,
 `private_inference_offer_seen`, `scrub_check`, `max_uploads_per_day`,
 `max_bytes_per_day` --
@@ -3483,6 +3484,14 @@ when older settings load. Watch reads direct `.json` children exported with
 [qualification report](superpowers/reports/2026-09-07-opencode-export-qualification.md)
 records version support and routing limits, and the declaration grants neither
 body capture nor remote submission.
+
+`trajectory_source` takes the same three values for a folder of exported
+trajectory files (a Letta Trajectory export, for example). Absent, null and
+Off add no folder; Watch reads its direct `.json`/`.jsonl` children with the
+strict trajectory reader alongside the staging folder. It is not part of the
+claude/codex start gate, `get_settings` reports only
+`trajectory_source_mode`, never the path, and a session found there is never
+armed for automatic upload: it always waits for a person.
 
 `approval_hold_secs` takes a non-negative integer no greater than 300
 (five minutes): how long an approval is
