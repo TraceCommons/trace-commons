@@ -189,7 +189,7 @@ struct WitnessSection: View {
                     .disabled(model.inferenceEvidenceBusy || model.daemonSettings?.ironwireAttestedBodies == nil)
                 }
                 if model.inferenceEvidenceSaveFailed {
-                    GlassNotice(tone: .outside) { Text(copy.inferenceSaveFailed) }
+                    GlassFlowNotice(message: copy.inferenceSaveFailed, glyph: copy.wallet?.refusedGlyph ?? "", tone: copy.wallet?.refusedTone)
                 }
             }
         }
@@ -231,7 +231,7 @@ struct WitnessSection: View {
                     storageBlock(storage)
                 }
                 if model.tokenContributionSaveFailed {
-                    GlassNotice(tone: .outside) { Text(copy.tokenSaveFailed ?? "") }
+                    GlassFlowNotice(message: copy.tokenSaveFailed ?? "", glyph: copy.wallet?.refusedGlyph ?? "", tone: copy.wallet?.refusedTone)
                 }
             }
         }

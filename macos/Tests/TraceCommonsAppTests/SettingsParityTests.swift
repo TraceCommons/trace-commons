@@ -245,7 +245,21 @@ final class SettingsParityTests: XCTestCase {
         XCTAssertTrue(source.contains(".opacity(copy.tokenHeading == nil ? 0 : 1)"))
         XCTAssertTrue(source.contains(".disabled(copy.tokenHeading == nil)"))
         XCTAssertEqual(source.components(separatedBy: ".confirmationDialog(").count - 1, 4)
-        XCTAssertTrue(source.contains("GlassNotice(tone: .outside)"))
+        // A save failure keeps the core's refusal glyph and tone, as legacy
+        // `NativeFlowNotice` did; a missing wallet copy is still a refusal.
+        XCTAssertFalse(source.contains("GlassNotice(tone: .outside)"), "the save failure's tone is chosen in Swift")
+        XCTAssertTrue(source.contains(
+            "GlassFlowNotice(message: copy.inferenceSaveFailed, glyph: copy.wallet?.refusedGlyph ?? \"\", tone: copy.wallet?.refusedTone)"))
+        XCTAssertTrue(source.contains(
+            "GlassFlowNotice(message: copy.tokenSaveFailed ?? \"\", glyph: copy.wallet?.refusedGlyph ?? \"\", tone: copy.wallet?.refusedTone)"))
+        XCTAssertEqual(GlassFlowNotice.status(forTone: "refused"), .outside)
+        XCTAssertEqual(GlassFlowNotice.status(forTone: "neutral"), .off)
+        XCTAssertEqual(GlassFlowNotice.status(forTone: ""), .off)
+        XCTAssertEqual(GlassFlowNotice.status(forTone: nil), .outside, "an unread tone is drawn as healthy")
+        let notice = try Self.text("Views/Settings/GlassFlowNotice.swift")
+        XCTAssertTrue(notice.contains("if !glyph.isEmpty { Text(glyph) }"), "the core's glyph is not drawn")
+        XCTAssertTrue(notice.contains("let ink = status == .outside ? status.textColor : GlassColor.textSecondary"))
+        XCTAssertTrue(notice.contains(".foregroundStyle(ink)"), "the tone never reaches the words")
         XCTAssertFalse(source.contains("NativeFlowNotice"))
         XCTAssertEqual(WitnessSection.tone(.refused), .outside)
         XCTAssertEqual(WitnessSection.tone(.attention), .ask)
@@ -282,15 +296,43 @@ final class SettingsParityTests: XCTestCase {
 
     /// The unreadable state is never a bare dot: with neither of the core's
     /// sentences it reads the core's "unknown" word, and only then a dash.
+    /// The card's title is never empty, and the line inside never repeats it:
+    /// when the panel sentence is missing the title is not drawn twice.
     func test_unreadableLineNeverDrawsEmpty() {
         typealias Line = RouteDisclosureUnreadableGlassLine
-        XCTAssertEqual(Line.text(line: "panel", fallback: "title", unknown: "unk"), "panel")
-        XCTAssertEqual(Line.text(line: nil, fallback: "title", unknown: "unk"), "title")
-        XCTAssertEqual(Line.text(line: nil, fallback: nil, unknown: "unk"), "unk")
-        XCTAssertFalse(Line.text(line: nil, fallback: nil, unknown: nil).isEmpty)
+        func parts(_ panel: String?, _ title: String?, _ unknown: String?) -> [String?] {
+            let p = Line.parts(panel: panel, title: title, unknown: unknown)
+            return [p.title, p.line]
+        }
+        XCTAssertEqual(parts("panel", "title", "unk"), ["title", "panel"])
+        XCTAssertEqual(parts(nil, "title", "unk"), ["title", nil])
+        XCTAssertEqual(parts("panel", nil, "unk"), ["unk", "panel"])
+        XCTAssertEqual(parts(nil, nil, "unk"), ["unk", nil])
+        XCTAssertEqual(parts("same", "same", "unk"), ["same", nil])
+        XCTAssertFalse(Line.parts(panel: nil, title: nil, unknown: nil).title.isEmpty)
+        for panel in ["panel", nil] as [String?] {
+            for title in ["title", nil] as [String?] {
+                for unknown in ["unk", nil] as [String?] {
+                    let p = Line.parts(panel: panel, title: title, unknown: unknown)
+                    XCTAssertNotEqual(p.line, p.title, "\(String(describing: panel)) \(String(describing: title))")
+                }
+            }
+        }
         let source = try? Self.text("Views/Settings/PrivateAISection.swift")
         XCTAssertTrue(source?.contains("Image(systemName: \"exclamationmark.triangle.fill\")") ?? false)
         XCTAssertTrue(source?.contains(".accessibilityLabel(words)") ?? false)
+        XCTAssertFalse(source?.contains("fallback:") ?? true, "the line still falls back to the card title")
+    }
+
+    /// The route disclosure is read paragraph by paragraph: its body
+    /// contains its children rather than merging them into one utterance.
+    func test_routeDisclosureBodyIsNavigableLineByLine() throws {
+        let source = try Self.text("Views/Settings/PrivateAISection.swift")
+        let start = try XCTUnwrap(source.range(of: "struct RouteDisclosureGlassBody: View"))
+        let end = try XCTUnwrap(source.range(of: "struct RouteDisclosureUnreadableGlassLine", range: start.upperBound..<source.endIndex))
+        let body = String(source[start.upperBound..<end.lowerBound])
+        XCTAssertFalse(body.contains(".accessibilityElement(children: .combine)"), "the disclosure is one VoiceOver element")
+        XCTAssertTrue(body.contains(".accessibilityElement(children: .contain)"))
     }
 
     func test_measurementsRowIsOmittedWhenNothingIsPinned() throws {

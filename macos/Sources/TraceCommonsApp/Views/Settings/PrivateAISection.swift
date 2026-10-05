@@ -38,12 +38,12 @@ struct PrivateAISection: View {
             case .loading:
                 ProgressView().controlSize(.small)
             case .unreadable:
-                GlassEyebrowCard(RouteDisclosureUnreadableGlassLine.text(
-                    line: nil, fallback: model.routeDisclosureUnreadableCopy?.title,
-                    unknown: RouteDisclosureUnreadableGlassLine.unknown)) {
-                    RouteDisclosureUnreadableGlassLine(
-                        line: model.routeDisclosureUnreadableCopy?.panel,
-                        fallback: model.routeDisclosureUnreadableCopy?.title)
+                let parts = RouteDisclosureUnreadableGlassLine.parts(
+                    panel: model.routeDisclosureUnreadableCopy?.panel,
+                    title: model.routeDisclosureUnreadableCopy?.title,
+                    unknown: RouteDisclosureUnreadableGlassLine.unknown)
+                GlassEyebrowCard(parts.title) {
+                    RouteDisclosureUnreadableGlassLine(line: parts.line)
                 }
             }
         }
@@ -76,7 +76,8 @@ struct RouteDisclosureGlassBody: View {
             if let line = copy.attestedBodies { sentence(line) }
             if let line = copy.receipts { sentence(line) }
         }
-        .accessibilityElement(children: .combine)
+        // Each paragraph and each witness row is its own VoiceOver stop.
+        .accessibilityElement(children: .contain)
     }
 
     /// The measurements row is left out when nothing is pinned, never drawn
@@ -104,30 +105,38 @@ struct RouteDisclosureGlassBody: View {
 
 /// The unreadable state: a shape glyph and words, so it survives greyscale,
 /// and drawn even when the core's sentences for it could not be read. The
-/// last resort is the core's own "unknown" word, so the panel is never a
-/// bare dot.
+/// card's title carries the words when the panel sentence is missing, down to
+/// the core's own "unknown" word, so the panel is never a bare dot; the line
+/// then draws the glyph alone rather than repeat the title.
 struct RouteDisclosureUnreadableGlassLine: View {
     let line: String?
-    var fallback: String?
 
     /// The core's word for an answer it does not have.
     static let unknown: String? = MonitorScreensCopy.decode(fromJSON: TCCoreCopy.monitorScreensCopyJSON())?.unknown
 
-    /// A dash, not a sentence, only if the core's word could not be read.
-    static func text(line: String?, fallback: String?, unknown: String?) -> String {
-        line ?? fallback ?? unknown ?? "\u{2014}"
+    /// The card's title and the line inside it. The title is the core's
+    /// unreadable title, then its "unknown" word, then a dash (not a
+    /// sentence); the line is the panel sentence, and nil when that is
+    /// missing or would repeat the title, so the same words are never drawn
+    /// twice.
+    static func parts(panel: String?, title: String?, unknown: String?) -> (title: String, line: String?) {
+        let heading = title ?? unknown ?? "\u{2014}"
+        return (heading, panel == heading ? nil : panel)
     }
 
     var body: some View {
-        let words = Self.text(line: line, fallback: fallback, unknown: Self.unknown)
         HStack(alignment: .firstTextBaseline, spacing: GlassTokens.Space.s3) {
             Image(systemName: "exclamationmark.triangle.fill")
                 .imageScale(.small)
                 .foregroundStyle(GlassColor.textSecondary)
                 .accessibilityHidden(true)
-            GlassStatusLabel(words, status: .ask)
+            if let words = line {
+                GlassStatusLabel(words, status: .ask)
+                    .accessibilityLabel(words)
+            }
         }
         .accessibilityElement(children: .combine)
-        .accessibilityLabel(words)
+        // Without a line the card's title has already said it.
+        .accessibilityHidden(line == nil)
     }
 }
