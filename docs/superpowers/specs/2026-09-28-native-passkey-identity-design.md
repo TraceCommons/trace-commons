@@ -1,12 +1,17 @@
 # Native Passkey Identity for the macOS App (Z2) — Design
 
 Date: 2026-09-28
-Status: server slices S1-S5 and S7 are built and open for review, as a stack:
-S1 in #1122, S2 in #1131, S3 in #1135, S4 in #1124, S5 in #1127 and S7 in
-#1136 (also #1137, the pilot env template's RP ID pin, and #1138, the
-`__Host-` cookies). S6 (the fold) is deferred. C1, the macOS client, is not
-built. The decisions Zaki made on 2026-09-28 and 2026-09-29 are implemented
-here, not reopened; the original six are resolved under "Decisions".
+Status: server slices S1-S5 and S7 are on `main`. S1-S3 landed together in
+the #1135 squash (17b128f16), and #1122 (S1) and #1131 (S2) were closed
+unmerged because #1135 carried their changes. S4 merged in #1124, S5 in #1127
+(V101) and S7 in #1136, and so did #1137, the pilot env template's RP ID pin,
+#1138, the `__Host-` cookies, and #1156 (V102: closed rows count toward the
+ceiling). S6 (the
+fold) is deferred. C1, the macOS client, is not built, and native passkey
+creation stays closed, by leaving its ceiling unset, until C1 passes its
+origin check (see the deploy gate under "Client prerequisites"). The decisions Zaki made on 2026-09-28, 2026-09-29 and
+2026-09-30 are implemented here, not reopened; the original six are resolved
+under "Decisions".
 Item: Z2 in #1118 ("Native passkey identity: account-less passkey creation, a
 native bearer from passkey login, AASA/webcredentials, the passkey-to-near.ai
 binding"), gap 1
@@ -96,21 +101,29 @@ P1. **Cancel** signs out and leaves the unbound account inert, and a reaper (S5)
    reclaims it. The reap rule is P4.
 P2. **S6 (the fold)** is deferred. Refuse-only ships first; the cross-tenant
    fold is not scheduled.
-P3. **Unbound-account ceiling: 5,000** on the pilot
-   (`TRACE_COMMONS_UNBOUND_PASSKEY_ACCOUNT_CEILING=5000`), with an alert on the
-   `unbound_account_ceiling_reached` log line. A **per-IP daily cap** on native
-   passkey creation, at most 10 per IP per day, backs it (#1131).
-P4. **The reap window is keyed on bound versus unbound, not on used versus
-   unused** (decided 2026-09-29, after review of #1127). Any account still
-   unbound 7 days after it was created is reaped, whether or not it signed in
-   again, once it has no live session. The 30-day idle window for an unbound
-   account that signed in again is removed. An account that completes Connect
-   near.ai is bound and is unaffected. Holding the ceiling therefore takes
-   fresh creations every week, at no more than 10 per IP per day.
+P3. **Unbound-account ceiling: decided 5,000 on the pilot; left unset until
+   C1 passes.** The pilot's value is
+   `TRACE_COMMONS_UNBOUND_PASSKEY_ACCOUNT_CEILING=5000`, with an alert on the
+   `unbound_account_ceiling_reached` log line, but the variable stays unset
+   until C1's signed-build origin check passes, because unset is what keeps
+   native creation closed (see the deploy gate under "Client prerequisites").
+   A **per-IP daily cap** on native passkey creation, at most 10 per IP per
+   day, backs it (written in #1131, landed in the #1135 squash).
+P4. **Each kind is reaped on its own clock alone** (decided 2026-09-29 and
+   2026-09-30, built in #1127). The window is keyed on bound versus unbound,
+   not on used versus unused: any account still unbound 7 days after it was
+   created is reaped, whether or not it signed in again. The 30-day idle window
+   for an unbound account that signed in again is removed. A live session does
+   not put the reap off either (decided 2026-09-30): the account's sessions are
+   deleted in the same transaction as the account, so neither a sign-in nor a
+   live session extends its life. An account that completes Connect near.ai is
+   bound and is unaffected. Holding the ceiling therefore takes fresh
+   creations every week, at no more than 10 per IP per day.
    **Closed passkey-origin accounts** (the refuse branch of "Binding to an
    account that already exists") are also deleted by the S5 reaper, 30 days
-   after they were closed, so they do not accumulate. Both rules are being
-   implemented in #1127.
+   after they were closed. Until then they count against the unbound ceiling
+   (V102, decided 2026-09-30), so creating and closing accounts in a loop
+   cannot get past it.
 P5. **Cookie.** Every account cookie is `__Host-`-prefixed (#1138). This is a
    one-time sign-out for existing browser sessions.
 P6. **Step-up sessions are short-lived, about 15 minutes**, not 7 days.
@@ -171,7 +184,7 @@ put a branch inside a path that has none.
                                   │
             bind/finish (anchor already has an account) ──► closed (see "existing account")
                                   │
-            reaper (unbound 7 days after creation, no live session) ──► deleted
+            reaper (unbound 7 days after creation, sessions or not) ──► deleted
             reaper (closed 30 days) ──► deleted
 ```
 
@@ -188,7 +201,8 @@ put a branch inside a path that has none.
 - **bound.** Terminal. There is no unbind. From here the account is an
   ordinary `nearai-` account and every existing rule applies to it.
 - **closed.** Only reached through the existing-account path below. The S5
-  reaper deletes a closed account 30 days after it was closed.
+  reaper deletes a closed account 30 days after it was closed, and until then
+  it counts against the unbound ceiling (V102).
 - **Legacy accounts have no binding row** and are never subject to the
   unbound gate. Absence of a row means "not a passkey-origin account", not
   "unbound". This matters: device-link accounts in `tenant-…` namespaces have
@@ -212,9 +226,10 @@ trace_account_bindings
 ```
 
 `origin` has one value now; it exists so a later account-less origin is a
-widened CHECK, not a new table. The migration number is the next free one at
-plan time (the tree ends at V91 with V83 absent; confirm against the PG test
-database, per the migration-numbering note).
+widened CHECK, not a new table. The migrations as merged are V97 (this table,
+S1), V98 (native creation and the ceiling's count function, S2), V100 (the
+bind, S3), V101 (the reaper, S5) and V102 (closed rows count toward the
+ceiling).
 
 ### Tenant: created at passkey creation, reused at bind
 
@@ -572,7 +587,7 @@ side, Cancel is the existing `POST /v1/account/logout` with the native token
 (`account_logout_handler`), and the app deletes its stored token. The account, its
 passkey and its binding row stay `unbound`. Signing in again with the passkey
 returns to the Verify step. A reaper deletes an account that is still unbound 7
-days after creation and has no live session, and a closed account 30 days
+days after creation, whatever sessions it holds, and a closed account 30 days
 after it was closed (slice S5, P4 above).
 
 Why inert rather than deleted:
@@ -588,7 +603,8 @@ Why inert rather than deleted:
   device, principal or grant, so there is nothing to unwind. "No half-linked
   accounts" is guaranteed by the single bind transaction, not by Cancel.
 - **The cost is bounded.** A few rows per account, capped by the unbound
-  ceiling and reclaimed by the reaper.
+  ceiling and reclaimed by the reaper, except the tenant row and its audit
+  rows, which the reaper keeps (an accepted residual, see S5).
 
 A bind that fails (introspection refused, ceremony expired, device signature
 wrong) leaves the account `unbound` with no write beyond the consumed
@@ -638,11 +654,14 @@ create unbound accounts at the rate the limits allow. What can they consume?
 
 **The unbound ceiling.** A new config value,
 `TRACE_COMMONS_UNBOUND_PASSKEY_ACCOUNT_CEILING`: when the count of `unbound`
-rows reaches it, `create/start` and `create/finish` refuse with the uniform
-deny, and ingest logs the label `unbound_account_ceiling_reached` once per
-crossing. Unset means passkey creation is **disabled** (fail closed), so a
-deployment opts in with a number. The pilot's is 5,000. The count is a cross-tenant read, so it goes
-through a definer function or the resolver role, not the runtime pool.
+and `closed` rows reaches it, `create/start` and `create/finish` refuse with
+the uniform deny, and ingest logs the label `unbound_account_ceiling_reached`
+once per crossing. `bound` rows never count. Unset means passkey creation is
+**disabled** (fail closed), so a deployment opts in with a number. The pilot's
+is decided at 5,000, and stays unset until C1's origin check passes (the
+deploy gate). The count is a cross-tenant read, so it goes through a definer
+function (`trace_unbound_passkey_account_count()`, V98, widened by V102), not
+the runtime pool.
 
 **What holds the ceiling down, and what it costs.** The ceiling can be held
 full on purpose, so what matters is the price of doing it:
@@ -652,19 +671,25 @@ full on purpose, so what matters is the price of doing it:
   cap.
 - The reaper is keyed on bound versus unbound (P4), so signing in
   again, or presenting the creation token after the first hour, does not move
-  an account into a longer window. Every unbound account is gone 7 days after
-  creation once it has no live session, so an attacker with a proxy pool must
-  make fresh creations every week to keep the ceiling full; a single sign-in
-  does not buy an account a longer life.
-- Closed passkey-origin accounts leave both the ceiling count (which counts
-  `unbound` rows) and, without the closed-account rule, the reaper. The reaper
-  deletes them 30 days after closing, so they do not accumulate without bound.
+  an account into a longer window. Nor does a live session: the reaper does
+  not read sessions, and deletes an account's sessions in the same
+  transaction as the account (decided 2026-09-30, #1127). Every unbound
+  account is gone 7 days after creation, so an attacker with a proxy pool must
+  make fresh creations every week to keep the ceiling full; neither a sign-in
+  nor a native sign-in every 12 hours buys an account a longer life.
+- Closed passkey-origin accounts count against the ceiling until the reaper
+  deletes them, 30 days after the close (V102, decided 2026-09-30). Before
+  V102 only `unbound` rows counted, so a create-then-close loop could hold
+  more rows than the ceiling allows; now a closed slot frees only when the
+  account is reaped.
 - **Limits of the per-IP key** (found in review of #1131). The key is the
   leftmost `X-Forwarded-For` hop. That is safe on the pilot only because the
   reverse proxy (Caddy) overwrites the header, so an operator must keep that
   true: a deployment whose proxy appends to a client-supplied header lets the
   client choose its own key. IPv6 addresses are not grouped by /64, so one
-  IPv6 allocation can present many keys.
+  IPv6 allocation can present many keys. The operator requirement is added to
+  `docs/operator/deployment.md` ("Native passkey creation (Z2 S2)") by a
+  follow-up to #1120, since that file is not in this PR's diff.
 
 **The sybil unit does not change.** Earned trust's sybil analysis ("Sybil
 accounts" in the earned-trust spec) counts anchored NEAR accounts: each is one
@@ -773,15 +798,18 @@ to be true.
 What the tree says the pilot runs:
 
 - `deploy/pilot-gcp/ingest.env.template` sets
-  `TRACE_COMMONS_WEBAUTHN_RP_ID=${TC_PUBLIC_HOST}` and
-  `RP_ORIGIN=https://${TC_PUBLIC_HOST}`.
-- `docs/operator/pilot-gcp-deployment.md` sets `TC_PUBLIC_HOST=tracecommons.ai`.
+  `TRACE_COMMONS_WEBAUTHN_RP_ID=${TC_WEBAUTHN_RP_ID}` and
+  `TRACE_COMMONS_WEBAUTHN_RP_ORIGIN=https://${TC_WEBAUTHN_RP_ID}` (the pin
+  from #1137; before it, both came from `${TC_PUBLIC_HOST}`).
+- `docs/operator/pilot-gcp-deployment.md` exports
+  `TC_WEBAUTHN_RP_ID=tracecommons.ai`, the apex.
 
-So **if the pilot was deployed from the template, its RP ID is already
-`tracecommons.ai` and nothing changes.** This spec cannot confirm that: the
-pilot's configuration lives in the running process's environment, not in the
-tree. Changing the RP ID invalidates every existing passkey
-(`docs/operator/deployment.md`; `WebauthnConfig` in `config.rs`).
+The tree cannot say what the pilot runs, because the pilot's configuration
+lives in the running process's environment, not in the tree. The S0 read of
+that environment on 2026-09-28 (below) settled it: the RP ID is already
+`tracecommons.ai` and nothing changes. Changing the RP ID invalidates every
+existing passkey (`docs/operator/deployment.md`; `WebauthnConfig` in
+`config.rs`).
 
 Options, if the live value differs:
 
@@ -846,13 +874,24 @@ entry the page loads but every sign-in there gets the uniform deny.
   (discoverable) key, so a security key can make a credential that cannot be
   found by the discoverable sign-in this design uses: an account that can never
   sign in again. The platform provider creates discoverable credentials.
-- **Deploy gate.** S3 and every later slice must not be deployed until C1's
+- **Deploy gate.** Native passkey creation must stay closed until C1's
   signed-build check passes: a build signed with the associated-domains
   entitlement, run against a staging ingest, records the
   `clientDataJSON.origin` Apple sends and shows it equals an entry in the
-  origin list. Apple-side Associated Domains is now granted and a Developer ID
+  origin list (`docs/operator/native-passkey-release-qualification.md`).
+  Apple-side Associated Domains is now granted and a Developer ID
   provisioning profile exists (2026-09-29); signing the app with the entitlement
   is not done, so the gate is not yet met.
+  **How the gate is held.** S3 and the later slices are on `main`, so any
+  pilot deploy carries their code; the gate is a setting, not a missing
+  binary. Leave `TRACE_COMMONS_UNBOUND_PASSKEY_ACCOUNT_CEILING` unset. With
+  no ceiling configured, `UnboundAccountCeiling::check`
+  (`account_native_passkey.rs`) returns `CeilingCheck::Closed`, so every
+  native `create/start` and `create/finish` gets the uniform deny. With no
+  native create there is no unbound account, so S3's bind (which answers
+  `409 account_already_bound` to any account that is not `unbound`) has
+  nothing to bind and S5's reaper nothing to reap. Set the variable to the
+  decided 5,000 only after C1's check passes.
 - The Tauri app is not in scope (decision 5).
 
 ## Audit
@@ -877,9 +916,11 @@ tenant to write it under, which is the "no account row for abandoned
 ceremonies" property. Failed unauthenticated attempts stay invisible, as the
 existing login is (`passkey_login_generic_deny`).
 
-**The reaper cannot audit into the tenant it deletes** (the cascade removes
-the row). It reports counts in its worker response and one label-only log line
-per run.
+**The reaper writes no audit row.** It deletes the account, never the
+tenant, so `trace_account_audit` and `trace_audit_events`, which are keyed to
+the tenant, are retained with the tenant row, including the reaped account's
+own rows. The reaper reports counts only: each tick logs `reaped_unbound`,
+`reaped_closed` and `skipped`, with no identifier.
 
 ## Threat model deltas
 
@@ -965,9 +1006,10 @@ replacements; none of these should ship without approval.
 
 Each slice is independently shippable and leaves `main` safe with the
 following slices absent. Server slices first; the client work cannot be
-exercised without S2, S3 and S4 and a signed build. The slices are built as a
-stack, so they merge top-down, head PR first. **Do not deploy S3 or a later
-slice until C1's signed-build `clientDataJSON.origin` check passes** (see
+exercised without S2, S3 and S4 and a signed build. S1-S5 and S7 are on
+`main`, so any pilot deploy carries them. **Keep native creation closed, by
+leaving `TRACE_COMMONS_UNBOUND_PASSKEY_ACCOUNT_CEILING` unset, until C1's
+signed-build `clientDataJSON.origin` check passes** (see the deploy gate under
 "Client prerequisites").
 
 ### S0 — Confirm the pilot RP (operator, no code)
@@ -978,7 +1020,7 @@ whether it changes").
 
 ### S1 — Binding state and the unbound gate (server)
 
-Built in #1122.
+Written in #1122 (closed unmerged); landed in the #1135 squash (V97).
 
 - M1: `trace_account_bindings`, RLS registry, coverage arrays.
 - The allowlist gate in `account_auth_middleware`; `GET /v1/account/binding`;
@@ -994,7 +1036,7 @@ Built in #1122.
 
 ### S2 — Native passkey create and sign-in (server)
 
-Built in #1131, stacked on S1.
+Written in #1131 (closed unmerged); landed in the #1135 squash (V98).
 
 - `CeremonyState::{NativeCreate, NativeDiscoverable, NativeRegistration}`;
   `create/{start,finish}`, `login/{start,finish}`,
@@ -1014,15 +1056,17 @@ Built in #1131, stacked on S1.
   but can register the first on a near.ai-first account; removing a passkey
   revokes its native sessions; `resolve_credential_tenant` under the real
   resolver role via `SET ROLE` for a credential in a freshly minted tenant.
-- **Deploy gate, not just a manual check.** S3 and every later slice are not
-  deployed until one create and one sign-in from a signed macOS build carrying
-  the associated-domains entitlement, against a staging ingest, record the
+- **Deploy gate, not just a manual check.** Native creation stays closed, by
+  leaving `TRACE_COMMONS_UNBOUND_PASSKEY_ACCOUNT_CEILING` unset, until one
+  create and one sign-in from a signed macOS build carrying the
+  associated-domains entitlement, against a staging ingest, record the
   `clientDataJSON.origin` Apple sends and it matches the origin list. That is
-  C1's check; the build it needs does not exist yet.
+  C1's check; the build it needs does not exist yet. See the deploy gate under
+  "Client prerequisites" for why unset is sufficient.
 
 ### S3 — Bind through NEAR AI provisioning (server + protocol)
 
-Built in #1135, stacked on S2.
+Built in #1135, which squashed S1-S3 onto `main` (V100).
 
 - `near_ai_bind_device_bytes` in `trace-commons-protocol` (permissive crate;
   nothing crosses the license boundary), `deny_unknown_fields` on
@@ -1062,31 +1106,53 @@ to the apex.
 
 ### S5 — Unbound-account reaper (server)
 
-Built in #1127, stacked on S1. Two rules, decided 2026-09-29 (P4), are
-being implemented in #1127; the PR as first pushed had a 30-day idle rule and a
-7-day never-used rule, which the first rule replaces:
+Built in #1127, merged 2026-09-30 as V101; V102 (#1156) then made closed rows
+count toward the ceiling. The rules are P4's, decided 2026-09-29 and 2026-09-30. The
+PR as first pushed had a 30-day idle rule, a 7-day never-used rule and a
+live-session skip; the first rule below replaced the first two, and the
+live-session skip was removed:
 
 - **Unbound.** Delete a passkey-origin account whose binding is still `unbound`
-  7 days after it was created, whether or not it signed in again, once it has no
-  live session. There is no longer a 30-day idle window for an account that
-  signed in again. A bound account is never a candidate, so an account that
+  7 days after it was created, whether or not it signed in again and whatever
+  sessions it holds. There is no longer a 30-day idle window for an account
+  that signed in again, and a live session does not put the reap off: the
+  account's sessions are deleted in the same transaction, by the cascade from
+  `trace_accounts`. A bound account is never a candidate, so an account that
   completes Connect near.ai is unaffected.
 - **Closed.** Delete a closed passkey-origin account 30 days after it was
-  closed.
+  closed (`trace_accounts.closed_at`). Until then it counts against the
+  unbound ceiling (V102).
 
-What #1127 builds around them: a `SECURITY DEFINER` function owned by a NOLOGIN
-NOBYPASSRLS guard that deletes the account and, when it was the tenant's last
-account and the tenant holds no submission, the tenant; refusing any tenant that
-holds anything else. It is driven by an in-process, env-gated loop with its own
-cross-tenant pool (copied from the PII-backstop driver), not by a worker route.
-It reports counts and one label-only log line per run; the audit trail cannot
-be written into a tenant the reaper deletes. Legacy accounts (no binding row)
-are never candidates.
+What #1127 builds around them: `trace_reap_unbound_accounts`, a `SECURITY
+DEFINER` function owned by a NOLOGIN NOBYPASSRLS guard, that deletes **the
+account, never the tenant** (decided 2026-09-29). It deletes only the
+`trace_accounts` row; whatever cascades from it goes too (for a passkey
+account, its binding, credentials, sessions and login links). The tenant row
+and every tenant-keyed row stay, including both audit tables,
+`trace_account_audit` and `trace_audit_events`. A candidate whose delete is
+refused by a non-cascading foreign key (23503), a lock timeout or a deadlock
+is rolled back, nothing of it is deleted, and it is counted `skipped`. It is
+driven by an in-process loop, off unless
+`TRACE_COMMONS_UNBOUND_REAPER_ENABLED=true`, with its own cross-tenant pool
+(copied from the PII-backstop driver), not by a worker route. Each tick logs
+the counts `reaped_unbound`, `reaped_closed` and `skipped`, and no
+identifier; the reaper writes no audit row of its own. Legacy accounts (no
+binding row) are never candidates. Operator detail is in
+`docs/operator/unbound-account-reaper.md`.
 
-- Tests: an unbound account past 7 days is reaped even if it signed in again; a
-  young one, a bound one, one with a live session, and a legacy account are not;
-  a closed account is reaped after 30 days and not before; the function refuses
-  a tenant holding any other row.
+**Accepted residual: empty tenants accumulate** (decided 2026-09-30). Every
+passkey creation mints its own tenant, and a reap leaves that tenant row, and
+its audit rows, in place. Reaped passkey accounts therefore leave empty tenant
+rows that grow without bound, and code that enumerates every tenant iterates
+them. A later sweep is tracked in #1153.
+
+- Tests (`unbound_account_reaper_pg`): an unbound account past 7 days is
+  reaped even if it signed in again, and one with a live session is reaped
+  with its sessions; a young one, a bound one and a legacy account are not; a
+  closed account is reaped after 30 days and not before; a candidate with a
+  non-cascading account-keyed row is skipped, not deleted; the tenant and its
+  audit rows survive a reap, and another account in the same tenant is
+  untouched.
 
 ### S6 — Fold into an existing account (server, optional)
 
@@ -1102,7 +1168,7 @@ Deferred (P2). Not scheduled; refuse-only ships first.
 
 ### S7 — Browser step-up page (server)
 
-Built in #1136, stacked on S3. The session the page mints lasts about 15
+Built in #1136. The session the page mints lasts about 15
 minutes (P6). Its copy is proposed and needs approval.
 
 - A minimal page on ingest (`/account/step-up`) that runs the existing browser
@@ -1147,14 +1213,16 @@ Not designed here. The surface it needs:
 2. **RP ID.** Resolved 2026-09-28 by S0: the live RP ID is `tracecommons.ai`,
    so nothing changes and no passkey is invalidated.
 3. **Cancel semantics.** Resolved: inert plus reaper, not deletion. The reaper
-   rule is P4 above (7 days unbound with no live session; closed
-   accounts after 30 days). This replaced the first proposal, 30 days since the
-   last session.
+   rule is P4 above (7 days after creation while unbound, whatever sessions
+   the account holds; closed accounts 30 days after the close). This replaced
+   the first proposal, 30 days since the last session.
 4. **Existing-account fold (S6).** Resolved 2026-09-28: refuse-only ships
    first, and the fold is deferred and not scheduled.
 5. **Unbound ceiling.** Resolved 2026-09-28: 5,000 for the pilot, with an alert
-   on `unbound_account_ceiling_reached`. Hardened 2026-09-29 by a per-IP daily
-   cap and the bound-versus-unbound reap rule.
+   on `unbound_account_ceiling_reached`, left unset until C1's origin check
+   passes (the deploy gate). Hardened 2026-09-29 by a per-IP daily cap and the
+   bound-versus-unbound reap rule, and 2026-09-30 by dropping the reaper's
+   live-session skip and counting closed rows toward the ceiling (V102).
 6. **Apple Team ID.** Resolved 2026-09-28: `KXSWJN7WY8` (Iqlusion Inc), so the
    association file's app id is `KXSWJN7WY8.ai.tracecommons.shell`.
 
