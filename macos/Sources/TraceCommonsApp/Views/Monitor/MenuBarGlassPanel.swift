@@ -66,7 +66,7 @@ struct MenuBarGlassPanel: View {
 
     private var pills: some View {
         HStack(spacing: GlassTokens.Space.s3) {
-            pill(.mode, caption: Self.modeCaption, value: modeValue, image: "bell.fill", fill: modeFill)
+            pill(.mode, caption: Self.modeCaption, value: modeValue, image: "bell", fill: modeFill)
             pill(.watch, caption: MonitorWords.watching, value: watchValue,
                  image: watchState == .paused ? "eye.slash" : "eye",
                  fill: .solid(watchState == .ready ? GlassTokens.Color.blue : GlassTokens.Color.menuPillOff))
@@ -326,12 +326,14 @@ struct MenuBarGlassPanel: View {
 
     // MARK: Menu items
 
+    /// The handoff spaces these rows like the popover's own children: 8pt
+    /// between each row and hairline, for a row pitch of at least 28pt.
     private var menuItems: some View {
-        VStack(alignment: .leading, spacing: 0) {
+        VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
             hairline
             Button { openMain(.queue) } label: {
                 HStack {
-                    Text(FlowMapScene.pair(MenuWords.flagged, store.stale ? nil : MenuPanelData.flagged(store.pending)))
+                    Text("\(MenuWords.flagged) · \(store.stale ? "—" : String(MenuPanelData.flagged(store.pending)))")
                     Spacer(minLength: 0)
                     Image(systemName: "chevron.right").glassGlyph(10, weight: .semibold)
                 }
@@ -349,7 +351,6 @@ struct MenuBarGlassPanel: View {
 
     private var hairline: some View {
         Rectangle().fill(GlassColor.ink(0.12)).frame(height: 1)
-            .padding(.vertical, GlassTokens.Space.s2)
             .accessibilityHidden(true)
     }
 
