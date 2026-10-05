@@ -81,10 +81,9 @@ enum SelfTest {
                 + "tenant_id=\(reportDigest(model.status.tenantID)) "
                 + "consent_scopes=\(model.status.consentScopes)\n"
                 + "isOnboardingComplete=\(model.isOnboardingComplete)\n"
+                + "isWatchOnlyComplete=\(model.isWatchOnlyComplete)\n"
                 + "would show: "
-                + (!model.status.loggedIn || !model.isOnboardingComplete
-                    ? "onboarding (resumed at .consent, since logged_in is true)"
-                    : "main window") + "\n"
+                + (model.requiresOnboarding ? "first run" : "main window") + "\n"
             try? report.write(toFile: path, atomically: true, encoding: .utf8)
             NSLog("trace-commons: resume check written to \(path)")
         }
