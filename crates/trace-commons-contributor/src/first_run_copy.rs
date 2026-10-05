@@ -186,6 +186,16 @@ pub struct UsesCopy {
     pub sharing_unavailable: &'static str,
     pub base_use_note: &'static str,
     pub start: &'static str,
+    /// Start finished on Ask me because the Automatic grant was refused.
+    pub sharing_refused: &'static str,
+    /// Start stopped before anything it sends was saved: the data uses.
+    pub scopes_failed: &'static str,
+    /// Start stopped on a folder rule or a past-session include; the data
+    /// uses were saved.
+    pub rules_failed: &'static str,
+    /// Start stopped on the Private AI setting while the Private AI copy,
+    /// whose `write_unconfirmed` a shell shows first, is unavailable.
+    pub private_ai_failed: &'static str,
 }
 
 /// The passkey popups P-1, P-2, P-5 and P-7 (`passkey-flow.tsx`). P-3, P-4
@@ -342,6 +352,10 @@ pub fn first_run_copy() -> FirstRunCopy {
             sharing_unavailable: "Sharing copy unavailable. Starting is disabled.",
             base_use_note: "Tick the first use to contribute. Without it nothing is shared.",
             start: "Start sharing",
+            sharing_refused: "Setup finished, but Automatic wasn't turned on. Sharing is on Ask me.",
+            scopes_failed: "How your traces may be used couldn't be saved. Setup hasn't finished; try Start sharing again.",
+            rules_failed: "A folder rule or past-session choice couldn't be saved. Setup hasn't finished; try Start sharing again.",
+            private_ai_failed: "The Private AI setting couldn't be saved. Setup hasn't finished; try Start sharing again.",
         },
         passkey: PasskeyCopy {
             back: "Back",
@@ -455,6 +469,32 @@ mod tests {
         );
         assert!(!tools.trajectory_label.trim().is_empty());
         assert_ne!(tools.trajectory_label, tools.add_tool_caption);
+    }
+
+    /// Start's failures each have a sentence that is true when it is shown.
+    /// A refused grant comes after setup finished, so it never says nothing
+    /// changed and never points at a control the first run does not have.
+    #[test]
+    fn start_failures_say_what_happened() {
+        let uses = first_run_copy().uses;
+        assert!(uses.sharing_refused.contains("Ask me"));
+        assert!(uses.sharing_refused.contains("Automatic"));
+        for line in [
+            uses.sharing_refused,
+            uses.scopes_failed,
+            uses.rules_failed,
+            uses.private_ai_failed,
+        ] {
+            assert!(!line.contains("Nothing changed"), "{line}");
+            assert!(!line.contains("pill"), "{line}");
+        }
+        for line in [
+            uses.scopes_failed,
+            uses.rules_failed,
+            uses.private_ai_failed,
+        ] {
+            assert!(line.contains("Setup hasn't finished"), "{line}");
+        }
     }
 
     fn empty_leaves(value: &serde_json::Value, path: &str, out: &mut Vec<String>) {

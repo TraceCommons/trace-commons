@@ -114,7 +114,9 @@ public enum FirstRunPlan {
             }
             calls.append(.setPrivateAI(state.privateAI))
         }
-        if state.sharing == .automatic, FirstRunNavigation.canChooseAutomatic(state.account) {
+        // Automatic alone is not enough: only the core's ready answer after
+        // both disclosures (`grantReady`) sends the grant.
+        if state.sharing == .automatic, state.grantReady, FirstRunNavigation.canChooseAutomatic(state.account) {
             calls.append(.grantAutomatic(witness: state.witnessSigningAddress))
         }
         calls.append(.markComplete)

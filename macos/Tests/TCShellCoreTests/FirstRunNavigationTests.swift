@@ -152,6 +152,18 @@ final class FirstRunNavigationTests: XCTestCase {
         XCTAssertEqual(FirstRunNavigation.next(back).step, .uses)
     }
 
+    /// The core's ready answer belongs to the Start it was asked for. Back
+    /// clears it, so coming back to Uses goes through the disclosures again.
+    func test_backClearsTheGrantMarker() {
+        var state = FirstRunState(tier: .quick, step: .uses, account: .nearAI, scopes: ["research"])
+        state.sharing = .automatic
+        state.grantReady = true
+        let back = FirstRunNavigation.back(state)
+        XCTAssertFalse(back.grantReady)
+        XCTAssertEqual(back.sharing, .automatic, "the answer itself is kept")
+        XCTAssertFalse(FirstRunNavigation.next(back).grantReady)
+    }
+
     func test_aDeadInviteReturnsToJoinWithAnswersKept() {
         var state = FirstRunState(tier: .quick, step: .folders)
         state.invite = "INVITE-DEAD"
@@ -246,6 +258,7 @@ final class FirstRunNavigationTests: XCTestCase {
         state.sharing = .automatic
         state.privateAI = true
         state.witnessSigningAddress = "witness-1"
+        state.grantReady = true
         state.daemonStarted = true
         state.startedSettingsJSON = "{}"
         state.enrolledInvite = "INVITE-1"
