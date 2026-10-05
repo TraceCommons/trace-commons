@@ -10,7 +10,8 @@ for later use. The user confirmed multiple saved accounts and approved the
 proposed UI and the rule that switching applies to newly opened sessions.
 The user additionally authorized changes to IronWire as needed for this feature.
 The user explicitly requires a managed-launch UI inside Trace Commons. A
-matching CLI workflow is proposed below, using the existing contributor binary.
+matching CLI workflow is proposed below. The user named the CLI **NEAR AI**;
+its canonical executable is `near-ai`.
 
 Each tool has an independent selected connection and account. Subscription
 sign-in and refresh remain owned by the native tool. A running session keeps
@@ -175,19 +176,33 @@ terminal output or transcripts or automatically arm folders for contribution.
 
 ## Managed-launch CLI
 
-Extend `crates/trace-commons-contributor/src/bin/trace-commons-contributor.rs`.
+Name the CLI **NEAR AI**, with the canonical executable `near-ai`. Build on
+the existing contributor CLI implementation in
+`crates/trace-commons-contributor/src/bin/trace-commons-contributor.rs`.
 Use the same account service, launch validation, selection generations, and
 session registry as the UI. No second account database or standalone CLI
-application is needed. Proposed commands are:
+implementation is needed. Proposed commands are:
 
 ```sh
-trace-commons-contributor launch claude --account personal --cwd .
-trace-commons-contributor launch codex --account work --cwd /path/to/project
-trace-commons-contributor launch claude --connection near-ai --cwd .
-trace-commons-contributor accounts list
-trace-commons-contributor accounts add --tool codex --connection subscription --label Work
-trace-commons-contributor sessions list
+near-ai launch claude --account personal --cwd .
+near-ai launch codex --account work --cwd /path/to/project
+near-ai launch claude --connection near-ai --cwd .
+near-ai accounts list
+near-ai accounts add --tool codex --connection subscription --label Work
+near-ai sessions list
 ```
+
+Keep `trace-commons-contributor` as a compatibility entry point backed by the
+same command implementation, preserving existing commands, flags, exit codes,
+configuration paths, environment variables, and machine-readable output.
+`near-ai` becomes the name used in new documentation, help examples, shell
+completions, installers, release artifacts, and UI launch instructions. Both
+entry points address the same local daemon and saved accounts. The Rust crate
+name and Trace Commons desktop application name do not change in this scope.
+CLI branding does not choose a provider: `near-ai launch claude` still uses
+the selected Claude connection/account rather than forcing NEAR AI inference.
+Installers must detect an unrelated existing `near-ai` executable and report
+the collision instead of overwriting it silently.
 
 Connection values are `near-ai`, `subscription`, and `api-key`, resolved against
 the chosen tool. An account argument accepts an opaque ID or a unique label;
@@ -382,7 +397,8 @@ an enabled control.
 
 Likely change areas are new contributor account and launch modules, daemon IPC,
 contributor FFI, shared UI copy/state, and each shell's Model calls surface.
-The existing contributor CLI also gains launch, account, and session commands.
+The contributor CLI gains the `near-ai` executable name plus launch, account,
+and session commands, with the former executable retained for compatibility.
 Extend existing modules through focused helpers; avoid unrelated refactoring.
 No hosted schema or contributor-identity change is needed.
 
@@ -408,6 +424,9 @@ No hosted schema or contributor-identity change is needed.
 - Launch from the UI using a chosen project and from the CLI using the current
   directory and an explicit directory; verify both appear in Managed sessions
   with the captured account, provider, and correct native working directory.
+- Verify `near-ai` packaging, help/version output, and completions, plus the
+  compatibility entry point's existing commands and shared configuration. Test
+  installer behavior when an unrelated executable already occupies the name.
 - Exercise double-submit, lost acknowledgements, terminal failure, paths with
   spaces/metacharacters, unavailable daemon, native exit/interrupt propagation,
   UI close/reopen, and daemon/helper reconnection. Uncertain sessions must not
