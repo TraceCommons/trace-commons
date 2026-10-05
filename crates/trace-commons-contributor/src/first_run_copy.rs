@@ -459,7 +459,13 @@ mod tests {
     #[test]
     fn every_install_url_is_https() {
         let urls = first_run_copy().folders.install_urls;
-        for url in [urls.claude_code, urls.codex, urls.gemini_cli, urls.cline, urls.opencode] {
+        for url in [
+            urls.claude_code,
+            urls.codex,
+            urls.gemini_cli,
+            urls.cline,
+            urls.opencode,
+        ] {
             assert!(url.starts_with("https://"), "{url}");
         }
     }
