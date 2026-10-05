@@ -183,11 +183,11 @@ enum JoinScreenLayout {
         if state.enrolledInvite != nil {
             return .joined(
                 FirstRunCopy.fill(
-                    copy.inviteJoined, ["host": state.issuerHost ?? dash, "pay_range": payRange(lookup)]))
+                    copy.inviteJoined, ["host": state.issuerHost ?? dash, "pay_range": payRange(lookup, copy: copy)]))
         }
         if passkeyDone(state) { return .note(copy.inviteOrPasskey) }
         if refused { return .error(copy.inviteError) }
-        if case .inviteDead = failure { return .error(copy.inviteError) }
+        if case .inviteDead = failure { return .error(copy.inviteDead) }
         // Watch only joins no invite (`FirstRunPlan`), so none is shown as
         // if it would be.
         if state.account == .watchOnly { return .hidden }
@@ -195,13 +195,20 @@ enum JoinScreenLayout {
         return .hidden
     }
 
-    /// The invite's credit range, or a dash when the daemon gave none: an
-    /// unknown range never reads as a figure.
-    static func payRange(_ lookup: DaemonData.InviteLookup?) -> String {
-        guard let range = lookup?.creditRange else { return dash }
-        let span = range.min == range.max ? "\(range.min)" : "\(range.min)–\(range.max)"
-        return "\(span) \(range.unit)"
+    /// The invite's credit range in the core's words, or a dash when the
+    /// daemon gave none or gave a unit this build cannot word: an unknown
+    /// range never reads as a figure, and the wire label never reaches the
+    /// screen.
+    static func payRange(_ lookup: DaemonData.InviteLookup?, copy: FirstRunCopy.Join) -> String {
+        guard let range = lookup?.creditRange, range.unit == pointsPerAcceptedTrace else { return dash }
+        if range.min == range.max {
+            return FirstRunCopy.fill(copy.payRangePointsOne, ["min": "\(range.min)"])
+        }
+        return FirstRunCopy.fill(copy.payRangePoints, ["min": "\(range.min)", "max": "\(range.max)"])
     }
+
+    /// The one credit-range unit the daemon accepts (`CREDIT_RANGE_UNIT_POINTS`).
+    static let pointsPerAcceptedTrace = "points_per_accepted_trace"
 
     /// The passkey ceremony completes with the daemon, which runs only once
     /// Folders or Tools commits. Before then Create passkey records the

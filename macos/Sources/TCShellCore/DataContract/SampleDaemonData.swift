@@ -231,7 +231,7 @@ enum SampleDaemonData {
         #"{"_sample":"no source yet","fetched_at":"2026-09-30T06:00:00Z","posture":{"settlement":"disabled","graded":false,"explanation":"Sample settlement explanation, supplied by the commons"},"missions":[{"id":"mission-sample-1","title":"Debug a failing test","summary":"Failing test found, then fixed","credit_range":{"min":5,"max":20,"unit":"points"}},{"id":"mission-sample-2","title":"Review a pull request","summary":null,"credit_range":null}]}"#
 
     static let inviteLookup =
-        #"{"_sample":"no source yet","valid":true,"issuer_display_name":"Sample Labs","credit_range":{"min":10,"max":40,"unit":"points"}}"#
+        #"{"_sample":"no source yet","valid":true,"issuer_display_name":"Sample Labs","credit_range":{"min":10,"max":40,"unit":"points_per_accepted_trace"}}"#
 
     static func passkeyState(_ set: Sample) -> String {
         set == .empty

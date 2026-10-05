@@ -46,6 +46,7 @@ pub const PLACEHOLDERS: &[&str] = &[
     "count",
     "folder",
     "name",
+    "min",
     "max",
     "selected",
     "total",
@@ -87,7 +88,17 @@ pub struct JoinCopy {
     /// range as the shell presents it (`issuer_client::lookup_invite` says it
     /// is an estimate, never a promise).
     pub invite_joined: &'static str,
+    /// The local refusal: what was pasted is not an invite link at all.
     pub invite_error: &'static str,
+    /// The daemon refused a real invite (expired, used up, revoked or not
+    /// found). Not Ron's words; owner-approved 2026-10-05.
+    pub invite_dead: &'static str,
+    /// `{min}`, `{max}`: the invite's range in the one unit the daemon
+    /// accepts, `points_per_accepted_trace`. A shell shows a dash for any
+    /// other unit, never the wire label. Not Ron's words; owner-approved.
+    pub pay_range_points: &'static str,
+    /// `{min}`: the same, when the range is a single figure.
+    pub pay_range_points_one: &'static str,
     pub passkey_eyebrow: &'static str,
     pub passkey_text: &'static str,
     /// `{name}`: the passkey's name.
@@ -301,6 +312,9 @@ pub fn first_run_copy() -> FirstRunCopy {
             look_up: "Look up",
             invite_joined: "Joined {host} · {pay_range}",
             invite_error: "That is not an invite link. It ends in #code.",
+            invite_dead: "This invite link is no longer valid. Ask whoever sent it for a new one.",
+            pay_range_points: "{min}–{max} points per accepted trace",
+            pay_range_points_one: "{min} points per accepted trace",
             passkey_eyebrow: "Sign in with a passkey",
             passkey_text: "Create a passkey that can be connected later.",
             passkey_ready: "“{name}” is ready. Connect it to near.ai any time.",
@@ -421,6 +435,17 @@ pub fn first_run_copy() -> FirstRunCopy {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_dead_invite_and_a_pay_range_have_their_own_words() {
+        let join = first_run_copy().join;
+        assert_ne!(join.invite_dead, join.invite_error);
+        for line in [join.pay_range_points, join.pay_range_points_one] {
+            assert!(!line.contains('_'), "{line}");
+            assert!(line.contains("{min}"), "{line}");
+        }
+        assert!(join.pay_range_points.contains("{max}"));
+    }
 
     #[test]
     fn first_run_copy_names_both_tiers_and_never_says_share_automatically() {

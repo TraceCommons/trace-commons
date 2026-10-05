@@ -36,6 +36,12 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
         /// `{host}` and `{pay_range}`.
         public let inviteJoined: String
         public let inviteError: String
+        /// The daemon refused a real invite.
+        public let inviteDead: String
+        /// `{min}`, `{max}`, in the unit `points_per_accepted_trace`.
+        public let payRangePoints: String
+        /// `{min}`.
+        public let payRangePointsOne: String
         public let passkeyEyebrow: String
         public let passkeyText: String
         /// `{name}`.

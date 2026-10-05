@@ -109,7 +109,7 @@ final class DaemonClientFirstRunGrantTests: XCTestCase {
     func test_inviteLookupSendsTheInviteAsItsCode() throws {
         let daemon = GrantRecordingDaemon()
         daemon.response =
-            #"{"id":1,"result":{"valid":true,"issuer_display_name":"Issuer","credit_range":{"min":10,"max":40,"unit":"points"}}}"#
+            #"{"id":1,"result":{"valid":true,"issuer_display_name":"Issuer","credit_range":{"min":10,"max":40,"unit":"points_per_accepted_trace"}}}"#
         let client = DaemonClient(daemon: daemon)
         let invite = "https://issuer.tracecommons.ai/onboard#VQWWPGYSG8Y4LTP6"
 

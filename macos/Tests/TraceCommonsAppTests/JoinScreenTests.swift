@@ -58,11 +58,27 @@ final class JoinScreenTests: XCTestCase {
         state.daemonStarted = true
         state.enrolledInvite = state.invite
         let found = try Self.lookup(
-            #"{"valid":true,"issuer_display_name":"Sample Labs","credit_range":{"min":10,"max":40,"unit":"points"}}"#)
+            #"{"valid":true,"issuer_display_name":"Sample Labs","credit_range":{"min":10,"max":40,"unit":"points_per_accepted_trace"}}"#)
+        let range = copy.join.payRangePoints
+            .replacingOccurrences(of: "{min}", with: "10")
+            .replacingOccurrences(of: "{max}", with: "40")
         let joined = copy.join.inviteJoined
             .replacingOccurrences(of: "{host}", with: "issuer.example")
-            .replacingOccurrences(of: "{pay_range}", with: "10–40 points")
-        XCTAssertEqual(JoinScreenLayout.inviteLine(state, lookup: found, failure: nil, copy: copy.join), .joined(joined))
+            .replacingOccurrences(of: "{pay_range}", with: range)
+        let line = JoinScreenLayout.inviteLine(state, lookup: found, failure: nil, copy: copy.join)
+        XCTAssertEqual(line, .joined(joined))
+        // The daemon's wire unit never reaches the screen.
+        if case .joined(let text) = line { XCTAssertFalse(text.contains("_"), text) }
+
+        // One figure reads as one figure; a unit this build cannot word reads
+        // as a dash, never as the wire label.
+        let one = try Self.lookup(
+            #"{"valid":true,"credit_range":{"min":5,"max":5,"unit":"points_per_accepted_trace"}}"#)
+        XCTAssertEqual(
+            JoinScreenLayout.payRange(one, copy: copy.join),
+            copy.join.payRangePointsOne.replacingOccurrences(of: "{min}", with: "5"))
+        let foreign = try Self.lookup(#"{"valid":true,"credit_range":{"min":1,"max":2,"unit":"dollars"}}"#)
+        XCTAssertEqual(JoinScreenLayout.payRange(foreign, copy: copy.join), "—")
         XCTAssertFalse(JoinScreenLayout.inviteIsEditable(state))
 
         // An unknown range reads as a dash, never as zero.
@@ -96,7 +112,8 @@ final class JoinScreenTests: XCTestCase {
         XCTAssertTrue(JoinScreenLayout.inviteIsEditable(state))
         XCTAssertEqual(
             JoinScreenLayout.inviteLine(state, lookup: nil, failure: .inviteDead(label: "exhausted"), copy: copy.join),
-            .error(copy.join.inviteError))
+            .error(copy.join.inviteDead))
+        XCTAssertNotEqual(copy.join.inviteDead, copy.join.inviteError)
 
         // Something that is not an invite is refused locally with the same
         // line, and is not kept, so it can never be enrolled. The refused
@@ -161,7 +178,7 @@ final class JoinScreenTests: XCTestCase {
         XCTAssertEqual(again.failure, dead)
         XCTAssertEqual(
             JoinScreenLayout.inviteLine(again.state, lookup: nil, failure: again.failure, copy: copy.join),
-            .error(copy.join.inviteError))
+            .error(copy.join.inviteDead))
 
         // A refused paste in between does not make the refused invite new:
         // looked up again, it still carries the core's error.
@@ -174,7 +191,7 @@ final class JoinScreenTests: XCTestCase {
         XCTAssertEqual(backAgain.failure, dead)
         XCTAssertEqual(
             JoinScreenLayout.inviteLine(backAgain.state, lookup: nil, failure: backAgain.failure, copy: copy.join),
-            .error(copy.join.inviteError))
+            .error(copy.join.inviteDead))
 
         // And after that refused paste an emptied field can still withdraw
         // the refused invite, taking its error with it.
