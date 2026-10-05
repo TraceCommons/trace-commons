@@ -16,10 +16,14 @@ enum PasskeySheetStep: Equatable {
 
 /// How the sheets ended, for Join.
 enum PasskeySheetOutcome: Equatable {
-    /// A passkey was created and bound to the account.
+    /// A passkey was created and bound to the account (`bound`).
     case created(name: String)
     /// An existing passkey signed in.
     case signedIn
+    /// Verify's bind answered `existing_account`: the daemon switched to an
+    /// account that already existed and makes no claim that the new passkey
+    /// moved, so no passkey name is carried.
+    case existingAccount
     /// Closed before a passkey existed; Join is unchanged.
     case closed
     /// Verify was cancelled and the daemon confirmed the sign-out.
@@ -53,6 +57,23 @@ enum PasskeyCallResult: Equatable {
     }
 }
 
+/// What P-5's `account_bind` answered. Only `bound` with `binding_state`
+/// `bound` is the new passkey's account; anything the daemon did not send
+/// fails closed.
+enum PasskeyBindResult: Equatable {
+    case bound
+    case existingAccount
+    case failed(PasskeyCallResult)
+
+    init(_ result: NativeAccountBindResult) {
+        switch (result.outcome, result.bindingState) {
+        case ("bound", "bound"): self = .bound
+        case ("existing_account", "bound"), ("existing_account", "legacy"): self = .existingAccount
+        default: self = .failed(.refused(label: "account-bind-invalid"))
+        }
+    }
+}
+
 /// The account calls behind the sheets. `LivePasskeyAccount` is the real
 /// one; tests record.
 @MainActor
@@ -61,9 +82,11 @@ protocol PasskeyAccount: AnyObject {
     /// login) and complete the ceremony with the daemon.
     func ceremony(_ action: NativePasskeyAction, label: String?) async -> PasskeyCallResult
     /// P-5: bind the passkey to the near.ai account (`account_bind`).
-    func bind() async -> PasskeyCallResult
+    func bind() async -> PasskeyBindResult
     /// Cancelling P-5 signs out (`account_sign_out`).
     func signOut() async -> PasskeyCallResult
+    /// Dismiss a system sheet that is still up.
+    func cancel()
 }
 
 /// The live account: the native passkey coordinator for the system sheets
@@ -87,12 +110,11 @@ final class LivePasskeyAccount: PasskeyAccount {
         }
     }
 
-    func bind() async -> PasskeyCallResult {
+    func bind() async -> PasskeyBindResult {
         do {
-            _ = try await transport.connectNearAI()
-            return .done
+            return PasskeyBindResult(try await transport.connectNearAI())
         } catch {
-            return PasskeyCallResult(error: error)
+            return .failed(PasskeyCallResult(error: error))
         }
     }
 
@@ -105,7 +127,6 @@ final class LivePasskeyAccount: PasskeyAccount {
         }
     }
 
-    /// Dismiss a system sheet that is still up.
     func cancel() {
         coordinator.cancel()
     }
@@ -113,8 +134,8 @@ final class LivePasskeyAccount: PasskeyAccount {
 
 /// Ron's `passkeyNameError`, worded by the core.
 enum PasskeyName {
-    /// Ron's `PASSKEY_NAME_MAX`, and the coordinator's own label limit, so a
-    /// name the sheet accepts is one the coordinator accepts.
+    /// Ron's `PASSKEY_NAME_MAX`, and the daemon's own label limit, so a
+    /// name the sheet accepts is one the daemon accepts.
     static let maxLength = 64
 
     static func trimmed(_ name: String) -> String {
@@ -124,7 +145,9 @@ enum PasskeyName {
     static func error(_ name: String, copy: FirstRunCopy.Passkey) -> String? {
         let trimmed = trimmed(name)
         if trimmed.isEmpty { return copy.nameEmpty }
-        if trimmed.count > maxLength {
+        // The daemon counts Unicode scalars; a grapheme count would pass a
+        // name the daemon then refuses as invalid.
+        if trimmed.unicodeScalars.count > maxLength {
             return copy.nameTooLong.replacingOccurrences(of: "{max}", with: "\(maxLength)")
         }
         return nil
@@ -207,9 +230,22 @@ final class PasskeySheetModel: ObservableObject {
     /// P-5 Verify.
     func verify() async {
         guard !busy, step == .verify, let createdName else { return }
-        if case .done = await run({ await $0.bind() }) {
-            outcome = .created(name: createdName)
+        busy = true
+        refusal = nil
+        defer { busy = false }
+        switch await account.bind() {
+        case .bound: outcome = .created(name: createdName)
+        case .existingAccount: outcome = .existingAccount
+        case .failed(.refused(let label)): refusal = label
+        case .failed: break
         }
+    }
+
+    /// The sheet left the screen: a system sheet still up is dismissed, so
+    /// the coordinator is not left running.
+    func disappeared() {
+        guard busy else { return }
+        account.cancel()
     }
 
     /// P-5 Cancel. Signed out only once the daemon says so.
@@ -248,6 +284,7 @@ struct PasskeySheets: View {
         content
             .frame(width: 360)
             .onExitCommand { escape() }
+            .onDisappear { model.disappeared() }
             .onChange(of: model.outcome) { _, outcome in
                 if let outcome { onFinish(outcome) }
             }

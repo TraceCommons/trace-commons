@@ -17,7 +17,7 @@ final class PasskeySheetsTests: XCTestCase {
         var calls: [String] = []
         var labels: [String?] = []
         var ceremonyAnswer: PasskeyCallResult = .done
-        var bindAnswer: PasskeyCallResult = .done
+        var bindAnswer: PasskeyBindResult = .bound
         var signOutAnswer: PasskeyCallResult = .done
 
         func ceremony(_ action: NativePasskeyAction, label: String?) async -> PasskeyCallResult {
@@ -26,9 +26,13 @@ final class PasskeySheetsTests: XCTestCase {
             return ceremonyAnswer
         }
 
-        func bind() async -> PasskeyCallResult {
+        func bind() async -> PasskeyBindResult {
             calls.append("bind")
             return bindAnswer
+        }
+
+        func cancel() {
+            calls.append("cancel")
         }
 
         func signOut() async -> PasskeyCallResult {
@@ -119,6 +123,95 @@ final class PasskeySheetsTests: XCTestCase {
         XCTAssertNil(PasskeySheetOutcome.closed.joinNotice(copy))
         XCTAssertNil(PasskeySheetOutcome.signedIn.joinNotice(copy))
         XCTAssertNil(PasskeySheetOutcome.created(name: "n").joinNotice(copy))
+        XCTAssertNil(PasskeySheetOutcome.existingAccount.joinNotice(copy))
+    }
+
+    private func bindResult(_ json: String) throws -> NativeAccountBindResult {
+        try JSONDecoder().decode(NativeAccountBindResult.self, from: Data(json.utf8))
+    }
+
+    /// The daemon's bind answers `bound` (this passkey's account) or
+    /// `existing_account` (a switch to an account that already existed, with
+    /// no claim that the new passkey moved). Only `bound` is a created passkey.
+    func test_anExistingAccountIsNeverReportedAsCreated() async throws {
+        XCTAssertEqual(
+            PasskeyBindResult(try bindResult(#"{"outcome":"bound","binding_state":"bound"}"#)), .bound)
+        XCTAssertEqual(
+            PasskeyBindResult(try bindResult(#"{"outcome":"existing_account","binding_state":"legacy"}"#)),
+            .existingAccount)
+        XCTAssertEqual(
+            PasskeyBindResult(try bindResult(#"{"outcome":"existing_account","binding_state":"bound"}"#)),
+            .existingAccount)
+        // Anything else fails closed: no outcome claims a binding.
+        XCTAssertEqual(
+            PasskeyBindResult(try bindResult(#"{"outcome":"bound","binding_state":"legacy"}"#)),
+            .failed(.refused(label: "account-bind-invalid")))
+        XCTAssertEqual(
+            PasskeyBindResult(try bindResult(#"{"outcome":"other","binding_state":"bound"}"#)),
+            .failed(.refused(label: "account-bind-invalid")))
+
+        let copy = try coreCopy()
+        let account = RecordingAccount()
+        let model = PasskeySheetModel(copy: copy.passkey, account: account)
+        model.createNew()
+        model.name = "Work laptop"
+        await model.submitName()
+        account.bindAnswer = .existingAccount
+        await model.verify()
+        XCTAssertEqual(account.calls, ["ceremony:create", "bind"])
+        XCTAssertEqual(model.outcome, .existingAccount)
+        if case .created = model.outcome { XCTFail("existing_account must not claim the passkey") }
+    }
+
+    /// Leaving the sheet while a system sheet is up dismisses it, so a later
+    /// ceremony does not meet a busy coordinator. Idle, nothing is cancelled.
+    func test_disappearingWhileBusyCancelsTheSystemSheet() async throws {
+        let copy = try coreCopy()
+        let account = RecordingAccount()
+        let model = PasskeySheetModel(copy: copy.passkey, account: account)
+        model.disappeared()
+        XCTAssertEqual(account.calls, [])
+
+        let gate = AsyncStream<Void>.makeStream()
+        let blocking = BlockingAccount(release: gate.stream)
+        let busyModel = PasskeySheetModel(copy: copy.passkey, account: blocking)
+        let running = Task { await busyModel.useExisting() }
+        while !busyModel.busy { await Task.yield() }
+        busyModel.disappeared()
+        XCTAssertEqual(blocking.calls, ["ceremony:login", "cancel"])
+        gate.continuation.yield()
+        gate.continuation.finish()
+        await running.value
+    }
+
+    /// Holds the ceremony open until released.
+    @MainActor
+    final class BlockingAccount: PasskeyAccount {
+        var calls: [String] = []
+        let release: AsyncStream<Void>
+        init(release: AsyncStream<Void>) { self.release = release }
+
+        func ceremony(_ action: NativePasskeyAction, label: String?) async -> PasskeyCallResult {
+            calls.append("ceremony:\(action.rawValue)")
+            for await _ in release { break }
+            return .cancelled
+        }
+        func bind() async -> PasskeyBindResult { .bound }
+        func signOut() async -> PasskeyCallResult { .done }
+        func cancel() { calls.append("cancel") }
+    }
+
+    /// The daemon counts Unicode scalars, not grapheme clusters; the sheet
+    /// matches it so a name it accepts is never refused as invalid later.
+    func test_theNameLimitCountsScalarsAsTheDaemonDoes() throws {
+        let copy = try coreCopy()
+        let tooLong = copy.passkey.nameTooLong.replacingOccurrences(of: "{max}", with: "\(PasskeyName.maxLength)")
+        // 33 graphemes, 66 scalars.
+        let combining = String(repeating: "e\u{0301}", count: 33)
+        XCTAssertEqual(combining.count, 33)
+        XCTAssertEqual(PasskeyName.error(combining, copy: copy.passkey), tooLong)
+        let fits = String(repeating: "e\u{0301}", count: 32)
+        XCTAssertNil(PasskeyName.error(fits, copy: copy.passkey))
     }
 
     /// Ron's table with the system sheets as ceremony results: a cancelled
@@ -159,7 +252,7 @@ final class PasskeySheetsTests: XCTestCase {
 
         // A refused bind stays on Verify with the label and claims nothing.
         account.ceremonyAnswer = .done
-        account.bindAnswer = .refused(label: "account-bind-refused")
+        account.bindAnswer = .failed(.refused(label: "account-bind-refused"))
         await creating.submitName()
         await creating.verify()
         XCTAssertEqual(creating.step, .verify)
@@ -192,6 +285,10 @@ final class PasskeySheetsTests: XCTestCase {
         XCTAssertEqual(
             PasskeyCallResult(error: DaemonClient.Failure(code: "refused", message: "account-bind-refused")),
             .refused(label: "account-bind-refused"))
+        // The daemon's own view sentence wins over its bare message.
+        var viewed = DaemonClient.Failure(code: "refused", message: "account-bind-refused")
+        viewed.viewMessage = "daemon view text"
+        XCTAssertEqual(PasskeyCallResult(error: viewed), .refused(label: "daemon view text"))
         struct Other: Error {}
         XCTAssertEqual(
             PasskeyCallResult(error: Other()),
