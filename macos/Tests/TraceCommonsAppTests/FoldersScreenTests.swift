@@ -226,7 +226,7 @@ final class FoldersScreenTests: XCTestCase {
         let screen = try Self.source("FoldersScreen.swift")
         XCTAssertTrue(screen.contains("NSApplication.didBecomeActiveNotification"))
         XCTAssertTrue(screen.contains("copy.folders.retry"))
-        XCTAssertFalse(screen.contains("TCDiscovery.sourcesJSON()) ?? []"))
+        XCTAssertTrue(screen.contains("FoldersScreenLayout.discovered(TCDiscovery.sourcesJSON(), keeping: discovery)"))
     }
 
     /// A missing tool the state already watches (restored, or added on
