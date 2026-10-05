@@ -51,7 +51,7 @@
 | `macos/Sources/TraceCommonsApp/Views/OnboardingCoordinatorView.swift`, `OnboardingNavigation.swift` | Kept names; now host the new flow |
 | `macos/Sources/TraceCommonsApp/Views/Monitor/FirstRunViews.swift` | Kept host; progress from `FirstRunNavigation` |
 
-The legacy step views (`OnboardingWelcomeView`, `OnboardingRootsView`, `OnboardingConnectView`, `ConsentScopesView` as a step, `OnboardingPrivacyScanView`, `OnboardingProjectsView`, `OnboardingDoneView`, `WhatGetsRemovedSheet`) are deleted when Task 11 rewires the hosts; their `ShellWordingTests` baseline entries are removed and their `SURFACES` rows re-pointed to the new files.
+The legacy step views (`OnboardingWelcomeView`, `OnboardingRootsView`, `OnboardingConnectView`, `ConsentScopesView` as a step, `OnboardingPrivacyScanView`, `OnboardingProjectsView`, `OnboardingDoneView`, `WhatGetsRemovedSheet`) are deleted when Task 11 rewires the hosts; their `ShellWordingTests` baseline entries are removed and their `SURFACES` rows re-pointed to the new files. Deleting `OnboardingRootsView` also removes its `ALLOWED` entry ("Which folders may this") in `crates/trace-commons-contributor-ffi/tests/swift_copy_surface_is_central.rs`; the test fails on an entry that no longer matches, so this is not optional.
 
 ---
 
@@ -140,6 +140,7 @@ P-1 Choose, P-2 Name (`GlassTextField`, the two name errors, the `GlassNotice(.a
 
 **Files:** `OnboardingNavigation.swift`, `Views/OnboardingCoordinatorView.swift`, `Views/Monitor/FirstRunViews.swift`, `Views/MainWindowView.swift`; delete the legacy step views listed under File Structure; tests: retire `OnboardingParityTests.test_unapprovedConceptStepsDoNotExist`, `UsesStepTests.test_alwaysOnRowsAreLockedOn`, `FirstRunProgressTests.test_foldersPrecedeJoinOnAFreshInstall` (each replaced by the Task 2 test that states the new rule, named in the commit); update `ShellWordingTests.wordingBaseline`, `GlassSurfaceRulesTests.files` (append the new files; remove deleted ones deliberately, saying why), `swift_copy_surface_is_central.rs` `SURFACES`.
 `OnboardingCoordinatorView(startAt:onStep:onComplete:)` keeps its signature and hosts `FirstRunRunner`; `FirstRunWindowView` keeps `FirstRunProgress.paneWidth`.
+- [ ] Remove the `OnboardingRootsView.swift` entry from `ALLOWED` in `swift_copy_surface_is_central.rs` with the view, and run `cargo test -p trace-commons-contributor-ffi --test swift_copy_surface_is_central`.
 - [ ] Steps: run the full gate (Global Constraints); fix only what the rewire breaks; commit `"Host Ron's first run in both windows and retire the old steps"`.
 
 ### Task 12: Replace #1235, restack, update the review page

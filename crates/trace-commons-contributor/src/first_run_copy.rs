@@ -13,16 +13,27 @@
 //! - The "add your tool" caption names what recognition actually reads; the
 //!   tools it used to name are not read (owner decision, 2026-10-04), and a
 //!   folder that matches nothing is refused with `tools.add_tool_refused`.
-//! - The joined line names the host only. How an invite's credit range is
-//!   presented is not decided here (`issuer_client::lookup_invite` says it is
-//!   an estimate, never a promise), so this table has no hole for it.
 //! - The invite placeholder carries no code: Ron's preview showed a mock one.
 //! - Preview-only strings (the mock-data tag, the simulated system sheets
 //!   P-3, P-4 and P-6, the preview's automatic-sharing refusal) are absent.
 //!
-//! Placeholders are `{tool}`, `{host}`, `{count}`, `{folder}`, `{name}`,
-//! `{max}`, `{selected}`, `{total}` and `{tools}`; the shell fills them and
-//! adds nothing else.
+//! Placeholders are `{tool}`, `{host}`, `{pay_range}`, `{count}`, `{folder}`,
+//! `{name}`, `{max}`, `{selected}`, `{total}` and `{tools}`; the shell fills
+//! them and adds nothing else.
+
+/// Every placeholder name the table uses, each written `{name}` in a string.
+pub const PLACEHOLDERS: &[&str] = &[
+    "tool",
+    "host",
+    "pay_range",
+    "count",
+    "folder",
+    "name",
+    "max",
+    "selected",
+    "total",
+    "tools",
+];
 
 /// The first-run window: tiers, step labels and the shared footer controls.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -50,7 +61,9 @@ pub struct JoinCopy {
     pub invite_eyebrow: &'static str,
     pub invite_placeholder: &'static str,
     pub look_up: &'static str,
-    /// `{host}`: the invite's issuer host.
+    /// `{host}`: the invite's issuer host. `{pay_range}`: the invite's credit
+    /// range as the shell presents it (`issuer_client::lookup_invite` says it
+    /// is an estimate, never a promise).
     pub invite_joined: &'static str,
     pub invite_error: &'static str,
     pub passkey_eyebrow: &'static str,
@@ -216,7 +229,7 @@ pub fn first_run_copy() -> FirstRunCopy {
             invite_eyebrow: "Invite link",
             invite_placeholder: "https://issuer.tracecommons.ai/onboard#…",
             look_up: "Look up",
-            invite_joined: "Joined {host}",
+            invite_joined: "Joined {host} · {pay_range}",
             invite_error: "That is not an invite link. It ends in #code.",
             passkey_eyebrow: "Sign in with a passkey",
             passkey_text: "Create a passkey that can be connected later.",
@@ -328,6 +341,43 @@ mod tests {
         assert!(json.contains("\"Quick setup\"") && json.contains("\"Custom setup\""));
         assert!(!json.contains("Share automatically"));
         assert!(!json.contains("Theia") && !json.contains("SSH"));
+    }
+
+    /// Ron's `join-screen.tsx`: `Joined {invite.host} · {invite.payRange}`.
+    /// The range is the shell's to fill, never to append.
+    #[test]
+    fn the_joined_line_holds_the_host_and_the_pay_range() {
+        assert_eq!(
+            first_run_copy().join.invite_joined,
+            "Joined {host} · {pay_range}"
+        );
+    }
+
+    /// Every `{...}` in the table is one the module doc lists, so a shell
+    /// knows every hole it has to fill.
+    #[test]
+    fn every_placeholder_is_a_documented_one() {
+        let json = serde_json::to_string(&first_run_copy()).unwrap();
+        let mut unknown = Vec::new();
+        let mut rest = json.as_str();
+        while let Some(open) = rest.find('{') {
+            rest = &rest[open + 1..];
+            let Some(close) = rest.find('}') else { break };
+            let name = &rest[..close];
+            if !name.is_empty()
+                && name.chars().all(|c| c.is_ascii_lowercase() || c == '_')
+                && !PLACEHOLDERS.contains(&name)
+            {
+                unknown.push(name.to_owned());
+            }
+        }
+        assert!(unknown.is_empty(), "undocumented placeholders: {unknown:?}");
+        for name in PLACEHOLDERS {
+            assert!(
+                json.contains(&format!("{{{name}}}")),
+                "{{{name}}} is documented but no string carries it"
+            );
+        }
     }
 
     fn empty_leaves(value: &serde_json::Value, path: &str, out: &mut Vec<String>) {

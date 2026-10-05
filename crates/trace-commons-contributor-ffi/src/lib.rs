@@ -5251,8 +5251,8 @@ pub extern "C" fn tc_onboarding_copy() -> *mut c_char {
 /// The first-run wording of #1030 (`first_run_copy::first_run_copy`): a JSON
 /// object of per-screen groups, `{frame, join, folders, tools, rules, uses,
 /// passkey, private_ai}`, each a map of strings. `{tool}`, `{host}`,
-/// `{count}`, `{folder}`, `{name}`, `{max}`, `{selected}`, `{total}` and
-/// `{tools}` are placeholders the shell fills.
+/// `{pay_range}`, `{count}`, `{folder}`, `{name}`, `{max}`, `{selected}`,
+/// `{total}` and `{tools}` are placeholders the shell fills.
 ///
 /// Returns an owned JSON string; free it with [`tc_string_free`]. NULL only
 /// on a caught panic.

@@ -29,7 +29,7 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
         public let inviteEyebrow: String
         public let invitePlaceholder: String
         public let lookUp: String
-        /// `{host}`.
+        /// `{host}` and `{pay_range}`.
         public let inviteJoined: String
         public let inviteError: String
         public let passkeyEyebrow: String

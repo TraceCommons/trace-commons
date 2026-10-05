@@ -1985,9 +1985,9 @@ char*       tc_onboarding_copy(void);
 
 /* The first-run wording of #1030 (first_run_copy::first_run_copy): {frame,
  * join, folders, tools, rules, uses, passkey, private_ai}, each a map of
- * strings with {tool}, {host}, {count}, {folder}, {name}, {max}, {selected},
- * {total} and {tools} placeholders the shell fills. NULL only on a caught
- * panic.
+ * strings with {tool}, {host}, {pay_range}, {count}, {folder}, {name},
+ * {max}, {selected}, {total} and {tools} placeholders the shell fills. NULL
+ * only on a caught panic.
  */
 char*       tc_first_run_copy_json(void);
 
