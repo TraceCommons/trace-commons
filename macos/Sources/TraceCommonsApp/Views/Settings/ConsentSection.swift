@@ -30,13 +30,13 @@ enum ConsentScopeRows {
         !scope.alwaysOn && !busy && !unavailable
     }
 
+    /// The core's monitor screens table, decoded once (as `MonitorWords`).
+    static let screens = MonitorScreensCopy.decode(fromJSON: TCCoreCopy.monitorScreensCopyJSON())
+
     /// The line a refused consent write draws, all of it the core's: the
     /// settings table's sentence, else the monitor table's request-failed
     /// sentence, else the dash every surface uses for "the core said
     /// nothing". A refusal never draws nothing.
-    /// The core's monitor screens table, decoded once (as `MonitorWords`).
-    static let screens = MonitorScreensCopy.decode(fromJSON: TCCoreCopy.monitorScreensCopyJSON())
-
     static func refusalLine(settings: String?, screens: MonitorScreensCopy?) -> String {
         settings ?? screens?.requestFailed ?? "\u{2014}"
     }
