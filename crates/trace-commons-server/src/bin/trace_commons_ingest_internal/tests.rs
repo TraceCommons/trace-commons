@@ -79314,6 +79314,9 @@ async fn large_upload_routes_authenticate_before_polling_the_body() {
 /// read, and finished uploads give their slots back.
 #[tokio::test]
 async fn large_upload_gate_caps_in_flight_bodies_per_principal() {
+    // Holding the lock keeps the focused submit tests' resets of the shared
+    // limiter out of the way.
+    let _lock = submit_rate_limit_test_lock().lock().await;
     const TOKEN: &str = "large-body-gate-token";
     let temp = tempfile::tempdir().expect("temp dir");
     let mut tokens = BTreeMap::new();
@@ -79326,36 +79329,51 @@ async fn large_upload_gate_caps_in_flight_bodies_per_principal() {
         &static_token_principal_ref(TOKEN),
     );
     let (addr, server) = serve_ingest_for_test(state).await;
+    let cap = LARGE_BODY_PER_PRINCIPAL_CONCURRENCY;
 
-    let mut stalled = Vec::new();
-    for _ in 0..LARGE_BODY_PER_PRINCIPAL_CONCURRENCY {
-        stalled
-            .push(send_upload_headers_without_body(addr, "POST", "/v1/traces", Some(TOKEN)).await);
-    }
-    tokio::time::timeout(StdDuration::from_secs(5), async {
-        while ACCOUNT_RATE_LIMITER.in_flight_for_test(&key) < LARGE_BODY_PER_PRINCIPAL_CONCURRENCY {
-            tokio::time::sleep(StdDuration::from_millis(10)).await;
+    // Some tests reset the shared limiter without that lock, and a reset
+    // zeroes in-flight counts. An attempt that a reset interrupts proves
+    // nothing either way, so it is retried. In an undisturbed attempt, the
+    // stalled uploads still hold every slot when the next upload is answered,
+    // and that upload must be refused. Without a cap, the next upload would
+    // also stall, unanswered, and the assertion below fails.
+    let mut undisturbed_status = None;
+    for _attempt in 0..5 {
+        let mut stalled = Vec::new();
+        for _ in 0..cap {
+            stalled.push(
+                send_upload_headers_without_body(addr, "POST", "/v1/traces", Some(TOKEN)).await,
+            );
         }
-    })
-    .await
-    .expect("every stalled upload holds a principal slot");
-
-    let mut refused = send_upload_headers_without_body(
-        addr,
-        "PUT",
-        "/v1/token-bundles/00000000-0000-0000-0000-000000000001/rev/artifact",
-        Some(TOKEN),
-    )
-    .await;
+        let held = tokio::time::timeout(StdDuration::from_secs(2), async {
+            while ACCOUNT_RATE_LIMITER.in_flight_for_test(&key) < cap {
+                tokio::time::sleep(StdDuration::from_millis(10)).await;
+            }
+        })
+        .await
+        .is_ok();
+        if !held {
+            continue;
+        }
+        let mut next = send_upload_headers_without_body(
+            addr,
+            "PUT",
+            "/v1/token-bundles/00000000-0000-0000-0000-000000000001/rev/artifact",
+            Some(TOKEN),
+        )
+        .await;
+        let status = response_status_within(&mut next, StdDuration::from_secs(2)).await;
+        if ACCOUNT_RATE_LIMITER.in_flight_for_test(&key) >= cap {
+            undisturbed_status = Some(status);
+            break;
+        }
+    }
     assert_eq!(
-        response_status_within(&mut refused, StdDuration::from_secs(5))
-            .await
-            .as_deref(),
-        Some("HTTP/1.1 429 Too Many Requests"),
+        undisturbed_status.expect("in some attempt the stalled uploads held every principal slot"),
+        Some("HTTP/1.1 429 Too Many Requests".to_string()),
         "an upload past the principal's in-flight cap is refused before its body is read"
     );
 
-    drop(stalled);
     tokio::time::timeout(StdDuration::from_secs(5), async {
         while ACCOUNT_RATE_LIMITER.in_flight_for_test(&key) > 0 {
             tokio::time::sleep(StdDuration::from_millis(10)).await;

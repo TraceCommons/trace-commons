@@ -156,7 +156,10 @@ three loggers mask `remote_ip`, `client_ip` and any client-sent
 `tenant_id`, `tenant_storage_ref` and `tenant` query values with an
 8-hex-character SHA-256 prefix. That keeps per-network abuse triage possible.
 The hash is unsalted, so it pseudonymizes a tenant identifier; it does not
-hide one that can be guessed.
+hide one that can be guessed. These filters were verified, including masking
+each address in an `X-Forwarded-For` list, on Caddy 2.11.7; nothing in
+`deploy.sh` pins the host's Caddy, so check `caddy version` there is not older
+before reloading.
 The services bind loopback, and each proxy block also overwrites
 `X-Forwarded-For` with `{remote_host}` so application rate limits never key on
 a caller-supplied leftmost hop.
