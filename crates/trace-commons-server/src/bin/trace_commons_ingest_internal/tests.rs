@@ -79068,6 +79068,20 @@ fn interstitial_rate_limit_has_a_global_blast_radius_ceiling() {
     assert!(!interstitial_rate_limit_allows(&limiter, "198.51.100.1"));
 }
 
+/// `GET /account/login` is a stateless render, so its deployment-wide ceiling
+/// must not be a cheap kill switch for every emailed login link: it takes on
+/// the order of a hundred addresses at the per-IP cap to exhaust, and it stays
+/// well above confirm's global ceiling, which is the budget-bearing gate.
+#[test]
+fn interstitial_global_ceiling_needs_many_capped_addresses_to_exhaust() {
+    assert!(INTERSTITIAL_GLOBAL_LIMIT / INTERSTITIAL_PER_IP_LIMIT >= 100);
+    assert!(INTERSTITIAL_GLOBAL_LIMIT >= 10 * CONFIRM_GLOBAL_LIMIT);
+    assert!(
+        (INTERSTITIAL_GLOBAL_LIMIT as usize) < MAX_ACCOUNT_RATE_WINDOWS,
+        "the per-IP keys that exhaust it must fit the anonymous table without folding"
+    );
+}
+
 /// Large upload endpoints must authenticate before `Bytes`/`SubmitBody`
 /// extraction. A malformed anonymous body therefore gets the uniform auth
 /// refusal, never an extractor error that proves the server buffered it.

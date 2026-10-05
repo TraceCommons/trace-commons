@@ -20755,8 +20755,12 @@ const ACCOUNT_RATE_WINDOW: StdDuration = StdDuration::from_secs(60);
 const INTERSTITIAL_PER_IP_LIMIT: u32 = 120;
 /// Header-independent blast-radius ceiling on interstitial renders. A botnet
 /// can rotate real source addresses, so the per-client bucket alone is not a
-/// deployment-wide bound.
-const INTERSTITIAL_GLOBAL_LIMIT: u32 = 1_200;
+/// deployment-wide bound. The render is stateless and in memory (no database,
+/// no code consumption), so the ceiling only has to bound CPU; set low, it is
+/// a cheap switch that turns every emailed login link into a 429. 12,000 takes
+/// 100 addresses at the per-IP cap to exhaust. Confirm's 600 global
+/// (`CONFIRM_GLOBAL_LIMIT`) is the budget-bearing gate for login itself.
+const INTERSTITIAL_GLOBAL_LIMIT: u32 = 12_000;
 /// Per-IP cap on `POST /account/login/confirm` attempts per window.
 const CONFIRM_PER_IP_LIMIT: u32 = 30;
 /// Coarse global cap on confirm attempts per window across ALL callers — a
