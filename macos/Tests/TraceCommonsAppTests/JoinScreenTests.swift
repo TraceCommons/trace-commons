@@ -387,7 +387,7 @@ final class JoinScreenTests: XCTestCase {
         XCTAssertFalse(source.contains("passkeyAvailable"), "the disabled-with-no-reason button is gone")
         XCTAssertTrue(source.contains("JoinLayout.passkeyOpensNow("))
         XCTAssertTrue(source.contains("runner.requestPasskey()"))
-        XCTAssertTrue(source.contains("firstRunPasskeySheets("))
+        XCTAssertFalse(source.contains("firstRunPasskeySheets("), "the first-run host mounts the sheets")
     }
 
     /// The sheets' outcome lowers the request whatever it was, so a closed
@@ -529,7 +529,8 @@ final class JoinScreenTests: XCTestCase {
             XCTAssertTrue(source.contains(field), "missing \(field)")
         }
         XCTAssertTrue(source.contains("FirstRunFrame("))
-        XCTAssertTrue(source.contains("PasskeySheets("))
+        // The sheets are the first-run host's (`OnboardingCoordinatorView`).
+        XCTAssertFalse(source.contains("PasskeySheets("))
         XCTAssertTrue(source.contains("TCInvite.issuerHost"))
         // The near.ai action only records a choice, so it carries no
         // external-link glyph.

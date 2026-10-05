@@ -318,7 +318,8 @@ final class PasskeySheetsTests: XCTestCase {
 
     /// Each mount of the presenter holds its own model, so two mounts would
     /// present two sheets for one request. Exactly one mount in the app's
-    /// sources: Join's until port plan Task 11, then the coordinator's.
+    /// sources: the first-run host's, which is on screen at every step, so
+    /// a request the Folders or Tools commit raises presents at once.
     func test_thePasskeySheetsAreMountedExactlyOnce() throws {
         let sources = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
@@ -332,6 +333,6 @@ final class PasskeySheetsTests: XCTestCase {
             let count = text.components(separatedBy: ".firstRunPasskeySheets(").count - 1
             mounts += Array(repeating: url.lastPathComponent, count: count)
         }
-        XCTAssertEqual(mounts, ["JoinScreen.swift"])
+        XCTAssertEqual(mounts, ["OnboardingCoordinatorView.swift"])
     }
 }

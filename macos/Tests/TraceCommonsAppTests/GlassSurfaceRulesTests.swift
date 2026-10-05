@@ -26,6 +26,18 @@ final class GlassSurfaceRulesTests: XCTestCase {
         "Views/Settings/ProjectsSection.swift",
         "Views/Settings/ToolsSection.swift",
         "Views/Settings/WitnessSection.swift",
+        // Ron's first run (#1030) and its hosts.
+        "Views/FirstRun/FirstRunFrame.swift",
+        "Views/FirstRun/JoinScreen.swift",
+        "Views/FirstRun/FoldersScreen.swift",
+        "Views/FirstRun/ToolAnswerRow.swift",
+        "Views/FirstRun/ToolsScreen.swift",
+        "Views/FirstRun/RulesScreen.swift",
+        "Views/FirstRun/UsesScreen.swift",
+        "Views/FirstRun/SharingDisclosures.swift",
+        "Views/FirstRun/PasskeySheets.swift",
+        "Views/OnboardingCoordinatorView.swift",
+        "Views/Monitor/FirstRunViews.swift",
     ]
 
     static func text(_ rel: String) throws -> String {

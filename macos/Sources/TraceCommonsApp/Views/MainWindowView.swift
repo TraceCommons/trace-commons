@@ -9,6 +9,9 @@ struct MainWindowView: View {
     let missionDrafts: MissionDraftsModel
     let insightsStoreSelection: InsightsStoreSelection
     private var section: Section { navigation.section }
+    /// The first run has been on screen: a failed daemon start from inside
+    /// it keeps it there (`OnboardingNavigation.hostsFirstRun`).
+    @State private var firstRunEntered = false
 
     @MainActor init(navigation: MainWindowNavigation, missionDrafts: MissionDraftsModel,
                     insightsStoreSelection: InsightsStoreSelection = .standard) {
@@ -98,52 +101,37 @@ struct MainWindowView: View {
     /// Insights is local and account-free. Compute and Private AI have their own activation paths.
     @ViewBuilder
     private var traceContent: some View {
-        switch model.startup {
-        case .starting, .refused:
-            DaemonStartupNotice(startup: model.startup)
-                .onAppear { model.refreshAll() }
-        case .needsRoots, .running:
-            // One branch for BOTH states, deliberately: `.needsRoots` is the
-            // start of a fresh install's onboarding, not a notice, and the
-            // roots screen it leads to flips `startup` to `.running` when
-            // the daemon starts. Two `case` arms would be two view
-            // identities, and the coordinator's `@State step` would be
-            // thrown away at exactly that flip -- the same reason the two
-            // enrolment states below share one `if` branch.
-            //
-            // First-run detection: `status.logged_in` from the daemon's own
-            // `status`, never a local file probe -- see `AppModel.start()`
-            // for why the app treats the daemon as the source of truth.
-            // `status` defaults to not-logged-in until the first real
-            // answer arrives (`DaemonStatus.unknown`), so an already
-            // enrolled contributor may see one brief onboarding frame
-            // before this flips to `true` -- the fail-closed direction,
-            // never the reverse. `isOnboardingComplete` is the second half
-            // of that check: see its doc comment on `AppModel` and
-            // `OnboardingCoordinatorView`'s "Atomicity" note for why
-            // `logged_in` alone cannot tell "fully onboarded" from
-            // "enrolled but consent was never confirmed."
-            // Both "not enrolled yet" and "enrolled but onboarding not
-            // finished" render through this ONE `if` branch, deliberately:
-            // `set_consent_scopes` succeeding mid-flow (screen 3 -> 4/5)
-            // flips `status.logged_in` from stale-false to true on the very
-            // same turn the coordinator advances its own `step` -- see
-            // `AppModel.setConsentScopes`. Two separate `if` / `else if`
-            // branches, each constructing their own
-            // `OnboardingCoordinatorView(startAt:)`, would count as two
-            // different view identities to SwiftUI; the moment `logged_in`
-            // flips, the view would be torn down and rebuilt from
-            // `startAt: .consent`, throwing away whatever step the
-            // contributor had just reached. One branch keeps one identity
-            // (and therefore one `@State step`) for the entire flow.
-            if model.requiresOnboarding {
-                OnboardingCoordinatorView(
-                    startAt: model.status.loggedIn ? .consent : .welcome,
-                    onComplete: { model.markOnboardingComplete() }
-                )
+        // Ron's first run (#1030), while onboarding is required. ONE branch
+        // across every startup state it spans, deliberately: Folders or
+        // Tools starts the daemon, flipping `startup` from `.needsRoots` to
+        // `.running` (or to `.refused` when the start fails, which that step
+        // reports itself), and Start writes the completion marker. A branch
+        // per state would be a view identity per state, and the
+        // coordinator's runner -- every answer, the deferred invite
+        // included -- would be thrown away at exactly those flips.
+        //
+        // First-run detection: `status.logged_in` from the daemon's own
+        // `status`, never a local file probe -- see `AppModel.start()`.
+        // `status` defaults to not-logged-in until the first real answer
+        // arrives, so an already enrolled contributor may see one brief
+        // first-run frame -- the fail-closed direction, never the reverse.
+        // `isOnboardingComplete` is the second half: `logged_in` alone
+        // cannot tell "set up" from "enrolled, Start never pressed".
+        if OnboardingNavigation.hostsFirstRun(
+            startup: model.startup, requiresOnboarding: model.requiresOnboarding, entered: firstRunEntered)
+        {
+            OnboardingCoordinatorView(onComplete: { model.markOnboardingComplete() })
                 .tcScreen()
-                .onAppear { model.refreshAll() }
-            } else {
+                .onAppear {
+                    firstRunEntered = true
+                    model.refreshAll()
+                }
+        } else {
+            switch model.startup {
+            case .starting, .refused:
+                DaemonStartupNotice(startup: model.startup)
+                    .onAppear { model.refreshAll() }
+            case .needsRoots, .running:
                 traceDestination
                     .onAppear { model.refreshAll() }
             }

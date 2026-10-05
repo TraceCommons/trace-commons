@@ -634,15 +634,6 @@ const ALLOWED: &[(&str, &str, &str)] = &[
         "Held for privacy review",
         "week tally heading; no core tally export yet",
     ),
-    // The current onboarding's roots screen already titles itself with the
-    // #1030 Folders title. The first-run port replaces that screen with one
-    // that reads `first_run_copy` (plan 2026-10-04-native-first-run-port.md);
-    // remove this entry with it.
-    (
-        "TraceCommonsApp/Views/OnboardingRootsView.swift",
-        "Which folders may this",
-        "pre-port onboarding title; the first-run port reads first_run_copy",
-    ),
 ];
 
 #[test]
@@ -891,13 +882,6 @@ const SURFACES: &[(&str, &str, &str, &str, &str)] = &[
         "tc_redaction_summary_json",
     ),
     (
-        "extra privacy scan",
-        "TraceCommonsApp/Views/OnboardingPrivacyScanView.swift",
-        "TCCoreCopy.privacyScanCopyJSON",
-        "TCBridge/TCCoreCopy.swift",
-        "tc_privacy_scan_copy_json",
-    ),
-    (
         "extra privacy scan recovery",
         "TraceCommonsApp/HealthCopy.swift",
         "TCCoreCopy.privacyScanCopyJSON",
@@ -926,6 +910,13 @@ const SURFACES: &[(&str, &str, &str, &str, &str)] = &[
         "tc_quit_prompt_json",
     ),
     (
+        "first run",
+        "TraceCommonsApp/Views/OnboardingCoordinatorView.swift",
+        "TCCoreCopy.firstRunCopyJSON",
+        "TCBridge/TCCoreCopy.swift",
+        "tc_first_run_copy_json",
+    ),
+    (
         "first-run sharing card",
         "TraceCommonsApp/Views/FirstRun/UsesScreen.swift",
         "TCCoreCopy.automaticContributionCopyJSON",
@@ -949,8 +940,6 @@ const BRIDGE_ONLY: &[(&str, &str)] = &[
         "TCBridge/TCCoreCopy.swift",
         "tc_inference_connection_copy_json",
     ),
-    // The first-run port moves this to SURFACES with the screen that reads it.
-    ("TCBridge/TCCoreCopy.swift", "tc_first_run_copy_json"),
 ];
 
 #[test]

@@ -826,6 +826,9 @@ final class AppModel: ObservableObject {
     private var daemon: TCDaemon?
     private var client: DaemonClient?
     var skillLearningClient: DaemonClient? { client }
+    /// The client the first run's passkey sheets complete their ceremony
+    /// with (`LivePasskeyAccount`). Nil while no daemon is running.
+    var passkeyClient: DaemonClient? { client }
     private var subscription: TCSubscription?
     /// The C1 data contract's live client (K1 of #1173), for screens that
     /// read through `DaemonDataClient`. Created with the daemon and fed by

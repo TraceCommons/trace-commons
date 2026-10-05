@@ -59,18 +59,11 @@ final class ShellWordingTests: XCTestCase {
         // The SwiftUI views, which carry their own labels and help text.
         "TraceCommonsApp/Views/ActionMessageBanner.swift": 2,
         "TraceCommonsApp/Views/BrandMark.swift": 1,
-        "TraceCommonsApp/Views/ConsentScopesView.swift": 7,
         "TraceCommonsApp/Views/CreditRecordView.swift": 9,
         // Lowered from 26: an unrecognised status reads the core's label.
         "TraceCommonsApp/Views/HistoryView.swift": 21,
         "TraceCommonsApp/Views/MainWindowView.swift": 14,
         "TraceCommonsApp/Views/MenuBarView.swift": 11,
-        "TraceCommonsApp/Views/OnboardingConnectView.swift": 7,
-        "TraceCommonsApp/Views/OnboardingCoordinatorView.swift": 5,
-        "TraceCommonsApp/Views/OnboardingDoneView.swift": 8,
-        "TraceCommonsApp/Views/OnboardingProjectsView.swift": 4,
-        "TraceCommonsApp/Views/OnboardingRootsView.swift": 5,
-        "TraceCommonsApp/Views/OnboardingWelcomeView.swift": 8,
         "TraceCommonsApp/Views/PreviewSheet.swift": 38,
         "TraceCommonsApp/Views/PublicProfileCopy.swift": 46,
         // Back to 3: the withheld line briefly lived here and is now
@@ -80,7 +73,6 @@ final class ShellWordingTests: XCTestCase {
         "TraceCommonsApp/Views/QueueView.swift": 25,
         "TraceCommonsApp/Views/ScrubbingCaveat.swift": 4,
         "TraceCommonsApp/Views/SettingsView.swift": 39,
-        "TraceCommonsApp/Views/WhatGetsRemovedSheet.swift": 4,
         "TraceCommonsApp/Views/WithdrawalCopy.swift": 48,
     ]
 

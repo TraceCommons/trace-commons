@@ -29,10 +29,11 @@ final class PrivateInferenceActivationTests: XCTestCase {
         let model = AppModel()
         model.setStartupForTesting(.running)
         let navigation = MainWindowNavigation()
+        let firstRun = try XCTUnwrap(FirstRunCopy.decode(try XCTUnwrap(TCCoreCopy.firstRunCopyJSON())))
         for section: MainWindowView.Section in [.queue, .history, .settings] {
             navigation.section = section
             let words = try recognizedWords(await render(model: model, navigation: navigation))
-            XCTAssertTrue(words.contains("GET STARTED"), "\(section) must retain the Commons welcome")
+            XCTAssertTrue(words.contains(firstRun.join.lookUp), "\(section) must retain the first run's Join")
             XCTAssertFalse(model.status.loggedIn)
             XCTAssertFalse(model.isOnboardingComplete)
         }
@@ -55,20 +56,26 @@ final class PrivateInferenceActivationTests: XCTestCase {
         let (window, hosting) = makeWindow(model: model, navigation: navigation, height: 1600)
         defer { window.close() }
         window.orderFront(nil)
-        try await press("Continue", window: window, hosting: hosting)
+        let firstRun = try XCTUnwrap(FirstRunCopy.decode(try XCTUnwrap(TCCoreCopy.firstRunCopyJSON())))
+        // The first run's Folders step, every row unanswered: its Continue
+        // is disabled (too faint to read back, so it is not pressed), and
+        // nothing has started.
+        let folders = try recognizedWords(await snapshot(hosting))
+        XCTAssertTrue(folders.contains(firstRun.frame.customSetupInstead), "Private AI must ask the first run's Folders")
         XCTAssertEqual(model.startup, .needsRoots, "Unanswered capture choices must block Continue")
         XCTAssertFalse(model.isStartingDaemon)
-        let sourceCopy = try XCTUnwrap(TCSourceChecks.settingsCopy())
-        for kind in SourceKind.allCases {
-            let label = try XCTUnwrap(sourceCopy.tools[kind.rawValue]?.decline)
-            try await press(label, window: window, hosting: hosting)
-        }
+        // Each row's answer is a `GlassPicker` menu, which a synthesised
+        // click cannot open; the answers go in through the call Continue
+        // makes (`FirstRunDaemon.startDaemon`), with every tool declined.
+        var declined = SessionRoots()
+        for kind in SourceKind.allCases { declined[kind] = .off }
         let ready = expectation(description: "Real daemon reports capture and credential state")
         let observation = model.$daemonSettings.combineLatest(model.$credentialStatus, model.$status)
             .filter { settings, credential, status in
                 settings != nil && !credential.state.isEmpty && !status.schemaVersion.isEmpty
             }.first().sink { _ in ready.fulfill() }
-        try await press("Continue", window: window, hosting: hosting)
+        let started = await model.startDaemon(settingsJSON: try XCTUnwrap(declined.settingsJSON()))
+        XCTAssertTrue(started)
         await fulfillment(of: [ready], timeout: 10)
         withExtendedLifetime(observation) {}
         XCTAssertEqual(model.startup, .running)

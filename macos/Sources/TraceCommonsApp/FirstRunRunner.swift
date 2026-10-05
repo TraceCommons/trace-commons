@@ -77,9 +77,8 @@ final class FirstRunRunner: ObservableObject {
     @Published private(set) var isCommitting = false
     /// The passkey sheets are asked for: by the commit that started the
     /// daemon for a passkey chosen on Join, or by Create passkey once the
-    /// daemon runs. `firstRunPasskeySheets` presents them; until Task 11's
-    /// coordinator mounts it, only Join does, so a request raised by the
-    /// commit stays raised and presents when Join is next on screen.
+    /// daemon runs. `firstRunPasskeySheets`, mounted on the first-run host,
+    /// presents them on whichever step is on screen.
     @Published private(set) var passkeyDue = false
     /// How the passkey sheets last ended, for Join's notice
     /// (`PasskeySheetOutcome.joinNotice`). Cleared when they are asked for
