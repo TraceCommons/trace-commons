@@ -455,7 +455,7 @@ fn limited(headers: &HeaderMap, action: &str) -> bool {
             client_ip_for_rate_limit(headers)
         ),
         30,
-    ) || !ACCOUNT_RATE_LIMITER.check(&format!("near-provision-{action}:global"), 600)
+    ) || !ACCOUNT_RATE_LIMITER.check_global(&format!("near-provision-{action}:global"), 600)
 }
 fn response(value: serde_json::Value) -> axum::response::Response {
     let mut response = Json(value).into_response();

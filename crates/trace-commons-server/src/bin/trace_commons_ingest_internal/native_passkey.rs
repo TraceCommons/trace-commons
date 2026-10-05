@@ -164,7 +164,7 @@ fn within_rate_limits(headers: &HeaderMap, bucket: &str) -> bool {
     ACCOUNT_RATE_LIMITER.check(
         &format!("native-passkey-{bucket}-ip:{client_ip}"),
         NATIVE_PASSKEY_PER_IP_LIMIT,
-    ) && ACCOUNT_RATE_LIMITER.check(
+    ) && ACCOUNT_RATE_LIMITER.check_global(
         &format!("native-passkey-{bucket}-global"),
         NATIVE_PASSKEY_GLOBAL_LIMIT,
     )

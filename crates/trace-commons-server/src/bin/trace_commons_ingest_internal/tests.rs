@@ -78960,6 +78960,27 @@ fn account_rate_limiter_bounds_distinct_keys_and_overflow_fails_closed() {
     assert_eq!(limiter.tracked_windows_for_test(), 3);
 }
 
+/// A full table must not fold a fixed, code-built global ceiling into the
+/// shared overflow bucket: that would cut every surface's deployment-wide
+/// cap to the overflow allowance, and spend the overflow bucket on global
+/// traffic, exactly when an address-rotation flood is in progress.
+#[test]
+fn account_rate_limiter_keeps_global_ceilings_out_of_the_overflow_bucket() {
+    let limiter = AccountRateLimiter::with_max_windows_for_test(2);
+    let now = std::time::Instant::now();
+    assert!(limiter.check_at("surface:one", 30, now));
+    assert!(limiter.check_at("surface:two", 30, now));
+    for hit in 0..30 {
+        assert!(
+            limiter.check_global_at("surface-global", 30, now),
+            "global hit {hit} is held to the global limit, not the overflow allowance"
+        );
+    }
+    assert!(!limiter.check_global_at("surface-global", 30, now));
+    assert_eq!(limiter.count_for_test(ACCOUNT_RATE_OVERFLOW_KEY), 0);
+    assert_eq!(limiter.count_for_test("surface-global"), 31);
+}
+
 /// Filling the table repeatedly may prune at most once per cadence, rather
 /// than rescanning every bucket for every attacker-controlled key.
 #[test]

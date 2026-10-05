@@ -20322,7 +20322,8 @@ async fn native_authorize_start_handler(
     ) {
         return native_generic_deny();
     }
-    if !ACCOUNT_RATE_LIMITER.check("native-authorize-global", NATIVE_AUTHORIZE_GLOBAL_LIMIT) {
+    if !ACCOUNT_RATE_LIMITER.check_global("native-authorize-global", NATIVE_AUTHORIZE_GLOBAL_LIMIT)
+    {
         return native_generic_deny();
     }
 
@@ -20465,7 +20466,7 @@ async fn native_token_inner(
     ) {
         return native_generic_deny();
     }
-    if !ACCOUNT_RATE_LIMITER.check("native-token-global", NATIVE_TOKEN_GLOBAL_LIMIT) {
+    if !ACCOUNT_RATE_LIMITER.check_global("native-token-global", NATIVE_TOKEN_GLOBAL_LIMIT) {
         return native_generic_deny();
     }
 
@@ -20875,13 +20876,32 @@ impl AccountRateLimiter {
         self.check_at(key, limit, std::time::Instant::now())
     }
 
+    /// Like [`Self::check`], for a fixed, code-built deployment-wide key
+    /// (`"confirm-global"`, `"reward-{resource}-global"`). Such a key never
+    /// falls into the shared overflow bucket when the table is full: a
+    /// global ceiling must keep its own limit during an address-rotation
+    /// flood, which is when it matters. The set of these keys is fixed by
+    /// the code, so they can push the table past `max_windows` only by that
+    /// small constant. Never pass a key that carries caller input.
+    fn check_global(&self, key: &str, limit: u32) -> bool {
+        self.check_global_at(key, limit, std::time::Instant::now())
+    }
+
     fn check_at(&self, key: &str, limit: u32, now: std::time::Instant) -> bool {
+        self.record_at(key, limit, now, false)
+    }
+
+    fn check_global_at(&self, key: &str, limit: u32, now: std::time::Instant) -> bool {
+        self.record_at(key, limit, now, true)
+    }
+
+    fn record_at(&self, key: &str, limit: u32, now: std::time::Instant, global: bool) -> bool {
         let mut table = match self.windows.lock() {
             Ok(guard) => guard,
             Err(_) => return false,
         };
         let new_key_at_capacity =
-            !table.entries.contains_key(key) && table.entries.len() >= self.max_windows;
+            !global && !table.entries.contains_key(key) && table.entries.len() >= self.max_windows;
         if new_key_at_capacity
             && table.last_prune.is_none_or(|last| {
                 now.saturating_duration_since(last) >= ACCOUNT_RATE_PRUNE_INTERVAL
@@ -20896,15 +20916,17 @@ impl AccountRateLimiter {
                 now.saturating_duration_since(window.window_start) < ACCOUNT_RATE_WINDOW
             });
         }
-        let (key, limit) =
-            if !table.entries.contains_key(key) && table.entries.len() >= self.max_windows {
-                (
-                    ACCOUNT_RATE_OVERFLOW_KEY,
-                    limit.min(ACCOUNT_RATE_OVERFLOW_LIMIT),
-                )
-            } else {
-                (key, limit)
-            };
+        let (key, limit) = if !global
+            && !table.entries.contains_key(key)
+            && table.entries.len() >= self.max_windows
+        {
+            (
+                ACCOUNT_RATE_OVERFLOW_KEY,
+                limit.min(ACCOUNT_RATE_OVERFLOW_LIMIT),
+            )
+        } else {
+            (key, limit)
+        };
         let entry = table
             .entries
             .entry(key.to_string())
@@ -21110,7 +21132,7 @@ fn interstitial_rate_limit_allows(limiter: &AccountRateLimiter, client_ip: &str)
     limiter.check(
         &format!("interstitial-ip:{client_ip}"),
         INTERSTITIAL_PER_IP_LIMIT,
-    ) && limiter.check("interstitial-global", INTERSTITIAL_GLOBAL_LIMIT)
+    ) && limiter.check_global("interstitial-global", INTERSTITIAL_GLOBAL_LIMIT)
 }
 
 /// Sleep until at least `REDEEM_MIN_LATENCY` has elapsed since `start`. A no-op
@@ -21410,7 +21432,7 @@ async fn confirm_login_inner(
     if !ACCOUNT_RATE_LIMITER.check(&format!("confirm-ip:{client_ip}"), CONFIRM_PER_IP_LIMIT) {
         return redeem_generic_deny();
     }
-    if !ACCOUNT_RATE_LIMITER.check("confirm-global", CONFIRM_GLOBAL_LIMIT) {
+    if !ACCOUNT_RATE_LIMITER.check_global("confirm-global", CONFIRM_GLOBAL_LIMIT) {
         return redeem_generic_deny();
     }
 
@@ -23049,7 +23071,7 @@ async fn account_passkey_login_start_handler(
     ) {
         return passkey_login_generic_deny();
     }
-    if !ACCOUNT_RATE_LIMITER.check("passkey-login-global", PASSKEY_LOGIN_GLOBAL_LIMIT) {
+    if !ACCOUNT_RATE_LIMITER.check_global("passkey-login-global", PASSKEY_LOGIN_GLOBAL_LIMIT) {
         return passkey_login_generic_deny();
     }
 
@@ -23232,7 +23254,7 @@ async fn account_passkey_login_finish_inner(
     ) {
         return passkey_login_generic_deny();
     }
-    if !ACCOUNT_RATE_LIMITER.check("passkey-login-global", PASSKEY_LOGIN_GLOBAL_LIMIT) {
+    if !ACCOUNT_RATE_LIMITER.check_global("passkey-login-global", PASSKEY_LOGIN_GLOBAL_LIMIT) {
         return passkey_login_generic_deny();
     }
 
@@ -23474,7 +23496,7 @@ async fn account_near_login_start_handler(
     ) {
         return near_login_generic_deny();
     }
-    if !ACCOUNT_RATE_LIMITER.check("near-login-global", NEAR_LOGIN_GLOBAL_LIMIT) {
+    if !ACCOUNT_RATE_LIMITER.check_global("near-login-global", NEAR_LOGIN_GLOBAL_LIMIT) {
         return near_login_generic_deny();
     }
 
@@ -23566,7 +23588,7 @@ async fn account_near_login_finish_inner(
     ) {
         return near_login_generic_deny();
     }
-    if !ACCOUNT_RATE_LIMITER.check("near-login-global", NEAR_LOGIN_GLOBAL_LIMIT) {
+    if !ACCOUNT_RATE_LIMITER.check_global("near-login-global", NEAR_LOGIN_GLOBAL_LIMIT) {
         return near_login_generic_deny();
     }
 
@@ -55525,7 +55547,7 @@ async fn register_stats_handler(
     ) {
         return Err(api_error(StatusCode::TOO_MANY_REQUESTS, "rate limited"));
     }
-    if !ACCOUNT_RATE_LIMITER.check("register-stats-global", REGISTER_STATS_GLOBAL_LIMIT) {
+    if !ACCOUNT_RATE_LIMITER.check_global("register-stats-global", REGISTER_STATS_GLOBAL_LIMIT) {
         return Err(api_error(StatusCode::TOO_MANY_REQUESTS, "rate limited"));
     }
 

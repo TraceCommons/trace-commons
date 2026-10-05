@@ -344,7 +344,7 @@ pub(super) async fn community_public_run_handler(
     AxumPath(slug): AxumPath<String>,
 ) -> ApiResult<axum::response::Response> {
     let client_ip = client_ip_for_rate_limit(&headers);
-    if !ACCOUNT_RATE_LIMITER.check("public-run-global", PUBLIC_RUN_GLOBAL_LIMIT)
+    if !ACCOUNT_RATE_LIMITER.check_global("public-run-global", PUBLIC_RUN_GLOBAL_LIMIT)
         || !ACCOUNT_RATE_LIMITER.check(
             &format!("public-run-ip:{client_ip}"),
             PUBLIC_RUN_PER_IP_LIMIT,
