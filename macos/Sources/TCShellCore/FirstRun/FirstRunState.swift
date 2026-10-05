@@ -62,7 +62,9 @@ public struct AddedFolder: Codable, Equatable, Sendable {
 /// Every answer the person gives during the first run, and how far the
 /// daemon calls have got. Pure: nothing here calls anything.
 /// `FirstRunPlan` turns it into calls; the runner records their outcomes
-/// back into `daemonStarted` and `enrolled`.
+/// back into `daemonStarted`, `startedSettingsJSON`, `enrolledInvite` and
+/// `signedIn`. Those four are facts the daemon holds, so navigation never
+/// clears them.
 public struct FirstRunState: Codable, Equatable, Sendable {
     public var tier: FirstRunTier
     public var step: FirstRunStep
@@ -73,8 +75,9 @@ public struct FirstRunState: Codable, Equatable, Sendable {
     public var issuerHost: String?
     public var account: AccountAnswer
     /// One answer per offered tool. A missing key or `.undecided` is not an
-    /// answer.
+    /// answer. Set through `answer(_:_:)`, which keeps one answer per kind.
     public var toolAnswers: [SourceKind: SourceChoice]
+    /// Set through `add(_:)`, which keeps one answer per kind.
     public var addedFolders: [AddedFolder]
     /// Rule per `project_id` (Custom only).
     public var rules: [String: ProjectMode]
@@ -87,7 +90,15 @@ public struct FirstRunState: Codable, Equatable, Sendable {
     /// The witness the disclosure showed, passed to `grant_automatic`.
     public var witnessSigningAddress: String?
     public var daemonStarted: Bool
-    public var enrolled: Bool
+    /// The declaration the daemon now holds: the `startDaemon` settings, then
+    /// each applied `setSourceSettings`. Nil with `daemonStarted` means it is
+    /// unknown, and the whole declaration is sent again.
+    public var startedSettingsJSON: String?
+    /// The trimmed invite the daemon enrolled. Its last use may be spent, so
+    /// it is neither looked up nor enrolled again.
+    public var enrolledInvite: String?
+    /// The near.ai sign-in completed; going forward again does not reopen it.
+    public var signedIn: Bool
 
     public init(
         tier: FirstRunTier = .quick,
@@ -104,7 +115,9 @@ public struct FirstRunState: Codable, Equatable, Sendable {
         privateAI: Bool = false,
         witnessSigningAddress: String? = nil,
         daemonStarted: Bool = false,
-        enrolled: Bool = false
+        startedSettingsJSON: String? = nil,
+        enrolledInvite: String? = nil,
+        signedIn: Bool = false
     ) {
         self.tier = tier
         self.step = step
@@ -120,7 +133,26 @@ public struct FirstRunState: Codable, Equatable, Sendable {
         self.privateAI = privateAI
         self.witnessSigningAddress = witnessSigningAddress
         self.daemonStarted = daemonStarted
-        self.enrolled = enrolled
+        self.startedSettingsJSON = startedSettingsJSON
+        self.enrolledInvite = enrolledInvite
+        self.signedIn = signedIn
+    }
+
+    /// Answer a tool's row. A folder added for that tool earlier is dropped,
+    /// so a later "I don't use it" is not turned back into a watch.
+    public mutating func answer(_ kind: SourceKind, _ choice: SourceChoice) {
+        addedFolders.removeAll { $0.kind == .source(kind) }
+        toolAnswers[kind] = choice
+    }
+
+    /// Add a folder. It replaces an earlier folder of the same kind and, for
+    /// a tool, that tool's row answer.
+    public mutating func add(_ folder: AddedFolder) {
+        addedFolders.removeAll { $0.kind == folder.kind }
+        if case .source(let kind) = folder.kind {
+            toolAnswers[kind] = nil
+        }
+        addedFolders.append(folder)
     }
 
     /// The tool answers and added folders as one declaration. An added folder

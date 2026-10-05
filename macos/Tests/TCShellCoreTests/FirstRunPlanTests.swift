@@ -62,28 +62,39 @@ final class FirstRunPlanTests: XCTestCase {
         _ = try settings(calls.first)
     }
 
+    /// A plan-level stand-in only: the plan is pure, so this pins that a
+    /// state the runner left untouched replans the whole join behind the
+    /// start. The outcome mapping is `FirstRunRunnerTests`' (Task 3).
     func test_aFailedStartKeepsTheInviteAndJoinsNothing() throws {
         let state = answered()
+        let json = try XCTUnwrap(state.sessionRoots.settingsJSON())
         let first = FirstRunPlan.calls(for: state, at: .leaveRoots)
-        _ = try settings(first.first)
+        XCTAssertEqual(first, [
+            .startDaemon(settingsJSON: json),
+            .lookupInvite("INVITE-1"),
+            .enroll("INVITE-1"),
+            .signInNearAI,
+        ])
 
-        // The start failed: the runner records nothing, so daemonStarted
-        // stays false and the step stays on Folders.
+        // The start failed: the runner records nothing, so the retry is the
+        // same plan, invite intact, and no join call runs ahead of the start.
         XCTAssertFalse(state.daemonStarted)
-        XCTAssertFalse(state.enrolled)
-        XCTAssertEqual(state.invite, "INVITE-1")
-        XCTAssertEqual(state.step, .folders)
-
-        let again = FirstRunPlan.calls(for: state, at: .leaveRoots)
-        XCTAssertEqual(again, first, "the retry is the same plan, invite intact")
-        XCTAssertTrue(again.contains(.enroll("INVITE-1")))
-        _ = try settings(again.first)
+        XCTAssertNil(state.enrolledInvite)
+        XCTAssertEqual(FirstRunPlan.calls(for: state, at: .leaveRoots), first)
     }
 
-    func test_backAfterStartDoesNotEnrollTwice() {
-        var state = answered()
-        state.daemonStarted = true
-        state.enrolled = true
+    /// The state after every `leaveRoots` call succeeded.
+    private func joined(_ state: FirstRunState) throws -> FirstRunState {
+        var joined = state
+        joined.daemonStarted = true
+        joined.startedSettingsJSON = try XCTUnwrap(state.sessionRoots.settingsJSON())
+        joined.enrolledInvite = "INVITE-1"
+        joined.signedIn = true
+        return joined
+    }
+
+    func test_backAfterStartDoesNotEnrollTwice() throws {
+        var state = try joined(answered())
         state.step = .uses
         state = FirstRunNavigation.back(state)
         state = FirstRunNavigation.back(state)
@@ -91,9 +102,70 @@ final class FirstRunPlanTests: XCTestCase {
         XCTAssertEqual(state.invite, "INVITE-1")
         state = FirstRunNavigation.next(state)
 
+        XCTAssertEqual(FirstRunPlan.calls(for: state, at: .leaveRoots), [],
+            "started, joined and signed in: nothing runs twice")
+    }
+
+    func test_anEnrolledInviteIsNotLookedUpAgain() throws {
+        var state = try joined(answered())
+        state.invite = "  INVITE-1\n"
+        state.signedIn = false
+        XCTAssertEqual(FirstRunPlan.calls(for: state, at: .leaveRoots), [.signInNearAI],
+            "a used-up invite would answer exhausted")
+    }
+
+    func test_aNewInviteAfterEnrollingIsLookedUpAndEnrolled() throws {
+        var state = try joined(answered())
+        state.invite = "INVITE-2"
+        XCTAssertEqual(FirstRunPlan.calls(for: state, at: .leaveRoots),
+            [.lookupInvite("INVITE-2"), .enroll("INVITE-2")])
+    }
+
+    private func sourceSettings(_ call: FirstRunCall?) throws -> [String: [String: String]] {
+        guard case .setSourceSettings(let json)? = call else {
+            XCTFail("expected setSourceSettings, got \(String(describing: call))")
+            return [:]
+        }
+        let object = try JSONSerialization.jsonObject(with: Data(json.utf8))
+        return try XCTUnwrap(object as? [String: [String: String]])
+    }
+
+    func test_aFolderChangedAfterStartReachesTheDaemon() throws {
+        var state = answered()
+        state.toolAnswers[.codex] = .watch(path: "/Users/someone/.codex/sessions")
+        state = try joined(state)
+        state.step = .uses
+        state = FirstRunNavigation.back(state)
+        XCTAssertEqual(state.step, .folders)
+        state.answer(.codex, .off)
+
         let calls = FirstRunPlan.calls(for: state, at: .leaveRoots)
-        XCTAssertFalse(calls.contains { if case .startDaemon = $0 { return true } else { return false } })
-        XCTAssertFalse(calls.contains { if case .enroll = $0 { return true } else { return false } })
+        XCTAssertEqual(calls.count, 1)
+        XCTAssertEqual(try sourceSettings(calls.first), ["codex_source": ["mode": "off"]],
+            "only the changed answer is sent")
+    }
+
+    func test_aFolderWithdrawnAfterStartIsTurnedOff() throws {
+        var state = answered(tier: .custom)
+        state.add(AddedFolder(kind: .trajectory, path: "/Users/someone/exports"))
+        state = try joined(state)
+        state.addedFolders = []
+
+        let calls = FirstRunPlan.calls(for: state, at: .leaveRoots)
+        XCTAssertEqual(calls.count, 1)
+        XCTAssertEqual(try sourceSettings(calls.first), ["trajectory_source": ["mode": "off"]],
+            "an absent key leaves the daemon watching, so a withdrawn folder is sent as off")
+    }
+
+    func test_aStartedDaemonWithNoRecordedDeclarationIsSentTheWholeOne() throws {
+        var state = try joined(answered())
+        state.startedSettingsJSON = nil
+        let calls = FirstRunPlan.calls(for: state, at: .leaveRoots)
+        XCTAssertEqual(calls.count, 1)
+        XCTAssertEqual(try sourceSettings(calls.first), [
+            "claude_source": ["mode": "watch", "path": "/Users/someone/.claude/projects"],
+            "codex_source": ["mode": "off"],
+        ])
     }
 
     func test_scopesAreSavedBeforeTheGrant() {

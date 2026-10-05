@@ -38,11 +38,11 @@ public enum FirstRunNavigation {
 
     /// The invite was rejected when it was finally looked up: back to Join,
     /// every answer kept. The daemon is still running, so the next
-    /// `leaveRoots` does not start it again.
+    /// `leaveRoots` does not start it again, and an earlier enrolment the
+    /// daemon holds is kept too.
     public static func returnToJoin(afterDeadInvite state: FirstRunState) -> FirstRunState {
         var returned = state
         returned.step = .join
-        returned.enrolled = false
         return returned
     }
 

@@ -125,10 +125,11 @@ final class FirstRunNavigationTests: XCTestCase {
         state.toolAnswers[.claudeCode] = .watch(path: "/Users/someone/.claude/projects")
         state.toolAnswers[.codex] = .off
         state.daemonStarted = true
+        state.startedSettingsJSON = state.sessionRoots.settingsJSON()
 
         let returned = FirstRunNavigation.returnToJoin(afterDeadInvite: state)
         XCTAssertEqual(returned.step, .join)
-        XCTAssertFalse(returned.enrolled)
+        XCTAssertNil(returned.enrolledInvite)
         XCTAssertTrue(returned.daemonStarted)
         var expected = state
         expected.step = .join
@@ -141,6 +142,30 @@ final class FirstRunNavigationTests: XCTestCase {
             [.lookupInvite("INVITE-NEW"), .enroll("INVITE-NEW"), .signInNearAI],
             "the daemon is already running, so it is not started again"
         )
+    }
+
+    func test_aDeadInviteKeepsAnEarlierEnrolment() {
+        var state = FirstRunState(tier: .quick, step: .folders)
+        state.invite = "INVITE-2"
+        state.enrolledInvite = "INVITE-1"
+        state.daemonStarted = true
+        let returned = FirstRunNavigation.returnToJoin(afterDeadInvite: state)
+        XCTAssertEqual(returned.enrolledInvite, "INVITE-1", "the daemon still holds that enrolment")
+    }
+
+    func test_aLaterAnswerReplacesAnAddedFolder() {
+        var state = FirstRunState(tier: .custom, step: .tools)
+        state.add(AddedFolder(kind: .source(.codex), path: "/Volumes/moved/codex"))
+        state.answer(.codex, .off)
+        XCTAssertEqual(state.sessionRoots.codex, .off, "a later off is not turned back into a watch")
+        XCTAssertEqual(state.addedFolders, [])
+
+        state.add(AddedFolder(kind: .source(.codex), path: "/Volumes/moved/codex"))
+        XCTAssertEqual(state.sessionRoots.codex, .watch(path: "/Volumes/moved/codex"))
+        XCTAssertNil(state.toolAnswers[.codex])
+
+        state.add(AddedFolder(kind: .source(.codex), path: "/Volumes/other/codex"))
+        XCTAssertEqual(state.addedFolders, [AddedFolder(kind: .source(.codex), path: "/Volumes/other/codex")])
     }
 
     func test_stateSurvivesARoundTrip() throws {
@@ -160,7 +185,9 @@ final class FirstRunNavigationTests: XCTestCase {
         state.privateAI = true
         state.witnessSigningAddress = "witness-1"
         state.daemonStarted = true
-        state.enrolled = true
+        state.startedSettingsJSON = "{}"
+        state.enrolledInvite = "INVITE-1"
+        state.signedIn = true
 
         let data = try JSONEncoder().encode(state)
         XCTAssertEqual(try JSONDecoder().decode(FirstRunState.self, from: data), state)

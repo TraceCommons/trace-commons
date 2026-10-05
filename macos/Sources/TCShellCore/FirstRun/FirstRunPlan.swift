@@ -4,6 +4,9 @@ import Foundation
 /// and stops at the first failure.
 public enum FirstRunCall: Equatable, Sendable {
     case startDaemon(settingsJSON: String)
+    /// A `set_settings` object (sorted keys) carrying only the source
+    /// declarations that changed since the daemon started.
+    case setSourceSettings(settingsJSON: String)
     case lookupInvite(String)
     case enroll(String)
     case signInNearAI
@@ -35,23 +38,52 @@ public enum FirstRunPlan {
     }
 
     private static func leaveRoots(_ state: FirstRunState) -> [FirstRunCall] {
+        // No join call runs without a declaration the daemon would take.
+        guard let json = state.sessionRoots.settingsJSON() else { return [] }
         var calls: [FirstRunCall] = []
         if !state.daemonStarted {
-            // No join call runs without a daemon to run it.
-            guard let json = state.sessionRoots.settingsJSON() else { return [] }
             calls.append(.startDaemon(settingsJSON: json))
+        } else if let changed = changedDeclarations(from: state.startedSettingsJSON, to: json) {
+            calls.append(.setSourceSettings(settingsJSON: changed))
         }
         let invite = state.invite.trimmingCharacters(in: .whitespacesAndNewlines)
-        if state.account != .watchOnly, !invite.isEmpty {
+        if state.account != .watchOnly, !invite.isEmpty, state.enrolledInvite != invite {
             calls.append(.lookupInvite(invite))
-            if !state.enrolled {
-                calls.append(.enroll(invite))
-            }
+            calls.append(.enroll(invite))
         }
-        if state.account == .nearAI {
+        if state.account == .nearAI, !state.signedIn {
             calls.append(.signInNearAI)
         }
         return calls
+    }
+
+    /// The declarations in `current` that differ from `started`, as a sorted
+    /// `set_settings` object, or nil when nothing changed.
+    ///
+    /// `set_settings` merges the keys it is given, so a key withdrawn since
+    /// the start is sent as `off`; leaving it out would leave the daemon
+    /// watching it. An unknown or unreadable `started` sends everything.
+    private static func changedDeclarations(from started: String?, to current: String) -> String? {
+        // Unreadable here means unknown, and unknown sends everything.
+        guard let now = declarations(current) else { return current }
+        let before = started.flatMap(declarations) ?? [:]
+        var changed: [String: [String: String]] = [:]
+        for (key, declaration) in now where before[key] != declaration {
+            changed[key] = declaration
+        }
+        for key in before.keys where now[key] == nil {
+            changed[key] = ["mode": "off"]
+        }
+        guard !changed.isEmpty,
+            let data = try? JSONSerialization.data(withJSONObject: changed, options: [.sortedKeys]),
+            let json = String(data: data, encoding: .utf8)
+        else { return nil }
+        return json
+    }
+
+    private static func declarations(_ json: String) -> [String: [String: String]]? {
+        guard let object = try? JSONSerialization.jsonObject(with: Data(json.utf8)) else { return nil }
+        return object as? [String: [String: String]]
     }
 
     private static func start(_ state: FirstRunState) -> [FirstRunCall] {
