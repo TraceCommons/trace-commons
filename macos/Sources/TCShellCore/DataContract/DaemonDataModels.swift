@@ -59,9 +59,10 @@ public enum DaemonDataError: Error, Equatable, Sendable, CustomStringConvertible
     /// transport failed. A screen draws its core-down state, and never a
     /// healthy one, from this.
     case unreachable
-    /// The method has no implementation on this daemon yet. Thrown by the
-    /// real client for the provisional network methods (Zaki's C3) and for
-    /// the few local ones the real client (K1) still has to route.
+    /// The method is not served by this client: one the live client has not
+    /// routed yet, and it sends nothing. An older attached daemon that
+    /// predates a method it is asked for answers `unknown_method` instead,
+    /// carried as `.daemon`.
     case notAvailableYet(method: String)
     /// The daemon answered with an IPC error. `code` and `message` are the
     /// fixed labels the contract defines, safe to show.

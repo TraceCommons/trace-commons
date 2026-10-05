@@ -202,6 +202,15 @@ extension DaemonData {
 
 /// Activity reply wrappers enforce the strict Rust field sets. Reject unsafe economic,
 /// profile and predicate extensions instead of displaying an unvalidated claim.
+///
+/// Deliberate, and it applies to version skew too: these key sets mirror
+/// `#[serde(deny_unknown_fields)]` on every activity type in
+/// `crates/trace-commons-protocol/src/activity_missions.rs`, so the daemon
+/// is exactly as strict toward the server. An additive field on these
+/// replies must bump `schema_version`. Until this app knows the new field,
+/// a newer attached daemon's reply throws `.undecodable` -- never decodes
+/// into a partial reward or progress claim this build could not check,
+/// which for economic fields is the point.
 private enum ActivityWireValidation {
     static func failure() -> DecodingError {
         .dataCorrupted(.init(codingPath: [], debugDescription: "activity-missions-invalid"))
