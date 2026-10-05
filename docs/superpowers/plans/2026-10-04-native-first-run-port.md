@@ -115,7 +115,7 @@ Ron's `tool-row.tsx`: `GlassCard` with `GlassToolTile(.tool(..), large: true)`, 
 ### Task 7: Tools (Custom) with "add your tool"
 
 **Files:** `Views/FirstRun/ToolsScreen.swift`; test `ToolsScreenTests.swift`
-The Folders rows in compact form plus Ron's add tile (`GlassCard` + `GlassToolTile(.folder)`, click opens `NSOpenPanel`, drop accepts a folder URL). The picked folder goes to `TCDiscovery.describeFolderJSON`: one match re-points that kind ("Added by you"); OpenCode and trajectory both matching asks which with a `GlassPicker`; a trajectory match sets `SessionRoots.trajectory`; no match shows the refusal line. Continue commits `.leaveRoots`.
+The Folders rows in compact form plus Ron's add tile (`GlassCard` + `GlassToolTile(.folder)`, click opens `NSOpenPanel`, drop accepts a folder URL). The picked folder goes to `TCDiscovery.describeFolderJSON`, decoded with `FolderMatch.decodeList` (never `SourceCandidate.decodeList`, which drops the trajectory row and would turn two matches into one): one match re-points that kind ("Added by you"); OpenCode and trajectory both matching asks which with a `GlassPicker`; a trajectory match sets `SessionRoots.trajectory`; no match shows the refusal line. Continue commits `.leaveRoots`.
 - [ ] Steps: tests `test_aRecognisedFolderRepointsItsKind`, `test_anAmbiguousFolderAsksWhichTool`, `test_anUnrecognisedFolderIsRefused`, `test_theCaptionNamesNoUnsupportedTool` (no "Theia", no "SSH" in the rendered copy); implement; pass; commit `"Port Ron's Tools screen with folder recognition"`.
 
 ### Task 8: Rules (Custom) with the past-session picker

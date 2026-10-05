@@ -21,9 +21,32 @@ final class DescribeFolderBridgeTests: XCTestCase {
         try Data("{}\n".utf8).write(to: day.appendingPathComponent("rollout-a.jsonl"))
 
         let json = try XCTUnwrap(TCDiscovery.describeFolderJSON(dir.path))
-        let candidates = try SourceCandidate.decodeList(from: json)
-        XCTAssertEqual(candidates.map(\.source), [.codex])
-        XCTAssertEqual(candidates.first?.sessionCount, 1)
+        let matches = try FolderMatch.decodeList(from: json)
+        XCTAssertEqual(matches.map(\.kind), [.source(.codex)])
+        XCTAssertEqual(matches.first?.sessionCount, 1)
+    }
+
+    /// A flat folder of `.json` files fits both OpenCode and a trajectory
+    /// export, and both reach the shell.
+    func testAFlatJsonFolderIsTwoMatches() throws {
+        let dir = try scratch()
+        try Data("{}".utf8).write(to: dir.appendingPathComponent("ses_a.json"))
+        try Data("{}".utf8).write(to: dir.appendingPathComponent("ses_b.json"))
+
+        let json = try XCTUnwrap(TCDiscovery.describeFolderJSON(dir.path))
+        let matches = try FolderMatch.decodeList(from: json)
+        XCTAssertEqual(matches.map(\.kind), [.source(.opencode), .trajectory])
+        XCTAssertEqual(matches.map(\.sessionCount), [2, 2])
+    }
+
+    /// A flat folder of `.jsonl` files is a trajectory export only.
+    func testAFlatJsonlFolderIsOneTrajectoryMatch() throws {
+        let dir = try scratch()
+        try Data("{}\n".utf8).write(to: dir.appendingPathComponent("run-1.jsonl"))
+
+        let json = try XCTUnwrap(TCDiscovery.describeFolderJSON(dir.path))
+        let matches = try FolderMatch.decodeList(from: json)
+        XCTAssertEqual(matches.map(\.kind), [.trajectory])
     }
 
     func testAnUnrelatedFolderIsNoRows() throws {
@@ -31,6 +54,6 @@ final class DescribeFolderBridgeTests: XCTestCase {
         try Data("x".utf8).write(to: dir.appendingPathComponent("notes.txt"))
 
         let json = try XCTUnwrap(TCDiscovery.describeFolderJSON(dir.path))
-        XCTAssertEqual(try SourceCandidate.decodeList(from: json), [])
+        XCTAssertEqual(try FolderMatch.decodeList(from: json), [])
     }
 }

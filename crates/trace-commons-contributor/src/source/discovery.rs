@@ -222,7 +222,10 @@ pub fn describe_opencode(path: &Path) -> SourceCandidate {
 /// A picked folder can be anything -- `$HOME`, `~/Downloads` -- and this runs
 /// on the calling thread. Each walk is already bounded in depth by the
 /// layout it checks; this bounds its breadth. It sits well above a real
-/// store (thousands of sessions), so a real count is not truncated.
+/// store (thousands of sessions), so a real count is not truncated. The
+/// OpenCode row is the exception: it is [`describe_opencode`]'s count, which
+/// stops at that adapter's own discovery cap of 256 entries, as the adapter
+/// itself does.
 const FOLDER_ENTRY_BUDGET: usize = 65_536;
 
 /// Recognise a folder the contributor picked by its layout alone, so "add
@@ -243,23 +246,15 @@ const FOLDER_ENTRY_BUDGET: usize = 65_536;
 /// the picked folder itself.
 ///
 /// Like everything in this module it reads directory entries and metadata
-/// only, follows no symlink, and never opens a file.
+/// only and never opens a file. It follows no symlink below the picked
+/// folder; the picked folder itself is taken as given, symlink or not, as
+/// [`describe_opencode`] takes it.
 #[must_use]
 pub fn describe_folder(path: &Path) -> Vec<SourceCandidate> {
     if !path.is_dir() {
         return Vec::new();
     }
-    let flat = Walk::Flat {
-        entry_budget: super::opencode::DISCOVERY_ENTRY_BUDGET,
-    };
     let opencode = describe_opencode(path);
-    let (json, json_recent) = count_sessions(path, JSON_SUFFIX, flat);
-    let (jsonl, jsonl_recent) = count_sessions(path, JSONL_SUFFIX, flat);
-    let trajectory = Tally {
-        count: json + jsonl,
-        most_recent: json_recent.max(jsonl_recent),
-        budget: 0,
-    };
 
     [
         (SOURCE_CLAUDE_CODE, claude_code_layout(path)),
@@ -274,7 +269,7 @@ pub fn describe_folder(path: &Path) -> Vec<SourceCandidate> {
                 budget: 0,
             },
         ),
-        (SOURCE_TRAJECTORY, trajectory),
+        (SOURCE_TRAJECTORY, trajectory_layout(path)),
     ]
     .into_iter()
     .filter(|(_, tally)| tally.count > 0)
@@ -414,6 +409,19 @@ fn gemini_layout(root: &Path) -> Tally {
         for file in tally.files(&chats, super::gemini_cli::is_session_file_name) {
             tally.note(file.metadata().ok());
         }
+    }
+    tally
+}
+
+/// Flat `*.json` and `*.jsonl` directly in the folder, the shape of a Letta
+/// trajectory export. Counted against [`FOLDER_ENTRY_BUDGET`], not
+/// OpenCode's smaller discovery cap: a declared trajectory folder is read
+/// whole, so the count it is offered under should be whole too.
+fn trajectory_layout(root: &Path) -> Tally {
+    let is_session = |name: &str| name.ends_with(JSON_SUFFIX) || name.ends_with(JSONL_SUFFIX);
+    let mut tally = Tally::new();
+    for file in tally.files(root, is_session) {
+        tally.note(file.metadata().ok());
     }
     tally
 }
@@ -886,6 +894,21 @@ mod tests {
 
         let row = only(&describe_folder(picked.path()), SOURCE_TRAJECTORY);
         assert_eq!(row.session_count, 2);
+    }
+
+    #[test]
+    fn describe_folder_counts_a_trajectory_export_past_the_opencode_cap() {
+        // OpenCode's adapter stops at its own discovery budget, so its row
+        // may; a trajectory export is read whole once declared, so its count
+        // must not stop there.
+        let picked = Scratch::new("folder-trajectory-large");
+        let total = super::super::opencode::DISCOVERY_ENTRY_BUDGET + 44;
+        for i in 0..total {
+            write_session(picked.path(), &format!("run-{i}.jsonl"));
+        }
+
+        let row = only(&describe_folder(picked.path()), SOURCE_TRAJECTORY);
+        assert_eq!(row.session_count, total as u64);
     }
 
     #[test]
