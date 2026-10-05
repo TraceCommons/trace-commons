@@ -918,6 +918,13 @@ const SURFACES: &[(&str, &str, &str, &str, &str)] = &[
         "TCBridge/TCCoreCopy.swift",
         "tc_quit_prompt_json",
     ),
+    (
+        "first-run sharing card",
+        "TraceCommonsApp/Views/FirstRun/UsesScreen.swift",
+        "TCCoreCopy.automaticContributionCopyJSON",
+        "TCBridge/TCCoreCopy.swift",
+        "tc_automatic_contribution_copy_json",
+    ),
 ];
 
 /// Bridge functions for surfaces macOS has not built yet. Each must still
@@ -934,10 +941,6 @@ const BRIDGE_ONLY: &[(&str, &str)] = &[
     (
         "TCBridge/TCCoreCopy.swift",
         "tc_inference_connection_copy_json",
-    ),
-    (
-        "TCBridge/TCCoreCopy.swift",
-        "tc_automatic_contribution_copy_json",
     ),
     // The first-run port moves this to SURFACES with the screen that reads it.
     ("TCBridge/TCCoreCopy.swift", "tc_first_run_copy_json"),

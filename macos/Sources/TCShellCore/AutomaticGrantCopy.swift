@@ -21,16 +21,26 @@ public struct AutomaticGrantCopy: Decodable, Equatable, Sendable {
     public let patternsOnly: Scrub?
     public let modelScrubbed: Scrub?
     public let noReview: String
+    /// The path question's two answers (`path_automatic`, `path_ask_first`),
+    /// read by the first run's Sharing card. Optional because an armed
+    /// folder's confirmation does not need them; a screen that does treats
+    /// nil as the copy being unavailable.
+    public let pathAutomatic: String?
+    public let pathAskFirst: String?
 
     enum CodingKeys: String, CodingKey {
         case disclosure
         case patternsOnly = "patterns_only"
         case modelScrubbed = "model_scrubbed"
         case noReview = "no_review"
+        case pathAutomatic = "path_automatic"
+        case pathAskFirst = "path_ask_first"
     }
 
     /// The payload fields this shell decodes, by wire name.
-    public static let consumedFields = ["disclosure", "patterns_only", "model_scrubbed", "no_review"]
+    public static let consumedFields = [
+        "disclosure", "patterns_only", "model_scrubbed", "no_review", "path_automatic", "path_ask_first",
+    ]
 
     /// The scrub wording for the disclosure named, and only that one.
     public var scrub: Scrub? {
