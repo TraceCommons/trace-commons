@@ -326,8 +326,8 @@ pub fn first_run_copy() -> FirstRunCopy {
             invite_joined: "Joined {host} · {pay_range}",
             invite_error: "That is not an invite link. It ends in #code.",
             invite_dead: "This invite link is no longer valid. Ask whoever sent it for a new one.",
-            pay_range_points: "{min}–{max} points per accepted trace",
-            pay_range_points_one: "{min} points per accepted trace",
+            pay_range_points: "an estimated {min}–{max} points per accepted trace, not yet settled",
+            pay_range_points_one: "an estimated {min} points per accepted trace, not yet settled",
             passkey_eyebrow: "Sign in with a passkey",
             passkey_text: "Create a passkey that can be connected later.",
             passkey_ready: "“{name}” is ready. Connect it to near.ai any time.",
@@ -477,6 +477,11 @@ mod tests {
         for line in [join.pay_range_points, join.pay_range_points_one] {
             assert!(!line.contains('_'), "{line}");
             assert!(line.contains("{min}"), "{line}");
+            // `InviteLookupResponse`: clients MUST present the range as
+            // estimated credit per accepted trace, not yet settled.
+            assert!(line.contains("estimated"), "{line}");
+            assert!(line.contains("per accepted trace"), "{line}");
+            assert!(line.contains("not yet settled"), "{line}");
         }
         assert!(join.pay_range_points.contains("{max}"));
     }
