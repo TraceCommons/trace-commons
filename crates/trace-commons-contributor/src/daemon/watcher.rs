@@ -624,6 +624,11 @@ pub(crate) fn offer_for_a_person(
     let _pass = shared.pass_lock.lock().expect("pass lock");
     // No cap: see the doc. The rest of the context is the pass's own.
     let ctx = PassContext::read(shared, now, usize::MAX, source_roots.source_identities());
+    let quiescence_secs = shared
+        .settings
+        .lock()
+        .expect("settings lock")
+        .quiescence_secs;
     let mut out = Vec::with_capacity(refs.len());
     let mut changed = false;
     for session_ref in refs {
@@ -631,7 +636,16 @@ pub(crate) fn offer_for_a_person(
             .get(&session_ref.path)
             .map(|&i| sources[i].as_ref())
             .ok_or("session-file-vanished")
-            .and_then(|source| offer_one(shared, &ctx, source, session_ref, project_key));
+            .and_then(|source| {
+                offer_one(
+                    shared,
+                    &ctx,
+                    source,
+                    session_ref,
+                    project_key,
+                    quiescence_secs,
+                )
+            });
         if offered.is_ok() {
             changed = true;
         }
@@ -655,6 +669,7 @@ fn offer_one(
     source: &dyn TraceSource,
     session_ref: &SessionRef,
     project_key: &str,
+    quiescence_secs: u64,
 ) -> std::result::Result<uuid::Uuid, &'static str> {
     let modified = std::fs::metadata(&session_ref.path)
         .and_then(|m| m.modified())
@@ -666,6 +681,11 @@ fn offer_one(
             .group_modified_at
             .unwrap_or_else(|| DateTime::<Utc>::from(modified)),
     };
+    // Judged again at the read, not only at the caller's walk: a session
+    // written to in between is still not read half-written.
+    if ctx.now.signed_duration_since(obs.modified_at).num_seconds() < quiescence_secs as i64 {
+        return Err(super::past_sessions::LABEL_SESSION_STILL_ACTIVE);
+    }
     {
         let queue = shared.queue.lock().expect("queue lock");
         if queue.dismissed_at_path(&obs.path) {
@@ -711,6 +731,26 @@ fn offer_one(
             super::past_sessions::LABEL_SESSION_UNREADABLE
         }
     })?;
+    // As `visit_session` does in an armed folder: content older than an
+    // arming from now is recorded on that arming, so if the person's
+    // approval below does not land, the offer it leaves still waits for a
+    // person rather than going out unattended.
+    if shared
+        .policy
+        .lock()
+        .expect("policy lock")
+        .resolve(&resolved_key)
+        == ProjectMode::AutoUpload
+    {
+        hold_if_older_than_arming(
+            shared,
+            ctx,
+            source,
+            &resolved_key,
+            &obs.path,
+            transcript.started_at,
+        );
+    }
     let (known, returned_from_keep) = {
         let policy = shared.policy.lock().expect("policy lock");
         let queue = shared.queue.lock().expect("queue lock");
