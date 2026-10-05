@@ -311,4 +311,25 @@ final class FoldersScreenTests: XCTestCase {
         ToolAnswerRowLayout.select(.watch, for: claude, in: &fresh)
         XCTAssertEqual(fresh.toolAnswers[.claudeCode], .watch(path: claude.path))
     }
+
+    /// "Get {tool}" opens the tool's install page: every tool the Mac is
+    /// asked about has one, from the core, over https.
+    func test_everyToolHasAnInstallLink() throws {
+        let folders = try copy().folders
+        for kind in SourceKind.allCases {
+            let url = try XCTUnwrap(folders.installURL(for: kind), "\(kind)")
+            XCTAssertEqual(url.scheme, "https", "\(kind)")
+        }
+    }
+
+    /// Both screens pass the core's links to the row, so the button is live.
+    func test_bothScreensPassTheInstallLinks() throws {
+        let coordinator = try String(
+            contentsOf: URL(fileURLWithPath: #filePath)
+                .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+                .appendingPathComponent("Sources/TraceCommonsApp/Views/OnboardingCoordinatorView.swift"),
+            encoding: .utf8)
+        XCTAssertTrue(coordinator.contains("FoldersScreen(copy: copy, runner: runner, installURL: copy.folders.installURL(for:), offersJoin: offersJoin)"))
+        XCTAssertTrue(coordinator.contains("ToolsScreen(copy: copy, runner: runner, installURL: copy.folders.installURL(for:), offersJoin: offersJoin)"))
+    }
 }
