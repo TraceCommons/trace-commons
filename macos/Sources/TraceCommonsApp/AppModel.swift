@@ -705,13 +705,18 @@ final class AppModel: ObservableObject {
     /// judgement of what was left rather than a certificate. The card says
     /// so, in the Rust's words.
     func clearWitness() {
-        writeWitness { TCWitness.clear(configDir: $0) }
+        writeWitness(clearsDraft: true) { TCWitness.clear(configDir: $0) }
     }
 
     /// Nothing is applied optimistically. The write's own answer decides
     /// only whether a refusal label is shown; what the card renders is the
     /// state and status read back afterwards.
-    private func writeWitness(_ work: @escaping @Sendable (String) -> TCWitness.Outcome) {
+    ///
+    /// `clearsDraft`: a clear that succeeds leaves nothing for an edited
+    /// field to describe, so the fields read the daemon again.
+    private func writeWitness(
+        clearsDraft: Bool = false, _ work: @escaping @Sendable (String) -> TCWitness.Outcome
+    ) {
         let dir = configDirectory
         guard !dir.isEmpty else { return }
         witnessBusy = true
@@ -722,6 +727,7 @@ final class AppModel: ObservableObject {
             let read = TCWitness.statusJSON(configDir: dir)
             await MainActor.run {
                 self.witnessBusy = false
+                if clearsDraft, case .done = wrote { self.witnessDraft = nil }
                 self.publishWitness(code: code, read: read, wrote: wrote)
             }
         }
@@ -1818,6 +1824,12 @@ final class AppModel: ObservableObject {
     @Published var routingDraft: RoutingForm?
     /// The witness card's edited fields; `nil` means nothing has been edited.
     @Published var witnessDraft: WitnessForm?
+    /// The public profile's edited handle and bio; `nil` means that field
+    /// has not been edited and reads the daemon's answer. On the model so a
+    /// section switch keeps an edit, and so a background refresh of the
+    /// profile cannot rewrite what is being typed.
+    @Published var profileHandleDraft: String?
+    @Published var profileBioDraft: String?
 
     @Published private(set) var inferenceEvidenceBusy = false
     @Published private(set) var inferenceEvidenceSaveFailed = false
@@ -1957,6 +1969,7 @@ final class AppModel: ObservableObject {
     }
     func setDaemonSettingsForTesting(_ settings: DaemonSettingsView) { publishIfChanged(\.daemonSettings, settings) }
     func setStartupForTesting(_ startup: Startup) { self.startup = startup }
+    func setConfigDirectoryForTesting(_ path: String) { configDirectory = path }
 
     func setStatusForTesting(_ status: DaemonStatus) {
         recordRead("status", answered: true)
@@ -2408,6 +2421,13 @@ final class AppModel: ObservableObject {
                     // cache miss that may not have happened, on a profile
                     // that is public either way.
                     self.profileOutcome = .published(cached: profile.handlePersisted ?? true)
+                    // The daemon now holds this profile, in its stored form,
+                    // so the fields read it again -- unless the person has
+                    // edited past what was sent while the write was out.
+                    if (self.profileHandleDraft ?? handle) == handle, (self.profileBioDraft ?? bio) == bio {
+                        self.profileHandleDraft = nil
+                        self.profileBioDraft = nil
+                    }
                     self.refreshStatus()
                     self.refreshAudit()
                 case .failure(let error):
@@ -2431,6 +2451,9 @@ final class AppModel: ObservableObject {
                 case .success(let profile):
                     self.publicProfile = profile.onRoster ? profile : nil
                     self.profileOutcome = .left(cached: profile.handlePersisted ?? true)
+                    // Off the roster there is no profile for an edit to be of.
+                    self.profileHandleDraft = nil
+                    self.profileBioDraft = nil
                     self.refreshStatus()
                     self.refreshAudit()
                 case .failure(let error):

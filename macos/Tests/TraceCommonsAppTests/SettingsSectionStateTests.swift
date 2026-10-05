@@ -76,6 +76,22 @@ private final class IronWireSettingsDaemon: DaemonCalling {
     func openPreview(entryID: String) throws -> TCPreview { throw TCDaemon.TCError.daemonGone }
 }
 
+/// Answers `set_public_profile` with the handle stored, or refuses it.
+private final class PublicProfileDaemon: DaemonCalling {
+    let refuse: Bool
+    init(refuse: Bool) { self.refuse = refuse }
+
+    func call(_ method: String, params paramsJSON: String) -> String {
+        guard method == "set_public_profile", !refuse else {
+            return #"{"id":1,"error":{"code":"unavailable","message":"unexpected-test-method"}}"#
+        }
+        return #"{"id":1,"result":{"on_roster":true,"handle":"ada","bio":"hi","handle_persisted":true}}"#
+    }
+
+    func searchOriginal(entryID: String, needle: String) -> Int? { nil }
+    func openPreview(entryID: String) throws -> TCPreview { throw TCDaemon.TCError.daemonGone }
+}
+
 /// G8 of #1229: the Settings window draws a fresh section view per section
 /// (`.id(section)`), so anything a section holds as `@State` is thrown away
 /// by switching section. A consent write in flight then lost its busy flag
@@ -194,6 +210,67 @@ final class SettingsSectionStateTests: XCTestCase {
         XCTAssertEqual(refused.routingDraft, applied, "a refused write dropped the edit")
     }
 
+    /// The profile drafts outlive the section view too, and clear once the
+    /// daemon has stored them, so the fields read its stored form. A
+    /// refused save keeps the edit.
+    @MainActor
+    func testTheProfileDraftsClearOnceASaveSucceeds() async throws {
+        let model = AppModel()
+        model.setClientForTesting(DaemonClient(daemon: PublicProfileDaemon(refuse: false)))
+        model.profileHandleDraft = " ada "
+        model.profileBioDraft = "hi"
+        model.claimHandle(" ada ", bio: "hi")
+        try await waitUntil { model.publicProfile != nil }
+        XCTAssertEqual(model.publicProfile?.handle, "ada")
+        XCTAssertNil(model.profileHandleDraft, "a saved handle draft shadows the stored one for good")
+        XCTAssertNil(model.profileBioDraft, "a saved bio draft shadows the stored one for good")
+
+        let refused = AppModel()
+        refused.setClientForTesting(DaemonClient(daemon: PublicProfileDaemon(refuse: true)))
+        refused.profileHandleDraft = "ada"
+        refused.profileBioDraft = "hi"
+        refused.claimHandle("ada", bio: "hi")
+        try await waitUntil { refused.profileOutcome != nil }
+        XCTAssertEqual(refused.profileHandleDraft, "ada", "a refused save dropped the edit")
+        XCTAssertEqual(refused.profileBioDraft, "hi", "a refused save dropped the edit")
+    }
+
+    /// A clear that succeeds drops the witness draft: there is no witness
+    /// left for the edited fields to describe. A refused clear keeps it.
+    @MainActor
+    func testTheWitnessDraftClearsWhenClearingTheWitnessSucceeds() async throws {
+        let dir = NSTemporaryDirectory() + "tcw-clear-\(UUID().uuidString.prefix(8))"
+        try FileManager.default.createDirectory(
+            atPath: dir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let draft = WitnessForm(url: "https://witness.example", signingAddress: "0xabc", measurements: "")
+        let model = AppModel()
+        model.setConfigDirectoryForTesting(dir)
+
+        // Not enrolled: the clear is refused, and the edit stays.
+        model.witnessDraft = draft
+        model.clearWitness()
+        try await waitUntil { !model.witnessBusy }
+        XCTAssertEqual(model.witnessLabel, "witness-not-enrolled")
+        XCTAssertEqual(model.witnessDraft, draft, "a refused clear dropped the edit")
+
+        // Enrolled with no witness: the clear succeeds, and the edit goes.
+        let config: [String: Any] = [
+            "schema_version": "trace_commons.contributor_config.v1",
+            "issuer_url": "https://issuer.example", "ingest_url": "https://ingest.example",
+            "audience": "trace-commons-ingest", "tenant_id": "tenant", "instance_id": "instance",
+            "user_subject": "subject", "device_key_id": "device", "consent_scopes": [String](),
+            "pii_filter": NSNull(), "allowed_hosts": NSNull(), "display_handle": NSNull(),
+            "public_bio": NSNull(), "public_since": NSNull(), "witness": NSNull(),
+        ]
+        try JSONSerialization.data(withJSONObject: config)
+            .write(to: URL(fileURLWithPath: dir + "/contributor.json"))
+        model.clearWitness()
+        XCTAssertTrue(model.witnessBusy)
+        try await waitUntil { !model.witnessBusy }
+        XCTAssertNil(model.witnessDraft, "a cleared witness kept its edited fields")
+    }
+
     /// With the settings copy missing, a refusal still draws a line: the
     /// core's own request-failed sentence, and never nothing.
     func testARefusalWithNoSettingsCopyStillDrawsTheCoresLine() throws {
@@ -223,6 +300,7 @@ final class SettingsSectionStateTests: XCTestCase {
             ("ToolsSection.swift", ["routingDraft"]),
             ("WitnessSection.swift", ["witnessDraft"]),
             ("WatchedFoldersSection.swift", ["busy", "saveFailed"]),
+            ("PublicProfileSection.swift", ["handleDraft", "bioDraft"]),
         ]
         for (file, names) in banned {
             let text = try String(contentsOf: settings.appendingPathComponent(file), encoding: .utf8)

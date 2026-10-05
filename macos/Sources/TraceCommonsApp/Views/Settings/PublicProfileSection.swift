@@ -42,11 +42,6 @@ private struct GlassBioEditor: View {
 struct PublicProfileSection: View {
     @EnvironmentObject private var model: AppModel
     @State private var showingGoPublic = false
-    /// The panel's two editable fields. Seeded from the daemon's answer --
-    /// see `seedProfileDraft` -- rather than bound straight to it, so a
-    /// background refresh cannot rewrite what is being typed.
-    @State private var handleDraft = ""
-    @State private var bioDraft = ""
 
     private static let rosterDate: DateFormatter = {
         let formatter = DateFormatter()
@@ -77,12 +72,6 @@ struct PublicProfileSection: View {
                 .fixedSize(horizontal: false, vertical: true)
             profileCopyDefects
         }
-        // Seeded from the daemon's answer whenever it changes, so the fields
-        // show what is actually published -- including the trimmed display
-        // form the server stored. Keyed on the published values rather than
-        // on every render, so a refresh cannot overwrite an edit in progress.
-        .onAppear { seedProfileDraft() }
-        .onChange(of: publishedSignature) { _, _ in seedProfileDraft() }
         .sheet(isPresented: $showingGoPublic) {
             // Handed the model explicitly: the sheet makes a daemon call, and
             // an environment object it did not get would be a crash on the
@@ -117,9 +106,17 @@ struct PublicProfileSection: View {
                 GlassTag(PublicProfileCopy.onRosterSince(Self.rosterDate.string(from: since)), tone: .accent)
             }
         }) {
+            // The panel's two editable fields are the model's drafts, so a
+            // section switch keeps an edit. With no edit they read what is
+            // actually published, including the trimmed display form the
+            // server stored; a refresh cannot overwrite an edit in progress.
+            let handleDraft = model.profileHandleDraft ?? profile.handle ?? ""
+            let bioDraft = model.profileBioDraft ?? profile.bio ?? ""
             VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
-                GlassTextField(PublicProfileCopy.handleLabel, text: $handleDraft)
-                GlassBioEditor(label: PublicProfileCopy.bioLabel, text: $bioDraft)
+                GlassTextField(PublicProfileCopy.handleLabel, text: Binding(
+                    get: { handleDraft }, set: { model.profileHandleDraft = $0 }))
+                GlassBioEditor(label: PublicProfileCopy.bioLabel, text: Binding(
+                    get: { bioDraft }, set: { model.profileBioDraft = $0 }))
                 HStack(spacing: GlassTokens.Space.s2) {
                     // Save re-publishes the whole profile, because that is
                     // what the PUT does: the handle and the bio as they
@@ -186,16 +183,6 @@ struct PublicProfileSection: View {
         }
     }
 
-    /// The published values, as one string, so the drafts are re-seeded when
-    /// and only when the daemon's answer actually changes.
-    private var publishedSignature: String {
-        "\(model.publicProfile?.handle ?? "")\u{1}\(model.publicProfile?.bio ?? "")"
-    }
-
-    private func seedProfileDraft() {
-        handleDraft = model.publicProfile?.handle ?? ""
-        bioDraft = model.publicProfile?.bio ?? ""
-    }
 }
 
 /// Going public is a deliberate consent dialog, not a toggle flip: what gets
