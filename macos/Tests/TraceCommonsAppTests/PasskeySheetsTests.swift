@@ -39,6 +39,12 @@ final class PasskeySheetsTests: XCTestCase {
             calls.append("signOut")
             return signOutAnswer
         }
+
+        var existing: Int? = 0
+        func existingPasskeys() async -> Int? {
+            calls.append("existingPasskeys")
+            return existing
+        }
     }
 
     private func coreCopy() throws -> FirstRunCopy {
@@ -199,6 +205,7 @@ final class PasskeySheetsTests: XCTestCase {
         func bind() async -> PasskeyBindResult { .bound }
         func signOut() async -> PasskeyCallResult { .done }
         func cancel() { calls.append("cancel") }
+        func existingPasskeys() async -> Int? { 0 }
     }
 
     /// The daemon counts Unicode scalars, not grapheme clusters; the sheet
@@ -348,5 +355,23 @@ final class PasskeySheetsTests: XCTestCase {
             mounts += Array(repeating: url.lastPathComponent, count: count)
         }
         XCTAssertEqual(mounts, ["OnboardingCoordinatorView.swift"])
+    }
+
+    /// Ron's P-7: a returning person, whose Mac already holds a passkey for
+    /// this account, opens at Welcome back. None, or a daemon that cannot
+    /// say, opens at P-1, which still offers "Use existing passkey".
+    func test_aReturningPasskeyOpensAtWelcomeBack() {
+        XCTAssertEqual(PasskeySheetModel.startStep(existingPasskeys: 1), .welcomeBack)
+        XCTAssertEqual(PasskeySheetModel.startStep(existingPasskeys: 3), .welcomeBack)
+        XCTAssertEqual(PasskeySheetModel.startStep(existingPasskeys: 0), .choose)
+        XCTAssertEqual(PasskeySheetModel.startStep(existingPasskeys: nil), .choose)
+    }
+
+    /// The first-run presenter asks the daemon before it opens the sheets,
+    /// and opens them at the step that answer chooses.
+    func test_theFirstRunPresenterAsksForExistingPasskeys() throws {
+        let source = try Self.source()
+        XCTAssertTrue(source.contains("await account.existingPasskeys()"))
+        XCTAssertTrue(source.contains("PasskeySheetModel.startStep(existingPasskeys:"))
     }
 }

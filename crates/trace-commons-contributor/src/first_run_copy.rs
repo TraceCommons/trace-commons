@@ -128,6 +128,16 @@ pub struct JoinCopy {
     pub signed_out: &'static str,
 }
 
+/// Each asked-about tool's own install page, keyed by the tool, for "Get {tool}".
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct InstallUrls {
+    pub claude_code: &'static str,
+    pub codex: &'static str,
+    pub gemini_cli: &'static str,
+    pub cline: &'static str,
+    pub opencode: &'static str,
+}
+
 /// Folders, Quick setup's tool list (`tool-screens.tsx`, `tool-row.tsx`).
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct FoldersCopy {
@@ -142,6 +152,9 @@ pub struct FoldersCopy {
     pub choose_folder: &'static str,
     pub get_tool: &'static str,
     pub download_tool: &'static str,
+    /// Where "Get {tool}" sends a person for each tool the Mac is asked about:
+    /// the tool's own install page, over https.
+    pub install_urls: InstallUrls,
     pub not_installed: &'static str,
     /// Discovery returned no row the shell could read.
     pub discovery_failed: &'static str,
@@ -313,8 +326,8 @@ pub fn first_run_copy() -> FirstRunCopy {
             invite_joined: "Joined {host} · {pay_range}",
             invite_error: "That is not an invite link. It ends in #code.",
             invite_dead: "This invite link is no longer valid. Ask whoever sent it for a new one.",
-            pay_range_points: "{min}–{max} points per accepted trace",
-            pay_range_points_one: "{min} points per accepted trace",
+            pay_range_points: "an estimated {min}–{max} points per accepted trace, not yet settled",
+            pay_range_points_one: "an estimated {min} points per accepted trace, not yet settled",
             passkey_eyebrow: "Sign in with a passkey",
             passkey_text: "Create a passkey that can be connected later.",
             passkey_ready: "“{name}” is ready. Connect it to near.ai any time.",
@@ -344,6 +357,13 @@ pub fn first_run_copy() -> FirstRunCopy {
             choose_folder: "Choose a different folder for {tool}",
             get_tool: "Get {tool}",
             download_tool: "Download {tool}",
+            install_urls: InstallUrls {
+                claude_code: "https://claude.com/product/claude-code",
+                codex: "https://github.com/openai/codex",
+                gemini_cli: "https://github.com/google-gemini/gemini-cli",
+                cline: "https://cline.bot/",
+                opencode: "https://opencode.ai/",
+            },
             not_installed: "Install it, then this row asks again.",
             discovery_failed: "Could not look for coding tools on this Mac.",
             retry: "Look again",
@@ -437,12 +457,31 @@ mod tests {
     use super::*;
 
     #[test]
+    fn every_install_url_is_https() {
+        let urls = first_run_copy().folders.install_urls;
+        for url in [
+            urls.claude_code,
+            urls.codex,
+            urls.gemini_cli,
+            urls.cline,
+            urls.opencode,
+        ] {
+            assert!(url.starts_with("https://"), "{url}");
+        }
+    }
+
+    #[test]
     fn a_dead_invite_and_a_pay_range_have_their_own_words() {
         let join = first_run_copy().join;
         assert_ne!(join.invite_dead, join.invite_error);
         for line in [join.pay_range_points, join.pay_range_points_one] {
             assert!(!line.contains('_'), "{line}");
             assert!(line.contains("{min}"), "{line}");
+            // `InviteLookupResponse`: clients MUST present the range as
+            // estimated credit per accepted trace, not yet settled.
+            assert!(line.contains("estimated"), "{line}");
+            assert!(line.contains("per accepted trace"), "{line}");
+            assert!(line.contains("not yet settled"), "{line}");
         }
         assert!(join.pay_range_points.contains("{max}"));
     }

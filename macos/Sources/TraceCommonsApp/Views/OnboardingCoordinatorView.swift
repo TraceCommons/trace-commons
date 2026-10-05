@@ -136,9 +136,9 @@ private struct FirstRunSteps: View {
         case .join:
             JoinScreen(copy: copy, runner: runner, passkeyAccount: passkeyAccount)
         case .folders:
-            FoldersScreen(copy: copy, runner: runner, offersJoin: offersJoin)
+            FoldersScreen(copy: copy, runner: runner, installURL: copy.folders.installURL(for:), offersJoin: offersJoin)
         case .tools:
-            ToolsScreen(copy: copy, runner: runner, offersJoin: offersJoin)
+            ToolsScreen(copy: copy, runner: runner, installURL: copy.folders.installURL(for:), offersJoin: offersJoin)
         case .rules:
             RulesScreen(copy: copy, runner: runner, source: model)
         case .uses:

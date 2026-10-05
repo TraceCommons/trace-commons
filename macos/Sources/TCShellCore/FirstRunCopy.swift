@@ -66,6 +66,14 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
         public let signedOut: String
     }
 
+    public struct InstallUrls: Decodable, Equatable, Sendable {
+        public let claudeCode: String
+        public let codex: String
+        public let geminiCli: String
+        public let cline: String
+        public let opencode: String
+    }
+
     public struct Folders: Decodable, Equatable, Sendable {
         public let titleLight: String
         public let titleBold: String
@@ -78,6 +86,22 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
         public let chooseFolder: String
         public let getTool: String
         public let downloadTool: String
+        /// Each asked-about tool's install page.
+        public let installUrls: InstallUrls
+
+        /// The install page for `kind`, or nil when the core gave none.
+        public func installURL(for kind: SourceKind) -> URL? {
+            let raw: String
+            switch kind {
+            case .claudeCode: raw = installUrls.claudeCode
+            case .codex: raw = installUrls.codex
+            case .geminiCli: raw = installUrls.geminiCli
+            case .cline: raw = installUrls.cline
+            case .opencode: raw = installUrls.opencode
+            }
+            guard let url = URL(string: raw), url.scheme == "https" else { return nil }
+            return url
+        }
         public let notInstalled: String
         /// Discovery returned no row the shell could read.
         public let discoveryFailed: String
