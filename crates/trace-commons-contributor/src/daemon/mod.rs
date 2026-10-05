@@ -22,6 +22,7 @@
 
 pub mod account_admission;
 pub mod account_onboarding;
+pub mod activity_missions;
 pub mod admission_setup;
 pub mod approved_envelope;
 pub mod arming_wording;
@@ -51,10 +52,13 @@ pub mod install;
 pub mod ipc;
 pub mod ironwire_pointer;
 pub(crate) mod legacy_migration;
+pub mod mission_catalogue;
 pub mod mission_matching;
 pub mod native_flow;
+mod native_identity;
 pub mod nearai_credential;
 pub mod nearai_onboarding;
+mod network_data;
 pub mod notify;
 #[cfg(feature = "test-credential-store")]
 pub(crate) mod test_credential_store;

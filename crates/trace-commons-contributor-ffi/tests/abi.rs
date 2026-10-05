@@ -807,36 +807,73 @@ fn concurrent_tc_call_and_tc_daemon_stop_do_not_crash() {
 
 // --- Allocation-registry double-free / cross-type-free detection -------
 
+/// A freed address is rejected only until another allocation of the same kind
+/// reuses it (see the public header's registry caveat). Run misuse probes alone
+/// in a child process, so parallel tests cannot turn their stale pointer into a
+/// different live object. Other ABI tests, and these parent tests, stay parallel.
+fn isolated_stale_pointer_probe(test_name: &str, probe: impl FnOnce()) {
+    const CHILD: &str = "TC_FFI_STALE_POINTER_PROBE";
+    let completed = format!("stale-pointer-probe-completed:{test_name}");
+    if std::env::var(CHILD).as_deref() == Ok(test_name) {
+        probe();
+        eprintln!("\n{completed}");
+        return;
+    }
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", test_name, "--nocapture"])
+        .env(CHILD, test_name)
+        .output()
+        .expect("spawn isolated stale-pointer probe");
+    assert!(
+        output.status.success(),
+        "{test_name} child failed:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // A mistyped exact filter runs zero tests and still exits successfully.
+    // Require evidence that this specific probe actually finished its assertions.
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .lines()
+            .any(|line| line == completed),
+        "{test_name} child did not execute its probe"
+    );
+}
+
 #[test]
 fn double_free_of_a_string_is_refused_not_ub() {
-    let dir = tempfile::tempdir().unwrap();
-    let h = start(dir.path());
-    let out = unsafe { tc_call(h, cstr_str("status").as_ptr(), cstr_str("{}").as_ptr()) };
-    assert!(!out.is_null());
-    unsafe { tc_string_free(out) };
-    // Second free of the same pointer: must not double-free.
-    unsafe { tc_string_free(out) };
-    assert!(
-        last_error()
-            .map(|e| e.contains("double-free") || e.contains("unknown-pointer"))
-            .unwrap_or(false)
-    );
-    stop(h);
+    isolated_stale_pointer_probe("double_free_of_a_string_is_refused_not_ub", || {
+        let dir = tempfile::tempdir().unwrap();
+        let h = start(dir.path());
+        let out = unsafe { tc_call(h, cstr_str("status").as_ptr(), cstr_str("{}").as_ptr()) };
+        assert!(!out.is_null());
+        unsafe { tc_string_free(out) };
+        // Second free of the same pointer: must not double-free.
+        unsafe { tc_string_free(out) };
+        assert!(
+            last_error()
+                .map(|e| e.contains("double-free") || e.contains("unknown-pointer"))
+                .unwrap_or(false)
+        );
+        stop(h);
+    });
 }
 
 #[test]
 fn double_free_of_a_handle_is_refused_not_ub() {
-    let dir = tempfile::tempdir().unwrap();
-    let h = start(dir.path());
-    unsafe { tc_daemon_stop(h) };
-    unsafe { tc_handle_free(h) };
-    // Second free of the same handle pointer.
-    unsafe { tc_handle_free(h) };
-    assert!(
-        last_error()
-            .map(|e| e.contains("double-free") || e.contains("unknown-pointer"))
-            .unwrap_or(false)
-    );
+    isolated_stale_pointer_probe("double_free_of_a_handle_is_refused_not_ub", || {
+        let dir = tempfile::tempdir().unwrap();
+        let h = start(dir.path());
+        unsafe { tc_daemon_stop(h) };
+        unsafe { tc_handle_free(h) };
+        // Second free of the same handle pointer.
+        unsafe { tc_handle_free(h) };
+        assert!(
+            last_error()
+                .map(|e| e.contains("double-free") || e.contains("unknown-pointer"))
+                .unwrap_or(false)
+        );
+    });
 }
 
 // --- Preview accessors must consult the registry before dereferencing ---
@@ -1038,94 +1075,111 @@ fn tc_preview_turns_json_refuses_a_pointer_that_is_not_a_handle() {
 
 #[test]
 fn tc_daemon_stop_refuses_a_freed_handle() {
-    with_freed_handle(assert_stop_refused);
+    isolated_stale_pointer_probe("tc_daemon_stop_refuses_a_freed_handle", || {
+        with_freed_handle(assert_stop_refused);
+    });
 }
 
 #[test]
 fn tc_call_refuses_a_freed_handle() {
-    with_freed_handle(assert_call_refused);
+    isolated_stale_pointer_probe("tc_call_refuses_a_freed_handle", || {
+        with_freed_handle(assert_call_refused);
+    });
 }
 
 #[test]
 fn tc_subscribe_refuses_a_freed_handle() {
-    with_freed_handle(assert_subscribe_refused);
+    isolated_stale_pointer_probe("tc_subscribe_refuses_a_freed_handle", || {
+        with_freed_handle(assert_subscribe_refused);
+    });
 }
 
 #[test]
 fn tc_unsubscribe_refuses_a_freed_handle() {
-    with_freed_handle(assert_unsubscribe_refused);
+    isolated_stale_pointer_probe("tc_unsubscribe_refuses_a_freed_handle", || {
+        with_freed_handle(assert_unsubscribe_refused);
+    });
 }
 
 #[test]
 fn tc_preview_open_refuses_a_freed_handle() {
-    with_freed_handle(assert_preview_open_refused);
+    isolated_stale_pointer_probe("tc_preview_open_refuses_a_freed_handle", || {
+        with_freed_handle(assert_preview_open_refused);
+    });
 }
 
 #[test]
 fn tc_preview_unsure_spans_json_refuses_a_bad_or_freed_handle() {
-    let dir = tempfile::tempdir().unwrap();
-    let h = start(dir.path());
-    let out = unsafe { tc_call(h, cstr_str("status").as_ptr(), cstr_str("{}").as_ptr()) };
-    assert!(!out.is_null());
-    // A string pointer passed where a handle belongs.
-    let mut err: *mut c_char = std::ptr::null_mut();
-    let p = unsafe {
-        tc_preview_unsure_spans_json(
-            out as *mut tc_handle,
-            cstr_str("00000000-0000-0000-0000-000000000000").as_ptr(),
-            cstr_str("sha256:irrelevant").as_ptr(),
-            &mut err,
-        )
-    };
-    assert!(p.is_null());
-    assert!(!err.is_null());
-    let msg = unsafe { CStr::from_ptr(err) }
-        .to_string_lossy()
-        .into_owned();
-    unsafe { tc_string_free(err) };
-    assert!(msg.contains("invalid-handle-pointer"), "{msg}");
-    unsafe { tc_string_free(out) };
+    isolated_stale_pointer_probe(
+        "tc_preview_unsure_spans_json_refuses_a_bad_or_freed_handle",
+        || {
+            let dir = tempfile::tempdir().unwrap();
+            let h = start(dir.path());
+            let out = unsafe { tc_call(h, cstr_str("status").as_ptr(), cstr_str("{}").as_ptr()) };
+            assert!(!out.is_null());
+            // A string pointer passed where a handle belongs.
+            let mut err: *mut c_char = std::ptr::null_mut();
+            let p = unsafe {
+                tc_preview_unsure_spans_json(
+                    out as *mut tc_handle,
+                    cstr_str("00000000-0000-0000-0000-000000000000").as_ptr(),
+                    cstr_str("sha256:irrelevant").as_ptr(),
+                    &mut err,
+                )
+            };
+            assert!(p.is_null());
+            assert!(!err.is_null());
+            let msg = unsafe { CStr::from_ptr(err) }
+                .to_string_lossy()
+                .into_owned();
+            unsafe { tc_string_free(err) };
+            assert!(msg.contains("invalid-handle-pointer"), "{msg}");
+            unsafe { tc_string_free(out) };
 
-    // A live handle and an entry it does not hold: the same fixed label
-    // the socket method gives.
-    let mut err: *mut c_char = std::ptr::null_mut();
-    let p = unsafe {
-        tc_preview_unsure_spans_json(
-            h,
-            cstr_str("00000000-0000-0000-0000-000000000000").as_ptr(),
-            cstr_str("sha256:irrelevant").as_ptr(),
-            &mut err,
-        )
-    };
-    assert!(p.is_null());
-    let msg = unsafe { CStr::from_ptr(err) }
-        .to_string_lossy()
-        .into_owned();
-    unsafe { tc_string_free(err) };
-    assert!(msg.contains("unknown-entry-id"), "{msg}");
+            // A live handle and an entry it does not hold: the same fixed label
+            // the socket method gives.
+            let mut err: *mut c_char = std::ptr::null_mut();
+            let p = unsafe {
+                tc_preview_unsure_spans_json(
+                    h,
+                    cstr_str("00000000-0000-0000-0000-000000000000").as_ptr(),
+                    cstr_str("sha256:irrelevant").as_ptr(),
+                    &mut err,
+                )
+            };
+            assert!(p.is_null());
+            let msg = unsafe { CStr::from_ptr(err) }
+                .to_string_lossy()
+                .into_owned();
+            unsafe { tc_string_free(err) };
+            assert!(msg.contains("unknown-entry-id"), "{msg}");
 
-    unsafe { tc_daemon_stop(h) };
-    unsafe { tc_handle_free(h) };
-    let mut err: *mut c_char = std::ptr::null_mut();
-    let p = unsafe {
-        tc_preview_unsure_spans_json(
-            h,
-            cstr_str("00000000-0000-0000-0000-000000000000").as_ptr(),
-            cstr_str("sha256:irrelevant").as_ptr(),
-            &mut err,
-        )
-    };
-    assert!(p.is_null());
-    let msg = unsafe { CStr::from_ptr(err) }
-        .to_string_lossy()
-        .into_owned();
-    unsafe { tc_string_free(err) };
-    assert!(msg.contains("invalid-handle-pointer"), "{msg}");
+            unsafe { tc_daemon_stop(h) };
+            unsafe { tc_handle_free(h) };
+            let mut err: *mut c_char = std::ptr::null_mut();
+            let p = unsafe {
+                tc_preview_unsure_spans_json(
+                    h,
+                    cstr_str("00000000-0000-0000-0000-000000000000").as_ptr(),
+                    cstr_str("sha256:irrelevant").as_ptr(),
+                    &mut err,
+                )
+            };
+            assert!(p.is_null());
+            let msg = unsafe { CStr::from_ptr(err) }
+                .to_string_lossy()
+                .into_owned();
+            unsafe { tc_string_free(err) };
+            assert!(msg.contains("invalid-handle-pointer"), "{msg}");
+        },
+    );
 }
 
 #[test]
 fn tc_preview_turns_json_refuses_a_freed_handle() {
-    with_freed_handle(assert_preview_turns_refused);
+    isolated_stale_pointer_probe("tc_preview_turns_json_refuses_a_freed_handle", || {
+        with_freed_handle(assert_preview_turns_refused);
+    });
 }
 
 // --- Discriminating token uniqueness for tc_subscribe -------------------
@@ -2387,16 +2441,21 @@ fn a_refused_cross_type_free_leaves_the_handle_live_and_freeable() {
 /// a binding is told to read `tc_last_error` after every `tc_unsubscribe`.
 #[test]
 fn tc_unsubscribe_refuses_a_freed_handle_even_with_a_zero_token() {
-    let dir = tempfile::tempdir().unwrap();
-    let h = start(dir.path());
-    unsafe { tc_daemon_stop(h) };
-    unsafe { tc_handle_free(h) };
-    // No read of tc_last_error clears it, so there is no way to prove the
-    // label below was recorded by this call rather than left over. What
-    // makes the assertion mean something is that nothing earlier in this
-    // test records "invalid-handle-pointer": the free above succeeds.
-    unsafe { tc_unsubscribe(h, 0) };
-    assert_last_error_contains("invalid-handle-pointer");
+    isolated_stale_pointer_probe(
+        "tc_unsubscribe_refuses_a_freed_handle_even_with_a_zero_token",
+        || {
+            let dir = tempfile::tempdir().unwrap();
+            let h = start(dir.path());
+            unsafe { tc_daemon_stop(h) };
+            unsafe { tc_handle_free(h) };
+            // No read of tc_last_error clears it, so there is no way to prove the
+            // label below was recorded by this call rather than left over. What
+            // makes the assertion mean something is that nothing earlier in this
+            // test records "invalid-handle-pointer": the free above succeeds.
+            unsafe { tc_unsubscribe(h, 0) };
+            assert_last_error_contains("invalid-handle-pointer");
+        },
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -5656,32 +5715,34 @@ fn the_external_url_allowlist_crosses_the_abi() {
 
 #[test]
 fn the_quit_prompt_is_chosen_from_the_handle() {
-    use trace_commons_contributor::quit_copy::{QuitRole, quit_prompt};
-    use trace_commons_contributor_ffi::tc_quit_prompt_json;
-    assert_eq!(
-        json_owned(unsafe { tc_quit_prompt_json(std::ptr::null()) }),
-        serde_json::to_value(quit_prompt(QuitRole::Unavailable)).unwrap()
-    );
-    let dir = tempfile::tempdir().unwrap();
-    let h = start(dir.path());
-    let hosting = json_owned(unsafe { tc_quit_prompt_json(h) });
-    assert_eq!(
-        hosting,
-        serde_json::to_value(quit_prompt(QuitRole::Hosting)).unwrap()
-    );
-    assert_eq!(hosting["role"], "hosting");
-    unsafe { tc_daemon_stop(h) };
-    assert_eq!(
-        json_owned(unsafe { tc_quit_prompt_json(h) })["role"],
-        "unavailable"
-    );
-    unsafe { tc_handle_free(h) };
-    // A freed handle is refused, not dereferenced, and has no watcher.
-    assert_eq!(
-        json_owned(unsafe { tc_quit_prompt_json(h) })["role"],
-        "unavailable"
-    );
-    assert_last_error_contains("invalid-handle-pointer");
+    isolated_stale_pointer_probe("the_quit_prompt_is_chosen_from_the_handle", || {
+        use trace_commons_contributor::quit_copy::{QuitRole, quit_prompt};
+        use trace_commons_contributor_ffi::tc_quit_prompt_json;
+        assert_eq!(
+            json_owned(unsafe { tc_quit_prompt_json(std::ptr::null()) }),
+            serde_json::to_value(quit_prompt(QuitRole::Unavailable)).unwrap()
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let h = start(dir.path());
+        let hosting = json_owned(unsafe { tc_quit_prompt_json(h) });
+        assert_eq!(
+            hosting,
+            serde_json::to_value(quit_prompt(QuitRole::Hosting)).unwrap()
+        );
+        assert_eq!(hosting["role"], "hosting");
+        unsafe { tc_daemon_stop(h) };
+        assert_eq!(
+            json_owned(unsafe { tc_quit_prompt_json(h) })["role"],
+            "unavailable"
+        );
+        unsafe { tc_handle_free(h) };
+        // A freed handle is refused, not dereferenced, and has no watcher.
+        assert_eq!(
+            json_owned(unsafe { tc_quit_prompt_json(h) })["role"],
+            "unavailable"
+        );
+        assert_last_error_contains("invalid-handle-pointer");
+    });
 }
 
 #[test]

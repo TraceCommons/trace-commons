@@ -148,7 +148,12 @@ that injects a pipeline runtime; the repository binary injects none and
 answers `404` there. Do these steps in this order:
 
 1. Restore PostgreSQL (the pipeline's rows restore with everything else --
-   there is no separate pipeline backup or restore path for the database).
+   there is no separate pipeline backup or restore path for the database). The
+   routing rows, the activation events, the receipt ownership rows, the policy
+   interventions, the qualifications, and the rebuild fences are pipeline rows:
+   they come back with the database, as they were at the time of the backup. A
+   routing change made after that time is lost with the rest of it. Step 3 says
+   how to check the rows before traffic returns.
 2. Restore the encrypted object store.
 3. Start every `trace-commons-ingest` process with
    `TRACE_COMMONS_PIPELINE_RECEIPTS_TENANT_IDS` and
@@ -158,8 +163,169 @@ answers `404` there. Do these steps in this order:
    `pipeline_index_rebuild_tenant_active`).
    The worker reads both lists once, at start, so it drains no tenant: it
    scores no pending run, and it pays and invalidates nothing. Keep these
-   processes out of client traffic until step 5: while a tenant is on
-   neither list, a new upload of that tenant takes the legacy path.
+   processes out of client traffic until step 5. While a tenant is on neither
+   list, a new upload of a tenant whose routing row says `pipeline` is refused
+   with `503` `pipeline_tenant_not_served`, and does not take the legacy path.
+   An upload of a tenant whose row says `contained` is refused with `503`
+   `pipeline_receipt_intake_contained`. A tenant with no row, or whose row says
+   `legacy`, takes the legacy path.
+
+   Bring each tenant's audit rows level with its audit file first, before
+   any other request of this step. The audit file
+   (`tenants/<key>/audit/events.jsonl` under the ingest root) is not in the
+   database. It still holds the tenant's events from after the backup, and the
+   restored database does not: the file's chain is ahead of the database's.
+   In a deployment that requires the database mirror
+   (`TRACE_COMMONS_REQUIRE_DB_MIRROR_WRITES`, or account admission is on), the
+   database then refuses each new audit row of that tenant, because the row
+   does not chain from the database's own latest row. Until the two are level:
+
+   - `GET /v1/admin/pipeline/routing` answers `500`, so you cannot read the
+     state, the record id, or `active_bundle_qualified_on_revision`.
+   - `contain`, `deactivate`, and a policy intervention commit their change
+     and answer `500` `pipeline_change_committed_audit_failed`, with no
+     routing row in the answer. `qualifications` does the same.
+   - `POST /v1/admin/audit-chain-repair` does not repair this case. It
+     restores a file that is behind the database. Here the file is ahead, and
+     it answers `409` with the label `file_head_not_in_db`.
+
+   The database mirror backfill makes the two level. Send it for each tenant,
+   with that tenant's admin credential:
+
+   ```sh
+   curl -sS -X POST "$BASE/v1/admin/maintenance" \
+     -H "Authorization: Bearer $ADMIN" -H 'Content-Type: application/json' \
+     -d '{"backfill_db_mirror": true, "prune_export_cache": false, "purpose": "restore: audit rows from the file"}'
+   ```
+
+   It writes a database row for each event of the file that the database does
+   not have, in the file's order, and then appends its own audit row. In the
+   answer, `db_mirror_backfill_failed` must be 0. Then
+   `POST /v1/admin/audit-chain-drill` verifies the chain, and the routes of
+   this step answer. The call is `main`'s retention call, and the backfill is
+   one of its effects: it also writes the database rows of the tenant's other
+   file records that the database lost, and it marks expired and revoked
+   records. [pipeline-activation.md](pipeline-activation.md), "Legacy drain
+   report", lists the effects, the dry run, and the body that a deployment
+   with `TRACE_COMMONS_REQUIRE_DB_RECONCILIATION_CLEAN` needs. A tenant with
+   no audit event after the backup needs no backfill.
+
+   If a tenant must be stopped before its backfill, send `contain`. It
+   commits and stops the tenant's uploads, although it answers the `500`
+   label. The record id of that containment is in the log's error line
+   (`pipeline admin action committed and its audit row was not appended`, the
+   field `activation_record_id`), and `GET /v1/admin/pipeline/routing` shows
+   it after the backfill. A change that committed before the backfill gets no
+   audit row: its record is its routing event and its two log lines.
+
+   Check each tenant's routing before step 5 puts the processes back into client
+   traffic. A containment made after the backup comes back as `pipeline`, and step
+   5 would then take that tenant's uploads. Read each tenant's row and events
+   (`GET /v1/admin/pipeline/routing`, with the tenant's admin credential; it needs
+   only the routing store). Repeat a lost containment first
+   (`POST /v1/admin/pipeline/contain`, which needs only the routing store and
+   works in this configuration; it needs no expectation in its body).
+
+   Read `active_bundle_qualified_on_revision` in the same answer, for each
+   tenant, whatever its row says. A process refuses the new uploads of a tenant
+   whose row says `pipeline` while the tenant's active bundle has no
+   qualification on the process's revision (`503`
+   `pipeline_bundle_not_qualified`), and the restored database holds only the
+   qualifications from the time of the backup. Both scope lists are unset in
+   this step, so no start warning and no count names these tenants: this field
+   is the only place that shows them. For each tenant where it is `false`,
+   record the qualification again (`POST /v1/admin/pipeline/qualifications`,
+   which works in this step), or contain the tenant, before step 5. Where it
+   is null, the tenant has no active bundle, or the build has no revision; a
+   build with no revision refuses every `pipeline` tenant's new uploads (`503`
+   `bundle_runtime_revision_unknown`).
+
+   Check each tenant's policy suspensions too, also before step 5. Step 5
+   resumes Settle, credit, and the NEAR payout dispatch for every listed
+   tenant. A policy that was suspended after the backup is runnable again in
+   the restored database, and step 5 then scores, settles, and pays under it.
+   For each tenant, read `suspended_policy_count` (`GET
+   /v1/admin/pipeline/operational-summary`) and the interventions of each of
+   its bundles (`GET /v1/admin/pipeline/policy-interventions?bundle_id=...`).
+   `GET /v1/admin/pipeline/routing` names the active bundle, and its events
+   name the earlier ones. Repeat each lost suspension
+   (`POST /v1/admin/pipeline/policy-interventions` with the action `suspend`,
+   which works in this configuration). Repeat a lost suspension of a Settle
+   policy first. A `resume` made after the backup is lost too: the policy is
+   suspended again, and its runs wait until you resume it again.
+
+   The restored database cannot show a change that it lost. A containment or a
+   suspension made after the backup is gone from the row, from the events, and
+   from the interventions, so the restored state reads like a tenant that was
+   never contained or suspended. Find the lost changes in a record outside the
+   database:
+
+   - The ingest log. Each successful admin action logs one line, `pipeline
+     admin action recorded`, with the tenant's storage reference
+     (`tenant_sha256:...`), an action label (`qualify`, `activate`, `rollback`,
+     `contain`, `deactivate`, `policy_suspend`, `policy_resume`), and an
+     evidence hash. Read the lines from the time of the backup onward. A line
+     shows that an action happened, for which tenant, and when. It does not
+     show the bundle of an activation or a rollback, or the bundle and the
+     phase of a policy action.
+   - `main`'s audit file. Each successful admin action appends one event of
+     the kind `pipeline_activation` to the tenant's audit file
+     (`tenants/<key>/audit/events.jsonl` under the ingest root), which a
+     database restore does not reach. The event holds the actor's
+     `principal_ref`, the time, and an action label (`pipeline_qualify`,
+     `pipeline_activate`, `pipeline_rollback`, `pipeline_contain`,
+     `pipeline_deactivate`, `pipeline_policy_suspend`,
+     `pipeline_policy_resume`). Like the log line, it does not show the bundle
+     or the phase. An action that answered `500`
+     `pipeline_change_committed_audit_failed` can have no event there: the
+     log has an error line for it. The audit rows in the database are lost
+     with the other rows; the file is the copy to read.
+   - Your own record. The code keeps no other record of an admin action
+     outside the database. Keep a record of each admin action (the route, the
+     body, and the time) in a place that a database restore does not reach.
+
+   If you cannot tell whether a tenant was contained, or one of its policies
+   was suspended, after the backup, contain the tenant until you know.
+
+   Only four changes work in this step: `contain`, `deactivate`, and the
+   `suspend` and `resume` of a policy. `activate` and `rollback` do not. Both
+   scope lists are unset here, and these two routes refuse a tenant that is not
+   on the receipts list of the process (`409` `pipeline_tenant_not_in_scope`).
+
+   So an activation or a rollback that was made after the backup cannot be
+   repeated before step 5. The restored database selects the bundle from the
+   time of the backup. After a lost rollback, that is the bundle that you
+   rolled back from, and its row says `pipeline`: step 5 returns the tenant's
+   uploads to it. After a lost activation of a newer bundle, it is the bundle
+   that you replaced. After a lost first activation, the tenant has no row, or
+   its row says `legacy`, and step 5 sends its uploads to the legacy path. For
+   each such tenant, do this:
+
+   1. In this step, contain the tenant (`POST /v1/admin/pipeline/contain`).
+      Step 5 then takes none of its new uploads, on either path.
+   2. After step 5, repeat the change. Each `rollback` and each `activate`
+      needs `expected_record_id` in its body: the `activation_record_id` of
+      the tenant's routing row, which `GET /v1/admin/pipeline/routing` shows
+      and which the answer of your last change also carries (the containment
+      of step 1 here). Without it the answer is `422`
+      `pipeline_request_invalid`; with an id that is no longer in force it is
+      `409` `pipeline_routing_state_changed`. For a lost rollback, send
+      `rollback` for the earlier bundle, with the record id of the
+      containment. The tenant stays contained. Then send `activate` for that
+      bundle, which is now the active one, with the record id that the
+      rollback answered, to open the tenant again. For a lost activation,
+      send `activate` for the bundle again, with the record id of the
+      containment. That activation opens the tenant.
+
+   A qualification that was recorded after the backup is lost too, and the
+   gate needs it: record it again (`POST /v1/admin/pipeline/qualifications`,
+   which works in this step) before the `rollback` or the `activate`. A lost
+   `deactivate` can be repeated in this step. Send it with the
+   `activation_record_id` that `GET /v1/admin/pipeline/routing` shows as
+   `expected_record_id`. For a tenant that you contained in this step, the
+   `deactivate` is refused without that id (`409`
+   `pipeline_routing_expectation_required`); `expected_state` alone is not
+   enough.
 4. For each tenant, call `POST /v1/workers/pipeline/index-rebuild` with that
    tenant's vector worker bearer token or an admin token -- the same gate
    as `main`'s vector index worker route (see
@@ -174,23 +340,57 @@ answers `404` there. Do these steps in this order:
    second request for a tenant whose rebuild is running is refused (`409`
    `pipeline_index_rebuild_in_progress`). A run's writes hold its rows for
    at most the smaller of the Settle lease and 30 seconds; past that, the
-   rebuild stops with `503` `index_unavailable`. A rerun starts again from
+   rebuild stops with `503` `index_unavailable`. A run's deadline starts before
+   its fence write (below), so it includes the wait for the run's row lock: a
+   slow wait, for a withdrawal that holds the row for example, fails the run
+   with `503` `index_unavailable` and writes nothing. A rerun starts again from
    the first run and reports the entries already written as unchanged; a
-   run whose writes take longer than that deadline fails on every rerun.
+   run whose writes take longer than that deadline fails on every rerun. A
+   fence that cannot be written (a database fault) stops the rebuild before
+   that run's first write with `503` `index_rebuild_fence_unavailable`. Rerun
+   once the database is healthy.
 
-   A withdrawal during the rebuild is safe because of step 3, not because
-   no withdrawal happens: withdrawals come from clients, from `main`'s
-   retention maintenance, and from the revocation-propagation reconciler,
-   and keeping client traffic away stops only the first. A run withdrawn
-   before its entries are written is skipped. A withdrawal of a run whose
-   entries are being written usually waits for them, but not always (a lost
-   database session, a stopped rebuild, a process exit), and it queues the
-   run's removal at once. With both lists unset, no worker processes that
-   removal until step 5, so it always runs after the rebuild's last write.
-   Run the rebuild only in step 3's configuration, on every process: a
-   process that drains or routes the tenant would process the removal
-   during the rebuild. A fence that closes this without step 3 (a committed
-   rebuild marker that the withdrawal's removal reads) is PR 5 work.
+   A withdrawal during the rebuild is safe because of the rebuild's fence, not
+   because no withdrawal happens: withdrawals come from clients, from `main`'s
+   retention maintenance, and from the revocation-propagation reconciler, and
+   keeping client traffic away stops only the first. A withdrawal of a complete
+   run queues the run's index removal at once. While a tenant has an unexpired
+   row in `pipeline_index_rebuild_fences` (V113), no worker in any process
+   claims that tenant's index invalidations, so a removal cannot run before the
+   rebuild's last write:
+
+   - A rebuild keeps one row for itself. Before each run's writes it sets the
+     row to the run's deadline plus the fence margin (60 seconds,
+     `PIPELINE_INDEX_WRITE_FENCE_MARGIN_SECONDS`), and it never shortens it.
+     When the rebuild ends it deletes its own row and the tenant's expired rows.
+   - A rebuild never shortens or deletes another rebuild's row. Two rebuilds of
+     one tenant (a client retry that reaches another replica, for example) each
+     hold their own fence.
+   - A run withdrawn before its entries are written is skipped: the rebuild
+     looks at the run again after it has set the fence.
+   - A withdrawal of a run whose entries are being written usually waits for
+     them, but not always (a lost database session, an abort past the shutdown
+     grace period, a process exit). The fence then holds the removal back until
+     the write's time has passed.
+   - A rebuild that is lost leaves its row, and the row expires on its own. A
+     rebuild is lost by a lost session, an abort, a process exit, or an index
+     call still running at the deadline plus the margin.
+   - The fence of a lost rebuild holds the tenant's index removals back for at
+     most 90 seconds at the defaults. That is a run deadline of 30 seconds (the
+     smaller of the Settle lease and the 30 second dispatch budget) plus the
+     60 second margin, counted from the lost rebuild's last fence write. The
+     worker then claims the removals on its next invalidation pass. No operator
+     action is needed. The tenant's next rebuild deletes the expired row when it
+     ends.
+   - The margin is a contract with the index writer. The fence does not enforce
+     it. The guarantee holds as long as each index call returns within the 60
+     second margin; an index call that takes longer is outside what the fence
+     covers.
+
+   Step 3 stays. The route still refuses a tenant that its own process routes or
+   drains (`409` `pipeline_index_rebuild_tenant_active`), because a Score of that
+   tenant must not read a partly rebuilt index, and that refusal reaches only its
+   own process. Run the rebuild only in step 3's configuration, on every process.
 5. Restart every `trace-commons-ingest` process with both lists set back to
    their values before the restore. The worker then resumes the pending
    runs, and processes the queued invalidations and payouts, against the

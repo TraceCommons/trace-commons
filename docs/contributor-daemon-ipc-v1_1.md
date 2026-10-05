@@ -5574,6 +5574,364 @@ connection id is written. The per-device state (a selection awaiting install,
 and what was installed) is in `daemon-inference-connection.json` and is
 removed at logout.
 
+## Native network additions: C3 (#1173)
+
+**Contract-only baseline (2026-10-01).** This section specifies additive
+interfaces before behavioral implementation. It does not assert that these
+methods are registered or that a pilot recording, signed app or deployment
+exists. Check `hello.methods` before calling a new method; absence means
+unsupported (`unknown_method`), never an empty result. Existing methods and
+fields retain their contracts. The tables distinguish a reusable backend from
+an implemented daemon method. Implementations may add response fields; callers
+must ignore fields they do not recognize.
+
+All JSON blocks in this section are **SAMPLE**, synthetic contract examples,
+not pilot observations. C1 may use them only in debug and previews, clearly
+marked `// SAMPLE`; release builds never substitute them for unavailable data.
+The normal IPC envelope carries the objects below as `params` and `result`.
+Dates use RFC3339, UUIDs are strings, counters are nonnegative integers and
+unknown amounts are `null`, never zero. Errors use the existing taxonomy with
+fixed labels; never pass a remote response body, URL, invite, token or platform
+error string into `error.message`.
+
+| Method | Parameters | Reply | Support at contract baseline |
+|---|---|---|---|
+| `inference_summary` | `since?`: RFC3339; default previous 24 hours | `readable`, `window_hours`, `observed_at`, `summary` | IronWire summary exists; daemon wrapper new |
+| `inference_call_proof` | `call_id`: positive integer | `call_id`, `proof`, `checked_at`, `checks`, `readable`, `found` | Stored proof labels exist; method and registration new |
+| `model_spend` | none | `known`, `scope`, `source`, `since`, `models`, `reason_label` | Organization-wide provider billing; see the Z4 source contract below |
+| `private_ai` | none | `on`, `state`, `port`, `disclosure` | Hosting state and Rust disclosure exist; wrapper new |
+| `set_private_ai` | `on`: boolean; `confirmed: true` when enabling | same as `private_ai` | Reuses existing async hosting lifecycle; wrapper new |
+| `mission_catalogue` | `limit?`: 1–50, default 20; `before?`: UUID | `kind`, `catalogue`, `disclosure` | Public skill-evaluation catalogue/client exist; IPC new |
+| `invite_lookup` | `code`: full invite URL | protocol `InviteLookupResponse` | Issuer lookup/client exist; IPC new |
+| Native passkey/account methods | see below | token-free replies below | Server routes exist; daemon and native adapter new |
+| `history_rollup` | none | existing optional `community` | Already implemented; authoritative standing surface |
+
+### `inference_summary`
+
+SAMPLE request: `{"since":"2026-09-30T00:00:00Z"}`. SAMPLE result:
+
+```json
+{
+  "readable": true,
+  "window_hours": null,
+  "observed_at": "2026-10-01T00:00:00Z",
+  "summary": {
+    "enabled": true,
+    "receipts": true,
+    "since": "2026-09-30T00:00:00Z",
+    "groups": [{
+      "model": "example-model", "backend": "nearai", "route": "routed",
+      "work_kind": null, "calls": 3, "priced_calls": 2, "cost_usd": 0.02,
+      "proof": {"verified":1,"gateway_only":1,"unattested":0,"pending":1,"unavailable":0,"failed":0,"outside":0,"unrecorded":0}
+    }],
+    "routed": {"calls":3,"priced_calls":2,"cost_usd":0.02,"proof":{"verified":1,"gateway_only":1,"unattested":0,"pending":1,"unavailable":0,"failed":0,"outside":0,"unrecorded":0}},
+    "outside": {"calls":0,"priced_calls":0,"cost_usd":0.0,"proof":{"verified":0,"gateway_only":0,"unattested":0,"pending":0,"unavailable":0,"failed":0,"outside":0,"unrecorded":0}},
+    "unknown": {"calls":0,"priced_calls":0,"cost_usd":0.0,"proof":{"verified":0,"gateway_only":0,"unattested":0,"pending":0,"unavailable":0,"failed":0,"outside":0,"unrecorded":0}}
+  }
+}
+```
+
+`summary` preserves the Cargo-pinned IronWire `/_ironwire/summary` shape,
+including its `(model, backend, route, work_kind)` groups and route totals;
+it does not rewrite the upstream DTO into one row per model. The contributor
+validates bounds, counter consistency, finite nonnegative prices and safe
+labels before exposing it. Arbitrary backend text is not a verified provider
+identity. `route` and proof counts come from stored proof statuses; no inference
+from the backend's spelling. A future bounded upstream `work_kind` string
+contributes to the opaque group identity, but is not displayed: this client
+returns `work_kind: null` until classification has an approved display contract. The summary contains no protocol family; do not invent `family`.
+
+`cost_usd` is **registry-priced cost, not billed spend**, including for an
+`api_key` backend. `priced_calls < calls` means incomplete pricing. Only
+`verified` counts are model proof; `failed` stays distinct. `enabled: false`
+means capture is disabled, not an observed empty window. `receipts` reports
+the upstream receipts setting, not that every call was verified.
+
+SAMPLE unavailable result:
+
+```json
+{"readable":false,"window_hours":24,"observed_at":null,"summary":null}
+```
+
+A refused, malformed, stale or unreachable read must not manufacture empty
+measured groups. `window_hours` is 24 for the default window and `null` for an
+explicit `since`; `summary.since` is the authoritative lower bound. Polling is
+bounded, authenticated to the existing loopback control API, content-free and
+read-only. It never fetches prompts, responses or receipt bodies.
+
+**C1 migration:** `InferenceSummary.models` / `ModelSummary` in #1175 were
+explicitly provisional. Decode this wrapper and the actual upstream DTO;
+identify group rows by `group_id`, with all grouping fields as the legacy
+fallback, never by `model` alone. A separate
+view projection may aggregate per model but must retain incomplete pricing,
+route/proof distinctions and the distinction between unknown and empty.
+This contract does not authorize editing the teammate's open branch.
+
+### Proof detail and billed spend
+
+SAMPLE `inference_call_proof` request: `{"call_id":412}`; SAMPLE result:
+
+```json
+{"call_id":412,"proof":"gateway_only","checked_at":null,"checks":null,"readable":true,"found":true}
+```
+
+This is a lookup of the stored `inference_calls` label, not a fresh attestation
+check. The ledger records neither a check timestamp nor detailed checks, so
+`checked_at` and `checks` are always `null` for this source. For an absent row
+return `found:false, proof:"unrecorded"`; for an unreadable ledger also return
+`readable:false`. Neither case asserts `outside` or verification. A zero,
+negative or noninteger `call_id` is `bad_params` / `call-id-invalid`.
+
+SAMPLE `model_spend` request: `{}`; SAMPLE result:
+
+```json
+{"known":false,"since":null,"models":[],"reason_label":"billed-model-spend-unavailable"}
+```
+
+This unknown result is returned when authoritative provider billing is
+unavailable; it is never a zero balance. The Z4 source contract below defines
+known organization-wide provider rows, their window, exact nano-USD amounts
+and rounded display amounts. IronWire summary prices, backend kinds,
+account-wide NEAR AI balance and the existing harness daily price estimate
+cannot be converted into billed-per-model facts.
+
+### Private AI switch
+
+SAMPLE `private_ai` request: `{}`; SAMPLE result:
+
+```json
+{
+  "on": false, "state": "off", "port": null,
+  "disclosure": "While it is on, anything else running on this computer can send calls through it as well, charged to the accounts you have set up here. On a computer only you use that is your own software; on a shared one it is anyone who can log in."
+}
+```
+
+SAMPLE `set_private_ai` request: `{"on":true,"confirmed":true}`. Both replies
+separate the requested setting (`on`, nullable when unreadable) from the actual
+`private_inference_state.state` and port documented under `set_settings`.
+`stopping`, `running_elsewhere`, `start_failed` and `crashed` are not running.
+An unreadable read uses `on:null, state:null, port:null`, not `off`.
+
+The disclosure is the existing Rust `private_inference_copy::OFFER_EXPOSURE`,
+returned from the core, not authored by Swift. Enabling requires the person's
+explicit answer after the core disclosure; a missing/false `confirmed` is
+`bad_params` / `confirmation-required`. Disabling requires `on:false` and
+may omit `confirmed`. The wrapper uses the existing async `set_settings`
+validation/persistence/reconciliation for `private_inference`. Only confirmed
+enabling marks `private_inference_offer_seen`; disabling preserves its prior
+value, so writing off cannot suppress an offer that was never shown. The
+wrapper does not create another proxy lifecycle.
+Enabling does not repoint tools, select a provider, grant body/contribution
+consent, or enroll an account. Turning off stops only the owned instance.
+
+Z5 extends existing `tool_destinations` additively; its existing fields retain
+their shape. Observed `outside` calls may traverse the owned proxy while their
+provider remains unknown. A tool default is still `basis:"tool_default"`, not
+observed traffic. An owned-loopback hub uses actual hosting state/port; no
+SSH/dev-server discovery or unobserved bypass traffic is claimed. K14 retains
+ownership of counts, tool attribution and new-call events.
+
+### Catalogue, standing and invite lookup
+
+SAMPLE `mission_catalogue` request: `{"limit":20}`; SAMPLE result:
+
+```json
+{
+  "kind": "skill_evaluation",
+  "disclosure": "SAMPLE: catalogue disclosure from the Rust core",
+  "catalogue": {
+    "schema_version": 1,
+    "entries": [{
+      "mission_id": "00000000-0000-4000-8000-000000000001",
+      "program_id": "00000000-0000-4000-8000-000000000002",
+      "package_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "offer_version_hash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "task_preview": "SAMPLE: evaluate a reviewed skill package against its controls.",
+      "published_at": "2026-10-01T00:00:00Z"
+    }],
+    "next_cursor": null
+  }
+}
+```
+
+`disclosure` carries the Rust-owned catalogue consent explanation; the SAMPLE
+placeholder is not release copy and grants no copy approval. `catalogue` is the unchanged protocol `MissionCatalogPage` from anonymous
+`GET /v1/missions`, read through the existing bounded, no-redirect
+`MissionCatalogClient`. `before` is the previous page's `next_cursor`;
+`package_sha256` is bare lowercase hex and `offer_version_hash` is `sha256:`
+plus lowercase hex. `task_preview` is plaintext, at most 240 Unicode scalar
+values. This is a catalogue of **skill-evaluation packages**, not daily tasks.
+An unavailable fetch is `unavailable` / `mission-catalogue-unavailable`, never
+an empty successful catalogue. No profile, local signals, match result or
+person-specific ranking goes into this request. Matching stays on the Mac;
+matching must not trigger a person-specific fetch. An entry grants no execution,
+model spend, capture, sending or contribution permission.
+
+The catalogue currently supplies no daily assignments, completion rewards,
+levels, streaks, badges or pending-credit range. The commons record is the
+settled ledger of record for pending credit (#1118); dollars remain a near.ai
+link-out. Daily mission economics and the credit-to-inference bridge remain
+unspecified in #1174/#1118. Build the configurable missions server with rewards
+off; do not invent reward arithmetic or a `missions[]` DTO with fabricated
+credits. Future pending credit must carry its condition and never be described
+as earned. Standing
+uses the existing `history_rollup.community` unchanged: absent object means no
+standing, nullable rank means unknown, and no percentile is implied by rank.
+
+SAMPLE `invite_lookup` request:
+`{"code":"https://issuer.example/onboard#SAMPLE-CODE"}`; SAMPLE result:
+
+```json
+{"valid":true,"issuer_display_name":"SAMPLE Pilot","credit_range":{"min":1,"max":5,"unit":"points_per_accepted_trace"}}
+```
+
+Despite C1's argument name `code`, it carries a **full invite URL**, parsed by
+the existing `commands::parse_invite`; a bare code has no issuer and is refused.
+Use the configured host allowlist (`allowlist_for(None)` when unenrolled),
+never a caller-supplied host override. HTTPS is required except for literal
+loopback IP addresses; a hostname such as `localhost` does not grant that
+exception. The issuer request is the existing
+`POST /v1/invite/lookup` with
+`{schema_version:"trace_commons.invite_lookup_request.v1",invite_code}` in its
+body, never its URL. This read neither consumes an invite nor enrolls/writes
+identity. On invalid invite return the protocol's fixed
+`reason_label: malformed|not_found|expired|exhausted|revoked`. Success metadata
+may be absent. Transport failure is unavailable, not an invalid invite.
+
+Credit is an operator-set **estimated credit per accepted trace, not yet
+settled**, never a payment promise. C1's provisional `CreditRange.unit` comment
+`points` must change to the real `points_per_accepted_trace`; lookup credit is
+not daily mission credit. Perform lookup for an explicit action, not on every
+keystroke. Display-name/range bounds must be validated before presentation.
+
+### Native passkey and account identity
+
+The C1 names in the approved [native passkey design](superpowers/specs/2026-09-28-native-passkey-identity-design.md)
+are authoritative. That design remains on the #1120 branch at this contract
+baseline; its proposed screen copy is **not approved** by this contract.
+The native app uses only Apple's platform passkey provider, while one Rust
+encoder creates the WebAuthn JSON. All raw byte fields below use canonical,
+unpadded base64url. The app receives no native bearer, NEAR AI token, device
+key, tenant identity or secret-store reference.
+
+| Method | Parameters | Token-free result |
+|---|---|---|
+| `passkey_create_begin` | `label?`, `ingest_url?` | registration options below |
+| `passkey_create_complete` | `ceremony`, `credential_id`, `raw_client_data_json`, `raw_attestation_object` | `{binding_state}` |
+| `passkey_login_begin` | `ingest_url?` | assertion options below |
+| `passkey_login_complete` | `ceremony`, `credential_id`, `raw_client_data_json`, `raw_authenticator_data`, `signature`, `user_handle` | `{binding_state}` |
+| `passkey_add_begin` | `label?` | registration options below |
+| `passkey_add_complete` | same fields as create complete | `{binding_state}` |
+| `passkey_cancel` | `ceremony` | `{cancelled:true}` |
+| `account_bind` | none | `{outcome,binding_state}` |
+| `account_binding` | none | `{binding_state}` |
+| `passkey_state` | none | `{state,passkey_count,near_ai_connected}` |
+| `account_sign_in` | `ingest_url?` | `{signed_in:true,expires_at}` |
+| `account_session_status` | none | `{state,signed_in,expires_at}` |
+| `account_sign_out` | none | `{signed_out:true}` |
+
+`label` is optional, at most 64 characters. A no-config create/login may name
+an `ingest_url` only when its canonical origin equals the compiled production
+API origin `https://ingest.tracecommons.ai`; omitting it selects that origin.
+A retained unconfigured session must satisfy the same trust root. Explicit
+operator configuration retains its host policy. Once a config or pre-enrollment
+session pins an origin, a caller cannot substitute another one. The native
+Swift adapter exposes no caller-supplied ingest URL. Begin stores the server ceremony privately and returns
+an opaque local `ceremony` handle pinned to action, origin, expiry and current
+credential/config lifecycle. Adding a passkey reloads the current token and
+permits ordinary rotation only within the same lifecycle and account. Complete
+consumes the ceremony once; cancel invalidates it.
+Sign-out, wipe or identity/config replacement invalidates stale finishes.
+Complete accepts no origin, account or tenant parameters.
+
+SAMPLE create/add begin result:
+
+```json
+{
+  "ceremony": "SAMPLE-local-handle", "rp_id": "tracecommons.ai",
+  "challenge": "AQID", "user_id": "BAUG", "user_name": "SAMPLE passkey",
+  "user_display_name": "SAMPLE passkey", "attestation": "none",
+  "expires_in_secs": 180, "exclude_credentials": [],
+  "user_verification": "preferred", "authenticator_attachment": "platform",
+  "resident_key": "preferred", "algorithms": [-7]
+}
+```
+
+SAMPLE login begin result:
+
+```json
+{"ceremony":"SAMPLE-local-handle","rp_id":"tracecommons.ai","challenge":"AQID","expires_in_secs":180,"user_verification":"preferred","allowed_credentials":[]}
+```
+
+Verification/resident-key options are the validated server values
+`required|preferred|discouraged`, not permission for the app to downgrade them.
+`exclude_credentials` and login's `allowed_credentials` contain canonical
+credential IDs, with at most 128 entries per list. An empty login list selects
+a discoverable credential. `user_display_name` is the validated server display
+name, falling back to `user_name`; `attestation` preserves the validated server
+preference `none|direct|indirect`, defaulting to `none`. These three fields are
+additive to the original C3 begin options. Creation uses the platform provider
+and algorithms the adapter actually supports (ES256 `-7`).
+Refuse unsupported server options rather than silently weakening them.
+
+SAMPLE create/add complete request:
+
+```json
+{"ceremony":"SAMPLE-local-handle","credential_id":"AQID","raw_client_data_json":"BAUG","raw_attestation_object":"BwgJ"}
+```
+
+SAMPLE login complete request:
+
+```json
+{"ceremony":"SAMPLE-local-handle","credential_id":"AQID","raw_client_data_json":"BAUG","raw_authenticator_data":"BwgJ","signature":"CgsM","user_handle":"DQ4P"}
+```
+
+These bytes illustrate encoding only and are not valid credentials. SAMPLE
+complete result: `{"binding_state":"unbound"}`. Binding read values are
+`unbound|bound|closed|legacy`; `legacy` means no passkey-origin binding row,
+not proof of a NEAR AI connection. A signed-out binding read is unavailable,
+not `unbound`. `passkey_state.state` projects those labels, or `none` when
+signed out and `unknown` when unreadable. `passkey_count` is nullable until
+an authenticated source answers; `near_ai_connected` is nullable unless an
+authenticated identity fact establishes it. Never infer a count of zero or
+connected status from a missing binding row.
+
+Native login is discoverable authentication: `user_handle` must contain the
+nonempty raw Apple user ID encoded as canonical base64url. A missing or empty
+handle is an incomplete credential and must not reach login completion.
+
+SAMPLE account status:
+
+```json
+{"state":"known","signed_in":true,"expires_at":"2026-10-02T00:00:00Z"}
+```
+
+Signed-out status has `state:"known", signed_in:false` and null expiry;
+unreadable OS storage has `state:"unknown", signed_in:null` and null
+expiry. Raw account identifiers do not cross this status surface. It must not become signed out merely because Keychain refused
+a read. Status and sign-out support a pre-enrollment account without creating a
+fake config. `account_sign_in` reuses existing browser/PKCE machinery where
+its enrollment prerequisites hold; without real enrollment configuration it
+refuses with `unavailable` / `account-enrollment-required`. An unenrolled
+account uses the native passkey create/login path. Browser URL exposure is bounded to the live sign-in attempt and
+uses the existing URL validation/opening controls.
+
+`account_bind` reuses retained NEAR AI provisioning against the authenticated
+bind start/finish routes and the **bind-specific** proof preimage. SAMPLE
+result: `{"outcome":"bound","binding_state":"bound"}`. An
+`existing_account` outcome switches to the existing account and closes the
+unbound account; its passkey is not transferred (S6 fold is deferred). Tokens,
+rotations and atomic device/config persistence stay in Rust/Keychain. Binding
+creates no folder/trace/body consent. Native login remains weak and native add
+keeps the existing first-strong-authenticator gate; adding another requires
+browser passkey step-up.
+
+The Associated Domains entitlement, approved profile bytes, deployed AASA and
+signed create/login origin check are **release gates**. Local/mock tests do
+not establish Apple origin behavior or satisfy the spec's S3 deployment gate.
+This contract approves no new screen copy, deployment, profile fabrication or
+relaxation of origin/CORS/CSP controls.
+
 ## Events
 
 | Event | When | Data |
@@ -5824,3 +6182,125 @@ per folder, `legacy-invite-migrated`), and
 through its copy commands, macOS and Windows through
 `tc_legacy_migration_notice`, GTK directly; each passes the `notice` object
 through unread and acknowledges with `acknowledge_legacy_invite_migration`.
+
+## Zaki network addendum: provider model spend and summary identity (#1173)
+
+This addendum supersedes the initial `model_spend` unavailable-only contract.
+`model_spend {}` is asynchronous and uses the existing connected NEAR AI session,
+selected inference-key organization (or the existing first-active-organization
+fallback for a legacy session), and the fixed trusted management origin
+`https://cloud-api.near.ai`. It requests
+`GET /v1/organizations/{organization}/usage/by-model?period=day`. The deployed
+[provider OpenAPI](https://cloud-api.near.ai/api-docs/openapi.json) defines this
+session-authenticated rolling 24-hour report. No registry price estimate is
+converted into an actual cost, and no additional reporting token is minted.
+
+A known reply has the following fields; all metadata shown is mandatory:
+
+```json
+{"known":true,"scope":"near_ai_organization","source":"near_ai_usage_by_model","currency":"USD","scale":9,"window_hours":24,"since":"2026-10-01T12:00:00Z","observed_at":"2026-10-02T12:00:00Z","models":[{"model":"example-model","billed_nanos":1501,"billed_micros":2,"rounding":"nearest_micro_half_up","calls":3}]}
+```
+
+This is a SAMPLE, not a release fallback. `since` is the provider's `start_date`,
+validated as an RFC3339 UTC timestamp no later than the daemon observation time;
+`observed_at` is the daemon's completion time. `billed_nanos` retains the exact
+provider usage cost in nanoUSD (the official [usage source](https://github.com/nearai/cloud-api/blob/88989203c8172fd19c46c2b0082c71b024925f49/crates/api/src/routes/usage.rs#L1624) specifies scale 9). `billed_micros` is a compatibility amount rounded
+to the nearest microUSD, half upward; `rounding` makes that conversion explicit.
+Counts and native costs must be nonnegative signed 64-bit integers. Model labels
+use the existing content-free label sanitizer. Display model labels are not
+guaranteed unique after sanitization: consumers must retain every row and use
+row position as identity when needed, rather than grouping by the display label. Provider display prose, organization
+identifiers, access tokens, inference credentials, and refresh tokens are omitted.
+
+The scope is the connected NEAR AI organization's usage across its callers. It is
+not a sum attributed to this machine, its local proxy, a tool, or its local ledger;
+it is not a payment, invoice, settlement, or cryptographic receipt. Empty provider
+`data` is a readable known report with `models: []`, rather than an unavailable
+report. Readable zero-cost rows retain their zero.
+
+No session, expired session, no organization, unavailable transport, or malformed
+source data returns `known:false`, `since:null`, `observed_at:null`, `models:[]`,
+`reason_label:"billed-model-spend-unavailable"`, and `state` equal to respectively
+`no_session`, `session_expired`, `no_organization`, or `unavailable`. Scope, source,
+currency, scale, and window remain present with the values above. Unknown never
+means known zero and never serves the last successful amount after a failed read.
+The balance and model-spend reads share the existing session rotation lock,
+conservative access-token reuse, single 401 retry, and stored-connection completion
+check. A forgotten or replaced account cannot receive an in-flight old account's
+cost report. Successful readings have the same 60-second cache policy as balance.
+The synchronous dispatcher returns `model-spend-requires-async`; socket and local
+CLI callers use the asynchronous dispatcher.
+
+Each newly returned `inference_summary.summary.groups` row also carries mandatory
+`group_id`, formatted `sha256:<64 lowercase hexadecimal digits>`. This is SHA-256
+of the canonical JSON array `[original_model, original_backend, original_route,
+original_work_kind]` before content-free label normalization. It is an opaque row
+identity, not a verified provider identity or an anonymization guarantee.
+These unsalted digests can be guessed from a dictionary of likely inputs. Backend labels continue to retain only
+the vetted `nearai` label or an opaque digest. Original model labels that normalize
+to the same display value therefore remain separate rows with separate stable IDs;
+no group counts, costs, or proof totals are merged or lost. Older daemons may omit
+`group_id`; clients may retain their existing tuple fallback for those versions.
+The summary wrapper preserves the validated upstream groups and totals, with these
+explicit identity and privacy normalizations.
+
+## Configured activity missions (Z7)
+
+`activity_missions_catalogue` and `activity_missions_status` each accept only
+an empty params object `{}`. Both are async methods advertised in `hello`.
+Unknown fields, including profile, matching results, session/account identifiers,
+URLs and pagination, are `bad_params` / `activity-missions-params-invalid` before
+credentials or HTTP are read. This is separate from the `mission_catalogue`
+skill-evaluation domain.
+
+`activity_missions_catalogue` returns
+`{"catalogue":<ActivityCatalogue>,"disclosure":<Rust-owned string>}`. Its inner
+schema-v1 protocol DTO comes from anonymous `GET /v1/activity-missions` at the
+stored ingest origin; an upload endpoint such as `/v1/traces` contributes only
+its origin. The complete bounded common policy is fetched independently of local
+matching. `kind` is `trace_activity`; `state: unconfigured` with null policy and
+digest is a real fetched state, not a fallback for a failed request. A configured
+policy and its canonical SHA-256 digest must agree. No account/device credential,
+profile or matching result goes to the public request.
+
+`activity_missions_status` returns
+`{"status":<ActivityProgress>,"disclosure":<Rust-owned string>}` from authenticated
+`GET /v1/account/activity-missions/status`, using the stored native account
+session. It accepts no caller-supplied principal or completion assertion. The
+unchanged DTO includes authoritative contribution qualification/source, UTC
+coverage/month dates, observation time, nullable daily/streak/level/badge fields
+and the policy digest. Unconfigured daily rules, levels and badges retain their
+null semantics; they do not become zero progress or invented defaults. Progress
+may decrease after withdrawal/revocation and is a current projection, not an
+irrevocable award. Account-token rotation is retained on success and refusal;
+rotation persistence failure refuses the result. Account/config snapshot checks
+before sending and after HTTP also refuse late progress from an account that
+signed out or changed while the request was in flight.
+
+Response envelopes and progress rows tolerate additive unknown fields and
+omit them from IPC. Known schema versions, policy digests, reward flags and
+credit conditions remain enforced. Policy and nested rule objects remain strict
+and digest-covered; changing their shape requires a supported schema-version
+change rather than an unversioned extension.
+
+Both replies carry `consent_copy::ACTIVITY_MISSIONS_DISCLOSURE` assembled in Rust.
+Neither read changes capture, contribution consent, project modes, scopes,
+approvals or uploads. Status can update only a rotated account credential.
+Rewards are hard-disabled: `rewards_enabled` is false,
+`credit_points_pending` is null, and `credit_condition` is
+`mission_credit_ledger_unavailable`. A response claiming activated rewards or
+mission credit is refused. Corpus credit and skill-evaluation awards remain
+separate.
+
+Responses are limited to 128 KiB, HTTP is allowed only on literal loopback IPs,
+and configured host allowlists apply. Proxies and redirects are disabled. Safe
+errors never include URLs or remote bodies: `unavailable` /
+`activity-missions-unavailable` for config, host, transport, status, bounds or
+response-validation failure; `unavailable` / `account-session-required` for no
+live native account; `unavailable` / `commons_credential_storage_unavailable`
+for credential read or rotation persistence failure. Unavailable is never an
+empty catalogue or a zero progress response.
+
+See `docs/superpowers/specs/2026-10-02-configured-activity-missions-design.md`
+for the operator policy and qualification rules. The policy is optional; this
+adapter does not choose thresholds or activate economics.

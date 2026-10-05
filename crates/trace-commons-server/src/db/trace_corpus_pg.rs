@@ -2510,6 +2510,85 @@ impl TraceCorpusStore for PgBackend {
         records
     }
 
+    async fn account_activity_days(
+        &self,
+        tenant_id: &str,
+        principal_refs: &[String],
+        starts_at: DateTime<Utc>,
+        observed_at: DateTime<Utc>,
+        qualification: trace_commons_protocol::activity_missions::Qualification,
+    ) -> Result<Vec<trace_commons_protocol::activity_missions::ActivityDay>, DatabaseError> {
+        use trace_commons_protocol::activity_missions::{ActivityDay, Qualification};
+        if observed_at < starts_at || observed_at - starts_at > chrono::Duration::days(366) {
+            return Err(DatabaseError::Query(
+                "activity_missions_window_invalid".into(),
+            ));
+        }
+        if principal_refs.is_empty() {
+            return Ok(Vec::new());
+        }
+        let statuses: &[&str] = match qualification {
+            Qualification::Accepted => &["accepted"],
+            Qualification::ReceivedOrAccepted => &["received", "accepted"],
+        };
+        let mut client = self.trace_pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        tx.batch_execute("SET LOCAL statement_timeout = '5s'")
+            .await?;
+        // One SELECT means one MVCC snapshot. Both withdrawal ledgers are
+        // authoritative even while the asynchronous cleanup has not yet
+        // changed the submission status. No trace body/profile is selected.
+        let rows = tx
+            .query(
+                "SELECT (submission.received_at AT TIME ZONE 'UTC')::date AS day,
+                    count(DISTINCT submission.submission_id) AS contributions
+               FROM trace_submissions submission
+              WHERE submission.tenant_id = $1
+                AND submission.auth_principal_ref = ANY($2)
+                AND submission.received_at >= $3 AND submission.received_at <= $4
+                AND submission.status = ANY($5)
+                AND submission.revoked_at IS NULL AND submission.purged_at IS NULL
+                AND (submission.expires_at IS NULL OR submission.expires_at > $4)
+                AND NOT EXISTS (
+                    SELECT 1 FROM trace_withdrawals withdrawal
+                     WHERE withdrawal.tenant_id = submission.tenant_id
+                       AND withdrawal.submission_id = submission.submission_id)
+                AND NOT EXISTS (
+                    SELECT 1 FROM trace_submission_sessions mapping
+                    JOIN trace_source_sessions source
+                      ON source.tenant_id = mapping.tenant_id
+                     AND source.account_id = mapping.account_id
+                     AND source.session_digest = mapping.session_digest
+                     WHERE mapping.tenant_id = submission.tenant_id
+                       AND mapping.submission_id = submission.submission_id
+                       AND source.withdrawn_at IS NOT NULL)
+              GROUP BY (submission.received_at AT TIME ZONE 'UTC')::date
+              ORDER BY day",
+                &[
+                    &tenant_id,
+                    &principal_refs,
+                    &starts_at,
+                    &observed_at,
+                    &statuses,
+                ],
+            )
+            .await?;
+        let days = rows
+            .iter()
+            .map(|row| {
+                let count: i64 = row.try_get("contributions")?;
+                Ok(ActivityDay {
+                    day: row.try_get("day")?,
+                    contributions: u64::try_from(count).map_err(|_| {
+                        DatabaseError::Query("activity_missions_count_invalid".into())
+                    })?,
+                })
+            })
+            .collect::<Result<Vec<_>, DatabaseError>>()?;
+        tx.commit().await?;
+        Ok(days)
+    }
+
     async fn upsert_trace_tenant_policy(
         &self,
         policy: TraceTenantPolicyWrite,
