@@ -628,4 +628,5 @@ private final class NoDaemon: FirstRunDaemon {
     func grantAutomatic(witness: String?) async -> FirstRunGrantAnswer { .refused(label: "none") }
     func markComplete() async -> Bool { false }
     func markWatchOnlyComplete() async -> Bool { false }
+    func firstRunFinished(notice: String?) {}
 }

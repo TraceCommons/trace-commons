@@ -59,6 +59,10 @@ final class RecordingFirstRunDaemon: FirstRunDaemon {
 
     func markComplete() async -> Bool { record(.markComplete) }
     func markWatchOnlyComplete() async -> Bool { record(.markWatchOnlyComplete) }
+
+    /// What each finished first run handed over, in order.
+    var finished: [String?] = []
+    func firstRunFinished(notice: String?) { finished.append(notice) }
 }
 
 /// The failure each call reports when the daemon refuses it.

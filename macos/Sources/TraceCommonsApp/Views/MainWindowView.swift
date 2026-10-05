@@ -775,6 +775,14 @@ struct ShellNotices: View {
                 .padding(.horizontal, TC.Space.md)
                 .padding(.top, TC.Space.s)
             }
+            // A finished first run's last word (Automatic was refused, so
+            // sharing is on Ask me). Here because the first-run host is gone
+            // by the time it can be read.
+            if let notice = model.firstRunNotice {
+                ActionMessageBanner(text: notice) { model.firstRunNotice = nil }
+                    .padding(.horizontal, TC.Space.md)
+                    .padding(.top, TC.Space.s)
+            }
             // Above the shell too: the contributor is told, wherever they
             // are, that their contributions now go under their NEAR AI
             // account (the consent spec requires it in every shell).

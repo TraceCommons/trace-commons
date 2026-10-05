@@ -85,10 +85,12 @@ struct OnboardingCoordinatorView: View {
         .onAppear {
             if copy == nil { NSLog("trace-commons: first-run-copy-undecodable") }
             guard runner == nil else { return }
+            let uses = copy?.uses
             runner = FirstRunRunner(
                 state: OnboardingNavigation.initialState(
                     startAt: startAt, daemonRunning: model.startup == .running, enrolled: model.status.loggedIn),
-                daemon: model)
+                daemon: model,
+                finishedNotice: { refusal in uses.flatMap { UsesScreenLayout.finishedNotice(refusal, uses: $0) } })
         }
     }
 }

@@ -43,7 +43,7 @@ import XCTest
 /// ever take it off the screen.
 final class ActionNoticeDismissTests: XCTestCase {
     /// The published properties that reach a contributor as a banner.
-    private static let messageProperties = ["lastActionError", "lastActionNotice"]
+    private static let messageProperties = ["lastActionError", "lastActionNotice", "firstRunNotice"]
 
     /// Every render of an action message goes through the dismissible banner,
     /// and each banner clears the very property whose presence drew it.

@@ -40,6 +40,13 @@ protocol FirstRunDaemon: AnyObject {
     /// True only once the watch-only marker is actually written. It is keyed
     /// by the daemon's config directory, so without one this answers false.
     func markWatchOnlyComplete() async -> Bool
+    /// The first run is finished: the marker was just written. `notice` is
+    /// the core's sentence for what the person must still be told (a
+    /// refused grant), or nil. Called synchronously after the marker, before
+    /// the commit returns, because writing the marker ends onboarding and
+    /// the first-run host, with its runner, leaves the screen at the next
+    /// render; whoever is told must outlive it.
+    func firstRunFinished(notice: String?)
 }
 
 /// Why a commit stopped. The screens map each case to a core sentence; the
@@ -98,23 +105,37 @@ final class FirstRunRunner: ObservableObject {
     @Published private(set) var refusedGrant: FirstRunFailure?
 
     private let daemon: FirstRunDaemon
+    /// The core's sentence for the refusal a finished first run carries
+    /// (`UsesScreenLayout.finishedNotice`), from the host's copy.
+    private let finishedNotice: (FirstRunFailure?) -> String?
+    /// A refusal decided before this Start (`UsesStart`), handed over with
+    /// the daemon's own if the marker is written.
+    private var carriedRefusal: FirstRunFailure?
 
-    init(state: FirstRunState, daemon: FirstRunDaemon) {
+    init(
+        state: FirstRunState, daemon: FirstRunDaemon,
+        finishedNotice: @escaping (FirstRunFailure?) -> String? = { _ in nil }
+    ) {
         self.state = state
         self.daemon = daemon
+        self.finishedNotice = finishedNotice
     }
 
     /// Run the calls for `point`. Leaving the roots moves on to the next step
     /// only when every call succeeded; a dead invite goes back to Join; any
     /// other failure leaves the step where it is. Start always ends in
     /// `markComplete` unless a call before the grant failed, and reports
-    /// `completeFailed` when the marker was not written.
-    func commit(_ point: CommitPoint) async {
+    /// `completeFailed` when the marker was not written. `refusal` is one
+    /// decided before Start (`UsesStart`); once the marker is written it is
+    /// handed over with any the daemon gave (`FirstRunDaemon.firstRunFinished`).
+    func commit(_ point: CommitPoint, carrying refusal: FirstRunFailure? = nil) async {
         guard !isCommitting else { return }
         isCommitting = true
         defer { isCommitting = false }
         failure = nil
         refusedGrant = nil
+        carriedRefusal = refusal
+        defer { carriedRefusal = nil }
 
         // Continue is disabled without a declaration; should it be pressed
         // anyway, nothing can start, and that is said rather than swallowed.
@@ -183,10 +204,10 @@ final class FirstRunRunner: ObservableObject {
             }
         case .markComplete:
             guard await daemon.markComplete() else { return fail(.completeFailed) }
-            completed = true
+            finish()
         case .markWatchOnlyComplete:
             guard await daemon.markWatchOnlyComplete() else { return fail(.completeFailed) }
-            completed = true
+            finish()
         }
         return true
     }
@@ -210,6 +231,13 @@ final class FirstRunRunner: ObservableObject {
         if outcome == .signedOut, !completed { state.step = .join }
         passkeyOutcome = outcome
         passkeyDue = false
+    }
+
+    /// The marker is written. No suspension point separates this from the
+    /// write, so the notice is handed over before the host can go.
+    private func finish() {
+        completed = true
+        daemon.firstRunFinished(notice: finishedNotice(refusedGrant ?? carriedRefusal))
     }
 
     private func fail(_ reason: FirstRunFailure) -> Bool {

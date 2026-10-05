@@ -271,7 +271,7 @@ final class UsesScreenTests: XCTestCase {
 
         // Both Start paths go through that decision.
         let source = try? Self.source()
-        XCTAssertEqual(source?.components(separatedBy: "await runner.commit(.start)").count, 2)
+        XCTAssertEqual(source?.components(separatedBy: "await runner.commit(.start, carrying: refusal)").count, 2)
         XCTAssertTrue(source?.contains("UsesScreenLayout.afterStart(") ?? false)
         XCTAssertEqual(source?.components(separatedBy: "UsesScreenLayout.refusalToCarry(").count, 3)
         XCTAssertFalse(source?.contains("?? pendingRefusal") ?? true)
@@ -377,6 +377,60 @@ final class UsesScreenTests: XCTestCase {
         XCTAssertNil(after)
     }
 
+    /// Review Focus 3 in the live app: Start writes the marker, which ends
+    /// onboarding and takes the first-run host (and this screen, and the
+    /// runner) off screen at the next render. So the refusal is handed to
+    /// the app model in the same step as the marker, before Start returns,
+    /// and the main window's notices show it after setup. Both refusals
+    /// count: the core's (decided at the disclosures and carried into
+    /// Start) and the daemon's (refused during Start).
+    @MainActor
+    func test_aRefusedGrantIsShownAfterSetupFinishes() async throws {
+        let uses = try copy().uses
+        let finished: (FirstRunFailure?) -> String? = { UsesScreenLayout.finishedNotice($0, uses: uses) }
+
+        let model = AppModel()
+        let core = StartDaemon(forwardingTo: model)
+        let carried = FirstRunRunner(state: onUses(.automatic), daemon: core, finishedNotice: finished)
+        _ = await UsesStart.finish(runner: carried, request: try readyRequest(connected: false), pending: nil)
+        XCTAssertTrue(carried.completed)
+        XCTAssertEqual(core.log.last, .markComplete)
+        XCTAssertEqual(core.finished, [uses.sharingRefused], "handed over as the marker is written")
+        XCTAssertEqual(model.firstRunNotice, uses.sharingRefused)
+
+        let refusing = RecordingFirstRunDaemon()
+        refusing.grant = .refused(label: "automatic-grant-witness-changed")
+        let daemon = FirstRunRunner(state: onUses(.automatic), daemon: refusing, finishedNotice: finished)
+        _ = await UsesStart.finish(runner: daemon, request: try readyRequest(connected: true), pending: nil)
+        XCTAssertTrue(daemon.completed)
+        XCTAssertEqual(refusing.finished, [uses.sharingRefused])
+
+        // A Start with nothing refused hands over no notice.
+        let granted = StartDaemon()
+        let plain = FirstRunRunner(state: onUses(.automatic), daemon: granted, finishedNotice: finished)
+        _ = await UsesStart.finish(runner: plain, request: try readyRequest(connected: true), pending: nil)
+        XCTAssertEqual(granted.finished, [nil])
+
+        // The first-run host gives its runner that mapping, and the notice
+        // is drawn above every section, outside the first-run branch.
+        let coordinator = try Self.appSource("Views/OnboardingCoordinatorView.swift")
+        XCTAssertTrue(coordinator.contains("UsesScreenLayout.finishedNotice("))
+        let window = try Self.appSource("Views/MainWindowView.swift")
+        XCTAssertTrue(window.contains("if let notice = model.firstRunNotice"))
+        let shellNotices = try XCTUnwrap(window.range(of: "struct ShellNotices"))
+        XCTAssertTrue(window[shellNotices.lowerBound...].contains("model.firstRunNotice"))
+    }
+
+    private static func appSource(_ path: String) throws -> String {
+        let url = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Sources/TraceCommonsApp")
+            .appendingPathComponent(path)
+        return try String(contentsOf: url, encoding: .utf8)
+    }
+
     /// Start that skips the disclosures on Automatic grants nothing: without
     /// the core's ready answer there is no grant to send.
     @MainActor
@@ -392,6 +446,19 @@ final class UsesScreenTests: XCTestCase {
 @MainActor
 private final class StartDaemon: FirstRunDaemon {
     var log: [FirstRunCall] = []
+    /// What each finished Start handed over, in order.
+    var finished: [String?] = []
+    /// The app model a finished Start's notice is passed on to, if any.
+    private let model: AppModel?
+
+    init(forwardingTo model: AppModel? = nil) {
+        self.model = model
+    }
+
+    func firstRunFinished(notice: String?) {
+        finished.append(notice)
+        model?.firstRunFinished(notice: notice)
+    }
 
     func startDaemon(settingsJSON: String) async -> Bool { log.append(.startDaemon(settingsJSON: settingsJSON)); return true }
     func setSourceSettings(settingsJSON: String) async -> Bool {

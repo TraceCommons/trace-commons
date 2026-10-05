@@ -835,6 +835,11 @@ final class AppModel: ObservableObject {
     /// the Waiting screen is therefore the only way out of it, which is why
     /// it has one: see `ActionMessageBanner`.
     @Published var lastActionNotice: String?
+    /// What a finished first run must still say -- Automatic was refused, so
+    /// sharing is on Ask me -- shown above every section once the first-run
+    /// host has gone (`FirstRunDaemon.firstRunFinished`). The core's
+    /// sentence; dismissed by the person.
+    @Published var firstRunNotice: String?
 
     private var daemon: TCDaemon?
     private var client: DaemonClient?
@@ -2969,6 +2974,12 @@ extension AppModel: FirstRunDaemon {
     /// not marked: its Start is the tenant's (`markComplete`). As with that
     /// marker, the write is announced, because `requiresOnboarding` is
     /// computed from `UserDefaults` and nothing else would tell the hosts.
+    /// The first run finished; keep what it must still say for the main
+    /// window (`ShellNotices`), which outlives the first-run host.
+    func firstRunFinished(notice: String?) {
+        firstRunNotice = notice
+    }
+
     func markWatchOnlyComplete() async -> Bool {
         if case .success(let fresh) = await firstRunCall({ try $0.status() }) {
             publishIfChanged(\.status, fresh)

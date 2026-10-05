@@ -150,6 +150,14 @@ enum UsesScreenLayout {
         }
     }
 
+    /// What a finished first run must still say once the first-run host has
+    /// gone: Automatic was refused, so sharing is on Ask me. Shown by the
+    /// main window (`AppModel.firstRunNotice`), not by this screen.
+    static func finishedNotice(_ refusal: FirstRunFailure?, uses: FirstRunCopy.Uses) -> String? {
+        if case .grantRefused? = refusal { return uses.sharingRefused }
+        return nil
+    }
+
     /// The refusal a Start carries. A fresh pass through the disclosures
     /// supersedes any earlier verdict; a plain Start keeps the earlier one.
     static func refusalToCarry(
@@ -196,7 +204,9 @@ enum UsesStart {
     /// The one Start path. A refusal is kept past a failed Start and shown
     /// once one succeeds; the commit clears failures when it begins.
     private static func commit(runner: FirstRunRunner, carrying refusal: FirstRunFailure?) async -> FirstRunFailure? {
-        await runner.commit(.start)
+        // The refusal goes into the commit too: once the marker is written
+        // the host can leave before this function resumes.
+        await runner.commit(.start, carrying: refusal)
         // `completeFailed` outranks a refusal the daemon gave in this same
         // Start; that refusal is kept for the retry, like one decided before.
         let kept = runner.failure == .completeFailed ? runner.refusedGrant ?? refusal : refusal
