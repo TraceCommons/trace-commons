@@ -2762,3 +2762,111 @@ final class AppModel: ObservableObject {
         }
     }
 }
+
+// MARK: - First run
+
+/// The live first-run calls. Here rather than beside `FirstRunRunner` because
+/// they need `client` and `daemon`, which stay private. Every call answers an
+/// outcome the runner can stop on, so the fire-and-forget paths
+/// (`setProjectMode(_:mode:)`, `applyPrivateInference(_:)`) are not used:
+/// one drops a call while another is in flight, and neither reports back.
+extension AppModel: FirstRunDaemon {
+    func startDaemon(settingsJSON: String) async -> Bool {
+        // Already running (a returning person whose roots were declared):
+        // the declaration goes through `set_settings` instead.
+        if daemon != nil { return await setSourceSettings(settingsJSON: settingsJSON) }
+        // `startDaemon(at:...)` returns without calling back in these cases,
+        // so awaiting it would never end.
+        guard !daemonStartup.isStarting, !configDirectory.isEmpty else { return false }
+        let path = configDirectory
+        return await withCheckedContinuation { continuation in
+            startDaemon(at: path, settingsJSON: settingsJSON) { startup in
+                continuation.resume(returning: startup == .running)
+            }
+        }
+    }
+
+    func setSourceSettings(settingsJSON: String) async -> Bool {
+        guard let object = try? JSONSerialization.jsonObject(with: Data(settingsJSON.utf8)),
+            let declarations = object as? [String: Any]
+        else { return false }
+        guard case .success(let settings) = await firstRunCall({ try $0.setSettings(declarations) })
+        else { return false }
+        publishIfChanged(\.daemonSettings, settings)
+        return true
+    }
+
+    func lookupInvite(_ invite: String) async -> FirstRunLookup {
+        switch await firstRunCall({ try $0.inviteLookup(invite) }) {
+        case .success(let lookup) where lookup.valid:
+            return .found(lookup)
+        case .success(let lookup):
+            return .refused(label: lookup.reasonLabel ?? "invite-invalid")
+        case .failure(let failure as DaemonClient.Failure) where !failure.message.isEmpty:
+            return .refused(label: failure.message)
+        case .failure, nil:
+            return .refused(label: "invite-lookup-unavailable")
+        }
+    }
+
+    func enrollInvite(_ invite: String) async -> Bool {
+        if case .succeeded = await enroll(invite: invite, scopes: []) { return true }
+        return false
+    }
+
+    func signInNearAI() async -> Bool {
+        guard case .success(let session) = await firstRunCall({ try $0.accountSignIn() }) else { return false }
+        return session.signedIn == true
+    }
+
+    func saveConsentScopes(_ scopes: [String]) async -> Bool {
+        let outcome = await setConsentScopes(scopes)
+        if case .succeeded = outcome { return true }
+        return false
+    }
+
+    func setProjectMode(projectID: String, mode: ProjectMode) async -> Bool {
+        guard case .success = await firstRunCall({ try $0.setProjectMode(projectID: projectID, mode: mode) })
+        else { return false }
+        refreshProjects()
+        return true
+    }
+
+    func includePastSessions(projectID: String, sessionIDs: [String]) async -> Bool {
+        guard case .success = await firstRunCall({
+            try $0.includePastSessions(projectID: projectID, sessionIDs: sessionIDs)
+        }) else { return false }
+        return true
+    }
+
+    func setPrivateAI(_ on: Bool) async -> Bool {
+        guard case .success(let settings) = await firstRunCall({ try $0.setPrivateInference(on) })
+        else { return false }
+        publishIfChanged(\.daemonSettings, settings)
+        return true
+    }
+
+    func grantAutomatic(witness: String?) async -> FirstRunGrantAnswer {
+        switch await firstRunCall({ try $0.grantAutomatic(witnessSigningAddress: witness) }) {
+        case .success(let grant) where grant.granted:
+            refreshStatus()
+            return .granted
+        case .success:
+            return .refused(label: "grant_automatic")
+        case .failure(let failure as DaemonClient.Failure) where !failure.message.isEmpty:
+            return .refused(label: failure.message)
+        case .failure, nil:
+            return .refused(label: "grant_automatic")
+        }
+    }
+
+    func markComplete() {
+        markOnboardingComplete()
+    }
+
+    /// One blocking client call off the main actor. Nil without a daemon.
+    private func firstRunCall<T>(_ work: @escaping (DaemonClient) throws -> T) async -> Result<T, Error>? {
+        guard let client else { return nil }
+        return await Task.detached(priority: .userInitiated) { Result { try work(client) } }.value
+    }
+}
