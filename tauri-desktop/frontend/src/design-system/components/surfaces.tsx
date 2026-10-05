@@ -70,6 +70,8 @@ const FOCUSABLE =
  * width at 450px, the width the FTUX flows use. `viewport` lifts it out of
  * its container to cover the whole window (confirmations raised from deep
  * inside a pane). `footer` holds the actions, below the scrolling body.
+ * A modal is never a native glass region: it keeps its own near-opaque
+ * backing, so what it covers never reads through it.
  */
 export function Modal({
   open,
@@ -163,7 +165,6 @@ export function Modal({
         aria-labelledby={titleId}
         aria-describedby={subtitle ? subtitleId : undefined}
         tabIndex={-1}
-        data-glass=""
         className={cx(
           "tc-modal flex flex-col outline-none",
           narrow && "tc-modal--narrow",

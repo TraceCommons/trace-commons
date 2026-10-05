@@ -179,8 +179,9 @@ int tc_macos_set_login_item(int enabled) {
 // native material view placed under the webview shows through wherever the
 // page leaves a pane translucent. The shell reports each glass pane's rect
 // (CSS pixels from the webview's top-left, which are points) and corner
-// radius; one material view sits under each, in the order given, so a later
-// region (a modal) stacks above an earlier one (a pane).
+// radius; one material view sits under each, in the order given. Modals are
+// not regions: a view under the webview cannot blur the panes a modal
+// covers, so the page gives a modal its own solid backing.
 //
 // macOS 26 has the Liquid Glass view (NSGlassEffectView); earlier systems
 // get the HUD vibrancy material, clipped to the same rounded rect. The class

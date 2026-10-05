@@ -172,10 +172,13 @@
 }
 
 /* Native glass (the app on macOS): a material view sits under every
-   [data-glass] element, so panes and modals drop their painted base and
-   their in-page blur and let it show through. */
-html.tc-native-glass .tc-window--floating .tc-pane,
-html.tc-native-glass .tc-modal {
+   [data-glass] element, so panes drop their painted base and their
+   in-page blur and let it show through. Modals never do: the native
+   material sits under the whole page, so it cannot blur the panes a
+   modal covers, and a modal on it shows them through as if it were not
+   there. A modal keeps its own solid backing (Liquid Glass: no glass on
+   glass, and an overlay stays legible over whatever is behind it). */
+html.tc-native-glass .tc-window--floating .tc-pane {
   background:
     var(--tc-pane-fill),
     var(--tc-glass-veil);
@@ -279,7 +282,9 @@ html.tc-native-glass .tc-modal {
   box-sizing: border-box;
   overflow: hidden;
   /* The same glass as the panes: pane fill over the neutral base, specular
-     edges instead of a rim, so the modal reads as one more pane. */
+     edges instead of a rim, so the modal reads as one more pane. The base
+     is near-opaque and stays in native glass, so nothing behind the
+     modal reads through it. */
   border-radius: var(--tc-radius-pane);
   background:
     var(--tc-pane-fill),

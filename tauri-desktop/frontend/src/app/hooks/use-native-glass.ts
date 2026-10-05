@@ -9,17 +9,15 @@ function round(value: number) {
 }
 
 /**
- * Every element marked `data-glass`, in paint order: panes first, then
- * anything inside a modal scrim, so a modal's glass stacks above the panes.
+ * Every element marked `data-glass`: the panes. Modals are not marked; the
+ * native material sits under the whole page and cannot blur the panes a
+ * modal covers, so a modal keeps its own solid backing.
  */
 function measureRegions(): GlassRegion[] {
   const elements = Array.from(
     document.querySelectorAll<HTMLElement>("[data-glass]"),
   );
-  const inScrim = (element: HTMLElement) =>
-    element.closest(".tc-scrim") !== null ? 1 : 0;
   return elements
-    .sort((a, b) => inScrim(a) - inScrim(b))
     .map((element) => {
       const rect = element.getBoundingClientRect();
       const radius = Number.parseFloat(
@@ -38,8 +36,8 @@ function measureRegions(): GlassRegion[] {
 
 /**
  * Keep the app's native glass under the glass panes. The window is
- * transparent; on macOS a native material view sits under each pane and
- * modal, and the page drops its own pane fills (`tc-native-glass` on
+ * transparent; on macOS a native material view sits under each pane, and
+ * the page drops its own pane fills (`tc-native-glass` on
  * <html>) so the material shows through. Where there is no native glass,
  * nothing changes. Regions are re-sent only when they move or resize.
  */

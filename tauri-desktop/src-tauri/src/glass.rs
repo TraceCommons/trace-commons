@@ -21,7 +21,7 @@ pub(crate) struct GlassRegion {
     pub radius: f64,
 }
 
-/// More than the shell ever shows at once (three panes and a modal).
+/// More than the shell ever shows at once (three panes).
 const MAX_REGIONS: usize = 16;
 /// Larger than any display; rejects garbage without limiting real windows.
 const MAX_EXTENT: f64 = 100_000.0;
