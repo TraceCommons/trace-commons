@@ -1,0 +1,97 @@
+import Foundation
+
+/// Ron's step lists and the rules for moving between them (#1030
+/// `ftux-model.ts`). Every function returns a new state and keeps every
+/// answer; only `step` and `tier` move.
+public enum FirstRunNavigation {
+    public static func steps(for tier: FirstRunTier) -> [FirstRunStep] {
+        switch tier {
+        case .quick: return [.join, .folders, .uses]
+        case .custom: return [.join, .tools, .rules, .uses]
+        }
+    }
+
+    /// The following step, or the same state on the last one.
+    public static func next(_ state: FirstRunState) -> FirstRunState {
+        move(state, by: 1)
+    }
+
+    /// The previous step, or the same state on the first one. Answers and the
+    /// daemon's progress are kept, so going forward again neither starts nor
+    /// enrolls twice.
+    public static func back(_ state: FirstRunState) -> FirstRunState {
+        move(state, by: -1)
+    }
+
+    /// Switch tiers, keeping the person on the equivalent screen: Folders and
+    /// Tools ask the same thing, and Quick has no Rules.
+    public static func switchTier(_ state: FirstRunState, to tier: FirstRunTier) -> FirstRunState {
+        var switched = state
+        switched.tier = tier
+        switch (tier, state.step) {
+        case (.custom, .folders): switched.step = .tools
+        case (.quick, .tools), (.quick, .rules): switched.step = .folders
+        default: break
+        }
+        return switched
+    }
+
+    /// The invite was rejected when it was finally looked up: back to Join,
+    /// every answer kept. The daemon is still running, so the next
+    /// `leaveRoots` does not start it again.
+    public static func returnToJoin(afterDeadInvite state: FirstRunState) -> FirstRunState {
+        var returned = state
+        returned.step = .join
+        returned.enrolled = false
+        return returned
+    }
+
+    /// Whether the current step's Continue (or Start, on Uses) is enabled.
+    ///
+    /// - Join: an account answer, which may be "watch only".
+    /// - Folders / Tools: every offered tool answered, missing ones included,
+    ///   and a declaration the daemon would start with.
+    /// - Rules: always; every choice there is optional.
+    /// - Uses: the required use ticked. With no required use known, Start
+    ///   stays disabled.
+    public static func canContinue(
+        _ state: FirstRunState,
+        candidates: [SourceCandidate],
+        requiredScope: String?
+    ) -> Bool {
+        switch state.step {
+        case .join:
+            return state.account != .none
+        case .folders, .tools:
+            let roots = state.sessionRoots
+            let everyOfferedAnswered = candidates.allSatisfy { roots[$0.source].isAnswered }
+            return everyOfferedAnswered && roots.settingsJSON() != nil
+        case .rules:
+            return true
+        case .uses:
+            guard let requiredScope else { return false }
+            return state.scopes.contains(requiredScope)
+        }
+    }
+
+    /// Whether this account can share automatically. Automatic needs an
+    /// account, so watching only cannot.
+    public static func canChooseAutomatic(_ account: AccountAnswer) -> Bool {
+        account != .watchOnly
+    }
+
+    /// The sharing paths the Uses picker offers.
+    public static func sharingPaths(for account: AccountAnswer) -> [SharingPath] {
+        canChooseAutomatic(account) ? [.askMe, .automatic] : [.askMe]
+    }
+
+    private static func move(_ state: FirstRunState, by offset: Int) -> FirstRunState {
+        let steps = steps(for: state.tier)
+        guard let index = steps.firstIndex(of: state.step) else { return state }
+        let target = index + offset
+        guard steps.indices.contains(target) else { return state }
+        var moved = state
+        moved.step = steps[target]
+        return moved
+    }
+}
