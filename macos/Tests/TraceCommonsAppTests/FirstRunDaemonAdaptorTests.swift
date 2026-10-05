@@ -105,16 +105,22 @@ final class FirstRunDaemonAdaptorTests: XCTestCase {
     /// before services start) still takes back the marker once it is.
     func test_anInviteLinkBeforeTheConfigDirectoryReopensOnceItIsKnown() async {
         let directory = "/tmp/first-run-adaptor-\(UUID().uuidString)"
-        let earlier = model(["status": #"{"result":{"logged_in":false,"consent_scopes":[],"health":{}}}"#])
-        earlier.setStartupForTesting(.running)
-        earlier.setConfigDirectoryForTesting(directory)
-        defer { earlier.clearWatchOnlyMarkerForTesting() }
-        let done = await earlier.markWatchOnlyComplete()
-        XCTAssertTrue(done)
+        // An earlier run's marker, written by a model released before the
+        // link arrives: only `launching` may clear it.
+        do {
+            let earlier = model(["status": #"{"result":{"logged_in":false,"consent_scopes":[],"health":{}}}"#])
+            earlier.setStartupForTesting(.running)
+            earlier.setConfigDirectoryForTesting(directory)
+            let done = await earlier.markWatchOnlyComplete()
+            XCTAssertTrue(done)
+        }
 
         let launching = model(["status": #"{"result":{"logged_in":false,"consent_scopes":[],"health":{}}}"#])
         launching.setStartupForTesting(.running)
-        defer { _ = PendingInvite.shared.take() }
+        defer {
+            launching.clearWatchOnlyMarkerForTesting()
+            _ = PendingInvite.shared.take()
+        }
         PendingInvite.shared.set("https://issuer.example/i#CODE")
         launching.setConfigDirectoryForTesting(directory)
 
