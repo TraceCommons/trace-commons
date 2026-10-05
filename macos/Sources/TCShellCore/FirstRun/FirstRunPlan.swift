@@ -19,7 +19,11 @@ public enum FirstRunCall: Equatable, Sendable {
     case includePastSessions(projectID: String, [String])
     case setPrivateAI(Bool)
     case grantAutomatic(witness: String?)
+    /// The completion marker for an enrolment, keyed by its tenant.
     case markComplete
+    /// The completion marker for watching only, which has no tenant to key
+    /// a marker by.
+    case markWatchOnlyComplete
 }
 
 /// Where the first run commits answers to the daemon.
@@ -96,8 +100,14 @@ public enum FirstRunPlan {
         return object as? [String: [String: String]]
     }
 
+    /// Watch only holds no enrolment, so Start sends nothing that belongs
+    /// to one: no consent scopes (the daemon keeps them in the enrolment's
+    /// config and refuses them without it), no grant, and the watch-only
+    /// marker instead of the tenant's. Custom's folder rules, past sessions
+    /// and Private AI are local to the daemon and are sent either way.
     private static func start(_ state: FirstRunState) -> [FirstRunCall] {
-        var calls: [FirstRunCall] = [.setConsentScopes(state.scopes.sorted())]
+        let watchOnly = state.account == .watchOnly
+        var calls: [FirstRunCall] = watchOnly ? [] : [.setConsentScopes(state.scopes.sorted())]
         if state.tier == .custom {
             for projectID in state.rules.keys.sorted() {
                 if let mode = state.rules[projectID] {
@@ -119,7 +129,7 @@ public enum FirstRunPlan {
         if state.sharing == .automatic, state.grantReady, FirstRunNavigation.canChooseAutomatic(state.account) {
             calls.append(.grantAutomatic(witness: state.witnessSigningAddress))
         }
-        calls.append(.markComplete)
+        calls.append(watchOnly ? .markWatchOnlyComplete : .markComplete)
         return calls
     }
 }

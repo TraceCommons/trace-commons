@@ -110,6 +110,7 @@ final class FirstRunNavigationTests: XCTestCase {
         XCTAssertEqual(FirstRunNavigation.sharingPaths(for: .watchOnly), [.askMe])
         XCTAssertEqual(FirstRunNavigation.sharingPaths(for: .nearAI), [.askMe, .automatic])
         XCTAssertEqual(FirstRunNavigation.sharingPaths(for: .passkey(name: "Laptop")), [.askMe, .automatic])
+        XCTAssertEqual(FirstRunNavigation.sharingPaths(for: .enrolled), [.askMe, .automatic])
 
         var state = FirstRunState(tier: .quick, step: .uses)
         state.account = .watchOnly
@@ -117,7 +118,9 @@ final class FirstRunNavigationTests: XCTestCase {
         state.scopes = ["research"]
         let calls = FirstRunPlan.calls(for: state, at: .start)
         XCTAssertFalse(calls.contains { if case .grantAutomatic = $0 { return true } else { return false } })
-        XCTAssertEqual(calls.last, .markComplete, "Start finishes watching")
+        // Watching has no tenant to key the enrolment's marker by, so Start
+        // finishes on the watch-only one (`AppModel.markWatchOnlyComplete`).
+        XCTAssertEqual(calls.last, .markWatchOnlyComplete, "Start finishes watching")
     }
 
     /// A passkey chosen on Join is not an account yet: its sheets open once

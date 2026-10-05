@@ -58,6 +58,7 @@ final class RecordingFirstRunDaemon: FirstRunDaemon {
     }
 
     func markComplete() async -> Bool { record(.markComplete) }
+    func markWatchOnlyComplete() async -> Bool { record(.markWatchOnlyComplete) }
 }
 
 /// The failure each call reports when the daemon refuses it.
@@ -73,7 +74,7 @@ private func expectedFailure(for call: FirstRunCall) -> FirstRunFailure? {
     case .grantAutomatic: return nil
     // Not a daemon call: the sheets are the person's ceremony.
     case .openPasskeySheets: return nil
-    case .markComplete: return .completeFailed
+    case .markComplete, .markWatchOnlyComplete: return .completeFailed
     }
 }
 
@@ -325,6 +326,26 @@ final class FirstRunRunnerTests: XCTestCase {
         XCTAssertEqual(daemon.log, [.lookupInvite("INVITE-1"), .enroll("INVITE-1"), .signInNearAI])
         XCTAssertNil(runner.failure)
         XCTAssertEqual(runner.state.step, .uses)
+    }
+
+    /// Review Focus 5: Start finishes watching. No consent scopes are sent
+    /// (the daemon refuses them without an enrolment) and the watch-only
+    /// marker, not the tenant's, ends the run.
+    func test_aWatchOnlyStartFinishes() async {
+        let daemon = RecordingFirstRunDaemon()
+        var state = FirstRunState(tier: .quick, step: .uses, account: .watchOnly)
+        state.answer(.claudeCode, .off)
+        state.answer(.codex, .off)
+        state.daemonStarted = true
+        state.startedSettingsJSON = state.sessionRoots.settingsJSON()
+        state.scopes = ["required"]
+        let runner = FirstRunRunner(state: state, daemon: daemon)
+
+        await runner.commit(.start)
+
+        XCTAssertEqual(daemon.log, [.markWatchOnlyComplete])
+        XCTAssertNil(runner.failure)
+        XCTAssertTrue(runner.completed)
     }
 
     func test_anUnfinishedCompleteIsReportedAndRetriedWithoutTheGrant() async {

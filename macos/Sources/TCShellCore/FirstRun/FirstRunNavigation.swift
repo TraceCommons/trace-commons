@@ -78,12 +78,13 @@ public enum FirstRunNavigation {
     }
 
     /// Whether this account can share automatically. Automatic needs an
-    /// account: a passkey the daemon holds, or near.ai, which the Folders or
-    /// Tools commit signs in before Uses is reached. Watching only, no
+    /// account: a passkey the daemon holds, an enrolment it held before this
+    /// first run, or near.ai, which the Folders or Tools commit signs in
+    /// before Uses is reached. Watching only, no
     /// answer, and a passkey chosen but not yet created cannot.
     public static func canChooseAutomatic(_ account: AccountAnswer) -> Bool {
         switch account {
-        case .passkey, .nearAI: return true
+        case .passkey, .nearAI, .enrolled: return true
         case .none, .watchOnly, .passkeyChosen: return false
         }
     }

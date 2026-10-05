@@ -32,6 +32,10 @@ public enum AccountAnswer: Codable, Equatable, Sendable {
     /// A passkey the daemon holds, with the name the person gave it (empty
     /// when it signed in or bound an existing account).
     case passkey(name: String)
+    /// The daemon was already enrolled when this first run began: an earlier
+    /// first run joined and was quit before Start. An account it holds, so
+    /// nothing is joined, signed in or created again.
+    case enrolled
 }
 
 /// The sharing decision on Uses.

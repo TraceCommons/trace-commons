@@ -117,10 +117,14 @@ struct MainWindowView: View {
         // first-run frame -- the fail-closed direction, never the reverse.
         // `isOnboardingComplete` is the second half: `logged_in` alone
         // cannot tell "set up" from "enrolled, Start never pressed".
+        // Without an enrolment, the watch-only marker is
+        // (`AppModel.requiresOnboarding`).
         if OnboardingNavigation.hostsFirstRun(
             startup: model.startup, requiresOnboarding: model.requiresOnboarding, entered: firstRunEntered)
         {
-            OnboardingCoordinatorView(onComplete: { model.markOnboardingComplete() })
+            // Start writes its marker (the tenant's, or watching only's)
+            // itself, and `requiresOnboarding` turning false replaces this.
+            OnboardingCoordinatorView(onComplete: {})
                 .tcScreen()
                 .onAppear {
                     firstRunEntered = true

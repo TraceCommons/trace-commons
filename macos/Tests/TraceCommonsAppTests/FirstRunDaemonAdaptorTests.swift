@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 import TCBridge
 import TCShellCore
@@ -35,8 +36,39 @@ final class FirstRunDaemonAdaptorTests: XCTestCase {
 
         let watching = model(["status": #"{"result":{"logged_in":false,"consent_scopes":[],"health":{}}}"#])
         let watchingDone = await watching.markComplete()
-        XCTAssertFalse(watchingDone, "a watch-only Start has no tenant, so it is not marked")
+        XCTAssertFalse(watchingDone, "no tenant, so the tenant's marker is not written (watching only has its own)")
         XCTAssertFalse(watching.isOnboardingComplete)
+    }
+
+    /// A watch-only Start has no tenant, so its marker is keyed by the
+    /// config directory the daemon runs from. It finishes the first run
+    /// only while the daemon holds no enrolment: an enrolled person must
+    /// still confirm on Start, whatever an earlier watch-only run wrote.
+    func test_aWatchOnlyCompleteIsKeyedByTheConfigDirectory() async {
+        let directory = "/tmp/first-run-adaptor-\(UUID().uuidString)"
+        let watching = model(["status": #"{"result":{"logged_in":false,"consent_scopes":[],"health":{}}}"#])
+        watching.setStartupForTesting(.running)
+        defer { watching.clearWatchOnlyMarkerForTesting() }
+
+        let noDirectory = await watching.markWatchOnlyComplete()
+        XCTAssertFalse(noDirectory, "nothing to key the marker to")
+        XCTAssertTrue(watching.requiresOnboarding)
+
+        watching.setConfigDirectoryForTesting(directory)
+        var notifications = 0
+        let observing = watching.objectWillChange.sink { _ in notifications += 1 }
+        let done = await watching.markWatchOnlyComplete()
+        observing.cancel()
+        XCTAssertGreaterThan(notifications, 0, "the hosts re-read requiresOnboarding only when told")
+        XCTAssertTrue(done)
+        XCTAssertFalse(watching.requiresOnboarding)
+        XCTAssertTrue(watching.traceNavigationReady, "a finished watch-only run shows the content header")
+
+        let tenant = "first-run-adaptor-\(UUID().uuidString)"
+        watching.setStatusForTesting(DaemonStatus(
+            schemaVersion: "1.1", loggedIn: true, tenantID: tenant, consentScopes: [], paused: false,
+            queueDepth: 0, nextDigestAt: nil, health: DaemonHealth(lastErrorLabel: nil, since: nil)))
+        XCTAssertTrue(watching.requiresOnboarding, "an enrolment needs its own Start")
     }
 
     func test_completeReadsTheTenantBeforeMarking() async {

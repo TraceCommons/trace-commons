@@ -84,7 +84,7 @@ final class FirstRunPlanTests: XCTestCase {
         state.enrolledInvite = "INVITE-1"
         XCTAssertEqual(FirstRunPlan.calls(for: state, at: .leaveRoots), [.openPasskeySheets])
 
-        for account in [AccountAnswer.none, .watchOnly, .nearAI, .passkey(name: "Mac"), .passkey(name: "")] {
+        for account in [AccountAnswer.none, .watchOnly, .nearAI, .passkey(name: "Mac"), .passkey(name: ""), .enrolled] {
             state.account = account
             XCTAssertFalse(FirstRunPlan.calls(for: state, at: .leaveRoots).contains(.openPasskeySheets),
                 "\(account)")
@@ -250,6 +250,35 @@ final class FirstRunPlanTests: XCTestCase {
         state.scopes = ["research"]
         XCTAssertEqual(FirstRunPlan.calls(for: state, at: .start),
             [.setConsentScopes(["research"]), .markComplete])
+    }
+
+    /// Review Focus 5: Start finishes watching. Watch only holds no
+    /// enrolment, so nothing goes to the enrolment's config (the daemon
+    /// refuses consent scopes without one) and nothing is granted; Start
+    /// ends in the watch-only marker, which needs no tenant. Custom's local
+    /// choices (folder rules, past sessions, Private AI) are still sent.
+    func test_watchOnlyStartFinishesWithoutAnEnrolment() {
+        var quick = answered()
+        quick.step = .uses
+        quick.account = .watchOnly
+        quick.scopes = ["research"]
+        quick.sharing = .automatic
+        quick.grantReady = true
+        XCTAssertEqual(FirstRunPlan.calls(for: quick, at: .start), [.markWatchOnlyComplete])
+
+        var custom = answered(tier: .custom)
+        custom.step = .uses
+        custom.account = .watchOnly
+        custom.scopes = ["research"]
+        custom.rules = ["p1": .ask]
+        custom.pastSelections = ["p1": ["s1"]]
+        custom.privateAI = true
+        XCTAssertEqual(FirstRunPlan.calls(for: custom, at: .start), [
+            .setProjectMode(projectID: "p1", .ask),
+            .includePastSessions(projectID: "p1", ["s1"]),
+            .setPrivateAI(true),
+            .markWatchOnlyComplete,
+        ])
     }
 
     func test_quickNeverSetsARuleOrIncludesPastSessions() {

@@ -57,12 +57,13 @@ final class PrivateInferenceActivationTests: XCTestCase {
         defer { window.close() }
         window.orderFront(nil)
         let firstRun = try XCTUnwrap(FirstRunCopy.decode(try XCTUnwrap(TCCoreCopy.firstRunCopyJSON())))
-        // The first run's Folders step, every row unanswered: its Continue
-        // is disabled (too faint to read back, so it is not pressed), and
-        // nothing has started.
+        // The first run's Folders step, every row unanswered, and nothing
+        // started by showing it. Continue is not pressed here (too faint to
+        // read back); its disabled rule is
+        // `FoldersScreenTests.test_continueIsDisabledUntilEveryRowIsAnswered`.
         let folders = try recognizedWords(await snapshot(hosting))
         XCTAssertTrue(folders.contains(firstRun.frame.customSetupInstead), "Private AI must ask the first run's Folders")
-        XCTAssertEqual(model.startup, .needsRoots, "Unanswered capture choices must block Continue")
+        XCTAssertEqual(model.startup, .needsRoots, "showing Folders starts nothing")
         XCTAssertFalse(model.isStartingDaemon)
         // Each row's answer is a `GlassPicker` menu, which a synthesised
         // click cannot open; the answers go in through the call Continue

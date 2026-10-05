@@ -32,7 +32,7 @@ enum JoinLayout {
     static func hasAccount(_ state: FirstRunState) -> Bool {
         switch state.account {
         case .none, .watchOnly: return false
-        case .nearAI, .passkeyChosen, .passkey: return true
+        case .nearAI, .passkeyChosen, .passkey, .enrolled: return true
         }
     }
 
@@ -68,7 +68,7 @@ enum JoinLayout {
         switch state.account {
         case .none, .watchOnly, .passkeyChosen: return true
         case .nearAI: return !state.signedIn
-        case .passkey: return false
+        case .passkey, .enrolled: return false
         }
     }
 
@@ -79,7 +79,7 @@ enum JoinLayout {
 
     /// Nothing while a passkey is held: near.ai cannot be chosen over it.
     static func nearAILine(_ state: FirstRunState, copy: FirstRunCopy.Join) -> String? {
-        if passkeyDone(state) { return nil }
+        if passkeyDone(state) || state.account == .enrolled { return nil }
         return nearAIChosen(state) ? copy.nearAiChosen : copy.nearAiText
     }
 
@@ -186,7 +186,7 @@ enum JoinLayout {
     /// (`canToggleNearAI`).
     static func passkeyOpensNow(_ state: FirstRunState, hasPasskeyAccount: Bool) -> Bool {
         hasPasskeyAccount && state.daemonStarted && !state.signedIn && !passkeyChosen(state)
-            && !passkeyDone(state)
+            && !passkeyDone(state) && state.account != .enrolled
     }
 
     /// Create passkey chosen and not yet created: the choice is undoable.
@@ -208,15 +208,16 @@ enum JoinLayout {
     }
 
     /// A signed-in near.ai is held, and a passkey is never created over it,
-    /// so the passkey card offers no action then (`passkeyOpensNow`).
+    /// so the passkey card offers no action then (`passkeyOpensNow`); nor
+    /// over an enrolment an earlier first run left.
     static func showsPasskeyAction(_ state: FirstRunState) -> Bool {
-        !state.signedIn
+        !state.signedIn && state.account != .enrolled
     }
 
     /// A held passkey is never replaced by near.ai (`canToggleNearAI`), so
     /// the near.ai card offers no action then.
     static func showsNearAIAction(_ state: FirstRunState) -> Bool {
-        !passkeyDone(state)
+        !passkeyDone(state) && state.account != .enrolled
     }
 
     static func passkeyDone(_ state: FirstRunState) -> Bool {

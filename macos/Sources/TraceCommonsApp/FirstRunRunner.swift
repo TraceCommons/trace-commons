@@ -37,6 +37,9 @@ protocol FirstRunDaemon: AnyObject {
     /// True only once the completion marker is actually written. The marker
     /// is keyed by tenant, so with no tenant known this answers false.
     func markComplete() async -> Bool
+    /// True only once the watch-only marker is actually written. It is keyed
+    /// by the daemon's config directory, so without one this answers false.
+    func markWatchOnlyComplete() async -> Bool
 }
 
 /// Why a commit stopped. The screens map each case to a core sentence; the
@@ -180,6 +183,9 @@ final class FirstRunRunner: ObservableObject {
             }
         case .markComplete:
             guard await daemon.markComplete() else { return fail(.completeFailed) }
+            completed = true
+        case .markWatchOnlyComplete:
+            guard await daemon.markWatchOnlyComplete() else { return fail(.completeFailed) }
             completed = true
         }
         return true

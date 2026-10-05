@@ -13,10 +13,12 @@ import TCShellCore
 ///
 /// - the copy table, read once from the core (`tc_first_run_copy_json`). A
 ///   table that will not decode shows no step at all: every word a step
-///   shows is the core's, and none is written here to fall back on;
+///   shows is the core's, and none is written here to fall back on. That
+///   is logged, label only, so a broken table is diagnosable;
 /// - the passkey sheets, mounted here exactly once, so a request the
 ///   Folders or Tools commit raises presents on whichever step follows;
-/// - invite links (`PendingInvite`), which fill Join and bring it up.
+/// - invite links (`PendingInvite`), which fill Join and bring it up, in a
+///   host that takes them (`takesInvites`).
 ///
 /// The daemon is not running on a fresh install: the core refuses to start
 /// it until the session roots are declared, and Folders or Tools is where
@@ -26,13 +28,14 @@ import TCShellCore
 ///
 /// ## Resuming
 ///
-/// The first run is not resumed mid-way: a host starts it at `startAt`
-/// (Join, unless it names another step). A person whose earlier first run
-/// started the daemon or enrolled finds the daemon recorded as started
-/// (`OnboardingNavigation.initialState`), so it is not started again, and
-/// the completion marker (`AppModel.isOnboardingComplete`, written by Start)
-/// is what tells "enrolled" from "set up": the main window shows its
-/// content only once both hold.
+/// A host starts the first run at `startAt` (Join, unless it names another
+/// step). What an earlier first run left on the daemon is recorded
+/// (`OnboardingNavigation.initialState`): a running daemon is not started
+/// again, and an enrolment is the account (`recordEnrolment`), so its
+/// invite is not joined again, Join reads Continue, and Automatic is
+/// offered. The daemon's first status can arrive after this view is up, so
+/// the enrolment is recorded then too. Start's marker (the tenant's, or
+/// watching only's) is what tells "enrolled" from "set up".
 struct OnboardingCoordinatorView: View {
     @EnvironmentObject private var model: AppModel
     var startAt: Step
@@ -41,6 +44,9 @@ struct OnboardingCoordinatorView: View {
     /// Called once Start has finished the first run. The caller decides
     /// what replaces this view.
     var onComplete: () -> Void
+    /// Whether this host takes invite links. One whose runner does not last
+    /// the whole first run leaves them parked for one that does.
+    var takesInvites: Bool
 
     typealias Step = OnboardingNavigation.Step
 
@@ -49,25 +55,33 @@ struct OnboardingCoordinatorView: View {
     /// environment's `AppModel`, and kept for the whole first run.
     @State private var runner: FirstRunRunner?
 
-    init(startAt: Step = .join, onStep: ((Step) -> Void)? = nil, onComplete: @escaping () -> Void) {
+    init(
+        startAt: Step = .join, onStep: ((Step) -> Void)? = nil, takesInvites: Bool = true,
+        onComplete: @escaping () -> Void
+    ) {
         self.startAt = startAt
         self.onStep = onStep
+        self.takesInvites = takesInvites
         self.onComplete = onComplete
     }
 
     var body: some View {
         Group {
             if let copy, let runner {
-                FirstRunSteps(copy: copy, runner: runner, onStep: onStep, onComplete: onComplete)
+                FirstRunSteps(
+                    copy: copy, runner: runner, onStep: onStep, takesInvites: takesInvites,
+                    onComplete: onComplete)
             } else {
                 ProgressView().controlSize(.small)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
         .onAppear {
+            if copy == nil { NSLog("trace-commons: first-run-copy-undecodable") }
             guard runner == nil else { return }
             runner = FirstRunRunner(
-                state: OnboardingNavigation.initialState(startAt: startAt, daemonRunning: model.startup == .running),
+                state: OnboardingNavigation.initialState(
+                    startAt: startAt, daemonRunning: model.startup == .running, enrolled: model.status.loggedIn),
                 daemon: model)
         }
     }
@@ -79,6 +93,7 @@ private struct FirstRunSteps: View {
     let copy: FirstRunCopy
     @ObservedObject var runner: FirstRunRunner
     let onStep: ((OnboardingNavigation.Step) -> Void)?
+    let takesInvites: Bool
     let onComplete: () -> Void
 
     @ObservedObject private var pendingInvite = PendingInvite.shared
@@ -95,12 +110,16 @@ private struct FirstRunSteps: View {
                 if completed { onComplete() }
             }
             .onChange(of: model.startup, initial: true) { _, _ in refreshPasskeyAccount() }
+            .onChange(of: model.status.loggedIn, initial: true) { _, _ in recordEnrolment() }
             // Not `onOpenURL`: a link can arrive before any window exists,
             // so `AppDelegate` parks it and the first run collects it when
             // it next appears, or at once while it is up.
             .onAppear(perform: receivePendingInvite)
             .onChange(of: pendingInvite.value) { _, _ in receivePendingInvite() }
-            .onChange(of: runner.isCommitting) { _, _ in receivePendingInvite() }
+            .onChange(of: runner.isCommitting) { _, _ in
+                recordEnrolment()
+                receivePendingInvite()
+            }
     }
 
     @ViewBuilder private var screen: some View {
@@ -133,14 +152,28 @@ private struct FirstRunSteps: View {
         }
     }
 
+    /// An enrolment the daemon reported after the runner was made. Not
+    /// during a commit: an enrol that commit runs records itself.
+    private func recordEnrolment() {
+        guard model.status.loggedIn, !runner.isCommitting else { return }
+        let recorded = OnboardingNavigation.recordEnrolment(runner.state)
+        if recorded != runner.state { runner.state = recorded }
+    }
+
     private func receivePendingInvite() {
-        guard !runner.isCommitting, let invite = pendingInvite.take() else { return }
-        guard
-            let received = OnboardingNavigation.receive(
-                invite: invite, in: runner.state, failure: runner.failure, isCommitting: false,
-                host: JoinScreen.defaultIssuerHost)
-        else { return }
-        runner.state = received.state
-        runner.failure = received.failure
+        guard let invite = pendingInvite.value else { return }
+        switch OnboardingNavigation.receive(
+            invite: invite, in: runner.state, failure: runner.failure, isCommitting: runner.isCommitting,
+            hostTakesInvites: takesInvites, host: JoinScreen.defaultIssuerHost)
+        {
+        case .leaveParked:
+            return
+        case .discard:
+            _ = pendingInvite.take()
+        case .apply(let state, let failure):
+            _ = pendingInvite.take()
+            runner.state = state
+            runner.failure = failure
+        }
     }
 }

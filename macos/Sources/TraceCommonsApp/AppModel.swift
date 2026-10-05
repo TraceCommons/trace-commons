@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import SwiftUI
 import TCBridge
@@ -1010,7 +1011,7 @@ final class AppModel: ObservableObject {
 
     var traceNavigationReady: Bool {
         guard case .running = startup else { return false }
-        return status.loggedIn && isOnboardingComplete
+        return !requiresOnboarding
     }
 
     func start() {
@@ -1848,8 +1849,22 @@ final class AppModel: ObservableObject {
     /// onboarding, not straight to the main window with whatever scopes
     /// `enroll`'s floor-only default happened to leave in place -- see the
     /// coordinator's atomicity note.
+    ///
+    /// Watching only finishes too (Review Focus 5 of #1030's port): with no
+    /// enrolment there is no tenant, so its marker is
+    /// `isWatchOnlyComplete`. It counts only while the daemon holds no
+    /// enrolment; an enrolled person confirms on Start whatever an earlier
+    /// watch-only run wrote.
     var requiresOnboarding: Bool {
-        startup == .needsRoots || !status.loggedIn || !isOnboardingComplete
+        if startup == .needsRoots { return true }
+        return status.loggedIn ? !isOnboardingComplete : !isWatchOnlyComplete
+    }
+
+    /// Whether a watch-only first run was finished against this config
+    /// directory. Keyed by a digest of the directory, never the path itself.
+    var isWatchOnlyComplete: Bool {
+        guard let key = Self.watchOnlyCompleteKey(configDirectory) else { return false }
+        return UserDefaults.standard.bool(forKey: key)
     }
 
     var isOnboardingComplete: Bool {
@@ -1887,6 +1902,11 @@ final class AppModel: ObservableObject {
     }
     func setDaemonSettingsForTesting(_ settings: DaemonSettingsView) { publishIfChanged(\.daemonSettings, settings) }
     func setStartupForTesting(_ startup: Startup) { self.startup = startup }
+    func setConfigDirectoryForTesting(_ path: String) { configDirectory = path }
+    func clearWatchOnlyMarkerForTesting() {
+        guard let key = Self.watchOnlyCompleteKey(configDirectory) else { return }
+        UserDefaults.standard.removeObject(forKey: key)
+    }
 
     func setStatusForTesting(_ status: DaemonStatus) {
         publishIfChanged(\.status, status)
@@ -1895,6 +1915,12 @@ final class AppModel: ObservableObject {
 
     private static func onboardingCompleteKey(_ tenantID: String) -> String {
         "trace_commons.onboarding_complete.\(tenantID)"
+    }
+
+    private static func watchOnlyCompleteKey(_ configDirectory: String) -> String? {
+        guard !configDirectory.isEmpty else { return nil }
+        let digest = SHA256.hash(data: Data(configDirectory.utf8))
+        return "trace_commons.watch_only_complete." + digest.map { String(format: "%02x", $0) }.joined()
     }
 
     func refreshOutcomeCounts() {
@@ -2898,6 +2924,21 @@ extension AppModel: FirstRunDaemon {
         guard status.tenantID != nil else { return false }
         markOnboardingComplete()
         return isOnboardingComplete
+    }
+
+    /// Watching only: the marker is keyed by the config directory, since
+    /// there is no tenant. Status is read first, and an enrolled daemon is
+    /// not marked: its Start is the tenant's (`markComplete`). As with that
+    /// marker, the write is announced, because `requiresOnboarding` is
+    /// computed from `UserDefaults` and nothing else would tell the hosts.
+    func markWatchOnlyComplete() async -> Bool {
+        if case .success(let fresh) = await firstRunCall({ try $0.status() }) {
+            publishIfChanged(\.status, fresh)
+        }
+        guard !status.loggedIn, let key = Self.watchOnlyCompleteKey(configDirectory) else { return false }
+        objectWillChange.send()
+        UserDefaults.standard.set(true, forKey: key)
+        return isWatchOnlyComplete
     }
 
     /// One blocking client call off the main actor. Nil without a daemon.

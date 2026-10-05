@@ -11,13 +11,16 @@ import TCShellCore
 /// its own pane and step progress (`FirstRunFrame`), so this view draws
 /// only the scene and sizes the pane.
 ///
-/// It is gated as the main window gates its own onboarding
-/// (`MainWindowView`): the coordinator is drawn only while
-/// `model.requiresOnboarding`, and the window closes itself as soon as
-/// that is false, so an onboarded person never lands in the flow.
+/// It is gated as the main window gates its own first run
+/// (`OnboardingNavigation.hostsFirstRun`, with this window's own `entered`):
+/// the core's startup notice while the daemon is starting or was refused
+/// at launch, the coordinator while onboarding is required, and the window
+/// closes itself as soon as it is not, so an onboarded person never lands
+/// in the flow.
 struct FirstRunWindowView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.dismissWindow) private var dismissWindow
+    @State private var entered = false
 
     var body: some View {
         ZStack {
@@ -26,17 +29,19 @@ struct FirstRunWindowView: View {
                 colors: [GlassTokens.Color.sceneWarm.color, GlassTokens.Color.sceneBase.color],
                 center: .top, startRadius: 40, endRadius: 900)
                 .ignoresSafeArea()
-            if model.requiresOnboarding {
-                OnboardingCoordinatorView(
-                    onComplete: {
-                        // As the shipping window does. The window closes
-                        // when the marker took (`requiresOnboarding` turns
-                        // false, below); with no tenant yet the marker is
-                        // not written and the flow stays on screen.
-                        model.markOnboardingComplete()
-                    })
+            if OnboardingNavigation.hostsFirstRun(
+                startup: model.startup, requiresOnboarding: model.requiresOnboarding, entered: entered)
+            {
+                // Start writes its marker (the tenant's, or watching
+                // only's) itself; the window closes when it took
+                // (`requiresOnboarding` turns false, below).
+                OnboardingCoordinatorView(onComplete: {})
                     .frame(width: FirstRunProgress.paneWidth)
                     .padding(.vertical, GlassTokens.Space.windowPadding * 3)
+                    .onAppear { entered = true }
+            } else if model.requiresOnboarding {
+                DaemonStartupNotice(startup: model.startup)
+                    .frame(width: FirstRunProgress.paneWidth)
             }
         }
         .frame(minWidth: FirstRunProgress.paneWidth + 80, minHeight: 640)
