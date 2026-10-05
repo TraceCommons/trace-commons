@@ -2251,8 +2251,9 @@ pub unsafe extern "C" fn tc_discover_opencode_export(path: *const c_char) -> *mu
 /// and one that fits none, or is not there, is `[]`. Free it with
 /// [`tc_string_free`].
 ///
-/// Reads directory entries and metadata only, follows no symlink, and never
-/// opens a file, per the same rule [`tc_discover_sources`] follows.
+/// Reads directory entries and metadata only, follows no symlink below the
+/// picked folder, and never opens a file, per the same rule
+/// [`tc_discover_sources`] follows.
 ///
 /// Returns NULL for a NULL or non-UTF-8 `path`, recording `null-pointer` or
 /// `invalid-utf8`, and NULL on a caught panic.

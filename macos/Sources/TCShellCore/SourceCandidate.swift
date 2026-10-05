@@ -116,8 +116,9 @@ public struct SourceCandidate: Equatable, Sendable {
 
     /// The wire shape, kept separate from the model so an unknown `source`
     /// slug can be dropped during mapping instead of throwing and taking the
-    /// whole array with it.
-    private struct Wire: Decodable {
+    /// whole array with it. `FolderMatch` decodes the same rows and keeps
+    /// what this drops.
+    struct Wire: Decodable {
         let source: String
         let path: String
         let exists: Bool
