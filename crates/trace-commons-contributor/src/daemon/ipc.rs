@@ -371,6 +371,7 @@ pub const METHODS: &[&str] = &[
     "list_audit",
     "list_history",
     "list_pending",
+    "list_past_sessions",
     "list_kept",
     "keep",
     "undo_keep",
@@ -2567,6 +2568,7 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
         "inference_call_proof" => super::network_data::handle_proof(shared, req),
         "private_ai" => super::network_data::handle_private_ai(shared, req),
         "list_pending" => handle_list_pending(shared, req),
+        "list_past_sessions" => handle_list_past_sessions(shared, req),
         "list_kept" => handle_list_kept(shared, req),
         "keep" => handle_keep(shared, req),
         "undo_keep" => handle_undo_keep(shared, req),
@@ -2992,6 +2994,39 @@ fn handle_list_pending(shared: &DaemonShared, req: &Request) -> Response {
         .map(|e| entry_value(e, admission_evidence))
         .collect();
     Response::ok(req.id, serde_json::json!({ "pending": entries }))
+}
+
+/// The first-run past-session picker: one folder's past sessions, queued or
+/// not, each named by an opaque session id. See `past_sessions`.
+///
+/// `project_id` is required and resolved against the known projects plus
+/// every project a declared source lists now, so a folder is answerable
+/// before the first discovery pass. An id that resolves to nothing is
+/// refused, never answered with an empty list.
+fn handle_list_past_sessions(shared: &DaemonShared, req: &Request) -> Response {
+    let Some(project_id) = req.params.get("project_id").and_then(|v| v.as_str()) else {
+        return Response::err(req.id, ERR_BAD_PARAMS, "project_id-invalid");
+    };
+    // The walk first, with no lock held; see `past_sessions::discover_sessions`.
+    let discovered = super::past_sessions::discover_sessions(shared);
+    let known = super::past_sessions::known_project_keys(shared, &discovered);
+    let Some(project_key) = project_key_for_id(project_id, &known) else {
+        return Response::err(req.id, ERR_BAD_PARAMS, ERR_PROJECT_ID_UNRECOGNIZED);
+    };
+    let rows = super::past_sessions::rows_for(shared, &discovered, &project_key, Utc::now());
+    let mode = shared
+        .policy
+        .lock()
+        .expect("policy lock")
+        .resolve(&project_key);
+    Response::ok(
+        req.id,
+        serde_json::json!({
+            "total": rows.len(),
+            "sessions": rows,
+            "project_mode": mode,
+        }),
+    )
 }
 
 /// K5: every session kept on this Mac, in the `list_pending` entry shape,
@@ -14425,7 +14460,7 @@ mod tests {
             src,
             "pub async fn handle_request_async(shared",
         ));
-        assert_eq!(sync.len(), 59, "synchronous dispatcher arms: {sync:?}");
+        assert_eq!(sync.len(), 60, "synchronous dispatcher arms: {sync:?}");
         assert_eq!(asy.len(), 63, "asynchronous dispatcher arms: {asy:?}");
 
         let dispatched: std::collections::BTreeSet<String> = sync.union(&asy).cloned().collect();

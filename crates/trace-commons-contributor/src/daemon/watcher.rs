@@ -4918,6 +4918,199 @@ mod tests {
         }
     }
 
+    /// Push a session file's mtime a day back, so a call answered at the
+    /// wall clock (every IPC handler) reads it as quiescent.
+    fn backdate(path: &Path) {
+        let file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+        file.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(86_400))
+            .unwrap();
+    }
+
+    fn alpha_key() -> String {
+        project_key_for(Some(&abs("Users/testuser/code/alpha")))
+    }
+
+    fn row_states(rows: &[serde_json::Value]) -> Vec<String> {
+        let mut states: Vec<String> = rows
+            .iter()
+            .map(|r| r["state"].as_str().unwrap().to_string())
+            .collect();
+        states.sort();
+        states
+    }
+
+    /// The first-run picker lists a folder's past sessions whatever the
+    /// queue knows of them: one waiting, one aged out, one never visited.
+    /// The unvisited one carries date and size only -- nothing is loaded
+    /// before the person chooses.
+    #[tokio::test]
+    async fn list_past_sessions_lists_queued_expired_and_unqueued_sessions() {
+        let f = WatcherFixture::new();
+        f.write_session("alpha", "11111111-1111-1111-1111-111111111111", 0);
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+        f.write_session("alpha", "22222222-2222-2222-2222-222222222222", 0);
+        f.settle(at("2030-02-01T00:00:00Z")).await;
+        let expired = f
+            .shared
+            .queue
+            .lock()
+            .unwrap()
+            .expire(at("2030-02-05T00:00:00Z"), 30, false);
+        assert_eq!(expired, 1);
+        f.write_session("alpha", "33333333-3333-3333-3333-333333333333", 0);
+
+        let rows = super::super::past_sessions::list_past_sessions(
+            &f.shared,
+            &alpha_key(),
+            at("2030-02-06T00:00:00Z"),
+        );
+        let rows: Vec<serde_json::Value> = rows
+            .iter()
+            .map(|r| serde_json::to_value(r).unwrap())
+            .collect();
+        assert_eq!(rows.len(), 3, "{rows:?}");
+        assert_eq!(row_states(&rows), vec!["expired", "not_queued", "pending"]);
+        for row in &rows {
+            assert_eq!(row["selectable"], true, "{row}");
+            assert!(row["session_id"].as_str().is_some_and(|s| !s.is_empty()));
+            if row["state"] == "not_queued" {
+                assert!(row["title"].is_null(), "{row}");
+                assert!(row["duration_secs"].is_null(), "{row}");
+                assert!(row["entry_id"].is_null(), "{row}");
+                assert!(row["started_at"].is_string(), "{row}");
+                assert!(row["size_bytes"].as_u64().unwrap() > 0, "{row}");
+            } else {
+                assert!(row["entry_id"].is_string(), "{row}");
+            }
+        }
+    }
+
+    /// Review Focus 5: Rules can be shown seconds after Folders started the
+    /// daemon, before any pass has run. The listing walks the declared
+    /// sources itself, so the folder is known and its sessions are there.
+    #[tokio::test]
+    async fn list_past_sessions_lists_sessions_the_watcher_has_not_seen() {
+        let f = WatcherFixture::new();
+        for name in [
+            "11111111-1111-1111-1111-111111111111",
+            "22222222-2222-2222-2222-222222222222",
+        ] {
+            backdate(&f.write_session("alpha", name, 0));
+        }
+        assert!(f.shared.queue.lock().unwrap().all().is_empty());
+        let project_id = super::super::policy::project_id_for(&alpha_key());
+        let listed = ipc_ok(
+            &f,
+            "list_past_sessions",
+            serde_json::json!({"project_id": project_id}),
+        );
+        let rows = listed["sessions"].as_array().unwrap();
+        assert_eq!(rows.len(), 2, "{listed}");
+        assert_eq!(listed["total"], 2);
+        assert_eq!(listed["project_mode"], "notify_only");
+        assert_eq!(row_states(rows), vec!["not_queued", "not_queued"]);
+        assert!(rows.iter().all(|r| r["selectable"] == true));
+    }
+
+    /// Fail closed: an id the daemon cannot place is refused, never answered
+    /// with an empty list a shell would draw as "no past sessions".
+    #[tokio::test]
+    async fn list_past_sessions_refuses_an_unknown_project() {
+        let f = WatcherFixture::new();
+        f.write_session("alpha", "11111111-1111-1111-1111-111111111111", 0);
+        for (params, label) in [
+            (
+                serde_json::json!({"project_id": "proj_0000000000000000"}),
+                "project-id-unrecognized",
+            ),
+            (
+                serde_json::json!({"project_id": "p-unknown"}),
+                "project-id-unrecognized",
+            ),
+            (serde_json::json!({"project_id": 7}), "project_id-invalid"),
+            (serde_json::json!({}), "project_id-invalid"),
+        ] {
+            let resp = ipc_call(&f, "list_past_sessions", params.clone());
+            assert_eq!(resp.error.unwrap().message, label, "{params}");
+        }
+    }
+
+    /// A folder set to Never still lists its sessions, so the picker can say
+    /// "rule is Never", but none of them can be ticked.
+    #[tokio::test]
+    async fn list_past_sessions_marks_a_never_folder_unselectable() {
+        let f = WatcherFixture::new();
+        f.write_session("alpha", "11111111-1111-1111-1111-111111111111", 0);
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+        backdate(&f.write_session("alpha", "22222222-2222-2222-2222-222222222222", 0));
+        ipc_ok(
+            &f,
+            "set_project_mode",
+            serde_json::json!({"project_key": alpha_key(), "mode": "ignore"}),
+        );
+        let project_id = super::super::policy::project_id_for(&alpha_key());
+        let listed = ipc_ok(
+            &f,
+            "list_past_sessions",
+            serde_json::json!({"project_id": project_id}),
+        );
+        let rows = listed["sessions"].as_array().unwrap();
+        assert_eq!(rows.len(), 2, "{listed}");
+        assert_eq!(listed["project_mode"], "ignore");
+        assert!(
+            rows.iter()
+                .all(|r| r["state"] == "never" && r["selectable"] == false),
+            "{listed}"
+        );
+    }
+
+    /// A session written moments ago may still be growing: it lists, but as
+    /// `still_active`, and cannot be ticked.
+    #[tokio::test]
+    async fn list_past_sessions_marks_a_session_still_being_written() {
+        let f = WatcherFixture::new();
+        f.write_session("alpha", "11111111-1111-1111-1111-111111111111", 0);
+        let project_id = super::super::policy::project_id_for(&alpha_key());
+        let listed = ipc_ok(
+            &f,
+            "list_past_sessions",
+            serde_json::json!({"project_id": project_id}),
+        );
+        let rows = listed["sessions"].as_array().unwrap();
+        assert_eq!(rows.len(), 1, "{listed}");
+        assert_eq!(rows[0]["state"], "still_active");
+        assert_eq!(rows[0]["selectable"], false);
+    }
+
+    /// Hash-only on the wire: no session path, no folder path, no cwd.
+    #[tokio::test]
+    async fn list_past_sessions_puts_no_path_in_the_response() {
+        let f = WatcherFixture::new();
+        f.write_session("alpha", "11111111-1111-1111-1111-111111111111", 0);
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+        backdate(&f.write_session("alpha", "22222222-2222-2222-2222-222222222222", 0));
+        let project_id = super::super::policy::project_id_for(&alpha_key());
+        let resp = ipc_call(
+            &f,
+            "list_past_sessions",
+            serde_json::json!({"project_id": project_id}),
+        );
+        assert!(resp.error.is_none(), "{resp:?}");
+        assert_eq!(
+            resp.result.as_ref().unwrap()["sessions"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        let wire = serde_json::to_string(&resp).unwrap();
+        let tmp = f._dir.path().to_string_lossy().to_string();
+        assert!(!wire.contains(&tmp), "{wire}");
+        assert!(!wire.contains("Users/testuser"), "{wire}");
+        assert!(!wire.contains("11111111-1111"), "{wire}");
+        assert!(!wire.contains(".jsonl"), "{wire}");
+    }
+
     #[tokio::test]
     async fn a_dismissed_session_is_not_re_offered_after_it_grows() {
         // "Not this one" is a decision about the conversation, not about the
