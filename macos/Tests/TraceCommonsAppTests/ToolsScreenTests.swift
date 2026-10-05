@@ -130,11 +130,76 @@ final class ToolsScreenTests: XCTestCase {
             ToolsScreenLayout.outcome(path: path, json: Self.describe(["opencode", "some-future-tool"], path: path)),
             .ask(path: path, kinds: [.source(.opencode)]))
 
-        // Each option is named; the question is asked with a picker.
-        XCTAssertEqual(ToolsScreenLayout.name(.source(.opencode)), SourceKind.opencode.displayName)
-        XCTAssertFalse(ToolsScreenLayout.name(.trajectory).isEmpty)
+        // Each option is named from the core, and the question is the
+        // core's, naming the folder.
+        let tools = try firstRunCopy().tools
+        XCTAssertEqual(ToolsScreenLayout.name(.source(.opencode), copy: tools), SourceKind.opencode.displayName)
+        XCTAssertEqual(ToolsScreenLayout.name(.trajectory, copy: tools), tools.trajectoryLabel)
+        XCTAssertEqual(
+            ToolsScreenLayout.question(path: path, copy: tools),
+            tools.whichKind.replacingOccurrences(of: "{folder}", with: "exports"))
         let screen = try Self.source("ToolsScreen.swift")
         XCTAssertTrue(screen.contains("GlassPicker("))
+        XCTAssertTrue(screen.contains("ToolsScreenLayout.question("))
+        XCTAssertFalse(screen.contains("\"Trajectory\""))
+    }
+
+    /// A folder answered wrongly can be answered again: picked once as a
+    /// trajectory export, then again as OpenCode, it is declared once.
+    func test_anAmbiguousFolderCanBeAnsweredAgain() {
+        let path = "/Users/someone/exports"
+        var state = FirstRunState(tier: .custom, step: .tools)
+        ToolsScreenLayout.choose(.trajectory, path: path, in: &state)
+        ToolsScreenLayout.choose(.source(.opencode), path: path, in: &state)
+        XCTAssertEqual(state.addedFolders, [AddedFolder(kind: .source(.opencode), path: path)])
+        XCTAssertNotEqual(state.sessionRoots.trajectory, .watch(path: path))
+        XCTAssertNil(ToolsScreenLayout.trajectoryFolder(in: state))
+    }
+
+    /// The trajectory row is withdrawn with "I don't use it" on its picker.
+    func test_theTrajectoryRowCanBeWithdrawn() throws {
+        var state = FirstRunState(tier: .custom, step: .tools)
+        ToolsScreenLayout.choose(.trajectory, path: "/t", in: &state)
+        ToolsScreenLayout.selectTrajectory(.watch, in: &state)
+        XCTAssertEqual(state.sessionRoots.trajectory, .watch(path: "/t"))
+        ToolsScreenLayout.selectTrajectory(nil, in: &state)
+        XCTAssertEqual(state.sessionRoots.trajectory, .watch(path: "/t"), "the placeholder answers nothing")
+        ToolsScreenLayout.selectTrajectory(.dontUse, in: &state)
+        XCTAssertNil(ToolsScreenLayout.trajectoryFolder(in: state))
+        XCTAssertEqual(state.sessionRoots.trajectory, .undecided)
+        let screen = try Self.source("ToolsScreen.swift")
+        XCTAssertTrue(screen.contains("ToolsScreenLayout.selectTrajectory("))
+    }
+
+    /// An open question holds Continue, as does a commit.
+    func test_anOpenQuestionHoldsContinue() throws {
+        let discovered = [Self.candidate(.claudeCode, exists: true)]
+        var state = FirstRunState(tier: .custom, step: .tools)
+        state.answer(.claudeCode, .watch(path: "/c"))
+        state.answer(.codex, .off)
+        XCTAssertTrue(
+            ToolsScreenLayout.canContinue(discovered: discovered, state: state, pending: false, isCommitting: false))
+        XCTAssertFalse(
+            ToolsScreenLayout.canContinue(discovered: discovered, state: state, pending: true, isCommitting: false))
+        XCTAssertFalse(
+            ToolsScreenLayout.canContinue(discovered: discovered, state: state, pending: false, isCommitting: true))
+        XCTAssertFalse(
+            ToolsScreenLayout.canContinue(discovered: nil, state: state, pending: false, isCommitting: false))
+        let screen = try Self.source("ToolsScreen.swift")
+        XCTAssertTrue(screen.contains("ToolsScreenLayout.canContinue("))
+    }
+
+    /// A described folder lands only while the screen is Tools and nothing is
+    /// committing: a drop's answer arrives later, and a folder taken in after
+    /// the start snapshot would show as added but never be watched.
+    func test_aFolderArrivingDuringACommitOrAfterToolsIsIgnored() throws {
+        XCTAssertTrue(ToolsScreenLayout.acceptsFolder(step: .tools, isCommitting: false))
+        XCTAssertFalse(ToolsScreenLayout.acceptsFolder(step: .tools, isCommitting: true))
+        XCTAssertFalse(ToolsScreenLayout.acceptsFolder(step: .rules, isCommitting: false))
+        let screen = try Self.source("ToolsScreen.swift")
+        XCTAssertTrue(screen.contains("ToolsScreenLayout.acceptsFolder("))
+        // The core walks the folder off the main actor.
+        XCTAssertTrue(screen.contains("Task.detached"))
     }
 
     func test_anUnrecognisedFolderIsRefused() throws {

@@ -14,6 +14,9 @@
 //!   tools it used to name are not read (owner decision, 2026-10-04), and a
 //!   folder that matches nothing is refused with `tools.add_tool_refused`.
 //! - The invite placeholder carries no code: Ron's preview showed a mock one.
+//! - Tools adds two lines for a folder that matches more than one kind:
+//!   `which_kind` asks which, and `trajectory_label` names the
+//!   exported-traces option and its row.
 //! - Folders adds three lines Ron's preview had no need for, since its data
 //!   was mocked: `discovery_failed` and `retry` for a discovery that returns
 //!   nothing readable, and `enroll_refused` for an enroll refused after the
@@ -121,6 +124,11 @@ pub struct ToolsCopy {
     /// A picked folder whose layout matches no kind the core reads.
     pub add_tool_refused: &'static str,
     pub added_by_you: &'static str,
+    /// `{folder}`: a picked folder that matches more than one kind, asked
+    /// which one it is.
+    pub which_kind: &'static str,
+    /// A folder of exported traces, as an option and as its row's name.
+    pub trajectory_label: &'static str,
     /// `{count}`: sessions found for a tool.
     pub session_count: &'static str,
 }
@@ -279,6 +287,8 @@ pub fn first_run_copy() -> FirstRunCopy {
             add_tool_caption: "OpenCode, a moved Claude Code or Codex folder, or a folder of exported traces",
             add_tool_refused: "Trace Commons can't read this folder yet.",
             added_by_you: "Added by you",
+            which_kind: "What does {folder} hold?",
+            trajectory_label: "Exported traces",
             session_count: "{count} sessions",
         },
         rules: RulesCopy {
@@ -410,6 +420,21 @@ mod tests {
         let copy = first_run_copy();
         assert_ne!(copy.folders.discovery_failed, copy.folders.loading);
         assert!(!copy.folders.retry.is_empty());
+    }
+
+    /// A folder that is both an OpenCode export and a trajectory export is a
+    /// question the shell asks with the core's words: a prompt naming the
+    /// folder and a name for the trajectory option.
+    #[test]
+    fn an_ambiguous_folder_has_a_question_and_a_trajectory_name() {
+        let tools = first_run_copy().tools;
+        assert!(
+            tools.which_kind.contains("{folder}"),
+            "{}",
+            tools.which_kind
+        );
+        assert!(!tools.trajectory_label.trim().is_empty());
+        assert_ne!(tools.trajectory_label, tools.add_tool_caption);
     }
 
     fn empty_leaves(value: &serde_json::Value, path: &str, out: &mut Vec<String>) {

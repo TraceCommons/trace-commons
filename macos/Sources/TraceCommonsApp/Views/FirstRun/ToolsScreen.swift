@@ -76,14 +76,43 @@ enum ToolsScreenLayout {
         copy.addToolRefused
     }
 
-    /// An option's name. A tool's is its display name; a trajectory export
-    /// has no core label, so it takes the single word the core's insights
-    /// table uses for the format.
-    static func name(_ kind: AddedFolder.Kind) -> String {
+    /// An option's name: a tool's display name, or the core's label for a
+    /// folder of exported traces.
+    static func name(_ kind: AddedFolder.Kind, copy: FirstRunCopy.Tools) -> String {
         switch kind {
         case .source(let source): return source.displayName
-        case .trajectory: return "Trajectory"
+        case .trajectory: return copy.trajectoryLabel
         }
+    }
+
+    /// The core's question for an ambiguous folder, naming it by its last
+    /// path component.
+    static func question(path: String, copy: FirstRunCopy.Tools) -> String {
+        copy.whichKind.replacingOccurrences(
+            of: "{folder}", with: URL(fileURLWithPath: path).lastPathComponent)
+    }
+
+    /// The trajectory row's picker. "I don't use it" withdraws the folder;
+    /// the placeholder and "Watch this folder" leave it as it is.
+    static func selectTrajectory(_ answer: ToolAnswer?, in state: inout FirstRunState) {
+        if answer == .dontUse { state.withdrawTrajectory() }
+    }
+
+    /// Continue: discovery read, nothing committing, no question open, and
+    /// every row answered.
+    static func canContinue(
+        discovered: [SourceCandidate]?, state: FirstRunState, pending: Bool, isCommitting: Bool
+    ) -> Bool {
+        guard let discovered, !isCommitting, !pending else { return false }
+        return FirstRunNavigation.canContinue(
+            state, candidates: rows(discovered, state: state), requiredScope: nil)
+    }
+
+    /// Whether a described folder may still change the state. A drop and an
+    /// off-main describe answer later; by then a commit may hold the start
+    /// snapshot, or the screen may have moved on.
+    static func acceptsFolder(step: FirstRunStep, isCommitting: Bool) -> Bool {
+        step == .tools && !isCommitting
     }
 
     /// Discovery's rows, with each folder the person gave shown as a found
@@ -195,22 +224,32 @@ struct ToolsScreen: View {
                                 )
                             }
                             if let trajectory = ToolsScreenLayout.trajectoryFolder(in: runner.state) {
-                                folderCard(name: ToolsScreenLayout.name(.trajectory), path: trajectory.path) {
-                                    Text(copy.tools.addedByYou)
-                                        .glassType(GlassTokens.TypeScale.caption)
-                                        .foregroundStyle(GlassColor.textTertiary)
-                                        .lineLimit(1)
+                                let name = ToolsScreenLayout.name(.trajectory, copy: copy.tools)
+                                let question = copy.folders.watchQuestion.replacingOccurrences(
+                                    of: "{tool}", with: name)
+                                folderCard(name: name, path: trajectory.path, meta: copy.tools.addedByYou) {
+                                    GlassPicker(
+                                        question,
+                                        selection: trajectoryChoice,
+                                        options: [
+                                            GlassPickerOption(copy.folders.watch, value: ToolAnswer.watch, dot: .on),
+                                            GlassPickerOption(copy.folders.dontUse, value: ToolAnswer.dontUse, dot: .off),
+                                        ],
+                                        placeholder: question
+                                    )
                                 }
                             }
                             if let pending {
-                                folderCard(name: Self.folderName(pending.path), path: pending.path) {
+                                let question = ToolsScreenLayout.question(path: pending.path, copy: copy.tools)
+                                folderCard(name: Self.folderName(pending.path), path: pending.path, meta: nil) {
                                     GlassPicker(
-                                        Self.folderName(pending.path),
+                                        question,
                                         selection: pendingChoice,
                                         options: pending.kinds.indices.map {
-                                            GlassPickerOption(ToolsScreenLayout.name(pending.kinds[$0]), value: $0)
+                                            GlassPickerOption(
+                                                ToolsScreenLayout.name(pending.kinds[$0], copy: copy.tools), value: $0)
                                         },
-                                        placeholder: Self.folderName(pending.path)
+                                        placeholder: question
                                     )
                                 }
                             }
@@ -282,6 +321,7 @@ struct ToolsScreen: View {
                 let isFolder = (try? url.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true
                 let path = url.path
                 Task { @MainActor in
+                    guard accepting else { return }
                     if isFolder { describe(path) } else { refused = true }
                 }
             }
@@ -290,7 +330,7 @@ struct ToolsScreen: View {
     }
 
     private func folderCard<Trailing: View>(
-        name: String, path: String, @ViewBuilder trailing: () -> Trailing
+        name: String, path: String, meta: String?, @ViewBuilder trailing: () -> Trailing
     ) -> some View {
         GlassCard {
             HStack(spacing: GlassTokens.Space.s6) {
@@ -305,6 +345,12 @@ struct ToolsScreen: View {
                         .lineLimit(1)
                         .truncationMode(.middle)
                         .help(path)
+                    if let meta {
+                        Text(meta)
+                            .glassType(GlassTokens.TypeScale.caption)
+                            .foregroundStyle(GlassColor.textTertiary)
+                            .lineLimit(1)
+                    }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 trailing()
@@ -312,15 +358,37 @@ struct ToolsScreen: View {
         }
     }
 
-    /// Describe a picked folder and act on what the core reports.
+    /// Describe a picked folder and act on what the core reports. The core
+    /// walks the folder off the main actor; its answer lands only if the
+    /// screen is still Tools and nothing is committing.
     private func describe(_ path: String) {
-        let outcome = ToolsScreenLayout.outcome(path: path, json: TCDiscovery.describeFolderJSON(path))
+        guard accepting else { return }
+        Task.detached(priority: .userInitiated) {
+            let json = TCDiscovery.describeFolderJSON(path)
+            await MainActor.run { land(ToolsScreenLayout.outcome(path: path, json: json)) }
+        }
+    }
+
+    @MainActor
+    private func land(_ outcome: AddToolOutcome) {
+        guard accepting else { return }
         refused = !ToolsScreenLayout.apply(outcome, to: &runner.state)
         if case .ask(let path, let kinds) = outcome {
             pending = (path, kinds)
         } else {
             pending = nil
         }
+    }
+
+    private var accepting: Bool {
+        ToolsScreenLayout.acceptsFolder(step: runner.state.step, isCommitting: runner.isCommitting)
+    }
+
+    private var trajectoryChoice: Binding<ToolAnswer?> {
+        Binding(
+            get: { .watch },
+            set: { ToolsScreenLayout.selectTrajectory($0, in: &runner.state) }
+        )
     }
 
     private var pendingChoice: Binding<Int?> {
@@ -339,9 +407,9 @@ struct ToolsScreen: View {
     }
 
     private var canContinue: Bool {
-        guard let discovered = discovery.rows, !runner.isCommitting, pending == nil else { return false }
-        let rows = ToolsScreenLayout.rows(discovered, state: runner.state)
-        return FirstRunNavigation.canContinue(runner.state, candidates: rows, requiredScope: nil)
+        ToolsScreenLayout.canContinue(
+            discovered: discovery.rows, state: runner.state, pending: pending != nil,
+            isCommitting: runner.isCommitting)
     }
 
     private var title: some View {
