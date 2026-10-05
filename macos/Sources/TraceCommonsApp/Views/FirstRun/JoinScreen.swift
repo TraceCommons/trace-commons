@@ -15,6 +15,16 @@ enum JoinInviteLine: Equatable {
     case error(String)
 }
 
+/// How "Look up" ended.
+enum JoinLookUpOutcome: Equatable {
+    /// The invite's host was read; the invite is kept.
+    case found
+    /// Not an invite: refused, and not kept.
+    case refused
+    /// The field was empty: the kept invite is dropped, with no error.
+    case withdrawn
+}
+
 /// Join's decisions (#1030 `join-screen.tsx`), apart from the view so they
 /// can be tested. Every string is the core's.
 enum JoinLayout {
@@ -82,22 +92,44 @@ enum JoinLayout {
     /// "Look up": the host is read locally (`TCInvite.issuerHost`), since the
     /// daemon that would look the invite up does not run yet. Something that
     /// is not an invite is refused and not kept, so it can never be enrolled.
-    /// A found invite replaces the one the daemon refused, so that refusal
-    /// (`.inviteDead`) is cleared; any other failure is kept.
+    ///
+    /// An empty field withdraws the kept invite. That is how a person whose
+    /// invite the daemon refused goes on without one: the refusal
+    /// (`.inviteDead`) goes with it, and nothing is joined. A found invite
+    /// other than the refused one clears that refusal too; the same invite
+    /// looked up again keeps it. Any other failure is kept.
+    ///
+    /// Looking an invite up asks to join, so it takes back watch only.
     static func lookUp(
         _ draft: String, in state: FirstRunState, failure: FirstRunFailure?, host: (String) -> String?
-    ) -> (state: FirstRunState, found: Bool, failure: FirstRunFailure?) {
+    ) -> (state: FirstRunState, outcome: JoinLookUpOutcome, failure: FirstRunFailure?) {
         let invite = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         var looked = state
+        let deadCleared: FirstRunFailure? = {
+            if case .inviteDead = failure { return nil }
+            return failure
+        }()
+        if invite.isEmpty {
+            looked.invite = ""
+            looked.issuerHost = nil
+            return (looked, .withdrawn, deadCleared)
+        }
         guard let issuerHost = host(invite) else {
             looked.invite = ""
             looked.issuerHost = nil
-            return (looked, false, failure)
+            return (looked, .refused, failure)
         }
         looked.invite = invite
         looked.issuerHost = issuerHost
-        if case .inviteDead = failure { return (looked, true, nil) }
-        return (looked, true, failure)
+        if looked.account == .watchOnly { looked.account = .none }
+        let same = invite == state.invite.trimmingCharacters(in: .whitespacesAndNewlines)
+        return (looked, .found, same ? failure : deadCleared)
+    }
+
+    /// "Look up" acts on a non-empty field, or on an empty one while an
+    /// invite is kept, which it then withdraws.
+    static func canLookUp(_ draft: String, in state: FirstRunState) -> Bool {
+        !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !state.invite.isEmpty
     }
 
     /// Once the daemon enrolled an invite the field is read-only, so an
@@ -138,8 +170,11 @@ enum JoinLayout {
 
     /// The passkey ceremony completes with the daemon, which runs only once
     /// Folders or Tools commits, so before then creating one is unavailable.
+    /// A signed-in near.ai already holds the daemon's account session, so a
+    /// passkey is not created over it, as near.ai is not chosen over a
+    /// passkey (`canToggleNearAI`).
     static func passkeyAvailable(_ state: FirstRunState, hasPasskeyAccount: Bool) -> Bool {
-        hasPasskeyAccount && state.daemonStarted
+        hasPasskeyAccount && state.daemonStarted && !state.signedIn
     }
 
     static func passkeyDone(_ state: FirstRunState) -> Bool {
@@ -261,7 +296,7 @@ struct JoinScreen: View {
                             .onSubmit(lookUp)
                         Button(copy.join.lookUp, action: lookUp)
                             .buttonStyle(GlassButtonStyle(.glass))
-                            .disabled(currentDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                            .disabled(!JoinLayout.canLookUp(currentDraft, in: runner.state))
                     }
                 } else {
                     Text(copy.join.inviteEyebrow)
@@ -310,11 +345,14 @@ struct JoinScreen: View {
             Button {
                 runner.state = JoinLayout.toggleNearAI(runner.state)
             } label: {
-                Label(
-                    JoinLayout.nearAIAction(runner.state, copy: copy.join),
-                    systemImage: JoinLayout.nearAIChosen(runner.state)
-                        ? "arrow.uturn.backward" : "arrow.up.right.square")
-                .labelStyle(.titleAndIcon)
+                // Choosing near.ai opens nothing (the sign-in comes after the
+                // daemon starts), so only the undo carries a glyph.
+                if JoinLayout.nearAIChosen(runner.state) {
+                    Label(JoinLayout.nearAIAction(runner.state, copy: copy.join), systemImage: "arrow.uturn.backward")
+                        .labelStyle(.titleAndIcon)
+                } else {
+                    Text(JoinLayout.nearAIAction(runner.state, copy: copy.join))
+                }
             }
             .buttonStyle(GlassButtonStyle(.glass))
             .disabled(!JoinLayout.canToggleNearAI(runner.state))
@@ -371,8 +409,8 @@ struct JoinScreen: View {
         let looked = JoinLayout.lookUp(currentDraft, in: runner.state, failure: runner.failure, host: issuerHost)
         runner.state = looked.state
         runner.failure = looked.failure
-        refused = !looked.found
-        if looked.found { draft = nil }
+        refused = looked.outcome == .refused
+        if looked.outcome != .refused { draft = nil }
     }
 
     /// A fresh model each time: a model's outcome is set once, so a reused
