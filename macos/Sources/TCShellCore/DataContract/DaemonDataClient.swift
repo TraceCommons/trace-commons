@@ -93,8 +93,11 @@ public protocol DaemonDataClient: Sendable {
     /// is refused before anything is sent; the daemon gets `confirmed: true`
     /// only when a consent is held. Turning off needs none.
     func setPrivateAI(on: Bool, consent: DaemonData.PrivateAIConsent?) async throws -> DaemonData.PrivateAISwitch
-    /// Z2.2, the mission catalogue.
-    func missionCatalogue() async throws -> DaemonData.MissionCatalogue
+    /// Z2.2, one page of the mission catalogue (`MissionCatalogQuery`):
+    /// at most `limit` entries (the daemon's default when `nil`), older than
+    /// the mission id `before`. Pass a page's `catalogue.nextCursor` as
+    /// `before` for the next; `nil` there means the last page.
+    func missionCatalogue(limit: Int?, before: String?) async throws -> DaemonData.MissionCatalogue
     /// Z3.1, invite lookup. `code` carries the full invite URL.
     func lookupInvite(code: String) async throws -> DaemonData.InviteLookup
     /// Z3.2, passkey binding state.
@@ -167,5 +170,12 @@ public enum DaemonDataEventParser {
             return .inferenceCallAdded(call)
         default: return .unknown(name)
         }
+    }
+}
+
+extension DaemonDataClient {
+    /// The first page of the mission catalogue, at the daemon's default size.
+    public func missionCatalogue() async throws -> DaemonData.MissionCatalogue {
+        try await missionCatalogue(limit: nil, before: nil)
     }
 }

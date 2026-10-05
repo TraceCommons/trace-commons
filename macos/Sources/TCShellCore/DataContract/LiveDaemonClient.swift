@@ -165,8 +165,11 @@ public final class LiveDaemonClient: DaemonDataClient, @unchecked Sendable {
             "set_private_ai", params: ["on": on, "confirmed": consent != nil], as: DaemonData.PrivateAISwitch.self)
     }
 
-    public func missionCatalogue() async throws -> DaemonData.MissionCatalogue {
-        try call("mission_catalogue", as: DaemonData.MissionCatalogue.self)
+    public func missionCatalogue(limit: Int?, before: String?) async throws -> DaemonData.MissionCatalogue {
+        var params: [String: Any] = [:]
+        if let limit { params["limit"] = limit }
+        if let before { params["before"] = before }
+        return try call("mission_catalogue", params: params, as: DaemonData.MissionCatalogue.self)
     }
 
     public func lookupInvite(code: String) async throws -> DaemonData.InviteLookup {

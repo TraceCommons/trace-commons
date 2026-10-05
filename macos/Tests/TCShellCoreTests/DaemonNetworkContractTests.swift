@@ -263,6 +263,34 @@ final class DaemonNetworkContractTests: XCTestCase {
         }
     }
 
+    /// `mission_catalogue` pages (#1187's `MissionCatalogQuery`): `limit`
+    /// and `before` are sent only when given, and a page's `next_cursor` is
+    /// what the next page is asked for with.
+    func testMissionCataloguePagesWithLimitAndBefore() async throws {
+        let cursor = "00000000-0000-4000-8000-000000000009"
+        let page = #"{"kind":"skill_evaluation","disclosure":"SAMPLE core consent","catalogue":{"schema_version":1,"entries":[],"next_cursor":"\#(cursor)"}}"#
+        let bare = NetworkTransport(page)
+        _ = try await LiveDaemonClient(transport: bare).missionCatalogue()
+        XCTAssertEqual(try bare.parameters().count, 0, "no bounds given, none sent")
+
+        let first = NetworkTransport(page)
+        let firstPage = try await LiveDaemonClient(transport: first).missionCatalogue(limit: 2, before: nil)
+        XCTAssertEqual(first.method, "mission_catalogue")
+        XCTAssertEqual(try first.parameters() as NSDictionary, ["limit": 2] as NSDictionary)
+        XCTAssertEqual(firstPage.catalogue.nextCursor, cursor)
+
+        let second = NetworkTransport(#"{"kind":"skill_evaluation","disclosure":"SAMPLE core consent","catalogue":{"schema_version":1,"entries":[],"next_cursor":null}}"#)
+        let secondPage = try await LiveDaemonClient(transport: second)
+            .missionCatalogue(limit: 2, before: firstPage.catalogue.nextCursor)
+        XCTAssertEqual(try second.parameters() as NSDictionary, ["limit": 2, "before": cursor] as NSDictionary)
+        XCTAssertNil(secondPage.catalogue.nextCursor)
+    }
+
+    func testSampleCatalogueAcceptsPagingBounds() async throws {
+        let result = try await SampleDaemonClient(.normalDay).missionCatalogue(limit: 1, before: nil)
+        XCTAssertEqual(result.kind, "skill_evaluation")
+    }
+
     /// The sample answers what was asked: turning Private AI off answers
     /// off, even in a set whose switch reads on.
     func testSampleTurningOffAnswersOff() async throws {

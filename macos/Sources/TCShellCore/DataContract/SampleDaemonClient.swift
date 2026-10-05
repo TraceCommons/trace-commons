@@ -210,7 +210,8 @@ public final class SampleDaemonClient: DaemonDataClient, @unchecked Sendable {
         }
     }
 
-    public func missionCatalogue() async throws -> DaemonData.MissionCatalogue {
+    /// One fixed page: the sample has no second page to ask for.
+    public func missionCatalogue(limit: Int?, before: String?) async throws -> DaemonData.MissionCatalogue {
         try serve("mission_catalogue", as: DaemonData.MissionCatalogue.self)
     }
 
