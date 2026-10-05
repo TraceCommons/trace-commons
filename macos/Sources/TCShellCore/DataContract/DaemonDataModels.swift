@@ -640,6 +640,8 @@ extension DaemonData {
         public let geminiSourceMode: String?
         public let clineSourceMode: String?
         public let opencodeSourceMode: String?
+        /// The declared trajectory folder's mode; the path is never sent.
+        public let trajectorySourceMode: String?
 
         public enum CodingKeys: String, CodingKey, CaseIterable {
             case quiescenceSecs = "quiescence_secs"
@@ -659,6 +661,7 @@ extension DaemonData {
             case geminiSourceMode = "gemini_source_mode"
             case clineSourceMode = "cline_source_mode"
             case opencodeSourceMode = "opencode_source_mode"
+            case trajectorySourceMode = "trajectory_source_mode"
         }
 
         public var scrubCheckMode: ScrubCheckMode? { scrubCheck.flatMap(ScrubCheckMode.init(rawValue:)) }

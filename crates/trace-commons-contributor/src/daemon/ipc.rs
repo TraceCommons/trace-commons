@@ -6588,7 +6588,7 @@ fn redacted_settings(s: &DaemonSettings) -> serde_json::Value {
         // not use. The mode carries that distinction, and carries no path.
         obj.remove("claude_root");
         obj.remove("codex_root");
-        for source in crate::source::registered_source_names() {
+        for source in crate::source::declarable_source_names() {
             let Some(key) = crate::daemon::settings::source_settings_key(source) else {
                 continue;
             };
@@ -8035,7 +8035,7 @@ mod tests {
     /// without a matching removal here would put that path on the wire.
     #[test]
     fn the_settings_blob_reports_source_modes_and_never_a_source_path() {
-        for source in crate::source::registered_source_names() {
+        for source in crate::source::declarable_source_names() {
             let key = crate::daemon::settings::source_settings_key(source)
                 .expect("every registered source has a settings key");
             for (declaration, expected) in [
@@ -8058,6 +8058,22 @@ mod tests {
                 assert_eq!(v[format!("{key}_mode")], expected);
             }
         }
+
+        // The declared trajectory folder by name: not a registered native
+        // adapter, so a loop over those alone would never have asked.
+        let mut settings = DaemonSettings::default();
+        crate::daemon::settings::apply_settings_object(
+            &mut settings,
+            &serde_json::json!({"trajectory_source": {
+                "mode": "watch",
+                "path": "/private/trajectory-folder-sentinel"
+            }}),
+        )
+        .unwrap();
+        let v = redacted_settings(&settings);
+        assert!(!v.to_string().contains("trajectory-folder-sentinel"));
+        assert!(v.get("trajectory_source").is_none());
+        assert_eq!(v["trajectory_source_mode"], "watch");
     }
 
     fn req(method: &str, params: serde_json::Value) -> Request {
