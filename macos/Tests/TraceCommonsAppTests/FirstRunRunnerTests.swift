@@ -121,6 +121,34 @@ final class FirstRunRunnerTests: XCTestCase {
         XCTAssertNil(runner.failure)
     }
 
+    /// The passkey sheets are a person's ceremony, not a daemon call: the
+    /// runner raises them once the daemon started and moves on, and a
+    /// failed start raises nothing.
+    func test_aChosenPasskeyOpensItsSheetsOnceTheDaemonStarts() async {
+        var state = onFolders()
+        state.account = .passkeyChosen
+        let json = state.sessionRoots.settingsJSON()!
+
+        let refusing = RecordingDaemon()
+        refusing.failing = { if case .startDaemon = $0 { return true }; return false }
+        let failed = FirstRunRunner(state: state, daemon: refusing)
+        XCTAssertFalse(failed.passkeyDue)
+        await failed.commit(.leaveRoots)
+        XCTAssertFalse(failed.passkeyDue, "no sheet before the daemon runs")
+        XCTAssertEqual(failed.state.account, .passkeyChosen)
+        XCTAssertEqual(failed.state.step, .folders)
+
+        let daemon = RecordingDaemon()
+        let runner = FirstRunRunner(state: state, daemon: daemon)
+        await runner.commit(.leaveRoots)
+        XCTAssertEqual(daemon.log, [.startDaemon(settingsJSON: json), .lookupInvite("INVITE-1"), .enroll("INVITE-1")],
+            "the sheets are not a daemon call, and nothing signs in to near.ai")
+        XCTAssertTrue(runner.passkeyDue)
+        XCTAssertTrue(runner.state.daemonStarted)
+        XCTAssertEqual(runner.state.step, .uses)
+        XCTAssertNil(runner.failure)
+    }
+
     func test_aDeadInviteReturnsToJoinWithAnswersKept() async {
         let daemon = RecordingDaemon()
         daemon.lookup = .refused(label: "invite-exhausted")

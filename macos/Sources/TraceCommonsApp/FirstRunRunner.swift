@@ -62,6 +62,14 @@ final class FirstRunRunner: ObservableObject {
     /// The last invite the daemon looked up and found valid.
     @Published private(set) var lookup: DaemonData.InviteLookup?
     @Published private(set) var isCommitting = false
+    /// The passkey sheets are asked for: by the commit that started the
+    /// daemon for a passkey chosen on Join, or by Create passkey once the
+    /// daemon runs. `firstRunPasskeySheets` presents them.
+    @Published private(set) var passkeyDue = false
+    /// How the passkey sheets last ended, for Join's notice
+    /// (`PasskeySheetOutcome.joinNotice`). Cleared when they are asked for
+    /// again.
+    @Published private(set) var passkeyOutcome: PasskeySheetOutcome?
 
     private let daemon: FirstRunDaemon
 
@@ -116,6 +124,10 @@ final class FirstRunRunner: ObservableObject {
         case .signInNearAI:
             guard await daemon.signInNearAI() else { return fail(.signInFailed) }
             state.signedIn = true
+        case .openPasskeySheets:
+            // The person's ceremony, not awaited: the commit moves on and
+            // the sheets record their outcome when they end.
+            requestPasskey()
         case .setConsentScopes(let scopes):
             guard await daemon.saveConsentScopes(scopes) else { return fail(.scopesFailed) }
         case .setProjectMode(let projectID, let mode):
@@ -136,6 +148,26 @@ final class FirstRunRunner: ObservableObject {
             daemon.markComplete()
         }
         return true
+    }
+
+    /// Ask for the passkey sheets.
+    func requestPasskey() {
+        passkeyOutcome = nil
+        passkeyDue = true
+    }
+
+    /// The passkey sheets ended: record their outcome (`JoinLayout.apply`)
+    /// and lower the request, whatever the outcome, so a closed sheet is
+    /// asked again only by the next commit or the button.
+    ///
+    /// The sheets open after Folders or Tools, so a sign-out (Verify
+    /// cancelled) can end them on a later step. It leaves no account, so
+    /// the person goes back to Join, which says why; every answer is kept.
+    func finishPasskey(_ outcome: PasskeySheetOutcome, copy: FirstRunCopy) {
+        state = JoinLayout.apply(outcome, to: state, copy: copy).state
+        if outcome == .signedOut { state.step = .join }
+        passkeyOutcome = outcome
+        passkeyDue = false
     }
 
     private func fail(_ reason: FirstRunFailure) -> Bool {

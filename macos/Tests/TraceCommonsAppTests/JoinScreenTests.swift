@@ -335,17 +335,101 @@ final class JoinScreenTests: XCTestCase {
         XCTAssertTrue(source.contains("JoinLayout.showsNearAIAction(runner.state)"))
     }
 
-    /// The passkey ceremony completes with the daemon, which runs only once
-    /// Folders or Tools commits; before then the action is unavailable.
-    func test_creatingAPasskeyWaitsForTheDaemon() {
-        XCTAssertFalse(JoinLayout.passkeyAvailable(FirstRunState(), hasPasskeyAccount: true))
-        XCTAssertFalse(JoinLayout.passkeyAvailable(FirstRunState(daemonStarted: true), hasPasskeyAccount: false))
-        XCTAssertTrue(JoinLayout.passkeyAvailable(FirstRunState(daemonStarted: true), hasPasskeyAccount: true))
-        // A signed-in near.ai is an account already; a passkey is not created
-        // over it, as near.ai is not chosen over a passkey.
-        XCTAssertFalse(
-            JoinLayout.passkeyAvailable(
-                FirstRunState(account: .nearAI, daemonStarted: true, signedIn: true), hasPasskeyAccount: true))
+    /// Create passkey before the daemon runs records the choice, says when
+    /// it happens, and can be undone until then; once the daemon started it
+    /// opens the sheets straight away. The button is never disabled
+    /// without a reason.
+    func test_choosingAPasskeyWaitsForTheDaemonAndCanBeUndone() throws {
+        let copy = try coreCopy()
+        let start = FirstRunState(toolAnswers: [.claudeCode: .off, .codex: .off])
+        XCTAssertFalse(JoinLayout.passkeyOpensNow(start, hasPasskeyAccount: true))
+        XCTAssertEqual(JoinLayout.passkeyAction(start, copy: copy.join), copy.join.passkeyCreate)
+
+        let chosen = JoinLayout.togglePasskey(start)
+        XCTAssertEqual(chosen.account, .passkeyChosen)
+        XCTAssertEqual(JoinLayout.passkeyLine(chosen, copy: copy.join), copy.join.passkeyChosen)
+        XCTAssertEqual(JoinLayout.passkeyAction(chosen, copy: copy.join), copy.join.passkeyUndo)
+        XCTAssertFalse(JoinLayout.passkeyDone(chosen), "chosen is not created")
+        XCTAssertTrue(JoinLayout.hasAccount(chosen))
+        XCTAssertEqual(JoinLayout.footerTitle(chosen, copy: copy), copy.frame.continueButton)
+        XCTAssertEqual(FirstRunPlan.calls(for: JoinLayout.forward(chosen), at: .leaveRoots).last, .openPasskeySheets)
+
+        let undone = JoinLayout.togglePasskey(chosen)
+        XCTAssertEqual(undone.account, AccountAnswer.none)
+        XCTAssertEqual(JoinLayout.footerTitle(undone, copy: copy), copy.join.skip)
+
+        // Either chosen account replaces the other until one is held.
+        let nearAI = JoinLayout.toggleNearAI(chosen)
+        XCTAssertEqual(nearAI.account, .nearAI)
+        XCTAssertEqual(JoinLayout.togglePasskey(nearAI).account, .passkeyChosen)
+        XCTAssertEqual(JoinLayout.nearAILine(chosen, copy: copy.join), copy.join.nearAiText)
+
+        // Watch only, then Create passkey: the passkey is the answer.
+        XCTAssertEqual(JoinLayout.togglePasskey(FirstRunState(account: .watchOnly)).account, .passkeyChosen)
+
+        // The daemon started: the sheets open now, given the account path;
+        // without it the choice is recorded for the next commit.
+        let started = FirstRunState(daemonStarted: true)
+        XCTAssertTrue(JoinLayout.passkeyOpensNow(started, hasPasskeyAccount: true))
+        XCTAssertFalse(JoinLayout.passkeyOpensNow(started, hasPasskeyAccount: false))
+        XCTAssertFalse(JoinLayout.passkeyOpensNow(JoinLayout.togglePasskey(started), hasPasskeyAccount: true),
+            "a chosen passkey undoes")
+
+        // A signed-in near.ai holds the account: no passkey over it.
+        let signedIn = FirstRunState(account: .nearAI, daemonStarted: true, signedIn: true)
+        XCTAssertFalse(JoinLayout.passkeyOpensNow(signedIn, hasPasskeyAccount: true))
+        XCTAssertEqual(JoinLayout.togglePasskey(signedIn), signedIn)
+        // A held passkey is not chosen again.
+        let held = FirstRunState(account: .passkey(name: "Mac"), daemonStarted: true)
+        XCTAssertEqual(JoinLayout.togglePasskey(held), held)
+
+        let source = try Self.source()
+        XCTAssertFalse(source.contains("passkeyAvailable"), "the disabled-with-no-reason button is gone")
+        XCTAssertTrue(source.contains("JoinLayout.passkeyOpensNow("))
+        XCTAssertTrue(source.contains("runner.requestPasskey()"))
+        XCTAssertTrue(source.contains("firstRunPasskeySheets("))
+    }
+
+    /// The sheets' outcome lowers the request whatever it was, so a closed
+    /// sheet is asked again only by the next commit or the button. The
+    /// sheets open after Folders or Tools, so a sign-out can end them on a
+    /// later step: it leaves no account, and Join says why.
+    func test_finishingThePasskeySheetsLowersTheRequest() throws {
+        let copy = try coreCopy()
+        var state = FirstRunState(
+            step: .uses, account: .passkeyChosen, toolAnswers: [.claudeCode: .off, .codex: .off])
+        state.daemonStarted = true
+        state.startedSettingsJSON = state.sessionRoots.settingsJSON()
+        let runner = FirstRunRunner(state: state, daemon: NoDaemon())
+        runner.requestPasskey()
+        XCTAssertTrue(runner.passkeyDue)
+
+        runner.finishPasskey(.closed, copy: copy)
+        XCTAssertFalse(runner.passkeyDue)
+        XCTAssertEqual(runner.state.account, .passkeyChosen, "closed keeps the choice")
+        XCTAssertEqual(runner.state.step, .uses)
+        XCTAssertNil(runner.passkeyOutcome?.joinNotice(copy))
+
+        // Verify cancelled: signed out, no account, back on Join with the
+        // core's notice and every answer kept.
+        runner.requestPasskey()
+        runner.finishPasskey(.signedOut, copy: copy)
+        XCTAssertFalse(runner.passkeyDue)
+        XCTAssertEqual(runner.state.account, AccountAnswer.none)
+        XCTAssertEqual(runner.state.step, .join)
+        XCTAssertEqual(runner.state.toolAnswers, state.toolAnswers)
+        XCTAssertEqual(runner.passkeyOutcome?.joinNotice(copy), copy.join.signedOut)
+
+        runner.state.account = .passkeyChosen
+        runner.requestPasskey()
+        XCTAssertNil(runner.passkeyOutcome, "asking again clears the notice")
+        runner.finishPasskey(.created(name: "Mac"), copy: copy)
+        XCTAssertFalse(runner.passkeyDue)
+        XCTAssertEqual(runner.state.account, .passkey(name: "Mac"))
+        XCTAssertFalse(FirstRunPlan.calls(for: runner.state, at: .leaveRoots).contains(.openPasskeySheets))
+
+        let source = try Self.source()
+        XCTAssertTrue(source.contains("runner.passkeyOutcome?.joinNotice(copy)"))
     }
 
     func test_skipReadsWatchOnlyUntilAnAccountExists() throws {
@@ -356,7 +440,7 @@ final class JoinScreenTests: XCTestCase {
             XCTAssertEqual(JoinLayout.footerTitle(state, copy: copy), copy.join.skip)
             XCTAssertEqual(JoinLayout.footerNote(state, copy: copy), copy.join.skipNote)
         }
-        for account in [AccountAnswer.nearAI, .passkey(name: "Mac"), .passkey(name: "")] {
+        for account in [AccountAnswer.nearAI, .passkeyChosen, .passkey(name: "Mac"), .passkey(name: "")] {
             let state = FirstRunState(account: account)
             XCTAssertTrue(JoinLayout.hasAccount(state))
             XCTAssertEqual(JoinLayout.footerTitle(state, copy: copy), copy.frame.continueButton)
@@ -437,7 +521,8 @@ final class JoinScreenTests: XCTestCase {
         for field in [
             "copy.join.titleLight", "copy.join.titleBold", "copy.join.body", "copy.join.bodyEmphasis",
             "copy.join.inviteEyebrow", "copy.join.invitePlaceholder", "copy.join.lookUp",
-            "copy.join.passkeyEyebrow", "copy.join.passkeyCreate", "copy.join.passkeyDone",
+            "copy.join.passkeyEyebrow", "copy.passkeyCreate", "copy.join.passkeyDone",
+            "copy.passkeyChosen", "copy.passkeyUndo",
             "copy.join.nearAiEyebrow", "copy.join.signedIn",
             "copy.join.noSharing",
         ] {
@@ -450,4 +535,20 @@ final class JoinScreenTests: XCTestCase {
         // external-link glyph.
         XCTAssertFalse(source.contains("arrow.up.right.square"))
     }
+}
+
+/// A daemon that confirms nothing; Join's tests never commit.
+@MainActor
+private final class NoDaemon: FirstRunDaemon {
+    func startDaemon(settingsJSON: String) async -> Bool { false }
+    func setSourceSettings(settingsJSON: String) async -> Bool { false }
+    func lookupInvite(_ invite: String) async -> FirstRunLookup { .refused(label: "none") }
+    func enrollInvite(_ invite: String) async -> Bool { false }
+    func signInNearAI() async -> Bool { false }
+    func saveConsentScopes(_ scopes: [String]) async -> Bool { false }
+    func setProjectMode(projectID: String, mode: ProjectMode) async -> Bool { false }
+    func includePastSessions(projectID: String, sessionIDs: [String]) async -> Bool { false }
+    func setPrivateAI(_ on: Bool) async -> Bool { false }
+    func grantAutomatic(witness: String?) async -> FirstRunGrantAnswer { .refused(label: "none") }
+    func markComplete() {}
 }

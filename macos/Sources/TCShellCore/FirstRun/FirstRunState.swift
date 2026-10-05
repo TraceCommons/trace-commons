@@ -25,7 +25,12 @@ public enum AccountAnswer: Codable, Equatable, Sendable {
     case watchOnly
     /// Sign in with near.ai after the daemon starts.
     case nearAI
-    /// A passkey the person named.
+    /// Create passkey chosen on Join. The sheets that create it complete
+    /// with the daemon, so they open once Folders or Tools started it
+    /// (`FirstRunCall.openPasskeySheets`); until then the choice is undoable.
+    case passkeyChosen
+    /// A passkey the daemon holds, with the name the person gave it (empty
+    /// when it signed in or bound an existing account).
     case passkey(name: String)
 }
 

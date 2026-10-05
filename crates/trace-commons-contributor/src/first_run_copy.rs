@@ -72,6 +72,11 @@ pub struct JoinCopy {
     pub passkey_ready: &'static str,
     pub passkey_create: &'static str,
     pub passkey_done: &'static str,
+    /// Create passkey chosen but not yet created: the passkey sheets open
+    /// once the daemon starts, after Folders or Tools. Not Ron's words.
+    pub passkey_chosen: &'static str,
+    /// Undoes a passkey choice not yet created. Not Ron's words.
+    pub passkey_undo: &'static str,
     pub near_ai_eyebrow: &'static str,
     pub near_ai_text: &'static str,
     pub near_ai_sign_in: &'static str,
@@ -241,6 +246,8 @@ pub fn first_run_copy() -> FirstRunCopy {
             passkey_ready: "“{name}” is ready. Connect it to near.ai any time.",
             passkey_create: "Create passkey",
             passkey_done: "Done",
+            passkey_chosen: "You'll create your passkey once watching starts.",
+            passkey_undo: "Undo",
             near_ai_eyebrow: "Sign in with near.ai",
             near_ai_text: "Use the login you already have. Credits land in that account.",
             near_ai_sign_in: "Sign in",

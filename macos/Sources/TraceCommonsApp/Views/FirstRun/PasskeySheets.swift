@@ -439,3 +439,57 @@ struct PasskeySheets: View {
         }
     }
 }
+
+/// Presents the passkey sheets whenever the runner asks for them
+/// (`FirstRunRunner.passkeyDue`): after the commit that started the daemon
+/// for a passkey chosen on Join, or from Create passkey once it runs. The
+/// one presentation path, so every first-run host mounts it. Without an
+/// account path the request stays raised, never dropped.
+private struct FirstRunPasskeyPresenter: ViewModifier {
+    let copy: FirstRunCopy
+    @ObservedObject var runner: FirstRunRunner
+    let account: (any PasskeyAccount)?
+
+    @State private var model: PasskeySheetModel?
+
+    func body(content: Content) -> some View {
+        content
+            .sheet(isPresented: presented) {
+                if let model {
+                    PasskeySheets(copy: copy, model: model, returningName: nil) { outcome in
+                        runner.finishPasskey(outcome, copy: copy)
+                        self.model = nil
+                    }
+                }
+            }
+            .onAppear(perform: open)
+            .onChange(of: runner.passkeyDue) { _, _ in open() }
+    }
+
+    /// A fresh model each time: a model's outcome is set once, so a reused
+    /// one would leave the second presentation unable to finish.
+    private func open() {
+        guard runner.passkeyDue, model == nil, let account else { return }
+        model = PasskeySheetModel(copy: copy.passkey, account: account)
+    }
+
+    /// Dismissed without an outcome: closed.
+    private var presented: Binding<Bool> {
+        Binding(
+            get: { model != nil },
+            set: {
+                guard !$0, model != nil else { return }
+                model = nil
+                if runner.passkeyDue { runner.finishPasskey(.closed, copy: copy) }
+            })
+    }
+}
+
+extension View {
+    /// Mount the first run's passkey sheets (`FirstRunPasskeyPresenter`).
+    func firstRunPasskeySheets(
+        copy: FirstRunCopy, runner: FirstRunRunner, account: (any PasskeyAccount)?
+    ) -> some View {
+        modifier(FirstRunPasskeyPresenter(copy: copy, runner: runner, account: account))
+    }
+}
