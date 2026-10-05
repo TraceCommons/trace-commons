@@ -2349,7 +2349,16 @@ final class AppModel: ObservableObject {
                 // A failure -- `not-logged-in` above all -- is the
                 // off-the-roster state, not an error worth a banner. Whether
                 // it may be drawn as one is `publicProfileRead`'s call.
-                self.publicProfile = (outcome?.onRoster ?? false) ? outcome : nil
+                if let outcome {
+                    self.publicProfile = outcome.onRoster ? outcome : nil
+                } else if self.statusRead == .answered, !self.status.loggedIn {
+                    // Signed out by the daemon's own answer: nothing is
+                    // claimed, so the cache goes.
+                    self.publicProfile = nil
+                }
+                // Otherwise a refused refresh keeps the cached profile: an
+                // answered read stays answered, and dropping the cache here
+                // would draw an on-roster contributor the opt-in card.
                 self.recordRead("get_public_profile", answered: outcome != nil)
             }
         }

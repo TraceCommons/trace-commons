@@ -15,7 +15,7 @@ private final class ScriptedDaemon: DaemonCalling {
     }
 
     private let lock = NSLock()
-    private let replies: [String: Reply]
+    private var replies: [String: Reply]
     private let gate = DispatchSemaphore(value: 0)
     private var asked: [String] = []
 
@@ -29,11 +29,19 @@ private final class ScriptedDaemon: DaemonCalling {
 
     func release() { gate.signal() }
 
+    /// Changes what `method` answers from the next call on.
+    func reply(_ method: String, with reply: Reply) {
+        lock.lock()
+        replies[method] = reply
+        lock.unlock()
+    }
+
     func call(_ method: String, params paramsJSON: String) -> String {
         lock.lock()
         asked.append(method)
+        let reply = replies[method]
         lock.unlock()
-        switch replies[method] {
+        switch reply {
         case .result(let json):
             return #"{"id":1,"result":"# + json + "}"
         case .parked(let json):
@@ -184,6 +192,39 @@ final class SettingsReadStateTests: XCTestCase {
         offRoster.refreshPublicProfile()
         try await waitUntil { offRoster.publicProfileRead != .awaiting }
         XCTAssertEqual(offRoster.publicProfileRead, .answered)
+    }
+
+    /// An answered read stays answered: one refused refresh after an
+    /// on-roster answer, while signed in, must not turn a contributor on the
+    /// roster into one shown the opt-in card. Signed out, the refusal is the
+    /// daemon saying nothing is claimed, and the cache goes.
+    @MainActor
+    func testARefusedProfileRefreshWhileSignedInKeepsTheRosterEntry() async throws {
+        for loggedIn in [true, false] {
+            let daemon = ScriptedDaemon([
+                "get_public_profile": .result(#"{"on_roster":true,"handle":"zed"}"#),
+            ])
+            let model = AppModel()
+            model.setClientForTesting(DaemonClient(daemon: daemon))
+            model.setStartupForTesting(.running)
+            model.setStatusForTesting(try status(#"{"logged_in":\#(loggedIn),"schema_version":"1"}"#))
+            model.refreshPublicProfile()
+            try await waitUntil { model.publicProfile != nil }
+            XCTAssertEqual(model.publicProfile?.handle, "zed")
+            XCTAssertEqual(model.publicProfileRead, .answered)
+
+            daemon.reply("get_public_profile", with: .refused)
+            model.refreshPublicProfile()
+            try await waitUntil { model.failedReads.contains("get_public_profile") }
+            if loggedIn {
+                XCTAssertEqual(model.publicProfile?.handle, "zed",
+                    "signed-in on-roster contributor lost the cached profile after one failed refresh")
+                XCTAssertEqual(model.publicProfileRead, .answered)
+            } else {
+                XCTAssertNil(model.publicProfile)
+                XCTAssertEqual(model.publicProfileRead, .answered)
+            }
+        }
     }
 
     // MARK: - (b) a status that never answers is not a spinner
