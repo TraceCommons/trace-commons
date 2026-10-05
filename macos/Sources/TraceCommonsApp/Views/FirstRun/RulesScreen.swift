@@ -1,4 +1,5 @@
 import SwiftUI
+import TCBridge
 import TCDesign
 import TCShellCore
 
@@ -36,9 +37,62 @@ enum FirstRunRulesLayout {
         state.rules[project.projectId] ?? project.mode
     }
 
-    /// Set a folder's rule. Never clears the folder's selection: a Never
+    /// What a pick on a folder's picker did.
+    enum PickOutcome: Equatable {
+        /// Written, or cleared because it is the daemon's own mode.
+        case applied
+        /// Automatic: nothing is written until the core's arming
+        /// confirmation is accepted (`confirmArming`).
+        case needsConfirmation
+        /// Not for this person or this folder; nothing is written.
+        case refused
+    }
+
+    /// The modes a folder's picker offers. Automatic needs an account, so a
+    /// watch-only person is not offered it; a folder the daemon already
+    /// arms keeps it, so the picker can show what is in force, and picking
+    /// it again is not a change.
+    static func offeredModes(_ project: ProjectRow, account: AccountAnswer) -> [ProjectMode] {
+        let modes = project.offerableModes
+        guard !FirstRunNavigation.canChooseAutomatic(account), project.mode != .autoUpload else { return modes }
+        return modes.filter { $0 != .autoUpload }
+    }
+
+    /// A pick on a folder's picker. The daemon's own mode clears the
+    /// folder's answer, so it is not sent again. Automatic is a grant, so
+    /// it is never silent: it waits for the arming confirmation, and a
+    /// watch-only person is refused it.
+    static func pick(_ state: inout FirstRunState, project: ProjectRow, wanted: ProjectMode) -> PickOutcome {
+        let id = project.projectId
+        if wanted == project.mode {
+            state.rules[id] = nil
+            if wanted == .ignore { state.pastSelections[id] = nil }
+            return .applied
+        }
+        guard project.offerableModes.contains(wanted) else { return .refused }
+        if wanted == .autoUpload {
+            return FirstRunNavigation.canChooseAutomatic(state.account) ? .needsConfirmation : .refused
+        }
+        setRule(&state, projectID: id, mode: wanted)
+        return .applied
+    }
+
+    /// The arming confirmation was accepted: the only writer of Automatic.
+    /// Refused for a watch-only person and for a folder the daemon will
+    /// not arm, whatever the view asked.
+    static func confirmArming(_ state: inout FirstRunState, project: ProjectRow) -> Bool {
+        guard FirstRunNavigation.canChooseAutomatic(state.account),
+            project.offerableModes.contains(.autoUpload)
+        else { return false }
+        state.rules[project.projectId] = .autoUpload
+        return true
+    }
+
+    /// Set a folder's rule other than Automatic, which only
+    /// `confirmArming` writes. Never clears the folder's selection: a Never
     /// folder contributes nothing, its past sessions included.
     static func setRule(_ state: inout FirstRunState, projectID: String, mode: ProjectMode) {
+        guard mode != .autoUpload else { return }
         state.rules[projectID] = mode
         if mode == .ignore {
             state.pastSelections[projectID] = nil
@@ -168,7 +222,12 @@ struct RulesScreen: View {
     let onContinue: () -> Void
 
     @State private var projects: [ProjectRow]?
+    @State private var loadFailed = false
     @State private var sessions: [String: [PastSession]] = [:]
+    /// Folders whose past sessions were refused: drawn as unavailable, not
+    /// as an empty list beside card 1's count.
+    @State private var refused: Set<String> = []
+    @State private var armingCandidate: ProjectRow?
     @State private var totals: [String: Int] = [:]
     @State private var open: Set<String> = []
     @State private var showingAll: Set<String> = []
@@ -197,6 +256,35 @@ struct RulesScreen: View {
             }
         }
         .task { await load() }
+        // One dialog for the list, named by whichever folder is being armed.
+        // Not presented without the core's words: arming is never confirmed
+        // against a sentence this shell wrote.
+        .confirmationDialog(
+            armingCandidate.flatMap(armingCopy)?.question ?? "",
+            isPresented: Binding(
+                get: { armingCandidate.flatMap(armingCopy) != nil },
+                set: { if !$0 { armingCandidate = nil } }),
+            titleVisibility: .visible,
+            presenting: armingCandidate
+        ) { project in
+            let words = armingCopy(project)
+            Button(words?.confirm ?? "") {
+                _ = FirstRunRulesLayout.confirmArming(&state, project: project)
+                armingCandidate = nil
+            }
+            Button(words?.decline ?? "", role: .cancel) { armingCandidate = nil }
+        } message: { project in
+            Text(armingCopy(project)?.body ?? "")
+        }
+    }
+
+    /// The arming confirmation's words, from the core, as Settings asks
+    /// them. No count is in hand here, so the evidence line is not drawn.
+    private func armingCopy(_ project: ProjectRow) -> ProjectArmingCopy? {
+        ProjectArmingCopy.decode(
+            fromJSON: TCCoreCopy.armingOfferCopyJSON(
+                project: project.displayLabel,
+                count: 0))
     }
 
     @ViewBuilder private var content: some View {
@@ -211,6 +299,12 @@ struct RulesScreen: View {
             } else {
                 rulesCard(projects)
                 pastSessionsCard(projects)
+            }
+        } else if loadFailed {
+            GlassNotice(tone: .outside) {
+                Text(copy.rules.unavailable)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
         } else {
             HStack(spacing: GlassTokens.Space.s4) {
@@ -259,9 +353,14 @@ struct RulesScreen: View {
                         get: { FirstRunRulesLayout.rule(state, for: project) },
                         set: { wanted in
                             guard let wanted else { return }
-                            FirstRunRulesLayout.setRule(&state, projectID: project.projectId, mode: wanted)
+                            // Arming is a grant, so it is never silent.
+                            if FirstRunRulesLayout.pick(&state, project: project, wanted: wanted) == .needsConfirmation {
+                                armingCandidate = project
+                            }
                         }),
-                    options: ProjectModeChoices.options(for: project.offerableModes, copy: modeCopy),
+                    options: ProjectModeChoices.options(
+                        for: FirstRunRulesLayout.offeredModes(project, account: state.account),
+                        copy: modeCopy),
                     placeholder: modeCopy.title)
             }
         }
@@ -320,6 +419,18 @@ struct RulesScreen: View {
             }
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(FirstRunRulesLayout.fill(copy.rules.neverLabel, ["folder": folder]))
+        } else if refused.contains(id) {
+            HStack(spacing: GlassTokens.Space.s4) {
+                Text(folder)
+                    .glassType(GlassTokens.TypeScale.mono)
+                    .foregroundStyle(GlassColor.textTertiary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer(minLength: 0)
+                Text(copy.rules.sessionsUnavailable)
+                    .glassType(GlassTokens.TypeScale.caption)
+                    .foregroundStyle(GlassColor.textTertiary)
+            }
         } else {
             VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
                 HStack(spacing: GlassTokens.Space.s4) {
@@ -414,13 +525,23 @@ struct RulesScreen: View {
     // MARK: Loading
 
     /// The folders, then each folder's past sessions. The first folder opens,
-    /// as Ron's does; a folder whose sessions are refused lists none.
+    /// as Ron's does. Folders that cannot be read say so, and Continue stays
+    /// disabled; a folder whose sessions are refused is drawn as unavailable
+    /// and lists nothing to tick.
     private func load() async {
-        guard projects == nil, let loaded = await source.rulesProjects() else { return }
+        guard projects == nil else { return }
+        guard let loaded = await source.rulesProjects() else {
+            loadFailed = true
+            return
+        }
+        loadFailed = false
         if let first = loaded.first { open.insert(first.projectId) }
         projects = loaded
         for project in loaded {
-            guard let list = await source.pastSessions(projectID: project.projectId) else { continue }
+            guard let list = await source.pastSessions(projectID: project.projectId) else {
+                refused.insert(project.projectId)
+                continue
+            }
             sessions[project.projectId] = list.sessions
             totals[project.projectId] = list.total
         }
