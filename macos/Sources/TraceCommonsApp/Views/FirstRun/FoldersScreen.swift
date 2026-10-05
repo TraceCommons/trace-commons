@@ -58,18 +58,19 @@ enum FoldersScreenLayout {
     /// reads `watcher_start_failed` and the step stays. A failed enroll reads
     /// `enroll_refused`: lookup has already accepted the invite, so Join's
     /// `invite_error` ("not an invite link") would be false, and the daemon
-    /// never says why enroll refused. A dead invite has already returned the
-    /// person to Join, which shows its own line.
+    /// never says why enroll refused. An invite the issuer could not be asked
+    /// about reads `lookup_unavailable`, which says nothing of the invite, and
+    /// a near.ai sign-in that did not finish reads the core's sign-in line
+    /// (`consent_copy::INFERENCE_SIGN_IN_FAILED`). A dead invite has already
+    /// returned the person to Join, which shows its own line.
     static func notice(
         for failure: FirstRunFailure?, copy: FirstRunCopy, onboarding: TCOnboardingCopy?
     ) -> String? {
         switch failure {
         case .startFailed?: return onboarding?.watcherStartFailed
         case .enrollFailed?: return copy.folders.enrollRefused
-        // Silent by decision: the step stays and Continue reopens near.ai's
-        // sheet, and a cancelled sheet is the person's own act. No core line
-        // tells a cancel from a refusal.
-        case .signInFailed?: return nil
+        case .lookupUnavailable?: return copy.folders.lookupUnavailable
+        case .signInFailed?: return copy.folders.signInFailed
         default: return nil
         }
     }

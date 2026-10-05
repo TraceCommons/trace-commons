@@ -113,9 +113,10 @@ final class FoldersScreenTests: XCTestCase {
     }
 
     /// Every way `.leaveRoots` can stop while the person stays on Folders
-    /// shows a core line, except a failed near.ai sign-in, which is silent
-    /// by decision: Continue reopens the sheet, and a cancelled sheet is the
-    /// person's own act. A failed enroll reads the core's `enroll_refused`:
+    /// shows a core line, so Continue never does nothing in silence. A
+    /// near.ai sign-in that did not finish reads the core's sign-in line;
+    /// an invite the issuer could not be asked about reads
+    /// `lookup_unavailable`. A failed enroll reads the core's `enroll_refused`:
     /// the invite was already accepted by lookup, so Join's "not an invite
     /// link" would be false.
     @MainActor
@@ -139,10 +140,19 @@ final class FoldersScreenTests: XCTestCase {
         XCTAssertTrue(plan.contains(.enroll("INVITE-1")))
         XCTAssertTrue(plan.contains(.signInNearAI))
 
+        XCTAssertEqual(
+            FoldersScreenLayout.notice(for: .signInFailed, copy: firstRun, onboarding: onboarding),
+            firstRun.folders.signInFailed)
+        XCTAssertEqual(
+            FoldersScreenLayout.notice(for: .lookupUnavailable, copy: firstRun, onboarding: onboarding),
+            firstRun.folders.lookupUnavailable)
+
         var seen: [FirstRunFailure] = []
-        for failing in plan {
+        for failing in plan + [.lookupInvite("unavailable")] {
             let daemon = RecordingFirstRunDaemon()
-            if case .lookupInvite = failing {
+            if failing == .lookupInvite("unavailable") {
+                daemon.lookup = .unavailable
+            } else if case .lookupInvite = failing {
                 daemon.lookup = .refused(label: "invite-invalid")
             } else {
                 daemon.failing = { $0 == failing }
@@ -154,17 +164,15 @@ final class FoldersScreenTests: XCTestCase {
             guard runner.state.step == .folders else { continue }
             let notice = FoldersScreenLayout.notice(for: failure, copy: firstRun, onboarding: onboarding)
             switch failure {
-            case .signInFailed:
-                XCTAssertNil(notice)
-            case .startFailed, .inviteDead, .enrollFailed, .scopesFailed, .rulesFailed, .privateAIFailed,
-                .grantRefused:
+            case .startFailed, .inviteDead, .lookupUnavailable, .enrollFailed, .signInFailed, .scopesFailed,
+                .rulesFailed, .privateAIFailed, .grantRefused:
                 XCTAssertNotNil(notice, "\(failure)")
-            // Neither is injected here: the lookup is refused, never
-            // unavailable, and leaving the roots never marks completion.
-            case .lookupUnavailable, .completeFailed:
+            // Leaving the roots never marks completion.
+            case .completeFailed:
                 XCTFail("\(failure)")
             }
         }
+        XCTAssertTrue(seen.contains(.lookupUnavailable))
         XCTAssertTrue(seen.contains(.startFailed))
         XCTAssertTrue(seen.contains(.enrollFailed))
         XCTAssertTrue(seen.contains(.signInFailed))

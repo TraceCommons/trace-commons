@@ -70,18 +70,17 @@ final class FirstRunPlanTests: XCTestCase {
     /// opens nothing.
     func test_aChosenPasskeyIsCreatedOnceTheDaemonStarts() throws {
         var state = answered()
+        state.invite = ""
         state.account = .passkeyChosen
         let json = try XCTUnwrap(state.sessionRoots.settingsJSON())
         XCTAssertEqual(FirstRunPlan.calls(for: state, at: .leaveRoots), [
-            .startDaemon(settingsJSON: json), .lookupInvite("INVITE-1"), .enroll("INVITE-1"),
-            .openPasskeySheets,
+            .startDaemon(settingsJSON: json), .openPasskeySheets,
         ])
 
         // Closed before a passkey existed and forward again: asked again,
-        // behind no second start, enroll or sign-in.
+        // behind no second start or sign-in.
         state.daemonStarted = true
         state.startedSettingsJSON = json
-        state.enrolledInvite = "INVITE-1"
         XCTAssertEqual(FirstRunPlan.calls(for: state, at: .leaveRoots), [.openPasskeySheets])
 
         for account in [AccountAnswer.none, .watchOnly, .nearAI, .passkey(name: "Mac"), .passkey(name: ""), .enrolled] {
@@ -89,6 +88,28 @@ final class FirstRunPlanTests: XCTestCase {
             XCTAssertFalse(FirstRunPlan.calls(for: state, at: .leaveRoots).contains(.openPasskeySheets),
                 "\(account)")
         }
+    }
+
+    /// A new passkey creates an account of its own, and the daemon refuses
+    /// to create one over an enrolment (`account-already-enrolled`), so an
+    /// invite and a chosen passkey never both reach the daemon. Join keeps
+    /// them apart (`JoinLayout.lookUp`); the plan refuses the pair anyway:
+    /// the invite is joined and no sheet opens.
+    func test_anInviteWithAChosenPasskeyOpensNoSheets() throws {
+        var state = answered()
+        state.account = .passkeyChosen
+        let json = try XCTUnwrap(state.sessionRoots.settingsJSON())
+        XCTAssertEqual(FirstRunPlan.calls(for: state, at: .leaveRoots), [
+            .startDaemon(settingsJSON: json), .lookupInvite("INVITE-1"), .enroll("INVITE-1"),
+        ])
+
+        // Already enrolled: still no sheet.
+        state.daemonStarted = true
+        state.startedSettingsJSON = json
+        state.enrolledInvite = "INVITE-1"
+        XCTAssertEqual(FirstRunPlan.calls(for: state, at: .leaveRoots), [])
+        state.invite = ""
+        XCTAssertEqual(FirstRunPlan.calls(for: state, at: .leaveRoots), [])
     }
 
     /// A plan-level stand-in only: the plan is pure, so this pins that a

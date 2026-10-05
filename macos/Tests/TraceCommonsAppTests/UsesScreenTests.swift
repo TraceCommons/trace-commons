@@ -235,6 +235,9 @@ final class UsesScreenTests: XCTestCase {
         XCTAssertEqual(
             UsesScreenLayout.notice(for: .privateAIFailed, uses: uses, privateAI: privateAI), privateAI.writeUnconfirmed)
         XCTAssertEqual(UsesScreenLayout.notice(for: .privateAIFailed, uses: uses, privateAI: nil), uses.privateAiFailed)
+        // Every call went through but the marker was not written: Start
+        // says setup has not finished rather than doing nothing.
+        XCTAssertEqual(UsesScreenLayout.notice(for: .completeFailed, uses: uses, privateAI: privateAI), uses.completeFailed)
     }
 
     /// A refusal the core decided before Start is kept while a later call

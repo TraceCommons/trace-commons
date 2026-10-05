@@ -36,7 +36,8 @@ enum PasskeySheetOutcome: Equatable {
 }
 
 /// What one account call answered. A refusal carries the daemon's or the
-/// coordinator's label, never a sentence written here.
+/// coordinator's label, never a sentence written here; the sheet shows the
+/// core's `passkey.refused` for it (`PasskeySheets.refusalLine`).
 enum PasskeyCallResult: Equatable {
     case done
     /// The person dismissed the system sheet.
@@ -414,10 +415,16 @@ struct PasskeySheets: View {
         }
     }
 
+    /// The core's sentence for a refused ceremony. The model keeps the
+    /// daemon's or the coordinator's label; it is never shown.
+    static func refusalLine(_ refusal: String?, copy: FirstRunCopy.Passkey) -> String? {
+        refusal == nil ? nil : copy.refused
+    }
+
     @ViewBuilder
     private var refusalNotice: some View {
-        if let refusal = model.refusal {
-            GlassNotice(tone: .outside) { Text(refusal) }
+        if let line = PasskeySheets.refusalLine(model.refusal, copy: copy.passkey) {
+            GlassNotice(tone: .outside) { Text(line) }
         }
     }
 

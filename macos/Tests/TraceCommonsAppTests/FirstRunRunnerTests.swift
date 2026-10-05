@@ -146,6 +146,9 @@ final class FirstRunRunnerTests: XCTestCase {
     /// failed start raises nothing.
     func test_aChosenPasskeyOpensItsSheetsOnceTheDaemonStarts() async {
         var state = onFolders()
+        // A new passkey is not combined with an invite.
+        state.invite = ""
+        state.issuerHost = nil
         state.account = .passkeyChosen
         let json = state.sessionRoots.settingsJSON()!
 
@@ -161,7 +164,7 @@ final class FirstRunRunnerTests: XCTestCase {
         let daemon = RecordingFirstRunDaemon()
         let runner = FirstRunRunner(state: state, daemon: daemon)
         await runner.commit(.leaveRoots)
-        XCTAssertEqual(daemon.log, [.startDaemon(settingsJSON: json), .lookupInvite("INVITE-1"), .enroll("INVITE-1")],
+        XCTAssertEqual(daemon.log, [.startDaemon(settingsJSON: json)],
             "the sheets are not a daemon call, and nothing signs in to near.ai")
         XCTAssertTrue(runner.passkeyDue)
         XCTAssertTrue(runner.state.daemonStarted)
@@ -211,6 +214,32 @@ final class FirstRunRunnerTests: XCTestCase {
         XCTAssertNil(runner.failure)
         XCTAssertNotEqual(runner.state.step, .join)
         XCTAssertEqual(runner.state.enrolledInvite, "")
+    }
+
+    /// near.ai chosen with no invite to sign in to: the daemon's
+    /// `account_sign_in` needs an enrolment and refuses
+    /// (`account-enrollment-required`). Join does not allow the pair
+    /// (`JoinLayout.canToggleNearAI`); should it reach the runner anyway,
+    /// the step stays and says so with the core's sign-in line.
+    func test_nearAIWithoutAnInviteReportsTheSignIn() async throws {
+        var state = onFolders()
+        state.invite = ""
+        state.issuerHost = nil
+        state.account = .nearAI
+        let daemon = RecordingFirstRunDaemon()
+        daemon.failing = { $0 == .signInNearAI }
+        let runner = FirstRunRunner(state: state, daemon: daemon)
+
+        await runner.commit(.leaveRoots)
+
+        XCTAssertEqual(daemon.log, [.startDaemon(settingsJSON: state.sessionRoots.settingsJSON()!), .signInNearAI])
+        XCTAssertEqual(runner.failure, .signInFailed)
+        XCTAssertEqual(runner.state.step, .folders)
+        XCTAssertFalse(runner.state.signedIn)
+        let copy = try XCTUnwrap(FirstRunCopy.decode(try XCTUnwrap(TCCoreCopy.firstRunCopyJSON())))
+        XCTAssertEqual(
+            FoldersScreenLayout.notice(for: runner.failure, copy: copy, onboarding: TCOnboardingCopy.load()),
+            copy.folders.signInFailed)
     }
 
     func test_aDeadInviteReturnsToJoinWithAnswersKept() async {

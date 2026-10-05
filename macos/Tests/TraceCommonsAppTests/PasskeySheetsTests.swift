@@ -295,6 +295,20 @@ final class PasskeySheetsTests: XCTestCase {
             .refused(label: NativePasskeyFailure.authorizationFailed.rawValue))
     }
 
+    /// A refusal is held as its label (`model.refusal`) and shown as the
+    /// core's sentence: a kebab-case daemon label such as
+    /// `account-already-enrolled` never reaches the sheet.
+    func test_aRefusalShowsTheCoresSentenceNotItsLabel() throws {
+        let copy = try coreCopy()
+        for label in ["account-already-enrolled", "passkey-busy", NativePasskeyFailure.authorizationFailed.rawValue] {
+            XCTAssertEqual(PasskeySheets.refusalLine(label, copy: copy.passkey), copy.passkey.refused, label)
+        }
+        XCTAssertNil(PasskeySheets.refusalLine(nil, copy: copy.passkey))
+        let source = try Self.source()
+        XCTAssertTrue(source.contains("PasskeySheets.refusalLine(model.refusal"))
+        XCTAssertFalse(source.contains("Text(refusal)"))
+    }
+
     /// P-3, P-4 and P-6 are drawn by macOS. The file draws no copy of them:
     /// no marked imitation, no store chooser, no fingerprint button.
     func test_noSimulatedSheetExists() throws {

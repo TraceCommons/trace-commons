@@ -56,7 +56,8 @@ public enum FirstRunPlan {
             calls.append(.setSourceSettings(settingsJSON: changed))
         }
         let invite = state.invite.trimmingCharacters(in: .whitespacesAndNewlines)
-        if state.account != .watchOnly, !invite.isEmpty, state.enrolledInvite != invite {
+        let joinsInvite = state.account != .watchOnly && !invite.isEmpty
+        if joinsInvite, state.enrolledInvite != invite {
             calls.append(.lookupInvite(invite))
             calls.append(.enroll(invite))
         }
@@ -65,7 +66,11 @@ public enum FirstRunPlan {
         if state.account == .nearAI, !state.signedIn {
             calls.append(.signInNearAI)
         }
-        if state.account == .passkeyChosen {
+        // A new passkey creates an account of its own, and the daemon
+        // refuses to create one over an enrolment
+        // (`account-already-enrolled`), so no sheet opens beside an invite.
+        // Join keeps the two apart; this refuses the pair anyway.
+        if state.account == .passkeyChosen, !joinsInvite, state.enrolledInvite == nil {
             calls.append(.openPasskeySheets)
         }
         return calls

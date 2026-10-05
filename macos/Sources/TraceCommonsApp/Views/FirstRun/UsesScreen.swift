@@ -142,11 +142,11 @@ enum UsesScreenLayout {
         case .scopesFailed: return uses.scopesFailed
         case .rulesFailed: return uses.rulesFailed
         case .privateAIFailed: return privateAI?.writeUnconfirmed ?? uses.privateAiFailed
+        // The marker was not written, so setup did not finish: its own
+        // line, never the refused grant's "Setup finished".
+        case .completeFailed: return uses.completeFailed
+        // Leaving the roots' failures, which never stop Start.
         case .startFailed, .inviteDead, .lookupUnavailable, .enrollFailed, .signInFailed: return nil
-        // No core sentence yet (the plan's "Core sentences each case
-        // needs"), and every Uses line above would be false here: the
-        // marker was not written, so setup did not finish.
-        case .completeFailed: return nil
         }
     }
 
