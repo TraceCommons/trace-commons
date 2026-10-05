@@ -21,7 +21,7 @@ use uuid::Uuid;
 
 use super::ipc::DaemonShared;
 use super::policy::ProjectMode;
-use super::queue::QueueState;
+use super::queue::{Queue, QueueEntry, QueueState};
 use crate::source::{SessionRef, all_sources};
 
 /// What every session id starts with, so a path, an empty string or a
@@ -89,6 +89,27 @@ pub struct DiscoveredSession {
     pub session_ref: SessionRef,
     /// The newest mtime the ref covers: its group's, or the file's own.
     pub modified_at: DateTime<Utc>,
+}
+
+impl DiscoveredSession {
+    /// Whether the session has stopped growing: nothing written for
+    /// `quiescence_secs`. The one test both the listing's `still_active` and
+    /// the include's `session-still-active` apply, so they cannot disagree.
+    pub fn quiescent(&self, now: DateTime<Utc>, quiescence_secs: u64) -> bool {
+        now.signed_duration_since(self.modified_at).num_seconds() >= quiescence_secs as i64
+    }
+}
+
+/// The latest offer at each path, superseded ones aside: queue order is
+/// insertion order, so a later entry replaces an earlier one here.
+fn latest_offers(queue: &Queue) -> HashMap<&Path, &QueueEntry> {
+    let mut latest_at: HashMap<&Path, &QueueEntry> = HashMap::new();
+    for e in queue.all() {
+        if e.state != QueueState::Superseded {
+            latest_at.insert(e.path.as_path(), e);
+        }
+    }
+    latest_at
 }
 
 /// Walk every declared source and key each session to its project, without
@@ -207,14 +228,7 @@ pub fn rows_for(
         .expect("settings lock")
         .quiescence_secs;
     let queue = shared.queue.lock().expect("queue lock");
-    // The latest offer at each path, superseded ones aside: queue order is
-    // insertion order, so a later entry replaces an earlier one here.
-    let mut latest_at: HashMap<&Path, &super::queue::QueueEntry> = HashMap::new();
-    for e in queue.all() {
-        if e.state != QueueState::Superseded {
-            latest_at.insert(e.path.as_path(), e);
-        }
-    }
+    let latest_at = latest_offers(&queue);
 
     let mut rows: Vec<(DateTime<Utc>, PastSessionRow)> = Vec::new();
     for d in discovered.iter().filter(|d| d.project_key == project_key) {
@@ -232,8 +246,7 @@ pub fn rows_for(
             // Decided another way; not a past session to choose.
             Some(_) => continue,
         };
-        let quiescent =
-            now.signed_duration_since(d.modified_at).num_seconds() >= quiescence_secs as i64;
+        let quiescent = d.quiescent(now, quiescence_secs);
         let state = if mode == ProjectMode::Ignore {
             PastSessionState::Never
         } else if !quiescent {
@@ -272,4 +285,254 @@ pub fn rows_for(
         b_at.cmp(a_at).then_with(|| a.session_id.cmp(&b.session_id))
     });
     rows.into_iter().map(|(_, row)| row).collect()
+}
+
+// -- `include_past_sessions`: the picker's Continue ------------------------
+
+/// The most session ids one include may name. The queue's own default cap,
+/// so "Include every past session" of a folder the size of a full queue is
+/// one call, and a runaway caller is refused before anything is read.
+pub const MAX_SESSIONS_PER_INCLUDE: usize = 500;
+
+/// Refusals of the whole call, and per-session skip labels. Fixed strings,
+/// never a path, a session id or anything the caller sent.
+pub const LABEL_SESSION_IDS_INVALID: &str = "session_ids-invalid";
+pub const LABEL_TOO_MANY_SESSIONS: &str = "too-many-sessions";
+pub const LABEL_SESSION_ID_UNRECOGNIZED: &str = "session-id-unrecognized";
+pub const LABEL_PROJECT_MODE_NEVER: &str = "project-mode-never";
+pub const LABEL_SESSION_STILL_ACTIVE: &str = "session-still-active";
+pub const LABEL_HELD_FOR_REVIEW: &str = "held-for-review";
+pub const LABEL_SESSION_DISMISSED: &str = "session-dismissed";
+pub const LABEL_SESSION_KEPT: &str = "session-kept";
+pub const LABEL_NOT_PENDING: &str = "not-pending";
+pub const LABEL_SESSION_PROJECT_CHANGED: &str = "session-project-changed";
+pub const LABEL_SESSION_UNREADABLE: &str = "session-unreadable";
+
+/// The audit row an include writes before it changes anything.
+pub const AUDIT_PAST_SESSIONS_INCLUDED: &str = "past-sessions-included";
+
+/// One chosen session the include did not approve, and why.
+#[derive(Debug, Clone, Serialize)]
+pub struct SkippedSession {
+    pub session_id: String,
+    pub label: &'static str,
+}
+
+/// What an include came to. Every distinct id asked for is counted in
+/// `approved` or listed in `skipped`, exactly once.
+#[derive(Debug, Clone, Serialize)]
+pub struct IncludeOutcome {
+    pub approved: usize,
+    pub skipped: Vec<SkippedSession>,
+}
+
+/// A refusal of the whole call: an IPC error code and a fixed label.
+pub type IncludeRefusal = (&'static str, &'static str);
+
+/// Approve the chosen past sessions of `project_key` as a person's
+/// approval: pinned to a preview, held for the undo window, and recorded as
+/// the person's own, so a later change of the folder's rule does not take
+/// it back. Never `include_backlog`: each session is named.
+///
+/// The whole call is validated before anything changes. The Never
+/// contribution override, a Never folder, and any id that is not one of
+/// this folder's sessions in `discovered` refuse every session; then a
+/// `past-sessions-included` audit row (label and count only) is written,
+/// and an unwritable log refuses the call too. Only then is anything
+/// revived, queued or approved.
+///
+/// Per session: kept and dismissed sessions are never revived; a session
+/// still being written is skipped `session-still-active` and never queued
+/// half-written; an offer held for a person's review is skipped
+/// `held-for-review`, as a group approve leaves it; an expired offer is
+/// revived; a session never offered is read and queued now, past the queue
+/// cap (`watcher::offer_for_a_person`); anything already decided is
+/// `not-pending`.
+pub async fn include_past_sessions(
+    shared: &DaemonShared,
+    discovered: &[DiscoveredSession],
+    project_key: &str,
+    session_ids: &[String],
+    now: DateTime<Utc>,
+) -> Result<IncludeOutcome, IncludeRefusal> {
+    use super::ipc::{ERR_BAD_PARAMS, ERR_UNAVAILABLE};
+
+    // Distinct, in the order asked.
+    let mut seen = std::collections::HashSet::new();
+    let ids: Vec<&String> = session_ids.iter().filter(|id| seen.insert(*id)).collect();
+    if ids.is_empty() {
+        return Err((ERR_BAD_PARAMS, LABEL_SESSION_IDS_INVALID));
+    }
+    if ids.len() > MAX_SESSIONS_PER_INCLUDE {
+        return Err((ERR_BAD_PARAMS, LABEL_TOO_MANY_SESSIONS));
+    }
+    {
+        let policy = shared.policy.lock().expect("policy lock");
+        // The "Never" contribution override promises nothing is sent
+        // (#1208); refused as `approve` refuses it.
+        if policy.holds_every_send() {
+            return Err((ERR_BAD_PARAMS, super::ipc::ERR_CONTRIBUTION_OVERRIDE_NEVER));
+        }
+        if policy.resolve(project_key) == ProjectMode::Ignore {
+            return Err((ERR_BAD_PARAMS, LABEL_PROJECT_MODE_NEVER));
+        }
+    }
+    let by_id: HashMap<&str, &DiscoveredSession> = discovered
+        .iter()
+        .filter(|d| d.project_key == project_key)
+        .map(|d| (d.session_id.as_str(), d))
+        .collect();
+    let mut chosen: Vec<&DiscoveredSession> = Vec::with_capacity(ids.len());
+    for id in &ids {
+        let Some(d) = by_id.get(id.as_str()) else {
+            return Err((ERR_BAD_PARAMS, LABEL_SESSION_ID_UNRECOGNIZED));
+        };
+        chosen.push(d);
+    }
+
+    // The record first, as `approve`'s `bulk-approved` row: a rollback that
+    // has to write to the disk that just refused a write is not a rollback.
+    // The label is derived from the key the daemon holds, never from the
+    // caller's string.
+    let known = known_project_keys(shared, discovered);
+    let project_label = super::policy::disambiguated_label(
+        project_key,
+        super::policy::display_path_for_key(project_key).as_deref(),
+        &known,
+    );
+    if super::audit::append(
+        &shared.store,
+        &super::audit::AuditEntry {
+            at: now,
+            action: AUDIT_PAST_SESSIONS_INCLUDED.to_string(),
+            project_label: Some(project_label),
+            detail: Some(chosen.len().to_string()),
+        },
+    )
+    .is_err()
+    {
+        return Err((ERR_UNAVAILABLE, "audit-write-failed"));
+    }
+
+    let quiescence_secs = shared
+        .settings
+        .lock()
+        .expect("settings lock")
+        .quiescence_secs;
+    let mut skipped: Vec<SkippedSession> = Vec::new();
+    let skip = |d: &DiscoveredSession, label: &'static str| SkippedSession {
+        session_id: d.session_id.clone(),
+        label,
+    };
+    // Entry ids to approve, each with the session it stands for.
+    let mut to_approve: Vec<(Uuid, &DiscoveredSession)> = Vec::new();
+    let mut to_offer: Vec<&DiscoveredSession> = Vec::new();
+    {
+        let mut queue = shared.queue.lock().expect("queue lock");
+        let latest: Vec<Option<(Uuid, QueueState, bool)>> = {
+            let latest_at = latest_offers(&queue);
+            chosen
+                .iter()
+                .map(|d| {
+                    latest_at.get(d.session_ref.path.as_path()).map(|e| {
+                        (
+                            e.entry_id,
+                            e.state,
+                            // Held now, or held once before it aged out: the
+                            // expiry overwrote the hold's label, and the
+                            // review clock is what still says so.
+                            e.held_for_review()
+                                || (e.state == QueueState::Expired
+                                    && e.review_started_at.is_some()),
+                        )
+                    })
+                })
+                .collect()
+        };
+        for (d, latest) in chosen.iter().copied().zip(latest) {
+            let path = d.session_ref.path.as_path();
+            if queue.dismissed_at_path(path) {
+                skipped.push(skip(d, LABEL_SESSION_DISMISSED));
+            } else if queue.kept_at_path(path) {
+                skipped.push(skip(d, LABEL_SESSION_KEPT));
+            } else if !d.quiescent(now, quiescence_secs) {
+                skipped.push(skip(d, LABEL_SESSION_STILL_ACTIVE));
+            } else {
+                match latest {
+                    None => to_offer.push(d),
+                    Some((_, _, true)) => skipped.push(skip(d, LABEL_HELD_FOR_REVIEW)),
+                    Some((id, QueueState::Pending, false)) => to_approve.push((id, d)),
+                    Some((id, QueueState::Expired, false)) => {
+                        if queue.revive_expired(id, now) {
+                            to_approve.push((id, d));
+                        } else {
+                            skipped.push(skip(d, LABEL_NOT_PENDING));
+                        }
+                    }
+                    Some(_) => skipped.push(skip(d, LABEL_NOT_PENDING)),
+                }
+            }
+        }
+    }
+
+    if !to_offer.is_empty() {
+        let refs: Vec<SessionRef> = to_offer.iter().map(|d| d.session_ref.clone()).collect();
+        let offered = super::run_blocking(|| {
+            super::watcher::offer_for_a_person(shared, now, &refs, project_key)
+        });
+        for (d, offered) in to_offer.into_iter().zip(offered) {
+            match offered {
+                Ok(id) => to_approve.push((id, d)),
+                Err(label) => skipped.push(skip(d, label)),
+            }
+        }
+    }
+
+    if to_approve.is_empty() {
+        return Ok(IncludeOutcome {
+            approved: 0,
+            skipped,
+        });
+    }
+    // The terms in force now, read as `approve` reads them; see there.
+    let cfg = shared.store.load_config().ok().flatten();
+    let scopes = cfg
+        .as_ref()
+        .map(|c| c.consent_scopes.clone())
+        .unwrap_or_default();
+    let (near_ai, attested_bodies, approval_hold_secs) = {
+        let s = shared.settings.lock().expect("settings lock");
+        (
+            s.near_ai.clone(),
+            s.ironwire_attested_bodies,
+            s.approval_hold_secs,
+        )
+    };
+    let inputs = cfg
+        .as_ref()
+        .map(|c| super::preview::input_fingerprint(c, near_ai.as_ref(), attested_bodies));
+    let terms = super::ipc::ApprovalTerms {
+        cfg: cfg.as_ref(),
+        scopes: &scopes,
+        inputs: inputs.as_deref(),
+        verdict: None,
+        correction: None,
+        // The call's one instant, as `approve` takes one.
+        approved_at: now,
+        approval_hold_secs,
+    };
+    let entry_ids: Vec<Uuid> = to_approve.iter().map(|(id, _)| *id).collect();
+    let batch = super::ipc::approve_as_a_person(shared, &entry_ids, &terms)
+        .await
+        .map_err(|label| (ERR_UNAVAILABLE, label))?;
+    let session_of: HashMap<Uuid, &DiscoveredSession> = to_approve.into_iter().collect();
+    for (id, label) in batch.skipped {
+        if let Some(d) = session_of.get(&id) {
+            skipped.push(skip(d, label));
+        }
+    }
+    Ok(IncludeOutcome {
+        approved: batch.approved_ids.len(),
+        skipped,
+    })
 }
