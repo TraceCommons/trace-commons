@@ -21,8 +21,9 @@ The following bind the code instead:
 - the contrast floors.
 
 Where the code lacks one of these, the gap is a defect in the code to fix,
-not a reason to change the spec. The current gaps are listed under "Open
-code gaps".
+not a reason to change the spec. "Open code gaps" names the known gaps,
+including Withdraw in History; the full parity list is the R15 plan's
+Phase 4 Tasks 5-8.
 
 - Decided: purple brand (D3), the minimum OS and glass on every supported
   macOS (D4), the Settings window (D8), the three-pane layout (D9), SF Pro
@@ -44,10 +45,13 @@ design (2026-09-28, in the #1118 review), and native SwiftUI is the main
 client on macOS with no new Tauri work (#1173 D1). Native macOS is the lead
 client (2026-10-02).
 Scope: `macos/` (the `TraceCommonsApp` target and the `TCDesign` target),
-the token source `design-tokens/glass.tokens.json`, and its Swift generator.
-No Tauri or GTK output. The product behaviour changes the glass shell makes
-are named and decided in "Behaviour changes (decided)"; there are no consent,
-withdrawal or Private AI behaviour changes.
+the token source `design-tokens/glass.tokens.json`, and its generator.
+Tauri gets no generated output. Since #1228 the generator also writes the
+GTK and WinUI shells' brand and status roles (`SHELL_ROLES`; see "One
+source, three outputs"); those shells take nothing else from this spec,
+and their own styling is out of scope. The product behaviour changes the
+glass shell makes are named and decided in "Behaviour changes (decided)";
+there are no consent, withdrawal or Private AI behaviour changes.
 
 ## Changes since 2026-09-30
 
@@ -92,6 +96,9 @@ already does.
   Toolbar paragraph.
 - **"Unknown has no dot"** (10-02 item 5) is now a general rule for every
   status readout.
+- **Kept versus Credit pending** (09-30 item 7), **subtitles** (09-30 item
+  2) and **where the queue panels sit** (09-30 parity list): answered under
+  Screens and Notices; the subtitle question is open.
 - **Folder Submit** (09-30 item 9, Zaki's decision): Submit all and Submit
   all as are kept, on the folder row and in the folder inspector, with
   Submit all as presented as a modal.
@@ -156,7 +163,8 @@ missing.
   2026-10-02 note); Windows and Linux stay on Tauri, frozen, until macOS ships
   (D13, a default). The acceptance item that diffed generated Tauri CSS
   against #1146 is dropped. The typefaces therefore change nothing in Tauri
-  or GTK.
+  or GTK. (Superseded in part: since #1228 the generator also writes the GTK
+  and WinUI brand and status roles; see "One source, three outputs".)
 - **Panes.** D9 as decided by Ron: three floating glass panes, with the map
   and the inspector each hidden independently. The leading-width formula,
   the map-hidden-below-1100pt rule and 10pt window padding are unchanged
@@ -201,9 +209,10 @@ that system:
   Its default size was 940×660 and its minimum 760×520. A `MenuBarExtra`
   provided the menu-bar item.
 - The package targets `.macOS(.v14)` (`macos/Package.swift`).
-- No token pipeline existed. The palettes were hand-maintained. This spec
-  fixes that for the macOS app only; the Tauri and GTK palettes are frozen
-  with their shells (D1, D13).
+- No token pipeline existed. The palettes were hand-maintained. The token
+  source now feeds the macOS app in full, and the GTK and WinUI shells'
+  brand and status roles (#1228). Tauri's palette is frozen with its shell
+  (D1, D13).
 
 #1146 is a good visual source for the geometry, the layer tiers and the
 component inventory. It is not a build spec on its own:
@@ -292,20 +301,24 @@ particular:
 - **Consent copy.** It always comes from the core. This spec adds no new
   sentence that promises privacy or security. The #1146 shield-and-check
   icon on the credential node is not carried over.
-- **Tauri and GTK.** No generated output for either shell (D1, D13). #1146's
-  Tauri glass bridge (`set_glass_regions`) is not carried forward.
+- **Tauri, GTK and WinUI.** Tauri gets no generated output (D1, D13), and
+  #1146's Tauri glass bridge (`set_glass_regions`) is not carried forward.
+  GTK and WinUI receive only the brand and status roles from the generator
+  (#1228); this spec does not restyle either shell.
 
 ## Behaviour changes (decided)
 
-The glass shell changes these behaviours. Each is decided; nothing else
-changes. There are no consent, withdrawal or Private AI behaviour changes.
+The glass shell changes these behaviours. Each is decided. One behaviour
+question is not decided, whether the Insights deferral survives, and it is
+under Open; nothing else changes. There are no consent, withdrawal or
+Private AI behaviour changes.
 
 | Change | From `main`'s shipping window | To | Decision |
 |---|---|---|---|
 | Settings | a sidebar destination (⌘7) | a macOS Settings window (⌘,) | #1173 D8 |
 | Compute | a sidebar destination | a Settings section, keeping pause, resume and withdraw | this spec (#1146 has no screen for it); built in `MonitorSettingsWindow` |
 | Navigation | a two-column sidebar of seven destinations | three tabs (Home, Inference, Traces) in a three-pane window | #1173 D9 |
-| Launch tab | Insights, with discovery and enrollment deferred while it shows | Home, the `@SceneStorage` default (built, R5). The debug monitor window calls `navigation.activateServicesForWindow()` on appear. Whether the Insights deferral is dropped when the monitor becomes the main window is not decided: it is plan D-11, an owner decision whose default is to start services when the monitor opens | Home: R5. The deferral: open (plan D-11) |
+| Launch tab | Insights, with discovery and enrollment deferred while it shows | Home, the `@SceneStorage` default (built, R5). Whether the Insights deferral survives is not in this table; see Open | Home: R5 |
 | Pane collapse | none | the map hides below 1100pt at runtime and returns when the window widens; the saved preference is kept. #1146 applies its 1100pt rule only once, at launch, so this is a native divergence | #1182 |
 | Map modes | none | the map shows Traces or Private AI; the selector changes the map only | D11, R8 |
 | A session's pill | a session card's Submit | Review: selects the session and opens the inspector | #1173 D10 |
@@ -356,8 +369,10 @@ From #1173's table, Ron's 2026-10-02 comment on it, and Zaki's decisions of
      Acceptance).
 4. **Settings: decided, a macOS Settings window (⌘,) (D8).** Ron may later
    restyle it to the glass theme rather than the stock window look.
-5. **Token source: decided, typed JSON at `design-tokens/glass.tokens.json`,
-   generating Swift only** (#1173 R1, built in #1178).
+5. **Token source: decided, typed JSON at `design-tokens/glass.tokens.json`**
+   (#1173 R1, built in #1178). It generates every token as Swift for the
+   macOS app, and since #1228 the brand and status roles for GTK and WinUI.
+   Tauri gets no output. See "One source, three outputs".
 6. **Typefaces: decided, SF Pro and SF Mono** (Ron on #1173, built in
    #1179). The type scale maps to macOS text styles.
 7. **Window layout: decided, a custom three-pane layout, not
@@ -384,19 +399,37 @@ From #1173's table, Ron's 2026-10-02 comment on it, and Zaki's decisions of
 
 ## Tokens
 
-### One source, one output
+### One source, three outputs
 
 `design-tokens/glass.tokens.json` is the only file anyone edits.
-`scripts/design-tokens/generate.py` writes
-`macos/Sources/TCDesign/Generated/GlassTokens.swift`, which the `TCDesign`
-components and the app's `TC` palette read.
+`scripts/design-tokens/generate.py` writes three outputs (its docstring at
+`efd05c6f8`; GTK and Windows since #1228):
 
-Drift is guarded twice, both inside existing CI:
+- `macos/Sources/TCDesign/Generated/GlassTokens.swift`: "every token, as
+  Swift constants for the native macOS app". The `TCDesign` components and
+  the app's `TC` palette read it.
+- `crates/trace-commons-contributor-gtk/src/ui/brand_tokens.rs`: "the brand
+  and status roles (SHELL_ROLES below), light and dark, as GTK
+  `@define-color` sheets and Rust constants for the Linux app".
+- `windows/src/TraceCommons.App/Themes/BrandTokens.xaml`: "the same roles
+  as a WinUI ResourceDictionary with Light, Default (dark) and HighContrast
+  theme dictionaries".
 
-- `python3 scripts/design-tokens/generate.py --check` exits non-zero if the
-  Swift file is out of date;
+`SHELL_ROLES` is the brand accent (`accent`, `accentLine`, `accentText`,
+`onAccent`) and the text-safe status colours (`statusOn`, `statusAsk`,
+`statusOutside`, each with its `*Text` twin, and `onStatus`). In the
+generator's words, those shells "keep their own grounds, ink and control
+styling (libadwaita, WinUI); what they share with the glass system is the
+brand accent and the text-safe status colours." Tauri gets no output.
+
+Drift is guarded inside existing CI:
+
+- `python3 scripts/design-tokens/generate.py --check` exits non-zero
+  if any output is out of date;
 - `TokenDriftTests` (in `macos/Tests/TCDesignTests`) decodes the JSON and
-  compares every token, value by value, with the generated constants.
+  compares every token, value by value, with the generated Swift constants;
+- "The GTK and Windows suites measure the generated roles for contrast on
+  their own grounds" (the generator's docstring).
 
 There is no separate drift job. The generator also validates the source: it
 refuses a type step whose size is not its text style's default size.
@@ -606,7 +639,8 @@ until it is added to the JSON.
   - a painted surface's soft edge becomes a solid 1pt stroke
     (`edgeHighContrast`; `GlassStyle.swift`). Liquid Glass surfaces take the
     system's own contrasting border instead;
-  - status glyphs carry their label as well as their colour.
+  - the flow map's quiet and dashed links are drawn stronger
+    (`FlowMapView.swift`).
 - **Reduce Transparency** (`accessibilityReduceTransparency`). Every tier
   swaps blur and translucent fill for an opaque fill: the pane is the
   `paneOpaque` token, solid (#1180), and a card is one step lighter. This is
@@ -616,8 +650,10 @@ until it is added to the JSON.
   did not report draws no dot and reads as unknown, in the core's word
   (`MonitorScreensCopy.unknown`). It is never drawn as on or as off. This
   covers the Inference dot, Home's Watching row, the Watching/Paused
-  readout, the Traces badge and the menu-bar pills
-  (`HomeViews.swift`, `MenuBarGlassPanel.swift`).
+  readout and the menu-bar pills (`HomeViews.swift`,
+  `MenuBarGlassPanel.swift`). The Traces badge follows the same rule with
+  its own word: a dash read as "unavailable" from the core's
+  `decisionsOwedText`, not `MonitorScreensCopy.unknown` (see Toolbar).
 
 ## Materials by OS
 
@@ -773,6 +809,18 @@ comes from `TCConsentCopy` or the core, and a notice the ABI cannot word
 draws nothing. The Traces tab's own notices (the folder notice, the
 queue-safeguard notices and the core-down line) are `GlassNotice`s above the
 tree.
+
+**`main`'s queue panels.** None of them sits under Home's Summary inspector,
+which holds only the counts, credit and community cards
+(`HomeSummaryInspector`). The queue-safeguard notices (a spent daily
+budget, a busy privacy witness, gate-held folders and the daemon's health
+label) are built, above the tree (`TracesStore.safeguards`). The arming
+offer and the Private AI offer go above the tree as well (plan Phase 4
+Task 5, not built). The Private AI panel (the switch, the credential and
+the tool list) goes in the Inference tab's inspector (plan Phase 4 Task 7,
+not built).
+Where `main`'s certificate section (`CertificateSection`, the sessions a
+witness certificate is held for) goes is not decided; see Open.
 
 ### The approval and undo region
 
@@ -995,7 +1043,7 @@ unreachable.
 | Home | the Home tab: the Watching row, the waiting and contributed counts, the Missions card, and recent history with a way into History. The inspector shows the Summary (`HomeSummaryInspector`) |
 | Traces (waiting, review) | the Traces tab: tree in the left pane, review and the folder inspector in the inspector |
 | Inference (Private AI) | the Inference tab, with core copy |
-| History | Home, then History (breadcrumb) |
+| History | Home, then History (breadcrumb). Withdraw is not there yet; see "Open code gaps" |
 | Mission drafts (`main`'s local drafts, `MissionDraftsView`) | a Home page (`.missionDrafts`), reached from Home (R15 plan, Phase 4 Task 8), with its delete confirmation unchanged. Until then it stays in the shipping window |
 | Missions catalogue | Home, then Missions (`MissionsPage`) |
 | Compute | a Settings section (`ComputeView`), including pause, resume and withdraw |
@@ -1004,6 +1052,25 @@ unreachable.
 | Onboarding / first run | a single pane over the scene, with StepProgress (#1235 ports #1030's first run; #1120 the passkey screens) |
 | Settings | the Settings window (⌘,) |
 | Menu bar | the menu-bar popover |
+
+**Home's counts, and Kept versus Credit pending.** Home shows two counts:
+Waiting (the core's `decisions_owed`) and Contributed (the all-time accepted
+count). #1146's third card, Credit pending, is not on Home. Pending credit
+appears only in the Summary inspector's Credit card, and only beside the
+commons' statement of its condition; without that statement it is a dash
+(`HomeSummaryInspector.credit`). "Kept" is not a Home count. It is the
+menu-bar panel's legend series, read from `list_kept`
+(`MenuPanelStore.columns`), so it excludes sessions still waiting, unlike
+#1146's "kept" (see Open, the chart footer).
+
+**Subtitles.** The monitor draws no subtitle at `efd05c6f8`, and
+`MonitorScreensCopy` has no subtitle field. `main`'s `contentHeader`
+subtitles for Queue ("Nothing is sent unless you say so."), History and
+Settings are written in Swift (`MainWindowView.Section.subtitle`) and leave
+with the shipping window (plan Phase 4 Task 11). Compute's and Private AI's
+are core copy (`ComputeCopy.subtitle`, `PrivateInferenceCopy.subtitle`),
+but nothing outside `MainWindowView` draws them. Whether any of these
+sentences returns in the monitor, from the core, is open.
 
 **Keyboard shortcuts.** `main`'s ⌘1–⌘7 select `MainWindowView`'s seven
 sidebar destinations, and the monitor window has no tab shortcuts. Whether
@@ -1154,9 +1221,33 @@ questions. Checked at `efd05c6f8`.
   port (at `84a45178`) draws Submit all with the withheld line on the folder
   row and Submit all as as an inline `GlassMenu` on the row. It has no folder
   inspector, and Submit all as is not yet a modal (Decision 14).
+- **Withdraw in History.** The monitor's History page lists contributions
+  but cannot withdraw one: "Withdrawing a contribution stays in the
+  shipping window until C1 carries the withdrawal call"
+  (`HomeViews.swift:139-141`). Withdraw, with its confirmation and outcome,
+  belongs in the History page's inspector (plan Phase 4 Task 6).
+- **Insights and Mission drafts not reachable from Home.** Neither is a
+  Home page in the monitor; both are reached only from the shipping
+  window's sidebar (plan Phase 4 Task 8; see Screens).
+- **The Traces tab lacks `main`'s queue panels.** The arming offer, the
+  Private AI offer and the hosted preview sheet are not in the monitor
+  (plan Phase 4 Task 5), nor is the certificate section, which has no
+  place yet (see Open). The Private AI switch, credential and tool list
+  are not in the Inference inspector (plan Phase 4 Task 7).
+
+This list names the gaps this spec's requirements expose. It is not the
+whole parity list: that is the R15 plan's Phase 4 Tasks 5-8
+(`docs/superpowers/plans/2026-10-02-macos-glass-rebuild-and-r15-cutover.md`).
 
 ## Open
 
+- **The Insights deferral (plan D-11).** `main` defers discovery and
+  enrollment while the shipping window rests on Insights or Mission drafts
+  (`MainWindowNavigation.activateServicesIfNeeded`). The debug monitor calls
+  `navigation.activateServicesForWindow()` on appear. Whether the deferral
+  is dropped when the monitor becomes the main window is an owner decision;
+  its default is that services start when the monitor opens, and the PR
+  says so.
 - Where D2 (appearance) was revised, and whether "follows the system" is
   the decision (Ron; plan D-2).
 - The pre-26 material in the light appearance. `GlassBackdrop` uses
@@ -1179,6 +1270,11 @@ questions. Checked at `efd05c6f8`.
 - #1146's binoculars focus and node-card hover and pin behaviour on the
   flow map.
 - ⌘1–⌘3 for the monitor's tabs at R15.
+- Whether any of `main`'s screen subtitles returns in the monitor, as core
+  copy (see Screens, Subtitles).
+- Where the certificate section (`CertificateSection`) sits in the monitor.
+  On `main` it is above the queue's folders; the plan lists it as missing
+  and names no place for it.
 - The Liquid Glass tint values per tier on macOS 26. They are tuned on
   device and recorded in the JSON.
 - Adding `flowDash` (0.6s linear) to the JSON.
