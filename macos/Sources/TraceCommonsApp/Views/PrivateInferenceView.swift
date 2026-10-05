@@ -86,6 +86,13 @@ struct PrivateInferenceContent: View {
             CredentialSection(copy: copy, prominent: true)
                 .padding(TC.Space.l)
                 .tcCard()
+            // Saved model accounts and managed sessions follow account
+            // setup and lead the tool list.
+            ManagedSessionsSection()
+                .padding(TC.Space.l)
+                .tcCard()
+            Text(model.managedText("global_title")).font(.headline)
+            Text(model.managedText("global_scope")).foregroundStyle(.secondary)
             HarnessListSection(copy: copy)
                 .padding(TC.Space.l)
                 .tcCard()

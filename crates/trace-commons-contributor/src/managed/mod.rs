@@ -1,18 +1,25 @@
 //! Local saved accounts and explicitly managed native-tool sessions.
 
 pub mod accounts;
+pub mod cli;
+pub mod profiles;
+pub mod secrets;
+pub mod sessions;
+pub mod supervisor;
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, clap::ValueEnum,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolId {
     Claude,
     Codex,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
 #[serde(rename_all = "snake_case")]
 pub enum ConnectionKind {
     NearAi,
@@ -86,3 +93,7 @@ pub enum ManagedError {
     #[error("invalid managed request")]
     InvalidRequest,
 }
+
+pub mod copy;
+pub mod route;
+pub mod terminal;

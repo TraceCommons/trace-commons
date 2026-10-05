@@ -304,6 +304,19 @@ const QUIESCE_POLL_MS: u64 = 200;
 /// until #777. Four members (`arming_suggestion`, `decline_arming`,
 /// `probe_routed_tools`, `search_original`) appear nowhere in it.
 pub const METHODS: &[&str] = &[
+    "managed_snapshot",
+    "managed_account_add",
+    "managed_select",
+    "managed_launch_prepare",
+    "managed_launch_redeem",
+    "managed_terminal_launch",
+    "managed_session_report",
+    "managed_session_dismiss",
+    "managed_account_remove",
+    "managed_account_reconnect",
+    "managed_account_rename",
+    "managed_account_set_key",
+    "managed_account_verify",
     "account_bind",
     "account_binding",
     "account_session_status",
@@ -641,6 +654,7 @@ pub struct GateHeld {
 /// Everything the daemon's loops and its IPC server share.
 pub struct DaemonShared {
     pub(crate) native_identity: Mutex<super::native_identity::Ceremonies>,
+    pub(crate) managed: Mutex<Result<super::managed::ManagedService, crate::managed::ManagedError>>,
     pub store: ConfigStore,
     pub queue: Mutex<Queue>,
     pub policy: Mutex<ProjectPolicy>,
@@ -939,7 +953,9 @@ impl DaemonShared {
         let (events, _) = broadcast::channel(256);
         let paused = state.paused;
         let pin_store = store.clone();
+        let managed = Mutex::new(super::managed::ManagedService::open(&store));
         Ok(Self {
+            managed,
             store,
             queue: Mutex::new(queue),
             policy: Mutex::new(policy),
@@ -2691,6 +2707,21 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
         return Response::err(req.id, ERR_UNAVAILABLE, label);
     }
     match req.method.as_str() {
+        // One arm per method: `every_advertised_method_is_dispatched_and_the_reverse`
+        // counts one arm per string literal, and an or-pattern hides all but its last.
+        "managed_snapshot" => super::managed::handle(shared, req),
+        "managed_account_add" => super::managed::handle(shared, req),
+        "managed_select" => super::managed::handle(shared, req),
+        "managed_launch_prepare" => super::managed::handle(shared, req),
+        "managed_terminal_launch" => super::managed::handle(shared, req),
+        "managed_launch_redeem" => super::managed::handle(shared, req),
+        "managed_session_report" => super::managed::handle(shared, req),
+        "managed_session_dismiss" => super::managed::handle(shared, req),
+        "managed_account_remove" => super::managed::handle(shared, req),
+        "managed_account_rename" => super::managed::handle(shared, req),
+        "managed_account_set_key" => super::managed::handle(shared, req),
+        "managed_account_verify" => super::managed::handle(shared, req),
+        "managed_account_reconnect" => super::managed::handle(shared, req),
         "hello" => Response::ok(
             req.id,
             serde_json::json!({
@@ -2700,6 +2731,7 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
                 "events": [
                     EVENT_SNAPSHOT, EVENT_QUEUE_CHANGED, EVENT_STATUS_CHANGED,
                     EVENT_DIGEST_DUE, EVENT_RESYNC_REQUIRED, EVENT_INFERENCE_CALL_ADDED,
+                    "managed_changed",
                 ],
                 "max_line_bytes": MAX_LINE_BYTES,
             }),
@@ -14838,7 +14870,7 @@ mod tests {
             src,
             "pub async fn handle_request_async(shared",
         ));
-        assert_eq!(sync.len(), 60, "synchronous dispatcher arms: {sync:?}");
+        assert_eq!(sync.len(), 73, "synchronous dispatcher arms: {sync:?}");
         assert_eq!(asy.len(), 63, "asynchronous dispatcher arms: {asy:?}");
 
         let dispatched: std::collections::BTreeSet<String> = sync.union(&asy).cloned().collect();

@@ -30,6 +30,25 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Launch a coding tool in this terminal with an isolated saved account.
+    Launch(crate::managed::cli::LaunchArgs),
+    /// Manage saved native subscriptions and OS-protected API keys.
+    Accounts {
+        #[command(subcommand)]
+        action: crate::managed::cli::AccountCommand,
+    },
+    /// Show managed sessions, including sessions started from the desktop app.
+    Sessions {
+        #[command(subcommand)]
+        action: crate::managed::cli::SessionCommand,
+    },
+    #[command(hide = true)]
+    RedeemLaunch {
+        #[arg(long)]
+        session_id: uuid::Uuid,
+        #[arg(long)]
+        ticket: String,
+    },
     /// Check a local mission proposal; does not fetch, execute, or publish
     MissionDraft {
         #[arg(long)]
@@ -457,6 +476,25 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
     }
     let store = ConfigStore::resolve(cli.config_dir)?;
     match cli.command {
+        Command::Launch(args) => {
+            let code = crate::managed::cli::launch(&store, args).await?;
+            std::process::exit(code);
+        }
+        Command::Accounts { action } => {
+            crate::managed::cli::accounts(&store, action, cli.json).await
+        }
+        Command::Sessions { action } => crate::managed::cli::sessions(&store, action, cli.json),
+        Command::RedeemLaunch { session_id, ticket } => {
+            let code = crate::managed::supervisor::redeem_and_run(
+                &store,
+                crate::managed::sessions::PreparedLaunch {
+                    session_id,
+                    ticket: Some(ticket),
+                },
+            )
+            .await?;
+            std::process::exit(code);
+        }
         Command::Login {
             grant,
             invite,

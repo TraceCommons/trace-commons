@@ -68,6 +68,14 @@ final class DaemonClient {
         self.daemon = daemon
     }
 
+    func managedSnapshot() throws -> ManagedSnapshot {
+        try call("managed_snapshot", as: ManagedSnapshot.self)
+    }
+
+    func managedAction(_ method: String, params: [String: Any]) throws -> [String: Any] {
+        try resultObject(method, params: params)
+    }
+
     // MARK: - Read
 
     func nativeWalletFlow(action: String, flowID: String, commons: String, account: String) throws -> NativeWalletView {

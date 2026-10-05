@@ -5974,6 +5974,7 @@ relaxation of origin/CORS/CSP controls.
 | `resync_required` | this client fell behind the event buffer | `{}` |
 | `preview_ready` | a scheduled preview finished and was delivered | the same object `preview_request` returns for a cache hit -- see "Scheduled previews" |
 | `inference_call_added` | the poll tick read a call from IronWire's log that no earlier tick had (K14) | `{id, tool, model, proof}` -- see below |
+| `managed_changed` | a saved model account or managed session changed (see `docs/managed-sessions.md`) | `{revision}` |
 
 `inference_call_added` is published where the daemon already reads IronWire's
 `/log`: the poll tick's routing refresh. Nothing is fetched for it and it adds

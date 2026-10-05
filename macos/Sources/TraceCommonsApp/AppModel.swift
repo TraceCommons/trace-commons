@@ -10,6 +10,50 @@ import TCShellCore
 /// back before touching any published property.
 @MainActor
 final class AppModel: ObservableObject {
+    @Published var managedSnapshot: ManagedSnapshot?
+    @Published var managedBusy = false
+    @Published var managedError: String?
+
+    func managedText(_ key: String) -> String { managedSnapshot?.copy?[key] ?? "" }
+
+    func refreshManagedSessions() {
+        perform("managed_snapshot", work: { try $0.managedSnapshot() }) { snapshot in
+            if snapshot.revision >= (self.managedSnapshot?.revision ?? 0), self.managedSnapshot != snapshot { self.managedSnapshot = snapshot }
+        }
+    }
+
+    func managedAction(_ method: String, params: [String: Any], openTerminal: Bool = false, newAccountKey: String? = nil) {
+        guard let client, !managedBusy else { return }
+        managedBusy = true
+        managedError = nil
+        Task.detached(priority: .userInitiated) {
+            let result = Result {
+                var response = try client.managedAction(method, params: params)
+                if method == "managed_account_add", let accountID = response["id"] as? String {
+                    if let key = newAccountKey {
+                        response = try client.managedAction("managed_account_set_key", params: ["account_id": accountID, "key": key])
+                    } else {
+                        response = try client.managedAction("managed_account_reconnect", params: ["account_id": accountID])
+                    }
+                }
+                if openTerminal {
+                    guard let session = response["session_id"] as? String,
+                          let ticket = response["ticket"] as? String else {
+                        throw DaemonClient.Failure(code: "launch-unknown", message: "managed-launch-unknown")
+                    }
+                    _ = try client.managedAction("managed_terminal_launch", params: ["session_id": session, "ticket": ticket])
+                }
+            }
+            await MainActor.run {
+                self.managedBusy = false
+                if case .failure(let error) = result {
+                    self.managedError = (error as? DaemonClient.Failure)?.message ?? self.managedText("action_failed")
+                }
+                self.refreshManagedSessions()
+            }
+        }
+    }
+
     enum Startup: Equatable {
         case starting
         /// The daemon is running in-process.
@@ -1156,10 +1200,11 @@ final class AppModel: ObservableObject {
                 creditPending: credit
             )
         case .resyncRequired, .lagged:
+            refreshManagedSessions()
             refreshQueue()
             refreshStatus()
-        case .unknown:
-            break
+        case .unknown(let name):
+            if name == "managed_changed" { refreshManagedSessions() }
         }
     }
 
@@ -1236,6 +1281,7 @@ final class AppModel: ObservableObject {
     // MARK: - Refresh
 
     func refreshAll() {
+        refreshManagedSessions()
         refreshStatus()
         refreshQueue()
         refreshHistory()
