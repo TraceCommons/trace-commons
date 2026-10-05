@@ -60,6 +60,22 @@ private final class GatedConsentDaemon: DaemonCalling {
     func openPreview(entryID: String) throws -> TCPreview { throw TCDaemon.TCError.daemonGone }
 }
 
+/// Answers `set_settings` with a declared IronWire, or refuses it.
+private final class IronWireSettingsDaemon: DaemonCalling {
+    let refuse: Bool
+    init(refuse: Bool) { self.refuse = refuse }
+
+    func call(_ method: String, params paramsJSON: String) -> String {
+        guard method == "set_settings", !refuse else {
+            return #"{"id":1,"error":{"code":"unavailable","message":"unexpected-test-method"}}"#
+        }
+        return #"{"id":1,"result":{"quiescence_secs":45,"digest_interval_secs":3600,"local_notifications":true,"queue_ttl_days":14,"max_queue_entries":500,"max_uploads_per_day":100,"near_ai_configured":false,"claude_root_configured":true,"codex_root_configured":true,"ironwire":{"mode":"watch","port":9001,"token_dir":"/tmp/iw"}}}"#
+    }
+
+    func searchOriginal(entryID: String, needle: String) -> Int? { nil }
+    func openPreview(entryID: String) throws -> TCPreview { throw TCDaemon.TCError.daemonGone }
+}
+
 /// G8 of #1229: the Settings window draws a fresh section view per section
 /// (`.id(section)`), so anything a section holds as `@State` is thrown away
 /// by switching section. A consent write in flight then lost its busy flag
@@ -154,6 +170,28 @@ final class SettingsSectionStateTests: XCTestCase {
 
         XCTAssertFalse(model.consentWriteBusy)
         XCTAssertTrue(model.consentWriteRefused, "the refusal went nowhere")
+    }
+
+    /// The routing draft outlives the section view, so it needs a reset of
+    /// its own: once the daemon confirms the form it was applied as, the
+    /// card reads the daemon again. A refused write keeps the edit.
+    @MainActor
+    func testTheRoutingDraftClearsOnceTheDaemonConfirmsIt() async throws {
+        let applied = RoutingForm(on: true, port: 9001, tokenDir: "/tmp/iw")
+        let model = AppModel()
+        model.setClientForTesting(DaemonClient(daemon: IronWireSettingsDaemon(refuse: false)))
+        model.routingDraft = applied
+        model.applyIronWire(applied)
+        try await waitUntil { model.daemonSettings != nil }
+        XCTAssertNotNil(model.daemonSettings)
+        XCTAssertNil(model.routingDraft, "a confirmed draft shadows the daemon's answer for good")
+
+        let refused = AppModel()
+        refused.setClientForTesting(DaemonClient(daemon: IronWireSettingsDaemon(refuse: true)))
+        refused.routingDraft = applied
+        refused.applyIronWire(applied)
+        try await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertEqual(refused.routingDraft, applied, "a refused write dropped the edit")
     }
 
     /// With the settings copy missing, a refusal still draws a line: the

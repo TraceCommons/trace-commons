@@ -1440,6 +1440,9 @@ final class AppModel: ObservableObject {
         routingChecking = form.on
         perform("set_settings", work: { try $0.setIronWire(form) }) { view in
             self.publishIfChanged(\.daemonSettings, view)
+            // The daemon now holds this form, so the card reads it again --
+            // unless the person has edited past it while the write was out.
+            if self.routingDraft == form { self.routingDraft = nil }
             guard form.on else {
                 self.routingChecking = false
                 return

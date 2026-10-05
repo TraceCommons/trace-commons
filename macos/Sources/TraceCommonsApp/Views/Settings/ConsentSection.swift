@@ -34,6 +34,9 @@ enum ConsentScopeRows {
     /// settings table's sentence, else the monitor table's request-failed
     /// sentence, else the dash every surface uses for "the core said
     /// nothing". A refusal never draws nothing.
+    /// The core's monitor screens table, decoded once (as `MonitorWords`).
+    static let screens = MonitorScreensCopy.decode(fromJSON: TCCoreCopy.monitorScreensCopyJSON())
+
     static func refusalLine(settings: String?, screens: MonitorScreensCopy?) -> String {
         settings ?? screens?.requestFailed ?? "\u{2014}"
     }
@@ -67,7 +70,7 @@ struct ConsentSection: View {
                     GlassNotice(tone: .outside) {
                         Text(ConsentScopeRows.refusalLine(
                             settings: TCSourceChecks.settingsCopy()?.consentSaveFailed,
-                            screens: MonitorScreensCopy.decode(fromJSON: TCCoreCopy.monitorScreensCopyJSON())))
+                            screens: ConsentScopeRows.screens))
                     }
                 }
                 caption(SettingsLegacyWords.nothingPreselected)
