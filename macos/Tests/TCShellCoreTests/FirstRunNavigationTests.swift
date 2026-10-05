@@ -69,6 +69,22 @@ final class FirstRunNavigationTests: XCTestCase {
         XCTAssertEqual(state.sessionRoots.codex, .watch(path: "/Volumes/moved/codex"))
     }
 
+    /// With no candidates discovered, every offered tool is trivially
+    /// answered; the declaration the daemon starts with is what keeps
+    /// Continue closed until Claude Code and Codex are answered.
+    func test_noCandidatesStillNeedsADeclaration() {
+        for (tier, step) in [(FirstRunTier.quick, FirstRunStep.folders), (.custom, .tools)] {
+            var state = FirstRunState(tier: tier, step: step)
+            XCTAssertFalse(FirstRunNavigation.canContinue(state, candidates: [], requiredScope: nil))
+
+            state.toolAnswers[.claudeCode] = .off
+            XCTAssertFalse(FirstRunNavigation.canContinue(state, candidates: [], requiredScope: nil))
+
+            state.toolAnswers[.codex] = .off
+            XCTAssertTrue(FirstRunNavigation.canContinue(state, candidates: [], requiredScope: nil))
+        }
+    }
+
     func test_startWaitsForTheRequiredUse() {
         var state = FirstRunState(tier: .quick, step: .uses)
         state.scopes = ["evaluation"]

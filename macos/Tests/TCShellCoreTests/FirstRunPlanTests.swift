@@ -53,13 +53,15 @@ final class FirstRunPlanTests: XCTestCase {
             ["mode": "watch", "path": "/Users/someone/exports"])
     }
 
+    /// An invite pasted on Join and then "watch only" chosen: the invite is
+    /// kept, so only the account answer stops the join.
     func test_watchOnlyJoinsNothing() throws {
         var state = answered()
         state.account = .watchOnly
-        state.invite = ""
-        let calls = FirstRunPlan.calls(for: state, at: .leaveRoots)
-        XCTAssertEqual(calls.count, 1)
-        _ = try settings(calls.first)
+        XCTAssertEqual(state.invite, "INVITE-1")
+        let json = try XCTUnwrap(state.sessionRoots.settingsJSON())
+        XCTAssertEqual(FirstRunPlan.calls(for: state, at: .leaveRoots),
+            [.startDaemon(settingsJSON: json)])
     }
 
     /// A plan-level stand-in only: the plan is pure, so this pins that a
