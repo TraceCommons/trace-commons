@@ -77,6 +77,15 @@
 //! is [`GATE_STATEMENT`] and whose one action is "Look, then decide". Both
 //! **DRAFT, NEEDS APPROVAL**.
 
+/// **DRAFT, NEEDS APPROVAL.**
+/// Core-owned disclosure for configured activity missions with rewards disabled.
+pub const ACTIVITY_MISSIONS_DISCLOSURE: &str = "Matching stays on this Mac; no activity profile or match result is sent. Missions change no capture or contribution permissions and send no sessions. Progress uses contributions made through your existing consent. Mission rewards are disabled, and no mission credit is available. Any future mission credit would remain pending and conditional until settlement.";
+
+/// **DRAFT, NEEDS APPROVAL.**
+/// Core-owned disclosure for discovery, separate from daily activity mechanics.
+/// Skill awards do not become corpus credit or authorize a contribution.
+pub const MISSION_CATALOGUE_DISCLOSURE: &str = "These are published skill-evaluation tasks. Matching stays on this Mac; no activity profile or match result is sent. Viewing or selecting a mission changes no capture or contribution permissions and sends no sessions. Contributions still require your existing consent. Corpus credit remains pending and conditional until settlement. Skill-evaluation awards are separate from corpus credit.";
+
 /// The sentence that replaced the acknowledgement checkbox.
 ///
 /// `Contribute` used to wait on three things: a pinned preview, the
@@ -988,6 +997,60 @@ pub fn legacy_migration_offer() -> LegacyMigrationOfferCopy {
         working: LEGACY_MIGRATION_WORKING,
         invite_prompt: LEGACY_MIGRATION_INVITE_PROMPT,
         start_failed: LEGACY_MIGRATION_START_FAILED,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Missions: the disclosure (M4)
+// ---------------------------------------------------------------------------
+//
+// The consent design's "Missions" section, M4: the first time Missions is
+// opened, and in Settings, the core's copy says that matching happens on
+// this Mac, that nothing is sent because of a mission, and that a mission's
+// credit is projected until the commons records it, then pending until it
+// settles. Every constant here is DRAFT, NEEDS APPROVAL, as M4 requires
+// until it is approved. Where the spec gives the words they are used as
+// given; the sentences it does not give are new and called out below.
+// Matching itself is `daemon::mission_matching` (K16).
+
+/// **DRAFT, NEEDS APPROVAL.** New: the spec gives no heading.
+pub const MISSIONS_DISCLOSURE_TITLE: &str = "How missions work";
+
+/// **DRAFT, NEEDS APPROVAL.** The first sentence is the spec's (M1, M4);
+/// the second is new.
+pub const MISSIONS_DISCLOSURE_MATCHING: &str =
+    "Matching happens on this Mac. What it looks at to find missions for you stays here.";
+
+/// **DRAFT, NEEDS APPROVAL.** The first sentence is the spec's (M2, M4);
+/// the second is new, and says the same as M2's "a session counts toward a
+/// mission only when it is contributed through one of the existing paths".
+pub const MISSIONS_DISCLOSURE_NOTHING_SENT: &str = "Nothing is sent because of a mission. A session counts toward one only when you contribute it, the same way as any other.";
+
+/// **DRAFT, NEEDS APPROVAL.** The spec's words (M3, M4).
+pub const MISSIONS_DISCLOSURE_CREDIT: &str =
+    "A mission's credit is projected until the commons records it, then pending until it settles.";
+
+/// The Missions disclosure, as a shell renders it (M4).
+#[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
+pub struct MissionsDisclosureCopy {
+    pub title: &'static str,
+    /// Matching happens on this Mac.
+    pub matching: &'static str,
+    /// Nothing is sent because of a mission.
+    pub nothing_sent: &'static str,
+    /// Credit is projected, then pending.
+    pub credit: &'static str,
+}
+
+/// The Missions disclosure (M4): shown the first time Missions is opened,
+/// and in Settings. Across the ABI, `tc_missions_disclosure_copy_json`.
+#[must_use]
+pub fn missions_disclosure_copy() -> MissionsDisclosureCopy {
+    MissionsDisclosureCopy {
+        title: MISSIONS_DISCLOSURE_TITLE,
+        matching: MISSIONS_DISCLOSURE_MATCHING,
+        nothing_sent: MISSIONS_DISCLOSURE_NOTHING_SENT,
+        credit: MISSIONS_DISCLOSURE_CREDIT,
     }
 }
 
@@ -2247,6 +2310,24 @@ pub fn session_notification_copy() -> SessionNotificationCopy {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// M4: the Missions disclosure says the three things, in the spec's
+    /// words where it gives them, and never calls credit earned.
+    #[test]
+    fn the_missions_disclosure_says_the_three_things() {
+        let copy = missions_disclosure_copy();
+        assert!(copy.matching.starts_with("Matching happens on this Mac."));
+        assert!(
+            copy.nothing_sent
+                .starts_with("Nothing is sent because of a mission.")
+        );
+        assert_eq!(
+            copy.credit,
+            "A mission's credit is projected until the commons records it, then pending until it settles."
+        );
+        let all = [copy.title, copy.matching, copy.nothing_sent, copy.credit].join(" ");
+        assert!(!all.to_lowercase().contains("earn"), "{all}");
+    }
 
     #[test]
     fn the_leaves_this_mac_line_is_assembled_from_labels() {

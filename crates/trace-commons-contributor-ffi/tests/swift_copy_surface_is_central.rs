@@ -541,6 +541,12 @@ fn pinned_sentences() -> Vec<(&'static str, String)> {
         legacy.push(consent::legacy_migration_refusal_line(label).to_owned());
     }
     add("consent_copy::legacy_migration_*", legacy);
+    // The Missions disclosure (M4, #1173): not built in macOS yet, pinned
+    // so the Missions tab arrives with the core's words.
+    add(
+        "consent_copy::missions_disclosure_copy",
+        table(json!(consent::missions_disclosure_copy())),
+    );
     add(
         "consent_copy::inference_connection_copy",
         table(json!(consent::inference_connection_copy())),

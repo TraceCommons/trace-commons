@@ -250,6 +250,7 @@ pub(super) fn client(
         "TRACE_COMMONS_CONTRIBUTOR_UNUSED_BEARER_ENV",
     )
     .bearer_token("unauthenticated")
+    .max_response_bytes(256 * 1024)
     .host_allowlist(allowed.clone())
     .build()
     .map_err(|_| anyhow!("near_signup_endpoint_refused"))

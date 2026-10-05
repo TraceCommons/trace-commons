@@ -89,5 +89,14 @@
         "inference_calls": null
       }
     }
-  ]
+  ],
+  "ledger_readable": false,
+  "observed_destinations": [],
+  "hub": {
+    "kind": "owned_loopback",
+    "state": "off",
+    "port": null,
+    "owned": false,
+    "basis": "unknown"
+  }
 }

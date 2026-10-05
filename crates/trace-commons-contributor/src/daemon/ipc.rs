@@ -235,6 +235,16 @@ pub const ERR_CORRECTION_NEEDS_ENTRY: &str = "correction-needs-entry-id";
 /// override promises nothing is queued or sent; clearing it lets the
 /// contributor approve again.
 pub const ERR_CONTRIBUTION_OVERRIDE_NEVER: &str = "contribution-override-never";
+/// K2 (#1173): refused because `DaemonShared::dev_dry_run` is set.
+///
+/// Returned by the dispatcher for every method not on
+/// [`DEV_DRY_RUN_LOCAL_METHODS`] -- everything that reaches ingest, the
+/// issuer, the witness or near.ai, or that approves or grants a send -- and
+/// by `set_project_mode` and `set_contribution_override` for `auto_upload`.
+/// Nothing clears this mode over the socket: it is set once, from the
+/// process environment, before the daemon starts serving requests, and only
+/// in a debug build.
+pub const ERR_DEV_DRY_RUN: &str = "dev-dry-run";
 /// The label an entry is skipped under when credential detection fired on
 /// the correction the contributor wrote for it.
 ///
@@ -294,6 +304,19 @@ const QUIESCE_POLL_MS: u64 = 200;
 /// until #777. Four members (`arming_suggestion`, `decline_arming`,
 /// `probe_routed_tools`, `search_original`) appear nowhere in it.
 pub const METHODS: &[&str] = &[
+    "account_bind",
+    "account_binding",
+    "account_session_status",
+    "account_sign_in",
+    "account_sign_out",
+    "passkey_add_begin",
+    "passkey_add_complete",
+    "passkey_cancel",
+    "passkey_create_begin",
+    "passkey_create_complete",
+    "passkey_login_begin",
+    "passkey_login_complete",
+    "passkey_state",
     "acknowledge_arming_rewordings",
     "acknowledge_grant_voids",
     "acknowledge_legacy_invite_migration",
@@ -308,6 +331,9 @@ pub const METHODS: &[&str] = &[
     "cancel",
     "clear_public_profile",
     "commons_credit_summary",
+    "mission_catalogue",
+    "activity_missions_catalogue",
+    "activity_missions_status",
     "consent_options",
     "discover_routing",
     "dismiss",
@@ -345,6 +371,12 @@ pub const METHODS: &[&str] = &[
     "inference_connection_install",
     "inference_connection_disconnect",
     "inference_calls",
+    "inference_summary",
+    "inference_call_proof",
+    "model_spend",
+    "private_ai",
+    "set_private_ai",
+    "invite_lookup",
     "tool_destinations",
     "list_audit",
     "list_history",
@@ -353,6 +385,7 @@ pub const METHODS: &[&str] = &[
     "keep",
     "undo_keep",
     "list_projects",
+    "mission_matches",
     "project_automatic_copy",
     "pause",
     "preview",
@@ -391,6 +424,102 @@ pub const METHODS: &[&str] = &[
     "withdraw_bulk",
     "unpublish_public_run",
 ];
+
+/// K2 (#1173): the methods a developer dry run still answers. An allowlist,
+/// not a denylist: each of these only reads or writes this daemon's own
+/// state store, so a method added later that reaches the network is refused
+/// until someone adds it here on purpose.
+///
+/// Not on it, and so refused, because they reach ingest, the issuer, the
+/// witness or near.ai: `enroll`, `near_ai_account_enroll`,
+/// `legacy_invite_migrate`, `near_account_start`, `native_wallet_flow`,
+/// `prepare_admission_session`, `near_account_capabilities`, the
+/// `account_*` and `passkey_*` methods, the `near_ai_credential_*` start,
+/// migrate, balance and funding calls, `invite_lookup`, `inference_summary`,
+/// `model_spend`, `set_private_ai`, `publish_public_run`,
+/// `unpublish_public_run`, `set_public_profile`, `clear_public_profile`,
+/// `history_detail`, `refresh_history`, `withdraw`, `withdraw_bulk`,
+/// `commons_credit_summary`, the mission catalogues, the
+/// `inference_connection_*` methods, `skill_candidate`, `skill_evaluate`,
+/// `witness_preview_request`, and the routing probes. Also refused, because
+/// they approve or grant a send, or write outside the state store (the
+/// keychain, a tool's own config, the skills folder): `approve`,
+/// `grant_automatic`, `harness_commit`, `near_ai_credential_forget`,
+/// `remove_token_local_copies`, `discard_token_reviews` and the
+/// `skill_install_*` writes.
+pub const DEV_DRY_RUN_LOCAL_METHODS: &[&str] = &[
+    "hello",
+    "status",
+    "subscribe",
+    "shutdown",
+    "quiesce",
+    "pause",
+    "resume",
+    "cancel",
+    "get_settings",
+    "set_settings",
+    "consent_options",
+    "set_consent_scopes",
+    "acknowledge_near_ai_notice",
+    "acknowledge_grant_voids",
+    "acknowledge_legacy_invite_migration",
+    "acknowledge_arming_rewordings",
+    "certificate_detail",
+    "route_disclosure",
+    "tool_destinations",
+    "inference_calls",
+    "inference_call_proof",
+    "private_ai",
+    "list_pending",
+    "list_kept",
+    "keep",
+    "undo_keep",
+    "dismiss",
+    "list_projects",
+    "project_automatic_copy",
+    "arming_suggestion",
+    "decline_arming",
+    // `auto_upload` is refused inside these two; the other modes only stop
+    // sends.
+    "set_project_mode",
+    "set_contribution_override",
+    "clear_contribution_override",
+    "automatic_grant",
+    "withdraw_automatic_grant",
+    "preview",
+    "preview_body",
+    "preview_cancel",
+    "preview_request",
+    "preview_turns",
+    "preview_unsure_spans",
+    "preview_visible",
+    "search_original",
+    "near_account_status",
+    "near_account_cancel",
+    "near_ai_credential_status",
+    "near_ai_credential_cancel",
+    "discover_routing",
+    "harness_list",
+    "harness_plan",
+    "skill_review",
+    "skill_install_plan",
+    "skill_install_status",
+    "list_audit",
+    "list_history",
+    "history_rollup",
+    "queue_outcome_counts",
+    "token_storage_status",
+    "get_public_profile",
+];
+
+/// K2 (#1173): the one dry-run check, made by both dispatchers before they
+/// look at the method. `None` lets the call through.
+fn dev_dry_run_refusal(shared: &DaemonShared, req: &Request) -> Option<Response> {
+    if shared.dev_dry_run && !DEV_DRY_RUN_LOCAL_METHODS.contains(&req.method.as_str()) {
+        return Some(Response::err(req.id, ERR_BAD_PARAMS, ERR_DEV_DRY_RUN));
+    }
+    None
+}
 
 pub const EVENT_SNAPSHOT: &str = "snapshot";
 pub const EVENT_QUEUE_CHANGED: &str = "queue_changed";
@@ -511,12 +640,28 @@ pub struct GateHeld {
 
 /// Everything the daemon's loops and its IPC server share.
 pub struct DaemonShared {
+    pub(crate) native_identity: Mutex<super::native_identity::Ceremonies>,
     pub store: ConfigStore,
     pub queue: Mutex<Queue>,
     pub policy: Mutex<ProjectPolicy>,
     pub state: Mutex<DaemonState>,
     pub settings: Arc<Mutex<DaemonSettings>>,
     pub health: Mutex<HealthState>,
+    /// K2 (#1173): the developer-only dry-run switch. Set exactly once, from
+    /// `TC_DEV_DRY_RUN` in the process environment, by `start_embedded`
+    /// before this struct's `Arc` is ever cloned -- see
+    /// `daemon::dev_dry_run_enabled`. `DaemonShared::load` always
+    /// initializes it to `false`; nothing past construction ever assigns it
+    /// again.
+    ///
+    /// No method on this type sets it, no IPC handler reads it out of
+    /// `req.params`, and no wire schema in `docs/contributor-daemon-ipc-v1_1.md`
+    /// names it -- that absence is what makes it untoggleable over the
+    /// socket, the same way `quiesced` above is process-lifetime state no
+    /// request can reach. A plain `bool`, not an `AtomicBool`: it is written
+    /// once, before any other thread holds a reference to this struct, and
+    /// read-only for the rest of the process's life.
+    pub dev_dry_run: bool,
     pub paused: AtomicBool,
     /// Uploads are parked for an update swap.
     ///
@@ -801,6 +946,9 @@ impl DaemonShared {
             state: Mutex::new(state),
             settings: Arc::new(Mutex::new(settings)),
             health: Mutex::new(HealthState::default()),
+            // `start_embedded` is the only place this ever becomes `true`,
+            // and only before this `Arc` is shared -- see the field's doc.
+            dev_dry_run: false,
             paused: AtomicBool::new(paused),
             quiesced: AtomicBool::new(false),
             shutdown: AtomicBool::new(false),
@@ -846,6 +994,7 @@ impl DaemonShared {
                 super::private_inference::PrivateInferenceState::Off,
             )),
             harness_plans: super::harness::PlanStore::default(),
+            native_identity: Mutex::new(Default::default()),
             skill_loop: Mutex::new(super::skill_loop::SkillLoopState::default()),
         })
     }
@@ -965,8 +1114,16 @@ impl DaemonShared {
         let (on, generation, credential, capture_enabled, attestor_key) = {
             let settings = self.settings.lock().expect("settings lock");
             (
+                // K2 (#1173): never host the proxy under a developer dry
+                // run, however `private_inference` reads. Hosting it is
+                // "IronWire changes" in the sense the dry-run guarantee
+                // names: it opens a loopback listener that forwards real
+                // inference traffic to the NEAR AI backend, which is network
+                // the dry run promises never to reach, regardless of what a
+                // contributor's real settings say.
                 !self.private_inference_terminating.load(Ordering::Acquire)
-                    && settings.private_inference,
+                    && settings.private_inference
+                    && !self.dev_dry_run,
                 self.private_inference_generation.load(Ordering::Acquire),
                 // Read here, under the same lock as the switch, so a key
                 // obtained while the daemon runs is picked up on the next
@@ -1237,7 +1394,7 @@ impl DaemonShared {
     /// contributor asked for; this is what actually happened, and a shell
     /// that renders the boolean alone would show a proxy as on while it was
     /// refusing to start.
-    fn private_inference_value(&self) -> serde_json::Value {
+    pub(crate) fn private_inference_value(&self) -> serde_json::Value {
         let state = self
             .private_inference_state
             .lock()
@@ -1640,7 +1797,8 @@ impl DaemonShared {
         drop(policy);
         let health = self.health.lock().expect("health lock");
         let cfg = self.store.load_config().ok().flatten();
-        serde_json::json!({
+        #[cfg_attr(not(debug_assertions), allow(unused_mut))]
+        let mut status = serde_json::json!({
             "schema_version": IPC_SCHEMA,
             "logged_in": self.logged_in(),
             "tenant_id": cfg.as_ref().map(|c| c.tenant_id.clone()),
@@ -1729,7 +1887,15 @@ impl DaemonShared {
             // unidentified folder, do not upload: the pill adds
             // `ContributionModeCopy.auto_partial` under its label.
             "contribution_mode_partial": contribution_mode_partial,
-        })
+        });
+        // K2 (#1173): debug builds only, so the app shows the dry-run notice
+        // from what this daemon is doing rather than parsing the
+        // environment itself. A release build never names the field.
+        #[cfg(debug_assertions)]
+        {
+            status["dev_dry_run"] = serde_json::Value::Bool(self.dev_dry_run);
+        }
+        status
     }
 
     /// The `arming_rewordings` list of [`Self::status_value`]. Each folder
@@ -2410,6 +2576,23 @@ fn handle_certificate_detail(shared: &DaemonShared, req: &Request) -> Response {
 /// Labels are explicit because several methods share a label that cannot
 /// be derived from their names, including the onboarding and profile groups.
 const ASYNC_ONLY_METHODS: &[(&str, &str)] = &[
+    ("inference_summary", "inference-summary-requires-async"),
+    ("model_spend", "model-spend-requires-async"),
+    ("set_private_ai", "private-ai-requires-async"),
+    ("invite_lookup", "invite-lookup-requires-async"),
+    ("account_bind", "identity-requires-async"),
+    ("account_binding", "identity-requires-async"),
+    ("account_session_status", "identity-requires-async"),
+    ("account_sign_in", "identity-requires-async"),
+    ("account_sign_out", "identity-requires-async"),
+    ("passkey_add_begin", "identity-requires-async"),
+    ("passkey_add_complete", "identity-requires-async"),
+    ("passkey_cancel", "identity-requires-async"),
+    ("passkey_create_begin", "identity-requires-async"),
+    ("passkey_create_complete", "identity-requires-async"),
+    ("passkey_login_begin", "identity-requires-async"),
+    ("passkey_login_complete", "identity-requires-async"),
+    ("passkey_state", "identity-requires-async"),
     (
         "prepare_admission_session",
         "admission-setup-requires-async",
@@ -2444,6 +2627,15 @@ const ASYNC_ONLY_METHODS: &[(&str, &str)] = &[
     (
         "commons_credit_summary",
         "commons-credit-summary-requires-async",
+    ),
+    ("mission_catalogue", "mission-catalogue-requires-async"),
+    (
+        "activity_missions_catalogue",
+        "activity-missions-requires-async",
+    ),
+    (
+        "activity_missions_status",
+        "activity-missions-requires-async",
     ),
     (
         "inference_connection_offers",
@@ -2488,6 +2680,9 @@ const ASYNC_ONLY_METHODS: &[(&str, &str)] = &[
 ];
 
 pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
+    if let Some(refused) = dev_dry_run_refusal(shared, req) {
+        return refused;
+    }
     if let Some(label) = ASYNC_ONLY_METHODS
         .iter()
         .find(|(name, _)| *name == req.method)
@@ -2514,11 +2709,16 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
         "route_disclosure" => handle_route_disclosure(shared, req),
         "tool_destinations" => super::inference_map::handle_destinations(shared, req),
         "inference_calls" => super::inference_map::handle_calls(shared, req),
+        "inference_call_proof" => super::network_data::handle_proof(shared, req),
+        "private_ai" => super::network_data::handle_private_ai(shared, req),
         "list_pending" => handle_list_pending(shared, req),
         "list_kept" => handle_list_kept(shared, req),
         "keep" => handle_keep(shared, req),
         "undo_keep" => handle_undo_keep(shared, req),
         "list_projects" => handle_list_projects(shared, req),
+        // K16: which contribution missions fit this Mac's work. Read-only,
+        // and answered here only (M1, M2); see `mission_matching`.
+        "mission_matches" => super::mission_matching::handle_mission_matches(shared, req),
         "project_automatic_copy" => handle_project_automatic_copy(shared, req),
         // The one project worth offering to arm right now, or nothing.
         //
@@ -3613,6 +3813,13 @@ fn handle_set_project_mode(shared: &DaemonShared, req: &Request) -> Response {
         Some(Ok(m)) => m,
         _ => return Response::err(req.id, ERR_BAD_PARAMS, "mode-invalid"),
     };
+    // K2 (#1173): arming a project for `auto_upload` is a send path -- it is
+    // what lets a future session leave unattended -- so it is refused before
+    // the project key is even resolved. `notify_only` and `ignore` only ever
+    // restrict, never enable a send, so neither is touched here.
+    if mode == ProjectMode::AutoUpload && shared.dev_dry_run {
+        return Response::err(req.id, ERR_BAD_PARAMS, ERR_DEV_DRY_RUN);
+    }
     // K5: arming is **from now** by default. `auto_upload` arms the project
     // for sessions that appear from here on, and what is already on disk
     // waits for the contributor -- the spec's rule that automatic
@@ -3982,6 +4189,13 @@ fn handle_set_contribution_override(shared: &DaemonShared, req: &Request) -> Res
         Some(Ok(m)) => m,
         _ => return Response::err(req.id, ERR_BAD_PARAMS, "mode-invalid"),
     };
+    // K2 (#1173): the contribution override's `auto_upload` is the whole-
+    // account version of arming, so it is refused on the same terms --
+    // before `confirm` is even checked. `notify_only` and `ignore` stay
+    // allowed: both only ever stop sends.
+    if mode == ProjectMode::AutoUpload && shared.dev_dry_run {
+        return Response::err(req.id, ERR_BAD_PARAMS, ERR_DEV_DRY_RUN);
+    }
     let confirm = match req.params.get("confirm") {
         None | Some(serde_json::Value::Null) => false,
         Some(serde_json::Value::Bool(b)) => *b,
@@ -4405,7 +4619,7 @@ fn handle_set_settings(shared: &DaemonShared, req: &Request) -> Response {
 /// the same friction `rebuild_effective_routing` exists to avoid for a typed port.
 /// The reported state is re-read after the reconcile so the answer describes
 /// what happened rather than what was true a moment before it.
-async fn handle_set_settings_async(shared: &DaemonShared, req: &Request) -> Response {
+pub(crate) async fn handle_set_settings_async(shared: &DaemonShared, req: &Request) -> Response {
     shared.absorb_near_ai_credential_change().await;
     let mut response = handle_set_settings(shared, req);
     if response.error.is_some() {
@@ -4433,7 +4647,28 @@ async fn handle_set_settings_async(shared: &DaemonShared, req: &Request) -> Resp
 /// why both real callers (the socket loop and `handle_local`) always go
 /// through this function rather than `handle_request` directly.
 pub async fn handle_request_async(shared: &DaemonShared, req: &Request) -> Response {
+    if let Some(refused) = dev_dry_run_refusal(shared, req) {
+        return refused;
+    }
     match req.method.as_str() {
+        "inference_summary" => super::network_data::handle_summary(shared, req).await,
+        "model_spend" => super::network_data::handle_model_spend(shared, req).await,
+        "set_private_ai" => super::network_data::handle_set_private_ai(shared, req).await,
+        "invite_lookup" => super::network_data::handle_invite_lookup(shared, req).await,
+        "account_bind" => super::native_identity::handle(shared, req).await,
+        "account_binding" => super::native_identity::handle(shared, req).await,
+        "account_session_status" => super::native_identity::handle(shared, req).await,
+        "account_sign_in" => super::native_identity::handle(shared, req).await,
+        "account_sign_out" => super::native_identity::handle(shared, req).await,
+        "passkey_add_begin" => super::native_identity::handle(shared, req).await,
+        "passkey_add_complete" => super::native_identity::handle(shared, req).await,
+        "passkey_cancel" => super::native_identity::handle(shared, req).await,
+        "passkey_create_begin" => super::native_identity::handle(shared, req).await,
+        "passkey_create_complete" => super::native_identity::handle(shared, req).await,
+        "passkey_login_begin" => super::native_identity::handle(shared, req).await,
+        "passkey_login_complete" => super::native_identity::handle(shared, req).await,
+        "passkey_state" => super::native_identity::handle(shared, req).await,
+
         "native_wallet_flow" => super::native_flow::handle_wallet(shared, req).await,
         "prepare_admission_session" => super::native_flow::admission_response(
             super::admission_setup::handle_prepare_admission_session(shared, req).await,
@@ -4479,6 +4714,11 @@ pub async fn handle_request_async(shared: &DaemonShared, req: &Request) -> Respo
         "commons_credit_summary" => {
             super::commons_credit::handle_commons_credit_summary(shared, req).await
         }
+        "mission_catalogue" => super::mission_catalogue::handle_catalogue(shared, req).await,
+        "activity_missions_catalogue" => {
+            super::activity_missions::handle_catalogue(shared, req).await
+        }
+        "activity_missions_status" => super::activity_missions::handle_status(shared, req).await,
         "inference_connection_offers" => {
             super::inference_connection::handle_offers(shared, req).await
         }
@@ -7207,6 +7447,10 @@ fn signer_attestor_for(
 
 #[cfg(test)]
 mod tests {
+    mod missions {
+        include!("mission_catalogue_tests.rs");
+        include!("activity_missions_tests.rs");
+    }
     mod witnessed_flow {
         include!("ipc_witness_flow_test.rs");
     }
@@ -7230,6 +7474,252 @@ mod tests {
             .save_config(&crate::commands::unenrolled_preview_config())
             .unwrap();
         s
+    }
+
+    /// K2 (#1173): every explicit send-enabling IPC method is refused,
+    /// before anything it would otherwise do, while `dev_dry_run` is set.
+    mod dev_dry_run {
+        use super::*;
+
+        /// Every method off `DEV_DRY_RUN_LOCAL_METHODS` is refused by both
+        /// dispatchers before its handler runs -- the network calls the
+        /// review named (`near_ai_account_enroll`, `legacy_invite_migrate`,
+        /// `near_account_start`, `native_wallet_flow`, `publish_public_run`,
+        /// `set_public_profile`, `withdraw`, `withdraw_bulk`) among them,
+        /// and any method added later until it is allowlisted.
+        #[tokio::test]
+        async fn refuses_every_method_off_the_local_allowlist() {
+            let mut s = enrolled_shared();
+            s.dev_dry_run = true;
+            let refused: Vec<&str> = METHODS
+                .iter()
+                .copied()
+                .filter(|m| !DEV_DRY_RUN_LOCAL_METHODS.contains(m))
+                .collect();
+            for named in [
+                "enroll",
+                "near_ai_account_enroll",
+                "legacy_invite_migrate",
+                "near_account_start",
+                "native_wallet_flow",
+                "publish_public_run",
+                "set_public_profile",
+                "withdraw",
+                "withdraw_bulk",
+                "approve",
+                "grant_automatic",
+                "witness_preview_request",
+            ] {
+                assert!(refused.contains(&named), "{named} must be refused");
+            }
+            for method in refused {
+                let async_r = handle_request_async(&s, &req(method, serde_json::json!({}))).await;
+                let sync_r = handle_request(&s, &req(method, serde_json::json!({})));
+                for r in [async_r, sync_r] {
+                    let err = r
+                        .error
+                        .unwrap_or_else(|| panic!("{method} answered under dev_dry_run"));
+                    assert_eq!(err.code, ERR_BAD_PARAMS, "{method}");
+                    assert_eq!(err.message, ERR_DEV_DRY_RUN, "{method}");
+                }
+            }
+            assert!(
+                s.store.load_config().unwrap().unwrap().device_key_id
+                    == crate::commands::unenrolled_preview_config().device_key_id,
+                "nothing was enrolled"
+            );
+        }
+
+        /// The allowlist names real methods, so a typo cannot quietly
+        /// refuse one the dry run is meant to keep.
+        #[test]
+        fn the_local_allowlist_names_only_real_methods() {
+            for m in DEV_DRY_RUN_LOCAL_METHODS {
+                assert!(METHODS.contains(m), "{m} is not a method");
+            }
+        }
+
+        /// Off, nothing is refused for being off the allowlist.
+        #[tokio::test]
+        async fn refuses_nothing_when_off() {
+            let s = enrolled_shared();
+            let r = handle_request(&s, &req("near_ai_credential_forget", serde_json::json!({})));
+            assert_ne!(
+                r.error.map(|e| e.message),
+                Some(ERR_DEV_DRY_RUN.to_string())
+            );
+        }
+
+        /// Debug builds report the mode in `status`, which is what the app
+        /// reads to show its notice.
+        #[test]
+        fn status_reports_the_mode() {
+            let mut s = enrolled_shared();
+            assert_eq!(s.status_value()["dev_dry_run"], false);
+            s.dev_dry_run = true;
+            assert_eq!(s.status_value()["dev_dry_run"], true);
+            let r = handle_request(&s, &req("status", serde_json::json!({})));
+            assert_eq!(r.result.expect("status still answers")["dev_dry_run"], true);
+        }
+
+        #[tokio::test]
+        async fn refuses_approve_a_single_entry_and_all() {
+            let mut s = enrolled_shared();
+            s.dev_dry_run = true;
+            let id = seed_entry(&s, "/tmp/dev-dry-run-approve");
+            for params in [
+                serde_json::json!({"entry_id": id}),
+                serde_json::json!({"all": true}),
+                serde_json::json!({"project_id": "whatever-a-folder-approve-would-send"}),
+            ] {
+                let r = handle_request_async(&s, &req("approve", params)).await;
+                let err = r.error.expect("approve is refused under dev_dry_run");
+                assert_eq!(err.code, ERR_BAD_PARAMS);
+                assert_eq!(err.message, ERR_DEV_DRY_RUN);
+            }
+            // Refused before anything is approved: the seeded entry is
+            // exactly where it started.
+            assert_eq!(
+                s.queue.lock().unwrap().get(id).unwrap().state,
+                super::super::super::queue::QueueState::Pending
+            );
+        }
+
+        #[test]
+        fn refuses_arming_a_project_for_auto_upload_but_not_notify_only_or_ignore() {
+            let mut s = enrolled_shared();
+            s.dev_dry_run = true;
+            seed_entry(&s, "/tmp/dev-dry-run-arm");
+            let r = handle_request(
+                &s,
+                &req(
+                    "set_project_mode",
+                    serde_json::json!({"project_key": "/tmp/dev-dry-run-arm", "mode": "auto_upload"}),
+                ),
+            );
+            let err = r.error.expect("arming is refused under dev_dry_run");
+            assert_eq!(err.code, ERR_BAD_PARAMS);
+            assert_eq!(err.message, ERR_DEV_DRY_RUN);
+            // A mode that only ever restricts a send is not a send path, and
+            // stays allowed -- the guarantee is "nothing can be made to
+            // send", not "nothing can be configured".
+            for mode in ["notify_only", "ignore"] {
+                let r = handle_request(
+                    &s,
+                    &req(
+                        "set_project_mode",
+                        serde_json::json!({"project_key": "/tmp/dev-dry-run-arm", "mode": mode}),
+                    ),
+                );
+                assert!(r.error.is_none(), "{mode}: {:?}", r.error);
+            }
+        }
+
+        #[test]
+        fn refuses_the_auto_contribution_override_but_not_notify_only_or_ignore() {
+            let mut s = enrolled_shared();
+            s.dev_dry_run = true;
+            let r = handle_request(
+                &s,
+                &req(
+                    "set_contribution_override",
+                    serde_json::json!({"mode": "auto_upload", "confirm": true}),
+                ),
+            );
+            let err = r
+                .error
+                .expect("the Auto override is refused under dev_dry_run");
+            assert_eq!(err.code, ERR_BAD_PARAMS);
+            assert_eq!(err.message, ERR_DEV_DRY_RUN);
+            for mode in ["notify_only", "ignore"] {
+                let r = handle_request(
+                    &s,
+                    &req(
+                        "set_contribution_override",
+                        serde_json::json!({"mode": mode}),
+                    ),
+                );
+                assert!(r.error.is_none(), "{mode}: {:?}", r.error);
+            }
+        }
+
+        #[test]
+        fn refuses_grant_automatic() {
+            let mut s = enrolled_shared();
+            s.dev_dry_run = true;
+            let r = handle_request(&s, &req("grant_automatic", serde_json::json!({})));
+            let err = r
+                .error
+                .expect("grant_automatic is refused under dev_dry_run");
+            assert_eq!(err.code, ERR_BAD_PARAMS);
+            assert_eq!(err.message, ERR_DEV_DRY_RUN);
+        }
+
+        #[tokio::test]
+        async fn refuses_the_witness_preview() {
+            let mut s = enrolled_shared();
+            s.dev_dry_run = true;
+            let id = seed_entry(&s, "/tmp/dev-dry-run-witness-preview");
+            let r = handle_request_async(
+                &s,
+                &req(
+                    "witness_preview_request",
+                    serde_json::json!({"entry_id": id, "raw_session_confirmed": true}),
+                ),
+            )
+            .await;
+            let err = r
+                .error
+                .expect("a witness preview is refused under dev_dry_run");
+            assert_eq!(err.code, ERR_BAD_PARAMS);
+            assert_eq!(err.message, ERR_DEV_DRY_RUN);
+        }
+
+        /// IronWire hosting is "nothing reaches the network" too: the exact
+        /// settings and home that `rejected_private_inference_settings_never_reach_reconcile`'s
+        /// sibling tests drive to `Running` elsewhere in this file stay `Off`
+        /// here, because `dev_dry_run` forces `on` to `false` regardless of
+        /// what `private_inference` says.
+        #[tokio::test]
+        async fn never_hosts_ironwire() {
+            let mut s = shared();
+            s.dev_dry_run = true;
+            let home = tempfile::tempdir().unwrap();
+            *s.private_inference.lock().await = Some(
+                super::super::super::private_inference::PrivateInference::with_port(
+                    home.path().to_path_buf(),
+                    0,
+                ),
+            );
+            s.settings.lock().unwrap().private_inference = true;
+            s.reconcile_private_inference().await;
+            assert_eq!(s.private_inference_value()["state"], "off");
+        }
+
+        /// The flag cannot be set, cleared, or discovered over the socket.
+        /// `set_settings` refuses any key `apply_settings_object` does not
+        /// recognize (`ERR_SETTINGS_UNKNOWN_FIELD`), and `dev_dry_run` is not
+        /// one of them -- the refusal itself is the proof that no code path
+        /// reads it out of `req.params`, and the field is unchanged either
+        /// way.
+        #[tokio::test]
+        async fn cannot_be_set_over_ipc() {
+            let mut s = enrolled_shared();
+            s.dev_dry_run = true;
+            let r = handle_request_async(
+                &s,
+                &req("set_settings", serde_json::json!({"dev_dry_run": false})),
+            )
+            .await;
+            let err = r
+                .error
+                .expect("an unrecognized settings key is refused outright");
+            assert_eq!(
+                err.message,
+                super::super::super::settings::ERR_SETTINGS_UNKNOWN_FIELD
+            );
+            assert!(s.dev_dry_run, "no IPC request may clear dev_dry_run");
+        }
     }
 
     #[test]
@@ -9965,6 +10455,7 @@ mod tests {
                     cwd: Some(project_key.to_string()),
                     project_key: Some(project_key.to_string()),
                     tool: Some(tool.to_string()),
+                    adapter: Some(tool.to_string()),
                 },
             );
         };
@@ -9983,6 +10474,7 @@ mod tests {
                 cwd: Some(project_key.to_string()),
                 project_key: Some(project_key.to_string()),
                 tool: None,
+                adapter: None,
             },
         );
 
@@ -13846,9 +14338,48 @@ mod tests {
     }
 
     #[test]
+    fn network_methods_are_reachable_and_unknown_is_not_zero() {
+        let s = shared();
+        for method in [
+            "inference_summary",
+            "inference_call_proof",
+            "model_spend",
+            "private_ai",
+            "set_private_ai",
+            "invite_lookup",
+        ] {
+            assert!(METHODS.contains(&method), "{method} must be advertised");
+        }
+        let spend = handle_local(&s, "model_spend", serde_json::json!({}))
+            .result
+            .unwrap();
+        assert_eq!(spend["known"], false);
+        assert_eq!(spend["reason_label"], "billed-model-spend-unavailable");
+        let summary = handle_local(&s, "inference_summary", serde_json::json!({}))
+            .result
+            .unwrap();
+        assert_eq!(summary["readable"], false);
+        assert!(summary["summary"].is_null());
+        let proof = handle_local(&s, "inference_call_proof", serde_json::json!({"call_id":1}))
+            .result
+            .unwrap();
+        assert_eq!(proof["readable"], false);
+        assert_eq!(proof["found"], false);
+        let private = handle_local(&s, "private_ai", serde_json::json!({}))
+            .result
+            .unwrap();
+        assert_eq!(private["on"], false);
+        assert_eq!(private["state"], "off");
+        assert_eq!(
+            private["disclosure"],
+            crate::private_inference_copy::OFFER_EXPOSURE
+        );
+    }
+
+    #[test]
     fn every_async_only_method_is_advertised_and_refused_synchronously() {
         let s = shared();
-        assert_eq!(ASYNC_ONLY_METHODS.len(), 36);
+        assert_eq!(ASYNC_ONLY_METHODS.len(), 56);
         let mut seen = std::collections::BTreeSet::new();
         for &(method, label) in ASYNC_ONLY_METHODS {
             assert!(
@@ -14218,6 +14749,18 @@ mod tests {
         assert_eq!(PROBE_UNREACHABLE, "unreachable");
     }
 
+    #[tokio::test]
+    async fn native_identity_no_config_status_and_logout_are_available() {
+        let s = shared();
+        let status =
+            handle_request_async(&s, &req("account_session_status", serde_json::json!({}))).await;
+        assert_eq!(status.result.unwrap()["signed_in"], false);
+        let logout =
+            handle_request_async(&s, &req("account_sign_out", serde_json::json!({}))).await;
+        assert_eq!(logout.result.unwrap()["signed_out"], true);
+        assert!(s.store.load_config().unwrap().is_none());
+    }
+
     /// `hello`'s method list and the dispatchers are one contract, checked
     /// here in BOTH directions against this file's own source.
     ///
@@ -14295,8 +14838,8 @@ mod tests {
             src,
             "pub async fn handle_request_async(shared",
         ));
-        assert_eq!(sync.len(), 57, "synchronous dispatcher arms: {sync:?}");
-        assert_eq!(asy.len(), 43, "asynchronous dispatcher arms: {asy:?}");
+        assert_eq!(sync.len(), 60, "synchronous dispatcher arms: {sync:?}");
+        assert_eq!(asy.len(), 63, "asynchronous dispatcher arms: {asy:?}");
 
         let dispatched: std::collections::BTreeSet<String> = sync.union(&asy).cloned().collect();
         let advertised: std::collections::BTreeSet<String> =
