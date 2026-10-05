@@ -1055,16 +1055,17 @@ final class AppModel: ObservableObject {
                 self.subscribe()
                 self.refreshAll()
                 #if DEBUG
-                // K2 (#1173): console-only, so a developer who set
-                // TC_DEV_DRY_RUN=1 can confirm it took before trusting the
-                // screens they are about to click through. The guarantee
-                // itself does not depend on this line running -- it is the
-                // daemon's own refusal, enforced whether or not anyone reads
-                // the console. A label, not a sentence (`ShellWordingTests`):
-                // the words a contributor could ever be shown about this
-                // mode live in `macos/SAMPLE_DATA.md`, not in app code.
-                if DaemonDataWiring.devDryRunActive {
-                    NSLog("TraceCommons: TC_DEV_DRY_RUN=1")
+                // K2 (#1173): console-only, so a developer can confirm the
+                // dry run took before trusting the screens. Asked of the
+                // daemon, not read from the environment, so it matches the
+                // daemon's own mode. A label, not a sentence
+                // (`ShellWordingTests`).
+                if let client = self.client {
+                    Task.detached {
+                        if client.devDryRunActive() {
+                            NSLog("TraceCommons: status.dev_dry_run=true")
+                        }
+                    }
                 }
                 #endif
             case .failure(TCDaemon.TCError.rootsNotDeclared):
