@@ -2021,6 +2021,10 @@ fn resolve_cwd(
     // `trajectory` adapter that happens to read it. For a staged import that
     // name is self-declared; see the method's doc.
     let tool = session_ref.displayed_source().to_string();
+    // The adapter that actually read this session (K16, #1227 review),
+    // never the self-declared `declared_source` a staged import can spoof.
+    // `readable_sessions` gates mission matching on this, not on `tool`.
+    let adapter = session_ref.source.to_string();
     let mut state = shared.state.lock().expect("state lock");
     state.cwd_cache.insert(
         key,
@@ -2030,6 +2034,7 @@ fn resolve_cwd(
             cwd: cwd.clone(),
             project_key: Some(project_key),
             tool: Some(tool),
+            adapter: Some(adapter),
         },
     );
     cwd
