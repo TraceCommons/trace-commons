@@ -193,7 +193,9 @@ public struct SessionRoots: Equatable, Sendable {
             object[Self.trajectorySettingsKey] = declaration
         }
 
-        guard let data = try? JSONSerialization.data(withJSONObject: object),
+        // Sorted: `FirstRunCall.startDaemon` compares this as bytes, and two
+        // equal dictionaries need not iterate in the same order.
+        guard let data = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]),
             let json = String(data: data, encoding: .utf8)
         else { return nil }
         return json

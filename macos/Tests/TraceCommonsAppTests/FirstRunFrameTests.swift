@@ -57,7 +57,7 @@ final class FirstRunFrameTests: XCTestCase {
         // The link exists once, behind that guard, and switches the tier.
         let source = try Self.source()
         XCTAssertEqual(source.components(separatedBy: "copy.frame.customSetupInstead").count - 1, 1)
-        let guardRange = try XCTUnwrap(source.range(of: "FirstRunFrameLayout.offersCustomSetupInstead(state)"))
+        let guardRange = try XCTUnwrap(source.range(of: "FirstRunFrameLayout.offersCustomSetupInstead(state, isCommitting: isCommitting)"))
         let linkRange = try XCTUnwrap(source.range(of: "copy.frame.customSetupInstead"))
         XCTAssertLessThan(guardRange.lowerBound, linkRange.lowerBound)
         XCTAssertTrue(source.contains("FirstRunNavigation.switchTier(state, to: .custom)"))

@@ -8,11 +8,11 @@ import XCTest
 /// `FirstRunCall` it carries out, so the log compares directly with
 /// `FirstRunPlan.calls(for:at:)`.
 @MainActor
-private final class RecordingDaemon: FirstRunDaemon {
+final class RecordingFirstRunDaemon: FirstRunDaemon {
     var log: [FirstRunCall] = []
     /// The call that answers as a failure; every other call succeeds.
     var failing: ((FirstRunCall) -> Bool) = { _ in false }
-    var lookup: FirstRunLookup = .found(RecordingDaemon.validLookup)
+    var lookup: FirstRunLookup = .found(RecordingFirstRunDaemon.validLookup)
     var grant: FirstRunGrantAnswer = .granted
 
     static let validLookup: DaemonData.InviteLookup = {
@@ -110,7 +110,7 @@ final class FirstRunRunnerTests: XCTestCase {
     }
 
     func test_aFailedStartKeepsTheInviteAndJoinsNothing() async {
-        let daemon = RecordingDaemon()
+        let daemon = RecordingFirstRunDaemon()
         daemon.failing = { if case .startDaemon = $0 { return true }; return false }
         let state = onFolders()
         let runner = FirstRunRunner(state: state, daemon: daemon)
@@ -147,7 +147,7 @@ final class FirstRunRunnerTests: XCTestCase {
         state.account = .passkeyChosen
         let json = state.sessionRoots.settingsJSON()!
 
-        let refusing = RecordingDaemon()
+        let refusing = RecordingFirstRunDaemon()
         refusing.failing = { if case .startDaemon = $0 { return true }; return false }
         let failed = FirstRunRunner(state: state, daemon: refusing)
         XCTAssertFalse(failed.passkeyDue)
@@ -156,7 +156,7 @@ final class FirstRunRunnerTests: XCTestCase {
         XCTAssertEqual(failed.state.account, .passkeyChosen)
         XCTAssertEqual(failed.state.step, .folders)
 
-        let daemon = RecordingDaemon()
+        let daemon = RecordingFirstRunDaemon()
         let runner = FirstRunRunner(state: state, daemon: daemon)
         await runner.commit(.leaveRoots)
         XCTAssertEqual(daemon.log, [.startDaemon(settingsJSON: json), .lookupInvite("INVITE-1"), .enroll("INVITE-1")],
@@ -177,7 +177,7 @@ final class FirstRunRunnerTests: XCTestCase {
         state.daemonStarted = true
         state.startedSettingsJSON = state.sessionRoots.settingsJSON()
         state.scopes = ["research"]
-        let daemon = RecordingDaemon()
+        let daemon = RecordingFirstRunDaemon()
         let runner = FirstRunRunner(state: state, daemon: daemon)
         runner.requestPasskey()
 
@@ -192,7 +192,7 @@ final class FirstRunRunnerTests: XCTestCase {
     }
 
     func test_aDeadInviteReturnsToJoinWithAnswersKept() async {
-        let daemon = RecordingDaemon()
+        let daemon = RecordingFirstRunDaemon()
         daemon.lookup = .refused(label: "invite-exhausted")
         let state = onFolders()
         let runner = FirstRunRunner(state: state, daemon: daemon)
@@ -212,16 +212,16 @@ final class FirstRunRunnerTests: XCTestCase {
 
         runner.state.invite = "INVITE-2"
         runner.state = FirstRunNavigation.next(runner.state)
-        daemon.lookup = .found(RecordingDaemon.validLookup)
+        daemon.lookup = .found(RecordingFirstRunDaemon.validLookup)
         daemon.log = []
         await runner.commit(.leaveRoots)
         XCTAssertEqual(daemon.log, [.lookupInvite("INVITE-2"), .enroll("INVITE-2"), .signInNearAI])
         XCTAssertEqual(runner.state.enrolledInvite, "INVITE-2")
-        XCTAssertEqual(runner.lookup, RecordingDaemon.validLookup)
+        XCTAssertEqual(runner.lookup, RecordingFirstRunDaemon.validLookup)
     }
 
     func test_aRefusedGrantFinishesOnAskMe() async {
-        let daemon = RecordingDaemon()
+        let daemon = RecordingFirstRunDaemon()
         daemon.grant = .refused(label: "automatic-grant-witness-changed")
         let runner = FirstRunRunner(state: onUses(), daemon: daemon)
 
@@ -235,7 +235,7 @@ final class FirstRunRunnerTests: XCTestCase {
 
     func test_callsRunInPlanOrderAndStopAtTheFirstFailure() async {
         let plan = FirstRunPlan.calls(for: onUses(), at: .start)
-        let succeeding = RecordingDaemon()
+        let succeeding = RecordingFirstRunDaemon()
         let runner = FirstRunRunner(state: onUses(), daemon: succeeding)
         await runner.commit(.start)
         XCTAssertEqual(succeeding.log, plan)
@@ -247,7 +247,7 @@ final class FirstRunRunnerTests: XCTestCase {
         // (`test_aRefusedGrantFinishesOnAskMe`).
         for (index, call) in plan.enumerated() {
             if case .grantAutomatic = call { continue }
-            let daemon = RecordingDaemon()
+            let daemon = RecordingFirstRunDaemon()
             daemon.failing = { $0 == call }
             let failed = FirstRunRunner(state: onUses(), daemon: daemon)
             await failed.commit(.start)
@@ -263,7 +263,7 @@ final class FirstRunRunnerTests: XCTestCase {
         roots.startedSettingsJSON = #"{"claude_source":{"mode":"off"}}"#
         let rootsPlan = FirstRunPlan.calls(for: roots, at: .leaveRoots)
         for (index, call) in rootsPlan.enumerated() {
-            let daemon = RecordingDaemon()
+            let daemon = RecordingFirstRunDaemon()
             if case .lookupInvite = call {
                 daemon.lookup = .refused(label: "invite-invalid")
             } else {
@@ -278,7 +278,7 @@ final class FirstRunRunnerTests: XCTestCase {
     }
 
     func test_anUnavailableLookupKeepsTheStep() async {
-        let daemon = RecordingDaemon()
+        let daemon = RecordingFirstRunDaemon()
         daemon.lookup = .unavailable
         let state = onFolders()
         let runner = FirstRunRunner(state: state, daemon: daemon)
@@ -293,7 +293,7 @@ final class FirstRunRunnerTests: XCTestCase {
         XCTAssertNil(runner.state.enrolledInvite)
 
         // The retry looks the same invite up again; nothing starts twice.
-        daemon.lookup = .found(RecordingDaemon.validLookup)
+        daemon.lookup = .found(RecordingFirstRunDaemon.validLookup)
         daemon.log = []
         await runner.commit(.leaveRoots)
         XCTAssertEqual(daemon.log, [.lookupInvite("INVITE-1"), .enroll("INVITE-1"), .signInNearAI])
@@ -302,7 +302,7 @@ final class FirstRunRunnerTests: XCTestCase {
     }
 
     func test_anUnfinishedCompleteIsReportedAndRetriedWithoutTheGrant() async {
-        let daemon = RecordingDaemon()
+        let daemon = RecordingFirstRunDaemon()
         daemon.grant = .refused(label: "automatic-grant-witness-changed")
         daemon.failing = { $0 == .markComplete }
         let runner = FirstRunRunner(state: onUses(), daemon: daemon)
@@ -323,7 +323,7 @@ final class FirstRunRunnerTests: XCTestCase {
     }
 
     func test_leavingWithoutADeclarationFailsClosed() async {
-        let daemon = RecordingDaemon()
+        let daemon = RecordingFirstRunDaemon()
         let runner = FirstRunRunner(state: FirstRunState(tier: .quick, step: .folders), daemon: daemon)
 
         await runner.commit(.leaveRoots)
@@ -334,7 +334,7 @@ final class FirstRunRunnerTests: XCTestCase {
     }
 
     func test_aSuccessfulLeaveRecordsTheDaemonFactsAndMovesOn() async {
-        let daemon = RecordingDaemon()
+        let daemon = RecordingFirstRunDaemon()
         let runner = FirstRunRunner(state: onFolders(), daemon: daemon)
         await runner.commit(.leaveRoots)
         let json = onFolders().sessionRoots.settingsJSON()

@@ -202,6 +202,34 @@ final class FirstRunNavigationTests: XCTestCase {
         XCTAssertEqual(state.addedFolders, [AddedFolder(kind: .source(.codex), path: "/Volumes/other/codex")])
     }
 
+    /// One folder is one thing: adding it again as another kind replaces the
+    /// first answer instead of declaring the folder under both.
+    func test_aFolderAddedAgainAsAnotherKindReplacesTheFirst() {
+        let path = "/Users/someone/exports"
+        var state = FirstRunState(tier: .custom, step: .tools)
+        state.add(AddedFolder(kind: .trajectory, path: path))
+        state.add(AddedFolder(kind: .source(.opencode), path: path))
+        XCTAssertEqual(state.addedFolders, [AddedFolder(kind: .source(.opencode), path: path)])
+        XCTAssertEqual(state.sessionRoots.trajectory, .undecided)
+        XCTAssertEqual(state.sessionRoots.opencode, .watch(path: path))
+
+        state.add(AddedFolder(kind: .trajectory, path: path))
+        XCTAssertEqual(state.addedFolders, [AddedFolder(kind: .trajectory, path: path)])
+        XCTAssertEqual(state.sessionRoots.opencode, .undecided)
+    }
+
+    /// The trajectory folder has no tool row, so it is withdrawn on its own.
+    /// That a key withdrawn after a start is sent `off` is
+    /// `FirstRunPlanTests.test_aFolderWithdrawnAfterStartIsTurnedOff`.
+    func test_theTrajectoryFolderCanBeWithdrawn() {
+        var state = FirstRunState(tier: .custom, step: .tools)
+        state.add(AddedFolder(kind: .source(.opencode), path: "/o"))
+        state.add(AddedFolder(kind: .trajectory, path: "/t"))
+        state.withdrawTrajectory()
+        XCTAssertEqual(state.addedFolders, [AddedFolder(kind: .source(.opencode), path: "/o")])
+        XCTAssertEqual(state.sessionRoots.trajectory, .undecided)
+    }
+
     func test_stateSurvivesARoundTrip() throws {
         var state = FirstRunState(tier: .custom, step: .rules)
         state.invite = "INVITE-1"

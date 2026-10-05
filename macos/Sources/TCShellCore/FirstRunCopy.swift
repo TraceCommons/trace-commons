@@ -67,6 +67,11 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
         public let getTool: String
         public let downloadTool: String
         public let notInstalled: String
+        /// Discovery returned no row the shell could read.
+        public let discoveryFailed: String
+        public let retry: String
+        /// Enroll was refused after the invite's lookup accepted it.
+        public let enrollRefused: String
     }
 
     public struct Tools: Decodable, Equatable, Sendable {
@@ -76,6 +81,10 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
         public let addToolCaption: String
         public let addToolRefused: String
         public let addedByYou: String
+        /// `{folder}`: a picked folder matching more than one kind.
+        public let whichKind: String
+        /// A folder of exported traces, as an option and as its row's name.
+        public let trajectoryLabel: String
         /// `{count}`.
         public let sessionCount: String
     }

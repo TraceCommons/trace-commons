@@ -329,4 +329,21 @@ final class SessionRootsTests: XCTestCase {
         XCTAssertFalse(unfinished.isComplete, "a trajectory folder cannot stand in for claude and codex")
         XCTAssertNil(unfinished.settingsJSON())
     }
+
+    /// The declaration is compared as bytes: `FirstRunCall.startDaemon` is
+    /// equal only when its JSON is, and a Swift dictionary's key order varies
+    /// between two equal dictionaries, so the keys are sorted.
+    func test_settingsJSONIsKeySorted() throws {
+        let roots = SessionRoots(
+            claude: .watch(path: "/Users/someone/.claude/projects"),
+            codex: .watch(path: "/Users/someone/.codex/sessions"),
+            gemini: .watch(path: "/Users/someone/.gemini/tmp"),
+            cline: .watch(path: "/Users/someone/cline/tasks"),
+            opencode: .watch(path: "/Users/someone/opencode-exports"),
+            trajectory: .watch(path: "/Users/someone/letta-exports")
+        )
+        let json = try XCTUnwrap(roots.settingsJSON())
+        let sorted = try JSONSerialization.data(withJSONObject: decode(json), options: [.sortedKeys])
+        XCTAssertEqual(json, String(decoding: sorted, as: UTF8.self))
+    }
 }

@@ -151,13 +151,22 @@ public struct FirstRunState: Codable, Equatable, Sendable {
     }
 
     /// Add a folder. It replaces an earlier folder of the same kind and, for
-    /// a tool, that tool's row answer.
+    /// a tool, that tool's row answer. One folder is one thing: an earlier
+    /// folder at the same path, of any kind, is dropped too, so a folder
+    /// answered again is never declared under two adapters.
     public mutating func add(_ folder: AddedFolder) {
-        addedFolders.removeAll { $0.kind == folder.kind }
+        addedFolders.removeAll { $0.kind == folder.kind || $0.path == folder.path }
         if case .source(let kind) = folder.kind {
             toolAnswers[kind] = nil
         }
         addedFolders.append(folder)
+    }
+
+    /// Withdraw the trajectory folder, which has no tool row to answer "I
+    /// don't use it" on. Nothing is declared for it afterwards; once the
+    /// daemon has started, `FirstRunPlan` sends the dropped key as `off`.
+    public mutating func withdrawTrajectory() {
+        addedFolders.removeAll { $0.kind == .trajectory }
     }
 
     /// The tool answers and added folders as one declaration. An added folder
