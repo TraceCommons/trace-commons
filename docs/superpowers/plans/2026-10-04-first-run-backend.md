@@ -45,6 +45,7 @@
 | `crates/trace-commons-contributor-ffi/src/lib.rs`, both `trace_commons.h` | `tc_first_run_copy_json`, `tc_describe_folder` |
 | `macos/Sources/TCBridge/TCCoreCopy.swift`, `TCDiscovery.swift`, new `TCFlow1.swift`, new `TCInvite.swift` | Raw bridges |
 | `macos/Sources/TCShellCore/FirstRunCopy.swift`, `PastSession.swift`, `Flow1.swift` (new) | Decoders and models |
+| `macos/Sources/TCShellCore/FolderMatch.swift` (new) | Decodes `tc_describe_folder` keeping every row, trajectory included (Task 5; `SourceCandidate.Wire` widened from private to internal for it) |
 | `macos/Sources/TraceCommonsApp/DaemonClient+FirstRun.swift` (new) | `listPastSessions`, `includePastSessions`, `grantAutomatic`, `inviteLookup` |
 
 ---
@@ -181,6 +182,12 @@ Rules: validate the whole call first (unknown or foreign id → refuse all with 
 - [ ] **Step 3: Implement** by reusing each adapter's existing walk predicates, as `describe_opencode` does; add the export, header lines and bridge.
 - [ ] **Step 4: Run** the Rust tests, `cargo test -p trace-commons-contributor-ffi`, and `swift test --filter SourceCandidateTests` — Expected: PASS.
 - [ ] **Step 5: Commit** — `git commit -m "Recognise a picked folder by its layout"`
+
+**Recorded deviations (Task 5, pending orchestrator ratification):**
+- *Interface.* Decoded with the new `FolderMatch.decodeList(from:)`, not `SourceCandidate.decodeList(from:)` as first planned; the latter drops the trajectory row. Amended in the Interfaces line above and in `2026-10-04-native-first-run-port.md` Task 7.
+- *One budget for every row.* `describe_folder`'s OpenCode row counts flat `*.json` under the same 65,536-entry budget as the trajectory row, not `describe_opencode`'s 256-entry count. With the smaller cap a large flat folder (`~/Downloads`) dropped the OpenCode row and returned one confident trajectory match. Consequence, not solved here: the folder screen can offer OpenCode for a folder of more than 256 entries that the OpenCode adapter then refuses at `discover()` (`opencode-discovery-entry-budget`). Whether that refusal should block the offer, as a separate refusal row or label, is an open design decision.
+- *Claude Code stem rule.* The Claude Code layout requires a 36-character hyphenated UUID stem, which the adapter's own `discover` does not (it reads any top-level `*.jsonl` in a project dir). Intentional: a `.jsonl` two levels down is too common a shape to call a Claude Code store. Recognition can refuse a folder the adapter would read; real stores name sessions by UUID.
+- *Stray top-level `.json`.* OpenCode and trajectory match by name suffix, as their layouts are defined, so a home directory or `~/Downloads` holding `package.json` or `.claude.json` reports both kinds and the shell asks rather than refusing. Dotfiles are not skipped, because the trajectory reader does not skip them. The Tools-screen port (`native-first-run-port` Task 7) should expect this.
 
 ---
 

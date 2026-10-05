@@ -57,7 +57,9 @@ const MESSAGES_JSON_SUFFIX: &str = ".messages.json";
 /// OpenCode's own export writes one `<session-id>.json` file per session,
 /// directly in the declared folder -- see `source::opencode`, which reads
 /// that folder non-recursively. The count here is flat too, so "N sessions
-/// found" never includes a file the adapter would not read.
+/// found" never includes a file below the folder the adapter would not read.
+/// [`describe_opencode`] also stops where the adapter's discovery cap does;
+/// [`describe_folder`]'s OpenCode row does not (see [`FOLDER_ENTRY_BUDGET`]).
 const OPENCODE_JSON_SUFFIX: &str = ".json";
 
 /// How far [`count_sessions`] may look below the store it was handed.
@@ -222,10 +224,14 @@ pub fn describe_opencode(path: &Path) -> SourceCandidate {
 /// A picked folder can be anything -- `$HOME`, `~/Downloads` -- and this runs
 /// on the calling thread. Each walk is already bounded in depth by the
 /// layout it checks; this bounds its breadth. It sits well above a real
-/// store (thousands of sessions), so a real count is not truncated. The
-/// OpenCode row is the exception: it is [`describe_opencode`]'s count, which
-/// stops at that adapter's own discovery cap of 256 entries, as the adapter
-/// itself does.
+/// store (thousands of sessions), so a real count is not truncated.
+///
+/// Every row, OpenCode's included, counts under this one budget. The OpenCode
+/// row is deliberately not [`describe_opencode`]'s count, which stops at the
+/// adapter's 256-entry discovery cap: in a large flat folder that cap would
+/// drop the OpenCode row while the trajectory row, walking further, still
+/// matched, and the shell would get one confident match for a layout that
+/// fits two.
 const FOLDER_ENTRY_BUDGET: usize = 65_536;
 
 /// Recognise a folder the contributor picked by its layout alone, so "add
@@ -254,21 +260,12 @@ pub fn describe_folder(path: &Path) -> Vec<SourceCandidate> {
     if !path.is_dir() {
         return Vec::new();
     }
-    let opencode = describe_opencode(path);
-
     [
         (SOURCE_CLAUDE_CODE, claude_code_layout(path)),
         (SOURCE_CODEX, codex_layout(path)),
         (SOURCE_GEMINI_CLI, gemini_layout(path)),
         (SOURCE_CLINE, cline_layout(path)),
-        (
-            SOURCE_OPENCODE,
-            Tally {
-                count: opencode.session_count,
-                most_recent: opencode.most_recent,
-                budget: 0,
-            },
-        ),
+        (SOURCE_OPENCODE, opencode_layout(path)),
         (SOURCE_TRAJECTORY, trajectory_layout(path)),
     ]
     .into_iter()
@@ -413,14 +410,27 @@ fn gemini_layout(root: &Path) -> Tally {
     tally
 }
 
+/// Flat `*.json` directly in the folder, the shape of an OpenCode export.
+/// Counted against [`FOLDER_ENTRY_BUDGET`] like [`trajectory_layout`], so a
+/// flat `.json` folder that fits both layouts reports both, with one count.
+fn opencode_layout(root: &Path) -> Tally {
+    flat_layout(root, |name| name.ends_with(OPENCODE_JSON_SUFFIX))
+}
+
 /// Flat `*.json` and `*.jsonl` directly in the folder, the shape of a Letta
 /// trajectory export. Counted against [`FOLDER_ENTRY_BUDGET`], not
 /// OpenCode's smaller discovery cap: a declared trajectory folder is read
 /// whole, so the count it is offered under should be whole too.
 fn trajectory_layout(root: &Path) -> Tally {
-    let is_session = |name: &str| name.ends_with(JSON_SUFFIX) || name.ends_with(JSONL_SUFFIX);
+    flat_layout(root, |name| {
+        name.ends_with(JSON_SUFFIX) || name.ends_with(JSONL_SUFFIX)
+    })
+}
+
+/// Regular files directly in `root` whose name satisfies `named`.
+fn flat_layout(root: &Path, named: impl Fn(&str) -> bool) -> Tally {
     let mut tally = Tally::new();
-    for file in tally.files(root, is_session) {
+    for file in tally.files(root, named) {
         tally.note(file.metadata().ok());
     }
     tally
@@ -898,9 +908,9 @@ mod tests {
 
     #[test]
     fn describe_folder_counts_a_trajectory_export_past_the_opencode_cap() {
-        // OpenCode's adapter stops at its own discovery budget, so its row
-        // may; a trajectory export is read whole once declared, so its count
-        // must not stop there.
+        // A trajectory export is read whole once declared, so its count
+        // must not stop at OpenCode's discovery budget. `.jsonl` alone, so
+        // only the trajectory layout fits.
         let picked = Scratch::new("folder-trajectory-large");
         let total = super::super::opencode::DISCOVERY_ENTRY_BUDGET + 44;
         for i in 0..total {
@@ -922,6 +932,24 @@ mod tests {
         let found = describe_folder(picked.path());
         assert_eq!(sources_of(&found), vec![SOURCE_OPENCODE, SOURCE_TRAJECTORY]);
         assert!(found.iter().all(|c| c.session_count == 2));
+    }
+
+    #[test]
+    fn describe_folder_reports_both_kinds_for_a_flat_json_folder_past_the_opencode_cap() {
+        // A large flat folder (`~/Downloads`) with `.json` files past the
+        // adapter's 256-entry discovery cap still fits both layouts. Counting
+        // the OpenCode row under the smaller cap would drop it and leave one
+        // confident trajectory match, which is a guess.
+        let picked = Scratch::new("folder-flat-json-large");
+        let over = super::super::opencode::DISCOVERY_ENTRY_BUDGET + 44;
+        for i in 0..over {
+            std::fs::write(picked.path().join(format!("note-{i}.txt")), b"x").unwrap();
+            write_session(picked.path(), &format!("ses_{i}.json"));
+        }
+
+        let found = describe_folder(picked.path());
+        assert_eq!(sources_of(&found), vec![SOURCE_OPENCODE, SOURCE_TRAJECTORY]);
+        assert!(found.iter().all(|c| c.session_count == over as u64));
     }
 
     #[test]
@@ -960,19 +988,38 @@ mod tests {
         write_session(&project, &format!("{A_UUID}.jsonl"));
         let flat = picked.path().join("loose.json");
         std::fs::write(&flat, b"{}").unwrap();
-        for file in [&session, &flat] {
+        let rollout = picked.path().join("2026/08/20/rollout-x.jsonl");
+        write_session(&picked.path().join("2026/08/20"), "rollout-x.jsonl");
+        let gemini = picked.path().join("proj/chats/session-a.json");
+        write_session(&picked.path().join("proj/chats"), "session-a.json");
+        let cline = picked
+            .path()
+            .join("1767000000000/1767000000000.messages.json");
+        write_session(
+            &picked.path().join("1767000000000"),
+            "1767000000000.messages.json",
+        );
+        let all = [&session, &flat, &rollout, &gemini, &cline];
+        for file in all {
             std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o000)).unwrap();
         }
 
         let found = describe_folder(picked.path());
         assert_eq!(
             sources_of(&found),
-            vec![SOURCE_CLAUDE_CODE, SOURCE_OPENCODE, SOURCE_TRAJECTORY]
+            vec![
+                SOURCE_CLAUDE_CODE,
+                SOURCE_CODEX,
+                SOURCE_GEMINI_CLI,
+                SOURCE_CLINE,
+                SOURCE_OPENCODE,
+                SOURCE_TRAJECTORY
+            ]
         );
         assert!(found.iter().all(|c| c.session_count == 1));
         assert!(found.iter().all(|c| c.most_recent.is_some()));
 
-        for file in [&session, &flat] {
+        for file in all {
             std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o600)).unwrap();
         }
     }
