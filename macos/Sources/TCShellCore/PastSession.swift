@@ -75,30 +75,13 @@ public struct PastSession: Decodable, Identifiable, Equatable, Sendable {
         state = known ?? .never
         selectable = known == nil ? false : try c.decode(Bool.self, forKey: .selectable)
         startedAt = try c.decodeIfPresent(String.self, forKey: .startedAt)
-            .flatMap(PastSession.parseTimestamp)
+            .flatMap(SourceCandidate.Wire.parseTimestamp)
         durationSecs = try c.decodeIfPresent(Int.self, forKey: .durationSecs)
         title = try c.decodeIfPresent(String.self, forKey: .title)
         sizeBytes = try c.decode(Int.self, forKey: .sizeBytes)
         source = try c.decode(String.self, forKey: .source)
     }
 
-    /// RFC 3339 at any fractional precision: the fraction is cut to
-    /// milliseconds before parsing, as `SourceCandidate` does.
-    static func parseTimestamp(_ raw: String) -> Date? {
-        let fractional = ISO8601DateFormatter()
-        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        let plain = ISO8601DateFormatter()
-        plain.formatOptions = [.withInternetDateTime]
-        if let date = fractional.date(from: raw) ?? plain.date(from: raw) {
-            return date
-        }
-        guard let dot = raw.firstIndex(of: "."),
-            let zone = raw[dot...].firstIndex(where: { $0 == "Z" || $0 == "+" || $0 == "-" })
-        else { return nil }
-        let digits = raw[raw.index(after: dot)..<zone].prefix(3)
-        let truncated = raw[..<dot] + "." + digits + raw[zone...]
-        return fractional.date(from: String(truncated))
-    }
 }
 
 /// The whole `list_past_sessions` answer for one folder.

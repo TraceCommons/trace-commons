@@ -306,6 +306,8 @@ pub const LABEL_SESSION_DISMISSED: &str = "session-dismissed";
 pub const LABEL_SESSION_KEPT: &str = "session-kept";
 pub const LABEL_NOT_PENDING: &str = "not-pending";
 pub const LABEL_SESSION_PROJECT_CHANGED: &str = "session-project-changed";
+pub const LABEL_SESSION_FILE_VANISHED: &str = "session-file-vanished";
+pub const LABEL_PROJECT_ID_INVALID: &str = "project_id-invalid";
 pub const LABEL_SESSION_UNREADABLE: &str = "session-unreadable";
 
 /// The audit row an include writes before it changes anything.

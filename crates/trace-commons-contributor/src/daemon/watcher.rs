@@ -636,7 +636,7 @@ pub(crate) fn offer_for_a_person(
         let offered = owner
             .get(&session_ref.path)
             .map(|&i| sources[i].as_ref())
-            .ok_or("session-file-vanished")
+            .ok_or(super::past_sessions::LABEL_SESSION_FILE_VANISHED)
             .and_then(|source| {
                 offer_one(
                     shared,
@@ -674,7 +674,7 @@ fn offer_one(
 ) -> std::result::Result<uuid::Uuid, &'static str> {
     let modified = std::fs::metadata(&session_ref.path)
         .and_then(|m| m.modified())
-        .map_err(|_| "session-file-vanished")?;
+        .map_err(|_| super::past_sessions::LABEL_SESSION_FILE_VANISHED)?;
     let obs = Observation {
         path: session_ref.path.clone(),
         size_bytes: session_ref.size_bytes,
@@ -783,7 +783,7 @@ fn offer_one(
     // still refused.
     let outcome = queue
         .replace_live_at_path(entry, usize::MAX)
-        .map_err(|_| "queue-full")?;
+        .map_err(|_| super::health::LABEL_QUEUE_FULL)?;
     if outcome.inserted {
         return Ok(entry_id);
     }
