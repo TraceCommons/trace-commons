@@ -415,6 +415,13 @@ fn pinned_sentences() -> Vec<(&'static str, String)> {
             .map(counted)
             .collect(),
     );
+    // The first-run wording of #1030.
+    add(
+        "first_run_copy::first_run_copy",
+        table(json!(
+            trace_commons_contributor::first_run_copy::first_run_copy()
+        )),
+    );
     // The menu-bar Contribution mode pill, its override confirmations and
     // their refusal lines (#1173).
     add(
@@ -613,6 +620,15 @@ const ALLOWED: &[(&str, &str, &str)] = &[
         "TraceCommonsApp/Views/QueueView.swift",
         "Held for privacy review",
         "week tally heading; no core tally export yet",
+    ),
+    // The current onboarding's roots screen already titles itself with the
+    // #1030 Folders title. The first-run port replaces that screen with one
+    // that reads `first_run_copy` (plan 2026-10-04-native-first-run-port.md);
+    // remove this entry with it.
+    (
+        "TraceCommonsApp/Views/OnboardingRootsView.swift",
+        "Which folders may this",
+        "pre-port onboarding title; the first-run port reads first_run_copy",
     ),
 ];
 
@@ -881,6 +897,8 @@ const BRIDGE_ONLY: &[(&str, &str)] = &[
         "TCBridge/TCCoreCopy.swift",
         "tc_automatic_contribution_copy_json",
     ),
+    // The first-run port moves this to SURFACES with the screen that reads it.
+    ("TCBridge/TCCoreCopy.swift", "tc_first_run_copy_json"),
 ];
 
 #[test]

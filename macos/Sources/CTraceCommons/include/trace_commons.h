@@ -1983,6 +1983,14 @@ char*       tc_witness_copy(void);
 /* Owned JSON; release with tc_string_free. */
 char*       tc_onboarding_copy(void);
 
+/* The first-run wording of #1030 (first_run_copy::first_run_copy): {frame,
+ * join, folders, tools, rules, uses, passkey, private_ai}, each a map of
+ * strings with {tool}, {host}, {count}, {folder}, {name}, {max}, {selected},
+ * {total} and {tools} placeholders the shell fills. NULL only on a caught
+ * panic.
+ */
+char*       tc_first_run_copy_json(void);
+
 /* The sentence for a witness state, given a TC_WITNESS_STATE_* value.
  * Returns an OWNED string; free with tc_string_free.
  *

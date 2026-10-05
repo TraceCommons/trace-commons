@@ -5248,6 +5248,22 @@ pub extern "C" fn tc_onboarding_copy() -> *mut c_char {
     })
 }
 
+/// The first-run wording of #1030 (`first_run_copy::first_run_copy`): a JSON
+/// object of per-screen groups, `{frame, join, folders, tools, rules, uses,
+/// passkey, private_ai}`, each a map of strings. `{tool}`, `{host}`,
+/// `{count}`, `{folder}`, `{name}`, `{max}`, `{selected}`, `{total}` and
+/// `{tools}` are placeholders the shell fills.
+///
+/// Returns an owned JSON string; free it with [`tc_string_free`]. NULL only
+/// on a caught panic.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_first_run_copy_json() -> *mut c_char {
+    guarded_string_no_err(|| {
+        let copy = trace_commons_contributor::first_run_copy::first_run_copy();
+        Ok(to_owned_cstring(&serde_json::to_string(&copy)?))
+    })
+}
+
 // ---------------------------------------------------------------------------
 // K3 (#1173): the copy commands that reached only Tauri. Each export below
 // is the C ABI route to a sentence, or a table of them, the contributor core

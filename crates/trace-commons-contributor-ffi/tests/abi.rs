@@ -5995,3 +5995,12 @@ fn the_regrant_void_notice_crosses_the_abi_only_on_the_grants_notice() {
     assert!(unsafe { tc_grant_void_notice_regrant_json(not_an_object.as_ptr()) }.is_null());
     assert!(unsafe { tc_grant_void_notice_regrant_json(std::ptr::null()) }.is_null());
 }
+
+#[test]
+fn the_first_run_copy_crosses_the_abi() {
+    use trace_commons_contributor::first_run_copy::first_run_copy;
+    use trace_commons_contributor_ffi::tc_first_run_copy_json;
+    let value = json_owned(tc_first_run_copy_json());
+    assert_eq!(value, serde_json::to_value(first_run_copy()).unwrap());
+    assert_eq!(value["frame"]["quick_setup"], "Quick setup");
+}
