@@ -6,16 +6,23 @@ public struct GlassSegment<Value: Hashable>: Identifiable {
     public let title: String
     /// Decisions owed, as a count pill. Never queue depth or credit.
     public let badge: Int?
-    /// A status dot after the title (Inference: Private AI on or off).
+    /// A status dot after the title (Inference: what Private AI is doing).
     public let dot: GlassStatus?
+    /// What the dot says, read to VoiceOver. The dot itself is hidden from
+    /// accessibility, so a segment with a dot needs one to be heard.
+    public let accessibilityValue: String?
 
     public var id: Value { value }
 
-    public init(_ title: String, value: Value, badge: Int? = nil, dot: GlassStatus? = nil) {
+    public init(
+        _ title: String, value: Value, badge: Int? = nil, dot: GlassStatus? = nil,
+        accessibilityValue: String? = nil
+    ) {
         self.title = title
         self.value = value
         self.badge = badge
         self.dot = dot
+        self.accessibilityValue = accessibilityValue
     }
 }
 
@@ -70,6 +77,7 @@ public struct GlassSegmentedTabs<Value: Hashable>: View {
                 }
                 .buttonStyle(GlassPressStyle())
                 .accessibilityAddTraits(selected ? [.isSelected, .isButton] : .isButton)
+                .accessibilityValue(segment.accessibilityValue ?? "")
             }
         }
         .padding(2)

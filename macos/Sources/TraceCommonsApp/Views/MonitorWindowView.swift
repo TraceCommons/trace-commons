@@ -1,6 +1,7 @@
 #if DEBUG
 import SwiftUI
 import TCDesign
+import TCShellCore
 
 /// The glass monitor window (R5 of #1173): the three-pane shell the native
 /// screens are built into. The main pane holds the tabs and is always shown;
@@ -42,7 +43,13 @@ struct MonitorWindowView: View {
     var body: some View {
         GlassThreePane(showsMap: showsMap, showsInspector: showsInspector, onFirstLayout: seedPanes) {
             MonitorMainPane(
-                tab: $tab, inferenceDot: Self.inferenceDot(settings: model.daemonSettings),
+                tab: $tab,
+                inferenceDot: Self.inferenceDot(
+                    settings: model.daemonSettings, state: model.privateInferenceState,
+                    calls: model.privateInferenceCalls),
+                inferenceAccessibilityValue: Self.inferenceAccessibilityValue(
+                    state: model.privateInferenceState, copy: model.privateInferenceCopy,
+                    calls: model.privateInferenceCalls),
                 showsMap: $showsMap, showsInspector: $showsInspector,
                 onSettings: { openSettings() })
         } map: {
@@ -64,11 +71,38 @@ struct MonitorWindowView: View {
         panesSeeded = true
     }
 
-    /// Inference's dot: Private AI on or off, and none while the daemon has
-    /// not said. Unknown is never drawn as off.
-    static func inferenceDot(settings: DaemonSettingsView?) -> GlassStatus? {
-        guard let on = settings?.privateInference else { return nil }
-        return on ? .on : .off
+    /// Inference's dot: what the listener is doing, from the shared table's
+    /// tone, never from the switch.
+    ///
+    /// Only `clear` is drawn on; the switch says what was asked for, and a
+    /// listener that refused to start under a switch that is on must not
+    /// read as running (`PrivateInferenceTone.readsAsWorking`). Held,
+    /// attention and refused take the existing ask and outside colours
+    /// until the glass palette grows its own (Phase 4).
+    ///
+    /// The switch is read in one direction only: the table answers both an
+    /// explicit off and an unreported state as neutral, so an explicit
+    /// `false` is what still draws off. Anything else neutral -- unreported,
+    /// unknown, or off under a switch that is not explicitly off -- draws
+    /// no dot. Unknown is never drawn as off (#1182).
+    static func inferenceDot(
+        settings: DaemonSettingsView?, state: PrivateInferenceState, calls: PrivateInferenceCalls
+    ) -> GlassStatus? {
+        switch PrivateInferenceSurface.tone(state, calls: calls) {
+        case .clear: return .on
+        case .held: return .ask
+        case .attention, .refused: return .outside
+        case .neutral: return settings?.privateInference == false ? .off : nil
+        }
+    }
+
+    /// What the dot says, for VoiceOver: the state line from the Rust, which
+    /// falls back to its own unknown sentence. Nothing without the copy.
+    static func inferenceAccessibilityValue(
+        state: PrivateInferenceState, copy: PrivateInferenceCopy?, calls: PrivateInferenceCalls
+    ) -> String? {
+        guard let copy else { return nil }
+        return PrivateInferenceSurface.stateLine(state, copy: copy, calls: calls)
     }
 }
 
@@ -79,6 +113,7 @@ struct MonitorWindowView: View {
 private struct MonitorMainPane: View {
     @Binding var tab: MonitorWindowView.Tab
     let inferenceDot: GlassStatus?
+    let inferenceAccessibilityValue: String?
     @Binding var showsMap: Bool
     @Binding var showsInspector: Bool
     let onSettings: () -> Void
@@ -115,7 +150,9 @@ private struct MonitorMainPane: View {
                     "Monitor",
                     selection: $tab,
                     segments: MonitorWindowView.Tab.allCases.map { item in
-                        GlassSegment(item.rawValue, value: item, dot: item == .inference ? inferenceDot : nil)
+                        GlassSegment(
+                            item.rawValue, value: item, dot: item == .inference ? inferenceDot : nil,
+                            accessibilityValue: item == .inference ? inferenceAccessibilityValue : nil)
                     })
                 Spacer(minLength: 0)
             }
