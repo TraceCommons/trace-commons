@@ -132,9 +132,42 @@ def _code_revision_hash():
     """Ports the tree hash from `ef97a459:scripts/operator/run-pipeline-
     qualification.sh` lines 70-88: every tracked-or-untracked, non-ignored
     file's path and content, in sorted path order, excluding the top-level
-    `.local`, `.vscode`, and `target` directories."""
+    `.local`, `.vscode`, and `target` directories.
+
+    "Non-ignored" means not ignored by the repository's own `.gitignore`
+    files, and nothing else: `--exclude-per-directory=.gitignore` in place of
+    `--exclude-standard`, which also applies the host's `.git/info/exclude`
+    and the user's global excludes file (`core.excludesFile`, emptied here as
+    well). The server compares the revision a release was built with to the
+    revision of the run that qualified it, so one checkout must give one
+    revision on every host, and a file that only a host's own exclude list
+    hides is part of the tree.
+
+    One exception: an untracked `.cargo/` directory, at any depth, is left
+    out (`--exclude=.cargo/`). It holds a developer's local cargo
+    configuration (a job count, a target directory), and the repository's
+    `.gitignore` does not list it. An ignore rule does not apply to a
+    tracked file; a line there would keep a new `.cargo/config.toml`, not
+    yet added, out of `git status` and out of `git add`, so a cargo
+    configuration that was meant to be checked in could be left out of a
+    commit unseen. `--exclude` applies to untracked files only: a tracked
+    file under `.cargo/` is listed by `--cached` and is part of the revision,
+    so a checked-in cargo configuration, which changes how the code builds,
+    changes the revision.
+    With no `.cargo` directory in the checkout the revision is what it was
+    before this exception."""
     listing = subprocess.run(
-        ["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"],
+        [
+            "git",
+            "-c",
+            "core.excludesFile=",
+            "ls-files",
+            "--cached",
+            "--others",
+            "--exclude-per-directory=.gitignore",
+            "--exclude=.cargo/",
+            "-z",
+        ],
         check=True,
         capture_output=True,
         cwd=ROOT,

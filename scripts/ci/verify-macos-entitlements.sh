@@ -18,6 +18,11 @@ APP="${1:?usage: verify-macos-entitlements.sh <path to a TraceCommons .app>}"
 PROFILE="$APP/Contents/embedded.provisionprofile"
 ACCESS_GROUP="KXSWJN7WY8.ai.tracecommons.shell"
 TEAM_ID="KXSWJN7WY8"
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+case "${TC_REQUIRE_NATIVE_PASSKEYS:-0}" in
+  0|1) ;;
+  *) echo "FAIL: invalid TC_REQUIRE_NATIVE_PASSKEYS (expected 0 or 1)"; exit 1 ;;
+esac
 
 INFO="$APP/Contents/Info.plist"
 test -f "$INFO" || { echo "FAIL: no Contents/Info.plist in $APP"; exit 1; }
@@ -69,6 +74,22 @@ test "$SIGNED_APP_ID" = "$EXPECTED_APP_ID" \
   || { echo "FAIL: signed application-identifier $SIGNED_APP_ID is not $EXPECTED_APP_ID"; exit 1; }
 test "$PROFILE_APP_ID" = "$EXPECTED_APP_ID" \
   || { echo "FAIL: embedded profile is for $PROFILE_APP_ID, not $EXPECTED_APP_ID"; exit 1; }
+
+echo "--- native Associated Domains qualification"
+# Pure metadata fixtures cover missing/wrong domains and grants separately.
+# This path reads the ACTUAL signature and embedded CMS, never synthetic CMS.
+NATIVE_METADATA="$(mktemp -d)"
+trap 'rm -rf "$NATIVE_METADATA"' EXIT
+printf '%s' "$ENTS" > "$NATIVE_METADATA/entitlements.plist"
+printf '%s' "$PLIST" > "$NATIVE_METADATA/profile.plist"
+PASSKEY_ARGS=(--bundle-id "$BUNDLE_ID")
+if [ "${TC_REQUIRE_NATIVE_PASSKEYS:-0}" = 1 ]; then
+  PASSKEY_ARGS+=(--require-passkeys)
+fi
+python3 "$ROOT/scripts/ci/native-passkey-entitlements.py" \
+  --entitlements "$NATIVE_METADATA/entitlements.plist" \
+  --profile "$NATIVE_METADATA/profile.plist" \
+  "${PASSKEY_ARGS[@]}"
 
 echo "--- the profile is not near expiry"
 EXPIRES="$(printf '%s' "$PLIST" | plutil -extract ExpirationDate raw -o - - 2>/dev/null)" \

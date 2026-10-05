@@ -68,6 +68,14 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 PACKAGE_DIR="$PWD"
+# Every native release requests webcredentials and must embed a matching
+# Apple-issued profile. An override is explicit local input, never a download.
+# Refuse invalid/expired grants before build or signing credential import.
+SIGNING_PROFILE="${TC_MACOS_PROVISION_PROFILE:-$PACKAGE_DIR/TraceCommons-DeveloperID.provisionprofile}"
+SIGNING_ENTITLEMENTS="$PACKAGE_DIR/entitlements.plist"
+python3 "$PACKAGE_DIR/../scripts/ci/native-passkey-entitlements.py" \
+  --entitlements "$SIGNING_ENTITLEMENTS" --profile-cms "$SIGNING_PROFILE" \
+  --bundle-id ai.tracecommons.shell --require-passkeys
 CONFIG=release
 APP="$PACKAGE_DIR/.build/TraceCommons.app"
 DMG="$PACKAGE_DIR/.build/TraceCommons.dmg"
@@ -205,11 +213,15 @@ find "$APP/Contents/Frameworks" -name '*.dylib' -print0 |
 # entitlement WITHOUT a profile that grants it is killed by the kernel at exec
 # -- measured, not assumed. The failure is an application that does not start,
 # which is why CI launches the signed app rather than trusting that it signed.
-cp "$PACKAGE_DIR/TraceCommons-DeveloperID.provisionprofile" "$APP/Contents/embedded.provisionprofile"
+cp "$SIGNING_PROFILE" "$APP/Contents/embedded.provisionprofile"
 codesign --force --timestamp --options runtime \
-  --entitlements "$PACKAGE_DIR/entitlements.plist" \
+  --entitlements "$SIGNING_ENTITLEMENTS" \
   --sign "$MACOS_SIGNING_IDENTITY" "$APP"
 codesign --verify --deep --strict --verbose=2 "$APP"
+# Inspect the actual signed metadata and embedded grant before packaging.
+# The release workflow separately runs the real launch/Keychain probe.
+TC_REQUIRE_NATIVE_PASSKEYS=1 TC_VERIFY_STATIC_ONLY=1 \
+  "$PACKAGE_DIR/../scripts/ci/verify-macos-entitlements.sh" "$APP"
 
 echo "--- packaging the DMG"
 rm -f "$DMG"
