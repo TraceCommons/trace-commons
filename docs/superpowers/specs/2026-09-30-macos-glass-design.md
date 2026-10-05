@@ -262,8 +262,8 @@ particular:
 - **Folder Submit all and Submit all as** (Zaki, 2026-10-05). #1146
   bulk-approves with one click and drops the core's withheld line. The macOS
   app keeps `main`'s folder actions, as the #1241 port does:
-  - **Submit all** (`approve_folder`) on the folder row and in the folder
-    inspector, with the folder's `withheld_line` shown beside it whenever
+  - **Submit all** (`approve` with the folder's `project_id`) on the folder
+    row and in the folder inspector, with the folder's `withheld_line` shown beside it whenever
     the core supplies one;
   - **Submit all as** on the folder row and in the folder inspector,
     presented as a modal (a sheet) that offers the `ContributorVerdict`
@@ -305,7 +305,7 @@ changes. There are no consent, withdrawal or Private AI behaviour changes.
 | Settings | a sidebar destination (⌘7) | a macOS Settings window (⌘,) | #1173 D8 |
 | Compute | a sidebar destination | a Settings section, keeping pause, resume and withdraw | this spec (#1146 has no screen for it); built in `MonitorSettingsWindow` |
 | Navigation | a two-column sidebar of seven destinations | three tabs (Home, Inference, Traces) in a three-pane window | #1173 D9 |
-| Launch tab | Insights, with discovery and enrollment deferred while it shows | Home (`@SceneStorage` default). The monitor and Settings windows call `navigation.activateServicesForWindow()` on appear, which replaces the Insights deferral; an Insights-only launch no longer avoids starting the watcher | R5; plan D-11 (Phase 4) |
+| Launch tab | Insights, with discovery and enrollment deferred while it shows | Home, the `@SceneStorage` default (built, R5). The debug monitor window calls `navigation.activateServicesForWindow()` on appear. Whether the Insights deferral is dropped when the monitor becomes the main window is not decided: it is plan D-11, an owner decision whose default is to start services when the monitor opens | Home: R5. The deferral: open (plan D-11) |
 | Pane collapse | none | the map hides below 1100pt at runtime and returns when the window widens; the saved preference is kept. #1146 applies its 1100pt rule only once, at launch, so this is a native divergence | #1182 |
 | Map modes | none | the map shows Traces or Private AI; the selector changes the map only | D11, R8 |
 | A session's pill | a session card's Submit | Review: selects the session and opens the inspector | #1173 D10 |
@@ -573,8 +573,8 @@ the macOS text-size setting; leading and tracking scale with it (#1179).
   Antigravity and Gemini CLI share `toolAntigravity`; whether Gemini CLI gets
   its own tint is open.
 
-**#1146's literal motion timings.** At `a1a15fbe`, ten timings sit outside
-#1146's tokens:
+**#1146's literal motion timings.** At `a1a15fbe`, eleven timings in its
+`.css` and `.tsx` files sit outside its tokens:
 
 | Where | Literal | macOS mapping |
 |---|---|---|
@@ -583,6 +583,7 @@ the macOS text-size setting; leading and tracking scale with it (#1179).
 | `glass.css:1193` | `tc-pulse 1.6s` (on the ease curve) | `slow` per step, repeating; removed under Reduce Motion |
 | `glass.css:1236` | `tc-rise-in 0.18s ease` | `reveal` (0.18s) on the single curve |
 | `glass.css:1273` | `background 0.1s` | `fast` |
+| `glass.css:1320` | `stroke 0.55s ease-out, stroke-width 0.55s ease-out` | `slow` on the single curve |
 | `glass.css:1332` | `tc-flow 0.6s linear infinite` | a named `flowDash` token, 0.6s linear, the only linear loop; removed under Reduce Motion |
 | `monitor-shell.tsx:312` | `height .25s ease` | `slide` (0.25s) on the single curve |
 | `flow-map.tsx:179` | `transform .7s cubic-bezier(.4,0,.2,1)` | `slow` on the single curve |
@@ -711,9 +712,10 @@ until it is added to the JSON.
   toggle shows it hidden and is disabled. Every icon has a tooltip and an
   accessible name; toggles expose their state. #1146's view menu and graph
   toggle are open with Ron (Decision 15).
-- **Watching/Paused readout and pause/resume** (Decision 13). A permanent
-  readout on the main pane's top row, visible on every tab and every pane
-  composition, with a pause/resume control beside it:
+- **Watching/Paused readout and pause/resume** (Decision 13). Required: a
+  permanent readout, visible on every tab and every pane composition, with
+  a pause/resume control beside it. Where it sits is Ron's choice; the
+  proposal is the main pane's top row, beside the toolbar capsule.
   - The readout says Watching or Paused, in the core's words, with a glyph
     as well as a colour. A state the core did not report is unknown, with
     no dot (see Appearance).
@@ -944,7 +946,7 @@ separate target).
   duration tokens (0.15, 0.18, 0.22, 0.25 and 0.30 seconds), read from the
   easing and duration tokens. Not `.easeInOut` or `.easeOut` (#1182
   review).
-- #1146's ten literal timings are mapped as the Tokens table says. The only
+- #1146's eleven literal timings are mapped as the Tokens table says. The only
   exception to the one curve is the flow-map dash (`flowDash`, 0.6s linear).
 - Reduce Motion (`accessibilityReduceMotion`) removes transitions, including
   pane show and hide, and the flow-map dash animation, as #1146's
@@ -994,7 +996,8 @@ unreachable.
 | Traces (waiting, review) | the Traces tab: tree in the left pane, review and the folder inspector in the inspector |
 | Inference (Private AI) | the Inference tab, with core copy |
 | History | Home, then History (breadcrumb) |
-| Mission drafts | Home, then Missions |
+| Mission drafts (`main`'s local drafts, `MissionDraftsView`) | a Home page (`.missionDrafts`), reached from Home (R15 plan, Phase 4 Task 8), with its delete confirmation unchanged. Until then it stays in the shipping window |
+| Missions catalogue | Home, then Missions (`MissionsPage`) |
 | Compute | a Settings section (`ComputeView`), including pause, resume and withdraw |
 | Insights, including comparison tasks (`ComparisonTasksView`) | a Home sub-view, or its existing view, as long as it stays reachable (including its delete actions) |
 | Skills (`SkillLearningView`) | per history record, in the History page's inspector for the selected row (plan D-7) |
@@ -1156,6 +1159,9 @@ questions. Checked at `efd05c6f8`.
 
 - Where D2 (appearance) was revised, and whether "follows the system" is
   the decision (Ron; plan D-2).
+- The pre-26 material in the light appearance. `GlassBackdrop` uses
+  `.hudWindow` whatever the appearance, and HUD is a dark material; the
+  first revision adopted it for a dark-only app.
 - Whether the community site adopts the purple brand (Decision 2).
 - Ron's call on the window radius 22, the scene glows and the window rim:
   add them or record them as dropped.
