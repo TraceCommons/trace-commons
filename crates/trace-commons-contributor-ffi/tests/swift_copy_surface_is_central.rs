@@ -870,6 +870,13 @@ const SURFACES: &[(&str, &str, &str, &str, &str)] = &[
         "tc_arming_offer_copy_json",
     ),
     (
+        "first-run arming confirmation",
+        "TraceCommonsApp/Views/FirstRun/RulesScreen.swift",
+        "TCCoreCopy.armingOfferCopyJSON",
+        "TCBridge/TCCoreCopy.swift",
+        "tc_arming_offer_copy_json",
+    ),
+    (
         "surviving secret",
         "TraceCommonsApp/Views/QueueView.swift",
         "TCCoreCopy.residualSecretLine",

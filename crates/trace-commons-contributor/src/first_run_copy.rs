@@ -162,6 +162,10 @@ pub struct RulesCopy {
     pub show_fewer: &'static str,
     pub never_count: &'static str,
     pub never_label: &'static str,
+    /// The folders could not be read; Continue stays disabled.
+    pub unavailable: &'static str,
+    /// One folder's past sessions could not be read.
+    pub sessions_unavailable: &'static str,
 }
 
 /// Uses: data use, Sharing and starting (`uses-screen.tsx`).
@@ -321,6 +325,8 @@ pub fn first_run_copy() -> FirstRunCopy {
             show_fewer: "Show fewer",
             never_count: "{count} · rule is Never",
             never_label: "{folder}: rule is Never",
+            unavailable: "Couldn't read repos from your sessions. Go back, then continue to try again.",
+            sessions_unavailable: "Past sessions unavailable",
         },
         uses: UsesCopy {
             title_light: "How your data is ",

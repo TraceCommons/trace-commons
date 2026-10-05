@@ -2848,6 +2848,23 @@ extension AppModel: FirstRunDaemon {
         return true
     }
 
+    /// The Rules screen's folders. Nil without a daemon or on a refusal, so
+    /// the screen keeps waiting rather than showing an empty list nobody
+    /// reported.
+    func rulesProjects() async -> [ProjectRow]? {
+        guard case .success(let projects) = await firstRunCall({ try $0.listProjects() }) else { return nil }
+        publishIfChanged(\.projects, projects)
+        return projects
+    }
+
+    /// One folder's past sessions for the picker. Nil on a refusal: the
+    /// folder then lists nothing to tick.
+    func pastSessions(projectID: String) async -> PastSessionList? {
+        guard case .success(let list) = await firstRunCall({ try $0.listPastSessions(projectID: projectID) })
+        else { return nil }
+        return list
+    }
+
     func setPrivateAI(_ on: Bool) async -> Bool {
         guard case .success(let settings) = await firstRunCall({ try $0.setPrivateInference(on) })
         else { return false }

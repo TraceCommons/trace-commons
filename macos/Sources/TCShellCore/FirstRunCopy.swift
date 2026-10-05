@@ -113,6 +113,10 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
         public let neverCount: String
         /// `{folder}`.
         public let neverLabel: String
+        /// The folders could not be read.
+        public let unavailable: String
+        /// One folder's past sessions could not be read.
+        public let sessionsUnavailable: String
     }
 
     public struct Uses: Decodable, Equatable, Sendable {
