@@ -86,28 +86,34 @@ enum ToolsScreenLayout {
         }
     }
 
-    /// Discovery's rows, each kind the person added shown as a found tool at
-    /// the added folder (Ron's custom tools are found), and an added kind
-    /// discovery did not offer given a row of its own.
+    /// Discovery's rows, with each folder the person gave shown as a found
+    /// tool at that folder (Ron's custom tools are found). A folder is the
+    /// person's when they added it with the tile, or when the state watches
+    /// a kind discovery did not find -- its row's own folder button writes
+    /// through `answer`, which drops the added folder, and the row must not
+    /// vanish while the watch stays declared.
     static func rows(_ discovered: [SourceCandidate], state: FirstRunState) -> [SourceCandidate] {
         var rows = discovered.map { candidate in
-            addedPath(for: candidate.source, in: state).map { added(candidate.source, at: $0) } ?? candidate
+            personalPath(for: candidate.source, discovered: discovered, in: state)
+                .map { added(candidate.source, at: $0) } ?? candidate
         }
-        for folder in state.addedFolders {
-            guard case .source(let kind) = folder.kind, !rows.contains(where: { $0.source == kind }) else {
-                continue
+        for kind in SourceKind.allCases where !rows.contains(where: { $0.source == kind }) {
+            if let path = personalPath(for: kind, discovered: discovered, in: state) {
+                rows.append(added(kind, at: path))
             }
-            rows.append(added(kind, at: folder.path))
         }
         return rows
     }
 
-    /// Ron's compact meta: "Added by you" for a folder the person added, the
+    /// Ron's compact meta: "Added by you" for a folder the person gave, the
     /// session count alone for a found tool, discovery's evidence otherwise.
     static func meta(
-        for candidate: SourceCandidate, in state: FirstRunState, copy: FirstRunCopy.Tools, now: Date
+        for candidate: SourceCandidate, in state: FirstRunState, discovered: [SourceCandidate],
+        copy: FirstRunCopy.Tools, now: Date
     ) -> String {
-        if addedPath(for: candidate.source, in: state) != nil { return copy.addedByYou }
+        if personalPath(for: candidate.source, discovered: discovered, in: state) != nil {
+            return copy.addedByYou
+        }
         if candidate.exists {
             return copy.sessionCount.replacingOccurrences(of: "{count}", with: String(candidate.sessionCount))
         }
@@ -119,8 +125,17 @@ enum ToolsScreenLayout {
         state.addedFolders.first { $0.kind == .trajectory }
     }
 
-    private static func addedPath(for kind: SourceKind, in state: FirstRunState) -> String? {
-        state.addedFolders.first { $0.kind == .source(kind) }?.path
+    /// The folder the person gave for `kind`: one added with the tile, or a
+    /// watch of a kind discovery did not find. Nil for discovery's own row.
+    private static func personalPath(
+        for kind: SourceKind, discovered: [SourceCandidate], in state: FirstRunState
+    ) -> String? {
+        if let folder = state.addedFolders.first(where: { $0.kind == .source(kind) }) {
+            return folder.path
+        }
+        let found = discovered.contains { $0.source == kind && $0.exists }
+        if !found, case .watch(let path) = state.sessionRoots[kind] { return path }
+        return nil
     }
 
     private static func added(_ kind: SourceKind, at path: String) -> SourceCandidate {
@@ -173,7 +188,8 @@ struct ToolsScreen: View {
                                     copy: copy.folders,
                                     candidate: candidate,
                                     meta: ToolsScreenLayout.meta(
-                                        for: candidate, in: runner.state, copy: copy.tools, now: Date()),
+                                        for: candidate, in: runner.state, discovered: discovered,
+                                        copy: copy.tools, now: Date()),
                                     state: $runner.state,
                                     installURL: installURL(candidate.source)
                                 )

@@ -68,12 +68,12 @@ final class ToolsScreenTests: XCTestCase {
         XCTAssertEqual(codex.path, path)
         XCTAssertFalse(ToolAnswerRowLayout.offersGetTool(codex))
         XCTAssertEqual(ToolAnswerRowLayout.answer(in: state, for: codex), .watch)
-        XCTAssertEqual(ToolsScreenLayout.meta(for: codex, in: state, copy: copy.tools, now: Date()), copy.tools.addedByYou)
+        XCTAssertEqual(ToolsScreenLayout.meta(for: codex, in: state, discovered: discovered, copy: copy.tools, now: Date()), copy.tools.addedByYou)
 
         // A found, un-added row is compact: the session count alone.
         let claude = try XCTUnwrap(rows.first { $0.source == .claudeCode })
         XCTAssertEqual(
-            ToolsScreenLayout.meta(for: claude, in: state, copy: copy.tools, now: Date()),
+            ToolsScreenLayout.meta(for: claude, in: state, discovered: discovered, copy: copy.tools, now: Date()),
             copy.tools.sessionCount.replacingOccurrences(of: "{count}", with: "12"))
 
         // A kind discovery did not offer still gets its row once added.
@@ -165,6 +165,33 @@ final class ToolsScreenTests: XCTestCase {
         XCTAssertTrue(screen.contains("copy.tools.addToolCaption"))
         XCTAssertFalse(screen.contains("Theia"))
         XCTAssertFalse(screen.contains("SSH"))
+    }
+
+    /// A row's own folder button writes through `answer`, which drops the
+    /// added folder. The row must stay, at the new path, so no watch goes to
+    /// the daemon that the screen does not show.
+    func test_aRowsChosenFolderKeepsItsRow() throws {
+        let copy = try firstRunCopy()
+        var state = FirstRunState(tier: .custom, step: .tools)
+        ToolsScreenLayout.apply(.added(AddedFolder(kind: .source(.opencode), path: "/a")), to: &state)
+        let row = try XCTUnwrap(ToolsScreenLayout.rows([], state: state).first { $0.source == .opencode })
+        ToolAnswerRowLayout.choose(folder: "/b", for: row, in: &state)
+        XCTAssertEqual(state.sessionRoots.opencode, .watch(path: "/b"))
+        let rows = ToolsScreenLayout.rows([], state: state)
+        XCTAssertEqual(rows.map(\.source), [.opencode])
+        XCTAssertEqual(rows.first?.path, "/b")
+        XCTAssertEqual(
+            ToolsScreenLayout.meta(for: rows[0], in: state, discovered: [], copy: copy.tools, now: Date()),
+            copy.tools.addedByYou)
+
+        // Discovered as missing: the row stays found at the watched path, with
+        // no install line beside a folder it is watching.
+        let missing = Self.candidate(.codex, exists: false)
+        state.answer(.codex, .watch(path: "/c"))
+        let codex = try XCTUnwrap(ToolsScreenLayout.rows([missing], state: state).first { $0.source == .codex })
+        XCTAssertTrue(codex.exists)
+        XCTAssertEqual(codex.path, "/c")
+        XCTAssertFalse(ToolAnswerRowLayout.offersGetTool(codex))
     }
 
     func test_aLaterOffDropsTheAddedFolder() throws {
