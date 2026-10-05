@@ -29,6 +29,8 @@ WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
 bash -n "$VERIFY"
+python3 -m unittest discover -s "$ROOT/scripts/ci/tests" \
+  -p test_native_passkey_entitlements.py
 
 if grep -nE '(^|[^A-Za-z_/])macos/(TraceCommons-DeveloperID\.provisionprofile|entitlements\.plist)' \
   "$ROOT/macos/scripts/make-release-dmg.sh"; then
@@ -82,6 +84,19 @@ TC_VERIFY_STATIC_ONLY=1 bash "$VERIFY" "$GOOD"
 # (GROUPS) killed the script with exit 1 and no message at all.
 echo "=== fixture: entitled bundle, /bin/bash"
 TC_VERIFY_STATIC_ONLY=1 /bin/bash "$VERIFY" "$GOOD"
+
+NO_DOMAIN="$WORK/no-domain/TraceCommons.app"
+make_bundle "$NO_DOMAIN"
+cp "$ROOT/macos/entitlements.plist" "$WORK/no-domain.plist"
+/usr/libexec/PlistBuddy -c 'Delete :com.apple.developer.associated-domains' "$WORK/no-domain.plist"
+codesign --force --sign - --entitlements "$WORK/no-domain.plist" "$NO_DOMAIN"
+echo "=== fixture: native bundle missing signed Associated Domains must be refused"
+if OUT="$(TC_VERIFY_STATIC_ONLY=1 bash "$VERIFY" "$NO_DOMAIN" 2>&1)"; then
+  echo "FAIL: native fixture unexpectedly passed without Associated Domains"
+  exit 1
+fi
+printf '%s' "$OUT" | grep -q '^FAIL: native passkeys require exactly webcredentials:tracecommons.ai$' \
+  || { echo "FAIL: expected missing signed Associated Domains refusal"; exit 1; }
 
 echo "=== fixture: unentitled bundle must be refused"
 if OUT="$(TC_VERIFY_STATIC_ONLY=1 bash "$VERIFY" "$BARE" 2>&1)"; then

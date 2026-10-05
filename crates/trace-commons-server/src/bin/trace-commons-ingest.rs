@@ -5,6 +5,8 @@
 mod account_routes;
 #[path = "trace_commons_ingest_internal/account_trust_growth.rs"]
 mod account_trust_growth_routes;
+#[path = "trace_commons_ingest_internal/activity_missions.rs"]
+mod activity_missions;
 #[path = "trace_commons_ingest_internal/admission.rs"]
 mod admission;
 #[path = "trace_commons_ingest_internal/file_witness.rs"]
@@ -260,13 +262,20 @@ use trace_commons_server::trace_score_attestation::{
     sign_versioned_score_attestation,
 };
 use trace_commons_server::versioned_pipeline::{
-    AttemptSweepCursor, PIPELINE_LEASE_CONFIG_INVALID_LABEL, PIPELINE_SUBMISSION_INOPERABLE_LABEL,
-    PgPipelineStore, PipelineAdmissionLimits, PipelineFollowUps, PipelineIndexRebuildReport,
-    PipelineLeaseConfig, PipelineNearPayoutControls, PipelineNearSettlementMode,
-    PipelineNoveltyUtilityChecks, PipelineQuotaScope, PipelineReceiptRequest,
-    PipelineReceiptResult, PipelineReplayReceipt, PipelineRetentionAction, PipelineReviewClaim,
-    PipelineReviewClaimOutcome, PipelineService, PipelineWithdrawalFollowUpState,
-    PipelineWithdrawalOutcome, is_pipeline_artifact_wrapper, is_pipeline_score_object_ref,
+    AttemptSweepCursor, PIPELINE_LEASE_CONFIG_INVALID_LABEL, PIPELINE_POLICY_NOT_RUNNABLE_LABEL,
+    PIPELINE_SUBMISSION_INOPERABLE_LABEL, PgPipelineStore, PipelineAdmissionLimits,
+    PipelineFollowUps, PipelineIndexRebuildReport, PipelineLeaseConfig, PipelineNearPayoutControls,
+    PipelineNearSettlementMode, PipelineNoveltyUtilityChecks, PipelineQuotaScope,
+    PipelineReceiptRequest, PipelineReceiptResult, PipelineReplayReceipt, PipelineRetentionAction,
+    PipelineReviewClaim, PipelineReviewClaimOutcome, PipelineService,
+    PipelineWithdrawalFollowUpState, PipelineWithdrawalOutcome, is_pipeline_artifact_wrapper,
+    is_pipeline_score_object_ref,
+};
+use trace_commons_server::versioned_pipeline_activation::{
+    NewReceiptRoute, NewReceiptRouting, PIPELINE_BUNDLE_NOT_QUALIFIED_LABEL,
+    PIPELINE_RECEIPT_INTAKE_CONTAINED_LABEL, PIPELINE_ROUTING_UNAVAILABLE_LABEL,
+    PIPELINE_TENANT_NOT_SERVED_LABEL, PipelineActivationStore, ReceiptOwner, RoutingState,
+    decide_new_receipt_route,
 };
 use trace_commons_server::versioned_pipeline_compat::MainGateConfig;
 use trace_commons_server::versioned_pipeline_product::{
@@ -276,6 +285,10 @@ use trace_commons_server::versioned_pipeline_product::{
     PipelineExportSnapshot, PipelineForensicTrace, PipelineOperationalSummary,
     PipelineProcessingStatus, PipelineProductStore, PipelineReconciliationRows,
     is_pipeline_export_manifest_purpose_code, pipeline_export_manifest_purpose_code,
+};
+use trace_commons_server::versioned_pipeline_qualification::{
+    BundlePackageTrustStore, CheckResultTrustStore, DEPLOYED_CODE_REVISION_HASH,
+    PACKAGE_RUNTIME_REVISION_UNKNOWN_LABEL, PipelineQualificationStore,
 };
 use uuid::Uuid;
 
@@ -1637,6 +1650,8 @@ fn flush_vector_indexes_on_shutdown(state: &AppState) {
 
 #[derive(Clone)]
 struct AppState {
+    activity_missions_policy:
+        Option<Arc<trace_commons_protocol::activity_missions::ActivityPolicy>>,
     inference_connection_catalog:
         Arc<Vec<trace_commons_server::inference_connection::OperatorInferenceConnection>>,
     near_provisioning_enabled: bool,
@@ -1670,6 +1685,61 @@ struct AppState {
     /// pipeline run (retention maintenance, ruling RB-30) queue the
     /// pipeline's follow-up through it, for a runtime to process.
     pipeline_store: Option<Arc<PgPipelineStore>>,
+    /// The tenants' committed routing rows and each submission id's
+    /// permanent owner, on the same PostgreSQL backend as `pipeline_store`
+    /// and present exactly when it is. With a pipeline runtime injected,
+    /// every new upload reads its tenant's routing row through it, and the
+    /// legacy path claims a submission id through it before its first write
+    /// (`decide_upload_route`, `route_pipeline_receipt`).
+    pipeline_activation: Option<Arc<PipelineActivationStore>>,
+    /// The tenants' bundle qualifications, on the same PostgreSQL backend as
+    /// `pipeline_activation` and present exactly when it is. Written only by
+    /// `POST /v1/admin/pipeline/qualifications`, through
+    /// `qualify_bundle_attested` (`pipeline_activation`).
+    pipeline_qualification: Option<Arc<PipelineQualificationStore>>,
+    /// The keys whose signatures make a bundle package trusted, from the JSON
+    /// file `TRACE_COMMONS_PIPELINE_PACKAGE_TRUSTED_KEYS_PATH` names; `None`
+    /// when the variable is unset, and then the qualification and activation
+    /// routes refuse with `pipeline_trust_store_missing`.
+    pipeline_package_trust: Option<Arc<BundlePackageTrustStore>>,
+    /// The keys whose signatures make a check result count, from
+    /// `TRACE_COMMONS_PIPELINE_CHECK_TRUSTED_KEYS_PATH`; `None` when unset.
+    /// Startup refuses a check key that is also a package key
+    /// (`pipeline_trust_store_overlap`).
+    pipeline_check_trust: Option<Arc<CheckResultTrustStore>>,
+    /// The code revision this binary was built from
+    /// (`DEPLOYED_CODE_REVISION_HASH`, P5-D17): the revision a qualification
+    /// records and an activation requires, and the revision a new upload of
+    /// a `pipeline` tenant needs a qualification of its active bundle on
+    /// (`decide_upload_route`). `None` in a build without it, and then every
+    /// qualification and every activation is refused with
+    /// `bundle_runtime_revision_unknown`, and so is every such upload on a
+    /// process with a runtime that is not started for unqualified routing
+    /// (tests only; that process reads no qualification). A revision that is
+    /// set is a `sha256:` digest: startup refuses any other value
+    /// (`pipeline_activation::deployed_code_revision`).
+    pipeline_code_revision_hash: Option<String>,
+    /// `main`'s gate configuration as ingest parsed it at start
+    /// (`pipeline_main_gate_config_from_env`). The activation routes check a
+    /// bundle activated after start against it (`check_runnable_package`),
+    /// as startup checks every tenant bundle it knows.
+    pipeline_main_gate: MainGateConfig,
+    /// Test builds only: the infrastructure profile the activation routes use
+    /// in place of `infrastructure_profile_from_state`. A test deployment has
+    /// development storage and static tokens, so without it no test could
+    /// pass the gate through a route. The field does not exist in a shipped
+    /// binary.
+    #[cfg(test)]
+    pipeline_infrastructure_override: Option<
+        trace_commons_server::versioned_pipeline_qualification::ProductionInfrastructureProfile,
+    >,
+    /// Whether a tenant with no routing row on the receipts list is routed
+    /// to the pipeline: `TRACE_COMMONS_PIPELINE_ALLOW_TEST_DEPENDENCIES`,
+    /// the setting of a process started for tests. The injected service
+    /// holds the same value (`assemble_ingest_pipeline_runtime` refuses one
+    /// that does not), because its receipt transaction checks the routing
+    /// again.
+    pipeline_unqualified_routing: bool,
     /// Fails startup closed (`pipeline_receipts_configured_without_runtime`
     /// / `pipeline_runtime_required_but_not_injected`) instead of silently
     /// running ingest without a pipeline runtime. See
@@ -3957,6 +4027,7 @@ impl AppState {
             pipeline_lease_config,
             pipeline_tenants_processed,
             pipeline_allow_test_dependencies,
+            pipeline_allow_test_dependencies,
             credit_settlement_near_contract_id.as_deref(),
             pipeline_near_confirmation_interval_from_env(pipeline_runtime_assembler.is_some())?,
             PipelineNearPayoutControls {
@@ -3989,6 +4060,39 @@ impl AppState {
         let pipeline_store = db_connections
             .as_ref()
             .map(|connections| Arc::new(PgPipelineStore::new(connections.postgres.clone())));
+        let pipeline_activation = db_connections.as_ref().map(|connections| {
+            Arc::new(PipelineActivationStore::new(connections.postgres.clone()))
+        });
+        let pipeline_qualification = db_connections.as_ref().map(|connections| {
+            Arc::new(PipelineQualificationStore::new(
+                connections.postgres.clone(),
+            ))
+        });
+        // Task 10: the two trust stores the qualification and activation
+        // routes verify against. A set variable whose file does not hold a
+        // valid key list, or a check key that is also a package key, refuses
+        // the start; an empty variable is unset.
+        let pipeline_trust_stores = pipeline_activation::pipeline_trust_stores_from_env()?;
+        // The build's code revision, which those routes compare with a
+        // qualification's: one that is set and is not a `sha256:` digest
+        // refuses the start.
+        let pipeline_code_revision_hash =
+            pipeline_activation::deployed_code_revision(DEPLOYED_CODE_REVISION_HASH)?;
+        // Review round 1, point 3: a new upload of a `pipeline` tenant needs
+        // a qualification of its active bundle on this revision. Say at the
+        // start which listed tenants have none; this only logs, and all
+        // its reads together have one time limit, so it holds the start for
+        // that limit at most.
+        if !pipeline_allow_test_dependencies {
+            if let Some(activation) = pipeline_activation.as_deref() {
+                pipeline_activation::warn_pipeline_tenants_not_qualified(
+                    activation,
+                    &tenant_rollout_gates,
+                    pipeline_code_revision_hash.as_deref(),
+                )
+                .await;
+            }
+        }
         let pipeline_worker_ready = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let near_credit_submitter_config = trace_near_credit_submitter_from_env()?;
         let near_credit_submitter_timeout_ms = near_credit_submitter_config
@@ -4487,6 +4591,17 @@ impl AppState {
             pipeline_service,
             pipeline_product,
             pipeline_store,
+            pipeline_activation,
+            pipeline_qualification,
+            pipeline_package_trust: pipeline_trust_stores.package,
+            pipeline_check_trust: pipeline_trust_stores.check,
+            pipeline_code_revision_hash,
+            pipeline_main_gate,
+            // `cfg(test)` because the field is; `None` unconditionally, so no
+            // configuration reaches it.
+            #[cfg(test)]
+            pipeline_infrastructure_override: None,
+            pipeline_unqualified_routing: pipeline_allow_test_dependencies,
             pipeline_runtime_required,
             pipeline_worker_ready,
             pipeline_drain_tenant_ids: Arc::new(pipeline_drain_tenant_ids),
@@ -4623,6 +4738,7 @@ impl AppState {
             account_native_codes,
             account_near_config,
             inference_connection_catalog: Arc::new(inference_connection_routes::catalog_from_env()?),
+            activity_missions_policy: activity_missions::policy_from_env()?,
             attestation_signing,
             legacy_invite_link,
             #[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
@@ -8099,6 +8215,10 @@ fn account_route_groups() -> (account_routes::AccountRoutes, account_routes::Acc
         )
         .get("/v1/account/credit-summary", account_credit_summary_handler)
         .get(
+            "/v1/account/activity-missions/status",
+            activity_missions::status,
+        )
+        .get(
             "/v1/account/traces/{submission_id}",
             account_trace_detail_handler,
         )
@@ -8251,6 +8371,7 @@ fn app(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/v1/reward-offers/{program_id}", get(rewards::offer))
         .route("/v1/missions", get(rewards::mission_catalog))
+        .route("/v1/activity-missions", get(activity_missions::catalogue))
         .route(
             "/v1/missions/{mission_id}",
             get(rewards::mission_publication),
@@ -8335,6 +8456,44 @@ fn app(state: Arc<AppState>) -> Router {
         .route(
             "/v1/admin/pipeline/operational-summary",
             get(pipeline_operational_summary_handler),
+        )
+        // PR 5 (P5-D11): qualification, routing, and policy interventions,
+        // each behind an admin credential, for the credential's tenant only
+        // (`pipeline_activation`). Each carries its own 1 MiB body limit
+        // (`pipeline_admin_body_limit`), inside the router-wide one below.
+        .route(
+            "/v1/admin/pipeline/routing",
+            get(pipeline_routing_handler).layer(pipeline_admin_body_limit()),
+        )
+        .route(
+            "/v1/admin/pipeline/qualifications",
+            post(pipeline_qualify_handler).layer(pipeline_admin_body_limit()),
+        )
+        .route(
+            "/v1/admin/pipeline/activate",
+            post(pipeline_activate_handler).layer(pipeline_admin_body_limit()),
+        )
+        .route(
+            "/v1/admin/pipeline/rollback",
+            post(pipeline_rollback_handler).layer(pipeline_admin_body_limit()),
+        )
+        .route(
+            "/v1/admin/pipeline/contain",
+            post(pipeline_contain_handler).layer(pipeline_admin_body_limit()),
+        )
+        .route(
+            "/v1/admin/pipeline/deactivate",
+            post(pipeline_deactivate_handler).layer(pipeline_admin_body_limit()),
+        )
+        .route(
+            "/v1/admin/pipeline/policy-interventions",
+            get(pipeline_policy_interventions_handler)
+                .post(pipeline_policy_intervention_handler)
+                .layer(pipeline_admin_body_limit()),
+        )
+        .route(
+            "/v1/admin/pipeline/legacy-drain",
+            get(pipeline_legacy_drain_handler).layer(pipeline_admin_body_limit()),
         )
         .route(
             "/v1/admin/pipeline/runs/{run_id}/forensic",
@@ -12649,6 +12808,21 @@ struct TraceCommonsConfigStatusResponse {
     pipeline_runtime_configured: bool,
     pipeline_runtime_required: bool,
     pipeline_runtime_production_qualified: bool,
+    /// Whether this process routes a listed tenant that has no routing row
+    /// to the pipeline (`TRACE_COMMONS_PIPELINE_ALLOW_TEST_DEPENDENCIES`): a
+    /// setting for a process started for tests.
+    pipeline_unqualified_routing_allowed: bool,
+    /// Whether this binary holds a build code revision
+    /// (`TRACE_COMMONS_BUILD_CODE_REVISION_HASH`); the pipeline
+    /// qualification, activation, and rollback routes need one. Never the
+    /// revision itself.
+    pipeline_code_revision_configured: bool,
+    /// Whether each trust store of those routes was loaded at start
+    /// (`TRACE_COMMONS_PIPELINE_PACKAGE_TRUSTED_KEYS_PATH`,
+    /// `TRACE_COMMONS_PIPELINE_CHECK_TRUSTED_KEYS_PATH`). Never a path, a
+    /// key id, or a key.
+    pipeline_package_trust_store_loaded: bool,
+    pipeline_check_trust_store_loaded: bool,
     signed_token_auth_enabled: bool,
     signed_token_key_count: usize,
     signed_token_eddsa_key_count: usize,
@@ -12916,6 +13090,10 @@ fn trace_commons_config_status_response(state: &AppState) -> TraceCommonsConfigS
             .pipeline_service
             .as_deref()
             .is_some_and(pipeline_runtime_is_production_qualified),
+        pipeline_unqualified_routing_allowed: state.pipeline_unqualified_routing,
+        pipeline_code_revision_configured: state.pipeline_code_revision_hash.is_some(),
+        pipeline_package_trust_store_loaded: state.pipeline_package_trust.is_some(),
+        pipeline_check_trust_store_loaded: state.pipeline_check_trust.is_some(),
         signed_token_auth_enabled: state.signed_token_verifier.is_some(),
         signed_token_key_count: signed_token_verifier
             .as_ref()
@@ -14180,15 +14358,19 @@ async fn reject_conflicting_witness_retry(
     Ok(())
 }
 
-/// The pipeline runtime for a tenant routed to `PipelineReceipts`, if any.
+/// The pipeline runtime for a tenant on the `PipelineReceipts` list, if any:
+/// the list is the scope of this process, not the decision.
 ///
 /// `Some` only when the tenant is in the `PipelineReceipts` rollout set AND a
-/// runtime was injected -- the same two conditions `route_pipeline_receipt`
-/// and the completed-admission branch of `submit_trace_handler` both gate
-/// on; shared here so the two cannot drift. A tenant listed without an
-/// injected runtime is refused at startup instead
-/// (`validate_pipeline_receipt_rollout`), so it can never reach either
-/// caller with `state.pipeline_service` still `None`.
+/// runtime was injected. It says whether this process may serve the tenant's
+/// new receipts, and so is the `on_receipts_list` input of
+/// `decide_new_receipt_route`: the tenant's committed routing row decides
+/// where a new receipt goes inside this scope (`route_pipeline_receipt`), and
+/// a row that names the pipeline for a tenant that is not listed is a
+/// refusal, not a route. `pipeline_runtime_for_replay`, which a retry uses,
+/// builds on it and adds the drain list. A tenant listed without an injected
+/// runtime is refused at startup instead (`validate_pipeline_receipt_rollout`),
+/// so it can never reach a caller with `state.pipeline_service` still `None`.
 fn pipeline_runtime_for_tenant<'a>(
     state: &'a AppState,
     tenant: &TenantCtx,
@@ -14296,10 +14478,15 @@ async fn pipeline_owned_submission_receipt(
             // `ContentConflict` result (`replay_result`, over a run it
             // found); any other variant fails closed rather than letting
             // the upload reach the legacy upsert.
+            // Neither routing result is ever built by `replay_receipt`: a
+            // replay is answered in every routing state, so it names no
+            // routing and no legacy owner.
             PipelineReceiptResult::Created(_)
             | PipelineReceiptResult::Tombstoned
             | PipelineReceiptResult::QuotaExceeded(_)
-            | PipelineReceiptResult::SourceSessionWithdrawn => {
+            | PipelineReceiptResult::SourceSessionWithdrawn
+            | PipelineReceiptResult::LegacyOwned
+            | PipelineReceiptResult::NotRouted(_) => {
                 Err(internal_error("pipeline_replay_result_unexpected"))
             }
         };
@@ -14319,19 +14506,280 @@ async fn pipeline_owned_submission_receipt(
     Ok(None)
 }
 
-/// Routes a receipt to the versioned pipeline instead of the legacy corpus
-/// path, for a `PipelineReceipts`-rollout tenant with an injected runtime.
+/// `pipeline_owned_submission_receipt` for a new upload (the call before the
+/// legacy record read), with the routing read that `decide_upload_route`
+/// needs when this function already made it (review round 1, amendment A11).
+///
+/// A process that may not replay the tenant's pipeline receipts (no runtime,
+/// or a tenant on neither pipeline list) asks the database whether a run owns
+/// the id, as `main` does. With the routing store that one statement also
+/// reads the tenant's routing (`run_and_routing_for_upload`), so the route
+/// decision of such a process adds no transaction to the upload. A run that
+/// owns the id is refused with `SUBMISSION_OWNED_BY_PIPELINE_RUN`, as before.
+///
+/// A read that fails: a process with no runtime answers as `main` answers its
+/// failed run read (`internal_error`); a process with a runtime answers `503
+/// pipeline_routing_unavailable`, as `decide_upload_route` answers a routing
+/// row that it cannot read. Neither goes on to the legacy path. The second
+/// answer is a change from `main` for a process with a runtime and a tenant
+/// on neither pipeline list: `main` answered `500` there, from its run read.
+///
+/// With a runtime that may replay the tenant's receipts, or with no routing
+/// store, this is `pipeline_owned_submission_receipt` and no routing read:
+/// `decide_upload_route` then reads the row itself.
+async fn pipeline_owner_and_routing_for_new_upload(
+    state: &AppState,
+    tenant: &TenantCtx,
+    submission_id: Uuid,
+    raw_body: &[u8],
+    ownership_conflict: &'static str,
+) -> ApiResult<(Option<TraceSubmissionReceipt>, Option<NewReceiptRouting>)> {
+    if pipeline_runtime_for_replay(state, tenant).is_none() {
+        if let Some(activation) = state.pipeline_activation.as_ref() {
+            let (has_pipeline_run, routing) = activation
+                .run_and_routing_for_upload(
+                    tenant.tenant_id(),
+                    submission_id,
+                    state.pipeline_code_revision_hash.as_deref(),
+                )
+                .await
+                .map_err(|error| {
+                    if state.pipeline_service.is_some() {
+                        routing_read_failed(&error)
+                    } else {
+                        internal_error(error)
+                    }
+                })?;
+            if has_pipeline_run {
+                return Err(api_error(
+                    StatusCode::CONFLICT,
+                    SUBMISSION_OWNED_BY_PIPELINE_RUN,
+                ));
+            }
+            return Ok((None, Some(routing)));
+        }
+    }
+    let receipt = pipeline_owned_submission_receipt(
+        state,
+        tenant,
+        submission_id,
+        raw_body,
+        ownership_conflict,
+    )
+    .await?;
+    Ok((receipt, None))
+}
+
+/// `503 pipeline_routing_unavailable` for a routing read that failed, with a
+/// hash-only log line.
+fn routing_read_failed(error: &impl std::fmt::Display) -> (StatusCode, Json<ApiError>) {
+    tracing::warn!(
+        error_hash = %safe_display_error_hash(error),
+        "Trace Commons pipeline routing read failed"
+    );
+    api_error(
+        StatusCode::SERVICE_UNAVAILABLE,
+        PIPELINE_ROUTING_UNAVAILABLE_LABEL,
+    )
+}
+
+/// Where a new upload goes, decided by `decide_upload_route`.
+enum UploadRoute<'a> {
+    /// The legacy path. `claim`: the legacy path claims the submission id
+    /// before its first write (`claim_legacy_receipt`).
+    Legacy { claim: bool },
+    /// The pipeline, through this service.
+    Pipeline(&'a Arc<PipelineService>),
+}
+
+/// Decides where a new upload goes, from its tenant's committed routing row
+/// (`decide_new_receipt_route`). The `PipelineReceipts` list is the scope of
+/// this process; the row decides inside it. In this order:
+///
+/// 1. No routing store (a process with no database): the legacy path with no
+///    claim, as `main`. A runtime with no routing store is a build that
+///    cannot read the rows: `503 pipeline_routing_unavailable`, for a
+///    remediation too.
+/// 2. The row, with the Admission policy and the qualification of the
+///    tenant's active bundle (`NewReceiptRouting`): `routing`, when the
+///    caller already read it (`pipeline_owner_and_routing_for_new_upload`),
+///    else `PipelineActivationStore::routing_for_new_receipt`, with no lock.
+///    A row that cannot be read is `503 pipeline_routing_unavailable`, never
+///    the legacy path.
+/// 3. `contained`: `503 pipeline_receipt_intake_contained`. For every upload:
+///    a remediation and a process with no runtime too (review round 1,
+///    point 4).
+/// 4. `pipeline` for a tenant that this process does not serve (no runtime,
+///    or the tenant is not on the receipts list): `503
+///    pipeline_tenant_not_served`, for a remediation too. A row cannot widen
+///    the scope, and the upload is not sent to the legacy path.
+/// 5. A remediation otherwise (`remediating`: a remediation of a legacy
+///    quarantine record this handler already holds): the legacy path, which
+///    owns the id, with a claim for a tenant in scope or with a row. It never
+///    answers the pipeline, and the Admission policy and the qualification
+///    are not looked at (they concern a pipeline receipt).
+/// 6. No runtime otherwise (the stock binary; the row is `legacy` or there is
+///    none): the legacy path, with a claim for a tenant with a row.
+/// 7. `pipeline` for a listed tenant: the pipeline. Unless this process was
+///    started for unqualified routing (`pipeline_unqualified_routing`, tests
+///    only), the tenant's active bundle needs a qualification row for the
+///    revision this binary was built from (review round 1, point 3): a build
+///    with no revision is `503 bundle_runtime_revision_unknown`, a bundle
+///    with no such row is `503 pipeline_bundle_not_qualified`. The check
+///    proves that the row exists, not what `activate` and `rollback` compare
+///    beside it. Then a suspended Admission policy of that bundle is `503
+///    bundle_policy_not_runnable` (final fix wave G1).
+/// 8. `legacy`, or no row: the legacy path, with a claim of the submission id
+///    for a tenant in scope or with a row. Only a listed tenant with no row
+///    and a process started for tests is routed to the pipeline.
+///
+/// `submit_trace_handler` calls this once for a new upload, before the
+/// admission attempt is marked processing, so that a refusal here releases
+/// the attempt (an attempt that is still `reserved` is released, and a
+/// bounded account's charge is refunded, by the handler's own
+/// `attempt.finish(false)`), and carries the answer to `route_pipeline_receipt`
+/// after the legacy checks. A retry of an existing receipt is answered
+/// before this (`pipeline_owned_submission_receipt`, the legacy record
+/// read), so a routing change never moves a retry to another owner, and a
+/// retry is checked against no qualification. A refusal that only the receipt
+/// transaction finds (a routing row or a policy that changes after this read:
+/// a `contain` or a `suspend` that commits while the upload is in flight)
+/// comes after `attempt.processing`, as `main`'s quota refusal does: the
+/// attempt then stays `processing` until its lease ends, because
+/// `Attempt::finish` releases an attempt only from `reserved`. A legacy
+/// upload that passed this decision before a `contain` committed completes on
+/// the legacy path: the legacy claim reads no routing.
+async fn decide_upload_route<'a>(
+    state: &'a AppState,
+    tenant: &TenantCtx,
+    remediating: bool,
+    routing: Option<NewReceiptRouting>,
+) -> ApiResult<UploadRoute<'a>> {
+    let in_scope = pipeline_runtime_for_replay(state, tenant).is_some();
+    let Some(activation) = state.pipeline_activation.as_ref() else {
+        // A runtime without a routing store is a build that cannot read the
+        // rows: the upload is refused, as for a row that cannot be read.
+        if state.pipeline_service.is_some() {
+            return Err(api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                PIPELINE_ROUTING_UNAVAILABLE_LABEL,
+            ));
+        }
+        return Ok(UploadRoute::Legacy { claim: false });
+    };
+    let NewReceiptRouting {
+        routing,
+        admission_runnable,
+        active_bundle_qualified,
+    } = match routing {
+        Some(routing) => routing,
+        None => activation
+            .routing_for_new_receipt(
+                tenant.tenant_id(),
+                state.pipeline_code_revision_hash.as_deref(),
+            )
+            .await
+            .map_err(|error| routing_read_failed(&error))?,
+    };
+    let has_row = routing.is_some();
+    let routing_state = routing.map(|row| row.routing_state);
+    let served = pipeline_runtime_for_tenant(state, tenant);
+    // The two refusals that hold for every upload of the tenant, whatever
+    // path it would take: a contained tenant takes no upload, and a tenant
+    // that an operator moved to the pipeline is not written on the legacy
+    // path by a process that does not serve it.
+    match routing_state {
+        Some(RoutingState::Contained) => {
+            return Err(api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                PIPELINE_RECEIPT_INTAKE_CONTAINED_LABEL,
+            ));
+        }
+        Some(RoutingState::Pipeline) if served.is_none() => {
+            return Err(api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                PIPELINE_TENANT_NOT_SERVED_LABEL,
+            ));
+        }
+        _ => {}
+    }
+    // A remediation rewrites a legacy record that this handler has in hand:
+    // the legacy path owns the id.
+    if remediating {
+        return Ok(UploadRoute::Legacy {
+            claim: in_scope || has_row,
+        });
+    }
+    let Some(pipeline_service) = state.pipeline_service.as_ref() else {
+        return Ok(UploadRoute::Legacy { claim: has_row });
+    };
+    match decide_new_receipt_route(
+        routing_state,
+        served.is_some(),
+        state.pipeline_unqualified_routing,
+    ) {
+        NewReceiptRoute::Legacy => Ok(UploadRoute::Legacy {
+            claim: in_scope || has_row,
+        }),
+        NewReceiptRoute::Contained => Err(api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            PIPELINE_RECEIPT_INTAKE_CONTAINED_LABEL,
+        )),
+        NewReceiptRoute::NotServed => Err(api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            PIPELINE_TENANT_NOT_SERVED_LABEL,
+        )),
+        // The gate is checked when an operator activates a bundle. A deploy
+        // changes the revision and no routing row, so the qualification is
+        // read again here, for each new receipt: a bundle that nobody
+        // qualified on the revision this binary was built from takes none.
+        // A process started for unqualified routing (tests only) skips this,
+        // as it skips the gate.
+        NewReceiptRoute::Pipeline
+            if !state.pipeline_unqualified_routing
+                && state.pipeline_code_revision_hash.is_none() =>
+        {
+            Err(api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                PACKAGE_RUNTIME_REVISION_UNKNOWN_LABEL,
+            ))
+        }
+        NewReceiptRoute::Pipeline
+            if !state.pipeline_unqualified_routing && !active_bundle_qualified =>
+        {
+            Err(api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                PIPELINE_BUNDLE_NOT_QUALIFIED_LABEL,
+            ))
+        }
+        // An operator suspended the Admission policy of the tenant's active
+        // bundle: the receipt would be refused in its own transaction, after
+        // the attempt is `processing` and after the re-scrub, the classifier,
+        // and the encryption. Refused here instead, for the whole suspension.
+        NewReceiptRoute::Pipeline if !admission_runnable => Err(api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            PIPELINE_POLICY_NOT_RUNNABLE_LABEL,
+        )),
+        NewReceiptRoute::Pipeline => Ok(UploadRoute::Pipeline(pipeline_service)),
+    }
+}
+
+/// Acts on the route `decide_upload_route` chose for a new upload: the legacy
+/// path (after its claim of the submission id, when it has one) or a receipt
+/// to the versioned pipeline instead of the legacy corpus path.
 ///
 /// Called from `submit_trace_handler` only after the legacy handler's
 /// authentication, submit rate limit, admission reservation,
-/// tenant-access-grant check, envelope validation, and server re-scrub have
-/// all already run (D15) -- this function does none of that itself and
-/// trusts its caller for it. `envelope` is that re-scrubbed envelope.
-/// Returns `Ok(None)` -- meaning "stay on the legacy path" -- unless the
-/// tenant is in the `PipelineReceipts` rollout set AND a runtime was
-/// injected; a tenant listed without an injected runtime is refused at
-/// startup instead (`validate_pipeline_receipt_rollout`), so it can never
-/// reach this function.
+/// tenant-access-grant check, envelope validation, server re-scrub,
+/// tombstone check, and submission quota have all already run (D15) -- this
+/// function does none of that itself and trusts its caller for it.
+/// `envelope` is that re-scrubbed envelope. Returns `Ok(None)` -- meaning
+/// "stay on the legacy path" -- for a legacy route, once the claim (if any)
+/// found the legacy path as the owner.
+///
+/// The receipt transaction checks the tenant's routing again and stays the
+/// authority on a race: a row that changed since the decision is answered by
+/// what the transaction found (see the arms below).
 ///
 /// A `Replayed` outcome always means a run already exists for this key. A
 /// `ContentConflict` outcome usually does too, but not always: it can also
@@ -14351,9 +14799,14 @@ async fn route_pipeline_receipt(
     raw_body: &[u8],
     residual_risk_basis: &[ResidualRiskCondition],
     source_claim: Option<(Uuid, [u8; 32])>,
+    route: UploadRoute<'_>,
 ) -> ApiResult<Option<TraceSubmissionReceipt>> {
-    let Some(pipeline_service) = pipeline_runtime_for_tenant(state, tenant) else {
-        return Ok(None);
+    let pipeline_service = match route {
+        UploadRoute::Legacy { claim } => {
+            return claim_legacy_receipt(state, tenant, envelope.submission_id, raw_body, claim)
+                .await;
+        }
+        UploadRoute::Pipeline(pipeline_service) => pipeline_service,
     };
     let idempotency_key = envelope.submission_id.to_string();
     let result = pipeline_service
@@ -14372,7 +14825,22 @@ async fn route_pipeline_receipt(
             },
         })
         .await
-        .map_err(internal_error)?;
+        .map_err(|error| {
+            // An operator suspended the Admission policy of the tenant's
+            // bundle (`intervene_policy`): the receipt stored nothing and is
+            // refused with its label, as the containment refusal is, so a
+            // contributor's client sees a blocked reason to retry later
+            // rather than an internal error (STA-002). The text is compared
+            // whole: only the label itself, never an error that carries it.
+            if error.to_string() == PIPELINE_POLICY_NOT_RUNNABLE_LABEL {
+                api_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    PIPELINE_POLICY_NOT_RUNNABLE_LABEL,
+                )
+            } else {
+                internal_error(error)
+            }
+        })?;
     match result {
         PipelineReceiptResult::Created(_) => Ok(Some(pipeline_processing_receipt())),
         replayed_or_conflicting @ (PipelineReceiptResult::Replayed(_)
@@ -14433,6 +14901,59 @@ async fn route_pipeline_receipt(
         PipelineReceiptResult::SourceSessionWithdrawn => {
             Err(api_error(StatusCode::CONFLICT, "source_session_withdrawn"))
         }
+        // The legacy path owns the submission id (its ownership row, or a
+        // legacy submission row): the receipt stored nothing here and the
+        // legacy path goes on.
+        PipelineReceiptResult::LegacyOwned => Ok(None),
+        // The routing row changed between this handler's read and the receipt
+        // transaction's own check. The transaction's answer is the one that
+        // holds: a contained tenant is refused; one returned to the legacy
+        // path is claimed for it.
+        PipelineReceiptResult::NotRouted(RoutingState::Contained) => Err(api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            PIPELINE_RECEIPT_INTAKE_CONTAINED_LABEL,
+        )),
+        PipelineReceiptResult::NotRouted(RoutingState::Legacy) => {
+            claim_legacy_receipt(state, tenant, envelope.submission_id, raw_body, true).await
+        }
+        // The transaction refuses a receipt for routing that is not
+        // `pipeline`; it never reports `pipeline` as the reason.
+        PipelineReceiptResult::NotRouted(RoutingState::Pipeline) => {
+            Err(internal_error("pipeline_routing_result_unexpected"))
+        }
+    }
+}
+
+/// Claims `submission_id` for the legacy path before its first write, when
+/// `claim` (the tenant is in this process's pipeline scope or has a routing
+/// row). `Ok(None)`: the legacy path goes on. A pipeline run that owns the id
+/// is answered as `pipeline_owned_submission_receipt` answers it.
+async fn claim_legacy_receipt(
+    state: &AppState,
+    tenant: &TenantCtx,
+    submission_id: Uuid,
+    raw_body: &[u8],
+    claim: bool,
+) -> ApiResult<Option<TraceSubmissionReceipt>> {
+    let (true, Some(activation)) = (claim, state.pipeline_activation.as_ref()) else {
+        return Ok(None);
+    };
+    match activation
+        .claim_legacy_receipt(tenant.tenant_id(), submission_id)
+        .await
+        .map_err(internal_error)?
+    {
+        ReceiptOwner::Legacy => Ok(None),
+        ReceiptOwner::Pipeline => pipeline_owned_submission_receipt(
+            state,
+            tenant,
+            submission_id,
+            raw_body,
+            "submission id already belongs to another principal",
+        )
+        .await?
+        .map(Some)
+        .ok_or_else(|| api_error(StatusCode::CONFLICT, SUBMISSION_OWNED_BY_PIPELINE_RUN)),
     }
 }
 
@@ -14586,15 +15107,18 @@ async fn submit_trace_handler(
         // admission still in progress). It is answered as `main` answers a
         // retry of an existing record, before the tenant policy and quota
         // checks.
-        if let Some(receipt) = pipeline_owned_submission_receipt(
+        // A process that may not replay this tenant's pipeline receipts
+        // reads the tenant's routing in the same statement; the route
+        // decision below uses it.
+        let (pipeline_receipt, routing_read) = pipeline_owner_and_routing_for_new_upload(
             state.as_ref(),
             &tenant,
             envelope.submission_id,
             &raw_body,
             "submission id already belongs to another principal",
         )
-        .await?
-        {
+        .await?;
+        if let Some(receipt) = pipeline_receipt {
             return Ok(Json(receipt));
         }
 
@@ -14685,6 +15209,28 @@ async fn submit_trace_handler(
         // that it stays above the rescrub.
         let witness = verified_witness_for_submission(state.as_ref(), &headers, &raw_body);
 
+        // Tenant routing decision (D3, D15): the `PipelineReceipts` list is
+        // the scope of this process and the tenant's committed routing row
+        // decides inside it. Decided here, before the admission attempt is
+        // marked processing, so that a refusal (contained, not served, no
+        // qualification on this build's revision, a suspended Admission
+        // policy, or routing unavailable) leaves the attempt reserved and
+        // the `attempt.finish(false)` below releases it, refunding a bounded
+        // account's charge, instead of leaving it processing with a live
+        // lease. The row is read once for an upload: above, with the run
+        // read, or by the decision. A retry was answered above and is not
+        // decided here. A remediation is: a contained tenant takes none, and
+        // otherwise the legacy path owns its id.
+        // `route_pipeline_receipt` acts on the decision after every legacy
+        // check.
+        let upload_route = decide_upload_route(
+            state.as_ref(),
+            &tenant,
+            remediating_prior.is_some(),
+            routing_read,
+        )
+        .await?;
+
         // The basis is a return value of the pass, never a field on the
         // envelope: the envelope is deserialised from contributor input, so a
         // basis carried there would be client-asserted by construction.
@@ -14725,13 +15271,20 @@ async fn submit_trace_handler(
         // 0.0: the contributor's figure is the gate's, once it has scored.
         apply_credit_estimate_to_envelope(&mut envelope);
 
-        // Tenant rollout gate (D3, D15): every legacy check above --
+        // Tenant routing gate (D3, D15): every legacy check above --
         // authentication, the submit rate limit, admission reservation, the
-        // tenant-access-grant check, envelope validation, and the server
-        // re-scrub -- has already run, so a `PipelineReceipts`-listed tenant
-        // with an injected runtime can be hived off to the pipeline here.
-        // Every other tenant falls through unchanged to the legacy path
-        // below.
+        // tenant-access-grant check, envelope validation, the server
+        // re-scrub, the tombstone check, and the submission quota -- has
+        // already run, so a receipt goes to the pipeline only after all of
+        // them. The route was decided above (`decide_upload_route`): a new
+        // receipt goes to the pipeline, or stays on the legacy path after the
+        // legacy path claims its submission id, and a refusal never gets
+        // here. A retry of an existing receipt was answered earlier and never
+        // gets here either; a remediation of a legacy quarantine record
+        // stays on the legacy path. With no pipeline runtime injected
+        // nothing here reads a row, and an id is claimed only for a tenant
+        // that has a routing row; an upload of a tenant with none falls
+        // through unchanged.
         if let Some(receipt) = route_pipeline_receipt(
             state.as_ref(),
             &tenant,
@@ -14739,6 +15292,7 @@ async fn submit_trace_handler(
             &raw_body,
             &residual_risk_basis,
             source_claim,
+            upload_route,
         )
         .await?
         {
@@ -19796,6 +20350,15 @@ use pipeline_runtime::{
     pipeline_runtime_is_production_qualified, run_pipeline_app,
 };
 
+#[path = "trace_commons_ingest_internal/pipeline_activation.rs"]
+mod pipeline_activation;
+use pipeline_activation::{
+    pipeline_activate_handler, pipeline_admin_body_limit, pipeline_contain_handler,
+    pipeline_deactivate_handler, pipeline_legacy_drain_handler,
+    pipeline_policy_intervention_handler, pipeline_policy_interventions_handler,
+    pipeline_qualify_handler, pipeline_rollback_handler, pipeline_routing_handler,
+};
+
 /// Complete the native half of a browser redeem: mint the one-time code and
 /// return the absolute loopback `Location` the browser should be sent to.
 ///
@@ -23889,6 +24452,14 @@ const AUDIT_CHAIN_REPAIR_AUDIT_KIND: &str =
 /// tombstone rows it wrote from file tombstones. Hash-only.
 const TOMBSTONE_REPAIR_AUDIT_KIND: &str = "tombstone_repair";
 
+/// The file audit event recording one change through the pipeline admin
+/// routes (`pipeline_activation`): a qualification, an activation, a
+/// rollback, a containment, a deactivation, or a policy suspension or
+/// resumption. Its DB row is a `PolicyUpdate` row with `Maintenance`
+/// metadata whose surface is this kind and whose one count is the action's
+/// label. Hash-only and label-only: no bundle, reason, or record id.
+const PIPELINE_ACTIVATION_AUDIT_KIND: &str = "pipeline_activation";
+
 fn trace_maintenance_audit_kind(kind: &str) -> bool {
     matches!(
         kind,
@@ -23897,6 +24468,7 @@ fn trace_maintenance_audit_kind(kind: &str) -> bool {
             | RETENTION_PURGED_ARTIFACT_INVALIDATION_AUDIT_KIND
             | AUDIT_CHAIN_REPAIR_AUDIT_KIND
             | TOMBSTONE_REPAIR_AUDIT_KIND
+            | PIPELINE_ACTIVATION_AUDIT_KIND
             | "maintenance"
             | "near_credit_outbox_submit"
             | "near_credit_outbox_confirm"
@@ -73740,7 +74312,7 @@ fn audit_backfill_storage_projection(
             StorageTraceAuditAction::BenchmarkConvert
         }
         "process_evaluation" => StorageTraceAuditAction::ProcessEvaluate,
-        "tenant_policy_update" | "tenant_access_grant_update" => {
+        "tenant_policy_update" | "tenant_access_grant_update" | PIPELINE_ACTIVATION_AUDIT_KIND => {
             StorageTraceAuditAction::PolicyUpdate
         }
         "export_job_recovery" => StorageTraceAuditAction::ExportJobRecovery,
@@ -73850,6 +74422,7 @@ fn audit_backfill_storage_projection(
         | RETENTION_PURGED_ARTIFACT_INVALIDATION_AUDIT_KIND
         | AUDIT_CHAIN_REPAIR_AUDIT_KIND
         | TOMBSTONE_REPAIR_AUDIT_KIND
+        | PIPELINE_ACTIVATION_AUDIT_KIND
         | "vector_index" => {
             trace_maintenance_audit_metadata_from_reason(&event.kind, event.reason.as_deref())
                 .unwrap_or(StorageTraceAuditSafeMetadata::Empty)
@@ -76302,6 +76875,12 @@ struct ApiError {
     error: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     retry_after_seconds: Option<i64>,
+    /// The blockers of a promotion decision that is not ready, labels only:
+    /// set by the pipeline qualification, activation, and rollback routes
+    /// on their refusal of such a decision (`pipeline_activation`), and
+    /// absent from every other answer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    blockers: Option<Vec<String>>,
 }
 
 fn api_error(status: StatusCode, message: impl Into<String>) -> (StatusCode, Json<ApiError>) {
@@ -76310,6 +76889,7 @@ fn api_error(status: StatusCode, message: impl Into<String>) -> (StatusCode, Jso
         Json(ApiError {
             error: message.into(),
             retry_after_seconds: None,
+            blockers: None,
         }),
     )
 }
@@ -76324,6 +76904,7 @@ fn api_error_with_retry(
         Json(ApiError {
             error: message.into(),
             retry_after_seconds,
+            blockers: None,
         }),
     )
 }
@@ -80072,6 +80653,34 @@ impl TraceCommonsAuditEvent {
             export_count: None,
             export_id: Some(record.export_job_id),
             decision_inputs_hash: Some(reason_hash.to_string()),
+            previous_event_hash: None,
+            event_hash: None,
+        }
+    }
+
+    /// One change through a pipeline admin route (`pipeline_activation`):
+    /// the action's label as the purpose (hashed) and as the one count. The
+    /// event names no submission, bundle, reason, or record id.
+    fn pipeline_activation(auth: &TenantAuth, action_label: &str) -> Self {
+        let purpose_hash = sha256_prefixed(action_label);
+        let action_counts = BTreeMap::from([(action_label.to_string(), 1)]);
+        Self {
+            event_id: Uuid::new_v4(),
+            tenant_id: auth.tenant_id.clone(),
+            submission_id: Uuid::nil(),
+            kind: PIPELINE_ACTIVATION_AUDIT_KIND.to_string(),
+            created_at: Utc::now(),
+            status: None,
+            actor_role: Some(auth.role),
+            actor_principal_ref: Some(auth.principal_ref.clone()),
+            reason: Some(trace_maintenance_audit_reason(
+                Some(&purpose_hash),
+                false,
+                &action_counts,
+            )),
+            export_count: None,
+            export_id: None,
+            decision_inputs_hash: None,
             previous_event_hash: None,
             event_hash: None,
         }

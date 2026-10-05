@@ -11,6 +11,20 @@ three corpus checks and the restore drill are emitted by the harnesses
 `PROMOTION_REQUIRED_CHECKS` less its three promotion-only checks (a
 self-test reads the list out of the source);
 `pipeline_http_corpus_package` is in neither list (ruling PF-1).
+
+A qualification run names exactly one package (P5-D15). The four checks that
+test the candidate carry its three digests (`digests_required`):
+`pipeline_bundle_qualification`, `pipeline_http_corpus_compatibility`,
+`pipeline_http_corpus_hf_local`, and `pipeline_restore_drill`. Every other
+required check is a mechanics check that carries none, and
+`require_current_pass_results` refuses a mechanics result that names a
+package. The Rust tests emit the same split: a mechanics test passes no
+package to `PipelineCheckEmitter`, and the four candidate tests pass the
+candidate (`qualification_candidate_package` in `pipeline_http_pg_tests.rs`,
+repeated in `versioned_pipeline_runtime_pg.rs`). `evaluate_promotion`
+enforces the split on the evidence itself, from the Rust list
+`PROMOTION_PACKAGE_CHECKS` (a self-test requires that list to equal the
+checks with `digests_required` here).
 """
 
 from __future__ import annotations
@@ -165,7 +179,8 @@ class DatabaseCheck:
     `runtime` (`TRACE_COMMONS_PG_TEST_DATABASE_URL`, used as given), or
     `pilot` (the same variable; the ingest suite runs in `<db>_pilot`, where
     the transaction guard looks). `digests` says whether the result must
-    carry the three package digests."""
+    carry the three package digests (only the bundle qualification of these
+    rows tests the candidate, P5-D15) or must carry none."""
 
     check_id: str
     cargo_args: Tuple[str, ...]
@@ -181,8 +196,8 @@ _INGEST_BIN = ("-p", "trace-commons-server", "--bin", "trace-commons-ingest")
 _HTTP_TESTS = "tests::pipeline_http_pg_tests::"
 
 
-def _runtime(check_id, test_name):
-    return DatabaseCheck(check_id, _RUNTIME_SUITE, test_name, "runtime", False, True)
+def _runtime(check_id, test_name, digests=False):
+    return DatabaseCheck(check_id, _RUNTIME_SUITE, test_name, "runtime", False, digests)
 
 
 REQUIRED_DATABASE_CHECKS = (
@@ -204,14 +219,18 @@ REQUIRED_DATABASE_CHECKS = (
     _runtime("pipeline_payout_recovery", "payout_crash_between_submit_and_confirm_submits_once"),
     _runtime("pipeline_index_rebuild", "index_rebuild_uses_sealed_commands_without_new_credit_or_outcomes"),
     _runtime("pipeline_orphan_sweep", "a_crashed_score_attempt_leaves_staged_objects_the_sweep_removes"),
-    _runtime("pipeline_bundle_qualification", "qualification_inspects_the_objects_the_constructor_receives"),
+    _runtime(
+        "pipeline_bundle_qualification",
+        "qualification_inspects_the_objects_the_constructor_receives",
+        digests=True,
+    ),
     DatabaseCheck(
         "pipeline_http_restart_recovery",
         _INGEST_BIN,
         _HTTP_TESTS + "real_http_receipt_completes_and_resumes_after_restart",
         "pilot",
         False,
-        True,
+        False,
     ),
     DatabaseCheck(
         "pipeline_http_receipt_ownership",
@@ -219,7 +238,26 @@ REQUIRED_DATABASE_CHECKS = (
         _HTTP_TESTS + "real_http_pipeline_receipt_checks_ownership_on_replay",
         "pilot",
         False,
-        True,
+        False,
+    ),
+    # PR 5's activation checks. Each is a mechanics check: its test passes no
+    # package to `PipelineCheckEmitter`, so its result carries no digests.
+    DatabaseCheck(
+        "pipeline_activation_containment",
+        _INGEST_BIN,
+        _HTTP_TESTS + "containment_refuses_new_receipts_and_keeps_pending_work",
+        "pilot",
+        False,
+        False,
+    ),
+    _runtime("pipeline_activation_rollback", "rollback_selects_an_earlier_bundle_for_new_runs_only"),
+    DatabaseCheck(
+        "pipeline_legacy_drain",
+        _INGEST_BIN,
+        "tests::pipeline_activation_pg_tests::the_legacy_drain_report_counts_real_pending_work_and_reaches_zero",
+        "pilot",
+        False,
+        False,
     ),
 )
 
@@ -231,17 +269,30 @@ REQUIRED_CORPUS_CHECK_IDS = (
     "pipeline_http_corpus_hf_local",
 )
 RESTORE_CHECK_ID = "pipeline_restore_drill"
+# The corpus check that serves a test bundle (PR 2's minimal package), not
+# the candidate: its result names no package (P5-D15). The corpus report
+# keeps its own digests.
+CORPUS_CHECKS_WITHOUT_PACKAGE = frozenset({"pipeline_http_corpus_minimal"})
 
 REQUIRED_CHECK_IDS = frozenset(
     {check.check_id for check in REQUIRED_DATABASE_CHECKS} | set(REQUIRED_CORPUS_CHECK_IDS) | {RESTORE_CHECK_ID}
 )
 
 
+def corpus_check_spec(check_id):
+    """The spec of a corpus check: it carries the package digests unless it
+    is the minimal corpus check (a signed package's own check,
+    `pipeline_http_corpus_package`, names its package)."""
+    return CheckSpec(check_id, digests_required=check_id not in CORPUS_CHECKS_WITHOUT_PACKAGE)
+
+
 def required_specs():
     """`require_current_pass_results`'s `required` for `qualify`: every
-    required check id, with the digests its row asks for (the corpus checks
-    and the restore drill always carry them)."""
+    required check id, with the digests its row asks for (the compatibility
+    and HF-local corpus checks and the restore drill carry them, the
+    minimal corpus check does not)."""
     specs = {check.check_id: CheckSpec(check.check_id, check.digests) for check in REQUIRED_DATABASE_CHECKS}
-    for check_id in (*REQUIRED_CORPUS_CHECK_IDS, RESTORE_CHECK_ID):
-        specs[check_id] = CheckSpec(check_id, digests_required=True)
+    for check_id in REQUIRED_CORPUS_CHECK_IDS:
+        specs[check_id] = corpus_check_spec(check_id)
+    specs[RESTORE_CHECK_ID] = CheckSpec(RESTORE_CHECK_ID, digests_required=True)
     return specs

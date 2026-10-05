@@ -1,0 +1,12 @@
+{
+  "capture_date": "2026-10-02",
+  "payload": {
+    "http_status": 404,
+    "readable": false
+  },
+  "payload_sha256": "46c95427536d0b2e64375426be08c55f87c26082175c295b78584703cec7c81c",
+  "representation": "allowlisted_projection",
+  "schema_version": "trace_commons.anonymized_network_projection.v1",
+  "source_kind": "authorized_recording",
+  "source_surface": "ironwire_summary"
+}

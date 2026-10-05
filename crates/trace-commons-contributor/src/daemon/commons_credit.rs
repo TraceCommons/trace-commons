@@ -39,11 +39,10 @@
 //!
 //! # Naming: these are the COMMONS' figures, not near.ai's
 //!
-//! #1118's open decision #1 asks which ledger is of record: the commons
-//! (this route) or near.ai (`near_ai_balance`, dollars). Every field here
-//! carries a `commons_` prefix precisely so a client cannot present one
-//! ledger's numbers as the other's, and this daemon presents both without
-//! preferring either. See `crate::commons_credit`'s module doc.
+//! #1118's decision makes the commons record the source of pending credit;
+//! dollars stay on near.ai as a link-out. Every figure here carries a
+//! `commons_` prefix so a client preserves that source and never presents
+//! points as a near.ai dollar balance. See `crate::commons_credit`'s module doc.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
