@@ -184,7 +184,8 @@ enum ToolsScreenLayout {
 struct ToolsScreen: View {
     let copy: FirstRunCopy
     @ObservedObject var runner: FirstRunRunner
-    /// Where each tool's "Get {tool}" leads; none is known yet.
+    /// Where each tool's "Get {tool}" leads: the core's install pages
+    /// (`FirstRunCopy.Folders.installURL(for:)`), passed by the host.
     var installURL: (SourceKind) -> URL? = { _ in nil }
     /// Whether Back to Join is offered (`FoldersScreenLayout.backAction`).
     var offersJoin = true

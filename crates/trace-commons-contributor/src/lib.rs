@@ -13,6 +13,7 @@ pub mod compute;
 pub mod config;
 pub mod consent;
 pub mod consent_copy;
+pub mod contribution_missions;
 pub mod daemon;
 pub mod deep_link;
 pub mod disclosure;

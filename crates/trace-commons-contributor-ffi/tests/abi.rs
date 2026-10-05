@@ -5397,6 +5397,23 @@ fn the_contribution_override_refusal_line_crosses_the_abi() {
 }
 
 #[test]
+fn the_missions_disclosure_crosses_the_abi() {
+    use trace_commons_contributor::consent_copy::{
+        MISSIONS_DISCLOSURE_CREDIT, missions_disclosure_copy,
+    };
+    use trace_commons_contributor_ffi::tc_missions_disclosure_copy_json;
+    let value = json_owned(tc_missions_disclosure_copy_json());
+    assert_eq!(
+        value,
+        serde_json::to_value(missions_disclosure_copy()).unwrap()
+    );
+    assert_eq!(value["credit"], MISSIONS_DISCLOSURE_CREDIT);
+    for key in ["title", "matching", "nothing_sent", "credit"] {
+        assert!(value[key].as_str().is_some_and(|s| !s.is_empty()), "{key}");
+    }
+}
+
+#[test]
 fn the_legacy_migration_offer_and_refusal_cross_the_abi() {
     use trace_commons_contributor::consent_copy::{
         legacy_migration_offer, legacy_migration_refusal_line,
