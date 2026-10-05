@@ -48,9 +48,7 @@ enum UsesScreenLayout {
         case .none: template = uses.optionalAllOff
         case .some: template = uses.optionalSomeOn
         }
-        return template
-            .replacingOccurrences(of: "{count}", with: String(optional.count))
-            .replacingOccurrences(of: "{selected}", with: String(on))
+        return FirstRunCopy.fill(template, ["count": String(optional.count), "selected": String(on)])
     }
 
     /// Start: the required use ticked (`FirstRunNavigation.canContinue`),
@@ -222,8 +220,8 @@ enum UsesStart {
 /// before the start commit.
 struct UsesScreen: View {
     @EnvironmentObject private var model: AppModel
-    @ObservedObject var runner: FirstRunRunner
     let copy: FirstRunCopy
+    @ObservedObject var runner: FirstRunRunner
 
     @State private var optionalOpen = false
     @State private var disclosure: SharingDisclosureFlow?
@@ -256,9 +254,7 @@ struct UsesScreen: View {
         ) {
             ScrollView {
                 VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
-                    Text("\(copy.uses.titleLight)\(Text(copy.uses.titleBold).fontWeight(.semibold))")
-                        .glassType(GlassTokens.TypeScale.heading)
-                        .foregroundStyle(GlassColor.textPrimary)
+                    FirstRunTitle(light: copy.uses.titleLight, bold: copy.uses.titleBold)
                     usesCard(options: options, required: required)
                     sharingCard(grant: grant)
                     if UsesScreenLayout.showsPrivateAI(runner.state) {

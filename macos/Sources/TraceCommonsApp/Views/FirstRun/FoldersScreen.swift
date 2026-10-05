@@ -169,8 +169,6 @@ struct FoldersScreen: View {
     }
 
     private var title: some View {
-        Text("\(Text(copy.folders.titleLight))\(Text(copy.folders.titleBold).fontWeight(.bold))")
-            .glassType(GlassTokens.TypeScale.display.weight(.regular))
-            .foregroundStyle(GlassColor.textPrimary)
+        FirstRunTitle(light: copy.folders.titleLight, bold: copy.folders.titleBold)
     }
 }

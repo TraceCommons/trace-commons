@@ -896,9 +896,9 @@ private enum SheetMetric {
 /// `ImageRenderer` runs on the CPU with no window-server session, and two of
 /// its limitations land squarely on this tab and are already documented
 /// elsewhere in the shell: an NSView-backed `TextField` comes out as a solid
-/// yellow bar with a "no entry" glyph (see `OnboardingConnectView`), and a
-/// `ScrollView` comes out blank (see `ConsentScopesView`). Both are artifacts
-/// of the renderer and neither is visible in the running app.
+/// yellow bar with a "no entry" glyph, and a `ScrollView` comes out blank.
+/// Both are artifacts of the renderer and neither is visible in the running
+/// app.
 ///
 /// They still matter, because the captures are how this sheet is reviewed,
 /// and a capture that shows a gold block where the search field is and an

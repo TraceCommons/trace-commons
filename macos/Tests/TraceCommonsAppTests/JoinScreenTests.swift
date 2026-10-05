@@ -6,7 +6,7 @@ import XCTest
 
 /// Ron's Join (#1030 `join-screen.tsx`): the invite with its host before the
 /// daemon runs and the joined line after it, the account cards, and "Skip:
-/// watch only" until an account exists. The decisions are `JoinLayout`'s, so
+/// watch only" until an account exists. The decisions are `JoinScreenLayout`'s, so
 /// they are tested without drawing; the source is read for the rest, the
 /// house pattern for a SwiftUI view.
 @MainActor
@@ -37,21 +37,21 @@ final class JoinScreenTests: XCTestCase {
     func test_joinShowsTheHostBeforeTheDaemonRuns() throws {
         let copy = try coreCopy()
         var state = FirstRunState()
-        XCTAssertEqual(JoinLayout.inviteLine(state, lookup: nil, failure: nil, copy: copy.join), .hidden)
+        XCTAssertEqual(JoinScreenLayout.inviteLine(state, lookup: nil, failure: nil, copy: copy.join), .hidden)
 
         // Look up reads the host locally; nothing reaches the daemon, which
         // does not run yet: Join holds no daemon to reach.
         let source = try Self.source()
         XCTAssertFalse(source.contains("DaemonClient"))
         XCTAssertFalse(source.contains("FirstRunDaemon"))
-        let looked = JoinLayout.lookUp("  invite:issuer.example  ", in: state, failure: nil, host: Self.host)
+        let looked = JoinScreenLayout.lookUp("  invite:issuer.example  ", in: state, failure: nil, host: Self.host)
         XCTAssertEqual(looked.outcome, .found)
         state = looked.state
         XCTAssertEqual(state.invite, "invite:issuer.example")
         XCTAssertEqual(state.issuerHost, "issuer.example")
         XCTAssertEqual(
-            JoinLayout.inviteLine(state, lookup: nil, failure: nil, copy: copy.join), .host("issuer.example"))
-        XCTAssertTrue(JoinLayout.inviteIsEditable(state))
+            JoinScreenLayout.inviteLine(state, lookup: nil, failure: nil, copy: copy.join), .host("issuer.example"))
+        XCTAssertTrue(JoinScreenLayout.inviteIsEditable(state))
 
         // Once the daemon enrolled it, the joined line with the pay range
         // replaces the field, so a second invite cannot be pasted.
@@ -62,13 +62,13 @@ final class JoinScreenTests: XCTestCase {
         let joined = copy.join.inviteJoined
             .replacingOccurrences(of: "{host}", with: "issuer.example")
             .replacingOccurrences(of: "{pay_range}", with: "10–40 points")
-        XCTAssertEqual(JoinLayout.inviteLine(state, lookup: found, failure: nil, copy: copy.join), .joined(joined))
-        XCTAssertFalse(JoinLayout.inviteIsEditable(state))
+        XCTAssertEqual(JoinScreenLayout.inviteLine(state, lookup: found, failure: nil, copy: copy.join), .joined(joined))
+        XCTAssertFalse(JoinScreenLayout.inviteIsEditable(state))
 
         // An unknown range reads as a dash, never as zero.
         let noRange = try Self.lookup(#"{"valid":true}"#)
         XCTAssertEqual(
-            JoinLayout.inviteLine(state, lookup: noRange, failure: nil, copy: copy.join),
+            JoinScreenLayout.inviteLine(state, lookup: noRange, failure: nil, copy: copy.join),
             .joined(
                 copy.join.inviteJoined
                     .replacingOccurrences(of: "{host}", with: "issuer.example")
@@ -77,12 +77,12 @@ final class JoinScreenTests: XCTestCase {
         // The screen's own host function is the core's (`TCInvite.issuerHost`),
         // so a real invite shows its issuer's host before the daemon runs.
         XCTAssertNil(JoinScreen.defaultIssuerHost("not an invite"))
-        let real = JoinLayout.lookUp(
+        let real = JoinScreenLayout.lookUp(
             "https://issuer.tracecommons.ai/onboard#VQWWPGYSG8Y4LTP6", in: FirstRunState(), failure: nil,
             host: JoinScreen.defaultIssuerHost)
         XCTAssertEqual(real.outcome, .found)
         XCTAssertEqual(
-            JoinLayout.inviteLine(real.state, lookup: nil, failure: real.failure, copy: copy.join),
+            JoinScreenLayout.inviteLine(real.state, lookup: nil, failure: real.failure, copy: copy.join),
             .host("issuer.tracecommons.ai"))
     }
 
@@ -93,9 +93,9 @@ final class JoinScreenTests: XCTestCase {
         let state = FirstRunState(
             step: .join, invite: "invite:issuer.example", issuerHost: "issuer.example", account: .nearAI,
             daemonStarted: true)
-        XCTAssertTrue(JoinLayout.inviteIsEditable(state))
+        XCTAssertTrue(JoinScreenLayout.inviteIsEditable(state))
         XCTAssertEqual(
-            JoinLayout.inviteLine(state, lookup: nil, failure: .inviteDead(label: "exhausted"), copy: copy.join),
+            JoinScreenLayout.inviteLine(state, lookup: nil, failure: .inviteDead(label: "exhausted"), copy: copy.join),
             .error(copy.join.inviteError))
 
         // Something that is not an invite is refused locally with the same
@@ -103,27 +103,27 @@ final class JoinScreenTests: XCTestCase {
         // invite stays held while its refusal stands, so the refusal stays
         // tied to it.
         let dead = FirstRunFailure.inviteDead(label: "exhausted")
-        let refused = JoinLayout.lookUp("not an invite", in: state, failure: dead, host: Self.host)
+        let refused = JoinScreenLayout.lookUp("not an invite", in: state, failure: dead, host: Self.host)
         XCTAssertEqual(refused.outcome, .refused)
         XCTAssertEqual(refused.state.invite, "invite:issuer.example")
         XCTAssertEqual(refused.state.issuerHost, "issuer.example")
         XCTAssertEqual(refused.failure, dead)
 
         // With no refusal pending, a refused paste drops the kept invite.
-        let plain = JoinLayout.lookUp("not an invite", in: state, failure: nil, host: Self.host)
+        let plain = JoinScreenLayout.lookUp("not an invite", in: state, failure: nil, host: Self.host)
         XCTAssertEqual(plain.outcome, .refused)
         XCTAssertEqual(plain.state.invite, "")
         XCTAssertNil(plain.state.issuerHost)
         XCTAssertEqual(
-            JoinLayout.inviteLine(refused.state, lookup: nil, failure: nil, copy: copy.join, refused: true),
+            JoinScreenLayout.inviteLine(refused.state, lookup: nil, failure: nil, copy: copy.join, refused: true),
             .error(copy.join.inviteError))
 
         // A new invite replaces the one the daemon refused, so its error goes.
-        let replaced = JoinLayout.lookUp("invite:other.example", in: state, failure: dead, host: Self.host)
+        let replaced = JoinScreenLayout.lookUp("invite:other.example", in: state, failure: dead, host: Self.host)
         XCTAssertEqual(replaced.outcome, .found)
         XCTAssertNil(replaced.failure)
         XCTAssertEqual(
-            JoinLayout.inviteLine(replaced.state, lookup: nil, failure: replaced.failure, copy: copy.join),
+            JoinScreenLayout.inviteLine(replaced.state, lookup: nil, failure: replaced.failure, copy: copy.join),
             .host("other.example"))
     }
 
@@ -131,12 +131,12 @@ final class JoinScreenTests: XCTestCase {
     /// real invite shows its issuer's host on Join before the daemon runs.
     func test_theRealBridgeReadsTheHost() throws {
         let copy = try coreCopy()
-        let looked = JoinLayout.lookUp(
+        let looked = JoinScreenLayout.lookUp(
             "https://issuer.tracecommons.ai/onboard#VQWWPGYSG8Y4LTP6", in: FirstRunState(), failure: nil,
             host: TCInvite.issuerHost)
         XCTAssertEqual(looked.outcome, .found)
         XCTAssertEqual(
-            JoinLayout.inviteLine(looked.state, lookup: nil, failure: looked.failure, copy: copy.join),
+            JoinScreenLayout.inviteLine(looked.state, lookup: nil, failure: looked.failure, copy: copy.join),
             .host("issuer.tracecommons.ai"))
     }
 
@@ -157,52 +157,52 @@ final class JoinScreenTests: XCTestCase {
 
         // Looking the same refused invite up again keeps the core's error:
         // nothing about it changed.
-        let again = JoinLayout.lookUp("invite:issuer.example", in: returned, failure: dead, host: Self.host)
+        let again = JoinScreenLayout.lookUp("invite:issuer.example", in: returned, failure: dead, host: Self.host)
         XCTAssertEqual(again.failure, dead)
         XCTAssertEqual(
-            JoinLayout.inviteLine(again.state, lookup: nil, failure: again.failure, copy: copy.join),
+            JoinScreenLayout.inviteLine(again.state, lookup: nil, failure: again.failure, copy: copy.join),
             .error(copy.join.inviteError))
 
         // A refused paste in between does not make the refused invite new:
         // looked up again, it still carries the core's error.
-        let garbage = JoinLayout.lookUp("not an invite", in: returned, failure: dead, host: Self.host)
+        let garbage = JoinScreenLayout.lookUp("not an invite", in: returned, failure: dead, host: Self.host)
         XCTAssertEqual(garbage.outcome, .refused)
         XCTAssertEqual(garbage.failure, dead)
-        let backAgain = JoinLayout.lookUp(
+        let backAgain = JoinScreenLayout.lookUp(
             "invite:issuer.example", in: garbage.state, failure: garbage.failure, host: Self.host)
         XCTAssertEqual(backAgain.outcome, .found)
         XCTAssertEqual(backAgain.failure, dead)
         XCTAssertEqual(
-            JoinLayout.inviteLine(backAgain.state, lookup: nil, failure: backAgain.failure, copy: copy.join),
+            JoinScreenLayout.inviteLine(backAgain.state, lookup: nil, failure: backAgain.failure, copy: copy.join),
             .error(copy.join.inviteError))
 
         // And after that refused paste an emptied field can still withdraw
         // the refused invite, taking its error with it.
-        XCTAssertTrue(JoinLayout.canLookUp("", in: garbage.state))
-        let clearedAfterGarbage = JoinLayout.lookUp("", in: garbage.state, failure: garbage.failure, host: Self.host)
+        XCTAssertTrue(JoinScreenLayout.canLookUp("", in: garbage.state))
+        let clearedAfterGarbage = JoinScreenLayout.lookUp("", in: garbage.state, failure: garbage.failure, host: Self.host)
         XCTAssertEqual(clearedAfterGarbage.outcome, .withdrawn)
         XCTAssertNil(clearedAfterGarbage.failure)
         XCTAssertEqual(
-            JoinLayout.inviteLine(
+            JoinScreenLayout.inviteLine(
                 clearedAfterGarbage.state, lookup: nil, failure: clearedAfterGarbage.failure, copy: copy.join),
             .hidden)
 
         // An empty field withdraws it: no error, no line, nothing planned.
-        XCTAssertTrue(JoinLayout.canLookUp("  ", in: returned))
-        XCTAssertFalse(JoinLayout.canLookUp("  ", in: FirstRunState()))
-        let withdrawn = JoinLayout.lookUp("  ", in: returned, failure: dead, host: Self.host)
+        XCTAssertTrue(JoinScreenLayout.canLookUp("  ", in: returned))
+        XCTAssertFalse(JoinScreenLayout.canLookUp("  ", in: FirstRunState()))
+        let withdrawn = JoinScreenLayout.lookUp("  ", in: returned, failure: dead, host: Self.host)
         XCTAssertEqual(withdrawn.outcome, .withdrawn)
         XCTAssertNil(withdrawn.failure)
         XCTAssertEqual(withdrawn.state.invite, "")
         XCTAssertNil(withdrawn.state.issuerHost)
         XCTAssertEqual(
-            JoinLayout.inviteLine(
+            JoinScreenLayout.inviteLine(
                 withdrawn.state, lookup: nil, failure: withdrawn.failure, copy: copy.join,
                 refused: withdrawn.outcome == .refused),
             .hidden)
 
         XCTAssertEqual(withdrawn.state.account, AccountAnswer.none)
-        let forward = JoinLayout.forward(withdrawn.state)
+        let forward = JoinScreenLayout.forward(withdrawn.state)
         XCTAssertEqual(forward.account, .watchOnly)
         let plan = FirstRunPlan.calls(for: forward, at: .leaveRoots)
         XCTAssertFalse(plan.contains { if case .lookupInvite = $0 { return true } else { return false } })
@@ -211,7 +211,7 @@ final class JoinScreenTests: XCTestCase {
 
         // Withdrawing keeps any failure that is not the invite's.
         XCTAssertEqual(
-            JoinLayout.lookUp("", in: returned, failure: .signInFailed, host: Self.host).failure, .signInFailed)
+            JoinScreenLayout.lookUp("", in: returned, failure: .signInFailed, host: Self.host).failure, .signInFailed)
     }
 
     /// Looking an invite up after Skip takes back watch only: the person is
@@ -219,14 +219,14 @@ final class JoinScreenTests: XCTestCase {
     func test_lookingUpAnInviteTakesBackWatchOnly() throws {
         let copy = try coreCopy()
         let skipped = FirstRunState(step: .join, account: .watchOnly)
-        let looked = JoinLayout.lookUp("invite:issuer.example", in: skipped, failure: nil, host: Self.host)
+        let looked = JoinScreenLayout.lookUp("invite:issuer.example", in: skipped, failure: nil, host: Self.host)
         XCTAssertEqual(looked.state.account, AccountAnswer.none)
         XCTAssertEqual(
-            JoinLayout.inviteLine(looked.state, lookup: nil, failure: nil, copy: copy.join), .host("issuer.example"))
-        XCTAssertEqual(JoinLayout.footerTitle(looked.state, copy: copy), copy.join.skip)
+            JoinScreenLayout.inviteLine(looked.state, lookup: nil, failure: nil, copy: copy.join), .host("issuer.example"))
+        XCTAssertEqual(JoinScreenLayout.footerTitle(looked.state, copy: copy), copy.join.skip)
 
         // A refused paste changes no answer.
-        let refused = JoinLayout.lookUp("not an invite", in: skipped, failure: nil, host: Self.host)
+        let refused = JoinScreenLayout.lookUp("not an invite", in: skipped, failure: nil, host: Self.host)
         XCTAssertEqual(refused.state.account, .watchOnly)
     }
 
@@ -234,23 +234,23 @@ final class JoinScreenTests: XCTestCase {
     /// (`FirstRunPlan`), so the looked-up host is not shown as if it would be.
     func test_watchOnlyHidesTheInviteItWillNotJoin() throws {
         let copy = try coreCopy()
-        let looked = JoinLayout.lookUp(
+        let looked = JoinScreenLayout.lookUp(
             "invite:issuer.example", in: FirstRunState(toolAnswers: [.claudeCode: .off, .codex: .off]),
             failure: nil, host: Self.host
         ).state
         XCTAssertEqual(
-            JoinLayout.inviteLine(looked, lookup: nil, failure: nil, copy: copy.join), .host("issuer.example"))
-        let skipped = JoinLayout.forward(looked)
+            JoinScreenLayout.inviteLine(looked, lookup: nil, failure: nil, copy: copy.join), .host("issuer.example"))
+        let skipped = JoinScreenLayout.forward(looked)
         XCTAssertEqual(skipped.account, .watchOnly)
         let plan = FirstRunPlan.calls(for: skipped, at: .leaveRoots)
         XCTAssertFalse(plan.isEmpty)
         XCTAssertFalse(plan.contains(.enroll("invite:issuer.example")))
-        XCTAssertEqual(JoinLayout.inviteLine(skipped, lookup: nil, failure: nil, copy: copy.join), .hidden)
+        XCTAssertEqual(JoinScreenLayout.inviteLine(skipped, lookup: nil, failure: nil, copy: copy.join), .hidden)
 
         // An invite the daemon already enrolled stays shown: that is a fact.
         var enrolled = skipped
         enrolled.enrolledInvite = enrolled.invite
-        guard case .joined = JoinLayout.inviteLine(enrolled, lookup: nil, failure: nil, copy: copy.join) else {
+        guard case .joined = JoinScreenLayout.inviteLine(enrolled, lookup: nil, failure: nil, copy: copy.join) else {
             return XCTFail("an enrolled invite reads as joined")
         }
     }
@@ -263,37 +263,37 @@ final class JoinScreenTests: XCTestCase {
         var start = FirstRunState(toolAnswers: [.claudeCode: .off, .codex: .off])
         start.invite = "invite:issuer.example"
         start.issuerHost = "issuer.example"
-        XCTAssertEqual(JoinLayout.nearAILine(start, copy: copy.join), copy.join.nearAiText)
-        XCTAssertEqual(JoinLayout.nearAIAction(start, copy: copy), copy.join.nearAiSignIn)
-        XCTAssertTrue(JoinLayout.canToggleNearAI(start))
+        XCTAssertEqual(JoinScreenLayout.nearAILine(start, copy: copy.join), copy.join.nearAiText)
+        XCTAssertEqual(JoinScreenLayout.nearAIAction(start, copy: copy), copy.join.nearAiSignIn)
+        XCTAssertTrue(JoinScreenLayout.canToggleNearAI(start))
 
-        let chosen = JoinLayout.toggleNearAI(start)
+        let chosen = JoinScreenLayout.toggleNearAI(start)
         XCTAssertEqual(chosen.account, .nearAI)
-        XCTAssertEqual(JoinLayout.nearAILine(chosen, copy: copy.join), copy.join.nearAiChosen)
-        XCTAssertEqual(JoinLayout.nearAIAction(chosen, copy: copy), copy.frame.undo)
-        XCTAssertTrue(JoinLayout.canToggleNearAI(chosen))
+        XCTAssertEqual(JoinScreenLayout.nearAILine(chosen, copy: copy.join), copy.join.nearAiChosen)
+        XCTAssertEqual(JoinScreenLayout.nearAIAction(chosen, copy: copy), copy.frame.undo)
+        XCTAssertTrue(JoinScreenLayout.canToggleNearAI(chosen))
         XCTAssertEqual(FirstRunPlan.calls(for: chosen, at: .leaveRoots).last, .signInNearAI)
 
-        let undone = JoinLayout.toggleNearAI(chosen)
+        let undone = JoinScreenLayout.toggleNearAI(chosen)
         XCTAssertEqual(undone.account, AccountAnswer.none)
-        XCTAssertEqual(JoinLayout.footerTitle(undone, copy: copy), copy.join.skip)
-        let skipped = JoinLayout.forward(undone)
+        XCTAssertEqual(JoinScreenLayout.footerTitle(undone, copy: copy), copy.join.skip)
+        let skipped = JoinScreenLayout.forward(undone)
         XCTAssertEqual(skipped.account, .watchOnly)
         let plan = FirstRunPlan.calls(for: skipped, at: .leaveRoots)
         XCTAssertTrue(plan.contains { if case .startDaemon = $0 { return true } else { return false } })
         XCTAssertFalse(plan.contains(.signInNearAI))
 
         // Back on Join after a failed sign-in, the choice still undoes.
-        var failed = JoinLayout.forward(chosen)
+        var failed = JoinScreenLayout.forward(chosen)
         failed.daemonStarted = true
         failed.step = .join
-        XCTAssertEqual(JoinLayout.toggleNearAI(failed).account, AccountAnswer.none)
+        XCTAssertEqual(JoinScreenLayout.toggleNearAI(failed).account, AccountAnswer.none)
 
         // A signed-in near.ai is the daemon's fact: the card shows it and the
         // action does nothing.
         let signedIn = FirstRunState(account: .nearAI, daemonStarted: true, signedIn: true)
-        XCTAssertFalse(JoinLayout.canToggleNearAI(signedIn))
-        XCTAssertEqual(JoinLayout.toggleNearAI(signedIn), signedIn)
+        XCTAssertFalse(JoinScreenLayout.canToggleNearAI(signedIn))
+        XCTAssertEqual(JoinScreenLayout.toggleNearAI(signedIn), signedIn)
     }
 
     /// near.ai signs in to the account an invite enrolls: the daemon's
@@ -303,18 +303,18 @@ final class JoinScreenTests: XCTestCase {
     func test_nearAIWaitsForAnInvite() throws {
         let copy = try coreCopy()
         let bare = FirstRunState(toolAnswers: [.claudeCode: .off, .codex: .off])
-        XCTAssertFalse(JoinLayout.canToggleNearAI(bare))
-        XCTAssertEqual(JoinLayout.toggleNearAI(bare), bare)
-        XCTAssertEqual(JoinLayout.nearAILine(bare, copy: copy.join), copy.join.nearAiNeedsInvite)
+        XCTAssertFalse(JoinScreenLayout.canToggleNearAI(bare))
+        XCTAssertEqual(JoinScreenLayout.toggleNearAI(bare), bare)
+        XCTAssertEqual(JoinScreenLayout.nearAILine(bare, copy: copy.join), copy.join.nearAiNeedsInvite)
 
-        let looked = JoinLayout.lookUp("invite:issuer.example", in: bare, failure: nil, host: Self.host)
-        XCTAssertTrue(JoinLayout.canToggleNearAI(looked.state))
-        XCTAssertEqual(JoinLayout.nearAILine(looked.state, copy: copy.join), copy.join.nearAiText)
-        let chosen = JoinLayout.toggleNearAI(looked.state)
+        let looked = JoinScreenLayout.lookUp("invite:issuer.example", in: bare, failure: nil, host: Self.host)
+        XCTAssertTrue(JoinScreenLayout.canToggleNearAI(looked.state))
+        XCTAssertEqual(JoinScreenLayout.nearAILine(looked.state, copy: copy.join), copy.join.nearAiText)
+        let chosen = JoinScreenLayout.toggleNearAI(looked.state)
         XCTAssertEqual(chosen.account, .nearAI)
 
         // Emptied field: the invite goes, and the near.ai it waited for too.
-        let withdrawn = JoinLayout.lookUp("", in: chosen, failure: nil, host: Self.host)
+        let withdrawn = JoinScreenLayout.lookUp("", in: chosen, failure: nil, host: Self.host)
         XCTAssertEqual(withdrawn.outcome, .withdrawn)
         XCTAssertEqual(withdrawn.state.account, AccountAnswer.none)
         XCTAssertFalse(FirstRunPlan.calls(for: withdrawn.state, at: .leaveRoots).contains(.signInNearAI))
@@ -323,7 +323,7 @@ final class JoinScreenTests: XCTestCase {
         var enrolled = bare
         enrolled.daemonStarted = true
         enrolled.enrolledInvite = "invite:issuer.example"
-        XCTAssertTrue(JoinLayout.canToggleNearAI(enrolled))
+        XCTAssertTrue(JoinScreenLayout.canToggleNearAI(enrolled))
     }
 
     /// A new passkey creates an account of its own, and the daemon refuses
@@ -336,25 +336,25 @@ final class JoinScreenTests: XCTestCase {
         var withInvite = FirstRunState(toolAnswers: [.claudeCode: .off, .codex: .off])
         withInvite.invite = "invite:issuer.example"
         withInvite.issuerHost = "issuer.example"
-        XCTAssertFalse(JoinLayout.showsPasskeyAction(withInvite))
-        XCTAssertEqual(JoinLayout.togglePasskey(withInvite), withInvite)
-        XCTAssertEqual(JoinLayout.passkeyLine(withInvite, copy: copy.join), copy.join.inviteOrPasskey)
+        XCTAssertFalse(JoinScreenLayout.showsPasskeyAction(withInvite))
+        XCTAssertEqual(JoinScreenLayout.togglePasskey(withInvite), withInvite)
+        XCTAssertEqual(JoinScreenLayout.passkeyLine(withInvite, copy: copy.join), copy.join.inviteOrPasskey)
         withInvite.daemonStarted = true
-        XCTAssertFalse(JoinLayout.passkeyOpensNow(withInvite, hasPasskeyAccount: true))
+        XCTAssertFalse(JoinScreenLayout.passkeyOpensNow(withInvite, hasPasskeyAccount: true))
 
         // Chosen first, then an invite: the invite replaces the choice.
-        let chosen = JoinLayout.togglePasskey(FirstRunState(toolAnswers: [.claudeCode: .off, .codex: .off]))
+        let chosen = JoinScreenLayout.togglePasskey(FirstRunState(toolAnswers: [.claudeCode: .off, .codex: .off]))
         XCTAssertEqual(chosen.account, .passkeyChosen)
-        let looked = JoinLayout.lookUp("invite:issuer.example", in: chosen, failure: nil, host: Self.host)
+        let looked = JoinScreenLayout.lookUp("invite:issuer.example", in: chosen, failure: nil, host: Self.host)
         XCTAssertEqual(looked.outcome, .found)
         XCTAssertEqual(looked.state.account, AccountAnswer.none)
         XCTAssertFalse(FirstRunPlan.calls(for: looked.state, at: .leaveRoots).contains(.openPasskeySheets))
 
         // A held passkey: the invite field is closed and says why.
         let held = FirstRunState(account: .passkey(name: "Mac"), daemonStarted: true)
-        XCTAssertFalse(JoinLayout.inviteIsEditable(held))
+        XCTAssertFalse(JoinScreenLayout.inviteIsEditable(held))
         XCTAssertEqual(
-            JoinLayout.inviteLine(held, lookup: nil, failure: nil, copy: copy.join), .note(copy.join.inviteOrPasskey))
+            JoinScreenLayout.inviteLine(held, lookup: nil, failure: nil, copy: copy.join), .note(copy.join.inviteOrPasskey))
         XCTAssertEqual(
             OnboardingNavigation.receive(
                 invite: "invite:issuer.example", in: held, failure: nil, isCommitting: false, host: Self.host),
@@ -367,10 +367,10 @@ final class JoinScreenTests: XCTestCase {
         for name in ["Mac", ""] {
             let held = FirstRunState(
                 account: .passkey(name: name), toolAnswers: [.claudeCode: .off, .codex: .off], daemonStarted: true)
-            XCTAssertFalse(JoinLayout.canToggleNearAI(held))
-            let after = JoinLayout.toggleNearAI(held)
+            XCTAssertFalse(JoinScreenLayout.canToggleNearAI(held))
+            let after = JoinScreenLayout.toggleNearAI(held)
             XCTAssertEqual(after, held)
-            XCTAssertTrue(JoinLayout.passkeyDone(after))
+            XCTAssertTrue(JoinScreenLayout.passkeyDone(after))
             XCTAssertFalse(FirstRunPlan.calls(for: after, at: .leaveRoots).contains(.signInNearAI))
         }
     }
@@ -380,33 +380,33 @@ final class JoinScreenTests: XCTestCase {
     func test_aHeldAccountQuietsTheOtherCard() throws {
         let copy = try coreCopy()
         let start = FirstRunState(daemonStarted: true)
-        XCTAssertTrue(JoinLayout.showsPasskeyAction(start))
-        XCTAssertTrue(JoinLayout.showsNearAIAction(start))
-        XCTAssertEqual(JoinLayout.passkeyLine(start, copy: copy.join), copy.join.passkeyText)
-        XCTAssertEqual(JoinLayout.nearAILine(start, copy: copy.join), copy.join.nearAiNeedsInvite)
+        XCTAssertTrue(JoinScreenLayout.showsPasskeyAction(start))
+        XCTAssertTrue(JoinScreenLayout.showsNearAIAction(start))
+        XCTAssertEqual(JoinScreenLayout.passkeyLine(start, copy: copy.join), copy.join.passkeyText)
+        XCTAssertEqual(JoinScreenLayout.nearAILine(start, copy: copy.join), copy.join.nearAiNeedsInvite)
 
         // A near.ai chosen beside its invite: no passkey is created beside
         // the invite, and the passkey card says why.
         var withInvite = start
         withInvite.invite = "invite:issuer.example"
-        let chosen = JoinLayout.toggleNearAI(withInvite)
+        let chosen = JoinScreenLayout.toggleNearAI(withInvite)
         XCTAssertEqual(chosen.account, .nearAI)
-        XCTAssertFalse(JoinLayout.showsPasskeyAction(chosen))
-        XCTAssertEqual(JoinLayout.passkeyLine(chosen, copy: copy.join), copy.join.inviteOrPasskey)
+        XCTAssertFalse(JoinScreenLayout.showsPasskeyAction(chosen))
+        XCTAssertEqual(JoinScreenLayout.passkeyLine(chosen, copy: copy.join), copy.join.inviteOrPasskey)
 
         let signedIn = FirstRunState(account: .nearAI, daemonStarted: true, signedIn: true)
-        XCTAssertFalse(JoinLayout.showsPasskeyAction(signedIn))
-        XCTAssertNil(JoinLayout.passkeyLine(signedIn, copy: copy.join))
+        XCTAssertFalse(JoinScreenLayout.showsPasskeyAction(signedIn))
+        XCTAssertNil(JoinScreenLayout.passkeyLine(signedIn, copy: copy.join))
 
         for name in ["Mac", ""] {
             let held = FirstRunState(account: .passkey(name: name), daemonStarted: true)
-            XCTAssertFalse(JoinLayout.showsNearAIAction(held))
-            XCTAssertNil(JoinLayout.nearAILine(held, copy: copy.join))
+            XCTAssertFalse(JoinScreenLayout.showsNearAIAction(held))
+            XCTAssertNil(JoinScreenLayout.nearAILine(held, copy: copy.join))
         }
 
         let source = try Self.source()
-        XCTAssertTrue(source.contains("JoinLayout.showsPasskeyAction(runner.state)"))
-        XCTAssertTrue(source.contains("JoinLayout.showsNearAIAction(runner.state)"))
+        XCTAssertTrue(source.contains("JoinScreenLayout.showsPasskeyAction(runner.state)"))
+        XCTAssertTrue(source.contains("JoinScreenLayout.showsNearAIAction(runner.state)"))
     }
 
     /// Create passkey before the daemon runs records the choice, says when
@@ -416,50 +416,50 @@ final class JoinScreenTests: XCTestCase {
     func test_choosingAPasskeyWaitsForTheDaemonAndCanBeUndone() throws {
         let copy = try coreCopy()
         let start = FirstRunState(toolAnswers: [.claudeCode: .off, .codex: .off])
-        XCTAssertFalse(JoinLayout.passkeyOpensNow(start, hasPasskeyAccount: true))
-        XCTAssertEqual(JoinLayout.passkeyAction(start, copy: copy), copy.join.passkeyCreate)
+        XCTAssertFalse(JoinScreenLayout.passkeyOpensNow(start, hasPasskeyAccount: true))
+        XCTAssertEqual(JoinScreenLayout.passkeyAction(start, copy: copy), copy.join.passkeyCreate)
 
-        let chosen = JoinLayout.togglePasskey(start)
+        let chosen = JoinScreenLayout.togglePasskey(start)
         XCTAssertEqual(chosen.account, .passkeyChosen)
-        XCTAssertEqual(JoinLayout.passkeyLine(chosen, copy: copy.join), copy.join.passkeyChosen)
-        XCTAssertEqual(JoinLayout.passkeyAction(chosen, copy: copy), copy.frame.undo)
-        XCTAssertFalse(JoinLayout.passkeyDone(chosen), "chosen is not created")
-        XCTAssertTrue(JoinLayout.hasAccount(chosen))
-        XCTAssertEqual(JoinLayout.footerTitle(chosen, copy: copy), copy.frame.continueButton)
-        XCTAssertEqual(FirstRunPlan.calls(for: JoinLayout.forward(chosen), at: .leaveRoots).last, .openPasskeySheets)
+        XCTAssertEqual(JoinScreenLayout.passkeyLine(chosen, copy: copy.join), copy.join.passkeyChosen)
+        XCTAssertEqual(JoinScreenLayout.passkeyAction(chosen, copy: copy), copy.frame.undo)
+        XCTAssertFalse(JoinScreenLayout.passkeyDone(chosen), "chosen is not created")
+        XCTAssertTrue(JoinScreenLayout.hasAccount(chosen))
+        XCTAssertEqual(JoinScreenLayout.footerTitle(chosen, copy: copy), copy.frame.continueButton)
+        XCTAssertEqual(FirstRunPlan.calls(for: JoinScreenLayout.forward(chosen), at: .leaveRoots).last, .openPasskeySheets)
 
-        let undone = JoinLayout.togglePasskey(chosen)
+        let undone = JoinScreenLayout.togglePasskey(chosen)
         XCTAssertEqual(undone.account, AccountAnswer.none)
-        XCTAssertEqual(JoinLayout.footerTitle(undone, copy: copy), copy.join.skip)
+        XCTAssertEqual(JoinScreenLayout.footerTitle(undone, copy: copy), copy.join.skip)
 
         // near.ai waits for an invite, and an invite replaces the chosen
         // passkey (`test_anInviteAndANewPasskeyAreNotCombined`), so near.ai
         // never replaces it directly.
-        XCTAssertEqual(JoinLayout.toggleNearAI(chosen), chosen)
-        XCTAssertEqual(JoinLayout.nearAILine(chosen, copy: copy.join), copy.join.nearAiNeedsInvite)
+        XCTAssertEqual(JoinScreenLayout.toggleNearAI(chosen), chosen)
+        XCTAssertEqual(JoinScreenLayout.nearAILine(chosen, copy: copy.join), copy.join.nearAiNeedsInvite)
 
         // Watch only, then Create passkey: the passkey is the answer.
-        XCTAssertEqual(JoinLayout.togglePasskey(FirstRunState(account: .watchOnly)).account, .passkeyChosen)
+        XCTAssertEqual(JoinScreenLayout.togglePasskey(FirstRunState(account: .watchOnly)).account, .passkeyChosen)
 
         // The daemon started: the sheets open now, given the account path;
         // without it the choice is recorded for the next commit.
         let started = FirstRunState(daemonStarted: true)
-        XCTAssertTrue(JoinLayout.passkeyOpensNow(started, hasPasskeyAccount: true))
-        XCTAssertFalse(JoinLayout.passkeyOpensNow(started, hasPasskeyAccount: false))
-        XCTAssertFalse(JoinLayout.passkeyOpensNow(JoinLayout.togglePasskey(started), hasPasskeyAccount: true),
+        XCTAssertTrue(JoinScreenLayout.passkeyOpensNow(started, hasPasskeyAccount: true))
+        XCTAssertFalse(JoinScreenLayout.passkeyOpensNow(started, hasPasskeyAccount: false))
+        XCTAssertFalse(JoinScreenLayout.passkeyOpensNow(JoinScreenLayout.togglePasskey(started), hasPasskeyAccount: true),
             "a chosen passkey undoes")
 
         // A signed-in near.ai holds the account: no passkey over it.
         let signedIn = FirstRunState(account: .nearAI, daemonStarted: true, signedIn: true)
-        XCTAssertFalse(JoinLayout.passkeyOpensNow(signedIn, hasPasskeyAccount: true))
-        XCTAssertEqual(JoinLayout.togglePasskey(signedIn), signedIn)
+        XCTAssertFalse(JoinScreenLayout.passkeyOpensNow(signedIn, hasPasskeyAccount: true))
+        XCTAssertEqual(JoinScreenLayout.togglePasskey(signedIn), signedIn)
         // A held passkey is not chosen again.
         let held = FirstRunState(account: .passkey(name: "Mac"), daemonStarted: true)
-        XCTAssertEqual(JoinLayout.togglePasskey(held), held)
+        XCTAssertEqual(JoinScreenLayout.togglePasskey(held), held)
 
         let source = try Self.source()
         XCTAssertFalse(source.contains("passkeyAvailable"), "the disabled-with-no-reason button is gone")
-        XCTAssertTrue(source.contains("JoinLayout.passkeyOpensNow("))
+        XCTAssertTrue(source.contains("JoinScreenLayout.passkeyOpensNow("))
         XCTAssertTrue(source.contains("runner.requestPasskey()"))
         XCTAssertFalse(source.contains("firstRunPasskeySheets("), "the first-run host mounts the sheets")
     }
@@ -510,29 +510,29 @@ final class JoinScreenTests: XCTestCase {
         let copy = try coreCopy()
         for account in [AccountAnswer.none, .watchOnly] {
             let state = FirstRunState(account: account)
-            XCTAssertFalse(JoinLayout.hasAccount(state))
-            XCTAssertEqual(JoinLayout.footerTitle(state, copy: copy), copy.join.skip)
-            XCTAssertEqual(JoinLayout.footerNote(state, copy: copy), copy.join.skipNote)
+            XCTAssertFalse(JoinScreenLayout.hasAccount(state))
+            XCTAssertEqual(JoinScreenLayout.footerTitle(state, copy: copy), copy.join.skip)
+            XCTAssertEqual(JoinScreenLayout.footerNote(state, copy: copy), copy.join.skipNote)
         }
         for account in [AccountAnswer.nearAI, .passkeyChosen, .passkey(name: "Mac"), .passkey(name: "")] {
             let state = FirstRunState(account: account)
-            XCTAssertTrue(JoinLayout.hasAccount(state))
-            XCTAssertEqual(JoinLayout.footerTitle(state, copy: copy), copy.frame.continueButton)
-            XCTAssertNil(JoinLayout.footerNote(state, copy: copy))
+            XCTAssertTrue(JoinScreenLayout.hasAccount(state))
+            XCTAssertEqual(JoinScreenLayout.footerTitle(state, copy: copy), copy.frame.continueButton)
+            XCTAssertNil(JoinScreenLayout.footerNote(state, copy: copy))
         }
 
         // Skip answers "watch only" and moves on; Continue keeps the account.
-        let skipped = JoinLayout.forward(FirstRunState())
+        let skipped = JoinScreenLayout.forward(FirstRunState())
         XCTAssertEqual(skipped.account, .watchOnly)
         XCTAssertEqual(skipped.step, .folders)
-        let continued = JoinLayout.forward(
-            JoinLayout.toggleNearAI(FirstRunState(tier: .custom, invite: "invite:issuer.example")))
+        let continued = JoinScreenLayout.forward(
+            JoinScreenLayout.toggleNearAI(FirstRunState(tier: .custom, invite: "invite:issuer.example")))
         XCTAssertEqual(continued.account, .nearAI)
         XCTAssertEqual(continued.step, .tools)
 
         // near.ai reads "Signed in" only once the daemon signed in.
-        XCTAssertFalse(JoinLayout.showsSignedIn(FirstRunState(account: .nearAI)))
-        XCTAssertTrue(JoinLayout.showsSignedIn(FirstRunState(account: .nearAI, signedIn: true)))
+        XCTAssertFalse(JoinScreenLayout.showsSignedIn(FirstRunState(account: .nearAI)))
+        XCTAssertTrue(JoinScreenLayout.showsSignedIn(FirstRunState(account: .nearAI, signedIn: true)))
     }
 
     /// The passkey sheets' outcomes as Join records them. A passkey known
@@ -540,27 +540,27 @@ final class JoinScreenTests: XCTestCase {
     func test_passkeyOutcomesBecomeTheAccount() throws {
         let copy = try coreCopy()
         let start = FirstRunState()
-        XCTAssertEqual(JoinLayout.passkeyLine(start, copy: copy.join), copy.join.passkeyText)
-        XCTAssertFalse(JoinLayout.passkeyDone(start))
+        XCTAssertEqual(JoinScreenLayout.passkeyLine(start, copy: copy.join), copy.join.passkeyText)
+        XCTAssertFalse(JoinScreenLayout.passkeyDone(start))
 
-        let created = JoinLayout.apply(.created(name: "Mac"), to: start, copy: copy)
+        let created = JoinScreenLayout.apply(.created(name: "Mac"), to: start, copy: copy)
         XCTAssertEqual(created.state.account, .passkey(name: "Mac"))
         XCTAssertNil(created.notice)
-        XCTAssertTrue(JoinLayout.passkeyDone(created.state))
+        XCTAssertTrue(JoinScreenLayout.passkeyDone(created.state))
         XCTAssertEqual(
-            JoinLayout.passkeyLine(created.state, copy: copy.join),
+            JoinScreenLayout.passkeyLine(created.state, copy: copy.join),
             copy.join.passkeyReady.replacingOccurrences(of: "{name}", with: "Mac"))
 
         for nameless in [PasskeySheetOutcome.signedIn, .existingAccount] {
-            let applied = JoinLayout.apply(nameless, to: start, copy: copy)
-            XCTAssertTrue(JoinLayout.hasAccount(applied.state))
-            XCTAssertTrue(JoinLayout.passkeyDone(applied.state))
-            XCTAssertNil(JoinLayout.passkeyLine(applied.state, copy: copy.join))
+            let applied = JoinScreenLayout.apply(nameless, to: start, copy: copy)
+            XCTAssertTrue(JoinScreenLayout.hasAccount(applied.state))
+            XCTAssertTrue(JoinScreenLayout.passkeyDone(applied.state))
+            XCTAssertNil(JoinScreenLayout.passkeyLine(applied.state, copy: copy.join))
         }
 
-        XCTAssertEqual(JoinLayout.apply(.closed, to: start, copy: copy).state, start)
+        XCTAssertEqual(JoinScreenLayout.apply(.closed, to: start, copy: copy).state, start)
 
-        let signedOut = JoinLayout.apply(.signedOut, to: created.state, copy: copy)
+        let signedOut = JoinScreenLayout.apply(.signedOut, to: created.state, copy: copy)
         XCTAssertEqual(signedOut.state.account, .none)
         XCTAssertEqual(signedOut.notice, copy.join.signedOut)
 
@@ -568,7 +568,7 @@ final class JoinScreenTests: XCTestCase {
         // included: the chosen near.ai stays chosen and is signed in again.
         let nearAI = FirstRunState(
             account: .nearAI, toolAnswers: [.claudeCode: .off, .codex: .off], daemonStarted: true, signedIn: true)
-        let afterNearAI = JoinLayout.apply(.signedOut, to: nearAI, copy: copy)
+        let afterNearAI = JoinScreenLayout.apply(.signedOut, to: nearAI, copy: copy)
         XCTAssertEqual(afterNearAI.state.account, .nearAI)
         XCTAssertFalse(afterNearAI.state.signedIn)
         XCTAssertEqual(FirstRunPlan.calls(for: afterNearAI.state, at: .leaveRoots).last, .signInNearAI)

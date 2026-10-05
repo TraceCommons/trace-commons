@@ -223,7 +223,7 @@ final class FirstRunRunnerTests: XCTestCase {
     /// near.ai chosen with no invite to sign in to: the daemon's
     /// `account_sign_in` needs an enrolment and refuses
     /// (`account-enrollment-required`). Join does not allow the pair
-    /// (`JoinLayout.canToggleNearAI`); should it reach the runner anyway,
+    /// (`JoinScreenLayout.canToggleNearAI`); should it reach the runner anyway,
     /// the step stays and says so with the core's sign-in line.
     func test_nearAIWithoutAnInviteReportsTheSignIn() async throws {
         var state = onFolders()

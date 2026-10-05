@@ -34,9 +34,12 @@ import XCTest
 ///   surface saying nothing about a state that still holds.
 /// - `AppModel.summaryErrors[id]`, `credentialAttempt` and
 ///   `harnessExposureRequest` are each cleared on their own completion path.
-/// - `StartupSection.loginItemActionError`, `ConsentSection.saveError`,
-///   `OnboardingRootsView.failure` and `PreviewSheet.failure` are view-local
-///   `@State`, cleared at the top of each attempt and gone with the view.
+/// - `StartupSection.loginItemActionError`, `ConsentSection.saveError` and
+///   `PreviewSheet.failure` are view-local `@State`, cleared at the top of
+///   each attempt and gone with the view.
+/// - `FirstRunRunner.failure` lives as long as the first-run host and is
+///   cleared at the start of each commit; what must outlive the host is
+///   handed to `firstRunNotice` (scanned here).
 ///
 /// What made the notice different is that only two actions ever assign it and
 /// nothing anywhere assigns `nil`, so nothing in the app's own operation could

@@ -45,26 +45,26 @@ final class RulesScreenTests: XCTestCase {
         var state = FirstRunState(tier: .custom, step: .rules)
 
         // One write per tickable row, as the native group toggle sends them.
-        for _ in sessions.filter(FirstRunRulesLayout.isTickable) {
-            FirstRunRulesLayout.includeEvery(&state, projectID: "p1", sessions: sessions, on: true)
+        for _ in sessions.filter(RulesScreenLayout.isTickable) {
+            RulesScreenLayout.includeEvery(&state, projectID: "p1", sessions: sessions, on: true)
         }
         XCTAssertEqual(state.pastSelections["p1"], ["a", "b"])
-        XCTAssertEqual(FirstRunRulesLayout.groupState(state, projectID: "p1", sessions: sessions), .all)
+        XCTAssertEqual(RulesScreenLayout.groupState(state, projectID: "p1", sessions: sessions), .all)
 
         // One unticked: the group reads mixed, and turning it on selects all.
-        FirstRunRulesLayout.setTicked(&state, projectID: "p1", session: sessions[0], on: false)
-        XCTAssertEqual(FirstRunRulesLayout.groupState(state, projectID: "p1", sessions: sessions), .some)
-        FirstRunRulesLayout.includeEvery(&state, projectID: "p1", sessions: sessions, on: true)
+        RulesScreenLayout.setTicked(&state, projectID: "p1", session: sessions[0], on: false)
+        XCTAssertEqual(RulesScreenLayout.groupState(state, projectID: "p1", sessions: sessions), .some)
+        RulesScreenLayout.includeEvery(&state, projectID: "p1", sessions: sessions, on: true)
         XCTAssertEqual(state.pastSelections["p1"], ["a", "b"])
 
         // Off clears the folder, however many rows the write reaches.
-        FirstRunRulesLayout.includeEvery(&state, projectID: "p1", sessions: sessions, on: false)
-        FirstRunRulesLayout.includeEvery(&state, projectID: "p1", sessions: sessions, on: false)
+        RulesScreenLayout.includeEvery(&state, projectID: "p1", sessions: sessions, on: false)
+        RulesScreenLayout.includeEvery(&state, projectID: "p1", sessions: sessions, on: false)
         XCTAssertNil(state.pastSelections["p1"])
-        XCTAssertEqual(FirstRunRulesLayout.groupState(state, projectID: "p1", sessions: sessions), .none)
+        XCTAssertEqual(RulesScreenLayout.groupState(state, projectID: "p1", sessions: sessions), .none)
 
         // The selection is what the plan sends as the person's approval.
-        FirstRunRulesLayout.includeEvery(&state, projectID: "p1", sessions: sessions, on: true)
+        RulesScreenLayout.includeEvery(&state, projectID: "p1", sessions: sessions, on: true)
         XCTAssertEqual(
             FirstRunPlan.calls(for: state, at: .start).filter {
                 if case .includePastSessions = $0 { return true }
@@ -78,20 +78,20 @@ final class RulesScreenTests: XCTestCase {
     func test_neverClearsTheFolderSelection() {
         let sessions = [session("a"), session("b")]
         var state = FirstRunState(tier: .custom, step: .rules)
-        FirstRunRulesLayout.includeEvery(&state, projectID: "p1", sessions: sessions, on: true)
-        FirstRunRulesLayout.includeEvery(&state, projectID: "p2", sessions: sessions, on: true)
+        RulesScreenLayout.includeEvery(&state, projectID: "p1", sessions: sessions, on: true)
+        RulesScreenLayout.includeEvery(&state, projectID: "p2", sessions: sessions, on: true)
 
-        FirstRunRulesLayout.setRule(&state, projectID: "p1", mode: .ask)
+        RulesScreenLayout.setRule(&state, projectID: "p1", mode: .ask)
         XCTAssertEqual(state.pastSelections["p1"], ["a", "b"])
 
-        FirstRunRulesLayout.setRule(&state, projectID: "p1", mode: .ignore)
+        RulesScreenLayout.setRule(&state, projectID: "p1", mode: .ignore)
         XCTAssertEqual(state.rules["p1"], .ignore)
         XCTAssertNil(state.pastSelections["p1"])
         XCTAssertEqual(state.pastSelections["p2"], ["a", "b"])
 
         // A Never folder cannot be ticked back while its rule is Never.
-        FirstRunRulesLayout.includeEvery(&state, projectID: "p1", sessions: sessions, on: true)
-        FirstRunRulesLayout.setTicked(&state, projectID: "p1", session: sessions[0], on: true)
+        RulesScreenLayout.includeEvery(&state, projectID: "p1", sessions: sessions, on: true)
+        RulesScreenLayout.setTicked(&state, projectID: "p1", session: sessions[0], on: true)
         XCTAssertNil(state.pastSelections["p1"])
     }
 
@@ -100,7 +100,7 @@ final class RulesScreenTests: XCTestCase {
     func test_anUntouchedRuleIsNotSent() {
         let project = ProjectRow(projectId: "p1", projectLabel: "repo", mode: .ask)
         let state = FirstRunState(tier: .custom, step: .rules)
-        XCTAssertEqual(FirstRunRulesLayout.rule(state, for: project), .ask)
+        XCTAssertEqual(RulesScreenLayout.rule(state, for: project), .ask)
         XCTAssertTrue(state.rules.isEmpty)
     }
 
@@ -109,18 +109,18 @@ final class RulesScreenTests: XCTestCase {
     /// never sends an arming the daemon would refuse for want of terms.
     func test_watchOnlyIsNotOfferedAutomaticPerFolder() {
         let project = ProjectRow(projectId: "p1", projectLabel: "repo", mode: .ask)
-        XCTAssertEqual(FirstRunRulesLayout.offeredModes(project, account: .watchOnly), [.ask, .ignore])
-        XCTAssertEqual(FirstRunRulesLayout.offeredModes(project, account: .nearAI), [.ask, .autoUpload, .ignore])
+        XCTAssertEqual(RulesScreenLayout.offeredModes(project, account: .watchOnly), [.ask, .ignore])
+        XCTAssertEqual(RulesScreenLayout.offeredModes(project, account: .nearAI), [.ask, .autoUpload, .ignore])
 
         var state = FirstRunState(tier: .custom, step: .rules, account: .watchOnly)
-        XCTAssertEqual(FirstRunRulesLayout.pick(&state, project: project, wanted: .autoUpload), .refused)
-        XCTAssertFalse(FirstRunRulesLayout.confirmArming(&state, project: project))
+        XCTAssertEqual(RulesScreenLayout.pick(&state, project: project, wanted: .autoUpload), .refused)
+        XCTAssertFalse(RulesScreenLayout.confirmArming(&state, project: project))
         XCTAssertTrue(state.rules.isEmpty)
 
         // A folder the daemon already arms keeps its mode on the picker, so
         // the picker never shows a mode it has no option for.
         let armed = ProjectRow(projectId: "p2", projectLabel: "armed", mode: .autoUpload)
-        XCTAssertEqual(FirstRunRulesLayout.offeredModes(armed, account: .watchOnly), [.ask, .autoUpload, .ignore])
+        XCTAssertEqual(RulesScreenLayout.offeredModes(armed, account: .watchOnly), [.ask, .autoUpload, .ignore])
     }
 
     /// Arming is a grant, so it is never silent: picking Automatic asks
@@ -129,7 +129,7 @@ final class RulesScreenTests: XCTestCase {
         let project = ProjectRow(projectId: "p1", projectLabel: "repo", mode: .ask)
         var state = FirstRunState(tier: .custom, step: .rules, account: .nearAI)
 
-        XCTAssertEqual(FirstRunRulesLayout.pick(&state, project: project, wanted: .autoUpload), .needsConfirmation)
+        XCTAssertEqual(RulesScreenLayout.pick(&state, project: project, wanted: .autoUpload), .needsConfirmation)
         XCTAssertTrue(state.rules.isEmpty)
         XCTAssertFalse(
             FirstRunPlan.calls(for: state, at: .start).contains {
@@ -138,10 +138,10 @@ final class RulesScreenTests: XCTestCase {
             })
 
         // `setRule` is not a way around the confirmation.
-        FirstRunRulesLayout.setRule(&state, projectID: "p1", mode: .autoUpload)
+        RulesScreenLayout.setRule(&state, projectID: "p1", mode: .autoUpload)
         XCTAssertTrue(state.rules.isEmpty)
 
-        XCTAssertTrue(FirstRunRulesLayout.confirmArming(&state, project: project))
+        XCTAssertTrue(RulesScreenLayout.confirmArming(&state, project: project))
         XCTAssertEqual(state.rules["p1"], .autoUpload)
     }
 
@@ -151,12 +151,12 @@ final class RulesScreenTests: XCTestCase {
         let project = ProjectRow(projectId: "p1", projectLabel: "repo", mode: .ask)
         var state = FirstRunState(tier: .custom, step: .rules, account: .nearAI)
 
-        XCTAssertEqual(FirstRunRulesLayout.pick(&state, project: project, wanted: .ask), .applied)
+        XCTAssertEqual(RulesScreenLayout.pick(&state, project: project, wanted: .ask), .applied)
         XCTAssertTrue(state.rules.isEmpty)
 
-        XCTAssertEqual(FirstRunRulesLayout.pick(&state, project: project, wanted: .ignore), .applied)
+        XCTAssertEqual(RulesScreenLayout.pick(&state, project: project, wanted: .ignore), .applied)
         XCTAssertEqual(state.rules["p1"], .ignore)
-        XCTAssertEqual(FirstRunRulesLayout.pick(&state, project: project, wanted: .ask), .applied)
+        XCTAssertEqual(RulesScreenLayout.pick(&state, project: project, wanted: .ask), .applied)
         XCTAssertTrue(state.rules.isEmpty)
     }
 
@@ -164,40 +164,40 @@ final class RulesScreenTests: XCTestCase {
     /// it, by the folder box or one by one.
     func test_aStillActiveSessionCannotBeTicked() {
         let active = session("live", state: .stillActive, selectable: true)
-        XCTAssertFalse(FirstRunRulesLayout.isTickable(active))
+        XCTAssertFalse(RulesScreenLayout.isTickable(active))
 
         var state = FirstRunState(tier: .custom, step: .rules)
-        FirstRunRulesLayout.setTicked(&state, projectID: "p1", session: active, on: true)
+        RulesScreenLayout.setTicked(&state, projectID: "p1", session: active, on: true)
         XCTAssertNil(state.pastSelections["p1"])
-        FirstRunRulesLayout.includeEvery(&state, projectID: "p1", sessions: [active], on: true)
+        RulesScreenLayout.includeEvery(&state, projectID: "p1", sessions: [active], on: true)
         XCTAssertNil(state.pastSelections["p1"])
 
         // A row the daemon says may not be ticked is refused the same way.
         let refused = session("x", state: .pending, selectable: false)
-        XCTAssertFalse(FirstRunRulesLayout.isTickable(refused))
-        XCTAssertTrue(FirstRunRulesLayout.isTickable(session("ok")))
+        XCTAssertFalse(RulesScreenLayout.isTickable(refused))
+        XCTAssertTrue(RulesScreenLayout.isTickable(session("ok")))
     }
 
     /// A `not_queued` row was never opened: it shows its date and size. A
     /// row with a title shows date, title and duration, and no size.
     func test_rowsWithoutATitleShowDateAndSize() {
-        let date = FirstRunRulesLayout.dateText(Self.started)
-        let size = FirstRunRulesLayout.sizeText(2_048)
+        let date = RulesScreenLayout.dateText(Self.started)
+        let size = RulesScreenLayout.sizeText(2_048)
         XCTAssertFalse(date.isEmpty)
         XCTAssertFalse(size.isEmpty)
 
-        XCTAssertEqual(FirstRunRulesLayout.labelParts(session("a")), [date, size])
+        XCTAssertEqual(RulesScreenLayout.labelParts(session("a")), [date, size])
 
         let titled = session("b", state: .pending, title: "Fix the parser", durationSecs: 3_120)
-        let duration = FirstRunRulesLayout.durationText(3_120)
+        let duration = RulesScreenLayout.durationText(3_120)
         XCTAssertFalse(duration.isEmpty)
-        XCTAssertEqual(FirstRunRulesLayout.labelParts(titled), [date, "Fix the parser", duration])
+        XCTAssertEqual(RulesScreenLayout.labelParts(titled), [date, "Fix the parser", duration])
 
         // No start time: the date part is left out, never replaced.
         let undated = PastSession(
             id: "c", entryID: nil, state: .notQueued, selectable: true, startedAt: nil,
             durationSecs: nil, title: nil, sizeBytes: 2_048, source: "codex")
-        XCTAssertEqual(FirstRunRulesLayout.labelParts(undated), [size])
+        XCTAssertEqual(RulesScreenLayout.labelParts(undated), [size])
     }
 
     /// "{selected} of {total} selected" counts folders that are not Never.
@@ -209,12 +209,12 @@ final class RulesScreenTests: XCTestCase {
             ProjectRow(projectId: "p2", projectLabel: "two", mode: .ask),
         ]
         let lists = ["p1": sessions, "p2": Array(sessions.prefix(2))]
-        FirstRunRulesLayout.includeEvery(&state, projectID: "p1", sessions: sessions, on: true)
-        XCTAssertEqual(FirstRunRulesLayout.summary(state, projects: projects, sessions: lists).selected, 3)
-        XCTAssertEqual(FirstRunRulesLayout.summary(state, projects: projects, sessions: lists).total, 5)
+        RulesScreenLayout.includeEvery(&state, projectID: "p1", sessions: sessions, on: true)
+        XCTAssertEqual(RulesScreenLayout.summary(state, projects: projects, sessions: lists).selected, 3)
+        XCTAssertEqual(RulesScreenLayout.summary(state, projects: projects, sessions: lists).total, 5)
 
-        FirstRunRulesLayout.setRule(&state, projectID: "p1", mode: .ignore)
-        XCTAssertEqual(FirstRunRulesLayout.summary(state, projects: projects, sessions: lists).selected, 0)
-        XCTAssertEqual(FirstRunRulesLayout.summary(state, projects: projects, sessions: lists).total, 2)
+        RulesScreenLayout.setRule(&state, projectID: "p1", mode: .ignore)
+        XCTAssertEqual(RulesScreenLayout.summary(state, projects: projects, sessions: lists).selected, 0)
+        XCTAssertEqual(RulesScreenLayout.summary(state, projects: projects, sessions: lists).total, 2)
     }
 }

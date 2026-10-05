@@ -97,14 +97,11 @@ struct SourceRootRow: View {
                         .disabled(choice == .watch(path: candidate.path))
                 }
                 Button(tool.chooseFolder ?? copy.chooseFolder) {
-                    if let path = Self.chooseFolder() { onChoose(path) }
+                    if let path = FolderPanel.choose() { onChoose(path) }
                 }
                 Button(tool.decline) { onDecline() }.disabled(choice == .off)
                 Spacer(minLength: 0)
             }
         }
     }
-
-    /// The folder panel lives once, in `GlassSourceRow`.
-    static func chooseFolder() -> String? { GlassSourceRow.chooseFolder() }
 }

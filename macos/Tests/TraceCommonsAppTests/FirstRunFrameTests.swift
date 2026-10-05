@@ -77,4 +77,78 @@ final class FirstRunFrameTests: XCTestCase {
             }
         }
     }
+
+    private static func appSource(_ path: String) throws -> String {
+        let url = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Sources/TraceCommonsApp")
+            .appendingPathComponent(path)
+        return try String(contentsOf: url, encoding: .utf8)
+    }
+
+    /// The five screens, each with its copy group and layout enum.
+    private static let screens: [(file: String, group: String, layout: String, type: String)] = [
+        ("JoinScreen.swift", "join", "JoinScreenLayout", "JoinScreen"),
+        ("FoldersScreen.swift", "folders", "FoldersScreenLayout", "FoldersScreen"),
+        ("ToolsScreen.swift", "tools", "ToolsScreenLayout", "ToolsScreen"),
+        ("RulesScreen.swift", "rules", "RulesScreenLayout", "RulesScreen"),
+        ("UsesScreen.swift", "uses", "UsesScreenLayout", "UsesScreen"),
+    ]
+
+    /// Ron draws every screen's title with one `ScreenTitle`; so does this
+    /// shell, with one weight for the bold half.
+    func test_everyScreenDrawsItsTitleThroughOneHelper() throws {
+        for screen in Self.screens {
+            let source = try Self.appSource("Views/FirstRun/\(screen.file)")
+            XCTAssertTrue(
+                source.contains(
+                    "FirstRunTitle(light: copy.\(screen.group).titleLight, bold: copy.\(screen.group).titleBold)"),
+                screen.file)
+            XCTAssertFalse(source.contains("titleBold).bold()"), screen.file)
+            XCTAssertFalse(source.contains("titleBold).fontWeight("), screen.file)
+            XCTAssertFalse(source.contains(".semibold"), screen.file)
+        }
+        XCTAssertTrue(try Self.source().contains("struct FirstRunTitle: View"))
+    }
+
+    /// Every screen has the same shape: the copy and the runner, and a
+    /// `<Screen>Layout` holding its decisions.
+    func test_everyScreenTakesTheRunnerAndNamesItsLayoutAlike() throws {
+        for screen in Self.screens {
+            let source = try Self.appSource("Views/FirstRun/\(screen.file)")
+            XCTAssertTrue(source.contains("enum \(screen.layout) {"), screen.file)
+            XCTAssertTrue(source.contains("@ObservedObject var runner: FirstRunRunner"), screen.file)
+            XCTAssertFalse(source.contains("@Binding var state: FirstRunState"), screen.file)
+        }
+        let coordinator = try Self.appSource("Views/OnboardingCoordinatorView.swift")
+        for screen in Self.screens {
+            XCTAssertTrue(coordinator.contains("\(screen.type)(copy: copy, runner: runner"), screen.type)
+        }
+    }
+
+    /// One folder panel and one placeholder filler, used everywhere.
+    func test_oneFolderPanelAndOnePlaceholderFiller() throws {
+        let base = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Sources/TraceCommonsApp")
+        let walker = try XCTUnwrap(FileManager.default.enumerator(at: base, includingPropertiesForKeys: nil))
+        var panels = 0
+        var fills: [String] = []
+        for case let url as URL in walker where url.pathExtension == "swift" {
+            let text = try String(contentsOf: url, encoding: .utf8)
+            panels += text.components(separatedBy: "NSOpenPanel()").count - 1
+            if url.path.contains("/Views/FirstRun/"), text.contains("replacingOccurrences(of: \"{") {
+                fills.append(url.lastPathComponent)
+            }
+        }
+        XCTAssertEqual(panels, 1, "one folder panel")
+        XCTAssertEqual(fills, [], "placeholders are filled by FirstRunCopy.fill")
+        XCTAssertEqual(
+            FirstRunCopy.fill("{count} of {total} in {folder}", ["count": "2", "total": "5", "folder": "app"]),
+            "2 of 5 in app")
+    }
 }

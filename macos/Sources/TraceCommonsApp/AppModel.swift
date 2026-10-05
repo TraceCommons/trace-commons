@@ -1541,11 +1541,6 @@ final class AppModel: ObservableObject {
         case failed
     }
 
-    /// Redeems `invite` for enrollment. Bypasses the `perform` helper (and
-    /// its `lastActionError` label) on purpose: that helper renders
-    /// `failure.message`, and `enroll`'s failure message must never reach a
-    /// screen -- `OnboardingConnectView` renders one fixed sentence for
-    /// every failure of this call instead.
     /// What a preparation did, and the words the daemon chose for it.
     ///
     /// This used to return `AdmissionPreparation?` through `try?`, which threw
@@ -1617,6 +1612,12 @@ final class AppModel: ObservableObject {
         }.value
     }
 
+    /// Redeems `invite` for enrollment. Bypasses the `perform` helper (and
+    /// its `lastActionError` label) on purpose: that helper renders
+    /// `failure.message`, and `enroll`'s failure message must never reach a
+    /// screen -- the first run's Folders and Tools steps show the core's
+    /// `enroll_refused` for every failure of this call instead
+    /// (`FirstRunFailure.enrollFailed`, `FoldersScreenLayout.notice`).
     func enroll(invite: String, scopes: [String] = []) async -> EnrollOutcome {
         guard let client else { return .failed }
         let outcome = await Task.detached(priority: .userInitiated) { () -> EnrollOutcome in
@@ -1748,12 +1749,12 @@ final class AppModel: ObservableObject {
         case failed
     }
 
-    /// Applies the consent scopes chosen on `ConsentScopesView`. Bypasses
-    /// `perform` (like `enroll`) so the onboarding coordinator can await the
-    /// outcome and only advance past the consent screen once the daemon has
-    /// actually recorded the choice -- see the coordinator's ordering note
-    /// on why this call, not `enroll`, is what applies scopes in this app's
-    /// flow.
+    /// Applies the consent scopes chosen on the first run's Uses screen
+    /// (`FirstRunCall.setConsentScopes`, the first call of Start). Bypasses
+    /// `perform` (like `enroll`) so the first run's runner can await the
+    /// outcome and stop Start with `scopesFailed` unless the daemon actually
+    /// recorded the choice. This call, not `enroll`, applies scopes in this
+    /// app's flow: `FirstRunPlan` enrolls with none.
     func setConsentScopes(_ scopes: [String]) async -> SetScopesOutcome {
         guard let client else { return .failed }
         let outcome: SetScopesOutcome = await Task.detached(priority: .userInitiated) {
@@ -1862,11 +1863,12 @@ final class AppModel: ObservableObject {
 
     // MARK: - Onboarding resume
 
-    /// Whether onboarding has been walked to the end (the Done screen) for
-    /// the *currently enrolled* device. Keyed off `status.tenantID` rather
-    /// than a single global flag: `enroll` alone flips `status.loggedIn` to
-    /// true (it happens on screen 2, before consent is even chosen on
-    /// screen 3), so `loggedIn` cannot by itself distinguish "fully
+    /// Whether the first run has been finished (Start on the Uses screen)
+    /// for the *currently enrolled* device. Keyed off `status.tenantID`
+    /// rather than a single global flag: `enroll` alone flips
+    /// `status.loggedIn` to true (it happens when Folders or Tools commits,
+    /// before the data uses are chosen on Uses), so `loggedIn` cannot by
+    /// itself distinguish "fully
     /// onboarded" from "enrolled but consent was never confirmed." A
     /// contributor who quit mid-flow must come back to the rest of
     /// onboarding, not straight to the main window with whatever scopes

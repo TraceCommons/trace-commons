@@ -193,6 +193,14 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
     public let passkey: Passkey
     public let privateAi: PrivateAi
 
+    /// Fill a string's `{name}` placeholders, each with its value. The one
+    /// filler every first-run screen uses; it adds nothing to the template.
+    public static func fill(_ template: String, _ values: [String: String]) -> String {
+        values.reduce(template) { text, pair in
+            text.replacingOccurrences(of: "{" + pair.key + "}", with: pair.value)
+        }
+    }
+
     /// Decode the table, or nil if it will not parse or any string in it is
     /// empty: a first run with a blank control is refused, not shown.
     public static func decode(_ json: String) -> FirstRunCopy? {

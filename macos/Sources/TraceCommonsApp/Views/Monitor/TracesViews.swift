@@ -180,7 +180,7 @@ struct TracesTreeView: View {
         if change.watch {
             // `get_settings` never reports a path, so watching asks which
             // folder, as Settings does.
-            guard let path = GlassSourceRow.chooseFolder() else { return }
+            guard let path = FolderPanel.choose() else { return }
             Task { await store.setSource(change.kind, .watch(path: path)) }
         } else {
             Task { await store.setSource(change.kind, .off) }

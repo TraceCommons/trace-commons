@@ -85,11 +85,15 @@ enum ToolsScreenLayout {
         }
     }
 
-    /// The core's question for an ambiguous folder, naming it by its last
-    /// path component.
+    /// The core's question for an ambiguous folder, naming it as its card
+    /// does (`folderName`).
     static func question(path: String, copy: FirstRunCopy.Tools) -> String {
-        copy.whichKind.replacingOccurrences(
-            of: "{folder}", with: URL(fileURLWithPath: path).lastPathComponent)
+        FirstRunCopy.fill(copy.whichKind, ["folder": folderName(path)])
+    }
+
+    /// A picked folder's name: its last path component.
+    static func folderName(_ path: String) -> String {
+        URL(fileURLWithPath: path).lastPathComponent
     }
 
     /// The trajectory row's picker. "I don't use it" withdraws the folder;
@@ -144,7 +148,7 @@ enum ToolsScreenLayout {
             return copy.tools.addedByYou
         }
         if candidate.exists {
-            return copy.frame.sessionCount.replacingOccurrences(of: "{count}", with: String(candidate.sessionCount))
+            return FirstRunCopy.fill(copy.frame.sessionCount, ["count": String(candidate.sessionCount)])
         }
         return candidate.evidence(now: now)
     }
@@ -227,8 +231,7 @@ struct ToolsScreen: View {
                             }
                             if let trajectory = ToolsScreenLayout.trajectoryFolder(in: runner.state) {
                                 let name = ToolsScreenLayout.name(.trajectory, copy: copy.tools)
-                                let question = copy.folders.watchQuestion.replacingOccurrences(
-                                    of: "{tool}", with: name)
+                                let question = FirstRunCopy.fill(copy.folders.watchQuestion, ["tool": name])
                                 folderCard(name: name, path: trajectory.path, meta: copy.tools.addedByYou) {
                                     GlassPicker(
                                         question,
@@ -243,7 +246,7 @@ struct ToolsScreen: View {
                             }
                             if let pending {
                                 let question = ToolsScreenLayout.question(path: pending.path, copy: copy.tools)
-                                folderCard(name: Self.folderName(pending.path), path: pending.path, meta: nil) {
+                                folderCard(name: ToolsScreenLayout.folderName(pending.path), path: pending.path, meta: nil) {
                                     GlassPicker(
                                         question,
                                         selection: pendingChoice,
@@ -289,7 +292,7 @@ struct ToolsScreen: View {
     /// Ron's add tile: click to pick a folder, or drop one on it.
     private var addTile: some View {
         Button {
-            if let path = Self.pickFolder() { describe(path) }
+            if let path = FolderPanel.choose() { describe(path) }
         } label: {
             GlassCard {
                 VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
@@ -415,22 +418,6 @@ struct ToolsScreen: View {
     }
 
     private var title: some View {
-        Text("\(Text(copy.tools.titleLight))\(Text(copy.tools.titleBold).fontWeight(.bold))")
-            .glassType(GlassTokens.TypeScale.display.weight(.regular))
-            .foregroundStyle(GlassColor.textPrimary)
-    }
-
-    private static func folderName(_ path: String) -> String {
-        URL(fileURLWithPath: path).lastPathComponent
-    }
-
-    private static func pickFolder() -> String? {
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.allowsMultipleSelection = false
-        panel.canCreateDirectories = false
-        guard panel.runModal() == .OK, let url = panel.url else { return nil }
-        return url.path
+        FirstRunTitle(light: copy.tools.titleLight, bold: copy.tools.titleBold)
     }
 }

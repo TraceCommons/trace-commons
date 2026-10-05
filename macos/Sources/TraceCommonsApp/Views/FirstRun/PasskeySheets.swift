@@ -149,7 +149,7 @@ enum PasskeyName {
         // The daemon counts Unicode scalars; a grapheme count would pass a
         // name the daemon then refuses as invalid.
         if trimmed.unicodeScalars.count > maxLength {
-            return copy.nameTooLong.replacingOccurrences(of: "{max}", with: "\(maxLength)")
+            return FirstRunCopy.fill(copy.nameTooLong, ["max": "\(maxLength)"])
         }
         return nil
     }

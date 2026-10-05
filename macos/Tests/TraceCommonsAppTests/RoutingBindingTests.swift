@@ -87,11 +87,12 @@ private enum RoutingCard {
         declaration("static func status(_ tone: RoutingTone) -> GlassStatus {", file: file, line: line)
     }
 
-    /// `.../macos/Sources/TraceCommonsApp/Views/Settings/GlassSourceRow.swift`,
-    /// which holds the one folder panel this card opens.
+    /// `.../macos/Sources/TraceCommonsApp/Views/FolderPanel.swift`, which
+    /// holds the one folder panel this card opens.
     static let panelPath = viewPath
-        .deletingLastPathComponent()
-        .appendingPathComponent("GlassSourceRow.swift")
+        .deletingLastPathComponent()  // Settings
+        .deletingLastPathComponent()  // Views
+        .appendingPathComponent("FolderPanel.swift")
 
     /// The source between `signature` and the brace that closes it.
     ///
@@ -302,11 +303,11 @@ final class RoutingBindingTests: XCTestCase {
         // one answer. Every other affordance on that panel is a way to give
         // an answer that cannot be right.
         XCTAssertTrue(
-            body.contains("if let path = GlassSourceRow.chooseFolder() {"),
+            body.contains("if let path = FolderPanel.choose() {"),
             "the folder chooser does not open the one shared panel"
         )
         let panel = try XCTUnwrap(
-            RoutingCard.declaration("static func chooseFolder() -> String? {", in: RoutingCard.panelPath)
+            RoutingCard.declaration("static func choose() -> String? {", in: RoutingCard.panelPath)
         )
         XCTAssertTrue(panel.contains("panel.canChooseDirectories = true"), panel)
         XCTAssertTrue(panel.contains("panel.canChooseFiles = false"), panel)

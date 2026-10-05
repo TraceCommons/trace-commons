@@ -54,13 +54,13 @@ final class OnboardingNavigationTests: XCTestCase {
         let copy = try XCTUnwrap(FirstRunCopy.decode(try XCTUnwrap(TCCoreCopy.firstRunCopyJSON())))
         var state = OnboardingNavigation.initialState(startAt: .join, daemonRunning: true, enrolled: true)
         XCTAssertEqual(state.account, .enrolled)
-        XCTAssertFalse(JoinLayout.inviteIsEditable(state), "no second invite over the enrolment")
-        XCTAssertEqual(JoinLayout.footerTitle(state, copy: copy), copy.frame.continueButton)
-        XCTAssertNotEqual(JoinLayout.footerTitle(state, copy: copy), copy.join.skip)
-        XCTAssertNil(JoinLayout.footerNote(state, copy: copy))
+        XCTAssertFalse(JoinScreenLayout.inviteIsEditable(state), "no second invite over the enrolment")
+        XCTAssertEqual(JoinScreenLayout.footerTitle(state, copy: copy), copy.frame.continueButton)
+        XCTAssertNotEqual(JoinScreenLayout.footerTitle(state, copy: copy), copy.join.skip)
+        XCTAssertNil(JoinScreenLayout.footerNote(state, copy: copy))
         XCTAssertTrue(FirstRunNavigation.canChooseAutomatic(state.account))
 
-        state = JoinLayout.forward(state)
+        state = JoinScreenLayout.forward(state)
         XCTAssertEqual(state.account, .enrolled, "Continue keeps the account")
         XCTAssertEqual(state.step, .folders)
         state.answer(.claudeCode, .off)
@@ -122,13 +122,13 @@ final class OnboardingNavigationTests: XCTestCase {
 
         let recorded = OnboardingNavigation.recordEnrolment(filled)
         XCTAssertEqual(recorded.account, .enrolled)
-        XCTAssertFalse(JoinLayout.inviteIsEditable(recorded))
+        XCTAssertFalse(JoinScreenLayout.inviteIsEditable(recorded))
         let calls = FirstRunPlan.calls(for: recorded, at: .leaveRoots)
         XCTAssertFalse(calls.contains { if case .lookupInvite = $0 { return true } else { return false } })
         XCTAssertFalse(calls.contains { if case .enroll = $0 { return true } else { return false } })
 
         for failure: FirstRunFailure? in [nil, .inviteDead(label: "invite-exhausted")] {
-            let line = JoinLayout.inviteLine(recorded, lookup: nil, failure: failure, copy: copy.join)
+            let line = JoinScreenLayout.inviteLine(recorded, lookup: nil, failure: failure, copy: copy.join)
             if case .joined(let text) = line {
                 XCTAssertFalse(text.contains("issuer.example"), "the held invite was never joined")
             }
@@ -207,7 +207,7 @@ final class OnboardingNavigationTests: XCTestCase {
             startup: model.startup, requiresOnboarding: model.requiresOnboarding, entered: true))
 
         var state = OnboardingNavigation.initialState(startAt: .join, daemonRunning: true, enrolled: false)
-        state = JoinLayout.forward(state)
+        state = JoinScreenLayout.forward(state)
         XCTAssertEqual(state.account, .watchOnly)
         state.answer(.claudeCode, .off)
         state.answer(.codex, .off)

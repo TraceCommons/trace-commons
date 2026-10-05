@@ -45,6 +45,19 @@ extension FirstRunCopy.Frame {
     }
 }
 
+/// Ron's `ScreenTitle` (`ftux-frame.tsx`): the light half, then the bold
+/// half, in one style and one weight on every screen.
+struct FirstRunTitle: View {
+    let light: String
+    let bold: String
+
+    var body: some View {
+        Text("\(Text(light))\(Text(bold).fontWeight(.bold))")
+            .glassType(GlassTokens.TypeScale.display.weight(.regular))
+            .foregroundStyle(GlassColor.textPrimary)
+    }
+}
+
 /// The frame's decisions, apart from the view so they can be tested.
 enum FirstRunFrameLayout {
     /// The current step's index within its tier's steps.

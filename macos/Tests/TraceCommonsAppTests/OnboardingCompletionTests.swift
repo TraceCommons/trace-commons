@@ -52,7 +52,7 @@ final class OnboardingCompletionTests: XCTestCase {
 
     /// The bug itself. A view only re-renders when the model it observes
     /// says something changed, so a marker write that publishes nothing
-    /// leaves the contributor on the Done screen forever -- and
+    /// leaves the contributor on the first run's Uses screen forever -- and
     /// `publishIfChanged` means no unrelated refresh will rescue them
     /// either, on a daemon whose status is not moving.
     @MainActor

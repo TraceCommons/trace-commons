@@ -93,7 +93,7 @@ final class FirstRunPlanTests: XCTestCase {
     /// A new passkey creates an account of its own, and the daemon refuses
     /// to create one over an enrolment (`account-already-enrolled`), so an
     /// invite and a chosen passkey never both reach the daemon. Join keeps
-    /// them apart (`JoinLayout.lookUp`); the plan refuses the pair anyway:
+    /// them apart (`JoinScreenLayout.lookUp`); the plan refuses the pair anyway:
     /// the invite is joined and no sheet opens.
     func test_anInviteWithAChosenPasskeyOpensNoSheets() throws {
         var state = answered()

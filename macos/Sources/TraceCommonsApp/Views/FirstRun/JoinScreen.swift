@@ -29,7 +29,7 @@ enum JoinLookUpOutcome: Equatable {
 
 /// Join's decisions (#1030 `join-screen.tsx`), apart from the view so they
 /// can be tested. Every string is the core's.
-enum JoinLayout {
+enum JoinScreenLayout {
     /// Contributing needs an account; without one, setup is watching only.
     static func hasAccount(_ state: FirstRunState) -> Bool {
         switch state.account {
@@ -182,9 +182,8 @@ enum JoinLayout {
     ) -> JoinInviteLine {
         if state.enrolledInvite != nil {
             return .joined(
-                copy.inviteJoined
-                    .replacingOccurrences(of: "{host}", with: state.issuerHost ?? dash)
-                    .replacingOccurrences(of: "{pay_range}", with: payRange(lookup)))
+                FirstRunCopy.fill(
+                    copy.inviteJoined, ["host": state.issuerHost ?? dash, "pay_range": payRange(lookup)]))
         }
         if passkeyDone(state) { return .note(copy.inviteOrPasskey) }
         if refused { return .error(copy.inviteError) }
@@ -268,7 +267,7 @@ enum JoinLayout {
             return heldBack ? copy.inviteOrPasskey : nil
         }
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : copy.passkeyReady.replacingOccurrences(of: "{name}", with: trimmed)
+        return trimmed.isEmpty ? nil : FirstRunCopy.fill(copy.passkeyReady, ["name": trimmed])
     }
 
     /// Record how the passkey sheets ended. A sign-in carries no name
@@ -327,10 +326,10 @@ struct JoinScreen: View {
             state: $runner.state,
             onBack: nil,
             footer: FirstRunFooter(
-                title: JoinLayout.footerTitle(runner.state, copy: copy),
+                title: JoinScreenLayout.footerTitle(runner.state, copy: copy),
                 isEnabled: true,
-                note: JoinLayout.footerNote(runner.state, copy: copy),
-                action: { runner.state = JoinLayout.forward(runner.state) })
+                note: JoinScreenLayout.footerNote(runner.state, copy: copy),
+                action: { runner.state = JoinScreenLayout.forward(runner.state) })
         ) {
             ScrollView {
                 VStack(alignment: .leading, spacing: GlassTokens.Space.s6) {
@@ -353,9 +352,7 @@ struct JoinScreen: View {
 
     private var title: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
-            (Text(copy.join.titleLight) + Text(copy.join.titleBold).bold())
-                .glassType(GlassTokens.TypeScale.display)
-                .foregroundStyle(GlassColor.textPrimary)
+            FirstRunTitle(light: copy.join.titleLight, bold: copy.join.titleBold)
             (Text(copy.join.body) + Text(" ") + Text(copy.join.bodyEmphasis).bold())
                 .glassType(GlassTokens.TypeScale.body)
                 .foregroundStyle(GlassColor.textSecondary)
@@ -365,13 +362,13 @@ struct JoinScreen: View {
     private var inviteCard: some View {
         GlassCard {
             VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
-                if JoinLayout.inviteIsEditable(runner.state) {
+                if JoinScreenLayout.inviteIsEditable(runner.state) {
                     HStack(alignment: .bottom, spacing: GlassTokens.Space.s3) {
                         GlassTextField(copy.join.inviteEyebrow, text: draftBinding, prompt: copy.join.invitePlaceholder)
                             .onSubmit(lookUp)
                         Button(copy.join.lookUp, action: lookUp)
                             .buttonStyle(GlassButtonStyle(.glass))
-                            .disabled(!JoinLayout.canLookUp(currentDraft, in: runner.state))
+                            .disabled(!JoinScreenLayout.canLookUp(currentDraft, in: runner.state))
                     }
                 } else {
                     Text(copy.join.inviteEyebrow)
@@ -385,7 +382,7 @@ struct JoinScreen: View {
 
     @ViewBuilder
     private var inviteLine: some View {
-        switch JoinLayout.inviteLine(
+        switch JoinScreenLayout.inviteLine(
             runner.state, lookup: runner.lookup, failure: runner.failure, copy: copy.join, refused: refused)
         {
         case .hidden:
@@ -406,18 +403,18 @@ struct JoinScreen: View {
     private var passkeyCard: some View {
         accountCard(
             eyebrow: copy.join.passkeyEyebrow,
-            text: JoinLayout.passkeyLine(runner.state, copy: copy.join),
-            done: JoinLayout.passkeyDone(runner.state) ? copy.join.passkeyDone : nil,
-            showsAction: JoinLayout.showsPasskeyAction(runner.state)
+            text: JoinScreenLayout.passkeyLine(runner.state, copy: copy.join),
+            done: JoinScreenLayout.passkeyDone(runner.state) ? copy.join.passkeyDone : nil,
+            showsAction: JoinScreenLayout.showsPasskeyAction(runner.state)
         ) {
             Button(action: passkeyAction) {
                 // Choosing opens nothing until the daemon runs, so only the
                 // undo carries a glyph, as on the near.ai card.
-                if JoinLayout.passkeyChosen(runner.state) {
-                    Label(JoinLayout.passkeyAction(runner.state, copy: copy), systemImage: "arrow.uturn.backward")
+                if JoinScreenLayout.passkeyChosen(runner.state) {
+                    Label(JoinScreenLayout.passkeyAction(runner.state, copy: copy), systemImage: "arrow.uturn.backward")
                         .labelStyle(.titleAndIcon)
                 } else {
-                    Text(JoinLayout.passkeyAction(runner.state, copy: copy))
+                    Text(JoinScreenLayout.passkeyAction(runner.state, copy: copy))
                 }
             }
             .buttonStyle(GlassButtonStyle(.glass))
@@ -427,24 +424,24 @@ struct JoinScreen: View {
     private var nearAICard: some View {
         accountCard(
             eyebrow: copy.join.nearAiEyebrow,
-            text: JoinLayout.nearAILine(runner.state, copy: copy.join),
-            done: JoinLayout.showsSignedIn(runner.state) ? copy.join.signedIn : nil,
-            showsAction: JoinLayout.showsNearAIAction(runner.state)
+            text: JoinScreenLayout.nearAILine(runner.state, copy: copy.join),
+            done: JoinScreenLayout.showsSignedIn(runner.state) ? copy.join.signedIn : nil,
+            showsAction: JoinScreenLayout.showsNearAIAction(runner.state)
         ) {
             Button {
-                runner.state = JoinLayout.toggleNearAI(runner.state)
+                runner.state = JoinScreenLayout.toggleNearAI(runner.state)
             } label: {
                 // Choosing near.ai opens nothing (the sign-in comes after the
                 // daemon starts), so only the undo carries a glyph.
-                if JoinLayout.nearAIChosen(runner.state) {
-                    Label(JoinLayout.nearAIAction(runner.state, copy: copy), systemImage: "arrow.uturn.backward")
+                if JoinScreenLayout.nearAIChosen(runner.state) {
+                    Label(JoinScreenLayout.nearAIAction(runner.state, copy: copy), systemImage: "arrow.uturn.backward")
                         .labelStyle(.titleAndIcon)
                 } else {
-                    Text(JoinLayout.nearAIAction(runner.state, copy: copy))
+                    Text(JoinScreenLayout.nearAIAction(runner.state, copy: copy))
                 }
             }
             .buttonStyle(GlassButtonStyle(.glass))
-            .disabled(!JoinLayout.canToggleNearAI(runner.state))
+            .disabled(!JoinScreenLayout.canToggleNearAI(runner.state))
         }
     }
 
@@ -490,7 +487,7 @@ struct JoinScreen: View {
     }
 
     private func lookUp() {
-        let looked = JoinLayout.lookUp(currentDraft, in: runner.state, failure: runner.failure, host: issuerHost)
+        let looked = JoinScreenLayout.lookUp(currentDraft, in: runner.state, failure: runner.failure, host: issuerHost)
         runner.state = looked.state
         runner.failure = looked.failure
         refused = looked.outcome == .refused
@@ -500,10 +497,10 @@ struct JoinScreen: View {
     /// Before the daemon runs, record or undo the choice; once it runs,
     /// open the sheets.
     private func passkeyAction() {
-        if JoinLayout.passkeyOpensNow(runner.state, hasPasskeyAccount: passkeyAccount != nil) {
+        if JoinScreenLayout.passkeyOpensNow(runner.state, hasPasskeyAccount: passkeyAccount != nil) {
             runner.requestPasskey()
         } else {
-            runner.state = JoinLayout.togglePasskey(runner.state)
+            runner.state = JoinScreenLayout.togglePasskey(runner.state)
         }
     }
 }

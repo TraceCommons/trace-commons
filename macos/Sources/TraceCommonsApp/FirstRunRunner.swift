@@ -218,7 +218,7 @@ final class FirstRunRunner: ObservableObject {
         passkeyDue = true
     }
 
-    /// The passkey sheets ended: record their outcome (`JoinLayout.apply`)
+    /// The passkey sheets ended: record their outcome (`JoinScreenLayout.apply`)
     /// and lower the request, whatever the outcome, so a closed sheet is
     /// asked again only by the next commit or the button.
     ///
@@ -227,7 +227,7 @@ final class FirstRunRunner: ObservableObject {
     /// the person goes back to Join, which says why; every answer is kept.
     /// After Start the first run is finished and stays where it is.
     func finishPasskey(_ outcome: PasskeySheetOutcome, copy: FirstRunCopy) {
-        state = JoinLayout.apply(outcome, to: state, copy: copy).state
+        state = JoinScreenLayout.apply(outcome, to: state, copy: copy).state
         if outcome == .signedOut, !completed { state.step = .join }
         passkeyOutcome = outcome
         passkeyDue = false

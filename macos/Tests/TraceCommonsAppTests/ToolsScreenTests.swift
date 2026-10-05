@@ -99,7 +99,7 @@ final class ToolsScreenTests: XCTestCase {
         let screen = try Self.source("ToolsScreen.swift")
         XCTAssertTrue(screen.contains("TCDiscovery.describeFolderJSON("))
         XCTAssertTrue(screen.contains("GlassToolTile(.folder"))
-        XCTAssertTrue(screen.contains("NSOpenPanel"))
+        XCTAssertTrue(screen.contains("FolderPanel.choose()"))
         XCTAssertTrue(screen.contains(".onDrop("))
         XCTAssertTrue(screen.contains(".commit(.leaveRoots)"))
         XCTAssertTrue(screen.contains("FolderMatch.decodeList("))

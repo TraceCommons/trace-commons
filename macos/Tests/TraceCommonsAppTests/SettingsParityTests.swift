@@ -128,7 +128,7 @@ final class SettingsParityTests: XCTestCase {
                               "copy.toolsHeading", "copy.intro", "copy.toggle", "copy.connect", "copy.lookAgain",
                               "copy.overrideTitle", "copy.portTitle", "copy.portNote", "copy.folderTitle", "copy.chooseFolder",
                               "copy.folderNote", "copy.checking", "copy.apply", "copy.appliesAtOnce", "copy.derivedOrigin"],
-                confirmations: ["GlassSourceRow.chooseFolder()"],
+                confirmations: ["FolderPanel.choose()"],
                 accessibility: ["GlassToggleStyle(.settings)", ".accessibilityLabel(copy.portTitle)",
                                 ".accessibilityLabel(copy.folderTitle)", ".accessibilityElement(children: .combine)"]),
         Section(glass: "Views/Settings/PrivateAISection.swift",
@@ -170,9 +170,9 @@ final class SettingsParityTests: XCTestCase {
                 accessibility: [".accessibilityLabel(copy.urlTitle)", ".accessibilityLabel(copy.signingAddressTitle)",
                                 ".accessibilityLabel(copy.measurementsTitle)", ".accessibilityElement(children: .combine)"]),
         Section(glass: "Views/Settings/GlassSourceRow.swift",
-                bindings: ["SourceRowState.answer(", "static func chooseFolder()"],
+                bindings: ["SourceRowState.answer(", "FolderPanel.choose()"],
                 copySources: ["copy.watchCandidate", "tool.decline", "tool.chooseFolder"],
-                confirmations: ["NSOpenPanel"],
+                confirmations: ["FolderPanel.choose()"],
                 accessibility: []),
     ]
 

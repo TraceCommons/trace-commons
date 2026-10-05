@@ -81,7 +81,7 @@ enum ToolAnswerRowLayout {
 
     /// Fill the core's `{tool}` placeholder with the tool's name.
     static func fill(_ template: String, tool: SourceKind) -> String {
-        template.replacingOccurrences(of: "{tool}", with: tool.displayName)
+        FirstRunCopy.fill(template, ["tool": tool.displayName])
     }
 }
 
@@ -146,7 +146,7 @@ struct ToolAnswerRow: View {
                     )
                     if ToolAnswerRowLayout.offersFolderChoice(candidate) {
                         GlassFolderButton(ToolAnswerRowLayout.fill(copy.chooseFolder, tool: candidate.source)) {
-                            if let path = Self.pickFolder() {
+                            if let path = FolderPanel.choose() {
                                 chosenFolder = path
                                 ToolAnswerRowLayout.choose(folder: path, for: candidate, in: &state)
                             }
@@ -171,15 +171,5 @@ struct ToolAnswerRow: View {
             case .dontUse: return GlassPickerOption(copy.dontUse, value: .dontUse, dot: .off)
             }
         }
-    }
-
-    private static func pickFolder() -> String? {
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.allowsMultipleSelection = false
-        panel.canCreateDirectories = false
-        guard panel.runModal() == .OK, let url = panel.url else { return nil }
-        return url.path
     }
 }

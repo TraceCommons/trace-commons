@@ -171,7 +171,7 @@ final class ShellWordingTests: XCTestCase {
     /// A literal nested inside an interpolation does not end the literal
     /// that holds it.
     ///
-    /// The line is `ConsentScopesView.swift`'s continue button, verbatim. A
+    /// The line is the retired consent step's continue button, verbatim. A
     /// walker that steps over `\(` as a plain two-character escape runs on
     /// into the expression, meets the `"` that opens `"permission"`, and
     /// reads it as the close of the outer literal -- one sentence becomes

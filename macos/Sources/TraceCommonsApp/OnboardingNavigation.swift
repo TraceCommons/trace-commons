@@ -92,8 +92,8 @@ enum OnboardingNavigation {
         hostTakesInvites: Bool = true, host: (String) -> String?
     ) -> InviteLinkAction {
         guard hostTakesInvites, !isCommitting else { return .leaveParked }
-        guard JoinLayout.inviteIsEditable(state) else { return .discard }
-        let looked = JoinLayout.lookUp(invite, in: state, failure: failure, host: host)
+        guard JoinScreenLayout.inviteIsEditable(state) else { return .discard }
+        let looked = JoinScreenLayout.lookUp(invite, in: state, failure: failure, host: host)
         guard looked.outcome == .found else { return .discard }
         var received = looked.state
         received.step = .join

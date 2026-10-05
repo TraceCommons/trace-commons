@@ -19,7 +19,7 @@ extension AppModel: FirstRunRulesSource {}
 ///
 /// A selection is the person's own approval: nothing here ticks a session
 /// the person did not tick, by the folder box or one by one.
-enum FirstRunRulesLayout {
+enum RulesScreenLayout {
     enum GroupState: Equatable {
         case none, some, all
     }
@@ -199,13 +199,6 @@ enum FirstRunRulesLayout {
     static func folder(_ project: ProjectRow) -> String {
         project.projectPath.isEmpty ? project.displayLabel : project.projectPath
     }
-
-    /// Fill a core sentence's `{name}` placeholders.
-    static func fill(_ template: String, _ values: [String: String]) -> String {
-        values.reduce(template) { text, pair in
-            text.replacingOccurrences(of: "{" + pair.key + "}", with: pair.value)
-        }
-    }
 }
 
 /// Ron's Rules screen (#1030 `rules-screen.tsx`, Custom setup's W-5) in
@@ -215,11 +208,9 @@ struct RulesScreen: View {
     private static let collapsedSessions = 2
 
     let copy: FirstRunCopy
-    @Binding var state: FirstRunState
+    @ObservedObject var runner: FirstRunRunner
+    /// Where the folders and their past sessions are read (the app model).
     let source: any FirstRunRulesSource
-    var notice: String?
-    var onBack: (() -> Void)?
-    let onContinue: () -> Void
 
     @State private var projects: [ProjectRow]?
     @State private var loadFailed = false
@@ -237,19 +228,16 @@ struct RulesScreen: View {
     var body: some View {
         FirstRunFrame(
             copy: copy,
-            state: $state,
-            onBack: onBack,
-            notice: notice,
+            state: $runner.state,
+            onBack: { runner.state = FirstRunNavigation.back(runner.state) },
             footer: FirstRunFooter(
                 title: copy.frame.continueButton,
                 isEnabled: projects != nil,
-                action: onContinue)
+                action: { runner.state = FirstRunNavigation.next(runner.state) })
         ) {
             ScrollView {
                 VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
-                    Text("\(copy.rules.titleLight)\(Text(copy.rules.titleBold).bold())")
-                        .glassType(GlassTokens.TypeScale.title)
-                        .foregroundStyle(GlassColor.textPrimary)
+                    FirstRunTitle(light: copy.rules.titleLight, bold: copy.rules.titleBold)
                     content
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -269,7 +257,7 @@ struct RulesScreen: View {
         ) { project in
             let words = armingCopy(project)
             Button(words?.confirm ?? "") {
-                _ = FirstRunRulesLayout.confirmArming(&state, project: project)
+                _ = RulesScreenLayout.confirmArming(&runner.state, project: project)
                 armingCandidate = nil
             }
             Button(words?.decline ?? "", role: .cancel) { armingCandidate = nil }
@@ -320,7 +308,7 @@ struct RulesScreen: View {
 
     private func rulesCard(_ projects: [ProjectRow]) -> some View {
         GlassEyebrowCard(
-            FirstRunRulesLayout.fill(copy.rules.reposFound, ["tools": FirstRunRulesLayout.toolNames(state)])
+            FirstRunCopy.fill(copy.rules.reposFound, ["tools": RulesScreenLayout.toolNames(runner.state)])
         ) {
             VStack(alignment: .leading, spacing: 0) {
                 ForEach(Array(projects.enumerated()), id: \.element.id) { index, project in
@@ -331,7 +319,7 @@ struct RulesScreen: View {
     }
 
     private func ruleRow(_ project: ProjectRow) -> some View {
-        let folder = FirstRunRulesLayout.folder(project)
+        let folder = RulesScreenLayout.folder(project)
         return HStack(alignment: .center, spacing: GlassTokens.Space.s4) {
             VStack(alignment: .leading, spacing: 0) {
                 Text(folder)
@@ -340,7 +328,7 @@ struct RulesScreen: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
                 if let count = sessionCount(project) {
-                    Text(FirstRunRulesLayout.fill(copy.frame.sessionCount, ["count": String(count)]))
+                    Text(FirstRunCopy.fill(copy.frame.sessionCount, ["count": String(count)]))
                         .glassType(GlassTokens.TypeScale.caption)
                         .foregroundStyle(GlassColor.textTertiary)
                 }
@@ -348,18 +336,18 @@ struct RulesScreen: View {
             Spacer(minLength: 0)
             if let modeCopy {
                 GlassPicker(
-                    FirstRunRulesLayout.fill(copy.rules.ruleFor, ["folder": folder]),
+                    FirstRunCopy.fill(copy.rules.ruleFor, ["folder": folder]),
                     selection: Binding<ProjectMode?>(
-                        get: { FirstRunRulesLayout.rule(state, for: project) },
+                        get: { RulesScreenLayout.rule(runner.state, for: project) },
                         set: { wanted in
                             guard let wanted else { return }
                             // Arming is a grant, so it is never silent.
-                            if FirstRunRulesLayout.pick(&state, project: project, wanted: wanted) == .needsConfirmation {
+                            if RulesScreenLayout.pick(&runner.state, project: project, wanted: wanted) == .needsConfirmation {
                                 armingCandidate = project
                             }
                         }),
                     options: ProjectModeChoices.options(
-                        for: FirstRunRulesLayout.offeredModes(project, account: state.account),
+                        for: RulesScreenLayout.offeredModes(project, account: runner.state.account),
                         copy: modeCopy),
                     placeholder: modeCopy.title)
             }
@@ -377,7 +365,7 @@ struct RulesScreen: View {
     // MARK: Card 2: past sessions, by folder
 
     private func pastSessionsCard(_ projects: [ProjectRow]) -> some View {
-        let summary = FirstRunRulesLayout.summary(state, projects: projects, sessions: sessions)
+        let summary = RulesScreenLayout.summary(runner.state, projects: projects, sessions: sessions)
         return GlassCard {
             VStack(alignment: .leading, spacing: GlassTokens.Space.s6) {
                 HStack {
@@ -386,7 +374,7 @@ struct RulesScreen: View {
                         .foregroundStyle(GlassColor.textPrimary)
                     Spacer(minLength: GlassTokens.Space.s4)
                     Text(
-                        FirstRunRulesLayout.fill(
+                        FirstRunCopy.fill(
                             copy.rules.selectedSummary,
                             ["selected": String(summary.selected), "total": String(summary.total)])
                     )
@@ -402,9 +390,9 @@ struct RulesScreen: View {
 
     @ViewBuilder private func folderSessions(_ project: ProjectRow) -> some View {
         let id = project.projectId
-        let folder = FirstRunRulesLayout.folder(project)
+        let folder = RulesScreenLayout.folder(project)
         let rows = sessions[id] ?? []
-        if FirstRunRulesLayout.rule(state, for: project) == .ignore {
+        if RulesScreenLayout.rule(runner.state, for: project) == .ignore {
             HStack(spacing: GlassTokens.Space.s4) {
                 GlassCheckMark(checked: false)
                 Text(folder)
@@ -413,12 +401,12 @@ struct RulesScreen: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
                 Spacer(minLength: 0)
-                Text(FirstRunRulesLayout.fill(copy.rules.neverCount, ["count": String(sessionCount(project) ?? rows.count)]))
+                Text(FirstRunCopy.fill(copy.rules.neverCount, ["count": String(sessionCount(project) ?? rows.count)]))
                     .glassType(GlassTokens.TypeScale.caption)
                     .foregroundStyle(GlassColor.textTertiary)
             }
             .accessibilityElement(children: .ignore)
-            .accessibilityLabel(FirstRunRulesLayout.fill(copy.rules.neverLabel, ["folder": folder]))
+            .accessibilityLabel(FirstRunCopy.fill(copy.rules.neverLabel, ["folder": folder]))
         } else if refused.contains(id) {
             HStack(spacing: GlassTokens.Space.s4) {
                 Text(folder)
@@ -437,10 +425,10 @@ struct RulesScreen: View {
                     includeEvery(project, rows: rows, folder: folder)
                     GlassExpander(folder, isOpen: openBinding(id))
                     Text(
-                        FirstRunRulesLayout.fill(
+                        FirstRunCopy.fill(
                             copy.rules.folderSelected,
                             [
-                                "selected": String(rows.filter { state.pastSelections[id]?.contains($0.id) == true }.count),
+                                "selected": String(rows.filter { runner.state.pastSelections[id]?.contains($0.id) == true }.count),
                                 "total": String(rows.count),
                             ])
                     )
@@ -461,8 +449,8 @@ struct RulesScreen: View {
     /// beside the box, so the box's sentence is its accessibility label and
     /// not drawn. With nothing to tick the box is off and disabled.
     @ViewBuilder private func includeEvery(_ project: ProjectRow, rows: [PastSession], folder: String) -> some View {
-        let label = FirstRunRulesLayout.fill(copy.rules.includeEvery, ["folder": folder])
-        let tickable = rows.filter(FirstRunRulesLayout.isTickable)
+        let label = FirstRunCopy.fill(copy.rules.includeEvery, ["folder": folder])
+        let tickable = rows.filter(RulesScreenLayout.isTickable)
         if tickable.isEmpty {
             Toggle(isOn: .constant(false)) { EmptyView() }
                 .toggleStyle(GlassCheckboxStyle())
@@ -484,13 +472,13 @@ struct RulesScreen: View {
         return VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
             ForEach(visible) { session in
                 Toggle(isOn: tickBinding(id, session)) {
-                    Text(FirstRunRulesLayout.labelParts(session).joined(separator: " · "))
+                    Text(RulesScreenLayout.labelParts(session).joined(separator: " · "))
                 }
                 .toggleStyle(GlassCheckboxStyle())
-                .disabled(!FirstRunRulesLayout.isTickable(session))
+                .disabled(!RulesScreenLayout.isTickable(session))
             }
             if rows.count > Self.collapsedSessions {
-                Button(all ? copy.rules.showFewer : FirstRunRulesLayout.fill(copy.rules.showAll, ["count": String(rows.count)])) {
+                Button(all ? copy.rules.showFewer : FirstRunCopy.fill(copy.rules.showAll, ["count": String(rows.count)])) {
                     withAnimation(GlassMotion.fast(GlassMotion.systemReducesMotion)) {
                         if all { showingAll.remove(id) } else { showingAll.insert(id) }
                     }
@@ -502,16 +490,16 @@ struct RulesScreen: View {
 
     private func tickBinding(_ projectID: String, _ session: PastSession) -> Binding<Bool> {
         Binding(
-            get: { state.pastSelections[projectID]?.contains(session.id) == true },
-            set: { on in FirstRunRulesLayout.setTicked(&state, projectID: projectID, session: session, on: on) })
+            get: { runner.state.pastSelections[projectID]?.contains(session.id) == true },
+            set: { on in RulesScreenLayout.setTicked(&runner.state, projectID: projectID, session: session, on: on) })
     }
 
     /// One row as a source of the folder's box: read per row, written for
     /// the whole folder.
     private func groupBinding(_ projectID: String, rows: [PastSession], _ session: PastSession) -> Binding<Bool> {
         Binding(
-            get: { state.pastSelections[projectID]?.contains(session.id) == true },
-            set: { on in FirstRunRulesLayout.includeEvery(&state, projectID: projectID, sessions: rows, on: on) })
+            get: { runner.state.pastSelections[projectID]?.contains(session.id) == true },
+            set: { on in RulesScreenLayout.includeEvery(&runner.state, projectID: projectID, sessions: rows, on: on) })
     }
 
     private func openBinding(_ id: String) -> Binding<Bool> {

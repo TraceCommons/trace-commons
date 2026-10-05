@@ -114,7 +114,7 @@ struct GlassSourceRow: View {
                                 .disabled(choice == .watch(path: candidate.path))
                         }
                         GlassFolderButton(tool.chooseFolder ?? copy.chooseFolder) {
-                            if let path = Self.chooseFolder() { onChoose(path) }
+                            if let path = FolderPanel.choose() { onChoose(path) }
                         }
                         Button(tool.decline) { onDecline() }
                             .buttonStyle(GlassButtonStyle(.glass))
@@ -125,16 +125,5 @@ struct GlassSourceRow: View {
             }
             .accessibilityElement(children: .contain)
         }
-    }
-
-    /// The folder panel. Nil when dismissed.
-    static func chooseFolder() -> String? {
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.allowsMultipleSelection = false
-        panel.canCreateDirectories = false
-        guard panel.runModal() == .OK, let url = panel.url else { return nil }
-        return url.path
     }
 }

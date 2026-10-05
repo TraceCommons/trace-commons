@@ -621,7 +621,7 @@ final class DaemonClient {
     /// the contract only ever reports `unavailable` / `enroll-failed` for
     /// this method, on purpose, because the underlying issuer response can
     /// carry a URL or a response body that must never reach a UI. See
-    /// `OnboardingConnectView`.
+    /// `AppModel.enroll(invite:scopes:)` and `FoldersScreenLayout.notice`.
     func enroll(invite: String, scopes: [String] = []) throws -> EnrollResult {
         var params: [String: Any] = ["invite": invite]
         if !scopes.isEmpty { params["scopes"] = scopes }
@@ -661,10 +661,10 @@ final class DaemonClient {
     /// Replaces the enrolled device's consent scopes. Local config write
     /// only -- no network I/O -- and requires an existing enrollment
     /// (`unavailable` / `not-logged-in` otherwise, per the contract). Used
-    /// by the onboarding consent screen: `enroll` is always called with no
-    /// scopes (floor scope only), and this call is what actually applies
-    /// whatever the contributor ticked on `ConsentScopesView`, once they
-    /// confirm it -- see "### `set_consent_scopes`" in the contract.
+    /// by the first run's Start: `enroll` is always called with no scopes
+    /// (floor scope only), and this call is what actually applies whatever
+    /// the contributor ticked on the Uses screen, once they press Start --
+    /// see "### `set_consent_scopes`" in the contract.
     @discardableResult
     func setConsentScopes(_ scopes: [String]) throws -> [String] {
         struct Wrapper: Decodable {

@@ -194,7 +194,7 @@ struct ToolsSection: View {
                     .foregroundStyle(GlassColor.textTertiary)
                 HStack(spacing: GlassTokens.Space.s3) {
                     GlassFolderButton(copy.chooseFolder) {
-                        if let path = GlassSourceRow.chooseFolder() {
+                        if let path = FolderPanel.choose() {
                             var next = form
                             next.tokenDir = path
                             routingDraft = next

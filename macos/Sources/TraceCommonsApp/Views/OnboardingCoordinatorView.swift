@@ -140,14 +140,9 @@ private struct FirstRunSteps: View {
         case .tools:
             ToolsScreen(copy: copy, runner: runner, offersJoin: offersJoin)
         case .rules:
-            RulesScreen(
-                copy: copy,
-                state: $runner.state,
-                source: model,
-                onBack: { runner.state = FirstRunNavigation.back(runner.state) },
-                onContinue: { runner.state = FirstRunNavigation.next(runner.state) })
+            RulesScreen(copy: copy, runner: runner, source: model)
         case .uses:
-            UsesScreen(runner: runner, copy: copy)
+            UsesScreen(copy: copy, runner: runner)
         }
     }
 
