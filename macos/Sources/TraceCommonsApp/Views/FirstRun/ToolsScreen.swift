@@ -1,0 +1,350 @@
+import AppKit
+import SwiftUI
+import TCBridge
+import TCDesign
+import TCShellCore
+import UniformTypeIdentifiers
+
+/// What a folder picked with "add your tool" turned out to be.
+enum AddToolOutcome: Equatable {
+    /// One kind matched; the folder is added as that kind.
+    case added(AddedFolder)
+    /// More than one kind matched (a flat folder of `.json` files is both an
+    /// OpenCode export and a trajectory export): the person picks which.
+    /// `kinds` holds only the matches this build can offer.
+    case ask(path: String, kinds: [AddedFolder.Kind])
+    /// Nothing this build can declare matched, or the core could not
+    /// describe the folder. Nothing is added.
+    case refused
+}
+
+/// The Tools screen's decisions, apart from the view so they can be tested.
+/// Every write goes through `FirstRunState.add(_:)` or, on a row,
+/// `ToolAnswerRowLayout.select`, so one answer per kind is kept.
+enum ToolsScreenLayout {
+    /// The `tc_describe_folder` JSON for `path` as an outcome. Decoded with
+    /// `FolderMatch.decodeList`, which keeps every row: a dropped trajectory
+    /// row would turn a question into a certainty. A nil or undecodable
+    /// answer is a refusal, so a folder the core could not read is never
+    /// added on a guess.
+    static func outcome(path: String, json: String?) -> AddToolOutcome {
+        guard let json, let matches = try? FolderMatch.decodeList(from: json) else { return .refused }
+        return outcome(path: path, matches: matches)
+    }
+
+    static func outcome(path: String, matches: [FolderMatch]) -> AddToolOutcome {
+        let offerable = matches.compactMap { match -> AddedFolder.Kind? in
+            switch match.kind {
+            case .source(let kind): return .source(kind)
+            case .trajectory: return .trajectory
+            case .unrecognised: return nil
+            }
+        }
+        if matches.count == 1, let kind = offerable.first {
+            return .added(AddedFolder(kind: kind, path: matches[0].path))
+        }
+        // More than one match is a question even when only one of them can
+        // be offered: the core said the folder is not certainly that kind.
+        if matches.count > 1, !offerable.isEmpty {
+            return .ask(path: path, kinds: offerable)
+        }
+        return .refused
+    }
+
+    /// Apply an outcome. An added folder is written; a question writes
+    /// nothing until it is answered. False for a refusal.
+    @discardableResult
+    static func apply(_ outcome: AddToolOutcome, to state: inout FirstRunState) -> Bool {
+        switch outcome {
+        case .added(let folder):
+            state.add(folder)
+            return true
+        case .ask:
+            return true
+        case .refused:
+            return false
+        }
+    }
+
+    /// The person's answer to an ambiguous folder.
+    static func choose(_ kind: AddedFolder.Kind, path: String, in state: inout FirstRunState) {
+        state.add(AddedFolder(kind: kind, path: path))
+    }
+
+    /// The core's line for a refused folder.
+    static func refusal(_ copy: FirstRunCopy.Tools) -> String {
+        copy.addToolRefused
+    }
+
+    /// An option's name. A tool's is its display name; a trajectory export
+    /// has no core label, so it takes the single word the core's insights
+    /// table uses for the format.
+    static func name(_ kind: AddedFolder.Kind) -> String {
+        switch kind {
+        case .source(let source): return source.displayName
+        case .trajectory: return "Trajectory"
+        }
+    }
+
+    /// Discovery's rows, each kind the person added shown as a found tool at
+    /// the added folder (Ron's custom tools are found), and an added kind
+    /// discovery did not offer given a row of its own.
+    static func rows(_ discovered: [SourceCandidate], state: FirstRunState) -> [SourceCandidate] {
+        var rows = discovered.map { candidate in
+            addedPath(for: candidate.source, in: state).map { added(candidate.source, at: $0) } ?? candidate
+        }
+        for folder in state.addedFolders {
+            guard case .source(let kind) = folder.kind, !rows.contains(where: { $0.source == kind }) else {
+                continue
+            }
+            rows.append(added(kind, at: folder.path))
+        }
+        return rows
+    }
+
+    /// Ron's compact meta: "Added by you" for a folder the person added, the
+    /// session count alone for a found tool, discovery's evidence otherwise.
+    static func meta(
+        for candidate: SourceCandidate, in state: FirstRunState, copy: FirstRunCopy.Tools, now: Date
+    ) -> String {
+        if addedPath(for: candidate.source, in: state) != nil { return copy.addedByYou }
+        if candidate.exists {
+            return copy.sessionCount.replacingOccurrences(of: "{count}", with: String(candidate.sessionCount))
+        }
+        return candidate.evidence(now: now)
+    }
+
+    /// The added trajectory folder, which has no tool row of its own.
+    static func trajectoryFolder(in state: FirstRunState) -> AddedFolder? {
+        state.addedFolders.first { $0.kind == .trajectory }
+    }
+
+    private static func addedPath(for kind: SourceKind, in state: FirstRunState) -> String? {
+        state.addedFolders.first { $0.kind == .source(kind) }?.path
+    }
+
+    private static func added(_ kind: SourceKind, at path: String) -> SourceCandidate {
+        SourceCandidate(
+            source: kind, path: path, exists: true, sessionCount: 0, mostRecent: nil, relocatedByEnv: false)
+    }
+}
+
+/// Ron's Tools screen (#1030 `tool-screens.tsx` W-4), Custom setup's tool
+/// list: the Folders rows with compact meta, then the "add your tool" tile.
+/// A click opens a folder panel; a drop takes a folder. Continue commits
+/// `.leaveRoots`, which starts the daemon.
+struct ToolsScreen: View {
+    let copy: FirstRunCopy
+    @ObservedObject var runner: FirstRunRunner
+    /// Where each tool's "Get {tool}" leads; none is known yet.
+    var installURL: (SourceKind) -> URL? = { _ in nil }
+
+    @State private var discovery: DiscoveredRows = .loading
+    @State private var onboarding = TCOnboardingCopy.load()
+    /// A folder that matched more than one kind, waiting for the person.
+    @State private var pending: (path: String, kinds: [AddedFolder.Kind])?
+    @State private var refused = false
+    @State private var dragging = false
+
+    var body: some View {
+        FirstRunFrame(
+            copy: copy,
+            state: $runner.state,
+            onBack: FoldersScreenLayout.backAction(isCommitting: runner.isCommitting) {
+                runner.state = FirstRunNavigation.back(runner.state)
+            },
+            isCommitting: runner.isCommitting,
+            notice: FoldersScreenLayout.notice(for: runner.failure, copy: copy, onboarding: onboarding),
+            footer: FirstRunFooter(
+                title: copy.frame.continueButton,
+                isEnabled: canContinue,
+                action: { Task { await runner.commit(.leaveRoots) } }
+            )
+        ) {
+            VStack(alignment: .leading, spacing: GlassTokens.Space.s6) {
+                title
+                switch discovery {
+                case .found(let discovered):
+                    ScrollView {
+                        VStack(spacing: GlassTokens.Space.s4) {
+                            ForEach(ToolsScreenLayout.rows(discovered, state: runner.state), id: \.source) {
+                                candidate in
+                                ToolAnswerRow(
+                                    copy: copy.folders,
+                                    candidate: candidate,
+                                    meta: ToolsScreenLayout.meta(
+                                        for: candidate, in: runner.state, copy: copy.tools, now: Date()),
+                                    state: $runner.state,
+                                    installURL: installURL(candidate.source)
+                                )
+                            }
+                            if let trajectory = ToolsScreenLayout.trajectoryFolder(in: runner.state) {
+                                folderCard(name: ToolsScreenLayout.name(.trajectory), path: trajectory.path) {
+                                    Text(copy.tools.addedByYou)
+                                        .glassType(GlassTokens.TypeScale.caption)
+                                        .foregroundStyle(GlassColor.textTertiary)
+                                        .lineLimit(1)
+                                }
+                            }
+                            if let pending {
+                                folderCard(name: Self.folderName(pending.path), path: pending.path) {
+                                    GlassPicker(
+                                        Self.folderName(pending.path),
+                                        selection: pendingChoice,
+                                        options: pending.kinds.indices.map {
+                                            GlassPickerOption(ToolsScreenLayout.name(pending.kinds[$0]), value: $0)
+                                        },
+                                        placeholder: Self.folderName(pending.path)
+                                    )
+                                }
+                            }
+                            addTile
+                        }
+                    }
+                    .disabled(!FoldersScreenLayout.rowsEnabled(isCommitting: runner.isCommitting))
+                case .failed:
+                    HStack(spacing: GlassTokens.Space.s4) {
+                        Text(discovery.failureLine(copy.folders) ?? "")
+                            .glassType(GlassTokens.TypeScale.body)
+                            .foregroundStyle(GlassColor.textSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Button(copy.folders.retry) { refreshDiscovery() }
+                            .buttonStyle(GlassButtonStyle(.secondary))
+                    }
+                case .loading:
+                    HStack(spacing: GlassTokens.Space.s4) {
+                        ProgressView().controlSize(.small)
+                        Text(copy.folders.loading)
+                            .glassType(GlassTokens.TypeScale.body)
+                            .foregroundStyle(GlassColor.textSecondary)
+                    }
+                }
+            }
+        }
+        .task {
+            if discovery == .loading { refreshDiscovery() }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            refreshDiscovery()
+        }
+    }
+
+    /// Ron's add tile: click to pick a folder, or drop one on it.
+    private var addTile: some View {
+        Button {
+            if let path = Self.pickFolder() { describe(path) }
+        } label: {
+            GlassCard {
+                VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
+                    HStack(spacing: GlassTokens.Space.s6) {
+                        GlassToolTile(.folder, large: true)
+                        VStack(alignment: .leading, spacing: 0) {
+                            Text(copy.tools.addTool)
+                                .glassType(GlassTokens.TypeScale.bodyStrong)
+                                .foregroundStyle(GlassColor.textPrimary)
+                            Text(copy.tools.addToolCaption)
+                                .glassType(GlassTokens.TypeScale.caption)
+                                .foregroundStyle(GlassColor.textTertiary)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    if refused {
+                        Text(ToolsScreenLayout.refusal(copy.tools))
+                            .glassType(GlassTokens.TypeScale.caption)
+                            .foregroundStyle(GlassColor.textSecondary)
+                    }
+                }
+            }
+            .opacity(dragging ? 0.7 : 1)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onDrop(of: [UTType.fileURL], isTargeted: $dragging) { providers in
+            guard let provider = providers.first else { return false }
+            _ = provider.loadObject(ofClass: URL.self) { url, _ in
+                guard let url else { return }
+                let isFolder = (try? url.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true
+                let path = url.path
+                Task { @MainActor in
+                    if isFolder { describe(path) } else { refused = true }
+                }
+            }
+            return true
+        }
+    }
+
+    private func folderCard<Trailing: View>(
+        name: String, path: String, @ViewBuilder trailing: () -> Trailing
+    ) -> some View {
+        GlassCard {
+            HStack(spacing: GlassTokens.Space.s6) {
+                GlassToolTile(.folder, large: true)
+                VStack(alignment: .leading, spacing: 0) {
+                    Text(name)
+                        .glassType(GlassTokens.TypeScale.bodyStrong)
+                        .foregroundStyle(GlassColor.textPrimary)
+                    Text(path)
+                        .glassType(GlassTokens.TypeScale.mono)
+                        .foregroundStyle(GlassColor.textTertiary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .help(path)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                trailing()
+            }
+        }
+    }
+
+    /// Describe a picked folder and act on what the core reports.
+    private func describe(_ path: String) {
+        let outcome = ToolsScreenLayout.outcome(path: path, json: TCDiscovery.describeFolderJSON(path))
+        refused = !ToolsScreenLayout.apply(outcome, to: &runner.state)
+        if case .ask(let path, let kinds) = outcome {
+            pending = (path, kinds)
+        } else {
+            pending = nil
+        }
+    }
+
+    private var pendingChoice: Binding<Int?> {
+        Binding(
+            get: { nil },
+            set: { index in
+                guard let index, let pending, pending.kinds.indices.contains(index) else { return }
+                ToolsScreenLayout.choose(pending.kinds[index], path: pending.path, in: &runner.state)
+                self.pending = nil
+            }
+        )
+    }
+
+    private func refreshDiscovery() {
+        discovery = FoldersScreenLayout.discovered(TCDiscovery.sourcesJSON(), keeping: discovery)
+    }
+
+    private var canContinue: Bool {
+        guard let discovered = discovery.rows, !runner.isCommitting, pending == nil else { return false }
+        let rows = ToolsScreenLayout.rows(discovered, state: runner.state)
+        return FirstRunNavigation.canContinue(runner.state, candidates: rows, requiredScope: nil)
+    }
+
+    private var title: some View {
+        Text("\(Text(copy.tools.titleLight))\(Text(copy.tools.titleBold).fontWeight(.bold))")
+            .glassType(GlassTokens.TypeScale.display.weight(.regular))
+            .foregroundStyle(GlassColor.textPrimary)
+    }
+
+    private static func folderName(_ path: String) -> String {
+        URL(fileURLWithPath: path).lastPathComponent
+    }
+
+    private static func pickFolder() -> String? {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = false
+        guard panel.runModal() == .OK, let url = panel.url else { return nil }
+        return url.path
+    }
+}
