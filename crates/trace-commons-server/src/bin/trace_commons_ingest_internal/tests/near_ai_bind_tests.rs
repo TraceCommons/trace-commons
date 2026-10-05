@@ -1778,9 +1778,11 @@ async fn pg_bind_shares_the_near_ai_provisioning_rate_budget() {
     let signature = device.sign(&started.signing_bytes);
 
     // Provisioning's per-address budget, used up. These requests carry no
-    // forwarded address, so they all share the one fallback key.
+    // forwarded address, so they all share the one fallback key. The key is
+    // derived, not spelled: a literal went stale when the fallback was renamed.
+    let fallback = client_ip_for_rate_limit(&HeaderMap::new());
     for action in ["near-ai-start", "near-ai-finish"] {
-        while ACCOUNT_RATE_LIMITER.check(&format!("near-provision-{action}:xff-absent"), 30) {}
+        while ACCOUNT_RATE_LIMITER.check(&format!("near-provision-{action}:{fallback}"), 30) {}
     }
 
     let reply = send(
