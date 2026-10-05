@@ -76,8 +76,10 @@ enum JoinLayout {
         state.account == .nearAI && !state.signedIn
     }
 
-    static func nearAILine(_ state: FirstRunState, copy: FirstRunCopy.Join) -> String {
-        nearAIChosen(state) ? copy.nearAiChosen : copy.nearAiText
+    /// Nothing while a passkey is held: near.ai cannot be chosen over it.
+    static func nearAILine(_ state: FirstRunState, copy: FirstRunCopy.Join) -> String? {
+        if passkeyDone(state) { return nil }
+        return nearAIChosen(state) ? copy.nearAiChosen : copy.nearAiText
     }
 
     static func nearAIAction(_ state: FirstRunState, copy: FirstRunCopy.Join) -> String {
@@ -99,6 +101,10 @@ enum JoinLayout {
     /// other than the refused one clears that refusal too; the same invite
     /// looked up again keeps it. Any other failure is kept.
     ///
+    /// While that refusal stands, a refused paste leaves the refused invite
+    /// held, so the refusal stays tied to it: looked up again it is still
+    /// the same invite, and an emptied field can still withdraw it.
+    ///
     /// Looking an invite up asks to join, so it takes back watch only.
     static func lookUp(
         _ draft: String, in state: FirstRunState, failure: FirstRunFailure?, host: (String) -> String?
@@ -115,6 +121,7 @@ enum JoinLayout {
             return (looked, .withdrawn, deadCleared)
         }
         guard let issuerHost = host(invite) else {
+            if case .inviteDead = failure { return (looked, .refused, failure) }
             looked.invite = ""
             looked.issuerHost = nil
             return (looked, .refused, failure)
@@ -177,6 +184,18 @@ enum JoinLayout {
         hasPasskeyAccount && state.daemonStarted && !state.signedIn
     }
 
+    /// A signed-in near.ai is held, and a passkey is never created over it,
+    /// so the passkey card offers no action then (`passkeyAvailable`).
+    static func showsPasskeyAction(_ state: FirstRunState) -> Bool {
+        !state.signedIn
+    }
+
+    /// A held passkey is never replaced by near.ai (`canToggleNearAI`), so
+    /// the near.ai card offers no action then.
+    static func showsNearAIAction(_ state: FirstRunState) -> Bool {
+        !passkeyDone(state)
+    }
+
     static func passkeyDone(_ state: FirstRunState) -> Bool {
         if case .passkey = state.account { return true }
         return false
@@ -184,9 +203,12 @@ enum JoinLayout {
 
     /// The passkey card's line: the invitation before a passkey exists, the
     /// ready line with its name after one was created, and nothing for a
-    /// passkey known without a name (a sign-in, or an existing account).
+    /// passkey known without a name (a sign-in, or an existing account) or
+    /// while a signed-in near.ai holds the account.
     static func passkeyLine(_ state: FirstRunState, copy: FirstRunCopy.Join) -> String? {
-        guard case .passkey(let name) = state.account else { return copy.passkeyText }
+        guard case .passkey(let name) = state.account else {
+            return showsPasskeyAction(state) ? copy.passkeyText : nil
+        }
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : copy.passkeyReady.replacingOccurrences(of: "{name}", with: trimmed)
     }
@@ -229,7 +251,11 @@ struct JoinScreen: View {
     let copy: FirstRunCopy
     @ObservedObject var runner: FirstRunRunner
     let passkeyAccount: (any PasskeyAccount)?
-    var issuerHost: (String) -> String? = TCInvite.issuerHost
+    var issuerHost: (String) -> String? = JoinScreen.defaultIssuerHost
+
+    /// The core's host reader, named so the test reaches the function the
+    /// screen uses.
+    static func defaultIssuerHost(_ invite: String) -> String? { TCInvite.issuerHost(invite) }
 
     @State private var draft: String?
     @State private var refused = false
@@ -328,7 +354,8 @@ struct JoinScreen: View {
         accountCard(
             eyebrow: copy.join.passkeyEyebrow,
             text: JoinLayout.passkeyLine(runner.state, copy: copy.join),
-            done: JoinLayout.passkeyDone(runner.state) ? copy.join.passkeyDone : nil
+            done: JoinLayout.passkeyDone(runner.state) ? copy.join.passkeyDone : nil,
+            showsAction: JoinLayout.showsPasskeyAction(runner.state)
         ) {
             Button(copy.join.passkeyCreate, action: openPasskey)
                 .buttonStyle(GlassButtonStyle(.glass))
@@ -340,7 +367,8 @@ struct JoinScreen: View {
         accountCard(
             eyebrow: copy.join.nearAiEyebrow,
             text: JoinLayout.nearAILine(runner.state, copy: copy.join),
-            done: JoinLayout.showsSignedIn(runner.state) ? copy.join.signedIn : nil
+            done: JoinLayout.showsSignedIn(runner.state) ? copy.join.signedIn : nil,
+            showsAction: JoinLayout.showsNearAIAction(runner.state)
         ) {
             Button {
                 runner.state = JoinLayout.toggleNearAI(runner.state)
@@ -360,9 +388,10 @@ struct JoinScreen: View {
     }
 
     /// Ron's `AccountCard`: eyebrow and line on the left, the action on the
-    /// right until it is done, then its status.
+    /// right until it is done, then its status. With the other account held
+    /// there is no action to offer, so none is shown.
     private func accountCard<Action: View>(
-        eyebrow: String, text: String?, done: String?, @ViewBuilder action: () -> Action
+        eyebrow: String, text: String?, done: String?, showsAction: Bool, @ViewBuilder action: () -> Action
     ) -> some View {
         GlassCard {
             HStack(spacing: GlassTokens.Space.s6) {
@@ -379,7 +408,7 @@ struct JoinScreen: View {
                 Spacer(minLength: 0)
                 if let done {
                     GlassStatusLabel(done, status: .on)
-                } else {
+                } else if showsAction {
                     action()
                 }
             }

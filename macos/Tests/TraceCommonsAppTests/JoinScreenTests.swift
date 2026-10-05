@@ -73,6 +73,17 @@ final class JoinScreenTests: XCTestCase {
                 copy.join.inviteJoined
                     .replacingOccurrences(of: "{host}", with: "issuer.example")
                     .replacingOccurrences(of: "{pay_range}", with: "—")))
+
+        // The screen's own host function is the core's (`TCInvite.issuerHost`),
+        // so a real invite shows its issuer's host before the daemon runs.
+        XCTAssertNil(JoinScreen.defaultIssuerHost("not an invite"))
+        let real = JoinLayout.lookUp(
+            "https://issuer.tracecommons.ai/onboard#VQWWPGYSG8Y4LTP6", in: FirstRunState(), failure: nil,
+            host: JoinScreen.defaultIssuerHost)
+        XCTAssertEqual(real.outcome, .found)
+        XCTAssertEqual(
+            JoinLayout.inviteLine(real.state, lookup: nil, failure: real.failure, copy: copy.join),
+            .host("issuer.tracecommons.ai"))
     }
 
     /// Review Focus 2: back on Join after a dead invite, with the daemon
@@ -88,13 +99,21 @@ final class JoinScreenTests: XCTestCase {
             .error(copy.join.inviteError))
 
         // Something that is not an invite is refused locally with the same
-        // line, and is not kept, so it can never be enrolled.
+        // line, and is not kept, so it can never be enrolled. The refused
+        // invite stays held while its refusal stands, so the refusal stays
+        // tied to it.
         let dead = FirstRunFailure.inviteDead(label: "exhausted")
         let refused = JoinLayout.lookUp("not an invite", in: state, failure: dead, host: Self.host)
         XCTAssertEqual(refused.outcome, .refused)
-        XCTAssertEqual(refused.state.invite, "")
-        XCTAssertNil(refused.state.issuerHost)
+        XCTAssertEqual(refused.state.invite, "invite:issuer.example")
+        XCTAssertEqual(refused.state.issuerHost, "issuer.example")
         XCTAssertEqual(refused.failure, dead)
+
+        // With no refusal pending, a refused paste drops the kept invite.
+        let plain = JoinLayout.lookUp("not an invite", in: state, failure: nil, host: Self.host)
+        XCTAssertEqual(plain.outcome, .refused)
+        XCTAssertEqual(plain.state.invite, "")
+        XCTAssertNil(plain.state.issuerHost)
         XCTAssertEqual(
             JoinLayout.inviteLine(refused.state, lookup: nil, failure: nil, copy: copy.join, refused: true),
             .error(copy.join.inviteError))
@@ -141,6 +160,30 @@ final class JoinScreenTests: XCTestCase {
         XCTAssertEqual(
             JoinLayout.inviteLine(again.state, lookup: nil, failure: again.failure, copy: copy.join),
             .error(copy.join.inviteError))
+
+        // A refused paste in between does not make the refused invite new:
+        // looked up again, it still carries the core's error.
+        let garbage = JoinLayout.lookUp("not an invite", in: returned, failure: dead, host: Self.host)
+        XCTAssertEqual(garbage.outcome, .refused)
+        XCTAssertEqual(garbage.failure, dead)
+        let backAgain = JoinLayout.lookUp(
+            "invite:issuer.example", in: garbage.state, failure: garbage.failure, host: Self.host)
+        XCTAssertEqual(backAgain.outcome, .found)
+        XCTAssertEqual(backAgain.failure, dead)
+        XCTAssertEqual(
+            JoinLayout.inviteLine(backAgain.state, lookup: nil, failure: backAgain.failure, copy: copy.join),
+            .error(copy.join.inviteError))
+
+        // And after that refused paste an emptied field can still withdraw
+        // the refused invite, taking its error with it.
+        XCTAssertTrue(JoinLayout.canLookUp("", in: garbage.state))
+        let clearedAfterGarbage = JoinLayout.lookUp("", in: garbage.state, failure: garbage.failure, host: Self.host)
+        XCTAssertEqual(clearedAfterGarbage.outcome, .withdrawn)
+        XCTAssertNil(clearedAfterGarbage.failure)
+        XCTAssertEqual(
+            JoinLayout.inviteLine(
+                clearedAfterGarbage.state, lookup: nil, failure: clearedAfterGarbage.failure, copy: copy.join),
+            .hidden)
 
         // An empty field withdraws it: no error, no line, nothing planned.
         XCTAssertTrue(JoinLayout.canLookUp("  ", in: returned))
@@ -260,6 +303,36 @@ final class JoinScreenTests: XCTestCase {
             XCTAssertTrue(JoinLayout.passkeyDone(after))
             XCTAssertFalse(FirstRunPlan.calls(for: after, at: .leaveRoots).contains(.signInNearAI))
         }
+    }
+
+    /// One held account leaves the other card with neither its inviting line
+    /// nor its action, which could never be taken over that account.
+    func test_aHeldAccountQuietsTheOtherCard() throws {
+        let copy = try coreCopy()
+        let start = FirstRunState(daemonStarted: true)
+        XCTAssertTrue(JoinLayout.showsPasskeyAction(start))
+        XCTAssertTrue(JoinLayout.showsNearAIAction(start))
+        XCTAssertEqual(JoinLayout.passkeyLine(start, copy: copy.join), copy.join.passkeyText)
+        XCTAssertEqual(JoinLayout.nearAILine(start, copy: copy.join), copy.join.nearAiText)
+
+        // A near.ai only chosen is not held: a passkey can still replace it.
+        let chosen = JoinLayout.toggleNearAI(start)
+        XCTAssertTrue(JoinLayout.showsPasskeyAction(chosen))
+        XCTAssertEqual(JoinLayout.passkeyLine(chosen, copy: copy.join), copy.join.passkeyText)
+
+        let signedIn = FirstRunState(account: .nearAI, daemonStarted: true, signedIn: true)
+        XCTAssertFalse(JoinLayout.showsPasskeyAction(signedIn))
+        XCTAssertNil(JoinLayout.passkeyLine(signedIn, copy: copy.join))
+
+        for name in ["Mac", ""] {
+            let held = FirstRunState(account: .passkey(name: name), daemonStarted: true)
+            XCTAssertFalse(JoinLayout.showsNearAIAction(held))
+            XCTAssertNil(JoinLayout.nearAILine(held, copy: copy.join))
+        }
+
+        let source = try Self.source()
+        XCTAssertTrue(source.contains("JoinLayout.showsPasskeyAction(runner.state)"))
+        XCTAssertTrue(source.contains("JoinLayout.showsNearAIAction(runner.state)"))
     }
 
     /// The passkey ceremony completes with the daemon, which runs only once
