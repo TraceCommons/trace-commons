@@ -5533,6 +5533,23 @@ pub unsafe extern "C" fn tc_contribution_override_refusal_text(
     })
 }
 
+/// The Missions disclosure (M4, #1173; `consent_copy::missions_disclosure_copy`):
+/// a JSON object `{title, matching, nothing_sent, credit}` -- matching
+/// happens on this Mac, nothing is sent because of a mission, and a
+/// mission's credit is projected until the commons records it, then
+/// pending. Shown the first time Missions is opened and in Settings. DRAFT,
+/// NEEDS APPROVAL, every sentence.
+///
+/// Returns an owned JSON string; free it with [`tc_string_free`]. NULL only
+/// on a caught panic.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_missions_disclosure_copy_json() -> *mut c_char {
+    guarded_string_no_err(|| {
+        let copy = trace_commons_contributor::consent_copy::missions_disclosure_copy();
+        Ok(to_owned_cstring(&serde_json::to_string(&copy)?))
+    })
+}
+
 /// The offer to move a legacy invite identity to a NEAR AI account
 /// (`consent_copy::legacy_migration_offer`), as a JSON object of
 /// `LegacyMigrationOfferCopy`'s fields. Shown only while

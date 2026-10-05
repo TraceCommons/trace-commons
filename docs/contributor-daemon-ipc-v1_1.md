@@ -558,6 +558,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `set_project_mode` | `project_id` **or** `project_key`, `mode` (`label` accepted and ignored), `include_backlog` (optional boolean, `auto_upload` only) | `ok: true`, `purged: <count>`, `retracted: <count>`, `from_now`, `overridden_by` (`null` or the override's mode) | socket clients send `project_id`; `auto_upload` no longer requires a terminal; see "Naming a project" above, "`set_project_mode` and the ignore purge" and "Arming from now" below |
 | `set_contribution_override` | `mode` (`notify_only`, `auto_upload` or `ignore`), `confirm` (boolean; `true` required for `auto_upload`) | `changed`, `contribution_override: {mode, since}`, `returned: <count>` | the menu-bar pill's global override (#1173); per-folder modes are never written; `auto_upload` is a grant, refused with `arming-terms-unavailable` without terms (#1208); see "The contribution override" below |
 | `clear_contribution_override` | — | `cleared`, `returned: <count>` | every folder back on its own mode; see "The contribution override" below |
+| `mission_matches` | `catalogue` (a contribution mission catalogue; PROVISIONAL, shape owned by Z7/Z8) | `matches[]` of mission ids, `read: {tools, folders}` (counts) | K16 (#1173): which contribution missions this Mac's work fits, worked out on this Mac only; read-only; refused with `catalogue-required`, `catalogue-invalid` or `catalogue-schema-unsupported`; see "`mission_matches`" below |
 | `list_history` | `limit` (optional, default 50, max 1000) | `history[]`, each row now also carrying `approved_unattended`, `approved_verdict`, `uploaded_bytes`, and `revoked_at` | see "History provenance (K7)", "Sizes in history, and the would-send size (K10)" and "Withdrawal dates on revoked rows (K12)" below |
 | `history_rollup` | — | see below | now also carries `taken_back`, and a `withdrawn` bucket in each window |
 | `commons_credit_summary` | — | `posture_state`, `commons_settlement`, `commons_settlement_explanation`, `commons_graded` (device route); `points_state`, `commons_points_earned_this_period`, `commons_points_lifetime_earned`, `commons_pending_review`, `commons_currency_code`, `commons_currency_earned_this_period`, `commons_period_start`, `commons_period_end` (account route); `observed_at` | always succeeds; see "`commons_credit_summary`" below |
@@ -2239,6 +2240,99 @@ side effects, computed from the same queue and policy state a client already
 fetches `list_projects` to draw. It is always present (never absent, unlike
 `contributable_count`), because whether a session is undecided-and-Ask-me is
 a question every contributor's queue can answer, invited or not.
+
+### `mission_matches`
+
+K16 (#1173). Which **contribution missions** fit this contributor's work,
+matched on this Mac, under the consent design's "Missions" rules (M1, M2).
+These are not the published mission packages (`GET /v1/missions`).
+
+```json
+{"method": "mission_matches", "params": {"catalogue": {
+  "schema_version": 1,
+  "missions": [
+    {"mission_id": "m-rust", "title": "Rust refactors",
+     "criteria": {"tools": ["claude-code"], "tool_families": ["anthropic"],
+                  "languages": ["rust"], "min_sessions": 2}}
+  ]}}}
+```
+
+```json
+{"matches": ["m-rust"], "read": {"tools": 1, "folders": 2}}
+```
+
+**The catalogue.** A parameter, for now: the daemon fetches nothing for
+this call. The server catalogue is Z7/Z8's, and when it exists the daemon
+will download it with a request that is the same for every contributor;
+nothing per-contributor is sent for it either way. The shape is
+**PROVISIONAL, owned by Z7/Z8** (`contribution_missions::ContributionMissionCatalogue`):
+`schema_version` (1) and `missions[]` of `{mission_id, title, criteria}`.
+`criteria` lists are each "any of", and an empty or absent list does not
+restrict: `tools` (session sources, as `list_projects`' `tools[].source`
+names them), `tool_families` (`anthropic`, `openai`, `google`), `languages`
+(from marker files at a folder's root, such as `Cargo.toml` for `rust`).
+A session fits when it satisfies every non-empty list; a mission matches when
+at least `min_sessions` (default 1, never less) readable sessions fit.
+Unknown fields are ignored, so a catalogue with later additions still
+loads; a newer `schema_version` is refused with
+`catalogue-schema-unsupported`; a malformed one, a duplicate `mission_id`,
+or one over a bound (256 missions, 200 characters, 32 values a list) with
+`catalogue-invalid`; no catalogue with `catalogue-required`.
+
+**What matching reads (M1).** Only the sessions the daemon has already seen
+(the cache `list_projects` counts tools from), and of those only sessions
+from an **adapter** that is on -- one whose session folder is watched; an
+imported Antigravity conversation is read by the trajectory adapter, so it
+counts as that, not as `antigravity` -- in a folder whose mode in force is
+not Never. The gate is the adapter that actually discovered a session
+(`SessionRef::source`, recorded as `CwdCacheEntry::adapter`), never the
+self-declared, contributor-facing name a staged import can claim
+(`SessionRef::displayed_source`): a trajectory file staged with
+`meta.source: "claude-code"` is read only once trajectory itself is on, not
+because claude-code is. A cache entry written before the `adapter` field
+existed carries no adapter and is not read -- fails closed, the same as one
+with no recorded tool at all. An unset claude-code or codex declaration
+still counts as on, matching what the watcher reads from by default (its
+conventional per-user store); Gemini, Cline and OpenCode count as off until
+declared. A Never contribution override makes every folder Never, so it
+reads nothing and matches nothing. A folder that is not armed and not
+shared may be read, including the unidentified-folder bucket -- it resolves
+to `NotifyOnly`, not Never, so it is read and counted in `read.folders`,
+though it is never asked about languages (it has no folder root to look
+at). When a folder has no display path recorded in the policy (never
+armed, or known only through the cache), the language probe falls back to
+the project key itself, which is case-folded on macOS and Windows; on a
+case-sensitive volume that can miss a marker file under its real-cased
+name, so a language goes unreported rather than over-reported. No session
+body is read. When a mission asks about `languages`, the roots of the
+readable folders are checked for marker files, by existence only. `read`
+counts the distinct tools and folders matching read, and nothing else.
+
+**What matching excludes (M2).** A session counts toward a mission only
+when it is contributed through one of the three consent paths ("The three
+paths," above). A **kept** session (the contributor explicitly holding it on
+this Mac) and a **withdrawn** one (an upload later taken back) are excluded
+from the candidates matching reads -- neither was contributed in a way that
+should count, the first because it was declined, the second because it was
+reversed. An **already-uploaded** session that is neither kept nor
+withdrawn, and one still being written and **not yet quiescent**, are
+excluded from neither set and stay candidates: quiescence is a fact about
+when a session is ready to read, not about whether it was ever offered, and
+an ordinary accepted upload did nothing M2 forbids.
+
+**What it never does (M1, M2).** It sends nothing: no activity profile,
+match, folder or tool list leaves the Mac. It writes no audit row and logs
+one label, `mission-matches-answered`. It changes no policy, queue or daemon
+state: it never arms a folder, approves a session or widens a scope, and
+emits no event -- the queue and the local history cache are read here (to
+exclude kept and withdrawn sessions), never written. A match is a
+suggestion for this screen; a session counts toward a mission only when it
+is contributed through one of the existing paths.
+
+**The disclosure (M4).** `tc_missions_disclosure_copy_json` returns the
+words shown the first time Missions is opened and in Settings
+(`consent_copy::missions_disclosure_copy`): `{title, matching, nothing_sent,
+credit}`. DRAFT, NEEDS APPROVAL.
 
 ### View menu: Group by and Sort by (K15)
 
