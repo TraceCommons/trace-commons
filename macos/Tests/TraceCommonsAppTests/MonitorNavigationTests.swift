@@ -131,6 +131,86 @@ final class MonitorNavigationTests: XCTestCase {
         XCTAssertTrue(store.failures.isEmpty, "an old read's outcome is recorded against the new client")
     }
 
+    // MARK: Traces: nothing the old daemon said survives an attach
+
+    /// After a daemon restart the old daemon's refusals, notices and undo
+    /// offers are not drawn on the new one's tab, and Undo never reaches it.
+    func test_attachClearsTheOldDaemonsNoticesAndUndo() async throws {
+        let store = TracesStore(client: SampleDaemonClient(.normalDay))
+        await store.load()
+        let id = try XCTUnwrap(store.tree.allSessions.first?.entryId)
+        await store.perform(.contribute, on: id)
+        XCTAssertNotNil(store.lastContributed)
+        // The sample core refuses the cancel, so a refusal is kept.
+        await store.perform(.undoContribute, on: id)
+        XCTAssertNotNil(store.actionError)
+        await store.perform(.keep, on: id)
+        XCTAssertEqual(store.lastKept, id)
+        await store.setSource(.codex, .watch(path: ""))
+        XCTAssertFalse(store.writeErrors.isEmpty)
+        let folder = TracesTree.FolderNode(id: "p1", label: "docs", mode: .ask, offerableModes: [.ask, .ignore], sessions: [])
+        await store.setFolderMode(folder, .ignore, promised: 3)
+        XCTAssertNotNil(store.folderNotice)
+
+        store.attach(SampleDaemonClient(.busyQueue))
+        XCTAssertNil(store.lastContributed, "the old daemon's Undo would send cancel to the new one")
+        XCTAssertNil(store.lastKept)
+        XCTAssertNil(store.actionError)
+        XCTAssertTrue(store.writeErrors.isEmpty)
+        XCTAssertNil(store.folderNotice)
+        XCTAssertTrue(store.acting.isEmpty)
+        XCTAssertTrue(store.writing.isEmpty)
+    }
+
+    /// A gated old client, a write started on it, then a restart (attach)
+    /// before the old daemon answers.
+    private func staleWrite(
+        _ write: @escaping @MainActor (TracesStore) async -> Void
+    ) async -> TracesStore {
+        let entered = expectation(description: "the write reached the old daemon")
+        entered.assertForOverFulfill = false
+        let gate = GatedTransport(.normalDay, entered: entered)
+        let store = TracesStore(client: LiveDaemonClient(transport: gate))
+        let writing = Task { await write(store) }
+        await fulfillment(of: [entered], timeout: 10)
+        store.attach(nil)
+        gate.open()
+        await writing.value
+        return store
+    }
+
+    func test_aReviewActionTheOldDaemonRefusesAfterAttachIsDropped() async {
+        // `cancel` is refused by the sample transport.
+        let store = await staleWrite { await $0.perform(.undoContribute, on: "e1") }
+        XCTAssertNil(store.actionError, "the old daemon's refusal is drawn on the new one's tab")
+        XCTAssertTrue(store.acting.isEmpty)
+        XCTAssertEqual(store.phase, .loading, "a stale answer moved the new client's tab")
+    }
+
+    func test_aReviewActionTheOldDaemonTakesAfterAttachIsDropped() async {
+        let store = await staleWrite { await $0.perform(.keep, on: "e1") }
+        XCTAssertNil(store.lastKept, "the old daemon's undo is offered against the new one")
+        XCTAssertNil(store.actionError)
+        XCTAssertEqual(store.phase, .loading)
+    }
+
+    func test_aSourceWriteTheOldDaemonRefusesAfterAttachIsDropped() async {
+        // `set_settings` is refused by the sample transport.
+        let store = await staleWrite { await $0.setSource(.codex, .off) }
+        XCTAssertTrue(store.writeErrors.isEmpty, "the old daemon's refusal is drawn beside the new one's row")
+        XCTAssertTrue(store.writing.isEmpty)
+        XCTAssertEqual(store.phase, .loading)
+    }
+
+    func test_aFolderWriteTheOldDaemonAnswersAfterAttachIsDropped() async {
+        let folder = TracesTree.FolderNode(id: "p1", label: "docs", mode: .ask, offerableModes: [.ask, .ignore], sessions: [])
+        let store = await staleWrite { await $0.setFolderMode(folder, .ignore, promised: 3) }
+        XCTAssertNil(store.folderNotice, "the old daemon's notice is drawn on the new one's tab")
+        XCTAssertTrue(store.writeErrors.isEmpty)
+        XCTAssertTrue(store.writing.isEmpty)
+        XCTAssertEqual(store.phase, .loading)
+    }
+
     // MARK: The live client's provisional methods (notAvailableYet)
 
     /// The live client throws `notAvailableYet` for the provisional methods

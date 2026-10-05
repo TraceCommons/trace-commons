@@ -54,6 +54,11 @@ final class TracesStore {
     /// Each load's number; a load that finishes after a newer one started is
     /// dropped, so an older read never overwrites a newer tree.
     private var generation = 0
+    /// Bumped only by `attach`, not by a load: a write that started against
+    /// an older client is dropped when it answers, whatever it says, so its
+    /// refusal, notice or undo is never drawn on the new client's tab. (A
+    /// load on the same client must not drop a write's answer.)
+    private var attachment = 0
 
     /// The tab's words, from the core (`tc_monitor_traces_copy_json`),
     /// decoded once rather than on every redraw. Nil leaves a label out
@@ -89,15 +94,25 @@ final class TracesStore {
     /// Follows a new client (or none). Nothing the old one reported is
     /// drawn or acted on: the tree empties, the badge and routes read
     /// unknown, and the tab is loading until the new client answers; a load
-    /// still in flight from the old one is dropped. (A failed read from the
-    /// same client still keeps the last tree.)
+    /// or write still in flight from the old one is dropped. Its refusals,
+    /// notices and undo offers go too: Undo would otherwise send `cancel` to
+    /// the new daemon. (A failed read from the same client still keeps the
+    /// last tree.)
     func attach(_ client: (any DaemonDataClient)?) {
         self.client = client
         generation += 1
+        attachment += 1
         phase = .loading
         tree = TracesTree(tools: [], unplaced: [])
         status = nil
         destinations = nil
+        acting = []
+        writing = []
+        lastKept = nil
+        lastContributed = nil
+        actionError = nil
+        writeErrors = [:]
+        folderNotice = nil
     }
 
     /// Marks the data as a sample set in a debug build; nil over the daemon.
@@ -302,11 +317,13 @@ final class TracesStore {
     }
 
     /// One review action on one session, then a reload. Nothing is applied
-    /// optimistically: the tree redraws from the core's answer.
+    /// optimistically: the tree redraws from the core's answer. An answer
+    /// from a client that has since been replaced changes nothing.
     func perform(_ action: ReviewAction, on entryId: String) async {
         guard !acting.contains(entryId) else { return }
+        let mine = attachment
         acting.insert(entryId)
-        defer { acting.remove(entryId) }
+        defer { if mine == attachment { acting.remove(entryId) } }
         actionError = nil
         do {
             let client = try attached()
@@ -316,23 +333,29 @@ final class TracesStore {
                 // the hold Undo can still reach. A skipped approve throws
                 // `notApproved` and is said as a refusal, never as success.
                 let response = try await client.approve(entryId: entryId)
+                guard mine == attachment else { return }
                 lastContributed = Contributed(entryId: entryId, toast: response.toast)
                 // A newer decision ends the older Keep's undo.
                 lastKept = nil
             case .undoContribute:
                 try await client.cancel(entryId: entryId)
+                guard mine == attachment else { return }
                 lastContributed = nil
             case .keep:
                 _ = try await client.keep(entryId: entryId)
+                guard mine == attachment else { return }
                 lastKept = entryId
             case .undoKeep:
                 _ = try await client.undoKeep(entryId: entryId)
+                guard mine == attachment else { return }
                 lastKept = nil
             case .dismiss:
                 try await client.dismiss(entryId: entryId)
+                guard mine == attachment else { return }
                 lastKept = nil
             }
         } catch {
+            guard mine == attachment else { return }
             let error = error as? DaemonDataError ?? .undecodable(method: "\(action)")
             // A core that did not answer is the tab's state, and its last
             // count is no longer known.
@@ -415,15 +438,18 @@ final class TracesStore {
     /// names the folder chosen for it. The core's answer is reloaded.
     func setSource(_ kind: SourceKind, _ choice: SourceChoice) async {
         guard !writing.contains(kind.rawValue) else { return }
+        let mine = attachment
         writing.insert(kind.rawValue)
-        defer { writing.remove(kind.rawValue) }
+        defer { if mine == attachment { writing.remove(kind.rawValue) } }
         writeErrors[kind.rawValue] = nil
         do {
             _ = try await attached().setSource(kind, choice)
         } catch {
+            guard mine == attachment else { return }
             refused(kind.rawValue, error, method: "set_settings")
             return
         }
+        guard mine == attachment else { return }
         await load()
     }
 
@@ -433,12 +459,14 @@ final class TracesStore {
     /// named; the core's `purged` is the authority, and a difference is said.
     func setFolderMode(_ folder: TracesTree.FolderNode, _ mode: ProjectMode, promised: Int) async {
         guard !writing.contains(folder.id) else { return }
+        let mine = attachment
         writing.insert(folder.id)
-        defer { writing.remove(folder.id) }
+        defer { if mine == attachment { writing.remove(folder.id) } }
         folderNotice = nil
         writeErrors[folder.id] = nil
         do {
             let result = try await attached().setProjectMode(projectId: folder.id, mode: mode, includeBacklog: nil)
+            guard mine == attachment else { return }
             if mode == .ignore {
                 folderNotice = TCCoreCopy.projectIgnoreReconciled(
                     project: folder.label, promised: promised, purged: result.purged ?? promised)
@@ -446,6 +474,7 @@ final class TracesStore {
         } catch {
             // The picker redraws from the core's answer, so a refused write
             // shows the folder as it still is; the error is kept beside it.
+            guard mine == attachment else { return }
             refused(folder.id, error, method: "set_project_mode")
             return
         }
