@@ -12,21 +12,22 @@ import TCShellCore
 /// figure here is money spent. Only `verified` is drawn as proof.
 ///
 /// The ledger needs the daemon, so the tab reads its startup first, as the
-/// legacy destination does (`PrivateInferenceActivationView`): the roots
-/// screen when folders are owed, a spinner while starting, the core's down
+/// legacy destination does (`PrivateInferenceActivationView`): the first
+/// run's Folders step when folders are owed (it starts the daemon, takes no
+/// invite and offers no Join), a spinner while starting, the core's down
 /// title over the refusal's sentence.
 struct InferenceTabView: View {
     let store: InferenceStore
     @EnvironmentObject private var model: AppModel
 
     var body: some View {
-        // The roots screen scrolls itself, so the switch sits outside the
+        // The Folders step scrolls itself, so the switch sits outside the
         // ledger's scroll; the refresh sits on the stack, which is always
         // drawn.
         VStack(alignment: .leading, spacing: 0) {
             switch model.startup {
             case .needsRoots:
-                OnboardingRootsView(configDirectory: model.configDirectory, onStarted: {})
+                OnboardingCoordinatorView(startAt: .folders, takesInvites: false, offersJoin: false, onComplete: {})
             case .starting:
                 SettingsAwaiting().frame(maxWidth: .infinity)
             case .refused(let sentence):

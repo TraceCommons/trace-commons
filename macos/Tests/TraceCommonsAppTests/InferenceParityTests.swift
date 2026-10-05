@@ -409,7 +409,7 @@ final class InferenceParityTests: XCTestCase {
     func test_theInspectorCarriesTheAccountTheSwitchAndTheTools() throws {
         let views = try Self.text("Views/Monitor/InferenceViews.swift")
         XCTAssertTrue(views.contains("InferenceAccountSection(store: store)"))
-        for needle in ["case .needsRoots", "OnboardingRootsView(configDirectory: model.configDirectory", "case .refused(let",
+        for needle in ["case .needsRoots", "OnboardingCoordinatorView(startAt: .folders, takesInvites: false, offersJoin: false", "case .refused(let",
                        "GlassHealthBanner(banner:", "model.refreshAll()"] {
             XCTAssertTrue(views.contains(needle), "InferenceViews.swift lacks \(needle)")
         }
@@ -465,7 +465,7 @@ final class InferenceParityTests: XCTestCase {
     }
 
     /// The tab reads the daemon's startup as the legacy destination did:
-    /// the roots screen when folders are owed (outside the ledger's scroll,
+    /// the first run's Folders step when folders are owed (outside the ledger's scroll,
     /// so it never nests one), a spinner while starting, the core's down
     /// title over the refusal's sentence, the ledger only while running;
     /// and the refresh sits on the always-present stack. The inspector's
@@ -475,7 +475,7 @@ final class InferenceParityTests: XCTestCase {
         for needle in ["        VStack(alignment: .leading, spacing: 0) {\n"
                            + "            switch model.startup {\n"
                            + "            case .needsRoots:\n"
-                           + "                OnboardingRootsView(configDirectory: model.configDirectory, onStarted: {})\n"
+                           + "                OnboardingCoordinatorView(startAt: .folders, takesInvites: false, offersJoin: false, onComplete: {})\n"
                            + "            case .starting:\n"
                            + "                SettingsAwaiting().frame(maxWidth: .infinity)\n"
                            + "            case .refused(let sentence):\n"
@@ -494,7 +494,7 @@ final class InferenceParityTests: XCTestCase {
             XCTAssertTrue(views.contains(needle), "InferenceViews.swift lacks \(needle)")
         }
         XCTAssertEqual(views.components(separatedBy: ".onAppear").count - 1, 1)
-        XCTAssertEqual(views.components(separatedBy: "OnboardingRootsView(").count - 1, 1)
+        XCTAssertEqual(views.components(separatedBy: "OnboardingCoordinatorView(").count - 1, 1)
         // The read-only tool cards are gone: the section's list is the one
         // with the connect action.
         XCTAssertFalse(views.contains("sentence(row)"), "the inspector draws one tools list, the section's")
