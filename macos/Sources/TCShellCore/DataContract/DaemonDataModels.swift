@@ -331,6 +331,10 @@ extension DaemonData {
         /// or the unidentified bucket does not upload (#1208): draw the core's
         /// `auto_partial` line under the label.
         public let contributionModePartial: Bool?
+        /// K2 (#1173): `true` while a debug daemon runs a developer dry
+        /// run. A release daemon never sends it. The app's notice reads it
+        /// rather than the environment.
+        public let devDryRun: Bool?
 
         public enum CodingKeys: String, CodingKey, CaseIterable {
             case schemaVersion = "schema_version"
@@ -353,6 +357,7 @@ extension DaemonData {
             case contributionOverride = "contribution_override"
             case contributionMode = "contribution_mode"
             case contributionModePartial = "contribution_mode_partial"
+            case devDryRun = "dev_dry_run"
         }
     }
 

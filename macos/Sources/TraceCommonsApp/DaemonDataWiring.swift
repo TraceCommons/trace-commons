@@ -22,5 +22,18 @@ enum DaemonDataWiring {
     static func sample(_ set: SampleDaemonClient.SampleSet) -> any DaemonDataClient {
         SampleDaemonClient(set)
     }
+
+    /// K2 (#1173): whether the daemon reports a developer dry run, read
+    /// from a `status` result. The daemon decides the mode (from
+    /// `TC_DEV_DRY_RUN`, in a debug build of the Rust library only) and
+    /// reports it as `dev_dry_run`; the app never parses the environment
+    /// itself, so its notice always matches what the daemon is doing.
+    /// Absent, or anything but `true`, is off.
+    static func devDryRun(fromStatus data: Data) -> Bool {
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return false
+        }
+        return object["dev_dry_run"] as? Bool == true
+    }
     #endif
 }
