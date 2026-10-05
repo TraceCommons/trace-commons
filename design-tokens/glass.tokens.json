@@ -21,7 +21,7 @@
     "statusOutside": { "hex": "#ff6b6b", "note": "Leaves for an outside model, no proof.", "light": { "hex": "#d0342c" } },
     "statusOnText": { "hex": "#3ddc84", "note": "statusOn as text (a pill label, the submit-done label): 4.5:1 or more on every light ground and on its own tint. Dark is statusOn.", "light": { "hex": "#11613a" } },
     "statusAskText": { "hex": "#f5c142", "note": "statusAsk as text: 4.5:1 or more on every light ground and on its own tint. Dark is statusAsk.", "light": { "hex": "#7a4a06" } },
-    "statusOutsideText": { "hex": "#ff6b6b", "note": "statusOutside as text: 4.5:1 or more on every light ground and on its own tint. Dark is statusOutside.", "light": { "hex": "#a3221c" } },
+    "statusOutsideText": { "hex": "#ff9494", "note": "statusOutside as text: 4.5:1 or more on every light ground and on its own tint. Dark is lighter than statusOutside: on tintOutside over every card stop on paneOpaque it clears 4.73:1, where #ff6b6b was 3.61.", "light": { "hex": "#a3221c" } },
     "badgeFill": { "hex": "#ff6b6b", "note": "The decisions-owed badge behind textOnStatus. Dark is statusOutside; light is lighter so the dark count clears 4.5:1 (4.86), and the fill 3:1 on the pane.", "light": { "hex": "#e04a42" } },
     "dataShared": { "hex": "#8a3dff", "light": { "hex": "#7a2cf5" } },
     "dataKept": { "hex": "#3a7bd5", "light": { "hex": "#2f6bc4" } },

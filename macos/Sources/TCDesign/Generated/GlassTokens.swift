@@ -44,8 +44,8 @@ public enum GlassTokens {
         public static let statusOnText: GlassRGBA = GlassRGBA(0x3DDC84, alpha: 1, light: GlassRGBA(0x11613A, alpha: 1))
         /// statusAsk as text: 4.5:1 or more on every light ground and on its own tint. Dark is statusAsk.
         public static let statusAskText: GlassRGBA = GlassRGBA(0xF5C142, alpha: 1, light: GlassRGBA(0x7A4A06, alpha: 1))
-        /// statusOutside as text: 4.5:1 or more on every light ground and on its own tint. Dark is statusOutside.
-        public static let statusOutsideText: GlassRGBA = GlassRGBA(0xFF6B6B, alpha: 1, light: GlassRGBA(0xA3221C, alpha: 1))
+        /// statusOutside as text: 4.5:1 or more on every light ground and on its own tint. Dark is lighter than statusOutside: on tintOutside over every card stop on paneOpaque it clears 4.73:1, where #ff6b6b was 3.61.
+        public static let statusOutsideText: GlassRGBA = GlassRGBA(0xFF9494, alpha: 1, light: GlassRGBA(0xA3221C, alpha: 1))
         /// The decisions-owed badge behind textOnStatus. Dark is statusOutside; light is lighter so the dark count clears 4.5:1 (4.86), and the fill 3:1 on the pane.
         public static let badgeFill: GlassRGBA = GlassRGBA(0xFF6B6B, alpha: 1, light: GlassRGBA(0xE04A42, alpha: 1))
         public static let dataShared: GlassRGBA = GlassRGBA(0x8A3DFF, alpha: 1, light: GlassRGBA(0x7A2CF5, alpha: 1))

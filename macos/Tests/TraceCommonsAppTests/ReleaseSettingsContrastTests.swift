@@ -8,8 +8,8 @@ import XCTest
 /// The release main window stacks the glass Settings sections on its own
 /// ground (#1229 review 2, item 6). The glass tokens are tested against the
 /// glass grounds; this tests them against the ground the release window
-/// actually paints, in both appearances, with every card, quiet card, well
-/// and tag tint blended over it the way the sections draw them.
+/// actually paints, in both appearances, with every card, quiet card, well,
+/// field and tag tint blended over it the way the sections draw them.
 ///
 /// Floors are the repo's: 4.5:1 for text, 3:1 for a UI glyph (a status dot).
 final class ReleaseSettingsContrastTests: XCTestCase {
@@ -35,9 +35,11 @@ final class ReleaseSettingsContrastTests: XCTestCase {
 
     /// Every surface a Settings sentence sits on, over the host ground:
     /// the ground itself, each stop of a card (`GlassEyebrowCard`) and a
-    /// quiet card (`GlassNotice`), and, with `wells`, a well inside each
-    /// (the bio, measurement and Homebrew-command boxes). Only text is
-    /// drawn in a well; no dot or tag is.
+    /// quiet card (`GlassNotice`), and, with `wells`, a well and a field
+    /// inside each: the well under the bio, measurement and
+    /// Homebrew-command boxes, and `fieldFill` under typed text (the Tools
+    /// port field, `ToolsSection`, and `GlassTextField` in `Controls`).
+    /// Only text is drawn in a well or a field; no dot or tag is.
     static func grounds(_ appearance: Appearance, glass: Bool = true, wells: Bool = true) -> [(String, RGB)] {
         let host = hostGround(appearance, glass: glass)
         var grounds: [(String, RGB)] = [("host ground", host)]
@@ -47,6 +49,7 @@ final class ReleaseSettingsContrastTests: XCTestCase {
                 grounds.append(("\(name) at \(stop.location)", card))
                 if wells {
                     grounds.append(("well in \(name) at \(stop.location)", over(appearance.token(GlassTokens.Color.wellFill), card)))
+                    grounds.append(("field in \(name) at \(stop.location)", over(appearance.token(GlassTokens.Color.fieldFill), card)))
                 }
             }
         }
@@ -86,12 +89,6 @@ final class ReleaseSettingsContrastTests: XCTestCase {
         ]
     }()
 
-    /// The one pair that falls short on every ground, glass included: the
-    /// outside tag in dark. A token defect, not the host's; pinned below.
-    static func isKnownTokenShortfall(_ appearance: Appearance, tone: String) -> Bool {
-        appearance == .dark && tone == "outside"
-    }
-
     func test_settingsTextClearsTextContrastOnTheReleaseGround() {
         for appearance in Appearance.allCases {
             for (ground, rgb) in Self.grounds(appearance) {
@@ -117,7 +114,7 @@ final class ReleaseSettingsContrastTests: XCTestCase {
     func test_tagInkClearsTextContrastOnItsTintOverTheReleaseGround() {
         for appearance in Appearance.allCases {
             for (ground, rgb) in Self.grounds(appearance, wells: false) {
-                for (tone, ink, tint) in Self.tags where !Self.isKnownTokenShortfall(appearance, tone: tone) {
+                for (tone, ink, tint) in Self.tags {
                     let pill = Self.over(appearance.token(tint), rgb)
                     let ratio = Self.contrast(Self.solid(appearance.token(ink)), pill)
                     XCTAssertGreaterThanOrEqual(ratio, 4.5, "\(appearance) \(tone) tag over \(ground): \(ratio)")
@@ -127,21 +124,12 @@ final class ReleaseSettingsContrastTests: XCTestCase {
     }
 
     /// Why the destination paints a glass ground at all: on the bare TC
-    /// ground a refusal's words on a card fall under 4.5:1 in dark.
+    /// ground the outside tag on a card falls under 4.5:1 in dark.
     func test_theBareTCGroundIsNotEnough() {
-        let card = Self.over(GlassTokens.Gradient.cardFill.stops[0].color.dark, Self.hostGround(.dark, glass: false))
-        let ratio = Self.contrast(Self.solid(GlassTokens.Color.statusOutsideText.dark), card)
-        XCTAssertLessThan(ratio, 4.5, "dark statusOutsideText on a card over TC.ground: \(ratio)")
-    }
-
-    /// The dark outside tag is short on the glass pane's own ground too, so
-    /// no host fixes it; the tokens must. When they do, this fails, and the
-    /// exclusion in the tag test comes out with it.
-    func test_theDarkOutsideTagIsAKnownTokenShortfall() {
         let c = GlassTokens.Color.self
-        let card = Self.over(GlassTokens.Gradient.cardFill.stops[0].color.dark, Self.solid(c.paneOpaque.dark))
+        let card = Self.over(GlassTokens.Gradient.cardFill.stops[0].color.dark, Self.hostGround(.dark, glass: false))
         let ratio = Self.contrast(Self.solid(c.statusOutsideText.dark), Self.over(c.tintOutside.dark, card))
-        XCTAssertLessThan(ratio, 4.5, "dark outside tag on a card on the glass pane: \(ratio)")
+        XCTAssertLessThan(ratio, 4.5, "dark outside tag on a card over TC.ground: \(ratio)")
     }
 
     // MARK: WCAG
