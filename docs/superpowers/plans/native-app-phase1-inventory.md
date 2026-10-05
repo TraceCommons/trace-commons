@@ -1,6 +1,6 @@
 # Native app: phase 1 inventory
 
-Tauri commands vs the C ABI, and #1146 screens vs SwiftUI views, at `main` ba8a8777 and #1146 09a26c0d (2026-10-01), for #1173. K3 and K5-K8 moved the logic it lists.
+> **Snapshot 2026-10-01, superseded by `docs/superpowers/plans/2026-10-02-macos-glass-rebuild-and-r15-cutover.md`. Do not use it for current status.** It is kept as the record #1173 was planned from (Refs #1173). Many gaps it lists have since closed.
 
 
 Read from `origin/main` at `ba8a8777` (Publish set_project_mode changes when a write fails, #1171) and from PR #1146 at `09a26c0d` (`claude/tc-monitor-frontend-refactor-8ecf22`). Nothing in the working tree was touched.

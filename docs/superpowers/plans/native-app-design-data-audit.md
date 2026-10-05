@@ -1,11 +1,11 @@
 # Native app: design-data audit
 
-Snapshot of the WYSIWYG design checked against `main` at ba8a8777 (2026-10-01), for #1173. Most gaps listed here have since been closed by the K and Z items; this is the record the plan was built from.
+> **Snapshot 2026-10-01, superseded by `docs/superpowers/plans/2026-10-02-macos-glass-rebuild-and-r15-cutover.md`. Do not use it for current status.** It is kept as the record #1173 was planned from (Refs #1173). Many gaps it lists have since closed.
 
 
 Audited at `origin/main` ba8a8777 (2026-10-01). Read-only. Sources: design.txt / design.html (2026-09-28), PR #1146's monitor files and gap list, #1030, `daemon/ipc.rs` METHODS, `docs/contributor-daemon-ipc-v1_1.md`, `macos/Sources`.
 
-**Limits of the source material.** design.html pulls the window mocks (Traces, Missions, Inference, History, menu bar) from an external `TC Monitor Window` component that isn't in the file. Those rows come from the design's flow text, its swim lanes and #1146's implementation and gap list. Missions also uses Michael's mechanism draft (missions-doc.txt).
+**Limits of the source material.** design.html pulls the window mocks (Traces, Missions, Inference, History, menu bar) from an external `TC Monitor Window` component that isn't in the file. Those rows come from the design's flow text, its swim lanes and #1146's implementation and gap list. Missions also uses the missions mechanism draft.
 
 **Transport.** The macOS app talks to the daemon through the C ABI, not the socket directly. It calls `tc_call(handle, method, params)` (`ffi/src/lib.rs:1163`), which runs the same handlers the socket serves, in process or attached. So every IPC method below is reachable from Swift with no new ABI work. The gaps are the features that have no IPC method at all: passkeys, invite lookup and the mission catalogue. Most K1–K9 fields aren't decoded in Swift yet; `git grep` finds no `inference_calls`, `tool_destinations`, `commons_credit_summary`, `keep`/`list_kept`, `scrub_check`, `started_at`, `user_turns`, `second_look`, `include_backlog`, `unpurposed_traces`, `taken_back` or `approved_unattended` in `macos/Sources`. That's KN0 and is assumed for every A row.
 
@@ -160,14 +160,14 @@ Everything on main for Missions:
 | Missions | Missions "matched to vendor requests from your activity" | C | No matching. A local activity profile is needed so activity never leaves the Mac. | daemon/K + server/Z; product decision |
 | Missions | Daily mission, one per day or per activity type | C | No assignment or scheduling. This is the doc's open question. | product decision, then server/Z |
 | Missions | Completion tracking | C | Reward awards are operator-reviewed with no automated verification. `mission_attempt.rs` records skill-evaluation attempts, not mission completion. Reservations and award history exist only on the account route. | server/Z + daemon/K |
-| Missions | Daily "factor bonus" / credit multiplier | C | Nothing applies a multiplier to credit. `account_trust_rule.rs`'s `multiplier` scales upload *allowance*, is shadow-only and isn't credit. | product decision (off-limits as projected credit) |
+| Missions | Daily "factor bonus" / credit multiplier | C | Nothing applies a multiplier to credit. `account_trust_rule.rs`'s `multiplier` scales upload *allowance*, is shadow-only and isn't credit. | product decision (was off-limits as projected credit; reversed 2026-10-02 in #1174: labelled projected credit is allowed) |
 | Missions | "Trace Activity" accruing monthly | B | `history_rollup.month` counts and `commons_credit_summary.commons_points_earned_this_period` with period start and end. "Trace Activity" itself is undefined. | product decision; server/Z |
 | Missions | Levels that raise rewards | C | None | product decision + server/Z |
 | Missions | Streaks | B | Derivable locally from `list_history.submitted_at`. Nothing computes them. | daemon/K or native UI; product decision |
 | Missions | Badges | C | None | product decision + server/Z |
-| Missions | "Top 8%" standing | B | `history_rollup.community` has `rank`, `novelty_credit` and `accept_rate`, only for a public handle. There's no roster size or percentile, and #1146 calls this off-limits. | product decision |
+| Missions | "Top 8%" standing | B | `history_rollup.community` has `rank`, `novelty_credit` and `accept_rate`, only for a public handle. There's no roster size or percentile, and #1146 called this off-limits (reversed 2026-10-02 in #1174: rankings may use pending credit). | product decision |
 
-**Conflicts with the design rules:** a factor bonus, a multiplier or "levels raise rewards" shown in the app is projected credit, which #1146 rules off-limits, and implies "earned" before settlement. Server mission awards are a third ledger, separate from Trace Credit, and #1118's open question of which ledger is of record is still open. Any Missions number must say which ledger it comes from and stay pending until settlement.
+**Conflicts with the design rules:** a factor bonus, a multiplier or "levels raise rewards" shown in the app is projected credit. #1146 ruled that off-limits; the owner reversed it on 2026-10-02 (#1174), so labelled projected credit is allowed and must never read as earned. Server mission awards are a third ledger, separate from Trace Credit, and #1118's open question of which ledger is of record is still open. Any Missions number must say which ledger it comes from and stay pending until settlement.
 
 ## History tab (W-8)
 
