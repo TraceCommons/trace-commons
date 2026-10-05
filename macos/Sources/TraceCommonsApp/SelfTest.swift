@@ -89,20 +89,21 @@ enum SelfTest {
         }
     }
 
-    /// Drives the same `AppModel` calls `OnboardingCoordinatorView` makes,
-    /// in the same order, against a real (not mocked) daemon and a real
-    /// network issuer -- see
+    /// Drives a subset of the `AppModel` calls the first run makes
+    /// (`FirstRunPlan.calls(for:at:)`, run by `FirstRunRunner`), in the same
+    /// order, against a real (not mocked) daemon and a real network issuer.
+    /// It is not the first run itself: no Folders declaration, no lookup, no
+    /// account sign-in or grant, and it acknowledges the NEAR AI notice,
+    /// which the first run no longer does. See
     /// `docs/superpowers/plans/macos-onboarding-flow-report.md` for why this
-    /// exists: proving the six-screen chain persists what a contributor
-    /// chose needs a real `enroll` round trip against a stub issuer, and
-    /// this repo has no macOS GUI-automation tool to drive
-    /// `OnboardingConnectView`'s text field and buttons directly. This
-    /// exercises the identical calls in the identical order instead:
-    /// `enroll(invite:)` with no scopes (screen 2), then
-    /// `setConsentScopes` with a chosen scope set (screen 3), then
+    /// exists: proving the first run persists what a contributor chose
+    /// needs a real `enroll` round trip against a stub issuer, and this repo
+    /// has no macOS GUI-automation tool to drive Join's field and buttons
+    /// directly. This makes `enroll(invite:)` with no scopes, then
+    /// `setConsentScopes` with a chosen scope set, then
     /// `acknowledgeNearAINotice()` when the operator has the second scanner
-    /// configured (screen 4) -- and reports what the daemon's own `status`
-    /// says afterward, which is the only thing this self-test asserts on.
+    /// configured -- and reports what the daemon's own `status` says
+    /// afterward, which is the only thing this self-test asserts on.
     @MainActor
     private static func runOnboardingSelfTestIfRequested(model: AppModel) {
         guard let path = ProcessInfo.processInfo.environment["TRACE_COMMONS_ONBOARD_SELFTEST_OUT"],
@@ -124,8 +125,8 @@ enum SelfTest {
         lines.append("before: status.logged_in=\(model.status.loggedIn) "
             + "consent_scopes=\(model.status.consentScopes)")
 
-        // Screen 2: enroll with no scopes -- matches
-        // `OnboardingConnectContent.join`, which never passes `scopes`.
+        // Enroll with no scopes -- as `FirstRunPlan`'s `.leaveRoots` does
+        // (`FirstRunCall.enroll`), which never passes `scopes`.
         switch await model.enroll(invite: invite) {
         case .succeeded(let result):
             lines.append("enroll: enrolled=\(result.enrolled) "
@@ -136,10 +137,10 @@ enum SelfTest {
             return lines.joined(separator: "\n") + "\n"
         }
 
-        // Screen 3: apply the chosen scopes -- matches
-        // `OnboardingCoordinatorView.advanceFromConsent`: always-on scopes
-        // plus whatever was "ticked" (hardcoded here to the two scopes a
-        // real contributor would pick from `consent_options`).
+        // Apply the chosen scopes -- as `FirstRunPlan`'s `.start` does
+        // (`FirstRunCall.setConsentScopes`) for an enrolled account:
+        // always-on scopes plus a chosen set (hardcoded here to two scopes
+        // from `consent_options`).
         let alwaysOn = model.consentScopes.filter(\.alwaysOn).map(\.name)
         let chosen = Set(alwaysOn).union(["public_attribution", "benchmark_only"])
         switch await model.setConsentScopes(Array(chosen)) {
@@ -150,9 +151,10 @@ enum SelfTest {
             return lines.joined(separator: "\n") + "\n"
         }
 
-        // Screen 4: only when the operator has the second scanner
-        // configured -- matches `OnboardingPrivacyScanContent.continueButton`
-        // gated on `nearAIConfigured`.
+        // Only when the operator has the second scanner configured. Not a
+        // first-run step any more: a new contributor clears this hold after
+        // setup, from the `near-ai-notice-not-acknowledged` recovery
+        // prompt. Kept so the report still shows the daemon's hold clears.
         if model.daemonSettings?.nearAIConfigured == true {
             model.acknowledgeNearAINotice()
             try? await Task.sleep(nanoseconds: 1_500_000_000)
@@ -167,9 +169,9 @@ enum SelfTest {
             + "tenant_id=\(reportDigest(model.status.tenantID)) "
             + "consent_scopes=\(model.status.consentScopes)")
 
-        // Screen 6 equivalent: mark onboarding complete, the way
-        // `OnboardingDoneView`'s `onFinish` does via `MainWindowView`'s
-        // `onComplete` closure, and confirm it sticks -- unless asked to
+        // Mark onboarding complete, the tenant's marker that `FirstRunPlan`'s
+        // `.start` ends on (`FirstRunCall.markComplete`, via
+        // `AppModel.markComplete`), and confirm it sticks -- unless asked to
         // stop short of it, which is how this same self-test doubles as
         // the "resumed mid-onboarding across a relaunch" check: a second
         // launch against the same state directory, without this env var,

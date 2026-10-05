@@ -71,6 +71,79 @@ final class FirstRunDaemonAdaptorTests: XCTestCase {
         XCTAssertTrue(watching.requiresOnboarding, "an enrolment needs its own Start")
     }
 
+    /// A finished watcher can still join: an invite link opened later takes
+    /// back the watch-only marker while the daemon holds no enrolment, so
+    /// the main window hosts the first run again and the coordinator applies
+    /// the parked link to Join.
+    func test_anInviteLinkReopensAFinishedWatchOnlyRun() async {
+        let watching = model(["status": #"{"result":{"logged_in":false,"consent_scopes":[],"health":{}}}"#])
+        watching.setStartupForTesting(.running)
+        watching.setConfigDirectoryForTesting("/tmp/first-run-adaptor-\(UUID().uuidString)")
+        defer {
+            watching.clearWatchOnlyMarkerForTesting()
+            _ = PendingInvite.shared.take()
+        }
+        let done = await watching.markWatchOnlyComplete()
+        XCTAssertTrue(done)
+        XCTAssertFalse(watching.requiresOnboarding)
+
+        var notifications = 0
+        let observing = watching.objectWillChange.sink { _ in notifications += 1 }
+        PendingInvite.shared.set("https://issuer.example/i#CODE")
+        observing.cancel()
+
+        XCTAssertGreaterThan(notifications, 0, "the hosts re-read requiresOnboarding only when told")
+        XCTAssertFalse(watching.isWatchOnlyComplete)
+        XCTAssertTrue(watching.requiresOnboarding)
+        XCTAssertTrue(OnboardingNavigation.hostsFirstRun(
+            startup: watching.startup, requiresOnboarding: watching.requiresOnboarding, entered: false))
+        XCTAssertEqual(PendingInvite.shared.value, "https://issuer.example/i#CODE",
+                       "the link stays parked for the coordinator to take")
+    }
+
+    /// A link that arrives before the config directory is known (at launch,
+    /// before services start) still takes back the marker once it is.
+    func test_anInviteLinkBeforeTheConfigDirectoryReopensOnceItIsKnown() async {
+        let directory = "/tmp/first-run-adaptor-\(UUID().uuidString)"
+        let earlier = model(["status": #"{"result":{"logged_in":false,"consent_scopes":[],"health":{}}}"#])
+        earlier.setStartupForTesting(.running)
+        earlier.setConfigDirectoryForTesting(directory)
+        defer { earlier.clearWatchOnlyMarkerForTesting() }
+        let done = await earlier.markWatchOnlyComplete()
+        XCTAssertTrue(done)
+
+        let launching = model(["status": #"{"result":{"logged_in":false,"consent_scopes":[],"health":{}}}"#])
+        launching.setStartupForTesting(.running)
+        defer { _ = PendingInvite.shared.take() }
+        PendingInvite.shared.set("https://issuer.example/i#CODE")
+        launching.setConfigDirectoryForTesting(directory)
+
+        XCTAssertFalse(launching.isWatchOnlyComplete)
+        XCTAssertTrue(launching.requiresOnboarding)
+    }
+
+    /// An enrolled daemon's marker is the tenant's; a link leaves the
+    /// watch-only one alone.
+    func test_anInviteLinkLeavesAnEnrolledDaemonsMarkersAlone() async {
+        let watching = model(["status": #"{"result":{"logged_in":false,"consent_scopes":[],"health":{}}}"#])
+        watching.setStartupForTesting(.running)
+        watching.setConfigDirectoryForTesting("/tmp/first-run-adaptor-\(UUID().uuidString)")
+        defer {
+            watching.clearWatchOnlyMarkerForTesting()
+            _ = PendingInvite.shared.take()
+        }
+        let done = await watching.markWatchOnlyComplete()
+        XCTAssertTrue(done)
+        watching.setStatusForTesting(DaemonStatus(
+            schemaVersion: "1.1", loggedIn: true, tenantID: "first-run-adaptor-\(UUID().uuidString)",
+            consentScopes: [], paused: false, queueDepth: 0, nextDigestAt: nil,
+            health: DaemonHealth(lastErrorLabel: nil, since: nil)))
+
+        PendingInvite.shared.set("https://issuer.example/i#CODE")
+
+        XCTAssertTrue(watching.isWatchOnlyComplete)
+    }
+
     func test_completeReadsTheTenantBeforeMarking() async {
         let tenant = "first-run-adaptor-\(UUID().uuidString)"
         let key = "trace_commons.onboarding_complete.\(tenant)"

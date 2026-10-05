@@ -1,3 +1,4 @@
+import Combine
 import CryptoKit
 import Foundation
 import SwiftUI
@@ -80,7 +81,18 @@ final class AppModel: ObservableObject {
 
     init(daemonStartup: DaemonStartup? = nil) {
         self.daemonStartup = daemonStartup ?? DaemonStartup()
+        // `@Published` emits in `willSet`, so the emitted value is read,
+        // not `PendingInvite.shared.value`. Delivered on the main actor:
+        // `PendingInvite` is main-actor isolated.
+        inviteLinks = PendingInvite.shared.$value.sink { [weak self] invite in
+            guard invite != nil else { return }
+            MainActor.assumeIsolated { self?.inviteLinkArrived() }
+        }
     }
+    private var inviteLinks: AnyCancellable?
+    /// An invite link arrived before the config directory was known, so the
+    /// watch-only marker it takes back is cleared once it is.
+    private var inviteAwaitsConfigDirectory = false
     @Published private(set) var status: DaemonStatus = .unknown {
         didSet {
             // Worded across the ABI once per notice the daemon sends, not on
@@ -990,7 +1002,13 @@ final class AppModel: ObservableObject {
     /// Held so the roots screen starts the daemon against the same directory
     /// that refused, rather than re-resolving and possibly disagreeing with
     /// it.
-    private(set) var configDirectory: String = ""
+    private(set) var configDirectory: String = "" {
+        didSet {
+            guard inviteAwaitsConfigDirectory, !configDirectory.isEmpty else { return }
+            inviteAwaitsConfigDirectory = false
+            inviteLinkArrived()
+        }
+    }
 
     /// Whether the watcher this shell is driving belongs to another
     /// process.
@@ -2926,6 +2944,24 @@ extension AppModel: FirstRunDaemon {
         guard status.tenantID != nil else { return false }
         markOnboardingComplete()
         return isOnboardingComplete
+    }
+
+    /// An invite link (`PendingInvite`) takes back a finished watch-only
+    /// run while the daemon holds no enrolment: the marker is cleared, so
+    /// `requiresOnboarding` turns true, a window hosts the first run again,
+    /// and the coordinator applies the parked link to Join. Without this a
+    /// finished watcher could never join, since the first run is the only
+    /// place a link is applied. An enrolled daemon's marker is the tenant's
+    /// and is left alone. Announced, as `markWatchOnlyComplete` is.
+    func inviteLinkArrived() {
+        guard !status.loggedIn else { return }
+        guard let key = Self.watchOnlyCompleteKey(configDirectory) else {
+            inviteAwaitsConfigDirectory = true
+            return
+        }
+        guard UserDefaults.standard.bool(forKey: key) else { return }
+        objectWillChange.send()
+        UserDefaults.standard.removeObject(forKey: key)
     }
 
     /// Watching only: the marker is keyed by the config directory, since
