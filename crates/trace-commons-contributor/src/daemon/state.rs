@@ -65,6 +65,26 @@ pub struct CwdCacheEntry {
     /// entry is rewritten.
     #[serde(default)]
     pub tool: Option<String>,
+    /// Which adapter actually discovered this session (K16, #1227 review):
+    /// `SessionRef::source`, never `declared_source` or `displayed_source`.
+    /// Recorded alongside `tool` when the entry is written, from the same
+    /// `SessionRef`.
+    ///
+    /// `tool` above is the self-declared, contributor-facing name --
+    /// unverified for a staged import, by that method's own doc -- and must
+    /// stay that way for display. This field is the thing a consent
+    /// decision is allowed to gate on: the adapter that actually read the
+    /// bytes, which a staged file cannot spoof into claiming a different
+    /// tool is switched on.
+    ///
+    /// `#[serde(default)]` so a state file written before this field
+    /// existed still loads, and `None` is never backfilled retroactively,
+    /// same as `tool`. `daemon::mission_matching::readable_sessions` reads
+    /// this field, not `tool`, to decide whether a session may be read, and
+    /// treats `None` as unreadable -- fails closed, rather than trusting
+    /// the self-declared name while the real adapter is unknown.
+    #[serde(default)]
+    pub adapter: Option<String>,
 }
 
 /// What `save` last actually wrote, and where: the store directory it was

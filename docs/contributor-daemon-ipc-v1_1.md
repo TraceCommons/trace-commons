@@ -2281,22 +2281,53 @@ or one over a bound (256 missions, 200 characters, 32 values a list) with
 
 **What matching reads (M1).** Only the sessions the daemon has already seen
 (the cache `list_projects` counts tools from), and of those only sessions
-from a tool that is on -- one whose session folder is watched; an imported
-Antigravity conversation counts as the trajectory adapter's -- in a folder
-whose mode in force is not Never. A Never contribution override makes every
-folder Never, so it reads nothing and matches nothing. A folder that is not
-armed and not shared may be read. No session body is read. When a mission
-asks about `languages`, the roots of the readable folders are checked for
-marker files, by existence only. `read` counts the distinct tools and
-folders matching read, and nothing else.
+from an **adapter** that is on -- one whose session folder is watched; an
+imported Antigravity conversation is read by the trajectory adapter, so it
+counts as that, not as `antigravity` -- in a folder whose mode in force is
+not Never. The gate is the adapter that actually discovered a session
+(`SessionRef::source`, recorded as `CwdCacheEntry::adapter`), never the
+self-declared, contributor-facing name a staged import can claim
+(`SessionRef::displayed_source`): a trajectory file staged with
+`meta.source: "claude-code"` is read only once trajectory itself is on, not
+because claude-code is. A cache entry written before the `adapter` field
+existed carries no adapter and is not read -- fails closed, the same as one
+with no recorded tool at all. An unset claude-code or codex declaration
+still counts as on, matching what the watcher reads from by default (its
+conventional per-user store); Gemini, Cline and OpenCode count as off until
+declared. A Never contribution override makes every folder Never, so it
+reads nothing and matches nothing. A folder that is not armed and not
+shared may be read, including the unidentified-folder bucket -- it resolves
+to `NotifyOnly`, not Never, so it is read and counted in `read.folders`,
+though it is never asked about languages (it has no folder root to look
+at). When a folder has no display path recorded in the policy (never
+armed, or known only through the cache), the language probe falls back to
+the project key itself, which is case-folded on macOS and Windows; on a
+case-sensitive volume that can miss a marker file under its real-cased
+name, so a language goes unreported rather than over-reported. No session
+body is read. When a mission asks about `languages`, the roots of the
+readable folders are checked for marker files, by existence only. `read`
+counts the distinct tools and folders matching read, and nothing else.
+
+**What matching excludes (M2).** A session counts toward a mission only
+when it is contributed through one of the three consent paths ("The three
+paths," above). A **kept** session (the contributor explicitly holding it on
+this Mac) and a **withdrawn** one (an upload later taken back) are excluded
+from the candidates matching reads -- neither was contributed in a way that
+should count, the first because it was declined, the second because it was
+reversed. An **already-uploaded** session that is neither kept nor
+withdrawn, and one still being written and **not yet quiescent**, are
+excluded from neither set and stay candidates: quiescence is a fact about
+when a session is ready to read, not about whether it was ever offered, and
+an ordinary accepted upload did nothing M2 forbids.
 
 **What it never does (M1, M2).** It sends nothing: no activity profile,
 match, folder or tool list leaves the Mac. It writes no audit row and logs
 one label, `mission-matches-answered`. It changes no policy, queue or daemon
 state: it never arms a folder, approves a session or widens a scope, and
-emits no event. A match is a suggestion for this screen; a session counts
-toward a mission only when it is contributed through one of the existing
-paths.
+emits no event -- the queue and the local history cache are read here (to
+exclude kept and withdrawn sessions), never written. A match is a
+suggestion for this screen; a session counts toward a mission only when it
+is contributed through one of the existing paths.
 
 **The disclosure (M4).** `tc_missions_disclosure_copy_json` returns the
 words shown the first time Missions is opened and in Settings
