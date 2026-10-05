@@ -88,6 +88,9 @@ protocol PasskeyAccount: AnyObject {
     func signOut() async -> PasskeyCallResult
     /// Dismiss a system sheet that is still up.
     func cancel()
+    /// How many passkeys the daemon holds for this account (`passkey_state`),
+    /// or nil when it cannot say. A returning person opens at P-7.
+    func existingPasskeys() async -> Int?
 }
 
 /// The live account: the native passkey coordinator for the system sheets
@@ -131,6 +134,10 @@ final class LivePasskeyAccount: PasskeyAccount {
     func cancel() {
         coordinator.cancel()
     }
+
+    func existingPasskeys() async -> Int? {
+        try? await transport.passkeys().passkeyCount
+    }
 }
 
 /// Ron's `passkeyNameError`, worded by the core.
@@ -172,6 +179,13 @@ final class PasskeySheetModel: ObservableObject {
     private let account: any PasskeyAccount
     /// The trimmed name the created passkey carries.
     private var createdName: String?
+
+    /// Ron's P-7 for a returning person: a Mac whose daemon holds a passkey for
+    /// this account opens at Welcome back. None, or no answer, opens at P-1,
+    /// which still offers "Use existing passkey".
+    static func startStep(existingPasskeys: Int?) -> PasskeySheetStep {
+        (existingPasskeys ?? 0) > 0 ? .welcomeBack : .choose
+    }
 
     init(start: PasskeySheetStep = .choose, copy: FirstRunCopy.Passkey, account: any PasskeyAccount) {
         self.step = start
@@ -463,6 +477,7 @@ private struct FirstRunPasskeyPresenter: ViewModifier {
     let account: (any PasskeyAccount)?
 
     @State private var model: PasskeySheetModel?
+    @State private var opening = false
 
     func body(content: Content) -> some View {
         content
@@ -480,9 +495,17 @@ private struct FirstRunPasskeyPresenter: ViewModifier {
 
     /// A fresh model each time: a model's outcome is set once, so a reused
     /// one would leave the second presentation unable to finish.
+    /// It asks the daemon first, so a returning person opens at P-7.
     private func open() {
-        guard runner.passkeyDue, model == nil, let account else { return }
-        model = PasskeySheetModel(copy: copy.passkey, account: account)
+        guard runner.passkeyDue, model == nil, !opening, let account else { return }
+        opening = true
+        Task {
+            let existing = await account.existingPasskeys()
+            opening = false
+            guard runner.passkeyDue, model == nil else { return }
+            model = PasskeySheetModel(
+                start: PasskeySheetModel.startStep(existingPasskeys: existing), copy: copy.passkey, account: account)
+        }
     }
 
     /// Dismissed without an outcome: closed.

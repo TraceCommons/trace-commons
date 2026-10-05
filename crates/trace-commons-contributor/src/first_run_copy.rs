@@ -128,6 +128,16 @@ pub struct JoinCopy {
     pub signed_out: &'static str,
 }
 
+/// Each asked-about tool's own install page, keyed by the tool, for "Get {tool}".
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct InstallUrls {
+    pub claude_code: &'static str,
+    pub codex: &'static str,
+    pub gemini_cli: &'static str,
+    pub cline: &'static str,
+    pub opencode: &'static str,
+}
+
 /// Folders, Quick setup's tool list (`tool-screens.tsx`, `tool-row.tsx`).
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct FoldersCopy {
@@ -142,6 +152,9 @@ pub struct FoldersCopy {
     pub choose_folder: &'static str,
     pub get_tool: &'static str,
     pub download_tool: &'static str,
+    /// Where "Get {tool}" sends a person for each tool the Mac is asked about:
+    /// the tool's own install page, over https.
+    pub install_urls: InstallUrls,
     pub not_installed: &'static str,
     /// Discovery returned no row the shell could read.
     pub discovery_failed: &'static str,
@@ -344,6 +357,13 @@ pub fn first_run_copy() -> FirstRunCopy {
             choose_folder: "Choose a different folder for {tool}",
             get_tool: "Get {tool}",
             download_tool: "Download {tool}",
+            install_urls: InstallUrls {
+                claude_code: "https://claude.com/product/claude-code",
+                codex: "https://github.com/openai/codex",
+                gemini_cli: "https://github.com/google-gemini/gemini-cli",
+                cline: "https://cline.bot/",
+                opencode: "https://opencode.ai/",
+            },
             not_installed: "Install it, then this row asks again.",
             discovery_failed: "Could not look for coding tools on this Mac.",
             retry: "Look again",
@@ -435,6 +455,14 @@ pub fn first_run_copy() -> FirstRunCopy {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_install_url_is_https() {
+        let urls = first_run_copy().folders.install_urls;
+        for url in [urls.claude_code, urls.codex, urls.gemini_cli, urls.cline, urls.opencode] {
+            assert!(url.starts_with("https://"), "{url}");
+        }
+    }
 
     #[test]
     fn a_dead_invite_and_a_pay_range_have_their_own_words() {
