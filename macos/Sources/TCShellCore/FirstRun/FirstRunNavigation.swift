@@ -2,7 +2,7 @@ import Foundation
 
 /// Ron's step lists and the rules for moving between them (#1030
 /// `ftux-model.ts`). Every function returns a new state and keeps every
-/// answer; only `step` and `tier` move.
+/// answer; only `step` and `tier` move (and Back clears `grantReady`).
 public enum FirstRunNavigation {
     public static func steps(for tier: FirstRunTier) -> [FirstRunStep] {
         switch tier {
@@ -18,9 +18,12 @@ public enum FirstRunNavigation {
 
     /// The previous step, or the same state on the first one. Answers and the
     /// daemon's progress are kept, so going forward again neither starts nor
-    /// enrolls twice.
+    /// enrolls twice. The core's ready answer for a grant is not: it belongs
+    /// to the Start it was asked for.
     public static func back(_ state: FirstRunState) -> FirstRunState {
-        move(state, by: -1)
+        var moved = move(state, by: -1)
+        moved.grantReady = false
+        return moved
     }
 
     /// Switch tiers, keeping the person on the equivalent screen: Folders and

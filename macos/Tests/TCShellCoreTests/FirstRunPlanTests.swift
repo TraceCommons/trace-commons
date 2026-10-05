@@ -179,6 +179,7 @@ final class FirstRunPlanTests: XCTestCase {
         state.privateAI = true
         state.sharing = .automatic
         state.witnessSigningAddress = "witness-1"
+        state.grantReady = true
 
         XCTAssertEqual(FirstRunPlan.calls(for: state, at: .start), [
             .setConsentScopes(["evaluation", "research"]),
@@ -189,6 +190,31 @@ final class FirstRunPlanTests: XCTestCase {
             .grantAutomatic(witness: "witness-1"),
             .markComplete,
         ])
+    }
+
+    /// Automatic is not enough on its own: the grant is sent only once the
+    /// core answered ready after both disclosures, which sets `grantReady`.
+    func test_automaticWithoutTheCoresReadyAnswerNeverGrants() {
+        var state = answered()
+        state.step = .uses
+        state.scopes = ["research"]
+        state.sharing = .automatic
+        state.witnessSigningAddress = "witness-1"
+        XCTAssertFalse(state.grantReady)
+        XCTAssertEqual(FirstRunPlan.calls(for: state, at: .start),
+            [.setConsentScopes(["research"]), .markComplete])
+
+        state.grantReady = true
+        XCTAssertTrue(FirstRunPlan.calls(for: state, at: .start).contains(.grantAutomatic(witness: "witness-1")))
+
+        // Writing the sharing path again clears the marker, whatever it is
+        // set to: a new choice needs a new answer.
+        state.sharing = .automatic
+        XCTAssertFalse(state.grantReady)
+        XCTAssertFalse(FirstRunPlan.calls(for: state, at: .start).contains { isGrant($0) })
+        state.grantReady = true
+        state.sharing = .askMe
+        XCTAssertFalse(state.grantReady)
     }
 
     func test_askMeNeverGrants() {

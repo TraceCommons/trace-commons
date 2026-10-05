@@ -89,6 +89,7 @@ final class FirstRunRunnerTests: XCTestCase {
         state.privateAI = true
         state.sharing = .automatic
         state.witnessSigningAddress = "witness-1"
+        state.grantReady = true
         return state
     }
 

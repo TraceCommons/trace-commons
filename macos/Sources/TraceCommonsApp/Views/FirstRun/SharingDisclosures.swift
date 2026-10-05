@@ -65,18 +65,22 @@ struct SharingDisclosureFlow: Equatable {
     }
 
     /// The state Start commits, and the failure to show once it has run.
-    /// Ready: Automatic stands, with the witness the core named. Anything
-    /// else finishes on Ask me and says why; it never claims Automatic.
+    /// Ready: Automatic stands, with the witness the core named, and
+    /// `grantReady` set, the only place it is; the plan sends the grant on
+    /// nothing else. Anything else finishes on Ask me and says why; it never
+    /// claims Automatic.
     static func resolve(
         _ state: FirstRunState, request: Flow1GrantRequest?
     ) -> (FirstRunState, FirstRunFailure?) {
         var next = state
         if let request, request.ready {
             next.witnessSigningAddress = request.witnessSigningAddress
+            next.grantReady = true
             return (next, nil)
         }
         next.sharing = .askMe
         next.witnessSigningAddress = nil
+        next.grantReady = false
         return (next, .grantRefused(label: request?.blockers.first ?? unreadableLabel))
     }
 }

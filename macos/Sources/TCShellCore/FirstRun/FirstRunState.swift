@@ -84,11 +84,20 @@ public struct FirstRunState: Codable, Equatable, Sendable {
     /// Chosen past sessions per `project_id` (Custom only).
     public var pastSelections: [String: Set<String>]
     public var scopes: Set<String>
-    public var sharing: SharingPath
+    /// Writing it, to any value, clears `grantReady`: a new choice needs a
+    /// new answer from the core.
+    public var sharing: SharingPath {
+        didSet { grantReady = false }
+    }
     /// The Private AI switch (Custom only).
     public var privateAI: Bool
     /// The witness the disclosure showed, passed to `grant_automatic`.
     public var witnessSigningAddress: String?
+    /// The core answered ready (`flow1::grant_request`) after both
+    /// disclosures, for this Start. Only `SharingDisclosureFlow.resolve`
+    /// sets it; writing `sharing` and Back clear it. `FirstRunPlan` sends
+    /// `grantAutomatic` only with it set.
+    public var grantReady: Bool
     public var daemonStarted: Bool
     /// The declaration the daemon now holds: the `startDaemon` settings, then
     /// each applied `setSourceSettings`. Nil with `daemonStarted` means it is
@@ -114,6 +123,7 @@ public struct FirstRunState: Codable, Equatable, Sendable {
         sharing: SharingPath = .askMe,
         privateAI: Bool = false,
         witnessSigningAddress: String? = nil,
+        grantReady: Bool = false,
         daemonStarted: Bool = false,
         startedSettingsJSON: String? = nil,
         enrolledInvite: String? = nil,
@@ -132,6 +142,7 @@ public struct FirstRunState: Codable, Equatable, Sendable {
         self.sharing = sharing
         self.privateAI = privateAI
         self.witnessSigningAddress = witnessSigningAddress
+        self.grantReady = grantReady
         self.daemonStarted = daemonStarted
         self.startedSettingsJSON = startedSettingsJSON
         self.enrolledInvite = enrolledInvite

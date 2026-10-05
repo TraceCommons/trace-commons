@@ -78,28 +78,68 @@ final class UsesScreenTests: XCTestCase {
 
     func test_startIsDisabledUntilTheRequiredUseIsTicked() throws {
         let grant = try grant()
+        let uses = try copy().uses
         var state = FirstRunState(tier: .quick, step: .uses, account: .nearAI)
         let required = UsesScreenLayout.requiredScope(options)
-        XCTAssertFalse(UsesScreenLayout.canStart(state, requiredScope: required, grant: grant, isCommitting: false))
+        XCTAssertFalse(UsesScreenLayout.canStart(state, uses: uses, requiredScope: required, grant: grant, isCommitting: false))
 
         // Every optional use ticked is still not the required one.
         state.scopes = Set(UsesScreenLayout.optionalScopes(options).map(\.name))
-        XCTAssertFalse(UsesScreenLayout.canStart(state, requiredScope: required, grant: grant, isCommitting: false))
+        XCTAssertFalse(UsesScreenLayout.canStart(state, uses: uses, requiredScope: required, grant: grant, isCommitting: false))
 
         state.scopes.insert("debugging_evaluation")
-        XCTAssertTrue(UsesScreenLayout.canStart(state, requiredScope: required, grant: grant, isCommitting: false))
+        XCTAssertTrue(UsesScreenLayout.canStart(state, uses: uses, requiredScope: required, grant: grant, isCommitting: false))
 
         // Without the sharing words, or while a Start is running, it stays
         // disabled; with no required use known, it never enables.
-        XCTAssertFalse(UsesScreenLayout.canStart(state, requiredScope: required, grant: nil, isCommitting: false))
-        XCTAssertFalse(UsesScreenLayout.canStart(state, requiredScope: required, grant: grant, isCommitting: true))
-        XCTAssertFalse(UsesScreenLayout.canStart(state, requiredScope: nil, grant: grant, isCommitting: false))
+        XCTAssertFalse(UsesScreenLayout.canStart(state, uses: uses, requiredScope: required, grant: nil, isCommitting: false))
+        XCTAssertFalse(UsesScreenLayout.canStart(state, uses: uses, requiredScope: required, grant: grant, isCommitting: true))
+        XCTAssertFalse(UsesScreenLayout.canStart(state, uses: uses, requiredScope: nil, grant: grant, isCommitting: false))
 
         // The footer note is Ron's, until the box is ticked.
-        let uses = try copy().uses
         XCTAssertNil(UsesScreenLayout.footerNote(uses, state: state, requiredScope: required))
         state.scopes.remove("debugging_evaluation")
         XCTAssertEqual(UsesScreenLayout.footerNote(uses, state: state, requiredScope: required), uses.baseUseNote)
+    }
+
+    /// The core's grant copy with `field` removed, as a copy that lacks it
+    /// would decode.
+    private func grant(without field: String) throws -> AutomaticGrantCopy {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tc-uses-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let json = try XCTUnwrap(TCCoreCopy.automaticContributionCopyJSON(configDir: dir.path))
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])
+        XCTAssertNotNil(object.removeValue(forKey: field), field)
+        let data = try JSONSerialization.data(withJSONObject: object)
+        return try XCTUnwrap(AutomaticGrantCopy.decode(fromJSON: String(data: data, encoding: .utf8)))
+    }
+
+    /// The fallback line says Starting is disabled, so whenever it shows,
+    /// Start is disabled: a copy without the chosen path's line disables
+    /// Start, and only on that path.
+    func test_startIsDisabledWheneverTheSharingLineIsTheFallback() throws {
+        let uses = try copy().uses
+        let required = UsesScreenLayout.requiredScope(options)
+        var state = FirstRunState(tier: .quick, step: .uses, account: .nearAI, scopes: ["debugging_evaluation"])
+
+        let noAskFirst = try grant(without: "path_ask_first")
+        XCTAssertEqual(
+            UsesScreenLayout.sharingLine(uses, path: .askMe, grant: noAskFirst), uses.sharingUnavailable)
+        XCTAssertFalse(UsesScreenLayout.canStart(
+            state, uses: uses, requiredScope: required, grant: noAskFirst, isCommitting: false))
+
+        let noAutomatic = try grant(without: "path_automatic")
+        XCTAssertTrue(UsesScreenLayout.canStart(
+            state, uses: uses, requiredScope: required, grant: noAutomatic, isCommitting: false))
+        state.sharing = .automatic
+        XCTAssertFalse(UsesScreenLayout.canStart(
+            state, uses: uses, requiredScope: required, grant: noAutomatic, isCommitting: false))
+        // Watching only reads Ask me's line, so Automatic's absence does
+        // not hold it.
+        state.account = .watchOnly
+        XCTAssertTrue(UsesScreenLayout.canStart(
+            state, uses: uses, requiredScope: required, grant: noAutomatic, isCommitting: false))
     }
 
     /// The Sharing card's line is the core's: Ask me reads `path_ask_first`;
@@ -147,9 +187,26 @@ final class UsesScreenTests: XCTestCase {
     /// line saying Automatic was not turned on and sharing is on Ask me. It
     /// is never the folder-override refusal, which says nothing changed or
     /// points at a pill this screen does not have.
-    func test_aRefusedGrantSaysSetupFinishedOnAskMe() throws {
+    @MainActor
+    func test_aRefusedGrantFinishesOnAskMe() async throws {
         let uses = try copy().uses
         let privateAI = try privateAI()
+
+        // Driven through Start's own path: both disclosures seen, the core
+        // refuses (not connected), Start runs on Ask me, grants nothing,
+        // and the screen's notice is the refusal line.
+        let daemon = StartDaemon()
+        let runner = FirstRunRunner(state: onUses(.automatic), daemon: daemon)
+        let pending = await UsesStart.finish(
+            runner: runner, request: try readyRequest(connected: false), pending: nil)
+        XCTAssertFalse(daemon.log.contains { if case .grantAutomatic = $0 { true } else { false } })
+        XCTAssertEqual(daemon.log.last, .markComplete)
+        XCTAssertEqual(runner.state.sharing, .askMe)
+        XCTAssertFalse(runner.state.grantReady)
+        XCTAssertEqual(runner.failure, .grantRefused(label: "connect"))
+        XCTAssertNil(pending)
+        XCTAssertEqual(UsesScreenLayout.notice(for: runner.failure, uses: uses, privateAI: privateAI), uses.sharingRefused)
+
         let labels = [
             "automatic-grant-witness-changed", "arming-terms-unavailable", "connect", "scrub_disclosure",
             SharingDisclosureFlow.unreadableLabel,
@@ -244,4 +301,95 @@ final class UsesScreenTests: XCTestCase {
         let source = try Self.source()
         XCTAssertFalse(source.contains("private var grant: AutomaticGrantCopy? {"))
     }
+    // MARK: - Start's routing
+
+    private func onUses(_ sharing: SharingPath) -> FirstRunState {
+        FirstRunState(
+            tier: .quick, step: .uses, account: .nearAI, scopes: ["debugging_evaluation"], sharing: sharing,
+            daemonStarted: true, enrolledInvite: "invite")
+    }
+
+    /// The core's answer after both disclosures, the witness shown being
+    /// `0xwitness`.
+    private func readyRequest(connected: Bool) throws -> Flow1GrantRequest {
+        var flow = SharingDisclosureFlow()
+        flow.acknowledgeScrub()
+        flow.acknowledgeWitness(shown: "0xwitness")
+        return try XCTUnwrap(SharingDisclosureFlow.grantRequest(
+            flow.progress(connected: connected, scopes: ["debugging_evaluation"])))
+    }
+
+    /// Start on Automatic goes through the disclosures; Ask me, and
+    /// watching only whatever `sharing` holds, commit directly.
+    func test_startSendsAutomaticThroughTheDisclosures() throws {
+        XCTAssertEqual(UsesScreenLayout.startRoute(onUses(.automatic)), .disclose)
+        XCTAssertEqual(UsesScreenLayout.startRoute(onUses(.askMe)), .commit)
+        var watching = onUses(.automatic)
+        watching.account = .watchOnly
+        XCTAssertEqual(UsesScreenLayout.startRoute(watching), .commit)
+
+        // The screen's Start reads that route.
+        let source = try Self.source()
+        XCTAssertTrue(source.contains("switch UsesScreenLayout.startRoute(runner.state)"))
+        XCTAssertTrue(source.contains("UsesStart.finish(runner: runner"))
+    }
+
+    /// A ready answer after both disclosures reaches the daemon as the grant,
+    /// with the witness shown, after the scopes are saved.
+    @MainActor
+    func test_aReadyAnswerAfterTheDisclosuresSendsTheGrant() async throws {
+        let daemon = StartDaemon()
+        let runner = FirstRunRunner(state: onUses(.automatic), daemon: daemon)
+        let pending = await UsesStart.finish(
+            runner: runner, request: try readyRequest(connected: true), pending: nil)
+        XCTAssertEqual(daemon.log, [
+            .setConsentScopes(["debugging_evaluation"]), .grantAutomatic(witness: "0xwitness"), .markComplete,
+        ])
+        XCTAssertEqual(runner.state.sharing, .automatic)
+        XCTAssertNil(runner.failure)
+        XCTAssertNil(pending)
+    }
+
+    /// Start that skips the disclosures on Automatic grants nothing: without
+    /// the core's ready answer there is no grant to send.
+    @MainActor
+    func test_aStartThatSkipsTheDisclosuresGrantsNothing() async {
+        let daemon = StartDaemon()
+        let runner = FirstRunRunner(state: onUses(.automatic), daemon: daemon)
+        _ = await UsesStart.plainStart(runner: runner, pending: nil)
+        XCTAssertEqual(daemon.log, [.setConsentScopes(["debugging_evaluation"]), .markComplete])
+    }
+}
+
+/// Records Start's calls; every call succeeds and the grant is granted.
+@MainActor
+private final class StartDaemon: FirstRunDaemon {
+    var log: [FirstRunCall] = []
+
+    func startDaemon(settingsJSON: String) async -> Bool { log.append(.startDaemon(settingsJSON: settingsJSON)); return true }
+    func setSourceSettings(settingsJSON: String) async -> Bool {
+        log.append(.setSourceSettings(settingsJSON: settingsJSON))
+        return true
+    }
+    func lookupInvite(_ invite: String) async -> FirstRunLookup {
+        log.append(.lookupInvite(invite))
+        return .refused(label: "unused")
+    }
+    func enrollInvite(_ invite: String) async -> Bool { log.append(.enroll(invite)); return true }
+    func signInNearAI() async -> Bool { log.append(.signInNearAI); return true }
+    func saveConsentScopes(_ scopes: [String]) async -> Bool { log.append(.setConsentScopes(scopes)); return true }
+    func setProjectMode(projectID: String, mode: ProjectMode) async -> Bool {
+        log.append(.setProjectMode(projectID: projectID, mode))
+        return true
+    }
+    func includePastSessions(projectID: String, sessionIDs: [String]) async -> Bool {
+        log.append(.includePastSessions(projectID: projectID, sessionIDs))
+        return true
+    }
+    func setPrivateAI(_ on: Bool) async -> Bool { log.append(.setPrivateAI(on)); return true }
+    func grantAutomatic(witness: String?) async -> FirstRunGrantAnswer {
+        log.append(.grantAutomatic(witness: witness))
+        return .granted
+    }
+    func markComplete() { log.append(.markComplete) }
 }

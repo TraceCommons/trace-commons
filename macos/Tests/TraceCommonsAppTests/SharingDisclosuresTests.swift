@@ -57,6 +57,7 @@ final class SharingDisclosuresTests: XCTestCase {
         let (state, failure) = SharingDisclosureFlow.resolve(onUses(.automatic), request: both)
         XCTAssertNil(failure)
         XCTAssertEqual(state.sharing, .automatic)
+        XCTAssertTrue(state.grantReady, "only the core's ready answer marks the grant ready")
         let calls = FirstRunPlan.calls(for: state, at: .start)
         let scopesAt = try XCTUnwrap(calls.firstIndex(of: .setConsentScopes(["debugging_evaluation"])))
         let grantAt = try XCTUnwrap(calls.firstIndex(of: .grantAutomatic(witness: "0xwitness")))
@@ -83,13 +84,22 @@ final class SharingDisclosuresTests: XCTestCase {
         let (state, failure) = SharingDisclosureFlow.resolve(onUses(.automatic), request: request)
         XCTAssertEqual(state.sharing, .askMe)
         XCTAssertNil(state.witnessSigningAddress)
+        XCTAssertFalse(state.grantReady)
         XCTAssertEqual(failure, .grantRefused(label: "connect"))
         XCTAssertFalse(FirstRunPlan.calls(for: state, at: .start).contains { if case .grantAutomatic = $0 { true } else { false } })
 
         // An unreadable answer is not ready either.
         let (unread, unreadFailure) = SharingDisclosureFlow.resolve(onUses(.automatic), request: nil)
         XCTAssertEqual(unread.sharing, .askMe)
+        XCTAssertFalse(unread.grantReady)
         XCTAssertNotNil(unreadFailure)
+
+        // A marker left from an earlier ready answer does not survive a
+        // refusal, even on a state that still says Automatic.
+        var stale = onUses(.automatic)
+        stale.grantReady = true
+        let (refusedAgain, _) = SharingDisclosureFlow.resolve(stale, request: request)
+        XCTAssertFalse(refusedAgain.grantReady)
     }
 
     func test_askMeGrantsNothing() {

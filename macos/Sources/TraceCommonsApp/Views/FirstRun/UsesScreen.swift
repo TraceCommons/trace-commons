@@ -54,12 +54,30 @@ enum UsesScreenLayout {
     }
 
     /// Start: the required use ticked (`FirstRunNavigation.canContinue`),
-    /// the sharing words present, and no Start already running.
+    /// the sharing line for the path shown present (the fallback says
+    /// Starting is disabled, so it is), and no Start already running.
     static func canStart(
-        _ state: FirstRunState, requiredScope: ConsentScope?, grant: AutomaticGrantCopy?, isCommitting: Bool
+        _ state: FirstRunState, uses: FirstRunCopy.Uses, requiredScope: ConsentScope?, grant: AutomaticGrantCopy?,
+        isCommitting: Bool
     ) -> Bool {
-        guard grant != nil, !isCommitting else { return false }
+        guard !isCommitting,
+            sharingLine(uses, path: effectiveSharing(state), grant: grant) != uses.sharingUnavailable
+        else { return false }
         return FirstRunNavigation.canContinue(state, candidates: [], requiredScope: requiredScope?.name)
+    }
+
+    /// Where Start goes.
+    enum StartRoute: Equatable {
+        /// The two disclosures, then the core's answer, then the commit.
+        case disclose
+        /// Straight to the commit.
+        case commit
+    }
+
+    /// Automatic, on an account that can choose it, goes through the
+    /// disclosures; everything else commits directly.
+    static func startRoute(_ state: FirstRunState) -> StartRoute {
+        SharingDisclosureFlow.isNeeded(for: state) ? .disclose : .commit
     }
 
     /// Ron's footer note, while the required use is unticked.
@@ -147,6 +165,40 @@ enum UsesScreenLayout {
     }
 }
 
+/// Start's two commits, apart from the view so a runner can drive them.
+/// Each returns the refusal still to be shown after a later Start.
+@MainActor
+enum UsesStart {
+    /// Start without the disclosures (Ask me, watching only). It carries an
+    /// earlier refusal; it cannot grant, since only `finish` marks the
+    /// grant ready.
+    static func plainStart(runner: FirstRunRunner, pending: FirstRunFailure?) async -> FirstRunFailure? {
+        let carried = UsesScreenLayout.refusalToCarry(decidedNow: false, refused: nil, pending: pending)
+        return await commit(runner: runner, carrying: carried)
+    }
+
+    /// Both disclosures seen: the core's answer decides the state Start
+    /// commits (Automatic with `grantReady`, or Ask me with the refusal),
+    /// then Start runs.
+    static func finish(
+        runner: FirstRunRunner, request: Flow1GrantRequest?, pending: FirstRunFailure?
+    ) async -> FirstRunFailure? {
+        let (next, refused) = SharingDisclosureFlow.resolve(runner.state, request: request)
+        runner.state = next
+        let carried = UsesScreenLayout.refusalToCarry(decidedNow: true, refused: refused, pending: pending)
+        return await commit(runner: runner, carrying: carried)
+    }
+
+    /// The one Start path. A refusal is kept past a failed Start and shown
+    /// once one succeeds; the commit clears failures when it begins.
+    private static func commit(runner: FirstRunRunner, carrying refusal: FirstRunFailure?) async -> FirstRunFailure? {
+        await runner.commit(.start)
+        let after = UsesScreenLayout.afterStart(failure: runner.failure, pending: refusal)
+        runner.failure = after.shown
+        return after.pending
+    }
+}
+
 /// Ron's Uses screen (#1030 `uses-screen.tsx`, W-3 and W-6) in glass: how
 /// traces may be used, the Sharing decision, the Private AI switch on
 /// Custom, and Start. Automatic leads through `SharingDisclosureSheet`
@@ -180,7 +232,8 @@ struct UsesScreen: View {
             footer: FirstRunFooter(
                 title: copy.uses.start,
                 isEnabled: UsesScreenLayout.canStart(
-                    runner.state, requiredScope: required, grant: grant, isCommitting: runner.isCommitting),
+                    runner.state, uses: copy.uses, requiredScope: required, grant: grant,
+                    isCommitting: runner.isCommitting),
                 note: UsesScreenLayout.footerNote(copy.uses, state: runner.state, requiredScope: required),
                 action: start)
         ) {
@@ -340,12 +393,12 @@ struct UsesScreen: View {
     // MARK: - Start
 
     private func start() {
-        if SharingDisclosureFlow.isNeeded(for: runner.state) {
+        switch UsesScreenLayout.startRoute(runner.state) {
+        case .disclose:
             disclosure = SharingDisclosureFlow()
-            return
+        case .commit:
+            Task { pendingRefusal = await UsesStart.plainStart(runner: runner, pending: pendingRefusal) }
         }
-        let carried = UsesScreenLayout.refusalToCarry(decidedNow: false, refused: nil, pending: pendingRefusal)
-        Task { await commitStart(carrying: carried) }
     }
 
     /// Both disclosures seen: the core decides the grant, then Start runs.
@@ -354,19 +407,7 @@ struct UsesScreen: View {
     private func finish(_ flow: SharingDisclosureFlow) {
         let request = SharingDisclosureFlow.grantRequest(
             flow.progress(connected: model.status.loggedIn, scopes: runner.state.scopes))
-        let (next, refused) = SharingDisclosureFlow.resolve(runner.state, request: request)
-        runner.state = next
-        let carried = UsesScreenLayout.refusalToCarry(decidedNow: true, refused: refused, pending: pendingRefusal)
-        Task { await commitStart(carrying: carried) }
-    }
-
-    /// The one Start path. A refusal is kept past a failed Start and shown
-    /// once one succeeds.
-    private func commitStart(carrying refusal: FirstRunFailure?) async {
-        await runner.commit(.start)
-        let after = UsesScreenLayout.afterStart(failure: runner.failure, pending: refusal)
-        runner.failure = after.shown
-        pendingRefusal = after.pending
+        Task { pendingRefusal = await UsesStart.finish(runner: runner, request: request, pending: pendingRefusal) }
     }
 
     private func caption(_ text: String) -> some View {
