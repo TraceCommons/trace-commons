@@ -442,9 +442,15 @@ struct PasskeySheets: View {
 
 /// Presents the passkey sheets whenever the runner asks for them
 /// (`FirstRunRunner.passkeyDue`): after the commit that started the daemon
-/// for a passkey chosen on Join, or from Create passkey once it runs. The
-/// one presentation path, so every first-run host mounts it. Without an
-/// account path the request stays raised, never dropped.
+/// for a passkey chosen on Join, or from Create passkey once it runs.
+///
+/// Mount it exactly once per runner: each mount holds its own model, so two
+/// mounts would present two sheets. It belongs on the first-run host, which
+/// is on screen at every step; until that host exists (port plan Task 11)
+/// it is mounted on Join, so a request the Folders or Tools commit raises
+/// presents only when Join is on screen again. Task 11 moves the mount to
+/// the coordinator and drops Join's. Without an account path the request
+/// stays raised, never dropped.
 private struct FirstRunPasskeyPresenter: ViewModifier {
     let copy: FirstRunCopy
     @ObservedObject var runner: FirstRunRunner

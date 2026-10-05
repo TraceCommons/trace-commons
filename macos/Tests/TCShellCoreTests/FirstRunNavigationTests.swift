@@ -120,6 +120,24 @@ final class FirstRunNavigationTests: XCTestCase {
         XCTAssertEqual(calls.last, .markComplete, "Start finishes watching")
     }
 
+    /// A passkey chosen on Join is not an account yet: its sheets open once
+    /// the daemon runs and may close or sign out, so Automatic waits for the
+    /// passkey the daemon holds. Start with Automatic grants nothing for it.
+    func test_aPasskeyNotYetCreatedCannotChooseAutomatic() {
+        XCTAssertEqual(FirstRunNavigation.sharingPaths(for: .passkeyChosen), [.askMe])
+        XCTAssertEqual(FirstRunNavigation.sharingPaths(for: AccountAnswer.none), [.askMe])
+        XCTAssertFalse(FirstRunNavigation.canChooseAutomatic(.passkeyChosen))
+        XCTAssertTrue(FirstRunNavigation.canChooseAutomatic(.passkey(name: "")))
+
+        var state = FirstRunState(tier: .quick, step: .uses)
+        state.account = .passkeyChosen
+        state.sharing = .automatic
+        state.scopes = ["research"]
+        let calls = FirstRunPlan.calls(for: state, at: .start)
+        XCTAssertFalse(calls.contains { if case .grantAutomatic = $0 { return true } else { return false } })
+        XCTAssertEqual(calls.last, .markComplete)
+    }
+
     func test_backKeepsEveryAnswer() {
         var state = FirstRunState(tier: .quick, step: .uses)
         state.invite = "INVITE-1"

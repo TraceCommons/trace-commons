@@ -273,7 +273,9 @@ enum JoinLayout {
 /// (`FirstRunPlan`). The one daemon path here is `passkeyAccount`, whose
 /// ceremony completes with the daemon: back on Join after the daemon
 /// started, Create passkey opens the sheets at once. They are presented by
-/// `firstRunPasskeySheets`, the one path the commit's request takes too.
+/// `firstRunPasskeySheets`, mounted here until port plan Task 11 moves it to
+/// the first-run host; until then the commit's request presents only once
+/// Join is on screen again.
 struct JoinScreen: View {
     let copy: FirstRunCopy
     @ObservedObject var runner: FirstRunRunner

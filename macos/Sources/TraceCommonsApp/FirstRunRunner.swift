@@ -64,12 +64,18 @@ final class FirstRunRunner: ObservableObject {
     @Published private(set) var isCommitting = false
     /// The passkey sheets are asked for: by the commit that started the
     /// daemon for a passkey chosen on Join, or by Create passkey once the
-    /// daemon runs. `firstRunPasskeySheets` presents them.
+    /// daemon runs. `firstRunPasskeySheets` presents them; until Task 11's
+    /// coordinator mounts it, only Join does, so a request raised by the
+    /// commit stays raised and presents when Join is next on screen.
     @Published private(set) var passkeyDue = false
     /// How the passkey sheets last ended, for Join's notice
     /// (`PasskeySheetOutcome.joinNotice`). Cleared when they are asked for
     /// again.
     @Published private(set) var passkeyOutcome: PasskeySheetOutcome?
+
+    /// Start ran `markComplete`: the first run is finished, and a passkey
+    /// sheet that ends afterwards does not reopen Join.
+    @Published private(set) var completed = false
 
     private let daemon: FirstRunDaemon
 
@@ -146,6 +152,7 @@ final class FirstRunRunner: ObservableObject {
             }
         case .markComplete:
             daemon.markComplete()
+            completed = true
         }
         return true
     }
@@ -163,9 +170,10 @@ final class FirstRunRunner: ObservableObject {
     /// The sheets open after Folders or Tools, so a sign-out (Verify
     /// cancelled) can end them on a later step. It leaves no account, so
     /// the person goes back to Join, which says why; every answer is kept.
+    /// After Start the first run is finished and stays where it is.
     func finishPasskey(_ outcome: PasskeySheetOutcome, copy: FirstRunCopy) {
         state = JoinLayout.apply(outcome, to: state, copy: copy).state
-        if outcome == .signedOut { state.step = .join }
+        if outcome == .signedOut, !completed { state.step = .join }
         passkeyOutcome = outcome
         passkeyDue = false
     }

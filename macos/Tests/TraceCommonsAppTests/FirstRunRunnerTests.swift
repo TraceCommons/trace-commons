@@ -1,4 +1,5 @@
 import Foundation
+import TCBridge
 import TCShellCore
 import XCTest
 @testable import TraceCommonsApp
@@ -147,6 +148,30 @@ final class FirstRunRunnerTests: XCTestCase {
         XCTAssertTrue(runner.state.daemonStarted)
         XCTAssertEqual(runner.state.step, .uses)
         XCTAssertNil(runner.failure)
+    }
+
+    /// The sheets are not awaited, so Start can run while they are open. A
+    /// sign-out that ends them after Start leaves the finished first run
+    /// where it is rather than reopening Join.
+    func test_aSignOutAfterStartLeavesTheFinishedRunAlone() async throws {
+        let copy = try XCTUnwrap(FirstRunCopy.decode(try XCTUnwrap(TCCoreCopy.firstRunCopyJSON())))
+        var state = FirstRunState(
+            step: .uses, account: .passkeyChosen, toolAnswers: [.claudeCode: .off, .codex: .off])
+        state.daemonStarted = true
+        state.startedSettingsJSON = state.sessionRoots.settingsJSON()
+        state.scopes = ["research"]
+        let daemon = RecordingDaemon()
+        let runner = FirstRunRunner(state: state, daemon: daemon)
+        runner.requestPasskey()
+
+        await runner.commit(.start)
+        XCTAssertEqual(daemon.log.last, .markComplete)
+        XCTAssertTrue(runner.completed)
+
+        runner.finishPasskey(.signedOut, copy: copy)
+        XCTAssertFalse(runner.passkeyDue)
+        XCTAssertEqual(runner.state.account, AccountAnswer.none)
+        XCTAssertEqual(runner.state.step, .uses, "a finished first run is not reopened")
     }
 
     func test_aDeadInviteReturnsToJoinWithAnswersKept() async {

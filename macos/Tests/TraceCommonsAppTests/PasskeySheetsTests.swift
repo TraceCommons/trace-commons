@@ -315,4 +315,23 @@ final class PasskeySheetsTests: XCTestCase {
         XCTAssertTrue(source.contains("copy.passkey.verifyTitle"))
         XCTAssertTrue(source.contains("copy.passkey.welcomeTitle"))
     }
+
+    /// Each mount of the presenter holds its own model, so two mounts would
+    /// present two sheets for one request. Exactly one mount in the app's
+    /// sources: Join's until port plan Task 11, then the coordinator's.
+    func test_thePasskeySheetsAreMountedExactlyOnce() throws {
+        let sources = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Sources/TraceCommonsApp")
+        let files = try XCTUnwrap(FileManager.default.enumerator(at: sources, includingPropertiesForKeys: nil))
+        var mounts: [String] = []
+        for case let url as URL in files where url.pathExtension == "swift" {
+            let text = try String(contentsOf: url, encoding: .utf8)
+            let count = text.components(separatedBy: ".firstRunPasskeySheets(").count - 1
+            mounts += Array(repeating: url.lastPathComponent, count: count)
+        }
+        XCTAssertEqual(mounts, ["JoinScreen.swift"])
+    }
 }
