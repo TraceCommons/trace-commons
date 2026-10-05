@@ -10,6 +10,10 @@ public enum FirstRunCall: Equatable, Sendable {
     case lookupInvite(String)
     case enroll(String)
     case signInNearAI
+    /// Open the passkey sheets for a passkey chosen on Join. Not a daemon
+    /// call: the person goes through the sheets, whose ceremony completes
+    /// with the daemon this commit started.
+    case openPasskeySheets
     case setConsentScopes([String])
     case setProjectMode(projectID: String, ProjectMode)
     case includePastSessions(projectID: String, [String])
@@ -21,7 +25,8 @@ public enum FirstRunCall: Equatable, Sendable {
 /// Where the first run commits answers to the daemon.
 public enum CommitPoint: Equatable, Sendable {
     /// Leaving Folders (Quick) or Tools (Custom): the daemon starts, then
-    /// the invite deferred from Join is looked up and joined.
+    /// the invite deferred from Join is looked up and joined, and the
+    /// account chosen there is signed in or created.
     case leaveRoots
     /// Start on Uses.
     case start
@@ -51,8 +56,13 @@ public enum FirstRunPlan {
             calls.append(.lookupInvite(invite))
             calls.append(.enroll(invite))
         }
+        // One account: the near.ai sign-in or the passkey sheets, whichever
+        // Join chose, in the same place.
         if state.account == .nearAI, !state.signedIn {
             calls.append(.signInNearAI)
+        }
+        if state.account == .passkeyChosen {
+            calls.append(.openPasskeySheets)
         }
         return calls
     }

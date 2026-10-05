@@ -1,4 +1,5 @@
 import Foundation
+import TCBridge
 import TCShellCore
 import XCTest
 @testable import TraceCommonsApp
@@ -70,6 +71,8 @@ private func expectedFailure(for call: FirstRunCall) -> FirstRunFailure? {
     case .setProjectMode, .includePastSessions: return .rulesFailed
     case .setPrivateAI: return .privateAIFailed
     case .grantAutomatic: return nil
+    // Not a daemon call: the sheets are the person's ceremony.
+    case .openPasskeySheets: return nil
     case .markComplete: return .completeFailed
     }
 }
@@ -134,6 +137,58 @@ final class FirstRunRunnerTests: XCTestCase {
             .lookupInvite("INVITE-1"), .enroll("INVITE-1"), .signInNearAI,
         ])
         XCTAssertNil(runner.failure)
+    }
+
+    /// The passkey sheets are a person's ceremony, not a daemon call: the
+    /// runner raises them once the daemon started and moves on, and a
+    /// failed start raises nothing.
+    func test_aChosenPasskeyOpensItsSheetsOnceTheDaemonStarts() async {
+        var state = onFolders()
+        state.account = .passkeyChosen
+        let json = state.sessionRoots.settingsJSON()!
+
+        let refusing = RecordingDaemon()
+        refusing.failing = { if case .startDaemon = $0 { return true }; return false }
+        let failed = FirstRunRunner(state: state, daemon: refusing)
+        XCTAssertFalse(failed.passkeyDue)
+        await failed.commit(.leaveRoots)
+        XCTAssertFalse(failed.passkeyDue, "no sheet before the daemon runs")
+        XCTAssertEqual(failed.state.account, .passkeyChosen)
+        XCTAssertEqual(failed.state.step, .folders)
+
+        let daemon = RecordingDaemon()
+        let runner = FirstRunRunner(state: state, daemon: daemon)
+        await runner.commit(.leaveRoots)
+        XCTAssertEqual(daemon.log, [.startDaemon(settingsJSON: json), .lookupInvite("INVITE-1"), .enroll("INVITE-1")],
+            "the sheets are not a daemon call, and nothing signs in to near.ai")
+        XCTAssertTrue(runner.passkeyDue)
+        XCTAssertTrue(runner.state.daemonStarted)
+        XCTAssertEqual(runner.state.step, .uses)
+        XCTAssertNil(runner.failure)
+    }
+
+    /// The sheets are not awaited, so Start can run while they are open. A
+    /// sign-out that ends them after Start leaves the finished first run
+    /// where it is rather than reopening Join.
+    func test_aSignOutAfterStartLeavesTheFinishedRunAlone() async throws {
+        let copy = try XCTUnwrap(FirstRunCopy.decode(try XCTUnwrap(TCCoreCopy.firstRunCopyJSON())))
+        var state = FirstRunState(
+            step: .uses, account: .passkeyChosen, toolAnswers: [.claudeCode: .off, .codex: .off])
+        state.daemonStarted = true
+        state.startedSettingsJSON = state.sessionRoots.settingsJSON()
+        state.scopes = ["research"]
+        let daemon = RecordingDaemon()
+        let runner = FirstRunRunner(state: state, daemon: daemon)
+        runner.requestPasskey()
+
+        await runner.commit(.start)
+        XCTAssertEqual(daemon.log.last, .markComplete)
+        XCTAssertTrue(runner.completed)
+
+        runner.finishPasskey(.signedOut, copy: copy)
+        XCTAssertFalse(runner.passkeyDue)
+        XCTAssertEqual(runner.state.account, AccountAnswer.none)
+        XCTAssertEqual(runner.state.step, .uses, "a finished first run is not reopened")
     }
 
     func test_aDeadInviteReturnsToJoinWithAnswersKept() async {

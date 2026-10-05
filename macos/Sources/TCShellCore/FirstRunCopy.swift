@@ -38,9 +38,15 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
         public let passkeyReady: String
         public let passkeyCreate: String
         public let passkeyDone: String
+        /// Create passkey chosen, created once the daemon starts.
+        public let passkeyChosen: String
+        public let passkeyUndo: String
         public let nearAiEyebrow: String
         public let nearAiText: String
         public let nearAiSignIn: String
+        /// near.ai chosen, signed in once the daemon starts.
+        public let nearAiChosen: String
+        public let nearAiUndo: String
         public let signedIn: String
         public let noSharing: String
         public let skipNote: String

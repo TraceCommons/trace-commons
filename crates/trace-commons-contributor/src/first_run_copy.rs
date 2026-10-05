@@ -72,9 +72,19 @@ pub struct JoinCopy {
     pub passkey_ready: &'static str,
     pub passkey_create: &'static str,
     pub passkey_done: &'static str,
+    /// Create passkey chosen but not yet created: the passkey sheets open
+    /// once the daemon starts, after Folders or Tools. Not Ron's words.
+    pub passkey_chosen: &'static str,
+    /// Undoes a passkey choice not yet created. Not Ron's words.
+    pub passkey_undo: &'static str,
     pub near_ai_eyebrow: &'static str,
     pub near_ai_text: &'static str,
     pub near_ai_sign_in: &'static str,
+    /// near.ai chosen but not yet signed in: the sign-in runs once the
+    /// daemon starts, after Folders or Tools. Not Ron's words.
+    pub near_ai_chosen: &'static str,
+    /// Undoes a near.ai choice not yet signed in. Not Ron's words.
+    pub near_ai_undo: &'static str,
     pub signed_in: &'static str,
     pub no_sharing: &'static str,
     pub skip_note: &'static str,
@@ -236,9 +246,13 @@ pub fn first_run_copy() -> FirstRunCopy {
             passkey_ready: "“{name}” is ready. Connect it to near.ai any time.",
             passkey_create: "Create passkey",
             passkey_done: "Done",
+            passkey_chosen: "You'll create your passkey once watching starts.",
+            passkey_undo: "Undo",
             near_ai_eyebrow: "Sign in with near.ai",
             near_ai_text: "Use the login you already have. Credits land in that account.",
             near_ai_sign_in: "Sign in",
+            near_ai_chosen: "You'll sign in once watching starts.",
+            near_ai_undo: "Undo",
             signed_in: "Signed in",
             no_sharing: "Connecting or creating an account doesn't authorize any data sharing.",
             skip_note: "Skipping sets up watching only. Contributing needs a near.ai account; sign in any time.",
