@@ -408,9 +408,7 @@ struct ManagedLaunchSheet: View {
                         .textSelection(.enabled)
                     Spacer(minLength: 0)
                     GlassFolderButton(model.managedText("choose_folder")) {
-                        let panel = NSOpenPanel()
-                        panel.canChooseDirectories = true; panel.canChooseFiles = false; panel.allowsMultipleSelection = false
-                        if panel.runModal() == .OK { project = panel.url }
+                        if let path = FolderPanel.choose() { project = URL(fileURLWithPath: path, isDirectory: true) }
                     }
                 }
                 ManagedNote(text: model.managedText("launch_scope").replacingOccurrences(of: "{destination}", with: model.managedSnapshot?.capabilities.terminalDestination ?? model.managedText("terminal")))
