@@ -160,17 +160,17 @@ enum RulesScreenLayout {
 
     /// A row's words: date, then title and duration when the session was
     /// opened; a `not_queued` row has neither and shows its size instead.
-    /// Every part is a system formatter's, in the person's locale.
-    static func labelParts(_ session: PastSession) -> [String] {
+    /// The date and duration are Ron's formats in the core's words.
+    static func labelParts(_ session: PastSession, copy: FirstRunCopy.Rules) -> [String] {
         var parts: [String] = []
         if let started = session.startedAt {
-            parts.append(dateText(started))
+            parts.append(dateText(started, copy: copy))
         }
         if let title = session.title, !title.isEmpty {
             parts.append(title)
         }
         if let seconds = session.durationSecs {
-            parts.append(durationText(seconds))
+            parts.append(durationText(seconds, copy: copy))
         }
         if session.title == nil, session.durationSecs == nil {
             parts.append(sizeText(session.sizeBytes))
@@ -178,15 +178,33 @@ enum RulesScreenLayout {
         return parts
     }
 
-    static func dateText(_ date: Date) -> String {
-        date.formatted(.dateTime.weekday(.abbreviated).day().month(.abbreviated))
+    /// "Sat 12 Sep" (Ron's `formatSessionDate`), read in UTC so a session
+    /// never moves to another day with the time zone. Every word is the
+    /// core's; only the calendar arithmetic is here.
+    static func dateText(_ date: Date, copy: FirstRunCopy.Rules) -> String {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "UTC") ?? TimeZone(secondsFromGMT: 0)!
+        let parts = calendar.dateComponents([.weekday, .day, .month], from: date)
+        guard let weekday = parts.weekday, let day = parts.day, let month = parts.month,
+            copy.weekdays.indices.contains(weekday - 1), copy.months.indices.contains(month - 1)
+        else { return "" }
+        return FirstRunCopy.fill(
+            copy.sessionDate,
+            ["weekday": copy.weekdays[weekday - 1], "day": String(day), "month": copy.months[month - 1]])
     }
 
-    static func durationText(_ seconds: Int) -> String {
-        let formatter = DateComponentsFormatter()
-        formatter.allowedUnits = seconds >= 3_600 ? [.hour, .minute] : [.minute]
-        formatter.unitsStyle = .abbreviated
-        return formatter.string(from: TimeInterval(max(seconds, 0))) ?? ""
+    /// "52 min", "1 h 18 min", "2 h 04 min" (Ron's `formatDuration`): whole
+    /// minutes, rounded; the minutes are padded to two digits from two hours
+    /// up, as his are.
+    static func durationText(_ seconds: Int, copy: FirstRunCopy.Rules) -> String {
+        let total = max(0, Int((Double(seconds) / 60).rounded()))
+        guard total >= 60 else {
+            return FirstRunCopy.fill(copy.durationMinutes, ["minutes": String(total)])
+        }
+        let hours = total / 60
+        let rest = total % 60
+        let minutes = hours >= 2 && rest < 10 ? "0\(rest)" : String(rest)
+        return FirstRunCopy.fill(copy.durationHours, ["hours": String(hours), "minutes": minutes])
     }
 
     static func sizeText(_ bytes: Int) -> String {
@@ -486,7 +504,7 @@ struct RulesScreen: View {
         return VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
             ForEach(visible) { session in
                 Toggle(isOn: tickBinding(id, session)) {
-                    Text(RulesScreenLayout.labelParts(session).joined(separator: " · "))
+                    Text(RulesScreenLayout.labelParts(session, copy: copy.rules).joined(separator: " · "))
                 }
                 .toggleStyle(GlassCheckboxStyle())
                 .disabled(!RulesScreenLayout.isTickable(session))

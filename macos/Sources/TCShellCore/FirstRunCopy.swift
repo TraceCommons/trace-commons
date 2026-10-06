@@ -23,6 +23,8 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
         public let sessionCount: String
         /// Takes back a choice not yet acted on.
         public let undo: String
+        /// What an unanswered picker reads (Ron's `Picker` placeholder).
+        public let choose: String
     }
 
     public struct Join: Decodable, Equatable, Sendable {
@@ -159,6 +161,15 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
         public let sessionsUnavailable: String
         /// Watching only: picked past sessions wait on this Mac.
         public let pastSessionsWatchOnly: String
+        /// A session's weekday names, Sunday first, and month names,
+        /// January first.
+        public let weekdays: [String]
+        public let months: [String]
+        /// `{weekday}`, `{day}`, `{month}`.
+        public let sessionDate: String
+        /// `{minutes}`; then `{hours}` and `{minutes}`.
+        public let durationMinutes: String
+        public let durationHours: String
     }
 
     public struct Uses: Decodable, Equatable, Sendable {

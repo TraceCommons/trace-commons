@@ -40,8 +40,9 @@
 //!   P-3, P-4 and P-6, the preview's automatic-sharing refusal) are absent.
 //!
 //! Placeholders are `{tool}`, `{host}`, `{pay_range}`, `{count}`, `{folder}`,
-//! `{name}`, `{max}`, `{selected}`, `{total}` and `{tools}`; the shell fills
-//! them and adds nothing else.
+//! `{name}`, `{min}`, `{max}`, `{selected}`, `{total}`, `{tools}`, and the
+//! session date and duration's `{weekday}`, `{day}`, `{month}`, `{hours}` and
+//! `{minutes}`; the shell fills them and adds nothing else.
 
 /// Every placeholder name the table uses, each written `{name}` in a string.
 pub const PLACEHOLDERS: &[&str] = &[
@@ -56,6 +57,11 @@ pub const PLACEHOLDERS: &[&str] = &[
     "selected",
     "total",
     "tools",
+    "weekday",
+    "day",
+    "month",
+    "hours",
+    "minutes",
 ];
 
 /// The first-run window: tiers, step labels and the shared footer controls.
@@ -77,6 +83,9 @@ pub struct FrameCopy {
     /// Takes back a choice not yet acted on (a passkey or near.ai on Join).
     /// Not Ron's words.
     pub undo: &'static str,
+    /// What an unanswered picker reads: Ron's design-system `Picker`
+    /// placeholder. The picker's question stays its accessible label.
+    pub choose: &'static str,
 }
 
 /// Join: the invite, the account cards and skipping (`join-screen.tsx`).
@@ -229,6 +238,18 @@ pub struct RulesCopy {
     /// there is no enrolment to send them under.
     /// **DRAFT, NEEDS APPROVAL**
     pub past_sessions_watch_only: &'static str,
+    /// A session's weekday names, Sunday first, as Ron's `WEEKDAYS`.
+    pub weekdays: [&'static str; 7],
+    /// A session's month names, January first, as Ron's `MONTHS`.
+    pub months: [&'static str; 12],
+    /// `{weekday}`, `{day}`, `{month}`: a session's start, read in UTC so it
+    /// never moves a day with the time zone (Ron's `formatSessionDate`).
+    pub session_date: &'static str,
+    /// `{minutes}`: a session under an hour long (Ron's `formatDuration`).
+    pub duration_minutes: &'static str,
+    /// `{hours}`, `{minutes}`: an hour or longer. The shell pads the minutes
+    /// to two digits from two hours up, as Ron's `formatDuration` does.
+    pub duration_hours: &'static str,
 }
 
 /// Uses: data use, Sharing and starting (`uses-screen.tsx`).
@@ -338,6 +359,7 @@ pub fn first_run_copy() -> FirstRunCopy {
             answer_every_tool: "Answer every tool above to continue",
             session_count: "{count} sessions",
             undo: "Undo",
+            choose: "Choose…",
         },
         join: JoinCopy {
             title_light: "Get started on ",
@@ -425,6 +447,13 @@ pub fn first_run_copy() -> FirstRunCopy {
             unavailable: "Couldn't read repos from your sessions. Go back, then continue to try again.",
             sessions_unavailable: "Past sessions unavailable",
             past_sessions_watch_only: "You're watching only, so the sessions you pick wait on this Mac, unsent, until you join.",
+            weekdays: ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"],
+            months: [
+                "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+            ],
+            session_date: "{weekday} {day} {month}",
+            duration_minutes: "{minutes} min",
+            duration_hours: "{hours} h {minutes} min",
         },
         uses: UsesCopy {
             title_light: "How your data is ",
@@ -557,6 +586,48 @@ mod tests {
                 "{{{name}}} is documented but no string carries it"
             );
         }
+    }
+
+    /// Ron's #1030 picker placeholder (design-system `Picker`): an
+    /// unanswered picker reads it, and the question stays its accessible
+    /// label.
+    #[test]
+    fn an_unanswered_picker_reads_rons_choose() {
+        let copy = first_run_copy();
+        assert_eq!(copy.frame.choose, "Choose…");
+        assert_ne!(copy.frame.choose, copy.folders.watch_question);
+    }
+
+    /// Ron's `formatSessionDate` and `formatDuration` (`ftux-model.ts`):
+    /// "Sat 12 Sep", "52 min", "1 h 18 min", "2 h 04 min". The shell reads
+    /// the date in UTC and fills these; it writes no unit of its own.
+    #[test]
+    fn session_dates_and_durations_are_rons_formats() {
+        let rules = first_run_copy().rules;
+        assert_eq!(
+            rules.weekdays,
+            ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
+        );
+        assert_eq!(
+            rules.months,
+            [
+                "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"
+            ]
+        );
+        let date = rules
+            .session_date
+            .replace("{weekday}", "Sat")
+            .replace("{day}", "12")
+            .replace("{month}", "Sep");
+        assert_eq!(date, "Sat 12 Sep");
+        assert_eq!(rules.duration_minutes.replace("{minutes}", "52"), "52 min");
+        assert_eq!(
+            rules
+                .duration_hours
+                .replace("{hours}", "2")
+                .replace("{minutes}", "04"),
+            "2 h 04 min"
+        );
     }
 
     /// Watching only queues picked past sessions on this Mac and sends
