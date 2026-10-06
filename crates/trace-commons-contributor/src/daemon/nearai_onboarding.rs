@@ -109,10 +109,15 @@ pub fn is_near_ai_tenant_id(tenant_id: &str) -> bool {
 /// Deliberately takes no account id and no token: the account comes from the
 /// commons's introspection of the JWT, and the JWT comes from the session this
 /// daemon already holds. A caller cannot name either.
+///
+/// `ingest_url` may be left out: the first run's "Sign in with near.ai"
+/// without an invite names no commons, and enrolls against the native
+/// account's (`enroll_origin`).
 pub(super) async fn handle_enroll(shared: &DaemonShared, req: &Request) -> Response {
-    let Some(ingest_url) = req.params.get("ingest_url").and_then(|v| v.as_str()) else {
+    let Ok(ingest_url) = enroll_origin(&shared.store, &req.params) else {
         return Response::err(req.id, ERR_BAD_PARAMS, "near_ai_enroll_invalid");
     };
+    let ingest_url = ingest_url.as_str();
     let api = match CloudApi::live() {
         Ok(api) => api,
         Err(_) => {
@@ -124,6 +129,20 @@ pub(super) async fn handle_enroll(shared: &DaemonShared, req: &Request) -> Respo
         // Label only. Every failure below already carries a control name, and
         // the errors underneath them can quote a remote body or a URL.
         Err(error) => Response::err(req.id, ERR_UNAVAILABLE, label(&error)),
+    }
+}
+
+/// The commons an enrollment is for: the one named, or, when none is, the
+/// origin `native_identity` trusts for this store -- the native account's
+/// commons on a daemon that holds no config. A non-string `ingest_url` is
+/// refused rather than read as absent.
+fn enroll_origin(store: &ConfigStore, params: &serde_json::Value) -> Result<String> {
+    match params.get("ingest_url") {
+        Some(value) => value
+            .as_str()
+            .map(str::to_string)
+            .ok_or_else(|| anyhow!("near_ai_enroll_invalid")),
+        None => super::native_identity::resolve_origin(store, &serde_json::json!({})),
     }
 }
 
@@ -670,6 +689,28 @@ mod tests {
                 "{address} left an enrollment behind"
             );
         }
+    }
+
+    /// The first run's "Sign in with near.ai" without an invite names no
+    /// commons: an unenrolled daemon enrolls against the native account's
+    /// commons, the one origin `native_identity` trusts before any config
+    /// exists. A named address is used as given, as before.
+    #[test]
+    fn an_enrollment_naming_no_commons_uses_the_native_account_origin() {
+        let (dir, store) = crate::config::tests_support::temp_store();
+        std::mem::forget(dir);
+        assert_eq!(
+            enroll_origin(&store, &serde_json::json!({})).unwrap(),
+            "https://ingest.tracecommons.ai"
+        );
+        assert_eq!(
+            enroll_origin(
+                &store,
+                &serde_json::json!({"ingest_url": "https://commons.example"})
+            )
+            .unwrap(),
+            "https://commons.example"
+        );
     }
 
     /// No login, no enrollment -- and no attempt to invent one.
