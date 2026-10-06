@@ -183,7 +183,7 @@ final class FirstRunRunnerTests: XCTestCase {
     func test_aSignOutAfterStartLeavesTheFinishedRunAlone() async throws {
         let copy = try XCTUnwrap(FirstRunCopy.decode(try XCTUnwrap(TCCoreCopy.firstRunCopyJSON())))
         var state = FirstRunState(
-            step: .uses, account: .passkeyChosen, toolAnswers: [.claudeCode: .off, .codex: .off])
+            step: .uses, account: .passkey(name: "Laptop"), toolAnswers: [.claudeCode: .off, .codex: .off])
         state.daemonStarted = true
         state.startedSettingsJSON = state.sessionRoots.settingsJSON()
         state.scopes = ["research"]
@@ -482,5 +482,40 @@ final class FirstRunRunnerTests: XCTestCase {
         XCTAssertNotEqual(runner.failure, .startFailed)
         XCTAssertEqual(runner.state.startedSettingsJSON, held)
         XCTAssertEqual(runner.state.step, .folders)
+    }
+
+    /// Kristi's #1235 I1, as decided: Start with a passkey chosen but not
+    /// created reopens the sheets, sends the daemon nothing and finishes
+    /// nothing. Closed again, Start reopens them again; once a passkey is
+    /// bound, Start finishes.
+    func test_startWithAChosenPasskeyReopensTheSheets() async throws {
+        let copy = try XCTUnwrap(FirstRunCopy.decode(try XCTUnwrap(TCCoreCopy.firstRunCopyJSON())))
+        let daemon = RecordingFirstRunDaemon()
+        var state = FirstRunState(tier: .quick, step: .uses)
+        state.account = .passkeyChosen
+        state.answer(.claudeCode, .watch(path: "/Users/someone/.claude/projects"))
+        state.answer(.codex, .off)
+        state.daemonStarted = true
+        state.startedSettingsJSON = state.sessionRoots.settingsJSON()
+        state.scopes = ["required"]
+        let runner = FirstRunRunner(state: state, daemon: daemon)
+
+        await runner.commit(.start)
+        XCTAssertTrue(runner.passkeyDue)
+        XCTAssertEqual(daemon.log, [], "no scopes, grant or marker without an enrolment")
+        XCTAssertFalse(runner.completed)
+        XCTAssertNil(runner.failure, "no Start failure line for a passkey still to create")
+
+        runner.finishPasskey(.closed, copy: copy)
+        XCTAssertEqual(runner.state.account, .passkeyChosen)
+        XCTAssertEqual(runner.state.step, .uses)
+        await runner.commit(.start)
+        XCTAssertTrue(runner.passkeyDue, "Start reopens them again")
+        XCTAssertEqual(daemon.log, [])
+
+        runner.finishPasskey(.created(name: "Laptop"), copy: copy)
+        await runner.commit(.start)
+        XCTAssertEqual(daemon.log, [.setConsentScopes(["required"]), .markComplete])
+        XCTAssertTrue(runner.completed)
     }
 }

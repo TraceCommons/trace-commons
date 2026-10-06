@@ -87,6 +87,7 @@ final class FirstRunNavigationTests: XCTestCase {
 
     func test_startWaitsForTheRequiredUse() {
         var state = FirstRunState(tier: .quick, step: .uses)
+        state.account = .enrolled
         state.scopes = ["evaluation"]
         XCTAssertFalse(FirstRunNavigation.canContinue(state, candidates: [], requiredScope: "research"))
 
@@ -107,10 +108,13 @@ final class FirstRunNavigationTests: XCTestCase {
     }
 
     func test_watchOnlyCannotChooseAutomatic() {
-        XCTAssertEqual(FirstRunNavigation.sharingPaths(for: .watchOnly), [.askMe])
-        XCTAssertEqual(FirstRunNavigation.sharingPaths(for: .nearAI), [.askMe, .automatic])
-        XCTAssertEqual(FirstRunNavigation.sharingPaths(for: .passkey(name: "Laptop")), [.askMe, .automatic])
-        XCTAssertEqual(FirstRunNavigation.sharingPaths(for: .enrolled), [.askMe, .automatic])
+        XCTAssertEqual(FirstRunNavigation.sharingPaths(for: FirstRunState(account: .watchOnly)), [.askMe])
+        XCTAssertEqual(
+            FirstRunNavigation.sharingPaths(for: FirstRunState(account: .nearAI, enrolledInvite: "INVITE-1")),
+            [.askMe, .automatic])
+        XCTAssertEqual(
+            FirstRunNavigation.sharingPaths(for: FirstRunState(account: .passkey(name: "Laptop"))), [.askMe, .automatic])
+        XCTAssertEqual(FirstRunNavigation.sharingPaths(for: FirstRunState(account: .enrolled)), [.askMe, .automatic])
 
         var state = FirstRunState(tier: .quick, step: .uses)
         state.account = .watchOnly
@@ -127,10 +131,10 @@ final class FirstRunNavigationTests: XCTestCase {
     /// the daemon runs and may close or sign out, so Automatic waits for the
     /// passkey the daemon holds. Start with Automatic grants nothing for it.
     func test_aPasskeyNotYetCreatedCannotChooseAutomatic() {
-        XCTAssertEqual(FirstRunNavigation.sharingPaths(for: .passkeyChosen), [.askMe])
-        XCTAssertEqual(FirstRunNavigation.sharingPaths(for: AccountAnswer.none), [.askMe])
-        XCTAssertFalse(FirstRunNavigation.canChooseAutomatic(.passkeyChosen))
-        XCTAssertTrue(FirstRunNavigation.canChooseAutomatic(.passkey(name: "")))
+        XCTAssertEqual(FirstRunNavigation.sharingPaths(for: FirstRunState(account: .passkeyChosen)), [.askMe])
+        XCTAssertEqual(FirstRunNavigation.sharingPaths(for: FirstRunState(account: .none)), [.askMe])
+        XCTAssertFalse(FirstRunNavigation.canChooseAutomatic(FirstRunState(account: .passkeyChosen)))
+        XCTAssertTrue(FirstRunNavigation.canChooseAutomatic(FirstRunState(account: .passkey(name: ""))))
 
         var state = FirstRunState(tier: .quick, step: .uses)
         state.account = .passkeyChosen
@@ -138,7 +142,8 @@ final class FirstRunNavigationTests: XCTestCase {
         state.scopes = ["research"]
         let calls = FirstRunPlan.calls(for: state, at: .start)
         XCTAssertFalse(calls.contains { if case .grantAutomatic = $0 { return true } else { return false } })
-        XCTAssertEqual(calls.last, .markComplete)
+        // Its Start reopens the sheets and finishes nothing (Kristi's #1235 I1).
+        XCTAssertEqual(calls, [.openPasskeySheets])
     }
 
     func test_backKeepsEveryAnswer() {
@@ -269,5 +274,33 @@ final class FirstRunNavigationTests: XCTestCase {
 
         let data = try JSONEncoder().encode(state)
         XCTAssertEqual(try JSONDecoder().decode(FirstRunState.self, from: data), state)
+    }
+
+    /// Kristi's #1235 B1 floor: Automatic and Start read an enrolment the
+    /// daemon holds, not an account answer. near.ai holds one once its
+    /// invite enrolled; a passkey only once Verify bound it.
+    func test_automaticAndStartNeedARealEnrolment() {
+        func state(_ account: AccountAnswer, enrolledInvite: String? = nil) -> FirstRunState {
+            var state = FirstRunState(tier: .quick, step: .uses)
+            state.account = account
+            state.enrolledInvite = enrolledInvite
+            state.scopes = ["required"]
+            return state
+        }
+        for account: AccountAnswer in [.none, .watchOnly, .passkeyChosen, .nearAI] {
+            XCTAssertFalse(state(account).holdsEnrolment, "\(account)")
+            XCTAssertFalse(FirstRunNavigation.canChooseAutomatic(state(account)), "\(account)")
+            XCTAssertEqual(FirstRunNavigation.sharingPaths(for: state(account)), [.askMe], "\(account)")
+        }
+        for held in [state(.nearAI, enrolledInvite: "INVITE-1"), state(.passkey(name: "")), state(.enrolled)] {
+            XCTAssertTrue(held.holdsEnrolment, "\(held.account)")
+            XCTAssertTrue(FirstRunNavigation.canChooseAutomatic(held), "\(held.account)")
+            XCTAssertTrue(FirstRunNavigation.canContinue(held, candidates: [], requiredScope: "required"))
+        }
+        // Start is offered to watching only and to a chosen passkey, whose
+        // Start reopens the sheets; never to an account without an enrolment.
+        XCTAssertTrue(FirstRunNavigation.canContinue(state(.watchOnly), candidates: [], requiredScope: "required"))
+        XCTAssertTrue(FirstRunNavigation.canContinue(state(.passkeyChosen), candidates: [], requiredScope: "required"))
+        XCTAssertFalse(FirstRunNavigation.canContinue(state(.nearAI), candidates: [], requiredScope: "required"))
     }
 }

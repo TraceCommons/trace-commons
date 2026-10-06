@@ -79,7 +79,7 @@ final class UsesScreenTests: XCTestCase {
     func test_startIsDisabledUntilTheRequiredUseIsTicked() throws {
         let grant = try grant()
         let uses = try copy().uses
-        var state = FirstRunState(tier: .quick, step: .uses, account: .nearAI)
+        var state = FirstRunState(tier: .quick, step: .uses, account: .nearAI, enrolledInvite: "INVITE-1")
         let required = UsesScreenLayout.requiredScope(options)
         XCTAssertFalse(UsesScreenLayout.canStart(state, uses: uses, requiredScope: required, grant: grant, isCommitting: false))
 
@@ -121,7 +121,8 @@ final class UsesScreenTests: XCTestCase {
     func test_startIsDisabledWheneverTheSharingLineIsTheFallback() throws {
         let uses = try copy().uses
         let required = UsesScreenLayout.requiredScope(options)
-        var state = FirstRunState(tier: .quick, step: .uses, account: .nearAI, scopes: ["debugging_evaluation"])
+        var state = FirstRunState(
+            tier: .quick, step: .uses, account: .nearAI, scopes: ["debugging_evaluation"], enrolledInvite: "INVITE-1")
 
         let noAskFirst = try grant(without: "path_ask_first")
         XCTAssertEqual(
@@ -158,10 +159,11 @@ final class UsesScreenTests: XCTestCase {
         XCTAssertEqual(UsesScreenLayout.sharingLine(uses, path: .automatic, grant: nil), uses.sharingUnavailable)
 
         let modes = try modes()
-        let full = UsesScreenLayout.sharingOptions(for: .nearAI, modes: modes)
+        let joined = FirstRunState(tier: .quick, step: .uses, account: .nearAI, enrolledInvite: "INVITE-1")
+        let full = UsesScreenLayout.sharingOptions(for: joined, modes: modes)
         XCTAssertEqual(full.map(\.value), [.askMe, .automatic])
         XCTAssertEqual(full.map(\.title), [modes.label(for: .ask), modes.label(for: .autoUpload)])
-        XCTAssertEqual(UsesScreenLayout.sharingOptions(for: .watchOnly, modes: modes).map(\.value), [.askMe])
+        XCTAssertEqual(UsesScreenLayout.sharingOptions(for: FirstRunState(account: .watchOnly), modes: modes).map(\.value), [.askMe])
     }
 
     func test_privateAIAppearsOnlyInCustom() throws {
@@ -287,7 +289,8 @@ final class UsesScreenTests: XCTestCase {
         XCTAssertEqual(
             UsesScreenLayout.sharingLine(uses, path: UsesScreenLayout.effectiveSharing(watching), grant: grant),
             grant.pathAskFirst)
-        let joined = FirstRunState(tier: .quick, step: .uses, account: .nearAI, sharing: .automatic)
+        let joined = FirstRunState(
+            tier: .quick, step: .uses, account: .nearAI, sharing: .automatic, enrolledInvite: "INVITE-1")
         XCTAssertEqual(UsesScreenLayout.effectiveSharing(joined), .automatic)
 
         let source = try Self.source()

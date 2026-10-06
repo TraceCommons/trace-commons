@@ -29,8 +29,10 @@ public enum AccountAnswer: Codable, Equatable, Sendable {
     /// with the daemon, so they open once Folders or Tools started it
     /// (`FirstRunCall.openPasskeySheets`); until then the choice is undoable.
     case passkeyChosen
-    /// A passkey the daemon holds, with the name the person gave it (empty
-    /// when it signed in or bound an existing account).
+    /// A passkey whose account Verify bound, which enrolled this Mac
+    /// (`account_bind`), with the name the person gave it (empty when an
+    /// existing passkey signed in, or the bind answered `existing_account`).
+    /// A sign-in alone never records it: it holds no enrolment.
     case passkey(name: String)
     /// The daemon was already enrolled when this first run began: an earlier
     /// first run joined and was quit before Start. An account it holds, so
@@ -156,6 +158,19 @@ public struct FirstRunState: Codable, Equatable, Sendable {
         self.startedSettingsJSON = startedSettingsJSON
         self.enrolledInvite = enrolledInvite
         self.signedIn = signedIn
+    }
+
+    /// Whether the daemon holds an enrolment for this first run, which is
+    /// what consent scopes, the Automatic grant and the enrolment's marker
+    /// need. An earlier first run's enrolment; a passkey Verify bound; or
+    /// near.ai once its invite enrolled. An account answer alone -- near.ai
+    /// chosen, a passkey chosen -- is not one.
+    public var holdsEnrolment: Bool {
+        switch account {
+        case .enrolled, .passkey: return true
+        case .nearAI: return enrolledInvite != nil
+        case .none, .watchOnly, .passkeyChosen: return false
+        }
     }
 
     /// Answer a tool's row. A folder added for that tool earlier is dropped,

@@ -28,7 +28,7 @@ struct SharingDisclosureFlow: Equatable {
     /// Whether Start goes through the disclosures: Automatic, on an account
     /// that can choose it. Ask me and watching only start directly.
     static func isNeeded(for state: FirstRunState) -> Bool {
-        state.sharing == .automatic && FirstRunNavigation.canChooseAutomatic(state.account)
+        state.sharing == .automatic && FirstRunNavigation.canChooseAutomatic(state)
     }
 
     /// The scrub sheet's Continue. Ignored out of order.

@@ -43,7 +43,7 @@ final class RulesScreenTests: XCTestCase {
             session("c", selectable: false),
             session("d", state: .stillActive, selectable: false),
         ]
-        var state = FirstRunState(tier: .custom, step: .rules)
+        var state = FirstRunState(tier: .custom, step: .rules, account: .enrolled)
 
         // One write per tickable row, as the native group toggle sends them.
         for _ in sessions.filter(RulesScreenLayout.isTickable) {
@@ -105,13 +105,15 @@ final class RulesScreenTests: XCTestCase {
         XCTAssertTrue(state.rules.isEmpty)
     }
 
-    /// Automatic needs an account. A watch-only person is not offered it per
+    /// Automatic needs an enrolment. A watch-only person is not offered it per
     /// folder, and the layout refuses it however it is asked, so the plan
     /// never sends an arming the daemon would refuse for want of terms.
     func test_watchOnlyIsNotOfferedAutomaticPerFolder() {
         let project = ProjectRow(projectId: "p1", projectLabel: "repo", mode: .ask)
-        XCTAssertEqual(RulesScreenLayout.offeredModes(project, account: .watchOnly), [.ask, .ignore])
-        XCTAssertEqual(RulesScreenLayout.offeredModes(project, account: .nearAI), [.ask, .autoUpload, .ignore])
+        let watching = FirstRunState(tier: .custom, step: .rules, account: .watchOnly)
+        let joined = FirstRunState(tier: .custom, step: .rules, account: .nearAI, enrolledInvite: "INVITE-1")
+        XCTAssertEqual(RulesScreenLayout.offeredModes(project, state: watching), [.ask, .ignore])
+        XCTAssertEqual(RulesScreenLayout.offeredModes(project, state: joined), [.ask, .autoUpload, .ignore])
 
         var state = FirstRunState(tier: .custom, step: .rules, account: .watchOnly)
         XCTAssertEqual(RulesScreenLayout.pick(&state, project: project, wanted: .autoUpload), .refused)
@@ -121,14 +123,14 @@ final class RulesScreenTests: XCTestCase {
         // A folder the daemon already arms keeps its mode on the picker, so
         // the picker never shows a mode it has no option for.
         let armed = ProjectRow(projectId: "p2", projectLabel: "armed", mode: .autoUpload)
-        XCTAssertEqual(RulesScreenLayout.offeredModes(armed, account: .watchOnly), [.ask, .autoUpload, .ignore])
+        XCTAssertEqual(RulesScreenLayout.offeredModes(armed, state: watching), [.ask, .autoUpload, .ignore])
     }
 
     /// Arming is a grant, so it is never silent: picking Automatic asks
     /// first, and only the confirmation writes the rule the plan sends.
     func test_automaticWaitsForTheArmingConfirmation() {
         let project = ProjectRow(projectId: "p1", projectLabel: "repo", mode: .ask)
-        var state = FirstRunState(tier: .custom, step: .rules, account: .nearAI)
+        var state = FirstRunState(tier: .custom, step: .rules, account: .nearAI, enrolledInvite: "INVITE-1")
 
         XCTAssertEqual(RulesScreenLayout.pick(&state, project: project, wanted: .autoUpload), .needsConfirmation)
         XCTAssertTrue(state.rules.isEmpty)
@@ -150,7 +152,7 @@ final class RulesScreenTests: XCTestCase {
     /// is sent for it, as Settings does.
     func test_repickingTheDaemonsModeIsNotSent() {
         let project = ProjectRow(projectId: "p1", projectLabel: "repo", mode: .ask)
-        var state = FirstRunState(tier: .custom, step: .rules, account: .nearAI)
+        var state = FirstRunState(tier: .custom, step: .rules, account: .nearAI, enrolledInvite: "INVITE-1")
 
         XCTAssertEqual(RulesScreenLayout.pick(&state, project: project, wanted: .ask), .applied)
         XCTAssertTrue(state.rules.isEmpty)
