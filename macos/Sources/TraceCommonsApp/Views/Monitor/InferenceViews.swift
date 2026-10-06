@@ -68,7 +68,7 @@ struct InferenceTabView: View {
                         unreadable
                     }
                 } else if store.failures["inference_calls"] == nil {
-                    ProgressView().controlSize(.small).frame(maxWidth: .infinity)
+                    GlassSpinner(standalone: true).frame(maxWidth: .infinity)
                 }
             }
         }

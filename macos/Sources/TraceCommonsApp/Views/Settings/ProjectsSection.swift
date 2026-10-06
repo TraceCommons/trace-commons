@@ -64,28 +64,27 @@ struct ProjectsSection: View {
         }
         // Presented from the section: one dialog for the list, named by
         // whichever row is being armed.
-        .confirmationDialog(
-            armingCandidate.flatMap(armingCopy)?.question ?? "",
-            isPresented: Binding(
-                // Not presented without the core's words: arming is never
-                // confirmed against a sentence this shell wrote.
-                get: { armingCandidate.flatMap(armingCopy) != nil },
-                // Any dismissal clears the candidate.
-                set: { if !$0 { armingCandidate = nil } }
-            ),
-            titleVisibility: .visible,
-            presenting: armingCandidate
-        ) { project in
-            // Not `.destructive`: arming destroys nothing and is reversible
-            // from this same picker.
-            let copy = armingCopy(project)
-            Button(copy?.confirm ?? "") {
-                model.setProjectMode(project, mode: .autoUpload)
-                armingCandidate = nil
+        .glassModal(isPresented: Binding(
+            // Not presented without the core's words: arming is never
+            // confirmed against a sentence this shell wrote.
+            get: { armingCandidate.flatMap(armingCopy) != nil },
+            // Any dismissal clears the candidate.
+            set: { if !$0 { armingCandidate = nil } }
+        )) {
+            if let project = armingCandidate, let copy = armingCopy(project) {
+                // Not `.destructive`: arming destroys nothing and is
+                // reversible from this same picker.
+                GlassConfirmation(
+                    title: copy.question, message: copy.body,
+                    actions: [
+                        .cancel(copy.decline) { armingCandidate = nil },
+                        GlassModalAction(copy.confirm, isDefault: true) {
+                            model.setProjectMode(project, mode: .autoUpload)
+                            armingCandidate = nil
+                        },
+                    ],
+                    onCancel: { armingCandidate = nil })
             }
-            Button(copy?.decline ?? "", role: .cancel) { armingCandidate = nil }
-        } message: { project in
-            Text(armingCopy(project)?.body ?? "")
         }
     }
 

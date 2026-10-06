@@ -1,4 +1,5 @@
 import SwiftUI
+import TCDesign
 
 /// Native transport and browser presentation only; Rust owns lifecycle and cadence.
 struct NearAccountConnectView: View {
@@ -16,20 +17,37 @@ struct NearAccountConnectView: View {
     var body: some View {
         Group {
             if let copy = model.witnessCopy?.wallet, let flow, flow.state != "Unsupported" {
-                VStack(alignment: .leading, spacing: TC.Space.m) {
-                    Text(copy.heading).font(TC.Font_.cardTitle)
-                    Text(copy.disclosure).font(.callout).foregroundStyle(.secondary)
-                    TextField(copy.commons, text: $commons).textFieldStyle(.roundedBorder).disabled(busy || !flow.canEdit)
-                    Button(copy.check) { run("check") }.disabled(pending || !flow.canCheck)
+                VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
+                    Text(copy.heading)
+                        .glassType(GlassTokens.TypeScale.bodyStrong)
+                        .foregroundStyle(GlassColor.textPrimary)
+                    Text(copy.disclosure)
+                        .glassType(GlassTokens.TypeScale.label.weight(.regular))
+                        .foregroundStyle(GlassColor.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    GlassTextField(copy.commons, text: $commons).disabled(busy || !flow.canEdit)
+                    Button(copy.check) { run("check") }
+                        .buttonStyle(GlassButtonStyle(.glass))
+                        .disabled(pending || !flow.canCheck)
                     if flow.canStart {
-                        TextField(copy.account, text: $account).textFieldStyle(.roundedBorder).disabled(busy)
-                        Button(copy.start) { run("start") }.disabled(pending)
+                        GlassTextField(copy.account, text: $account).disabled(busy)
+                        Button(copy.start) { run("start") }
+                            .buttonStyle(GlassButtonStyle(.primary))
+                            .disabled(pending)
                     }
-                    if busy { ProgressView().controlSize(.small) }
-                    if transportFailed { NativeFlowNotice(message: copy.failed, glyph: copy.refusedGlyph, tone: copy.refusedTone) }
-                    else if flow.tone == "refused" { NativeFlowNotice(message: flow.message, glyph: flow.glyph, tone: flow.tone) }
-                    else if !flow.message.isEmpty { Text(flow.message).font(.callout).foregroundStyle(.secondary) }
-                    if flow.canCancel { Button(copy.cancel, role: .cancel) { run("cancel") } }
+                    if busy { GlassSpinner(standalone: true) }
+                    if transportFailed { notice(copy.failed, glyph: copy.refusedGlyph) }
+                    else if flow.tone == "refused" { notice(flow.message, glyph: flow.glyph) }
+                    else if !flow.message.isEmpty {
+                        Text(flow.message)
+                            .glassType(GlassTokens.TypeScale.label.weight(.regular))
+                            .foregroundStyle(GlassColor.textSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    if flow.canCancel {
+                        Button(copy.cancel, role: .cancel) { run("cancel") }
+                            .buttonStyle(GlassButtonStyle(.glass))
+                    }
                 }
             }
         }
@@ -40,6 +58,12 @@ struct NearAccountConnectView: View {
         .onChange(of: busy) { _, value in onBusyChanged(value) }
         .onDisappear { closed = true; Task { await cancel() } }
     }
+    /// A refusal: the core's glyph beside its sentence, in the outside tone.
+    private func notice(_ message: String, glyph: String) -> some View {
+        GlassStatusLabel([glyph, message].filter { !$0.isEmpty }.joined(separator: " "), status: .outside)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
     private func cancel() async {
         guard let flow else { return }
         self.flow = await model.nativeWalletFlow(action: "cancel", flowID: flow.flowID, commons: "", account: "") ?? flow

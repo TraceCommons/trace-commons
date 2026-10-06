@@ -146,18 +146,20 @@ final class SkillLearningRenderingTests: XCTestCase {
         // component's own; only the target is checked here, adjacent.
         XCTAssertTrue(source.contains(
             "GlassTextField(copy.name, text: $draft.name)\n                .frame(minHeight: 44)\n"))
+        // `GlassTextArea` names its editor with its first argument, as
+        // `GlassTextField` does, so the label is the component's own.
         assertControl(
             in: source,
-            from: "TextEditor(text: $draft.description)",
+            from: "GlassTextArea(copy.applicability, text: $draft.description",
             to: "fieldLabel(",
-            label: ".accessibilityLabel(copy.applicability)",
+            label: "GlassTextArea(copy.applicability,",
             minimumHeight: 96
         )
         assertControl(
             in: source,
-            from: "TextEditor(text: $draft.procedure)",
+            from: "GlassTextArea(copy.procedure, text: $draft.procedure",
             to: "GlassExpander(copy.sourceEvidence, isOpen:",
-            label: ".accessibilityLabel(copy.procedure)",
+            label: "GlassTextArea(copy.procedure,",
             minimumHeight: 240
         )
         assertControl(

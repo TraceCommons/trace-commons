@@ -36,7 +36,7 @@ struct PrivateAISection: View {
                     RouteDisclosureGlassBody(disclosure: disclosure)
                 }
             case .loading:
-                ProgressView().controlSize(.small)
+                GlassSpinner(standalone: true)
             case .unreadable:
                 GlassEyebrowCard(RouteDisclosureUnreadableGlassLine.text(
                     line: nil, fallback: model.routeDisclosureUnreadableCopy?.title,
@@ -121,10 +121,8 @@ struct RouteDisclosureUnreadableGlassLine: View {
     var body: some View {
         let words = Self.text(line: line, fallback: fallback, unknown: Self.unknown)
         HStack(alignment: .firstTextBaseline, spacing: GlassTokens.Space.s3) {
-            Image(systemName: "exclamationmark.triangle.fill")
-                .imageScale(.small)
+            GlassWarningGlyph()
                 .foregroundStyle(GlassColor.textSecondary)
-                .accessibilityHidden(true)
             GlassStatusLabel(words, status: .ask)
         }
         .accessibilityElement(children: .combine)

@@ -19,18 +19,7 @@ private struct GlassBioEditor: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
-            Text(label)
-                .glassType(GlassTokens.TypeScale.eyebrow)
-                .foregroundStyle(GlassColor.textTertiary)
-            GlassWell {
-                TextEditor(text: $text)
-                    .glassType(GlassTokens.TypeScale.body)
-                    .foregroundStyle(GlassColor.textPrimary)
-                    .scrollContentBackground(.hidden)
-                    .frame(minHeight: 56)
-                    .padding(GlassTokens.Space.s2)
-                    .accessibilityLabel(label)
-            }
+            GlassTextArea(label, text: $text)
             Text("\(text.utf8.count)/280")
                 .glassType(GlassTokens.TypeScale.mono)
                 .foregroundStyle(GlassColor.textSecondary)
@@ -80,8 +69,8 @@ struct PublicProfileSection: View {
         // on every render, so a refresh cannot overwrite an edit in progress.
         .onAppear { seedProfileDraft() }
         .onChange(of: publishedSignature) { _, _ in seedProfileDraft() }
-        .sheet(isPresented: $showingGoPublic) {
-            // Handed the model explicitly: the sheet makes a daemon call, and
+        .glassModal(isPresented: $showingGoPublic) {
+            // Handed the model explicitly: the modal makes a daemon call, and
             // an environment object it did not get would be a crash on the
             // one button that matters.
             GoPublicSheet(onDismiss: { showingGoPublic = false })
@@ -206,44 +195,54 @@ struct GoPublicSheet: View {
     @State private var handle = ""
     @State private var bio = ""
 
+    /// Not now is the cancel (Escape). Go public is drawn as the primary but
+    /// is never the default: consent is a click, never a stray Return.
     var body: some View {
-        GlassSheet(title: PublicProfileCopy.goPublicHeadline) {
-            HStack(alignment: .top, spacing: GlassTokens.Space.cardGap) {
-                column(PublicProfileCopy.publishedHeading, SettingsLegacyWords.publishedLines)
-                column(PublicProfileCopy.neverHeading, SettingsLegacyWords.neverLines)
-            }
-            // The handle is inside the consent dialog rather than behind it:
-            // the thing consented to is this exact string becoming public.
-            GlassTextField(PublicProfileCopy.goPublicHandleLabel, text: $handle)
-            GlassBioEditor(label: PublicProfileCopy.goPublicBioLabel, text: $bio)
-            Toggle(PublicProfileCopy.goPublicAcknowledgement, isOn: $acknowledged)
-                .toggleStyle(GlassCheckboxStyle())
-            // A refusal stays in the dialog, next to the field it is about.
-            if case .refused(let label) = model.profileOutcome {
-                GlassNotice(tone: .outside) { Text(PublicProfileCopy.failureSentence(label)) }
-            }
-            HStack {
-                Spacer(minLength: 0)
-                Button(PublicProfileCopy.notNow, action: onDismiss).buttonStyle(GlassButtonStyle(.glass))
-                Button(PublicProfileCopy.goPublicConfirm) { model.claimHandle(handle, bio: bio) }
-                    .buttonStyle(GlassButtonStyle(.primary))
-                    .disabled(!GoPublicGate.canGoPublic(acknowledged: acknowledged, handle: handle, busy: model.profileBusy))
-            }
-            Text(PublicProfileCopy.goPublicFootnote)
-                .glassType(GlassTokens.TypeScale.caption)
-                .foregroundStyle(GlassColor.textSecondary)
-                .fixedSize(horizontal: false, vertical: true)
+        GlassModal(
+            title: PublicProfileCopy.goPublicHeadline, width: .regular,
+            actions: [
+                .cancel(PublicProfileCopy.notNow, action: onDismiss),
+                GlassModalAction(
+                    PublicProfileCopy.goPublicConfirm,
+                    isEnabled: GoPublicGate.canGoPublic(acknowledged: acknowledged, handle: handle, busy: model.profileBusy),
+                    isProminent: true
+                ) { model.claimHandle(handle, bio: bio) },
+            ],
+            onCancel: onDismiss
+        ) {
+            GlassModalBody { consent }
         }
-        .frame(width: 560)
         // Any outcome that is not a refusal is a claim the server accepted,
         // including one this device failed to cache: the handle is on the
-        // roster either way, so the sheet's work is done.
+        // roster either way, so the modal's work is done.
         .onChange(of: outcomeIsSettled) { _, settled in
             if settled { onDismiss() }
         }
         // A stale refusal from an earlier attempt must not greet the next
-        // opening of this sheet.
+        // opening of this modal.
         .onAppear { model.clearProfileOutcome() }
+    }
+
+    @ViewBuilder
+    private var consent: some View {
+        HStack(alignment: .top, spacing: GlassTokens.Space.cardGap) {
+            column(PublicProfileCopy.publishedHeading, SettingsLegacyWords.publishedLines)
+            column(PublicProfileCopy.neverHeading, SettingsLegacyWords.neverLines)
+        }
+        // The handle is inside the consent dialog rather than behind it:
+        // the thing consented to is this exact string becoming public.
+        GlassTextField(PublicProfileCopy.goPublicHandleLabel, text: $handle)
+        GlassBioEditor(label: PublicProfileCopy.goPublicBioLabel, text: $bio)
+        Toggle(PublicProfileCopy.goPublicAcknowledgement, isOn: $acknowledged)
+            .toggleStyle(GlassCheckboxStyle())
+        // A refusal stays in the dialog, next to the field it is about.
+        if case .refused(let label) = model.profileOutcome {
+            GlassNotice(tone: .outside) { Text(PublicProfileCopy.failureSentence(label)) }
+        }
+        Text(PublicProfileCopy.goPublicFootnote)
+            .glassType(GlassTokens.TypeScale.caption)
+            .foregroundStyle(GlassColor.textSecondary)
+            .fixedSize(horizontal: false, vertical: true)
     }
 
     private var outcomeIsSettled: Bool {

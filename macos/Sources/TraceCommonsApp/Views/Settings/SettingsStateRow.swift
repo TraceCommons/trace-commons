@@ -21,12 +21,12 @@ struct SettingsStateRow: View {
     }
 }
 
-/// What a section draws where the daemon has not answered yet: the
-/// system's own progress indicator (R-20), which VoiceOver reads as in
-/// progress. Never an empty card, never a value read from a default.
+/// What a section draws where the daemon has not answered yet: the glass
+/// spinner (R-20), which VoiceOver reads as a native progress indicator.
+/// Never an empty card, never a value read from a default.
 struct SettingsAwaiting: View {
     var body: some View {
-        ProgressView().controlSize(.small)
+        GlassSpinner(standalone: true)
     }
 }
 

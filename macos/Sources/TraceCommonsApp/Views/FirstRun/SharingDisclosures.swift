@@ -102,27 +102,20 @@ struct SharingDisclosureSheet: View {
     }
 
     var body: some View {
-        ScrollView {
+        Group {
             switch flow?.step {
             case .scrub: scrubSheet
             case .witness: witnessSheet
             case .done, nil: EmptyView()
             }
         }
-        .frame(width: 520)
-        .frame(minHeight: 320)
         .onAppear { model.refreshRouteDisclosure() }
     }
 
     private var scrubSheet: some View {
-        GlassSheet(title: automaticTitle) {
-            VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
-                ForEach(grant.lines, id: \.self) { line in
-                    sentence(line)
-                }
-                buttons(isEnabled: true) {
-                    flow?.acknowledgeScrub()
-                }
+        modal(automaticTitle, isEnabled: true, onContinue: { flow?.acknowledgeScrub() }) {
+            ForEach(grant.lines, id: \.self) { line in
+                sentence(line)
             }
         }
     }
@@ -131,33 +124,24 @@ struct SharingDisclosureSheet: View {
     private var witnessSheet: some View {
         switch model.routeDisclosureState {
         case .shown(let disclosure):
-            GlassSheet(title: disclosure.copy.title) {
-                VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
-                    RouteDisclosureGlassBody(disclosure: disclosure)
-                    if let line = witnessStateLine {
-                        sentence(line)
-                    }
-                    buttons(isEnabled: true) {
-                        flow?.acknowledgeWitness(shown: disclosure.facts.witness?.signingAddress)
-                    }
+            modal(disclosure.copy.title, isEnabled: true, onContinue: {
+                flow?.acknowledgeWitness(shown: disclosure.facts.witness?.signingAddress)
+            }) {
+                RouteDisclosureGlassBody(disclosure: disclosure)
+                if let line = witnessStateLine {
+                    sentence(line)
                 }
             }
         case .loading:
-            GlassSheet(title: automaticTitle) {
-                VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
-                    ProgressView().controlSize(.small)
-                    buttons(isEnabled: false) {}
-                }
+            modal(automaticTitle, isEnabled: false, onContinue: {}) {
+                GlassSpinner(standalone: true)
             }
         case .unreadable:
             // Not shown truthfully, so not seen: Continue stays disabled.
-            GlassSheet(title: automaticTitle) {
-                VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
-                    RouteDisclosureUnreadableGlassLine(
-                        line: model.routeDisclosureUnreadableCopy?.panel,
-                        fallback: model.routeDisclosureUnreadableCopy?.title)
-                    buttons(isEnabled: false) {}
-                }
+            modal(automaticTitle, isEnabled: false, onContinue: {}) {
+                RouteDisclosureUnreadableGlassLine(
+                    line: model.routeDisclosureUnreadableCopy?.panel,
+                    fallback: model.routeDisclosureUnreadableCopy?.title)
             }
         }
     }
@@ -168,21 +152,28 @@ struct SharingDisclosureSheet: View {
         return WitnessSurface.stateLine(status.stateCode, calls: model.witnessCalls)
     }
 
-    private func buttons(isEnabled: Bool, onContinue: @escaping () -> Void) -> some View {
-        HStack(spacing: GlassTokens.Space.s6) {
-            Spacer(minLength: 0)
-            Button(copy.passkey.cancel) { flow = nil }
-                .buttonStyle(GlassButtonStyle(.glass))
-                .keyboardShortcut(.cancelAction)
-            Button(copy.frame.continueButton) {
-                onContinue()
-                if let finished = flow, finished.step == .done {
-                    flow = nil
-                    onFinish(finished)
-                }
-            }
-            .buttonStyle(GlassButtonStyle(.primary))
-            .disabled(!isEnabled)
+    /// One disclosure as a glass modal over the window. Cancel (and
+    /// Escape) closes both and grants nothing; Continue is drawn as the
+    /// primary but answers no key, so a disclosure is never passed with a
+    /// stray Return.
+    private func modal<Body: View>(
+        _ title: String, isEnabled: Bool, onContinue: @escaping () -> Void, @ViewBuilder body: () -> Body
+    ) -> some View {
+        GlassModal(
+            title: title,
+            actions: [
+                .cancel(copy.passkey.cancel) { flow = nil },
+                GlassModalAction(copy.frame.continueButton, isEnabled: isEnabled, isProminent: true) {
+                    onContinue()
+                    if let finished = flow, finished.step == .done {
+                        flow = nil
+                        onFinish(finished)
+                    }
+                },
+            ],
+            onCancel: { flow = nil }
+        ) {
+            GlassModalBody(spacing: GlassTokens.Space.s4) { body() }
         }
     }
 

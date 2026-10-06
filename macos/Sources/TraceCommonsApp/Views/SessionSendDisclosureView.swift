@@ -48,7 +48,7 @@ struct SessionSendDisclosureView: View {
                 }
                 .fixedSize(horizontal: false, vertical: true)
             } else if model.routeDisclosureState == .loading {
-                ProgressView().controlSize(.small)
+                GlassSpinner(standalone: true)
             } else {
                 RouteDisclosureUnreadableGlassLine(line: model.routeDisclosureUnreadableCopy?.session)
             }
