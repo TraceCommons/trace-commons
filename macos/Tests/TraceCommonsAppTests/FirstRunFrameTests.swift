@@ -224,6 +224,11 @@ final class FirstRunFrameTests: XCTestCase {
         // Start sharing shows a spinner while it runs.
         let uses = try Self.appSource("Views/FirstRun/UsesScreen.swift")
         XCTAssertTrue(uses.contains("busy: runner.isCommitting"))
+        // Continue on Folders and Tools too: leaving them can wait on the
+        // near.ai browser sign-in.
+        for file in ["FoldersScreen.swift", "ToolsScreen.swift"] {
+            XCTAssertTrue(try Self.appSource("Views/FirstRun/\(file)").contains("busy: runner.isCommitting"), file)
+        }
         let frame = try Self.source()
         XCTAssertTrue(frame.contains("if footer.busy { GlassSpinner() }"))
         // "required" is inline text in the on colour, not a tag.

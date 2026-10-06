@@ -95,6 +95,7 @@ struct FoldersScreen: View {
             footer: FirstRunFooter(
                 title: copy.frame.continueButton,
                 isEnabled: canContinue,
+                busy: runner.isCommitting,
                 action: { Task { await runner.commit(.leaveRoots) } }
             )
         ) {
