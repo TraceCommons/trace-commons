@@ -28,6 +28,7 @@ public struct GlassListRow: View {
     private let onSelect: (() -> Void)?
     private let onSubmit: (() -> Void)?
     private let onMenu: (() -> Void)?
+    @State private var hovering = false
 
     /// `accessory` is a control drawn before the row menu (a folder's mode
     /// picker). `watchDisabled` shows the switch's state without letting it
@@ -94,6 +95,19 @@ public struct GlassListRow: View {
     static let selectedInk = GlassTokens.Color.textOnAccent
     /// The sub-line's ink when selected: the same solid ink, not a faded one.
     static let selectedSubInk = selectedInk
+
+    /// The row's fill: the selection, or the faint hover fill under the
+    /// pointer (#1146 `.tc-list-row:hover`), never over a selected row.
+    static func fill(selected: Bool, hovering: Bool) -> GlassRGBA? {
+        if selected { return GlassTokens.Color.selection }
+        return hovering ? GlassTokens.Color.rowHover : nil
+    }
+
+    /// An unflagged sub-line's ink. An off row fades by `rowOff`, under which
+    /// tertiary text falls below 4.5:1, so it takes the secondary ink.
+    static func plainSubInk(off: Bool) -> GlassRGBA {
+        off ? GlassTokens.Color.textSecondary : GlassTokens.Color.textTertiary
+    }
 
     public var body: some View {
         HStack(spacing: GlassTokens.Space.s4) {
@@ -173,10 +187,11 @@ public struct GlassListRow: View {
         .frame(minHeight: GlassTokens.Size.listRow)
         .background(
             RoundedRectangle(cornerRadius: GlassTokens.Radius.control, style: .continuous)
-                .fill(selected ? GlassTokens.Color.selection.color : Color.clear)
+                .fill(Self.fill(selected: selected, hovering: hovering)?.color ?? Color.clear)
         )
         .opacity(off ? GlassTokens.Opacity.rowOff : 1)
         .contentShape(Rectangle())
+        .onHover { hovering = $0 }
         // A click selects the row. The keyboard does not stop on each row:
         // the list holding the rows is one tab stop and the arrow keys move
         // its selection (spec, "Components": one list, not a tab stop per
@@ -208,7 +223,7 @@ public struct GlassListRow: View {
         return switch flag {
         case .ask: GlassTokens.Color.statusAsk.color
         case .on: GlassTokens.Color.statusOn.color
-        case nil: GlassColor.textTertiary
+        case nil: off ? GlassColor.textSecondary : GlassColor.textTertiary
         }
     }
 }

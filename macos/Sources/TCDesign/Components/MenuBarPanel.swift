@@ -174,8 +174,9 @@ public struct GlassOptionRow: View {
                     .glassPressedFill()
             )
             .contentShape(Rectangle())
-            .opacity(isEnabled ? 1 : 0.55)
         }
+        // Disabled, the row dims by the shared disabled opacity, in
+        // GlassPressStyle, and by nothing more.
         .buttonStyle(GlassPressStyle())
         .onHover { hovering = $0 }
         .accessibilityAddTraits(checked ? .isSelected : [])
