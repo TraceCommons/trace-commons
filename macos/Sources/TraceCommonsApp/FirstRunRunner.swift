@@ -196,6 +196,7 @@ final class FirstRunRunner: ObservableObject {
         case .enroll(let invite):
             guard await daemon.enrollInvite(invite) else { return fail(.enrollFailed) }
             state.enrolledInvite = invite
+            state.signedOutOfEnrolment = false
         case .signInNearAI:
             guard await daemon.signInNearAI() else { return fail(.signInFailed) }
             state.signedIn = true
@@ -206,6 +207,7 @@ final class FirstRunRunner: ObservableObject {
             case .enrolled:
                 state.nearAIEnrolled = true
                 state.signedIn = true
+                state.signedOutOfEnrolment = false
             case .refused(let label):
                 return fail(.nearAIEnrollFailed(label: label))
             }
@@ -251,11 +253,15 @@ final class FirstRunRunner: ObservableObject {
     /// asked again only by the next commit or the button.
     ///
     /// The sheets open after Folders or Tools, so a sign-out (Verify
-    /// cancelled) can end them on a later step. It leaves no account, so
-    /// the person goes back to Join, which says why; every answer is kept.
+    /// cancelled) can end them on a later step. It clears every sign-in, the
+    /// invite included, so the person goes back to Join, which says why;
+    /// every other answer is kept.
     /// After Start the first run is finished and stays where it is.
     func finishPasskey(_ outcome: PasskeySheetOutcome, copy: FirstRunCopy) {
         state = JoinScreenLayout.apply(outcome, to: state, copy: copy).state
+        // A sign-out clears the invite (`JoinScreenLayout.signOut`), so its
+        // lookup goes with it: no joined line outlives it.
+        if outcome == .signedOut { lookup = nil }
         if outcome == .signedOut, !completed { state.step = .join }
         passkeyOutcome = outcome
         passkeyDue = false

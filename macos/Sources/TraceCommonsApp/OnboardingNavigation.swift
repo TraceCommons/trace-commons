@@ -36,7 +36,9 @@ enum OnboardingNavigation {
     /// the daemon never joined it, so Join's line does not name it, and it
     /// is not looked up or joined over the enrolment.
     static func recordEnrolment(_ state: FirstRunState) -> FirstRunState {
-        guard state.enrolledInvite == nil else { return state }
+        // An enrolment the person signed out of on Join is not their
+        // account again just because the daemon still reports it.
+        guard state.enrolledInvite == nil, !state.signedOutOfEnrolment else { return state }
         var recorded = state
         recorded.enrolledInvite = ""
         recorded.invite = ""

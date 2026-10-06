@@ -267,6 +267,32 @@ enum JoinScreenLayout {
         return trimmed.isEmpty ? nil : FirstRunCopy.fill(copy.passkeyReady, ["name": trimmed])
     }
 
+    /// Signing out clears every sign-in on Join (#1030 rule 6): the
+    /// invite, near.ai and the passkey, held or only chosen, so no card
+    /// claims an account that is not linked. `account_sign_out` has already
+    /// ended the daemon's account session, the one near.ai holds too.
+    ///
+    /// The daemon has no call that drops an enrolment, so one it holds --
+    /// this run's invite, near.ai's invite-free enrolment, a passkey Verify
+    /// bound, an earlier first run's --
+    /// may outlive the sign-out. It is cleared here and marked
+    /// (`signedOutOfEnrolment`), which fails closed: nothing that belongs to
+    /// an enrolment is sent for it, and it is not recorded as the account
+    /// again. Every other answer (tools, rules, uses) is kept.
+    static func signOut(_ state: FirstRunState) -> FirstRunState {
+        var cleared = state
+        if state.holdsEnrolment || state.enrolledInvite != nil || state.nearAIEnrolled || state.account == .enrolled {
+            cleared.signedOutOfEnrolment = true
+        }
+        cleared.account = .none
+        cleared.signedIn = false
+        cleared.nearAIEnrolled = false
+        cleared.invite = ""
+        cleared.issuerHost = nil
+        cleared.enrolledInvite = nil
+        return cleared
+    }
+
     /// Record how the passkey sheets ended. A sign-in ends them only once
     /// Verify bound its account, or joined this Mac to the account another
     /// Mac bound (`PasskeySheetOutcome.signedIn`), so every held passkey is
@@ -278,16 +304,15 @@ enum JoinScreenLayout {
     ) -> (state: FirstRunState, notice: String?) {
         var applied = state
         switch outcome {
-        case .created(let name): applied.account = .passkey(name: name)
-        case .signedIn, .existingAccount: applied.account = .passkey(name: "")
+        case .created(let name):
+            applied.account = .passkey(name: name)
+            applied.signedOutOfEnrolment = false
+        case .signedIn, .existingAccount:
+            applied.account = .passkey(name: "")
+            applied.signedOutOfEnrolment = false
         case .closed: break
         case .signedOut:
-            // `account_sign_out` clears the daemon's account session, the
-            // one a near.ai sign-in holds too, so that fact goes with it and
-            // a chosen near.ai is signed in again at the next commit. The
-            // passkey, held or only chosen, is not asked for again.
-            if passkeyDone(applied) || passkeyChosen(applied) { applied.account = .none }
-            applied.signedIn = false
+            applied = signOut(applied)
         }
         return (applied, outcome.joinNotice(copy))
     }
