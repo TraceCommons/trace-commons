@@ -253,9 +253,26 @@ async fn two_managed_accounts_and_a_standard_session_run_together() {
         // On a timeout, say which launches never reached the tool and what
         // they printed: the children's output is otherwise discarded.
         if Instant::now() >= deadline {
-            let waiting: Vec<_> = projects.iter().filter(|p| !p.join("inherited-key").exists()).collect();
-            let output: Vec<_> = ["Personal", "Work"].iter().flat_map(|label| ["out", "err"].map(|kind| format!("{label}.{kind}: {}", std::fs::read_to_string(home.path().join(format!("{label}.{kind}"))).unwrap_or_default()))).collect();
-            panic!("launches never reached the tool: {waiting:?}\n{}", output.join("\n"));
+            let waiting: Vec<_> = projects
+                .iter()
+                .filter(|p| !p.join("inherited-key").exists())
+                .collect();
+            let output: Vec<_> = ["Personal", "Work"]
+                .iter()
+                .flat_map(|label| {
+                    ["out", "err"].map(|kind| {
+                        format!(
+                            "{label}.{kind}: {}",
+                            std::fs::read_to_string(home.path().join(format!("{label}.{kind}")))
+                                .unwrap_or_default()
+                        )
+                    })
+                })
+                .collect();
+            panic!(
+                "launches never reached the tool: {waiting:?}\n{}",
+                output.join("\n")
+            );
         }
         tokio::time::sleep(Duration::from_millis(30)).await;
     }
