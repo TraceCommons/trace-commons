@@ -81,6 +81,9 @@ struct TraceCommonsShell: App {
         Window("Trace Commons", id: WindowID.main) {
             MainWindowView(navigation: navigation, missionDrafts: missionDrafts,
                            insightsStoreSelection: insightsStoreSelection)
+                // The shared screens it draws raise glass modals; they
+                // cover the whole window.
+                .glassModalHost()
                 .environmentObject(model)
                 .environment(compute)
                 .frame(minWidth: 760, minHeight: 520)

@@ -1,5 +1,6 @@
 import SwiftUI
 import TCBridge
+import TCDesign
 import TCShellCore
 
 /// The queue: one per session waiting for a decision.
@@ -28,6 +29,8 @@ struct QueueView: View {
         .sheet(item: $previewing) { entry in
             PreviewSheet(entry: entry)
                 .environmentObject(model)
+                // The preview's confirmations cover the sheet.
+                .glassModalHost()
         }
         .onChange(of: model.awaitingDecision.count) { _, _ in
             // Development hook: opens the first preview so the sheet can be

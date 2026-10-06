@@ -180,6 +180,9 @@ struct MonitorWindowView: View {
             }
         }
         .glassWindow()
+        // Modals and confirmations raised anywhere in the window cover all
+        // of it.
+        .glassModalHost()
         // The undo window, a folder's Submit all and the core's offers open
         // the inspector when they appear, so none runs out of sight (#1146
         // `useInspectorDemand`); they also stay above the tree.
@@ -566,6 +569,8 @@ struct MonitorSettingsWindow: View {
             .id(section)
         }
         .frame(minWidth: 760, minHeight: 520)
+        // A section's modals and confirmations cover the whole window.
+        .glassModalHost()
     }
 }
 #endif

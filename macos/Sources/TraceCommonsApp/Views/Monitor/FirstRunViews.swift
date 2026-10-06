@@ -45,6 +45,8 @@ struct FirstRunWindowView: View {
             }
         }
         .frame(minWidth: FirstRunProgress.paneWidth + 80, minHeight: 640)
+        // A screen's modals and confirmations cover the whole window.
+        .glassModalHost()
         .onAppear { model.refreshAll() }
         .onChange(of: model.requiresOnboarding, initial: true) { _, requires in
             if !requires { dismissWindow(id: WindowID.firstRun) }
