@@ -31,9 +31,10 @@
 //!   account of its own, so the two are not combined.
 //! - Uses adds Start's failures (`sharing_refused`, `scopes_failed`,
 //!   `rules_failed`, `private_ai_failed`, `complete_failed`), and the passkey
-//!   sheets add `refused`, so no daemon label is ever shown, and
-//!   `bound_elsewhere` for an existing passkey whose account this Mac cannot
-//!   join yet.
+//!   sheets add `refused`, so no daemon label is ever shown,
+//!   `bound_elsewhere` for an existing passkey whose (legacy) account this
+//!   Mac cannot join with a passkey, and `near_ai_mismatch` for a Mac whose
+//!   near.ai sign-in is not the one its passkey's account uses.
 //! - One string has one key: the session count and Undo, shared by more than
 //!   one screen, live in `frame`.
 //! - Preview-only strings (the mock-data tag, the simulated system sheets
@@ -293,11 +294,19 @@ pub struct PasskeyCopy {
     /// A passkey ceremony the daemon or the system refused; its label is
     /// never shown.
     pub refused: &'static str,
-    /// "Use existing passkey" signed in to an account already bound (on
-    /// another Mac, or a legacy account). Enrolling a further Mac into it is
-    /// not built, so the sheet signed out and stays on Choose.
+    /// "Use existing passkey" signed in to a legacy account (created by a
+    /// path other than passkey creation, so it has no binding an enrolment
+    /// could check).
+    /// Adding a Mac to one with a passkey is not built, so the sheet signed
+    /// out and stays on Choose. (An account bound on another Mac goes through
+    /// Verify and joins.)
     /// **DRAFT, NEEDS APPROVAL**
     pub bound_elsewhere: &'static str,
+    /// Verify, joining an account bound on another Mac, was refused: this
+    /// Mac's near.ai sign-in is not the one that account uses. Nothing was
+    /// added; the sheet signed out and stays on Choose.
+    /// **DRAFT, NEEDS APPROVAL**
+    pub near_ai_mismatch: &'static str,
 }
 
 /// The Private AI card's fallbacks only; its words are
@@ -470,7 +479,8 @@ pub fn first_run_copy() -> FirstRunCopy {
             welcome_sign_in: "Sign in with passkey",
             other_options: "Other sign-in options",
             refused: "The passkey step didn't go through. Try again, or close this and choose another way to join.",
-            bound_elsewhere: "This passkey's account is already set up on another Mac, and adding this Mac to it isn't possible yet, so you were signed out here. Close this to choose another way to join, or to watch only.",
+            bound_elsewhere: "This passkey's account wasn't created with a passkey, and adding a Mac to it with a passkey isn't possible yet, so you were signed out here. Close this to choose another way to join, or to watch only.",
+            near_ai_mismatch: "This Mac is signed in to a different near.ai account from the one this passkey's account uses, so this Mac wasn't added to it, and you were signed out here. Sign in to near.ai with the account you use on your other Mac and try again, or close this to choose another way to join.",
         },
         private_ai: PrivateAiCopy {
             loading: "Loading disclosure…",
@@ -669,15 +679,31 @@ mod tests {
         assert_ne!(join.near_ai_needs_invite, join.invite_or_passkey);
     }
 
-    /// An existing passkey whose account is already bound elsewhere cannot
-    /// be enrolled from this Mac yet; the sheet signs out and says so, in
-    /// words of its own rather than the generic refusal.
+    /// An existing passkey whose account this Mac cannot join (a legacy
+    /// account, which has no binding an enrolment could check) signs out and says so,
+    /// in words of its own rather than the generic refusal. An account bound
+    /// on another Mac is joinable now, so the line no longer claims a Mac
+    /// can't be added to one.
     #[test]
     fn a_passkey_bound_elsewhere_has_its_own_line() {
         let passkey = first_run_copy().passkey;
         assert_ne!(passkey.bound_elsewhere, passkey.refused);
-        assert!(passkey.bound_elsewhere.contains("another Mac"));
+        assert!(!passkey.bound_elsewhere.contains("another Mac"));
         assert!(passkey.bound_elsewhere.contains("signed out"));
+    }
+
+    /// A second Mac signed in to a different near.ai account than the one
+    /// its passkey's account uses is refused and signed out. The line says
+    /// which sign-in to fix, names no account, and is not the generic
+    /// refusal or the legacy line.
+    #[test]
+    fn a_near_ai_mismatch_has_its_own_line() {
+        let passkey = first_run_copy().passkey;
+        assert_ne!(passkey.near_ai_mismatch, passkey.refused);
+        assert_ne!(passkey.near_ai_mismatch, passkey.bound_elsewhere);
+        assert!(passkey.near_ai_mismatch.contains("near.ai"));
+        assert!(passkey.near_ai_mismatch.contains("signed out"));
+        assert!(!passkey.near_ai_mismatch.contains('{'));
     }
 
     /// A refused passkey ceremony is worded here: the daemon's label never

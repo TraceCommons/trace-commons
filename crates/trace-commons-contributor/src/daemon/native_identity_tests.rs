@@ -750,3 +750,22 @@ async fn unconfigured_logout_never_sends_retained_token_to_untrusted_origin() {
             .is_err()
     );
 }
+
+/// An enrolment the commons refused because this Mac's near.ai login is not
+/// the passkey account's reaches the shell under its own label, so the shell
+/// can word it; an unknown error never reaches it at all.
+#[test]
+fn the_enrol_mismatch_reaches_the_shell_by_name() {
+    assert_eq!(
+        super::ipc_label("account-enrol-mismatch"),
+        "account-enrol-mismatch"
+    );
+    assert_eq!(
+        super::ipc_label("near_ai_account_mismatch"),
+        "account-unavailable"
+    );
+    assert_eq!(
+        super::ipc_label("https://commons.example/v1 failed"),
+        "account-unavailable"
+    );
+}

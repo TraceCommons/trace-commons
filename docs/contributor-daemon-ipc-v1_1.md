@@ -6191,7 +6191,23 @@ uses the existing URL validation/opening controls.
 bind start/finish routes and the **bind-specific** proof preimage. SAMPLE
 result: `{"outcome":"bound","binding_state":"bound"}`. An
 `existing_account` outcome switches to the existing account and closes the
-unbound account; its passkey is not transferred (S6 fold is deferred). Tokens,
+unbound account; its passkey is not transferred (S6 fold is deferred).
+
+For a signed-in account whose `binding_state` is `bound` (another Mac bound
+it, and this Mac signed in with the same passkey), `account_bind` **enrols
+this Mac into that account** through the same routes: SAMPLE result
+`{"outcome":"enrolled","binding_state":"bound"}`. The commons compares the
+near.ai login this Mac proves with the account the passkey session is signed
+in to -- the session's own account, never a request field -- inside the one
+transaction that would write the device key, and refuses before writing
+anything when they differ. That refusal is `unavailable` /
+`account-enrol-mismatch` (server: `409 {"error":"near_ai_account_mismatch"}`),
+one fixed label whether the login owns another account or none; the passkey
+session is left as it was, and the shell signs it out. A `bound` or
+`enrolled` result is persisted only if its tenant and account are the passkey
+session's (`account-enrollment-mismatch` otherwise). `legacy` (or any other
+state) is refused with `account-bind-refused` before the refresh token is
+spent. Tokens,
 rotations and atomic device/config persistence stay in Rust/Keychain. Binding
 creates no folder/trace/body consent. Native login remains weak and native add
 keeps the existing first-strong-authenticator gate; adding another requires
