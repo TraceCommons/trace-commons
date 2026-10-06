@@ -1,4 +1,3 @@
-#if DEBUG
 import SwiftUI
 import TCBridge
 import TCDesign
@@ -276,4 +275,3 @@ struct FolderInspector: View {
         ]
     }
 }
-#endif

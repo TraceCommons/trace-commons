@@ -1,9 +1,9 @@
 import XCTest
 
 /// What a rebuilt file may no longer name: the legacy palette and every
-/// `DesignSystem.swift` symbol without a `TC.` prefix, so Phase 4 can
-/// delete that file. (`CenteredNotice` is `MainWindowView`'s, deleted with
-/// it in Phase 4.)
+/// symbol `DesignSystem.swift` defined without a `TC.` prefix. That file and
+/// `MainWindowView.swift` (home of `CenteredNotice`) are deleted; this list
+/// keeps their names from coming back.
 enum LegacySymbols {
     static let banned = [".tcType(", ".tcPrimaryAction(", ".tcCard(", ".tcColumn(", ".tcScreen(",
                          "TCFieldLabel", "TCTag(", "TCSectionHeader", "TCReadGateCheckbox",

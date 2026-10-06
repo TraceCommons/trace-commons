@@ -1,4 +1,3 @@
-#if DEBUG
 import SwiftUI
 import TCDesign
 import TCShellCore
@@ -145,4 +144,3 @@ extension MonitorWords {
     static var projected: String { table?.projected ?? "" }
     static var projectedNote: String { table?.projectedNote ?? "" }
 }
-#endif

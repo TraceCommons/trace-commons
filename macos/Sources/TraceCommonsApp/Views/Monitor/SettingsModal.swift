@@ -1,4 +1,3 @@
-#if DEBUG
 import SwiftUI
 import TCDesign
 import TCShellCore
@@ -131,16 +130,41 @@ struct SettingsModal: View {
         }
     }
 
+    /// One section of the body. Before onboarding, no write surface outside
+    /// first run (R-43): a section that writes what first run asks draws
+    /// the Monitor's onboarding notice in its place, whose button opens
+    /// first run. As in the Monitor's pane, it waits until the core has
+    /// said, and a refused daemon is said as a refusal (`MonitorGate`).
     @ViewBuilder
     private func section(_ item: SettingsSection) -> some View {
-        switch item {
-        case .compute:
-            ComputeView(model: compute)
+        switch MonitorGate.of(
+            startup: model.startup, onboardingKnown: model.onboardingKnown,
+            requiresOnboarding: model.requiresOnboarding
+        ).forSettings(availableBeforeOnboarding: item.availableBeforeOnboarding) {
+        case .awaiting:
+            SettingsAwaiting()
                 .padding(GlassTokens.Space.panePadding)
-                .frame(maxWidth: 560, alignment: .leading)
                 .frame(maxWidth: .infinity, alignment: .topLeading)
-        default:
-            GlassSettingsContent(navigation: navigation, section: item, onPrivateAI: onPrivateAI)
+        case .down(let sentence):
+            StartupRefusedBanner(sentence: sentence)
+                .padding(GlassTokens.Space.panePadding)
+                .frame(maxWidth: .infinity, alignment: .topLeading)
+        case .signedOut:
+            GlassNotice(tone: .ask, title: MonitorWords.signedOut) {
+                Button(MonitorWindowView.openFirstRun) { OpenMonitor.request() }
+            }
+            .padding(GlassTokens.Space.panePadding)
+            .frame(maxWidth: .infinity, alignment: .topLeading)
+        case .open:
+            switch item {
+            case .compute:
+                ComputeView(model: compute)
+                    .padding(GlassTokens.Space.panePadding)
+                    .frame(maxWidth: 560, alignment: .leading)
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
+            default:
+                GlassSettingsContent(navigation: navigation, section: item, onPrivateAI: onPrivateAI)
+            }
         }
     }
 
@@ -161,4 +185,3 @@ struct SettingsModal: View {
         return paused ? (words.paused, .off) : (words.watching, .on)
     }
 }
-#endif

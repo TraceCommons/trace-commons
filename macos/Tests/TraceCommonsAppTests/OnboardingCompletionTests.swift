@@ -7,7 +7,7 @@ import XCTest
 /// This target exists because that button shipped broken: pressing it wrote
 /// the completion marker and nothing else, and since `isOnboardingComplete`
 /// is computed from `UserDefaults` rather than a `@Published` property, the
-/// write notified nobody and `MainWindowView` never re-evaluated. The screen
+/// write notified nobody and the main window never re-evaluated. The screen
 /// simply stayed. Nothing could catch it, because the app target had no test
 /// target at all.
 ///

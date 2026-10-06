@@ -45,7 +45,7 @@ struct ProjectsSection: View {
                             Image(systemName: "xmark").imageScale(.small)
                         }
                         .buttonStyle(GlassButtonStyle(.glass))
-                        .accessibilityLabel(ActionMessageBanner.dismissWord)
+                        .accessibilityLabel(ActionNoticeWords.dismissWord)
                     }
                 }
             }

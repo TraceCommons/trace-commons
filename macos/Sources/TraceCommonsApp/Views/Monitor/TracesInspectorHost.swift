@@ -1,4 +1,3 @@
-#if DEBUG
 import SwiftUI
 import TCBridge
 import TCDesign
@@ -102,4 +101,3 @@ extension InspectorDemand {
         opens(previous: [], current: keys)
     }
 }
-#endif

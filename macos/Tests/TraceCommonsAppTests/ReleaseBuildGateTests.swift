@@ -239,8 +239,11 @@ final class ReleaseBuildGateTests: XCTestCase {
         let sources = try Self.sources()
         XCTAssertFalse(Self.debugOnlyTypes(sources).isEmpty,
                        "no debug-only types found: the scanner is not reading the sources")
-        XCTAssertTrue(Self.debugOnlyMembers(sources).contains("MonitorWords.creditNotCurrency"),
-                      "the debug-only MonitorWords extension is not read: the scanner is not reading extensions")
+        // No debug-only extension member is left to sample since R15 made
+        // the Monitor screens (and `HomeViews.swift`'s `MonitorWords`
+        // extension) release code; the scanner's reading of extensions is
+        // pinned on a synthetic source
+        // (`test_theScannerSeesADebugExtensionMemberInReleaseCode`).
         XCTAssertEqual(Self.findings(sources), [],
                        "release code names a type or member that exists only in debug builds")
     }

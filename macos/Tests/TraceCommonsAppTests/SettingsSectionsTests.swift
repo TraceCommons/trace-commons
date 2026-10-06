@@ -79,7 +79,7 @@ final class SettingsSectionsTests: XCTestCase {
         XCTAssertEqual(Self.view(drawnFor: .startup, in: content), "StartupSection()")
         XCTAssertEqual(Self.view(drawnFor: .notifications, in: content), "NotificationsSection()")
         XCTAssertEqual(Self.view(drawnFor: .updates, in: content), "UpdatesSection()")
-        XCTAssertEqual(Self.view(drawnFor: .privateAI, in: content), "PrivateAISection(navigation: navigation, onPointer: onPrivateAI)")
+        XCTAssertEqual(Self.view(drawnFor: .privateAI, in: content), "PrivateAISection(onPointer: onPrivateAI)")
 
         let startup = try SettingsParityTests.text("Views/Settings/StartupSection.swift")
         let startupBody = try XCTUnwrap(startup.components(separatedBy: "struct NotificationsSection").first)

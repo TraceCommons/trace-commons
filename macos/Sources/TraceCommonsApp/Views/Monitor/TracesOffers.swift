@@ -1,4 +1,3 @@
-#if DEBUG
 import SwiftUI
 import TCBridge
 import TCDesign
@@ -213,4 +212,3 @@ struct ArmingOfferGlassCard: View {
         }
     }
 }
-#endif

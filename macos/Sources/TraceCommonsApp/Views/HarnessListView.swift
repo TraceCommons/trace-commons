@@ -344,9 +344,8 @@ private struct HarnessExposureSheet: View {
     }
 }
 
-/// IronWire's harness ids to the tools that have artwork. Here rather than
-/// beside the flow map, because the legacy window draws this list in
-/// release and the flow map is debug-only; the map forwards here.
+/// IronWire's harness ids to the tools that have artwork, in one place:
+/// the flow map forwards here.
 enum HarnessToolArt {
     static func tool(harness id: String) -> GlassTool? {
         switch id {

@@ -150,7 +150,7 @@ enum UsesScreenLayout {
 
     /// What a finished first run must still say once the first-run host has
     /// gone: Automatic was refused, so sharing is on Ask me. Shown by the
-    /// main window (`AppModel.firstRunNotice`), not by this screen.
+    /// shell notices (`AppModel.firstRunNotice`), not by this screen.
     static func finishedNotice(_ refusal: FirstRunFailure?, uses: FirstRunCopy.Uses) -> String? {
         if case .grantRefused? = refusal { return uses.sharingRefused }
         return nil

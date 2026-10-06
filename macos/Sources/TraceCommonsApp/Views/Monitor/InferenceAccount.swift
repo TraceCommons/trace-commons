@@ -1,10 +1,9 @@
-#if DEBUG
 import SwiftUI
 import TCDesign
 import TCShellCore
 
 /// The Inference inspector's account: sign-in, the tools and the Private AI
-/// switch, as the legacy destination draws them (`PrivateInferenceContent`).
+/// switch, in the order the retired legacy destination drew them.
 /// Sign-in and the tools keep their live `AppModel` paths; the switch reads
 /// and writes through the data contract (`InferenceStore`).
 ///
@@ -45,4 +44,3 @@ struct InferenceAccountSection: View {
         PrivateInferenceState(label: state?.state ?? "", port: state?.port.flatMap { UInt16(exactly: $0) })
     }
 }
-#endif

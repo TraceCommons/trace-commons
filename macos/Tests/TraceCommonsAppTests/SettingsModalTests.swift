@@ -20,7 +20,7 @@ final class SettingsModalTests: XCTestCase {
     func test_settingsIsAModalInTheMonitorNotAWindow() throws {
         let main = try Self.text("TraceCommonsAppMain.swift")
         XCTAssertFalse(main.contains("Settings {"), "a separate Settings scene is still declared")
-        XCTAssertTrue(main.contains("MonitorWindowView(navigation: navigation)"))
+        XCTAssertTrue(main.contains("MonitorWindowView(navigation: navigation, "))
         // Cmd-comma: the app menu's Settings item opens the Monitor and asks
         // it for the modal.
         XCTAssertTrue(main.contains("CommandGroup(replacing: .appSettings)"))
@@ -151,7 +151,7 @@ final class SettingsModalTests: XCTestCase {
         XCTAssertNil(navigation.settingsRequest)
 
         let content = try Self.text("Views/Settings/GlassSettingsContent.swift")
-        XCTAssertTrue(content.contains("case .privateAI: PrivateAISection(navigation: navigation, onPointer: onPrivateAI)"))
+        XCTAssertTrue(content.contains("case .privateAI: PrivateAISection(onPointer: onPrivateAI)"))
         let section = try Self.text("Views/Settings/PrivateAISection.swift")
         XCTAssertTrue(section.contains("if let onPointer {\n                                onPointer()"))
         let window = try Self.text("Views/MonitorWindowView.swift")

@@ -1,4 +1,3 @@
-#if DEBUG
 import XCTest
 import TCBridge
 import TCShellCore
@@ -213,7 +212,7 @@ final class HistoryParityTests: XCTestCase {
             "GlassTextArea(copy.reusableInstructions, text: $workflow, showsLabel: false)",
             "GlassTextField(copy.sourcePlaceholder, text: $source, prompt: copy.sourcePlaceholder, showsLabel: false)",
             // A publication error can be put away; the next attempt shows it again.
-            "Button(ActionMessageBanner.coreDismissWord ?? ActionMessageBanner.dismissWord) { dismissedError = message }",
+            "Button(ActionNoticeWords.coreDismissWord ?? ActionNoticeWords.dismissWord) { dismissedError = message }",
         ] {
             XCTAssertTrue(flat.contains(needle), "SessionDetailView.swift lacks \(needle)")
         }
@@ -221,24 +220,24 @@ final class HistoryParityTests: XCTestCase {
     }
 
     /// One implementation of the core's dismiss word: the notices that can
-    /// be put away read it from the banner, beside its fallback.
+    /// be put away read it from `ActionNoticeWords`, beside its fallback.
     func test_theDismissWordIsDecodedOnce() throws {
         let decode = "MonitorTracesCopy.decode(fromJSON: TCCoreCopy.monitorTracesCopyJSON())?.dismiss"
-        let banner = try Self.text("Views/ActionMessageBanner.swift")
-        XCTAssertTrue(banner.contains("static let coreDismissWord = \(decode)"))
+        let words = try Self.text("Views/SettingsView.swift")
+        XCTAssertTrue(words.contains("static let coreDismissWord = \(decode)"))
         for rel in ["Views/SessionDetailView.swift", "Views/SkillLearningView.swift", "Views/Settings/ProjectsSection.swift"] {
             let source = try Self.text(rel)
             XCTAssertFalse(source.contains(decode), "\(rel) decodes the dismiss word again")
         }
         for rel in ["Views/SessionDetailView.swift", "Views/SkillLearningView.swift"] {
             let source = try Self.text(rel)
-            XCTAssertTrue(source.contains("Button(ActionMessageBanner.coreDismissWord ?? ActionMessageBanner.dismissWord) {"),
+            XCTAssertTrue(source.contains("Button(ActionNoticeWords.coreDismissWord ?? ActionNoticeWords.dismissWord) {"),
                           "\(rel) lacks the shared dismiss word")
         }
         // Projects puts its error away with the banner's x, named by the
         // banner's word, never Traces' dismiss verb (ActionNoticeDismissTests).
         let projects = try Self.text("Views/Settings/ProjectsSection.swift")
-        XCTAssertFalse(projects.contains("ActionMessageBanner.coreDismissWord"))
+        XCTAssertFalse(projects.contains("ActionNoticeWords.coreDismissWord"))
     }
 
     /// Publishing a public page always passes the exact preview: the only
@@ -318,7 +317,9 @@ final class HistoryParityTests: XCTestCase {
             // said nothing about reads the held sentence.
             "let lines = HeldExplanations.lines(in: [record.explanations])",
             "ForEach(lines, id: \\.self) { Text($0)",
-            "if lines.isEmpty, record.status == \"quarantined\" { Text(HistoryCopy.heldExplanation)",
+            // The core's held sentence (R-37), and no blank line without it.
+            "if lines.isEmpty, record.status == \"quarantined\", !MonitorWords.heldExplanation.isEmpty "
+                + "{ Text(MonitorWords.heldExplanation)",
         ] {
             XCTAssertTrue(flat.contains(needle), "HistoryInspector.swift lacks \(needle)")
         }
@@ -346,11 +347,8 @@ final class HistoryParityTests: XCTestCase {
             XCTAssertTrue(homeFlat.contains(needle), "HomeViews.swift lacks \(needle)")
         }
 
+        // The legacy screen is gone (R15); its file holds the table alone.
         let legacy = try Self.text("Views/HistoryView.swift")
-        for needle in ["HeldExplanations.lines(in: records.map(\\.explanations))", "Text(HistoryLegacyWords.typicalWait)",
-                       "Text(HistoryLegacyWords.withdrawalWordingDefect)"] {
-            XCTAssertTrue(legacy.contains(needle), "HistoryView.swift lacks \(needle)")
-        }
         for sentence in ["Typical wait: we don't have a reliable number yet.",
                          "Do not trust the withdrawal wording on this screen."] {
             XCTAssertEqual(legacy.components(separatedBy: sentence).count - 1, 1, "\(sentence) is held once, in the table")
@@ -766,4 +764,3 @@ private final class HistoryActionsDaemon: DaemonCalling, @unchecked Sendable {
     func openPreview(entryID: String) throws -> TCPreview { fatalError("No preview in History tests") }
     func searchOriginal(entryID: String, needle: String) -> Int? { nil }
 }
-#endif

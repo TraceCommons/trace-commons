@@ -221,6 +221,33 @@ final class MenuBarGlassPanelTests: XCTestCase {
         XCTAssertTrue(panel.contains("store.attach(model.daemonData, configDirectory: model.configDirectory)"))
     }
 
+    // MARK: Private AI pill
+
+    /// The pill reads what the listener reports, never the switch alone: a
+    /// switch left on over a listener that refused to start, crashed or is
+    /// stopping is never drawn On. Unknown is unknown, never Off.
+    func test_thePrivateAIPillFollowsTheListenerNotTheSwitch() throws {
+        let running = PrivateInferenceSurface.tone(
+            PrivateInferenceState(label: "running", port: 8080), calls: .testing)
+        XCTAssertEqual(MenuPanelStatus.privateAI(on: true, tone: running), .on)
+        for label in ["port_in_use", "start_failed", "crashed", "stopping", "unknown_state", ""] {
+            let tone = PrivateInferenceSurface.tone(PrivateInferenceState(label: label, port: nil), calls: .testing)
+            XCTAssertEqual(MenuPanelStatus.privateAI(on: true, tone: tone), .notWorking,
+                           "a switch on over \(label) must not read On")
+        }
+        XCTAssertEqual(MenuPanelStatus.privateAI(on: false, tone: running), .off)
+        XCTAssertEqual(MenuPanelStatus.privateAI(on: nil, tone: running), .unknown)
+        // The pill's fill and value come from that, not from the switch.
+        let url = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Sources/TraceCommonsApp/Views/Monitor/MenuBarGlassPanel.swift")
+        let source = try String(contentsOf: url, encoding: .utf8)
+        XCTAssertTrue(source.contains("MenuPanelStatus.privateAI(\n            on: privateAIOn,"))
+        XCTAssertTrue(source.contains("fill: .solid(privateAIPill == .on ? GlassTokens.Color.dataShared"))
+        XCTAssertFalse(source.contains("privateAIOn == true ? GlassTokens.Color.dataShared"))
+        XCTAssertFalse(source.contains("private var privateAIValue: String {\n        switch privateAIOn {"))
+    }
+
     // MARK: Badge
 
     func test_theBadgeCountsDecisionsOwedOnly() {
@@ -247,7 +274,7 @@ final class MenuBarGlassPanelTests: XCTestCase {
             XCTAssertFalse(source.contains(forbidden), "the popover contains \(forbidden)")
         }
         XCTAssertTrue(source.contains("modeOptions"))
-        XCTAssertTrue(source.contains(".disabled(!store.canChooseOverride)"),
+        XCTAssertTrue(source.contains(".disabled(!store.canChooseOverride || model.requiresOnboarding)"),
                       "the choices are disabled unless the store has positive evidence the core is up")
         XCTAssertTrue(source.contains("store.resolveConfirmation(confirmed:"))
     }

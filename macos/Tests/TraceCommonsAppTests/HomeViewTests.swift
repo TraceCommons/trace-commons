@@ -20,13 +20,14 @@ final class HomeViewTests: XCTestCase {
         for needle in [
             "Button(action: openTraces) { HStack(spacing: GlassTokens.Space.s1) { Text(HomeFormat.openTracesWord)",
             "static var openTracesWord: String { MonitorWords.table?.openTraces ?? \"\" }",
-            "store: store, traces: traces, statusLabel: statusLabel, openTraces: openTraces, "
-                + "openHistory: { page = .history }, openMissions: { page = .missions })",
+            // The hosted Insights and Mission drafts cards (R15) sit between.
+            "store: store, traces: traces, statusLabel: statusLabel, openTraces: openTraces, ",
+            "openHistory: { page = .history }, openMissions: { page = .missions }, ",
         ] {
             XCTAssertTrue(home.contains(needle), "HomeViews.swift lacks \(needle)")
         }
         let window = try Self.flat("Views/MonitorWindowView.swift")
-        XCTAssertTrue(window.contains("openTraces: { tab = .traces })"))
+        XCTAssertTrue(window.contains("openTraces: { tab = .traces },"))
     }
 
     /// One waiting number on Home: the stat tile reads the Traces store,

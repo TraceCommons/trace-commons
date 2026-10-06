@@ -167,7 +167,7 @@ final class MonitorShellTests: XCTestCase {
             XCTAssertTrue(home.contains(needle), "HomeViews.swift lacks \(needle)")
         }
         let window = try Self.text("Views/MonitorWindowView.swift")
-        XCTAssertTrue(window.contains("openTraces: { tab = .traces })"))
+        XCTAssertTrue(window.contains("openTraces: { tab = .traces },"))
     }
 
     // MARK: Inference

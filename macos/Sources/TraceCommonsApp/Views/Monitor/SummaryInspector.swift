@@ -1,4 +1,3 @@
-#if DEBUG
 import SwiftUI
 import TCBridge
 import TCDesign
@@ -444,4 +443,3 @@ enum SummaryFacts {
         return rows == 1 ? copy.rowsUnavailableOne : FirstRunCopy.fill(copy.rowsUnavailable, ["count": String(rows)])
     }
 }
-#endif

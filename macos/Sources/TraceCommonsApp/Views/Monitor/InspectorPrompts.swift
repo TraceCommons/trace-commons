@@ -1,4 +1,3 @@
-#if DEBUG
 import SwiftUI
 import TCBridge
 import TCDesign
@@ -20,7 +19,7 @@ struct InspectorPrompts: View {
 
     /// The core's Dismiss, or the word the legacy banner already says.
     private var dismissWord: String {
-        store.words?.dismissAction ?? ActionMessageBanner.coreDismissWord ?? ActionMessageBanner.dismissWord
+        store.words?.dismissAction ?? ActionNoticeWords.coreDismissWord ?? ActionNoticeWords.dismissWord
     }
 
     var body: some View {
@@ -177,4 +176,3 @@ private struct UndoBarCard<Detail: View, Actions: View>: View {
         .accessibilityElement(children: .contain)
     }
 }
-#endif

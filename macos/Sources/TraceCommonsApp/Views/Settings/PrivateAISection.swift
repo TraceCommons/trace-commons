@@ -10,10 +10,9 @@ import TCShellCore
 /// refresh. Unreadable is said as such and never drawn as some other route.
 struct PrivateAISection: View {
     @EnvironmentObject private var model: AppModel
-    var navigation: MainWindowNavigation?
     /// Where the pointer goes when Settings is the Monitor's modal: it closes
-    /// the modal and opens the Inference tab (Ron's #1146). Nil in the main
-    /// window, whose own Private AI destination the pointer opens.
+    /// the modal and opens the Inference tab (Ron's #1146). With none, the
+    /// pointer opens the Monitor at Inference (`OpenMonitor`).
     var onPointer: (() -> Void)? = nil
 
     var body: some View {
@@ -25,13 +24,15 @@ struct PrivateAISection: View {
                             .glassType(GlassTokens.TypeScale.caption)
                             .foregroundStyle(GlassColor.textSecondary)
                             .fixedSize(horizontal: false, vertical: true)
-                        // The label is the destination's own, so the sidebar
+                        // The label is the destination's own, so the tab
                         // and this pointer can never name it differently.
+                        // It lands on the Inference inspector, where the
+                        // switch is.
                         Button(copy.destination) {
                             if let onPointer {
                                 onPointer()
                             } else {
-                                navigation?.section = .privateInference
+                                OpenMonitor.request(.inference)
                             }
                         }
                         .buttonStyle(GlassButtonStyle(.link))

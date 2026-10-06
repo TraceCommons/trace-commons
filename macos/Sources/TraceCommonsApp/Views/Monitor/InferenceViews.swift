@@ -1,4 +1,3 @@
-#if DEBUG
 import SwiftUI
 import TCBridge
 import TCDesign
@@ -12,9 +11,9 @@ import TCShellCore
 /// figure here is money spent. Only `verified` is drawn as proof.
 ///
 /// The ledger needs the daemon, so the tab reads its startup first, as the
-/// legacy destination does (`PrivateInferenceActivationView`): the first
-/// run's Folders step when folders are owed (it starts the daemon, takes no
-/// invite and offers no Join), a spinner while starting, the core's down
+/// retired legacy destination did: the first run's Folders step when
+/// folders are owed (it starts the daemon, takes no invite and offers no
+/// Join), a spinner while starting, the core's down
 /// title over the refusal's sentence.
 struct InferenceTabView: View {
     let store: InferenceStore
@@ -375,4 +374,3 @@ enum InferenceWords {
         DaemonData.ProofLabel(rawValue: raw).map(proof) ?? "—"
     }
 }
-#endif

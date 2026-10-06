@@ -1,4 +1,3 @@
-#if DEBUG
 import TCBridge
 import TCDesign
 import TCShellCore
@@ -87,33 +86,21 @@ final class InferenceParityTests: XCTestCase {
                        "isOn ?? false", "busy || isOn == nil", "GlassToggleStyle(.settings)",
                        "let label = Self.stateLabel(state: state, copy: copy, calls: calls)",
                        "GlassStatusLabel(label.line, status: label.status)",
-                       "CredentialSection(copy: copy, prominent: true)", "HarnessListSection(copy: copy)",
                        "GlassExpander(copy.settingsTitle, isOpen:",
                        "GlassNotice(tone: .outside, title: refusal)",
-                       "Button(ActionMessageBanner.coreDismissWord ?? ActionMessageBanner.dismissWord, action: onDismiss)"] {
+                       "Button(ActionNoticeWords.coreDismissWord ?? ActionNoticeWords.dismissWord, action: onDismiss)"] {
             XCTAssertTrue(source.contains(needle), "PrivateInferenceView.swift lacks \(needle)")
         }
         XCTAssertFalse(source.contains("privateInferenceOn ? .on"), "the state must come from the tone, not the switch")
         XCTAssertEqual(source.components(separatedBy: "GlassStatusLabel(").count - 1, 1,
                        "the card's one state label is the only status drawn")
-        XCTAssertFalse(source.contains("static func palette("), "the TC palette moved to QueueView.swift")
+        XCTAssertFalse(source.contains("static func palette("), "the TC palette left with the legacy queue")
         XCTAssertFalse(source.contains("ActionMessageBanner(text:"), "the refusal is the card's, not a legacy banner")
         XCTAssertEqual(PrivateInferenceIndicator.status(.clear), .on)
         for tone in [PrivateInferenceTone.held, .attention, .refused, .neutral] {
             XCTAssertNotEqual(PrivateInferenceIndicator.status(tone), .on, "\(tone) must never read as working")
         }
         try LegacySymbols.assertClean("Views/PrivateInferenceView.swift")
-    }
-
-    /// The legacy window draws the same card, bound to the model's switch,
-    /// its busy flag, its write and its refusal.
-    func test_theLegacyDestinationDrawsTheCardOnTheModel() throws {
-        let source = try Self.text("Views/PrivateInferenceView.swift")
-        for needle in ["isOn: model.daemonSettings?.privateInference,", "state: model.privateInferenceState,",
-                       "busy: model.privateInferenceBusy,", "refusal: model.lastActionError,",
-                       "onSet: model.applyPrivateInference,", "onDismiss: { model.lastActionError = nil }"] {
-            XCTAssertTrue(source.contains(needle), "PrivateInferenceContent lacks \(needle)")
-        }
     }
 
     /// The core's own copy and calls, as `AppModel` wires them.
@@ -378,9 +365,8 @@ final class InferenceParityTests: XCTestCase {
         }
         XCTAssertFalse(source.contains("palette("), "the row reads the glass status, not the TC palette")
         XCTAssertEqual(source.components(separatedBy: "GlassStatusLabel(").count - 1, 1, "one worded state per row")
-        // The legacy window draws this list in release; the flow map is
-        // debug-only, so the artwork lives here and the map forwards to it.
-        XCTAssertFalse(source.contains("FlowMapScene"), "a release file must not read the debug-only flow map")
+        // One mapping: the artwork lives here and the map forwards to it.
+        XCTAssertFalse(source.contains("FlowMapScene"), "the list must not read the flow map's copy of the art")
         let map = try Self.text("Views/Monitor/FlowMapScene.swift")
         XCTAssertTrue(map.contains("static func glassTool(harness id: String) -> GlassTool? {\n"
             + "        HarnessToolArt.tool(harness: id)\n    }"), "one mapping, forwarded")
@@ -446,7 +432,7 @@ final class InferenceParityTests: XCTestCase {
         XCTAssertFalse(account.contains("truncatingIfNeeded"), "a port out of range is unknown, never another port")
         XCTAssertEqual(account.components(separatedBy: "PrivateAISwitchCard(").count - 1, 1)
         try LegacySymbols.assertClean("Views/Monitor/InferenceAccount.swift")
-        XCTAssertTrue(account.hasPrefix("#if DEBUG\n") && account.hasSuffix("#endif\n"), "a Monitor file is debug-only")
+        XCTAssertFalse(account.hasPrefix("#if DEBUG"), "the Monitor is the release default (R15)")
     }
 
     /// The daemon's listener report onto the card's state: the label as
@@ -534,4 +520,3 @@ final class InferenceParityTests: XCTestCase {
         }
     }
 }
-#endif

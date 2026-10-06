@@ -137,7 +137,7 @@ final class SettingsParityTests: XCTestCase {
                 accessibility: ["GlassToggleStyle(.settings)", ".accessibilityLabel(copy.portTitle)",
                                 ".accessibilityLabel(copy.folderTitle)", ".accessibilityElement(children: .combine)"]),
         Section(glass: "Views/Settings/PrivateAISection.swift",
-                bindings: ["model.privateInferenceCopy", "navigation?.section = .privateInference",
+                bindings: ["model.privateInferenceCopy", "OpenMonitor.request(.inference)",
                            "model.routeDisclosureState", "model.routeDisclosureUnreadableCopy", "model.refreshRouteDisclosure()"],
                 copySources: ["copy.settingsTitle", "copy.settingsMoved", "copy.destination",
                               "copy.route", "copy.localFilter", "witness.heading", "witness.addressLabel", "witness.signingLabel",

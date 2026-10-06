@@ -115,8 +115,9 @@ final class TracesInspectorHostTests: XCTestCase {
         let inspector = try XCTUnwrap(window.range(of: "} inspector: {"))
         let end = try XCTUnwrap(window.range(of: ".glassWindow()", range: inspector.upperBound..<window.endIndex))
         let pane = String(window[inspector.upperBound..<end.lowerBound])
-        let switchStart = try XCTUnwrap(pane.range(of: "switch tab {"))
-        let arms = pane[switchStart.upperBound...].components(separatedBy: "\n                case ").dropFirst()
+        // The switch is on the shown tab inside the onboarding gate (R15).
+        let switchStart = try XCTUnwrap(pane.range(of: "switch Self.shownTab(tab, requiresOnboarding: model.requiresOnboarding) {"))
+        let arms = pane[switchStart.upperBound...].components(separatedBy: "\n                    case ").dropFirst()
         return (pane, Array(arms))
     }
 

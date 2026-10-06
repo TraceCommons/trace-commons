@@ -1,4 +1,3 @@
-#if DEBUG
 import SwiftUI
 import TCDesign
 import TCShellCore
@@ -175,4 +174,3 @@ struct TracesGraphFooter: View {
         return "\(first.formatted(style)) – \(last.formatted(style))"
     }
 }
-#endif

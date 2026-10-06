@@ -1,4 +1,3 @@
-#if DEBUG
 import SwiftUI
 import TCBridge
 import TCDesign
@@ -554,4 +553,3 @@ struct SessionReviewCard: View {
         return rows
     }
 }
-#endif

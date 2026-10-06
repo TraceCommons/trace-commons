@@ -1,4 +1,3 @@
-#if DEBUG
 import SwiftUI
 import TCBridge
 import TCDesign
@@ -13,11 +12,9 @@ import TCShellCore
 /// credit is shown only beside the commons' own statement of what it waits
 /// on (D6), and never as earned.
 struct HomeTabView: View {
-    enum Page: String {
-        case overview
-        case history
-        case missions
-    }
+    /// Declared top-level (`MonitorNavigation.swift`) so a destination can
+    /// name a page in a release build.
+    typealias Page = HomePage
 
     let store: HomeStore
     let traces: TracesStore
@@ -29,6 +26,25 @@ struct HomeTabView: View {
     @Binding var selection: String
     /// The status card's "Open Traces" link: switches the window's tab.
     var openTraces: () -> Void = {}
+    /// The hosted Insights and Mission drafts screens' inputs, from
+    /// `TraceCommonsAppMain`.
+    let insightsStoreSelection: InsightsStoreSelection
+    let missionDrafts: MissionDraftsModel
+
+    /// The core's Insights copy, read once: it is fixed for the life of the
+    /// process, and reading it is a C ABI call and a JSON decode, which
+    /// `body` would otherwise repeat on every evaluation.
+    private static let insightsCopy = TCInsights.copy()
+
+    /// The breadcrumb word for a hosted page: the core's heading, or nil
+    /// before its copy has arrived.
+    static func hostedHeading(_ page: Page, missionDrafts: MissionDraftsModel) -> String? {
+        switch page {
+        case .insights: HomeFormat.cardHeading(Self.insightsCopy?["title"])
+        case .missionDrafts: HomeFormat.cardHeading(missionDrafts.copy["title"])
+        case .overview, .history, .missions: nil
+        }
+    }
 
     var body: some View {
         // History and Missions are reached from here and lead back here; the
@@ -38,11 +54,21 @@ struct HomeTabView: View {
         case .overview:
             HomeOverview(
                 store: store, traces: traces, statusLabel: statusLabel, openTraces: openTraces,
-                openHistory: { page = .history }, openMissions: { page = .missions })
+                insightsHeading: Self.hostedHeading(.insights, missionDrafts: missionDrafts),
+                missionDraftsHeading: Self.hostedHeading(.missionDrafts, missionDrafts: missionDrafts),
+                openHistory: { page = .history }, openMissions: { page = .missions },
+                openInsights: { page = .insights }, openMissionDrafts: { page = .missionDrafts })
         case .history:
             HistoryPage(store: store, statusLabel: statusLabel, selection: $selection, back: { page = .overview })
         case .missions:
             MissionsPage(store: store, back: { page = .overview })
+        // The screens built outside the Monitor (R15: the legacy window
+        // that held them is gone), hosted as Home pages under the shell's
+        // breadcrumb.
+        case .insights:
+            InsightsView(storeSelection: insightsStoreSelection)
+        case .missionDrafts:
+            MissionDraftsView(model: missionDrafts)
         }
     }
 }
@@ -52,8 +78,14 @@ private struct HomeOverview: View {
     let traces: TracesStore
     let statusLabel: (String?) -> String?
     let openTraces: () -> Void
+    /// The core's headings for the two hosted screens; nil until the
+    /// core's copy has arrived, and then the card is not drawn.
+    let insightsHeading: String?
+    let missionDraftsHeading: String?
     let openHistory: () -> Void
     let openMissions: () -> Void
+    let openInsights: () -> Void
+    let openMissionDrafts: () -> Void
 
     /// The rollup, or nil after a failed `history_rollup` read
     /// (`SummaryFacts.fresh`): a stale one is not shown as current.
@@ -83,6 +115,12 @@ private struct HomeOverview: View {
                         .glassType(GlassTokens.TypeScale.title)
                         .foregroundStyle(GlassColor.textPrimary)
                 }
+                if let insightsHeading {
+                    hostedCard(insightsHeading, action: openInsights)
+                }
+                if let missionDraftsHeading {
+                    hostedCard(missionDraftsHeading, action: openMissionDrafts)
+                }
                 GlassEyebrowCard(MonitorWords.history, action: openHistory) {
                     Image(systemName: "chevron.right")
                         .glassGlyph(10, weight: .semibold)
@@ -93,6 +131,18 @@ private struct HomeOverview: View {
             }
         }
         .scrollIndicators(.never)
+    }
+
+    /// A way into a hosted screen: the core's heading and a chevron, and
+    /// nothing else (the screen holds its own words).
+    private func hostedCard(_ heading: String, action: @escaping () -> Void) -> some View {
+        GlassEyebrowCard(heading, action: action) {
+            Image(systemName: "chevron.right")
+                .glassGlyph(10, weight: .semibold)
+                .foregroundStyle(GlassColor.textTertiary)
+        } content: {
+            EmptyView()
+        }
     }
 
     /// Paused, or watching N tools, from the core's status and the tree.
@@ -444,14 +494,16 @@ private struct HistoryListRow: View {
     }
 
     /// The server's own reasons for this row, without opaque digests; a held
-    /// row the server said nothing about reads the held sentence.
+    /// row the server said nothing about reads the core's held sentence
+    /// (`MonitorScreensCopy.heldExplanation`); without the core's words it
+    /// reads nothing, never a blank line.
     @ViewBuilder
     private var explanations: some View {
         let lines = HeldExplanations.lines(in: [row.explanations ?? []])
         VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
             ForEach(lines, id: \.self) { Text($0).fixedSize(horizontal: false, vertical: true) }
-            if lines.isEmpty, row.status == "quarantined" {
-                Text(HistoryCopy.heldExplanation).fixedSize(horizontal: false, vertical: true)
+            if lines.isEmpty, row.status == "quarantined", !MonitorWords.heldExplanation.isEmpty {
+                Text(MonitorWords.heldExplanation).fixedSize(horizontal: false, vertical: true)
             }
         }
         .glassType(GlassTokens.TypeScale.caption)
@@ -803,6 +855,14 @@ private struct HomeStatTile: View {
 
 /// Formatting for Home and History. Pure, so the rules are tested.
 enum HomeFormat {
+    /// A card heading from the core's copy: the word, or nil when the copy
+    /// has not arrived (or the word is empty), so no card is drawn on a
+    /// word of this shell's own.
+    static func cardHeading(_ word: String?) -> String? {
+        guard let word, !word.isEmpty else { return nil }
+        return word
+    }
+
     /// A count, or a dash when the core did not say. Zero is a number.
     static func count(_ value: Int?) -> String {
         value.map(String.init) ?? "—"
@@ -976,4 +1036,3 @@ extension MonitorWords {
     static var approved: String { table?.approved ?? "" }
     static var unrecorded: String { table?.unrecorded ?? "" }
 }
-#endif

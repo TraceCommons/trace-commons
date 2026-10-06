@@ -1,4 +1,4 @@
-// INTEGRATION: reached from HistoryView and backed only by the account-authenticated
+// INTEGRATION: reached from HistoryDetailInspector and backed only by the account-authenticated
 // history_detail / publish_public_run / unpublish_public_run daemon methods.
 
 import AppKit
@@ -206,7 +206,7 @@ private struct PublicRunEditor: View {
                             Text(message)
                                 .fixedSize(horizontal: false, vertical: true)
                                 .frame(maxWidth: .infinity, alignment: .leading)
-                            Button(ActionMessageBanner.coreDismissWord ?? ActionMessageBanner.dismissWord) { dismissedError = message }
+                            Button(ActionNoticeWords.coreDismissWord ?? ActionNoticeWords.dismissWord) { dismissedError = message }
                                 .buttonStyle(GlassButtonStyle(.glass))
                                 .frame(minHeight: 44)
                         }

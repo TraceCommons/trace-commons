@@ -52,20 +52,28 @@ final class ShellWordingTests: XCTestCase {
 
         // The app model and its non-view surfaces.
         "TraceCommonsApp/AppModel.swift": 8,
-        // Lowered from 20: the label sentences moved to the core (`tc_health_copy_json`);
-        // the 10 left are the budget/witness banners, QueueStateCopy and the on-hold fallback.
-        "TraceCommonsApp/HealthCopy.swift": 10,
+        // Lowered from 20: the label sentences moved to the core (`tc_health_copy_json`).
+        // Lowered from 10 at R15: `QueueStateCopy` (8 sentences, no caller) was
+        // deleted; the 2 left are the on-hold fallback's.
+        "TraceCommonsApp/HealthCopy.swift": 2,
         "TraceCommonsApp/Notifier.swift": 2,
         "TraceCommonsApp/SelfTest.swift": 14,
 
         // The SwiftUI views, which carry their own labels and help text.
-        "TraceCommonsApp/Views/ActionMessageBanner.swift": 2,
-        "TraceCommonsApp/Views/BrandMark.swift": 1,
-        "TraceCommonsApp/Views/CreditRecordView.swift": 9,
+        // R15 deleted ActionMessageBanner.swift (2: its dismiss word moved to
+        // SettingsView.swift; its help line left with the banner, the glass
+        // notices dismiss with `MonitorTracesCopy.dismiss`), BrandMark.swift
+        // (1), CreditRecordView.swift (9: the Home credit card carries the
+        // credit record in the core's words) and MainWindowView.swift (14:
+        // the Monitor's words are the core's `MonitorScreensCopy`).
         // Lowered from 26: an unrecognised status reads the core's label.
-        "TraceCommonsApp/Views/HistoryView.swift": 21,
-        "TraceCommonsApp/Views/MainWindowView.swift": 14,
-        "TraceCommonsApp/Views/MenuBarView.swift": 11,
+        // Lowered from 21 at R15: the screen left, and the held sentence left
+        // for the core (`MonitorScreensCopy.heldExplanation`, #1218; R-37).
+        // What glass still reads is `HistoryLegacyWords` (2).
+        "TraceCommonsApp/Views/HistoryView.swift": 2,
+        // Lowered from 11: the AppKit menu left the shell with the glass menu
+        // bar (R15); the three pause choices stay in `MenuBarWords` (D-12).
+        "TraceCommonsApp/Views/MenuBarView.swift": 3,
         // Lowered from 38: Look inside is read-only (#1241 Task 7) -- its
         // verdict, correction, Contribute and header lines left, and Ron's
         // words come from the core's `look_inside` table. Then 24 -> 14:
@@ -77,10 +85,17 @@ final class ShellWordingTests: XCTestCase {
         // Back to 3: the withheld line briefly lived here and is now
         // `tc_contribution_withheld_line`, assembled in the Rust and shared
         // with the other two shells. Do not raise this again for it.
-        "TraceCommonsApp/Views/QueueFolderRow.swift": 3,
-        "TraceCommonsApp/Views/QueueView.swift": 25,
+        // Lowered from 3 at R15: the row's Open help left with the row (the
+        // glass folder row expands in place).
+        "TraceCommonsApp/Views/QueueFolderRow.swift": 2,
+        // Lowered from 25 at R15: the queue screen left; `QueueLegacyWords`
+        // is what the glass Traces tab still reads.
+        "TraceCommonsApp/Views/QueueView.swift": 7,
         "TraceCommonsApp/Views/ScrubbingCaveat.swift": 4,
-        "TraceCommonsApp/Views/SettingsView.swift": 39,
+        // 39 + 1 at R15: `ActionNoticeWords.dismissWord` moved here, verbatim,
+        // from the deleted ActionMessageBanner.swift. A move, not a new
+        // sentence: that file's entry went down by it.
+        "TraceCommonsApp/Views/SettingsView.swift": 40,
         "TraceCommonsApp/Views/WithdrawalCopy.swift": 48,
     ]
 
@@ -137,9 +152,11 @@ final class ShellWordingTests: XCTestCase {
 
         // A scan that found nothing would turn this test into a pass over
         // nothing, which is the failure mode the Windows guard names
-        // explicitly. There are 96 Swift sources under macos/Sources today.
+        // explicitly. There are 237 Swift sources under macos/Sources today;
+        // the floor sits just under that, so a scan that loses part of the
+        // tree fails rather than passing over less of it.
         XCTAssertGreaterThanOrEqual(
-            scanned.count, 86,
+            scanned.count, 232,
             "only \(scanned.count) Swift sources were scanned under \(ShellSources.root().path); "
                 + "the whole tree is expected")
 

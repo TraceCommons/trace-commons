@@ -173,6 +173,14 @@ final class AppModel: ObservableObject {
     /// -- a raw stat and the cap -- never a would-send estimate.
     @Published private(set) var tooLarge: [String: PreviewTooLarge] = [:]
     @Published private(set) var history: [HistoryRecord] = []
+    /// Whether the last `status` read failed. Until a status answers, a
+    /// failed read is the gates' answer: `LaunchRouting.onboardingKnown`
+    /// takes it as known, and the unanswered status requires onboarding, so
+    /// every write surface stays closed (fail closed). The launch does not
+    /// open first run on it (`LaunchRouting.launchOpening`): the next status
+    /// event re-reads, and an onboarded install is not sent to Welcome by a
+    /// transient failure.
+    @Published private(set) var statusReadFailed = false
     /// Whether the daemon has answered `list_pending` (or sent a snapshot)
     /// and `list_history`. Until then `pending` and `history` are
     /// placeholders, and an empty one is not "none"; a failed read leaves
@@ -894,8 +902,8 @@ final class AppModel: ObservableObject {
     /// Nothing here clears it on the way to somewhere else -- only two
     /// actions ever assign it, so unlike `lastActionError` it is not
     /// overwritten by the next thing that goes wrong. Its dismiss control on
-    /// the Waiting screen is therefore the only way out of it, which is why
-    /// it has one: see `ActionMessageBanner`.
+    /// the Traces tab (`TracesOffersBar`'s notice) is therefore the only way
+    /// out of it, which is why it has one.
     @Published var lastActionNotice: String?
     /// What a finished first run must still say -- Automatic was refused, so
     /// sharing is on Ask me -- shown above every section once the first-run
@@ -1352,7 +1360,10 @@ final class AppModel: ObservableObject {
     }
 
     func refreshStatus() {
-        perform("status", work: { try $0.status() }) { self.publishIfChanged(\.status, $0) }
+        perform("status", work: { try $0.status() }, onFailure: { self.publishIfChanged(\.statusReadFailed, true) }) {
+            self.publishIfChanged(\.status, $0)
+            self.publishIfChanged(\.statusReadFailed, false)
+        }
     }
 
     func refreshQueue() {
@@ -2007,6 +2018,18 @@ final class AppModel: ObservableObject {
 
     // MARK: - Onboarding resume
 
+    /// Whether the core has said enough to know if onboarding is required
+    /// (`LaunchRouting.onboardingKnown`), in one spelling for the launch,
+    /// the Monitor's gates and every request's routing.
+    var onboardingKnown: Bool {
+        LaunchRouting.onboardingKnown(startup: startup, statusAnswered: status.answered, statusFailed: statusReadFailed)
+    }
+
+    /// What the launch's own request opens (`LaunchRouting.launchOpening`).
+    var launchOpening: LaunchRouting.LaunchOpening {
+        LaunchRouting.launchOpening(startup: startup, statusAnswered: status.answered, requiresOnboarding: requiresOnboarding)
+    }
+
     /// Whether the first run has been finished (Start on the Uses screen)
     /// for the *currently enrolled* device. Keyed off `status.tenantID`
     /// rather than a single global flag: `enroll` alone flips
@@ -2079,6 +2102,7 @@ final class AppModel: ObservableObject {
         guard let key = Self.watchOnlyCompleteKey(configDirectory) else { return }
         UserDefaults.standard.removeObject(forKey: key)
     }
+    func setHistoryForTesting(_ history: [HistoryRecord]) { publishIfChanged(\.history, history) }
 
     func setStatusForTesting(_ status: DaemonStatus) {
         recordRead("status", answered: true)
@@ -2117,9 +2141,10 @@ final class AppModel: ObservableObject {
     /// before #353/#357 made the queue's row list a `LazyVStack`. Doing so
     /// here would mean asking the daemon about all 500 entries the instant
     /// a snapshot arrives, which defeats the point of realizing rows lazily
-    /// in the first place: `QueueRow.onAppear` drives `requestPreview(for:)`
-    /// for whatever the viewport actually realizes, so this stays
-    /// proportional to what is on screen.
+    /// in the first place: the legacy queue row drove `requestPreview(for:)`
+    /// from `onAppear` for whatever the viewport realized, so this stayed
+    /// proportional to what was on screen. Since R15 the glass Traces tab
+    /// reads previews through `TracesStore`, and only `SelfTest` asks here.
     ///
     /// Internal rather than private so a test can land a snapshot and watch
     /// what a view holding this model would see. `pending` is
@@ -2145,10 +2170,11 @@ final class AppModel: ObservableObject {
     }
 
     /// One `preview_request` per card, requirement 1 of the scheduler
-    /// design: draw a pending card immediately ("Reading it locally...",
-    /// see `QueueRow`) and never block waiting for the daemon's answer.
+    /// design: draw a pending card immediately and never block waiting for
+    /// the daemon's answer.
     ///
-    /// Called from `QueueRow.onAppear` -- the same trigger #357 introduced
+    /// Called by `SelfTest` since R15; before it, from the legacy queue
+    /// row's `onAppear` -- the same trigger #357 introduced
     /// as `requestSummary(for:)`, kept here under the scheduler's name
     /// because what changed is not when a row asks, only what happens once
     /// it does: this goes through the daemon's bounded preview scheduler
@@ -3130,6 +3156,7 @@ final class AppModel: ObservableObject {
     private func perform<T>(
         _ label: String,
         work: @escaping (DaemonClient) throws -> T,
+        onFailure: (() -> Void)? = nil,
         onSuccess: @escaping (T) -> Void
     ) {
         guard let client else { return }
@@ -3149,6 +3176,7 @@ final class AppModel: ObservableObject {
                     } else {
                         self.lastActionError = "\(label): failed"
                     }
+                    onFailure?()
                 }
             }
         }

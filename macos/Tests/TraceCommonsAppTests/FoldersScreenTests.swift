@@ -208,7 +208,9 @@ final class FoldersScreenTests: XCTestCase {
             let screen = try Self.source(name)
             XCTAssertTrue(screen.contains("backAction(isCommitting: runner.isCommitting, offersJoin: offersJoin)"), name)
         }
-        let host = try Self.source("../PrivateInferenceActivationView.swift")
+        // The legacy activation host left with the legacy window (R15); the
+        // Inference tab is the Private AI host that remains.
+        let host = try Self.source("../Monitor/InferenceViews.swift")
         XCTAssertTrue(host.contains("OnboardingCoordinatorView(startAt: .folders, takesInvites: false, offersJoin: false"))
 
         var state = OnboardingNavigation.initialState(startAt: .folders, daemonRunning: false, enrolled: false)

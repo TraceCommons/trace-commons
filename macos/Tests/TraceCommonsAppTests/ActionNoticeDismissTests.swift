@@ -82,9 +82,11 @@ final class ActionNoticeDismissTests: XCTestCase {
                 let rendered = lines[(index + 1)...].prefix(glass ? 12 : 3).joined(separator: " ")
                 let location = "\(path):\(index + 1) (\(property))"
                 if glass { glassSites += 1 }
-                if !glass && !rendered.contains("ActionMessageBanner(") {
+                // The legacy banner left with the legacy shell (R15): every
+                // render site is a glass notice.
+                if !glass {
                     failures.append(
-                        "\(location) renders without a dismiss control: \(rendered.trimmed)")
+                        "\(location) renders outside a dismissible GlassNotice: \(rendered.trimmed)")
                 } else if !rendered.contains("model.\(property) = nil") {
                     failures.append(
                         "\(location) has a banner whose dismiss does not clear \(property): "
@@ -117,10 +119,10 @@ final class ActionNoticeDismissTests: XCTestCase {
         XCTAssertTrue(text.contains("Button { model.lastActionError = nil } label: {"),
                       "the dismiss button must be drawn unconditionally and clear the error")
         XCTAssertTrue(text.contains("Image(systemName: \"xmark\")"))
-        XCTAssertTrue(text.contains(".accessibilityLabel(ActionMessageBanner.dismissWord)"))
+        XCTAssertTrue(text.contains(".accessibilityLabel(ActionNoticeWords.dismissWord)"))
         XCTAssertFalse(text.contains("MonitorTracesCopy"), "the Traces dismiss verb is borrowed")
         XCTAssertFalse(text.contains("dismissLabel"))
-        XCTAssertFalse(text.contains("Button(ActionMessageBanner.dismissWord"),
+        XCTAssertFalse(text.contains("Button(ActionNoticeWords.dismissWord"),
                        "the VoiceOver sentence is drawn as visible text")
     }
 

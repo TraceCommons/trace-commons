@@ -1,4 +1,3 @@
-#if DEBUG
 import CoreGraphics
 import TCDesign
 import TCShellCore
@@ -311,4 +310,3 @@ struct FlowMapScene: Equatable {
         return Arc(from: from, control1: CGPoint(x: midX, y: from.y), control2: CGPoint(x: midX, y: to.y), to: to, style: style, dim: dim)
     }
 }
-#endif

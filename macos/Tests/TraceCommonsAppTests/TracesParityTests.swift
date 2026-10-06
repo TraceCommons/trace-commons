@@ -1,4 +1,3 @@
-#if DEBUG
 import XCTest
 import TCBridge
 import TCDesign
@@ -354,7 +353,7 @@ final class TracesParityTests: XCTestCase {
             "model.answerPrivateInferenceOffer(accepted: false)", "model.privateInferenceBusy",
             "model.armingOffer", "model.acceptArmingOffer(", "model.declineArmingOffer(",
             "model.lastActionError = nil", "model.lastActionNotice = nil",
-            "model.witnessCopy?.onboarding", "QueueLegacyWords.undo)", "ActionMessageBanner.dismissWord",
+            "model.witnessCopy?.onboarding", "QueueLegacyWords.undo)", "ActionNoticeWords.dismissWord",
             "words.undo.approvalSaved", "words.undo.undoing", "store.words?.optionalAutomation",
         ] {
             XCTAssertTrue(prompts.contains(needle), "InspectorPrompts.swift lacks \(needle)")
@@ -402,7 +401,7 @@ final class TracesParityTests: XCTestCase {
         // One dismiss accessor everywhere a glass notice is put away, and
         // never the review's "Not this one".
         XCTAssertTrue(prompts.contains(
-            "store.words?.dismissAction ?? ActionMessageBanner.coreDismissWord ?? ActionMessageBanner.dismissWord"))
+            "store.words?.dismissAction ?? ActionNoticeWords.coreDismissWord ?? ActionNoticeWords.dismissWord"))
         for text in [prompts, offers] {
             XCTAssertNil(text.range(of: #"words\??\.dismiss\b(?!Action)"#, options: .regularExpression))
         }
@@ -424,16 +423,12 @@ final class TracesParityTests: XCTestCase {
             XCTAssertTrue(GlassSurfaceRulesTests.files.contains(rel))
         }
 
-        // The legacy queue reads the same table, one literal per sentence.
+        // The legacy queue is gone (R15); its file holds the table alone,
+        // one literal per sentence.
         let queue = try Self.text("Views/QueueView.swift")
-        for needle in [
-            "Text(QueueLegacyWords.undoWillSend)", "QueueLegacyWords.closeNoticeStillSends",
-            "QueueLegacyWords.approvedAgo(undo.heldSeconds)", "Text(QueueLegacyWords.noLongerWaiting(",
-            "Text(QueueLegacyWords.notOfferedScope)", "title: QueueLegacyWords.nothingWaiting,",
-            "detail: QueueLegacyWords.nothingWaitingDetail", "Button(QueueLegacyWords.lookInside,",
-            "DisclosureGroup(QueueLegacyWords.agentSetup)", "Button(QueueLegacyWords.undo,",
-        ] {
-            XCTAssertTrue(queue.contains(needle), "QueueView.swift lacks \(needle)")
+        XCTAssertTrue(queue.contains("enum QueueLegacyWords"))
+        for sentence in ["Nothing is waiting.", "Close this notice.\"", "\"Undo\"", "\"Look inside\"", "\"Agent setup\""] {
+            XCTAssertEqual(queue.components(separatedBy: sentence).count - 1, 1, "\(sentence) is held once, in the table")
         }
     }
 
@@ -630,4 +625,3 @@ final class TracesParityTests: XCTestCase {
         XCTAssertFalse(window.contains("selectedEntry"), "no entry is picked by the raw stored selection")
     }
 }
-#endif

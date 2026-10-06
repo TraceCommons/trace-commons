@@ -165,6 +165,12 @@ final class TracesStore {
         actionError = nil
         writeErrors = [:]
         folderNotice = nil
+        // A new client is a new daemon: no undo, toast or refusal from the
+        // old one survives into it.
+        lastKept = nil
+        lastContributed = nil
+        actionError = nil
+        writeErrors = [:]
     }
 
     /// Marks the data as a sample set in a debug build; nil over the daemon.
