@@ -353,6 +353,35 @@ public final class TCDaemon {
         return TCPreview(pointer: p)
     }
 
+    /// `tc_preview_turns_json`: the turn index over the redacted body whose
+    /// digest is `bodyDigest`, as JSON, or the export's refusal label. A
+    /// body that is not that one is refused (`preview-body-changed`) rather
+    /// than indexed. Blocks like `openPreview`, so callers run it off the
+    /// main thread. Reached through `TCPreviewTurns`.
+    public func previewTurns(entryID: String, bodyDigest: String) -> Result<String, TCPreviewTurns.Refusal> {
+        var errPtr: UnsafeMutablePointer<CChar>?
+        let raw: UnsafeMutablePointer<CChar>?? = withHandle { h in
+            entryID.withCString { cEntry in
+                bodyDigest.withCString { cDigest in
+                    withUnsafeMutablePointer(to: &errPtr) { errOut in
+                        tc_preview_turns_json(h, cEntry, cDigest, errOut)
+                    }
+                }
+            }
+        }
+        // The refusal is owned whichever way the call went: freed here.
+        let refusal: String? = errPtr.map { e in
+            defer { tc_string_free(e) }
+            return String(cString: e)
+        }
+        guard let inner = raw else { return .failure(TCPreviewTurns.Refusal(label: "handle-freed")) }
+        guard let json = inner else {
+            return .failure(TCPreviewTurns.Refusal(label: refusal ?? "null-response"))
+        }
+        defer { tc_string_free(json) }
+        return .success(String(cString: json))
+    }
+
     /// How many times `needle` appears in an entry's PRE-redaction session
     /// text. `nil` on error, and `nil` when the handle is gone.
     ///

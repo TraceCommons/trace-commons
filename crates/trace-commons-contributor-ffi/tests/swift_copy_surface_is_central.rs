@@ -348,11 +348,17 @@ macro_rules! json {
 /// A first-run sentence with each `{name}` placeholder replaced by [`HOLE`],
 /// so it compares equal to the Swift literal that interpolates the argument.
 fn holed(text: String) -> String {
+    placeholders().fold(text, |text, name| {
+        text.replace(&format!("{{{name}}}"), HOLE)
+    })
+}
+
+/// Every `{name}` a pinned table may carry: the first run's and the
+/// monitor's (#1241).
+fn placeholders() -> impl Iterator<Item = &'static &'static str> {
     trace_commons_contributor::first_run_copy::PLACEHOLDERS
         .iter()
-        .fold(text, |text, name| {
-            text.replace(&format!("{{{name}}}"), HOLE)
-        })
+        .chain(trace_commons_contributor::preview_copy::MONITOR_PLACEHOLDERS)
 }
 
 /// The core sentences no Swift literal may hold, by where they come from.
@@ -435,6 +441,32 @@ fn pinned_sentences() -> Vec<(&'static str, String)> {
         .map(holed)
         .collect(),
     );
+    // Ron's #1146 inspector words (#1241), the parts of the monitor tables
+    // that carry them. The tables' older single words are not pinned here.
+    {
+        let traces = json!(preview_copy::monitor_traces_copy());
+        let screens = json!(preview_copy::monitor_screens_copy());
+        let mut ron = Vec::new();
+        for key in [
+            "tree",
+            "counts",
+            "inspector",
+            "summary_panel",
+            "session_review",
+            "look_inside",
+            "undo",
+            "optional_automation",
+            "dismiss_action",
+        ] {
+            ron.extend(table(traces[key].clone()));
+        }
+        ron.extend(table(screens["safeguards"].clone()));
+        assert!(ron.len() > 100, "Ron's inspector words are not being read");
+        add(
+            "preview_copy::monitor_*_copy (#1146 inspector)",
+            ron.into_iter().map(holed).collect(),
+        );
+    }
     // The menu-bar Contribution mode pill, its override confirmations and
     // their refusal lines (#1173).
     add(
@@ -676,6 +708,55 @@ const ALLOWED: &[(&str, &str, &str)] = &[
         "Held for privacy review",
         "week tally heading; no core tally export yet",
     ),
+    // Ron's #1146 inspector words (#1241) that native screens already say
+    // in Swift. Each goes when its screen reads the core's table instead.
+    //
+    // The legacy queue window's no-longer-waiting group. Ron's summary
+    // inspector reads the core's line; the queue window is outside #1241.
+    (
+        "TraceCommonsApp/Views/QueueView.swift",
+        "Sessions no longer waiting (",
+        "legacy queue window; #1241 moves only the monitor to the core's words",
+    ),
+    (
+        "TraceCommonsApp/Views/QueueView.swift",
+        "This covers sessions that reached the queue.",
+        "legacy queue window; #1241 moves only the monitor to the core's words",
+    ),
+    // Look inside's own words, until #1241 Task 7 makes it Ron's read-only
+    // view on the core's `look_inside` and `session_review` tables.
+    (
+        "TraceCommonsApp/Views/PreviewSheet.swift",
+        "Exactly what would be sent",
+        "Look inside until #1241 Task 7",
+    ),
+    (
+        "TraceCommonsApp/Views/PreviewSheet.swift",
+        "This one can't be shown.",
+        "Look inside until #1241 Task 7",
+    ),
+    (
+        "TraceCommonsApp/Views/PreviewSheet.swift",
+        "Nothing has been sent, and nothing will be until it can be shown to you.",
+        "Look inside until #1241 Task 7",
+    ),
+    (
+        "TraceCommonsApp/Views/PreviewSheet.swift",
+        "Found, and still in what would be sent",
+        "Look inside until #1241 Task 7",
+    ),
+    // Not a copy: the scanner matches substrings, and "N waiting for your
+    // decision" contains Ron's "N waiting for you".
+    (
+        "TCShellCore/MenuBarStatus.swift",
+        "waiting for you",
+        "substring of a different sentence (\"waiting for your decision\")",
+    ),
+    (
+        "TraceCommonsApp/Views/MenuBarView.swift",
+        "waiting for you",
+        "substring of a different sentence (\"waiting for your decision\")",
+    ),
 ];
 
 #[test]
@@ -739,11 +820,7 @@ fn a_placeholder_sentence_is_pinned_the_way_swift_interpolates_it() {
     let braced: Vec<&String> = pinned
         .iter()
         .map(|(_, sentence)| sentence)
-        .filter(|sentence| {
-            trace_commons_contributor::first_run_copy::PLACEHOLDERS
-                .iter()
-                .any(|name| sentence.contains(&format!("{{{name}}}")))
-        })
+        .filter(|sentence| placeholders().any(|name| sentence.contains(&format!("{{{name}}}"))))
         .collect();
     assert!(
         braced.is_empty(),
