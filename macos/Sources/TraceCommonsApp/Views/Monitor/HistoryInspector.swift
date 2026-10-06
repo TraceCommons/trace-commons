@@ -23,11 +23,14 @@ struct HistoryDetailInspector: View {
         HistorySelection.record(for: row.submissionId, in: model.history)
     }
 
-    // The always-present stack reads the detail and the installed skill for
-    // the row, again when its record first resolves or its status moves.
-    // The session detail reads it again when the app comes back to the
-    // front. It scrolls with History's page (Ron's #1146 draws the opened
-    // row below the list, in the left pane), so it has no scroll of its own.
+    // Every read is the composed session detail's, on legacy's triggers:
+    // the detail when it appears (a new record, or one that first resolves)
+    // and when the app comes back to the front; the installed skill only for
+    // a terminal or unaccepted row. The stack adds no read of its own, so a
+    // status move does not reload the detail and an ineligible row costs no
+    // install-status read. It scrolls with History's page (Ron's #1146 draws
+    // the opened row below the list, in the left pane), so it has no scroll
+    // of its own.
     var body: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
             summary
@@ -42,7 +45,6 @@ struct HistoryDetailInspector: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .task(id: [row.submissionId, record?.status ?? ""]) { load() }
     }
 
     /// The row's status from the core's one table, the same word its list
@@ -107,12 +109,6 @@ struct HistoryDetailInspector: View {
         }
         .glassType(GlassTokens.TypeScale.caption)
         .foregroundStyle(GlassColor.textSecondary)
-    }
-
-    private func load() {
-        guard let record else { return }
-        model.loadSessionDetail(record)
-        model.ensureLocalInstalledSkillStatus(for: record)
     }
 }
 
