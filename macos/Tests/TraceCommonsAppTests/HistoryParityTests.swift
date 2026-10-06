@@ -229,9 +229,16 @@ final class HistoryParityTests: XCTestCase {
         for rel in ["Views/SessionDetailView.swift", "Views/SkillLearningView.swift", "Views/Settings/ProjectsSection.swift"] {
             let source = try Self.text(rel)
             XCTAssertFalse(source.contains(decode), "\(rel) decodes the dismiss word again")
+        }
+        for rel in ["Views/SessionDetailView.swift", "Views/SkillLearningView.swift"] {
+            let source = try Self.text(rel)
             XCTAssertTrue(source.contains("Button(ActionMessageBanner.coreDismissWord ?? ActionMessageBanner.dismissWord) {"),
                           "\(rel) lacks the shared dismiss word")
         }
+        // Projects puts its error away with the banner's x, named by the
+        // banner's word, never Traces' dismiss verb (ActionNoticeDismissTests).
+        let projects = try Self.text("Views/Settings/ProjectsSection.swift")
+        XCTAssertFalse(projects.contains("ActionMessageBanner.coreDismissWord"))
     }
 
     /// Publishing a public page always passes the exact preview: the only
