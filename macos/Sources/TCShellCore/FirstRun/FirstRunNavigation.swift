@@ -88,9 +88,10 @@ public enum FirstRunNavigation {
         state.holdsEnrolment
     }
 
-    /// The sharing paths the Uses picker offers.
+    /// The sharing paths the Uses picker offers, in Ron's #1030 order:
+    /// Automatic first, then Ask me. The default answer stays Ask me.
     public static func sharingPaths(for state: FirstRunState) -> [SharingPath] {
-        canChooseAutomatic(state) ? [.askMe, .automatic] : [.askMe]
+        canChooseAutomatic(state) ? [.automatic, .askMe] : [.askMe]
     }
 
     private static func move(_ state: FirstRunState, by offset: Int) -> FirstRunState {

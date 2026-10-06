@@ -111,10 +111,10 @@ final class FirstRunNavigationTests: XCTestCase {
         XCTAssertEqual(FirstRunNavigation.sharingPaths(for: FirstRunState(account: .watchOnly)), [.askMe])
         XCTAssertEqual(
             FirstRunNavigation.sharingPaths(for: FirstRunState(account: .nearAI, enrolledInvite: "INVITE-1")),
-            [.askMe, .automatic])
+            [.automatic, .askMe])
         XCTAssertEqual(
-            FirstRunNavigation.sharingPaths(for: FirstRunState(account: .passkey(name: "Laptop"))), [.askMe, .automatic])
-        XCTAssertEqual(FirstRunNavigation.sharingPaths(for: FirstRunState(account: .enrolled)), [.askMe, .automatic])
+            FirstRunNavigation.sharingPaths(for: FirstRunState(account: .passkey(name: "Laptop"))), [.automatic, .askMe])
+        XCTAssertEqual(FirstRunNavigation.sharingPaths(for: FirstRunState(account: .enrolled)), [.automatic, .askMe])
 
         var state = FirstRunState(tier: .quick, step: .uses)
         state.account = .watchOnly

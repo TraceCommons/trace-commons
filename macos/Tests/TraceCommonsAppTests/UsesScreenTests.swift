@@ -161,8 +161,9 @@ final class UsesScreenTests: XCTestCase {
         let modes = try modes()
         let joined = FirstRunState(tier: .quick, step: .uses, account: .nearAI, enrolledInvite: "INVITE-1")
         let full = UsesScreenLayout.sharingOptions(for: joined, modes: modes)
-        XCTAssertEqual(full.map(\.value), [.askMe, .automatic])
-        XCTAssertEqual(full.map(\.title), [modes.label(for: .ask), modes.label(for: .autoUpload)])
+        // Ron's #1030 order: Automatic first, then Ask me.
+        XCTAssertEqual(full.map(\.value), [.automatic, .askMe])
+        XCTAssertEqual(full.map(\.title), [modes.label(for: .autoUpload), modes.label(for: .ask)])
         XCTAssertEqual(UsesScreenLayout.sharingOptions(for: FirstRunState(account: .watchOnly), modes: modes).map(\.value), [.askMe])
     }
 
