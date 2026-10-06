@@ -196,9 +196,10 @@ struct MenuBarGlassPanel: View {
     /// core is down. Auto contribute carries the core's partial line, and
     /// the override line shows while one is in force. Choosing an override
     /// shows its core confirmation in place of the choices; only its
-    /// confirm button writes. Choosing Mixed clears an override in one
-    /// press, unconfirmed by decision (#1254 review): clearing arms nothing
-    /// that each folder's own setting does not. While the core is down,
+    /// confirm button writes. Choosing Mixed clears an override: at once
+    /// when no folder's own setting is Automatic, otherwise after the
+    /// core's clear confirmation, since clearing would resume unattended
+    /// sending there (`MenuPanelStore.chooseMixed`). While the core is down,
     /// loading or stale every row is disabled
     /// (`MenuPanelStore.canChooseOverride`).
     @ViewBuilder
