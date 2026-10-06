@@ -99,6 +99,13 @@ enum RulesScreenLayout {
         }
     }
 
+    /// The past-session card's note. Watching only has no enrolment, so the
+    /// sessions picked here are queued on this Mac and none is sent; the
+    /// core's line says they wait there. Nil for every other account.
+    static func pastSessionsNote(_ state: FirstRunState, copy: FirstRunCopy.Rules) -> String? {
+        state.account == .watchOnly ? copy.pastSessionsWatchOnly : nil
+    }
+
     static func groupState(_ state: FirstRunState, projectID: String, sessions: [PastSession]) -> GroupState {
         let tickable = sessions.filter(isTickable).map(\.id)
         let selected = state.pastSelections[projectID] ?? []
@@ -380,6 +387,12 @@ struct RulesScreen: View {
                     )
                     .glassType(GlassTokens.TypeScale.caption)
                     .foregroundStyle(GlassColor.textTertiary)
+                }
+                if let note = RulesScreenLayout.pastSessionsNote(runner.state, copy: copy.rules) {
+                    Text(note)
+                        .glassType(GlassTokens.TypeScale.caption)
+                        .foregroundStyle(GlassColor.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 ForEach(projects) { project in
                     folderSessions(project)

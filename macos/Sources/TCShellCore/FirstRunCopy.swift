@@ -157,6 +157,8 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
         public let unavailable: String
         /// One folder's past sessions could not be read.
         public let sessionsUnavailable: String
+        /// Watching only: picked past sessions wait on this Mac.
+        public let pastSessionsWatchOnly: String
     }
 
     public struct Uses: Decodable, Equatable, Sendable {

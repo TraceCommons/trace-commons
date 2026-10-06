@@ -1,4 +1,5 @@
 import Foundation
+import TCBridge
 import TCShellCore
 import XCTest
 
@@ -216,5 +217,30 @@ final class RulesScreenTests: XCTestCase {
         RulesScreenLayout.setRule(&state, projectID: "p1", mode: .ignore)
         XCTAssertEqual(RulesScreenLayout.summary(state, projects: projects, sessions: lists).selected, 0)
         XCTAssertEqual(RulesScreenLayout.summary(state, projects: projects, sessions: lists).total, 2)
+    }
+
+    /// Kristi's #1235 M1, as decided: watching only keeps the picker, and
+    /// the sessions picked there are queued on this Mac. The card says so
+    /// with the core's line, for watching only and for nothing else.
+    func test_watchingOnlySaysPastSessionsWaitLocally() throws {
+        let copy = try XCTUnwrap(FirstRunCopy.decode(try XCTUnwrap(TCCoreCopy.firstRunCopyJSON())))
+        var state = FirstRunState(tier: .custom, step: .rules)
+        state.account = .watchOnly
+        XCTAssertEqual(RulesScreenLayout.pastSessionsNote(state, copy: copy.rules), copy.rules.pastSessionsWatchOnly)
+        for account: AccountAnswer in [.nearAI, .passkeyChosen, .passkey(name: "p"), .enrolled, .none] {
+            state.account = account
+            XCTAssertNil(RulesScreenLayout.pastSessionsNote(state, copy: copy.rules), "\(account)")
+        }
+
+        // Start still sends the picks for watching only: they are queued
+        // locally, which is what the line says.
+        state.account = .watchOnly
+        state.pastSelections = ["p1": ["s1"]]
+        XCTAssertTrue(FirstRunPlan.calls(for: state, at: .start).contains(.includePastSessions(projectID: "p1", ["s1"])))
+
+        let url = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Sources/TraceCommonsApp/Views/FirstRun/RulesScreen.swift")
+        XCTAssertTrue(try String(contentsOf: url, encoding: .utf8).contains("RulesScreenLayout.pastSessionsNote("))
     }
 }

@@ -109,7 +109,10 @@ public enum FirstRunPlan {
     /// to one: no consent scopes (the daemon keeps them in the enrolment's
     /// config and refuses them without it), no grant, and the watch-only
     /// marker instead of the tenant's. Custom's folder rules, past sessions
-    /// and Private AI are local to the daemon and are sent either way.
+    /// and Private AI are local to the daemon and are sent either way: for
+    /// watching only, picked past sessions are queued on this Mac as pending
+    /// offers and none is sent, which the Rules card says
+    /// (`rules.past_sessions_watch_only`).
     private static func start(_ state: FirstRunState) -> [FirstRunCall] {
         let watchOnly = state.account == .watchOnly
         var calls: [FirstRunCall] = watchOnly ? [] : [.setConsentScopes(state.scopes.sorted())]

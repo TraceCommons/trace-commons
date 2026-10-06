@@ -24,6 +24,8 @@
 //!   `sign_in_failed` (the core's existing sign-in line), so leaving Folders
 //!   or Tools never stops in silence, and `settings_failed` for a changed
 //!   folder declaration the running daemon refused.
+//! - Rules adds `past_sessions_watch_only`: watching only queues the picked
+//!   past sessions on this Mac, and the card says they wait there.
 //! - Join adds `near_ai_needs_invite` and `invite_or_passkey`: near.ai signs
 //!   in to the account an invite enrolls, and a new passkey creates an
 //!   account of its own, so the two are not combined.
@@ -220,6 +222,11 @@ pub struct RulesCopy {
     pub unavailable: &'static str,
     /// One folder's past sessions could not be read.
     pub sessions_unavailable: &'static str,
+    /// Watching only: the past-session card's note. Start queues the picked
+    /// sessions on this Mac as pending offers and sends none of them, since
+    /// there is no enrolment to send them under.
+    /// **DRAFT, NEEDS APPROVAL**
+    pub past_sessions_watch_only: &'static str,
 }
 
 /// Uses: data use, Sharing and starting (`uses-screen.tsx`).
@@ -410,6 +417,7 @@ pub fn first_run_copy() -> FirstRunCopy {
             never_label: "{folder}: rule is Never",
             unavailable: "Couldn't read repos from your sessions. Go back, then continue to try again.",
             sessions_unavailable: "Past sessions unavailable",
+            past_sessions_watch_only: "You're watching only, so the sessions you pick wait on this Mac, unsent, until you join.",
         },
         uses: UsesCopy {
             title_light: "How your data is ",
@@ -541,6 +549,17 @@ mod tests {
                 "{{{name}}} is documented but no string carries it"
             );
         }
+    }
+
+    /// Watching only queues picked past sessions on this Mac and sends
+    /// nothing, so the card says they wait there, and never that they are
+    /// shared.
+    #[test]
+    fn watching_only_says_past_sessions_wait_on_this_mac() {
+        let rules = first_run_copy().rules;
+        assert!(rules.past_sessions_watch_only.contains("this Mac"));
+        assert!(rules.past_sessions_watch_only.contains("join"));
+        assert_ne!(rules.past_sessions_watch_only, rules.past_sessions);
     }
 
     /// Enroll runs only after the invite was looked up and accepted, so its
