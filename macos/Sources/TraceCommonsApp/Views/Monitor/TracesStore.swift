@@ -293,6 +293,24 @@ final class TracesStore {
         }
     }
 
+    // MARK: Selection
+
+    /// The selection while it names something in the current tree; nil
+    /// otherwise, and then the inspector shows the Summary. While a new
+    /// client's tree loads nothing resolves, and the stored selection is
+    /// kept for when it does.
+    func resolve(_ selection: MonitorSelection?) -> MonitorSelection? {
+        tree.resolve(selection)
+    }
+
+    /// The selected session's queue entry while it is still waiting; nil for
+    /// a folder, for nothing, and for a session that has gone. Its card and
+    /// Contribute are drawn only from this.
+    func selectedSession(_ selection: MonitorSelection?) -> DaemonData.QueueEntry? {
+        guard let entryID = resolve(selection)?.entryID else { return nil }
+        return tree.allSessions.first { $0.entryId == entryID }
+    }
+
     // MARK: Review (R7)
 
     enum ReviewAction: Equatable {

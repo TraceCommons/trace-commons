@@ -540,5 +540,59 @@ final class TracesParityTests: XCTestCase {
         XCTAssertTrue(try Self.text("Views/Monitor/TracesStore.swift")
             .contains("TCCoreCopy.residualSecretLine(count: total,"))
     }
+
+    // MARK: Selection (Task 2 of the #1146 inspector port)
+
+    /// Ron's `useInspectorDemand` opens the inspector for a selected
+    /// session only: selecting a folder moves the selection and leaves the
+    /// inspector as the person set it. A session opens it, as Review does.
+    func test_selectingAFolderDoesNotOpenTheInspector() throws {
+        var selection: MonitorSelection?
+        var showsInspector = false
+        MonitorWindowView.select(.folder(projectID: "p1"), selection: &selection, showsInspector: &showsInspector)
+        XCTAssertEqual(selection, .folder(projectID: "p1"))
+        XCTAssertFalse(showsInspector, "a folder is not a demand to open the inspector")
+
+        MonitorWindowView.select(.session(entryID: "e1"), selection: &selection, showsInspector: &showsInspector)
+        XCTAssertEqual(selection, .session(entryID: "e1"))
+        XCTAssertTrue(showsInspector, "a session is")
+
+        // Never closes itself: back to a folder, or to nothing, it stays open.
+        MonitorWindowView.select(.folder(projectID: "p1"), selection: &selection, showsInspector: &showsInspector)
+        XCTAssertTrue(showsInspector)
+        MonitorWindowView.select(nil, selection: &selection, showsInspector: &showsInspector)
+        XCTAssertNil(selection)
+        XCTAssertTrue(showsInspector)
+
+        // The tree routes its selection through that rule, and Return opens
+        // a review only for a session.
+        let window = try Self.text("Views/MonitorWindowView.swift")
+        XCTAssertTrue(window.contains("Self.select($0, selection: &selection, showsInspector: &showsInspector)"))
+        let tree = try Self.text("Views/Monitor/TracesViews.swift")
+        XCTAssertTrue(tree.contains("guard case .session(let entryID) = selection else { return .ignored }"))
+    }
+
+    /// The selection is restored per window under one key, through a
+    /// stored form that round-trips both kinds and refuses anything else.
+    func test_theSelectionIsRestoredPerWindow() throws {
+        let window = try Self.text("Views/MonitorWindowView.swift")
+        XCTAssertTrue(window.contains("@SceneStorage(\"monitor.selection\") private var selection: MonitorSelection?"))
+        XCTAssertFalse(window.contains("monitor.selectedSession"), "the session-only key is retired")
+
+        for value: MonitorSelection in [
+            .folder(projectID: "/Users/me/api"), .session(entryID: "e1"), .session(entryID: "with:colon"),
+        ] {
+            XCTAssertEqual(MonitorSelection(rawValue: value.rawValue), value)
+            let coded = try JSONDecoder().decode(MonitorSelection.self, from: JSONEncoder().encode(value))
+            XCTAssertEqual(coded, value)
+        }
+        XCTAssertNil(MonitorSelection(rawValue: ""))
+        XCTAssertNil(MonitorSelection(rawValue: "tool:claude-code"), "the tree has no tool level")
+        XCTAssertNil(MonitorSelection(rawValue: "e1"), "a bare id from the old key is not a selection")
+
+        // The inspector reads the resolved selection, never the stored one.
+        XCTAssertTrue(window.contains("traces.selectedSession(selection)"))
+        XCTAssertFalse(window.contains("selectedEntry"), "no entry is picked by the raw stored selection")
+    }
 }
 #endif

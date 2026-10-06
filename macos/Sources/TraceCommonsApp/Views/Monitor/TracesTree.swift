@@ -175,3 +175,84 @@ struct TracesTree: Equatable {
         tools.flatMap { $0.folders.flatMap(\.sessions) } + unplaced.flatMap(\.sessions)
     }
 }
+
+/// What the Traces tree has selected (Ron's `TraceSelection` in #1146,
+/// `traces-workspace.tsx`): a folder or a session. There is no tool case:
+/// the tree has no tool level (owner, 2026-10-05). Nothing selected is nil,
+/// and the inspector then shows the Summary.
+///
+/// The stored form is `folder:<project id>` or `session:<entry id>`, which
+/// `@SceneStorage` restores per window and Codable writes as one string.
+/// Anything else, a bare id from the retired session-only key included, is
+/// no selection.
+enum MonitorSelection: Equatable, Codable, RawRepresentable {
+    case folder(projectID: String)
+    case session(entryID: String)
+
+    private static let folderTag = "folder:"
+    private static let sessionTag = "session:"
+
+    init?(rawValue: String) {
+        if rawValue.hasPrefix(Self.folderTag), rawValue.count > Self.folderTag.count {
+            self = .folder(projectID: String(rawValue.dropFirst(Self.folderTag.count)))
+        } else if rawValue.hasPrefix(Self.sessionTag), rawValue.count > Self.sessionTag.count {
+            self = .session(entryID: String(rawValue.dropFirst(Self.sessionTag.count)))
+        } else {
+            return nil
+        }
+    }
+
+    var rawValue: String {
+        switch self {
+        case .folder(let projectID): Self.folderTag + projectID
+        case .session(let entryID): Self.sessionTag + entryID
+        }
+    }
+
+    init(from decoder: any Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        guard let value = Self(rawValue: raw) else {
+            throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: raw))
+        }
+        self = value
+    }
+
+    func encode(to encoder: any Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(rawValue)
+    }
+
+    /// The session's entry id, or nil for a folder.
+    var entryID: String? {
+        if case .session(let entryID) = self { return entryID }
+        return nil
+    }
+
+    /// The folder's project id, or nil for a session.
+    var projectID: String? {
+        if case .folder(let projectID) = self { return projectID }
+        return nil
+    }
+}
+
+extension TracesTree {
+    /// Every folder in the tree, in drawing order.
+    var allFolders: [FolderNode] {
+        tools.flatMap(\.folders) + unplaced
+    }
+
+    /// The selection while what it names is still in the tree; nil when it
+    /// is not (uploaded, expired, dismissed or ignored elsewhere), so the
+    /// inspector falls back to the Summary rather than a stale card. A
+    /// lookup only: the stored selection is left as it is.
+    func resolve(_ selection: MonitorSelection?) -> MonitorSelection? {
+        switch selection {
+        case nil:
+            return nil
+        case .folder(let projectID):
+            return allFolders.contains { $0.id == projectID } ? selection : nil
+        case .session(let entryID):
+            return allSessions.contains { $0.entryId == entryID } ? selection : nil
+        }
+    }
+}

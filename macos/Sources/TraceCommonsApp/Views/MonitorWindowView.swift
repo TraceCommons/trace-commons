@@ -46,8 +46,10 @@ struct MonitorWindowView: View {
     /// without touching this, so widening the window brings it back.
     @SceneStorage("monitor.showsMap") private var showsMap = true
     @SceneStorage("monitor.showsInspector") private var showsInspector = true
-    /// The selected session's entry id; empty for none.
-    @SceneStorage("monitor.selectedSession") private var selectedSession = ""
+    /// The Traces tree's selection, a folder or a session; nil for none.
+    /// Restored per window, and read only through `TracesStore.resolve`, so
+    /// one that has gone is the Summary, never a stale card.
+    @SceneStorage("monitor.selection") private var selection: MonitorSelection?
     /// Home's page: the overview or History, restored per window.
     @SceneStorage("monitor.homePage") private var homePage: HomeTabView.Page = .overview
     /// The selected History row's submission id; empty for none.
@@ -120,8 +122,13 @@ struct MonitorWindowView: View {
             ) {
                 switch tab {
                 case .traces:
-                    TracesTreeView(store: traces, selection: $selectedSession) { entryId in
-                        Self.review(entryId, selection: &selectedSession, showsInspector: &showsInspector)
+                    TracesTreeView(
+                        store: traces,
+                        selection: Binding(
+                            get: { selection },
+                            set: { Self.select($0, selection: &selection, showsInspector: &showsInspector) })
+                    ) { entryId in
+                        Self.select(.session(entryID: entryId), selection: &selection, showsInspector: &showsInspector)
                     }
                 case .inference: InferenceTabView(store: inference)
                 case .home:
@@ -147,7 +154,7 @@ struct MonitorWindowView: View {
                 // it would vanish while the layout still reserved its width.
                 switch tab {
                 case .traces:
-                    SessionInspectorView(store: traces, entry: selectedEntry)
+                    SessionInspectorView(store: traces, entry: traces.selectedSession(selection))
                 case .inference:
                     PrivateAIInspectorView(store: inference, destinationLabel: model.privateInferenceCopy?.destination)
                 case .home:
@@ -206,11 +213,6 @@ struct MonitorWindowView: View {
         return parts.isEmpty ? nil : parts.joined(separator: ", ")
     }
 
-    /// The selected session, while it is still in the tree.
-    private var selectedEntry: DaemonData.QueueEntry? {
-        traces.tree.allSessions.first { $0.entryId == selectedSession }
-    }
-
     /// The selected History row, while it is still in the list.
     private var selectedHistoryRow: DaemonData.HistoryRow? {
         guard !selectedHistory.isEmpty else { return nil }
@@ -223,6 +225,15 @@ struct MonitorWindowView: View {
     static func review(_ entryId: String, selection: inout String, showsInspector: inout Bool) {
         selection = entryId
         showsInspector = true
+    }
+
+    /// A tree selection. A session is a demand on the inspector, as in
+    /// Ron's `useInspectorDemand`: selecting one shows the inspector its
+    /// card lives in. A folder, or nothing, moves the selection only. The
+    /// inspector never closes itself.
+    static func select(_ wanted: MonitorSelection?, selection: inout MonitorSelection?, showsInspector: inout Bool) {
+        selection = wanted
+        if case .session = wanted { showsInspector = true }
     }
 
     /// The first time this window lays out, open the panes its width suits.

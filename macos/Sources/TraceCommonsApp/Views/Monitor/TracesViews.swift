@@ -15,7 +15,8 @@ struct TracesTreeView: View {
     /// Only for the queue's configured limit, which the queue-full banner
     /// names (the store's data contract does not carry it).
     @EnvironmentObject private var model: AppModel
-    @Binding var selection: String
+    /// The folder or session selected; nil for none.
+    @Binding var selection: MonitorSelection?
     /// A session's Review pill: select it and show the inspector its review
     /// lives in, so Review is never a press that does nothing visible.
     var onReview: (String) -> Void = { _ in }
@@ -122,23 +123,23 @@ struct TracesTreeView: View {
                     }
                     // The keyboard moves the selection; keep it on screen.
                     .onChange(of: selection) { _, selected in
-                        guard !selected.isEmpty else { return }
+                        guard let id = selected.map(Self.rowID) else { return }
                         withAnimation(GlassMotion.fast(GlassMotion.systemReducesMotion)) {
-                            proxy.scrollTo(selected)
+                            proxy.scrollTo(id)
                         }
-                        spoken = selected
+                        spoken = id
                     }
                 }
                 .scrollIndicators(.never)
                 // Full Keyboard Access: focus the tree, then the arrow keys
-                // move the selection through the sessions as drawn.
+                // move the selection through the folders and sessions as drawn.
                 .focusable()
                 .onMoveCommand(perform: move)
                 // Return opens the selected session's review, so the pill
                 // need not be its own tab stop on every row.
                 .onKeyPress(.return) {
-                    guard !selection.isEmpty else { return .ignored }
-                    onReview(selection)
+                    guard case .session(let entryID) = selection else { return .ignored }
+                    onReview(entryID)
                     return .handled
                 }
             }
@@ -251,37 +252,54 @@ struct TracesTreeView: View {
 
     // MARK: Keyboard
 
-    /// The sessions in drawing order, skipping collapsed tools and folders.
-    private var visibleSessions: [DaemonData.QueueEntry] {
-        var sessions: [DaemonData.QueueEntry] = []
-        for tool in store.tree.tools where isOpen(tool.id) {
-            for folder in tool.folders where isOpen(folder.id) { sessions += folder.sessions }
+    /// The selectable rows in drawing order, folders and sessions both,
+    /// skipping what a collapsed tool or folder hides. A collapsed folder
+    /// keeps its own row.
+    static func visibleRows(in tree: TracesTree, collapsed: Set<String>) -> [MonitorSelection] {
+        var rows: [MonitorSelection] = []
+        func add(_ folder: TracesTree.FolderNode) {
+            rows.append(.folder(projectID: folder.id))
+            if !collapsed.contains(folder.id) {
+                rows += folder.sessions.map { .session(entryID: $0.entryId) }
+            }
         }
-        for folder in store.tree.unplaced where isOpen(folder.id) { sessions += folder.sessions }
-        return sessions
+        for tool in tree.tools where !collapsed.contains(tool.id) { tool.folders.forEach(add) }
+        tree.unplaced.forEach(add)
+        return rows
+    }
+
+    /// One step up or down from the current row; the top row when nothing
+    /// drawn is selected, and the ends hold.
+    static func moved(from current: MonitorSelection?, down: Bool, through rows: [MonitorSelection]) -> MonitorSelection? {
+        guard !rows.isEmpty else { return nil }
+        guard let at = current.flatMap({ rows.firstIndex(of: $0) }) else { return rows[0] }
+        return rows[down ? min(at + 1, rows.count - 1) : max(at - 1, 0)]
+    }
+
+    /// A row click, as Ron's tree: the selected row again selects nothing
+    /// (the Summary), any other row selects that row.
+    static func toggled(_ clicked: MonitorSelection, current: MonitorSelection?) -> MonitorSelection? {
+        clicked == current ? nil : clicked
     }
 
     private func move(_ direction: MoveCommandDirection) {
-        let sessions = visibleSessions
-        guard !sessions.isEmpty else { return }
-        let current = sessions.firstIndex { $0.entryId == selection }
-        let next: Int
         switch direction {
-        case .down: next = current.map { min($0 + 1, sessions.count - 1) } ?? 0
-        case .up: next = current.map { max($0 - 1, 0) } ?? 0
+        case .down, .up:
+            let rows = Self.visibleRows(in: store.tree, collapsed: collapsed)
+            if let next = Self.moved(from: selection, down: direction == .down, through: rows), next != selection {
+                selection = next
+            }
         case .left, .right:
-            disclose(selection, open: direction == .right)
-            return
+            if let selection { disclose(selection, open: direction == .right) }
         @unknown default: return
         }
-        selection = sessions[next].entryId
     }
 
-    /// Left collapses the selected session's folder; right expands it and
-    /// its tool. The selection stays, so the two undo each other and the
-    /// inspector keeps the session.
-    private func disclose(_ entryId: String, open: Bool) {
-        guard let path = TracesTreeView.path(to: entryId, in: store.tree) else { return }
+    /// Left collapses the selected session's folder, or the selected
+    /// folder; right expands it and its tool. The selection stays, so the
+    /// two undo each other and the inspector keeps what it shows.
+    private func disclose(_ selected: MonitorSelection, open: Bool) {
+        guard let path = TracesTreeView.path(to: selected, in: store.tree) else { return }
         if open {
             if let tool = path.tool { collapsed.remove(tool) }
             collapsed.remove(path.folder)
@@ -289,6 +307,23 @@ struct TracesTreeView: View {
             collapsed.insert(path.folder)
         }
     }
+
+    /// The tool (if placed under one) and folder holding a selection: the
+    /// folder itself, or the session's folder.
+    static func path(to selected: MonitorSelection, in tree: TracesTree) -> (tool: String?, folder: String)? {
+        switch selected {
+        case .session(let entryID):
+            return path(to: entryID, in: tree)
+        case .folder(let projectID):
+            for tool in tree.tools where tool.folders.contains(where: { $0.id == projectID }) {
+                return (tool.id, projectID)
+            }
+            return tree.unplaced.contains { $0.id == projectID } ? (nil, projectID) : nil
+        }
+    }
+
+    /// The row id a selection scrolls to and VoiceOver focuses.
+    static func rowID(_ selected: MonitorSelection) -> String { selected.rawValue }
 
     /// The tool (if placed under one) and folder holding a session.
     static func path(to entryId: String, in tree: TracesTree) -> (tool: String?, folder: String)? {
@@ -384,6 +419,7 @@ struct TracesTreeView: View {
             title: folder.label,
             // The mode is the picker's; the sub-line counts what is waiting.
             sub: folder.sessions.isEmpty ? nil : String(folder.sessions.count),
+            selected: selection == .folder(projectID: folder.id),
             expanded: folder.sessions.isEmpty ? nil : isOpen(folder.id),
             submitTitle: submits ? QueueFolderWords.submitAll(offer.count) : nil,
             // The folder's mode: the three-way choice, with the core's
@@ -393,11 +429,14 @@ struct TracesTreeView: View {
             menuLabel: submits ? VerdictCopy.submitAllAs : "",
             menuOpen: verdictMenu == folder.id,
             onToggleExpand: { toggle(folder.id) },
+            onSelect: { selection = Self.toggled(.folder(projectID: folder.id), current: selection) },
             onSubmit: submits ? { Task { await store.contributeFolder(folder, verdict: nil) } } : nil,
             onMenu: submits ? { verdictMenu = verdictMenu == folder.id ? nil : folder.id } : nil
         )
         .help(submits ? QueueFolderWords.submitAllHelp(folder.label) : "")
         .disabled(store.writing.contains(folder.id))
+        .id(Self.rowID(.folder(projectID: folder.id)))
+        .accessibilityFocused($spoken, equals: Self.rowID(.folder(projectID: folder.id)))
         if submits, verdictMenu == folder.id {
             GlassMenu(onDismiss: { verdictMenu = nil }) {
                 ForEach(ContributorVerdict.allCases, id: \.rawValue) { option in
@@ -427,16 +466,16 @@ struct TracesTreeView: View {
             title: Self.when(entry),
             sub: Self.sub(entry, held: store.words?.held, ineligible: store.ineligibleLine(entry)),
             flag: Self.flag(entry, ineligible: store.ineligibleLine(entry) != nil),
-            selected: selection == entry.entryId,
+            selected: selection == .session(entryID: entry.entryId),
             // D10 default: a session's pill opens its review. Focus roves:
             // only the selected row's pill is a tab stop; Return opens it.
             submitTitle: store.words?.review,
-            submitFocusable: selection == entry.entryId,
-            onSelect: { selection = entry.entryId },
+            submitFocusable: selection == .session(entryID: entry.entryId),
+            onSelect: { selection = Self.toggled(.session(entryID: entry.entryId), current: selection) },
             onSubmit: { onReview(entry.entryId) }
         )
-        .id(entry.entryId)
-        .accessibilityFocused($spoken, equals: entry.entryId)
+        .id(Self.rowID(.session(entryID: entry.entryId)))
+        .accessibilityFocused($spoken, equals: Self.rowID(.session(entryID: entry.entryId)))
     }
 
 
