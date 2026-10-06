@@ -76,6 +76,24 @@ final class UsesScreenTests: XCTestCase {
         XCTAssertEqual(UsesScreenLayout.group([], optional: UsesScreenLayout.optionalScopes(options)), .none)
     }
 
+    /// Ron's review of #1235, item 2: "List my handle publicly as a
+    /// contributor" is its own row after the optional group, shown whether
+    /// or not the group is open.
+    func test_theHandleRowIsAlwaysShownAfterTheOptionalGroup() throws {
+        XCTAssertEqual(
+            UsesScreenLayout.expandedScopes(options).map(\.name),
+            ["benchmark_only", "ranking_training", "model_training"])
+        XCTAssertEqual(
+            UsesScreenLayout.visibleScopes(options, optionalOpen: false).map(\.name),
+            ["debugging_evaluation", "public_attribution"])
+        XCTAssertEqual(
+            UsesScreenLayout.visibleScopes(options, optionalOpen: true).map(\.name),
+            ["debugging_evaluation", "benchmark_only", "ranking_training", "model_training", "public_attribution"])
+        let source = try Self.source()
+        XCTAssertTrue(source.contains("UsesScreenLayout.expandedScopes(options)"))
+        XCTAssertFalse(source.contains("optional + UsesScreenLayout.handleScopes(options)"))
+    }
+
     func test_startIsDisabledUntilTheRequiredUseIsTicked() throws {
         let grant = try grant()
         let uses = try copy().uses

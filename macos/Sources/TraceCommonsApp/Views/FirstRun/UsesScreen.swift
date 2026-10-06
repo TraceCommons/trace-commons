@@ -29,6 +29,20 @@ enum UsesScreenLayout {
         options.filter { !$0.alwaysOn && !$0.grantsDataUse }
     }
 
+    /// What the optional group's expander opens onto: the optional data
+    /// uses only. The handle is a row of its own after the group (Ron's
+    /// review of #1235, item 2).
+    static func expandedScopes(_ options: [ConsentScope]) -> [ConsentScope] {
+        optionalScopes(options)
+    }
+
+    /// The scope rows on screen, in order: the required use, the optional
+    /// uses while the group is open, then the handle, always.
+    static func visibleScopes(_ options: [ConsentScope], optionalOpen: Bool) -> [ConsentScope] {
+        (requiredScope(options).map { [$0] } ?? []) + (optionalOpen ? expandedScopes(options) : [])
+            + handleScopes(options)
+    }
+
     static func isTicked(_ scope: String, in state: FirstRunState) -> Bool {
         state.scopes.contains(scope)
     }
@@ -319,11 +333,15 @@ struct UsesScreen: View {
                 }
                 if optionalOpen {
                     VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
-                        ForEach(optional + UsesScreenLayout.handleScopes(options)) { option in
+                        ForEach(UsesScreenLayout.expandedScopes(options)) { option in
                             scopeRow(option, options: options)
                         }
                     }
                     .padding(.leading, GlassTokens.Space.s8)
+                }
+                // The handle: its own row after the group, always shown.
+                ForEach(UsesScreenLayout.handleScopes(options)) { option in
+                    scopeRow(option, options: options)
                 }
             }
         }
