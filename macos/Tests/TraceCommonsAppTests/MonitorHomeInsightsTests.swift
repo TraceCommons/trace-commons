@@ -34,7 +34,8 @@ final class MonitorHomeInsightsTests: XCTestCase {
     /// not drawn, never drawn with a Swift-authored word.
     func test_theHomeCardsTakeTheirHeadingsFromTheCore() throws {
         let home = try MonitorNavigationTests.text("Views/Monitor/HomeViews.swift")
-        XCTAssertTrue(home.contains(#"TCInsights.copy()?["title"]"#))
+        XCTAssertTrue(home.contains("private static let insightsCopy = TCInsights.copy()"))
+        XCTAssertEqual(home.components(separatedBy: #"Self.insightsCopy?["title"]"#).count - 1, 2)
         XCTAssertTrue(home.contains(#"missionDrafts.copy["title"]"#))
         XCTAssertNil(HomeFormat.cardHeading(nil))
         XCTAssertNil(HomeFormat.cardHeading(""))

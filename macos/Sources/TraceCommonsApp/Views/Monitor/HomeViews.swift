@@ -28,12 +28,17 @@ struct HomeTabView: View {
     let insightsStoreSelection: InsightsStoreSelection
     let missionDrafts: MissionDraftsModel
 
+    /// The core's Insights copy, read once: it is fixed for the life of the
+    /// process, and reading it is a C ABI call and a JSON decode, which
+    /// `body` would otherwise repeat on every evaluation.
+    private static let insightsCopy = TCInsights.copy()
+
     var body: some View {
         switch page {
         case .overview:
             HomeOverview(
                 store: store, traces: traces, statusLabel: statusLabel,
-                insightsHeading: HomeFormat.cardHeading(TCInsights.copy()?["title"]),
+                insightsHeading: HomeFormat.cardHeading(Self.insightsCopy?["title"]),
                 missionDraftsHeading: HomeFormat.cardHeading(missionDrafts.copy["title"]),
                 openHistory: { page = .history }, openMissions: { page = .missions },
                 openInsights: { page = .insights }, openMissionDrafts: { page = .missionDrafts })
@@ -42,7 +47,7 @@ struct HomeTabView: View {
         case .missions:
             MissionsPage(store: store, back: { page = .overview })
         case .insights:
-            HostedPage(heading: HomeFormat.cardHeading(TCInsights.copy()?["title"]), back: { page = .overview }) {
+            HostedPage(heading: HomeFormat.cardHeading(Self.insightsCopy?["title"]), back: { page = .overview }) {
                 InsightsView(storeSelection: insightsStoreSelection)
             }
         case .missionDrafts:
