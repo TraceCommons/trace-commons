@@ -154,6 +154,10 @@ public struct GlassListRow: View {
             if let submitTitle {
                 Button(submitTitle) { onSubmit?() }
                     .buttonStyle(GlassButtonStyle(.submit(done: submitDone)))
+                    // One line at its full width ("Submit all (12)" at the
+                    // 360pt left pane): the title gives way, never the count.
+                    .lineLimit(1)
+                    .fixedSize()
                     .disabled(onSubmit == nil)
                     .focusable(submitFocusable)
             }
