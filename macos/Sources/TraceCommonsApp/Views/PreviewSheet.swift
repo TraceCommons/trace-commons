@@ -41,6 +41,10 @@ struct PreviewSheet: View {
 
     let entry: QueueEntry
     let preloaded: Preloaded?
+    /// How the preview closes when it is raised in a `GlassModal`
+    /// (`PreviewModal`); nil in a stock sheet, which the environment's
+    /// dismiss closes.
+    let onClose: (() -> Void)?
 
     @EnvironmentObject private var model: AppModel
     @Environment(\.dismiss) private var dismiss
@@ -125,9 +129,10 @@ struct PreviewSheet: View {
         }
     }
 
-    init(entry: QueueEntry, preloaded: Preloaded? = nil) {
+    init(entry: QueueEntry, preloaded: Preloaded? = nil, onClose: (() -> Void)? = nil) {
         self.entry = entry
         self.preloaded = preloaded
+        self.onClose = onClose
         _summary = State(initialValue: preloaded?.summary)
         _transcriptText = State(initialValue: preloaded?.transcript ?? "")
         _document = State(initialValue: preloaded.map { TranscriptDocument($0.transcript) })
@@ -150,9 +155,11 @@ struct PreviewSheet: View {
         // and search tabs can use the additional reading space. Ideal
         // keeps the first presentation at
         // the spec measure and the screenshot hook renders at exactly it.
+        // In a modal the window sets the floor instead.
         .frame(
-            minWidth: SheetMetric.width, idealWidth: SheetMetric.width, maxWidth: .infinity,
-            minHeight: SheetMetric.height, idealHeight: SheetMetric.height, maxHeight: .infinity
+            minWidth: onClose == nil ? SheetMetric.width : nil, idealWidth: SheetMetric.width, maxWidth: .infinity,
+            minHeight: onClose == nil ? SheetMetric.height : nil, idealHeight: SheetMetric.height,
+            maxHeight: .infinity
         )
         .background {
             // A shortcut needs a control to hang from. This one is never
@@ -169,16 +176,20 @@ struct PreviewSheet: View {
             .accessibilityHidden(true)
             .focusable(false)
         }
-        .glassTier(.pane)
+        // In a modal the modal is the pane; a second tier would be glass on
+        // glass.
+        .modifier(PreviewChrome(inModal: onClose != nil))
         .task(id: entry.entryID) {
             guard preloaded == nil else { return }
             witnessSupported = await model.supportsWitnessReview()
             await load()
         }
         .onDisappear { closePreview() }
-        .sheet(isPresented: $confirmingWitness) {
+        .glassModal(isPresented: $confirmingWitness) {
             if let copy = model.witnessCopy?.review {
-                WitnessReviewConsent(copy: copy) { Task { await prepareWitness() } }
+                WitnessReviewConsent(copy: copy, onCancel: { confirmingWitness = false }) {
+                    Task { await prepareWitness() }
+                }
             }
         }
         // The credential refusal, as its own alert rather than a line in
@@ -187,14 +198,18 @@ struct PreviewSheet: View {
         // things -- edit the text, and rotate what they typed. Neither
         // string is derived from the response, so no correction text and no
         // detected value can reach the screen a second time.
-        .alert(
-            CorrectionCopy.credentialHeadline,
-            isPresented: $correctionRefused
-        ) {
-            Button("Close", role: .cancel) {}
-        } message: {
-            Text(CorrectionCopy.credentialBody)
+        .glassModal(isPresented: $correctionRefused) {
+            GlassConfirmation(
+                title: CorrectionCopy.credentialHeadline, message: CorrectionCopy.credentialBody,
+                actions: [.cancel("Close") { correctionRefused = false }],
+                onCancel: { correctionRefused = false })
         }
+    }
+
+    /// Closes the preview: the modal's close when it is raised in one, the
+    /// sheet's dismiss otherwise.
+    private func close() {
+        if let onClose { onClose() } else { dismiss() }
     }
 
     // MARK: - Chrome
@@ -208,7 +223,8 @@ struct PreviewSheet: View {
     /// screen, because that is the number a person reads the body against.
     private var header: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
-            if let copy = model.publicRunCopy {
+            // The modal draws this heading as its title.
+            if onClose == nil, let copy = model.publicRunCopy {
                 Text(copy.sessionDetail)
                     .glassType(GlassTokens.TypeScale.title)
                     .foregroundStyle(GlassColor.textPrimary)
@@ -416,7 +432,7 @@ struct PreviewSheet: View {
     /// The core's word for the review this sheet is: the tab group's name
     /// when the public-run copy does not decode, so the group is never
     /// nameless.
-    private static let reviewWord = MonitorTracesCopy.decode(fromJSON: TCCoreCopy.monitorTracesCopyJSON())?.review
+    static let reviewWord = MonitorTracesCopy.decode(fromJSON: TCCoreCopy.monitorTracesCopyJSON())?.review
 
     /// The four tabs, in the spec's order. The one that has something to
     /// report says so on its face; the segment carries the selected trait.
@@ -481,13 +497,13 @@ struct PreviewSheet: View {
                 // as a second way to approve.
                 Button("Not this one") {
                     model.dismiss(entry)
-                    dismiss()
+                    close()
                 }
                 .buttonStyle(GlassButtonStyle(.glass))
                 Spacer(minLength: GlassTokens.Space.s6)
                 // Escape closes the sheet. The only other binding on this
                 // sheet is Command-F below; Return stays unbound.
-                Button("Close") { dismiss() }
+                Button("Close") { close() }
                     .buttonStyle(GlassButtonStyle(.glass))
                     .keyboardShortcut(.cancelAction)
                 // The ONLY approve control in the product. It is behind the
@@ -681,14 +697,14 @@ struct PreviewSheet: View {
         else { return }
         guard let text = correctionToSend else {
             model.approve(entry, verdict: verdict)
-            dismiss()
+            close()
             return
         }
         model.approve(entry, verdict: verdict, correction: text) { refused in
             if refused {
                 correctionRefused = true
             } else {
-                dismiss()
+                close()
             }
         }
     }
@@ -705,19 +721,10 @@ struct PreviewSheet: View {
             Text(CorrectionCopy.question)
                 .glassType(GlassTokens.TypeScale.caption)
                 .foregroundStyle(GlassColor.textSecondary)
-            // A plain editor on the field fill: `GlassTextField` has no seam
-            // for the character cap below.
-            TextEditor(text: $correction)
-                .glassType(GlassTokens.TypeScale.label.weight(.regular))
-                .foregroundStyle(GlassColor.textPrimary)
-                .frame(minHeight: 64, maxHeight: 140)
-                .scrollContentBackground(.hidden)
-                .padding(.horizontal, GlassTokens.Space.s5)
-                .padding(.vertical, GlassTokens.Space.s3)
-                .background(
-                    RoundedRectangle(cornerRadius: GlassTokens.Radius.control, style: .continuous)
-                        .fill(GlassTokens.Color.fieldFill.color))
-                .accessibilityLabel(CorrectionCopy.question)
+            // The question above names it; the cap below works on the
+            // binding.
+            GlassTextArea(CorrectionCopy.question, text: $correction, showsLabel: false)
+                .frame(maxHeight: 140)
                 .accessibilityHint(CorrectionCopy.placeholder)
                 // Capped where the person can see it, so an over-long
                 // correction is shortened at the keyboard rather than
@@ -1033,38 +1040,29 @@ struct SearchTab: View {
         .onChange(of: focusRequest) { _, _ in focused = true }
     }
 
-    /// The field, drawn as `GlassTextField` draws its own: the field fill,
-    /// the control radius, the large control height. A plain `TextField`
-    /// rather than `GlassTextField`, which has no seam for the focus and
-    /// the submit this tab needs.
+    /// The field: `GlassTextField`, its focus bound for Command-F and its
+    /// submit running the search.
     ///
     /// Under the screenshot hook it is drawn rather than editable -- see
-    /// `CaptureMode`. The box, the type and the text are identical either
+    /// `CaptureMode`. The well, the type and the text are identical either
     /// way; what the capture loses is the caret and the ability to type,
     /// neither of which a still image was ever going to show.
     @ViewBuilder
     private var searchField: some View {
-        Group {
-            if CaptureMode.isRendering {
-                Text(needle.isEmpty ? "Client name, hostname, anything" : needle)
-                    .glassType(GlassTokens.TypeScale.label.weight(.regular))
-                    .foregroundStyle(needle.isEmpty ? GlassColor.textTertiary : GlassColor.textPrimary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            } else {
-                TextField("Client name, hostname, anything", text: $needle)
-                    .textFieldStyle(.plain)
-                    .glassType(GlassTokens.TypeScale.label.weight(.regular))
-                    .foregroundStyle(GlassColor.textPrimary)
-                    .focused($focused)
-                    .onSubmit(commit)
-                    .onChange(of: needle) { _, _ in run() }
-            }
+        let prompt = "Client name, hostname, anything"
+        if CaptureMode.isRendering {
+            Text(needle.isEmpty ? prompt : needle)
+                .glassType(GlassTokens.TypeScale.label.weight(.regular))
+                .foregroundStyle(needle.isEmpty ? GlassColor.textTertiary : GlassColor.textPrimary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 10)
+                .frame(minHeight: GlassTokens.Size.controlLarge)
+                .glassFieldWell(invalid: false)
+        } else {
+            GlassTextField(prompt, text: $needle, prompt: prompt, showsLabel: false, focus: $focused)
+                .onSubmit(commit)
+                .onChange(of: needle) { _, _ in run() }
         }
-        .padding(.horizontal, GlassTokens.Space.s5)
-        .frame(minHeight: GlassTokens.Size.controlLarge)
-        .background(
-            RoundedRectangle(cornerRadius: GlassTokens.Radius.control, style: .continuous)
-                .fill(GlassTokens.Color.fieldFill.color))
     }
 
     @ViewBuilder
@@ -1654,26 +1652,21 @@ enum ScopeCopy {
 /// Confirm, and Cancel (or Escape) leaves the preview exactly as it was.
 struct WitnessReviewConsent: View {
     let copy: WitnessReviewCopy
+    let onCancel: () -> Void
     let onConfirm: () -> Void
-    @Environment(\.dismiss) private var dismiss
 
+    /// Confirm is never the default: Return does not start a review.
     var body: some View {
-        GlassSheet(title: copy.heading) {
-            ViewThatFits(in: .vertical) {
-                disclosure
-                ScrollView { disclosure }
-            }
-            Spacer(minLength: 0)
-            HStack {
-                Spacer()
-                Button(copy.cancel, role: .cancel) { dismiss() }
-                    .buttonStyle(GlassButtonStyle(.glass))
-                    .keyboardShortcut(.cancelAction)
-                Button(copy.confirm) { dismiss(); onConfirm() }
-                    .buttonStyle(GlassButtonStyle(.primary))
-            }
+        GlassModal(
+            title: copy.heading, width: .narrow,
+            actions: [
+                .cancel(copy.cancel, action: onCancel),
+                GlassModalAction(copy.confirm, isProminent: true) { onCancel(); onConfirm() },
+            ],
+            onCancel: onCancel
+        ) {
+            GlassModalBody { disclosure }
         }
-        .frame(width: 560, height: 390)
     }
 
     private var disclosure: some View {
@@ -1687,5 +1680,37 @@ struct WitnessReviewConsent: View {
                 .foregroundStyle(GlassColor.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
         }.frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+/// The preview's own surface: the pane tier in a stock sheet, none in a
+/// modal, which is already the pane.
+private struct PreviewChrome: ViewModifier {
+    let inModal: Bool
+
+    func body(content: Content) -> some View {
+        if inModal {
+            content
+        } else {
+            content.glassTier(.pane)
+        }
+    }
+}
+
+/// The preview raised in a `GlassModal` over the whole window: the same
+/// four tabs, gates and footer as the sheet, the modal titled with the
+/// sheet's own heading. Escape and Close both close it; nothing in it
+/// answers Return.
+struct PreviewModal: View {
+    let entry: QueueEntry
+    let onClose: () -> Void
+    @EnvironmentObject private var model: AppModel
+
+    var body: some View {
+        GlassModal(
+            title: model.publicRunCopy?.sessionDetail ?? PreviewSheet.reviewWord ?? "", onCancel: onClose
+        ) {
+            PreviewSheet(entry: entry, onClose: onClose)
+        }
     }
 }

@@ -19,7 +19,7 @@ final class NativeOnboardingRenderTests: XCTestCase {
                 try? FileManager.default.removeItem(at: directory)
             }
         }
-        try render(WitnessReviewConsent(copy: copy) { confirmed = true },
+        try render(WitnessReviewConsent(copy: copy, onCancel: {}) { confirmed = true },
                    size: CGSize(width: 560, height: 390), to: directory.appendingPathComponent("native-witness-consent.png"))
         // Constructing this model does not start a daemon or inspect sessions.
         let model = AppModel()

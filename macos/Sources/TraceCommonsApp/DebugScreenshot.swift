@@ -72,7 +72,7 @@ enum DebugScreenshot {
             }
             if let copy = model.witnessCopy?.review {
                 render(
-                    WitnessReviewConsent(copy: copy, onConfirm: {}),
+                    WitnessReviewConsent(copy: copy, onCancel: {}, onConfirm: {}),
                     to: directory + "/macos-shell-witness-review-consent.png",
                     size: CGSize(width: 560, height: 390)
                 )

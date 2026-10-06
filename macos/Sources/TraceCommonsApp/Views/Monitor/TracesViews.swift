@@ -89,7 +89,7 @@ struct TracesTreeView: View {
             // inspector, so they are on screen with the inspector hidden.
             TracesOffersBar(store: store)
             if store.phase == .loading && isEmpty {
-                ProgressView().controlSize(.small).frame(maxWidth: .infinity)
+                GlassSpinner(standalone: true).frame(maxWidth: .infinity)
             } else if isEmpty && store.phase == .loaded {
                 VStack(spacing: GlassTokens.Space.s2) {
                     Image(systemName: "tray")
@@ -143,34 +143,45 @@ struct TracesTreeView: View {
                 }
             }
         }
-        .confirmationDialog(
-            confirming?.title ?? "",
-            isPresented: Binding(get: { confirming != nil }, set: { if !$0 { confirming = nil } }),
-            titleVisibility: .visible,
-            presenting: confirming
-        ) { pending in
-            switch pending.words {
-            case .ignore(let copy):
-                Button(copy.button, role: .destructive) { apply(pending.folder, pending.mode) }
-                // The system's word, as the Waiting screen's ignore uses.
-                Button("Cancel", role: .cancel) { confirming = nil }
-            case .arm(let copy):
-                Button(copy.confirm) { apply(pending.folder, pending.mode) }
-                Button(copy.decline, role: .cancel) { confirming = nil }
-            }
-        } message: { pending in
-            Text(pending.body)
+        // Whole-window confirmations: the destructive action right-most and
+        // never on Return; Escape cancels.
+        .glassModal(isPresented: Binding(get: { confirming != nil }, set: { if !$0 { confirming = nil } })) {
+            if let pending = confirming { confirmation(pending) }
         }
-        .confirmationDialog(
-            sourceChange?.kind.displayName ?? "",
-            isPresented: Binding(get: { sourceChange != nil }, set: { if !$0 { sourceChange = nil } }),
-            titleVisibility: .visible,
-            presenting: sourceChange
-        ) { change in
-            Button(change.action) { applySource(change) }
-            Button("Cancel", role: .cancel) { sourceChange = nil }
-        } message: { change in
-            Text(change.explanation)
+        .glassModal(isPresented: Binding(get: { sourceChange != nil }, set: { if !$0 { sourceChange = nil } })) {
+            if let change = sourceChange {
+                GlassConfirmation(
+                    title: change.kind.displayName, message: change.explanation,
+                    actions: [
+                        .cancel("Cancel") { sourceChange = nil },
+                        GlassModalAction(change.action, isDefault: true) { applySource(change) },
+                    ],
+                    onCancel: { sourceChange = nil })
+            }
+        }
+    }
+
+    /// A mode change's confirmation, in the core's words for that folder.
+    private func confirmation(_ pending: Confirmation) -> GlassConfirmation {
+        let cancel = { confirming = nil }
+        switch pending.words {
+        case .ignore(let copy):
+            return GlassConfirmation(
+                title: pending.title, message: pending.body,
+                actions: [
+                    // The system's word, as the Waiting screen's ignore uses.
+                    .cancel("Cancel", action: cancel),
+                    .destructive(copy.button) { apply(pending.folder, pending.mode) },
+                ],
+                onCancel: cancel)
+        case .arm(let copy):
+            return GlassConfirmation(
+                title: pending.title, message: pending.body,
+                actions: [
+                    .cancel(copy.decline, action: cancel),
+                    GlassModalAction(copy.confirm, isDefault: true) { apply(pending.folder, pending.mode) },
+                ],
+                onCancel: cancel)
         }
     }
 
@@ -577,7 +588,8 @@ struct SessionInspectorView: View {
                 Spacer(minLength: 0)
             }
         }
-        .sheet(item: $previewing) { PreviewSheet(entry: $0).environmentObject(model) }
+        // Over the whole window (`glassModalHost` at its root), not a sheet.
+        .glassModal(item: $previewing) { PreviewModal(entry: $0) { previewing = nil }.environmentObject(model) }
         .onChange(of: model.awaitingDecision.count) { _, _ in
             // Development hook, as the legacy queue's: opens the first
             // preview so the sheet can be captured. Never on by default.

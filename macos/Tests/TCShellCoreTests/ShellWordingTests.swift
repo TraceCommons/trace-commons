@@ -66,7 +66,7 @@ final class ShellWordingTests: XCTestCase {
         "TraceCommonsApp/Views/HistoryView.swift": 21,
         "TraceCommonsApp/Views/MainWindowView.swift": 14,
         "TraceCommonsApp/Views/MenuBarView.swift": 11,
-        "TraceCommonsApp/Views/PreviewSheet.swift": 38,
+        "TraceCommonsApp/Views/PreviewSheet.swift": 37,
         "TraceCommonsApp/Views/PublicProfileCopy.swift": 46,
         // Back to 3: the withheld line briefly lived here and is now
         // `tc_contribution_withheld_line`, assembled in the Rust and shared
