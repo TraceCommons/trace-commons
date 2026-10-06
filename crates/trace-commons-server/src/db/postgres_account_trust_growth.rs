@@ -163,7 +163,11 @@ impl PgBackend {
                         netted_quarantined, penalty_active, facts_digest
                    FROM trace_account_trust_evaluations
                   WHERE tenant_id=$1 AND account_id=$2 AND growth_policy_version=$3 AND mode=$4
-                  ORDER BY as_of DESC, recorded_at DESC
+                    AND units IS NOT NULL AND units_capped IS NOT NULL
+                    AND active_weeks IS NOT NULL AND age_weeks IS NOT NULL
+                    AND netted_withdrawn IS NOT NULL AND netted_revoked IS NOT NULL
+                    AND netted_quarantined IS NOT NULL AND penalty_active IS NOT NULL
+                  ORDER BY as_of DESC, recorded_at DESC, evaluation_id DESC
                   LIMIT 1",
                 &[&tenant, &account.account_id(), &policy_version, &mode],
             )

@@ -1232,6 +1232,37 @@ impl Queue {
         Ok(())
     }
 
+    /// Offer an aged-out session again, because a person chose it in the
+    /// first-run picker: `Expired` back to `Pending`, dated `now` as
+    /// [`Self::undo_keep`] dates its return, so expiry counts afresh.
+    ///
+    /// Only `Expired` moves. A kept, dismissed, waiting or decided entry
+    /// answers `false` and is left exactly as it was: a keep or a dismissal
+    /// is the contributor's own answer and the picker never overrides it.
+    /// No queue cap: an explicit selection is not the watcher offering more.
+    pub fn revive_expired(&mut self, entry_id: Uuid, now: DateTime<Utc>) -> bool {
+        let Some(e) = self.entries.iter_mut().find(|e| e.entry_id == entry_id) else {
+            return false;
+        };
+        if e.state != QueueState::Expired {
+            return false;
+        }
+        e.state = QueueState::Pending;
+        e.reason_label = None;
+        e.discovered_at = now;
+        e.retry_after = None;
+        e.approved_scopes = None;
+        e.approved_verdict = None;
+        e.approved_correction = None;
+        e.approved_inputs = None;
+        e.approved_at = None;
+        e.approved_unattended = false;
+        e.previewed_envelope_digest = None;
+        e.attested_inference = None;
+        e.would_send_bytes = None;
+        true
+    }
+
     pub fn pending(&self) -> Vec<&QueueEntry> {
         self.entries
             .iter()
@@ -4521,6 +4552,33 @@ mod tests {
             q.keep(entry_id_for("sha256:none")).unwrap_err().to_string(),
             "unknown-entry-id"
         );
+    }
+
+    /// The first-run picker revives an aged-out offer, and nothing else: a
+    /// kept session stays kept, and a waiting one is not re-dated.
+    #[test]
+    fn revive_expired_returns_false_for_a_kept_entry() {
+        let mut q = queue_of(vec![entry("sha256:k", "2026-08-01T00:00:00Z")]);
+        let id = entry_id_for("sha256:k");
+        let now = at("2026-10-01T00:00:00Z");
+        assert!(!q.revive_expired(id, now), "a Pending entry is not expired");
+        q.keep(id).unwrap();
+        assert!(!q.revive_expired(id, now), "a kept entry stays kept");
+        assert!(q.get(id).unwrap().is_kept());
+        assert!(!q.revive_expired(entry_id_for("sha256:none"), now));
+
+        let mut q = queue_of(vec![entry("sha256:e", "2026-08-01T00:00:00Z")]);
+        let id = entry_id_for("sha256:e");
+        assert_eq!(q.expire(at("2026-09-15T00:00:00Z"), 30, false), 1);
+        assert!(q.revive_expired(id, now));
+        let e = q.get(id).unwrap();
+        assert_eq!(e.state, QueueState::Pending);
+        assert_eq!(
+            e.discovered_at, now,
+            "dated now, so it does not expire again at once"
+        );
+        assert!(e.reason_label.is_none());
+        assert_eq!(q.expire(at("2026-10-02T00:00:00Z"), 30, false), 0);
     }
 
     // -- `decisions_owed` (K6): the badge's exact count -----------------

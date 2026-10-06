@@ -214,6 +214,10 @@ find "$APP/Contents/Frameworks" -name '*.dylib' -print0 |
 # -- measured, not assumed. The failure is an application that does not start,
 # which is why CI launches the signed app rather than trusting that it signed.
 cp "$SIGNING_PROFILE" "$APP/Contents/embedded.provisionprofile"
+# The bundled `near-ai` CLI is signed without entitlements, before the app
+# that contains it: a command-line binary cannot carry a keychain access group.
+codesign --force --timestamp --options runtime \
+  --sign "$MACOS_SIGNING_IDENTITY" "$APP/Contents/MacOS/near-ai"
 codesign --force --timestamp --options runtime \
   --entitlements "$SIGNING_ENTITLEMENTS" \
   --sign "$MACOS_SIGNING_IDENTITY" "$APP"

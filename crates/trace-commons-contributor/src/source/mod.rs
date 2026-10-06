@@ -388,6 +388,8 @@ pub struct SessionTranscript {
     /// attribution only, never a gate or scoring input (issue #298 S4a).
     /// `None` when a source cannot resolve one.
     pub conversation_id: Option<String>,
+    /// Validated identity supplied only by a native loader, never attribution/import metadata.
+    pub source_session: Option<trace_commons_protocol::trace_contribution::SourceSessionIdentity>,
     pub events: Vec<SessionEvent>,
     /// How many delegated transcripts were merged into this one, and how
     /// many were left out because the group exceeded the raw byte budget.
@@ -714,6 +716,12 @@ pub(crate) fn registered_source_names() -> impl Iterator<Item = &'static str> {
     NATIVE_SOURCES.iter().map(|spec| spec.name)
 }
 
+/// Every source a contributor can declare in settings: the registered
+/// native adapters, and the trajectory folder.
+pub(crate) fn declarable_source_names() -> impl Iterator<Item = &'static str> {
+    registered_source_names().chain(std::iter::once(SOURCE_TRAJECTORY))
+}
+
 /// The subdirectory of the contributor state directory that trajectory
 /// files may be staged in. Placing a file there IS the opt-in, which is why
 /// nothing in it needs a name suffix.
@@ -822,10 +830,25 @@ impl SourceRoots {
                 staging_dir.as_deref()
             )),
         };
+        let trajectory = match (trajectory, self.declared_trajectory_folder()) {
+            (Some(root), Some(folder)) => Some(format!("{root} {}", folder.to_string_lossy())),
+            (None, Some(folder)) => Some(folder.to_string_lossy().to_string()),
+            (root, None) => root,
+        };
         if let Some(root) = trajectory {
             out.insert(SOURCE_TRAJECTORY, root);
         }
         out
+    }
+
+    /// The trajectory folder the contributor declared, read alongside
+    /// whatever [`TrajectorySelection`] this root set carries. `Off` and
+    /// absent both add nothing: there is no conventional trajectory store.
+    fn declared_trajectory_folder(&self) -> Option<&Path> {
+        match self.declared.get(SOURCE_TRAJECTORY) {
+            Some(SourceDeclaration::Watch { path }) => Some(path),
+            Some(SourceDeclaration::Off) | None => None,
+        }
     }
 
     pub fn new() -> Self {
@@ -979,18 +1002,29 @@ pub fn all_sources(roots: &SourceRoots) -> Vec<Box<dyn TraceSource>> {
         }
     }
 
-    match &roots.trajectory {
-        TrajectorySelection::None => {}
+    let selected = match &roots.trajectory {
+        TrajectorySelection::None => None,
         TrajectorySelection::Declared(path) => {
-            sources.push(Box::new(trajectory::TrajectorySource::new(path.clone())))
+            Some(trajectory::TrajectorySource::new(path.clone()))
         }
         TrajectorySelection::Auto {
             working_dir,
             staging_dir,
-        } => sources.push(Box::new(trajectory::TrajectorySource::auto(
+        } => Some(trajectory::TrajectorySource::auto(
             working_dir.clone(),
             staging_dir.clone(),
-        ))),
+        )),
+    };
+    // A declared trajectory folder joins the SAME source rather than a
+    // second one: two sources both named `trajectory` would make a by-name
+    // lookup answer for whichever came first.
+    let trajectory = match (selected, roots.declared_trajectory_folder()) {
+        (Some(source), Some(folder)) => Some(source.also_declared(folder.to_path_buf())),
+        (None, Some(folder)) => Some(trajectory::TrajectorySource::new(folder.to_path_buf())),
+        (source, None) => source,
+    };
+    if let Some(source) = trajectory {
+        sources.push(Box::new(source));
     }
 
     // One insertion point for the whole overlay. Without a declared proxy the
@@ -1426,5 +1460,31 @@ mod tests {
         assert_ne!(preview, submission_id_for("sha256:aa"));
         assert_eq!(preview.get_version_num(), 8);
         assert_eq!(submission_id_for("sha256:aa").get_version_num(), 5);
+    }
+}
+
+/// Native adapters alone call this syntax validator. Imported attribution is not an identity.
+pub(crate) fn native_session_identity(
+    adapter: &str,
+    native_id: Option<&str>,
+) -> Option<trace_commons_protocol::trace_contribution::SourceSessionIdentity> {
+    let identity = trace_commons_protocol::trace_contribution::SourceSessionIdentity {
+        adapter: adapter.to_owned(),
+        native_id: native_id?.to_owned(),
+    };
+    trace_commons_protocol::trace_contribution::validate_source_session_identity(&identity).ok()?;
+    Some(identity)
+}
+
+#[cfg(test)]
+mod native_identity_tests {
+    #[test]
+    fn malformed_and_missing_native_ids_do_not_qualify() {
+        for adapter in ["codex", "claude-code", "opencode", "cline", "gemini-cli"] {
+            for id in [None, Some(""), Some("../secret"), Some("id with spaces")] {
+                assert!(super::native_session_identity(adapter, id).is_none());
+            }
+        }
+        assert!(super::native_session_identity("trajectory", Some("native_id")).is_none());
     }
 }

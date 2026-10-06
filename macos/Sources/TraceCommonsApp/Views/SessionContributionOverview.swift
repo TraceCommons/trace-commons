@@ -3,6 +3,7 @@
 // account action and canonical tier copy as History.
 
 import SwiftUI
+import TCDesign
 
 struct SessionContributionOverview: View {
     let record: HistoryRecord
@@ -10,23 +11,12 @@ struct SessionContributionOverview: View {
     let copy: PublicRunCopy
 
     var body: some View {
-        VStack(alignment: .leading, spacing: TC.Space.l) {
+        VStack(alignment: .leading, spacing: GlassTokens.Space.s6) {
             if detail.contentUnavailable == true {
-                HStack(alignment: .firstTextBaseline, spacing: TC.Space.xs) {
-                    Image(systemName: "info.circle")
-                        .imageScale(.small)
-                        .accessibilityHidden(true)
+                GlassNotice(tone: .off) {
                     Text(copy.contentUnavailable)
                         .fixedSize(horizontal: false, vertical: true)
                 }
-                .font(TC.Font_.footnote)
-                .foregroundStyle(TC.inkSecondary)
-                .padding(TC.Space.m)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(
-                    TC.surfaceInset,
-                    in: RoundedRectangle(cornerRadius: TC.Radius.inset)
-                )
             }
             taskAndOutcome
             correction
@@ -36,135 +26,102 @@ struct SessionContributionOverview: View {
     }
 
     private var taskAndOutcome: some View {
-        VStack(alignment: .leading, spacing: TC.Space.s) {
-            TCFieldLabel(copy.task)
-            Text(detail.task ?? missingContentValue(copy.noTask))
-                .font(TC.Font_.body)
-                .foregroundStyle(detail.task == nil ? TC.inkSecondary : TC.inkPrimary)
-                .textSelection(.enabled)
-            Divider()
-            TCFieldLabel(copy.outcome)
-            let taskOutcome = copy.taskOutcomeLabel(for: detail.taskSuccess)
-            Text(taskOutcome ?? missingContentValue(copy.outcomeUnavailable))
-                .font(TC.Font_.cardTitle)
-                .foregroundStyle(taskOutcome == nil ? TC.inkSecondary : TC.inkPrimary)
-            if let feedbackLine = copy.feedbackLabel(for: detail.userFeedback) {
-                Text(feedbackLine)
-                    .font(TC.Font_.footnote)
-                    .foregroundStyle(TC.inkSecondary)
+        GlassEyebrowCard(copy.task) {
+            VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
+                value(detail.task, missing: copy.noTask)
+                    .textSelection(.enabled)
+                eyebrow(copy.outcome)
+                let taskOutcome = copy.taskOutcomeLabel(for: detail.taskSuccess)
+                Text(taskOutcome ?? missingContentValue(copy.outcomeUnavailable))
+                    .glassType(GlassTokens.TypeScale.bodyStrong)
+                    .foregroundStyle(taskOutcome == nil ? GlassColor.textSecondary : GlassColor.textPrimary)
+                if let feedbackLine = copy.feedbackLabel(for: detail.userFeedback) {
+                    Text(feedbackLine)
+                        .glassType(GlassTokens.TypeScale.caption)
+                        .foregroundStyle(GlassColor.textSecondary)
+                }
             }
         }
-        .padding(TC.Space.l)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .tcCard()
     }
 
     private var correction: some View {
-        VStack(alignment: .leading, spacing: TC.Space.s) {
-            TCFieldLabel(copy.decisiveCorrection)
-            Text(detail.humanCorrection ?? missingContentValue(copy.noCorrection))
-                .font(TC.Font_.body)
-                .foregroundStyle(detail.humanCorrection == nil ? TC.inkSecondary : TC.inkPrimary)
+        GlassEyebrowCard(copy.decisiveCorrection) {
+            value(detail.humanCorrection, missing: copy.noCorrection)
                 .textSelection(.enabled)
         }
-        .padding(TC.Space.l)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .tcCard()
     }
 
     private var evidence: some View {
-        VStack(alignment: .leading, spacing: TC.Space.s) {
-            TCFieldLabel(copy.supportingEvidence)
-            Text(copy.observedInVersion)
-                .font(TC.Font_.footnote)
-                .foregroundStyle(TC.inkSecondary)
-            if detail.evidence.isEmpty {
-                Text(missingContentValue(copy.noEvidence))
-                    .font(TC.Font_.body)
-                    .foregroundStyle(TC.inkSecondary)
-            } else {
-                ForEach(detail.evidence) { item in
-                    VStack(alignment: .leading, spacing: TC.Space.xxs) {
-                        Text(copy.evidenceKindLabel(for: item.kind).uppercased())
-                            .font(TC.Font_.fieldLabel)
-                            .tracking(TC.Font_.Tracking.eyebrow)
-                            .foregroundStyle(TC.inkTertiary)
-                        Text(item.excerpt)
-                            .font(TC.Font_.footnote)
-                            .textSelection(.enabled)
+        GlassEyebrowCard(copy.supportingEvidence) {
+            VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
+                Text(copy.observedInVersion)
+                    .glassType(GlassTokens.TypeScale.caption)
+                    .foregroundStyle(GlassColor.textSecondary)
+                if detail.evidence.isEmpty {
+                    value(nil, missing: copy.noEvidence)
+                } else {
+                    ForEach(detail.evidence) { item in
+                        VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
+                            eyebrow(copy.evidenceKindLabel(for: item.kind))
+                            Text(item.excerpt)
+                                .glassType(GlassTokens.TypeScale.caption)
+                                .foregroundStyle(GlassColor.textPrimary)
+                                .textSelection(.enabled)
+                        }
+                        .padding(.vertical, GlassTokens.Space.s2)
                     }
-                    .padding(.vertical, TC.Space.xs)
                 }
             }
         }
-        .padding(TC.Space.l)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .tcCard()
     }
 
     private var contributionDetails: some View {
-        VStack(alignment: .leading, spacing: TC.Space.s) {
-            TCFieldLabel(copy.contributionDetails)
-            labelledValue(
-                copy.processingStatus,
-                copy.contributionStatusLabel(for: detail.contributionStatus ?? record.status)
-            )
-            VStack(alignment: .leading, spacing: TC.Space.xs) {
-                Text(copy.permittedUses)
-                    .font(TC.Font_.footnote)
-                    .foregroundStyle(TC.inkSecondary)
-                if let uses = detail.permittedUses, !uses.isEmpty {
-                    ForEach(uses, id: \.self) { use in
-                        HStack(alignment: .firstTextBaseline, spacing: TC.Space.xs) {
-                            Image(systemName: "checkmark.circle")
-                                .imageScale(.small)
-                                .accessibilityHidden(true)
-                            Text(copy.permittedUseLabel(for: use))
+        GlassEyebrowCard(copy.contributionDetails) {
+            VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
+                GlassKeyValueList([
+                    .init(copy.processingStatus,
+                          copy.historyStatusLabel(for: detail.contributionStatus ?? record.status)),
+                ])
+                VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
+                    Text(copy.permittedUses)
+                        .glassType(GlassTokens.TypeScale.caption)
+                        .foregroundStyle(GlassColor.textSecondary)
+                    if let uses = detail.permittedUses, !uses.isEmpty {
+                        ForEach(uses, id: \.self) { use in
+                            GlassStatusLabel(copy.permittedUseLabel(for: use), status: .on)
                         }
-                        .font(TC.Font_.footnote)
+                    } else if detail.permittedUses != nil {
+                        Text(copy.noPermittedUses)
+                            .glassType(GlassTokens.TypeScale.caption)
+                            .foregroundStyle(GlassColor.textSecondary)
+                    } else {
+                        Text(copy.permittedUsesUnavailable)
+                            .glassType(GlassTokens.TypeScale.caption)
+                            .foregroundStyle(GlassColor.textSecondary)
                     }
-                } else if detail.permittedUses != nil {
-                    Text(copy.noPermittedUses)
-                        .font(TC.Font_.footnote)
-                        .foregroundStyle(TC.inkSecondary)
-                } else {
-                    Text(copy.permittedUsesUnavailable)
-                        .font(TC.Font_.footnote)
-                        .foregroundStyle(TC.inkSecondary)
                 }
+                eyebrow(copy.contributedVersion)
+                GlassKeyValueList([
+                    .init(copy.envelopeVersion, detail.contributedVersion, mono: true),
+                    .init(copy.consentPolicyVersion, detail.consentPolicyVersion, mono: true),
+                    .init(copy.redactionVersion, detail.redactionPipelineVersion, mono: true),
+                ])
             }
-            Divider()
-            TCFieldLabel(copy.contributedVersion)
-            versionLine(copy.envelopeVersion, detail.contributedVersion)
-            versionLine(copy.consentPolicyVersion, detail.consentPolicyVersion)
-            versionLine(copy.redactionVersion, detail.redactionPipelineVersion)
-        }
-        .padding(TC.Space.l)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .tcCard()
-    }
-
-    private func labelledValue(_ label: String, _ value: String) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: TC.Space.s) {
-            Text(label)
-                .font(TC.Font_.footnote)
-                .foregroundStyle(TC.inkSecondary)
-                .frame(width: 112, alignment: .leading)
-            Text(value)
-                .font(TC.Font_.body.weight(.semibold))
         }
     }
 
-    private func versionLine(_ label: String, _ value: String) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: TC.Space.s) {
-            Text(label)
-                .font(TC.Font_.footnote)
-                .foregroundStyle(TC.inkSecondary)
-                .frame(width: 112, alignment: .leading)
-            Text(value)
-                .font(TC.Font_.ledger)
-                .textSelection(.enabled)
-        }
+    /// A value in body type, or the missing-value word in the secondary
+    /// colour.
+    private func value(_ text: String?, missing: String) -> some View {
+        Text(text ?? missingContentValue(missing))
+            .glassType(GlassTokens.TypeScale.body)
+            .foregroundStyle(text == nil ? GlassColor.textSecondary : GlassColor.textPrimary)
+    }
+
+    private func eyebrow(_ text: String) -> some View {
+        Text(text)
+            .glassType(GlassTokens.TypeScale.eyebrow)
+            .foregroundStyle(GlassColor.textTertiary)
     }
 
     private func missingContentValue(_ ordinaryFallback: String) -> String {
@@ -182,32 +139,30 @@ struct SessionWithdrawalAction: View {
 
     var body: some View {
         if isWithdrawable || model.withdrawals[record.submissionID] != nil {
-            VStack(alignment: .leading, spacing: TC.Space.s) {
-                TCFieldLabel(copy.nextAction)
-                if let result = model.withdrawals[record.submissionID] {
-                    WithdrawalOutcomeView(result: result)
-                    if shouldOfferRetry(result) {
-                        Button(copy.withdraw) { model.withdraw(record) }
-                            .buttonStyle(.bordered)
+            GlassEyebrowCard(copy.nextAction) {
+                VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
+                    if let result = model.withdrawals[record.submissionID] {
+                        WithdrawalOutcomeView(result: result)
+                        if shouldOfferRetry(result) {
+                            Button(copy.withdraw) { model.withdraw(record) }
+                                .buttonStyle(GlassButtonStyle(.glass))
+                                .frame(minHeight: 44)
+                        }
+                    } else if confirming {
+                        WithdrawalConfirmationView(
+                            status: currentStatus,
+                            keepLabel: copy.keepContribution,
+                            inFlight: model.withdrawing.contains(record.submissionID),
+                            onKeep: { confirming = false },
+                            onConfirm: { model.withdraw(record) }
+                        )
+                    } else {
+                        Button(copy.withdraw) { confirming = true }
+                            .buttonStyle(GlassButtonStyle(.glass))
                             .frame(minHeight: 44)
                     }
-                } else if confirming {
-                    WithdrawalConfirmationView(
-                        status: currentStatus,
-                        keepLabel: copy.keepContribution,
-                        inFlight: model.withdrawing.contains(record.submissionID),
-                        onKeep: { confirming = false },
-                        onConfirm: { model.withdraw(record) }
-                    )
-                } else {
-                    Button(copy.withdraw) { confirming = true }
-                        .buttonStyle(.bordered)
-                        .frame(minHeight: 44)
                 }
             }
-            .padding(TC.Space.l)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .tcCard()
         }
     }
 
@@ -227,25 +182,18 @@ struct WithdrawalOutcomeView: View {
     let result: AppModel.WithdrawalResult
 
     var body: some View {
-        let (text, tone): (String, TC.Tone) = {
+        let (text, status): (String, GlassStatus) = {
             switch result {
             case .withdrawn(let reach, let note):
-                return ([WithdrawalCopy.resultSentence(reach), note].compactMap { $0 }.joined(separator: "\n"), .refused)
+                return ([WithdrawalCopy.resultSentence(reach), note].compactMap { $0 }.joined(separator: "\n"), .off)
             case .noAccountSession:
-                return (WithdrawalCopy.accountSessionRequired, .attention)
+                return (WithdrawalCopy.accountSessionRequired, .ask)
             case .failed(let label):
-                return (WithdrawalCopy.failureSentence(label: label), .attention)
+                return (WithdrawalCopy.failureSentence(label: label), .ask)
             }
         }()
-        HStack(alignment: .firstTextBaseline, spacing: TC.Space.xs) {
-            Image(systemName: tone.symbol)
-                .imageScale(.small)
-                .accessibilityHidden(true)
-            Text(text).fixedSize(horizontal: false, vertical: true)
-        }
-        .font(TC.Font_.footnote)
-        .foregroundStyle(tone.textColor)
-        .frame(maxWidth: TC.Measure.prose, alignment: .leading)
+        GlassStatusLabel(text, status: status)
+            .fixedSize(horizontal: false, vertical: true)
     }
 }
 
@@ -262,51 +210,49 @@ struct WithdrawalConfirmationView: View {
         } else {
             // Not confirmable without the core's words; the way back stays.
             Button(keepLabel, action: onKeep)
+                .buttonStyle(GlassButtonStyle(.glass))
                 .keyboardShortcut(.cancelAction)
                 .frame(minHeight: 44)
-                .font(TC.Font_.footnote)
         }
     }
 
     private func confirmationBody(_ confirmation: WithdrawalCopy.Confirmation) -> some View {
-        VStack(alignment: .leading, spacing: TC.Space.s) {
-            if let question = confirmation.question {
-                Text(question).font(TC.Font_.cardTitle)
-            }
-            if let ambiguity = confirmation.ambiguity {
-                Text(ambiguity)
-                    .font(TC.Font_.footnote)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            ForEach(Array(confirmation.bodies.enumerated()), id: \.offset) { index, body in
-                let gravest = index == confirmation.gravest
-                HStack(alignment: .firstTextBaseline, spacing: TC.Space.xs) {
-                    Image(systemName: gravest ? "exclamationmark.triangle" : "info.circle")
-                        .imageScale(.small)
-                        .accessibilityHidden(true)
-                    Text(body).fixedSize(horizontal: false, vertical: true)
+        GlassWell {
+            VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
+                if let question = confirmation.question {
+                    Text(question)
+                        .glassType(GlassTokens.TypeScale.bodyStrong)
+                        .foregroundStyle(GlassColor.textPrimary)
                 }
-                .font(TC.Font_.footnote)
-                .foregroundStyle(gravest ? AnyShapeStyle(TC.coralText) : AnyShapeStyle(.primary))
+                if let ambiguity = confirmation.ambiguity {
+                    Text(ambiguity)
+                        .glassType(GlassTokens.TypeScale.caption)
+                        .foregroundStyle(GlassColor.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                ForEach(Array(confirmation.bodies.enumerated()), id: \.offset) { index, body in
+                    GlassStatusLabel(body, status: index == confirmation.gravest ? .outside : .off)
+                        .fontWeight(index == confirmation.gravest ? .semibold : nil)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                if let credit = confirmation.credit {
+                    Text(credit)
+                        .glassType(GlassTokens.TypeScale.caption)
+                        .foregroundStyle(GlassColor.textSecondary)
+                }
+                HStack(spacing: GlassTokens.Space.s4) {
+                    Button(keepLabel, action: onKeep)
+                        .buttonStyle(GlassButtonStyle(.glass))
+                        .keyboardShortcut(.cancelAction)
+                        .frame(minHeight: 44)
+                    Button(inFlight ? "Withdrawing..." : confirmation.confirmLabel, action: onConfirm)
+                        .buttonStyle(GlassButtonStyle(.primary))
+                        .frame(minHeight: 44)
+                        .disabled(inFlight)
+                }
             }
-            if let credit = confirmation.credit {
-                Text(credit)
-                    .font(TC.Font_.footnote)
-                    .foregroundStyle(.secondary)
-            }
-            HStack(spacing: TC.Space.s) {
-                Button(keepLabel, action: onKeep)
-                    .keyboardShortcut(.cancelAction)
-                    .frame(minHeight: 44)
-                Button(inFlight ? "Withdrawing..." : confirmation.confirmLabel, action: onConfirm)
-                    .tcPrimaryAction()
-                    .frame(minHeight: 44)
-                    .disabled(inFlight)
-            }
-            .font(TC.Font_.footnote)
+            .padding(GlassTokens.Space.s6)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .frame(maxWidth: TC.Measure.prose, alignment: .leading)
-        .padding(TC.Space.m)
-        .background(TC.surfaceInset, in: RoundedRectangle(cornerRadius: TC.Radius.inset))
     }
 }

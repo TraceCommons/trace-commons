@@ -1,23 +1,41 @@
 import SwiftUI
 
 /// A tint layer on a pane. Never blurred. `quiet` is the 12pt-radius tier.
+///
+/// `interactive` is a card that acts (it sits in a button): it lifts under
+/// the pointer (#1146 `.tc-card--interactive:hover`).
 public struct GlassCard<Content: View>: View {
     private let quiet: Bool
     private let flush: Bool
+    private let interactive: Bool
     private let content: Content
 
-    public init(quiet: Bool = false, flush: Bool = false, @ViewBuilder content: () -> Content) {
+    public init(quiet: Bool = false, flush: Bool = false, interactive: Bool = false, @ViewBuilder content: () -> Content) {
         self.quiet = quiet
         self.flush = flush
+        self.interactive = interactive
         self.content = content()
     }
 
+    /// The hover fill: `cardHover` on an interactive card, none otherwise.
+    static func hoverFill(interactive: Bool) -> GlassRGBA? {
+        interactive ? GlassTokens.Color.cardHover : nil
+    }
+
     public var body: some View {
-        content
+        let radius = quiet ? GlassTokens.Radius.cardQuiet : GlassTokens.Radius.card
+        let padded = content
             .padding(.vertical, flush ? 0 : (quiet ? 10 : GlassTokens.Space.cardPaddingVertical))
             .padding(.horizontal, flush ? 0 : (quiet ? 12 : GlassTokens.Space.cardPaddingHorizontal))
             .frame(maxWidth: .infinity, alignment: .leading)
-            .glassTier(quiet ? .cardQuiet : .card)
+        Group {
+            if let hover = Self.hoverFill(interactive: interactive) {
+                padded.glassHover(hover, in: RoundedRectangle(cornerRadius: radius, style: .continuous))
+            } else {
+                padded
+            }
+        }
+        .glassTier(quiet ? .cardQuiet : .card)
     }
 }
 
@@ -42,7 +60,7 @@ public struct GlassEyebrowCard<Accessory: View, Content: View>: View {
     }
 
     private var card: some View {
-        GlassCard {
+        GlassCard(interactive: action != nil) {
             VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
                 HStack {
                     Text(eyebrow).glassType(GlassTokens.TypeScale.eyebrow).foregroundStyle(GlassColor.textTertiary)
@@ -200,6 +218,28 @@ public struct GlassTableRow<Content: View>: View {
     }
 }
 
+/// The heading row over a flush card's `GlassTableRow`s (#1146
+/// `TableHead`): eyebrow type in tertiary text, on the rows' insets, read as
+/// a header. The caller lays out the columns to match its rows.
+public struct GlassTableHead<Content: View>: View {
+    private let content: Content
+
+    public init(@ViewBuilder content: () -> Content) {
+        self.content = content()
+    }
+
+    public var body: some View {
+        content
+            .glassType(GlassTokens.TypeScale.eyebrow)
+            .foregroundStyle(GlassColor.textTertiary)
+            .padding(.vertical, 8)
+            .padding(.horizontal, 12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .accessibilityElement(children: .combine)
+            .accessibilityAddTraits(.isHeader)
+    }
+}
+
 /// A Settings section heading: purple eyebrow and a rule to the right.
 public struct GlassSectionRule: View {
     private let title: String
@@ -235,9 +275,13 @@ public struct GlassNotice<Content: View>: View {
         self.content = content()
     }
 
+    static var titleGap: CGFloat { GlassTokens.Space.s3 }
+
     public var body: some View {
         GlassCard(quiet: true) {
-            VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
+            // Title to body: space-3 (#1146 `.tc-notice`); the title stays
+            // secondary text, its tone carried by the dot.
+            VStack(alignment: .leading, spacing: Self.titleGap) {
                 if let title {
                     GlassStatusLabel(title, status: tone).fontWeight(.semibold)
                 }

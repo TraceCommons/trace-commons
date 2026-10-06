@@ -37,6 +37,10 @@ path = "src/main.rs"
 name = "trace-commons-shell-probe"
 path = "src/bin/probe.rs"
 
+[[bin]]
+name = "near-ai"
+path = "src/bin/near-ai.rs"
+
 [dependencies]
 # The core is linked directly rather than through the C ABI: on Linux both
 # sides are Rust, so the FFI layer would buy nothing and cost a marshalling

@@ -14,9 +14,13 @@ import Foundation
 /// replacing it: K1 moves the remaining calls across, and Ron's screens
 /// are written against this one from the start.
 ///
-/// One `async throws` method per IPC method a screen needs. Methods marked
-/// PROVISIONAL are network methods that do not exist on main yet (Zaki's C3);
-/// the live client throws `DaemonDataError.notAvailableYet` for them.
+/// One `async throws` method per IPC method a screen needs. The network
+/// methods (C3, #1187) are routed. Two methods marked PROVISIONAL keep the
+/// earlier shapes the screens were written against, and the live client
+/// throws `DaemonDataError.notAvailableYet` for them; their real replies are
+/// `networkInferenceSummary()` and `networkMissionCatalogue(limit:before:)`.
+/// A method an older attached daemon does not have keeps the daemon's
+/// `unknown_method` refusal; no sample data substitutes for live data.
 public protocol DaemonDataClient: Sendable {
     // MARK: Status and the queue
 
@@ -93,8 +97,9 @@ public protocol DaemonDataClient: Sendable {
     /// of the rest -- `skipped[]` per entry, `excludedHeld` (held for a
     /// person's review) and `excludedIneligible` (cannot be contributed),
     /// neither of which is part of `skipped`. An id the daemon does not
-    /// know is refused with `project-id-unrecognized`.
-    func approveFolder(projectId: String) async throws -> ApproveResponse
+    /// know is refused with `project-id-unrecognized`. A `verdict` is the
+    /// opt-in "Submit all as" answer, sent as `outcome`; `nil` sends none.
+    func approveFolder(projectId: String, verdict: ContributorVerdict?) async throws -> ApproveResponse
     /// `cancel` for one entry: Undo inside the hold window (R7). Only an
     /// entry still `approved` can be cancelled, which the hold guarantees
     /// until it ends; any other is refused with `not-cancelable`. The entry
@@ -148,6 +153,13 @@ public protocol DaemonDataClient: Sendable {
 
     /// `get_settings`.
     func settings() async throws -> DaemonData.Settings
+    /// Z1.5, the Private AI switch: `get_settings`' `private_inference`,
+    /// its offer marker and the listener's state.
+    func privateAI() async throws -> DaemonData.PrivateAISwitch
+    /// Z1.5, `set_settings` with `private_inference` and the offer marker.
+    /// Answers what the daemon echoed; nothing is confirmed here, the caller
+    /// confirms with the core's rule (`TCPrivateInference.writeConfirmed`).
+    func setPrivateAI(on: Bool) async throws -> DaemonData.PrivateAISwitch
     /// `set_settings` with `scrub_check`.
     func setScrubCheck(_ mode: DaemonData.ScrubCheckMode) async throws -> DaemonData.Settings
     /// `set_settings` with `local_notifications`.
@@ -172,26 +184,52 @@ public protocol DaemonDataClient: Sendable {
     /// `inference_calls`. `limit` 1-200; `cursor` is the previous page's `nextCursor`.
     func inferenceCalls(limit: Int, cursor: String?) async throws -> DaemonData.InferenceCallPage
 
-    // MARK: PROVISIONAL network methods (Zaki's C3)
+    // MARK: Network methods (C3, #1187)
 
-    /// Z1.1, per-model summary. PROVISIONAL.
-    func inferenceSummary() async throws -> DaemonData.InferenceSummary
-    /// Z1.2, `inference_call_proof`. PROVISIONAL.
+    /// Z1.1, `inference_summary`: IronWire's upstream grouped summary;
+    /// registry-priced cost is not billed spend.
+    func networkInferenceSummary() async throws -> DaemonData.NetworkInferenceSummary
+    /// Z1.2, `inference_call_proof`.
     func inferenceCallProof(callId: Int64) async throws -> DaemonData.InferenceProofDetail
-    /// Z1.3, billed spend per model. PROVISIONAL.
+    /// Z1.3, billed spend by model for the entire NEAR AI organization, not this Mac.
     func modelSpend() async throws -> DaemonData.ModelSpend
-    /// Z1.5, the Private AI switch's state and disclosure. PROVISIONAL.
-    func privateAI() async throws -> DaemonData.PrivateAISwitch
-    /// Z1.5, turning Private AI on or off. PROVISIONAL.
-    func setPrivateAI(on: Bool) async throws -> DaemonData.PrivateAISwitch
-    /// Z2.2, the mission catalogue. PROVISIONAL.
-    func missionCatalogue() async throws -> DaemonData.MissionCatalogue
-    /// Z3.1, invite lookup. PROVISIONAL.
+    /// Z1.5, `private_ai`: the Private AI switch's state with the core's
+    /// disclosure.
+    func networkPrivateAI() async throws -> DaemonData.NetworkPrivateAISwitch
+    /// Z1.5, `set_private_ai`: turning Private AI on or off.
+    /// `consent` is built only from the `NetworkPrivateAISwitch` whose
+    /// disclosure the caller showed (`PrivateAIConsent(acknowledging:)`).
+    /// Enabling with `nil` is refused before anything is sent; the daemon
+    /// gets `confirmed: true` only when a consent is held. Turning off needs
+    /// none.
+    func setNetworkPrivateAI(on: Bool, consent: DaemonData.PrivateAIConsent?) async throws
+        -> DaemonData.NetworkPrivateAISwitch
+    /// Z2.2, one page of the mission catalogue (`MissionCatalogQuery`):
+    /// at most `limit` entries (the daemon's default when `nil`), older than
+    /// the mission id `before`. Pass a page's `catalogue.nextCursor` as
+    /// `before` for the next; `nil` there means the last page.
+    func networkMissionCatalogue(limit: Int?, before: String?) async throws -> DaemonData.NetworkMissionCatalogue
+    /// Z3.1, invite lookup. `code` carries the full invite URL.
     func lookupInvite(code: String) async throws -> DaemonData.InviteLookup
-    /// Z3.2, passkey binding state. PROVISIONAL.
+    /// Z3.2, passkey binding state.
     func passkeyState() async throws -> DaemonData.PasskeyState
-    /// Z3.4, `account_session_status`. PROVISIONAL.
+    /// Z3.4, `account_session_status`.
     func accountState() async throws -> DaemonData.AccountState
+    /// Read-only shared trace_activity policy; no matching/profile input leaves the Mac.
+    func activityMissionsCatalogue() async throws -> DaemonData.ActivityMissionsCatalogue
+    /// Authenticated server contribution facts; unavailable never becomes zero progress.
+    func activityMissionsStatus() async throws -> DaemonData.ActivityMissionsStatus
+
+    // MARK: PROVISIONAL shapes the screens still read
+
+    /// Z1.1, per-model summary. PROVISIONAL: the Inference screen's shape.
+    /// The live client throws `notAvailableYet`; the real reply is
+    /// `networkInferenceSummary()`.
+    func inferenceSummary() async throws -> DaemonData.InferenceSummary
+    /// Z2.2, the mission catalogue. PROVISIONAL: the Missions screen's
+    /// shape. The live client throws `notAvailableYet`; the real reply is
+    /// `networkMissionCatalogue(limit:before:)`.
+    func missionCatalogue() async throws -> DaemonData.MissionCatalogue
 
     // MARK: Live updates
 
@@ -209,6 +247,16 @@ extension DaemonDataClient {
     /// `approve` for one entry with no verdict.
     public func approve(entryId: String) async throws -> ApproveResponse {
         try await approve(entryId: entryId, verdict: nil, correction: nil)
+    }
+
+    /// `approveFolder` with no verdict.
+    public func approveFolder(projectId: String) async throws -> ApproveResponse {
+        try await approveFolder(projectId: projectId, verdict: nil)
+    }
+
+    /// The first page of the mission catalogue, at the daemon's default size.
+    public func networkMissionCatalogue() async throws -> DaemonData.NetworkMissionCatalogue {
+        try await networkMissionCatalogue(limit: nil, before: nil)
     }
 }
 
