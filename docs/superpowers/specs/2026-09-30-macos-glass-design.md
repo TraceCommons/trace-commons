@@ -26,7 +26,8 @@ including Withdraw in History; the full parity list is the R15 plan's
 Phase 4 Tasks 5-8.
 
 - Decided: purple brand (D3), the minimum OS and glass on every supported
-  macOS (D4), the Settings window (D8), the three-pane layout (D9), SF Pro
+  macOS (D4), Settings as a modal over the Monitor (D8, revised 2026-10-05),
+  the three-pane layout (D9), SF Pro
   and SF Mono, the token source and generator, Ron's custom-painted menus,
   popovers and toggles, eyebrow weight 600, the Reduce Transparency base
   `paneOpaque`, a permanent Watching/Paused readout with pause and resume on
@@ -169,8 +170,9 @@ missing.
   and the inspector each hidden independently. The leading-width formula,
   the map-hidden-below-1100pt rule and 10pt window padding are unchanged
   (#1182 review).
-- **Settings.** D8 confirmed: a macOS Settings window (⌘,), which may later be
-  restyled to the glass theme.
+- **Settings.** D8 confirmed a macOS Settings window (⌘,); **revised
+  2026-10-05** (Zaki): Settings is an opaque modal over the Monitor, as #1146
+  presents it. See Decisions item 4.
 - **Type scale.** Every step is a macOS text style (#1179). `micro` is added
   and `number` is 26 (largeTitle); both adopted. Eyebrow weight was open here;
   it is now decided as 600 (see the second revision).
@@ -253,7 +255,7 @@ precedence over the recording.
 | 01:15–01:44 | Hierarchical trace rows, a stationary chart footer, selected-project details and a separate approval/Undo card | Selection, scrolling and approval feedback have separate state; do not turn row selection into submission. |
 | 02:00 | Map and inspector hidden; the trace tree and chart span the main pane | Define the one-pane layout and preserve a way to reopen either pane. |
 | 02:05–02:15 | Chart date hover and range change (11 to 42 days); checked "Show ignored folders" menu item | Open with Ron: the chart footer and the view menu (see Open). If built, keep the view filter separate from watch and consent settings. |
-| 02:26–02:35 | Settings with a persistent section list and a scrolling detail area | Carry the navigation and grouped content into the native Settings window, not the recorded modal presentation. |
+| 02:26–02:35 | Settings with a persistent section list and a scrolling detail area | Adopt the recorded modal presentation (D8, revised 2026-10-05): an opaque modal over the Monitor with the persistent section list and one scrolling body. |
 | 02:46 | Return to the trace tree with the inspector and the wider chart range | Preserve presentation state when opening and closing Settings. |
 
 The brand and typeface questions the recording left open are settled by
@@ -315,8 +317,8 @@ Private AI behaviour changes.
 
 | Change | From `main`'s shipping window | To | Decision |
 |---|---|---|---|
-| Settings | a sidebar destination (⌘7) | a macOS Settings window (⌘,) | #1173 D8 |
-| Compute | a sidebar destination | a Settings section, keeping pause, resume and withdraw | this spec (#1146 has no screen for it); built in `MonitorSettingsWindow` |
+| Settings | a sidebar destination (⌘7) | an opaque modal over the Monitor, opened by ⌘, | #1173 D8, revised 2026-10-05 |
+| Compute | a sidebar destination | a Settings section, keeping pause, resume and withdraw | this spec (#1146 has no screen for it); built in `SettingsModal` |
 | Navigation | a two-column sidebar of seven destinations | three tabs (Home, Inference, Traces) in a three-pane window | #1173 D9 |
 | Launch tab | Insights, with discovery and enrollment deferred while it shows | Home, the `@SceneStorage` default (built, R5). Whether the Insights deferral survives is not in this table; see Open | Home: R5 |
 | Pane collapse | none | the map hides below 1100pt at runtime and returns when the window widens; the saved preference is kept. #1146 applies its 1100pt rule only once, at launch, so this is a native divergence | #1182 |
@@ -367,8 +369,19 @@ From #1173's table, Ron's 2026-10-02 comment on it, and Zaki's decisions of
      Materials by OS).
    - Every custom surface therefore has two renderings, both exercised (see
      Acceptance).
-4. **Settings: decided, a macOS Settings window (⌘,) (D8).** Ron may later
-   restyle it to the glass theme rather than the stock window look.
+4. **Settings: decided, an opaque modal over the Monitor (D8, revised
+   2026-10-05).** D8 first chose a separate macOS Settings window (⌘,); on
+   2026-10-05 Zaki asked that Settings "not be transparent but work like it
+   does in #1146". Settings is therefore an in-window modal over the
+   Monitor's three panes, as #1146 presents it: a scrim behind, an opaque pane
+   (the pane fill over `paneOpaque`), a header with the Watching/Paused chip,
+   a 180pt section list (`modalNavWidth`), and one scrolling body of every
+   section. There is no separate Settings window or `Settings` scene. ⌘,, the
+   menu bar's Settings item and every route into a section (for example a
+   refused quit to Compute) open the Monitor and request the modal at that
+   section (`MainWindowNavigation.requestSettings(at:)`). A section's own
+   modals and confirmations present over it through the window's
+   `.glassModalHost()`. Built as `SettingsModal`.
 5. **Token source: decided, typed JSON at `design-tokens/glass.tokens.json`**
    (#1173 R1, built in #1178). It generates every token as Swift for the
    macOS app, and since #1228 the brand and status roles for GTK and WinUI.
@@ -787,9 +800,10 @@ until it is added to the JSON.
   session and shows the inspector, where its review is
   (`MonitorWindowView.review`). Selecting a row alone only changes the
   selection.
-- **Settings.** A macOS Settings window (D8), `MonitorSettingsWindow`. Its
-  sections are the ones #1146's modal lists, plus Compute, which shows
-  `ComputeView` with pause, resume and withdraw (see Screens).
+- **Settings.** An opaque modal over the Monitor (D8, revised 2026-10-05),
+  `SettingsModal`. Its sections are the ones #1146's modal lists, plus
+  Compute, which shows `ComputeView` with pause, resume and withdraw (see
+  Screens).
 
 ### Notices
 
@@ -871,7 +885,7 @@ gaps").
   shield and hand-written routing copy remain excluded by Non-goals.
   #1146's binoculars focus and node-card hover and pin behaviour are open
   with Ron.
-- **Settings navigation.** Inside the native Settings window, retain the
+- **Settings navigation.** Inside the Settings modal, retain the
   section list and grouped, independently scrolling content: Connection,
   Startup, Notifications, Updates, Watching, How traces may be used, Public
   profile, Watched folders, Tools, Private AI, Redaction witness, Projects,
@@ -962,7 +976,7 @@ must supply it:
 |---|---|
 | Window, Pane | the Window and layout section (`GlassThreePane`, `GlassPane`) |
 | Popover, Menu | Ron's custom-painted `GlassPopover` and `GlassMenu` (with `GlassMenuItem`, `GlassMenuSeparator`), meeting the accessibility requirements above |
-| Modal, Sheet | `.sheet`; Settings is its own window; Submit all as is a sheet |
+| Modal, Sheet | `GlassModal` / `GlassConfirmation` hosted at the window root (`.glassModalHost()`); Settings is the opaque `SettingsModal` over the Monitor; Submit all as is a modal |
 | Scrim | the system sheet dimming |
 | Card (quiet, flush, interactive), Well | `GlassCard` using the tier tokens |
 | Notice | `GlassNotice`, with a tone; words from the core or `TCConsentCopy` only |
@@ -1050,7 +1064,7 @@ unreachable.
 | Insights, including comparison tasks (`ComparisonTasksView`) | a Home sub-view, or its existing view, as long as it stays reachable (including its delete actions) |
 | Skills (`SkillLearningView`) | per history record, in the History page's inspector for the selected row (plan D-7) |
 | Onboarding / first run | a single pane over the scene, with StepProgress (#1235 ports #1030's first run; #1120 the passkey screens) |
-| Settings | the Settings window (⌘,) |
+| Settings | the Settings modal over the Monitor (⌘,) |
 | Menu bar | the menu-bar popover |
 
 **Home's counts, and Kept versus Credit pending.** Home shows two counts:
@@ -1116,8 +1130,9 @@ and parts of 6 and 7 are merged (`ff7ffa99f`).
    Merged. Remaining: the accessibility requirements on the custom menus,
    popovers and toggles (see Components), pressed fill, arrow-key lists.
 5. **Window shell [R5].** Three panes, the toolbar, tabs, restoration, all
-   four pane compositions, independent scrolling, the notices and the
-   Settings window. Merged (debug-only). Remaining: the Watching/Paused
+   four pane compositions, independent scrolling, the notices and
+   Settings (since D8's 2026-10-05 revision, the modal over the Monitor).
+   Merged (debug-only). Remaining: the Watching/Paused
    readout with pause and resume, and the undo region outside the
    inspector.
 6. **Screens [R6–R12].** Move screens one at a time, keeping `main`'s
@@ -1280,7 +1295,7 @@ whole parity list: that is the R15 plan's Phase 4 Tasks 5-8
 - Adding `flowDash` (0.6s linear) to the JSON.
 - Removing the unused `mapWidth` token.
 - A separate tint for Gemini CLI, and artwork for Gemini CLI and Cline.
-- Restyling the Settings window to the glass theme (Ron, D8: "theming may
-  follow").
+- (Closed by D8's 2026-10-05 revision: Settings is the opaque glass modal
+  over the Monitor, so there is no separate window left to restyle.)
 - Where Insights lives long term. This spec only requires that it stays
   reachable.
