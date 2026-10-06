@@ -228,6 +228,43 @@ final class RulesScreenTests: XCTestCase {
         XCTAssertEqual(RulesScreenLayout.durationText(-5, copy: copy), "0 min")
     }
 
+    /// Spec rule 9 (design review of #1235, item 5): Rules offers only the
+    /// repos found in the sessions of a tool the person chose to watch, and
+    /// in a repo only those sessions. A repo whose tools the daemon has not
+    /// named is not known to be from a watched tool, so it is left out.
+    func test_rulesOffersOnlyReposOfWatchedTools() {
+        var state = FirstRunState(tier: .custom, step: .rules)
+        state.answer(.claudeCode, .watch(path: "/Users/someone/.claude"))
+        state.answer(.codex, .off)
+        let claude = ProjectRow(
+            projectId: "p1", projectLabel: "one", mode: .ask,
+            tools: [ProjectTool(source: "claude-code", sessionCount: 3)])
+        let codex = ProjectRow(
+            projectId: "p2", projectLabel: "two", mode: .ask, tools: [ProjectTool(source: "codex", sessionCount: 2)])
+        let both = ProjectRow(
+            projectId: "p3", projectLabel: "three", mode: .ask,
+            tools: [ProjectTool(source: "claude-code", sessionCount: 1), ProjectTool(source: "codex", sessionCount: 4)])
+        let unknown = ProjectRow(projectId: "p4", projectLabel: "four", mode: .ask)
+        XCTAssertEqual(
+            RulesScreenLayout.offered([claude, codex, both, unknown], state: state).map(\.projectId), ["p1", "p3"])
+        // A repo's count is its watched tools' sessions, not the codex ones.
+        XCTAssertEqual(RulesScreenLayout.watchedSessionCount(both, state: state), 1)
+
+        let mixed = [
+            session("c1"),
+            PastSession(
+                id: "x1", entryID: nil, state: .notQueued, selectable: true, startedAt: nil, durationSecs: nil,
+                title: nil, sizeBytes: 1, source: "codex"),
+        ]
+        XCTAssertEqual(RulesScreenLayout.offered(mixed, state: state).map(\.id), ["c1"])
+
+        // An exported-traces folder the person added is a watched tool too.
+        state.addedFolders = [AddedFolder(kind: .trajectory, path: "/tmp/exports")]
+        let exported = ProjectRow(
+            projectId: "p5", projectLabel: "five", mode: .ask, tools: [ProjectTool(source: "trajectory", sessionCount: 1)])
+        XCTAssertEqual(RulesScreenLayout.offered([exported], state: state).map(\.projectId), ["p5"])
+    }
+
     /// "{selected} of {total} selected" counts folders that are not Never.
     func test_theSummaryLeavesNeverFoldersOut() {
         let sessions = [session("a"), session("b"), session("c")]

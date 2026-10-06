@@ -30,6 +30,43 @@ enum RulesScreenLayout {
         session.selectable && session.state != .stillActive
     }
 
+    /// The tools the person chose to watch, by the daemon's source name
+    /// (`ProjectTool.source`, `PastSession.source`): each watched session
+    /// store, and the exported-traces folder when one is declared.
+    static func watchedSources(_ state: FirstRunState) -> Set<String> {
+        let roots = state.sessionRoots
+        var watched = Set(
+            SourceKind.allCases.filter {
+                if case .watch = roots[$0] { return true }
+                return false
+            }.map(\.rawValue))
+        if case .watch = roots.trajectory { watched.insert(trajectorySource) }
+        return watched
+    }
+
+    /// The daemon's source name for exported traces (`SOURCE_TRAJECTORY`).
+    static let trajectorySource = "trajectory"
+
+    /// Spec rule 9: only repos found in the sessions of a watched tool. A
+    /// repo whose tools the daemon has not named is not known to be one, so
+    /// it is left out rather than offered on a guess.
+    static func offered(_ projects: [ProjectRow], state: FirstRunState) -> [ProjectRow] {
+        let watched = watchedSources(state)
+        return projects.filter { project in project.tools.contains { watched.contains($0.source) } }
+    }
+
+    /// A repo's session count over its watched tools only.
+    static func watchedSessionCount(_ project: ProjectRow, state: FirstRunState) -> Int {
+        let watched = watchedSources(state)
+        return project.tools.filter { watched.contains($0.source) }.reduce(0) { $0 + $1.sessionCount }
+    }
+
+    /// A repo's past sessions from watched tools only.
+    static func offered(_ sessions: [PastSession], state: FirstRunState) -> [PastSession] {
+        let watched = watchedSources(state)
+        return sessions.filter { watched.contains($0.source) }
+    }
+
     /// The folder's rule as shown: the person's answer, else the daemon's
     /// mode. Only a change is written to the state, so an untouched rule is
     /// not sent again.
@@ -245,7 +282,6 @@ struct RulesScreen: View {
     /// as an empty list beside card 1's count.
     @State private var refused: Set<String> = []
     @State private var armingCandidate: ProjectRow?
-    @State private var totals: [String: Int] = [:]
     @State private var open: Set<String> = []
     @State private var showingAll: Set<String> = []
 
@@ -381,11 +417,11 @@ struct RulesScreen: View {
     }
 
     /// A folder's session count as card 1 and a Never folder show it: the
-    /// daemon's total for the folder, which can exceed the rows it lists.
-    /// The selection counts ("{selected} of {total}") are over listed rows,
-    /// what a person could tick.
+    /// sessions of its watched tools (`watchedSessionCount`), since Rules
+    /// offers no other. The selection counts ("{selected} of {total}") are
+    /// over listed rows, what a person could tick.
     private func sessionCount(_ project: ProjectRow) -> Int? {
-        totals[project.projectId] ?? project.sessionCount
+        RulesScreenLayout.watchedSessionCount(project, state: runner.state)
     }
 
     // MARK: Card 2: past sessions, by folder
@@ -550,10 +586,11 @@ struct RulesScreen: View {
     /// and lists nothing to tick.
     private func load() async {
         guard projects == nil else { return }
-        guard let loaded = await source.rulesProjects() else {
+        guard let all = await source.rulesProjects() else {
             loadFailed = true
             return
         }
+        let loaded = RulesScreenLayout.offered(all, state: runner.state)
         loadFailed = false
         if let first = loaded.first { open.insert(first.projectId) }
         projects = loaded
@@ -562,8 +599,7 @@ struct RulesScreen: View {
                 refused.insert(project.projectId)
                 continue
             }
-            sessions[project.projectId] = list.sessions
-            totals[project.projectId] = list.total
+            sessions[project.projectId] = RulesScreenLayout.offered(list.sessions, state: runner.state)
         }
     }
 }
