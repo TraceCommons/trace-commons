@@ -321,6 +321,30 @@ final class LiveDaemonClientTests: XCTestCase {
         XCTAssertEqual(transport.calls.first?.onQueue, true)
     }
 
+    /// The network methods (C3) wait on a server round trip, so each runs on
+    /// the client's work queue like every local call, never holding a Swift
+    /// concurrency thread for the trip.
+    func testNetworkCallsDoNotRunOnTheCallersThread() async throws {
+        let transport = ScriptedTransport.sample(.normalDay)
+        let client = LiveDaemonClient(transport: transport)
+        _ = try await client.networkInferenceSummary()
+        _ = try await client.inferenceCallProof(callId: 414)
+        _ = try await client.modelSpend()
+        let shown = try await client.networkPrivateAI()
+        _ = try await client.setNetworkPrivateAI(on: false, consent: DaemonData.PrivateAIConsent(acknowledging: shown))
+        _ = try await client.networkMissionCatalogue(limit: 1, before: nil)
+        _ = try await client.lookupInvite(code: "c")
+        _ = try await client.passkeyState()
+        _ = try await client.accountState()
+        _ = try await client.activityMissionsCatalogue()
+        XCTAssertEqual(transport.calls.map(\.method), [
+            "inference_summary", "inference_call_proof", "model_spend", "private_ai", "set_private_ai",
+            "mission_catalogue", "invite_lookup", "passkey_state", "account_session_status",
+            "activity_missions_catalogue",
+        ])
+        XCTAssertEqual(transport.calls.filter { !$0.onQueue }.map(\.method), [])
+    }
+
     // MARK: - Events
 
     func testAStreamOpensWithASnapshotBuiltFromStatusAndTheQueue() async throws {
@@ -453,12 +477,13 @@ private final class ScriptedTransport: DaemonTransport, @unchecked Sendable {
     }
 
     /// Answers from a sample set's daemon-shaped replies, wrapped in a
-    /// `tc_call` result frame. `dismiss` answers `ok: true`, as the daemon does.
+    /// `tc_call` result frame. `dismiss` answers `ok: true`, as the daemon does;
+    /// a write answers with what its read returns.
     static func sample(_ set: SampleDaemonClient.SampleSet) -> ScriptedTransport {
         ScriptedTransport { method, _ in
             if method == "dismiss" { return #"{"id":0,"result":{"ok":true}}"# }
-            let reply = method == "set_settings" ? SampleDaemonData.reply("get_settings", in: set)
-                : SampleDaemonData.reply(method, in: set)
+            let read = ["set_settings": "get_settings", "set_private_ai": "private_ai"][method] ?? method
+            let reply = SampleDaemonData.reply(read, in: set)
             return reply.map { #"{"id":0,"result":\#($0)}"# }
         }
     }
