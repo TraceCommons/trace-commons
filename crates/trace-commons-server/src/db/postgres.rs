@@ -161,6 +161,13 @@ pub struct PgBackend {
     invite_registry_pool: Option<Pool>,
 }
 
+/// Global internal lock state; these tables have guard-only forced RLS and
+/// deliberately carry no tenant-readable rows or ordinary login grants.
+pub const TRACE_COMMONS_INTERNAL_RLS_TABLES: &[&str] = &[
+    "trace_account_trust_dependency_locks",
+    "trace_account_trust_external_growth",
+];
+
 /// Tables whose tenant isolation `trace_corpus_rls_diagnostics` attests to.
 ///
 /// Public so RLS tests assert against this list rather than a hand-maintained
@@ -232,6 +239,7 @@ pub const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
     "trace_account_admission_submissions",
     "trace_account_trust_facts",
     "trace_account_trust_evaluations",
+    "trace_account_trust_frontiers",
     "trace_source_sessions",
     "trace_submission_sessions",
     "trace_account_inference_connections",
@@ -1726,6 +1734,11 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "versioned_pipeline_rebuild_fence",
         include_str!("../../../../migrations/V113__versioned_pipeline_rebuild_fence.sql"),
     ),
+    (
+        114,
+        "external_account_trust_evaluations",
+        include_str!("../../../../migrations/V114__external_account_trust_evaluations.sql"),
+    ),
 ];
 
 /// One account's active strong authenticators (unrevoked passkeys plus
@@ -1987,6 +2000,22 @@ impl Database for PgBackend {
     > {
         self.participant_reward_history(tenant, account, query)
             .await
+    }
+
+    async fn external_account_trust_runtime_ready(&self) -> Result<bool, DatabaseError> {
+        PgBackend::external_account_trust_runtime_ready(self).await
+    }
+
+    async fn enable_external_account_trust_growth(&self) -> Result<(), DatabaseError> {
+        PgBackend::enable_external_account_trust_growth(self).await
+    }
+
+    async fn prune_account_trust_dependency_locks(
+        &self,
+        limit: i32,
+        dry_run: bool,
+    ) -> Result<u64, DatabaseError> {
+        PgBackend::prune_account_trust_dependency_locks(self, limit, dry_run).await
     }
 
     async fn account_admission_runtime_ready(&self) -> Result<bool, DatabaseError> {
@@ -7879,6 +7908,7 @@ mod tests {
             include_str!("../../../../migrations/V79__inference_connection.sql"),
             include_str!("../../../../migrations/V81__legacy_invite_link.sql"),
             include_str!("../../../../migrations/V86__account_trust_evaluations.sql"),
+            include_str!("../../../../migrations/V114__external_account_trust_evaluations.sql"),
             include_str!("../../../../migrations/V91__legacy_invite_link_devices.sql"),
             include_str!("../../../../migrations/V97__account_bindings.sql"),
         ];
@@ -7924,6 +7954,7 @@ mod tests {
             include_str!("../../../../migrations/V79__inference_connection.sql"),
             include_str!("../../../../migrations/V81__legacy_invite_link.sql"),
             include_str!("../../../../migrations/V86__account_trust_evaluations.sql"),
+            include_str!("../../../../migrations/V114__external_account_trust_evaluations.sql"),
             include_str!("../../../../migrations/V91__legacy_invite_link_devices.sql"),
             include_str!("../../../../migrations/V97__account_bindings.sql"),
         ];

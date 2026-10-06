@@ -4,6 +4,7 @@
 //! identities.
 
 pub mod account_auth;
+pub mod account_contribution;
 pub(crate) mod antigravity;
 pub mod attach_copy;
 pub mod brand;

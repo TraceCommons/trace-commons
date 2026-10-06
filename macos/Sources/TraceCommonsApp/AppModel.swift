@@ -127,6 +127,39 @@ final class AppModel: ObservableObject {
         static let tickCeiling = 120
     }
 
+    @Published private(set) var contributionLine = PrivateInferenceCopy.decode(fromJSON: TCPrivateInference.copyJSON() ?? "")?.accountContributionRefresh ?? ""
+    @Published private(set) var contributionBusy = false
+    private var inviteAttempt: (code: String, key: String)?
+    func updateContributionAccount(inviteCode: String? = nil) async -> Bool {
+        guard let client, let scope = status.accountScope, !contributionBusy else { return false }
+        contributionBusy = true
+        contributionLine = privateInferenceCopy?.accountContributionChecking ?? ""
+        if let inviteCode, inviteAttempt?.code != inviteCode {
+            inviteAttempt = (inviteCode, UUID().uuidString)
+        }
+        let attempt = inviteAttempt
+        let outcome = await Task.detached(priority: .userInitiated) {
+            Result {
+                if let inviteCode, let attempt {
+                    return try client.redeemInvite(code: inviteCode, idempotencyKey: attempt.key, scope: scope)
+                }
+                return try client.contributionStatus(scope: scope)
+            }
+        }.value
+        contributionBusy = false
+        guard self.client === client, self.status.accountScope == scope, !Task.isCancelled else { return false }
+        switch outcome {
+        case .success(let account):
+            guard account.accountScope == scope else { return false }
+            contributionLine = account.line
+            if inviteCode != nil { inviteAttempt = nil }
+            return true
+        case .failure:
+            contributionLine = privateInferenceCopy?.accountContributionUnavailable ?? ""
+            return false
+        }
+    }
+
     @Published private(set) var startup: Startup = .starting
     @Published private(set) var isStartingDaemon = false
     private let daemonStartup: DaemonStartup
@@ -147,6 +180,10 @@ final class AppModel: ObservableObject {
     private var inviteAwaitingConfigDirectory: String?
     @Published private(set) var status: DaemonStatus = .unknown {
         didSet {
+            if status.accountScope != oldValue.accountScope {
+                contributionLine = privateInferenceCopy?.accountContributionRefresh ?? ""
+                inviteAttempt = nil
+            }
             // Worded across the ABI once per notice the daemon sends, not on
             // every re-render of the card.
             if status.legacyInviteMigration != oldValue.legacyInviteMigration {

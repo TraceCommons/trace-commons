@@ -360,6 +360,23 @@ pub trait Database: TraceCorpusStore + Send + Sync {
     ) -> Result<Option<uuid::Uuid>, DatabaseError> {
         Err(DatabaseError::Pool("near_provisioning_unconfigured".into()))
     }
+    async fn external_account_trust_runtime_ready(&self) -> Result<bool, DatabaseError> {
+        Ok(false)
+    }
+    async fn enable_external_account_trust_growth(&self) -> Result<(), DatabaseError> {
+        Err(DatabaseError::Pool(
+            "external_account_trust_unavailable".into(),
+        ))
+    }
+    async fn prune_account_trust_dependency_locks(
+        &self,
+        _limit: i32,
+        _dry_run: bool,
+    ) -> Result<u64, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "account_trust_retention_unavailable".into(),
+        ))
+    }
     async fn account_admission_runtime_ready(&self) -> Result<bool, DatabaseError> {
         Ok(false)
     }

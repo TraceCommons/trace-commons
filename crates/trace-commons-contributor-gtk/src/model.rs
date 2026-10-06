@@ -20,6 +20,8 @@ pub struct Status {
     #[serde(default)]
     pub tenant_id: Option<String>,
     #[serde(default)]
+    pub account_scope: Option<String>,
+    #[serde(default)]
     pub consent_scopes: Vec<String>,
     #[serde(default)]
     pub paused: bool,

@@ -379,10 +379,10 @@ public final class SampleDaemonClient: DaemonDataClient, @unchecked Sendable {
         try serve("inference_calls", as: DaemonData.InferenceCallPage.self)
     }
 
-    // MARK: PROVISIONAL network methods (Zaki's C3)
+    // MARK: Network methods (C3, #1187): hand-written samples
 
-    public func inferenceSummary() async throws -> DaemonData.InferenceSummary {
-        try serve("inference_summary", as: DaemonData.InferenceSummary.self)
+    public func networkInferenceSummary() async throws -> DaemonData.NetworkInferenceSummary {
+        try serve("inference_summary", as: DaemonData.NetworkInferenceSummary.self)
     }
 
     public func inferenceCallProof(callId: Int64) async throws -> DaemonData.InferenceProofDetail {
@@ -393,8 +393,36 @@ public final class SampleDaemonClient: DaemonDataClient, @unchecked Sendable {
         try serve("model_spend", as: DaemonData.ModelSpend.self)
     }
 
-    public func missionCatalogue() async throws -> DaemonData.MissionCatalogue {
-        try serve("mission_catalogue", as: DaemonData.MissionCatalogue.self)
+    public func networkPrivateAI() async throws -> DaemonData.NetworkPrivateAISwitch {
+        try serve("private_ai", as: DaemonData.NetworkPrivateAISwitch.self)
+    }
+
+    /// Answers the switch as asked -- off with no port, or running on the
+    /// sample port -- keeping the set's disclosure. Not remembered: a later
+    /// `networkPrivateAI()` still reads the set's own state.
+    public func setNetworkPrivateAI(on: Bool, consent: DaemonData.PrivateAIConsent?) async throws
+        -> DaemonData.NetworkPrivateAISwitch
+    {
+        guard set != .coreDown else { throw DaemonDataError.unreachable }
+        guard !on || consent != nil else {
+            throw DaemonDataError.daemon(code: "bad_params", message: "confirmation-required")
+        }
+        let shown = try serve("private_ai", as: DaemonData.NetworkPrivateAISwitch.self)
+        let answer: [String: Any] = [
+            "on": on, "state": on ? "running" : "off", "port": on ? 3128 : NSNull(), "disclosure": shown.disclosure,
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: answer) else {
+            throw DaemonDataError.undecodable(method: "set_private_ai")
+        }
+        return try decode(String(decoding: data, as: UTF8.self), method: "set_private_ai",
+                          as: DaemonData.NetworkPrivateAISwitch.self)
+    }
+
+    /// One fixed page: the sample has no second page to ask for.
+    public func networkMissionCatalogue(limit: Int?, before: String?) async throws
+        -> DaemonData.NetworkMissionCatalogue
+    {
+        try serve("mission_catalogue", as: DaemonData.NetworkMissionCatalogue.self)
     }
 
     public func lookupInvite(code: String) async throws -> DaemonData.InviteLookup {
@@ -407,6 +435,41 @@ public final class SampleDaemonClient: DaemonDataClient, @unchecked Sendable {
 
     public func accountState() async throws -> DaemonData.AccountState {
         try serve("account_session_status", as: DaemonData.AccountState.self)
+    }
+
+    public func activityMissionsCatalogue() async throws -> DaemonData.ActivityMissionsCatalogue {
+        guard set != .coreDown else { throw DaemonDataError.unreachable }
+        guard set != .unknownCounts else {
+            throw DaemonDataError.daemon(code: "unavailable", message: "activity-missions-unavailable")
+        }
+        return try serve("activity_missions_catalogue", as: DaemonData.ActivityMissionsCatalogue.self)
+    }
+
+    public func activityMissionsStatus() async throws -> DaemonData.ActivityMissionsStatus {
+        guard set != .coreDown else { throw DaemonDataError.unreachable }
+        // SAMPLE: no official configured policy or authoritative progress recording yet.
+        throw DaemonDataError.daemon(code: "unavailable", message: "activity-missions-unavailable")
+    }
+
+    // MARK: PROVISIONAL shapes the screens still read
+
+    /// The Inference screen's earlier shape, from `SampleDaemonData.provisional`;
+    /// the wire's `inference_summary` is `networkInferenceSummary()`.
+    public func inferenceSummary() async throws -> DaemonData.InferenceSummary {
+        try serveProvisional("inference_summary", as: DaemonData.InferenceSummary.self)
+    }
+
+    /// The Missions screen's earlier shape, from `SampleDaemonData.provisional`;
+    /// the wire's `mission_catalogue` is `networkMissionCatalogue(limit:before:)`.
+    public func missionCatalogue() async throws -> DaemonData.MissionCatalogue {
+        try serveProvisional("mission_catalogue", as: DaemonData.MissionCatalogue.self)
+    }
+
+    private func serveProvisional<T: Decodable>(_ method: String, as type: T.Type) throws -> T {
+        guard set != .coreDown, let json = SampleDaemonData.provisional(method, in: set) else {
+            throw DaemonDataError.unreachable
+        }
+        return try decode(json, method: method, as: T.self)
     }
 
     // MARK: Live updates
