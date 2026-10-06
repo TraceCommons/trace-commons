@@ -40,6 +40,12 @@ final class RecordingFirstRunDaemon: FirstRunDaemon {
 
     func enrollInvite(_ invite: String) async -> Bool { record(.enroll(invite)) }
     func signInNearAI() async -> Bool { record(.signInNearAI) }
+    var nearAIEnrolment: FirstRunNearAIEnrolment = .enrolled
+    func nearAILogin() async -> Bool { record(.nearAILogin) }
+    func enrollNearAI() async -> FirstRunNearAIEnrolment {
+        log.append(.enrollNearAI)
+        return nearAIEnrolment
+    }
     func saveConsentScopes(_ scopes: [String]) async -> Bool { record(.setConsentScopes(scopes)) }
 
     func setProjectMode(projectID: String, mode: ProjectMode) async -> Bool {
@@ -72,7 +78,8 @@ private func expectedFailure(for call: FirstRunCall) -> FirstRunFailure? {
     case .setSourceSettings: return .settingsFailed
     case .lookupInvite: return .inviteDead(label: "invite-invalid")
     case .enroll: return .enrollFailed
-    case .signInNearAI: return .signInFailed
+    case .signInNearAI, .nearAILogin: return .signInFailed
+    case .enrollNearAI: return .nearAIEnrollFailed(label: "near_ai_enroll_unavailable")
     case .setConsentScopes: return .scopesFailed
     case .setProjectMode, .includePastSessions: return .rulesFailed
     case .setPrivateAI: return .privateAIFailed
@@ -226,18 +233,47 @@ final class FirstRunRunnerTests: XCTestCase {
     /// (`account-enrollment-required`). Join does not allow the pair
     /// (`JoinScreenLayout.canToggleNearAI`); should it reach the runner anyway,
     /// the step stays and says so with the core's sign-in line.
+    /// near.ai without an invite: the near.ai sign-in, then the enrolment
+    /// through it. The enrolment the daemon holds is what lets Uses offer
+    /// Automatic and Start send scopes and the tenant's marker.
+    func test_nearAIWithoutAnInviteSignsInAndEnrolls() async throws {
+        var state = onFolders()
+        state.invite = ""
+        state.issuerHost = nil
+        state.account = .nearAI
+        let daemon = RecordingFirstRunDaemon()
+        let runner = FirstRunRunner(state: state, daemon: daemon)
+
+        await runner.commit(.leaveRoots)
+
+        XCTAssertEqual(
+            daemon.log, [.startDaemon(settingsJSON: state.sessionRoots.settingsJSON()!), .nearAILogin, .enrollNearAI])
+        XCTAssertNil(runner.failure)
+        XCTAssertTrue(runner.state.nearAIEnrolled)
+        XCTAssertTrue(runner.state.signedIn)
+        XCTAssertTrue(runner.state.holdsEnrolment)
+        XCTAssertEqual(FirstRunNavigation.sharingPaths(for: runner.state), [.automatic, .askMe])
+        XCTAssertNotEqual(runner.state.step, .folders)
+
+        // Going forward again neither signs in nor enrolls twice.
+        daemon.log = []
+        runner.state.step = .folders
+        await runner.commit(.leaveRoots)
+        XCTAssertEqual(daemon.log, [])
+    }
+
     func test_nearAIWithoutAnInviteReportsTheSignIn() async throws {
         var state = onFolders()
         state.invite = ""
         state.issuerHost = nil
         state.account = .nearAI
         let daemon = RecordingFirstRunDaemon()
-        daemon.failing = { $0 == .signInNearAI }
+        daemon.failing = { $0 == .nearAILogin }
         let runner = FirstRunRunner(state: state, daemon: daemon)
 
         await runner.commit(.leaveRoots)
 
-        XCTAssertEqual(daemon.log, [.startDaemon(settingsJSON: state.sessionRoots.settingsJSON()!), .signInNearAI])
+        XCTAssertEqual(daemon.log, [.startDaemon(settingsJSON: state.sessionRoots.settingsJSON()!), .nearAILogin])
         XCTAssertEqual(runner.failure, .signInFailed)
         XCTAssertEqual(runner.state.step, .folders)
         XCTAssertFalse(runner.state.signedIn)
@@ -245,6 +281,29 @@ final class FirstRunRunnerTests: XCTestCase {
         XCTAssertEqual(
             FoldersScreenLayout.notice(for: runner.failure, copy: copy, onboarding: TCOnboardingCopy.load()),
             copy.folders.signInFailed)
+    }
+
+    /// A refused enrolment says why in the core's own line for its label
+    /// (`TCNearAiEnroll`), never the label, and the step stays.
+    func test_aRefusedNearAIEnrolmentReadsTheCoresLine() async throws {
+        var state = onFolders()
+        state.invite = ""
+        state.issuerHost = nil
+        state.account = .nearAI
+        let daemon = RecordingFirstRunDaemon()
+        daemon.nearAIEnrolment = .refused(label: "near_ai_enroll_commons_unreachable")
+        let runner = FirstRunRunner(state: state, daemon: daemon)
+
+        await runner.commit(.leaveRoots)
+
+        XCTAssertEqual(runner.failure, .nearAIEnrollFailed(label: "near_ai_enroll_commons_unreachable"))
+        XCTAssertFalse(runner.state.nearAIEnrolled)
+        XCTAssertFalse(runner.state.holdsEnrolment)
+        XCTAssertEqual(runner.state.step, .folders)
+        let copy = try XCTUnwrap(FirstRunCopy.decode(try XCTUnwrap(TCCoreCopy.firstRunCopyJSON())))
+        let line = try XCTUnwrap(FoldersScreenLayout.notice(for: runner.failure, copy: copy, onboarding: nil))
+        XCTAssertEqual(line, TCNearAiEnroll.line(label: "near_ai_enroll_commons_unreachable"))
+        XCTAssertFalse(line.contains("near_ai_enroll"))
     }
 
     func test_aDeadInviteReturnsToJoinWithAnswersKept() async {

@@ -80,8 +80,8 @@ public struct AddedFolder: Codable, Equatable, Sendable {
 /// Every answer the person gives during the first run, and how far the
 /// daemon calls have got. Pure: nothing here calls anything.
 /// `FirstRunPlan` turns it into calls; the runner records their outcomes
-/// back into `daemonStarted`, `startedSettingsJSON`, `enrolledInvite` and
-/// `signedIn`. Those four are facts the daemon holds, so navigation never
+/// back into `daemonStarted`, `startedSettingsJSON`, `enrolledInvite`,
+/// `signedIn` and `nearAIEnrolled`. Those are facts the daemon holds, so navigation never
 /// clears them.
 public struct FirstRunState: Codable, Equatable, Sendable {
     public var tier: FirstRunTier
@@ -127,6 +127,9 @@ public struct FirstRunState: Codable, Equatable, Sendable {
     public var enrolledInvite: String?
     /// The near.ai sign-in completed; going forward again does not reopen it.
     public var signedIn: Bool
+    /// The daemon enrolled this Mac through the near.ai login, with no
+    /// invite (`near_ai_account_enroll`). A fact the daemon holds.
+    public var nearAIEnrolled: Bool
     /// The tools discovery last reported not on this Mac
     /// (`recordDiscovery`). Such a tool is not asked (spec rule 1); see
     /// `sessionRoots` for how it is declared.
@@ -151,6 +154,7 @@ public struct FirstRunState: Codable, Equatable, Sendable {
         startedSettingsJSON: String? = nil,
         enrolledInvite: String? = nil,
         signedIn: Bool = false,
+        nearAIEnrolled: Bool = false,
         notFound: Set<SourceKind> = []
     ) {
         self.tier = tier
@@ -171,6 +175,7 @@ public struct FirstRunState: Codable, Equatable, Sendable {
         self.startedSettingsJSON = startedSettingsJSON
         self.enrolledInvite = enrolledInvite
         self.signedIn = signedIn
+        self.nearAIEnrolled = nearAIEnrolled
         self.notFound = notFound
     }
 
@@ -184,12 +189,13 @@ public struct FirstRunState: Codable, Equatable, Sendable {
     /// Whether the daemon holds an enrolment for this first run, which is
     /// what consent scopes, the Automatic grant and the enrolment's marker
     /// need. An earlier first run's enrolment; a passkey Verify bound; or
-    /// near.ai once its invite enrolled. An account answer alone -- near.ai
-    /// chosen, a passkey chosen -- is not one.
+    /// near.ai once its invite enrolled, or once it enrolled this Mac with no
+    /// invite. An account answer alone -- near.ai chosen, a passkey chosen --
+    /// is not one.
     public var holdsEnrolment: Bool {
         switch account {
         case .enrolled, .passkey: return true
-        case .nearAI: return enrolledInvite != nil
+        case .nearAI: return enrolledInvite != nil || nearAIEnrolled
         case .none, .watchOnly, .passkeyChosen: return false
         }
     }

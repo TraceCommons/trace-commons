@@ -93,6 +93,13 @@ final class DaemonClient {
         try call("near_ai_account_enroll", params: ["ingest_url": commons], as: NearAiEnrollment.self)
     }
 
+    /// The same, naming no commons: the daemon enrolls against the native
+    /// account's commons (the first run's near.ai sign-in without an
+    /// invite).
+    func nearAiAccountEnroll() throws -> NearAiEnrollment {
+        try call("near_ai_account_enroll", as: NearAiEnrollment.self)
+    }
+
     func prepareAdmissionSession(entryID: String, backend: String) throws -> AdmissionPreparation {
         try call("prepare_admission_session", params: ["entry_id": entryID, "backend": backend, "confirmed": true], as: AdmissionPreparation.self)
     }

@@ -372,4 +372,18 @@ final class FirstRunPlanTests: XCTestCase {
             .setConsentScopes(["research"]), .grantAutomatic(witness: "witness-1"), .markComplete,
         ])
     }
+
+    /// The near.ai login the first run waits on: signed in once the daemon
+    /// keeps a session; still waiting while the browser sign-in runs; over,
+    /// unsigned, once the attempt ended any other way.
+    func test_theNearAILoginWaitsOnlyWhileTheBrowserSignInRuns() {
+        XCTAssertEqual(NearAILoginPoll.verdict(CredentialStatus(state: "x", sessionState: "present")), .signedIn)
+        XCTAssertEqual(
+            NearAILoginPoll.verdict(CredentialStatus(state: "x", attemptStatus: "waiting_for_browser")), .waiting)
+        XCTAssertEqual(NearAILoginPoll.verdict(CredentialStatus(state: "x", attemptStatus: nil)), .waiting)
+        for ended in ["cancelled", "failed", "complete", "something-new"] {
+            XCTAssertEqual(NearAILoginPoll.verdict(CredentialStatus(state: "x", attemptStatus: ended)), .ended, ended)
+        }
+        XCTAssertEqual(NearAILoginPoll.verdict(nil), .waiting)
+    }
 }

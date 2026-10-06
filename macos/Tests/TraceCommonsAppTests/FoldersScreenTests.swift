@@ -188,7 +188,7 @@ final class FoldersScreenTests: XCTestCase {
             let notice = FoldersScreenLayout.notice(for: failure, copy: firstRun, onboarding: onboarding)
             switch failure {
             case .startFailed, .settingsFailed, .inviteDead, .lookupUnavailable, .enrollFailed, .signInFailed,
-                .scopesFailed, .rulesFailed, .privateAIFailed, .grantRefused:
+                .nearAIEnrollFailed, .scopesFailed, .rulesFailed, .privateAIFailed, .grantRefused:
                 XCTAssertNotNil(notice, "\(failure)")
             // Leaving the roots never marks completion.
             case .completeFailed:

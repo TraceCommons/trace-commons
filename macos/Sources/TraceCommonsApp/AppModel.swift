@@ -3310,6 +3310,55 @@ extension AppModel: FirstRunDaemon {
         return session.signedIn == true
     }
 
+    /// The near.ai login for a first run without an invite: done at once if
+    /// the daemon keeps a session, else the browser sign-in, waited on
+    /// until it ends (`NearAILoginPoll`). Called directly rather than
+    /// through `startNearAiCredential`, whose failure writes the Settings
+    /// notice; the first run says its own (`folders.sign_in_failed`).
+    func nearAILogin() async -> Bool {
+        guard let client else { return false }
+        let first = await Task.detached { try? client.nearAiCredentialStatus(attemptID: nil) }.value
+        if NearAILoginPoll.verdict(first) == .signedIn { return true }
+        let started = await Task.detached { try? client.nearAiCredentialStart() }.value
+        guard let attempt = started, let url = URL(string: attempt.browserURL) else { return false }
+        NSWorkspace.shared.open(url)
+        let deadline = Date().addingTimeInterval(NearAILoginPoll.limit)
+        while Date() < deadline, !Task.isCancelled {
+            try? await Task.sleep(for: .seconds(1))
+            guard self.client === client else { return false }
+            let status = await Task.detached { try? client.nearAiCredentialStatus(attemptID: attempt.attemptID) }.value
+            switch NearAILoginPoll.verdict(status) {
+            case .signedIn:
+                refreshNearAiCredential()
+                return true
+            case .ended:
+                refreshNearAiCredential()
+                return false
+            case .waiting:
+                continue
+            }
+        }
+        return false
+    }
+
+    /// Enroll through the near.ai login with no invite. The daemon's label
+    /// is passed back for the core's line, never shown.
+    func enrollNearAI() async -> FirstRunNearAIEnrolment {
+        guard let client else { return .refused(label: "near_ai_enroll_unavailable") }
+        let outcome = await Task.detached(priority: .userInitiated) { () -> FirstRunNearAIEnrolment in
+            do {
+                return try client.nearAiAccountEnroll().enrolled
+                    ? .enrolled : .refused(label: "near_ai_enroll_unavailable")
+            } catch let failure as DaemonClient.Failure {
+                return .refused(label: failure.message.isEmpty ? "near_ai_enroll_unavailable" : failure.message)
+            } catch {
+                return .refused(label: "near_ai_enroll_unavailable")
+            }
+        }.value
+        if outcome == .enrolled { refreshStatus() }
+        return outcome
+    }
+
     func saveConsentScopes(_ scopes: [String]) async -> Bool {
         let outcome = await setConsentScopes(scopes)
         if case .succeeded = outcome { return true }

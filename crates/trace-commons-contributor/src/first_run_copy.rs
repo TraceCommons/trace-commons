@@ -27,9 +27,9 @@
 //!   folder declaration the running daemon refused.
 //! - Rules adds `past_sessions_watch_only`: watching only queues the picked
 //!   past sessions on this Mac, and the card says they wait there.
-//! - Join adds `near_ai_needs_invite` and `invite_or_passkey`: near.ai signs
-//!   in to the account an invite enrolls, and a new passkey creates an
-//!   account of its own, so the two are not combined.
+//! - Join adds `invite_or_passkey`: a new passkey creates an account of its
+//!   own, so it is not combined with an invite. near.ai needs no invite
+//!   (owner, Ron's review of #1235), so there is no line asking for one.
 //! - Uses adds Start's failures (`sharing_refused`, `scopes_failed`,
 //!   `rules_failed`, `private_ai_failed`, `complete_failed`), and the passkey
 //!   sheets add `refused`, so no daemon label is ever shown, and
@@ -129,9 +129,6 @@ pub struct JoinCopy {
     /// near.ai chosen but not yet signed in: the sign-in runs once the
     /// daemon starts, after Folders or Tools. Not Ron's words.
     pub near_ai_chosen: &'static str,
-    /// near.ai signs in to the account an invite enrolls, so it waits for
-    /// one. Not Ron's words.
-    pub near_ai_needs_invite: &'static str,
     /// A new passkey creates an account of its own, so it is not combined
     /// with an invite. Not Ron's words.
     pub invite_or_passkey: &'static str,
@@ -391,7 +388,6 @@ pub fn first_run_copy() -> FirstRunCopy {
             near_ai_text: "Use the login you already have. Credits land in that account.",
             near_ai_sign_in: "Sign in",
             near_ai_chosen: "You'll sign in once watching starts.",
-            near_ai_needs_invite: "Paste an invite above to sign in with near.ai.",
             invite_or_passkey: "An invite and a new passkey can't be combined. Use one or the other.",
             signed_in: "Signed in",
             no_sharing: "Connecting or creating an account doesn't authorize any data sharing.",
@@ -747,14 +743,16 @@ mod tests {
         assert!(copy.folders.settings_failed.contains("Continue"));
     }
 
-    /// near.ai signs in to the account an invite enrolls, and a new passkey
-    /// creates an account of its own, so Join says why each is held back.
+    /// A new passkey creates an account of its own, so Join says why it is
+    /// held back beside an invite. near.ai needs no invite, so nothing asks
+    /// for one.
     #[test]
-    fn join_says_why_an_account_choice_is_held_back() {
+    fn join_says_why_a_passkey_is_held_back_and_never_asks_for_an_invite() {
         let join = first_run_copy().join;
-        assert_ne!(join.near_ai_needs_invite, join.near_ai_text);
         assert_ne!(join.invite_or_passkey, join.passkey_text);
-        assert_ne!(join.near_ai_needs_invite, join.invite_or_passkey);
+        let json = serde_json::to_string(&first_run_copy()).unwrap();
+        assert!(!json.contains("near_ai_needs_invite"));
+        assert!(!json.contains("Paste an invite above"));
     }
 
     /// An existing passkey whose account is already bound elsewhere cannot

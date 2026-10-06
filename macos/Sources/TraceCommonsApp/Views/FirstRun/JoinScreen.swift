@@ -66,13 +66,13 @@ enum JoinScreenLayout {
         return toggled
     }
 
-    /// near.ai signs in to the account an invite enrolls: the daemon's
-    /// `account_sign_in` refuses without an enrolment
-    /// (`account-enrollment-required`), so it is chosen only with an invite
-    /// held, and `nearAILine` says so until then.
+    /// Signing in with near.ai needs no invite (owner, Ron's review of
+    /// #1235): with one it signs in to the account the invite enrolls;
+    /// without one it enrolls this Mac through the near.ai login
+    /// (`FirstRunPlan`, `near_ai_account_enroll`).
     static func canToggleNearAI(_ state: FirstRunState) -> Bool {
         switch state.account {
-        case .none, .watchOnly, .passkeyChosen: return holdsInvite(state)
+        case .none, .watchOnly, .passkeyChosen: return true
         case .nearAI: return !state.signedIn
         case .passkey, .enrolled: return false
         }
@@ -84,26 +84,15 @@ enum JoinScreenLayout {
     }
 
     /// Nothing while a passkey is held: near.ai cannot be chosen over it.
-    /// Without an invite, why near.ai waits for one.
     static func nearAILine(_ state: FirstRunState, copy: FirstRunCopy.Join) -> String? {
         if passkeyDone(state) || state.account == .enrolled { return nil }
         if nearAIChosen(state) { return copy.nearAiChosen }
-        if !state.signedIn, !holdsInvite(state) { return copy.nearAiNeedsInvite }
         return copy.nearAiText
     }
 
     /// An invite is held: pasted and found, or already enrolled.
     static func holdsInvite(_ state: FirstRunState) -> Bool {
         !state.invite.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || state.enrolledInvite != nil
-    }
-
-    /// near.ai waits for an invite, so one chosen and not yet signed in goes
-    /// when the invite does.
-    private static func releasingNearAI(_ state: FirstRunState) -> FirstRunState {
-        guard nearAIChosen(state), !holdsInvite(state) else { return state }
-        var released = state
-        released.account = .none
-        return released
     }
 
     static func nearAIAction(_ state: FirstRunState, copy: FirstRunCopy) -> String {
@@ -131,8 +120,8 @@ enum JoinScreenLayout {
     ///
     /// Looking an invite up asks to join, so it takes back watch only, and a
     /// passkey only chosen: a new passkey is an account of its own, never
-    /// combined with an invite. Withdrawing the invite takes back a near.ai
-    /// not yet signed in, which needs one (`canToggleNearAI`).
+    /// combined with an invite. Withdrawing the invite keeps near.ai, which
+    /// needs none.
     static func lookUp(
         _ draft: String, in state: FirstRunState, failure: FirstRunFailure?, host: (String) -> String?
     ) -> (state: FirstRunState, outcome: JoinLookUpOutcome, failure: FirstRunFailure?) {
@@ -145,13 +134,13 @@ enum JoinScreenLayout {
         if invite.isEmpty {
             looked.invite = ""
             looked.issuerHost = nil
-            return (releasingNearAI(looked), .withdrawn, deadCleared)
+            return (looked, .withdrawn, deadCleared)
         }
         guard let issuerHost = host(invite) else {
             if case .inviteDead = failure { return (looked, .refused, failure) }
             looked.invite = ""
             looked.issuerHost = nil
-            return (releasingNearAI(looked), .refused, failure)
+            return (looked, .refused, failure)
         }
         looked.invite = invite
         looked.issuerHost = issuerHost

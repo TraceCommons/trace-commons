@@ -57,8 +57,6 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
         public let nearAiSignIn: String
         /// near.ai chosen, signed in once the daemon starts.
         public let nearAiChosen: String
-        /// near.ai waits for an invite to sign in to.
-        public let nearAiNeedsInvite: String
         /// An invite and a new passkey are not combined.
         public let inviteOrPasskey: String
         public let signedIn: String

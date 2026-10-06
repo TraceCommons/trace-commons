@@ -19,6 +19,13 @@ enum FirstRunGrantAnswer: Equatable {
     case refused(label: String)
 }
 
+/// What `near_ai_account_enroll` answered.
+enum FirstRunNearAIEnrolment: Equatable {
+    case enrolled
+    /// The daemon's own label, which `TCNearAiEnroll.line(label:)` words.
+    case refused(label: String)
+}
+
 /// The daemon calls a first run makes, one per `FirstRunCall`. Each answers
 /// whether the daemon confirmed it; nothing here carries a sentence.
 /// `AppModel` is the live one; tests record.
@@ -29,6 +36,11 @@ protocol FirstRunDaemon: AnyObject {
     func lookupInvite(_ invite: String) async -> FirstRunLookup
     func enrollInvite(_ invite: String) async -> Bool
     func signInNearAI() async -> Bool
+    /// The near.ai login: true once the daemon keeps a near.ai session,
+    /// after the browser sign-in when it kept none.
+    func nearAILogin() async -> Bool
+    /// Enroll this Mac through that login, with no invite.
+    func enrollNearAI() async -> FirstRunNearAIEnrolment
     func saveConsentScopes(_ scopes: [String]) async -> Bool
     func setProjectMode(projectID: String, mode: ProjectMode) async -> Bool
     func includePastSessions(projectID: String, sessionIDs: [String]) async -> Bool
@@ -65,6 +77,9 @@ enum FirstRunFailure: Equatable {
     case lookupUnavailable
     case enrollFailed
     case signInFailed
+    /// The near.ai enrolment without an invite was refused; the daemon's
+    /// label, for the core's line (`TCNearAiEnroll`).
+    case nearAIEnrollFailed(label: String)
     case scopesFailed
     /// A folder rule or a past-session include was not saved.
     case rulesFailed
@@ -184,6 +199,16 @@ final class FirstRunRunner: ObservableObject {
         case .signInNearAI:
             guard await daemon.signInNearAI() else { return fail(.signInFailed) }
             state.signedIn = true
+        case .nearAILogin:
+            guard await daemon.nearAILogin() else { return fail(.signInFailed) }
+        case .enrollNearAI:
+            switch await daemon.enrollNearAI() {
+            case .enrolled:
+                state.nearAIEnrolled = true
+                state.signedIn = true
+            case .refused(let label):
+                return fail(.nearAIEnrollFailed(label: label))
+            }
         case .openPasskeySheets:
             // The person's ceremony, not awaited: the commit moves on and
             // the sheets record their outcome when they end.
