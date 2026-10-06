@@ -12,6 +12,58 @@ import TCShellCore
 /// back before touching any published property.
 @MainActor
 final class AppModel: ObservableObject {
+    @Published var managedSnapshot: ManagedSnapshot? {
+        didSet { if let copy = managedSnapshot?.copy { managedCopy = copy } }
+    }
+    @Published var managedBusy = false
+    /// The copy key of the last failed managed action (`ManagedSurface.errorKey`),
+    /// never the daemon's code.
+    @Published var managedErrorKey: String?
+    /// The last copy table the daemon sent, kept when a later read fails so
+    /// the connecting and failure states still have their words.
+    private var managedCopy: [String: String] = [:]
+
+    func managedText(_ key: String) -> String { managedCopy[key] ?? "" }
+
+    func refreshManagedSessions() {
+        perform("managed_snapshot", work: { try $0.managedSnapshot() }) { snapshot in
+            if snapshot.revision >= (self.managedSnapshot?.revision ?? 0), self.managedSnapshot != snapshot { self.managedSnapshot = snapshot }
+        }
+    }
+
+    func managedAction(_ method: String, params: [String: Any], openTerminal: Bool = false, newAccountKey: String? = nil) {
+        guard let client, !managedBusy else { return }
+        managedBusy = true
+        managedErrorKey = nil
+        Task.detached(priority: .userInitiated) {
+            let result = Result {
+                var response = try client.managedAction(method, params: params)
+                if method == "managed_account_add", let accountID = response["id"] as? String {
+                    if let key = newAccountKey {
+                        response = try client.managedAction("managed_account_set_key", params: ["account_id": accountID, "key": key])
+                    } else {
+                        response = try client.managedAction("managed_account_reconnect", params: ["account_id": accountID])
+                    }
+                }
+                if openTerminal {
+                    guard let session = response["session_id"] as? String,
+                          let ticket = response["ticket"] as? String else {
+                        throw DaemonClient.Failure(code: "launch-unknown", message: "managed-launch-unknown")
+                    }
+                    _ = try client.managedAction("managed_terminal_launch", params: ["session_id": session, "ticket": ticket])
+                }
+            }
+            await MainActor.run {
+                self.managedBusy = false
+                if case .failure(let error) = result {
+                    let failure = error as? DaemonClient.Failure
+                    self.managedErrorKey = ManagedSurface.errorKey(code: failure?.code, message: failure?.message)
+                }
+                self.refreshManagedSessions()
+            }
+        }
+    }
+
     enum Startup: Equatable {
         case starting
         /// The daemon is running in-process.
@@ -1087,6 +1139,20 @@ final class AppModel: ObservableObject {
                 self.startup = .running
                 self.subscribe()
                 self.refreshAll()
+                #if DEBUG
+                // K2 (#1173): console-only, so a developer can confirm the
+                // dry run took before trusting the screens. Asked of the
+                // daemon, not read from the environment, so it matches the
+                // daemon's own mode. A label, not a sentence
+                // (`ShellWordingTests`).
+                if let client = self.client {
+                    Task.detached {
+                        if client.devDryRunActive() {
+                            NSLog("TraceCommons: status.dev_dry_run=true")
+                        }
+                    }
+                }
+                #endif
             case .failure(TCDaemon.TCError.rootsNotDeclared):
                 self.startup = .needsRoots
             case .failure(let error):
@@ -1175,10 +1241,11 @@ final class AppModel: ObservableObject {
                 creditPending: credit
             )
         case .resyncRequired, .lagged:
+            refreshManagedSessions()
             refreshQueue()
             refreshStatus()
-        case .unknown:
-            break
+        case .unknown(let name):
+            if name == "managed_changed" { refreshManagedSessions() }
         }
     }
 
@@ -1255,6 +1322,7 @@ final class AppModel: ObservableObject {
     // MARK: - Refresh
 
     func refreshAll() {
+        refreshManagedSessions()
         refreshStatus()
         refreshQueue()
         refreshHistory()

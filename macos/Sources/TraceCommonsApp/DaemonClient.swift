@@ -68,6 +68,14 @@ final class DaemonClient {
         self.daemon = daemon
     }
 
+    func managedSnapshot() throws -> ManagedSnapshot {
+        try call("managed_snapshot", as: ManagedSnapshot.self)
+    }
+
+    func managedAction(_ method: String, params: [String: Any]) throws -> [String: Any] {
+        try resultObject(method, params: params)
+    }
+
     // MARK: - Read
 
     func nativeWalletFlow(action: String, flowID: String, commons: String, account: String) throws -> NativeWalletView {
@@ -940,6 +948,15 @@ final class DaemonClient {
     func openPreview(entryID: String) throws -> TCPreview {
         try daemon.openPreview(entryID: entryID)
     }
+
+    #if DEBUG
+    /// K2 (#1173): whether this daemon is running a developer dry run, as
+    /// its own `status` reports it. False when the call fails.
+    func devDryRunActive() -> Bool {
+        guard let data = try? rawResult("status") else { return false }
+        return DaemonDataWiring.devDryRun(fromStatus: data)
+    }
+    #endif
 
     // MARK: - Plumbing
 

@@ -1,24 +1,24 @@
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
-use anyhow::Result;
-use clap::{Args, Subcommand, ValueEnum};
-use trace_commons_contributor::insights::comparison_specs::{
+use crate::insights::comparison_specs::{
     ComparisonSpecificationDraftInput, ComparisonSpecificationV1, DescriptiveComparisonResultV1,
     ExactCandidateDecision, ExactCandidateEvaluation, ExactComparisonStratumV1,
 };
-use trace_commons_contributor::insights::comparison_tasks::{
+use crate::insights::comparison_tasks::{
     CheckoutProvenance, ComparisonConfigurationV1, ComparisonTaskContextInput, ContextDigest,
     ContextString,
 };
-use trace_commons_contributor::insights::service::{
+use crate::insights::service::{
     LocalInsightsOperation, LocalInsightsRequest, LocalInsightsResponse, execute,
 };
-use trace_commons_contributor::insights::usage::UsageSource;
-use trace_commons_contributor::insights::{
+use crate::insights::usage::UsageSource;
+use crate::insights::{
     LocalInsight, LocalInsightStore, MutationEffects, QuarantineReport, SourceFormat, TaskCategory,
     TaskOutcome, service::open_store,
 };
+use anyhow::Result;
+use clap::{Args, Subcommand, ValueEnum};
 use trace_commons_protocol::insights::MetricId;
 use trace_commons_protocol::insights_cards::InsightQuestionId;
 
@@ -574,9 +574,7 @@ pub(super) fn run(args: &InsightsArgs, json: bool) -> Result<()> {
             }
         }
         InsightsCommand::Summary => {
-            let summary = trace_commons_contributor::insights::summary::read_saved(
-                args.store_dir.as_deref(),
-            )?;
+            let summary = crate::insights::summary::read_saved(args.store_dir.as_deref())?;
             if !json {
                 println!(
                     "All currently saved, explicitly selected session snapshots; not verified completed tasks."
@@ -740,7 +738,7 @@ fn render_comparison_operation(
         println!("{}", serde_json::to_string_pretty(&response)?);
         return Ok(());
     }
-    let copy = trace_commons_contributor::insights::service::ui_copy();
+    let copy = crate::insights::service::ui_copy();
     match response {
         LocalInsightsResponse::ComparisonPreviewSpec {
             specification,
@@ -870,7 +868,7 @@ fn render_comparison_result(
 
 fn exact_estimation_text(
     result: &DescriptiveComparisonResultV1,
-    estimation: &trace_commons_contributor::insights::comparison_specs::QualifiedExactEstimationV1,
+    estimation: &crate::insights::comparison_specs::QualifiedExactEstimationV1,
     copy: &std::collections::BTreeMap<String, String>,
 ) -> Result<String> {
     let mut rendered = String::new();
@@ -976,7 +974,7 @@ fn render_comparison_task_operation(
         println!("{}", serde_json::to_string_pretty(&response)?);
         return Ok(());
     }
-    let copy = trace_commons_contributor::insights::service::ui_copy();
+    let copy = crate::insights::service::ui_copy();
     match response {
         LocalInsightsResponse::ComparisonTaskList { tasks } => {
             if tasks.is_empty() {
@@ -1006,10 +1004,8 @@ fn render_comparison_task_operation(
 }
 
 fn render_comparison_task(
-    task: &trace_commons_contributor::insights::comparison_tasks::LocalComparisonTaskV1,
-    reasons: Option<
-        &[trace_commons_contributor::insights::comparison_tasks::ComparisonTaskStaleReason],
-    >,
+    task: &crate::insights::comparison_tasks::LocalComparisonTaskV1,
+    reasons: Option<&[crate::insights::comparison_tasks::ComparisonTaskStaleReason]>,
     copy: &std::collections::BTreeMap<String, String>,
 ) -> Result<()> {
     println!("{} — {}", copy["comparison_task_title"], task.id);
@@ -1096,7 +1092,7 @@ fn render_quarantine(quarantined: &QuarantineReport, json: bool) {
 
 fn render_mutation_effects(effects: &MutationEffects) {
     if !effects.invalidated_episode_ids.is_empty() {
-        let copy = trace_commons_contributor::insights::service::ui_copy();
+        let copy = crate::insights::service::ui_copy();
         println!("{}", copy["episode_invalidated_notice"]);
         for id in &effects.invalidated_episode_ids {
             println!("  {id}");
@@ -1127,7 +1123,7 @@ fn render_episode_operation(
         println!("{}", serde_json::to_string_pretty(&response)?);
         return Ok(());
     }
-    let copy = trace_commons_contributor::insights::service::ui_copy();
+    let copy = crate::insights::service::ui_copy();
     println!("{}", copy["episode_scope"]);
     println!("{}", copy["episode_assessment_notice"]);
     println!("{}", copy["episode_overlap_notice"]);
@@ -1194,7 +1190,7 @@ fn render_overlap(ids: &[String], copy: &std::collections::BTreeMap<String, Stri
 }
 
 fn render_episode(
-    episode: &trace_commons_contributor::insights::episodes::LocalEpisode,
+    episode: &crate::insights::episodes::LocalEpisode,
     copy: &std::collections::BTreeMap<String, String>,
 ) -> Result<()> {
     println!("\n{} — {}", copy["episode_title"], episode.id);
@@ -1336,13 +1332,13 @@ mod tests {
     #[test]
     fn qualified_exact_result_renders_conditional_orientation_and_statuses() {
         let response: LocalInsightsResponse = serde_json::from_slice(include_bytes!(
-            "../../../fixtures/insights/comparison-estimator/schema2-qualified/preview-response.json"
+            "../../fixtures/insights/comparison-estimator/schema2-qualified/preview-response.json"
         ))
         .unwrap();
         let LocalInsightsResponse::ComparisonPreviewSpec { result, .. } = response else {
             panic!("fixture must be a comparison preview")
         };
-        let copy = trace_commons_contributor::insights::service::ui_copy();
+        let copy = crate::insights::service::ui_copy();
         let text = exact_estimation_text(&result, result.exact_estimation.as_ref().unwrap(), &copy)
             .unwrap();
         assert!(text.contains("model-b minus model-a"));

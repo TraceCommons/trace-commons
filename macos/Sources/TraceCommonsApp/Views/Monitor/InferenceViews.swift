@@ -45,6 +45,13 @@ struct InferenceTabView: View {
     private var ledger: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
+                // Saved model accounts and managed sessions lead the tab
+                // (#1146's private-AI page): accounts, then sessions, then
+                // their error notice.
+                ManagedSessionsSection()
+                // The standard tool settings below are global; managed
+                // launches never edit them.
+                ManagedGlobalSettingsHeader()
                 // Sign-in with balance and funding, the tools with their
                 // connect action, and the Private AI switch, in the main pane
                 // above the ledger as #1146's Private AI page has them (owner
