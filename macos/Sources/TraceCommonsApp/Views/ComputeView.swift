@@ -26,7 +26,8 @@ enum ComputeAllowance {
     }
 }
 
-/// The same content renders in a native scroll view and in CPU screenshot QA.
+/// The same content renders in the Settings window's scroll view and in CPU
+/// screenshot QA (`ComputeNavigationTests`, through `ImageRenderer`).
 /// Every sentence is the core's (`ComputeCopy`); this file authors none.
 struct ComputeContent: View {
     let model: ComputeModel
