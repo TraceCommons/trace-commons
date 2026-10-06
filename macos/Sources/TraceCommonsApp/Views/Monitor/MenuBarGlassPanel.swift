@@ -200,17 +200,27 @@ struct MenuBarGlassPanel: View {
                             choice.label,
                             sub: sub,
                             fill: .solid(Self.modeFill(choice.mode)),
-                            checked: MenuPanelData.rollup(choice.mode) == rollup) {
+                            checked: MenuPanelData.listChecks(choice.mode, status: store.status)) {
                                 store.choose(choice.mode)
                             }
                             .accessibilityLabel(choice.label)
                             .accessibilityHint(sub)
                     }
-                    if store.status?.contributionOverride != nil {
-                        Button(copy.clear) { Task { await store.clearOverride() } }
-                            .buttonStyle(GlassButtonStyle(.link, small: true))
-                            .accessibilityLabel(copy.clear)
-                    }
+                    // Mixed: no override, so each folder keeps its own
+                    // setting. Choosing it clears an override in force.
+                    GlassOptionRow(
+                        copy.mixed,
+                        sub: copy.clear,
+                        fill: .mixed,
+                        checked: MenuPanelData.listChecks(nil, status: store.status)) {
+                            if store.status?.contributionOverride != nil {
+                                Task { await store.clearOverride() }
+                            } else {
+                                sub = nil
+                            }
+                        }
+                        .accessibilityLabel(copy.mixed)
+                        .accessibilityHint(copy.clear)
                 }
                 .disabled(!store.canChooseOverride)
                 if let refusal = store.overrideRefusal {
