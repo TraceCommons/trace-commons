@@ -480,16 +480,24 @@ final class TracesParityTests: XCTestCase {
         XCTAssertFalse(offers[privateAI.lowerBound..<arming.lowerBound].contains("GlassButtonStyle(.primary"))
     }
 
-    /// The folder row offers Submit all and Submit all as only when the
-    /// shared table offers Contribute, with the daemon's counts, and says
-    /// what it withheld.
+    /// The folder row offers Submit all only when the shared table offers
+    /// Contribute, with the daemon's counts, and says what it withheld.
+    /// Submit all as is the Folder inspector's modal (Task 5 of the #1146
+    /// port), in the core's outcome words, with Submit all beside it.
     func test_theFolderRowSubmitsAllAsTheQueueDid() throws {
         let tree = try Self.text("Views/Monitor/TracesViews.swift")
-        for needle in ["store.groupOffer(", "offer.offersContribute", "QueueFolderWords.submitAll(offer.count)",
-                       "QueueFolderWords.submitAllHelp(", "store.contributeFolder(", "VerdictCopy.submitAllAs",
-                       "ContributorVerdict.allCases", "offer.withheldLine", "submitTitle: submits ?", "onSubmit: submits ?",
-                       "onMenu: submits ?", "menuLabel: submits ?", "store.mayContributeFolder(folder)"] {
+        for needle in ["store.groupOffer(", "offer.offersContribute", "Self.submitTitle(offer.count, words: $0)",
+                       "Self.submitHelp(offer.withheldLine, words: words)", "store.contributeFolder(folder, verdict: nil)",
+                       "offer.withheldLine", "submitTitle: submits ?", "onSubmit: submits && !busy ?",
+                       "store.mayContributeFolder(folder)", "words.tree.submitCount", "words?.tree.submitTip"] {
             XCTAssertTrue(tree.contains(needle), "TracesViews.swift lacks \(needle)")
+        }
+        let inspector = try Self.text("Views/Monitor/ToolFolderInspectors.swift")
+        for needle in ["store.groupOffer(folder)", "store.mayContributeFolder(folder)", "outcome.submitAllAs",
+                       "outcome.submitAllAsTooltip", "store.contributeFolder(folder, verdict: verdict)",
+                       "store.contributeFolder(folder, verdict: nil)", "offer.withheldLine",
+                       "TracesTreeView.submitTitle(offer.count, words: words)"] {
+            XCTAssertTrue(inspector.contains(needle), "ToolFolderInspectors.swift lacks \(needle)")
         }
         let store = try Self.text("Views/Monitor/TracesStore.swift")
         for needle in ["approveFolder(projectId: folder.id, verdict: verdict)", "verdict:", "excludedIneligible", "withheldLine(", "cancelFolder(projectId:",

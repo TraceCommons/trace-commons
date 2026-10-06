@@ -1,8 +1,19 @@
 import Foundation
 import TCShellCore
 
-/// The Traces tree (R6 of #1173): tool › folder › session, built only from
-/// what the core reports through `DaemonDataClient`. Nothing is estimated.
+/// The Traces tree (R6 of #1173), built only from what the core reports
+/// through `DaemonDataClient`. Nothing is estimated.
+///
+/// What the tree pane draws is `folders`: folders at the top level, each
+/// with its sessions, and no tool level (owner, 2026-10-05, on Ron's #1146
+/// hierarchy). A folder can hold sessions from several tools, so each
+/// session row shows its own tool. Folders are ordered by their most recent
+/// waiting session, then by name. Ignored folders stay in it, with a switch
+/// back to Ask me.
+///
+/// `tools` and `unplaced` are the per-tool aggregate the flow map draws (and
+/// the Summary's top tools reads); the tree pane never draws them. Their
+/// rules are those of #1146's `traces-model.ts`:
 ///
 /// The same rules as #1146's `traces-model.ts`:
 /// - A tool's switch is its source declaration. `unset` is never drawn as
@@ -24,6 +35,9 @@ struct TracesTree: Equatable {
     var tools: [ToolNode]
     /// Folders no session places under a tool yet (K11).
     var unplaced: [FolderNode]
+    /// The tree pane's top level: every folder the core reports, ignored
+    /// ones included, newest waiting session first.
+    var folders: [FolderNode] = []
 
     struct ToolNode: Equatable, Identifiable {
         let kind: SourceKind
@@ -52,6 +66,15 @@ struct TracesTree: Equatable {
         /// a folder it does not list, and nil is never read as zero.
         var pendingCount: Int? = nil
         var contributableCount: Int? = nil
+        /// The folder's path from `list_projects`; nil for a folder the
+        /// queue names but the core does not list.
+        var path: String? = nil
+
+        /// When its most recent waiting session started, or was queued if
+        /// no start was recorded; nil with nothing waiting.
+        var mostRecent: Date? {
+            sessions.compactMap { $0.startedAt ?? $0.discoveredAt }.max()
+        }
     }
 
     /// A tool's source declaration in `get_settings`. `unknown` is settings
@@ -112,7 +135,8 @@ struct TracesTree: Equatable {
                 offerableModes: project.offerableModes, sessions: [],
                 disclosure: project.mode == .autoUpload ? project.automaticDisclosure : nil,
                 isBucket: project.isUnresolvedBucket,
-                pendingCount: project.pendingCount, contributableCount: project.contributableCount))
+                pendingCount: project.pendingCount, contributableCount: project.contributableCount,
+                path: project.projectPath))
         }
         for entry in entries {
             add(FolderNode(id: entry.projectId, label: entry.projectLabel, mode: nil, sessions: []))
@@ -121,9 +145,13 @@ struct TracesTree: Equatable {
 
         var byTool: [SourceKind: [FolderNode]] = [:]
         var unplaced: [FolderNode] = []
+        var drawn: [FolderNode] = []
         for id in order {
-            guard var node = folders[id], node.mode != .ignore else { continue }
+            guard var node = folders[id] else { continue }
             node.sessions.sort { ($0.startedAt ?? .distantPast) > ($1.startedAt ?? .distantPast) }
+            drawn.append(node)
+            // The flow map's aggregate leaves ignored folders out.
+            guard node.mode != .ignore else { continue }
             if let kind = majorityTool(node.sessions) {
                 byTool[kind, default: []].append(node)
             } else {
@@ -139,7 +167,23 @@ struct TracesTree: Equatable {
         }
         .sorted { $0.waiting > $1.waiting }
 
-        return TracesTree(tools: tools, unplaced: unplaced)
+        return TracesTree(tools: tools, unplaced: unplaced, folders: ordered(drawn))
+    }
+
+    /// Newest waiting session first; folders with nothing waiting after
+    /// them; ties by name, then by id so the order never depends on how
+    /// the core happened to list them.
+    static func ordered(_ folders: [FolderNode]) -> [FolderNode] {
+        folders.sorted { a, b in
+            switch (a.mostRecent, b.mostRecent) {
+            case let (x?, y?) where x != y: return x > y
+            case (.some, nil): return true
+            case (nil, .some): return false
+            default:
+                let byName = a.label.localizedStandardCompare(b.label)
+                return byName == .orderedSame ? a.id < b.id : byName == .orderedAscending
+            }
+        }
     }
 
     /// The tool most of a folder's sessions came from; `nil` with none, or
@@ -172,7 +216,7 @@ struct TracesTree: Equatable {
 
     /// Every session in the tree, in drawing order.
     var allSessions: [DaemonData.QueueEntry] {
-        tools.flatMap { $0.folders.flatMap(\.sessions) } + unplaced.flatMap(\.sessions)
+        folders.flatMap(\.sessions)
     }
 }
 
@@ -238,7 +282,7 @@ enum MonitorSelection: Equatable, Codable, RawRepresentable {
 extension TracesTree {
     /// Every folder in the tree, in drawing order.
     var allFolders: [FolderNode] {
-        tools.flatMap(\.folders) + unplaced
+        folders
     }
 
     /// The selection while what it names is still in the tree; nil when it

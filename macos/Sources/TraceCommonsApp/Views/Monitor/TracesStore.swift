@@ -315,6 +315,14 @@ final class TracesStore {
         return tree.allSessions.first { $0.entryId == entryID }
     }
 
+    /// The selected folder while it is still in the tree; nil for a
+    /// session, for nothing, and for a folder that has gone. Its inspector
+    /// is drawn only from this.
+    func selectedFolder(_ selection: MonitorSelection?) -> TracesTree.FolderNode? {
+        guard let projectID = resolve(selection)?.projectID else { return nil }
+        return tree.folders.first { $0.id == projectID }
+    }
+
     // MARK: Review (R7)
 
     enum ReviewAction: Equatable {

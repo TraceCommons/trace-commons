@@ -12,8 +12,9 @@ import TCShellCore
 ///
 /// The selection is read only through `TracesStore.selectedSession`, so a
 /// session that has gone (uploaded, expired, dismissed elsewhere) is the
-/// Summary, never a stale card. A folder shows the Summary until it has an
-/// inspector of its own.
+/// Summary, never a stale card. A folder is read only through
+/// `TracesStore.selectedFolder` and shows Ron's Folder inspector
+/// (`FolderInspector`); one that has gone is the Summary too.
 struct TracesInspectorHost: View {
     @EnvironmentObject private var model: AppModel
     let traces: TracesStore
@@ -29,12 +30,14 @@ struct TracesInspectorHost: View {
     private enum Shown {
         case history(DaemonData.HistoryRow)
         case session(DaemonData.QueueEntry)
+        case folder(TracesTree.FolderNode)
         case summary
     }
 
     private var shown: Shown {
         if let historyRow { return .history(historyRow) }
         if let entry = traces.selectedSession(selection) { return .session(entry) }
+        if let folder = traces.selectedFolder(selection) { return .folder(folder) }
         return .summary
     }
 
@@ -53,6 +56,8 @@ struct TracesInspectorHost: View {
                 HistoryDetailInspector(row: row)
             case .session(let entry):
                 SessionInspectorView(store: traces, entry: entry)
+            case .folder(let folder):
+                FolderInspector(store: traces, folder: folder)
             case .summary:
                 summary
             }

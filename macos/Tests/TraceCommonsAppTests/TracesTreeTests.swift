@@ -76,14 +76,6 @@ final class TracesTreeTests: XCTestCase {
         XCTAssertTrue(tree.tools.allSatisfy { $0.mode == .unknown })
     }
 
-    /// Ignored folders are left out, and their sessions with them.
-    func test_ignoredFoldersAreLeftOut() throws {
-        let project = ProjectRow(projectId: "p1", projectLabel: "quiet", projectPath: "/x", mode: .ignore)
-        let tree = TracesTree.build(entries: [], projects: [project], settings: nil, scansWhenUnset: [])
-        XCTAssertTrue(tree.tools.isEmpty)
-        XCTAssertTrue(tree.unplaced.isEmpty)
-    }
-
     /// A folder with nothing waiting cannot be placed until the core says
     /// which tool it belongs to (K11): it is listed on its own.
     func test_aFolderWithNothingWaitingIsUnplaced() throws {
@@ -121,16 +113,18 @@ final class TracesTreeTests: XCTestCase {
         XCTAssertEqual(store.phase, .loaded)
         XCTAssertEqual(store.tree.allSessions.count, 3)
     }
-    /// Left and right find the selected session's folder (and tool) to
-    /// collapse and expand; a session not in the tree finds nothing.
+    /// Left and right find the selected session's folder to collapse and
+    /// expand; a session not in the tree finds nothing.
     func test_arrowKeysFindTheSelectedSessionsFolder() async throws {
         let built = try await tree(.normalDay)
         let session = try XCTUnwrap(built.allSessions.first)
-        let path = try XCTUnwrap(TracesTreeView.path(to: session.entryId, in: built))
-        let folders: [TracesTree.FolderNode] = built.tools.flatMap { $0.folders } + built.unplaced
-        let folder = try XCTUnwrap(folders.first { $0.id == path.folder })
+        let id = try XCTUnwrap(TracesTreeView.folder(of: session.entryId, in: built))
+        let folder = try XCTUnwrap(built.folders.first { $0.id == id })
         XCTAssertTrue(folder.sessions.contains { $0.entryId == session.entryId })
-        XCTAssertNil(TracesTreeView.path(to: "no-such-entry", in: built))
+        XCTAssertEqual(TracesTreeView.folder(of: .session(entryID: session.entryId), in: built), id)
+        XCTAssertEqual(TracesTreeView.folder(of: .folder(projectID: id), in: built), id)
+        XCTAssertNil(TracesTreeView.folder(of: "no-such-entry", in: built))
+        XCTAssertNil(TracesTreeView.folder(of: .folder(projectID: "no-such-folder"), in: built))
     }
 
     /// Review Focus 2: a selected session that leaves the queue (uploaded,
@@ -218,7 +212,7 @@ final class TracesTreeTests: XCTestCase {
     func test_theKeyboardWalksFoldersAndSessionsAsDrawn() async throws {
         let built = try await tree(.normalDay)
         let rows = TracesTreeView.visibleRows(in: built, collapsed: [])
-        let folders = built.tools.flatMap(\.folders) + built.unplaced
+        let folders = built.folders
         var expected: [MonitorSelection] = []
         for folder in folders {
             expected.append(.folder(projectID: folder.id))
@@ -255,11 +249,6 @@ final class TracesTreeTests: XCTestCase {
             XCTAssertEqual(
                 TracesTreeView.moved(from: .folder(projectID: first.id), down: true, through: closed), closed[after])
             XCTAssertNotNil(closed[after].projectID)
-        }
-        // A collapsed tool hides its folders too.
-        if let tool = built.tools.first {
-            let hidden = TracesTreeView.visibleRows(in: built, collapsed: [tool.id])
-            for folder in tool.folders { XCTAssertFalse(hidden.contains(.folder(projectID: folder.id))) }
         }
     }
 }
@@ -761,5 +750,175 @@ final class TracesFolderSubmitTests: XCTestCase {
         XCTAssertFalse(store.mayContributeFolder(folder))
         await store.contributeFolder(folder, verdict: nil)
         XCTAssertNil(store.lastContributedFolder)
+    }
+}
+
+/// Task 5 of the #1146 port, with the owner's change of 2026-10-05: Ron's
+/// tree without the tool level. Folders at the top, sessions under them,
+/// each session showing its own tool.
+@MainActor
+final class TracesFolderFirstTreeTests: XCTestCase {
+    private static let words = MonitorTracesCopy.decode(fromJSON: TCCoreCopy.monitorTracesCopyJSON())
+
+    /// Folders are the top level and sessions sit under them; the rows the
+    /// keyboard walks are folders and sessions only, and the view draws no
+    /// tool row and no tool switch (watching a tool stays in Settings).
+    func test_theTreeHasNoToolLevel() async throws {
+        let store = TracesStore(client: SampleDaemonClient(.normalDay))
+        await store.load()
+        let tree = store.tree
+        XCTAssertEqual(Set(tree.folders.map(\.label)), ["api", "web"])
+        XCTAssertEqual(
+            tree.folders.flatMap(\.sessions).map(\.entryId).sorted(), tree.allSessions.map(\.entryId).sorted())
+        // A folder can hold sessions from more than one tool: it is not
+        // placed under either.
+        let api = try XCTUnwrap(tree.folders.first { $0.label == "api" })
+        XCTAssertEqual(Set(api.sessions.map(\.source)), ["claude-code", "codex"])
+
+        var expected: [MonitorSelection] = []
+        for folder in tree.folders {
+            expected.append(.folder(projectID: folder.id))
+            expected += folder.sessions.map { .session(entryID: $0.entryId) }
+        }
+        XCTAssertEqual(TracesTreeView.visibleRows(in: tree, collapsed: []), expected)
+        // A tool's id collapses nothing: there is no tool row to collapse.
+        XCTAssertEqual(
+            TracesTreeView.visibleRows(in: tree, collapsed: [SourceKind.claudeCode.rawValue, SourceKind.codex.rawValue]),
+            expected)
+
+        let source = try TracesParityTests.text("Views/Monitor/TracesViews.swift")
+        let treeView = try XCTUnwrap(source.range(of: "struct TracesTreeView"))
+        let inspector = try XCTUnwrap(source.range(of: "struct SessionInspectorView"))
+        let body = source[treeView.lowerBound..<inspector.lowerBound]
+        for gone in ["toolRow(", "depth: .tool", "ForEach(store.tree.tools)", "ForEach(store.tree.unplaced)",
+                     "requestSource(", "store.setSource(", "SourceChange"] {
+            XCTAssertFalse(body.contains(gone), "the tree still draws \(gone)")
+        }
+        XCTAssertTrue(body.contains("ForEach(store.tree.folders)"))
+    }
+
+    /// Every session row shows its own tool's tile and names the tool first
+    /// in its sub-line, since one folder can hold several tools' sessions.
+    /// A source this build does not know keeps the plain session tile.
+    func test_sessionRowsShowTheirTool() throws {
+        let claude = try recordedEntry(["source": "claude-code"])
+        let codex = try recordedEntry(["source": "codex"])
+        let unknown = try recordedEntry(["source": "not-a-tool"])
+        XCTAssertEqual(TracesTreeView.sessionTile(claude), .tool(.claudeCode))
+        XCTAssertEqual(TracesTreeView.sessionTile(codex), .tool(.codex))
+        XCTAssertEqual(TracesTreeView.sessionTile(unknown), .session)
+        XCTAssertEqual(TracesTreeView.toolName(claude), SourceKind.claudeCode.displayName)
+        XCTAssertEqual(TracesTreeView.toolName(codex), SourceKind.codex.displayName)
+        XCTAssertNil(TracesTreeView.toolName(unknown))
+
+        let sub = try XCTUnwrap(TracesTreeView.sub(codex, held: nil, ineligible: nil, tool: TracesTreeView.toolName(codex)))
+        XCTAssertTrue(sub.hasPrefix(SourceKind.codex.displayName), sub)
+        if let measures = TracesTreeView.measures(codex) { XCTAssertTrue(sub.hasSuffix(measures), sub) }
+        XCTAssertEqual(TracesTreeView.sub(unknown, held: nil, ineligible: nil, tool: nil), TracesTreeView.measures(unknown))
+
+        let source = try TracesParityTests.text("Views/Monitor/TracesViews.swift")
+        XCTAssertTrue(source.contains("tile: Self.sessionTile(entry),"))
+        XCTAssertTrue(source.contains("tool: Self.toolName(entry)"))
+    }
+
+    /// Folders are ordered by their most recent waiting session (when it
+    /// started, or was queued when no start was recorded), newest first;
+    /// folders with nothing waiting follow; ties go by name.
+    func test_foldersAreOrderedByMostRecentWaitingSession() async throws {
+        func entry(_ id: Int, _ project: String, started: String?, discovered: String) throws -> DaemonData.QueueEntry {
+            try recordedEntry([
+                "entry_id": String(format: "00000000-0000-4000-8000-%012d", id),
+                "project_id": project, "project_label": project,
+                "started_at": started.map { $0 as Any } ?? NSNull(), "discovered_at": discovered,
+            ])
+        }
+        let entries = [
+            try entry(1, "old", started: "2026-09-30T08:00:00Z", discovered: "2026-09-30T08:30:00Z"),
+            try entry(2, "new", started: "2026-09-30T07:00:00Z", discovered: "2026-09-30T07:30:00Z"),
+            try entry(3, "new", started: "2026-09-30T12:00:00Z", discovered: "2026-09-30T12:30:00Z"),
+            // No start recorded: when it was queued.
+            try entry(4, "queued", started: nil, discovered: "2026-09-30T10:00:00Z"),
+            // The same time as `queued`: the name breaks the tie.
+            try entry(5, "beside", started: "2026-09-30T10:00:00Z", discovered: "2026-09-30T11:00:00Z"),
+        ]
+        let projects = [
+            ProjectRow(projectId: "quiet", projectLabel: "quiet", projectPath: "/q", mode: .ask),
+            ProjectRow(projectId: "idle", projectLabel: "idle", projectPath: "/i", mode: .ask),
+        ]
+        let tree = TracesTree.build(entries: entries, projects: projects, settings: nil, scansWhenUnset: [])
+        XCTAssertEqual(tree.folders.map(\.id), ["new", "beside", "queued", "old", "idle", "quiet"])
+
+        // The sample day: api's newest session was queued after web's.
+        let store = TracesStore(client: SampleDaemonClient(.normalDay))
+        await store.load()
+        XCTAssertEqual(store.tree.folders.map(\.label), ["api", "web"])
+    }
+
+    /// An ignored folder stays in the tree (Ron), drawn off and saying the
+    /// core's "ignored" line, with a switch back to Ask me and no Submit.
+    /// It resolves as a selection, so its inspector can show its rule.
+    func test_ignoredFoldersStayInTheTree() throws {
+        let words = try XCTUnwrap(Self.words)
+        let project = ProjectRow(projectId: "p1", projectLabel: "quiet", projectPath: "/x", mode: .ignore)
+        let tree = TracesTree.build(entries: [], projects: [project], settings: nil, scansWhenUnset: [])
+        let folder = try XCTUnwrap(tree.folders.first)
+        XCTAssertEqual(tree.folders.map(\.id), ["p1"])
+        XCTAssertEqual(folder.mode, .ignore)
+        XCTAssertEqual(folder.path, "/x")
+        XCTAssertEqual(tree.resolve(.folder(projectID: "p1")), .folder(projectID: "p1"))
+        XCTAssertEqual(TracesTreeView.visibleRows(in: tree, collapsed: []), [.folder(projectID: "p1")])
+        // The flow map's per-tool aggregate still leaves it out.
+        XCTAssertTrue(tree.tools.isEmpty)
+        XCTAssertTrue(tree.unplaced.isEmpty)
+
+        let labels = try XCTUnwrap(FolderInspector.disclosure).folderModeLabels
+        XCTAssertEqual(TracesTreeView.folderSub(folder, words: words, modeLabels: labels), words.tree.ignoredFolder)
+        // The switch on is Ask me, a direct write; off is Never, which asks
+        // first when sessions are waiting.
+        XCTAssertEqual(TracesTreeView.watchChoice(true), .ask)
+        XCTAssertEqual(TracesTreeView.watchChoice(false), .ignore)
+        guard case .apply = TracesTreeView.modeChange(folder, .ask) else {
+            return XCTFail("switching an ignored folder back to Ask me is a direct write")
+        }
+        let store = TracesStore(client: SampleDaemonClient(.normalDay))
+        XCTAssertFalse(FolderInspector.offersSubmitAll(folder, store: store))
+
+        // A folder that is not ignored says its mode word and its count.
+        let asked = TracesTree.FolderNode(
+            id: "p2", label: "api", mode: .ask, sessions: [try recordedEntry()])
+        let sub = try XCTUnwrap(TracesTreeView.folderSub(asked, words: words, modeLabels: labels))
+        XCTAssertTrue(sub.hasPrefix(try XCTUnwrap(labels[ProjectMode.ask.rawValue])), sub)
+        XCTAssertTrue(sub.hasSuffix(words.counts.sessionsWaitingOne), sub)
+
+        let source = try TracesParityTests.text("Views/Monitor/TracesViews.swift")
+        for needle in ["off: folder.mode == .ignore", "watchLabel: words?.tree.watchFolder ?? \"\"",
+                       "request(folder, Self.watchChoice($0))", "menuLabel: ignorable ? words?.tree.ignoreFolder ?? \"\" : \"\""] {
+            XCTAssertTrue(source.contains(needle), "TracesViews.swift lacks \(needle)")
+        }
+    }
+
+    /// A session row's menu offers Dismiss session, which asks first: the
+    /// only dismiss in the tree is the confirmation's own button, in the
+    /// core's words, and the body names the session without a hole left.
+    func test_dismissAsksFirst() throws {
+        let words = try XCTUnwrap(Self.words)
+        let entry = try recordedEntry()
+        let body = TracesTreeView.dismissBody(entry, words: words)
+        XCTAssertFalse(body.contains("{"), body)
+        XCTAssertTrue(body.contains(TracesTreeView.when(entry)), body)
+
+        let source = try TracesParityTests.text("Views/Monitor/TracesViews.swift")
+        let treeView = try XCTUnwrap(source.range(of: "struct TracesTreeView"))
+        let inspector = try XCTUnwrap(source.range(of: "struct SessionInspectorView"))
+        let tree = String(source[treeView.lowerBound..<inspector.lowerBound])
+        XCTAssertEqual(tree.components(separatedBy: "perform(.dismiss").count - 1, 1, "one dismiss, in the confirmation")
+        let title = try XCTUnwrap(tree.range(of: "GlassSheet(title: words.tree.dismissSessionTitle"))
+        let dismiss = try XCTUnwrap(tree.range(of: "perform(.dismiss"))
+        XCTAssertLessThan(title.lowerBound, dismiss.lowerBound, "the dismiss is inside the confirmation")
+        for needle in ["menuLabel: words?.tree.dismissSession ?? \"\"", "onMenu: { sessionMenu = ",
+                       "dismissing = entry", ".sheet(item: $dismissing)", "words.tree.dismissSessionKeep",
+                       "words.dismissAction", "words.tree.dismissing", "words.tree.dismissSessionFailed"] {
+            XCTAssertTrue(tree.contains(needle), "the tree lacks \(needle)")
+        }
     }
 }
