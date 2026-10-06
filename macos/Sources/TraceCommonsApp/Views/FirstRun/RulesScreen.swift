@@ -291,19 +291,17 @@ struct RulesScreen: View {
         FirstRunFrame(
             copy: copy,
             state: $runner.state,
-            onBack: { runner.state = FirstRunNavigation.back(runner.state) },
             footer: FirstRunFooter(
                 title: copy.frame.continueButton,
                 isEnabled: projects != nil,
                 action: { runner.state = FirstRunNavigation.next(runner.state) })
         ) {
-            ScrollView {
-                VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
-                    FirstRunTitle(light: copy.rules.titleLight, bold: copy.rules.titleBold)
-                    content
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
+            FirstRunTitle(light: copy.rules.titleLight, bold: copy.rules.titleBold)
+        } content: {
+            VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
+                content
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
         .task { await load() }
         // One dialog for the list, named by whichever folder is being armed.
@@ -351,10 +349,16 @@ struct RulesScreen: View {
                 pastSessionsCard(projects)
             }
         } else if loadFailed {
-            GlassNotice(tone: .outside) {
-                Text(copy.rules.unavailable)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+            // No Back to retry through (Ron's review of #1235, item 9): the
+            // core's retry reads the folders again.
+            HStack(spacing: GlassTokens.Space.s4) {
+                GlassNotice(tone: .outside) {
+                    Text(copy.rules.unavailable)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                Button(copy.folders.retry) { Task { await load() } }
+                    .buttonStyle(GlassButtonStyle(.secondary))
             }
         } else {
             HStack(spacing: GlassTokens.Space.s4) {

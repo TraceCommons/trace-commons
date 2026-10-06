@@ -322,28 +322,24 @@ struct JoinScreen: View {
         FirstRunFrame(
             copy: copy,
             state: $runner.state,
-            onBack: nil,
             footer: FirstRunFooter(
                 title: JoinScreenLayout.footerTitle(runner.state, copy: copy),
                 isEnabled: true,
                 note: JoinScreenLayout.footerNote(runner.state, copy: copy),
                 action: { runner.state = JoinScreenLayout.forward(runner.state) })
         ) {
-            ScrollView {
-                VStack(alignment: .leading, spacing: GlassTokens.Space.s6) {
-                    title
-                    inviteCard
-                    passkeyCard
-                    nearAICard
-                    if let notice = runner.passkeyOutcome?.joinNotice(copy) {
-                        GlassNotice(tone: .ask) { Text(notice) }
-                    }
-                    GlassCard(quiet: true) {
-                        Text(copy.join.noSharing)
-                            .glassType(GlassTokens.TypeScale.label)
-                            .foregroundStyle(GlassColor.textSecondary)
-                    }
-                }
+            title
+        } content: {
+            inviteCard
+            passkeyCard
+            nearAICard
+            if let notice = runner.passkeyOutcome?.joinNotice(copy) {
+                GlassNotice(tone: .ask) { Text(notice) }
+            }
+            GlassCard(quiet: true) {
+                Text(copy.join.noSharing)
+                    .glassType(GlassTokens.TypeScale.label)
+                    .foregroundStyle(GlassColor.textSecondary)
             }
         }
     }

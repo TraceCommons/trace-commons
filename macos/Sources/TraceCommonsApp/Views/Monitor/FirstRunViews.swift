@@ -102,6 +102,7 @@ struct StartupRefusedBanner: View {
 
 /// The first-run pane's size.
 enum FirstRunProgress {
-    /// Wide enough for Ron's screens.
-    static let paneWidth: CGFloat = 700
+    /// Ron's FTUX width (#1030 spec, Design system table: one padded pane
+    /// at 450px).
+    static let paneWidth: CGFloat = 450
 }

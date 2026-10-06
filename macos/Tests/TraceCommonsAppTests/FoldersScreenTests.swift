@@ -205,36 +205,13 @@ final class FoldersScreenTests: XCTestCase {
         XCTAssertTrue(screen.contains("notice: FoldersScreenLayout.notice("))
     }
 
-    /// Back is withdrawn while a commit runs: the runner moves the step on
-    /// from wherever the state is when the calls finish.
-    func test_backIsWithdrawnWhileCommitting() throws {
-        var pressed = 0
-        XCTAssertNil(FoldersScreenLayout.backAction(isCommitting: true, back: { pressed += 1 }))
-        let back = try XCTUnwrap(FoldersScreenLayout.backAction(isCommitting: false, back: { pressed += 1 }))
-        back()
-        XCTAssertEqual(pressed, 1)
-
-        let screen = try Self.source("FoldersScreen.swift")
-        XCTAssertTrue(screen.contains("onBack: FoldersScreenLayout.backAction(isCommitting: runner.isCommitting"))
-    }
-
     /// A host whose runner does not last the whole first run (Private AI's)
-    /// offers no Back to Join from Folders or Tools: what Join would take
-    /// (an invite, an account) would be committed after that host is gone,
-    /// with nowhere to show a refusal and no passkey sheets to open. Its
-    /// commit is the start alone.
-    func test_aHostWithoutJoinOffersNoBackAndCommitsOnlyTheStart() throws {
-        XCTAssertNil(FoldersScreenLayout.backAction(isCommitting: false, offersJoin: false, back: {}))
-        XCTAssertNotNil(FoldersScreenLayout.backAction(isCommitting: false, offersJoin: true, back: {}))
-
-        for name in ["FoldersScreen.swift", "ToolsScreen.swift"] {
-            let screen = try Self.source(name)
-            XCTAssertTrue(screen.contains("backAction(isCommitting: runner.isCommitting, offersJoin: offersJoin)"), name)
-        }
-        // The legacy activation host left with the legacy window (R15); the
-        // Inference tab is the Private AI host that remains.
+    /// starts on Folders, and no screen has a Back (Ron's review of #1235,
+    /// item 9), so it never reaches Join: what Join would take (an invite,
+    /// an account) is never committed there. Its commit is the start alone.
+    func test_aHostWithoutJoinCommitsOnlyTheStart() throws {
         let host = try Self.source("../Monitor/InferenceViews.swift")
-        XCTAssertTrue(host.contains("OnboardingCoordinatorView(startAt: .folders, takesInvites: false, offersJoin: false"))
+        XCTAssertTrue(host.contains("OnboardingCoordinatorView(startAt: .folders, takesInvites: false"))
 
         var state = OnboardingNavigation.initialState(startAt: .folders, daemonRunning: false, enrolled: false)
         state.answer(.claudeCode, .off)
@@ -374,7 +351,7 @@ final class FoldersScreenTests: XCTestCase {
                 .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
                 .appendingPathComponent("Sources/TraceCommonsApp/Views/OnboardingCoordinatorView.swift"),
             encoding: .utf8)
-        XCTAssertTrue(coordinator.contains("FoldersScreen(copy: copy, runner: runner, installURL: copy.folders.installURL(for:), offersJoin: offersJoin)"))
-        XCTAssertTrue(coordinator.contains("ToolsScreen(copy: copy, runner: runner, installURL: copy.folders.installURL(for:), offersJoin: offersJoin)"))
+        XCTAssertTrue(coordinator.contains("FoldersScreen(copy: copy, runner: runner, installURL: copy.folders.installURL(for:))"))
+        XCTAssertTrue(coordinator.contains("ToolsScreen(copy: copy, runner: runner, installURL: copy.folders.installURL(for:))"))
     }
 }

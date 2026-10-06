@@ -233,7 +233,10 @@ pub struct RulesCopy {
     pub show_fewer: &'static str,
     pub never_count: &'static str,
     pub never_label: &'static str,
-    /// The folders could not be read; Continue stays disabled.
+    /// The folders could not be read; Continue stays disabled, and the
+    /// card offers `folders.retry`. No screen has a Back (Ron's review of
+    /// #1235, item 9), so it does not say to go back.
+    /// **DRAFT, NEEDS APPROVAL**
     pub unavailable: &'static str,
     /// One folder's past sessions could not be read.
     pub sessions_unavailable: &'static str,
@@ -448,7 +451,7 @@ pub fn first_run_copy() -> FirstRunCopy {
             show_fewer: "Show fewer",
             never_count: "{count} · rule is Never",
             never_label: "{folder}: rule is Never",
-            unavailable: "Couldn't read repos from your sessions. Go back, then continue to try again.",
+            unavailable: "Couldn't read repos from your sessions.",
             sessions_unavailable: "Past sessions unavailable",
             past_sessions_watch_only: "You're watching only, so the sessions you pick wait on this Mac, unsent, until you join.",
             weekdays: ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"],
@@ -632,6 +635,14 @@ mod tests {
                 .replace("{minutes}", "04"),
             "2 h 04 min"
         );
+    }
+
+    /// No first-run screen has a Back, so nothing tells the person to go
+    /// back.
+    #[test]
+    fn no_line_says_to_go_back() {
+        let json = serde_json::to_string(&first_run_copy()).unwrap();
+        assert!(!json.contains("Go back"), "{json}");
     }
 
     /// Watching only queues picked past sessions on this Mac and sends

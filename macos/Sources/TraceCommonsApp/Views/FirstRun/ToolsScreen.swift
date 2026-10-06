@@ -262,8 +262,6 @@ struct ToolsScreen: View {
     /// Where each tool's "Get {tool}" leads: the core's install pages
     /// (`FirstRunCopy.Folders.installURL(for:)`), passed by the host.
     var installURL: (SourceKind) -> URL? = { _ in nil }
-    /// Whether Back to Join is offered (`FoldersScreenLayout.backAction`).
-    var offersJoin = true
 
     @State private var discovery: DiscoveredRows = .loading
     @State private var onboarding = TCOnboardingCopy.load()
@@ -276,9 +274,6 @@ struct ToolsScreen: View {
         FirstRunFrame(
             copy: copy,
             state: $runner.state,
-            onBack: FoldersScreenLayout.backAction(isCommitting: runner.isCommitting, offersJoin: offersJoin) {
-                runner.state = FirstRunNavigation.back(runner.state)
-            },
             isCommitting: runner.isCommitting,
             notice: FoldersScreenLayout.notice(for: runner.failure, copy: copy, onboarding: onboarding),
             footer: FirstRunFooter(
@@ -287,11 +282,12 @@ struct ToolsScreen: View {
                 action: { Task { await runner.commit(.leaveRoots) } }
             )
         ) {
-            VStack(alignment: .leading, spacing: GlassTokens.Space.s6) {
-                title
+            title
+        } content: {
+            Group {
                 switch discovery {
                 case .found(let discovered):
-                    ScrollView {
+                    Group {
                         VStack(spacing: GlassTokens.Space.s4) {
                             ForEach(ToolsScreenLayout.rows(discovered, state: runner.state), id: \.source) {
                                 candidate in

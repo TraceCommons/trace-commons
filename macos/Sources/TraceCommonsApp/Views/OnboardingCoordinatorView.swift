@@ -48,11 +48,6 @@ struct OnboardingCoordinatorView: View {
     /// Whether this host takes invite links. One whose runner does not last
     /// the whole first run leaves them parked for one that does.
     var takesInvites: Bool
-    /// Whether Folders and Tools offer Back to Join. One whose runner does
-    /// not last the whole first run offers none, so its commit is the start
-    /// alone: an invite or account taken there would be committed after the
-    /// host is gone, with nowhere to show a refusal or the passkey sheets.
-    var offersJoin: Bool
 
     typealias Step = OnboardingNavigation.Step
 
@@ -63,12 +58,11 @@ struct OnboardingCoordinatorView: View {
 
     init(
         startAt: Step = .join, onStep: ((Step) -> Void)? = nil, takesInvites: Bool = true,
-        offersJoin: Bool = true, onComplete: @escaping () -> Void
+        onComplete: @escaping () -> Void
     ) {
         self.startAt = startAt
         self.onStep = onStep
         self.takesInvites = takesInvites
-        self.offersJoin = offersJoin
         self.onComplete = onComplete
     }
 
@@ -77,7 +71,7 @@ struct OnboardingCoordinatorView: View {
             if let copy, let runner {
                 FirstRunSteps(
                     copy: copy, runner: runner, onStep: onStep, takesInvites: takesInvites,
-                    offersJoin: offersJoin, onComplete: onComplete)
+                    onComplete: onComplete)
             } else {
                 GlassSpinner(standalone: true)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -103,7 +97,6 @@ private struct FirstRunSteps: View {
     @ObservedObject var runner: FirstRunRunner
     let onStep: ((OnboardingNavigation.Step) -> Void)?
     let takesInvites: Bool
-    let offersJoin: Bool
     let onComplete: () -> Void
 
     @ObservedObject private var pendingInvite = PendingInvite.shared
@@ -137,9 +130,9 @@ private struct FirstRunSteps: View {
         case .join:
             JoinScreen(copy: copy, runner: runner, passkeyAccount: passkeyAccount)
         case .folders:
-            FoldersScreen(copy: copy, runner: runner, installURL: copy.folders.installURL(for:), offersJoin: offersJoin)
+            FoldersScreen(copy: copy, runner: runner, installURL: copy.folders.installURL(for:))
         case .tools:
-            ToolsScreen(copy: copy, runner: runner, installURL: copy.folders.installURL(for:), offersJoin: offersJoin)
+            ToolsScreen(copy: copy, runner: runner, installURL: copy.folders.installURL(for:))
         case .rules:
             RulesScreen(copy: copy, runner: runner, source: model)
         case .uses:

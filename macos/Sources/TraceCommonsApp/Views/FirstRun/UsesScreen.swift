@@ -264,7 +264,6 @@ struct UsesScreen: View {
         FirstRunFrame(
             copy: copy,
             state: $runner.state,
-            onBack: runner.isCommitting ? nil : { runner.state = FirstRunNavigation.back(runner.state) },
             notice: UsesScreenLayout.notice(for: runner.failure, uses: copy.uses, privateAI: privateAI),
             footer: FirstRunFooter(
                 title: copy.uses.start,
@@ -274,14 +273,13 @@ struct UsesScreen: View {
                 note: UsesScreenLayout.footerNote(copy.uses, state: runner.state, requiredScope: required),
                 action: start)
         ) {
-            ScrollView {
-                VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
-                    FirstRunTitle(light: copy.uses.titleLight, bold: copy.uses.titleBold)
-                    usesCard(options: options, required: required)
-                    sharingCard(grant: grant)
-                    if UsesScreenLayout.showsPrivateAI(runner.state) {
-                        privateAICard
-                    }
+            FirstRunTitle(light: copy.uses.titleLight, bold: copy.uses.titleBold)
+        } content: {
+            VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
+                usesCard(options: options, required: required)
+                sharingCard(grant: grant)
+                if UsesScreenLayout.showsPrivateAI(runner.state) {
+                    privateAICard
                 }
             }
         }

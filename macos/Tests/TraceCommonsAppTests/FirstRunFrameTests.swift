@@ -160,4 +160,52 @@ final class FirstRunFrameTests: XCTestCase {
         let body = String(source[title.upperBound...].prefix(400))
         XCTAssertTrue(body.contains(".accessibilityAddTraits(.isHeader)"), "FirstRunTitle must carry the header trait")
     }
+
+    /// Ron's review of #1235, items 9 to 12: no Back on any screen, the
+    /// tier label on the right of the bar, the 450pt pane, titles fixed
+    /// while only the cards scroll, and an error notice in the body after
+    /// the cards.
+    func test_theFrameMatchesRonsLayout() throws {
+        let frame = try Self.source()
+        XCTAssertFalse(frame.contains("onBack"), "no Back on any screen")
+        XCTAssertFalse(frame.contains("copy.passkey.back"))
+        // The tier label sits on the right: a spacer, then the eyebrow.
+        let bar = try XCTUnwrap(frame.range(of: "private var bar: some View {"))
+        let barBody = String(frame[bar.upperBound...].prefix(400))
+        let spacer = try XCTUnwrap(barBody.range(of: "Spacer(minLength: 0)"))
+        let eyebrow = try XCTUnwrap(barBody.range(of: "copy.frame.eyebrow(for: state.tier)"))
+        XCTAssertLessThan(spacer.lowerBound, eyebrow.lowerBound)
+        // The header is fixed above the one ScrollView; the notice follows
+        // the cards inside it.
+        let body = try XCTUnwrap(frame.range(of: "GlassPane {"))
+        let frameBody = String(frame[body.upperBound...].prefix(1200))
+        let header = try XCTUnwrap(frameBody.range(of: "header\n"))
+        let scroll = try XCTUnwrap(frameBody.range(of: "ScrollView {"))
+        let content = try XCTUnwrap(frameBody.range(of: "content\n"))
+        let notice = try XCTUnwrap(frameBody.range(of: "if let notice {"))
+        XCTAssertLessThan(header.lowerBound, scroll.lowerBound)
+        XCTAssertLessThan(scroll.lowerBound, content.lowerBound)
+        XCTAssertLessThan(content.lowerBound, notice.lowerBound)
+
+        for screen in Self.screens {
+            let source = try Self.appSource("Views/FirstRun/\(screen.file)")
+            XCTAssertFalse(source.contains("onBack"), screen.file)
+            XCTAssertFalse(source.contains("ScrollView"), "\(screen.file): only the frame scrolls")
+            // The frame's header closure, between its footer and
+            // `content:`, holds the title.
+            let frameCall = try XCTUnwrap(source.range(of: "FirstRunFrame("), screen.file)
+            let cards = try XCTUnwrap(source.range(of: "} content: {"), screen.file)
+            let header = String(source[frameCall.upperBound..<cards.lowerBound])
+            XCTAssertTrue(
+                header.contains("FirstRunTitle(")
+                    || header.split(separator: "\n").contains { $0.trimmingCharacters(in: .whitespaces) == "title" },
+                "\(screen.file): the title is the fixed header")
+        }
+
+        // The pane is Ron's 450pt, in the first-run window and in the
+        // Inference tab's host alike.
+        XCTAssertEqual(FirstRunProgress.paneWidth, 450)
+        let inference = try Self.appSource("Views/Monitor/InferenceViews.swift")
+        XCTAssertTrue(inference.contains(".frame(width: FirstRunProgress.paneWidth)"))
+    }
 }
