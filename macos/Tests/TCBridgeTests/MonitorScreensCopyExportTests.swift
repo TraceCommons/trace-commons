@@ -18,6 +18,15 @@ final class MonitorScreensCopyExportTests: XCTestCase {
         }
     }
 
+    /// History's refresh and sign-in words (native words for Ron's #1146
+    /// controls).
+    func testTheHistoryActionsDecode() throws {
+        let copy = try XCTUnwrap(MonitorScreensCopy.decode(fromJSON: TCCoreCopy.monitorScreensCopyJSON()))
+        XCTAssertEqual(copy.historyActions.requestRefresh, "Check for updates")
+        XCTAssertEqual(copy.historyActions.signInToWithdraw, "Sign in to your account")
+        XCTAssertTrue(copy.historyActions.refreshFailed.hasPrefix("Could not ask for updates"))
+    }
+
     /// Ron's safeguards panel labels (#1241).
     func testTheSafeguardsLabelsDecode() throws {
         let copy = try XCTUnwrap(MonitorScreensCopy.decode(fromJSON: TCCoreCopy.monitorScreensCopyJSON()))

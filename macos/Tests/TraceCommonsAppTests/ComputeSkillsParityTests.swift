@@ -75,9 +75,11 @@ final class ComputeSkillsParityTests: XCTestCase {
             "ComputeContent(model: model, allowance: $allowance)\n"
                 + "            .onChange(of: model.snapshot?.ramAllowanceGib, initial: true)"))
         let inspector = try Self.text("Views/Monitor/HistoryInspector.swift")
-        XCTAssertTrue(inspector.contains("var body: some View {\n        ScrollView {\n"))
+        // The always-present stack, scrolling with History's page.
         XCTAssertTrue(inspector.contains(
-            "        .scrollIndicators(.never)\n"
+            "var body: some View {\n        VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {\n"))
+        XCTAssertTrue(inspector.contains(
+            "        .frame(maxWidth: .infinity, alignment: .leading)\n"
                 + "        .task(id: [row.submissionId, record?.status ?? \"\"]) { load() }\n    }\n"))
         // The reload on activation is the session detail's own, once.
         XCTAssertFalse(inspector.contains("didBecomeActiveNotification"))
@@ -97,7 +99,7 @@ final class ComputeSkillsParityTests: XCTestCase {
     /// second copy).
     func test_theInspectorShowsReadingAndAReadFailure() throws {
         let inspector = try Self.text("Views/Monitor/HistoryInspector.swift")
-        XCTAssertTrue(inspector.contains("SessionDetailView(record: record)\n"))
+        XCTAssertTrue(inspector.contains("SessionDetailView(record: record, offersWithdrawal: false)\n"))
         let detail = try Self.text("Views/SessionDetailView.swift")
         for needle in [
             // Beside the detail it already holds, never instead of it: a
@@ -203,12 +205,11 @@ final class ComputeSkillsParityTests: XCTestCase {
         // The inspector draws the session detail, so it asks the gate
         // through it and never re-derives the rule beside it.
         let inspector = try Self.text("Views/Monitor/HistoryInspector.swift")
-        XCTAssertTrue(inspector.contains("SessionDetailView(record: record)\n"))
+        XCTAssertTrue(inspector.contains("SessionDetailView(record: record, offersWithdrawal: false)\n"))
         XCTAssertFalse(inspector.contains("SkillLearningGate."))
         XCTAssertTrue(inspector.contains("model.loadSessionDetail(record)"))
         let window = try Self.text("Views/MonitorWindowView.swift")
-        XCTAssertTrue(window.contains(
-            "set: { Self.review($0, selection: &selectedHistory, showsInspector: &showsInspector) }"))
+        XCTAssertTrue(window.contains("set: { selectedHistory = $0 }"))
     }
 
     func test_skillsLivesInTheHistoryInspector() throws {
@@ -220,10 +221,10 @@ final class ComputeSkillsParityTests: XCTestCase {
         // A new row is a new panel: the draft and the install status are per
         // record, and the inspector pane outlives a change of selection.
         XCTAssertTrue(inspector.contains(".id(record.submissionID)"))
-        // The selected row's details are drawn by the inspector host, under
-        // the health banners and the prompts.
-        let host = try Self.text("Views/Monitor/TracesInspectorHost.swift")
-        XCTAssertTrue(host.contains("HistoryDetailInspector(row: row)"))
+        // The opened row's details are drawn in History's left pane, below
+        // the list (Task 8 of the #1146 port).
+        let homeViews = try Self.text("Views/Monitor/HomeViews.swift")
+        XCTAssertTrue(homeViews.contains("HistoryDetailInspector(row: opened)"))
         let window = try Self.text("Views/MonitorWindowView.swift")
         XCTAssertTrue(window.contains("@SceneStorage(\"monitor.selectedHistory\") private var selectedHistory = \"\""))
         let home = try Self.text("Views/Monitor/HomeViews.swift")

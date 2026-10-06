@@ -52,7 +52,8 @@ struct MonitorWindowView: View {
     @SceneStorage("monitor.selection") private var selection: MonitorSelection?
     /// Home's page: the overview or History, restored per window.
     @SceneStorage("monitor.homePage") private var homePage: HomeTabView.Page = .overview
-    /// The selected History row's submission id; empty for none.
+    /// The opened History row's submission id; empty for none. Its details
+    /// are drawn in History's left pane, below the list.
     @SceneStorage("monitor.selectedHistory") private var selectedHistory = ""
 
     /// The screens' data, read through the app's live client
@@ -136,11 +137,13 @@ struct MonitorWindowView: View {
                         store: home, traces: traces,
                         statusLabel: { HomeFormat.historyStatusLabel(copy: model.publicRunCopy, $0) },
                         page: $homePage,
-                        // Selecting a row shows the inspector, where its
-                        // details are, as a session's Review does.
+                        // Opening a row draws its details in History's own
+                        // pane, below the list (Ron's #1146). The inspector
+                        // keeps the Traces selection's card.
                         selection: Binding(
                             get: { selectedHistory },
-                            set: { Self.review($0, selection: &selectedHistory, showsInspector: &showsInspector) }))
+                            set: { selectedHistory = $0 }),
+                        openTraces: { tab = .traces })
                 }
             }
         } map: {
@@ -164,12 +167,10 @@ struct MonitorWindowView: View {
                         PrivateAIInspectorView(store: inference, destinationLabel: model.privateInferenceCopy?.destination)
                     }
                 case .home, .traces:
-                    // Until History's detail moves into the left pane (Task 8
-                    // of the #1146 port), the selected History row's details
-                    // are the host's, under its banners and prompts.
-                    TracesInspectorHost(
-                        traces: traces, home: home, selection: selection,
-                        historyRow: tab == .home && homePage == .history ? selectedHistoryRow : nil)
+                    // History included: Ron mounts `WaitingPage` there too,
+                    // so the inspector keeps the Traces selection's card
+                    // while History's detail opens in the left pane.
+                    TracesInspectorHost(traces: traces, home: home, selection: selection)
                 }
             }
         }
@@ -233,20 +234,6 @@ struct MonitorWindowView: View {
     /// What the inspector must show right now (`InspectorDemand`).
     private var demandKeys: Set<String> {
         InspectorDemand.keys(model: model, traces: traces, selection: selection)
-    }
-
-    /// The selected History row, while it is still in the list.
-    private var selectedHistoryRow: DaemonData.HistoryRow? {
-        guard !selectedHistory.isEmpty else { return nil }
-        return home.history?.first { $0.submissionId == selectedHistory }
-    }
-
-    /// A session's Review: select it and show the inspector, where its
-    /// review is. With the inspector hidden, selecting alone did nothing a
-    /// person could see. Selecting a History row goes the same way.
-    static func review(_ entryId: String, selection: inout String, showsInspector: inout Bool) {
-        selection = entryId
-        showsInspector = true
     }
 
     /// A tree selection. A session is a demand on the inspector, as in

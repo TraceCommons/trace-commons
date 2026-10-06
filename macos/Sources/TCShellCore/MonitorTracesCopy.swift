@@ -453,3 +453,36 @@ public struct MonitorSafeguardsCopy: MonitorWordTable {
 
     public static var consumedFields: [String] { CodingKeys.allCases.map(\.rawValue) }
 }
+
+/// History's refresh and account sign-in controls: the controls Ron's
+/// #1146 `history-refresh-control.tsx` and `account-sign-in-control.tsx`
+/// draw, in the core's native words rather than his.
+public struct MonitorHistoryActionsCopy: MonitorWordTable {
+    public let requestRefresh: String
+    public let requesting: String
+    public let refreshRequested: String
+    public let refreshFailed: String
+    public let checkingAccount: String
+    public let signInToWithdraw: String
+    public let waitingForSignIn: String
+    public let completeSignIn: String
+    public let signInInactive: String
+    public let signInUnverified: String
+    public let signInFailed: String
+
+    enum CodingKeys: String, CodingKey, CaseIterable {
+        case requestRefresh = "request_refresh"
+        case requesting
+        case refreshRequested = "refresh_requested"
+        case refreshFailed = "refresh_failed"
+        case checkingAccount = "checking_account"
+        case signInToWithdraw = "sign_in_to_withdraw"
+        case waitingForSignIn = "waiting_for_sign_in"
+        case completeSignIn = "complete_sign_in"
+        case signInInactive = "sign_in_inactive"
+        case signInUnverified = "sign_in_unverified"
+        case signInFailed = "sign_in_failed"
+    }
+
+    public static var consumedFields: [String] { CodingKeys.allCases.map(\.rawValue) }
+}

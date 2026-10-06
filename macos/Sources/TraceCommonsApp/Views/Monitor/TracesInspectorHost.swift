@@ -14,28 +14,23 @@ import TCShellCore
 /// session that has gone (uploaded, expired, dismissed elsewhere) is the
 /// Summary, never a stale card. A folder is read only through
 /// `TracesStore.selectedFolder` and shows Ron's Folder inspector
-/// (`FolderInspector`); one that has gone is the Summary too.
+/// (`FolderInspector`); one that has gone is the Summary too. On History it
+/// keeps the Traces selection's card: History's opened row is drawn in
+/// History's left pane, never here.
 struct TracesInspectorHost: View {
     @EnvironmentObject private var model: AppModel
     let traces: TracesStore
     let home: HomeStore
     let selection: MonitorSelection?
-    /// The History row selected on History, while it is still listed; nil
-    /// elsewhere. Until History's detail moves into the left pane (Task 8
-    /// of the #1146 port) its details are drawn here, under the banners and
-    /// the prompts like everything else the inspector shows.
-    var historyRow: DaemonData.HistoryRow? = nil
 
     /// What the inspector shows below the prompts.
     private enum Shown {
-        case history(DaemonData.HistoryRow)
         case session(DaemonData.QueueEntry)
         case folder(TracesTree.FolderNode)
         case summary
     }
 
     private var shown: Shown {
-        if let historyRow { return .history(historyRow) }
         if let entry = traces.selectedSession(selection) { return .session(entry) }
         if let folder = traces.selectedFolder(selection) { return .folder(folder) }
         return .summary
@@ -52,8 +47,6 @@ struct TracesInspectorHost: View {
             ) { GlassHealthBanner(banner: $0) }
             InspectorPrompts(store: traces)
             switch shown {
-            case .history(let row):
-                HistoryDetailInspector(row: row)
             case .session(let entry):
                 SessionReviewCard(store: traces, entry: entry)
             case .folder(let folder):

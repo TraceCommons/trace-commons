@@ -39,11 +39,12 @@ final class TracesInspectorHostTests: XCTestCase {
         XCTAssertTrue(body.contains("maxQueueEntries: model.daemonSettings?.maxQueueEntries"),
                       "the queue-full banner names the configured limit")
         XCTAssertTrue(body.contains("coreDown: TracesHealth.coreDownLine"))
-        // A selected History row's details are one arm of the same switch,
-        // below the banners and the prompts, never a pane that skips them.
-        let history = try XCTUnwrap(body.range(of: "case .history(let row):"))
-        XCTAssertLessThan(selection.lowerBound, history.lowerBound)
-        XCTAssertTrue(body.contains("HistoryDetailInspector(row: row)"))
+        // History's detail is drawn in History's left pane (Task 8 of the
+        // #1146 port): the host has no History arm and never draws it.
+        let hostSource = try Self.text("Views/Monitor/TracesInspectorHost.swift")
+        XCTAssertFalse(hostSource.contains("HistoryDetailInspector("), "the host draws History's detail")
+        XCTAssertFalse(hostSource.contains("historyRow"), "the host is handed a History row")
+        XCTAssertFalse(hostSource.contains("case history"))
         // The session arm is reached only through the resolved selection,
         // so a session that has gone is the Summary, not a stale card.
         let host = try Self.text("Views/Monitor/TracesInspectorHost.swift")
@@ -147,11 +148,11 @@ final class TracesInspectorHostTests: XCTestCase {
                 XCTAssertTrue(arm.contains("TracesInspectorHost("), "an arm skips the host: \(arm)")
             }
         }
-        XCTAssertFalse(pane.contains("HistoryDetailInspector("), "History's detail is drawn inside the host")
+        XCTAssertFalse(pane.contains("HistoryDetailInspector("), "History's detail is drawn in History's left pane")
         let flat = pane.split(whereSeparator: \.isWhitespace).joined(separator: " ")
-        XCTAssertTrue(flat.contains(
-            "TracesInspectorHost( traces: traces, home: home, selection: selection, "
-                + "historyRow: tab == .home && homePage == .history ? selectedHistoryRow : nil)"))
+        // History included: the inspector keeps the Traces selection's card
+        // (Task 8 of the #1146 port).
+        XCTAssertTrue(flat.contains("TracesInspectorHost(traces: traces, home: home, selection: selection)"))
     }
 
     /// A demand already there when the window opens opens the inspector,

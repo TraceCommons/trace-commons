@@ -77,6 +77,8 @@ public struct MonitorScreensCopy: Decodable, Equatable, Sendable {
     public let historySubmitted: String
     /// The queue's safeguards panel (Ron's #1146 `QueueStatusPanel`, #1241).
     public let safeguards: MonitorSafeguardsCopy
+    /// History's refresh and account sign-in controls (Ron's #1146).
+    public let historyActions: MonitorHistoryActionsCopy
 
     enum CodingKeys: String, CodingKey {
         case computer
@@ -142,6 +144,7 @@ public struct MonitorScreensCopy: Decodable, Equatable, Sendable {
         case windowLastHours = "window_last_hours"
         case historySubmitted = "history_submitted"
         case safeguards
+        case historyActions = "history_actions"
     }
 
     /// The payload fields this shell decodes, by wire name.
@@ -209,11 +212,13 @@ public struct MonitorScreensCopy: Decodable, Equatable, Sendable {
         "window_last_hours",
         "history_submitted",
         "safeguards",
+        "history_actions",
     ]
 
     /// Each nested table's wire fields, by its wire name.
     public static let consumedTables: [String: [String]] = [
         "safeguards": MonitorSafeguardsCopy.consumedFields,
+        "history_actions": MonitorHistoryActionsCopy.consumedFields,
     ]
 
     /// Decode the payload, or nil if it will not parse or a field is empty.
@@ -224,7 +229,7 @@ public struct MonitorScreensCopy: Decodable, Equatable, Sendable {
             return nil
         }
         let words = [copy.computer, copy.commons, copy.waiting, copy.folders, copy.watched, copy.off, copy.on, copy.connected, copy.reduce, copy.enlarge, copy.calls, copy.models, copy.priced, copy.unknown, copy.proofVerified, copy.proofGatewayOnly, copy.proofUnattested, copy.proofPending, copy.proofUnavailable, copy.proofFailed, copy.proofOutside, copy.proofUnrecorded, copy.history, copy.contributed, copy.watching, copy.paused, copy.summary, copy.week, copy.month, copy.total, copy.held, copy.withdrawn, copy.credit, copy.creditFinal, copy.pending, copy.community, copy.rank, copy.window, copy.approved, copy.unrecorded, copy.missions, copy.contributionMode, copy.mixed, copy.shared, copy.kept, copy.recentActivity, copy.flagged, copy.manageRules, copy.settings, copy.quit, copy.coreUnreachable, copy.requestFailed, copy.heldForReview, copy.heldExplanation, copy.creditNotCurrency, copy.historyShownOf, copy.historyShown, copy.signedOut, copy.projected, copy.projectedNote, copy.windowLastHours, copy.historySubmitted]
-        return words.contains(where: \.isEmpty) || !copy.safeguards.isWhole ? nil : copy
+        return words.contains(where: \.isEmpty) || !copy.safeguards.isWhole || !copy.historyActions.isWhole ? nil : copy
     }
 
     /// What a screen says for a failed read: the core's line for a core that

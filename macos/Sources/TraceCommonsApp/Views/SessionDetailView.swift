@@ -12,11 +12,16 @@ struct SessionDetailView: View {
     /// Back to the list. Nil where the detail is drawn in an inspector,
     /// which has no back control.
     let onBack: (() -> Void)?
+    /// Whether the detail draws its own Withdraw. False in the Monitor's
+    /// History pane, where Withdraw lives on the row above (Ron's #1146
+    /// `HistoryRow`), so the page has one Withdraw.
+    let offersWithdrawal: Bool
 
     @EnvironmentObject private var model: AppModel
 
-    init(record: HistoryRecord, onBack: (() -> Void)? = nil) {
+    init(record: HistoryRecord, offersWithdrawal: Bool = true, onBack: (() -> Void)? = nil) {
         self.record = record
+        self.offersWithdrawal = offersWithdrawal
         self.onBack = onBack
     }
 
@@ -85,7 +90,9 @@ struct SessionDetailView: View {
         if let detail = model.sessionDetails[record.submissionID] {
             detailContent(detail, copy: copy)
         }
-        SessionWithdrawalAction(record: record, currentStatus: Self.withdrawalStatus(record, detail: model.sessionDetails[record.submissionID]), copy: copy)
+        if offersWithdrawal {
+            SessionWithdrawalAction(record: record, currentStatus: Self.withdrawalStatus(record, detail: model.sessionDetails[record.submissionID]), copy: copy)
+        }
 
         localInstalledSkillSurface(copy)
     }

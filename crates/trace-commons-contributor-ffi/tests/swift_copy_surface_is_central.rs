@@ -466,6 +466,14 @@ fn pinned_sentences() -> Vec<(&'static str, String)> {
             "preview_copy::monitor_*_copy (#1146 inspector)",
             ron.into_iter().map(holed).collect(),
         );
+        // History's refresh and sign-in controls, in native words (#1241).
+        add(
+            "preview_copy::monitor_screens_copy history_actions",
+            table(screens["history_actions"].clone())
+                .into_iter()
+                .map(holed)
+                .collect(),
+        );
     }
     // The menu-bar Contribution mode pill, its override confirmations and
     // their refusal lines (#1173).

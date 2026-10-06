@@ -426,6 +426,30 @@ pub struct MonitorSafeguardsCopy {
     pub capacity_unreadable: &'static str,
 }
 
+/// History's refresh and account sign-in controls: the controls Ron's
+/// #1146 `history-refresh-control.tsx` and `account-sign-in-control.tsx`
+/// draw, in native words rather than his (History and withdrawal copy keep
+/// native's voice). They name no machinery and promise no timing.
+#[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
+pub struct MonitorHistoryActionsCopy {
+    /// Asks the daemon to check the server sooner (`refresh_history`).
+    pub request_refresh: &'static str,
+    pub requesting: &'static str,
+    pub refresh_requested: &'static str,
+    pub refresh_failed: &'static str,
+    /// The account session has not been read yet.
+    pub checking_account: &'static str,
+    /// In Withdraw's place on a row while no account session is active.
+    pub sign_in_to_withdraw: &'static str,
+    pub waiting_for_sign_in: &'static str,
+    pub complete_sign_in: &'static str,
+    /// Sign-in returned, and the re-read session is not active.
+    pub sign_in_inactive: &'static str,
+    /// Sign-in returned, and the session could not be re-read.
+    pub sign_in_unverified: &'static str,
+    pub sign_in_failed: &'static str,
+}
+
 /// The one table of the monitor's Traces words. See [`MonitorTracesCopy`].
 #[must_use]
 pub fn monitor_traces_copy() -> MonitorTracesCopy {
@@ -757,6 +781,8 @@ pub struct MonitorScreensCopy {
     pub history_submitted: &'static str,
     /// The queue's safeguards panel (Ron's #1146 `QueueStatusPanel`).
     pub safeguards: MonitorSafeguardsCopy,
+    /// History's refresh and account sign-in controls (#1146).
+    pub history_actions: MonitorHistoryActionsCopy,
 }
 
 /// The one table of the monitor screens' words. See [`MonitorScreensCopy`].
@@ -839,6 +865,21 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             held_by_limit: "{count} queued sessions held by limit",
             capacity_unreadable: "Some approved sessions may be waiting and have not been sent, \
                 but this build could not read how many or why.",
+        },
+        history_actions: MonitorHistoryActionsCopy {
+            request_refresh: "Check for updates",
+            requesting: "Checking for updates\u{2026}",
+            refresh_requested: "Asked Trace Commons for the latest results. Changes show here when they arrive.",
+            refresh_failed: "Could not ask for updates. Nothing changed; try again.",
+            checking_account: "Reading your account\u{2026}",
+            sign_in_to_withdraw: "Sign in to your account",
+            waiting_for_sign_in: "Signing in\u{2026}",
+            complete_sign_in: "Finish signing in in your browser, then come back here.",
+            sign_in_inactive: "Sign-in finished, but this device is still signed out of your \
+                Trace Commons account. Sign in again to withdraw.",
+            sign_in_unverified: "Sign-in finished, but your account could not be checked. \
+                Sign in again before withdrawing.",
+            sign_in_failed: "Sign-in did not finish. Nothing was withdrawn; sign in again to withdraw.",
         },
     }
 }
@@ -928,6 +969,7 @@ mod tests {
             "/look_inside/",
             "/undo/",
             "/safeguards/",
+            "/history_actions/",
         ] {
             assert!(
                 words.iter().any(|(key, _)| key.starts_with(table)),
@@ -976,6 +1018,35 @@ mod tests {
         // A singular is its own line, never a plural with a 1 in it.
         assert!(!traces.counts.sessions_waiting_one.contains('{'));
         assert!(!traces.counts.project_count_one.contains('{'));
+    }
+
+    /// History's refresh and sign-in controls are native words, not Ron's
+    /// #1146 literals: History and withdrawal copy keep native's voice. They
+    /// name no machinery (daemon, core, server) and promise no timing.
+    #[test]
+    fn history_actions_speak_in_native_voice() {
+        let words = words_of(&monitor_screens_copy().history_actions);
+        assert_eq!(words.len(), 11, "every history action is read");
+        let ron = [
+            "Request server refresh",
+            "Sign in to withdraw",
+            "Refresh requested. The daemon checks server results asynchronously.",
+            "Refresh request failed. Try again when the core is available.",
+            "Checking account session\u{2026}",
+            "Waiting for sign-in\u{2026}",
+            "Complete sign-in in your browser. This may take up to five minutes.",
+        ];
+        for (key, word) in &words {
+            assert!(!word.is_empty(), "{key} is empty");
+            assert!(
+                !ron.contains(&word.as_str()),
+                "{key} is Ron's literal: {word}"
+            );
+            let lower = word.to_lowercase();
+            for machinery in ["daemon", "core", "server", "asynchronous", "minute"] {
+                assert!(!lower.contains(machinery), "{key} says {machinery}: {word}");
+            }
+        }
     }
 
     /// Every `{...}` in the monitor tables is one [`MONITOR_PLACEHOLDERS`]

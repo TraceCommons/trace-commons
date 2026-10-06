@@ -614,7 +614,7 @@ final class TracesParityTests: XCTestCase {
 
         // The inspector reads the resolved selection, never the stored one:
         // the window hands the stored one to the host, which resolves it.
-        XCTAssertTrue(window.contains("traces: traces, home: home, selection: selection,"))
+        XCTAssertTrue(window.contains("TracesInspectorHost(traces: traces, home: home, selection: selection"))
         XCTAssertTrue(try Self.text("Views/Monitor/TracesInspectorHost.swift")
             .contains("traces.selectedSession(selection)"))
         XCTAssertFalse(window.contains("selectedEntry"), "no entry is picked by the raw stored selection")
