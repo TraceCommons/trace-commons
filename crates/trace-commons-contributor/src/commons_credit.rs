@@ -21,13 +21,10 @@
 //!
 //! # Naming: these are the COMMONS' figures
 //!
-//! #1118's open decision #1 is which ledger is of record for credit: the
-//! commons (this route -- points, settlement posture) or near.ai (the cloud
-//! balance in dollars, `near_ai_balance`). This client does not decide that
-//! question, and neither does the daemon. Every field this module exposes is
-//! named `commons_*` so a caller cannot mistake one ledger's figures for the
-//! other's, and the daemon presents both without preferring either. See
-//! `daemon::commons_credit`'s module doc for the IPC-side half of that rule.
+//! #1118's decision makes the commons record the source of pending credit;
+//! dollars stay on near.ai as a link-out. Every field exposed here is named
+//! `commons_*` so a caller preserves provenance rather than converting points
+//! into a near.ai dollar balance. See `daemon::commons_credit` for the IPC half.
 //!
 //! Never logs or returns a path, a token, or trace content: errors here are
 //! a bare "did this work" (only an exactly-200 response counts), matching

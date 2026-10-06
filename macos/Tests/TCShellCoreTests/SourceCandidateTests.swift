@@ -158,4 +158,60 @@ final class SourceCandidateTests: XCTestCase {
             """
         XCTAssertEqual(try SourceCandidate.decodeList(from: json).count, 0)
     }
+
+    /// What `tc_describe_folder` returns for a flat folder of `.json`
+    /// exports: an OpenCode row and a trajectory row, both naming the picked
+    /// folder. Both survive, so the shell has two matches to ask between
+    /// rather than one it would take as certain.
+    func testADescribedFlatJsonFolderKeepsBothRows() throws {
+        let json = """
+            [{"source":"opencode","path":"/Users/someone/exports","exists":true,
+              "session_count":2,"most_recent":"2026-10-04T09:00:00.123456789Z",
+              "relocated_by_env":false,"answers_at":null},
+             {"source":"trajectory","path":"/Users/someone/exports","exists":true,
+              "session_count":2,"most_recent":"2026-10-04T09:00:00.123456789Z",
+              "relocated_by_env":false,"answers_at":null}]
+            """
+        let matches = try FolderMatch.decodeList(from: json)
+        XCTAssertEqual(matches.map(\.kind), [.source(.opencode), .trajectory])
+        XCTAssertEqual(matches.map(\.path), ["/Users/someone/exports", "/Users/someone/exports"])
+        XCTAssertEqual(matches.map(\.sessionCount), [2, 2])
+        XCTAssertTrue(matches.allSatisfy { $0.mostRecent != nil })
+        XCTAssertEqual(matches[0].candidate?.source, .opencode)
+        XCTAssertNil(matches[1].candidate)
+    }
+
+    /// A trajectory-only export is one trajectory match, not no match: a
+    /// declared Letta trajectory folder is a recognised kind.
+    func testADescribedJsonlFolderIsOneTrajectoryRow() throws {
+        let json = """
+            [{"source":"trajectory","path":"/Users/someone/runs","exists":true,
+              "session_count":3,"most_recent":null,
+              "relocated_by_env":false,"answers_at":null}]
+            """
+        let matches = try FolderMatch.decodeList(from: json)
+        XCTAssertEqual(matches.map(\.kind), [.trajectory])
+        XCTAssertEqual(matches.first?.sessionCount, 3)
+    }
+
+    /// A slug this build has never heard of is kept as a match it cannot
+    /// name, not dropped: dropping it would turn two matches into one and
+    /// the shell would stop asking.
+    func testADescribedFolderKeepsAnUnknownKind() throws {
+        let json = """
+            [{"source":"codex","path":"/p","exists":true,"session_count":1,
+              "most_recent":null,"relocated_by_env":false,"answers_at":"OpenAI"},
+             {"source":"some-future-tool","path":"/p","exists":true,"session_count":1,
+              "most_recent":null,"relocated_by_env":false,"answers_at":null}]
+            """
+        let matches = try FolderMatch.decodeList(from: json)
+        XCTAssertEqual(matches.map(\.kind), [.source(.codex), .unrecognised("some-future-tool")])
+        XCTAssertEqual(matches[0].answersAt, "OpenAI")
+    }
+
+    /// A folder that matches no layout is an empty array, and decodes to no
+    /// matches rather than failing.
+    func testAnUnrecognisedFolderDecodesToNoMatches() throws {
+        XCTAssertEqual(try FolderMatch.decodeList(from: "[]"), [])
+    }
 }

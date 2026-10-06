@@ -68,6 +68,14 @@ final class DaemonClient {
         self.daemon = daemon
     }
 
+    func managedSnapshot() throws -> ManagedSnapshot {
+        try call("managed_snapshot", as: ManagedSnapshot.self)
+    }
+
+    func managedAction(_ method: String, params: [String: Any]) throws -> [String: Any] {
+        try resultObject(method, params: params)
+    }
+
     // MARK: - Read
 
     func nativeWalletFlow(action: String, flowID: String, commons: String, account: String) throws -> NativeWalletView {
@@ -226,8 +234,11 @@ final class DaemonClient {
         try call("history_rollup", as: HistoryRollup.self)
     }
 
-    func refreshHistory() throws {
-        _ = try rawResult("refresh_history")
+    /// Asks the daemon's poller to check the server sooner. True when the
+    /// daemon says the refresh was requested.
+    func refreshHistory() throws -> Bool {
+        struct Reply: Decodable { let requested: Bool? }
+        return try call("refresh_history", as: Reply.self).requested == true
     }
 
     func sessionDetail(submissionID: String) throws -> SessionDetail {
@@ -650,7 +661,7 @@ final class DaemonClient {
     /// the contract only ever reports `unavailable` / `enroll-failed` for
     /// this method, on purpose, because the underlying issuer response can
     /// carry a URL or a response body that must never reach a UI. See
-    /// `OnboardingConnectView`.
+    /// `AppModel.enroll(invite:scopes:)` and `FoldersScreenLayout.notice`.
     func enroll(invite: String, scopes: [String] = []) throws -> EnrollResult {
         var params: [String: Any] = ["invite": invite]
         if !scopes.isEmpty { params["scopes"] = scopes }
@@ -690,10 +701,10 @@ final class DaemonClient {
     /// Replaces the enrolled device's consent scopes. Local config write
     /// only -- no network I/O -- and requires an existing enrollment
     /// (`unavailable` / `not-logged-in` otherwise, per the contract). Used
-    /// by the onboarding consent screen: `enroll` is always called with no
-    /// scopes (floor scope only), and this call is what actually applies
-    /// whatever the contributor ticked on `ConsentScopesView`, once they
-    /// confirm it -- see "### `set_consent_scopes`" in the contract.
+    /// by the first run's Start: `enroll` is always called with no scopes
+    /// (floor scope only), and this call is what actually applies whatever
+    /// the contributor ticked on the Uses screen, once they press Start --
+    /// see "### `set_consent_scopes`" in the contract.
     @discardableResult
     func setConsentScopes(_ scopes: [String]) throws -> [String] {
         struct Wrapper: Decodable {
@@ -969,6 +980,24 @@ final class DaemonClient {
     func openPreview(entryID: String) throws -> TCPreview {
         try daemon.openPreview(entryID: entryID)
     }
+
+    /// The turn index over the body whose digest is `bodyDigest`, or nil
+    /// when the core refused (a changed body among them) or this client is
+    /// not over a live daemon. Nil is never an empty index.
+    func previewTurns(entryID: String, bodyDigest: String) -> PreviewTurns? {
+        guard let live = daemon as? TCDaemon else { return nil }
+        return PreviewTurns.decode(
+            fromJSON: TCPreviewTurns.turnsJSON(daemon: live, entryID: entryID, bodyDigest: bodyDigest))
+    }
+
+    #if DEBUG
+    /// K2 (#1173): whether this daemon is running a developer dry run, as
+    /// its own `status` reports it. False when the call fails.
+    func devDryRunActive() -> Bool {
+        guard let data = try? rawResult("status") else { return false }
+        return DaemonDataWiring.devDryRun(fromStatus: data)
+    }
+    #endif
 
     // MARK: - Plumbing
 

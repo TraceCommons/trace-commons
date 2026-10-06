@@ -1431,7 +1431,19 @@ fn force_rls_migration_covers_every_trace_rls_table() {
         "../../../migrations/V108__versioned_pipeline_attempt_artifacts.sql"
     ));
     sql.push_str(include_str!(
-        "../../../migrations/V109__external_account_trust_evaluations.sql"
+        "../../../migrations/V110__versioned_pipeline_activation.sql"
+    ));
+    sql.push_str(include_str!(
+        "../../../migrations/V111__versioned_pipeline_policy_interventions.sql"
+    ));
+    sql.push_str(include_str!(
+        "../../../migrations/V112__versioned_pipeline_activation_gate.sql"
+    ));
+    sql.push_str(include_str!(
+        "../../../migrations/V113__versioned_pipeline_rebuild_fence.sql"
+    ));
+    sql.push_str(include_str!(
+        "../../../migrations/V114__external_account_trust_evaluations.sql"
     ));
     // `trace_pii_backstop` carries the same tenant-isolation policy but is not
     // in `TRACE_COMMONS_RLS_TABLES`, so assert it here rather than lose the
@@ -1534,7 +1546,19 @@ fn central_rls_tenant_predicate_migration_covers_every_trace_rls_table() {
         "../../../migrations/V108__versioned_pipeline_attempt_artifacts.sql"
     ));
     sql.push_str(include_str!(
-        "../../../migrations/V109__external_account_trust_evaluations.sql"
+        "../../../migrations/V110__versioned_pipeline_activation.sql"
+    ));
+    sql.push_str(include_str!(
+        "../../../migrations/V111__versioned_pipeline_policy_interventions.sql"
+    ));
+    sql.push_str(include_str!(
+        "../../../migrations/V112__versioned_pipeline_activation_gate.sql"
+    ));
+    sql.push_str(include_str!(
+        "../../../migrations/V113__versioned_pipeline_rebuild_fence.sql"
+    ));
+    sql.push_str(include_str!(
+        "../../../migrations/V114__external_account_trust_evaluations.sql"
     ));
     for table in expected_trace_rls_tables()
         .into_iter()
@@ -6211,7 +6235,7 @@ async fn store_facade_drains_withdrawal_evictions_across_tenants() {
 
 #[test]
 fn internal_trust_dependency_migration_forces_guard_only_rls() {
-    let sql = include_str!("../../../migrations/V109__external_account_trust_evaluations.sql");
+    let sql = include_str!("../../../migrations/V114__external_account_trust_evaluations.sql");
     for table in trace_commons_server::db::postgres::TRACE_COMMONS_INTERNAL_RLS_TABLES {
         assert!(sql.contains(&format!("ALTER TABLE {table} ENABLE ROW LEVEL SECURITY;")));
         assert!(sql.contains(&format!("ALTER TABLE {table} FORCE ROW LEVEL SECURITY;")));

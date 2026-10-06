@@ -144,7 +144,9 @@ impl Fixture {
                 | "discover_routing"
                 // Settings' K11 disclosure; refused, it draws its unreadable
                 // line.
-                | "route_disclosure" => {
+                | "route_disclosure"
+                // Private AI's saved-account panel; refused, it stays empty.
+                | "managed_snapshot" => {
                     self.reply(id, Err("synthetic_read_refused".into()));
                 }
                 _ => panic!("unexpected billing-side operation: {method}"),

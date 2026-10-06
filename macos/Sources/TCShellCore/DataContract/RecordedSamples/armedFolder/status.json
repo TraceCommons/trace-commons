@@ -53,5 +53,6 @@
   },
   "contribution_override": null,
   "contribution_mode": "auto_upload",
-  "contribution_mode_partial": false
+  "contribution_mode_partial": false,
+  "dev_dry_run": false
 }

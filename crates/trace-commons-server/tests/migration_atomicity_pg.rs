@@ -1663,10 +1663,10 @@ async fn v90_gives_a_pilot_shaped_runtime_group_what_submit_repost_and_withdraw_
 }
 
 /// Role setup must work for CREATEROLE without accepting an existing role
-/// that can bypass RLS. Exercise the actual V109 blocks with private role
+/// that can bypass RLS. Exercise the actual V114 blocks with private role
 /// names and transactional DDL, so no cluster-wide roles survive the probe.
 #[tokio::test]
-async fn v109_role_setup_accepts_restricted_roles_and_rejects_elevated_roles() {
+async fn v114_role_setup_accepts_restricted_roles_and_rejects_elevated_roles() {
     let Some(url) = std::env::var("TRACE_COMMONS_PG_TEST_DATABASE_URL")
         .or_else(|_| std::env::var("DATABASE_URL"))
         .ok()
@@ -1675,7 +1675,7 @@ async fn v109_role_setup_accepts_restricted_roles_and_rejects_elevated_roles() {
         return;
     };
     let migration =
-        include_str!("../../../migrations/V109__external_account_trust_evaluations.sql");
+        include_str!("../../../migrations/V114__external_account_trust_evaluations.sql");
     let mut admin = connect(&url).await;
     for role in [
         "trace_account_trust_evaluator",
@@ -1685,27 +1685,27 @@ async fn v109_role_setup_accepts_restricted_roles_and_rejects_elevated_roles() {
         let start = migration[..create].rfind("DO $$ BEGIN").unwrap();
         let end_marker = format!("ALTER ROLE {role} NOLOGIN;");
         let end = create + migration[create..].find(&end_marker).unwrap() + end_marker.len();
-        let setup = migration[start..end].replace(role, "trace_v109_role_probe");
+        let setup = migration[start..end].replace(role, "trace_v114_role_probe");
         for existing in [None, Some("LOGIN"), Some("SUPERUSER"), Some("BYPASSRLS")] {
             let tx = admin.transaction().await.expect("begin role probe");
             tx.batch_execute(
-                "CREATE ROLE trace_v109_owner_probe CREATEROLE NOSUPERUSER NOBYPASSRLS;",
+                "CREATE ROLE trace_v114_owner_probe CREATEROLE NOSUPERUSER NOBYPASSRLS;",
             )
             .await
             .expect("create ordinary migrator");
             // A benign existing role must be owned/administered by the
             // migrator on PostgreSQL 16+, just like roles it created earlier.
             if existing == Some("LOGIN") {
-                tx.batch_execute("SET LOCAL ROLE trace_v109_owner_probe;")
+                tx.batch_execute("SET LOCAL ROLE trace_v114_owner_probe;")
                     .await
                     .expect("use migrator for benign role creation");
             }
             if let Some(attributes) = existing {
-                tx.batch_execute(&format!("CREATE ROLE trace_v109_role_probe {attributes};"))
+                tx.batch_execute(&format!("CREATE ROLE trace_v114_role_probe {attributes};"))
                     .await
                     .expect("create existing role");
             }
-            tx.batch_execute("SET LOCAL ROLE trace_v109_owner_probe;")
+            tx.batch_execute("SET LOCAL ROLE trace_v114_owner_probe;")
                 .await
                 .expect("use ordinary migrator");
             let result = tx.batch_execute(&setup).await;
@@ -1713,7 +1713,7 @@ async fn v109_role_setup_accepts_restricted_roles_and_rejects_elevated_roles() {
                 let error = result.expect_err("elevated role must be refused");
                 assert_eq!(
                     error.as_db_error().expect("database error").message(),
-                    "trace_v109_role_probe must be NOSUPERUSER NOBYPASSRLS",
+                    "trace_v114_role_probe must be NOSUPERUSER NOBYPASSRLS",
                     "{role}: existing {existing:?} must fail at the explicit security check"
                 );
             } else {
@@ -1721,7 +1721,7 @@ async fn v109_role_setup_accepts_restricted_roles_and_rejects_elevated_roles() {
                 let safe: bool = tx
                     .query_one(
                         "SELECT NOT rolcanlogin AND NOT rolsuper AND NOT rolbypassrls
-                         FROM pg_roles WHERE rolname = 'trace_v109_role_probe'",
+                         FROM pg_roles WHERE rolname = 'trace_v114_role_probe'",
                         &[],
                     )
                     .await

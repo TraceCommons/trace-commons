@@ -1,3 +1,5 @@
+import Combine
+import CryptoKit
 import Foundation
 import SwiftUI
 import TCBridge
@@ -10,6 +12,58 @@ import TCShellCore
 /// back before touching any published property.
 @MainActor
 final class AppModel: ObservableObject {
+    @Published var managedSnapshot: ManagedSnapshot? {
+        didSet { if let copy = managedSnapshot?.copy { managedCopy = copy } }
+    }
+    @Published var managedBusy = false
+    /// The copy key of the last failed managed action (`ManagedSurface.errorKey`),
+    /// never the daemon's code.
+    @Published var managedErrorKey: String?
+    /// The last copy table the daemon sent, kept when a later read fails so
+    /// the connecting and failure states still have their words.
+    private var managedCopy: [String: String] = [:]
+
+    func managedText(_ key: String) -> String { managedCopy[key] ?? "" }
+
+    func refreshManagedSessions() {
+        perform("managed_snapshot", work: { try $0.managedSnapshot() }) { snapshot in
+            if snapshot.revision >= (self.managedSnapshot?.revision ?? 0), self.managedSnapshot != snapshot { self.managedSnapshot = snapshot }
+        }
+    }
+
+    func managedAction(_ method: String, params: [String: Any], openTerminal: Bool = false, newAccountKey: String? = nil) {
+        guard let client, !managedBusy else { return }
+        managedBusy = true
+        managedErrorKey = nil
+        Task.detached(priority: .userInitiated) {
+            let result = Result {
+                var response = try client.managedAction(method, params: params)
+                if method == "managed_account_add", let accountID = response["id"] as? String {
+                    if let key = newAccountKey {
+                        response = try client.managedAction("managed_account_set_key", params: ["account_id": accountID, "key": key])
+                    } else {
+                        response = try client.managedAction("managed_account_reconnect", params: ["account_id": accountID])
+                    }
+                }
+                if openTerminal {
+                    guard let session = response["session_id"] as? String,
+                          let ticket = response["ticket"] as? String else {
+                        throw DaemonClient.Failure(code: "launch-unknown", message: "managed-launch-unknown")
+                    }
+                    _ = try client.managedAction("managed_terminal_launch", params: ["session_id": session, "ticket": ticket])
+                }
+            }
+            await MainActor.run {
+                self.managedBusy = false
+                if case .failure(let error) = result {
+                    let failure = error as? DaemonClient.Failure
+                    self.managedErrorKey = ManagedSurface.errorKey(code: failure?.code, message: failure?.message)
+                }
+                self.refreshManagedSessions()
+            }
+        }
+    }
+
     enum Startup: Equatable {
         case starting
         /// The daemon is running in-process.
@@ -112,7 +166,18 @@ final class AppModel: ObservableObject {
 
     init(daemonStartup: DaemonStartup? = nil) {
         self.daemonStartup = daemonStartup ?? DaemonStartup()
+        // `@Published` emits in `willSet`, so the emitted value is read,
+        // not `PendingInvite.shared.value`. Delivered on the main actor:
+        // `PendingInvite` is main-actor isolated.
+        inviteLinks = PendingInvite.shared.$value.sink { [weak self] invite in
+            guard invite != nil else { return }
+            MainActor.assumeIsolated { self?.inviteLinkArrived() }
+        }
     }
+    private var inviteLinks: AnyCancellable?
+    /// An invite link arrived before the config directory was known, so the
+    /// watch-only marker it takes back is cleared once it is.
+    private var inviteAwaitsConfigDirectory = false
     @Published private(set) var status: DaemonStatus = .unknown {
         didSet {
             if status.accountScope != oldValue.accountScope {
@@ -145,6 +210,20 @@ final class AppModel: ObservableObject {
     /// -- a raw stat and the cap -- never a would-send estimate.
     @Published private(set) var tooLarge: [String: PreviewTooLarge] = [:]
     @Published private(set) var history: [HistoryRecord] = []
+    /// Whether the last `status` read failed. Until a status answers, a
+    /// failed read is the gates' answer: `LaunchRouting.onboardingKnown`
+    /// takes it as known, and the unanswered status requires onboarding, so
+    /// every write surface stays closed (fail closed). The launch does not
+    /// open first run on it (`LaunchRouting.launchOpening`): the next status
+    /// event re-reads, and an onboarded install is not sent to Welcome by a
+    /// transient failure.
+    @Published private(set) var statusReadFailed = false
+    /// Whether the daemon has answered `list_pending` (or sent a snapshot)
+    /// and `list_history`. Until then `pending` and `history` are
+    /// placeholders, and an empty one is not "none"; a failed read leaves
+    /// them false.
+    @Published private(set) var queueAnswered = false
+    @Published private(set) var historyAnswered = false
     @Published private(set) var rollup: HistoryRollup?
     @Published private(set) var projects: [ProjectRow] = []
     /// The one project the daemon suggests arming, or nil. Refreshed
@@ -742,13 +821,16 @@ final class AppModel: ObservableObject {
     /// judgement of what was left rather than a certificate. The card says
     /// so, in the Rust's words.
     func clearWitness() {
-        writeWitness { TCWitness.clear(configDir: $0) }
+        writeWitness(clearsDraft: true) { TCWitness.clear(configDir: $0) }
     }
 
     /// Nothing is applied optimistically. The write's own answer decides
     /// only whether a refusal label is shown; what the card renders is the
     /// state and status read back afterwards.
-    private func writeWitness(_ work: @escaping @Sendable (String) -> TCWitness.Outcome) {
+    ///
+    /// `clearsDraft`: a clear that succeeds leaves nothing for an edited
+    /// field to describe, so the fields read the daemon again.
+    private func writeWitness(clearsDraft: Bool = false, _ work: @escaping @Sendable (String) -> TCWitness.Outcome) {
         let dir = configDirectory
         guard !dir.isEmpty else { return }
         witnessBusy = true
@@ -759,6 +841,7 @@ final class AppModel: ObservableObject {
             let read = TCWitness.statusJSON(configDir: dir)
             await MainActor.run {
                 self.witnessBusy = false
+                if clearsDraft, case .done = wrote { self.witnessDraft = nil }
                 self.publishWitness(code: code, read: read, wrote: wrote)
             }
         }
@@ -856,13 +939,21 @@ final class AppModel: ObservableObject {
     /// Nothing here clears it on the way to somewhere else -- only two
     /// actions ever assign it, so unlike `lastActionError` it is not
     /// overwritten by the next thing that goes wrong. Its dismiss control on
-    /// the Waiting screen is therefore the only way out of it, which is why
-    /// it has one: see `ActionMessageBanner`.
+    /// the Traces tab (`TracesOffersBar`'s notice) is therefore the only way
+    /// out of it, which is why it has one.
     @Published var lastActionNotice: String?
+    /// What a finished first run must still say -- Automatic was refused, so
+    /// sharing is on Ask me -- shown above every section once the first-run
+    /// host has gone (`FirstRunDaemon.firstRunFinished`). The core's
+    /// sentence; dismissed by the person.
+    @Published var firstRunNotice: String?
 
     private var daemon: TCDaemon?
     private var client: DaemonClient?
     var skillLearningClient: DaemonClient? { client }
+    /// The client the first run's passkey sheets complete their ceremony
+    /// with (`LivePasskeyAccount`). Nil while no daemon is running.
+    var passkeyClient: DaemonClient? { client }
     private var subscription: TCSubscription?
     /// The C1 data contract's live client (K1 of #1173), for screens that
     /// read through `DaemonDataClient`. Created with the daemon and fed by
@@ -982,14 +1073,14 @@ final class AppModel: ObservableObject {
         // And the held-folder notice, which names the folders and says why --
         // again only when it is going to be drawn.
         if label == GateHeld.label && gateHeldNotice != nil { return nil }
-        return HealthCopy.forLabel(label)
+        return HealthCopy.core(label: label, maxQueueEntries: daemonSettings?.maxQueueEntries)
     }
 
     /// The notice for armed folders the automatic-contribution gate is
     /// holding, in the Rust's words, when there are any. Independent of
     /// `health` for the reason `witnessCapacityHealth` is. Nil when nothing
     /// is held or the notice cannot be read; the label, if it holds the
-    /// slot, then falls back to `forLabel`'s on-hold line.
+    /// slot, then falls back to the core's on-hold line.
     var gateHeldNotice: GateHeldNotice? {
         guard status.gateHeld.held else { return nil }
         return TCConsentCopy.gateHeldNoticeJSON(forHeld: status.gateHeld.json)
@@ -1023,7 +1114,13 @@ final class AppModel: ObservableObject {
     /// Held so the roots screen starts the daemon against the same directory
     /// that refused, rather than re-resolving and possibly disagreeing with
     /// it.
-    private(set) var configDirectory: String = ""
+    private(set) var configDirectory: String = "" {
+        didSet {
+            guard inviteAwaitsConfigDirectory, !configDirectory.isEmpty else { return }
+            inviteAwaitsConfigDirectory = false
+            inviteLinkArrived()
+        }
+    }
 
     /// Whether the watcher this shell is driving belongs to another
     /// process.
@@ -1044,7 +1141,7 @@ final class AppModel: ObservableObject {
 
     var traceNavigationReady: Bool {
         guard case .running = startup else { return false }
-        return status.loggedIn && isOnboardingComplete
+        return !requiresOnboarding
     }
 
     func start() {
@@ -1091,6 +1188,20 @@ final class AppModel: ObservableObject {
                 self.startup = .running
                 self.subscribe()
                 self.refreshAll()
+                #if DEBUG
+                // K2 (#1173): console-only, so a developer can confirm the
+                // dry run took before trusting the screens. Asked of the
+                // daemon, not read from the environment, so it matches the
+                // daemon's own mode. A label, not a sentence
+                // (`ShellWordingTests`).
+                if let client = self.client {
+                    Task.detached {
+                        if client.devDryRunActive() {
+                            NSLog("TraceCommons: status.dev_dry_run=true")
+                        }
+                    }
+                }
+                #endif
             case .failure(TCDaemon.TCError.rootsNotDeclared):
                 self.startup = .needsRoots
             case .failure(let error):
@@ -1127,6 +1238,7 @@ final class AppModel: ObservableObject {
         switch event {
         case .snapshot(let pending, let status):
             applyPendingUpdate(pending)
+            recordRead("status", answered: true)
             publishIfChanged(\.status, status)
         case .previewReady(let result):
             applyPreviewOutcome(result)
@@ -1179,10 +1291,11 @@ final class AppModel: ObservableObject {
                 creditPending: credit
             )
         case .resyncRequired, .lagged:
+            refreshManagedSessions()
             refreshQueue()
             refreshStatus()
-        case .unknown:
-            break
+        case .unknown(let name):
+            if name == "managed_changed" { refreshManagedSessions() }
         }
     }
 
@@ -1259,6 +1372,7 @@ final class AppModel: ObservableObject {
     // MARK: - Refresh
 
     func refreshAll() {
+        refreshManagedSessions()
         refreshStatus()
         refreshQueue()
         refreshHistory()
@@ -1283,7 +1397,10 @@ final class AppModel: ObservableObject {
     }
 
     func refreshStatus() {
-        perform("status", work: { try $0.status() }) { self.publishIfChanged(\.status, $0) }
+        perform("status", work: { try $0.status() }, onFailure: { self.publishIfChanged(\.statusReadFailed, true) }) {
+            self.publishIfChanged(\.status, $0)
+            self.publishIfChanged(\.statusReadFailed, false)
+        }
     }
 
     func refreshQueue() {
@@ -1295,6 +1412,7 @@ final class AppModel: ObservableObject {
     func refreshHistory() {
         perform("list_history", work: { try $0.listHistory() }) {
             self.publishIfChanged(\.history, $0)
+            self.publishIfChanged(\.historyAnswered, true)
         }
         perform("history_rollup", work: { try $0.historyRollup() }) {
             self.publishIfChanged(\.rollup, $0)
@@ -1477,6 +1595,9 @@ final class AppModel: ObservableObject {
         routingChecking = form.on
         perform("set_settings", work: { try $0.setIronWire(form) }) { view in
             self.publishIfChanged(\.daemonSettings, view)
+            // The daemon now holds this form, so the card reads it again --
+            // unless the person has edited past it while the write was out.
+            if self.routingDraft == form { self.routingDraft = nil }
             guard form.on else {
                 self.routingChecking = false
                 return
@@ -1551,11 +1672,6 @@ final class AppModel: ObservableObject {
         case failed
     }
 
-    /// Redeems `invite` for enrollment. Bypasses the `perform` helper (and
-    /// its `lastActionError` label) on purpose: that helper renders
-    /// `failure.message`, and `enroll`'s failure message must never reach a
-    /// screen -- `OnboardingConnectView` renders one fixed sentence for
-    /// every failure of this call instead.
     /// What a preparation did, and the words the daemon chose for it.
     ///
     /// This used to return `AdmissionPreparation?` through `try?`, which threw
@@ -1627,6 +1743,12 @@ final class AppModel: ObservableObject {
         }.value
     }
 
+    /// Redeems `invite` for enrollment. Bypasses the `perform` helper (and
+    /// its `lastActionError` label) on purpose: that helper renders
+    /// `failure.message`, and `enroll`'s failure message must never reach a
+    /// screen -- the first run's Folders and Tools steps show the core's
+    /// `enroll_refused` for every failure of this call instead
+    /// (`FirstRunFailure.enrollFailed`, `FoldersScreenLayout.notice`).
     func enroll(invite: String, scopes: [String] = []) async -> EnrollOutcome {
         guard let client else { return .failed }
         let outcome = await Task.detached(priority: .userInitiated) { () -> EnrollOutcome in
@@ -1758,12 +1880,12 @@ final class AppModel: ObservableObject {
         case failed
     }
 
-    /// Applies the consent scopes chosen on `ConsentScopesView`. Bypasses
-    /// `perform` (like `enroll`) so the onboarding coordinator can await the
-    /// outcome and only advance past the consent screen once the daemon has
-    /// actually recorded the choice -- see the coordinator's ordering note
-    /// on why this call, not `enroll`, is what applies scopes in this app's
-    /// flow.
+    /// Applies the consent scopes chosen on the first run's Uses screen
+    /// (`FirstRunCall.setConsentScopes`, the first call of Start). Bypasses
+    /// `perform` (like `enroll`) so the first run's runner can await the
+    /// outcome and stop Start with `scopesFailed` unless the daemon actually
+    /// recorded the choice. This call, not `enroll`, applies scopes in this
+    /// app's flow: `FirstRunPlan` enrolls with none.
     func setConsentScopes(_ scopes: [String]) async -> SetScopesOutcome {
         guard let client else { return .failed }
         let outcome: SetScopesOutcome = await Task.detached(priority: .userInitiated) {
@@ -1778,10 +1900,71 @@ final class AppModel: ObservableObject {
             refreshStatus()
             refreshAudit()
         } else if let confirmed = await Task.detached(operation: { try? client.status() }).value {
+            recordRead("status", answered: true)
             publishIfChanged(\.status, confirmed)
         }
         return outcome
     }
+
+    // MARK: - Settings section state
+    //
+    // The Settings window draws a fresh section view per section
+    // (`.id(section)`), so a section's `@State` is thrown away by switching
+    // section. What must survive that -- a write in flight, its refusal, a
+    // half-typed draft -- lives here, where every section view reads it and
+    // none owns it (G8 of #1229).
+
+    /// A Settings consent write is in flight. While it is, every consent row
+    /// is disabled, wherever it is drawn.
+    @Published private(set) var consentWriteBusy = false
+    /// The last Settings consent write was refused. The words are the core's,
+    /// chosen when drawn (`ConsentScopeRows.refusalLine`).
+    @Published private(set) var consentWriteRefused = false
+
+    /// Adds or removes one optional scope from Settings, sending the daemon's
+    /// own list with this one changed. The list is built when the write
+    /// starts, from what the daemon reported, and no second write starts
+    /// until the first has answered: a list built while one is in flight
+    /// would still hold the scope that write withdraws.
+    func toggleConsentScope(_ scope: ConsentScope, granted: Bool, options: [ConsentScope]) async {
+        guard !consentWriteBusy, status.loggedIn, !scope.alwaysOn else { return }
+        let scopes = ConsentScopeRows.nextScopes(
+            reported: status.consentScopes, options: options, toggling: scope, granted: granted)
+        consentWriteRefused = false
+        consentWriteBusy = true
+        if case .failed = await setConsentScopes(Array(scopes)) {
+            consentWriteRefused = true
+        }
+        consentWriteBusy = false
+    }
+
+    /// A Watched folders write is in flight; the card is disabled until it
+    /// answers.
+    @Published private(set) var sourceRootBusy = false
+    /// The last Watched folders write was refused.
+    @Published private(set) var sourceRootSaveFailed = false
+
+    func saveSourceRoot(_ kind: SourceKind, _ choice: SourceChoice) async {
+        guard !sourceRootBusy else { return }
+        sourceRootBusy = true
+        sourceRootSaveFailed = false
+        sourceRootSaveFailed = !(await setSourceRoot(kind, choice))
+        sourceRootBusy = false
+    }
+
+    /// The login item's last refusal, in the words it was drawn with.
+    @Published var loginItemActionError: String?
+    /// The routing card's edited form; `nil` means nothing has been edited
+    /// and the card reads the daemon's answer.
+    @Published var routingDraft: RoutingForm?
+    /// The witness card's edited fields; `nil` means nothing has been edited.
+    @Published var witnessDraft: WitnessForm?
+    /// The public profile's edited handle and bio; `nil` means that field
+    /// has not been edited and reads the daemon's answer. On the model so a
+    /// section switch keeps an edit, and so a background refresh of the
+    /// profile cannot rewrite what is being typed.
+    @Published var profileHandleDraft: String?
+    @Published var profileBioDraft: String?
 
     @Published private(set) var inferenceEvidenceBusy = false
     @Published private(set) var inferenceEvidenceSaveFailed = false
@@ -1872,18 +2055,47 @@ final class AppModel: ObservableObject {
 
     // MARK: - Onboarding resume
 
-    /// Whether onboarding has been walked to the end (the Done screen) for
-    /// the *currently enrolled* device. Keyed off `status.tenantID` rather
-    /// than a single global flag: `enroll` alone flips `status.loggedIn` to
-    /// true (it happens on screen 2, before consent is even chosen on
-    /// screen 3), so `loggedIn` cannot by itself distinguish "fully
+    /// Whether the core has said enough to know if onboarding is required
+    /// (`LaunchRouting.onboardingKnown`), in one spelling for the launch,
+    /// the Monitor's gates and every request's routing.
+    var onboardingKnown: Bool {
+        LaunchRouting.onboardingKnown(startup: startup, statusAnswered: status.answered, statusFailed: statusReadFailed)
+    }
+
+    /// What the launch's own request opens (`LaunchRouting.launchOpening`).
+    var launchOpening: LaunchRouting.LaunchOpening {
+        LaunchRouting.launchOpening(startup: startup, statusAnswered: status.answered, requiresOnboarding: requiresOnboarding)
+    }
+
+    /// Whether the first run has been finished (Start on the Uses screen)
+    /// for the *currently enrolled* device. Keyed off `status.tenantID`
+    /// rather than a single global flag: `enroll` alone flips
+    /// `status.loggedIn` to true (it happens when Folders or Tools commits,
+    /// before the data uses are chosen on Uses), so `loggedIn` cannot by
+    /// itself distinguish "fully
     /// onboarded" from "enrolled but consent was never confirmed." A
     /// contributor who quit mid-flow must come back to the rest of
     /// onboarding, not straight to the main window with whatever scopes
     /// `enroll`'s floor-only default happened to leave in place -- see the
     /// coordinator's atomicity note.
+    ///
+    /// Watching only finishes too (Review Focus 5 of #1030's port): with no
+    /// enrolment there is no tenant, so its marker is
+    /// `isWatchOnlyComplete`. It counts only while the daemon holds no
+    /// enrolment; an enrolled person confirms on Start whatever an earlier
+    /// watch-only run wrote. Before the first status arrives `loggedIn`
+    /// reads false, so that marker alone decides until then: the main
+    /// window may show its content, then switch back into the first run.
     var requiresOnboarding: Bool {
-        startup == .needsRoots || !status.loggedIn || !isOnboardingComplete
+        if startup == .needsRoots { return true }
+        return status.loggedIn ? !isOnboardingComplete : !isWatchOnlyComplete
+    }
+
+    /// Whether a watch-only first run was finished against this config
+    /// directory. Keyed by a digest of the directory, never the path itself.
+    var isWatchOnlyComplete: Bool {
+        guard let key = Self.watchOnlyCompleteKey(configDirectory) else { return false }
+        return UserDefaults.standard.bool(forKey: key)
     }
 
     var isOnboardingComplete: Bool {
@@ -1921,14 +2133,28 @@ final class AppModel: ObservableObject {
     }
     func setDaemonSettingsForTesting(_ settings: DaemonSettingsView) { publishIfChanged(\.daemonSettings, settings) }
     func setStartupForTesting(_ startup: Startup) { self.startup = startup }
+    func setArmingOfferForTesting(_ offer: ArmingOffer?) { publishIfChanged(\.armingOffer, offer) }
+    func setConfigDirectoryForTesting(_ path: String) { configDirectory = path }
+    func clearWatchOnlyMarkerForTesting() {
+        guard let key = Self.watchOnlyCompleteKey(configDirectory) else { return }
+        UserDefaults.standard.removeObject(forKey: key)
+    }
+    func setHistoryForTesting(_ history: [HistoryRecord]) { publishIfChanged(\.history, history) }
 
     func setStatusForTesting(_ status: DaemonStatus) {
+        recordRead("status", answered: true)
         publishIfChanged(\.status, status)
     }
     #endif
 
     private static func onboardingCompleteKey(_ tenantID: String) -> String {
         "trace_commons.onboarding_complete.\(tenantID)"
+    }
+
+    private static func watchOnlyCompleteKey(_ configDirectory: String) -> String? {
+        guard !configDirectory.isEmpty else { return nil }
+        let digest = SHA256.hash(data: Data(configDirectory.utf8))
+        return "trace_commons.watch_only_complete." + digest.map { String(format: "%02x", $0) }.joined()
     }
 
     func refreshOutcomeCounts() {
@@ -1952,9 +2178,10 @@ final class AppModel: ObservableObject {
     /// before #353/#357 made the queue's row list a `LazyVStack`. Doing so
     /// here would mean asking the daemon about all 500 entries the instant
     /// a snapshot arrives, which defeats the point of realizing rows lazily
-    /// in the first place: `QueueRow.onAppear` drives `requestPreview(for:)`
-    /// for whatever the viewport actually realizes, so this stays
-    /// proportional to what is on screen.
+    /// in the first place: the legacy queue row drove `requestPreview(for:)`
+    /// from `onAppear` for whatever the viewport realized, so this stayed
+    /// proportional to what was on screen. Since R15 the glass Traces tab
+    /// reads previews through `TracesStore`, and only `SelfTest` asks here.
     ///
     /// Internal rather than private so a test can land a snapshot and watch
     /// what a view holding this model would see. `pending` is
@@ -1965,6 +2192,7 @@ final class AppModel: ObservableObject {
     func applyPendingUpdate(_ entries: [QueueEntry]) {
         let previousIDs = Set(pending.map(\.entryID))
         publishIfChanged(\.pending, entries)
+        publishIfChanged(\.queueAnswered, true)
         let currentIDs = Set(entries.map(\.entryID))
         let vanished = previousIDs.subtracting(currentIDs)
         if !vanished.isEmpty {
@@ -1979,10 +2207,11 @@ final class AppModel: ObservableObject {
     }
 
     /// One `preview_request` per card, requirement 1 of the scheduler
-    /// design: draw a pending card immediately ("Reading it locally...",
-    /// see `QueueRow`) and never block waiting for the daemon's answer.
+    /// design: draw a pending card immediately and never block waiting for
+    /// the daemon's answer.
     ///
-    /// Called from `QueueRow.onAppear` -- the same trigger #357 introduced
+    /// Called by `SelfTest` since R15; before it, from the legacy queue
+    /// row's `onAppear` -- the same trigger #357 introduced
     /// as `requestSummary(for:)`, kept here under the scheduler's name
     /// because what changed is not when a row asks, only what happens once
     /// it does: this goes through the daemon's bounded preview scheduler
@@ -2324,8 +2553,19 @@ final class AppModel: ObservableObject {
             let outcome = try? client.publicProfile()
             await MainActor.run {
                 // A failure -- `not-logged-in` above all -- is the
-                // off-the-roster state, not an error worth a banner.
-                self.publicProfile = (outcome?.onRoster ?? false) ? outcome : nil
+                // off-the-roster state, not an error worth a banner. Whether
+                // it may be drawn as one is `publicProfileRead`'s call.
+                if let outcome {
+                    self.publicProfile = outcome.onRoster ? outcome : nil
+                } else if self.statusRead == .answered, !self.status.loggedIn {
+                    // Signed out by the daemon's own answer: nothing is
+                    // claimed, so the cache goes.
+                    self.publicProfile = nil
+                }
+                // Otherwise a refused refresh keeps the cached profile: an
+                // answered read stays answered, and dropping the cache here
+                // would draw an on-roster contributor the opt-in card.
+                self.recordRead("get_public_profile", answered: outcome != nil)
             }
         }
     }
@@ -2360,6 +2600,13 @@ final class AppModel: ObservableObject {
                     // cache miss that may not have happened, on a profile
                     // that is public either way.
                     self.profileOutcome = .published(cached: profile.handlePersisted ?? true)
+                    // The daemon now holds this profile, in its stored form,
+                    // so the fields read it again -- unless the person has
+                    // edited past what was sent while the write was out.
+                    if (self.profileHandleDraft ?? handle) == handle, (self.profileBioDraft ?? bio) == bio {
+                        self.profileHandleDraft = nil
+                        self.profileBioDraft = nil
+                    }
                     self.refreshStatus()
                     self.refreshAudit()
                 case .failure(let error):
@@ -2383,6 +2630,9 @@ final class AppModel: ObservableObject {
                 case .success(let profile):
                     self.publicProfile = profile.onRoster ? profile : nil
                     self.profileOutcome = .left(cached: profile.handlePersisted ?? true)
+                    // Off the roster there is no profile for an edit to be of.
+                    self.profileHandleDraft = nil
+                    self.profileBioDraft = nil
                     self.refreshStatus()
                     self.refreshAudit()
                 case .failure(let error):
@@ -2465,11 +2715,117 @@ final class AppModel: ObservableObject {
                     self.withdrawals[id] = label == "account-session-required"
                         ? .noAccountSession
                         : .failed(label)
+                    // The commons rejected the stored session: History's
+                    // rows ask for sign-in rather than offer a Retry that
+                    // would be refused again.
+                    if label == "account-session-required" { self.accountSession = .signedOut }
                 }
             }
         }
     }
 
+    /// What the app knows of the account session Withdraw needs (Ron's
+    /// #1146 `accountSignedIn`). Only `signedIn` lets a History row offer
+    /// Withdraw; anything else offers sign-in, and `checking` says so while
+    /// the session is first read.
+    enum AccountSessionRead: Equatable {
+        case unread
+        case checking
+        case signedIn
+        case signedOut
+    }
+
+    /// Why the last sign-in from History did not leave an active session.
+    enum AccountSignInFailure: Equatable {
+        /// Sign-in returned, and the session read again is not active.
+        case inactive
+        /// Sign-in returned, and the session could not be read again.
+        case unverified
+        /// Sign-in did not finish.
+        case failed
+    }
+
+    /// Where History's refresh request (Ron's #1146 refresh control) stands.
+    enum HistoryRefreshState: Equatable {
+        case idle
+        case requesting
+        case requested
+        case failed
+    }
+
+    @Published private(set) var accountSession: AccountSessionRead = .unread
+    @Published private(set) var accountSigningIn = false
+    @Published private(set) var accountSignInFailure: AccountSignInFailure?
+    @Published private(set) var historyRefresh: HistoryRefreshState = .idle
+
+    /// Reads the account session (`account_session_status`). An answer
+    /// that does not say signed in, or no answer, is not signed in.
+    func refreshAccountSession() {
+        if accountSession == .unread { accountSession = .checking }
+        Task {
+            let read = await firstRunCall { try $0.accountSessionStatus() }
+            if case .success(let session) = read, session.signedIn == true {
+                accountSession = .signedIn
+            } else {
+                accountSession = .signedOut
+            }
+        }
+    }
+
+    /// Signs in through the native identity path (`account_sign_in`, which
+    /// opens the browser), then reads the session again and trusts only
+    /// that read, as Ron's History does.
+    func signInToWithdraw() async {
+        guard !accountSigningIn else { return }
+        accountSigningIn = true
+        accountSignInFailure = nil
+        defer { accountSigningIn = false }
+        guard case .success = await firstRunCall({ try $0.accountSignIn() }) else {
+            accountSignInFailure = .failed
+            return
+        }
+        switch await firstRunCall({ try $0.accountSessionStatus() }) {
+        case .success(let session) where session.signedIn == true:
+            accountSession = .signedIn
+            // The refusals sign-in answers are forgotten: those rows offer
+            // Withdraw again, which asks first.
+            withdrawals = withdrawals.filter { $0.value != .noAccountSession }
+        case .success:
+            accountSession = .signedOut
+            accountSignInFailure = .inactive
+        case .failure, nil:
+            accountSession = .signedOut
+            accountSignInFailure = .unverified
+        }
+    }
+
+    /// The refresh control (Ron's #1146 HistoryRefreshControl): asks the daemon's poller to check
+    /// the server sooner (`refresh_history`), then reads History again.
+    /// True only when the daemon said the refresh was requested.
+    @discardableResult
+    func requestHistoryRefresh() async -> Bool {
+        guard historyRefresh != .requesting else { return false }
+        historyRefresh = .requesting
+        guard case .success(true) = await firstRunCall({ try $0.refreshHistory() }) else {
+            historyRefresh = .failed
+            return false
+        }
+        historyRefresh = .requested
+        refreshHistory()
+        return true
+    }
+
+    /// Forgets the last refresh request's outcome, so a later visit to
+    /// History does not show it. A request in flight is left alone.
+    func clearHistoryRefresh() {
+        if historyRefresh != .requesting { historyRefresh = .idle }
+    }
+
+    /// Reads a session's detail. The detail already held stays until the
+    /// daemon answers: replaced when it does, kept beside the error when it
+    /// fails, so a reload (one runs on every app switch) never unmounts the
+    /// public-run editor drawn from it, or the draft typed there. An account
+    /// change still clears it (`clearAccountOwnedContent`).
     func loadSessionDetail(_ record: HistoryRecord) {
         guard let client else { return }
         let id = record.submissionID
@@ -2478,7 +2834,6 @@ final class AppModel: ObservableObject {
         sessionDetailRequestSequence &+= 1
         let requestSequence = sessionDetailRequestSequence
         loadingSessionDetails.insert(id)
-        sessionDetails[id] = nil
         sessionDetailErrors[id] = nil
         Task.detached(priority: .userInitiated) {
             let result = Result { try client.sessionDetail(submissionID: id) }
@@ -2490,7 +2845,6 @@ final class AppModel: ObservableObject {
                     self.reconcileAccountOwnedContent(scope: detail.ownerScopeSHA256)
                     self.sessionDetails[id] = detail
                 case .failure(let error):
-                    self.sessionDetails[id] = nil
                     let label = (error as? DaemonClient.Failure)?.message ?? ""
                     if label == "account-session-required"
                         || label == "session-detail-not-found"
@@ -2608,6 +2962,16 @@ final class AppModel: ObservableObject {
     /// a count, with no redaction pass to block on.
     func searchOriginal(entryID: String, needle: String) -> Int? {
         client?.searchOriginal(entryID: entryID, needle: needle)
+    }
+
+    /// The core's turn index over an open preview's body, anchored to that
+    /// body's digest (`LookInside.bodyDigest`). Off the main actor: the
+    /// core re-resolves the preview to check the anchor.
+    func previewTurns(entryID: String, bodyDigest: String) async -> PreviewTurns? {
+        guard let client else { return nil }
+        return await Task.detached(priority: .userInitiated) {
+            client.previewTurns(entryID: entryID, bodyDigest: bodyDigest)
+        }.value
     }
 
     /// Opens the in-process preview off the main actor -- the redaction pass
@@ -2772,11 +3136,64 @@ final class AppModel: ObservableObject {
         case failed(String)
     }
 
+    // MARK: - Where each Settings read stands
+
+    /// Labels of the reads that have answered at least once. Kept apart from
+    /// the data: a list that answered empty and one that never answered are
+    /// both `[]`, and only this tells them apart.
+    @Published private(set) var answeredReads: Set<String> = []
+    /// Labels of the reads whose last call failed. A later success clears it.
+    @Published private(set) var failedReads: Set<String> = []
+
+    private func recordRead(_ label: String, answered: Bool) {
+        if answered {
+            if !answeredReads.contains(label) { answeredReads.insert(label) }
+            if failedReads.contains(label) { failedReads.remove(label) }
+        } else if !failedReads.contains(label) {
+            failedReads.insert(label)
+        }
+    }
+
+    private func read(_ label: String, answered: Bool = false) -> SettingsRead {
+        SettingsRead.resolve(
+            answered: answered || answeredReads.contains(label),
+            failed: failedReads.contains(label),
+            startup: startup)
+    }
+
+    /// `status`. The placeholder comparison stays for answers that reach the
+    /// model some other way; the recorded answer covers a signed-out status
+    /// that decodes equal to the placeholder.
+    var statusRead: SettingsRead { read("status", answered: status.answered) }
+    /// `get_settings`, or any write that handed back the settings.
+    var settingsRead: SettingsRead { read("get_settings", answered: daemonSettings != nil) }
+    /// `list_audit`: what "Nothing has been changed." waits on.
+    var auditRead: SettingsRead { read("list_audit") }
+    /// `list_projects`: what "No projects seen yet." waits on.
+    var projectsRead: SettingsRead { read("list_projects") }
+    /// The cached public profile. A failed read while signed in may be
+    /// hiding a roster entry, so it is a failure; signed out (by the
+    /// daemon's own answer) it is the daemon saying nothing is claimed.
+    var publicProfileRead: SettingsRead {
+        let signedOutRefusal = failedReads.contains("get_public_profile")
+            && statusRead == .answered && !status.loggedIn
+        return read("get_public_profile", answered: publicProfile != nil || signedOutRefusal)
+    }
+    /// The witness state. It is read from the config directory, not the
+    /// daemon, so it answers even when the daemon refused -- unless the
+    /// directory never resolved, when no read can ever run.
+    var witnessRead: SettingsRead {
+        if witnessStateCode != nil { return .answered }
+        if configDirectory.isEmpty, read("witness") == .coreDown { return .coreDown }
+        return .awaiting
+    }
+
     // MARK: - Plumbing
 
     private func perform<T>(
         _ label: String,
         work: @escaping (DaemonClient) throws -> T,
+        onFailure: (() -> Void)? = nil,
         onSuccess: @escaping (T) -> Void
     ) {
         guard let client else { return }
@@ -2785,8 +3202,10 @@ final class AppModel: ObservableObject {
             await MainActor.run {
                 switch outcome {
                 case .success(let value):
+                    self.recordRead(label, answered: true)
                     onSuccess(value)
                 case .failure(let error):
+                    self.recordRead(label, answered: false)
                     // `error.message` is a fixed label by contract, never a
                     // path, a token, or a server response body.
                     if let failure = error as? DaemonClient.Failure {
@@ -2794,8 +3213,189 @@ final class AppModel: ObservableObject {
                     } else {
                         self.lastActionError = "\(label): failed"
                     }
+                    onFailure?()
                 }
             }
         }
+    }
+}
+
+// MARK: - First run
+
+/// The live first-run calls. Here rather than beside `FirstRunRunner` because
+/// they need `client` and `daemon`, which stay private. Every call answers an
+/// outcome the runner can stop on, so the fire-and-forget paths
+/// (`setProjectMode(_:mode:)`, `applyPrivateInference(_:)`) are not used:
+/// one drops a call while another is in flight, and neither reports back.
+extension AppModel: FirstRunDaemon {
+    func startDaemon(settingsJSON: String) async -> Bool {
+        // Already running (a returning person whose roots were declared):
+        // the declaration goes through `set_settings` instead.
+        if daemon != nil { return await setSourceSettings(settingsJSON: settingsJSON) }
+        // `startDaemon(at:...)` returns without calling back in these cases,
+        // so awaiting it would never end.
+        guard !daemonStartup.isStarting, !configDirectory.isEmpty else { return false }
+        let path = configDirectory
+        return await withCheckedContinuation { continuation in
+            startDaemon(at: path, settingsJSON: settingsJSON) { startup in
+                continuation.resume(returning: startup == .running)
+            }
+        }
+    }
+
+    func setSourceSettings(settingsJSON: String) async -> Bool {
+        guard let object = try? JSONSerialization.jsonObject(with: Data(settingsJSON.utf8)),
+            let declarations = object as? [String: Any]
+        else { return false }
+        guard case .success(let settings) = await firstRunCall({ try $0.setSettings(declarations) })
+        else { return false }
+        publishIfChanged(\.daemonSettings, settings)
+        return true
+    }
+
+    func lookupInvite(_ invite: String) async -> FirstRunLookup {
+        switch await firstRunCall({ try $0.inviteLookup(invite) }) {
+        case .success(let lookup) where lookup.valid:
+            return .found(lookup)
+        case .success(let lookup):
+            return .refused(label: lookup.reasonLabel ?? "invite-invalid")
+        case .failure(let failure as DaemonClient.Failure)
+        where !failure.message.isEmpty && !Self.transientLookupLabels.contains(failure.message):
+            // Includes `invite-host-not-allowed`, which the daemon sends with
+            // the `unavailable` code but which no retry can change.
+            return .refused(label: failure.message)
+        case .failure, nil:
+            return .unavailable
+        }
+    }
+
+    /// Lookup failures that say nothing about the invite: the daemon could
+    /// not reach the issuer, or its reply could not be read.
+    private static let transientLookupLabels: Set<String> = [
+        "invite-lookup-unavailable", "unparseable-response", "missing-result",
+    ]
+
+    func enrollInvite(_ invite: String) async -> Bool {
+        if case .succeeded = await enroll(invite: invite, scopes: []) { return true }
+        return false
+    }
+
+    func signInNearAI() async -> Bool {
+        guard case .success(let session) = await firstRunCall({ try $0.accountSignIn() }) else { return false }
+        return session.signedIn == true
+    }
+
+    func saveConsentScopes(_ scopes: [String]) async -> Bool {
+        let outcome = await setConsentScopes(scopes)
+        if case .succeeded = outcome { return true }
+        return false
+    }
+
+    func setProjectMode(projectID: String, mode: ProjectMode) async -> Bool {
+        guard case .success = await firstRunCall({ try $0.setProjectMode(projectID: projectID, mode: mode) })
+        else { return false }
+        refreshProjects()
+        return true
+    }
+
+    func includePastSessions(projectID: String, sessionIDs: [String]) async -> Bool {
+        guard case .success = await firstRunCall({
+            try $0.includePastSessions(projectID: projectID, sessionIDs: sessionIDs)
+        }) else { return false }
+        return true
+    }
+
+    /// The Rules screen's folders. Nil without a daemon or on a refusal, so
+    /// the screen keeps waiting rather than showing an empty list nobody
+    /// reported.
+    func rulesProjects() async -> [ProjectRow]? {
+        guard case .success(let projects) = await firstRunCall({ try $0.listProjects() }) else { return nil }
+        publishIfChanged(\.projects, projects)
+        return projects
+    }
+
+    /// One folder's past sessions for the picker. Nil on a refusal: the
+    /// folder then lists nothing to tick.
+    func pastSessions(projectID: String) async -> PastSessionList? {
+        guard case .success(let list) = await firstRunCall({ try $0.listPastSessions(projectID: projectID) })
+        else { return nil }
+        return list
+    }
+
+    func setPrivateAI(_ on: Bool) async -> Bool {
+        guard case .success(let settings) = await firstRunCall({ try $0.setPrivateInference(on) })
+        else { return false }
+        publishIfChanged(\.daemonSettings, settings)
+        return true
+    }
+
+    func grantAutomatic(witness: String?) async -> FirstRunGrantAnswer {
+        switch await firstRunCall({ try $0.grantAutomatic(witnessSigningAddress: witness) }) {
+        case .success(let grant) where grant.granted:
+            refreshStatus()
+            return .granted
+        case .failure(let failure as DaemonClient.Failure) where !failure.message.isEmpty:
+            return .refused(label: failure.message)
+        case .success, .failure, nil:
+            // Not granted, and no daemon label to say why.
+            return .refused(label: "automatic-grant-unavailable")
+        }
+    }
+
+    /// Reads status first: right after enrolling, the tenant the marker is
+    /// keyed by may not have reached `status` yet. Without a tenant nothing
+    /// is marked, and that is reported rather than passed off as done.
+    func markComplete() async -> Bool {
+        if case .success(let fresh) = await firstRunCall({ try $0.status() }) {
+            publishIfChanged(\.status, fresh)
+        }
+        guard status.tenantID != nil else { return false }
+        markOnboardingComplete()
+        return isOnboardingComplete
+    }
+
+    /// An invite link (`PendingInvite`) takes back a finished watch-only
+    /// run while the daemon holds no enrolment: the marker is cleared, so
+    /// `requiresOnboarding` turns true, a window hosts the first run again,
+    /// and the coordinator applies the parked link to Join. Without this a
+    /// finished watcher could never join, since the first run is the only
+    /// place a link is applied. An enrolled daemon's marker is the tenant's
+    /// and is left alone. Announced, as `markWatchOnlyComplete` is.
+    func inviteLinkArrived() {
+        guard !status.loggedIn else { return }
+        guard let key = Self.watchOnlyCompleteKey(configDirectory) else {
+            inviteAwaitsConfigDirectory = true
+            return
+        }
+        guard UserDefaults.standard.bool(forKey: key) else { return }
+        objectWillChange.send()
+        UserDefaults.standard.removeObject(forKey: key)
+    }
+
+    /// The first run finished; keep what it must still say for the main
+    /// window (`ShellNotices`), which outlives the first-run host.
+    func firstRunFinished(notice: String?) {
+        firstRunNotice = notice
+    }
+
+    /// Watching only: the marker is keyed by the config directory, since
+    /// there is no tenant. Status is read first, and an enrolled daemon is
+    /// not marked: its Start is the tenant's (`markComplete`). As with that
+    /// marker, the write is announced, because `requiresOnboarding` is
+    /// computed from `UserDefaults` and nothing else would tell the hosts.
+    func markWatchOnlyComplete() async -> Bool {
+        if case .success(let fresh) = await firstRunCall({ try $0.status() }) {
+            publishIfChanged(\.status, fresh)
+        }
+        guard !status.loggedIn, let key = Self.watchOnlyCompleteKey(configDirectory) else { return false }
+        objectWillChange.send()
+        UserDefaults.standard.set(true, forKey: key)
+        return isWatchOnlyComplete
+    }
+
+    /// One blocking client call off the main actor. Nil without a daemon.
+    private func firstRunCall<T>(_ work: @escaping (DaemonClient) throws -> T) async -> Result<T, Error>? {
+        guard let client else { return nil }
+        return await Task.detached(priority: .userInitiated) { Result { try work(client) } }.value
     }
 }

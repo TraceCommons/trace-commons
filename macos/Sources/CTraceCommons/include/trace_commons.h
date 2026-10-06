@@ -45,13 +45,13 @@
  * this library returns -- fixed labels only, the same discipline the
  * daemon's socket already applies.
  *
- * FOUR NAMED EXEMPTIONS, and no others: tc_discover_sources and
- * tc_discover_opencode_export return filesystem paths, tc_preview_body
- * returns post-redaction trace content, and tc_witness_status_json returns
- * the witness URL and signing address. Each is documented where it is
- * declared, and each is a value the contributor is being asked to make a
- * decision about -- a consent prompt that will not name what it is asking
- * about is not a consent prompt.
+ * FIVE NAMED EXEMPTIONS, and no others: tc_discover_sources,
+ * tc_discover_opencode_export and tc_describe_folder return filesystem
+ * paths, tc_preview_body returns post-redaction trace content, and
+ * tc_witness_status_json returns the witness URL and signing address.
+ * Each is documented where it is declared, and each is a value the
+ * contributor is being asked to make a decision about -- a consent prompt
+ * that will not name what it is asking about is not a consent prompt.
  *
  * THE PREVIEW EXEMPTION: tc_preview_body is the one and only interface here
  * that deliberately carries trace content, and the rule above is absolute
@@ -434,6 +434,25 @@ char*       tc_discover_sources(void);
  * Returns NULL for a NULL or non-UTF-8 path, and NULL on a caught panic.
  */
 char*       tc_discover_opencode_export(const char* path);
+
+/* Recognise a folder the contributor picked, by its layout alone, so "add
+ * your tool" can say which tool's sessions it holds.
+ *
+ * Takes no handle, like tc_discover_sources. Returns an owned JSON array
+ * whose elements have the shape of one row of tc_discover_sources: source
+ * ("claude-code" | "codex" | "gemini-cli" | "cline" | "opencode" |
+ * "trajectory"), path (the picked folder itself), exists, session_count,
+ * most_recent, relocated_by_env (always false) and answers_at. One element
+ * per kind whose layout matches; a folder that fits two kinds (a flat
+ * folder of .json files is both an OpenCode and a trajectory export)
+ * reports both, and one that fits none, or is not there, is []. Free it
+ * with tc_string_free.
+ *
+ * Reads directory entries and metadata only, follows no symlink below the
+ * picked folder, and never opens a file. Returns NULL for a NULL or
+ * non-UTF-8 path, and NULL on a caught panic.
+ */
+char*       tc_describe_folder(const char* path);
 
 /* Every fixed word on the routing surface, in one call.
  *
@@ -1983,6 +2002,14 @@ char*       tc_witness_copy(void);
 /* Owned JSON; release with tc_string_free. */
 char*       tc_onboarding_copy(void);
 
+/* The first-run wording of #1030 (first_run_copy::first_run_copy): {frame,
+ * join, folders, tools, rules, uses, passkey, private_ai}, each a map of
+ * strings with {tool}, {host}, {pay_range}, {count}, {folder}, {name},
+ * {max}, {selected}, {total} and {tools} placeholders the shell fills. NULL
+ * only on a caught panic.
+ */
+char*       tc_first_run_copy_json(void);
+
 /* The sentence for a witness state, given a TC_WITNESS_STATE_* value.
  * Returns an OWNED string; free with tc_string_free.
  *
@@ -2405,6 +2432,14 @@ char*       tc_contribution_override_confirm_json(const char* mode, const char* 
  * only on a caught panic.
  */
 char*       tc_contribution_override_refusal_text(const char* label);
+
+/* The Missions disclosure (M4, #1173; consent_copy::
+ * missions_disclosure_copy): {title, matching, nothing_sent, credit}.
+ * Matching happens on this Mac; nothing is sent because of a mission; a
+ * mission's credit is projected until the commons records it, then pending.
+ * DRAFT, NEEDS APPROVAL. NULL only on a caught panic.
+ */
+char*       tc_missions_disclosure_copy_json(void);
 
 /* The legacy invite migration offer (consent_copy::legacy_migration_offer),
  * as LegacyMigrationOfferCopy's fields. NULL only on a caught panic.

@@ -53,34 +53,78 @@ final class SettingsSectionsTests: XCTestCase {
         XCTAssertEqual(SettingsSection.updates.listRow(none).text, SettingsWords.updates)
     }
 
-    /// Every section but Compute (its own view) draws something when
-    /// chosen, and between them the sections reach every block the main
-    /// window draws, each exactly once: nothing in Settings is reachable
-    /// only by scrolling the main window.
-    func test_everySectionsContentIsReachable() {
-        let all = SettingsContent.parts(for: nil)
-        XCTAssertEqual(all, SettingsContent.Part.allCases)
-
-        var reached: [SettingsContent.Part] = []
+    /// Every section but Compute (its own view) draws its own glass view
+    /// when chosen, and no two sections draw the same one: nothing in
+    /// Settings is reachable only by scrolling the main window, and nothing
+    /// is drawn twice when the main window lists every section.
+    func test_everySectionsContentIsReachable() throws {
+        let content = try SettingsParityTests.text("Views/Settings/GlassSettingsContent.swift")
+        var drawn: [String] = []
         for section in SettingsSection.allCases {
-            let parts = SettingsContent.parts(for: section)
+            let view = try XCTUnwrap(Self.view(drawnFor: section, in: content), "no arm for .\(section.rawValue)")
             if section == .compute {
-                XCTAssertTrue(parts.isEmpty)
+                XCTAssertEqual(view, "EmptyView()")
             } else {
-                XCTAssertFalse(parts.isEmpty, "\(section) draws nothing")
+                XCTAssertNotEqual(view, "EmptyView()", "\(section) draws nothing")
+                drawn.append(view)
             }
-            reached += parts
         }
-        XCTAssertEqual(reached.count, Set(reached).count, "a block is drawn by two sections")
-        XCTAssertEqual(Set(reached), Set(all), "a block no section reaches")
+        XCTAssertEqual(drawn.count, Set(drawn).count, "a view is drawn by two sections: \(drawn)")
     }
 
-    /// Startup no longer hides Notifications and Updates behind its row.
-    func test_notificationsAndUpdatesAreTheirOwnSections() {
-        XCTAssertEqual(SettingsContent.parts(for: .connection), [.connection, .contributionAccount])
-        XCTAssertEqual(SettingsContent.parts(for: .startup), [.loginItem])
-        XCTAssertEqual(SettingsContent.parts(for: .notifications), [.notifications])
-        XCTAssertEqual(SettingsContent.parts(for: .updates), [.updates])
-        XCTAssertEqual(SettingsContent.parts(for: .privateAI), [.privateInference, .routeDisclosure])
+    /// Startup no longer hides Notifications and Updates behind its row, and
+    /// Private AI draws the route disclosure with its pointer.
+    func test_notificationsAndUpdatesAreTheirOwnSections() throws {
+        let content = try SettingsParityTests.text("Views/Settings/GlassSettingsContent.swift")
+        XCTAssertEqual(Self.view(drawnFor: .startup, in: content), "StartupSection()")
+        XCTAssertEqual(Self.view(drawnFor: .notifications, in: content), "NotificationsSection()")
+        XCTAssertEqual(Self.view(drawnFor: .updates, in: content), "UpdatesSection()")
+        XCTAssertEqual(Self.view(drawnFor: .privateAI, in: content), "PrivateAISection(onPointer: onPrivateAI)")
+
+        let startup = try SettingsParityTests.text("Views/Settings/StartupSection.swift")
+        let startupBody = try XCTUnwrap(startup.components(separatedBy: "struct NotificationsSection").first)
+        XCTAssertFalse(startupBody.contains("NotificationsSection()"), "Startup draws Notifications too")
+        XCTAssertFalse(startupBody.contains("UpdatesSection()"), "Startup draws Updates too")
+
+        let privateAI = try SettingsParityTests.text("Views/Settings/PrivateAISection.swift")
+        XCTAssertTrue(privateAI.contains("model.routeDisclosureState"), "Private AI no longer draws the route disclosure")
+    }
+
+    /// Each section's heading is the one the list names it by: the same
+    /// source, read in the section's own file.
+    func test_eachSectionIsHeadedByTheListsTitleSource() throws {
+        let headings: [SettingsSection: (file: String, source: String)] = [
+            .connection: ("ConnectionSection", "GlassEyebrowCard(SettingsWords.connection)"),
+            .startup: ("StartupSection", "GlassEyebrowCard(SettingsWords.startup)"),
+            .notifications: ("StartupSection", "if let heading = Notifier.copy?.notificationHeading"),
+            .updates: ("StartupSection", "GlassEyebrowCard(SettingsWords.updates)"),
+            .watching: ("WatchingSection", "GlassEyebrowCard(SettingsWords.watching)"),
+            .consent: ("ConsentSection", "GlassEyebrowCard(SettingsLegacyWords.consentHeading)"),
+            .publicProfile: ("PublicProfileSection", "GlassEyebrowCard(PublicProfileCopy.heading)"),
+            .watchedFolders: ("WatchedFoldersSection", "GlassEyebrowCard(copy.heading)"),
+            .tools: ("ToolsSection", "GlassEyebrowCard(copy.toolsHeading)"),
+            .privateAI: ("PrivateAISection", "GlassEyebrowCard(copy.settingsTitle)"),
+            .witness: ("WitnessSection", "GlassEyebrowCard(copy.heading)"),
+            .projects: ("ProjectsSection", "GlassEyebrowCard(SettingsWords.projects)"),
+            .changes: ("ChangesSection", "GlassEyebrowCard(SettingsLegacyWords.auditHeading)"),
+        ]
+        for section in SettingsSection.allCases where section != .compute {
+            let heading = try XCTUnwrap(headings[section], "no heading recorded for \(section)")
+            let source = try SettingsParityTests.text("Views/Settings/\(heading.file).swift")
+            XCTAssertTrue(source.contains(heading.source), "\(heading.file) is not headed by \(heading.source)")
+        }
+        // The two the words table holds are the list's own two.
+        XCTAssertEqual(SettingsLegacyWords.consentHeading, SettingsContent.consentHeading)
+        XCTAssertEqual(SettingsLegacyWords.auditHeading, SettingsContent.auditHeading)
+    }
+
+    /// The view a section's `case` arm draws in `GlassSettingsContent`.
+    static func view(drawnFor section: SettingsSection, in content: String) -> String? {
+        let arm = "case .\(section.rawValue):"
+        guard let line = content.split(separator: "\n").first(where: {
+            $0.trimmingCharacters(in: .whitespaces).hasPrefix(arm)
+        }) else { return nil }
+        return line.trimmingCharacters(in: .whitespaces).dropFirst(arm.count)
+            .trimmingCharacters(in: .whitespaces)
     }
 }

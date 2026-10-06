@@ -716,6 +716,12 @@ pub(crate) fn registered_source_names() -> impl Iterator<Item = &'static str> {
     NATIVE_SOURCES.iter().map(|spec| spec.name)
 }
 
+/// Every source a contributor can declare in settings: the registered
+/// native adapters, and the trajectory folder.
+pub(crate) fn declarable_source_names() -> impl Iterator<Item = &'static str> {
+    registered_source_names().chain(std::iter::once(SOURCE_TRAJECTORY))
+}
+
 /// The subdirectory of the contributor state directory that trajectory
 /// files may be staged in. Placing a file there IS the opt-in, which is why
 /// nothing in it needs a name suffix.
@@ -824,10 +830,25 @@ impl SourceRoots {
                 staging_dir.as_deref()
             )),
         };
+        let trajectory = match (trajectory, self.declared_trajectory_folder()) {
+            (Some(root), Some(folder)) => Some(format!("{root} {}", folder.to_string_lossy())),
+            (None, Some(folder)) => Some(folder.to_string_lossy().to_string()),
+            (root, None) => root,
+        };
         if let Some(root) = trajectory {
             out.insert(SOURCE_TRAJECTORY, root);
         }
         out
+    }
+
+    /// The trajectory folder the contributor declared, read alongside
+    /// whatever [`TrajectorySelection`] this root set carries. `Off` and
+    /// absent both add nothing: there is no conventional trajectory store.
+    fn declared_trajectory_folder(&self) -> Option<&Path> {
+        match self.declared.get(SOURCE_TRAJECTORY) {
+            Some(SourceDeclaration::Watch { path }) => Some(path),
+            Some(SourceDeclaration::Off) | None => None,
+        }
     }
 
     pub fn new() -> Self {
@@ -981,18 +1002,29 @@ pub fn all_sources(roots: &SourceRoots) -> Vec<Box<dyn TraceSource>> {
         }
     }
 
-    match &roots.trajectory {
-        TrajectorySelection::None => {}
+    let selected = match &roots.trajectory {
+        TrajectorySelection::None => None,
         TrajectorySelection::Declared(path) => {
-            sources.push(Box::new(trajectory::TrajectorySource::new(path.clone())))
+            Some(trajectory::TrajectorySource::new(path.clone()))
         }
         TrajectorySelection::Auto {
             working_dir,
             staging_dir,
-        } => sources.push(Box::new(trajectory::TrajectorySource::auto(
+        } => Some(trajectory::TrajectorySource::auto(
             working_dir.clone(),
             staging_dir.clone(),
-        ))),
+        )),
+    };
+    // A declared trajectory folder joins the SAME source rather than a
+    // second one: two sources both named `trajectory` would make a by-name
+    // lookup answer for whichever came first.
+    let trajectory = match (selected, roots.declared_trajectory_folder()) {
+        (Some(source), Some(folder)) => Some(source.also_declared(folder.to_path_buf())),
+        (None, Some(folder)) => Some(trajectory::TrajectorySource::new(folder.to_path_buf())),
+        (source, None) => source,
+    };
+    if let Some(source) = trajectory {
+        sources.push(Box::new(source));
     }
 
     // One insertion point for the whole overlay. Without a declared proxy the

@@ -47,6 +47,63 @@ fn publication_methods_are_documented_with_bounds_and_fixed_errors() {
         );
     }
 }
+#[test]
+fn first_run_picker_methods_are_documented_with_every_label() {
+    use trace_commons_contributor::daemon::past_sessions as past;
+    let contract = include_str!("../../../docs/contributor-daemon-ipc-v1_1.md");
+    for method in ["list_past_sessions", "include_past_sessions"] {
+        assert!(
+            trace_commons_contributor::daemon::ipc::METHODS.contains(&method),
+            "not served: {method}"
+        );
+        let row = format!("| `{method}` |");
+        assert!(contract.contains(&row), "missing method row: {method}");
+        let section = format!("### `{method}`");
+        assert!(contract.contains(&section), "missing section: {method}");
+    }
+    for label in [
+        past::LABEL_SESSION_IDS_INVALID,
+        past::LABEL_TOO_MANY_SESSIONS,
+        past::LABEL_SESSION_ID_UNRECOGNIZED,
+        past::LABEL_PROJECT_MODE_NEVER,
+        past::LABEL_SESSION_STILL_ACTIVE,
+        past::LABEL_HELD_FOR_REVIEW,
+        past::LABEL_SESSION_DISMISSED,
+        past::LABEL_SESSION_KEPT,
+        past::LABEL_NOT_PENDING,
+        past::LABEL_SESSION_PROJECT_CHANGED,
+        past::LABEL_SESSION_UNREADABLE,
+        past::AUDIT_PAST_SESSIONS_INCLUDED,
+        "project-id-unrecognized",
+        "project_id-invalid",
+        "contribution-override-never",
+        "audit-write-failed",
+        "session-file-vanished",
+        trace_commons_contributor::daemon::queue::REASON_TOO_LARGE,
+        "queue-full",
+        "not-enrolled",
+        "queue-write-failed",
+    ] {
+        let quoted = format!("`{label}`");
+        assert!(contract.contains(&quoted), "undocumented label: {label}");
+    }
+    for state in [
+        "pending",
+        "approved",
+        "expired",
+        "not_queued",
+        "never",
+        "still_active",
+    ] {
+        let quoted = format!("`{state}`");
+        assert!(contract.contains(&quoted), "undocumented state: {state}");
+    }
+    assert!(
+        contract.contains("### The `trajectory_source` declaration"),
+        "missing trajectory_source section"
+    );
+    assert!(contract.contains("`trajectory_source_mode`"));
+}
 use trace_commons_contributor::daemon::settings::DaemonSettings;
 use trace_commons_contributor::identity::DeviceIdentity;
 use trace_commons_contributor::source::TraceSource;

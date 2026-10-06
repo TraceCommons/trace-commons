@@ -64,9 +64,8 @@ enum LoginItemManager {
     }
 
     /// Registers the app as a login item. Returns the resulting state rather
-    /// than throwing past the caller -- `OnboardingDoneView` and
-    /// `SettingsView` both need to render `.requiresApproval` as guidance,
-    /// not as an error banner.
+    /// than throwing past the caller -- `StartupSection` needs to render
+    /// `.requiresApproval` as guidance, not as an error banner.
     @discardableResult
     static func register() -> RegisterOutcome {
         do {

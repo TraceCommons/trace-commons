@@ -125,8 +125,10 @@ public final class LiveDaemonClient: DaemonDataClient, @unchecked Sendable {
         try await call("cancel", params: ["project_id": projectId], as: DaemonData.CancelFolderResult.self).canceled
     }
 
-    public func approveFolder(projectId: String) async throws -> ApproveResponse {
-        try await call("approve", params: ["project_id": projectId], as: ApproveResponse.self)
+    public func approveFolder(projectId: String, verdict: ContributorVerdict?) async throws -> ApproveResponse {
+        var params: [String: Any] = ["project_id": projectId]
+        if let verdict { params["outcome"] = verdict.rawValue }
+        return try await call("approve", params: params, as: ApproveResponse.self)
     }
 
     public func keep(entryId: String) async throws -> DaemonData.KeepResult {
@@ -185,6 +187,16 @@ public final class LiveDaemonClient: DaemonDataClient, @unchecked Sendable {
         try await call("get_settings", as: DaemonData.Settings.self)
     }
 
+    public func privateAI() async throws -> DaemonData.PrivateAISwitch {
+        DaemonData.PrivateAISwitch(settings: try await settings())
+    }
+
+    public func setPrivateAI(on: Bool) async throws -> DaemonData.PrivateAISwitch {
+        DaemonData.PrivateAISwitch(
+            settings: try await call(
+                "set_settings", params: PrivateInferenceSurface.settingsParams(on: on), as: DaemonData.Settings.self))
+    }
+
     public func setScrubCheck(_ mode: DaemonData.ScrubCheckMode) async throws -> DaemonData.Settings {
         try await call("set_settings", params: ["scrub_check": mode.rawValue], as: DaemonData.Settings.self)
     }
@@ -237,14 +249,6 @@ public final class LiveDaemonClient: DaemonDataClient, @unchecked Sendable {
 
     public func modelSpend() async throws -> DaemonData.ModelSpend {
         throw DaemonDataError.notAvailableYet(method: "model_spend")
-    }
-
-    public func privateAI() async throws -> DaemonData.PrivateAISwitch {
-        throw DaemonDataError.notAvailableYet(method: "private_ai")
-    }
-
-    public func setPrivateAI(on: Bool) async throws -> DaemonData.PrivateAISwitch {
-        throw DaemonDataError.notAvailableYet(method: "set_private_ai")
     }
 
     public func missionCatalogue() async throws -> DaemonData.MissionCatalogue {

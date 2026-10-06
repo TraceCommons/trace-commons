@@ -205,7 +205,7 @@ condition makes no promise that a lifetime budget will reset.
 
 ## External evaluation contract
 
-V109 adds an optional `"growth_rule":"external"` policy mode. Keep `"none"`
+V114 adds an optional `"growth_rule":"external"` policy mode. Keep `"none"`
 for a flat allowance. External mode additionally requires explicit
 `growth_policy_version`, `allowance_ceiling` and
 `evaluation_max_age_seconds`. The ceiling must be at least the base allowance;

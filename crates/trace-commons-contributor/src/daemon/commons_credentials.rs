@@ -178,6 +178,27 @@ pub(crate) struct Snapshot {
     previous: Option<Vec<u8>>,
     kind: Kind,
 }
+impl Snapshot {
+    /// Configuration captured with this credential generation; never a later
+    /// config selected during an in-flight request or sign-out.
+    pub(crate) fn configuration(&self) -> Result<Option<ContributorConfig>> {
+        self.config
+            .as_deref()
+            .map(serde_json::from_slice)
+            .transpose()
+            .map_err(|_| unavailable())
+    }
+
+    /// Whether config and sign-out generation survived a token-record rotation.
+    /// This alone does not prove the payload is still the same account: callers
+    /// allowing a record change must also compare the original account identity.
+    pub(crate) fn same_lifecycle(&self, other: &Self) -> bool {
+        self.generation == other.generation
+            && self.config == other.config
+            && self.kind == other.kind
+    }
+}
+
 pub(crate) fn snapshot(store: &ConfigStore, kind: Kind) -> Result<Snapshot> {
     let locks = coordination(store.dir())?;
     let _commit = locks.commit.lock()?;

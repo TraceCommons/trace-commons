@@ -10,5 +10,9 @@
   <array>
     <string>KXSWJN7WY8.ai.tracecommons.shell</string>
   </array>
+  <key>com.apple.developer.associated-domains</key>
+  <array>
+    <string>webcredentials:tracecommons.ai</string>
+  </array>
 </dict>
 </plist>

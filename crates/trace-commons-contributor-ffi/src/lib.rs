@@ -594,7 +594,11 @@ pub unsafe extern "C" fn tc_daemon_start(
     guarded_scalar(err, std::ptr::null_mut(), || {
         let store_result: anyhow::Result<ConfigStore> = (|| {
             let dir = unsafe { borrow_str(config_dir) }?;
+            // K2 (#1173): under a debug build's dev dry run, the separate
+            // dry-run store, so neither the pre-start settings nor the
+            // daemon ever write the real one.
             ConfigStore::open(std::path::PathBuf::from(dir))
+                .and_then(trace_commons_contributor::daemon::dev_dry_run_store)
         })();
         let store = match store_result {
             Ok(store) => store,
@@ -890,7 +894,11 @@ pub unsafe extern "C" fn tc_daemon_start_with_settings(
     guarded_scalar(err, std::ptr::null_mut(), || {
         let store_result: anyhow::Result<ConfigStore> = (|| {
             let dir = unsafe { borrow_str(config_dir) }?;
+            // K2 (#1173): under a debug build's dev dry run, the separate
+            // dry-run store, so neither the pre-start settings nor the
+            // daemon ever write the real one.
             ConfigStore::open(std::path::PathBuf::from(dir))
+                .and_then(trace_commons_contributor::daemon::dev_dry_run_store)
         })();
         let store = match store_result {
             Ok(store) => store,
@@ -2229,6 +2237,45 @@ pub unsafe extern "C" fn tc_discover_opencode_export(path: *const c_char) -> *mu
             std::path::Path::new(path),
         );
         let json = serde_json::to_string(&candidate).unwrap_or_else(|_| "{}".to_string());
+        Ok(to_owned_cstring(&json))
+    })
+    .unwrap_or_else(|err| {
+        set_last_error(&err);
+        std::ptr::null_mut()
+    })
+}
+
+/// Recognise a folder the contributor picked, by its layout alone, so "add
+/// your tool" can say which tool's sessions it holds.
+///
+/// Needs no handle, like [`tc_discover_sources`]. Returns an owned JSON
+/// array whose elements have the shape of one row of
+/// [`tc_discover_sources`] -- `source` (`claude-code`, `codex`,
+/// `gemini-cli`, `cline`, `opencode` or `trajectory`), `path` (the picked
+/// folder itself), `exists`, `session_count`, `most_recent`,
+/// `relocated_by_env` (always `false`) and `answers_at`. One element per kind
+/// whose layout matches; a folder that fits two kinds (a flat folder of
+/// `.json` files is both an OpenCode and a trajectory export) reports both,
+/// and one that fits none, or is not there, is `[]`. Free it with
+/// [`tc_string_free`].
+///
+/// Reads directory entries and metadata only, follows no symlink below the
+/// picked folder, and never opens a file, per the same rule
+/// [`tc_discover_sources`] follows.
+///
+/// Returns NULL for a NULL or non-UTF-8 `path`, recording `null-pointer` or
+/// `invalid-utf8`, and NULL on a caught panic.
+///
+/// # Safety
+/// `path` must point to a valid, NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_describe_folder(path: *const c_char) -> *mut c_char {
+    guard_forwarding(|| {
+        let path = unsafe { borrow_str(path) }?;
+        let found = trace_commons_contributor::source::discovery::describe_folder(
+            std::path::Path::new(path),
+        );
+        let json = serde_json::to_string(&found).unwrap_or_else(|_| "[]".to_string());
         Ok(to_owned_cstring(&json))
     })
     .unwrap_or_else(|err| {
@@ -5248,6 +5295,22 @@ pub extern "C" fn tc_onboarding_copy() -> *mut c_char {
     })
 }
 
+/// The first-run wording of #1030 (`first_run_copy::first_run_copy`): a JSON
+/// object of per-screen groups, `{frame, join, folders, tools, rules, uses,
+/// passkey, private_ai}`, each a map of strings. `{tool}`, `{host}`,
+/// `{pay_range}`, `{count}`, `{folder}`, `{name}`, `{max}`, `{selected}`,
+/// `{total}` and `{tools}` are placeholders the shell fills.
+///
+/// Returns an owned JSON string; free it with [`tc_string_free`]. NULL only
+/// on a caught panic.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_first_run_copy_json() -> *mut c_char {
+    guarded_string_no_err(|| {
+        let copy = trace_commons_contributor::first_run_copy::first_run_copy();
+        Ok(to_owned_cstring(&serde_json::to_string(&copy)?))
+    })
+}
+
 // ---------------------------------------------------------------------------
 // K3 (#1173): the copy commands that reached only Tauri. Each export below
 // is the C ABI route to a sentence, or a table of them, the contributor core
@@ -5530,6 +5593,23 @@ pub unsafe extern "C" fn tc_contribution_override_refusal_text(
         Ok(to_owned_cstring(
             trace_commons_contributor::project_copy::contribution_override_refusal_line(label),
         ))
+    })
+}
+
+/// The Missions disclosure (M4, #1173; `consent_copy::missions_disclosure_copy`):
+/// a JSON object `{title, matching, nothing_sent, credit}` -- matching
+/// happens on this Mac, nothing is sent because of a mission, and a
+/// mission's credit is projected until the commons records it, then
+/// pending. Shown the first time Missions is opened and in Settings. DRAFT,
+/// NEEDS APPROVAL, every sentence.
+///
+/// Returns an owned JSON string; free it with [`tc_string_free`]. NULL only
+/// on a caught panic.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_missions_disclosure_copy_json() -> *mut c_char {
+    guarded_string_no_err(|| {
+        let copy = trace_commons_contributor::consent_copy::missions_disclosure_copy();
+        Ok(to_owned_cstring(&serde_json::to_string(&copy)?))
     })
 }
 

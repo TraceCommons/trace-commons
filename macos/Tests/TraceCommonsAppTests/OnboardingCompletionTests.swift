@@ -7,7 +7,7 @@ import XCTest
 /// This target exists because that button shipped broken: pressing it wrote
 /// the completion marker and nothing else, and since `isOnboardingComplete`
 /// is computed from `UserDefaults` rather than a `@Published` property, the
-/// write notified nobody and `MainWindowView` never re-evaluated. The screen
+/// write notified nobody and the main window never re-evaluated. The screen
 /// simply stayed. Nothing could catch it, because the app target had no test
 /// target at all.
 ///
@@ -52,7 +52,7 @@ final class OnboardingCompletionTests: XCTestCase {
 
     /// The bug itself. A view only re-renders when the model it observes
     /// says something changed, so a marker write that publishes nothing
-    /// leaves the contributor on the Done screen forever -- and
+    /// leaves the contributor on the first run's Uses screen forever -- and
     /// `publishIfChanged` means no unrelated refresh will rescue them
     /// either, on a daemon whose status is not moving.
     @MainActor
