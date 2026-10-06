@@ -39,6 +39,16 @@ final class PrivateInferenceActivationTests: XCTestCase {
         }
     }
 
+    /// The tolerant reading matches the runner's garbled sign-in label and
+    /// still refuses a different sentence that shares its words.
+    func testReadsToleratesTwoEditsOnLongTextsOnly() {
+        XCTAssertTrue(Self.reads("Sian in with NEAR A", as: "Sign in with NEAR AI"))
+        XCTAssertTrue(Self.reads("x Sign in with NEAR AI y", as: "Sign in with NEAR AI"))
+        XCTAssertFalse(Self.reads("Sign in to use NEAR AI", as: "Sign in with NEAR AI"))
+        XCTAssertFalse(Self.reads("Codey.", as: "Codex:"))
+        XCTAssertTrue(Self.reads("Codex:", as: "Codex:"))
+    }
+
     @MainActor
     func testFreshPrivateAIRequiresCaptureChoicesAndTransitionsAfterContinue() async throws {
         let root = URL(fileURLWithPath: "/private/tmp/tc-activation-\(UUID().uuidString.prefix(8))")
@@ -106,8 +116,10 @@ final class PrivateInferenceActivationTests: XCTestCase {
 
     /// Whether the window shows any of `texts`, found as `press` finds a button:
     /// Vision is told the words to expect and any of a line's top five
-    /// readings counts, since the runner's rendering garbles a top reading
-    /// ("Sian in" for "Sign in") that a local one does not. Reads again for
+    /// readings counts. The runner's rendering still garbles a reading that
+    /// a local one does not ("Sian in with NEAR A" for "Sign in with NEAR
+    /// AI"), so a text of 12 or more characters also matches within two
+    /// edits; a shorter one must match exactly. Reads again for
     /// up to two seconds, for a runner that draws a frame or two late. The
     /// last plain read comes back too, for the assertion's message.
     @MainActor
@@ -116,12 +128,37 @@ final class PrivateInferenceActivationTests: XCTestCase {
         for _ in 0..<8 {
             image = try await snapshot(hosting)
             let found = try observations(image, labels: texts).contains { observation in
-                observation.topCandidates(5).contains { candidate in texts.contains { candidate.string.contains($0) } }
+                observation.topCandidates(5).contains { candidate in
+                    texts.contains { Self.reads(candidate.string, as: $0) }
+                }
             }
             if found { return (true, try recognizedWords(image)) }
             try await Task.sleep(nanoseconds: 250_000_000)
         }
         return (false, try recognizedWords(image))
+    }
+
+    /// Whether `needle` occurs in `reading` with at most two edits when it
+    /// is 12 characters or longer, exactly otherwise: the least edit
+    /// distance from `needle` to any substring of `reading`.
+    static func reads(_ reading: String, as needle: String) -> Bool {
+        let allowed = needle.count >= 12 ? 2 : 0
+        if allowed == 0 { return reading.contains(needle) }
+        let text = Array(reading), pattern = Array(needle)
+        // Row j: the cost of matching pattern[..<j] ending at the current
+        // character of text; any start in text is free.
+        var previous = Array(0...pattern.count)
+        if previous[pattern.count] <= allowed { return true }
+        for character in text {
+            var current = [0]
+            for j in 1...pattern.count {
+                let substitute = previous[j - 1] + (pattern[j - 1] == character ? 0 : 1)
+                current.append(min(substitute, previous[j] + 1, current[j - 1] + 1))
+            }
+            if current[pattern.count] <= allowed { return true }
+            previous = current
+        }
+        return false
     }
 
     private func recognizedWords(_ image: Data) throws -> String {
