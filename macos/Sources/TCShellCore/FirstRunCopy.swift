@@ -131,6 +131,8 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
         public let trajectoryLabel: String
         /// The ambiguous folder's last option: neither kind.
         public let neither: String
+        /// `{tool}`: a tool watched in two rows.
+        public let oneFolderPerTool: String
     }
 
     public struct Rules: Decodable, Equatable, Sendable {

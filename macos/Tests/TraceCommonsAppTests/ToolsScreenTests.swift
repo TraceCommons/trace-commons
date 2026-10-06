@@ -45,47 +45,64 @@ final class ToolsScreenTests: XCTestCase {
         try XCTUnwrap(FirstRunCopy.decode(try XCTUnwrap(TCCoreCopy.firstRunCopyJSON())))
     }
 
-    func test_aRecognisedFolderRepointsItsKind() throws {
+    /// Ron's review of #1235, item 3: a recognised folder is added as a row
+    /// of its own, unanswered, named after the folder, with a folder tile
+    /// and "Added by you", and the same picker and folder button as every
+    /// other row. The matched tool's row is left as it was.
+    func test_aRecognisedFolderIsAddedAsItsOwnUnansweredRow() throws {
         let copy = try firstRunCopy()
         let path = "/Volumes/work/codex-home"
         let outcome = ToolsScreenLayout.outcome(
             path: path, json: Self.describe(["codex"], path: path))
         XCTAssertEqual(outcome, .added(AddedFolder(kind: .source(.codex), path: path)))
 
-        // A missing Codex answered "I don't use it" is re-pointed, not kept off.
-        let discovered = [Self.candidate(.claudeCode, exists: true), Self.candidate(.codex, exists: false)]
+        let discovered = [Self.candidate(.claudeCode, exists: true), Self.candidate(.codex, exists: true)]
         var state = FirstRunState(tier: .custom, step: .tools)
         state.answer(.codex, .off)
         XCTAssertTrue(ToolsScreenLayout.apply(outcome, to: &state))
-        XCTAssertEqual(state.sessionRoots.codex, .watch(path: path))
-        XCTAssertEqual(state.addedFolders, [AddedFolder(kind: .source(.codex), path: path)])
+        XCTAssertEqual(state.toolAnswers[.codex], .off, "the Codex row is not answered for the person")
+        XCTAssertEqual(state.sessionRoots.codex, .off)
 
-        // Its row is now a found tool at the added folder, marked as the
-        // person's, with no "Get Codex" on it.
+        // Codex's own row is untouched: discovery's folder, its own meta.
         let rows = ToolsScreenLayout.rows(discovered, state: state)
+        XCTAssertEqual(rows.map(\.source), [.claudeCode, .codex])
         let codex = try XCTUnwrap(rows.first { $0.source == .codex })
-        XCTAssertTrue(codex.exists)
-        XCTAssertEqual(codex.path, path)
-        XCTAssertFalse(ToolAnswerRowLayout.offersGetTool(codex, installURL: URL(string: "https://example.com"), in: state))
-        XCTAssertEqual(ToolAnswerRowLayout.answer(in: state, for: codex), .watch)
-        XCTAssertEqual(ToolsScreenLayout.meta(for: codex, in: state, discovered: discovered, copy: copy, now: Date()), copy.tools.addedByYou)
-
-        // A found, un-added row is compact: the session count alone.
-        let claude = try XCTUnwrap(rows.first { $0.source == .claudeCode })
+        XCTAssertEqual(codex.path, "/Users/someone/.codex")
         XCTAssertEqual(
-            ToolsScreenLayout.meta(for: claude, in: state, discovered: discovered, copy: copy, now: Date()),
+            ToolsScreenLayout.meta(for: codex, in: state, discovered: discovered, copy: copy, now: Date()),
             copy.frame.sessionCount.replacingOccurrences(of: "{count}", with: "12"))
 
-        // A kind discovery did not offer still gets its row once added.
+        // The added folder's row: its folder's name, unanswered.
+        let added = ToolsScreenLayout.addedRows(state)
+        XCTAssertEqual(added.map(\.path), [path])
+        XCTAssertEqual(ToolsScreenLayout.folderName(path), "codex-home")
+        XCTAssertNil(ToolsScreenLayout.addedAnswer(added[0]))
+        XCTAssertFalse(
+            ToolsScreenLayout.canContinue(
+                discovered: discovered, state: { var answered = state; answered.answer(.claudeCode, .off); return answered }(),
+                pending: false, isCommitting: false))
+
+        ToolsScreenLayout.selectAdded(.watch, path: path, in: &state)
+        XCTAssertEqual(ToolsScreenLayout.addedAnswer(ToolsScreenLayout.addedRows(state)[0]), .watch)
+        XCTAssertEqual(state.sessionRoots.codex, .watch(path: path))
+        // Codex's own row still shows its own answer and folder.
+        XCTAssertEqual(ToolAnswerRowLayout.answer(in: state, for: codex), .dontUse)
+        XCTAssertEqual(ToolAnswerRowLayout.shownPath(in: state, for: codex), "/Users/someone/.codex")
+        ToolsScreenLayout.selectAdded(.dontUse, path: path, in: &state)
+        XCTAssertEqual(state.sessionRoots.codex, .off)
+        XCTAssertEqual(ToolsScreenLayout.addedRows(state).count, 1, "the row stays, answered")
+
+        // A kind discovery did not offer is added the same way.
         let opencode = "/Users/someone/exports"
         XCTAssertTrue(
             ToolsScreenLayout.apply(
                 ToolsScreenLayout.outcome(path: opencode, json: Self.describe(["opencode"], path: opencode)),
                 to: &state))
-        XCTAssertEqual(
-            ToolsScreenLayout.rows(discovered, state: state).map(\.source), [.claudeCode, .codex, .opencode])
+        XCTAssertEqual(ToolsScreenLayout.addedRows(state).map(\.path), [path, opencode])
+        XCTAssertEqual(ToolsScreenLayout.rows(discovered, state: state).map(\.source), [.claudeCode, .codex])
 
-        // A trajectory export is declared as `trajectory_source`, not as a tool.
+        // A trajectory export is declared as `trajectory_source`, not as a
+        // tool, and keeps its row as built: it reads Watch.
         let runs = "/Users/someone/runs"
         XCTAssertTrue(
             ToolsScreenLayout.apply(
@@ -93,6 +110,7 @@ final class ToolsScreenTests: XCTestCase {
                 to: &state))
         XCTAssertEqual(state.sessionRoots.trajectory, .watch(path: runs))
         XCTAssertEqual(ToolsScreenLayout.trajectoryFolder(in: state)?.path, runs)
+        XCTAssertFalse(ToolsScreenLayout.addedRows(state).contains { $0.path == runs })
 
         // The screen reads the core's description, decoded so the trajectory
         // row is kept, and writes only through the state's own mutators.
@@ -103,9 +121,33 @@ final class ToolsScreenTests: XCTestCase {
         XCTAssertTrue(screen.contains(".onDrop("))
         XCTAssertTrue(screen.contains(".commit(.leaveRoots)"))
         XCTAssertTrue(screen.contains("FolderMatch.decodeList("))
+        XCTAssertTrue(screen.contains("copy.tools.addedByYou"))
+        XCTAssertTrue(screen.contains("GlassFolderButton("))
         XCTAssertFalse(screen.contains("SourceCandidate.decodeList("))
         XCTAssertFalse(screen.contains(".toolAnswers["))
         XCTAssertFalse(screen.contains(".addedFolders.append"))
+    }
+
+    /// One tool watched in two rows holds Continue, and the added row says
+    /// so in the core's words, naming the tool.
+    func test_aToolWatchedTwiceIsSaidOnTheAddedRow() throws {
+        let copy = try firstRunCopy()
+        let discovered = [Self.candidate(.claudeCode, exists: true), Self.candidate(.codex, exists: true)]
+        var state = FirstRunState(tier: .custom, step: .tools)
+        state.answer(.claudeCode, .off)
+        state.answer(.codex, .watch(path: "/Users/someone/.codex"))
+        ToolsScreenLayout.apply(.added(AddedFolder(kind: .source(.codex), path: "/v/codex")), to: &state)
+        ToolsScreenLayout.selectAdded(.watch, path: "/v/codex", in: &state)
+        let row = ToolsScreenLayout.addedRows(state)[0]
+        XCTAssertEqual(
+            ToolsScreenLayout.conflict(row, in: state, copy: copy.tools),
+            copy.tools.oneFolderPerTool.replacingOccurrences(of: "{tool}", with: "Codex"))
+        XCTAssertFalse(
+            ToolsScreenLayout.canContinue(discovered: discovered, state: state, pending: false, isCommitting: false))
+        ToolsScreenLayout.selectAdded(.dontUse, path: "/v/codex", in: &state)
+        XCTAssertNil(ToolsScreenLayout.conflict(ToolsScreenLayout.addedRows(state)[0], in: state, copy: copy.tools))
+        XCTAssertTrue(
+            ToolsScreenLayout.canContinue(discovered: discovered, state: state, pending: false, isCommitting: false))
     }
 
     func test_anAmbiguousFolderAsksWhichTool() throws {
@@ -271,53 +313,36 @@ final class ToolsScreenTests: XCTestCase {
         XCTAssertFalse(screen.contains("SSH"))
     }
 
-    /// A row's own folder button writes through `answer`, which drops the
-    /// added folder. The row must stay, at the new path, so no watch goes to
-    /// the daemon that the screen does not show.
-    func test_aRowsChosenFolderKeepsItsRow() throws {
-        let copy = try firstRunCopy()
+    /// An added row's folder button picks another folder for that row: it
+    /// is described again and replaces the row, watched, as choosing a
+    /// folder on any other row watches it. A tool row's folder button never
+    /// touches an added row.
+    func test_anAddedRowsFolderButtonReplacesItsFolder() throws {
         var state = FirstRunState(tier: .custom, step: .tools)
         ToolsScreenLayout.apply(.added(AddedFolder(kind: .source(.opencode), path: "/a")), to: &state)
-        let row = try XCTUnwrap(ToolsScreenLayout.rows([], state: state).first { $0.source == .opencode })
-        ToolAnswerRowLayout.choose(folder: "/b", for: row, in: &state)
+        XCTAssertTrue(
+            ToolsScreenLayout.replace(
+                path: "/a", with: .added(AddedFolder(kind: .source(.opencode), path: "/b")), in: &state))
+        XCTAssertEqual(state.addedFolders, [AddedFolder(kind: .source(.opencode), path: "/b", watched: true)])
         XCTAssertEqual(state.sessionRoots.opencode, .watch(path: "/b"))
-        let rows = ToolsScreenLayout.rows([], state: state)
-        XCTAssertEqual(rows.map(\.source), [.opencode])
-        XCTAssertEqual(rows.first?.path, "/b")
-        XCTAssertEqual(
-            ToolsScreenLayout.meta(for: rows[0], in: state, discovered: [], copy: copy, now: Date()),
-            copy.tools.addedByYou)
 
-        // Discovered as missing: the row stays found at the watched path, with
-        // no install line beside a folder it is watching.
+        // A refused folder leaves the row as it was.
+        XCTAssertFalse(ToolsScreenLayout.replace(path: "/b", with: .refused, in: &state))
+        XCTAssertEqual(state.addedFolders.map(\.path), ["/b"])
+
+        // A tool row's own folder writes only that tool's answer.
+        let claude = Self.candidate(.claudeCode, exists: true)
+        ToolAnswerRowLayout.choose(folder: "/c", for: claude, in: &state)
+        XCTAssertEqual(state.addedFolders.map(\.path), ["/b"])
+
+        // Discovered as missing but watched by its row: the row stays found
+        // at the watched path, with no install line beside it.
         let missing = Self.candidate(.codex, exists: false)
-        state.answer(.codex, .watch(path: "/c"))
+        state.answer(.codex, .watch(path: "/d"))
         let codex = try XCTUnwrap(ToolsScreenLayout.rows([missing], state: state).first { $0.source == .codex })
         XCTAssertTrue(codex.exists)
-        XCTAssertEqual(codex.path, "/c")
-        XCTAssertFalse(ToolAnswerRowLayout.offersGetTool(codex, installURL: URL(string: "https://example.com"), in: state))
-    }
-
-    func test_aLaterOffDropsTheAddedFolder() throws {
-        let path = "/Users/someone/exports"
-        var state = FirstRunState(tier: .custom, step: .tools)
-        XCTAssertTrue(
-            ToolsScreenLayout.apply(
-                ToolsScreenLayout.outcome(path: path, json: Self.describe(["opencode"], path: path)),
-                to: &state))
-        let row = try XCTUnwrap(
-            ToolsScreenLayout.rows([], state: state).first { $0.source == .opencode })
-
-        // "I don't use it" on the row drops the folder: no watch survives it.
-        ToolAnswerRowLayout.select(.dontUse, for: row, in: &state)
-        XCTAssertEqual(state.addedFolders, [])
-        XCTAssertEqual(state.toolAnswers[.opencode], .off)
-        XCTAssertEqual(state.sessionRoots.opencode, .off)
-
-        // And adding again replaces the row's "off".
-        XCTAssertTrue(
-            ToolsScreenLayout.apply(.added(AddedFolder(kind: .source(.opencode), path: path)), to: &state))
-        XCTAssertNil(state.toolAnswers[.opencode])
-        XCTAssertEqual(state.sessionRoots.opencode, .watch(path: path))
+        XCTAssertEqual(codex.path, "/d")
+        XCTAssertFalse(
+            ToolAnswerRowLayout.offersGetTool(codex, installURL: URL(string: "https://example.com"), in: state))
     }
 }

@@ -53,8 +53,9 @@ public enum FirstRunNavigation {
     ///
     /// - Join: an account answer, which may be "watch only".
     /// - Folders / Tools: every tool found on this Mac answered (a missing
-    ///   one is not asked, spec rule 1), and a declaration the daemon would
-    ///   start with.
+    ///   one is not asked, spec rule 1), every added folder answered, no
+    ///   tool watched in two rows, and a declaration the daemon would start
+    ///   with.
     /// - Rules: always; every choice there is optional.
     /// - Uses: the required use ticked, and something Start can do: finish
     ///   watching only, reopen a chosen passkey's sheets, or finish an
@@ -71,7 +72,8 @@ public enum FirstRunNavigation {
         case .folders, .tools:
             let roots = state.sessionRoots
             let everyOfferedAnswered = candidates.filter(\.exists).allSatisfy { roots[$0.source].isAnswered }
-            return everyOfferedAnswered && roots.settingsJSON() != nil
+            return everyOfferedAnswered && state.everyAddedFolderAnswered && state.watchedTwice.isEmpty
+                && roots.settingsJSON() != nil
         case .rules:
             return true
         case .uses:

@@ -20,7 +20,7 @@ enum ToolAnswerRowLayout {
     /// asks, so the picker can show the answer Continue counts.
     static func asks(_ candidate: SourceCandidate, in state: FirstRunState) -> Bool {
         if candidate.exists { return true }
-        if case .watch = state.sessionRoots[candidate.source] { return true }
+        if case .watch = state.rowAnswer(candidate.source) { return true }
         return false
     }
 
@@ -40,11 +40,12 @@ enum ToolAnswerRowLayout {
         !asks(candidate, in: state) && installURL != nil
     }
 
-    /// What the row shows as answered, read from the same declaration
-    /// Continue reads. The picker can show it because
-    /// `options(for:in:)` offers every answer this can return.
+    /// What the row shows as answered: the row's own answer, never a folder
+    /// added for the same tool, which has a row of its own (Ron's review of
+    /// #1235, item 3). The picker can show it because `options(for:in:)`
+    /// offers every answer this can return.
     static func answer(in state: FirstRunState, for candidate: SourceCandidate) -> ToolAnswer? {
-        switch state.sessionRoots[candidate.source] {
+        switch state.rowAnswer(candidate.source) {
         case .undecided: return nil
         case .watch: return .watch
         case .off: return .dontUse
@@ -53,7 +54,7 @@ enum ToolAnswerRowLayout {
 
     /// The folder the row would watch: a chosen one, else discovery's.
     static func shownPath(in state: FirstRunState, for candidate: SourceCandidate) -> String {
-        if case .watch(let path) = state.sessionRoots[candidate.source] { return path }
+        if case .watch(let path) = state.rowAnswer(candidate.source) { return path }
         return candidate.path
     }
 

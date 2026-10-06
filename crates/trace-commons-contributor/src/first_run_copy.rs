@@ -16,7 +16,8 @@
 //! - The invite placeholder carries no code: Ron's preview showed a mock one.
 //! - Tools adds three lines for a folder that matches more than one kind:
 //!   `which_kind` asks which, `trajectory_label` names the exported-traces
-//!   option and its row, and `neither` dismisses the question.
+//!   option and its row, and `neither` dismisses the question; and
+//!   `one_folder_per_tool` for a tool watched in two rows.
 //! - Folders adds three lines Ron's preview had no need for, since its data
 //!   was mocked: `discovery_failed` and `retry` for a discovery that returns
 //!   nothing readable, and `enroll_refused` for an enroll refused after the
@@ -209,6 +210,12 @@ pub struct ToolsCopy {
     /// It closes the question and adds the folder as nothing.
     /// **DRAFT, NEEDS APPROVAL**
     pub neither: &'static str,
+    /// `{tool}`: a tool's own row and a folder added for it both read
+    /// Watch. The daemon watches one folder per tool, so Continue waits for
+    /// one of them to say "I don't use it"; this says so beside the added
+    /// folder.
+    /// **DRAFT, NEEDS APPROVAL**
+    pub one_folder_per_tool: &'static str,
 }
 
 /// Rules and the past-session picker (`rules-screen.tsx`).
@@ -428,6 +435,7 @@ pub fn first_run_copy() -> FirstRunCopy {
             which_kind: "What does {folder} hold?",
             trajectory_label: "Exported traces",
             neither: "Neither",
+            one_folder_per_tool: "{tool} can watch only one folder. Answer “I don’t use it” on one of its rows.",
         },
         rules: RulesCopy {
             title_light: "Set your ",
@@ -675,6 +683,15 @@ mod tests {
         // The question can be dismissed: the folder is neither kind.
         assert!(!tools.neither.trim().is_empty());
         assert_ne!(tools.neither, tools.trajectory_label);
+    }
+
+    /// A tool watched in two rows holds Continue, and the added row says
+    /// why with the tool's name.
+    #[test]
+    fn a_tool_watched_twice_has_its_own_line() {
+        let tools = first_run_copy().tools;
+        assert!(tools.one_folder_per_tool.contains("{tool}"));
+        assert!(tools.one_folder_per_tool.contains("I don’t use it"));
     }
 
     /// Start's failures each have a sentence that is true when it is shown.

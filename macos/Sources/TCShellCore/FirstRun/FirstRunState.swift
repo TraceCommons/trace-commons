@@ -63,10 +63,17 @@ public struct AddedFolder: Codable, Equatable, Sendable {
 
     public let kind: Kind
     public let path: String
+    /// The person's answer on the folder's own row: nil until answered,
+    /// true for Watch, false for "I don't use it". A tool's folder starts
+    /// unanswered (Ron's review of #1235, item 3). A folder of exported
+    /// traces reads Watch, and "I don't use it" removes it (`Fine as
+    /// built`), so it starts at true.
+    public var watched: Bool?
 
-    public init(kind: Kind, path: String) {
+    public init(kind: Kind, path: String, watched: Bool? = nil) {
         self.kind = kind
         self.path = path
+        self.watched = watched ?? (kind == .trajectory ? true : nil)
     }
 }
 
@@ -88,7 +95,8 @@ public struct FirstRunState: Codable, Equatable, Sendable {
     /// One answer per offered tool. A missing key or `.undecided` is not an
     /// answer. Set through `answer(_:_:)`, which keeps one answer per kind.
     public var toolAnswers: [SourceKind: SourceChoice]
-    /// Set through `add(_:)`, which keeps one answer per kind.
+    /// Folders added on Tools, each its own row. Set through `add(_:)` and
+    /// answered through `answerAdded(path:watched:)`.
     public var addedFolders: [AddedFolder]
     /// Rule per `project_id` (Custom only).
     public var rules: [String: ProjectMode]
@@ -186,23 +194,53 @@ public struct FirstRunState: Codable, Equatable, Sendable {
         }
     }
 
-    /// Answer a tool's row. A folder added for that tool earlier is dropped,
-    /// so a later "I don't use it" is not turned back into a watch.
+    /// Answer a tool's row. A folder added for that tool is a row of its
+    /// own and keeps its own answer.
     public mutating func answer(_ kind: SourceKind, _ choice: SourceChoice) {
-        addedFolders.removeAll { $0.kind == .source(kind) }
         toolAnswers[kind] = choice
     }
 
-    /// Add a folder. It replaces an earlier folder of the same kind and, for
-    /// a tool, that tool's row answer. One folder is one thing: an earlier
-    /// folder at the same path, of any kind, is dropped too, so a folder
-    /// answered again is never declared under two adapters.
+    /// Add a folder as a row of its own. It answers nothing: no tool row is
+    /// written, and a tool's folder starts unanswered. One folder is one
+    /// thing: an earlier folder at the same path, of any kind, is dropped,
+    /// so a folder answered again is never declared under two adapters. A
+    /// second folder of exported traces replaces the first, which has one
+    /// declaration of its own.
     public mutating func add(_ folder: AddedFolder) {
-        addedFolders.removeAll { $0.kind == folder.kind || $0.path == folder.path }
-        if case .source(let kind) = folder.kind {
-            toolAnswers[kind] = nil
-        }
+        addedFolders.removeAll { $0.path == folder.path || (folder.kind == .trajectory && $0.kind == .trajectory) }
         addedFolders.append(folder)
+    }
+
+    /// What a tool's own row answered, apart from any folder added for it.
+    public func rowAnswer(_ kind: SourceKind) -> SourceChoice {
+        toolAnswers[kind] ?? .undecided
+    }
+
+    /// Answer an added folder's row: true for Watch, false for "I don't use
+    /// it", nil to take the answer back.
+    public mutating func answerAdded(path: String, watched: Bool?) {
+        guard let index = addedFolders.firstIndex(where: { $0.path == path }) else { return }
+        addedFolders[index].watched = watched
+    }
+
+    /// Tools that two rows both watch: the tool's own row and a folder
+    /// added for it, or two added folders. The daemon watches one folder per
+    /// tool, so Continue is held until one of them says "I don't use it".
+    public var watchedTwice: Set<SourceKind> {
+        var counts: [SourceKind: Int] = [:]
+        for (kind, choice) in toolAnswers {
+            if case .watch = choice { counts[kind, default: 0] += 1 }
+        }
+        for folder in addedFolders where folder.watched == true {
+            if case .source(let kind) = folder.kind { counts[kind, default: 0] += 1 }
+        }
+        return Set(counts.filter { $0.value > 1 }.keys)
+    }
+
+    /// Every added tool folder has an answer. A folder of exported traces
+    /// always reads Watch.
+    public var everyAddedFolderAnswered: Bool {
+        addedFolders.allSatisfy { $0.watched != nil }
     }
 
     /// Withdraw the trajectory folder, which has no tool row to answer "I
@@ -213,7 +251,10 @@ public struct FirstRunState: Codable, Equatable, Sendable {
     }
 
     /// The tool answers and added folders as one declaration. An added folder
-    /// for a tool is that tool's answer; a later one replaces an earlier one.
+    /// answered Watch is that tool's folder (while a tool is watched in two
+    /// rows, `watchedTwice`, Continue is held, so this is never sent); one
+    /// unanswered or answered "I don't use it" declares nothing, and the
+    /// tool's own row stands.
     /// Both Continue on Folders/Tools and the daemon start read this, so they
     /// cannot disagree about what is answered.
     ///
@@ -231,7 +272,7 @@ public struct FirstRunState: Codable, Equatable, Sendable {
         for kind in [SourceKind.claudeCode, .codex] where notFound.contains(kind) && !roots[kind].isAnswered {
             roots[kind] = .off
         }
-        for folder in addedFolders {
+        for folder in addedFolders where folder.watched == true {
             switch folder.kind {
             case .source(let kind): roots[kind] = .watch(path: folder.path)
             case .trajectory: roots.trajectory = .watch(path: folder.path)
