@@ -1,4 +1,4 @@
-// INTEGRATION: shared by HistoryView, SessionDetailView, DaemonClient, and
+// INTEGRATION: shared by the History inspector, SessionDetailView, DaemonClient, and
 // AppModel for account-owned session detail and reviewed public workflows.
 
 import Foundation
@@ -135,6 +135,14 @@ struct PublicRunCopy: Decodable, Equatable {
     let feedbackChoices: [PublicRunValueLabel]
     let evidenceKindChoices: [PublicRunValueLabel]
     let contributionStatusChoices: [PublicRunValueLabel]
+    /// The core's label for a status not in `contributionStatusChoices`
+    /// (`history_copy::STATUS_UNAVAILABLE`): "Status unavailable" in every
+    /// shell.
+    let contributionStatusUnavailable: String
+    /// History's word for each contribution status, the core's
+    /// `history_copy::STATUS_LABELS`: the one table every shell reads. Read
+    /// it through `historyStatusLabel(for:)`.
+    let historyStatusLabels: [PublicRunValueLabel]
     let permittedUseChoices: [PublicRunValueLabel]
     let reusePermissions: [PublicRunReuseChoice]
 
@@ -150,7 +158,17 @@ struct PublicRunCopy: Decodable, Equatable {
     }
 
     func contributionStatusLabel(for value: String) -> String {
-        contributionStatusChoices.first { $0.value == value }?.label ?? unrecognizedValue
+        contributionStatusChoices.first { $0.value == value }?.label ?? contributionStatusUnavailable
+    }
+
+    /// The word a History or monitor row shows for a contribution status:
+    /// the core's (`history_copy::STATUS_LABELS`), so "Waiting to be scored"
+    /// for `submitted` and `processing`, never the session-detail table's
+    /// "Submitted". A status the core does not name reads as
+    /// `contributionStatusUnavailable`, and is terminal
+    /// (`ContributionStatusPresentation`).
+    func historyStatusLabel(for value: String) -> String {
+        historyStatusLabels.first { $0.value == value }?.label ?? contributionStatusUnavailable
     }
 
     func permittedUseLabel(for value: String) -> String {
@@ -173,12 +191,26 @@ struct PublicRunCopy: Decodable, Equatable {
 }
 
 enum ContributionStatusPresentation {
-    private static let terminalValues: Set<String> = [
-        "withdrawn", "revoked", "purged", "expired",
+    /// The core's statuses a contribution can still be withdrawn from. The
+    /// other four it names -- withdrawn, revoked, purged, expired -- are
+    /// closed.
+    private static let openValues: Set<String> = [
+        "submitted", "received", "accepted", "quarantined",
+        "awaiting_pii_backstop", "rejected",
     ]
 
+    /// Closed, or not a status this build recognizes. Fails closed, as
+    /// Tauri's `canWithdrawStatus` allowlist does: a status from a newer
+    /// daemon is treated as terminal, so Withdraw is not offered on it.
+    /// `nil` (no status reported yet) is not terminal.
     static func isTerminal(_ value: String?) -> Bool {
-        value.map(terminalValues.contains) ?? false
+        guard let value else { return false }
+        return !openValues.contains(value)
+    }
+
+    /// Whether Withdraw is offered on a contribution in this status.
+    static func offersWithdraw(_ value: String?) -> Bool {
+        !isTerminal(value)
     }
 }
 

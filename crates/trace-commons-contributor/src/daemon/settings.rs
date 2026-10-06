@@ -89,6 +89,92 @@ const DEFAULT_CANARY_INTERVAL_SECS: u64 = 3600;
 /// `approve` reports no `hold_until`.
 const DEFAULT_APPROVAL_HOLD_SECS: u64 = 10;
 
+/// How patient the watcher may be told to be, in seconds. Above the ceiling
+/// "done" never arrives in any practical session -- an unbounded value would
+/// let a session sit in `Writing` forever, which is the open-ended footgun
+/// this range exists to close. Zero is in range: a session counts as
+/// finished the instant it stops growing, which a test harness relies on to
+/// avoid racing a real-time window (`a_claude_root_override_is_scanned_from_
+/// the_first_tick`), and which is merely eager, not unsafe, for a real
+/// contributor. A shell's own minute-granularity control (1..=240 minutes)
+/// is free to offer a coarser minimum than this.
+pub const QUIESCENCE_SECS_MIN: u64 = 0;
+pub const QUIESCENCE_SECS_MAX: u64 = 14_400;
+/// How long an approved upload may be held before the uploader touches it.
+/// Zero is in range -- see `DEFAULT_APPROVAL_HOLD_SECS`'s doc for why zero
+/// disables the hold rather than being refused -- and five minutes is far
+/// past any undo a person could need to press.
+pub const APPROVAL_HOLD_SECS_MIN: u64 = 0;
+pub const APPROVAL_HOLD_SECS_MAX: u64 = 300;
+/// How often a digest notification may repeat, on `DigestSchedule::Interval`.
+/// Mirrors a shell's hour-granularity control (1..=24 hours).
+pub const DIGEST_INTERVAL_SECS_MIN: u64 = 3_600;
+pub const DIGEST_INTERVAL_SECS_MAX: u64 = 86_400;
+/// The floor for `max_bytes_per_day`: non-zero, same as `max_uploads_per_day`
+/// -- a contributor throttling their own uploads down to almost nothing is
+/// self-throttling, not the runaway-client case the ceiling exists for, and
+/// is deliberately allowed (`a_cap_below_the_default_is_allowed_as_self_throttling`).
+/// Only `MAX_BYTES_PER_DAY_CEILING` is a real safety bound; a shell's own
+/// megabyte-granularity control is free to offer a coarser minimum than this.
+pub const MAX_BYTES_PER_DAY_MIN: u64 = 1;
+
+/// A validated numeric setting's bounds, in the unit `set_settings` itself
+/// stores and checks -- seconds or bytes, never the minutes, hours or
+/// megabytes a shell's control is scaled in. One definition, read by every
+/// shell's control instead of each one transcribing its own copy of the
+/// same two numbers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct SettingRange {
+    pub min: u64,
+    pub max: u64,
+}
+
+impl SettingRange {
+    const fn new(min: u64, max: u64) -> Self {
+        Self { min, max }
+    }
+
+    /// Whether `value` is in `self.min..=self.max`.
+    fn contains(&self, value: u64) -> bool {
+        (self.min..=self.max).contains(&value)
+    }
+
+    /// `value`, pulled inside `self.min..=self.max` if it is not already
+    /// there. Used to repair a value already on disk from before this range
+    /// existed; a *write* refuses an out-of-range value outright (see
+    /// `parse_ranged_u64`) rather than silently rewriting what a caller
+    /// asked for.
+    fn clamp(&self, value: u64) -> u64 {
+        value.clamp(self.min, self.max)
+    }
+}
+
+/// Every numeric setting's range, for a shell to draw its control's bounds
+/// from -- the ranges [`apply_settings_object`] itself enforces, so a shell
+/// cannot offer a control wider than what `set_settings` will actually
+/// accept.
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct SettingsRanges {
+    pub quiescence_secs: SettingRange,
+    pub approval_hold_secs: SettingRange,
+    pub digest_interval_secs: SettingRange,
+    pub max_uploads_per_day: SettingRange,
+    pub max_bytes_per_day: SettingRange,
+}
+
+/// The ranges [`apply_settings_object`] validates every numeric setting
+/// against. See [`SettingsRanges`].
+#[must_use]
+pub fn settings_ranges() -> SettingsRanges {
+    SettingsRanges {
+        quiescence_secs: SettingRange::new(QUIESCENCE_SECS_MIN, QUIESCENCE_SECS_MAX),
+        approval_hold_secs: SettingRange::new(APPROVAL_HOLD_SECS_MIN, APPROVAL_HOLD_SECS_MAX),
+        digest_interval_secs: SettingRange::new(DIGEST_INTERVAL_SECS_MIN, DIGEST_INTERVAL_SECS_MAX),
+        max_uploads_per_day: SettingRange::new(1, MAX_UPLOADS_PER_DAY_CEILING as u64),
+        max_bytes_per_day: SettingRange::new(MAX_BYTES_PER_DAY_MIN, MAX_BYTES_PER_DAY_CEILING),
+    }
+}
+
 /// A minted NEAR AI inference credential, as persisted.
 ///
 /// The service returns the plaintext key exactly once, at creation, so there
@@ -387,6 +473,18 @@ pub struct DaemonSettings {
     /// adapter; there is no conventional native database or export location.
     #[serde(default)]
     pub opencode_source: Option<SourceDeclaration>,
+    /// A folder of exported trajectory files the contributor chose, read
+    /// with the strict trajectory reader alongside the staging folder.
+    ///
+    /// Absent/null and Off both add no folder: there is no conventional
+    /// location, so an undeclared value builds nothing (the staging folder
+    /// is still read either way -- placing a file THERE is its own opt-in).
+    /// Deliberately not part of [`roots_declared`]: an absent folder reads
+    /// nothing, so it cannot gate starting. Sessions found here are never
+    /// armed for automatic upload; they always wait for a person (see the
+    /// trajectory check in `daemon::watcher`).
+    #[serde(default)]
+    pub trajectory_source: Option<SourceDeclaration>,
 
     /// An explicit local proxy declaration. Off refuses metadata; Watch
     /// keeps its endpoint. Absent permits the daemon to derive metadata only
@@ -926,6 +1024,7 @@ impl Default for DaemonSettings {
             gemini_source: None,
             cline_source: None,
             opencode_source: None,
+            trajectory_source: None,
             ironwire: None,
             ironwire_attested_bodies: false,
             token_distributions_contribution: false,
@@ -990,7 +1089,61 @@ impl DaemonSettings {
             .is_none_or(serde_json::Value::is_null);
         settings.absorb_legacy_roots();
         settings.validate_digest_schedule();
+        for field in settings.clamp_numeric_ranges() {
+            // Label-only, like `validate_digest_schedule`: the field name,
+            // never the value or anything from the file.
+            tracing::warn!(
+                field,
+                "daemon setting out of range in the saved file; clamped into range"
+            );
+        }
         Ok(settings)
+    }
+
+    /// Pull `quiescence_secs`, `approval_hold_secs` and `digest_interval_secs`
+    /// back into the ranges [`apply_settings_object`] enforces on a write,
+    /// for a value a FILE already holds from before those ranges existed, or
+    /// from a hand edit, or from a future build with a wider range than
+    /// this one knows.
+    ///
+    /// Clamped, not refused: refusing here would mean a value `set_settings`
+    /// used to accept -- and which is sitting in a real contributor's file
+    /// right now -- bricks every `load` from here on, including the very
+    /// next `set_settings` call that would have fixed it. A write is a
+    /// choice being made right now and is held to the range; a load is
+    /// reading back a choice that was already made, by this build or an
+    /// older one, and the honest repair is to bring it inside the range this
+    /// build enforces, not to make the whole settings file unreadable.
+    ///
+    /// Returns the name of each field it moved, so `load` says so rather
+    /// than clamping silently -- the next unrelated `set_settings` saves
+    /// the whole file and makes the clamped value permanent.
+    fn clamp_numeric_ranges(&mut self) -> Vec<&'static str> {
+        let ranges = settings_ranges();
+        let mut moved = Vec::new();
+        let mut clamp = |name: &'static str, range: &SettingRange, value: &mut u64| {
+            let clamped = range.clamp(*value);
+            if clamped != *value {
+                *value = clamped;
+                moved.push(name);
+            }
+        };
+        clamp(
+            "quiescence_secs",
+            &ranges.quiescence_secs,
+            &mut self.quiescence_secs,
+        );
+        clamp(
+            "approval_hold_secs",
+            &ranges.approval_hold_secs,
+            &mut self.approval_hold_secs,
+        );
+        clamp(
+            "digest_interval_secs",
+            &ranges.digest_interval_secs,
+            &mut self.digest_interval_secs,
+        );
+        moved
     }
 
     /// Refuse an evening `hour` outside 0..=23 read from the file (a hand
@@ -1071,10 +1224,54 @@ impl DaemonSettings {
             .declare(crate::source::SOURCE_GEMINI_CLI, self.gemini_source.clone())
             .declare(crate::source::SOURCE_CLINE, self.cline_source.clone())
             .declare(crate::source::SOURCE_OPENCODE, self.opencode_source.clone())
+            .declare(
+                crate::source::SOURCE_TRAJECTORY,
+                self.trajectory_source.clone(),
+            )
             .with_trajectory(crate::source::TrajectorySelection::Auto {
                 working_dir: None,
                 staging_dir: Some(store.dir().join(crate::source::TRAJECTORY_STAGING_SUBDIR)),
             })
+    }
+
+    /// The "keychain" block of the private-AI credential status (the
+    /// contributor-facing answer `near_ai_credential_status` extends with
+    /// what this machine's own credential store holds). Moved here from
+    /// Tauri (K7, #1173) so every shell -- Tauri today, macOS over the C ABI
+    /// -- assembles the identical fields the identical way.
+    ///
+    /// Labels and booleans only, per the repo's hash-only / label-only rule:
+    /// never the inference key, never the session's refresh token, never an
+    /// account id. `key_prefix` is the service's own truncated display
+    /// prefix, not a secret; see [`NearAiInferenceCredential::key_prefix`].
+    ///
+    /// `key_prefix` and `minted_at` are present only alongside an inference
+    /// credential, and `session_expires_at` only alongside a session that
+    /// has reported an expiry -- a key absent from the object, not `null`,
+    /// is how "nothing to show" is spelled here.
+    pub fn keychain_status_json(&self) -> serde_json::Value {
+        let mut keychain = serde_json::json!({
+            "state": if self.cloud_storage_unavailable {
+                "unavailable"
+            } else if self.cloud_credentials.is_some() {
+                "present"
+            } else {
+                "empty"
+            },
+            "inference_present": self.near_ai_inference.is_some(),
+            "session_present": self.near_ai_session.is_some(),
+            "migration": if self.cloud_credentials.is_some() { "native-v1" } else { "none" },
+        });
+        if let Some(inference) = self.near_ai_inference.as_ref() {
+            keychain["key_prefix"] = serde_json::Value::String(inference.key_prefix.clone());
+            keychain["minted_at"] = serde_json::Value::String(inference.minted_at.to_rfc3339());
+        }
+        if let Some(session) = self.near_ai_session.as_ref()
+            && let Some(expires_at) = session.refresh_token_expires_at
+        {
+            keychain["session_expires_at"] = serde_json::Value::String(expires_at.to_rfc3339());
+        }
+        keychain
     }
 
     pub fn save(&self, store: &ConfigStore) -> Result<()> {
@@ -1106,6 +1303,24 @@ impl DaemonSettings {
         let body = serde_json::to_vec_pretty(&persisted).context("serializing daemon settings")?;
         store.write_daemon_file(DAEMON_SETTINGS_FILE, &body)
     }
+}
+
+/// [`DaemonSettings::keychain_status_json`]'s answer when the settings
+/// document could not even be loaded (an unreadable config directory, or a
+/// document `load_with_cloud_credentials` refused). The daemon's own
+/// `near_ai_credential_status` IPC answer already names a storage failure it
+/// can detect -- `migration_available`, `storage_unentitled`,
+/// `storage_unavailable` -- with the action that goes with it; this is only
+/// the fallback for the one case where this process cannot even open the
+/// document, and it must read as "nothing here", never as an error a
+/// contributor cannot act on.
+pub fn keychain_status_unavailable_json() -> serde_json::Value {
+    serde_json::json!({
+        "state": "unavailable",
+        "inference_present": false,
+        "session_present": false,
+        "migration": "none",
+    })
 }
 
 /// A partial-settings object held nothing this function recognizes.
@@ -1140,6 +1355,7 @@ pub fn source_settings_key(source: &str) -> Option<&'static str> {
         crate::source::SOURCE_GEMINI_CLI => Some("gemini_source"),
         crate::source::SOURCE_CLINE => Some("cline_source"),
         crate::source::SOURCE_OPENCODE => Some("opencode_source"),
+        crate::source::SOURCE_TRAJECTORY => Some("trajectory_source"),
         _ => None,
     }
 }
@@ -1239,10 +1455,16 @@ pub fn apply_settings_object(
         // replaces.
         match key.as_str() {
             "quiescence_secs" => {
-                settings.quiescence_secs = value.as_u64().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
+                settings.quiescence_secs = parse_ranged_u64(
+                    value,
+                    SettingRange::new(QUIESCENCE_SECS_MIN, QUIESCENCE_SECS_MAX),
+                )?;
             }
             "digest_interval_secs" => {
-                settings.digest_interval_secs = value.as_u64().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
+                settings.digest_interval_secs = parse_ranged_u64(
+                    value,
+                    SettingRange::new(DIGEST_INTERVAL_SECS_MIN, DIGEST_INTERVAL_SECS_MAX),
+                )?;
             }
             // `{"mode":"interval"}` or `{"mode":"evening","hour":0..=23}`.
             // See `DigestSchedule`; K9 (#1118), open decision #5.
@@ -1250,7 +1472,10 @@ pub fn apply_settings_object(
                 settings.digest_schedule = parse_digest_schedule(value)?;
             }
             "approval_hold_secs" => {
-                settings.approval_hold_secs = value.as_u64().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
+                settings.approval_hold_secs = parse_ranged_u64(
+                    value,
+                    SettingRange::new(APPROVAL_HOLD_SECS_MIN, APPROVAL_HOLD_SECS_MAX),
+                )?;
             }
             "local_notifications" => {
                 settings.local_notifications = value.as_bool().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
@@ -1298,6 +1523,9 @@ pub fn apply_settings_object(
             }
             "opencode_source" => {
                 settings.opencode_source = parse_source_declaration(value)?;
+            }
+            "trajectory_source" => {
+                settings.trajectory_source = parse_source_declaration(value)?;
             }
             // Unlike the source roots above, `null` here means **off**, not
             // "never asked" -- see `IronWireDeclaration`'s doc comment for
@@ -1361,24 +1589,37 @@ pub fn apply_settings_object(
     Ok(changed)
 }
 
-/// `max_uploads_per_day`: a non-zero `u32` at most `MAX_UPLOADS_PER_DAY_CEILING`.
+/// A `u64` field restricted to `range` (inclusive both ends). Every numeric
+/// field `apply_settings_object` accepts is validated through this one
+/// function, so there is one definition of "a valid range" rather than one
+/// embedded in each match arm.
+fn parse_ranged_u64(
+    value: &serde_json::Value,
+    range: SettingRange,
+) -> std::result::Result<u64, &'static str> {
+    let n = value.as_u64().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
+    if range.contains(n) {
+        Ok(n)
+    } else {
+        Err(ERR_SETTINGS_INVALID_VALUE)
+    }
+}
+
+/// `max_uploads_per_day`: a `u32` in `settings_ranges().max_uploads_per_day`.
 /// Zero is refused -- see the call site's doc for why a cap of zero is not
 /// this method's way to stop uploads.
 fn parse_max_uploads_per_day(value: &serde_json::Value) -> std::result::Result<u32, &'static str> {
-    let n = value.as_u64().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
-    if n == 0 || n > MAX_UPLOADS_PER_DAY_CEILING as u64 {
-        return Err(ERR_SETTINGS_INVALID_VALUE);
-    }
-    Ok(n as u32)
+    let range = SettingRange::new(1, MAX_UPLOADS_PER_DAY_CEILING as u64);
+    Ok(parse_ranged_u64(value, range)? as u32)
 }
 
-/// `max_bytes_per_day`: a non-zero `u64` at most `MAX_BYTES_PER_DAY_CEILING`.
+/// `max_bytes_per_day`: a `u64` in `settings_ranges().max_bytes_per_day` --
+/// at least `MAX_BYTES_PER_DAY_MIN` (the smallest amount a shell's
+/// megabyte-granularity control can express) and at most
+/// `MAX_BYTES_PER_DAY_CEILING`.
 fn parse_max_bytes_per_day(value: &serde_json::Value) -> std::result::Result<u64, &'static str> {
-    let n = value.as_u64().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
-    if n == 0 || n > MAX_BYTES_PER_DAY_CEILING {
-        return Err(ERR_SETTINGS_INVALID_VALUE);
-    }
-    Ok(n)
+    let range = SettingRange::new(MAX_BYTES_PER_DAY_MIN, MAX_BYTES_PER_DAY_CEILING);
+    parse_ranged_u64(value, range)
 }
 
 /// `null` clears the override (falls back to the conventional per-user
@@ -1396,6 +1637,73 @@ fn parse_optional_root(
     }
 }
 
+/// Refusal for an `ironwire` `Watch` port of zero. Shared by every caller
+/// that validates a routing port: `set_settings`'s own `ironwire` field
+/// (through [`parse_ironwire_declaration`]) and the Tauri shell's
+/// `configure_routing`/`probe_routing`/`probe_routed_tools` commands. Before
+/// this existed, only Tauri's command layer carried this check -- a raw
+/// `set_settings` caller (another shell, or a future one) had no floor
+/// between it and a persisted port of zero.
+pub const ERR_ROUTING_PORT_INVALID: &str = "routing-port-invalid";
+/// Refusal for a `token_dir` that is not an absolute path. A relative path
+/// would be resolved against whatever directory happens to be the reading
+/// process' current one, which a contributor typing a path into a settings
+/// field has no way to predict or control.
+pub const ERR_ROUTING_TOKEN_DIR_MUST_BE_ABSOLUTE: &str = "routing-token-dir-must-be-absolute";
+
+/// A routing port: non-zero. Port 0 is the ask-the-kernel sentinel, never a
+/// port a proxy actually listens on.
+pub fn validate_routing_port(port: u16) -> std::result::Result<(), &'static str> {
+    if port == 0 {
+        Err(ERR_ROUTING_PORT_INVALID)
+    } else {
+        Ok(())
+    }
+}
+
+/// `token_dir` as a shell collects it: trimmed, with an absent or
+/// empty-after-trim value collapsing to "not declared" (falls back to the
+/// discovery pointer, then `IRONWIRE_HOME`, then the conventional home --
+/// see [`ironwire_token_path`]), and anything else required to be absolute.
+pub fn validate_routing_token_dir(
+    token_dir: Option<&str>,
+) -> std::result::Result<Option<String>, &'static str> {
+    let Some(token_dir) = token_dir else {
+        return Ok(None);
+    };
+    let token_dir = token_dir.trim();
+    if token_dir.is_empty() {
+        return Ok(None);
+    }
+    if !std::path::Path::new(token_dir).is_absolute() {
+        return Err(ERR_ROUTING_TOKEN_DIR_MUST_BE_ABSOLUTE);
+    }
+    Ok(Some(token_dir.to_owned()))
+}
+
+/// `IronWireDeclaration::Watch`'s port must be non-zero, and its `token_dir`
+/// -- when present and non-empty -- must be absolute. An empty `token_dir`
+/// is normalized to `None`, the same "not declared" state a shell's own
+/// collection already collapses it to (see [`validate_routing_token_dir`]).
+fn validate_ironwire_declaration(
+    declaration: IronWireDeclaration,
+) -> std::result::Result<IronWireDeclaration, &'static str> {
+    match declaration {
+        IronWireDeclaration::Watch { port, token_dir } => {
+            validate_routing_port(port)?;
+            let token_dir = match token_dir {
+                Some(dir) if dir.as_os_str().is_empty() => None,
+                Some(dir) if !dir.is_absolute() => {
+                    return Err(ERR_ROUTING_TOKEN_DIR_MUST_BE_ABSOLUTE);
+                }
+                other => other,
+            };
+            Ok(IronWireDeclaration::Watch { port, token_dir })
+        }
+        off @ IronWireDeclaration::Off => Ok(off),
+    }
+}
+
 /// `{"mode":"watch","port":8463}` or null to turn it off. `{"mode":"off"}`
 /// is also accepted since it round-trips `IronWireDeclaration::Off`, but null
 /// is the documented way to reach the same state over IPC. Never formats
@@ -1405,9 +1713,11 @@ fn parse_ironwire_declaration(
 ) -> std::result::Result<Option<IronWireDeclaration>, &'static str> {
     match value {
         serde_json::Value::Null => Ok(None),
-        serde_json::Value::Object(_) => serde_json::from_value(value.clone())
-            .map(Some)
-            .map_err(|_| ERR_SETTINGS_INVALID_VALUE),
+        serde_json::Value::Object(_) => {
+            let declaration: IronWireDeclaration =
+                serde_json::from_value(value.clone()).map_err(|_| ERR_SETTINGS_INVALID_VALUE)?;
+            validate_ironwire_declaration(declaration).map(Some)
+        }
         _ => Err(ERR_SETTINGS_INVALID_VALUE),
     }
 }
@@ -1457,6 +1767,122 @@ mod tests {
             workspace_id: "ws-1".into(),
             minted_at: Utc::now(),
         }
+    }
+
+    fn session() -> NearAiSession {
+        NearAiSession {
+            refresh_token: "rt_super_secret_refresh_token".into(),
+            refresh_token_expires_at: Some(Utc::now()),
+            stored_at: Utc::now(),
+            user_agent: "test-agent".into(),
+        }
+    }
+
+    /// Nothing in the store: empty, and nothing is present.
+    #[test]
+    fn keychain_status_reports_empty_with_nothing_stored() {
+        let value = DaemonSettings::default().keychain_status_json();
+        assert_eq!(value["state"], "empty");
+        assert_eq!(value["inference_present"], false);
+        assert_eq!(value["session_present"], false);
+        assert_eq!(value["migration"], "none");
+        assert!(value.get("key_prefix").is_none());
+        assert!(value.get("minted_at").is_none());
+        assert!(value.get("session_expires_at").is_none());
+    }
+
+    /// An inference credential and a session with a known expiry: present,
+    /// with the labels and the one non-secret prefix, but never the key or
+    /// the refresh token itself.
+    #[test]
+    fn keychain_status_reports_present_fields_with_no_secret_material() {
+        let credential = credential();
+        let session = session();
+        let expires_at = session.refresh_token_expires_at.unwrap();
+        let settings = DaemonSettings {
+            near_ai_inference: Some(credential.clone()),
+            near_ai_session: Some(session),
+            ..Default::default()
+        };
+        let value = settings.keychain_status_json();
+        assert_eq!(value["state"], "empty"); // no cloud_credentials metadata yet
+        assert_eq!(value["inference_present"], true);
+        assert_eq!(value["session_present"], true);
+        assert_eq!(value["key_prefix"], "sk-sup");
+        assert_eq!(value["minted_at"], credential.minted_at.to_rfc3339());
+        assert_eq!(value["session_expires_at"], expires_at.to_rfc3339());
+        let rendered = value.to_string();
+        assert!(!rendered.contains("sk-super-secret-key"));
+        assert!(!rendered.contains("rt_super_secret_refresh_token"));
+    }
+
+    /// A session with no known expiry omits the field rather than writing
+    /// `null` -- the convention this surface uses throughout.
+    #[test]
+    fn keychain_status_omits_session_expiry_when_unknown() {
+        let mut session = session();
+        session.refresh_token_expires_at = None;
+        let settings = DaemonSettings {
+            near_ai_session: Some(session),
+            ..Default::default()
+        };
+        let value = settings.keychain_status_json();
+        assert_eq!(value["session_present"], true);
+        assert!(value.get("session_expires_at").is_none());
+    }
+
+    /// Storage the daemon could not reach reports `unavailable`, not
+    /// `empty`, so a contributor sees "can't reach it" rather than "there's
+    /// nothing here".
+    #[test]
+    fn keychain_status_reports_unavailable_when_storage_is_unreachable() {
+        let settings = DaemonSettings {
+            cloud_storage_unavailable: true,
+            near_ai_inference: Some(credential()),
+            ..Default::default()
+        };
+        let value = settings.keychain_status_json();
+        assert_eq!(value["state"], "unavailable");
+        // The state names the storage failure; presence of secrets this
+        // process did load is still reported truthfully.
+        assert_eq!(value["inference_present"], true);
+    }
+
+    /// Migrated metadata (`cloud_credentials`) is what marks `present` and
+    /// `native-v1`, independent of whether this process also holds the
+    /// in-memory secret right now.
+    #[test]
+    fn keychain_status_present_and_migration_follow_cloud_credentials_metadata() {
+        let (metadata, _bundle) =
+            crate::daemon::stored_cloud_credentials::StoredCloudCredentials::from_secrets(
+                crate::daemon::credential_store::CredentialReference::allocate(),
+                Some(&credential()),
+                None,
+            )
+            .unwrap();
+        // `present`/`native-v1` follow the persisted metadata, not whether
+        // this process currently holds the secret in memory -- so leave
+        // `near_ai_inference` unset here on purpose.
+        let settings = DaemonSettings {
+            cloud_credentials: Some(metadata),
+            ..Default::default()
+        };
+        let value = settings.keychain_status_json();
+        assert_eq!(value["state"], "present");
+        assert_eq!(value["migration"], "native-v1");
+        assert_eq!(value["inference_present"], false);
+    }
+
+    /// The fallback for a settings document this process could not even
+    /// load: unavailable, with nothing present, so a contributor is shown
+    /// "can't reach it" instead of an error with no button.
+    #[test]
+    fn keychain_status_unavailable_fallback_has_nothing_present() {
+        let value = keychain_status_unavailable_json();
+        assert_eq!(value["state"], "unavailable");
+        assert_eq!(value["inference_present"], false);
+        assert_eq!(value["session_present"], false);
+        assert_eq!(value["migration"], "none");
     }
 
     /// `DaemonSettings` derives `Debug`, so a derived `Debug` on the
@@ -1670,6 +2096,99 @@ mod tests {
                 port: 8463,
                 token_dir: None
             })
+        );
+    }
+
+    /// Port 0 used to deserialize fine through `set_settings` -- only
+    /// Tauri's `configure_routing` command refused it before the call ever
+    /// reached the daemon. A raw caller had no such floor. Port 0 is the
+    /// ask-the-kernel sentinel, never a port a proxy actually listens on.
+    #[test]
+    fn set_settings_refuses_a_routing_port_of_zero() {
+        let mut s = DaemonSettings::default();
+        assert_eq!(
+            apply_settings_object(
+                &mut s,
+                &serde_json::json!({"ironwire": {"mode": "watch", "port": 0}}),
+            ),
+            Err(ERR_ROUTING_PORT_INVALID)
+        );
+        assert!(
+            s.ironwire.is_none(),
+            "a rejected declaration changes nothing"
+        );
+        assert_eq!(
+            apply_settings_object(
+                &mut s,
+                &serde_json::json!({"ironwire": {"mode": "watch", "port": 1}}),
+            ),
+            Ok(true)
+        );
+    }
+
+    /// A relative `token_dir` used to persist fine through `set_settings`;
+    /// again, only Tauri's command layer refused it. A relative path would
+    /// be resolved against whatever directory the daemon happens to be
+    /// running from, which a contributor typing a path into a settings
+    /// field has no way to predict.
+    #[test]
+    fn set_settings_refuses_a_relative_routing_token_dir() {
+        let mut s = DaemonSettings::default();
+        assert_eq!(
+            apply_settings_object(
+                &mut s,
+                &serde_json::json!({
+                    "ironwire": {"mode": "watch", "port": 8463, "token_dir": "relative/dir"},
+                }),
+            ),
+            Err(ERR_ROUTING_TOKEN_DIR_MUST_BE_ABSOLUTE)
+        );
+        assert!(s.ironwire.is_none());
+    }
+
+    /// An empty `token_dir` collapses to "not declared", the same leniency
+    /// a shell's own collection already applies, rather than being refused
+    /// as a relative path.
+    #[test]
+    fn set_settings_treats_an_empty_token_dir_as_not_declared() {
+        let mut s = DaemonSettings::default();
+        assert_eq!(
+            apply_settings_object(
+                &mut s,
+                &serde_json::json!({
+                    "ironwire": {"mode": "watch", "port": 8463, "token_dir": ""},
+                }),
+            ),
+            Ok(true)
+        );
+        assert_eq!(
+            s.ironwire,
+            Some(IronWireDeclaration::Watch {
+                port: 8463,
+                token_dir: None,
+            })
+        );
+    }
+
+    /// [`validate_routing_token_dir`] is the exact function the Tauri shell
+    /// calls from `configure_routing`/`probe_routing`/`probe_routed_tools`;
+    /// pinned here against the behaviour that file used to implement
+    /// locally.
+    #[test]
+    fn validate_routing_token_dir_is_optional_but_never_relative() {
+        assert_eq!(validate_routing_token_dir(None).unwrap(), None);
+        assert_eq!(validate_routing_token_dir(Some("  ")).unwrap(), None);
+        let absolute = std::env::temp_dir()
+            .join("ironwire")
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(
+            validate_routing_token_dir(Some(&absolute)).unwrap(),
+            Some(absolute)
+        );
+        assert_eq!(
+            validate_routing_token_dir(Some(".ironwire")).unwrap_err(),
+            ERR_ROUTING_TOKEN_DIR_MUST_BE_ABSOLUTE
         );
     }
 
@@ -2435,6 +2954,108 @@ mod tests {
         assert!(!enabled(&settings));
     }
 
+    /// A trajectory folder is read only when the contributor named it.
+    ///
+    /// Probed by what is read, not by whether a source called `trajectory`
+    /// exists: the staging folder builds one on every daemon.
+    #[test]
+    fn trajectory_declaration_is_explicit_and_old_settings_stay_off() {
+        let (_dir, store) = temp_store();
+        let exports = tempfile::tempdir().unwrap();
+        let exported = exports.path().join("exported.json");
+        std::fs::write(
+            &exported,
+            serde_json::json!([
+                {"role": "meta", "source": "letta", "cwd": "/synthetic/project"},
+                {"role": "user", "content": "hello", "timestamp": "2026-08-30T10:00:00Z"}
+            ])
+            .to_string(),
+        )
+        .unwrap();
+        let mut value = serde_json::to_value(DaemonSettings::default()).unwrap();
+        value.as_object_mut().unwrap().remove("trajectory_source");
+        store
+            .write_daemon_file(DAEMON_SETTINGS_FILE, value.to_string().as_bytes())
+            .unwrap();
+        let mut settings = DaemonSettings::load(&store).unwrap();
+        let reads_the_folder = |s: &DaemonSettings| {
+            crate::source::all_sources(&s.source_roots(&store))
+                .iter()
+                .filter(|source| source.name() == crate::source::SOURCE_TRAJECTORY)
+                .flat_map(|source| source.discover().unwrap())
+                .any(|r| r.path == exported)
+        };
+        assert_eq!(settings.trajectory_source, None);
+        assert!(!reads_the_folder(&settings), "old settings read no folder");
+        assert_eq!(
+            source_settings_key(crate::source::SOURCE_TRAJECTORY),
+            Some("trajectory_source")
+        );
+        let declaration = serde_json::json!({
+            "trajectory_source": {"mode": "watch", "path": exports.path()}
+        });
+        assert_eq!(apply_settings_object(&mut settings, &declaration), Ok(true));
+        assert!(reads_the_folder(&settings));
+        assert!(
+            crate::source::all_sources(&settings.source_roots(&store))
+                .iter()
+                .filter(|source| source.name() == crate::source::SOURCE_TRAJECTORY)
+                .count()
+                == 1,
+            "one trajectory source carries both the staging and the declared folder"
+        );
+        settings.save(&store).unwrap();
+        assert_eq!(
+            DaemonSettings::load(&store).unwrap().trajectory_source,
+            settings.trajectory_source
+        );
+        assert_eq!(
+            apply_settings_object(
+                &mut settings,
+                &serde_json::json!({"trajectory_source": "/bare/path"})
+            ),
+            Err(ERR_SETTINGS_INVALID_VALUE)
+        );
+        assert_eq!(
+            apply_settings_object(
+                &mut settings,
+                &serde_json::json!({"trajectory_source": {"mode": "off"}})
+            ),
+            Ok(true)
+        );
+        assert!(!reads_the_folder(&settings));
+        assert_eq!(
+            apply_settings_object(
+                &mut settings,
+                &serde_json::json!({"trajectory_source": null})
+            ),
+            Ok(true)
+        );
+        assert!(!reads_the_folder(&settings));
+    }
+
+    /// The trajectory folder is offered, never required: an absent one reads
+    /// nothing, so it neither satisfies nor blocks the start gate.
+    #[test]
+    fn roots_declared_ignores_the_trajectory_folder() {
+        let declared = |path: &str| {
+            Some(SourceDeclaration::Watch {
+                path: PathBuf::from(path),
+            })
+        };
+        let only_trajectory = DaemonSettings {
+            trajectory_source: declared("/declared/exports"),
+            ..Default::default()
+        };
+        assert!(!roots_declared(&only_trajectory));
+        let without_trajectory = DaemonSettings {
+            claude_source: declared("/declared/claude"),
+            codex_source: Some(SourceDeclaration::Off),
+            ..Default::default()
+        };
+        assert!(roots_declared(&without_trajectory));
+    }
+
     #[test]
     fn the_cline_declaration_is_settable_and_type_checked() {
         let mut s = DaemonSettings::default();
@@ -2582,6 +3203,168 @@ mod tests {
             Err(ERR_SETTINGS_INVALID_VALUE)
         );
         assert_eq!(s.approval_hold_secs, 30, "a rejected value changes nothing");
+    }
+
+    /// `quiescence_secs`, `digest_interval_secs` and `approval_hold_secs`
+    /// used to accept any `u64`, with only Tauri's command layer clamping to
+    /// a sane range before the call ever reached `set_settings`. A raw
+    /// caller -- another shell, or a future one -- had no such floor between
+    /// it and the daemon. Each is now bounded in the core itself, and at the
+    /// value exactly one past its exported ceiling, not a value this test
+    /// invented separately.
+    #[test]
+    fn quiescence_digest_and_approval_hold_are_bounded_in_the_core() {
+        let ranges = settings_ranges();
+        let mut s = DaemonSettings::default();
+        for (field, range) in [
+            ("quiescence_secs", ranges.quiescence_secs),
+            ("digest_interval_secs", ranges.digest_interval_secs),
+            ("approval_hold_secs", ranges.approval_hold_secs),
+        ] {
+            assert_eq!(
+                apply_settings_object(&mut s, &serde_json::json!({ field: range.max + 1 })),
+                Err(ERR_SETTINGS_INVALID_VALUE),
+                "{field} accepted a value past its exported ceiling"
+            );
+            assert_eq!(
+                apply_settings_object(&mut s, &serde_json::json!({ field: range.max })),
+                Ok(true),
+                "{field} refused its own exported ceiling"
+            );
+        }
+    }
+
+    /// Zero is explicitly in range for `quiescence_secs` (instant) and
+    /// `approval_hold_secs` (no hold); both are meaningful, not accidents of
+    /// an absent floor. One past `digest_interval_secs`' floor is refused.
+    #[test]
+    fn a_meaningful_zero_stays_valid_and_digests_floor_is_enforced() {
+        let mut s = DaemonSettings::default();
+        assert_eq!(
+            apply_settings_object(&mut s, &serde_json::json!({"quiescence_secs": 0})),
+            Ok(true)
+        );
+        assert_eq!(
+            apply_settings_object(&mut s, &serde_json::json!({"approval_hold_secs": 0})),
+            Ok(true)
+        );
+        assert_eq!(
+            apply_settings_object(
+                &mut s,
+                &serde_json::json!({"digest_interval_secs": DIGEST_INTERVAL_SECS_MIN - 1}),
+            ),
+            Err(ERR_SETTINGS_INVALID_VALUE)
+        );
+        assert_eq!(
+            apply_settings_object(
+                &mut s,
+                &serde_json::json!({"digest_interval_secs": DIGEST_INTERVAL_SECS_MIN}),
+            ),
+            Ok(true)
+        );
+    }
+
+    /// The exported ranges are not a second, hand-maintained copy of the
+    /// bounds `apply_settings_object` enforces -- they are read from the
+    /// same constants, so this just pins the shape and the two upload/byte
+    /// caps' floors at 1 (self-throttling is allowed; see
+    /// `a_cap_below_the_default_is_allowed_as_self_throttling`).
+    #[test]
+    fn exported_ranges_match_the_constants_set_settings_enforces() {
+        let ranges = settings_ranges();
+        assert_eq!(ranges.quiescence_secs, SettingRange::new(0, 14_400));
+        assert_eq!(ranges.approval_hold_secs, SettingRange::new(0, 300));
+        assert_eq!(
+            ranges.digest_interval_secs,
+            SettingRange::new(3_600, 86_400)
+        );
+        assert_eq!(ranges.max_uploads_per_day, SettingRange::new(1, 1_000));
+        assert_eq!(
+            ranges.max_bytes_per_day,
+            SettingRange::new(1, 5 * 1024 * 1024 * 1024)
+        );
+    }
+
+    /// A value already on disk from before these ranges existed, or from a
+    /// hand edit, must not brick the file: `load` repairs it into range
+    /// rather than erroring. Covers all three bounded fields, one over each
+    /// end of its range.
+    #[test]
+    fn load_clamps_an_out_of_range_saved_value_into_range() {
+        let (_d, store) = temp_store();
+        let mut v = serde_json::to_value(DaemonSettings::default()).unwrap();
+        let ranges = settings_ranges();
+        v["quiescence_secs"] = serde_json::json!(ranges.quiescence_secs.max + 1_000);
+        v["approval_hold_secs"] = serde_json::json!(ranges.approval_hold_secs.max + 1_000);
+        // Below the floor, not just above the ceiling: digest_interval_secs'
+        // floor is non-zero, unlike the other two.
+        v["digest_interval_secs"] = serde_json::json!(ranges.digest_interval_secs.min - 1);
+        store
+            .write_daemon_file(DAEMON_SETTINGS_FILE, v.to_string().as_bytes())
+            .unwrap();
+
+        let loaded = DaemonSettings::load(&store).expect("a saved out-of-range value still loads");
+        assert_eq!(loaded.quiescence_secs, ranges.quiescence_secs.max);
+        assert_eq!(loaded.approval_hold_secs, ranges.approval_hold_secs.max);
+        assert_eq!(loaded.digest_interval_secs, ranges.digest_interval_secs.min);
+    }
+
+    /// The load-time clamp says which fields it moved, so `load` can log
+    /// them -- the same "never clamp silently" rule `validate_digest_schedule`
+    /// keeps -- and leaves an in-range file untouched and unreported.
+    #[test]
+    fn the_load_clamp_names_each_field_it_moved() {
+        let ranges = settings_ranges();
+        let mut s = DaemonSettings::default();
+        assert!(s.clamp_numeric_ranges().is_empty(), "defaults are in range");
+        s.quiescence_secs = ranges.quiescence_secs.max + 1;
+        s.digest_interval_secs = ranges.digest_interval_secs.min - 1;
+        assert_eq!(
+            s.clamp_numeric_ranges(),
+            vec!["quiescence_secs", "digest_interval_secs"]
+        );
+        assert!(
+            s.clamp_numeric_ranges().is_empty(),
+            "a second pass moves nothing"
+        );
+    }
+
+    /// Clamping a saved value on load must not make `set_settings` quietly
+    /// rewrite an *unrelated* field's out-of-range value back into range --
+    /// the gate on a write stays a refusal (see
+    /// `quiescence_digest_and_approval_hold_are_bounded_in_the_core`), and
+    /// nothing about loading changes that. This also proves the clamp is
+    /// load-time repair, not a standing exception swallowed by every write.
+    #[test]
+    fn a_write_still_refuses_out_of_range_even_after_a_clamped_load() {
+        let (_d, store) = temp_store();
+        let mut v = serde_json::to_value(DaemonSettings::default()).unwrap();
+        let ranges = settings_ranges();
+        v["quiescence_secs"] = serde_json::json!(ranges.quiescence_secs.max + 1_000);
+        store
+            .write_daemon_file(DAEMON_SETTINGS_FILE, v.to_string().as_bytes())
+            .unwrap();
+
+        let mut loaded = DaemonSettings::load(&store).expect("loads, clamped");
+        assert_eq!(loaded.quiescence_secs, ranges.quiescence_secs.max);
+
+        // An unrelated write must still see the now-clamped value, and must
+        // still refuse an out-of-range value of its own.
+        assert_eq!(
+            apply_settings_object(
+                &mut loaded,
+                &serde_json::json!({"local_notifications": true})
+            ),
+            Ok(true)
+        );
+        assert_eq!(loaded.quiescence_secs, ranges.quiescence_secs.max);
+        assert_eq!(
+            apply_settings_object(
+                &mut loaded,
+                &serde_json::json!({"quiescence_secs": ranges.quiescence_secs.max + 1}),
+            ),
+            Err(ERR_SETTINGS_INVALID_VALUE)
+        );
     }
 
     #[test]

@@ -925,6 +925,11 @@ pub struct TraceNearCreditOutboxItemRecord {
     pub near_transaction_hash: Option<String>,
     pub last_error_hash: Option<String>,
     pub confirmed_at: Option<DateTime<Utc>>,
+    /// Set (V94) only on a versioned-pipeline payout row, which the
+    /// pipeline submits and confirms through its own NEAR payout adapter;
+    /// `None` on every row `main` writes, and on every account-hold row.
+    #[serde(default)]
+    pub instrument_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -2712,6 +2717,23 @@ pub trait TraceCorpusStore: Send + Sync {
         tenant_id: &str,
     ) -> Result<Vec<TraceSubmissionRecord>, DatabaseError>;
 
+    /// The submissions of `tenant_id` among `submission_ids`, in no set
+    /// order; an id with no submission is left out. A store that cannot read
+    /// them in one statement reads them one at a time (the default).
+    async fn get_trace_submissions(
+        &self,
+        tenant_id: &str,
+        submission_ids: &[Uuid],
+    ) -> Result<Vec<TraceSubmissionRecord>, DatabaseError> {
+        let mut records = Vec::with_capacity(submission_ids.len());
+        for submission_id in submission_ids {
+            if let Some(record) = self.get_trace_submission(tenant_id, *submission_id).await? {
+                records.push(record);
+            }
+        }
+        Ok(records)
+    }
+
     /// Keyset-paginated submission read scoped to an account's active principal
     /// set, for the dual-auth account read-back surface
     /// (`GET /v1/account/traces`). Rows are filtered by
@@ -2729,6 +2751,21 @@ pub trait TraceCorpusStore: Send + Sync {
         cursor: Option<TraceSubmissionKeysetCursor>,
         limit: i64,
     ) -> Result<Vec<TraceSubmissionRecord>, DatabaseError>;
+
+    /// Read-only activity projection under one statement snapshot. Tenant and
+    /// principals MUST come from account authentication, never a request body.
+    async fn account_activity_days(
+        &self,
+        _tenant_id: &str,
+        _principal_refs: &[String],
+        _starts_at: DateTime<Utc>,
+        _observed_at: DateTime<Utc>,
+        _qualification: trace_commons_protocol::activity_missions::Qualification,
+    ) -> Result<Vec<trace_commons_protocol::activity_missions::ActivityDay>, DatabaseError> {
+        Err(DatabaseError::Query(
+            "activity_missions_source_unavailable".into(),
+        ))
+    }
 
     async fn upsert_trace_tenant_policy(
         &self,
@@ -2761,6 +2798,25 @@ pub trait TraceCorpusStore: Send + Sync {
         &self,
         tenant_id: &str,
     ) -> Result<Vec<TraceCreditEventRecord>, DatabaseError>;
+
+    /// `list_trace_credit_events` for the events of `submission_ids` only, in
+    /// the same order. The default filters the whole ledger.
+    async fn list_trace_credit_events_for_submissions(
+        &self,
+        tenant_id: &str,
+        submission_ids: &[Uuid],
+    ) -> Result<Vec<TraceCreditEventRecord>, DatabaseError> {
+        let wanted = submission_ids
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>();
+        Ok(self
+            .list_trace_credit_events(tenant_id)
+            .await?
+            .into_iter()
+            .filter(|event| wanted.contains(&event.submission_id))
+            .collect())
+    }
 
     /// Move quarantined submissions back to `AwaitingPiiBackstop` so the
     /// backstop driver re-assesses them, oldest-received first, capped at

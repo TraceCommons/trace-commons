@@ -45,13 +45,13 @@
  * this library returns -- fixed labels only, the same discipline the
  * daemon's socket already applies.
  *
- * FOUR NAMED EXEMPTIONS, and no others: tc_discover_sources and
- * tc_discover_opencode_export return filesystem paths, tc_preview_body
- * returns post-redaction trace content, and tc_witness_status_json returns
- * the witness URL and signing address. Each is documented where it is
- * declared, and each is a value the contributor is being asked to make a
- * decision about -- a consent prompt that will not name what it is asking
- * about is not a consent prompt.
+ * FIVE NAMED EXEMPTIONS, and no others: tc_discover_sources,
+ * tc_discover_opencode_export and tc_describe_folder return filesystem
+ * paths, tc_preview_body returns post-redaction trace content, and
+ * tc_witness_status_json returns the witness URL and signing address.
+ * Each is documented where it is declared, and each is a value the
+ * contributor is being asked to make a decision about -- a consent prompt
+ * that will not name what it is asking about is not a consent prompt.
  *
  * THE PREVIEW EXEMPTION: tc_preview_body is the one and only interface here
  * that deliberately carries trace content, and the rule above is absolute
@@ -295,6 +295,24 @@ tc_handle*  tc_daemon_start(const char* config_dir, char** err);
  */
 tc_handle*  tc_daemon_start_with_settings(const char* config_dir, const char* settings_json, char** err);
 
+/* Every numeric setting's valid range, in the unit set_settings itself
+ * stores and validates -- seconds or bytes, never the minutes, hours or
+ * megabytes a shell's own control is scaled in. A shell draws its
+ * slider/stepper bounds from this rather than hard-coding a second copy of
+ * the numbers daemon::settings::apply_settings_object enforces.
+ *
+ * {"quiescence_secs":{"min":0,"max":14400},
+ *  "approval_hold_secs":{"min":0,"max":300},
+ *  "digest_interval_secs":{"min":3600,"max":86400},
+ *  "max_uploads_per_day":{"min":1,"max":1000},
+ *  "max_bytes_per_day":{"min":1,"max":5368709120}}
+ *
+ * Reads nothing and writes nothing; the same object for every caller on
+ * this build. Returns an owned string; free it with tc_string_free. NULL
+ * only on a caught panic.
+ */
+char*       tc_settings_ranges_json(void);
+
 /* Attach to a daemon ALREADY RUNNING in another process, over its socket.
  *
  * This is the answer to tc_daemon_start reporting "already-running". That
@@ -416,6 +434,25 @@ char*       tc_discover_sources(void);
  * Returns NULL for a NULL or non-UTF-8 path, and NULL on a caught panic.
  */
 char*       tc_discover_opencode_export(const char* path);
+
+/* Recognise a folder the contributor picked, by its layout alone, so "add
+ * your tool" can say which tool's sessions it holds.
+ *
+ * Takes no handle, like tc_discover_sources. Returns an owned JSON array
+ * whose elements have the shape of one row of tc_discover_sources: source
+ * ("claude-code" | "codex" | "gemini-cli" | "cline" | "opencode" |
+ * "trajectory"), path (the picked folder itself), exists, session_count,
+ * most_recent, relocated_by_env (always false) and answers_at. One element
+ * per kind whose layout matches; a folder that fits two kinds (a flat
+ * folder of .json files is both an OpenCode and a trajectory export)
+ * reports both, and one that fits none, or is not there, is []. Free it
+ * with tc_string_free.
+ *
+ * Reads directory entries and metadata only, follows no symlink below the
+ * picked folder, and never opens a file. Returns NULL for a NULL or
+ * non-UTF-8 path, and NULL on a caught panic.
+ */
+char*       tc_describe_folder(const char* path);
 
 /* Every fixed word on the routing surface, in one call.
  *
@@ -1098,6 +1135,32 @@ int32_t     tc_contribution_group_control(int64_t pending, int64_t contributable
  * panic.
  */
 char*       tc_contribution_withheld_line(int64_t withheld);
+
+/* How many of pending are actually eligible, clamped to pending.
+ *
+ * Before this existed, a caller that wanted both the eligible count and
+ * tc_contribution_withheld_line's sentence had to derive withheld itself --
+ * pending minus contributable -- which is the exact arithmetic this call and
+ * tc_contribution_group_withheld_count now do once, in the core, instead of
+ * in each shell's own language.
+ *
+ * Same pending/contributable convention as tc_contribution_group_control:
+ * contributable is a list_projects row's contributable_count, or any
+ * NEGATIVE value for an ABSENT one -- never zero, which means the question
+ * applies and nothing qualifies.
+ *
+ * pending is read as 0 on a negative value, which no honest caller produces;
+ * a negative contributable is read as absent, per the convention above.
+ */
+int64_t     tc_contribution_group_eligible_count(int64_t pending, int64_t contributable);
+
+/* pending minus tc_contribution_group_eligible_count's answer, never
+ * negative. The exact value tc_contribution_withheld_line expects.
+ *
+ * Same pending/contributable convention as
+ * tc_contribution_group_eligible_count.
+ */
+int64_t     tc_contribution_group_withheld_count(int64_t pending, int64_t contributable);
 
 /* K9 (#1118): the toast after a submit -- "Sent. N left to decide - upload
  * limit X of Y", the WYSIWYG design's Flow 2/3 example.
@@ -1939,6 +2002,14 @@ char*       tc_witness_copy(void);
 /* Owned JSON; release with tc_string_free. */
 char*       tc_onboarding_copy(void);
 
+/* The first-run wording of #1030 (first_run_copy::first_run_copy): {frame,
+ * join, folders, tools, rules, uses, passkey, private_ai}, each a map of
+ * strings with {tool}, {host}, {pay_range}, {count}, {folder}, {name},
+ * {max}, {selected}, {total} and {tools} placeholders the shell fills. NULL
+ * only on a caught panic.
+ */
+char*       tc_first_run_copy_json(void);
+
 /* The sentence for a witness state, given a TC_WITNESS_STATE_* value.
  * Returns an OWNED string; free with tc_string_free.
  *
@@ -2288,6 +2359,279 @@ void        tc_string_free(char*);
  * the returned pointer.
  */
 const char* tc_last_error(void);
+
+/* ------------------------------------------------------------------------
+ * K3 (#1173): the copy commands that reached only Tauri. Each is the C ABI
+ * route to a sentence, or a table of them, the contributor core already
+ * assembles; none chooses or writes a word of its own. Every returned char*
+ * is owned; free it with tc_string_free.
+ * ------------------------------------------------------------------------ */
+
+/* The line for secrets found and left in what would be sent
+ * (preview_copy::residual_secret_line). count is detection SITES, never
+ * secrets. sites_json, if non-null, is a JSON array of the sites' schema
+ * paths, named in the sentence; NULL or anything else names none.
+ * NULL only on a caught panic.
+ */
+char*       tc_residual_secret_line_text(uint32_t count, const char* sites_json);
+
+/* The preview's removed-summary panel (redaction_summary::summary_copy):
+ * {"removed": [row], "still_present": [row]}, each row {family, display,
+ * description, occurrences, distinct, detail}. redactions_json and
+ * distinct_json are the preview summary's redaction_counts and
+ * redactions_distinct objects passed through; a NULL or unparseable
+ * distinct_json reads as no distinct counts. Which rows are removals and
+ * which are still present is the core's choice. NULL for an unreadable
+ * redactions_json and on a caught panic.
+ */
+char*       tc_redaction_summary_json(const char* redactions_json, const char* distinct_json);
+
+/* The ignore-project control and confirmation (project_copy::
+ * ignore_project_copy): {title, body, button, tooltip}. pending is the count
+ * the confirmation names; negative clamps to 0. NULL for an unreadable
+ * project_label and on a caught panic.
+ */
+char*       tc_project_ignore_copy_json(const char* project_label, int64_t pending);
+
+/* What is said after an ignore when the daemon's purged count differs from
+ * the promised one (project_copy::ignore_project_reconciled). The EMPTY
+ * STRING when they agree. Negative values clamp to 0. NULL for an unreadable
+ * project_label and on a caught panic.
+ */
+char*       tc_project_ignore_reconciled_text(const char* project_label, int64_t promised, int64_t purged);
+
+/* The arming offer and confirmation (project_copy::arming_offer_copy):
+ * {evidence, question, confirm, decline, body, body_with_backlog, customize}.
+ * count is arming_suggestion's contributed_count; a confirmation shown from
+ * Settings passes 0 and does not render evidence. NULL for an unreadable
+ * project_label and on a caught panic.
+ */
+char*       tc_arming_offer_copy_json(const char* project_label, uint32_t count);
+
+/* The menu-bar Contribution mode pill (#1173, project_copy::
+ * contribution_mode_copy): {title, mixed, choices, override_active, clear},
+ * choices being [{mode, label, line}] for Ask me, Automatic and Never.
+ * NULL only on a caught panic.
+ */
+char*       tc_contribution_mode_copy_json(void);
+
+/* The confirmation for one contribution override (#1173, project_copy::
+ * contribution_override_confirm_copy): {mode, title, body, confirm, cancel,
+ * arming}. mode is "notify_only", "auto_upload" or "ignore". arming is the
+ * arming disclosure for auto_upload, read for the configuration in
+ * config_dir, and null otherwise; config_dir may be NULL for the other two.
+ * NULL for an unknown or unreadable mode, for auto_upload with an unreadable
+ * config_dir or configuration, and on a caught panic.
+ */
+char*       tc_contribution_override_confirm_json(const char* mode, const char* config_dir);
+
+/* The sentence for a refused set_contribution_override or
+ * clear_contribution_override (#1173, project_copy::
+ * contribution_override_refusal_line), from the IPC error's label. An
+ * unknown, NULL or non-UTF-8 label gets the core's fallback sentence. NULL
+ * only on a caught panic.
+ */
+char*       tc_contribution_override_refusal_text(const char* label);
+
+/* The Missions disclosure (M4, #1173; consent_copy::
+ * missions_disclosure_copy): {title, matching, nothing_sent, credit}.
+ * Matching happens on this Mac; nothing is sent because of a mission; a
+ * mission's credit is projected until the commons records it, then pending.
+ * DRAFT, NEEDS APPROVAL. NULL only on a caught panic.
+ */
+char*       tc_missions_disclosure_copy_json(void);
+
+/* The legacy invite migration offer (consent_copy::legacy_migration_offer),
+ * as LegacyMigrationOfferCopy's fields. NULL only on a caught panic.
+ */
+char*       tc_legacy_migration_offer_json(void);
+
+/* The sentence for a refused legacy_invite_migrate, from the IPC error's
+ * label (consent_copy::legacy_migration_refusal_line). An unknown, NULL or
+ * non-UTF-8 label gets the core's fallback. NULL only on a caught panic.
+ */
+char*       tc_legacy_migration_refusal_text(const char* label);
+
+/* The glass monitor's Traces words (preview_copy::monitor_traces_copy):
+ * the inspector's row labels, the review's actions, and the lines for a core
+ * that does not answer. NULL only on a caught panic.
+ */
+char*       tc_monitor_traces_copy_json(void);
+
+/* The glass monitor's other screens' words
+ * (preview_copy::monitor_screens_copy): the map, Inference, Home, History,
+ * Missions and the menu-bar popover. NULL only on a caught panic.
+ */
+char*       tc_monitor_screens_copy_json(void);
+
+/* The grant screens' words for one disclosure the daemon chose and named
+ * (consent_copy::automatic_grant_copy_named): an armed folder's list_projects
+ * row carries automatic_disclosure ("patterns_only" or "model_scrubbed"),
+ * and this words that answer. NULL for a NULL or unknown name, and on a
+ * caught panic.
+ */
+char*       tc_automatic_grant_copy_json(const char* disclosure);
+
+/* The Traces badge's text equivalent (preview_copy::decisions_owed_text).
+ * A negative decisions_owed is an unknown count, never zero. The EMPTY
+ * STRING for zero. NULL only on a caught panic.
+ */
+char*       tc_decisions_owed_text(int64_t decisions_owed);
+
+/* The connecting-inference step's sentences (K12,
+ * consent_copy::inference_connection_copy). NULL only on a caught panic.
+ */
+char*       tc_inference_connection_copy_json(void);
+
+/* The Flow 1 grant screens' sentences for the configuration in config_dir
+ * (consent_copy::automatic_contribution_copy). The core chooses the
+ * disclosure: exactly one of patterns_only and model_scrubbed is present.
+ * NULL for an unreadable config_dir or configuration and on a caught panic.
+ */
+char*       tc_automatic_contribution_copy_json(const char* config_dir);
+
+/* The quit prompt true for the process holding handle (quit_copy::
+ * quit_prompt): {role, title, body, confirm, cancel}. The role is read off
+ * the handle: hosting for a daemon run in this process, attached for one
+ * another process runs, unavailable for NULL, a handle that is not live, or
+ * a stopped daemon. NULL only on a caught panic.
+ */
+char*       tc_quit_prompt_json(const tc_handle* handle);
+
+/* The withdrawal confirmation for a trace whose reach this machine cannot
+ * know (withdraw::confirmation_prompt_unknown), paragraphs separated by a
+ * blank line. NULL only on a caught panic.
+ */
+char*       tc_withdrawal_confirmation_prompt_text(void);
+
+/* The extra privacy scan's words (privacy_scan_copy::privacy_scan_copy), for
+ * onboarding's scan screen and the near-ai-notice recovery prompt. NULL only
+ * on a caught panic.
+ */
+char*       tc_privacy_scan_copy_json(void);
+
+/* ------------------------------------------------------------------------
+ * K5 (#1173): the disclosure bundle and the Flow 1 decisions, which were
+ * taken in the Tauri shell and are now core functions. Each export is the
+ * C ABI route to one of them; none chooses or writes anything itself.
+ * Every returned char* is owned; free it with tc_string_free.
+ * ------------------------------------------------------------------------ */
+
+/* The disclosure bundle (disclosure_copy::contributor_disclosure_copy): the
+ * object Tauri's contributor_disclosure_copy command returns.
+ * private_inference.states maps each runtime state label to {line,
+ * working}; a label not in it is private_inference.state_unknown, an absent
+ * one private_inference.state_unreported, neither working. NULL only on a
+ * caught panic.
+ */
+char*       tc_contributor_disclosure_copy_json(void);
+
+/* The check before asking for the Flow 1 grant (flow1::grant_precondition)
+ * for the configuration in config_dir. confirmed is the grant screen's
+ * button: 1 pressed, anything else not. The EMPTY STRING when the grant may
+ * be asked for, otherwise the refusal label:
+ * automatic-grant-confirmation-required, automatic-grant-not-enrolled,
+ * automatic-grant-scope-required or contributor-config-unreadable. NULL for
+ * an unreadable config_dir and on a caught panic.
+ */
+char*       tc_grant_precondition_text(int32_t confirmed, const char* config_dir);
+
+/* Whether the scope picker may continue (flow1::scope_choice):
+ * {can_continue, missing_required}. options_json is consent_options' answer
+ * ({"scopes": [...]} or its array); selected_json a JSON array of the names
+ * ticked. NULL for an unreadable argument and on a caught panic.
+ */
+char*       tc_scope_choice_json(const char* options_json, const char* selected_json);
+
+/* Where the Flow 1 onboarding starts (flow1::start): {step, progress,
+ * privacy_included}. regrant 1 is the re-grant, from the scope picker with
+ * nothing carried over; anything else a first run. NULL only on a caught
+ * panic.
+ */
+char*       tc_flow1_start_json(int32_t regrant);
+
+/* The Flow 1 onboarding's next state (flow1::apply): state_json as last
+ * returned, event_json {"event": <name>, ...}. The step order, Back, and
+ * which events leave the disclosures unread are the core's. Set
+ * progress.connected from the daemon's status before each call. NULL for an
+ * unreadable argument, an unknown event, an event the step on screen does
+ * not offer (Back from the welcome or once done included) and on a caught
+ * panic; a NULL leaves the state the shell holds as it was.
+ */
+char*       tc_flow1_apply_json(const char* state_json, const char* event_json);
+
+/* The steps still standing before the grant (flow1::grant_blockers): a JSON
+ * array of connect, scope, path, scrub_disclosure, witness_disclosure, in
+ * that order; empty when none. A missing progress field reads as not done.
+ * NULL for an unreadable progress_json and on a caught panic.
+ */
+char*       tc_flow1_grant_blockers_json(const char* progress_json);
+
+/* Whether the grant may be asked for now (flow1::grant_request): {ready,
+ * blockers, witness_signing_address}. ready exactly when blockers is empty;
+ * only then is witness_signing_address the witness the disclosure screen
+ * showed (null for none). NULL for an unreadable progress_json and on a
+ * caught panic.
+ */
+char*       tc_flow1_grant_request_json(const char* progress_json);
+
+/* tc_grant_void_notice's object plus regrant and regrant_action, for a shell
+ * that can give the Flow 1 grant (consent_copy::
+ * void_notice_for_wire_with_regrant): present on the automatic grant's
+ * notice, null on a project's. NULL for an unreadable argument, one that is
+ * not an object, and on a caught panic.
+ */
+char*       tc_grant_void_notice_regrant_json(const char* void_json);
+
+/* The "keychain" block of the private-AI credential status
+ * (DaemonSettings::keychain_status_json): what the credential store at
+ * config_dir holds, as labels and booleans only -- never the inference key,
+ * never the session's refresh token. MAY PROMPT FOR OS STORAGE; call off a
+ * blocking worker. NULL for a NULL or non-UTF-8 config_dir. A config_dir
+ * that cannot be opened fails the call: NULL with *err set to
+ * credential-storage-unavailable, as Tauri does. A settings document that
+ * opens but cannot be loaded answers the unavailable fallback. *err is owned;
+ * free it with tc_string_free. On a caught panic, NULL and *err = "panic".
+ */
+char*       tc_private_ai_keychain_status_json(const char* config_dir, char** err);
+
+/* Parse one deep link or launch argument (deep_link::parse_deep_link): a
+ * JSON object naming exactly one action -- enroll, public_run, credential,
+ * or navigate. PARSING ONLY: never opens anything, never stores anything.
+ * NULL and *err = "deep-link-invalid" for anything this build does not
+ * recognise, including a malformed link and a NULL or non-UTF-8 url.
+ */
+char*       tc_parse_deep_link_json(const char* url, char** err);
+
+/* Whether url is one of the fixed external destinations the app may hand to
+ * the OS to open (external_url::is_allowed): the near.ai credits dashboard,
+ * a tracecommons.ai public run, the CI fixture commit on GitHub, and a
+ * loopback OAuth callback. The list is exactly Tauri's open_external_url
+ * allowlist, unchanged. 1 allowed, 0 refused -- including a NULL or
+ * non-UTF-8 url, and on a caught panic.
+ */
+int32_t     tc_external_url_is_allowed(const char* url);
+
+/* The health banner's words (R6/R7, #1173): health_copy::core_down_copy when
+ * reachable is 0, or health_copy::health_copy_for_label for label when the
+ * daemon answered. reachable is the caller's own liveness fact and is never
+ * derived here. When reachable is non-zero, a NULL or empty label means a
+ * reachable daemon reported nothing wrong, and this returns NULL: there is no
+ * banner to draw; any other label, including one that is not UTF-8, gets a
+ * banner. max_queue_entries is the configured queue limit for queue-full's
+ * count; 0 or negative when unknown. {title, detail, action, action_kind,
+ * severity}. NULL for nothing to show and on a caught panic.
+ */
+char*       tc_health_copy_json(int32_t reachable, const char* label,
+                                int64_t max_queue_entries);
+
+/* The explanatory line under a second_look reason (R6/R7, #1173):
+ * why one scrubbed session waits for a person instead of moving on its own.
+ * reason is one of the fixed second_look labels (nothing-matched,
+ * looks-unsure, trimmed-to-fit). NULL for a NULL, non-UTF-8 or unrecognised
+ * reason, and on a caught panic.
+ */
+char*       tc_second_look_line_text(const char* reason);
 
 /*
  * Can this process reach the Cloud credential store?

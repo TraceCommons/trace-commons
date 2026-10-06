@@ -1,0 +1,80 @@
+{
+  "_comment": "The Flow 1 transitions both implementations run: flow1.rs (the core) in its unit tests, and tauri-desktop/frontend/src/features/onboarding/flow1.ts in flow1.test.mjs. Change a row here and both must follow. Progress keys are the core's (snake_case); the TS test maps them to flow1.ts's names.",
+  "steps": [
+    "welcome",
+    "roots",
+    "connect",
+    "consent",
+    "path",
+    "privacy",
+    "inference",
+    "disclosure_scrub",
+    "disclosure_witness",
+    "grant",
+    "projects",
+    "done"
+  ],
+  "blockers": [
+    "connect",
+    "scope",
+    "path",
+    "scrub_disclosure",
+    "witness_disclosure"
+  ],
+  "back": [
+    { "from": "welcome", "privacy_included": false, "path": null, "scopes_chosen": false, "to": "welcome" },
+    { "from": "roots", "privacy_included": false, "path": null, "scopes_chosen": false, "to": "welcome" },
+    { "from": "connect", "privacy_included": false, "path": null, "scopes_chosen": false, "to": "roots" },
+    { "from": "consent", "privacy_included": false, "path": null, "scopes_chosen": false, "to": "connect" },
+    { "from": "path", "privacy_included": false, "path": null, "scopes_chosen": true, "to": "consent" },
+    { "from": "privacy", "privacy_included": true, "path": "automatic", "scopes_chosen": true, "to": "path" },
+    { "from": "privacy", "privacy_included": true, "path": "ask_first", "scopes_chosen": false, "to": "consent" },
+    { "from": "inference", "privacy_included": true, "path": "automatic", "scopes_chosen": true, "to": "privacy" },
+    { "from": "inference", "privacy_included": true, "path": "ask_first", "scopes_chosen": false, "to": "privacy" },
+    { "from": "inference", "privacy_included": false, "path": "automatic", "scopes_chosen": true, "to": "path" },
+    { "from": "inference", "privacy_included": false, "path": "ask_first", "scopes_chosen": true, "to": "path" },
+    { "from": "inference", "privacy_included": false, "path": "ask_first", "scopes_chosen": false, "to": "consent" },
+    { "from": "inference", "privacy_included": false, "path": null, "scopes_chosen": true, "to": "consent" },
+    { "from": "disclosure_scrub", "privacy_included": false, "path": "automatic", "scopes_chosen": true, "to": "inference" },
+    { "from": "disclosure_scrub", "privacy_included": true, "path": "automatic", "scopes_chosen": true, "to": "inference" },
+    { "from": "disclosure_witness", "privacy_included": false, "path": "automatic", "scopes_chosen": true, "to": "disclosure_scrub" },
+    { "from": "grant", "privacy_included": false, "path": "automatic", "scopes_chosen": true, "to": "disclosure_witness" },
+    { "from": "projects", "privacy_included": false, "path": "ask_first", "scopes_chosen": true, "to": "inference" },
+    { "from": "done", "privacy_included": false, "path": "automatic", "scopes_chosen": true, "to": "done" }
+  ],
+  "after_inference": [
+    { "path": null, "to": "projects" },
+    { "path": "ask_first", "to": "projects" },
+    { "path": "automatic", "to": "disclosure_scrub" }
+  ],
+  "grant_blockers": [
+    {
+      "progress": {},
+      "blockers": ["connect", "scope", "path", "scrub_disclosure", "witness_disclosure"]
+    },
+    {
+      "progress": { "connected": true, "scopes_saved": ["debugging_evaluation"], "path": "automatic", "scrub_disclosure_seen": true, "witness_disclosure_seen": true },
+      "blockers": []
+    },
+    {
+      "progress": { "connected": false, "scopes_saved": ["debugging_evaluation"], "path": "automatic", "scrub_disclosure_seen": true, "witness_disclosure_seen": true },
+      "blockers": ["connect"]
+    },
+    {
+      "progress": { "connected": true, "scopes_saved": [], "path": "automatic", "scrub_disclosure_seen": true, "witness_disclosure_seen": true },
+      "blockers": ["scope"]
+    },
+    {
+      "progress": { "connected": true, "scopes_saved": ["debugging_evaluation"], "path": "ask_first", "scrub_disclosure_seen": true, "witness_disclosure_seen": true },
+      "blockers": ["path"]
+    },
+    {
+      "progress": { "connected": true, "scopes_saved": ["debugging_evaluation"], "path": "automatic", "scrub_disclosure_seen": false, "witness_disclosure_seen": true },
+      "blockers": ["scrub_disclosure"]
+    },
+    {
+      "progress": { "connected": true, "scopes_saved": ["debugging_evaluation"], "path": "automatic", "scrub_disclosure_seen": true, "witness_disclosure_seen": false },
+      "blockers": ["witness_disclosure"]
+    }
+  ]
+}

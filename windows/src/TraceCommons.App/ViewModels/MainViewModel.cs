@@ -1823,7 +1823,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     }
 
     /// <summary>
-    /// "Ask me first" on a rewording or held-folder notice: the Settings
+    /// "Ask me" on a rewording or held-folder notice: the Settings
     /// call, unchanged, which also answers a rewording notice. A refusal
     /// changes nothing, and <paramref name="failed"/>, the core's refusal
     /// line, is shown.

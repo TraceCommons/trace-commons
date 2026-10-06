@@ -20,13 +20,25 @@ final class DaemonDataContractTests: XCTestCase {
                     XCTAssertEqual(summary.entry?.entryId, entry.entryId)
                     XCTAssertNotNil(summary.title)
                 }
+                for entry in pending {
+                    let outcome = try await client.requestPreview(entryId: entry.entryId)
+                    XCTAssertEqual(outcome.state, .ready)
+                    // A scheduled card (`PreviewOutcome::to_value`) carries
+                    // no entry: it outlives the entry state it was built beside.
+                    XCTAssertNotNil(outcome.summary?.title)
+                    XCTAssertNil(outcome.summary?.entry)
+                    _ = try await client.approve(entryId: entry.entryId)
+                }
+                _ = try await client.setVisiblePreviews(entryIds: pending.map(\.entryId))
+                _ = try await client.cancelPreview(entryId: "e")
                 _ = try await client.previewUnsureSpans(entryId: "e", bodyDigest: "sha256:b")
-                _ = try await client.approve(entryId: "e")
                 _ = try await client.keep(entryId: "e")
                 _ = try await client.undoKeep(entryId: "e")
                 try await client.dismiss(entryId: "e")
                 _ = try await client.listProjects()
                 _ = try await client.setProjectMode(projectId: "p", mode: .autoUpload, includeBacklog: nil)
+                _ = try await client.setContributionOverride(mode: .ask, confirm: false)
+                _ = try await client.clearContributionOverride()
                 _ = try await client.harnessList()
                 _ = try await client.settings()
                 _ = try await client.setScrubCheck(.manual)
@@ -38,11 +50,16 @@ final class DaemonDataContractTests: XCTestCase {
                 _ = try await client.toolDestinations()
                 _ = try await client.inferenceCalls(limit: 50, cursor: nil)
                 _ = try await client.inferenceSummary()
+                _ = try await client.networkInferenceSummary()
                 _ = try await client.inferenceCallProof(callId: 414)
                 _ = try await client.modelSpend()
-                let shown = try await client.privateAI()
-                _ = try await client.setPrivateAI(on: true, consent: DaemonData.PrivateAIConsent(acknowledging: shown))
+                _ = try await client.privateAI()
+                _ = try await client.setPrivateAI(on: true)
+                let shown = try await client.networkPrivateAI()
+                _ = try await client.setNetworkPrivateAI(
+                    on: true, consent: DaemonData.PrivateAIConsent(acknowledging: shown))
                 _ = try await client.missionCatalogue()
+                _ = try await client.networkMissionCatalogue()
                 _ = try await client.lookupInvite(code: "c")
                 _ = try await client.passkeyState()
                 _ = try await client.accountState()
@@ -52,19 +69,16 @@ final class DaemonDataContractTests: XCTestCase {
         }
     }
 
-    func testSampleJSONKeysAreAllDeclared() throws {
-        // A sample key with no CodingKey would be silently dropped; the
-        // samples exist to exercise every field, so they must use real keys.
-        let entryKeys = Set(DaemonData.QueueEntry.CodingKeys.allCases.map(\.rawValue))
-        let pending = try XCTUnwrap(SampleDaemonClient(.heldSessions).json(for: "list_pending"))
-        let object = try JSONSerialization.jsonObject(with: Data(pending.utf8)) as? [String: Any]
-        for row in try XCTUnwrap(object?["pending"] as? [[String: Any]]) {
-            XCTAssertEqual(Set(row.keys).subtracting(entryKeys), [], "undeclared entry keys")
-        }
-    }
-
     // MARK: - Unknown stays unknown
 
+    /// `unknownCounts` draws Ron's badge as "—": the one state meant for an
+    /// older daemon, or one that is unreachable, neither of which a temp
+    /// store's real daemon can be (`status_value` in `daemon::ipc` always
+    /// computes a concrete `decisions_owed`). K2's recorder records the real
+    /// reply and then removes this one field by hand, marking the file
+    /// `"_sample":"absent on purpose: older daemon"` -- see
+    /// `k2_sample_recorder.rs`'s `apply_hand_written_overrides` -- so this is
+    /// the one sample file the drift test excludes rather than compares.
     func testAbsentDecisionsOwedDecodesAsNil() async throws {
         let status = try await SampleDaemonClient(.unknownCounts).status()
         XCTAssertNil(status.decisionsOwed)
@@ -154,8 +168,29 @@ final class DaemonDataContractTests: XCTestCase {
         XCTAssertEqual(rollup.takenBack, 1)
     }
 
+    /// K2 of #1173: `inference_calls` is only ever `readable` with a live
+    /// IronWire proxy answering (`shared.routing_ledger()`), which no temp
+    /// store can run, so `normalDay`'s recording is hand-written --
+    /// `k2_sample_recorder.rs`'s `apply_hand_written_overrides`, marked
+    /// `"_sample":"no live IronWire in a temp store"` and excluded from the
+    /// drift test -- shaped exactly like the real reply `calls_page` builds
+    /// (`daemon/inference_map.rs` and its own tests), not invented.
     func testOnlyVerifiedIsProof() async throws {
-        let calls = try await SampleDaemonClient(.normalDay).inferenceCalls(limit: 50, cursor: nil).calls
+        let sampleCalls = try await SampleDaemonClient(.normalDay).inferenceCalls(limit: 50, cursor: nil).calls
+        XCTAssertEqual(sampleCalls.filter { $0.proofLabel.isProof }.map(\.proof), ["verified"])
+        XCTAssertTrue(sampleCalls.contains { $0.proofLabel == .failed })
+
+        // The filter this test is actually about, `ProofLabel.isProof`,
+        // exercised directly against decoded calls too, so it holds
+        // independent of the sample's own content.
+        func call(proof: String) throws -> DaemonData.InferenceCall {
+            try DaemonDataDecoding.decoder().decode(
+                DaemonData.InferenceCall.self,
+                from: Data(
+                    #"{"id":1,"at":"2026-09-30T09:00:00Z","tool":"claude-code","family":"anthropic","model":"m","route":"routed","proof":"\#(proof)"}"#
+                        .utf8))
+        }
+        let calls = try [call(proof: "verified"), call(proof: "pending"), call(proof: "failed"), call(proof: "gateway_only")]
         XCTAssertEqual(calls.filter { $0.proofLabel.isProof }.map(\.proof), ["verified"])
         XCTAssertTrue(calls.contains { $0.proofLabel == .failed })
         XCTAssertEqual(DaemonData.ProofLabel.allCases.filter(\.isProof), [.verified])
@@ -186,6 +221,9 @@ final class DaemonDataContractTests: XCTestCase {
             ("listPending", { _ = try await client.listPending(projectId: nil) }),
             ("listKept", { _ = try await client.listKept() }),
             ("preview", { _ = try await client.preview(entryId: "e") }),
+            ("requestPreview", { _ = try await client.requestPreview(entryId: "e") }),
+            ("setVisiblePreviews", { _ = try await client.setVisiblePreviews(entryIds: ["e"]) }),
+            ("cancelPreview", { _ = try await client.cancelPreview(entryId: "e") }),
             ("previewUnsureSpans", { _ = try await client.previewUnsureSpans(entryId: "e", bodyDigest: "d") }),
             ("approve", { _ = try await client.approve(entryId: "e") }),
             ("keep", { _ = try await client.keep(entryId: "e") }),
@@ -193,6 +231,8 @@ final class DaemonDataContractTests: XCTestCase {
             ("dismiss", { try await client.dismiss(entryId: "e") }),
             ("listProjects", { _ = try await client.listProjects() }),
             ("setProjectMode", { _ = try await client.setProjectMode(projectId: "p", mode: .ask, includeBacklog: nil) }),
+            ("setContributionOverride", { _ = try await client.setContributionOverride(mode: .ignore, confirm: false) }),
+            ("clearContributionOverride", { _ = try await client.clearContributionOverride() }),
             ("harnessList", { _ = try await client.harnessList() }),
             ("settings", { _ = try await client.settings() }),
             ("setScrubCheck", { _ = try await client.setScrubCheck(.automatic) }),
@@ -204,11 +244,15 @@ final class DaemonDataContractTests: XCTestCase {
             ("toolDestinations", { _ = try await client.toolDestinations() }),
             ("inferenceCalls", { _ = try await client.inferenceCalls(limit: 5, cursor: nil) }),
             ("inferenceSummary", { _ = try await client.inferenceSummary() }),
+            ("networkInferenceSummary", { _ = try await client.networkInferenceSummary() }),
             ("inferenceCallProof", { _ = try await client.inferenceCallProof(callId: 1) }),
             ("modelSpend", { _ = try await client.modelSpend() }),
             ("privateAI", { _ = try await client.privateAI() }),
-            ("setPrivateAI", { _ = try await client.setPrivateAI(on: false, consent: nil) }),
+            ("setPrivateAI", { _ = try await client.setPrivateAI(on: false) }),
+            ("networkPrivateAI", { _ = try await client.networkPrivateAI() }),
+            ("setNetworkPrivateAI", { _ = try await client.setNetworkPrivateAI(on: false, consent: nil) }),
             ("missionCatalogue", { _ = try await client.missionCatalogue() }),
+            ("networkMissionCatalogue", { _ = try await client.networkMissionCatalogue() }),
             ("lookupInvite", { _ = try await client.lookupInvite(code: "c") }),
             ("passkeyState", { _ = try await client.passkeyState() }),
             ("accountState", { _ = try await client.accountState() }),
@@ -282,48 +326,97 @@ final class DaemonDataContractTests: XCTestCase {
         }
     }
 
+    func testLiveClientThrowsNotAvailableYetForProvisionalMethods() async {
+        let transport = FakeTransport(response: #"{"id":1,"result":{}}"#)
+        let client = LiveDaemonClient(transport: transport)
+        do {
+            _ = try await client.missionCatalogue()
+            XCTFail("a provisional method answered")
+        } catch {
+            XCTAssertEqual(error as? DaemonDataError, .notAvailableYet(method: "mission_catalogue"))
+        }
+        XCTAssertTrue(transport.calls.isEmpty, "nothing is sent for a method the daemon does not have")
+    }
+
+    /// An older attached daemon that predates a network method answers
+    /// `unknown_method`; the live client keeps that refusal rather than
+    /// turning it into `notAvailableYet` or an empty answer.
     func testLiveClientKeepsUnknownMethodForAnOlderDaemon() async {
         let transport = FakeTransport(response: #"{"id":1,"error":{"code":"unknown_method","message":"unknown-method"}}"#)
         let client = LiveDaemonClient(transport: transport)
         do {
-            _ = try await client.missionCatalogue()
+            _ = try await client.networkMissionCatalogue()
             XCTFail("an unsupported method answered")
         } catch {
             XCTAssertEqual(error as? DaemonDataError, .daemon(code: "unknown_method", message: "unknown-method"))
+            XCTAssertEqual((error as? DaemonDataError)?.isNotServed, true)
         }
         XCTAssertEqual(transport.calls.first?.method, "mission_catalogue")
     }
 
+    func testOnlyAnUnservedMethodIsNotServed() {
+        XCTAssertTrue(DaemonDataError.notAvailableYet(method: "mission_catalogue").isNotServed)
+        XCTAssertTrue(DaemonDataError.daemon(code: "unknown_method", message: "unknown-method").isNotServed)
+        XCTAssertFalse(DaemonDataError.daemon(code: "unavailable", message: "activity-missions-unavailable").isNotServed)
+        XCTAssertFalse(DaemonDataError.unreachable.isNotServed)
+        XCTAssertFalse(DaemonDataError.undecodable(method: "mission_catalogue").isNotServed)
+    }
+
     func testLiveEventsDeliverParsedFrames() async {
+        // "{}" is not a frame, so the opening snapshot cannot be built and
+        // the stream opens with a resync instead; frames follow it.
         let client = LiveDaemonClient(transport: FakeTransport(response: "{}"))
         let stream = client.events()
         client.deliver(eventJSON: #"{"event":"status_changed","data":{}}"#)
-        client.deliver(eventJSON: #"{"event":"inference_call_added","data":{"id":7,"at":"2026-09-30T09:00:00Z","tool":"codex","family":"openai","model":"m","route":"routed","proof":"pending"}}"#)
+        // The daemon's frame (`inference_map::call_added`): a pulse with four
+        // fields, not an `inference_calls` row. No `at`, `family`, `route`
+        // or `cost`.
+        client.deliver(eventJSON: #"{"event":"inference_call_added","data":{"id":7,"tool":"codex","model":"m","proof":"pending"}}"#)
         var iterator = stream.makeAsyncIterator()
+        let opening = await iterator.next()
+        XCTAssertEqual(opening, .resyncRequired)
         let first = await iterator.next()
         XCTAssertEqual(first, .statusChanged)
         guard case .inferenceCallAdded(let call)? = await iterator.next() else {
             return XCTFail("no inference call event")
         }
-        XCTAssertEqual(call.id, 7)
+        XCTAssertEqual(call, DaemonData.InferenceCallAdded(id: 7, tool: "codex", model: "m", proof: "pending"))
+        XCTAssertEqual(call.proofLabel, .pending)
     }
 }
 
-private final class FakeTransport: DaemonTransport, @unchecked Sendable {
+/// A transport that answers from a script and records what it was sent,
+/// and whether it ran on the live client's own queue.
+final class FakeTransport: DaemonTransport, @unchecked Sendable {
     struct Call {
         let method: String
         let params: String
+        let onQueue: Bool
     }
 
-    let response: String
-    private(set) var calls: [Call] = []
+    private let answer: @Sendable (String, String) -> String
+    private let lock = NSLock()
+    private var recorded: [Call] = []
 
-    init(response: String) {
-        self.response = response
+    var calls: [Call] {
+        lock.lock()
+        defer { lock.unlock() }
+        return recorded
+    }
+
+    convenience init(response: String) {
+        self.init { _, _ in response }
+    }
+
+    init(_ answer: @escaping @Sendable (String, String) -> String) {
+        self.answer = answer
     }
 
     func call(_ method: String, params paramsJSON: String) -> String {
-        calls.append(Call(method: method, params: paramsJSON))
-        return response
+        let onQueue = String(cString: __dispatch_queue_get_label(nil)) == "trace-commons.live-daemon-client"
+        lock.lock()
+        recorded.append(Call(method: method, params: paramsJSON, onQueue: onQueue))
+        lock.unlock()
+        return answer(method, paramsJSON)
     }
 }

@@ -72,6 +72,9 @@ jobs:
           scripts/ci/check-release-credential-store.sh check
           scripts/ci/check-release-credential-store.sh self-test
 
+      - name: Offline network recording privacy projections
+        run: python3 -m unittest discover -s scripts/operator/tests -p test_anonymize_network_recording.py
+
   postgres-suites:
     name: database suites against a real PostgreSQL
     runs-on: ubuntu-latest
@@ -103,6 +106,7 @@ jobs:
         admission_test_account_trust_route
         admission_test_witness_evidence
         admission_test_source_sessions
+        admission_test_activity_missions
         admission_test_inference_connection
         admission_test_inference_connection_route
         admission_test_walletv2
@@ -110,6 +114,8 @@ jobs:
         admission_test_device_invite_subject
         admission_test_pipeline
         admission_test_pipeline_http
+        admission_test_pipeline_compat
+        admission_test_pipeline_parity
         admission_test_unbound_reaper
         pipeline_test_upgrade
     # The tests in this repository that touch PostgreSQL do not run anywhere.
@@ -222,6 +228,19 @@ jobs:
           PGPASSWORD=trace createdb -h 127.0.0.1 -U trace reward_test_participant_http
           PGPASSWORD=trace createdb -h 127.0.0.1 -U trace reward_test_mission_packages
           PGPASSWORD=trace createdb -h 127.0.0.1 -U trace reward_test_mission_http
+      # The two versioned pipeline HTTP steps below withdraw through an
+      # account session, which needs the login-resolver pool. The roles are
+      # the ones the `ingest-bin-postgres` job creates, for the same reason
+      # it gives there, and they are created here before any suite migrates:
+      # V30 creates `trace_login_resolver` only if it is absent.
+      - name: Create the login-resolver roles
+        run: |
+          set -euo pipefail
+          PGPASSWORD=trace psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U trace postgres <<'SQL'
+          CREATE ROLE trace_login_resolver NOLOGIN NOBYPASSRLS;
+          CREATE ROLE tc_login_resolver_login LOGIN NOBYPASSRLS;
+          GRANT trace_login_resolver TO tc_login_resolver_login;
+          SQL
       # Each step carries only the variables its own suite reads, NOT a job-wide
       # `env:` block (`PG_SUITE_DATABASES` above is job-wide only because no
       # suite reads it). That is not tidiness: `trace_invite_registry_pg` reads
@@ -355,6 +374,14 @@ jobs:
         run: cargo test -p trace-commons-server --test trace_session_withdrawal_pg
         env:
           TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_source_sessions
+      # Activity progress uses the owner URL only to migrate and seed fixtures.
+      # Its account-history SELECT grants stay in this fresh test database;
+      # the reader SET ROLEs to trace_ingest_runtime and asserts NOBYPASSRLS,
+      # no superuser privileges, and no rows without tenant context.
+      - name: activity_missions_pg
+        run: cargo test --locked -p trace-commons-server --test activity_missions_pg -- --nocapture
+        env:
+          TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_activity_missions
       # The R1 measurement script (scripts/operator/r1-pipeline-measurement.sql)
       # run through the real psql against a current and a pre-V76 schema. The
       # suite creates and drops databases of its own, so the xact_commit guard
@@ -401,10 +428,36 @@ jobs:
             echo "::error::versioned_pipeline_runtime_pg never provisioned its runtime role"
             exit 1
           fi
+      # Each of the three steps below runs one named test in `<database>_pilot`,
+      # a database each test process drops and creates beside the one its URL
+      # names, so neither the xact_commit guard at the end of this job nor a
+      # commit floor can prove the test ran (the harness setup alone commits
+      # more than some of the tests do). A test name that matches nothing
+      # passes with "0 passed", so each step requires its own "1 passed" line,
+      # as the upgrade step requires its count.
       - name: versioned pipeline real HTTP
-        run: cargo test -p trace-commons-server --bin trace-commons-ingest real_http_receipt_completes_and_resumes_after_restart
+        run: |
+          set -euo pipefail
+          cargo test -p trace-commons-server --bin trace-commons-ingest real_http_receipt_completes_and_resumes_after_restart 2>&1 | tee pipeline-real-http.log
+          grep -q 'test result: ok. 1 passed; 0 failed' pipeline-real-http.log
         env:
           TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_pipeline_http
+      - name: versioned pipeline compatibility through HTTP
+        run: |
+          set -euo pipefail
+          cargo test -p trace-commons-server --bin trace-commons-ingest compatibility_bundle_through_http_with_review_privacy_withdrawal_and_export 2>&1 | tee pipeline-compat.log
+          grep -q 'test result: ok. 1 passed; 0 failed' pipeline-compat.log
+        env:
+          TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_pipeline_compat
+          TRACE_COMMONS_LOGIN_RESOLVER_DATABASE_URL: postgres://tc_login_resolver_login@127.0.0.1:5432/admission_test_pipeline_compat
+      - name: versioned pipeline parity with legacy
+        run: |
+          set -euo pipefail
+          cargo test -p trace-commons-server --bin trace-commons-ingest legacy_and_pipeline_tenants_match_under_equivalent_configuration 2>&1 | tee pipeline-parity.log
+          grep -q 'test result: ok. 1 passed; 0 failed' pipeline-parity.log
+        env:
+          TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_pipeline_parity
+          TRACE_COMMONS_LOGIN_RESOLVER_DATABASE_URL: postgres://tc_login_resolver_login@127.0.0.1:5432/admission_test_pipeline_parity
       - name: mission and insight reward ledger
         # Reward suites report independently: a red ledger step used to abort
         # the job before the two published-mission steps ever ran, so their
@@ -624,17 +677,97 @@ jobs:
       # return leaves xact_commit where createdb left it. A full run commits
       # tens of thousands of transactions; the floor is far below that and far
       # above what a skipping run could produce.
+      #
+      # The pipeline HTTP tests commit to `admission_test_ingest_bin_pilot`, a
+      # database their harness creates beside this one, so it is held to its
+      # own floor. Their harness setup alone commits about 550 transactions
+      # there and the tests about 10,000 more; 2,000 is far above the first
+      # and far below the second.
       - name: Refuse a run that executed nothing
         if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
-          n=$(PGPASSWORD=trace psql -qtA -h 127.0.0.1 -U trace postgres \
-                -c "SELECT xact_commit FROM pg_stat_database WHERE datname='admission_test_ingest_bin';")
-          echo "admission_test_ingest_bin committed ${n:-0} transactions"
-          if [ "${n:-0}" -lt 1000 ]; then
-            echo "::error::admission_test_ingest_bin shows no real activity; the PostgreSQL tests skipped instead of running"
-            exit 1
-          fi
+          fail=0
+          for pair in admission_test_ingest_bin:1000 admission_test_ingest_bin_pilot:2000; do
+            db=${pair%%:*}
+            floor=${pair##*:}
+            n=$(PGPASSWORD=trace psql -qtA -h 127.0.0.1 -U trace postgres \
+                  -c "SELECT xact_commit FROM pg_stat_database WHERE datname='$db';")
+            echo "$db committed ${n:-0} transactions (floor $floor)"
+            if [ "${n:-0}" -lt "$floor" ]; then
+              echo "::error::$db shows no real activity; the PostgreSQL tests skipped instead of running"
+              fail=1
+            fi
+          done
+          exit $fail
+      - uses: ./.github/actions/trim-cargo-cache
+
+  pipeline-qualification:
+    # Not a required status check (owner decision P4-D17): it runs on every
+    # pull request and in the merge queue, and it blocks nothing until the
+    # owner promotes it. `pipeline.py` starts its own digest-pinned
+    # PostgreSQL container, so this job has no `services:` block.
+    #
+    # The run is signed with a throwaway check key that the job makes
+    # itself (`pipeline.py keygen`, then `qualify --signing-key`), so that the
+    # key writer and the signing step, which an unsigned run never reaches,
+    # run on every pull request. The key is trusted nowhere: no trust store
+    # holds its public key, and it is gone with the runner. It is written
+    # under the runner's temp directory, outside the checkout (so the code
+    # revision does not see it) and outside the paths the failure step
+    # uploads.
+    name: pipeline qualification and restore
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-pipeline-qualification-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-pipeline-qualification-
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: pipeline tooling self-tests
+        run: python3 scripts/operator/test_pipeline_tooling.py
+      - name: pipeline check key (throwaway)
+        run: |
+          python3 scripts/operator/pipeline.py keygen \
+            --output "${RUNNER_TEMP}/pipeline-ci-check-key/ci_check_key.der" \
+            --key-id ci_check_key \
+            --trusted-key-output "${RUNNER_TEMP}/pipeline-ci-check-key/ci_check_key.trusted.json"
+      - name: pipeline qualify
+        run: |
+          python3 scripts/operator/pipeline.py qualify \
+            --signing-key "${RUNNER_TEMP}/pipeline-ci-check-key/ci_check_key.der" \
+            --signing-key-id ci_check_key
+      # A failed run prints only its label and a log path on this runner.
+      # Keep the run directories `pipeline.py` writes (`Run.create`:
+      # `.local/pipeline/runs/<run id>/`) -- the protected step logs, results,
+      # evidence, and reports -- so the failure can be read without
+      # reproducing it. The encrypted `artifacts/` are left out: their key
+      # only ever reached a child process. Every value in the rest comes from
+      # the synthetic fixtures and test constants.
+      - name: upload the pipeline run directories on failure
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: pipeline-qualification-runs
+          path: |
+            .local/pipeline/runs/
+            !.local/pipeline/runs/*/artifacts/
+          include-hidden-files: true
+          if-no-files-found: ignore
+          retention-days: 7
+      # Last, so every step above still has its binaries; see the action for
+      # what is removed and why.
       - uses: ./.github/actions/trim-cargo-cache
 
   mark-assets-drift:

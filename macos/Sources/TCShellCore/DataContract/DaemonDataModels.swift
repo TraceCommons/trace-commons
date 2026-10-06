@@ -20,8 +20,13 @@ import Foundation
 ///   with the same plain `JSONDecoder` the existing `ProjectRow` and
 ///   `HarnessList` already use (`DaemonDataDecoding.decoder()`).
 ///
-/// Network models follow the finalized C3 contract, including the upstream
-/// summary grouping and the separate skill-evaluation catalogue wrapper.
+/// The network methods (C3, #1187) decode into the shapes the daemon
+/// serves. Three of them -- `inference_summary`, `mission_catalogue` and
+/// `private_ai` -- live under `Network*` names beside the earlier shapes the
+/// Inference and Missions screens were written against (`InferenceSummary`,
+/// `MissionCatalogue`, and the settings-backed `PrivateAISwitch`). Types
+/// still marked `// PROVISIONAL: shape owned by Zaki's C3` are those earlier
+/// shapes; moving the screens to the `Network*` types retires them.
 public enum DaemonData {}
 
 // MARK: - Decoding
@@ -59,24 +64,82 @@ public enum DaemonDataError: Error, Equatable, Sendable, CustomStringConvertible
     /// transport failed. A screen draws its core-down state, and never a
     /// healthy one, from this.
     case unreachable
-    /// The method is not served by this client: one the live client has not
-    /// routed yet, and it sends nothing. An older attached daemon that
-    /// predates a method it is asked for answers `unknown_method` instead,
-    /// carried as `.daemon`.
+    /// The method is not served by this client: the live client has not
+    /// routed it, and sends nothing. Today that is the provisional
+    /// `inferenceSummary()` and `missionCatalogue()`, whose real replies are
+    /// `networkInferenceSummary()` and `networkMissionCatalogue()`. An older
+    /// attached daemon that predates a method it is asked for answers
+    /// `unknown_method` instead, carried as `.daemon` (see `isNotServed`).
     case notAvailableYet(method: String)
     /// The daemon answered with an IPC error. `code` and `message` are the
     /// fixed labels the contract defines, safe to show.
     case daemon(code: String, message: String)
+    /// A single-entry `approve` the daemon answered OK but did not act on:
+    /// `approved` is 0 and `skipped` names the entry. `reasonLabel` is the
+    /// daemon's fixed `skipped[].reason_label` (`not-pending`,
+    /// `not-enrolled`, `witness-review-stale`, ...), safe to show and turned
+    /// into words by `SubmitToast.reasonLabel`; `nil` only if the daemon
+    /// approved nothing and named no reason. Never drawn as success.
+    case notApproved(reasonLabel: String?)
     /// The daemon answered, but not in a shape this build reads.
-    case undecodable(method: String)
+    /// `codingPath` is where decoding stopped, as `DecodingError` reported
+    /// it: keys and array indices only (`pending[2].started_at`), never a
+    /// value, so it is safe to log. Empty when the frame itself was not
+    /// JSON, or the failure was at the top level.
+    case undecodable(method: String, codingPath: String = "")
 
     public var description: String {
         switch self {
         case .unreachable: return "unreachable"
         case .notAvailableYet(let method): return "not-available-yet: \(method)"
         case .daemon(let code, let message): return "\(code): \(message)"
-        case .undecodable(let method): return "undecodable: \(method)"
+        case .notApproved(let reason): return "not-approved: \(reason ?? "unknown")"
+        case .undecodable(let method, let path):
+            return path.isEmpty ? "undecodable: \(method)" : "undecodable: \(method): \(path)"
         }
+    }
+
+    /// The method is not there to ask: this client has not routed it
+    /// (`notAvailableYet`), or an older attached daemon predates it
+    /// (`unknown_method`). Neither is a failure of a method that exists, so
+    /// a screen draws it as absent, never as an error.
+    public var isNotServed: Bool {
+        switch self {
+        case .notAvailableYet: return true
+        case .daemon(let code, _): return code == "unknown_method"
+        default: return false
+        }
+    }
+
+    /// `.undecodable` for `error`, keeping the coding path a
+    /// `DecodingError` carries: the keys and indices down to the field that
+    /// failed, never the value it held. Any other error keeps no path.
+    public static func undecodable(method: String, from error: any Error) -> DaemonDataError {
+        guard let decoding = error as? DecodingError else { return .undecodable(method: method) }
+        var path: [any CodingKey]
+        switch decoding {
+        case .typeMismatch(_, let context), .valueNotFound(_, let context), .dataCorrupted(let context):
+            path = context.codingPath
+        case .keyNotFound(let key, let context):
+            path = context.codingPath + [key]
+        @unknown default:
+            path = []
+        }
+        return .undecodable(method: method, codingPath: renderCodingPath(path))
+    }
+
+    /// `pending[2].started_at`: string keys joined with dots, integer keys
+    /// (array positions) in brackets.
+    static func renderCodingPath(_ path: [any CodingKey]) -> String {
+        var out = ""
+        for key in path {
+            if let index = key.intValue {
+                out += "[\(index)]"
+            } else {
+                out += out.isEmpty ? key.stringValue : ".\(key.stringValue)"
+            }
+        }
+        return out
     }
 }
 
@@ -93,9 +156,18 @@ extension DaemonData {
         public let declaredSource: String?
         public let projectId: String
         public let projectLabel: String
+        /// The session's title (K9): the first line of its opening prompt,
+        /// through the deterministic redaction pass only. On the queue only:
+        /// receipts and history rows never carry it. `nil` for an entry
+        /// queued before titles existed, or a task with no description.
+        public let title: String?
         public let projectPath: String?
         public let sessionPath: String?
         public let sizeBytes: Int?
+        /// The pinned preview's measured envelope size (K10), or `nil` when
+        /// nothing is pinned. Measured before scope stamping, so it can be a
+        /// few bytes short of what an upload sends.
+        public let wouldSendBytes: Int?
         public let discoveredAt: Date?
         /// `pending`, `approved`, `uploading`, `uploaded`, `refused`,
         /// `failed`, `expired`, `superseded`. See `queueState`.
@@ -118,6 +190,12 @@ extension DaemonData {
         public let eligibility: String?
         public let eligibilityReason: String?
         public let holdsCertificate: Bool?
+        /// Whether attested inference was inside the witness certificate
+        /// `holdsCertificate` says is held. Absent is "not known" (no review,
+        /// a review that predates the record, a local preview): draw
+        /// nothing, never either answer. Not `attestation`, which is about
+        /// the session's last model call.
+        public let attestedInference: AttestedInference?
         public let attestation: String?
         public let attestationReason: String?
 
@@ -130,6 +208,9 @@ extension DaemonData {
         /// Fixed reasons: `nothing-matched`, `looks-unsure`, `trimmed-to-fit`.
         /// Empty is an all-clear only when `scrub` is `scrubbed`.
         public let secondLook: [String]?
+        /// The sentence for each `secondLook` reason, index for index (R6/R7;
+        /// DRAFT wording). Never shorter than `secondLook`.
+        public let secondLookLines: [String]?
 
         public var id: String { entryId }
 
@@ -140,9 +221,11 @@ extension DaemonData {
             case declaredSource = "declared_source"
             case projectId = "project_id"
             case projectLabel = "project_label"
+            case title
             case projectPath = "project_path"
             case sessionPath = "session_path"
             case sizeBytes = "size_bytes"
+            case wouldSendBytes = "would_send_bytes"
             case discoveredAt = "discovered_at"
             case state
             case reasonLabel = "reason_label"
@@ -158,12 +241,14 @@ extension DaemonData {
             case eligibility
             case eligibilityReason = "eligibility_reason"
             case holdsCertificate = "holds_certificate"
+            case attestedInference = "attested_inference"
             case attestation
             case attestationReason = "attestation_reason"
             case scrub, marks
             case contentMarks = "content_marks"
             case unsureSpans = "unsure_spans"
             case secondLook = "second_look"
+            case secondLookLines = "second_look_lines"
         }
 
         public var queueState: QueueStateLabel? { QueueStateLabel(rawValue: state) }
@@ -178,6 +263,20 @@ extension DaemonData {
         public var heldForSecondLook: Bool { reasonLabel == ReasonLabel.secondLookReviewRequired }
         /// held because Scrub check is Manual.
         public var heldByManualScrubCheck: Bool { reasonLabel == ReasonLabel.scrubCheckManual }
+        /// waiting for a person even in an armed folder, and left out of a
+        /// folder approve: the daemon's `held_for_review`. Manual Scrub check
+        /// is not one of these.
+        public var heldForReview: Bool { reasonLabel.map(ReasonLabel.needingAPerson.contains) ?? false }
+    }
+
+    /// A queue entry's `attested_inference`
+    /// (`witness::inference_record::InferenceAttestationRecord`). Labels
+    /// only: no model, provider, digest or key.
+    public struct AttestedInference: Codable, Equatable, Hashable, Sendable {
+        /// `certified` or `uncertified`.
+        public let state: String
+        /// Why it is uncertified; absent for `certified`.
+        public let reason: String?
     }
 
     public enum ReasonLabel {
@@ -185,6 +284,17 @@ extension DaemonData {
         public static let returnedFromKeep = "returned-from-keep"
         public static let secondLookReviewRequired = "second-look-review-required"
         public static let scrubCheckManual = "scrub-check-manual"
+        public static let tokenDistributionReviewRequired = "token-distribution-review-required"
+        public static let witnessRiskReviewRequired = "witness-risk-review-required"
+        public static let privacyFilterTransientExhausted = "privacy-filter-transient-exhausted"
+
+        /// `queue.rs` `REASONS_NEEDING_A_PERSON`, in its order.
+        public static let needingAPerson: Set<String> = [
+            tokenDistributionReviewRequired,
+            witnessRiskReviewRequired,
+            privacyFilterTransientExhausted,
+            secondLookReviewRequired,
+        ]
     }
 
     public enum QueueStateLabel: String, Sendable, CaseIterable {
@@ -223,6 +333,28 @@ extension DaemonData {
         public let witnessCapacity: WitnessCapacity?
         public let armingRewordings: [ArmingRewording]?
         public let automaticContributionHeld: AutomaticContributionHeld?
+        /// Grants the daemon voided (R6) that no shell has shown yet: a ship
+        /// condition. `[]` is "nothing to show"; `nil` is a daemon too old
+        /// to say, which is not the same and must not be drawn as it. Each
+        /// element is kept verbatim for `TCConsentCopy.voidNoticeJSON`.
+        public let grantVoids: [GrantVoidWire]?
+        /// Whether moving a legacy invite identity is offered, and the
+        /// notice after it moved. `nil` when the daemon did not say.
+        public let legacyInviteMigration: LegacyInviteMigration?
+        /// The menu-bar pill's global override (#1173): `nil` when none is in
+        /// force, or from a daemon predating it.
+        public let contributionOverride: ContributionOverride?
+        /// The pill's roll-up: `notify_only`, `auto_upload`, `ignore` or
+        /// `mixed`. Computed by the daemon; a shell never derives it.
+        public let contributionMode: String?
+        /// `true` when `contributionMode` is `auto_upload` but a Never folder
+        /// or the unidentified bucket does not upload (#1208): draw the core's
+        /// `auto_partial` line under the label.
+        public let contributionModePartial: Bool?
+        /// K2 (#1173): `true` while a debug daemon runs a developer dry
+        /// run. A release daemon never sends it. The app's notice reads it
+        /// rather than the environment.
+        public let devDryRun: Bool?
 
         public enum CodingKeys: String, CodingKey, CaseIterable {
             case schemaVersion = "schema_version"
@@ -240,6 +372,45 @@ extension DaemonData {
             case witnessCapacity = "witness_capacity"
             case armingRewordings = "arming_rewordings"
             case automaticContributionHeld = "automatic_contribution_held"
+            case grantVoids = "grant_voids"
+            case legacyInviteMigration = "legacy_invite_migration"
+            case contributionOverride = "contribution_override"
+            case contributionMode = "contribution_mode"
+            case contributionModePartial = "contribution_mode_partial"
+            case devDryRun = "dev_dry_run"
+        }
+    }
+
+    /// `status.contribution_override` while one is in force.
+    public struct ContributionOverride: Codable, Equatable, Sendable {
+        public let mode: String?
+        public let since: Date?
+    }
+
+    /// `status.legacy_invite_migration` (`legacy_migration::status_value`).
+    public struct LegacyInviteMigration: Codable, Equatable, Sendable {
+        public let offered: Bool?
+        /// The notice after the identity moved, until a shell acknowledges
+        /// it. `nil` when there is none to show.
+        public let notice: Notice?
+
+        public struct Notice: Codable, Equatable, Sendable {
+            public let foldersKept: Bool?
+            public let automaticGrantKept: Bool?
+
+            public enum CodingKeys: String, CodingKey {
+                case foldersKept = "folders_kept"
+                case automaticGrantKept = "automatic_grant_kept"
+            }
+        }
+
+        /// The notice as `TCConsentCopy.legacyMigrationNoticeJSON` takes it,
+        /// re-encoded with the wire's keys, or `nil` when there is none.
+        public var noticeJSON: String? {
+            guard let notice else { return nil }
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.sortedKeys]
+            return (try? encoder.encode(notice)).map { String(decoding: $0, as: UTF8.self) }
         }
     }
 
@@ -285,10 +456,13 @@ extension DaemonData {
         public let state: String
         public let derived: Bool?
         public let lastRefreshAt: Date?
+        /// Ledger rows the daemon could not read at the last refresh.
+        public let unreadableRows: Int?
 
         public enum CodingKeys: String, CodingKey {
             case state, derived
             case lastRefreshAt = "last_refresh_at"
+            case unreadableRows = "unreadable_rows"
         }
     }
 
@@ -296,6 +470,11 @@ extension DaemonData {
         /// The label `tool_destinations.private_ai` repeats (`running`, ...).
         public let state: String
         public let port: Int?
+
+        public init(state: String, port: Int?) {
+            self.state = state
+            self.port = port
+        }
     }
 
     public struct WitnessCapacity: Codable, Equatable, Sendable {
@@ -365,12 +544,27 @@ extension DaemonData {
         public let rawSessionBytes: Int?
         public let eventCount: Int?
         public let openingPrompt: String?
+        /// Times each pattern fired, by category.
         public let redactions: [String: Int]?
+        /// Distinct VALUES removed, by category: one email address seen ten
+        /// times is 10 in `redactions` and 1 here. `{}` when nothing was
+        /// removed. Sent only with the FULL summary -- `preview` of an entry
+        /// that holds a witness certificate, and `tc_preview_summary_json`
+        /// -- never with a card summary (`preview` of any other entry, and
+        /// `preview_request` / `preview_ready`), where it is `nil`: unknown,
+        /// not zero.
+        public let redactionsDistinct: [String: Int]?
+        /// Present only on the full preview, never on a card.
+        public let tokenDistributionSummary: String?
         public let piiLabelsPresent: [String]?
         public let consentScopes: [String]?
         public let residualRisk: String?
         public let envelopeDigest: String?
         public let inputFingerprint: String?
+        /// `false`: this device is not enrolled, the summary describes a
+        /// placeholder-identity build, and Contribute will be skipped as
+        /// `not-enrolled`. The check before Contribute (R7), with the
+        /// entry's `eligibility` (present only when eligibility applies).
         public let enrolled: Bool?
         public let subagentCount: Int?
         public let subagentsDropped: Int?
@@ -380,6 +574,9 @@ extension DaemonData {
         /// how many spans `preview_unsure_spans` would report.
         public let unsureSpans: Int?
         public let secondLook: [String]?
+        /// The sentence for each `secondLook` reason, index for index (R6/R7;
+        /// DRAFT wording).
+        public let secondLookLines: [String]?
 
         public enum CodingKeys: String, CodingKey, CaseIterable {
             case entry, title, redactions, enrolled, scrub, marks
@@ -387,6 +584,8 @@ extension DaemonData {
             case rawSessionBytes = "raw_session_bytes"
             case eventCount = "event_count"
             case openingPrompt = "opening_prompt"
+            case redactionsDistinct = "redactions_distinct"
+            case tokenDistributionSummary = "token_distribution_summary"
             case piiLabelsPresent = "pii_labels_present"
             case consentScopes = "consent_scopes"
             case residualRisk = "residual_risk"
@@ -397,6 +596,7 @@ extension DaemonData {
             case contentMarks = "content_marks"
             case unsureSpans = "unsure_spans"
             case secondLook = "second_look"
+            case secondLookLines = "second_look_lines"
         }
     }
 
@@ -441,7 +641,9 @@ extension DaemonData {
 
 extension DaemonData {
     /// `get_settings`, and what `set_settings` answers. Only the keys a
-    /// screen draws; credential presence stays in the existing models.
+    /// screen draws; the rest are named, with the reason each is left out,
+    /// in `DaemonDataKeyCoverageTests.notModeled`, so a key the daemon adds
+    /// fails that test until someone decides.
     public struct Settings: Codable, Equatable, Sendable {
         public let quiescenceSecs: Int?
         public let approvalHoldSecs: Int?
@@ -451,15 +653,29 @@ extension DaemonData {
         public let localNotifications: Bool?
         // `automatic` or `manual`; see `scrubCheckMode`.
         public let scrubCheck: String?
+        /// The stored Scrub check was unset when Automatic became the
+        /// default, so already-armed folders changed behaviour: announce it.
+        public let scrubCheckDefaultedOnUpgrade: Bool?
+        /// Only on the `set_settings` reply that switched Scrub check to
+        /// Manual: how many unsent unattended approvals went back to waiting.
+        public let scrubCheckReturnedToWaiting: Int?
+        /// Whether attested model-call bodies are sent with a session.
+        public let ironwireAttestedBodies: Bool?
         public let maxUploadsPerDay: Int?
         public let maxBytesPerDay: Int?
         public let privateInference: Bool?
+        /// Whether the first-run Private AI question has been answered.
+        public let privateInferenceOfferSeen: Bool?
+        /// The listener's own report; never assumed running.
+        public let privateInferenceState: PrivateInferenceState?
         /// `unset`, `off` or `watch` per tool. `unset` is never drawn as off.
         public let claudeSourceMode: String?
         public let codexSourceMode: String?
         public let geminiSourceMode: String?
         public let clineSourceMode: String?
         public let opencodeSourceMode: String?
+        /// The declared trajectory folder's mode; the path is never sent.
+        public let trajectorySourceMode: String?
 
         public enum CodingKeys: String, CodingKey, CaseIterable {
             case quiescenceSecs = "quiescence_secs"
@@ -468,18 +684,29 @@ extension DaemonData {
             case digestSchedule = "digest_schedule"
             case localNotifications = "local_notifications"
             case scrubCheck = "scrub_check"
+            case scrubCheckDefaultedOnUpgrade = "scrub_check_defaulted_on_upgrade"
+            case scrubCheckReturnedToWaiting = "scrub_check_returned_to_waiting"
+            case ironwireAttestedBodies = "ironwire_attested_bodies"
             case maxUploadsPerDay = "max_uploads_per_day"
             case maxBytesPerDay = "max_bytes_per_day"
             case privateInference = "private_inference"
+            case privateInferenceOfferSeen = "private_inference_offer_seen"
+            case privateInferenceState = "private_inference_state"
             case claudeSourceMode = "claude_source_mode"
             case codexSourceMode = "codex_source_mode"
             case geminiSourceMode = "gemini_source_mode"
             case clineSourceMode = "cline_source_mode"
             case opencodeSourceMode = "opencode_source_mode"
+            case trajectorySourceMode = "trajectory_source_mode"
         }
 
         public var scrubCheckMode: ScrubCheckMode? { scrubCheck.flatMap(ScrubCheckMode.init(rawValue:)) }
     }
+
+    /// What `setSource` throws for a choice that is not an answer, sending
+    /// nothing: the label the daemon's settings validator gives the same
+    /// input (`daemon::settings::ERR_SETTINGS_INVALID_VALUE`).
+    static let unansweredSource = DaemonDataError.daemon(code: "bad_params", message: "settings-invalid-value")
 
     public enum ScrubCheckMode: String, Codable, Sendable, CaseIterable {
         case automatic, manual
@@ -523,10 +750,50 @@ extension DaemonData {
         public let purged: Int?
         public let retracted: Int?
         public let fromNow: Bool?
+        /// The contribution override's mode when it still decides this
+        /// folder, so the change is saved but not yet in effect (#1208).
+        /// `nil` when the folder now resolves to what was set.
+        public let overriddenBy: String?
 
         public enum CodingKeys: String, CodingKey {
             case ok, purged, retracted
             case fromNow = "from_now"
+            case overriddenBy = "overridden_by"
+        }
+    }
+
+    /// `set_contribution_override` (#1173, #1208).
+    public struct ContributionOverrideResult: Codable, Equatable, Sendable {
+        /// `false` when that override was already in force: nothing was
+        /// recorded, and an Automatic override kept its hold.
+        public let changed: Bool
+        /// The override now in force, `{mode, since}`.
+        public let contributionOverride: ContributionOverride?
+        /// Unattended approvals not yet sent that went back to waiting.
+        public let returned: Int
+
+        public init(changed: Bool, contributionOverride: ContributionOverride?, returned: Int) {
+            self.changed = changed
+            self.contributionOverride = contributionOverride
+            self.returned = returned
+        }
+
+        public enum CodingKeys: String, CodingKey {
+            case changed, returned
+            case contributionOverride = "contribution_override"
+        }
+    }
+
+    /// `clear_contribution_override`.
+    public struct ContributionOverrideClearResult: Codable, Equatable, Sendable {
+        /// `false` when no override was in force.
+        public let cleared: Bool
+        /// Unattended approvals not yet sent that went back to waiting.
+        public let returned: Int
+
+        public init(cleared: Bool, returned: Int) {
+            self.cleared = cleared
+            self.returned = returned
         }
     }
 }
@@ -534,24 +801,83 @@ extension DaemonData {
 // MARK: - Queue actions
 
 extension DaemonData {
-    /// `approve` for one entry. Only what a screen draws; `skipped[]` and
-    /// the group fields stay in `ApproveResponse`.
-    public struct ApproveResult: Codable, Equatable, Sendable {
-        public let approved: Int?
-        public let holdSecs: Int?
-        /// `nil` when the hold is off: offer no undo.
-        public let holdUntil: Date?
+    // `approve` answers with `TCShellCore.ApproveResponse`, the shape the
+    // existing shell already decodes: `approved`, `flagged`, `redactions`,
+    // `skipped[]`, `hold_secs`, `hold_until`, and on a group call
+    // `excluded_ineligible` / `excluded_held`. See
+    // `DaemonDataClient.approve(entryId:)` for the single-entry rule.
+
+    /// `preview_request`'s answer and the `preview_ready` event's payload:
+    /// `entry_id`, `state`, and whatever that state carries.
+    public typealias PreviewRequestOutcome = PreviewRequestResult<PreviewSummary>
+
+    /// `preview_cancel`.
+    public struct PreviewCancelResult: Codable, Equatable, Sendable {
+        public let entryId: String
+        /// `false` is "nothing to drop" (finished, cancelled, never asked),
+        /// not an error.
+        public let dropped: Bool
 
         public enum CodingKeys: String, CodingKey {
-            case approved
-            case holdSecs = "hold_secs"
-            case holdUntil = "hold_until"
+            case entryId = "entry_id"
+            case dropped
         }
+    }
+
+    /// `preview_visible`: how many ids the daemon now treats as on screen.
+    struct PreviewVisibleResult: Decodable {
+        let visible: Int
+    }
+
+    /// `cancel` for one entry (and other methods that answer only `ok`).
+    struct OkReply: Decodable {
+        let ok: Bool?
+    }
+
+    /// `cancel` with `project_id`.
+    struct CancelFolderResult: Decodable {
+        let canceled: Int
     }
 
     /// `keep` (`kept: true`) and `undo_keep` (`kept: false`).
     public struct KeepResult: Codable, Equatable, Sendable {
         public let kept: Bool
+    }
+}
+
+// MARK: - Events
+
+extension DaemonData {
+    /// The `digest_due` event's payload. Every field is optional because
+    /// an older daemon sends only `pending` and `text`: absent is unknown,
+    /// never 0. `text` is the core's own sentence; a shell that words its
+    /// notification itself does so from the counts and labels here.
+    public struct DigestDue: Codable, Equatable, Sendable {
+        public let pending: Int?
+        /// Sessions that went without the contributor since the last digest.
+        public let contributed: Int?
+        /// The folders they went from, as labels, never keys.
+        public let contributedProjects: [String]?
+        /// Pending credit for them; pending, never earned.
+        public let creditPending: Double?
+        public let text: String?
+
+        public init(
+            pending: Int?, contributed: Int? = nil, contributedProjects: [String]? = nil,
+            creditPending: Double? = nil, text: String?
+        ) {
+            self.pending = pending
+            self.contributed = contributed
+            self.contributedProjects = contributedProjects
+            self.creditPending = creditPending
+            self.text = text
+        }
+
+        public enum CodingKeys: String, CodingKey {
+            case pending, contributed, text
+            case contributedProjects = "contributed_projects"
+            case creditPending = "credit_pending"
+        }
     }
 }
 
@@ -572,6 +898,11 @@ extension DaemonData {
         public let explanations: [String]?
         public let lastRefreshedAt: Date?
         public let withdrawnAt: Date?
+        /// When a web withdrawal was first seen (K12). `nil` when not revoked,
+        /// revoked before the field existed, or withdrawn from this device.
+        public let revokedAt: Date?
+        /// The bytes this submission actually sent (K10), or `nil`.
+        public let uploadedBytes: Int?
         /// Provenance: `true` armed, `false` a person, `nil` NOT RECORDED.
         public let approvedUnattended: Bool?
         /// `worked` / `partly` / `failed`, or `nil` when none was given.
@@ -590,6 +921,8 @@ extension DaemonData {
             case creditPointsFinal = "credit_points_final"
             case lastRefreshedAt = "last_refreshed_at"
             case withdrawnAt = "withdrawn_at"
+            case revokedAt = "revoked_at"
+            case uploadedBytes = "uploaded_bytes"
             case approvedUnattended = "approved_unattended"
             case approvedVerdict = "approved_verdict"
         }
@@ -719,12 +1052,47 @@ extension DaemonData {
         public let sessionsRoute: String?
         public let folders: FolderCounts?
         public let tools: [ToolDestination]
+        /// The window `counts` cover, in hours (K14): the same 24 hours
+        /// `inference_calls` uses.
+        public let windowHours: Int?
+        /// The window's listed calls no tool can be named for (K14). `nil`
+        /// when no ledger answered -- not zero.
+        public let unattributedCalls: Int?
+        /// Whether the ledger answered. Missing on older daemons is unknown,
+        /// not a readable ledger with zero destinations.
+        public let ledgerReadable: Bool?
+        public let observedDestinations: [ObservedDestination]?
+        public let hub: InferenceHub?
 
         public enum CodingKeys: String, CodingKey {
-            case folders, tools
+            case folders, tools, hub
             case privateAi = "private_ai"
             case sessionsRoute = "sessions_route"
+            case windowHours = "window_hours"
+            case unattributedCalls = "unattributed_calls"
+            case ledgerReadable = "ledger_readable"
+            case observedDestinations = "observed_destinations"
         }
+    }
+
+    /// A route observed in the ledger. `to` can remain `unknown` even when
+    /// the route and local proxy are known; never infer a provider from it.
+    public struct ObservedDestination: Codable, Equatable, Sendable {
+        public let route: String
+        public let to: String
+        public let via: String
+        public let basis: String
+    }
+
+    /// The local proxy's reported state. Configuration is not proof that a
+    /// provider answered a call, and nullable ownership remains unknown.
+    public struct InferenceHub: Codable, Equatable, Sendable {
+        public let kind: String
+        /// Missing or null when settings could not be read.
+        public let state: String?
+        public let port: Int?
+        public let owned: Bool?
+        public let basis: String
     }
 
     public struct FolderCounts: Codable, Equatable, Sendable {
@@ -743,12 +1111,28 @@ extension DaemonData {
         public let name: String?
         public let sessions: SessionRoute?
         public let modelCalls: ModelCallRoute?
+        /// The map's per-tool node counts over `windowHours` (K14).
+        public let counts: ToolCounts?
 
         public var id: String { tool }
 
         public enum CodingKeys: String, CodingKey {
-            case tool, name, sessions
+            case tool, name, sessions, counts
             case modelCalls = "model_calls"
+        }
+    }
+
+    /// One tool's counts for the window. `nil` is "could not be read",
+    /// never zero.
+    public struct ToolCounts: Codable, Equatable, Sendable {
+        /// Sessions, once per session hash, under the tool each reads as.
+        public let sessions: Int?
+        /// Exactly the `inference_calls` rows naming this tool.
+        public let inferenceCalls: Int?
+
+        public enum CodingKeys: String, CodingKey {
+            case sessions
+            case inferenceCalls = "inference_calls"
         }
     }
 
@@ -798,6 +1182,26 @@ extension DaemonData {
         public var proofLabel: ProofLabel { ProofLabel(rawValue: proof) ?? .unrecorded }
     }
 
+    /// An `inference_call_added` event (`inference_map::call_added`). A
+    /// pulse, not a row: it carries no time, family, route or cost, so a
+    /// screen re-reads `inference_calls` and `tool_destinations` rather
+    /// than adding it to what it holds.
+    public struct InferenceCallAdded: Codable, Equatable, Sendable {
+        public let id: Int64
+        public let tool: String
+        public let model: String
+        public let proof: String
+
+        public init(id: Int64, tool: String, model: String, proof: String) {
+            self.id = id
+            self.tool = tool
+            self.model = model
+            self.proof = proof
+        }
+
+        public var proofLabel: ProofLabel { ProofLabel(rawValue: proof) ?? .unrecorded }
+    }
+
     public struct PricedCost: Codable, Equatable, Sendable {
         /// `false` is not zero.
         public let known: Bool
@@ -821,11 +1225,14 @@ extension DaemonData {
     }
 }
 
-// MARK: - Network methods (finalized C3 contract)
+// MARK: - Network methods (C3, #1187)
 
 extension DaemonData {
-    /// `inference_summary`: unreadable is never an observed empty window.
-    public struct InferenceSummary: Codable, Equatable, Sendable {
+    /// `inference_summary` as #1187 serves it: IronWire's upstream grouped
+    /// summary in a `readable` wrapper. Unreadable is never an observed empty
+    /// window. Beside the provisional `InferenceSummary`, which the Inference
+    /// screen still reads; moving the screen here is a follow-up.
+    public struct NetworkInferenceSummary: Codable, Equatable, Sendable {
         public let readable: Bool
         public let windowHours: Int?
         public let observedAt: Date?
@@ -1019,8 +1426,10 @@ extension DaemonData {
         }
     }
 
-    /// Requested setting and actual owned-proxy state are separate facts.
-    public struct PrivateAISwitch: Codable, Equatable, Sendable {
+    /// `private_ai` as #1187 serves it, with the core's disclosure. Requested
+    /// setting and actual owned-proxy state are separate facts. Beside the
+    /// settings-backed `PrivateAISwitch` the screens use today.
+    public struct NetworkPrivateAISwitch: Codable, Equatable, Sendable {
         public let on: Bool?
         public let state: String?
         public let port: Int?
@@ -1028,8 +1437,8 @@ extension DaemonData {
         public let disclosure: String
     }
 
-    /// What `setPrivateAI(on: true, ...)` needs: an acknowledgement that
-    /// can only be built from a `PrivateAISwitch` the core answered, so a
+    /// What `setNetworkPrivateAI(on: true, ...)` needs: an acknowledgement that
+    /// can only be built from a `NetworkPrivateAISwitch` the core answered, so a
     /// caller cannot enable Private AI without first holding the switch
     /// whose `disclosure` it shows. Carries the SHA-256 of that disclosure,
     /// lowercase hex. The daemon does not check the digest yet (#1187's
@@ -1040,15 +1449,18 @@ extension DaemonData {
 
         /// `nil` for a switch with no disclosure: there is nothing to
         /// acknowledge, so there is no consent.
-        public init?(acknowledging shown: PrivateAISwitch) {
+        public init?(acknowledging shown: NetworkPrivateAISwitch) {
             guard !shown.disclosure.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
             disclosureSHA256 = SHA256.hash(data: Data(shown.disclosure.utf8))
                 .map { String(format: "%02x", $0) }.joined()
         }
     }
 
-    /// `mission_catalogue`: public skill-evaluation packages, with no daily rewards.
-    public struct MissionCatalogue: Codable, Equatable, Sendable {
+    /// `mission_catalogue` as #1187 serves it: public skill-evaluation
+    /// packages, with no daily rewards. Beside the provisional
+    /// `MissionCatalogue`, which the Missions screen still reads; moving the
+    /// screen here is a follow-up.
+    public struct NetworkMissionCatalogue: Codable, Equatable, Sendable {
         public let kind: String
         public let catalogue: MissionCatalogPage
         public let disclosure: String
@@ -1086,21 +1498,6 @@ extension DaemonData {
             case taskPreview = "task_preview"
             case publishedAt = "published_at"
         }
-    }
-
-    /// Protocol `CreditPosture`; catalogue entries do not supply credit ranges.
-    public struct CreditPosture: Codable, Equatable, Sendable {
-        public let settlement: String
-        public let graded: Bool
-        public let explanation: String
-    }
-
-    /// Invite operator's estimated credit per accepted trace, not yet settled.
-    public struct CreditRange: Codable, Equatable, Sendable {
-        public let min: Int
-        public let max: Int
-        /// `points_per_accepted_trace`.
-        public let unit: String
     }
 
     /// Mirrors protocol `InviteLookupResponse`.
@@ -1145,5 +1542,122 @@ extension DaemonData {
             case accountId = "account_id"
             case expiresAt = "expires_at"
         }
+    }
+}
+
+// MARK: - Shapes the screens still read
+//
+// The Inference and Missions screens (and `HomeStore` / `InferenceStore`)
+// were written against these before #1187 fixed the wire.
+// `InferenceSummary` and `MissionCatalogue` are provisional: the live client
+// answers their methods with `notAvailableYet`, and the real replies decode
+// into `NetworkInferenceSummary` and `NetworkMissionCatalogue` above.
+// `PrivateAISwitch` is K1's real switch over `get_settings`/`set_settings`;
+// `NetworkPrivateAISwitch` is the same switch over #1187's `private_ai`.
+// Moving the screens across and retiring the duplicates is a follow-up.
+
+extension DaemonData {
+    /// Z1.1: per-model calls, cost and proof counts from IronWire's
+    /// `/_ironwire/summary`, which nothing reads today.
+    // PROVISIONAL: shape owned by Zaki's C3
+    public struct InferenceSummary: Codable, Equatable, Sendable {
+        /// Same meaning as `InferenceCallPage.readable`.
+        public let readable: Bool
+        public let windowHours: Int?
+        public let models: [ModelSummary]
+
+        public enum CodingKeys: String, CodingKey {
+            case readable, models
+            case windowHours = "window_hours"
+        }
+    }
+
+    // PROVISIONAL: shape owned by Zaki's C3
+    public struct ModelSummary: Codable, Equatable, Sendable, Identifiable {
+        public let model: String
+        public let family: String?
+        public let calls: Int?
+        /// Priced, not billed (see `PricedCost`).
+        public let pricedMicros: Int64?
+        /// Calls per `ProofLabel` raw value.
+        public let proofCounts: [String: Int]?
+
+        public var id: String { model }
+
+        public enum CodingKeys: String, CodingKey {
+            case model, family, calls
+            case pricedMicros = "priced_micros"
+            case proofCounts = "proof_counts"
+        }
+    }
+
+    /// Z1.5: the Private AI on/off switch, as the daemon's settings echo it.
+    /// The disclosure words are the core's (`PrivateInferenceCopy.offerExposure`),
+    /// read through the bridge in the app target, not carried here.
+    public struct PrivateAISwitch: Codable, Equatable, Sendable {
+        /// `nil` when the daemon cannot say.
+        public let on: Bool?
+        /// Whether the first-run question has been answered; a write sets it.
+        public let offerSeen: Bool?
+        /// The listener's own report (`state`, `port`).
+        public let state: PrivateInferenceState?
+
+        public init(on: Bool?, offerSeen: Bool?, state: PrivateInferenceState?) {
+            self.on = on
+            self.offerSeen = offerSeen
+            self.state = state
+        }
+
+        public init(settings: Settings) {
+            self.init(
+                on: settings.privateInference, offerSeen: settings.privateInferenceOfferSeen,
+                state: settings.privateInferenceState)
+        }
+    }
+
+    /// Z2.2: the mission catalogue, the same request for every contributor.
+    // PROVISIONAL: shape owned by Zaki's C3
+    public struct MissionCatalogue: Codable, Equatable, Sendable {
+        public let missions: [Mission]
+        public let fetchedAt: Date?
+        /// Settlement posture, so pending credit carries its condition (D8).
+        public let posture: CreditPosture?
+
+        public enum CodingKeys: String, CodingKey {
+            case missions, posture
+            case fetchedAt = "fetched_at"
+        }
+    }
+
+    // PROVISIONAL: shape owned by Zaki's C3
+    public struct Mission: Codable, Equatable, Sendable, Identifiable {
+        public let id: String
+        public let title: String
+        public let summary: String?
+        /// Always pending, never earned (D8).
+        public let creditRange: CreditRange?
+
+        public enum CodingKeys: String, CodingKey {
+            case id, title, summary
+            case creditRange = "credit_range"
+        }
+    }
+
+    /// Mirrors `trace_commons_protocol::CreditPosture`.
+    // PROVISIONAL: shape owned by Zaki's C3
+    public struct CreditPosture: Codable, Equatable, Sendable {
+        /// `http`, `dry_run`, or `disabled`.
+        public let settlement: String
+        public let graded: Bool
+        public let explanation: String
+    }
+
+    /// Mirrors `trace_commons_protocol::invite_lookup::CreditRange`: an
+    /// invite operator's estimated credit per accepted trace, not yet settled.
+    public struct CreditRange: Codable, Equatable, Sendable {
+        public let min: Int
+        public let max: Int
+        /// `points_per_accepted_trace`.
+        public let unit: String
     }
 }

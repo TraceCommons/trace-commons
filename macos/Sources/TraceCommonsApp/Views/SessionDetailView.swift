@@ -1,22 +1,37 @@
-// INTEGRATION: reached from HistoryView and backed only by the account-authenticated
+// INTEGRATION: reached from HistoryDetailInspector and backed only by the account-authenticated
 // history_detail / publish_public_run / unpublish_public_run daemon methods.
 
 import AppKit
 import SwiftUI
 import TCBridge
+import TCDesign
+import TCShellCore
 
 struct SessionDetailView: View {
     let record: HistoryRecord
-    let onBack: () -> Void
+    /// Back to the list. Nil where the detail is drawn in an inspector,
+    /// which has no back control.
+    let onBack: (() -> Void)?
+    /// Whether the detail draws its own Withdraw. False in the Monitor's
+    /// History pane, where Withdraw lives on the row above (Ron's #1146
+    /// `HistoryRow`), so the page has one Withdraw.
+    let offersWithdrawal: Bool
 
     @EnvironmentObject private var model: AppModel
 
+    init(record: HistoryRecord, offersWithdrawal: Bool = true, onBack: (() -> Void)? = nil) {
+        self.record = record
+        self.offersWithdrawal = offersWithdrawal
+        self.onBack = onBack
+    }
+
     var body: some View {
-        Group {
+        VStack(alignment: .leading, spacing: GlassTokens.Space.s6) {
             if let copy = model.publicRunCopy {
                 content(copy)
             }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
         .onAppear {
             model.loadSessionDetail(record)
             if ContributionStatusPresentation.isTerminal(record.status) {
@@ -40,98 +55,95 @@ struct SessionDetailView: View {
 
     @ViewBuilder
     private func content(_ copy: PublicRunCopy) -> some View {
-        VStack(alignment: .leading, spacing: TC.Space.l) {
-            Button(action: onBack) {
-                HStack(spacing: TC.Space.xs) {
-                    Image(systemName: "chevron.left")
-                    Text(copy.allContributions)
-                }
-                .font(TC.Font_.meta)
-            }
-            .buttonStyle(.plain)
-            .frame(minHeight: 44)
-
-            VStack(alignment: .leading, spacing: TC.Space.xxs) {
+        VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
+            // The trail's last crumb is the heading; without a trail the
+            // title is.
+            if let onBack {
+                GlassBreadcrumb([GlassCrumb(copy.allContributions, action: onBack), GlassCrumb(copy.sessionDetail)],
+                                backLabel: copy.allContributions, onBack: onBack)
+                    .frame(minHeight: 44, alignment: .leading)
+            } else {
                 Text(copy.sessionDetail)
-                    .font(TC.Font_.sectionTitle)
-                    .foregroundStyle(TC.inkPrimary)
-                Text("\(record.projectLabel) · \(Format.when(record.submittedAt))")
-                    .font(TC.Font_.meta)
-                    .foregroundStyle(TC.inkSecondary)
+                    .glassType(GlassTokens.TypeScale.title)
+                    .foregroundStyle(GlassColor.textPrimary)
+                    .accessibilityAddTraits(.isHeader)
             }
-
-            if let detail = model.sessionDetails[record.submissionID] {
-                detailContent(detail, copy: copy)
-            } else if model.loadingSessionDetails.contains(record.submissionID) {
-                Text(copy.readingRecord)
-                    .font(TC.Font_.body)
-                    .foregroundStyle(TC.inkSecondary)
-            } else if let message = model.sessionDetailErrors[record.submissionID] {
-                VStack(alignment: .leading, spacing: TC.Space.s) {
-                    Text(message)
-                        .font(TC.Font_.body)
-                        .foregroundStyle(TC.coralText)
-                    Button(copy.retryRead) { model.loadSessionDetail(record) }
-                        .buttonStyle(.bordered)
-                        .frame(minHeight: 44)
-                }
-            }
-
-            localInstalledSkillSurface(copy)
+            Text("\(record.projectLabel) · \(Format.when(record.submittedAt))")
+                .glassType(GlassTokens.TypeScale.caption)
+                .foregroundStyle(GlassColor.textSecondary)
         }
+
+        // Reading, or why a read failed, beside the detail already held
+        // (`AppModel.loadSessionDetail` keeps it until the daemon answers),
+        // never instead of it: a reload keeps the editor and its draft.
+        if model.loadingSessionDetails.contains(record.submissionID) {
+            Text(copy.readingRecord)
+                .glassType(GlassTokens.TypeScale.caption)
+                .foregroundStyle(GlassColor.textSecondary)
+        } else if let message = model.sessionDetailErrors[record.submissionID] {
+            GlassNotice(tone: .outside, title: message) {
+                Button(copy.retryRead) { model.loadSessionDetail(record) }
+                    .buttonStyle(GlassButtonStyle(.glass))
+                    .frame(minHeight: 44)
+            }
+        }
+        if let detail = model.sessionDetails[record.submissionID] {
+            detailContent(detail, copy: copy)
+        }
+        if offersWithdrawal {
+            SessionWithdrawalAction(record: record, currentStatus: Self.withdrawalStatus(record, detail: model.sessionDetails[record.submissionID]), copy: copy)
+        }
+
+        localInstalledSkillSurface(copy)
+    }
+
+    /// The status Withdraw asks about: the detail's when it has been read,
+    /// else the app's own record's. Withdraw stands on the record, as the
+    /// legacy row offered it, so reading the detail, or failing to, never
+    /// hides it or its outcome. An unknown status still offers none.
+    static func withdrawalStatus(_ record: HistoryRecord, detail: SessionDetail?) -> String {
+        detail?.contributionStatus ?? record.status
     }
 
     @ViewBuilder
     private func localInstalledSkillSurface(_ copy: PublicRunCopy) -> some View {
         let state = model.skillLearningState(for: record.submissionID)
         let detail = model.sessionDetails[record.submissionID]
-        let regularSurfaceIsVisible = detail?.accepted == true
-            && detail?.humanCorrection != nil
-            && !withdrawalCompleted
-            && !ContributionStatusPresentation.isTerminal(detail?.contributionStatus)
-        if !regularSurfaceIsVisible {
+        if SkillLearningGate.showsInstalledSurface(detail, withdrawalCompleted: withdrawalCompleted) {
             if state.installedSkill != nil {
                 if let skillCopy = model.skillLearningCopy {
                     SkillLearningView(record: record, copy: skillCopy)
                 }
-            } else if case .idle = state.phase,
-                      state.failure != nil,
-                      ContributionStatusPresentation.isTerminal(record.status)
-                        || detail?.accepted == false
-            {
-                VStack(alignment: .leading, spacing: TC.Space.s) {
-                    if let message = state.failure {
-                        Text(message)
-                            .font(TC.Font_.footnote)
-                            .foregroundStyle(TC.coralText)
+            } else if SkillLearningGate.offersInstallStatusRetry(state, detail: detail, recordStatus: record.status) {
+                GlassCard {
+                    VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
+                        if let message = state.failure {
+                            GlassStatusLabel(message, status: .outside)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        Button(copy.retryRead) {
+                            model.ensureLocalInstalledSkillStatus(for: record)
+                        }
+                        .buttonStyle(GlassButtonStyle(.glass))
+                        .frame(minHeight: 44)
+                        .disabled(state.isWorking)
                     }
-                    Button(copy.retryRead) {
-                        model.ensureLocalInstalledSkillStatus(for: record)
-                    }
-                    .buttonStyle(.bordered)
-                    .frame(minHeight: 44)
-                    .disabled(state.isWorking)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .padding(TC.Space.l)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .tcCard()
             }
         }
     }
 
     @ViewBuilder
     private func detailContent(_ detail: SessionDetail, copy: PublicRunCopy) -> some View {
-        let currentStatus = detail.contributionStatus ?? record.status
-        let contributionIsWithdrawn = withdrawalCompleted
-            || ContributionStatusPresentation.isTerminal(currentStatus)
-        let contributionIsActive = detail.accepted == true
-            && detail.taskSuccess != nil
-            && !contributionIsWithdrawn
+        let contributionIsWithdrawn = SkillLearningGate.contributionIsWithdrawn(
+            detail, recordStatus: record.status, withdrawalCompleted: withdrawalCompleted)
+        let contributionIsActive = SkillLearningGate.contributionIsActive(
+            detail, recordStatus: record.status, withdrawalCompleted: withdrawalCompleted)
 
         SessionContributionOverview(record: record, detail: detail, copy: copy)
 
-        if contributionIsActive,
-           detail.humanCorrection != nil,
+        if SkillLearningGate.offersLearning(detail, recordStatus: record.status, withdrawalCompleted: withdrawalCompleted),
            let skillCopy = model.skillLearningCopy {
             SkillLearningView(record: record, copy: skillCopy)
         }
@@ -140,19 +152,15 @@ struct SessionDetailView: View {
             PublicRunEditor(record: record, detail: detail, copy: copy)
         } else if !contributionIsWithdrawn {
             Text(copy.publicationAfterAcceptance)
-                .font(TC.Font_.footnote)
-                .foregroundStyle(TC.inkSecondary)
+                .glassType(GlassTokens.TypeScale.caption)
+                .foregroundStyle(GlassColor.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
-
-        SessionWithdrawalAction(record: record, currentStatus: currentStatus, copy: copy)
     }
 
     private var withdrawalCompleted: Bool {
-        if ContributionStatusPresentation.isTerminal(record.status) { return true }
-        if case .some(.withdrawn) = model.withdrawals[record.submissionID] {
-            return true
-        }
-        return false
+        SkillLearningGate.withdrawalCompleted(
+            recordStatus: record.status, withdrawal: model.withdrawals[record.submissionID])
     }
 
 }
@@ -173,6 +181,9 @@ private struct PublicRunEditor: View {
     @State private var reviewDraft: PublicRunDraftInput?
     @State private var editingPublished = false
     @State private var configured = false
+    /// The publication error the person put away. The next publish or
+    /// unpublish clears it, so its error is shown even when it reads the same.
+    @State private var dismissedError: String?
 
     private var working: Bool {
         model.publicRunWorking.contains(record.submissionID)
@@ -180,55 +191,67 @@ private struct PublicRunEditor: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: TC.Space.m) {
-            TCSectionHeader(title: copy.publicWorkflow)
-            if let publication = detail.publication, !editingPublished {
-                published(publication)
-            } else if let reviewDraft {
-                review(reviewDraft)
-            } else {
-                editor
-            }
-            if let message = model.publicRunErrors[record.submissionID] {
-                Text(message)
-                    .font(TC.Font_.footnote)
-                    .foregroundStyle(TC.coralText)
+        GlassEyebrowCard(copy.publicWorkflow) {
+            VStack(alignment: .leading, spacing: GlassTokens.Space.s6) {
+                if let publication = detail.publication, !editingPublished {
+                    published(publication)
+                } else if let reviewDraft {
+                    review(reviewDraft)
+                } else {
+                    editor
+                }
+                if let message = model.publicRunErrors[record.submissionID], message != dismissedError {
+                    GlassNotice(tone: .outside) {
+                        HStack(alignment: .top, spacing: GlassTokens.Space.s3) {
+                            Text(message)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                            Button(ActionNoticeWords.coreDismissWord ?? ActionNoticeWords.dismissWord) { dismissedError = message }
+                                .buttonStyle(GlassButtonStyle(.glass))
+                                .frame(minHeight: 44)
+                        }
+                    }
+                }
             }
         }
-        .padding(TC.Space.l)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .tcCard(emphasised: reviewDraft != nil)
         .onAppear { configureIfNeeded() }
         .onChange(of: detail.publication?.version) { _, newVersion in
             guard newVersion != nil else { return }
             reviewDraft = nil
             editingPublished = false
         }
+        .onChange(of: model.publicRunWorking.contains(record.submissionID)) { _, working in
+            if working { dismissedError = nil }
+        }
     }
 
     private func published(_ publication: PublicRunPage) -> some View {
-        VStack(alignment: .leading, spacing: TC.Space.s) {
-            TCTag(text: copy.published, tone: .clear, symbol: "globe")
-            Text(publication.title).font(TC.Font_.cardTitle)
+        VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
+            GlassTag(copy.published, tone: .on)
+            Text(publication.title)
+                .glassType(GlassTokens.TypeScale.bodyStrong)
+                .foregroundStyle(GlassColor.textPrimary)
             Text(publication.outcomeSummary)
-                .font(TC.Font_.body)
-                .foregroundStyle(TC.inkSecondary)
-            HStack(spacing: TC.Space.s) {
+                .glassType(GlassTokens.TypeScale.body)
+                .foregroundStyle(GlassColor.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: GlassTokens.Space.s4) {
                 if let url = publication.publicURL {
                     Link(copy.openPage, destination: url)
-                        .tcPrimaryAction()
+                        .buttonStyle(GlassButtonStyle(.primary))
                         .frame(minHeight: 44)
                 }
                 Button(copy.editPage) {
                     populate(from: publication)
                     editingPublished = true
                 }
-                .buttonStyle(.bordered)
+                .buttonStyle(GlassButtonStyle(.glass))
                 .frame(minHeight: 44)
                 Button(working ? copy.unpublishing : copy.unpublish) {
                     model.unpublishPublicRun(record)
                 }
-                .buttonStyle(.bordered)
+                .buttonStyle(GlassButtonStyle(.glass))
                 .frame(minHeight: 44)
                 .disabled(working)
             }
@@ -236,48 +259,46 @@ private struct PublicRunEditor: View {
     }
 
     private var editor: some View {
-        VStack(alignment: .leading, spacing: TC.Space.m) {
+        VStack(alignment: .leading, spacing: GlassTokens.Space.s6) {
             Text(copy.publicationDisclosure)
-                .font(TC.Font_.footnote)
-                .foregroundStyle(TC.inkSecondary)
+                .glassType(GlassTokens.TypeScale.caption)
+                .foregroundStyle(GlassColor.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
 
-            fieldLabel(copy.pageTitle, count: title.count, maximum: 100)
-            TextField("", text: $title)
-                .textFieldStyle(.plain)
-                .font(TC.Font_.body)
-                .padding(.horizontal, TC.Space.m)
-                .frame(minHeight: 44)
-                .background(TC.surfaceInset, in: RoundedRectangle(cornerRadius: TC.Radius.control))
-                .overlay { RoundedRectangle(cornerRadius: TC.Radius.control).stroke(TC.line) }
+            VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
+                fieldLabel(copy.pageTitle, count: title.count, maximum: 100)
+                GlassTextField(copy.pageTitle, text: $title, prompt: copy.pageTitle, showsLabel: false)
+            }
 
-            fieldLabel(copy.publicOutcome, count: outcomeSummary.count, maximum: 600)
-            TextEditor(text: $outcomeSummary)
-                .font(TC.Font_.body)
-                .frame(minHeight: 88)
-                .overlay { RoundedRectangle(cornerRadius: TC.Radius.control).stroke(TC.line) }
+            VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
+                fieldLabel(copy.publicOutcome, count: outcomeSummary.count, maximum: 600)
+                GlassTextArea(copy.publicOutcome, text: $outcomeSummary, showsLabel: false)
+                    .frame(minHeight: 88)
+            }
 
-            fieldLabel(copy.reusableInstructions, count: workflow.count, maximum: 4_000)
-            TextEditor(text: $workflow)
-                .font(TC.Font_.body)
-                .frame(minHeight: 128)
-                .overlay { RoundedRectangle(cornerRadius: TC.Radius.control).stroke(TC.line) }
+            VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
+                fieldLabel(copy.reusableInstructions, count: workflow.count, maximum: 4_000)
+                GlassTextArea(copy.reusableInstructions, text: $workflow, showsLabel: false)
+                    .frame(minHeight: 128)
+            }
 
-            VStack(alignment: .leading, spacing: TC.Space.xs) {
-                TCFieldLabel(copy.supportingEvidence)
+            VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
+                eyebrow(copy.supportingEvidence)
                 Text(copy.selectEvidence)
-                    .font(TC.Font_.footnote)
-                    .foregroundStyle(TC.inkSecondary)
+                    .glassType(GlassTokens.TypeScale.caption)
+                    .foregroundStyle(GlassColor.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
                 ForEach(detail.evidence) { evidence in
                     Toggle(isOn: evidenceBinding(evidence.eventID)) {
-                        VStack(alignment: .leading, spacing: TC.Space.xxs) {
+                        VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
                             Text(copy.evidenceKindLabel(for: evidence.kind))
-                                .font(TC.Font_.meta)
+                                .glassType(GlassTokens.TypeScale.label)
                             Text(evidence.excerpt)
-                                .font(TC.Font_.footnote)
+                                .glassType(GlassTokens.TypeScale.caption)
                                 .lineLimit(4)
                         }
                     }
-                    .toggleStyle(.checkbox)
+                    .toggleStyle(GlassCheckboxStyle())
                     .disabled(
                         selectedEvidence.count >= 4
                         && !selectedEvidence.contains(evidence.eventID)
@@ -288,36 +309,38 @@ private struct PublicRunEditor: View {
 
             if let correction = detail.humanCorrection {
                 Toggle(copy.publishCorrection, isOn: $includeCorrection)
-                    .toggleStyle(.checkbox)
-                    .frame(minHeight: 44)
+                    .toggleStyle(GlassCheckboxStyle())
+                    .frame(minHeight: 44, alignment: .leading)
                 if includeCorrection {
-                    Text(correction)
-                        .font(TC.Font_.footnote)
-                        .padding(TC.Space.s)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(TC.surfaceInset, in: RoundedRectangle(cornerRadius: TC.Radius.inset))
+                    GlassWell {
+                        Text(correction)
+                            .glassType(GlassTokens.TypeScale.caption)
+                            .foregroundStyle(GlassColor.textPrimary)
+                            .padding(GlassTokens.Space.s4)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
                 }
             }
 
-            VStack(alignment: .leading, spacing: TC.Space.xs) {
-                TCFieldLabel(copy.reusePermission)
+            VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
+                eyebrow(copy.reusePermission)
                 if reusePermission == nil {
                     Text(copy.choosePermission)
-                        .font(TC.Font_.footnote)
-                        .foregroundStyle(TC.inkSecondary)
+                        .glassType(GlassTokens.TypeScale.caption)
+                        .foregroundStyle(GlassColor.textSecondary)
                 }
                 ForEach(copy.reusePermissions) { choice in
                     let selected = reusePermission == choice.permission
                     Button {
                         reusePermission = choice.permission
                     } label: {
-                        HStack(alignment: .firstTextBaseline, spacing: TC.Space.s) {
-                            Image(systemName: selected ? "circle.inset.filled" : "circle")
-                                .foregroundStyle(selected ? TC.greenText : TC.inkSecondary)
-                                .accessibilityHidden(true)
+                        HStack(alignment: .firstTextBaseline, spacing: GlassTokens.Space.s4) {
+                            GlassCheckMark(checked: selected)
                             Text([choice.label, choice.explanation].joined(separator: " · "))
-                                .font(TC.Font_.footnote)
+                                .glassType(GlassTokens.TypeScale.label.weight(.regular))
+                                .foregroundStyle(GlassColor.textPrimary)
                                 .multilineTextAlignment(.leading)
+                                .fixedSize(horizontal: false, vertical: true)
                             Spacer(minLength: 0)
                         }
                         .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
@@ -328,36 +351,30 @@ private struct PublicRunEditor: View {
                 }
             }
 
-            VStack(alignment: .leading, spacing: TC.Space.xs) {
-                TCFieldLabel(copy.sourcePublicRun)
-                TextField(copy.sourcePlaceholder, text: $source)
-                    .textFieldStyle(.plain)
-                    .font(TC.Font_.body)
-                    .padding(.horizontal, TC.Space.m)
-                    .frame(minHeight: 44)
-                    .background(TC.surfaceInset, in: RoundedRectangle(cornerRadius: TC.Radius.control))
-                    .overlay { RoundedRectangle(cornerRadius: TC.Radius.control).stroke(TC.line) }
+            VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
+                eyebrow(copy.sourcePublicRun)
+                GlassTextField(copy.sourcePlaceholder, text: $source, prompt: copy.sourcePlaceholder, showsLabel: false)
                 Text(copy.sourceHelp)
-                    .font(TC.Font_.footnote)
-                    .foregroundStyle(TC.inkSecondary)
+                    .glassType(GlassTokens.TypeScale.caption)
+                    .foregroundStyle(GlassColor.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             if let problem = validationProblem {
-                Text(problem)
-                    .font(TC.Font_.footnote)
-                    .foregroundStyle(TC.coralText)
+                GlassStatusLabel(problem, status: .outside)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
-            HStack(spacing: TC.Space.s) {
+            HStack(spacing: GlassTokens.Space.s4) {
                 if detail.publication != nil {
                     Button(copy.cancelEdit) { editingPublished = false }
-                        .buttonStyle(.bordered)
+                        .buttonStyle(GlassButtonStyle(.glass))
                         .frame(minHeight: 44)
                 }
                 Button(copy.reviewPage) {
                     reviewDraft = makeDraft()
                 }
-                .tcPrimaryAction()
+                .buttonStyle(GlassButtonStyle(.primary))
                 .frame(minHeight: 44)
                 .disabled(makeDraft() == nil)
             }
@@ -365,10 +382,13 @@ private struct PublicRunEditor: View {
     }
 
     private func review(_ draft: PublicRunDraftInput) -> some View {
-        VStack(alignment: .leading, spacing: TC.Space.m) {
+        VStack(alignment: .leading, spacing: GlassTokens.Space.s6) {
             Text(copy.exactPublicPreview)
-                .font(TC.Font_.sectionTitle)
-            Text(draft.title).font(TC.Font_.cardTitle)
+                .glassType(GlassTokens.TypeScale.title)
+                .foregroundStyle(GlassColor.textPrimary)
+            Text(draft.title)
+                .glassType(GlassTokens.TypeScale.bodyStrong)
+                .foregroundStyle(GlassColor.textPrimary)
             previewField(
                 copy.creatorReport,
                 copy.taskOutcomeLabel(for: detail.taskSuccess) ?? copy.outcomeUnavailable
@@ -378,33 +398,30 @@ private struct PublicRunEditor: View {
             if let correction = draft.correctionExcerpt {
                 previewField(copy.decisiveCorrection, correction)
             }
-            VStack(alignment: .leading, spacing: TC.Space.xs) {
-                TCFieldLabel(copy.observedEvidence)
+            VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
+                eyebrow(copy.observedEvidence)
                 ForEach(Array(draft.evidence.enumerated()), id: \.offset) { _, evidence in
-                    Text(evidence.excerpt).font(TC.Font_.footnote)
+                    Text(evidence.excerpt)
+                        .glassType(GlassTokens.TypeScale.body)
+                        .foregroundStyle(GlassColor.textPrimary)
+                        .textSelection(.enabled)
                 }
             }
             previewField(copy.useWorkflow, draft.workflow)
             if let choice = copy.reuseChoice(for: draft.reusePermission) {
-                VStack(alignment: .leading, spacing: TC.Space.xxs) {
-                    TCFieldLabel(copy.reusePermission)
-                    Text(choice.label).font(TC.Font_.meta)
-                }
+                previewField(copy.reusePermission, choice.label)
             }
             if let sourceSlug = draft.sourceSlug {
-                VStack(alignment: .leading, spacing: TC.Space.xxs) {
-                    TCFieldLabel(copy.sourcePublicRun)
-                    Text("/runs/\(sourceSlug)").font(TC.Font_.meta)
-                }
+                previewField(copy.sourcePublicRun, "/runs/\(sourceSlug)")
             }
-            HStack(spacing: TC.Space.s) {
+            HStack(spacing: GlassTokens.Space.s4) {
                 Button(copy.editDraft) { reviewDraft = nil }
-                    .buttonStyle(.bordered)
+                    .buttonStyle(GlassButtonStyle(.glass))
                     .frame(minHeight: 44)
                 Button(working ? copy.publishing : detail.publication == nil ? copy.publishPage : copy.updatePage) {
                     model.publishPublicRun(record, draft: draft)
                 }
-                .tcPrimaryAction()
+                .buttonStyle(GlassButtonStyle(.primary))
                 .frame(minHeight: 44)
                 .disabled(working)
             }
@@ -412,21 +429,29 @@ private struct PublicRunEditor: View {
     }
 
     private func previewField(_ label: String, _ value: String) -> some View {
-        VStack(alignment: .leading, spacing: TC.Space.xs) {
-            TCFieldLabel(label)
+        VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
+            eyebrow(label)
             Text(value)
-                .font(TC.Font_.body)
+                .glassType(GlassTokens.TypeScale.body)
+                .foregroundStyle(GlassColor.textPrimary)
+                .fixedSize(horizontal: false, vertical: true)
                 .textSelection(.enabled)
         }
     }
 
+    private func eyebrow(_ text: String) -> some View {
+        Text(text)
+            .glassType(GlassTokens.TypeScale.eyebrow)
+            .foregroundStyle(GlassColor.textTertiary)
+    }
+
     private func fieldLabel(_ label: String, count: Int, maximum: Int) -> some View {
         HStack {
-            TCFieldLabel(label)
+            eyebrow(label)
             Spacer()
             Text("\(count)/\(maximum)")
-                .font(TC.Font_.ledger)
-                .foregroundStyle(TC.inkTertiary)
+                .glassType(GlassTokens.TypeScale.mono)
+                .foregroundStyle(GlassColor.textTertiary)
         }
     }
 
@@ -503,3 +528,4 @@ private struct PublicRunEditor: View {
     }
 
 }
+

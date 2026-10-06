@@ -831,7 +831,7 @@ public sealed class ProjectViewModel : INotifyPropertyChanged
     /// The line beneath the name: the mode for an ordinary row, and for the
     /// unresolvable bucket the note explaining why it can never be armed. The
     /// note REPLACES the mode rather than joining it, because "you'll always be
-    /// asked" already says what "Ask me first" says.
+    /// asked" already says what "Ask me" says.
     /// </summary>
     public string SubLine => WatchCopy.SubLineFor(IsUnresolvable, _mode);
 

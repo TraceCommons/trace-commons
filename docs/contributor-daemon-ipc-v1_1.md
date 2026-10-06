@@ -109,6 +109,40 @@ old behaviour, because no application has shipped against `v1` yet. See
     `GET /v1/account/credit-summary` with the account session. The daemon
     never read either before this. See
     ["`commons_credit_summary`"](#commons_credit_summary).
+- **K9 (titles on the queue).** `title` -- previously served only on a
+  `preview` summary -- is now also on every queue entry (`list_pending`, the
+  `snapshot` event). It is never written to a receipt or a history row.
+  The watcher computes it synchronously when it queues the session, from
+  the same opening prompt and the same cut/truncate rule `preview`'s own
+  `title` uses, but through the deterministic redaction pass alone rather
+  than a full preview build. See ["`title`"](#title) and
+  ["The preview content boundary"](#the-preview-content-boundary).
+- **K10 (sizes in history, and the would-send size).** Two additive fields,
+  so the History graph can weigh contributions by bytes and not only by
+  count. `list_history` rows now carry `uploaded_bytes`: the serialized size
+  of the redacted envelope a submission actually sent, recorded once at
+  upload time. Every queue entry (`list_pending`, the `snapshot` event) now
+  also carries `would_send_bytes`: the serialized size of the redacted
+  envelope a preview pinned for that entry, present only once a preview has
+  run. Neither is the raw session size on disk (`size_bytes`), which was the
+  only figure either surface could report before this. See
+  ["Sizes in history, and the would-send size (K10)"](#sizes-in-history-and-the-would-send-size-k10).
+- **K12 (withdrawal dates on revoked rows).** `list_history` rows now carry
+  `revoked_at`: when a server `revoked` read-back -- a withdrawal made on the
+  web, which this daemon never drove -- was first observed, so a revoked row
+  can show a date the way a locally `withdrawn` one already does from
+  `withdrawn_at`. The server's read-back itself carries no timestamp, so this
+  is the moment of first discovery rather than the moment of the web
+  withdrawal; it does not move on a later poll that only re-confirms the same
+  status. See
+  ["Withdrawal dates on revoked rows (K12)"](#withdrawal-dates-on-revoked-rows-k12).
+- **K15 (the native View menu's Group by and Sort by).** No field is added
+  for this. Every Group by and Sort by option the native Traces tab needs
+  is already answerable from `list_pending`'s entry fields, `list_projects`,
+  and `list_history` -- once K11's `list_projects[].tools` (#1192) lands.
+  K9's `title` (#1191) and K10's `would_send_bytes` and `uploaded_bytes`
+  (#1196) have already landed. See ["View menu: Group by and Sort by
+  (K15)"](#view-menu-group-by-and-sort-by-k15).
 
 `crates/trace-commons-contributor/tests/daemon_ipc_contract.rs` is the
 executable half of this document. `hello` reports its own method list and a
@@ -353,8 +387,10 @@ something it can corroborate, rather than to a string a client invented.
   sizes. The full redacted event body is a separate call, `preview_body`,
   because it does not fit one frame and has to be paged. Both carry trace
   content under the preview boundary below. Account-authenticated session
-  detail and tested-skill extraction have their own bounded content boundary;
-  no other method returns session-derived text.
+  detail and tested-skill extraction have their own bounded content boundary.
+  The one other session-derived text is a queue entry's `title` (K9), a
+  bounded exception described under the boundary below; no other method
+  returns session-derived text.
   An earlier revision of this document said the body was deliberately
   in-process only, reachable through the crate's C ABI, on the reasoning
   that any process could compute a preview for itself. That reasoning does
@@ -386,6 +422,24 @@ and a project name is not an informed one. This content is bounded:
 - **Never onward.** It never appears in a log line, an audit entry, a
   history record, notification text, or a receipt. Not truncated, not
   summarized, not hashed-with-a-sample. Nothing copies it into any of those.
+
+**The one exception: a queue entry's `title` (K9).** Every queue entry, in
+`list_pending` and the `snapshot` event, carries `title`: the first non-empty
+line of the opening prompt, cut and truncated as `preview`'s `title` is. It
+departs from the first two rules above, deliberately, and only these ways:
+
+- **Deterministic redaction only.** The watcher builds it when it queues the
+  session, through the deterministic pass alone (secret-leak patterns, local
+  paths, private emails, PEM blocks), never a configured prose filter. So it
+  is never less redacted than an unenrolled `preview.title`, but can be less
+  redacted than an enrolled contributor's.
+- **Served in bulk.** It is on every row of the queue a client already
+  lists, without naming an entry.
+
+It keeps the third rule in full. It lives on the queue entry and goes when
+the entry goes. It is never written to a receipt, a history record, a log, an
+audit entry or a notification, and nothing copies it onward. A history list
+shows the project label, not a title.
 
 `preview_unsure_spans` is outside the exemption for the same reason as
 `preview_turns` below: it carries fixed labels and byte offsets into the body
@@ -470,7 +524,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 |---|---|---|---|
 | `hello` | — | `schema_version`, `supported_versions[]`, `methods[]`, `events[]`, `max_line_bytes` | |
 | `status` | — | see below | |
-| `list_pending` | `project_id` (optional) | `pending[]` of queue entries | `project_id` narrows the list to that project's `pending` entries, for Customize's past-session picker; refused with `project-id-unrecognized` if the daemon does not know that project, or `project_id-invalid` if it is not a string. Absent is every project, as before. Each entry carries `scrub`, `marks` / `content_marks` / `unsure_spans` (only once its pinned bytes are counted) and `second_look[]`; see "The scrub state and `second_look`" below |
+| `list_pending` | `project_id` (optional) | `pending[]` of queue entries | `project_id` narrows the list to that project's `pending` entries, for Customize's past-session picker; refused with `project-id-unrecognized` if the daemon does not know that project, or `project_id-invalid` if it is not a string. Absent is every project, as before. Each entry carries `scrub`, `marks` / `content_marks` / `unsure_spans` (only once its pinned bytes are counted) and `second_look[]`; see "The scrub state and `second_look`" below. Each entry also carries `would_send_bytes`, the pinned preview's measured size (K10); see ["Sizes in history, and the would-send size (K10)"](#sizes-in-history-and-the-would-send-size-k10) |
 | `certificate_detail` | `entry_id` | held certificate claims and verification metadata | read-only; refuses entries without a witness pin and never returns raw artifact bytes |
 | `route_disclosure` | — | `route`, `witness`, `local_filter`, `receipts`, `attested_bodies` | read-only, no network; what leaves this machine, to whom, and what this client checked; see "`route_disclosure`" below |
 | `preview` | `entry_id` | see below | summary only; the body is `preview_body` |
@@ -492,17 +546,22 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `preview_request` | `entry_id` | `entry_id`, `state`, and the fields that state carries | enqueues and returns immediately; the result arrives as a `preview_ready` event. See "Scheduled previews" below |
 | `preview_visible` | `entry_ids[]` | `visible: <count>` | replaces the on-screen set wholesale; decides preview **order**, never membership |
 | `preview_cancel` | `entry_id` | `entry_id`, `dropped` | drops a queued preview, or discards a running one's result; `dropped: false` is a no-op, not an error |
-| `approve` | `entry_id`, `all: true`, or `project_id`; `outcome` (optional); `correction` (optional, `entry_id` + `partly`/`failed` only) | `approved: <count>`, `hold_secs`, `hold_until`, `flagged`, `redactions`, `skipped[]` | `all: true` no longer requires a terminal; `project_id` approves that project's `Pending` entries and no others, matched by the id `entry_value` publishes (never `project_label`, which is display text and unstable), and is refused with `project-id-unrecognized` if the daemon does not know that project; the three are mutually exclusive and `all` wins over `project_id` wins over `entry_id` when more than one is sent; see "The approval hold", "What `approve` reports" and "The `outcome` verdict" below |
+| `approve` | `entry_id`, `all: true`, or `project_id`; `outcome` (optional); `correction` (optional, `entry_id` + `partly`/`failed` only) | `approved: <count>`, `hold_secs`, `hold_until`, `flagged`, `redactions`, `skipped[]` | `all: true` no longer requires a terminal; `project_id` approves that project's `Pending` entries and no others, matched by the id `entry_value` publishes (never `project_label`, which is display text and unstable), and is refused with `project-id-unrecognized` if the daemon does not know that project; the three are mutually exclusive and `all` wins over `project_id` wins over `entry_id` when more than one is sent; refused with `contribution-override-never` while a Never contribution override is in force (#1208); see "The approval hold", "What `approve` reports" and "The `outcome` verdict" below |
 | `dismiss` | `entry_id` | `ok: true` | declines the **session**, not just this entry: the daemon never offers that session file again, however much it grows afterwards. See "`dismiss` is permanent" below |
 | `keep` | `entry_id` | `kept: true` | "Keep on this Mac": the **reversible** decline. The entry must be `pending`, or `approved` unattended, which the keep revokes (`not-pending` otherwise, `unknown-entry-id` if there is none). See "`keep`: Keep on this Mac" below |
 | `undo_keep` | `entry_id` | `kept: false` | returns a kept entry to `pending`, waiting for a person; `not-kept` for anything that is not kept, a dismissed entry included; `queue-full` at the queue cap; `project-ignored` if its folder is now Never. See "`keep`: Keep on this Mac" below |
 | `list_kept` | — | `kept[]` of queue entries | every kept entry, in the `list_pending` shape, so a shell can show them and offer the undo |
+| `list_past_sessions` | `project_id` (required) | `sessions[]` of past-session rows, `total`, `project_mode` | the first-run past-session picker: one folder's past sessions, queued or never offered, each named by an opaque `session_id`, never a path; nothing is read before the person chooses; `project_id-invalid` / `project-id-unrecognized`, never an empty list for an unknown folder. See "`list_past_sessions`" below |
+| `include_past_sessions` | `project_id`, `session_ids[]` (1 to 500 distinct) | `approved`, `skipped[]` of `{session_id, label}` | the picker's Continue: a person's `approve` of exactly the sessions named, never `include_backlog`; the whole call is refused on one foreign id (`session-id-unrecognized`), a Never folder (`project-mode-never`) or the Never override; writes `past-sessions-included` first. Async entry point only, as `approve`. See "`include_past_sessions`" below |
 | `cancel` | `entry_id` **or** `project_id` | `ok: true` (`entry_id`) or `canceled: <count>` (`project_id`) | returns matching `approved` entries to `pending` and clears their pin, so the next `approve` rebuilds; guaranteed to succeed for the whole hold; `project_id` undoes that project's `approved` entries and no others -- `pending` entries are left alone, matched by the id `entry_value` publishes (never `project_label`) -- and is refused with `project-id-unrecognized` if the daemon does not know that project; the two selectors are mutually exclusive and `project_id` wins if both are sent; a known project with nothing `approved` succeeds with `canceled: 0`; the single-`entry_id` form errors if that entry is not currently `approved`; see "The approval hold" below |
 | `pause` | `until` (optional RFC 3339 timestamp) | `paused: true`, `paused_until` | see "Pause semantics" below |
 | `resume` | — | `paused: false` | |
-| `list_projects` | — | `projects[]` of `{project_id, project_label, mode, added_at, configured, is_unresolved_bucket}`, plus a top-level `unpurposed_traces` | configured **and** discovered projects; see "`list_projects`" below |
-| `set_project_mode` | `project_id` **or** `project_key`, `mode` (`label` accepted and ignored), `include_backlog` (optional boolean, `auto_upload` only) | `ok: true`, `purged: <count>`, `retracted: <count>`, `from_now` | socket clients send `project_id`; `auto_upload` no longer requires a terminal; see "Naming a project" above, "`set_project_mode` and the ignore purge" and "Arming from now" below |
-| `list_history` | `limit` (optional, default 50, max 1000) | `history[]`, each row now also carrying `approved_unattended` and `approved_verdict` | see "History provenance (K7)" below |
+| `list_projects` | — | `projects[]` of `{project_id, project_label, mode, folder_mode, added_at, configured, is_unresolved_bucket}`, plus a top-level `unpurposed_traces` | configured **and** discovered projects; see "`list_projects`" below |
+| `set_project_mode` | `project_id` **or** `project_key`, `mode` (`label` accepted and ignored), `include_backlog` (optional boolean, `auto_upload` only) | `ok: true`, `purged: <count>`, `retracted: <count>`, `from_now`, `overridden_by` (`null` or the override's mode) | socket clients send `project_id`; `auto_upload` no longer requires a terminal; see "Naming a project" above, "`set_project_mode` and the ignore purge" and "Arming from now" below |
+| `set_contribution_override` | `mode` (`notify_only`, `auto_upload` or `ignore`), `confirm` (boolean; `true` required for `auto_upload`) | `changed`, `contribution_override: {mode, since}`, `returned: <count>` | the menu-bar pill's global override (#1173); per-folder modes are never written; `auto_upload` is a grant, refused with `arming-terms-unavailable` without terms (#1208); see "The contribution override" below |
+| `clear_contribution_override` | — | `cleared`, `returned: <count>` | every folder back on its own mode; see "The contribution override" below |
+| `mission_matches` | `catalogue` (a contribution mission catalogue; PROVISIONAL, shape owned by Z7/Z8) | `matches[]` of mission ids, `read: {tools, folders}` (counts) | K16 (#1173): which contribution missions this Mac's work fits, worked out on this Mac only; read-only; refused with `catalogue-required`, `catalogue-invalid` or `catalogue-schema-unsupported`; see "`mission_matches`" below |
+| `list_history` | `limit` (optional, default 50, max 1000) | `history[]`, each row now also carrying `approved_unattended`, `approved_verdict`, `uploaded_bytes`, and `revoked_at` | see "History provenance (K7)", "Sizes in history, and the would-send size (K10)" and "Withdrawal dates on revoked rows (K12)" below |
 | `history_rollup` | — | see below | now also carries `taken_back`, and a `withdrawn` bucket in each window |
 | `commons_credit_summary` | — | `posture_state`, `commons_settlement`, `commons_settlement_explanation`, `commons_graded` (device route); `points_state`, `commons_points_earned_this_period`, `commons_points_lifetime_earned`, `commons_pending_review`, `commons_currency_code`, `commons_currency_earned_this_period`, `commons_period_start`, `commons_period_end` (account route); `observed_at` | always succeeds; see "`commons_credit_summary`" below |
 | `history_detail` | `submission_id` | owned redacted outcome, correction, up to 24 evidence candidates, contributed versions, publication state, and an opaque local owner-scope digest | one account-authenticated request; each excerpt capped at 700 characters; native clients use the digest only to evict account-owned caches after sign-in changes |
@@ -525,7 +584,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `harness_commit` | `plan_id` (required) | `id`, `action`, `committed: true`, `path`, `backup_path` | makes an edit that was already shown; takes a plan id and **nothing else**, so a shell cannot ask for a write it did not preview |
 | `quiesce` | `timeout_secs` (optional, default 60, max 300) | `quiesced: true`, `waited_ms` | parks uploads for an update swap; `busy` / `quiesce-timeout` if in-flight work does not finish in time |
 | `get_settings` | — | settings; credential presence as booleans, source declarations as `*_source_mode` (`unset`/`off`/`watch`), never local paths | |
-| `set_settings` | any of `quiescence_secs`, `digest_interval_secs`, `digest_schedule`, `approval_hold_secs`, `local_notifications`, `claude_root`, `codex_root`, `claude_source`, `codex_source`, `gemini_source`, `cline_source`, `opencode_source`, `ironwire`, `ironwire_attested_bodies`, `token_distributions_contribution`, `token_capture_enabled`, `private_inference`, `private_inference_offer_seen`, `scrub_check`, `max_uploads_per_day`, `max_bytes_per_day` | updated settings | see "`set_settings`" below |
+| `set_settings` | any of `quiescence_secs`, `digest_interval_secs`, `digest_schedule`, `approval_hold_secs`, `local_notifications`, `claude_root`, `codex_root`, `claude_source`, `codex_source`, `gemini_source`, `cline_source`, `opencode_source`, `trajectory_source`, `ironwire`, `ironwire_attested_bodies`, `token_distributions_contribution`, `token_capture_enabled`, `private_inference`, `private_inference_offer_seen`, `scrub_check`, `max_uploads_per_day`, `max_bytes_per_day` | updated settings | see "`set_settings`" below |
 | `consent_options` | — | `scopes[]` of `{name, description, always_on, grants_data_use}` | |
 | `set_consent_scopes` | `scopes[]` (wire-name strings; omitted means floor scope only) | `consent_scopes[]` | requires an existing enrollment |
 | `enroll` | `grant` xor `invite`, `scopes[]` (optional) | `enrolled: bool`, and on success `tenant_id`, `device_key_id`, `consent_scopes[]` | performs real network I/O |
@@ -544,8 +603,8 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `withdraw_bulk` | `status` (`submitted` \| `quarantined` \| `accepted`) | `withdrawn: <count>`, `failed: <count>` | performs real network I/O; see "Withdrawal" below |
 | `inference_connection_offers` | — | `offers[]` of `{offer_id, revision, provider_id, disclosure_version, config_digest}` | account session; a read that selects nothing; see "Connecting inference" below |
 | `inference_connection_current` | — | `selection` (or `null`), `installed_on_this_device`, `pending_install`, `revocation_applied` | account session; applies an observed revocation on this device; see "Connecting inference" below |
-| `inference_connection_select` | `offer_id`, `provider_id`, `revision`, `config_digest`, `disclosure_version` (all **required**, exactly as shown); `expected_current_version` (optional); `idempotency_key` (optional UUID) | `selected: true`, `connection_id`, `state_version`, `offer_id`, `revision`, `config_digest`, `disclosure_version`, `receipt_endpoint_offered`, `install_required: true`, `previous_witness_removed` | account session; installs nothing; see "Connecting inference" below |
-| `inference_connection_install` | `connection_id`, `config_digest` (both **required**) | `installed: true`, `connection_id`, `state_version`, `receipt_endpoint_installed` | account session; the separate explicit step that writes the witness on this device; see "Connecting inference" below |
+| `inference_connection_select` | `offer_id`, `provider_id`, `revision`, `config_digest`, `disclosure_version`, `confirmed: true` (all **required**, exactly as shown); `expected_current_version` (optional); `idempotency_key` (optional UUID) | `selected: true`, `connection_id`, `state_version`, `offer_id`, `revision`, `config_digest`, `disclosure_version`, `receipt_endpoint_offered`, `install_required: true`, `previous_witness_removed` | account session; installs nothing; see "Connecting inference" below |
+| `inference_connection_install` | `connection_id`, `config_digest`, `confirmed: true` (all **required**) | `installed: true`, `connection_id`, `state_version`, `receipt_endpoint_installed` | account session; the separate explicit step that writes the witness on this device; see "Connecting inference" below |
 | `inference_connection_disconnect` | `connection_id` (**required**) | `disconnected`, `connection_id`, `state_version` (or `null`), `local_witness_removed`, `server_disconnect` (`revoked` / `not-found` / `pending`), `server_refusal` (label or `null`) | removes the local witness first, with or without an account session; see "Connecting inference" below |
 
 ### `status`
@@ -577,9 +636,16 @@ pins. No account token, device key or PKCE verifier is returned to native views.
   "grant_voids": [],
   "witness_capacity": { "waiting_sessions": 0, "next_retry_at": null },
   "arming_rewordings": [],
-  "automatic_contribution_held": { "held_sessions": 0, "reasons": [], "projects": [] }
+  "automatic_contribution_held": { "held_sessions": 0, "reasons": [], "projects": [] },
+  "contribution_override": null,
+  "contribution_mode": "notify_only",
+  "contribution_mode_partial": false
 }
 ```
+
+`contribution_override`, `contribution_mode` and `contribution_mode_partial`
+are additive; see "The
+contribution override" below.
 
 `grant_voids` is additive; see "Void notices" below. `witness_capacity`,
 `arming_rewordings`, `automatic_contribution_held` and `decisions_owed` are
@@ -592,6 +658,48 @@ invite identity" below.
 `health.last_error_label` is the field a tray renders when something is
 wrong. It is one of the labels in "Health precedence" below, or `null` when
 healthy.
+
+The banner's words -- a title, a sentence stating what is held and the data
+consequence, and an action label where there is a real recovery step -- are
+`health_copy::health_copy_for_label`, across the C ABI as `tc_health_copy_json`
+(R6/R7, #1173). Pass `reachable: 0` instead of a label when the daemon
+cannot be reached at all; that returns the separate core-down sentence
+(`health_copy::core_down_copy`, **DRAFT, NEEDS APPROVAL** -- no shell has
+shown a contributor-facing sentence for a fully unreachable daemon before).
+`reachable` is never derived from this call: it is the caller's own
+liveness fact, from whatever probe or IPC failure told it the daemon is
+down. A reachable daemon with `last_error_label: null` has nothing to show
+and should not call this at all; passed anyway with an empty label it
+answers `NULL`, not a banner. A non-empty label that is not UTF-8 gets the
+on-hold banner, never `NULL`.
+
+The C signature is `tc_health_copy_json(reachable, label,
+max_queue_entries)`: pass `get_settings.max_queue_entries` so `queue-full`
+says how many are waiting, or `0` when unknown and the sentence names no
+number. The JSON is `{title, detail, action, action_kind, severity}`:
+
+- `severity` is `actionable` (the contributor can act on it) or `waiting`
+  (it clears on its own) -- Swift `HealthCopy.Severity`'s two banner kinds.
+  It cannot be derived from `action`: an unsupported OpenCode export is
+  actionable with no button.
+- `action_kind` is a stable kind for the button, present exactly when
+  `action` is: `reconnect`, `privacy_scan_notice` or `review_queue` (Swift's
+  `reviewsQueue`). Switch on it, never on the button's words.
+- `opencode-export-version-unsupported` is answered with the source settings'
+  own version sentence (`source_copy`), not the generic banner.
+
+The core-down detail (draft) says the queue is safe and that sessions from
+while the daemon was down are picked up when it is running again: the queue
+is persisted, and the daemon's first poll after it starts is a full pass over
+every watched source.
+
+Moved into the core from
+`macos/Sources/TraceCommonsApp/HealthCopy.swift`, which has shipped this
+table since before this export existed; Windows
+(`windows/src/TraceCommons.Interop/HealthCopy.cs`) independently wrote the
+same sentences by hand. Neither shell has been switched over to the export
+yet -- that is follow-up work, not part of this change -- so the two Swift
+and C# tables still carry their own copies for now.
 
 `next_digest_at` depends on `digest_schedule` (see `set_settings`). Under
 `interval` it is `null` until a first digest has fired, then that digest's
@@ -694,6 +802,14 @@ It stays until a shell calls `acknowledge_arming_rewordings` with its `id`
 (audited as `arming-rewordings-acknowledged`, no "all") or the contributor
 sets the project's mode, which answers it. A void takes it with it. The
 rewording itself is audited as `arming-reworded` with the project label.
+
+An "Auto contribute" contribution override (#1208) is armed by its own
+words and gets the same notice when they narrow: an element with
+`"kind": "contribution_override"`, `project_id` and `project_label` both
+`null` (no folder; the copy words it as unplaced, with no "Ask me first"
+button), audited as `arming-reworded` with no project label. The override
+stays on. Setting or clearing the override, or its void, answers it.
+Elements for folders carry no `kind`.
 
 For claim narrowings, every shell's arming offer currently says "will be
 scrubbed" whatever R1's disclosure is, so the words in force have not
@@ -930,12 +1046,38 @@ other would be a claim this daemon cannot verify.
 above for why this one field is allowed to be, and what that permission does
 not extend to.
 
+#### `title`
+
 `title` is a short name for the session, for a row or a sheet header: the
 first non-empty line of the redacted `opening_prompt`, cut at a word boundary
 to 60 characters with an ellipsis when cut, and `null` when there is no task
-description. It is the same redacted content as `opening_prompt`, under the
-same boundary, so it is served only where `opening_prompt` is -- in a preview
-summary, never in `list_pending`. A list that wants titles schedules previews
+description.
+
+**K9**: `title` is no longer confined to a `preview` summary. It is also on
+every queue entry (`list_pending`, the `snapshot` event), as the one
+exception to the preview content boundary -- see
+["The preview content boundary"](#the-preview-content-boundary). It is never
+carried onto a receipt or a `list_history` row.
+The watcher builds it once, synchronously, at the moment it queues the
+session, from the same opening prompt and the same cut/truncate rule this
+`preview` field uses -- but through the deterministic redaction pass alone
+(secret-leak patterns, known and generic local paths, private emails, PEM
+blocks), never a configured prose privacy filter. The watcher's poll loop is
+synchronous and runs on every discovered session; it cannot pay for that
+filter's network call there the way a `preview` build can. That deterministic
+pass is the floor every `preview`'s own redaction starts from and an
+unenrolled contributor's `preview.title` never goes past, so the queued
+`title` is never LESS redacted than an equivalent `preview.title` -- an
+enrolled contributor's `preview` may additionally scrub prose PII that only a
+configured filter catches, which the queued `title` cannot. `preview.title`
+itself is unchanged: same field, same rule, independently computed on that
+path.
+
+`title` on a queue entry is `null` on an entry queued before this existed --
+it is not backfilled, exactly like `shape` (see below): the entry gets a
+title the next time its session is loaded (it grows, or is re-offered) --
+and whenever the task named no description. A client that wants the
+preview's fully-filtered title regardless of either still schedules previews
 (`preview_request`, `preview_visible`) and fills each row in as its
 `preview_ready` arrives.
 
@@ -957,6 +1099,12 @@ every event of the redacted envelope. `ended_at` spans the delegated work
 too, since it is part of the session. An entry queued before these fields
 existed has them all `null`; it is not backfilled, and gains a shape when its
 session is next loaded (it grows, or is re-offered).
+
+Every entry also carries `title` (K9) -- unlike the fields above, redacted
+*content*, not metadata, so it is documented on its own: see
+["`title`"](#title). It also carries `would_send_bytes` (K10), the pinned
+preview's measured size, documented in
+["Sizes in history, and the would-send size (K10)"](#sizes-in-history-and-the-would-send-size-k10).
 
 `envelope_digest` identifies the redacted envelope this summary describes;
 `input_fingerprint` identifies the configuration that produced it. Both are
@@ -990,6 +1138,16 @@ direction, only that `would_send_bytes` is the number that governs consent.
 `preview-failed` on failure). Neither `redactions` nor `pii_labels_present`
 in the response ever contains the actual matched text, only counts and
 category labels.
+
+`redactions_distinct` (R7, #1173) is distinct values removed per label,
+beside the occurrence counts in `redactions`: a client renders "185 local
+path (12 distinct)" rather than just the total. It was previously only on
+the full summary (a certificate entry's `preview`, and `tc_preview_summary_json`
+across the C ABI); it is now on the card shape too -- `preview` for every
+other entry, `preview_request`'s cache hit, and the `preview_ready` event --
+since the review screen needs it on a card exactly as much as on the full
+sheet. A count only, like every other field here: no value removed is ever
+named.
 
 **`preview` does not require an enrollment.** It performs no network I/O and
 needs neither the daemon's file lock nor its running loop, so an app can
@@ -1036,6 +1194,17 @@ in additive fields on every queue entry (`list_pending`, `snapshot`, the
 | `content_marks` | **only when `scrubbed`** | `marks` without the path family (`local_path`). |
 | `unsure_spans` | **only when `scrubbed`** | how many spans `preview_unsure_spans` would report for that build's body. |
 | `second_look` | always, possibly empty | fixed reasons, in this order: `nothing-matched`, `looks-unsure`, `trimmed-to-fit` |
+| `second_look_lines` | always, possibly empty (R6/R7, #1173; **DRAFT, NEEDS APPROVAL**) | `second_look`'s reasons, in the same order, each already turned into the sentence a person reads for it (`preview_copy::second_look_line`) |
+
+`second_look_lines` exists so a card or the review sheet can render the
+explanation without separately asking `tc_second_look_line_text` for each
+reason; it is the same table, inlined. It is exactly as long as
+`second_look` and lines up with it index for index -- never reordered,
+never deduplicated, and never shorter: a reason this build has no sentence
+for gets a generic fallback line rather than being dropped. **DRAFT, NEEDS APPROVAL** because the sentences it
+quotes (`preview_copy::second_look_line`) are themselves unapproved spec
+wording; a client that renders it should expect the words, not the
+presence or absence of the field, to still change.
 
 The reasons:
 
@@ -1453,6 +1622,322 @@ so the picker and the rule compose: the rule covers what comes next, the
 picker what is already there. Unticked sessions stay `pending`; "Keep on this
 Mac" (`keep`) takes one out of the list without deciding it for good.
 
+The first run's picker (#1030's Rules step) needs more than the queue holds:
+on a first run nothing has been offered yet, and a session the watcher never
+visited is not in the queue at all. It uses `list_past_sessions` and
+`include_past_sessions`, below, which walk the declared sources themselves.
+
+### `list_past_sessions`
+
+```json
+{ "method": "list_past_sessions", "params": { "project_id": "proj_..." } }
+```
+
+```json
+{
+  "sessions": [
+    {
+      "session_id": "sess_0123456789abcdef0123456789abcdef",
+      "entry_id": "5f0c...-uuid",
+      "state": "pending",
+      "selectable": true,
+      "started_at": "2026-10-01T09:12:00Z",
+      "duration_secs": 1840,
+      "title": "Fix the flaky upload test",
+      "size_bytes": 482113,
+      "source": "claude-code"
+    },
+    {
+      "session_id": "sess_fedcba9876543210fedcba9876543210",
+      "entry_id": null,
+      "state": "not_queued",
+      "selectable": true,
+      "started_at": "2026-09-14T16:40:00Z",
+      "duration_secs": null,
+      "title": null,
+      "size_bytes": 90211,
+      "source": "codex"
+    }
+  ],
+  "total": 2,
+  "project_mode": "notify_only"
+}
+```
+
+One folder's past sessions, newest first, whatever the queue knows of them.
+The listing walks every declared source's discovery itself rather than the
+watcher's cwd cache, so it is complete before the first discovery pass has
+run (a Rules step shown seconds after Folders started the daemon) and it
+includes sessions no pass has ever visited. It never loads a session: a row
+the queue has not offered is described by its date and size alone.
+
+`project_id` is required. A missing or non-string one is `bad_params` /
+`project_id-invalid`; an id that resolves to no project the daemon knows --
+the usual known set plus every project a declared source lists now -- is
+`bad_params` / `project-id-unrecognized`. An unknown folder is refused, never
+answered with an empty list. `project_mode` is the folder's resolved rule
+(`notify_only`, `auto_upload` or `ignore`).
+
+Each row's `state`:
+
+| `state` | `selectable` | Meaning |
+|---|---|---|
+| `pending` | true | queued and waiting on a person |
+| `approved` | false | already approved |
+| `expired` | true | aged out of the queue without a decision; including it revives it |
+| `not_queued` | true | on disk, never offered |
+| `never` | false | the folder's rule is Never; every row it would list is `never` |
+| `still_active` | false | still being written: modified within `quiescence_secs` |
+
+A queued row (`pending`, `approved`, `expired`) carries its queue entry's
+`entry_id`, `started_at`, `duration_secs`, `title`, `size_bytes` and `source`
+(the declared source where the entry has one). A `not_queued` row carries
+`entry_id: null`, `title: null`, `duration_secs: null`, the discovery's
+`started_at` (else the file's modification time) and the file's
+`size_bytes`: nothing is read before the person chooses. `title` is `null`
+on a queued entry that has none, as on `list_pending`.
+
+Kept and dismissed sessions are not listed. Outside a Never folder, neither
+is a session whose latest offer was decided some other way (uploading,
+uploaded, refused, failed): the picker is for sessions still open to a
+choice. A Never folder lists those too, as `never`. `total` is the number of rows
+returned.
+
+**No path crosses the socket.** `session_id` is `sess_` and the first 32 hex
+characters of sha256 over the session path's bytes: one-way, and
+deterministic, so the id a listing gave is the id `include_past_sessions`
+re-derives from its own walk. No row carries a path, a cwd or a project
+path; the folder is named only by `project_id`.
+
+### `include_past_sessions`
+
+```json
+{
+  "method": "include_past_sessions",
+  "params": {
+    "project_id": "proj_...",
+    "session_ids": ["sess_0123456789abcdef0123456789abcdef"]
+  }
+}
+```
+
+```json
+{
+  "approved": 1,
+  "skipped": [
+    { "session_id": "sess_fedcba9876543210fedcba9876543210", "label": "session-still-active" }
+  ]
+}
+```
+
+The picker's Continue: approve exactly the sessions named, as a person's
+approval. Each one is pinned to a preview and held for the undo window
+exactly as a click on a card is (`approve` and this method share one
+implementation), and it is recorded as the person's own, so a later change
+of the folder's rule -- back to Ask me, say -- does not take it back.
+"Include every past session in {folder}" is a selection of every id the
+listing returned, never `include_backlog`.
+
+Dispatched on the async entry point only, as `approve` is; the synchronous
+entry point answers `unknown_method`.
+
+**The whole call is validated before anything changes.** Each of these
+refuses every session and records nothing:
+
+| Code / label | When |
+|---|---|
+| `bad_params` / `project_id-invalid` | `project_id` missing or not a string |
+| `bad_params` / `session_ids-invalid` | `session_ids` missing, not an array, holding a non-string, or empty once duplicates are dropped |
+| `bad_params` / `too-many-sessions` | more than 500 ids, checked before any id is read |
+| `bad_params` / `project-id-unrecognized` | the project resolves as for `list_past_sessions` and does not |
+| `bad_params` / `contribution-override-never` | the global Never contribution override is on, as `approve` refuses it |
+| `bad_params` / `project-mode-never` | the folder's rule is Never |
+| `bad_params` / `session-id-unrecognized` | any one id is not one of this folder's sessions in the daemon's own walk -- another folder's id, a path, an empty string, a made-up id |
+| `unavailable` / `audit-write-failed` | the `past-sessions-included` audit row could not be written |
+
+Duplicate ids are counted once, in the order first named. A session the
+walk can no longer find is `session-id-unrecognized`, not a skip: the call
+names what the person saw, and a vanished session refuses the selection.
+
+**The audit row comes first.** Once the call validates, a
+`past-sessions-included` row is appended to the audit log (`list_audit`)
+before anything is revived, queued or approved: `project_label` is the
+folder's derived label (from the key the daemon holds, never the caller's
+string) and `detail` the number of sessions chosen. No session id, path or
+title is in it. A log that refuses the write refuses the call, under the
+same rollback-cannot-record guarantee as `bulk-approved`.
+
+**One refusal comes after the audit row.** If the queue cannot be saved once
+the approvals are made, the call is `unavailable` / `queue-write-failed`:
+every approval it made is cancelled again (back to `pending`, its pin
+dropped, as `cancel` leaves an entry), so nothing it named is sent. The
+`past-sessions-included` row stands, as `bulk-approved`'s does after a
+failed save. Sessions it revived from `expired` or queued for the first time
+are left `pending`, waiting for a person, and a retry with the same ids
+approves them.
+
+**Per session**, every distinct id is counted in `approved` or listed in
+`skipped` exactly once, with a fixed label:
+
+| `label` | Meaning |
+|---|---|
+| `session-dismissed` | the session was dismissed; it is never revived |
+| `session-kept` | the session is kept on this Mac; `undo_keep` first |
+| `session-still-active` | still being written (judged at the walk, and again at the read); never queued half-written |
+| `held-for-review` | its offer is held for a person's review, or was when it aged out, as a group `approve` leaves it |
+| `not-pending` | already decided (approved, uploading, uploaded) by the time the include reached it |
+| `session-project-changed` | read now, the session resolves to another folder than the one named |
+| `project-mode-never` | the folder turned Never between the validation and the read |
+| `session-unreadable` | the session file could not be read or parsed |
+| `session-file-vanished` | the session file was gone by the read |
+| `envelope-too-large` | over the size limit, at the read or at the pin |
+| `queue-full` | the queue refused the offer outright |
+| `not-enrolled`, and `approve`'s other per-entry labels | the approval itself was refused, as `approve` reports it |
+
+An `expired` session is revived to `pending` (its `discovered_at` set to
+now, as `undo_keep` dates a return) and approved. A `not_queued` session is
+read and queued now, then approved; an explicit selection lands past the
+queue's entry cap, because it is a person's choice rather than the watcher's
+offer, but never past the quiescence check. A session queued by a discovery
+pass that ran between the listing and the include is approved through that
+offer if it still waits.
+
+A session read here for a folder armed from now, with content older than
+that arming, is recorded on the arming as the watcher records it, so if the
+approval does not land the offer it leaves still waits for a person.
+
+### The contribution override
+
+The menu-bar Contribution mode pill (R13, #1202; requested on #1173) offers
+three global overrides: **Ask me** (`notify_only`), **Auto contribute**
+(`auto_upload`) and **Never** (`ignore`). `set_contribution_override` sets
+one; `clear_contribution_override` clears it.
+
+**Per-folder modes are never written.** The override is one value in the
+policy file beside the folders' own entries, and the mode in force is read
+over the folder's own mode. Clearing it drops that value, so every folder is
+back on exactly the mode it had. `set_project_mode` still works while an
+override is in force: it sets the folder's own mode (`list_projects`
+`folder_mode`), and the override still decides `mode` until it clears. Its
+reply then carries `overridden_by`: the override's mode when the override
+still decides that folder (for example a folder set to Ask me under Auto
+contribute, whose new sessions are still approved unattended), and `null`
+when the folder now resolves to what was set -- always so with no override,
+and always so for Never, which every override leaves alone. A shell shows
+the change as saved but not yet in effect when `overridden_by` is present.
+
+What each override does, with the stricter rule winning:
+
+| Override | Folder set to Automatic | Folder set to Ask me, or never ruled on | Folder set to Never | Unresolved bucket |
+|---|---|---|---|---|
+| `ignore` | Never | Never | Never | Never |
+| `notify_only` | Ask me | Ask me | **Never** | Ask me (or Never if set) |
+| `auto_upload` | Automatic, under its own holds | **Automatic from now** | **Never** | Ask me (or Never if set) |
+
+- **Never** queues and sends nothing from any folder (#1208). Nothing
+  waiting is refused: entries already `pending` stay `pending` (they leave
+  `decisions_owed` while it is in force), and an unattended approval not yet
+  sent goes back to `pending` rather than being refused, so clearing the
+  override restores both. An entry the **contributor** approved is held,
+  not sent: it stays `approved`, with its pin and hold, and the send path
+  skips it (re-checked when it claims each entry, so a Never set mid-pass
+  stops the next one); clearing the override releases it to send as it
+  was. `approve` is refused while Never is in force (`bad_params` /
+  `contribution-override-never`), before anything is approved or audited.
+  An upload already in flight when Never is set is not recalled. Sessions
+  finished while it is in force are not queued; once it clears, the next
+  pass offers them under each folder's own mode -- an Automatic folder
+  sends them unattended.
+- **Ask me** leaves nothing to go unattended. Every unattended approval not
+  yet sent in a folder that no longer resolves to Automatic goes back to
+  `pending` (counted in `returned`), and the send path returns any that
+  comes back from `uploading`. A folder set to Never stays Never.
+- **Auto contribute** is the consent-sensitive one, and is held to the
+  arming paths' rules:
+  - **It arms nothing already on disk.** For every folder not already armed
+    by its own mode it is an arming from now (see "Arming from now"): what is
+    on disk when it begins, queued or not, is recorded per source by the next
+    full pass and waits for a person; until a source is recorded, nothing
+    from it goes. Only a session that first appears after it is approved
+    unattended. A folder already armed keeps its own holds (an arming from
+    now, the automatic grant's) and nothing more.
+  - **A folder set to Never stays Never.** A global override does not reach
+    into a folder the contributor excluded.
+  - Every other gate still applies: the Scrub check (Manual holds
+    everything), review holds, the settle window, and the
+    automatic-contribution gate.
+  - It is refused without `confirm: true` (`bad_params` /
+    `confirm-required`; a non-boolean `confirm` is `confirm-invalid`). A
+    shell sends it only from the confirmation the core words
+    (`tc_contribution_override_confirm_json`), which carries the arming
+    disclosure.
+  - **It is a grant** (owner decision on #1208), held to everything a
+    per-folder arming is. Without grant terms in force (no config, or one
+    that cannot be read) it is refused, `unavailable` /
+    `arming-terms-unavailable`, before anything is recorded -- the label
+    `set_project_mode` uses. It records the terms in force and the claim its
+    words made. On every pass the grant sweep compares those terms with the
+    terms in force, as it does a folder's (see `auto-upload-voided`): a
+    widening **clears the override**, so every folder is back on its own
+    mode and none resolves to Automatic because of it, and the pill shows the
+    folders' roll-up again. What it approved unattended and has not sent, in
+    folders that then ask first, goes back to `pending`. The void is told
+    like any other: a `grant_voids` element of kind `contribution_override`,
+    the audit row `contribution-override-voided`, and `status_changed`
+    (`queue_changed` too if entries went back). Folders armed by their own
+    mode void exactly as before, with their own notices. An override saved
+    with no recorded terms (only a pre-release build could write one) is
+    voided with the reason `terms-unrecorded` rather than baselined. A K5
+    rewording reaches it too (see `arming_rewordings`). It still creates no
+    `automatic_grant` and no per-folder `armed-auto-upload` row. Folders it
+    arms report the `patterns_only` disclosure.
+- Re-sending the override in force changes nothing (`changed: false`): no
+  audit row, and an Auto contribute override keeps the hold it had.
+- Clearing an Auto contribute override returns what it approved unattended
+  and has not sent, in folders that then ask first, to `pending`.
+
+**Audit.** Label-only, never a folder: `contribution-override-set` with
+`detail` the mode, `contribution-override-cleared` with `detail` the mode
+that was in force, and `contribution-override-voided` with `detail` the
+comma-separated reason labels of `auto-upload-voided` (or
+`terms-unrecorded`). For `auto_upload` the row is written **before** the
+override takes effect, and an audit failure refuses the call
+(`unavailable` / `audit-write-failed`). A stopping override and a clear are
+never refused for want of an audit row, and record after. The "same mode
+again" check and the row are made under the one policy lock that applies
+the change, so two identical concurrent sets write one row.
+
+**Writes and events.** A policy file that cannot be written rolls the
+override back (`unavailable` / `policy-write-failed`) and nothing changes. On
+every change `status_changed` is published, and `queue_changed` too when
+entries were returned to `pending`. A queue file that cannot be written after
+that keeps the in-memory truth, publishes both events exactly as success
+does, and answers `unavailable` / `queue-write-failed`.
+
+**Status.** `status.contribution_override` is `null`, or `{mode, since}`
+while one is in force. `status.contribution_mode` is the pill's roll-up, so
+no shell computes it: the override's mode while one is in force; otherwise
+the one mode every folder shares (`notify_only`, `auto_upload`, `ignore`), or
+`mixed`. "Every folder" is every configured folder and every folder with a
+session in the queue, by its own mode, excluding the unresolved bucket, which
+can never be armed. With no folders it is `notify_only`, the default.
+`status.contribution_mode_partial` (#1208) is `true` when the roll-up is
+`auto_upload` but some of those folders do not upload: one set to Never, or
+the unresolved bucket (whose sessions ask first). It is `false` for every
+other roll-up. A shell shows the copy's `auto_partial` line under the
+label exactly when it is `true`.
+
+**Copy.** `tc_contribution_mode_copy_json` is the pill (title, `Mixed`, the
+three choices with their sub-list lines, the override line, `clear`, and
+`auto_partial`). `clear` describes the Mixed row, whose choice clears an
+override in force; it is a sub-line, not a button label. A shell's list
+checks what the pill shows: the override's own mode while one is in force,
+otherwise the roll-up (the Mixed row only for `mixed`), and nothing while the
+status is unread or the daemon is down. `tc_contribution_override_confirm_json(mode, config_dir)` is each
+confirmation; for `auto_upload` it carries `arming`, the Flow 1 grant
+screens' disclosure table for the configuration in `config_dir`. Every new
+sentence is DRAFT, NEEDS APPROVAL (`project_copy.rs`).
+
 ### `preview_body`
 
 The redacted body `preview` describes: the envelope's redacted events,
@@ -1756,13 +2241,18 @@ handle with `preview-requires-embedded`.
       "project_id": "proj_9f2c1ab30d4e5f60",
       "project_label": "my-proj",
       "mode": "notify_only",
+      "folder_mode": "notify_only",
       "added_at": null,
       "configured": false,
       "is_unresolved_bucket": false,
       "session_count": 22,
       "last_session_at": "2026-09-12T11:18:00Z",
       "pending_count": 7,
-      "contributable_count": 3
+      "contributable_count": 3,
+      "tools": [
+        { "source": "antigravity", "session_count": 2, "answers_at": "Google" },
+        { "source": "claude-code", "session_count": 20, "answers_at": "Anthropic" }
+      ]
     }
   ]
 }
@@ -1777,6 +2267,51 @@ written, not when it started -- or `null` when none has been observed. Both
 come from the daemon's per-session record of each session's project, recorded
 when the watcher resolves it, so answering reads and canonicalizes nothing. A tool's own totals are in `tc_discover_sources` (`session_count`,
 `most_recent`).
+
+#### `tools` (K11)
+
+Which tool (or tools) this project's sessions came from, each with its own
+`session_count` within this project -- the design's first-run screen says
+"Repos found in Claude Code sessions"; this is what lets a later screen say
+the same thing about any project, for any tool, once more than one has
+contributed to it.
+
+Each row names a `source`: an adapter name (`claude-code`, `codex`,
+`gemini-cli`, `cline`, `opencode`) for a session the daemon watched directly,
+or the declared source a trajectory file names for one that was staged
+(`trajectory`'s own imports carry their vendor's name, e.g. `antigravity` for
+an imported Antigravity conversation -- see "Antigravity" under `harness_list`
+below). This is the same preference a queue entry's own display already
+applies: what a session declares about itself over the adapter that happens
+to store it, so an imported conversation is never attributed to `trajectory`.
+
+For a staged import the `source` is **self-declared**: it is the
+`meta.source` field of a file anyone can drop into the staging directory,
+checked for shape (`validate_source_name`) but not verified. A staged
+trajectory that claims `claude-code` is counted here as Claude Code and
+reads `answers_at: "Anthropic"`. The effect is local display only; nothing
+decides routing, consent or upload on this field.
+
+`answers_at` is the same fixed vendor word `tc_discover_sources` and
+`harness_list` read `answers_at` from, so a project's tool breakdown cannot
+name a vendor differently than either surface does for the same tool.
+`null` for a tool this build has no fixed default for (Cline, OpenCode) or
+does not recognise.
+
+Always an array, empty rather than absent when nothing is known yet -- a
+client tests its length rather than testing for the key, the way `tools`
+being empty and `session_count` being `0` already agree with each other.
+Rows are ordered by `source`, alphabetically, not by count.
+
+**This can undercount `session_count`.** The per-tool breakdown is read from
+the same per-session record `session_count` already comes from, but the tool
+a session came from was not recorded before this field existed, and a cache
+entry whose file has not changed since is never rewritten just to backfill
+it. A project can therefore show `"session_count": 22` with its `tools[]`
+entries summing to fewer than 22 on a daemon upgraded from an older state
+file, until those sessions' files change again. Never read `tools[]` as a
+second, more detailed `session_count` -- read `session_count` for the total
+and `tools[]` for what it can say about the sessions it has re-seen since.
 
 `pending_count` is how many `Pending` entries this project holds.
 `contributable_count` is how many of those a group-level `approve` would act
@@ -1821,10 +2356,17 @@ Every project the daemon knows about, in two kinds:
   seen a session for it and nobody has ruled on it. `mode` is the effective
   mode, which for an unruled project is the `notify_only` default.
 
+`mode` is the mode **in force**, which a contribution override can change;
+`folder_mode` is the folder's own mode, the one `set_project_mode` set and
+clearing the override returns it to. They differ only while an override is
+in force. See "The contribution override" below.
+
 An armed row also carries `from_now`: `true` when it was armed from now,
 the `set_project_mode` default, so its backlog waits for the contributor,
 and `false` when it was armed with `include_backlog: true` or before that
-default existed. Absent on rows that are not armed. See
+default existed. A row armed only by an "Auto contribute" override reports
+`from_now: true` too, since the override holds its backlog the same way.
+Absent on rows that are not armed. See
 "Arming from now" above.
 
 #### `is_unresolved_bucket`
@@ -1888,6 +2430,153 @@ side effects, computed from the same queue and policy state a client already
 fetches `list_projects` to draw. It is always present (never absent, unlike
 `contributable_count`), because whether a session is undecided-and-Ask-me is
 a question every contributor's queue can answer, invited or not.
+
+### `mission_matches`
+
+K16 (#1173). Which **contribution missions** fit this contributor's work,
+matched on this Mac, under the consent design's "Missions" rules (M1, M2).
+These are not the published mission packages (`GET /v1/missions`).
+
+```json
+{"method": "mission_matches", "params": {"catalogue": {
+  "schema_version": 1,
+  "missions": [
+    {"mission_id": "m-rust", "title": "Rust refactors",
+     "criteria": {"tools": ["claude-code"], "tool_families": ["anthropic"],
+                  "languages": ["rust"], "min_sessions": 2}}
+  ]}}}
+```
+
+```json
+{"matches": ["m-rust"], "read": {"tools": 1, "folders": 2}}
+```
+
+**The catalogue.** A parameter, for now: the daemon fetches nothing for
+this call. The server catalogue is Z7/Z8's, and when it exists the daemon
+will download it with a request that is the same for every contributor;
+nothing per-contributor is sent for it either way. The shape is
+**PROVISIONAL, owned by Z7/Z8** (`contribution_missions::ContributionMissionCatalogue`):
+`schema_version` (1) and `missions[]` of `{mission_id, title, criteria}`.
+`criteria` lists are each "any of", and an empty or absent list does not
+restrict: `tools` (session sources, as `list_projects`' `tools[].source`
+names them), `tool_families` (`anthropic`, `openai`, `google`), `languages`
+(from marker files at a folder's root, such as `Cargo.toml` for `rust`).
+A session fits when it satisfies every non-empty list; a mission matches when
+at least `min_sessions` (default 1, never less) readable sessions fit.
+Unknown fields are ignored, so a catalogue with later additions still
+loads; a newer `schema_version` is refused with
+`catalogue-schema-unsupported`; a malformed one, a duplicate `mission_id`,
+or one over a bound (256 missions, 200 characters, 32 values a list) with
+`catalogue-invalid`; no catalogue with `catalogue-required`.
+
+**What matching reads (M1).** Only the sessions the daemon has already seen
+(the cache `list_projects` counts tools from), and of those only sessions
+from an **adapter** that is on -- one whose session folder is watched; an
+imported Antigravity conversation is read by the trajectory adapter, so it
+counts as that, not as `antigravity` -- in a folder whose mode in force is
+not Never. The gate is the adapter that actually discovered a session
+(`SessionRef::source`, recorded as `CwdCacheEntry::adapter`), never the
+self-declared, contributor-facing name a staged import can claim
+(`SessionRef::displayed_source`): a trajectory file staged with
+`meta.source: "claude-code"` is read only once trajectory itself is on, not
+because claude-code is. A cache entry written before the `adapter` field
+existed carries no adapter and is not read -- fails closed, the same as one
+with no recorded tool at all. An unset claude-code or codex declaration
+still counts as on, matching what the watcher reads from by default (its
+conventional per-user store); Gemini, Cline and OpenCode count as off until
+declared. A Never contribution override makes every folder Never, so it
+reads nothing and matches nothing. A folder that is not armed and not
+shared may be read, including the unidentified-folder bucket -- it resolves
+to `NotifyOnly`, not Never, so it is read and counted in `read.folders`,
+though it is never asked about languages (it has no folder root to look
+at). When a folder has no display path recorded in the policy (never
+armed, or known only through the cache), the language probe falls back to
+the project key itself, which is case-folded on macOS and Windows; on a
+case-sensitive volume that can miss a marker file under its real-cased
+name, so a language goes unreported rather than over-reported. No session
+body is read. When a mission asks about `languages`, the roots of the
+readable folders are checked for marker files, by existence only. `read`
+counts the distinct tools and folders matching read, and nothing else.
+
+**What matching excludes (M2).** A session counts toward a mission only
+when it is contributed through one of the three consent paths ("The three
+paths," above). A **kept** session (the contributor explicitly holding it on
+this Mac) and a **withdrawn** one (an upload later taken back) are excluded
+from the candidates matching reads -- neither was contributed in a way that
+should count, the first because it was declined, the second because it was
+reversed. An **already-uploaded** session that is neither kept nor
+withdrawn, and one still being written and **not yet quiescent**, are
+excluded from neither set and stay candidates: quiescence is a fact about
+when a session is ready to read, not about whether it was ever offered, and
+an ordinary accepted upload did nothing M2 forbids.
+
+**What it never does (M1, M2).** It sends nothing: no activity profile,
+match, folder or tool list leaves the Mac. It writes no audit row and logs
+one label, `mission-matches-answered`. It changes no policy, queue or daemon
+state: it never arms a folder, approves a session or widens a scope, and
+emits no event -- the queue and the local history cache are read here (to
+exclude kept and withdrawn sessions), never written. A match is a
+suggestion for this screen; a session counts toward a mission only when it
+is contributed through one of the existing paths.
+
+**The disclosure (M4).** `tc_missions_disclosure_copy_json` returns the
+words shown the first time Missions is opened and in Settings
+(`consent_copy::missions_disclosure_copy`): `{title, matching, nothing_sent,
+credit}`. DRAFT, NEEDS APPROVAL.
+
+### View menu: Group by and Sort by (K15)
+
+The native app's View menu (#1146, #1152) offers Group by and Sort by for
+the Traces tab, alongside the already-built "Show ignored folders". Neither
+needs a new field: every option is answerable from `list_pending`'s entry
+fields (`entry_value`), `list_projects`, and `list_history`, below. One of
+those fields is on an open, not-yet-merged PR -- `list_projects[].tools`
+(K11, #1192); the table names it, so nothing here is duplicated when it
+lands. K9's `title` (#1191) and K10's `would_send_bytes` and
+`uploaded_bytes` (#1196) have landed and are listed as existing.
+
+**Group by**
+
+| Option | What it groups on | Source |
+|---|---|---|
+| Tool (default) | an entry's `source` / `declared_source` | `list_pending`, existing |
+| Tool, for a folder with nothing waiting | the per-tool session counts the project has seen | `list_projects[].tools[].source` (K11, #1192) -- until it lands, such a folder cannot be placed and is listed on its own, exactly as #1183 (R6) documents |
+| Folder / project | `project_id` (grouping key) and `project_label` (display) | both existing, on every entry and every `list_projects` row |
+| None (flat list) | no grouping field; every entry already carries enough to render a row on its own | — |
+
+**Sort by**
+
+| Option | What it sorts on | Source |
+|---|---|---|
+| Name | a session's `title`, falling back to its formatted `started_at` when `title` is `null` (the existing fallback, unchanged) | `title` on every `list_pending` entry (K9, existing; `null` on an entry queued before K9, see ["`title`"](#title)); `started_at` existing |
+| Name, for a folder | `project_label` | existing, on every `list_projects` row (already disambiguated when two projects share a basename) |
+| Date | a session's `started_at`, or `discovered_at` when `started_at` is unknown | both existing, on every `list_pending` entry |
+| Date, for a folder | `last_session_at`, falling back to `added_at` for a configured folder the watcher has not yet observed a session in | both existing, on every `list_projects` row |
+| Size | a session's `would_send_bytes` (what an upload would actually send), falling back to `size_bytes` (the raw file) when no envelope is pinned | `would_send_bytes` on `list_pending` (K10, #1196); `size_bytes` existing |
+| Size, in history | `uploaded_bytes` | `list_history` rows (K10, #1196) |
+| Status | `state` and `reason_label` for a queued session, plus `eligibility` where it is present; `status` for a history row | all existing; `eligibility` is ABSENT whenever the signup flag is off (see ["Contribution eligibility"](#contribution-eligibility)), so a client must not require it -- sort an entry without it as `eligible`, since an invited contributor's whole queue is contributable |
+
+No row carries a folder-level size or count total. A client that wants one
+-- to sort folders themselves by total size, say -- already holds every
+session in that folder from `list_pending` and can sum `size_bytes` or
+`would_send_bytes` itself; `list_projects` already carries the plain count
+(`session_count`, `pending_count`). Nothing here asks the daemon to
+pre-aggregate what the client already has the parts for.
+
+**A stable sort key needs no new field.** Every row already carries a
+daemon-issued, stable, unique id to break ties deterministically: `entry_id`
+on a queue entry, `submission_id` on a history row, `project_id` on a
+project. The underlying lists are themselves returned in a deterministic
+order, so two reads with nothing changed produce the same order even before
+a client's own Group by / Sort by choice is applied: `list_pending` is the
+queue's insertion order, and `list_projects` is every configured project
+(sorted by its policy key) followed by every discovered-but-unconfigured
+one (sorted by its key) -- so a configured `/z/repo` precedes a discovered
+`/a/repo`. Neither order is alphabetical by anything a contributor sees; a
+client that offers a sort sorts for itself.
+
+A project's label on an entry needs no new field either: `project_label` is
+a plain (non-optional) `String` on every `QueueEntry`, never absent.
 
 ### The `outcome` verdict
 
@@ -2208,6 +2897,11 @@ one entry -- a `cancel` against a project with nothing `approved` appends
 nothing. The single-`entry_id` form of `cancel` stays unaudited, the same
 as the single-`entry_id` form of `approve`.
 
+A `past-sessions-included` entry is `include_past_sessions`'s: `detail`
+carries the number of sessions chosen and `project_label` the folder's
+derived label. It is written once the call validates and before anything is
+revived, queued or approved; no session id, path or title is in it.
+
 An `auto-upload-voided` entry records a standing `auto_upload` grant that the
 daemon voided because the terms in force widened past what it was armed under
 -- a new recipient (destination, identity, witness, classifier host or model,
@@ -2227,6 +2921,11 @@ Four entries belong to the automatic grant (`grant_automatic`, below):
 withdrawn; `armed-by-default` records a project it armed, with that project's
 `project_label`; `automatic-grant-voided` records the grant itself voided by
 widened terms, with the same `detail` labels as `auto-upload-voided`.
+
+A `contribution-override-voided` entry records an "Auto contribute"
+contribution override cleared by widened terms (#1208), with no
+`project_label` and the same `detail` labels as `auto-upload-voided` (or
+`terms-unrecorded`); see "The contribution override".
 
 `limit` is optional, defaults to 50, and is capped at 1000 even if a larger
 value is requested. Entries are returned newest first, matching
@@ -2257,10 +2956,15 @@ yet, oldest first:
 }
 ```
 
-- `kind` is `project` for an `auto-upload-voided` void and `automatic_grant`
-  for an `automatic-grant-voided` one. `project_id` and `project_label` are
-  the ones `list_projects` gives that project, and are `null` for the grant.
-  No path crosses.
+- `kind` is `project` for an `auto-upload-voided` void, `automatic_grant`
+  for an `automatic-grant-voided` one, and `contribution_override` for a
+  `contribution-override-voided` one (#1208; see "The contribution
+  override"). `project_id` and `project_label` are the ones `list_projects`
+  gives that project, and are `null` for the grant and the override. No
+  path crosses. The override's notice has no re-arm button: it is turned
+  back on from the pill's own confirmation, and setting any override
+  answers the notice. Giving the Flow 1 grant again answers only the
+  grant's notice.
 - `reasons` are the same fixed labels as the audit's `detail`.
 - The list is always present, and `[]` when there is nothing to show, so a
   shell can tell that from a daemon too old to report voids.
@@ -2315,18 +3019,31 @@ automatically from projects discovered from now on.
 { "granted": true, "granted_at": "2026-09-25T12:00:00Z", "on_disk_recorded": false }
 ```
 
-`grant_automatic` takes one required param, `witness_signing_address`: the
-signing address of the witness the contributor was shown on the disclosure
-screen, or `null` when that screen showed none. It returns the grant as
-`automatic_grant` reports it. Nothing is granted when it is refused:
+`grant_automatic` takes two required params:
+
+- `confirmed`: JSON `true`, sent only from the grant screen's button, after
+  the contributor has gone through the scope, path and disclosure screens.
+- `witness_signing_address`: the signing address of the witness the
+  contributor was shown on the disclosure screen, or `null` when that screen
+  showed none.
+
+It returns the grant as `automatic_grant` reports it. Nothing is granted when
+it is refused:
 
 - `arming-terms-unavailable` (`ERR_UNAVAILABLE`): there is no config to record
   terms from.
+- `automatic-grant-confirmation-required` (`bad_params`): `confirmed` is
+  absent, `false`, or not a boolean (`"true"` and `1` are refused). The same
+  label `flow1::grant_precondition` gives a shell, so the daemon holds the
+  confirmation for every IPC caller rather than trusting a shell to have
+  asked.
 - `automatic-grant-scopes-not-chosen` (`bad_params`): the config's
-  `consent_scopes_chosen` is false, so nobody chose the saved scopes (R7). A
-  saved scope list is not a choice: every enrollment saves at least the floor
-  scope, which `validate_scopes` adds, and an invite enrollment saves it with
-  nobody having picked it. Only `set_consent_scopes` records a choice.
+  `consent_scopes_chosen` is false, so nobody chose the saved scopes (R7), or
+  the saved `consent_scopes` list is empty, so there is nothing to grant
+  under. A saved scope list is not a choice: every enrollment saves at least
+  the floor scope, which `validate_scopes` adds, and an invite enrollment
+  saves it with nobody having picked it. Only `set_consent_scopes` records a
+  choice.
 - `automatic-grant-witness-required` (`bad_params`): `witness_signing_address`
   is absent, or neither a string nor `null`.
 - `automatic-grant-witness-changed` (`bad_params`): the witness configured now
@@ -2590,6 +3307,51 @@ default either. Like `family`, this is a fixed fact about the tool's own
 released default, never something this daemon checked against the copy
 actually installed.
 
+#### Gemini CLI and Antigravity are not rows here (K13)
+
+`harness_list` is deliberately narrower than "every coding tool this daemon
+knows about". `found` above is `ironwire_agents::tools::all(catalog)`, and
+with no catalog loaded (`catalog_present: false`, the only state this build
+ships in today) that is **exactly** `claude` and `codex` -- the two tools
+IronWire's embedded proxy can redirect, because `Facade::url` only speaks
+the Anthropic and OpenAI wire shapes. Gemini CLI speaks neither, so it has
+never had a row here, and Antigravity -- which is not even a watched
+source; see below -- cannot either. Adding either would mean writing our
+loopback URL into a config key that does not actually redirect that tool's
+calls, which is the exact hazard `owned_agents`'s doc comment refuses to
+guess at. Nothing in K13 changes this list; "Gemini CLI keeps its row"
+refers to its row in `tc_discover_sources` (a watched session store, not a
+redirectable harness), not to this one.
+
+Antigravity's own `answers_at` is `"Google"`, from the same
+`source::source_default_family` table as `gemini-cli`'s -- see `tools` under
+`list_projects` above, and "Antigravity" under `tc_discover_sources`-shaped
+discovery, below.
+
+#### Antigravity has no `tc_discover_sources` row either, and that is also deliberate
+
+Antigravity is not a `TraceSource`: there is no conventional, watchable
+per-user store for it to probe blind, the way `claude-code`, `codex`,
+`gemini-cli` and `cline` are probed. It ships as a one-shot
+`import-antigravity` command that reads the running IDE's local API and
+stages what it finds as `trajectory` files -- see
+`crates/trace-commons-contributor/src/antigravity/mod.rs`'s own doc comment.
+Nothing it stages shares a folder with Gemini CLI's `~/.gemini/tmp` adapter,
+and the two were never actually merged in the shipped code: an earlier,
+abandoned design (`docs/superpowers/specs/2026-08-29-antigravity-source-design.md`)
+would have read Antigravity's own SQLite files from under `~/.gemini/`, but
+it was superseded before it shipped by the API-import design actually in
+place (`docs/superpowers/specs/2026-08-31-antigravity-import-command-design.md`).
+
+What an imported conversation DOES carry, and has carried since that design
+landed, is its own declared source: `meta.source: "antigravity"` on the
+staged file, read back as `SessionRef::declared_source` and shown as
+`"Antigravity"` by every shell's agent label -- never as `"trajectory"`,
+and never merged with a real Gemini CLI session. K11's `tools` field and
+K13's `source_default_family` entry read that same string, so a project
+mixing an Antigravity import with a real Gemini CLI session reports two
+distinct tool rows, not one.
+
 `spend` is what the calls answered **on this computer** have cost since the
 most recent local midnight, in millionths of a dollar. It comes from the
 proxy's own status object, which is why it is metered-only: the ledger rows
@@ -2740,8 +3502,10 @@ ledger -- and make no network call and read no body.
 
 Every value on the wire is a fixed label, a count, a time or a ledger row id,
 with one exception: `model` is free text (see below). No prompt, response,
-body reference, body digest, provider exchange identifier, session id, token
-or URL crosses the socket, and nothing here is logged.
+body reference, body digest, provider exchange identifier, session id, token,
+endpoint or URL crosses the socket, and nothing here is logged. The same holds
+for the `inference_call_added` event (K14), which carries a subset of an
+`inference_calls` row.
 
 #### `tool_destinations`
 
@@ -2749,13 +3513,16 @@ or URL crosses the socket, and nothing here is logged.
 {
   "private_ai": "running",
   "sessions_route": "witness",
+  "window_hours": 24,
+  "unattributed_calls": 2,
   "folders": { "armed": 1, "ask_first": 3, "ignored": 0 },
   "tools": [
     {
       "tool": "claude-code",
       "name": "Claude Code",
       "sessions": { "watch": "watched", "to": ["commons", "witness"] },
-      "model_calls": { "to": "near_ai", "basis": "observed" }
+      "model_calls": { "to": "near_ai", "basis": "observed" },
+      "counts": { "sessions": 4, "inference_calls": 37 }
     }
   ]
 }
@@ -2776,6 +3543,39 @@ does not name; the witness a connected inference offer installs
 (`inference_connection_install`) reaches the map through it. `folders` counts
 the per-repository rules (`auto_upload`, `notify_only`, `ignore`). They are
 per repository across tools, so they say *when* a session goes, not *where*.
+
+`counts` (K14) is the map's per-tool node data over `window_hours`, the same
+24-hour window `inference_calls` uses. Local reads only; nothing new is
+fetched.
+
+- `sessions` counts the sessions this daemon saw in the window, once per
+  session hash: queue entries whose session was last seen written (or, for an
+  entry from before that was recorded, discovered) inside it, and history
+  records submitted inside it. An entry still in the queue and its history
+  record are one session. `null` when the history cache cannot be read; a
+  count from the queue alone would undercount.
+
+  A session counts under the tool it reads as: its declared source when
+  discovery knew one, else the adapter that read it -- the rule
+  `list_projects.tools` and the CLI's session table use. So an imported
+  Antigravity conversation (read by the `trajectory` adapter, declaring
+  `antigravity`) counts as `antigravity`, never as `trajectory`, and never
+  under both. A history record names only the adapter, so it takes its label
+  from the queue entry with the same session hash; one with no queue twin (a
+  CLI `submit`, say) falls back to the adapter. There is no `antigravity`
+  row on this map -- it has no adapter, watch declaration or connection of
+  its own -- so those sessions are not counted on any tool row today.
+- `inference_calls` counts exactly the rows `inference_calls` lists (rows
+  with a ledger id) by the `tool` it names for them, so the map and the
+  Inference tab cannot disagree. `null` when no ledger has answered
+  (`inference_calls.readable: false`), which is not zero.
+- `unattributed_calls` is the window's listed calls whose `tool` is
+  `unknown`. They are counted there and never folded into a tool; `null`
+  under the same condition as `inference_calls`.
+
+A shell that pulses on `inference_call_added` should re-read these counts
+rather than add to them: the event is capped per poll and is a pulse, not a
+ledger.
 
 `model_calls.to` and `basis`:
 
@@ -2837,11 +3637,47 @@ expose an `id` are not listed.
 calls and must not be drawn as an empty table. The window is the ledger's
 own 24 hours.
 
-- `tool` is named only when exactly one tool connected **now** speaks the
-  call's protocol family (the rule `harness_list` applies to `answering`);
-  otherwise `unknown`. It is approximate: a row from before a connection
-  changed can carry the wrong name. `family` is `anthropic`, `openai` or
-  `unknown`.
+- `tool` (K14). IronWire's log rows carry no harness, only the facade that
+  took the call and the endpoint inside it the client called. Each tool this
+  daemon connects is pointed at its own facade and speaks its own API there,
+  so the endpoint names the tool, connected now or not:
+
+  | facade | endpoint | `tool` |
+  |---|---|---|
+  | `anthropic` | `/v1/messages`, `/v1/messages/count_tokens` | `claude-code` |
+  | `openai` | `/v1/responses` (Codex is connected with `wire_api = "responses"`) | `codex` |
+  | any | any other endpoint, e.g. `/v1/chat/completions` | `unknown` |
+
+  An endpoint no connection writes is `unknown` even while a tool of that
+  family is connected: it is not that tool's own wire. A named endpoint is
+  also `unknown` while a *different* connected tool speaks the same family.
+  On a proxy too old to record the endpoint, the fallback is the harness
+  that set the proxy: the one tool connected **now** that speaks the call's
+  family (the rule `harness_list` applies to `answering`), else `unknown`;
+  that fallback is approximate, since a row from before a connection changed
+  can carry the wrong name. A tool pointed at the proxy by hand, speaking the
+  same API at the same facade as a connected one, cannot be told apart in the
+  row and reads as that tool. The endpoint is read for this and never passed
+  through. `family` is `anthropic`, `openai` or `unknown`.
+
+  **Limit: endpoint attribution does not check who set up the proxy.** Any
+  `/anthropic` + `/v1/messages` call reads `claude-code`, and any `/openai`
+  + `/v1/responses` call reads `codex`, whether or not this daemon connected
+  that tool, and whether or not this daemon owns the proxy at all. An agent
+  routed through IronWire's own catalog, or by another program that manages
+  the same proxy, is counted as Claude Code or Codex, and the "different
+  connected tool" check above cannot see it, because only tools this daemon
+  connects are speakers. The label means "called the endpoint Claude Code's
+  connection writes", not "came from Claude Code".
+
+  `/v1/messages/count_tokens` calls are included: they are listed, counted
+  in `tool_destinations.counts.inference_calls` and announced by
+  `inference_call_added` like any other call.
+
+  The "different connected tool speaks the same family" case cannot arise
+  today, since each family has exactly one tool this daemon connects; it is
+  there so a second one in a family turns that family's endpoints
+  `unknown` rather than crediting the first.
 - `model` is **free text, not a fixed label**: the served model as recorded,
   else the requested one, passed through when it is at most 128 characters of
   `[A-Za-z0-9._:/@-]` and names no URL; else `unknown`. It comes from a proxy
@@ -2880,8 +3716,9 @@ routed answer. These are not in the local ledger, and nothing here invents
 them:
 
 - **kind of work** -- no field records it; there is no classifier;
-- **tool** -- the ledger records a facade, so a call is attributable only
-  when one connected tool speaks that family;
+- **tool** -- the ledger records a facade and an endpoint, not a harness,
+  so a call is attributed by the endpoint its tool's connection writes (see
+  `inference_calls.tool`), and is `unknown` otherwise;
 - **billed cost** -- the ledger prices every call; only the day's metered
   total (`harness_list.spend`) is billed spend;
 - **outside calls that bypass the proxy** -- a tool not connected to Private
@@ -2896,7 +3733,8 @@ Takes a JSON object whose top-level keys must come from
 `quiescence_secs`, `digest_interval_secs`, `digest_schedule`,
 `approval_hold_secs`,
 `local_notifications`, `claude_root`, `codex_root`, `claude_source`,
-`codex_source`, `gemini_source`, `cline_source`, `opencode_source`, `ironwire`,
+`codex_source`, `gemini_source`, `cline_source`, `opencode_source`,
+`trajectory_source`, `ironwire`,
 `ironwire_attested_bodies`, `private_inference`,
 `private_inference_offer_seen`, `scrub_check`, `max_uploads_per_day`,
 `max_bytes_per_day` --
@@ -2936,14 +3774,63 @@ when older settings load. Watch reads direct `.json` children exported with
 records version support and routing limits, and the declaration grants neither
 body capture nor remote submission.
 
-`approval_hold_secs` takes a non-negative integer: how long an approval is
+`trajectory_source` takes the same three values for a folder of exported
+trajectory files (a Letta Trajectory export, for example). Absent, null and
+Off add no folder; Watch reads its direct `.json`/`.jsonl` children with the
+strict trajectory reader alongside the staging folder. It is not part of the
+claude/codex start gate, `get_settings` reports only
+`trajectory_source_mode`, never the path, and a session found there is never
+armed for automatic upload: it always waits for a person.
+
+See "The `trajectory_source` declaration", below.
+
+`approval_hold_secs` takes a non-negative integer no greater than 300
+(five minutes): how long an approval is
 held before the uploader will touch it, which sets the duration of the
 contributor's undo; the default is 10, while `0` disables the hold and makes `approve` report
 `hold_until: null` so a client knows to offer no undo. It is read at each
 upload pass, so a change applies to approvals already sitting in the queue,
 and a shortened hold can release an entry a client is still counting down
 for -- treat the `hold_until` from `approve` as authoritative for the
-approval it accompanied, and do not change this setting mid-countdown.
+approval it accompanied, and do not change this setting mid-countdown. A
+value outside `0..=300` is `bad_params` / `settings-invalid-value`.
+
+`quiescence_secs` and `digest_interval_secs` are likewise bounded, not open
+`u64` fields: `quiescence_secs` to `0..=14_400` (zero is meaningful -- a
+session counts as finished the instant it stops growing -- and 14,400
+seconds is four hours, past which "done" never realistically arrives for a
+session still being written) and `digest_interval_secs` to `3_600..=86_400`
+(one hour to one day). Each used to accept any value, with only the Tauri
+shell's own command layer clamping before the call ever reached
+`set_settings`; a raw caller had no such floor. Both are now validated in
+`apply_settings_object` itself, so every caller gets the same bound with the
+same label-only `settings-invalid-value` the other numeric fields already
+use.
+
+Every numeric field's exact bounds -- `quiescence_secs`, `approval_hold_secs`,
+`digest_interval_secs`, `max_uploads_per_day` and `max_bytes_per_day`, all in
+the unit `set_settings` itself stores and validates (seconds or bytes, never
+a shell's own minute/hour/megabyte control granularity) -- are available
+without guessing or hard-coding a second copy: the C ABI's
+`tc_settings_ranges_json` returns them as one JSON object, so a shell can
+draw its controls' bounds from the same numbers this method enforces.
+
+`ironwire`'s `{"mode":"watch","port":P,"token_dir":D}` now validates `P` and
+`D` with the same floor `probe_routing` holds: `port` must be non-zero (`0` is
+the ask-the-kernel sentinel, never a port a proxy actually listens on,
+`bad_params` / `settings-invalid-value` -- more precisely
+`routing-port-invalid`), and `token_dir`, when present and non-empty, must be
+an absolute path (`routing-token-dir-must-be-absolute`); an empty `token_dir`
+is treated as absent. The two differ in two labelled ways a shell should
+know: `probe_routing` refuses port `0` as `port-invalid` (not
+`routing-port-invalid`), and refuses an empty `token_dir` as
+`token-dir-invalid` rather than treating it as absent, because a probe that
+fell through to the environment would answer about a path the caller did
+not ask about. A relative `token_dir` is refused by both, with
+`routing-token-dir-must-be-absolute`. Before this, only the Tauri shell's own command layer
+refused these two shapes -- a raw `set_settings` caller (another shell, or a
+future one) had no such floor and could persist a declaration nothing would
+ever actually route through.
 
 `claude_root` and `codex_root` each take a JSON string (a filesystem path)
 or `null` (clear the override, falling back to the conventional per-user
@@ -3130,6 +4017,40 @@ in `trace-commons-contributor`, whose `every_sentence_arrives_finished` pins
 the payload's field count and is what a shell's decoder is checked against.
 This document deliberately does not repeat that number: a count copied into
 prose goes stale in silence, and the test does not.
+
+### The `trajectory_source` declaration
+
+```json
+{ "method": "set_settings", "params": { "trajectory_source": { "mode": "watch", "path": "/chosen/exports" } } }
+```
+
+"Add your tool" (#1030's Tools step) lets a person point at a folder of
+exported traces -- a Letta Trajectory export, for example -- that no parsed
+tool's layout matches. `trajectory_source` declares it:
+
+- `{"mode":"watch","path":"..."}` reads the folder's direct `.json` and
+  `.jsonl` children with the strict trajectory reader, the one that reads the
+  staging folder, as one `trajectory` source covering both. No new parser is
+  involved.
+- `{"mode":"off"}`, `null`, or the key absent add no folder. Settings
+  written before this key existed load as absent, so an upgrade reads no new
+  folder.
+- Any other value -- a bare path string, an unknown mode -- is `bad_params`
+  / `settings-invalid-value`, as for the other `*_source` keys.
+
+`get_settings` reports `trajectory_source_mode` (`unset`, `off` or `watch`)
+and never the path; no response, log line or audit row carries it.
+
+The declaration is not part of the claude/codex start gate: a daemon with
+only a trajectory folder declared has not declared its roots.
+
+**A session found there is never armed for automatic upload.** It always
+waits for a person, in a folder on Automatic too, under the same rule as a
+staged trajectory: a trajectory there is an export somebody added, not a
+watched agent store, and sending it on first sight could send something the
+person does not remember adding. The rule is on the adapter, so it holds for
+a file dropped in by hand as well as for one that names its own source. It
+can be approved one by one, or chosen in `include_past_sessions`.
 
 ### Contribution eligibility
 
@@ -3833,6 +4754,105 @@ the row -- "you approved" and "armed" are not synonyms for any existing
 status, and mean nothing about whether the submission was later accepted,
 quarantined, or withdrawn.
 
+### Sizes in history, and the would-send size (K10)
+
+Before this, a history row carried no bytes at all -- only the server's
+status, credit and explanation prose -- so the History graph could count
+sessions but not weigh them, and nothing on a queue entry said how large an
+upload would actually be once redaction ran. `size_bytes` on a queue entry
+is the raw session file on disk, which redaction shrinks or reshapes; it was
+never a stand-in for either figure.
+
+`list_history` rows (`HistoryRecord`) carry one more field:
+
+```json
+{
+  "submission_id": "…",
+  "...": "…existing fields unchanged…",
+  "uploaded_bytes": 15320
+}
+```
+
+- **`uploaded_bytes`** -- the serialized size, in bytes, of the redacted
+  envelope this submission actually sent, or `null`. Recorded once, at
+  upload time, in `submit_loaded`: a witnessed submission reports the
+  witness's own certified `envelope_bytes.len()` -- the exact wire bytes
+  `/v1/traces` received -- and an ordinary submission reports
+  `envelope::envelope_size` on the final, grant-stamped envelope, which is
+  what the same call serializes onto the wire. Written onto the receipt
+  by `submit_loaded`, and carried from there onto the history row.
+
+Every queue entry (`list_pending`, the `snapshot` event) carries a sibling
+field:
+
+```json
+{
+  "entry_id": "…",
+  "...": "…existing fields unchanged…",
+  "size_bytes": 48210,
+  "would_send_bytes": 15320
+}
+```
+
+- **`would_send_bytes`** -- the serialized size of the redacted envelope a
+  preview pinned for this entry, or `null` when nothing is pinned: an entry
+  never previewed (an armed auto-upload, an approve-all), or one written
+  before this field existed. The same figure [`preview`](#preview)'s own
+  `would_send_bytes` reports, mirrored onto the entry at the moment a
+  preview pins it (`QueueEntry::previewed_envelope_digest`'s own sibling
+  field) so a queue list can say it without opening the stored envelope for
+  every row -- the same reason `attested_inference` is mirrored there. It
+  is cleared wherever the pin is (keep, Undo, a released preview, a revoked
+  approval). For a local preview it is measured before the upload stamps
+  the grant's scopes onto the envelope, so it can be a few bytes short of
+  `uploaded_bytes`; treat it as the size to expect, not a promise.
+
+Both `uploaded_bytes` and `would_send_bytes` are `Option<u64>`,
+`#[serde(default)]` on the wire, so a cached row or a queue line written
+before either field existed still loads, reading `null`.
+
+### Withdrawal dates on revoked rows (K12)
+
+A locally driven withdrawal (`withdraw`, `withdraw_bulk`) stamps
+`withdrawn_at` the moment it runs, so a `withdrawn` row has always been able
+to show a date. A withdrawal made on the web instead, which this daemon only
+learns about the next time it polls submission status and gets back
+`revoked`, had no equivalent: the server's status read-back
+(`TraceSubmissionStatusUpdate`) carries a status and credit figures, never a
+timestamp, so a `revoked` row had no date to show at all.
+
+`list_history` rows (`HistoryRecord`) carry one more field:
+
+```json
+{
+  "submission_id": "…",
+  "...": "…existing fields unchanged…",
+  "status": "revoked",
+  "revoked_at": "2026-08-09T12:00:00Z"
+}
+```
+
+- **`revoked_at`** -- when this row was first seen carrying status
+  `revoked`, or `null` for a row that is not (or not yet) revoked, or one
+  written before this field existed. **Not** the moment of the web
+  withdrawal itself, which this daemon has no way to learn -- the moment
+  this device first discovered it, the same honest compromise
+  `observed_modified_at` and `review_started_at` already make elsewhere on
+  this contract for a fact only discoverable by polling. Stamped once, by
+  the history join that first sees `revoked`, from that poll's own
+  `last_refreshed_at`, and carried forward on every later refresh exactly
+  the way a local `withdrawn_at` already is -- a later poll that merely
+  re-confirms the same `revoked` status must not push the date forward.
+  Two cases stay `null` on purpose: a row the cache already held as
+  `revoked` before this field existed (it was withdrawn on a day this
+  device cannot know, and the upgrade's first poll is not that day), and a
+  withdrawal this device drove itself, which already carries `withdrawn_at`
+  and whose `revoked` read-back is not a web withdrawal.
+
+`#[serde(default)]` on the wire, like every other field on this row, so a
+cached row written before this field existed still loads, reading `null`
+until the next poll re-observes the revocation and dates it.
+
 ### `history_rollup`
 
 ```json
@@ -3871,6 +4891,28 @@ receipts into the history cache immediately, without calling the server, so
 a trace that has just gone out is counted as `submitted` within seconds
 rather than at the next `history_poll_secs` boundary. Those rows carry
 `last_refreshed_at: null`, because nothing has been read back for them yet.
+
+The bucket also counts `processing`, the status the versioned pipeline's
+receipt carries: uploaded, no verdict **reported** yet. That is not the same
+as no verdict. Admission runs inside the upload request, so a trace it
+quarantined or rejected gets the same `processing` receipt, and receipts are
+never rewritten. Render and offer a `processing` row exactly as `submitted`:
+same words, same withdrawal stage.
+
+A `list_history` row keeps the raw `processing` until a status read-back
+reports something for that submission. A server with the pipeline's product
+layer (#1143) reads a pipeline submission back in `main`'s vocabulary:
+`quarantined` or `rejected` when Admission decided so, and `accepted` for an
+admitted trace, before Review has decided it. On such a server the first
+read-back after the upload replaces `processing`. An older server leaves a
+submission whose stored status is still `received` out of the read-back
+altogether, so there an admitted trace's row stays `processing` until Review
+promotes it, and only a quarantined or rejected one changes sooner.
+
+The CLI's submit short-circuit and its picker's SUBMITTED marker read a
+`processing` receipt through that read-back: once the history cache holds
+`rejected` for the submission, the session is no longer already submitted,
+and `quarantined` is reported as `quarantined`.
 
 The daemon then asks the server for verdicts about ninety seconds after an
 upload pass, rather than waiting out the full `history_poll_secs` interval
@@ -4551,7 +5593,8 @@ export membership. A client holds only the local `status`. So:
 
 - local status `submitted` or `quarantined` maps to `not_distributed`
   reliably -- that is the server's own rule, and its copy can be shown before
-  the action.
+  the action. `processing` is `submitted` (see `history_rollup`) and maps the
+  same way.
 - local status `accepted` may resolve to EITHER `commons_not_distributed` or
   `commons_distributed`, and the client cannot tell which. It must show
   **both** bodies before the action, with the `commons_distributed` one given
@@ -4604,7 +5647,9 @@ Rules that bind every application:
 `withdraw_bulk` withdraws every submission currently at `status` in the
 local history cache (one of `submitted`, `quarantined`, or `accepted`; not
 `withdrawn` itself, and not the `other` bucket `history_rollup` reports,
-which covers statuses this client has no stable name for). It reports
+which covers statuses this client has no stable name for). A `submitted`
+selector also takes in `processing` rows, which `history_rollup` counts as
+`submitted`; `processing` is not a selector of its own. It reports
 `withdrawn` and `failed` counts rather than per-submission detail -- a
 partial failure does not fail the whole call, and a contributor can retry
 individual traces with `withdraw` if some did not go through.
@@ -4655,7 +5700,12 @@ The flow a shell drives:
 2. The shell shows one offer and the disclosure its `disclosure_version`
    names, and on the contributor's choice calls `inference_connection_select`
    with **exactly** that offer's `offer_id`, `provider_id`, `revision`,
-   `config_digest` and `disclosure_version`. The daemon sends those values
+   `config_digest` and `disclosure_version`, plus `confirmed: true` --
+   refused (`bad_params` / `inference-connection-confirmation-required`)
+   without it, even with an otherwise well-formed offer. (Before this
+   existed, the only place this was ever checked was the Tauri shell's own
+   command layer, which refused locally and never forwarded the choice; a
+   raw caller had no such floor.) The daemon sends those values
    unchanged (`provider_id` is not sent; it is bound into the digest check
    below) and fills in nothing. Pass `expected_current_version` as the `state_version` from
    `inference_connection_current` when replacing an existing selection
@@ -4675,8 +5725,10 @@ The flow a shell drives:
 3. **Selecting installs nothing.** The witness material the server returns is
    held on this device only. The shell then asks the contributor, separately,
    whether to use this witness on this device, and on confirmation calls
-   `inference_connection_install` with the `connection_id` and
-   `config_digest` from the select result. The daemon re-checks the held
+   `inference_connection_install` with the `connection_id`, `config_digest`
+   from the select result, and `confirmed: true` -- refused
+   (`inference-connection-confirmation-required`) without it, same as
+   `inference_connection_select` above. The daemon re-checks the held
    material against its digest (`inference-connection-digest-mismatch`), then
    re-reads the account's selection; if it was disconnected or replaced since,
    the answer is `inference-connection-not-current`, and if its revision was
@@ -4793,6 +5845,364 @@ connection id is written. The per-device state (a selection awaiting install,
 and what was installed) is in `daemon-inference-connection.json` and is
 removed at logout.
 
+## Native network additions: C3 (#1173)
+
+**Contract-only baseline (2026-10-01).** This section specifies additive
+interfaces before behavioral implementation. It does not assert that these
+methods are registered or that a pilot recording, signed app or deployment
+exists. Check `hello.methods` before calling a new method; absence means
+unsupported (`unknown_method`), never an empty result. Existing methods and
+fields retain their contracts. The tables distinguish a reusable backend from
+an implemented daemon method. Implementations may add response fields; callers
+must ignore fields they do not recognize.
+
+All JSON blocks in this section are **SAMPLE**, synthetic contract examples,
+not pilot observations. C1 may use them only in debug and previews, clearly
+marked `// SAMPLE`; release builds never substitute them for unavailable data.
+The normal IPC envelope carries the objects below as `params` and `result`.
+Dates use RFC3339, UUIDs are strings, counters are nonnegative integers and
+unknown amounts are `null`, never zero. Errors use the existing taxonomy with
+fixed labels; never pass a remote response body, URL, invite, token or platform
+error string into `error.message`.
+
+| Method | Parameters | Reply | Support at contract baseline |
+|---|---|---|---|
+| `inference_summary` | `since?`: RFC3339; default previous 24 hours | `readable`, `window_hours`, `observed_at`, `summary` | IronWire summary exists; daemon wrapper new |
+| `inference_call_proof` | `call_id`: positive integer | `call_id`, `proof`, `checked_at`, `checks`, `readable`, `found` | Stored proof labels exist; method and registration new |
+| `model_spend` | none | `known`, `scope`, `source`, `since`, `models`, `reason_label` | Organization-wide provider billing; see the Z4 source contract below |
+| `private_ai` | none | `on`, `state`, `port`, `disclosure` | Hosting state and Rust disclosure exist; wrapper new |
+| `set_private_ai` | `on`: boolean; `confirmed: true` when enabling | same as `private_ai` | Reuses existing async hosting lifecycle; wrapper new |
+| `mission_catalogue` | `limit?`: 1–50, default 20; `before?`: UUID | `kind`, `catalogue`, `disclosure` | Public skill-evaluation catalogue/client exist; IPC new |
+| `invite_lookup` | `code`: full invite URL | protocol `InviteLookupResponse` | Issuer lookup/client exist; IPC new |
+| Native passkey/account methods | see below | token-free replies below | Server routes exist; daemon and native adapter new |
+| `history_rollup` | none | existing optional `community` | Already implemented; authoritative standing surface |
+
+### `inference_summary`
+
+SAMPLE request: `{"since":"2026-09-30T00:00:00Z"}`. SAMPLE result:
+
+```json
+{
+  "readable": true,
+  "window_hours": null,
+  "observed_at": "2026-10-01T00:00:00Z",
+  "summary": {
+    "enabled": true,
+    "receipts": true,
+    "since": "2026-09-30T00:00:00Z",
+    "groups": [{
+      "model": "example-model", "backend": "nearai", "route": "routed",
+      "work_kind": null, "calls": 3, "priced_calls": 2, "cost_usd": 0.02,
+      "proof": {"verified":1,"gateway_only":1,"unattested":0,"pending":1,"unavailable":0,"failed":0,"outside":0,"unrecorded":0}
+    }],
+    "routed": {"calls":3,"priced_calls":2,"cost_usd":0.02,"proof":{"verified":1,"gateway_only":1,"unattested":0,"pending":1,"unavailable":0,"failed":0,"outside":0,"unrecorded":0}},
+    "outside": {"calls":0,"priced_calls":0,"cost_usd":0.0,"proof":{"verified":0,"gateway_only":0,"unattested":0,"pending":0,"unavailable":0,"failed":0,"outside":0,"unrecorded":0}},
+    "unknown": {"calls":0,"priced_calls":0,"cost_usd":0.0,"proof":{"verified":0,"gateway_only":0,"unattested":0,"pending":0,"unavailable":0,"failed":0,"outside":0,"unrecorded":0}}
+  }
+}
+```
+
+`summary` preserves the Cargo-pinned IronWire `/_ironwire/summary` shape,
+including its `(model, backend, route, work_kind)` groups and route totals;
+it does not rewrite the upstream DTO into one row per model. The contributor
+validates bounds, counter consistency, finite nonnegative prices and safe
+labels before exposing it. Arbitrary backend text is not a verified provider
+identity. `route` and proof counts come from stored proof statuses; no inference
+from the backend's spelling. A future bounded upstream `work_kind` string
+contributes to the opaque group identity, but is not displayed: this client
+returns `work_kind: null` until classification has an approved display contract. The summary contains no protocol family; do not invent `family`.
+
+`cost_usd` is **registry-priced cost, not billed spend**, including for an
+`api_key` backend. `priced_calls < calls` means incomplete pricing. Only
+`verified` counts are model proof; `failed` stays distinct. `enabled: false`
+means capture is disabled, not an observed empty window. `receipts` reports
+the upstream receipts setting, not that every call was verified.
+
+SAMPLE unavailable result:
+
+```json
+{"readable":false,"window_hours":24,"observed_at":null,"summary":null}
+```
+
+A refused, malformed, stale or unreachable read must not manufacture empty
+measured groups. `window_hours` is 24 for the default window and `null` for an
+explicit `since`; `summary.since` is the authoritative lower bound. Polling is
+bounded, authenticated to the existing loopback control API, content-free and
+read-only. It never fetches prompts, responses or receipt bodies.
+
+**C1 migration:** `InferenceSummary.models` / `ModelSummary` in #1175 were
+explicitly provisional. Decode this wrapper and the actual upstream DTO;
+identify group rows by `group_id`, with all grouping fields as the legacy
+fallback, never by `model` alone. A separate
+view projection may aggregate per model but must retain incomplete pricing,
+route/proof distinctions and the distinction between unknown and empty.
+This contract does not authorize editing the teammate's open branch.
+
+### Proof detail and billed spend
+
+SAMPLE `inference_call_proof` request: `{"call_id":412}`; SAMPLE result:
+
+```json
+{"call_id":412,"proof":"gateway_only","checked_at":null,"checks":null,"readable":true,"found":true}
+```
+
+This is a lookup of the stored `inference_calls` label, not a fresh attestation
+check. The ledger records neither a check timestamp nor detailed checks, so
+`checked_at` and `checks` are always `null` for this source. For an absent row
+return `found:false, proof:"unrecorded"`; for an unreadable ledger also return
+`readable:false`. Neither case asserts `outside` or verification. A zero,
+negative or noninteger `call_id` is `bad_params` / `call-id-invalid`.
+
+SAMPLE `model_spend` request: `{}`; SAMPLE result:
+
+```json
+{"known":false,"since":null,"models":[],"reason_label":"billed-model-spend-unavailable"}
+```
+
+This unknown result is returned when authoritative provider billing is
+unavailable; it is never a zero balance. The Z4 source contract below defines
+known organization-wide provider rows, their window, exact nano-USD amounts
+and rounded display amounts. IronWire summary prices, backend kinds,
+account-wide NEAR AI balance and the existing harness daily price estimate
+cannot be converted into billed-per-model facts.
+
+### Private AI switch
+
+SAMPLE `private_ai` request: `{}`; SAMPLE result:
+
+```json
+{
+  "on": false, "state": "off", "port": null,
+  "disclosure": "While it is on, anything else running on this computer can send calls through it as well, charged to the accounts you have set up here. On a computer only you use that is your own software; on a shared one it is anyone who can log in."
+}
+```
+
+SAMPLE `set_private_ai` request: `{"on":true,"confirmed":true}`. Both replies
+separate the requested setting (`on`, nullable when unreadable) from the actual
+`private_inference_state.state` and port documented under `set_settings`.
+`stopping`, `running_elsewhere`, `start_failed` and `crashed` are not running.
+An unreadable read uses `on:null, state:null, port:null`, not `off`.
+
+The disclosure is the existing Rust `private_inference_copy::OFFER_EXPOSURE`,
+returned from the core, not authored by Swift. Enabling requires the person's
+explicit answer after the core disclosure; a missing/false `confirmed` is
+`bad_params` / `confirmation-required`. Disabling requires `on:false` and
+may omit `confirmed`. The wrapper uses the existing async `set_settings`
+validation/persistence/reconciliation for `private_inference`. Only confirmed
+enabling marks `private_inference_offer_seen`; disabling preserves its prior
+value, so writing off cannot suppress an offer that was never shown. The
+wrapper does not create another proxy lifecycle.
+Enabling does not repoint tools, select a provider, grant body/contribution
+consent, or enroll an account. Turning off stops only the owned instance.
+
+Z5 extends existing `tool_destinations` additively; its existing fields retain
+their shape. Observed `outside` calls may traverse the owned proxy while their
+provider remains unknown. A tool default is still `basis:"tool_default"`, not
+observed traffic. An owned-loopback hub uses actual hosting state/port; no
+SSH/dev-server discovery or unobserved bypass traffic is claimed. K14 retains
+ownership of counts, tool attribution and new-call events.
+
+### Catalogue, standing and invite lookup
+
+SAMPLE `mission_catalogue` request: `{"limit":20}`; SAMPLE result:
+
+```json
+{
+  "kind": "skill_evaluation",
+  "disclosure": "SAMPLE: catalogue disclosure from the Rust core",
+  "catalogue": {
+    "schema_version": 1,
+    "entries": [{
+      "mission_id": "00000000-0000-4000-8000-000000000001",
+      "program_id": "00000000-0000-4000-8000-000000000002",
+      "package_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "offer_version_hash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "task_preview": "SAMPLE: evaluate a reviewed skill package against its controls.",
+      "published_at": "2026-10-01T00:00:00Z"
+    }],
+    "next_cursor": null
+  }
+}
+```
+
+`disclosure` carries the Rust-owned catalogue consent explanation; the SAMPLE
+placeholder is not release copy and grants no copy approval. `catalogue` is the unchanged protocol `MissionCatalogPage` from anonymous
+`GET /v1/missions`, read through the existing bounded, no-redirect
+`MissionCatalogClient`. `before` is the previous page's `next_cursor`;
+`package_sha256` is bare lowercase hex and `offer_version_hash` is `sha256:`
+plus lowercase hex. `task_preview` is plaintext, at most 240 Unicode scalar
+values. This is a catalogue of **skill-evaluation packages**, not daily tasks.
+An unavailable fetch is `unavailable` / `mission-catalogue-unavailable`, never
+an empty successful catalogue. No profile, local signals, match result or
+person-specific ranking goes into this request. Matching stays on the Mac;
+matching must not trigger a person-specific fetch. An entry grants no execution,
+model spend, capture, sending or contribution permission.
+
+The catalogue currently supplies no daily assignments, completion rewards,
+levels, streaks, badges or pending-credit range. The commons record is the
+settled ledger of record for pending credit (#1118); dollars remain a near.ai
+link-out. Daily mission economics and the credit-to-inference bridge remain
+unspecified in #1174/#1118. Build the configurable missions server with rewards
+off; do not invent reward arithmetic or a `missions[]` DTO with fabricated
+credits. Future pending credit must carry its condition and never be described
+as earned. Standing
+uses the existing `history_rollup.community` unchanged: absent object means no
+standing, nullable rank means unknown, and no percentile is implied by rank.
+
+SAMPLE `invite_lookup` request:
+`{"code":"https://issuer.example/onboard#SAMPLE-CODE"}`; SAMPLE result:
+
+```json
+{"valid":true,"issuer_display_name":"SAMPLE Pilot","credit_range":{"min":1,"max":5,"unit":"points_per_accepted_trace"}}
+```
+
+Despite C1's argument name `code`, it carries a **full invite URL**, parsed by
+the existing `commands::parse_invite`; a bare code has no issuer and is refused.
+Use the configured host allowlist (`allowlist_for(None)` when unenrolled),
+never a caller-supplied host override. HTTPS is required except for literal
+loopback IP addresses; a hostname such as `localhost` does not grant that
+exception. The issuer request is the existing
+`POST /v1/invite/lookup` with
+`{schema_version:"trace_commons.invite_lookup_request.v1",invite_code}` in its
+body, never its URL. This read neither consumes an invite nor enrolls/writes
+identity. On invalid invite return the protocol's fixed
+`reason_label: malformed|not_found|expired|exhausted|revoked`. Success metadata
+may be absent. Transport failure is unavailable, not an invalid invite.
+
+Credit is an operator-set **estimated credit per accepted trace, not yet
+settled**, never a payment promise. C1's provisional `CreditRange.unit` comment
+`points` must change to the real `points_per_accepted_trace`; lookup credit is
+not daily mission credit. Perform lookup for an explicit action, not on every
+keystroke. Display-name/range bounds must be validated before presentation.
+
+### Native passkey and account identity
+
+The C1 names in the approved [native passkey design](superpowers/specs/2026-09-28-native-passkey-identity-design.md)
+are authoritative. That design remains on the #1120 branch at this contract
+baseline; its proposed screen copy is **not approved** by this contract.
+The native app uses only Apple's platform passkey provider, while one Rust
+encoder creates the WebAuthn JSON. All raw byte fields below use canonical,
+unpadded base64url. The app receives no native bearer, NEAR AI token, device
+key, tenant identity or secret-store reference.
+
+| Method | Parameters | Token-free result |
+|---|---|---|
+| `passkey_create_begin` | `label?`, `ingest_url?` | registration options below |
+| `passkey_create_complete` | `ceremony`, `credential_id`, `raw_client_data_json`, `raw_attestation_object` | `{binding_state}` |
+| `passkey_login_begin` | `ingest_url?` | assertion options below |
+| `passkey_login_complete` | `ceremony`, `credential_id`, `raw_client_data_json`, `raw_authenticator_data`, `signature`, `user_handle` | `{binding_state}` |
+| `passkey_add_begin` | `label?` | registration options below |
+| `passkey_add_complete` | same fields as create complete | `{binding_state}` |
+| `passkey_cancel` | `ceremony` | `{cancelled:true}` |
+| `account_bind` | none | `{outcome,binding_state}` |
+| `account_binding` | none | `{binding_state}` |
+| `passkey_state` | none | `{state,passkey_count,near_ai_connected}` |
+| `account_sign_in` | `ingest_url?` | `{signed_in:true,expires_at}` |
+| `account_session_status` | none | `{state,signed_in,expires_at}` |
+| `account_sign_out` | none | `{signed_out:true}` |
+
+`label` is optional, at most 64 characters. A no-config create/login may name
+an `ingest_url` only when its canonical origin equals the compiled production
+API origin `https://ingest.tracecommons.ai`; omitting it selects that origin.
+A retained unconfigured session must satisfy the same trust root. Explicit
+operator configuration retains its host policy. Once a config or pre-enrollment
+session pins an origin, a caller cannot substitute another one. The native
+Swift adapter exposes no caller-supplied ingest URL. Begin stores the server ceremony privately and returns
+an opaque local `ceremony` handle pinned to action, origin, expiry and current
+credential/config lifecycle. Adding a passkey reloads the current token and
+permits ordinary rotation only within the same lifecycle and account. Complete
+consumes the ceremony once; cancel invalidates it.
+Sign-out, wipe or identity/config replacement invalidates stale finishes.
+Complete accepts no origin, account or tenant parameters.
+
+SAMPLE create/add begin result:
+
+```json
+{
+  "ceremony": "SAMPLE-local-handle", "rp_id": "tracecommons.ai",
+  "challenge": "AQID", "user_id": "BAUG", "user_name": "SAMPLE passkey",
+  "user_display_name": "SAMPLE passkey", "attestation": "none",
+  "expires_in_secs": 180, "exclude_credentials": [],
+  "user_verification": "preferred", "authenticator_attachment": "platform",
+  "resident_key": "preferred", "algorithms": [-7]
+}
+```
+
+SAMPLE login begin result:
+
+```json
+{"ceremony":"SAMPLE-local-handle","rp_id":"tracecommons.ai","challenge":"AQID","expires_in_secs":180,"user_verification":"preferred","allowed_credentials":[]}
+```
+
+Verification/resident-key options are the validated server values
+`required|preferred|discouraged`, not permission for the app to downgrade them.
+`exclude_credentials` and login's `allowed_credentials` contain canonical
+credential IDs, with at most 128 entries per list. An empty login list selects
+a discoverable credential. `user_display_name` is the validated server display
+name, falling back to `user_name`; `attestation` preserves the validated server
+preference `none|direct|indirect`, defaulting to `none`. These three fields are
+additive to the original C3 begin options. Creation uses the platform provider
+and algorithms the adapter actually supports (ES256 `-7`).
+Refuse unsupported server options rather than silently weakening them.
+
+SAMPLE create/add complete request:
+
+```json
+{"ceremony":"SAMPLE-local-handle","credential_id":"AQID","raw_client_data_json":"BAUG","raw_attestation_object":"BwgJ"}
+```
+
+SAMPLE login complete request:
+
+```json
+{"ceremony":"SAMPLE-local-handle","credential_id":"AQID","raw_client_data_json":"BAUG","raw_authenticator_data":"BwgJ","signature":"CgsM","user_handle":"DQ4P"}
+```
+
+These bytes illustrate encoding only and are not valid credentials. SAMPLE
+complete result: `{"binding_state":"unbound"}`. Binding read values are
+`unbound|bound|closed|legacy`; `legacy` means no passkey-origin binding row,
+not proof of a NEAR AI connection. A signed-out binding read is unavailable,
+not `unbound`. `passkey_state.state` projects those labels, or `none` when
+signed out and `unknown` when unreadable. `passkey_count` is nullable until
+an authenticated source answers; `near_ai_connected` is nullable unless an
+authenticated identity fact establishes it. Never infer a count of zero or
+connected status from a missing binding row.
+
+Native login is discoverable authentication: `user_handle` must contain the
+nonempty raw Apple user ID encoded as canonical base64url. A missing or empty
+handle is an incomplete credential and must not reach login completion.
+
+SAMPLE account status:
+
+```json
+{"state":"known","signed_in":true,"expires_at":"2026-10-02T00:00:00Z"}
+```
+
+Signed-out status has `state:"known", signed_in:false` and null expiry;
+unreadable OS storage has `state:"unknown", signed_in:null` and null
+expiry. Raw account identifiers do not cross this status surface. It must not become signed out merely because Keychain refused
+a read. Status and sign-out support a pre-enrollment account without creating a
+fake config. `account_sign_in` reuses existing browser/PKCE machinery where
+its enrollment prerequisites hold; without real enrollment configuration it
+refuses with `unavailable` / `account-enrollment-required`. An unenrolled
+account uses the native passkey create/login path. Browser URL exposure is bounded to the live sign-in attempt and
+uses the existing URL validation/opening controls.
+
+`account_bind` reuses retained NEAR AI provisioning against the authenticated
+bind start/finish routes and the **bind-specific** proof preimage. SAMPLE
+result: `{"outcome":"bound","binding_state":"bound"}`. An
+`existing_account` outcome switches to the existing account and closes the
+unbound account; its passkey is not transferred (S6 fold is deferred). Tokens,
+rotations and atomic device/config persistence stay in Rust/Keychain. Binding
+creates no folder/trace/body consent. Native login remains weak and native add
+keeps the existing first-strong-authenticator gate; adding another requires
+browser passkey step-up.
+
+The Associated Domains entitlement, approved profile bytes, deployed AASA and
+signed create/login origin check are **release gates**. Local/mock tests do
+not establish Apple origin behavior or satisfy the spec's S3 deployment gate.
+This contract approves no new screen copy, deployment, profile fabrication or
+relaxation of origin/CORS/CSP controls.
+
 ## Events
 
 | Event | When | Data |
@@ -4803,6 +6213,28 @@ removed at logout.
 | `digest_due` | batching interval elapsed with pending work | `{pending, text}` |
 | `resync_required` | this client fell behind the event buffer | `{}` |
 | `preview_ready` | a scheduled preview finished and was delivered | the same object `preview_request` returns for a cache hit -- see "Scheduled previews" |
+| `inference_call_added` | the poll tick read a call from IronWire's log that no earlier tick had (K14) | `{id, tool, model, proof}` -- see below |
+| `managed_changed` | a saved model account or managed session changed (see `docs/managed-sessions.md`) | `{revision}` |
+
+`inference_call_added` is published where the daemon already reads IronWire's
+`/log`: the poll tick's routing refresh. Nothing is fetched for it and it adds
+no poll of its own, so a call is announced on the first tick after it lands
+(the daemon's poll interval). Its data is label-only and is the same labels
+`inference_calls` puts on that row: `id` (the ledger row id), `tool`,
+`model` (the same free-text rule) and `proof` (IronWire's label, or
+`unrecorded`). No body, URL, endpoint, session id, digest or token.
+
+- Once per call. New is tracked per ledger by the highest row id announced.
+- The first window a ledger reads is the backlog and is not announced; it
+  sets the baseline. A ledger rebuilt for a new endpoint starts over the
+  same way, and so does one whose ids went backwards (a proxy whose own
+  ledger started over). A ledger that started over and climbed past the old
+  highest id within one tick cannot be told from one that only grew: its
+  rows above the old id are announced, and the rest are never announced.
+  Counts on `tool_destinations` are unaffected.
+- Rows without an id (a proxy too old to expose one) are never announced.
+- At most 64 per tick, the newest kept, so a burst cannot push a subscriber
+  into `resync_required`. Re-read `tool_destinations` for exact counts.
 
 `subscribe` sends a full `snapshot` before any delta, so a client never has to
 race `list_pending` against the stream at startup. On `resync_required`, call
@@ -5022,3 +6454,125 @@ per folder, `legacy-invite-migrated`), and
 through its copy commands, macOS and Windows through
 `tc_legacy_migration_notice`, GTK directly; each passes the `notice` object
 through unread and acknowledges with `acknowledge_legacy_invite_migration`.
+
+## Zaki network addendum: provider model spend and summary identity (#1173)
+
+This addendum supersedes the initial `model_spend` unavailable-only contract.
+`model_spend {}` is asynchronous and uses the existing connected NEAR AI session,
+selected inference-key organization (or the existing first-active-organization
+fallback for a legacy session), and the fixed trusted management origin
+`https://cloud-api.near.ai`. It requests
+`GET /v1/organizations/{organization}/usage/by-model?period=day`. The deployed
+[provider OpenAPI](https://cloud-api.near.ai/api-docs/openapi.json) defines this
+session-authenticated rolling 24-hour report. No registry price estimate is
+converted into an actual cost, and no additional reporting token is minted.
+
+A known reply has the following fields; all metadata shown is mandatory:
+
+```json
+{"known":true,"scope":"near_ai_organization","source":"near_ai_usage_by_model","currency":"USD","scale":9,"window_hours":24,"since":"2026-10-01T12:00:00Z","observed_at":"2026-10-02T12:00:00Z","models":[{"model":"example-model","billed_nanos":1501,"billed_micros":2,"rounding":"nearest_micro_half_up","calls":3}]}
+```
+
+This is a SAMPLE, not a release fallback. `since` is the provider's `start_date`,
+validated as an RFC3339 UTC timestamp no later than the daemon observation time;
+`observed_at` is the daemon's completion time. `billed_nanos` retains the exact
+provider usage cost in nanoUSD (the official [usage source](https://github.com/nearai/cloud-api/blob/88989203c8172fd19c46c2b0082c71b024925f49/crates/api/src/routes/usage.rs#L1624) specifies scale 9). `billed_micros` is a compatibility amount rounded
+to the nearest microUSD, half upward; `rounding` makes that conversion explicit.
+Counts and native costs must be nonnegative signed 64-bit integers. Model labels
+use the existing content-free label sanitizer. Display model labels are not
+guaranteed unique after sanitization: consumers must retain every row and use
+row position as identity when needed, rather than grouping by the display label. Provider display prose, organization
+identifiers, access tokens, inference credentials, and refresh tokens are omitted.
+
+The scope is the connected NEAR AI organization's usage across its callers. It is
+not a sum attributed to this machine, its local proxy, a tool, or its local ledger;
+it is not a payment, invoice, settlement, or cryptographic receipt. Empty provider
+`data` is a readable known report with `models: []`, rather than an unavailable
+report. Readable zero-cost rows retain their zero.
+
+No session, expired session, no organization, unavailable transport, or malformed
+source data returns `known:false`, `since:null`, `observed_at:null`, `models:[]`,
+`reason_label:"billed-model-spend-unavailable"`, and `state` equal to respectively
+`no_session`, `session_expired`, `no_organization`, or `unavailable`. Scope, source,
+currency, scale, and window remain present with the values above. Unknown never
+means known zero and never serves the last successful amount after a failed read.
+The balance and model-spend reads share the existing session rotation lock,
+conservative access-token reuse, single 401 retry, and stored-connection completion
+check. A forgotten or replaced account cannot receive an in-flight old account's
+cost report. Successful readings have the same 60-second cache policy as balance.
+The synchronous dispatcher returns `model-spend-requires-async`; socket and local
+CLI callers use the asynchronous dispatcher.
+
+Each newly returned `inference_summary.summary.groups` row also carries mandatory
+`group_id`, formatted `sha256:<64 lowercase hexadecimal digits>`. This is SHA-256
+of the canonical JSON array `[original_model, original_backend, original_route,
+original_work_kind]` before content-free label normalization. It is an opaque row
+identity, not a verified provider identity or an anonymization guarantee.
+These unsalted digests can be guessed from a dictionary of likely inputs. Backend labels continue to retain only
+the vetted `nearai` label or an opaque digest. Original model labels that normalize
+to the same display value therefore remain separate rows with separate stable IDs;
+no group counts, costs, or proof totals are merged or lost. Older daemons may omit
+`group_id`; clients may retain their existing tuple fallback for those versions.
+The summary wrapper preserves the validated upstream groups and totals, with these
+explicit identity and privacy normalizations.
+
+## Configured activity missions (Z7)
+
+`activity_missions_catalogue` and `activity_missions_status` each accept only
+an empty params object `{}`. Both are async methods advertised in `hello`.
+Unknown fields, including profile, matching results, session/account identifiers,
+URLs and pagination, are `bad_params` / `activity-missions-params-invalid` before
+credentials or HTTP are read. This is separate from the `mission_catalogue`
+skill-evaluation domain.
+
+`activity_missions_catalogue` returns
+`{"catalogue":<ActivityCatalogue>,"disclosure":<Rust-owned string>}`. Its inner
+schema-v1 protocol DTO comes from anonymous `GET /v1/activity-missions` at the
+stored ingest origin; an upload endpoint such as `/v1/traces` contributes only
+its origin. The complete bounded common policy is fetched independently of local
+matching. `kind` is `trace_activity`; `state: unconfigured` with null policy and
+digest is a real fetched state, not a fallback for a failed request. A configured
+policy and its canonical SHA-256 digest must agree. No account/device credential,
+profile or matching result goes to the public request.
+
+`activity_missions_status` returns
+`{"status":<ActivityProgress>,"disclosure":<Rust-owned string>}` from authenticated
+`GET /v1/account/activity-missions/status`, using the stored native account
+session. It accepts no caller-supplied principal or completion assertion. The
+unchanged DTO includes authoritative contribution qualification/source, UTC
+coverage/month dates, observation time, nullable daily/streak/level/badge fields
+and the policy digest. Unconfigured daily rules, levels and badges retain their
+null semantics; they do not become zero progress or invented defaults. Progress
+may decrease after withdrawal/revocation and is a current projection, not an
+irrevocable award. Account-token rotation is retained on success and refusal;
+rotation persistence failure refuses the result. Account/config snapshot checks
+before sending and after HTTP also refuse late progress from an account that
+signed out or changed while the request was in flight.
+
+Response envelopes and progress rows tolerate additive unknown fields and
+omit them from IPC. Known schema versions, policy digests, reward flags and
+credit conditions remain enforced. Policy and nested rule objects remain strict
+and digest-covered; changing their shape requires a supported schema-version
+change rather than an unversioned extension.
+
+Both replies carry `consent_copy::ACTIVITY_MISSIONS_DISCLOSURE` assembled in Rust.
+Neither read changes capture, contribution consent, project modes, scopes,
+approvals or uploads. Status can update only a rotated account credential.
+Rewards are hard-disabled: `rewards_enabled` is false,
+`credit_points_pending` is null, and `credit_condition` is
+`mission_credit_ledger_unavailable`. A response claiming activated rewards or
+mission credit is refused. Corpus credit and skill-evaluation awards remain
+separate.
+
+Responses are limited to 128 KiB, HTTP is allowed only on literal loopback IPs,
+and configured host allowlists apply. Proxies and redirects are disabled. Safe
+errors never include URLs or remote bodies: `unavailable` /
+`activity-missions-unavailable` for config, host, transport, status, bounds or
+response-validation failure; `unavailable` / `account-session-required` for no
+live native account; `unavailable` / `commons_credential_storage_unavailable`
+for credential read or rotation persistence failure. Unavailable is never an
+empty catalogue or a zero progress response.
+
+See `docs/superpowers/specs/2026-10-02-configured-activity-missions-design.md`
+for the operator policy and qualification rules. The policy is optional; this
+adapter does not choose thresholds or activate economics.

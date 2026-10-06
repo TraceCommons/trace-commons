@@ -26,6 +26,7 @@ pub struct Client {
     endpoint: url::Url,
     bearer_token: String,
     host_allowlist: HostAllowlist,
+    max_response_bytes: Option<usize>,
 }
 
 pub struct ClientBuilder {
@@ -34,6 +35,7 @@ pub struct ClientBuilder {
     host_allowlist: HostAllowlist,
     timeout: Duration,
     explicit_bearer: Option<String>,
+    max_response_bytes: Option<usize>,
 }
 
 /// A typed response plus one selected header, even when the response itself
@@ -59,6 +61,7 @@ impl Client {
             host_allowlist: HostAllowlist::permissive(),
             timeout: DEFAULT_TIMEOUT,
             explicit_bearer: None,
+            max_response_bytes: None,
         }
     }
 
@@ -307,7 +310,7 @@ impl Client {
                 };
             }
         };
-        let response = match request.send().await {
+        let mut response = match request.send().await {
             Ok(response) => response,
             Err(source) => {
                 return CallWithResponseHeader {
@@ -346,14 +349,43 @@ impl Client {
                 };
             }
         };
-        let response_body = match response.text().await {
-            Ok(response_body) => response_body,
-            Err(source) => {
+        let body_result = if let Some(limit) = self.max_response_bytes {
+            if response
+                .content_length()
+                .is_some_and(|length| length > limit as u64)
+            {
+                Err(Error::ResponseTooLarge { limit })
+            } else {
+                let mut body = Vec::new();
+                loop {
+                    match response.chunk().await {
+                        Ok(Some(chunk)) => {
+                            if body.len().saturating_add(chunk.len()) > limit {
+                                break Err(Error::ResponseTooLarge { limit });
+                            }
+                            body.extend_from_slice(&chunk);
+                        }
+                        Ok(None) => break Ok(String::from_utf8_lossy(&body).into_owned()),
+                        Err(source) => {
+                            break Err(Error::Transport {
+                                url: url.to_string(),
+                                source,
+                            });
+                        }
+                    }
+                }
+            }
+        } else {
+            response.text().await.map_err(|source| Error::Transport {
+                url: url.to_string(),
+                source,
+            })
+        };
+        let response_body = match body_result {
+            Ok(body) => body,
+            Err(error) => {
                 return CallWithResponseHeader {
-                    result: Err(Error::Transport {
-                        url: url.to_string(),
-                        source,
-                    }),
+                    result: Err(error),
                     response_header: selected_header,
                     status: Some(status),
                 };
@@ -412,6 +444,14 @@ impl ClientBuilder {
         self
     }
 
+    /// Bound bytes accumulated from an HTTP response before JSON decoding.
+    /// The selected response header remains available on an overflow, so a
+    /// credential rotation is not lost with a refused body.
+    pub fn max_response_bytes(mut self, limit: usize) -> Self {
+        self.max_response_bytes = Some(limit);
+        self
+    }
+
     /// Provide the bearer token directly instead of naming an env var.
     /// Used by clients that mint short-lived tokens in memory (e.g. the
     /// contributor CLI's upload claims). Blank tokens are rejected at build.
@@ -462,6 +502,7 @@ impl ClientBuilder {
             endpoint,
             bearer_token,
             host_allowlist: self.host_allowlist,
+            max_response_bytes: self.max_response_bytes,
         })
     }
 }
@@ -504,6 +545,71 @@ mod tests {
                 std::env::remove_var(&self.name);
             }
         }
+    }
+
+    #[tokio::test]
+    async fn bounded_chunked_success_and_error_bodies_stop_at_the_limit() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        for status in ["200 OK", "403 Forbidden"] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let origin = format!("http://{}", listener.local_addr().unwrap());
+            let response = format!(
+                "HTTP/1.1 {status}\r\nTransfer-Encoding: chunked\r\nx-rotation: rotated-secret\r\nConnection: close\r\n\r\n100\r\n{}\r\n0\r\n\r\n",
+                "x".repeat(256)
+            );
+            let worker = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = [0; 1024];
+                let _ = socket.read(&mut request).await;
+                let _ = socket.write_all(response.as_bytes()).await;
+            });
+            let client = Client::builder(origin, "UNUSED")
+                .bearer_token("synthetic")
+                .max_response_bytes(128)
+                .build()
+                .unwrap();
+            let response = client
+                .call_json_with_response_header::<(), serde_json::Value>(
+                    Method::GET,
+                    "/",
+                    &[],
+                    None,
+                    "x-rotation",
+                )
+                .await;
+            assert_eq!(response.result.unwrap_err().kind(), "response-too-large");
+            assert_eq!(response.response_header.as_deref(), Some("rotated-secret"));
+            worker.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn bounded_response_retains_rotation_header_on_overflow() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("x-rotation", "rotated-secret")
+                    .set_body_string("x".repeat(4096)),
+            )
+            .mount(&server)
+            .await;
+        let client = Client::builder(server.uri(), "UNUSED")
+            .bearer_token("synthetic")
+            .max_response_bytes(128)
+            .build()
+            .unwrap();
+        let response = client
+            .call_json_with_response_header::<(), serde_json::Value>(
+                Method::GET,
+                "/",
+                &[],
+                None,
+                "x-rotation",
+            )
+            .await;
+        assert_eq!(response.result.unwrap_err().kind(), "response-too-large");
+        assert_eq!(response.response_header.as_deref(), Some("rotated-secret"));
     }
 
     #[tokio::test]

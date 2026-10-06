@@ -47,6 +47,63 @@ fn publication_methods_are_documented_with_bounds_and_fixed_errors() {
         );
     }
 }
+#[test]
+fn first_run_picker_methods_are_documented_with_every_label() {
+    use trace_commons_contributor::daemon::past_sessions as past;
+    let contract = include_str!("../../../docs/contributor-daemon-ipc-v1_1.md");
+    for method in ["list_past_sessions", "include_past_sessions"] {
+        assert!(
+            trace_commons_contributor::daemon::ipc::METHODS.contains(&method),
+            "not served: {method}"
+        );
+        let row = format!("| `{method}` |");
+        assert!(contract.contains(&row), "missing method row: {method}");
+        let section = format!("### `{method}`");
+        assert!(contract.contains(&section), "missing section: {method}");
+    }
+    for label in [
+        past::LABEL_SESSION_IDS_INVALID,
+        past::LABEL_TOO_MANY_SESSIONS,
+        past::LABEL_SESSION_ID_UNRECOGNIZED,
+        past::LABEL_PROJECT_MODE_NEVER,
+        past::LABEL_SESSION_STILL_ACTIVE,
+        past::LABEL_HELD_FOR_REVIEW,
+        past::LABEL_SESSION_DISMISSED,
+        past::LABEL_SESSION_KEPT,
+        past::LABEL_NOT_PENDING,
+        past::LABEL_SESSION_PROJECT_CHANGED,
+        past::LABEL_SESSION_UNREADABLE,
+        past::AUDIT_PAST_SESSIONS_INCLUDED,
+        "project-id-unrecognized",
+        "project_id-invalid",
+        "contribution-override-never",
+        "audit-write-failed",
+        "session-file-vanished",
+        trace_commons_contributor::daemon::queue::REASON_TOO_LARGE,
+        "queue-full",
+        "not-enrolled",
+        "queue-write-failed",
+    ] {
+        let quoted = format!("`{label}`");
+        assert!(contract.contains(&quoted), "undocumented label: {label}");
+    }
+    for state in [
+        "pending",
+        "approved",
+        "expired",
+        "not_queued",
+        "never",
+        "still_active",
+    ] {
+        let quoted = format!("`{state}`");
+        assert!(contract.contains(&quoted), "undocumented state: {state}");
+    }
+    assert!(
+        contract.contains("### The `trajectory_source` declaration"),
+        "missing trajectory_source section"
+    );
+    assert!(contract.contains("`trajectory_source_mode`"));
+}
 use trace_commons_contributor::daemon::settings::DaemonSettings;
 use trace_commons_contributor::identity::DeviceIdentity;
 use trace_commons_contributor::source::TraceSource;
@@ -1190,6 +1247,30 @@ async fn an_unpreviewed_approval_pins_the_bytes_that_were_persisted() {
         trace_commons_contributor::daemon::preview::envelope_digest(&saved).expect("digest"),
         pinned,
         "the pinned digest must name the bytes actually persisted"
+    );
+}
+
+#[tokio::test]
+async fn an_unpreviewed_approval_pins_the_measured_size_of_the_persisted_bytes() {
+    // K10: `would_send_bytes` describes the bytes actually pinned, not an
+    // estimate made some other way. Removing the measurement in
+    // `pin_previewed_envelope` (or threading `None` through it) would leave
+    // this `None` even though an envelope was persisted right beside it.
+    let (_dir, store_dir, entry_id) = daemon_with_a_multi_event_entry().await;
+    let store = ConfigStore::open(store_dir.clone()).unwrap();
+    let mut c = connect_to(&store_dir).await;
+    approve_one(&mut c, entry_id).await;
+
+    let queue = Queue::load(&store).unwrap();
+    let entry = queue.get(entry_id).expect("entry");
+    let would_send_bytes = entry.would_send_bytes.expect("a size must be pinned");
+    let saved = trace_commons_contributor::daemon::approved_envelope::load(&store, entry_id)
+        .expect("load")
+        .expect("an envelope must be on disk");
+    assert_eq!(
+        would_send_bytes,
+        trace_commons_contributor::envelope::envelope_size(&saved).expect("size") as u64,
+        "the pinned size must describe the bytes actually persisted"
     );
 }
 

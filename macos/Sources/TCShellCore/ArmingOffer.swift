@@ -25,32 +25,5 @@ public struct ArmingOffer: Decodable, Equatable, Sendable {
     }
 }
 
-/// The words for the arming offer.
-///
-/// This is the offer, not the confirmation. It appears in the queue once a
-/// project has been approved several times, and its whole job is to make the
-/// case from evidence the contributor already has: they have read previews
-/// from this project and kept approving them. Arming asks someone to stop
-/// reading those previews, and the only honest basis for that question is
-/// the history of them saying yes.
-public enum ArmingOfferCopy {
-    /// The evidence, stated before the question. A contributor who reads
-    /// only the first line should still learn why they are being asked.
-    public static func evidence(project: String, count: Int) -> String {
-        let times = count == 1 ? "once" : "\(count) times"
-        return "You've contributed from \(project) \(times)."
-    }
-
-    public static func question(project: String) -> String {
-        "Contribute from \(project) automatically?"
-    }
-
-    /// Carries the action rather than agreeing in the abstract.
-    public static let confirm = "Turn on automatic contributing"
-
-    /// "Not now" rather than "No": declining is a decision about this
-    /// moment, and the daemon treats it that way -- the offer is silenced
-    /// for thirty days, not forever. Settings still arms the project at any
-    /// point in between, without being asked.
-    public static let decline = "Not now"
-}
+// The offer's words are `ProjectArmingCopy`, decoded from the core's
+// `tc_arming_offer_copy_json` (K3, #1173).

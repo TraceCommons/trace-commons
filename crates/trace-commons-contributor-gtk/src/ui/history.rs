@@ -671,8 +671,8 @@ fn record_row(app: &Rc<App>, record: &HistoryRecord) -> gtk::Box {
         card.append(&line);
     }
 
-    // Withdrawal, which the shared spec calls first-class and always
-    // available. It is the one promise on this screen that is the
+    // Withdrawal, which the shared spec calls first-class: it is on every
+    // contribution still open to it. It is the one promise on this screen that is the
     // contributor's to make about their own trace, so it is on the row
     // rather than behind a menu. See `offers_withdrawal` for which rows
     // get it.
@@ -682,16 +682,32 @@ fn record_row(app: &Rc<App>, record: &HistoryRecord) -> gtk::Box {
     card
 }
 
+/// The statuses a contribution can still be withdrawn from: the macOS
+/// app's allowlist (`ContributionStatusPresentation.openValues` in
+/// `PublicRunModels.swift`), which is the parity target.
+const WITHDRAWABLE_STATUSES: [&str; 6] = [
+    "submitted",
+    "received",
+    "accepted",
+    "quarantined",
+    "awaiting_pii_backstop",
+    "rejected",
+];
+
 /// Whether a record gets a withdraw button.
 ///
-/// An already-withdrawn record does not: there is nothing left to withdraw,
-/// and it stays on the list reading as withdrawn rather than being dropped
-/// or re-labelled. A record carrying no `submission_id` does not either --
-/// `withdraw` takes exactly that id and nothing else, so the button would
-/// have nothing to send and would fail for a reason the contributor could
-/// do nothing about.
+/// Only a record in one of [`WITHDRAWABLE_STATUSES`] does. The other
+/// statuses the core names -- withdrawn, revoked, purged, expired -- are
+/// closed: an already-withdrawn record stays on the list reading as
+/// withdrawn rather than being dropped or re-labelled. A status this build
+/// does not recognise is treated as closed too, as macOS treats it: it may
+/// come from a newer daemon, and offering an action on a state nobody here
+/// understands is failing open. A record carrying no `submission_id` gets
+/// no button either -- `withdraw` takes exactly that id and nothing else,
+/// so the button would have nothing to send and would fail for a reason the
+/// contributor could do nothing about.
 fn offers_withdrawal(record: &HistoryRecord) -> bool {
-    record.status != "withdrawn" && !record.submission_id.is_empty()
+    WITHDRAWABLE_STATUSES.contains(&record.status.as_str()) && !record.submission_id.is_empty()
 }
 
 /// The withdraw button, or -- once an attempt has been made -- what that
@@ -884,13 +900,12 @@ fn explanation_is_contributor_facing(explanation: &str) -> bool {
     !explanation.contains("sha256:")
 }
 
+/// The core's word for a status (`history_copy::STATUS_LABELS`), the table
+/// every shell reads. A status it has no word for reads as
+/// `STATUS_UNAVAILABLE`, never "Waiting to be scored": that would render an
+/// absent signal as a healthy in-flight state.
 fn status_word(status: &str) -> &'static str {
-    match status {
-        "accepted" => copy::HISTORY_IN_THE_COMMONS,
-        "quarantined" => copy::QUARANTINE_HEADING,
-        "withdrawn" => copy::WITHDRAWN_BY_YOU,
-        _ => copy::HISTORY_WAITING_TO_BE_SCORED,
-    }
+    trace_commons_contributor::history_copy::status_label(status)
 }
 
 fn status_tone(status: &str) -> Tone {
@@ -931,17 +946,19 @@ impl Glyph {
     /// inks -- and with the same rule: if one ever drifts from `style.rs`,
     /// `style.rs` is right. They are the text-safe twins (`tc_green_text`,
     /// `tc_blue_icon`, `tc_muted`, `tc_coral_text`), which is what the
-    /// mockup strokes an 11px glyph in.
+    /// mockup strokes an 11px glyph in. The accent and coral twins are the
+    /// generated design tokens themselves, so they cannot drift.
     fn ink(self, scheme: Scheme) -> &'static str {
+        use style::brand_tokens::{dark, light};
         match (self, scheme) {
-            (Glyph::Accepted, Scheme::Light) => "#0F7256",
-            (Glyph::Accepted, Scheme::Dark) => "#5CD3AF",
+            (Glyph::Accepted, Scheme::Light) => light::ACCENT_TEXT,
+            (Glyph::Accepted, Scheme::Dark) => dark::ACCENT_TEXT,
             (Glyph::Held, Scheme::Light) => "#315FBA",
             (Glyph::Held, Scheme::Dark) => "#9DB6F1",
             (Glyph::Waiting, Scheme::Light) => "#5C635B",
             (Glyph::Waiting, Scheme::Dark) => "#A6AC9F",
-            (Glyph::Withdrawn, Scheme::Light) => "#B8483B",
-            (Glyph::Withdrawn, Scheme::Dark) => "#F79C8F",
+            (Glyph::Withdrawn, Scheme::Light) => light::STATUS_OUTSIDE_TEXT,
+            (Glyph::Withdrawn, Scheme::Dark) => dark::STATUS_OUTSIDE_TEXT,
         }
     }
 }
@@ -1384,14 +1401,40 @@ mod tests {
     }
 
     #[test]
-    fn every_other_state_can_be_withdrawn() {
-        // "Withdraw is first-class and always available" in the shared
-        // design, which includes the held ones -- the state a contributor
-        // is most likely to want out of.
-        for status in ["submitted", "quarantined", "accepted", "something-new"] {
+    fn every_open_state_can_be_withdrawn() {
+        // macOS's allowlist (`ContributionStatusPresentation.openValues`),
+        // which includes the held ones -- the state a contributor is most
+        // likely to want out of.
+        for status in [
+            "submitted",
+            "received",
+            "accepted",
+            "quarantined",
+            "awaiting_pii_backstop",
+            "rejected",
+        ] {
             assert!(
                 offers_withdrawal(&record(status, "sub-1")),
                 "{status} cannot be withdrawn"
+            );
+        }
+    }
+
+    #[test]
+    fn a_closed_or_unrecognised_state_is_not_offered_withdrawal() {
+        // Fails closed, as macOS does: a status from a newer daemon is
+        // treated as terminal, so Withdraw is not offered on it.
+        for status in [
+            "withdrawn",
+            "revoked",
+            "purged",
+            "expired",
+            "something-new",
+            "",
+        ] {
+            assert!(
+                !offers_withdrawal(&record(status, "sub-1")),
+                "{status:?} is offered withdrawal"
             );
         }
     }
@@ -1404,10 +1447,51 @@ mod tests {
         assert!(!offers_withdrawal(&record("accepted", "")));
     }
 
+    /// Every status the core knows reads as the core's word for it -- not a
+    /// word typed here, and not "Status unavailable". `rejected` and
+    /// `revoked` read "Status unavailable" before the core had a table.
     #[test]
-    fn an_unknown_status_is_never_claimed_to_be_in_the_commons() {
-        for status in ["submitted", "pending", "something-new"] {
-            assert_eq!(status_word(status), copy::HISTORY_WAITING_TO_BE_SCORED);
+    fn a_known_status_reads_as_the_cores_label() {
+        use trace_commons_contributor::history_copy::{STATUS_LABELS, STATUS_UNAVAILABLE};
+        for row in STATUS_LABELS {
+            assert_eq!(status_word(row.status), row.label, "{}", row.status);
+            assert_ne!(status_word(row.status), STATUS_UNAVAILABLE);
+        }
+        assert_eq!(status_word("rejected"), "Rejected");
+        assert_eq!(status_word("received"), "Received");
+        assert_eq!(status_word("revoked"), "Withdrawn");
+    }
+
+    /// The withdraw allowlist names only statuses the core has a word for:
+    /// a Withdraw button never sits beside "Status unavailable".
+    #[test]
+    fn every_withdrawable_status_has_a_label() {
+        for status in WITHDRAWABLE_STATUSES {
+            assert_ne!(
+                status_word(status),
+                trace_commons_contributor::history_copy::STATUS_UNAVAILABLE,
+                "{status}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_submitted_record_is_waiting_to_be_scored() {
+        assert_eq!(status_word("submitted"), copy::HISTORY_WAITING_TO_BE_SCORED);
+    }
+
+    #[test]
+    fn an_unknown_status_reads_as_the_cores_status_unavailable() {
+        // Never "Waiting to be scored": that renders an absent signal as a
+        // healthy in-flight state.
+        for status in ["pending", "something-new", ""] {
+            assert_eq!(
+                status_word(status),
+                trace_commons_contributor::history_copy::STATUS_UNAVAILABLE
+            );
+            assert!(matches!(status_tone(status), Tone::Neutral));
+            // And it is terminal: no Withdraw beside it.
+            assert!(!offers_withdrawal(&record(status, "sub-1")));
         }
     }
 

@@ -117,7 +117,7 @@ final class ActivityMissionsContractTests: XCTestCase {
                 XCTAssertNil(result.catalogue.creditPointsPending)
                 XCTAssertFalse(result.catalogue.rewardsEnabled)
                 let raw = try XCTUnwrap(client.json(for: "activity_missions_catalogue"))
-                XCTAssertEqual(try json(raw)["_sample"] as? String, "SAMPLE")
+                XCTAssertEqual(try json(raw)["_sample"] as? String, "hand-written")
             }
             do {
                 _ = try await client.activityMissionsStatus()

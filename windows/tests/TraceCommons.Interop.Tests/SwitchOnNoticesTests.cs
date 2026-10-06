@@ -31,7 +31,7 @@ public sealed class SwitchOnNoticesTests
         ["limit"] = "L",
         ["no_review"] = "N",
         ["acknowledge"] = "K",
-        ["ask_first_action"] = "Ask me first",
+        ["ask_first_action"] = "Ask me",
         ["ask_first_failed"] = "F",
     };
 
@@ -112,7 +112,7 @@ public sealed class SwitchOnNoticesTests
                 new Dictionary<string, object?>
                 {
                     ["project_id"] = "p", ["line"] = "api: 2 sessions waiting",
-                    ["ask_first_action"] = "Ask me first", ["ask_first_failed"] = "F",
+                    ["ask_first_action"] = "Ask me", ["ask_first_failed"] = "F",
                 },
             },
         };

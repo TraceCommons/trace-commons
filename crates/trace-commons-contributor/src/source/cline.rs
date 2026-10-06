@@ -83,7 +83,7 @@ impl ClineSource {
 }
 
 /// The messages file a session directory must hold: `<dir name>.messages.json`.
-fn messages_file_for(session_dir: &Path) -> Option<PathBuf> {
+pub(crate) fn messages_file_for(session_dir: &Path) -> Option<PathBuf> {
     let id = session_dir.file_name()?.to_str()?;
     Some(session_dir.join(format!("{id}{MESSAGES_SUFFIX}")))
 }

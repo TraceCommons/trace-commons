@@ -5,7 +5,7 @@ import XCTest
 final class DaemonNetworkContractTests: XCTestCase {
     func testUnavailableSummaryIsNotMeasuredEmptyData() async throws {
         let transport = NetworkTransport(#"{"readable":false,"window_hours":24,"observed_at":null,"summary":null}"#)
-        let result = try await LiveDaemonClient(transport: transport).inferenceSummary()
+        let result = try await LiveDaemonClient(transport: transport).networkInferenceSummary()
         let object = try wire(result)
         XCTAssertEqual(object["readable"] as? Bool, false)
         XCTAssertNil(object["models"], "the upstream summary must not become model-only rows")
@@ -34,7 +34,7 @@ final class DaemonNetworkContractTests: XCTestCase {
 
     func testPrivateAIReadPreservesUnreadableState() async throws {
         let transport = NetworkTransport(#"{"on":null,"state":null,"port":null,"disclosure":"SAMPLE core disclosure"}"#)
-        let result = try await LiveDaemonClient(transport: transport).privateAI()
+        let result = try await LiveDaemonClient(transport: transport).networkPrivateAI()
         XCTAssertNil(result.on)
         XCTAssertNil(result.state)
         XCTAssertEqual(result.disclosure, "SAMPLE core disclosure")
@@ -43,7 +43,7 @@ final class DaemonNetworkContractTests: XCTestCase {
 
     func testMissionCatalogueKeepsSkillEvaluationWrapper() async throws {
         let transport = NetworkTransport(#"{"kind":"skill_evaluation","disclosure":"SAMPLE core consent","catalogue":{"schema_version":1,"entries":[],"next_cursor":null}}"#)
-        let result = try await LiveDaemonClient(transport: transport).missionCatalogue()
+        let result = try await LiveDaemonClient(transport: transport).networkMissionCatalogue()
         let object = try wire(result)
         XCTAssertEqual(object["kind"] as? String, "skill_evaluation")
         XCTAssertNotNil(object["catalogue"])
@@ -83,20 +83,20 @@ final class DaemonNetworkContractTests: XCTestCase {
         let consent = try XCTUnwrap(DaemonData.PrivateAIConsent(acknowledging: privateAISwitch("SAMPLE core disclosure")))
         for given in [nil, consent] {
             let transport = NetworkTransport(#"{"on":false,"state":"off","port":null,"disclosure":"SAMPLE core disclosure"}"#)
-            _ = try await LiveDaemonClient(transport: transport).setPrivateAI(on: false, consent: given)
+            _ = try await LiveDaemonClient(transport: transport).setNetworkPrivateAI(on: false, consent: given)
             XCTAssertEqual(transport.method, "set_private_ai")
             XCTAssertEqual(try transport.parameters()["on"] as? Bool, false)
             XCTAssertEqual(try transport.parameters()["confirmed"] as? Bool, given != nil)
         }
         let refusal = NetworkTransport(error: #"{"code":"bad_params","message":"confirmation-required"}"#)
         do {
-            _ = try await LiveDaemonClient(transport: refusal).setPrivateAI(on: true, consent: consent)
+            _ = try await LiveDaemonClient(transport: refusal).setNetworkPrivateAI(on: true, consent: consent)
             XCTFail("a daemon refusal succeeded")
         } catch {
             XCTAssertEqual(error as? DaemonDataError, .daemon(code: "bad_params", message: "confirmation-required"))
         }
         let accepted = NetworkTransport(#"{"on":true,"state":"running","port":3128,"disclosure":"SAMPLE core disclosure"}"#)
-        let result = try await LiveDaemonClient(transport: accepted).setPrivateAI(on: true, consent: consent)
+        let result = try await LiveDaemonClient(transport: accepted).setNetworkPrivateAI(on: true, consent: consent)
         XCTAssertEqual(result.port, 3128)
         XCTAssertEqual(try accepted.parameters()["confirmed"] as? Bool, true)
     }
@@ -108,7 +108,7 @@ final class DaemonNetworkContractTests: XCTestCase {
     func testEnablingWithoutConsentIsRefusedBeforeTheDaemonIsAsked() async {
         let transport = NetworkTransport(#"{"on":true,"state":"running","port":3128,"disclosure":"SAMPLE core disclosure"}"#)
         do {
-            _ = try await LiveDaemonClient(transport: transport).setPrivateAI(on: true, consent: nil)
+            _ = try await LiveDaemonClient(transport: transport).setNetworkPrivateAI(on: true, consent: nil)
             XCTFail("enabled with no consent")
         } catch {
             XCTAssertEqual(error as? DaemonDataError, .daemon(code: "bad_params", message: "confirmation-required"))
@@ -125,18 +125,22 @@ final class DaemonNetworkContractTests: XCTestCase {
         }
     }
 
-    func testEverySampleIsMarkedAndSpendIsUnknown() async throws {
+    /// Every hand-written network sample says so. Only the network methods:
+    /// the K2 recordings are real daemon replies and carry no marker (a few
+    /// hand-adjusted ones carry their own reason, see `SAMPLE_DATA.md`).
+    func testEveryNetworkSampleIsMarkedAndSpendIsUnknown() async throws {
         XCTAssertEqual(SampleDaemonClient.SampleSet.allCases.count, 7)
         for set in SampleDaemonClient.SampleSet.allCases where set != .coreDown {
             let client = SampleDaemonClient(set)
-            for method in ["status", "list_pending", "list_kept", "list_projects", "harness_list", "get_settings",
-                           "list_history", "history_rollup", "commons_credit_summary", "tool_destinations", "inference_calls",
-                           "inference_summary", "inference_call_proof", "model_spend", "private_ai", "mission_catalogue",
+            for method in ["inference_summary", "inference_call_proof", "model_spend", "private_ai", "mission_catalogue",
                            "invite_lookup", "passkey_state", "account_session_status"] {
                 let json = try XCTUnwrap(client.json(for: method))
                 let object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])
-                XCTAssertEqual(object["_sample"] as? String, "SAMPLE", "\(set): \(method)")
+                XCTAssertEqual(object["_sample"] as? String, "hand-written", "\(set): \(method)")
             }
+            let status = try XCTUnwrap(client.json(for: "status"))
+            let recorded = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(status.utf8)) as? [String: Any])
+            XCTAssertNotEqual(recorded["_sample"] as? String, "hand-written", "\(set): a K2 recording is not hand-written")
             let spend = try await client.modelSpend()
             XCTAssertFalse(spend.known, "default previews make no provider billing claim")
             XCTAssertTrue(spend.models.isEmpty)
@@ -146,10 +150,10 @@ final class DaemonNetworkContractTests: XCTestCase {
 
     func testSampleUnknownNetworkFactsStayUnknown() async throws {
         let client = SampleDaemonClient(.unknownCounts)
-        let summary = try await client.inferenceSummary()
+        let summary = try await client.networkInferenceSummary()
         XCTAssertFalse(summary.readable)
         XCTAssertNil(summary.summary)
-        let privateAI = try await client.privateAI()
+        let privateAI = try await client.networkPrivateAI()
         XCTAssertNil(privateAI.on)
         XCTAssertNil(privateAI.state)
         let passkey = try await client.passkeyState()
@@ -163,7 +167,7 @@ final class DaemonNetworkContractTests: XCTestCase {
 
     func testSampleEnablingNeedsAcknowledgement() async {
         do {
-            _ = try await SampleDaemonClient(.normalDay).setPrivateAI(on: true, consent: nil)
+            _ = try await SampleDaemonClient(.normalDay).setNetworkPrivateAI(on: true, consent: nil)
             XCTFail("sample implied consent")
         } catch {
             XCTAssertEqual(error as? DaemonDataError, .daemon(code: "bad_params", message: "confirmation-required"))
@@ -172,7 +176,7 @@ final class DaemonNetworkContractTests: XCTestCase {
 
     func testLiveSummaryPreservesGroupsRouteTotalsAndIncompletePricing() async throws {
         let json = try XCTUnwrap(SampleDaemonClient(.normalDay).json(for: "inference_summary"))
-        let result = try await LiveDaemonClient(transport: NetworkTransport(json)).inferenceSummary()
+        let result = try await LiveDaemonClient(transport: NetworkTransport(json)).networkInferenceSummary()
         let summary = try XCTUnwrap(result.summary)
         XCTAssertTrue(summary.enabled)
         XCTAssertTrue(summary.receipts)
@@ -209,7 +213,7 @@ final class DaemonNetworkContractTests: XCTestCase {
 
     func testLiveCataloguePreservesEntryAndCoreDisclosureWithoutRewards() async throws {
         let json = try XCTUnwrap(SampleDaemonClient(.normalDay).json(for: "mission_catalogue"))
-        let result = try await LiveDaemonClient(transport: NetworkTransport(json)).missionCatalogue()
+        let result = try await LiveDaemonClient(transport: NetworkTransport(json)).networkMissionCatalogue()
         XCTAssertEqual(result.kind, "skill_evaluation")
         XCTAssertEqual(result.disclosure, "SAMPLE: catalogue consent disclosure from the Rust core")
         XCTAssertEqual(result.catalogue.schemaVersion, 1)
@@ -244,7 +248,7 @@ final class DaemonNetworkContractTests: XCTestCase {
         let zero = #"{"calls":0,"priced_calls":0,"cost_usd":0.0,"proof":{"verified":0,"gateway_only":0,"unattested":0,"pending":0,"unavailable":0,"failed":0,"outside":0,"unrecorded":0}}"#
         let group = #"{"model":null,"backend":"nearai","route":"routed","work_kind":null,"calls":18446744073709551615,"priced_calls":0,"cost_usd":0.0,"proof":\#(proof)}"#
         let reply = #"{"readable":true,"window_hours":24,"observed_at":"2026-10-02T00:00:00Z","summary":{"enabled":true,"receipts":true,"since":"2026-10-01T00:00:00Z","groups":[\#(group)],"routed":\#(total),"outside":\#(zero),"unknown":\#(zero)}}"#
-        let result = try await LiveDaemonClient(transport: NetworkTransport(reply)).inferenceSummary()
+        let result = try await LiveDaemonClient(transport: NetworkTransport(reply)).networkInferenceSummary()
         let summary = try XCTUnwrap(result.summary)
         let object = try wire(summary)
         let routed = try XCTUnwrap(object["routed"] as? [String: Any])
@@ -270,24 +274,24 @@ final class DaemonNetworkContractTests: XCTestCase {
         let cursor = "00000000-0000-4000-8000-000000000009"
         let page = #"{"kind":"skill_evaluation","disclosure":"SAMPLE core consent","catalogue":{"schema_version":1,"entries":[],"next_cursor":"\#(cursor)"}}"#
         let bare = NetworkTransport(page)
-        _ = try await LiveDaemonClient(transport: bare).missionCatalogue()
+        _ = try await LiveDaemonClient(transport: bare).networkMissionCatalogue()
         XCTAssertEqual(try bare.parameters().count, 0, "no bounds given, none sent")
 
         let first = NetworkTransport(page)
-        let firstPage = try await LiveDaemonClient(transport: first).missionCatalogue(limit: 2, before: nil)
+        let firstPage = try await LiveDaemonClient(transport: first).networkMissionCatalogue(limit: 2, before: nil)
         XCTAssertEqual(first.method, "mission_catalogue")
         XCTAssertEqual(try first.parameters() as NSDictionary, ["limit": 2] as NSDictionary)
         XCTAssertEqual(firstPage.catalogue.nextCursor, cursor)
 
         let second = NetworkTransport(#"{"kind":"skill_evaluation","disclosure":"SAMPLE core consent","catalogue":{"schema_version":1,"entries":[],"next_cursor":null}}"#)
         let secondPage = try await LiveDaemonClient(transport: second)
-            .missionCatalogue(limit: 2, before: firstPage.catalogue.nextCursor)
+            .networkMissionCatalogue(limit: 2, before: firstPage.catalogue.nextCursor)
         XCTAssertEqual(try second.parameters() as NSDictionary, ["limit": 2, "before": cursor] as NSDictionary)
         XCTAssertNil(secondPage.catalogue.nextCursor)
     }
 
     func testSampleCatalogueAcceptsPagingBounds() async throws {
-        let result = try await SampleDaemonClient(.normalDay).missionCatalogue(limit: 1, before: nil)
+        let result = try await SampleDaemonClient(.normalDay).networkMissionCatalogue(limit: 1, before: nil)
         XCTAssertEqual(result.kind, "skill_evaluation")
     }
 
@@ -295,23 +299,23 @@ final class DaemonNetworkContractTests: XCTestCase {
     /// off, even in a set whose switch reads on.
     func testSampleTurningOffAnswersOff() async throws {
         for set in [SampleDaemonClient.SampleSet.normalDay, .busyQueue, .empty] {
-            let result = try await SampleDaemonClient(set).setPrivateAI(on: false, consent: nil)
+            let result = try await SampleDaemonClient(set).setNetworkPrivateAI(on: false, consent: nil)
             XCTAssertEqual(result.on, false, "\(set)")
             XCTAssertEqual(result.state, "off", "\(set)")
             XCTAssertNil(result.port, "\(set)")
             XCTAssertFalse(result.disclosure.isEmpty, "\(set)")
         }
-        let shown = try await SampleDaemonClient(.empty).privateAI()
+        let shown = try await SampleDaemonClient(.empty).networkPrivateAI()
         let consent = try XCTUnwrap(DaemonData.PrivateAIConsent(acknowledging: shown))
-        let on = try await SampleDaemonClient(.empty).setPrivateAI(on: true, consent: consent)
+        let on = try await SampleDaemonClient(.empty).setNetworkPrivateAI(on: true, consent: consent)
         XCTAssertEqual(on.on, true)
         XCTAssertEqual(on.state, "running")
         XCTAssertNotNil(on.port)
     }
 
-    private func privateAISwitch(_ disclosure: String) throws -> DaemonData.PrivateAISwitch {
+    private func privateAISwitch(_ disclosure: String) throws -> DaemonData.NetworkPrivateAISwitch {
         let json = try JSONSerialization.data(withJSONObject: ["on": false, "state": "off", "port": NSNull(), "disclosure": disclosure])
-        return try DaemonDataDecoding.decoder().decode(DaemonData.PrivateAISwitch.self, from: json)
+        return try DaemonDataDecoding.decoder().decode(DaemonData.NetworkPrivateAISwitch.self, from: json)
     }
 
     private func wire<T: Encodable>(_ value: T) throws -> [String: Any] {

@@ -9,6 +9,7 @@
 
 import Foundation
 import SwiftUI
+import TCDesign
 import TCShellCore
 
 /// The exact Cloud organization and credential revision displayed to the user.
@@ -113,14 +114,15 @@ struct FundingRow: View {
     @State private var visible = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: TC.Space.sm) {
-            TCSectionHeader(title: copy.fundingTitle)
+        VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
+            GlassSectionRule(copy.fundingTitle)
             Text(status?.view.message ?? copy.fundingUnavailable)
-                .font(TC.Font_.body)
+                .glassType(GlassTokens.TypeScale.body)
+                .foregroundStyle(GlassColor.textPrimary)
                 .fixedSize(horizontal: false, vertical: true)
             Text(copy.fundingWhat)
-                .font(TC.Font_.meta)
-                .foregroundStyle(.secondary)
+                .glassType(GlassTokens.TypeScale.caption)
+                .foregroundStyle(GlassColor.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
             Button {
                 load(opening: status?.destination)
@@ -128,7 +130,7 @@ struct FundingRow: View {
                 Text(status?.destination == nil ? copy.fundingRefresh : copy.fundingManage)
                     .frame(minHeight: 44)
             }
-            .buttonStyle(.bordered)
+            .buttonStyle(GlassButtonStyle(.glass))
             .disabled(model.credentialBusy || request != nil)
         }
         .onAppear {
