@@ -58,11 +58,14 @@ final class PrivateInferenceActivationTests: XCTestCase {
         window.orderFront(nil)
         let firstRun = try XCTUnwrap(FirstRunCopy.decode(try XCTUnwrap(TCCoreCopy.firstRunCopyJSON())))
         // The first run's Folders step, every row unanswered, and nothing
-        // started by showing it. Continue is not pressed here (too faint to
-        // read back); its disabled rule is
+        // started by showing it. Read by a row's question, which only Folders
+        // asks: the eyebrow and the footer's links are too faint to read
+        // back, so Continue is not pressed here and its disabled rule is
         // `FoldersScreenTests.test_continueIsDisabledUntilEveryRowIsAnswered`.
-        let folders = try recognizedWords(await snapshot(hosting))
-        XCTAssertTrue(folders.contains(firstRun.frame.customSetupInstead), "Private AI must ask the first run's Folders")
+        let question = firstRun.folders.watchQuestion.replacingOccurrences(of: "{tool}", with: "Codex")
+        let folders = try await settledWords(hosting) { $0.contains(question) }
+        XCTAssertTrue(folders.contains(question),
+                      "Private AI must ask the first run's Folders")
         XCTAssertEqual(model.startup, .needsRoots, "showing Folders starts nothing")
         XCTAssertFalse(model.isStartingDaemon)
         // Each row's answer is a `GlassPicker` menu, which a synthesised
@@ -91,12 +94,28 @@ final class PrivateInferenceActivationTests: XCTestCase {
         XCTAssertFalse(model.status.loggedIn)
         XCTAssertTrue(model.status.consentScopes.isEmpty)
         XCTAssertFalse(model.isOnboardingComplete)
-        let words = try recognizedWords(await snapshot(hosting))
         let copy = try XCTUnwrap(model.privateInferenceCopy)
         let action = CredentialSurface.action(model.credentialStatus, calls: model.credentialCalls)
         XCTAssertEqual(action, .obtain)
         let label = try XCTUnwrap(CredentialSurface.actionLabel(action, copy: copy))
+        let words = try await settledWords(hosting) { $0.contains(label) }
         XCTAssertTrue(words.contains(label), "The fresh profile must have an actionable Cloud sign-in")
+    }
+
+    /// The window's words once `ready` holds, reading again for up to two
+    /// seconds: a slower runner draws the page a frame or two after the
+    /// state it reflects. The last read comes back either way, for the
+    /// caller's assertion.
+    @MainActor
+    private func settledWords(_ hosting: NSHostingView<AnyView>,
+                              until ready: (String) -> Bool) async throws -> String {
+        var words = ""
+        for _ in 0..<8 {
+            words = try recognizedWords(await snapshot(hosting))
+            if ready(words) { break }
+            try await Task.sleep(nanoseconds: 250_000_000)
+        }
+        return words
     }
 
     private func recognizedWords(_ image: Data) throws -> String {
