@@ -2437,7 +2437,7 @@ async fn pg_a_second_mac_signed_in_to_another_identity_is_refused_and_writes_not
         let text = String::from_utf8_lossy(&reply.bytes).to_string();
         for secret in [
             x_tenant.as_str(),
-            &x["account_id"].as_str().expect("account").to_string(),
+            x["account_id"].as_str().expect("account"),
             &x_anchor,
             account.tenant.as_str(),
             &account.account_id.to_string(),
