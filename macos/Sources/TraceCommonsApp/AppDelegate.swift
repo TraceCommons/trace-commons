@@ -28,7 +28,6 @@ import TCShellCore
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     var compute: ComputeModel?
-    var navigation: MainWindowNavigation?
     /// Read at quit time for one sentence, and for nothing else.
     ///
     /// With the listener inside this process, quitting stops answering
@@ -94,8 +93,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }, reply: { [weak self] stopped in
             if !stopped {
                 self?.compute?.noteQuitRefused()
-                self?.navigation?.section = .compute
-                OpenMainWindow.request()
+                OpenMonitor.request(.settings(.compute))
             }
             sender.reply(toApplicationShouldTerminate: stopped)
         })
@@ -108,7 +106,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         _ sender: NSApplication,
         hasVisibleWindows: Bool
     ) -> Bool {
-        if !hasVisibleWindows { OpenMainWindow.request() }
+        if !hasVisibleWindows { OpenMonitor.request() }
         return true
     }
 
@@ -122,12 +120,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// The invite reaches `PendingInvite` and nothing else. It is a
     /// credential, so it is not logged, not put in a window title, and not
     /// echoed in an error.
+    ///
+    /// D-14 (default taken): a link that arrives while already onboarded
+    /// only opens the Monitor. The request carries no destination; while
+    /// onboarding is required it routes to the first-run window, where the
+    /// Connect screen picks the invite up.
     func application(_ application: NSApplication, open urls: [URL]) {
         for url in urls {
             guard let invite = DeepLink.inviteURL(from: url) else { continue }
             PendingInvite.shared.set(invite)
             NSApp.activate(ignoringOtherApps: true)
-            OpenMainWindow.request()
+            OpenMonitor.request()
             return
         }
     }

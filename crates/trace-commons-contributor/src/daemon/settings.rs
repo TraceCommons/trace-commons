@@ -473,6 +473,18 @@ pub struct DaemonSettings {
     /// adapter; there is no conventional native database or export location.
     #[serde(default)]
     pub opencode_source: Option<SourceDeclaration>,
+    /// A folder of exported trajectory files the contributor chose, read
+    /// with the strict trajectory reader alongside the staging folder.
+    ///
+    /// Absent/null and Off both add no folder: there is no conventional
+    /// location, so an undeclared value builds nothing (the staging folder
+    /// is still read either way -- placing a file THERE is its own opt-in).
+    /// Deliberately not part of [`roots_declared`]: an absent folder reads
+    /// nothing, so it cannot gate starting. Sessions found here are never
+    /// armed for automatic upload; they always wait for a person (see the
+    /// trajectory check in `daemon::watcher`).
+    #[serde(default)]
+    pub trajectory_source: Option<SourceDeclaration>,
 
     /// An explicit local proxy declaration. Off refuses metadata; Watch
     /// keeps its endpoint. Absent permits the daemon to derive metadata only
@@ -1012,6 +1024,7 @@ impl Default for DaemonSettings {
             gemini_source: None,
             cline_source: None,
             opencode_source: None,
+            trajectory_source: None,
             ironwire: None,
             ironwire_attested_bodies: false,
             token_distributions_contribution: false,
@@ -1211,6 +1224,10 @@ impl DaemonSettings {
             .declare(crate::source::SOURCE_GEMINI_CLI, self.gemini_source.clone())
             .declare(crate::source::SOURCE_CLINE, self.cline_source.clone())
             .declare(crate::source::SOURCE_OPENCODE, self.opencode_source.clone())
+            .declare(
+                crate::source::SOURCE_TRAJECTORY,
+                self.trajectory_source.clone(),
+            )
             .with_trajectory(crate::source::TrajectorySelection::Auto {
                 working_dir: None,
                 staging_dir: Some(store.dir().join(crate::source::TRAJECTORY_STAGING_SUBDIR)),
@@ -1338,6 +1355,7 @@ pub fn source_settings_key(source: &str) -> Option<&'static str> {
         crate::source::SOURCE_GEMINI_CLI => Some("gemini_source"),
         crate::source::SOURCE_CLINE => Some("cline_source"),
         crate::source::SOURCE_OPENCODE => Some("opencode_source"),
+        crate::source::SOURCE_TRAJECTORY => Some("trajectory_source"),
         _ => None,
     }
 }
@@ -1505,6 +1523,9 @@ pub fn apply_settings_object(
             }
             "opencode_source" => {
                 settings.opencode_source = parse_source_declaration(value)?;
+            }
+            "trajectory_source" => {
+                settings.trajectory_source = parse_source_declaration(value)?;
             }
             // Unlike the source roots above, `null` here means **off**, not
             // "never asked" -- see `IronWireDeclaration`'s doc comment for
@@ -2931,6 +2952,108 @@ mod tests {
             Ok(true)
         );
         assert!(!enabled(&settings));
+    }
+
+    /// A trajectory folder is read only when the contributor named it.
+    ///
+    /// Probed by what is read, not by whether a source called `trajectory`
+    /// exists: the staging folder builds one on every daemon.
+    #[test]
+    fn trajectory_declaration_is_explicit_and_old_settings_stay_off() {
+        let (_dir, store) = temp_store();
+        let exports = tempfile::tempdir().unwrap();
+        let exported = exports.path().join("exported.json");
+        std::fs::write(
+            &exported,
+            serde_json::json!([
+                {"role": "meta", "source": "letta", "cwd": "/synthetic/project"},
+                {"role": "user", "content": "hello", "timestamp": "2026-08-30T10:00:00Z"}
+            ])
+            .to_string(),
+        )
+        .unwrap();
+        let mut value = serde_json::to_value(DaemonSettings::default()).unwrap();
+        value.as_object_mut().unwrap().remove("trajectory_source");
+        store
+            .write_daemon_file(DAEMON_SETTINGS_FILE, value.to_string().as_bytes())
+            .unwrap();
+        let mut settings = DaemonSettings::load(&store).unwrap();
+        let reads_the_folder = |s: &DaemonSettings| {
+            crate::source::all_sources(&s.source_roots(&store))
+                .iter()
+                .filter(|source| source.name() == crate::source::SOURCE_TRAJECTORY)
+                .flat_map(|source| source.discover().unwrap())
+                .any(|r| r.path == exported)
+        };
+        assert_eq!(settings.trajectory_source, None);
+        assert!(!reads_the_folder(&settings), "old settings read no folder");
+        assert_eq!(
+            source_settings_key(crate::source::SOURCE_TRAJECTORY),
+            Some("trajectory_source")
+        );
+        let declaration = serde_json::json!({
+            "trajectory_source": {"mode": "watch", "path": exports.path()}
+        });
+        assert_eq!(apply_settings_object(&mut settings, &declaration), Ok(true));
+        assert!(reads_the_folder(&settings));
+        assert!(
+            crate::source::all_sources(&settings.source_roots(&store))
+                .iter()
+                .filter(|source| source.name() == crate::source::SOURCE_TRAJECTORY)
+                .count()
+                == 1,
+            "one trajectory source carries both the staging and the declared folder"
+        );
+        settings.save(&store).unwrap();
+        assert_eq!(
+            DaemonSettings::load(&store).unwrap().trajectory_source,
+            settings.trajectory_source
+        );
+        assert_eq!(
+            apply_settings_object(
+                &mut settings,
+                &serde_json::json!({"trajectory_source": "/bare/path"})
+            ),
+            Err(ERR_SETTINGS_INVALID_VALUE)
+        );
+        assert_eq!(
+            apply_settings_object(
+                &mut settings,
+                &serde_json::json!({"trajectory_source": {"mode": "off"}})
+            ),
+            Ok(true)
+        );
+        assert!(!reads_the_folder(&settings));
+        assert_eq!(
+            apply_settings_object(
+                &mut settings,
+                &serde_json::json!({"trajectory_source": null})
+            ),
+            Ok(true)
+        );
+        assert!(!reads_the_folder(&settings));
+    }
+
+    /// The trajectory folder is offered, never required: an absent one reads
+    /// nothing, so it neither satisfies nor blocks the start gate.
+    #[test]
+    fn roots_declared_ignores_the_trajectory_folder() {
+        let declared = |path: &str| {
+            Some(SourceDeclaration::Watch {
+                path: PathBuf::from(path),
+            })
+        };
+        let only_trajectory = DaemonSettings {
+            trajectory_source: declared("/declared/exports"),
+            ..Default::default()
+        };
+        assert!(!roots_declared(&only_trajectory));
+        let without_trajectory = DaemonSettings {
+            claude_source: declared("/declared/claude"),
+            codex_source: Some(SourceDeclaration::Off),
+            ..Default::default()
+        };
+        assert!(roots_declared(&without_trajectory));
     }
 
     #[test]

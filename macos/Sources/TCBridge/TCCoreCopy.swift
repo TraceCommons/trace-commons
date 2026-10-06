@@ -118,10 +118,26 @@ public enum TCCoreCopy {
         take(tc_privacy_scan_copy_json())
     }
 
+    /// `tc_health_copy_json`: the health banner's words. `reachable` is this
+    /// shell's own liveness fact; a nil or empty `label` on a reachable
+    /// daemon is nil (nothing to show). A nil `maxQueueEntries` is passed as
+    /// -1 (unknown). Decoded by `TCShellCore.HealthLineCopy`.
+    public static func healthCopyJSON(reachable: Bool, label: String?, maxQueueEntries: Int?) -> String? {
+        let limit = Int64(maxQueueEntries ?? -1)
+        guard let label else { return take(tc_health_copy_json(reachable ? 1 : 0, nil, limit)) }
+        return take(label.withCString { tc_health_copy_json(reachable ? 1 : 0, $0, limit) })
+    }
+
     /// `tc_monitor_traces_copy_json`: the monitor's Traces words. Decoded by
     /// `TCShellCore.MonitorTracesCopy`.
     public static func monitorTracesCopyJSON() -> String? {
         take(tc_monitor_traces_copy_json())
+    }
+
+    /// `tc_first_run_copy_json`: the #1030 first run's words, grouped by
+    /// screen. Decoded by `TCShellCore.FirstRunCopy`.
+    public static func firstRunCopyJSON() -> String? {
+        take(tc_first_run_copy_json())
     }
 
     /// `tc_contribution_mode_copy_json`: the menu-bar Contribution mode
@@ -148,6 +164,13 @@ public enum TCCoreCopy {
     /// override write, from the IPC error's label.
     public static func contributionOverrideRefusalLine(label: String) -> String? {
         take(label.withCString { tc_contribution_override_refusal_text($0) })
+    }
+
+    /// `tc_contributor_disclosure_copy_json`: the disclosure bundle. The
+    /// monitor decodes its verdict, History and folder-mode tables with
+    /// `TCShellCore.ContributorDisclosureCopy`.
+    public static func contributorDisclosureCopyJSON() -> String? {
+        take(tc_contributor_disclosure_copy_json())
     }
 
     /// `tc_monitor_screens_copy_json`: the monitor's other screens' words.

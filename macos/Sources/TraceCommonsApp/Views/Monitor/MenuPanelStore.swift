@@ -1,4 +1,3 @@
-#if DEBUG
 import Foundation
 import Observation
 import TCBridge
@@ -180,6 +179,12 @@ final class MenuPanelStore {
 
 /// The popover's rules, as pure functions so they are tested.
 enum MenuPanelData {
+    /// Where "Manage rules" goes: the watched folders in Settings, or first
+    /// run while onboarding is required, with no Settings section (R-43).
+    static func manageRules(requiresOnboarding: Bool) -> MonitorDestination? {
+        requiresOnboarding ? nil : .settings(.watchedFolders)
+    }
+
     /// The roll-up of every listed folder's mode, for the mode pill.
     enum ModeRollup: Equatable {
         case ask, armed, never
@@ -213,14 +218,21 @@ enum MenuPanelData {
         }
     }
 
-    /// Whether the pill's list checks a row: an override's own mode while
-    /// one is in force, and the Mixed row (`mode` nil, each folder on its
-    /// own setting) while none is. Nothing is checked before the status
-    /// has been read.
-    static func listChecks(_ mode: String?, status: DaemonData.Status?) -> Bool {
-        guard let status else { return false }
-        guard let active = status.contributionOverride else { return mode == nil }
-        return mode != nil && active.mode == mode
+    /// Whether the pill's list checks a row, agreeing with the pill: an
+    /// override's own mode while one is in force; with none, the core's
+    /// roll-up, which is the Mixed row (`mode` nil) only when the folders
+    /// differ. Nothing is checked before the status has been read, or while
+    /// the core is down: a status kept from before is not a known mode.
+    static func listChecks(_ mode: String?, status: DaemonData.Status?, stale: Bool) -> Bool {
+        guard !stale, let status else { return false }
+        if let active = status.contributionOverride {
+            return mode != nil && active.mode == mode
+        }
+        switch rollup(status.contributionMode) {
+        case .mixed: return mode == nil
+        case .none: return false
+        case .ask, .armed, .never: return mode != nil && status.contributionMode == mode
+        }
     }
 
     /// The core's partial line, under Auto contribute exactly when the
@@ -279,7 +291,7 @@ enum MenuPanelData {
     /// outside model with their proof label.
     static func recent(
         pending: [DaemonData.QueueEntry], history: [DaemonData.HistoryRow], calls: [DaemonData.InferenceCall],
-        statusLabel: (String) -> String?, limit: Int = 3
+        statusLabel: (String?) -> String?, limit: Int = 3
     ) -> [Recent] {
         var rows: [Recent] = []
         for entry in pending {
@@ -289,10 +301,13 @@ enum MenuPanelData {
                 text: "\(entry.projectLabel) · \(MonitorWords.waiting)", trailing: nil))
         }
         for row in history {
-            guard let at = row.submittedAt, let status = row.status else { continue }
+            // A row with no status is still activity: the shared table
+            // reads it as unavailable, as the History list does.
+            guard let at = row.submittedAt else { continue }
             rows.append(Recent(
                 id: "history:\(row.submissionId)", kind: .contributed, at: at, tool: row.source.flatMap(tool),
-                text: "\(row.projectLabel ?? "—") · \(statusLabel(status) ?? status)", trailing: nil))
+                text: [row.projectLabel ?? "—", statusLabel(row.status)].compactMap { $0 }.joined(separator: " · "),
+                trailing: nil))
         }
         for call in calls where call.route == "outside" {
             rows.append(Recent(
@@ -307,4 +322,3 @@ enum MenuPanelData {
         SourceKind(rawValue: source).map(TracesTreeView.glassTool)
     }
 }
-#endif

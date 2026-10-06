@@ -12,6 +12,7 @@ mod css_contract;
 pub mod funding;
 pub mod history;
 pub mod insights;
+mod managed_sessions;
 pub mod mark;
 pub mod mission_drafts;
 pub mod onboarding;

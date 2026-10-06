@@ -1,4 +1,3 @@
-#if DEBUG
 import SwiftUI
 import TCBridge
 import TCDesign
@@ -6,12 +5,12 @@ import TCShellCore
 
 /// The menu-bar popover (R13 of #1173), from the "Menu bar item and
 /// popover" handoff: three state pills, a sub-list, the shared/kept legend
-/// and day graph, recent activity, and shortcuts into the app. Debug-only,
-/// in place of the shipping menu, until R15 (`TRACE_COMMONS_GLASS_MENU=1`).
+/// and day graph, recent activity, and shortcuts into the app. It is the
+/// app's only menu-bar item, in every build.
 ///
 /// The handoff's rules hold here:
-/// - Nothing is sent from the popover. The writes are the shipping menu's
-///   own (pausing, resuming, turning Private AI off) and the contribution
+/// - Nothing is sent from the popover. The writes are pausing, resuming,
+///   turning Private AI off (`PrivateInferenceTray`) and the contribution
 ///   override.
 /// - Private AI "On" opens the window at its destination; a menu press
 ///   never turns it on.
@@ -24,7 +23,6 @@ import TCShellCore
 struct MenuBarGlassPanel: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.openWindow) private var openWindow
-    @Environment(\.openSettings) private var openSettings
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let navigation: MainWindowNavigation
     let store: MenuPanelStore
@@ -58,8 +56,12 @@ struct MenuBarGlassPanel: View {
         .frame(width: Self.width)
         .modifier(PanelSurface(owns: ownsSurface))
         .animation(reduceMotion ? nil : GlassMotion.curve(GlassTokens.Motion.slide), value: sub)
-        // A fresh read on opening; the label follows the event stream.
+        // A fresh read on opening; the label follows the event stream. The
+        // app's own reads (the Private AI pill and Cmd-Shift-M read
+        // `model.daemonSettings`) refresh on opening too, as the legacy menu
+        // did.
         .task { await store.load() }
+        .onAppear { model.refreshAll() }
     }
 
     // MARK: Pills
@@ -73,7 +75,7 @@ struct MenuBarGlassPanel: View {
             if let label = model.privateInferenceCopy?.destination {
                 pill(.privateAI, caption: label, value: privateAIValue,
                      image: "arrow.left.arrow.right",
-                     fill: .solid(privateAIOn == true ? GlassTokens.Color.dataShared : GlassTokens.Color.menuPillOff))
+                     fill: .solid(privateAIPill == .on ? GlassTokens.Color.dataShared : GlassTokens.Color.menuPillOff))
             }
         }
         .frame(height: 44)
@@ -114,11 +116,25 @@ struct MenuBarGlassPanel: View {
     /// say, which is drawn as unknown, never as off.
     private var privateAIOn: Bool? { model.daemonSettings?.privateInferenceOn }
 
+    /// What the pill draws: the listener's reported tone, never the switch
+    /// alone, so a switch left on over a dead listener never reads On.
+    private var privateAIPill: MenuPanelStatus.PrivateAI {
+        MenuPanelStatus.privateAI(
+            on: privateAIOn,
+            tone: PrivateInferenceSurface.tone(model.privateInferenceState, calls: model.privateInferenceCalls))
+    }
+
+    /// On and Off in the core's words; a listener that is not working while
+    /// the switch is on reads the core's state line for it.
     private var privateAIValue: String {
-        switch privateAIOn {
-        case true?: MenuWords.on
-        case false?: MonitorWords.off
-        case nil: "—"
+        switch privateAIPill {
+        case .on: MenuWords.on
+        case .off: MonitorWords.off
+        case .notWorking:
+            model.privateInferenceCopy.map {
+                PrivateInferenceSurface.stateLine(model.privateInferenceState, copy: $0, calls: model.privateInferenceCalls)
+            } ?? "—"
+        case .unknown: "—"
         }
     }
 
@@ -173,12 +189,18 @@ struct MenuBarGlassPanel: View {
         }
     }
 
-    /// The overrides, in the core's words, with the core's roll-up checked,
-    /// its partial line under Auto contribute, and its override line and
-    /// clear action while one is in force. Choosing one shows that
-    /// override's core confirmation in place of the choices; only its
-    /// confirm button writes. While the core is down, loading or stale the
-    /// choices are disabled (`MenuPanelStore.canChooseOverride`).
+    /// The overrides, in the core's words, then the Mixed row (each folder
+    /// on its own setting, sub-lined with the core's `clear` description).
+    /// The checked row agrees with the pill (`MenuPanelData.listChecks`):
+    /// an override in force, else the core's roll-up; nothing while the
+    /// core is down. Auto contribute carries the core's partial line, and
+    /// the override line shows while one is in force. Choosing an override
+    /// shows its core confirmation in place of the choices; only its
+    /// confirm button writes. Choosing Mixed clears an override in one
+    /// press, unconfirmed by decision (#1254 review): clearing arms nothing
+    /// that each folder's own setting does not. While the core is down,
+    /// loading or stale every row is disabled
+    /// (`MenuPanelStore.canChooseOverride`).
     @ViewBuilder
     private var modeOptions: some View {
         if let copy = Self.modeCopy {
@@ -200,7 +222,7 @@ struct MenuBarGlassPanel: View {
                             choice.label,
                             sub: sub,
                             fill: .solid(Self.modeFill(choice.mode)),
-                            checked: MenuPanelData.listChecks(choice.mode, status: store.status)) {
+                            checked: MenuPanelData.listChecks(choice.mode, status: store.status, stale: store.stale)) {
                                 store.choose(choice.mode)
                             }
                             .accessibilityLabel(choice.label)
@@ -212,7 +234,7 @@ struct MenuBarGlassPanel: View {
                         copy.mixed,
                         sub: copy.clear,
                         fill: .mixed,
-                        checked: MenuPanelData.listChecks(nil, status: store.status)) {
+                        checked: MenuPanelData.listChecks(nil, status: store.status, stale: store.stale)) {
                             if store.status?.contributionOverride != nil {
                                 Task { await store.clearOverride() }
                             } else {
@@ -222,7 +244,9 @@ struct MenuBarGlassPanel: View {
                         .accessibilityLabel(copy.mixed)
                         .accessibilityHint(copy.clear)
                 }
-                .disabled(!store.canChooseOverride)
+                // No override before onboarding is done (R-43): it is a
+                // grant, and first run is where consent is asked.
+                .disabled(!store.canChooseOverride || model.requiresOnboarding)
                 if let refusal = store.overrideRefusal {
                     Text(refusal)
                         .glassType(GlassTokens.TypeScale.caption)
@@ -242,19 +266,19 @@ struct MenuBarGlassPanel: View {
         }
     }
 
-    /// The shipping menu's pause choices, in its words, or resume.
+    /// The pause choices (`MenuBarWords`), or resume.
     @ViewBuilder
     private var watchOptions: some View {
         if paused {
-            GlassOptionRow(MenuBarContent.resumeLabel, fill: .solid(GlassTokens.Color.blue), checked: false) {
+            GlassOptionRow(MenuBarWords.resume, fill: .solid(GlassTokens.Color.blue), checked: false) {
                 model.resume()
                 sub = nil
             }
         } else {
-            ForEach(Array([MenuBarContent.pauseHourLabel, MenuBarContent.pauseMorningLabel,
-                           MenuBarContent.pauseIndefiniteLabel].enumerated()), id: \.offset) { index, label in
+            ForEach(Array([MenuBarWords.pauseHour, MenuBarWords.pauseMorning,
+                           MenuBarWords.pauseIndefinite].enumerated()), id: \.offset) { index, label in
                 GlassOptionRow(label, fill: .solid(GlassTokens.Color.menuPillOff), checked: false) {
-                    model.pause(until: MenuBarContent.pauseUntil(index))
+                    model.pause(until: MenuBarWords.pauseUntil(index))
                     sub = nil
                 }
             }
@@ -268,14 +292,14 @@ struct MenuBarGlassPanel: View {
         if let copy = model.privateInferenceCopy {
             GlassOptionRow(MenuWords.on, sub: privateAIOn == true ? nil : copy.trayOpenToTurnOn,
                            fill: .solid(GlassTokens.Color.menuModeArmed), checked: privateAIOn == true) {
-                openMain(.privateInference)
+                open(.inference)
                 sub = nil
             }
             GlassOptionRow(MonitorWords.off, sub: privateAIOn == true ? copy.trayTurnOff : nil,
                            fill: .solid(GlassTokens.Color.menuPillOff), checked: privateAIOn == false) {
-                MenuBarContent.performPrivateInferenceTray(
+                PrivateInferenceTray.perform(
                     on: privateAIOn == true, turnOff: { model.applyPrivateInference(false) },
-                    open: { openMain(.privateInference) })
+                    open: { open(.inference) })
                 sub = nil
             }
             .disabled(privateAIOn == true && (model.privateInferenceBusy || model.daemonSettings?.privateInference == nil))
@@ -313,7 +337,7 @@ struct MenuBarGlassPanel: View {
     private var recent: some View {
         let rows = MenuPanelData.recent(
             pending: store.pending, history: store.history, calls: store.calls,
-            statusLabel: { model.publicRunCopy?.contributionStatusLabel(for: $0) })
+            statusLabel: { HomeFormat.historyStatusLabel(copy: model.publicRunCopy, $0) })
         if !rows.isEmpty && !store.stale {
             VStack(alignment: .leading, spacing: 0) {
                 Text(MenuWords.recentActivity)
@@ -324,9 +348,9 @@ struct MenuBarGlassPanel: View {
                 ForEach(rows) { row in
                     GlassActivityRow(tool: row.tool, text: row.text, trailing: row.trailing) {
                         switch row.kind {
-                        case .waiting: openMain(.queue)
-                        case .contributed: openMain(.history)
-                        case .call: openMain(.privateInference)
+                        case .waiting: open(.traces(entryId: nil))
+                        case .contributed: open(.home(.history))
+                        case .call: open(.inference)
                         }
                     }
                 }
@@ -337,11 +361,14 @@ struct MenuBarGlassPanel: View {
     // MARK: Menu items
 
     /// The handoff spaces these rows like the popover's own children: 8pt
-    /// between each row and hairline, for a row pitch of at least 28pt.
+    /// between each row's selection and the next. The rows stack with no
+    /// gap; each carries its own clear 4pt above and below
+    /// (`GlassMenuRowStyle`), so its hit rect is 32pt and a click between
+    /// two selections still lands on a row.
     private var menuItems: some View {
-        VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
+        VStack(alignment: .leading, spacing: 0) {
             hairline
-            Button { openMain(.queue) } label: {
+            Button { open(.traces(entryId: nil)) } label: {
                 HStack {
                     Text(FlowMapScene.dotPair(MenuWords.flagged, store.stale ? nil : MenuPanelData.flagged(store.pending)))
                     Spacer(minLength: 0)
@@ -349,10 +376,11 @@ struct MenuBarGlassPanel: View {
                 }
             }
             hairline
-            Button(MenuWords.manageRules) { openMain(.settings) }
+            Button(MenuWords.manageRules) { open(MenuPanelData.manageRules(requiresOnboarding: model.requiresOnboarding)) }
             Button(MenuWords.settings) {
                 NSApp.activate(ignoringOtherApps: true)
-                openSettings()
+                openWindow(id: WindowID.monitor)
+                navigation.requestSettings()
             }
             Button(MenuWords.quit) { NSApp.terminate(nil) }
         }
@@ -361,13 +389,13 @@ struct MenuBarGlassPanel: View {
 
     private var hairline: some View {
         Rectangle().fill(GlassColor.ink(0.12)).frame(height: 1)
+            .padding(.vertical, GlassTokens.Space.s2)
             .accessibilityHidden(true)
     }
 
-    private func openMain(_ section: MainWindowView.Section) {
-        navigation.section = section
-        NSApp.activate(ignoringOtherApps: true)
-        openWindow(id: WindowID.main)
+    /// The Monitor (or first run) at a destination; the handler raises it.
+    private func open(_ destination: MonitorDestination?) {
+        OpenMonitor.request(destination)
     }
 }
 
@@ -470,6 +498,26 @@ enum MenuPanelStatus {
         if unhealthy || decisionsOwed == nil { return .attention }
         return paused ? .paused : .live
     }
+
+    /// The Private AI pill's state.
+    enum PrivateAI: Equatable {
+        /// The core has not said whether the switch is on.
+        case unknown
+        case off
+        /// The switch is on and the listener reports clear.
+        case on
+        /// The switch is on but the listener refused, crashed, is stopping
+        /// or reports anything else: never drawn On.
+        case notWorking
+    }
+
+    /// On only while the switch is on AND the listener's tone is clear
+    /// (`PrivateInferenceIndicator.status`); fail closed otherwise.
+    static func privateAI(on: Bool?, tone: PrivateInferenceTone) -> PrivateAI {
+        guard let on else { return .unknown }
+        guard on else { return .off }
+        return PrivateInferenceIndicator.status(tone) == .on ? .on : .notWorking
+    }
 }
 
 /// The popover's single words and short labels, beside the core's copy.
@@ -486,8 +534,6 @@ enum MenuWords {
     static var settings: String { MonitorWords.table?.settings ?? "" }
     static var quit: String { MonitorWords.table?.quit ?? "" }
 }
-#endif
-
 #if DEBUG
 /// The menu-bar item and the popover under it, in a window: the same views
 /// on the same store, for reviewing them where the menu bar has no room.

@@ -46,24 +46,41 @@ final class MenuBarGlassPanelTests: XCTestCase {
         XCTAssertTrue(source.contains("store.status?.contributionMode"))
     }
 
-    /// The pill's list checks Mixed while no override is in force, and the
-    /// override's own mode, alone, while one is. Clearing it goes back to
-    /// Mixed. Nothing is checked before the status is read.
-    func test_theListChecksMixedUnlessAnOverrideIsInForce() async throws {
+    /// The list agrees with the pill: with no override it checks the
+    /// core's roll-up (Mixed only when the folders differ, otherwise that
+    /// mode's row), and while one is in force it checks the override's own
+    /// mode alone. Nothing is checked before the status is read or while
+    /// the core is down, even with a status still in hand.
+    func test_theListChecksTheRollupUnlessAnOverrideIsInForce() async throws {
         let client = SampleDaemonClient(.normalDay)
         let modes: [String?] = [nil, "notify_only", "auto_upload", "ignore"]
-        func checked(_ status: DaemonData.Status?) -> [String?] {
-            modes.filter { MenuPanelData.listChecks($0, status: status) }
+        func checked(_ status: DaemonData.Status?, stale: Bool = false) -> [String?] {
+            modes.filter { MenuPanelData.listChecks($0, status: status, stale: stale) }
         }
         XCTAssertEqual(checked(nil), [])
         let before = try await client.status()
-        XCTAssertEqual(checked(before), [nil])
+        XCTAssertEqual(before.contributionMode, "notify_only")
+        XCTAssertEqual(checked(before), ["notify_only"], "every folder on Ask me checks Ask me, not Mixed")
+        XCTAssertEqual(checked(try Self.status(before, contributionMode: "mixed")), [nil])
+        XCTAssertEqual(checked(try Self.status(before, contributionMode: "auto_upload")), ["auto_upload"])
+        XCTAssertEqual(checked(before, stale: true), [])
         _ = try await client.setContributionOverride(mode: .ignore, confirm: false)
         let overridden = try await client.status()
         XCTAssertEqual(checked(overridden), ["ignore"])
+        XCTAssertEqual(checked(overridden, stale: true), [], "a core-down panel shows no override as known")
         _ = try await client.clearContributionOverride()
         let cleared = try await client.status()
-        XCTAssertEqual(checked(cleared), [nil])
+        XCTAssertEqual(checked(cleared), ["notify_only"])
+    }
+
+    /// `status` with the core's roll-up replaced, through its own coding.
+    private static func status(_ status: DaemonData.Status, contributionMode: String) throws -> DaemonData.Status {
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(status)) as? [String: Any])
+        let key = try XCTUnwrap(object.first { $0.value as? String == status.contributionMode && $0.key.lowercased().hasPrefix("contribution") }?.key)
+        object[key] = contributionMode
+        let patched = try JSONDecoder().decode(DaemonData.Status.self, from: JSONSerialization.data(withJSONObject: object))
+        XCTAssertEqual(patched.contributionMode, contributionMode)
+        return patched
     }
 
     // MARK: Day graph
@@ -118,6 +135,32 @@ final class MenuBarGlassPanelTests: XCTestCase {
             pending: store.pending, history: store.history, calls: store.calls, statusLabel: { _ in nil })
         XCTAssertLessThanOrEqual(rows.count, 3)
         XCTAssertEqual(rows.map(\.at), rows.map(\.at).sorted(by: >))
+    }
+
+    /// With no word for a status the row names the project only, never the
+    /// raw wire token.
+    func test_recentActivityNeverShowsTheRawStatusToken() async throws {
+        let store = MenuPanelStore(client: SampleDaemonClient(.normalDay))
+        await store.load()
+        let statuses = Set(store.history.compactMap(\.status))
+        let rows = MenuPanelData.recent(
+            pending: [], history: store.history, calls: [], statusLabel: { _ in nil }, limit: 50)
+        XCTAssertFalse(rows.isEmpty)
+        for row in rows {
+            for status in statuses { XCTAssertFalse(row.text.contains(status), row.text) }
+        }
+    }
+
+    /// A row with no status is still recent activity, read with the shared
+    /// status table's unknown word, as the History list reads it.
+    func test_aRowWithNoStatusReadsStatusUnavailable() throws {
+        let copy = try XCTUnwrap(PublicRunCopy.decode(fromJSON: TCPublicRun.copyJSON() ?? ""))
+        let row = try DaemonDataDecoding.decoder().decode(DaemonData.HistoryRow.self, from: Data(
+            #"{"submission_id":"a","submitted_at":"2026-09-30T09:00:00Z","project_label":"repo","status":null}"#.utf8))
+        let rows = MenuPanelData.recent(
+            pending: [], history: [row], calls: [],
+            statusLabel: { HomeFormat.historyStatusLabel(copy: copy, $0) })
+        XCTAssertEqual(rows.map(\.text), ["repo · \(copy.contributionStatusUnavailable)"])
     }
 
     /// An outside call carries its proof label unless it was verified; a
@@ -178,6 +221,33 @@ final class MenuBarGlassPanelTests: XCTestCase {
         XCTAssertTrue(panel.contains("store.attach(model.daemonData, configDirectory: model.configDirectory)"))
     }
 
+    // MARK: Private AI pill
+
+    /// The pill reads what the listener reports, never the switch alone: a
+    /// switch left on over a listener that refused to start, crashed or is
+    /// stopping is never drawn On. Unknown is unknown, never Off.
+    func test_thePrivateAIPillFollowsTheListenerNotTheSwitch() throws {
+        let running = PrivateInferenceSurface.tone(
+            PrivateInferenceState(label: "running", port: 8080), calls: .testing)
+        XCTAssertEqual(MenuPanelStatus.privateAI(on: true, tone: running), .on)
+        for label in ["port_in_use", "start_failed", "crashed", "stopping", "unknown_state", ""] {
+            let tone = PrivateInferenceSurface.tone(PrivateInferenceState(label: label, port: nil), calls: .testing)
+            XCTAssertEqual(MenuPanelStatus.privateAI(on: true, tone: tone), .notWorking,
+                           "a switch on over \(label) must not read On")
+        }
+        XCTAssertEqual(MenuPanelStatus.privateAI(on: false, tone: running), .off)
+        XCTAssertEqual(MenuPanelStatus.privateAI(on: nil, tone: running), .unknown)
+        // The pill's fill and value come from that, not from the switch.
+        let url = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Sources/TraceCommonsApp/Views/Monitor/MenuBarGlassPanel.swift")
+        let source = try String(contentsOf: url, encoding: .utf8)
+        XCTAssertTrue(source.contains("MenuPanelStatus.privateAI(\n            on: privateAIOn,"))
+        XCTAssertTrue(source.contains("fill: .solid(privateAIPill == .on ? GlassTokens.Color.dataShared"))
+        XCTAssertFalse(source.contains("privateAIOn == true ? GlassTokens.Color.dataShared"))
+        XCTAssertFalse(source.contains("private var privateAIValue: String {\n        switch privateAIOn {"))
+    }
+
     // MARK: Badge
 
     func test_theBadgeCountsDecisionsOwedOnly() {
@@ -204,7 +274,7 @@ final class MenuBarGlassPanelTests: XCTestCase {
             XCTAssertFalse(source.contains(forbidden), "the popover contains \(forbidden)")
         }
         XCTAssertTrue(source.contains("modeOptions"))
-        XCTAssertTrue(source.contains(".disabled(!store.canChooseOverride)"),
+        XCTAssertTrue(source.contains(".disabled(!store.canChooseOverride || model.requiresOnboarding)"),
                       "the choices are disabled unless the store has positive evidence the core is up")
         XCTAssertTrue(source.contains("store.resolveConfirmation(confirmed:"))
     }

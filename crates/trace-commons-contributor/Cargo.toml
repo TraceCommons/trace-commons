@@ -603,6 +603,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 ring = "0.17"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+toml = "0.9"
 sha2 = "0.10"
 # A direct dependency, not dev-only: the Antigravity import command (staged
 # after this task) writes files to a scratch directory before upload, the

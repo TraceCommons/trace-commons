@@ -88,7 +88,7 @@ impl TraceSource for CodexSource {
 }
 
 /// The rollout naming rule, in one place: `rollout-<...>.jsonl`.
-fn is_rollout_file_name(file_name: &str) -> bool {
+pub(crate) fn is_rollout_file_name(file_name: &str) -> bool {
     file_name.starts_with("rollout-") && file_name.ends_with(".jsonl")
 }
 

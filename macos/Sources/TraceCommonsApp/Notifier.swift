@@ -31,10 +31,10 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
     }
 
     /// Registers the two-action category. Deliberately does NOT ask for
-    /// authorization: the macOS design spec has that asked at the end of
-    /// onboarding with a sentence saying what notifications are for, not
-    /// sprung at first launch before the app has said what it is. See
-    /// `requestAuthorization`, which the Done screen and Settings call.
+    /// authorization: it is asked with a sentence saying what notifications
+    /// are for, not sprung at first launch before the app has said what it
+    /// is. See `requestAuthorization`, which Settings' `StartupSection`
+    /// calls; the first run no longer offers it.
     func configure() {
         guard available else { return }
         let center = UNUserNotificationCenter.current()
@@ -85,7 +85,7 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
     )!
 
     /// The one sentence that says what a notification from this app is.
-    /// Shown above the permission button on the Done screen and in Settings.
+    /// Shown above the permission button in Settings (`StartupSection`).
     static let copy = TCOnboardingCopy.load()
     static var purpose: String { copy?.notificationPurpose ?? "" }
 

@@ -8712,6 +8712,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "toml 0.9.12+spec-1.1.0",
  "tower 0.5.3",
  "trace-commons-attestation",
  "trace-commons-build-info",

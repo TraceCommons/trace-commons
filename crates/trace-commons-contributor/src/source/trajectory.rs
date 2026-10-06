@@ -347,6 +347,14 @@ impl TrajectorySource {
                 .collect(),
         }
     }
+
+    /// Also read `path` as a declared location: a folder of exports the
+    /// contributor chose, read on the same strict terms as `--trajectory`.
+    #[must_use]
+    pub fn also_declared(mut self, path: PathBuf) -> Self {
+        self.scopes.push(Scope::Declared(path));
+        self
+    }
 }
 
 fn is_trajectory_file(path: &Path) -> bool {
