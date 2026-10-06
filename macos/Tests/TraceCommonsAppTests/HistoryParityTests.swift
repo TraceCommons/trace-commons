@@ -208,8 +208,10 @@ final class HistoryParityTests: XCTestCase {
                 + "{ model.publishPublicRun(record, draft: draft) } .buttonStyle(GlassButtonStyle(.primary)) "
                 + ".frame(minHeight: 44) .disabled(working)",
             // Fields carry their names for VoiceOver.
-            "TextField(copy.pageTitle, text: $title)", ".accessibilityLabel(copy.publicOutcome)",
-            ".accessibilityLabel(copy.reusableInstructions)", "TextField(copy.sourcePlaceholder, text: $source)",
+            "GlassTextField(copy.pageTitle, text: $title, prompt: copy.pageTitle, showsLabel: false)",
+            "GlassTextArea(copy.publicOutcome, text: $outcomeSummary, showsLabel: false)",
+            "GlassTextArea(copy.reusableInstructions, text: $workflow, showsLabel: false)",
+            "GlassTextField(copy.sourcePlaceholder, text: $source, prompt: copy.sourcePlaceholder, showsLabel: false)",
             // A publication error can be put away; the next attempt shows it again.
             "Button(ActionMessageBanner.coreDismissWord ?? ActionMessageBanner.dismissWord) { dismissedError = message }",
         ] {

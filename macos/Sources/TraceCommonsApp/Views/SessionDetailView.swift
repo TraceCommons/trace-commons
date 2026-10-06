@@ -267,34 +267,19 @@ private struct PublicRunEditor: View {
 
             VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
                 fieldLabel(copy.pageTitle, count: title.count, maximum: 100)
-                TextField(copy.pageTitle, text: $title)
-                    .labelsHidden()
-                    .textFieldStyle(.plain)
-                    .modifier(GlassFieldLook())
-                    .frame(minHeight: GlassTokens.Size.controlLarge)
-                    .background(fieldBackground)
+                GlassTextField(copy.pageTitle, text: $title, prompt: copy.pageTitle, showsLabel: false)
             }
 
             VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
                 fieldLabel(copy.publicOutcome, count: outcomeSummary.count, maximum: 600)
-                TextEditor(text: $outcomeSummary)
-                    .accessibilityLabel(copy.publicOutcome)
-                    .scrollContentBackground(.hidden)
-                    .modifier(GlassFieldLook())
-                    .padding(.vertical, GlassTokens.Space.s3)
+                GlassTextArea(copy.publicOutcome, text: $outcomeSummary, showsLabel: false)
                     .frame(minHeight: 88)
-                    .background(fieldBackground)
             }
 
             VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
                 fieldLabel(copy.reusableInstructions, count: workflow.count, maximum: 4_000)
-                TextEditor(text: $workflow)
-                    .accessibilityLabel(copy.reusableInstructions)
-                    .scrollContentBackground(.hidden)
-                    .modifier(GlassFieldLook())
-                    .padding(.vertical, GlassTokens.Space.s3)
+                GlassTextArea(copy.reusableInstructions, text: $workflow, showsLabel: false)
                     .frame(minHeight: 128)
-                    .background(fieldBackground)
             }
 
             VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
@@ -368,11 +353,7 @@ private struct PublicRunEditor: View {
 
             VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
                 eyebrow(copy.sourcePublicRun)
-                TextField(copy.sourcePlaceholder, text: $source)
-                    .textFieldStyle(.plain)
-                    .modifier(GlassFieldLook())
-                    .frame(minHeight: GlassTokens.Size.controlLarge)
-                    .background(fieldBackground)
+                GlassTextField(copy.sourcePlaceholder, text: $source, prompt: copy.sourcePlaceholder, showsLabel: false)
                 Text(copy.sourceHelp)
                     .glassType(GlassTokens.TypeScale.caption)
                     .foregroundStyle(GlassColor.textSecondary)
@@ -474,11 +455,6 @@ private struct PublicRunEditor: View {
         }
     }
 
-    private var fieldBackground: some View {
-        RoundedRectangle(cornerRadius: GlassTokens.Radius.control, style: .continuous)
-            .fill(GlassTokens.Color.fieldFill.color)
-    }
-
     private func evidenceBinding(_ id: String) -> Binding<Bool> {
         Binding(
             get: { selectedEvidence.contains(id) },
@@ -553,14 +529,3 @@ private struct PublicRunEditor: View {
 
 }
 
-/// A public-run field's type and inset (preamble §7, `GlassTextField`'s own
-/// shape): these fields need a character count and a multi-line editor,
-/// which `GlassTextField` has no seam for.
-private struct GlassFieldLook: ViewModifier {
-    func body(content: Content) -> some View {
-        content
-            .glassType(GlassTokens.TypeScale.label.weight(.regular))
-            .foregroundStyle(GlassColor.textPrimary)
-            .padding(.horizontal, 10)
-    }
-}

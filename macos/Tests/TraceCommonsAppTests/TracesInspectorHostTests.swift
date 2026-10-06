@@ -84,7 +84,9 @@ final class TracesInspectorHostTests: XCTestCase {
         // The window watches the keys and opens on a new one.
         let window = try Self.text("Views/MonitorWindowView.swift")
         XCTAssertTrue(window.contains("InspectorDemand.keys(model: model, traces: traces, selection: selection)"))
-        XCTAssertTrue(window.contains("if InspectorDemand.opens(previous: old, current: new) { showsInspector = true }"))
+        // Ron's shell keeps the last keys it saw (`lastDemand`).
+        XCTAssertTrue(window.contains(
+            "if InspectorDemand.opens(previous: lastDemand, current: current) { showsInspector = true }"))
     }
 
     /// A demand going away, or staying, never closes the inspector: only
@@ -169,7 +171,9 @@ final class TracesInspectorHostTests: XCTestCase {
         let flat = window.split(whereSeparator: \.isWhitespace).joined(separator: " ")
         // A restored closed inspector: the window appears with a demand.
         XCTAssertTrue(flat.contains(
-            ".onAppear { if InspectorDemand.opensOnAppear(keys: demandKeys) { showsInspector = true } }"))
+            ".onAppear { // `onChange` sees changes only:"))
+        XCTAssertTrue(flat.contains(
+            "if InspectorDemand.opensOnAppear(keys: demandKeys) { showsInspector = true } lastDemand = demandKeys"))
         // A narrow first layout seeds the inspector closed, unless a demand is there.
         XCTAssertTrue(flat.contains(
             "showsInspector = seed.showsInspector || InspectorDemand.opensOnAppear(keys: demandKeys)"))
@@ -195,7 +199,7 @@ final class TracesInspectorHostTests: XCTestCase {
         // The arming offer.
         model.setArmingOfferForTesting(ArmingOffer(projectId: "p1", projectLabel: "api", contributedCount: 3))
         let arming = InspectorDemand.keys(model: model, traces: traces, selection: nil)
-        XCTAssertTrue(arming.contains("arming:p1"))
+        XCTAssertTrue(arming.contains("offer:arming:p1"))
         XCTAssertTrue(InspectorDemand.opens(previous: none, current: arming))
 
         // The Private AI offer, while it is unanswered and off.
@@ -208,7 +212,7 @@ final class TracesInspectorHostTests: XCTestCase {
         offerModel.setDaemonSettingsForTesting(try DaemonClient(daemon: FrameDaemon(frame)).settings())
         XCTAssertTrue(offerModel.showsPrivateInferenceOffer)
         let offered = InspectorDemand.keys(model: offerModel, traces: traces, selection: nil)
-        XCTAssertTrue(offered.contains("private-ai-offer"))
+        XCTAssertTrue(offered.contains("offer:private-ai"))
         XCTAssertTrue(InspectorDemand.opens(previous: before, current: offered))
     }
 
@@ -222,16 +226,16 @@ final class TracesInspectorHostTests: XCTestCase {
         let folder = try XCTUnwrap(traces.tree.allFolders.first { traces.mayContributeFolder($0) && !$0.sessions.isEmpty })
         let model = AppModel()
         let idle = InspectorDemand.keys(model: model, traces: traces, selection: nil)
-        XCTAssertFalse(idle.contains { $0.hasPrefix("submit:") })
+        XCTAssertFalse(idle.contains { $0.hasPrefix("folder-submit:") })
         let submit = Task { await traces.contributeFolder(folder, verdict: nil) }
         await fulfillment(of: [entered], timeout: 2)
         let busy = InspectorDemand.keys(model: model, traces: traces, selection: nil)
-        XCTAssertTrue(busy.contains("submit:\(folder.id)"))
+        XCTAssertTrue(busy.contains("folder-submit:\(folder.id)"))
         XCTAssertTrue(InspectorDemand.opens(previous: idle, current: busy))
         transport.open()
         await submit.value
         XCTAssertFalse(InspectorDemand.keys(model: model, traces: traces, selection: nil)
-            .contains { $0.hasPrefix("submit:") })
+            .contains { $0.hasPrefix("folder-submit:") })
     }
 
     /// The contribution's and the folder's undo cards carry the core's

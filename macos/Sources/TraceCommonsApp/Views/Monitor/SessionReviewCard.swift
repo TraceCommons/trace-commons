@@ -113,7 +113,8 @@ struct SessionReviewCard: View {
                 Spacer(minLength: 0)
             }
         }
-        .sheet(item: $previewing) { PreviewSheet(entry: $0).environmentObject(model) }
+        // Over the whole window (`glassModalHost` at its root), not a sheet.
+        .glassModal(item: $previewing) { PreviewModal(entry: $0) { previewing = nil }.environmentObject(model) }
         .onChange(of: model.awaitingDecision.count) { _, _ in
             // Development hook, as the legacy queue's: opens the first
             // preview so the sheet can be captured. Never on by default.
@@ -300,25 +301,15 @@ struct SessionReviewCard: View {
                 Text(outcome.correctionQuestion)
                     .glassType(GlassTokens.TypeScale.label)
                     .foregroundStyle(GlassColor.textPrimary)
-                // A plain editor on the field fill: `GlassTextField` has no
-                // seam for the character cap.
-                TextEditor(text: Binding(
+                // The question above names it; the cap works on the binding.
+                GlassTextArea(outcome.correctionQuestion, text: Binding(
                     get: { draft.correction },
                     set: { text in
                         var next = self.draft.current(for: draft.entryId)
                         next.write(text, limit: outcome.maxCorrectionChars)
                         self.draft = next
-                    }))
-                    .glassType(GlassTokens.TypeScale.label.weight(.regular))
-                    .foregroundStyle(GlassColor.textPrimary)
-                    .frame(minHeight: 64, maxHeight: 140)
-                    .scrollContentBackground(.hidden)
-                    .padding(.horizontal, GlassTokens.Space.s5)
-                    .padding(.vertical, GlassTokens.Space.s3)
-                    .background(
-                        RoundedRectangle(cornerRadius: GlassTokens.Radius.control, style: .continuous)
-                            .fill(GlassTokens.Color.fieldFill.color))
-                    .accessibilityLabel(outcome.correctionQuestion)
+                    }), showsLabel: false)
+                    .frame(maxHeight: 140)
                     .accessibilityHint(outcome.correctionPlaceholder)
                 // The disclosure that a correction is stored as written:
                 // printed in full, never shortened for layout.

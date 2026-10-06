@@ -43,24 +43,12 @@ struct FolderInspector: View {
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            .confirmationDialog(
-                confirming?.title ?? "",
-                isPresented: Binding(get: { confirming != nil }, set: { if !$0 { confirming = nil } }),
-                titleVisibility: .visible,
-                presenting: confirming
-            ) { pending in
-                switch pending.words {
-                case .ignore(let copy):
-                    Button(copy.button, role: .destructive) { apply(pending.mode) }
-                    Button(words.inspector.cancel, role: .cancel) { confirming = nil }
-                case .arm(let copy):
-                    Button(copy.confirm) { apply(pending.mode) }
-                    Button(copy.decline, role: .cancel) { confirming = nil }
-                }
-            } message: { pending in
-                Text(pending.body)
+            // Whole-window confirmations, as the tree's: the destructive
+            // action right-most and never on Return; Escape cancels.
+            .glassModal(isPresented: Binding(get: { confirming != nil }, set: { if !$0 { confirming = nil } })) {
+                if let pending = confirming { confirmation(pending, words: words) }
             }
-            .sheet(isPresented: $choosingVerdict) { submitAllAsSheet(words) }
+            .glassModal(isPresented: $choosingVerdict) { submitAllAsModal(words) }
         }
     }
 
@@ -142,40 +130,62 @@ struct FolderInspector: View {
     /// Ron's `SubmitAllAsControl`: one outcome for every eligible session,
     /// in the core's words, or Cancel.
     @ViewBuilder
-    private func submitAllAsSheet(_ words: MonitorTracesCopy) -> some View {
+    private func submitAllAsModal(_ words: MonitorTracesCopy) -> some View {
         if let outcome = store.disclosure?.outcome {
             let busy = store.writing.contains(folder.id)
-            GlassSheet(title: outcome.submitAllAs, subtitle: outcome.submitAllAsTooltip) {
-                Text(Self.applyLine(store.groupOffer(folder).count, words: words))
-                    .glassType(GlassTokens.TypeScale.label)
-                    .foregroundStyle(GlassColor.textSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                HStack(spacing: GlassTokens.Space.s4) {
-                    Button(outcome.worked) {
-                        choosingVerdict = false
-                        Task { await Self.submitAllAs(.worked, folder: folder, store: store) }
-                    }
-                    .buttonStyle(GlassButtonStyle(.primary, small: true))
-                    Button(outcome.partly) {
-                        choosingVerdict = false
-                        Task { await Self.submitAllAs(.partly, folder: folder, store: store) }
-                    }
-                    .buttonStyle(GlassButtonStyle(.glass))
-                    Button(outcome.failed) {
-                        choosingVerdict = false
-                        Task { await Self.submitAllAs(.failed, folder: folder, store: store) }
-                    }
-                    .buttonStyle(GlassButtonStyle(.glass))
-                }
-                .disabled(busy)
-                HStack {
-                    Spacer(minLength: 0)
-                    Button(words.inspector.cancel) { choosingVerdict = false }
+            GlassModal(
+                title: outcome.submitAllAs, subtitle: outcome.submitAllAsTooltip, width: .narrow,
+                actions: [.cancel(words.inspector.cancel) { choosingVerdict = false }],
+                onCancel: { choosingVerdict = false }
+            ) {
+                GlassModalBody {
+                    Text(Self.applyLine(store.groupOffer(folder).count, words: words))
+                        .glassType(GlassTokens.TypeScale.label)
+                        .foregroundStyle(GlassColor.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    HStack(spacing: GlassTokens.Space.s4) {
+                        Button(outcome.worked) {
+                            choosingVerdict = false
+                            Task { await Self.submitAllAs(.worked, folder: folder, store: store) }
+                        }
+                        .buttonStyle(GlassButtonStyle(.primary, small: true))
+                        Button(outcome.partly) {
+                            choosingVerdict = false
+                            Task { await Self.submitAllAs(.partly, folder: folder, store: store) }
+                        }
                         .buttonStyle(GlassButtonStyle(.glass))
-                        .keyboardShortcut(.cancelAction)
+                        Button(outcome.failed) {
+                            choosingVerdict = false
+                            Task { await Self.submitAllAs(.failed, folder: folder, store: store) }
+                        }
+                        .buttonStyle(GlassButtonStyle(.glass))
+                    }
+                    .disabled(busy)
                 }
             }
-            .frame(minWidth: 360)
+        }
+    }
+
+    /// A rule change's confirmation, in the core's words for this folder.
+    private func confirmation(_ pending: TracesTreeView.Confirmation, words: MonitorTracesCopy) -> GlassConfirmation {
+        let cancel = { confirming = nil }
+        switch pending.words {
+        case .ignore(let copy):
+            return GlassConfirmation(
+                title: pending.title, message: pending.body,
+                actions: [
+                    .cancel(words.inspector.cancel, action: cancel),
+                    .destructive(copy.button) { apply(pending.mode) },
+                ],
+                onCancel: cancel)
+        case .arm(let copy):
+            return GlassConfirmation(
+                title: pending.title, message: pending.body,
+                actions: [
+                    .cancel(copy.decline, action: cancel),
+                    GlassModalAction(copy.confirm, isDefault: true) { apply(pending.mode) },
+                ],
+                onCancel: cancel)
         }
     }
 

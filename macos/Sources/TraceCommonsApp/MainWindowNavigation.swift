@@ -1,4 +1,3 @@
-import Foundation
 import Observation
 
 /// Window selection is independent of watcher startup and trace onboarding.
@@ -34,23 +33,4 @@ final class MainWindowNavigation {
 
     var displaysInsights: Bool { section == .insights }
     var displaysCompute: Bool { section == .compute }
-
-    /// Settings, asked for: the Monitor draws it as Ron's #1146 modal over
-    /// its panes while this is set, and closing the modal clears it (#1241
-    /// Task 10). Cmd-comma, the Monitor's gear and the menu-bar popover each
-    /// set it; nil is closed.
-    var settingsRequest: SettingsRequest?
-
-    /// Ask for Settings, opened at `section` (scrolled straight to it), or
-    /// at the top for nil. Each request is new, so asking again for the
-    /// same section while the modal is open scrolls to it again.
-    func requestSettings(at section: SettingsSection? = nil) {
-        settingsRequest = SettingsRequest(section: section)
-    }
-}
-
-/// One ask for Settings: the section to open at, if any.
-struct SettingsRequest: Equatable, Identifiable {
-    let id = UUID()
-    let section: SettingsSection?
 }

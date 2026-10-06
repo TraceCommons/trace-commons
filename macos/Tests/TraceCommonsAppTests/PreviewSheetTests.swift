@@ -80,14 +80,16 @@ final class PreviewSheetTests: XCTestCase {
         }
         let footer = try Self.declaration("private var footer: some View {", in: sheet)
         XCTAssertEqual(footer.components(separatedBy: "Button(").count - 1, 1, "the footer holds one control: \(footer)")
-        XCTAssertTrue(footer.contains("Button(close) { dismiss() }"), "the one control is the core's Close")
+        // `close()`: the modal's close when raised in one (Ron's
+        // `PreviewModal`), the sheet's dismiss otherwise.
+        XCTAssertTrue(footer.contains("Button(closeLabel) { close() }"), "the one control is the core's Close")
         // Never a Close with no name: the Look-inside table's word, else the
         // core's other Close, else no visible control (Escape still closes).
         XCTAssertFalse(footer.contains("?? \"\""), "a missing table must not draw an unnamed control")
-        XCTAssertTrue(footer.contains("if let close = closeWord {"))
+        XCTAssertTrue(footer.contains("if let closeLabel = closeWord {"))
         XCTAssertTrue(sheet.contains("private var closeWord: String? { words?.close ?? Self.fallbackClose }"))
         // With no Close word, Escape still closes, from an unseen control.
-        XCTAssertTrue(sheet.contains("if closeWord == nil {\n                Button(\"\") { dismiss() }\n"
+        XCTAssertTrue(sheet.contains("if closeWord == nil {\n                Button(\"\") { close() }\n"
                                      + "                    .keyboardShortcut(.cancelAction)\n"))
         XCTAssertTrue(sheet.contains("TCCoreCopy.firstRunCopyJSON().flatMap(FirstRunCopy.decode)?.passkey.close"),
                       "the fallback Close is the core's word too")
@@ -133,10 +135,10 @@ final class PreviewSheetTests: XCTestCase {
         XCTAssertTrue(sheet.contains("WitnessReviewConsent(copy: copy, confirmLine: words?.witnessConfirmLine,"))
         let consentStart = try XCTUnwrap(sheet.range(of: "struct WitnessReviewConsent: View {")).lowerBound
         let consent = String(sheet[consentStart...])
-        XCTAssertTrue(consent.contains(".toggleStyle(GlassCheckboxStyle())"))
+        XCTAssertTrue(consent.contains("GlassCheckRow(confirmLine, isOn: $confirmed)"))
         // Fail closed: a caller without the core's tick line cannot confirm.
-        XCTAssertTrue(consent.contains(".disabled(confirmLine == nil || !confirmed)"))
-        XCTAssertFalse(consent.contains(".disabled(confirmLine != nil && !confirmed)"))
+        XCTAssertTrue(consent.contains("isEnabled: confirmLine != nil && confirmed"))
+        XCTAssertFalse(consent.contains("isEnabled: confirmLine == nil || confirmed"))
         // Every caller passes the core's tick line, the screenshot hook included.
         let screenshot = try Self.text("DebugScreenshot.swift")
         XCTAssertFalse(screenshot.contains("WitnessReviewConsent(copy: copy, onConfirm: {})"),

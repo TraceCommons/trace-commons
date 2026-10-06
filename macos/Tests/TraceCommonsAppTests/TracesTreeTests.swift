@@ -854,22 +854,26 @@ final class TracesFolderFirstTreeTests: XCTestCase {
         XCTAssertEqual(store.tree.folders.map(\.label), ["api", "web"])
     }
 
-    /// An ignored folder stays in the tree (Ron), drawn off and saying the
-    /// core's "ignored" line, with a switch back to Ask me and no Submit.
-    /// It resolves as a selection, so its inspector can show its rule.
+    /// An ignored folder is drawn while the View menu's "Show ignored
+    /// folders" asks for it (Ron's shell; hidden by default), drawn off and
+    /// saying the core's "ignored" line, with a switch back to Ask me and
+    /// no Submit. It resolves as a selection, so its inspector can show its
+    /// rule.
     func test_ignoredFoldersStayInTheTree() throws {
         let words = try XCTUnwrap(Self.words)
         let project = ProjectRow(projectId: "p1", projectLabel: "quiet", projectPath: "/x", mode: .ignore)
-        let tree = TracesTree.build(entries: [], projects: [project], settings: nil, scansWhenUnset: [])
+        let hidden = TracesTree.build(entries: [], projects: [project], settings: nil, scansWhenUnset: [])
+        XCTAssertTrue(hidden.folders.isEmpty, "hidden by default")
+        XCTAssertNil(hidden.resolve(.folder(projectID: "p1")))
+        let tree = TracesTree.build(entries: [], projects: [project], settings: nil, scansWhenUnset: [], showsIgnored: true)
         let folder = try XCTUnwrap(tree.folders.first)
         XCTAssertEqual(tree.folders.map(\.id), ["p1"])
         XCTAssertEqual(folder.mode, .ignore)
         XCTAssertEqual(folder.path, "/x")
         XCTAssertEqual(tree.resolve(.folder(projectID: "p1")), .folder(projectID: "p1"))
         XCTAssertEqual(TracesTreeView.visibleRows(in: tree, collapsed: []), [.folder(projectID: "p1")])
-        // The flow map's per-tool aggregate still leaves it out.
-        XCTAssertTrue(tree.tools.isEmpty)
-        XCTAssertTrue(tree.unplaced.isEmpty)
+        // Shown, it is on the map too (Ron's `MonitorShellTests`).
+        XCTAssertEqual(tree.unplaced.map(\.id), ["p1"])
 
         let labels = try XCTUnwrap(TracesStore.disclosureCopy).folderModeLabels
         XCTAssertEqual(TracesTreeView.folderSub(folder, words: words, modeLabels: labels), words.tree.ignoredFolder)
@@ -912,11 +916,11 @@ final class TracesFolderFirstTreeTests: XCTestCase {
         let inspector = try XCTUnwrap(source.range(of: "struct PreviewSlot"))
         let tree = String(source[treeView.lowerBound..<inspector.lowerBound])
         XCTAssertEqual(tree.components(separatedBy: "perform(.dismiss").count - 1, 1, "one dismiss, in the confirmation")
-        let title = try XCTUnwrap(tree.range(of: "GlassSheet(title: words.tree.dismissSessionTitle"))
+        let title = try XCTUnwrap(tree.range(of: "title: words.tree.dismissSessionTitle"))
         let dismiss = try XCTUnwrap(tree.range(of: "perform(.dismiss"))
         XCTAssertLessThan(title.lowerBound, dismiss.lowerBound, "the dismiss is inside the confirmation")
         for needle in ["menuLabel: words?.tree.dismissSession ?? \"\"", "onMenu: { sessionMenu = ",
-                       "dismissing = entry", ".sheet(item: $dismissing)", "words.tree.dismissSessionKeep",
+                       "dismissing = entry", ".glassModal(item: $dismissing)", "words.tree.dismissSessionKeep",
                        "words.dismissAction", "words.tree.dismissing", "words.tree.dismissSessionFailed"] {
             XCTAssertTrue(tree.contains(needle), "the tree lacks \(needle)")
         }

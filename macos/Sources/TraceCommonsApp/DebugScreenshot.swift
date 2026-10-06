@@ -78,7 +78,7 @@ enum DebugScreenshot {
                 render(
                     WitnessReviewConsent(
                         copy: copy, confirmLine: lookInside?.witnessConfirmLine,
-                        confirmLabel: lookInside?.witnessConfirmLabel, onConfirm: {}),
+                        confirmLabel: lookInside?.witnessConfirmLabel, onCancel: {}, onConfirm: {}),
                     to: directory + "/macos-shell-witness-review-consent.png",
                     size: CGSize(width: 560, height: 390)
                 )

@@ -90,7 +90,7 @@ struct TracesTreeView: View {
                 GlassNotice(tone: .outside, title: line) { EmptyView() }
             }
             if store.phase == .loading && isEmpty {
-                ProgressView().controlSize(.small).frame(maxWidth: .infinity)
+                GlassSpinner(standalone: true).frame(maxWidth: .infinity)
             } else if isEmpty && store.phase == .loaded {
                 VStack(spacing: GlassTokens.Space.s2) {
                     Image(systemName: "tray")
@@ -138,25 +138,36 @@ struct TracesTreeView: View {
                 }
             }
         }
-        .confirmationDialog(
-            confirming?.title ?? "",
-            isPresented: Binding(get: { confirming != nil }, set: { if !$0 { confirming = nil } }),
-            titleVisibility: .visible,
-            presenting: confirming
-        ) { pending in
-            switch pending.words {
-            case .ignore(let copy):
-                Button(copy.button, role: .destructive) { apply(pending.folder, pending.mode) }
-                // The system's word, as the Waiting screen's ignore uses.
-                Button("Cancel", role: .cancel) { confirming = nil }
-            case .arm(let copy):
-                Button(copy.confirm) { apply(pending.folder, pending.mode) }
-                Button(copy.decline, role: .cancel) { confirming = nil }
-            }
-        } message: { pending in
-            Text(pending.body)
+        // Whole-window confirmations: the destructive action right-most and
+        // never on Return; Escape cancels.
+        .glassModal(isPresented: Binding(get: { confirming != nil }, set: { if !$0 { confirming = nil } })) {
+            if let pending = confirming { confirmation(pending) }
         }
-        .sheet(item: $dismissing) { dismissSheet($0) }
+        .glassModal(item: $dismissing) { dismissModal($0) }
+    }
+
+    /// A mode change's confirmation, in the core's words for that folder.
+    private func confirmation(_ pending: Confirmation) -> GlassConfirmation {
+        let cancel = { confirming = nil }
+        switch pending.words {
+        case .ignore(let copy):
+            return GlassConfirmation(
+                title: pending.title, message: pending.body,
+                actions: [
+                    // The system's word, as the Waiting screen's ignore uses.
+                    .cancel("Cancel", action: cancel),
+                    .destructive(copy.button) { apply(pending.folder, pending.mode) },
+                ],
+                onCancel: cancel)
+        case .arm(let copy):
+            return GlassConfirmation(
+                title: pending.title, message: pending.body,
+                actions: [
+                    .cancel(copy.decline, action: cancel),
+                    GlassModalAction(copy.confirm, isDefault: true) { apply(pending.folder, pending.mode) },
+                ],
+                onCancel: cancel)
+        }
     }
 
     // MARK: Folder modes
@@ -435,37 +446,39 @@ struct TracesTreeView: View {
         }
     }
 
-    /// Ron's Dismiss-session confirmation: the session named by when and
-    /// size, Keep it, and Dismiss, which is the only dismiss the tree has.
-    /// A refusal is said here, and the confirmation stays open over it.
+    /// Ron's Dismiss-session confirmation, raised over the whole window: the
+    /// session named by when and size, Keep it, and Dismiss, which is the
+    /// only dismiss the tree has, right-most and never on Return. A refusal
+    /// is said here, and the confirmation stays open over it.
     @ViewBuilder
-    private func dismissSheet(_ entry: DaemonData.QueueEntry) -> some View {
+    private func dismissModal(_ entry: DaemonData.QueueEntry) -> some View {
         if let words = store.words {
             let busy = store.acting.contains(entry.entryId)
-            GlassSheet(title: words.tree.dismissSessionTitle, subtitle: Self.dismissBody(entry, words: words)) {
-                if let refused = store.actionError, refused.entryId == entry.entryId {
-                    GlassNotice(tone: .outside, title: words.tree.dismissSessionFailed) {
-                        Text(words.line(for: refused.error))
-                    }
-                }
-                HStack(spacing: GlassTokens.Space.s4) {
-                    Spacer(minLength: 0)
-                    Button(words.tree.dismissSessionKeep) { dismissing = nil }
-                        .buttonStyle(GlassButtonStyle(.glass))
-                        .keyboardShortcut(.cancelAction)
-                    Button(busy ? words.tree.dismissing : words.dismissAction) {
+            let keep = { dismissing = nil }
+            GlassModal(
+                title: words.tree.dismissSessionTitle, subtitle: Self.dismissBody(entry, words: words),
+                width: .narrow,
+                actions: [
+                    .cancel(words.tree.dismissSessionKeep, action: keep),
+                    .destructive(busy ? words.tree.dismissing : words.dismissAction, isEnabled: !busy) {
                         Task {
                             await store.perform(.dismiss, on: entry.entryId)
                             guard store.actionError?.entryId != entry.entryId else { return }
                             dismissing = nil
                             if selection == .session(entryID: entry.entryId) { selection = nil }
                         }
+                    },
+                ],
+                onCancel: keep
+            ) {
+                if let refused = store.actionError, refused.entryId == entry.entryId {
+                    GlassModalBody {
+                        GlassNotice(tone: .outside, title: words.tree.dismissSessionFailed) {
+                            Text(words.line(for: refused.error))
+                        }
                     }
-                    .buttonStyle(GlassButtonStyle(.glass))
                 }
-                .disabled(busy)
             }
-            .frame(minWidth: 360)
         }
     }
 

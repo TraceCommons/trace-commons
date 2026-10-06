@@ -68,47 +68,29 @@ struct TracesInspectorHost: View {
 }
 
 /// What the inspector must show has appeared (Ron's `useInspectorDemand`,
-/// `monitor-shell.tsx:98-107`): an undo, a selected session, a folder's
-/// Submit all in flight, the arming offer, the Private AI offer. Each is a
-/// key; a key that was not there before opens the inspector, and a key
-/// going away closes nothing.
-@MainActor
-enum InspectorDemand {
+/// `monitor-shell.tsx:98-107`), read from the app and the Traces store:
+/// the shell's keys (`InspectorDemand.keys(approvalUndo:...)`: an undo, a
+/// folder's Submit all in flight, the arming offer, the Private AI offer)
+/// and two of the port's. A key that was not there before opens the
+/// inspector, and a key going away closes nothing.
+extension InspectorDemand {
+    @MainActor
     static func keys(model: AppModel, traces: TracesStore, selection: MonitorSelection?) -> Set<String> {
-        var keys: Set<String> = []
+        var keys = keys(
+            approvalUndo: model.undo?.entryIDs, contributed: traces.lastContributed?.entryId, kept: traces.lastKept,
+            contributedFolder: traces.lastContributedFolder?.projectId, submittingFolder: traces.submittingFolder,
+            privateAIOffer: model.showsPrivateInferenceOffer, armingOffer: model.armingOffer?.projectId)
         if let undo = model.undo {
             // The approval's time, not its ticking count: a second approval
             // of the same session is a new undo, a tick is not.
-            keys.insert("undo:approval:\(undo.entryIDs.joined(separator: ","))@\(undo.approvedAt.timeIntervalSince1970)")
+            keys.insert("undo:approval-at:\(undo.approvedAt.timeIntervalSince1970)")
         }
-        if let contributed = traces.lastContributed {
-            keys.insert("undo:session:\(contributed.entryId)")
-        }
-        if let folder = traces.lastContributedFolder {
-            keys.insert("undo:folder:\(folder.projectId)")
-        }
-        if let kept = traces.lastKept {
-            keys.insert("undo:keep:\(kept)")
-        }
+        // A selected session: its card lives in the inspector. A folder is
+        // not a demand.
         if let entry = traces.selectedSession(selection) {
             keys.insert("review:\(entry.entryId)")
         }
-        if let folder = traces.submittingFolder {
-            keys.insert("submit:\(folder)")
-        }
-        if let offer = model.armingOffer {
-            keys.insert("arming:\(offer.projectId)")
-        }
-        if model.showsPrivateInferenceOffer {
-            keys.insert("private-ai-offer")
-        }
         return keys
-    }
-
-    /// Whether `current` holds a key `previous` did not. Never a reason to
-    /// close: the inspector closes only on the person's toggle.
-    static func opens(previous: Set<String>, current: Set<String>) -> Bool {
-        !current.subtracting(previous).isEmpty
     }
 
     /// Whether the keys there when the window appears open the inspector:

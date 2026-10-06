@@ -22,7 +22,7 @@ final class NativeOnboardingRenderTests: XCTestCase {
         let lookInside = try XCTUnwrap(
             MonitorTracesCopy.decode(fromJSON: TCCoreCopy.monitorTracesCopyJSON())?.lookInside)
         try render(WitnessReviewConsent(copy: copy, confirmLine: lookInside.witnessConfirmLine,
-                                        confirmLabel: lookInside.witnessConfirmLabel) { confirmed = true },
+                                        confirmLabel: lookInside.witnessConfirmLabel, onCancel: {}) { confirmed = true },
                    size: CGSize(width: 560, height: 390), to: directory.appendingPathComponent("native-witness-consent.png"))
         // Constructing this model does not start a daemon or inspect sessions.
         let model = AppModel()

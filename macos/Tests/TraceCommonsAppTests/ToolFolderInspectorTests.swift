@@ -38,7 +38,8 @@ final class ToolFolderInspectorTests: XCTestCase {
 
         // An ignored project from the core is still in the tree and resolves.
         let ignored = ProjectRow(projectId: "p1", projectLabel: "quiet", projectPath: "/x", mode: .ignore)
-        let tree = TracesTree.build(entries: [], projects: [ignored], settings: nil, scansWhenUnset: [])
+        let tree = TracesTree.build(
+            entries: [], projects: [ignored], settings: nil, scansWhenUnset: [], showsIgnored: true)
         XCTAssertEqual(tree.folders.first?.mode, .ignore)
         // The bucket's empty path is a dash, never a blank value.
         let words = try XCTUnwrap(store.words)
@@ -85,8 +86,10 @@ final class ToolFolderInspectorTests: XCTestCase {
         XCTAssertTrue(source.contains("TracesTreeView.modeChange(folder, wanted)"))
         XCTAssertTrue(source.contains("TracesTreeView.modeChange(folder, .ignore)"))
         XCTAssertEqual(source.components(separatedBy: "store.setFolderMode(").count - 1, 1, "one write, after the route")
-        XCTAssertTrue(source.contains("Button(copy.confirm)"))
-        XCTAssertTrue(source.contains("Button(copy.decline, role: .cancel)"))
+        // Ron's whole-window confirmation: arming is the default action,
+        // declining is the cancel.
+        XCTAssertTrue(source.contains("GlassModalAction(copy.confirm, isDefault: true) { apply(pending.mode) }"))
+        XCTAssertTrue(source.contains(".cancel(copy.decline, action: cancel)"))
     }
 
     /// Submit all as is a modal: each of its three outcomes sends that
@@ -109,7 +112,7 @@ final class ToolFolderInspectorTests: XCTestCase {
         }
 
         let source = try TracesParityTests.text("Views/Monitor/ToolFolderInspectors.swift")
-        let sheet = try XCTUnwrap(source.range(of: "GlassSheet(title: outcome.submitAllAs"))
+        let sheet = try XCTUnwrap(source.range(of: "title: outcome.submitAllAs, subtitle: outcome.submitAllAsTooltip"))
         let body = source[sheet.lowerBound...]
         for verdict in ["worked", "partly", "failed"] {
             XCTAssertTrue(body.contains("Self.submitAllAs(.\(verdict), folder: folder, store: store)"), verdict)

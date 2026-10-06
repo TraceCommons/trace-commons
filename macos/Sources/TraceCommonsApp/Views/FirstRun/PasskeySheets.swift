@@ -377,7 +377,7 @@ struct PasskeySheets: View {
                 Task { await model.verify() }
             } label: {
                 HStack(spacing: GlassTokens.Space.s3) {
-                    if model.busy { ProgressView().controlSize(.small) }
+                    if model.busy { GlassSpinner() }
                     Text(copy.passkey.verify)
                 }
             }
@@ -481,7 +481,9 @@ private struct FirstRunPasskeyPresenter: ViewModifier {
 
     func body(content: Content) -> some View {
         content
-            .sheet(isPresented: presented) {
+            // Over the whole first-run window, on the modal scrim; the
+            // sheets' own corners and Escape close them.
+            .glassModal(isPresented: presented) {
                 if let model {
                     PasskeySheets(copy: copy, model: model, returningName: nil) { outcome in
                         runner.finishPasskey(outcome, copy: copy)

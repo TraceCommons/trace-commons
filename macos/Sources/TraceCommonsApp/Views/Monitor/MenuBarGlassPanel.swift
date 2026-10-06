@@ -24,6 +24,7 @@ import TCShellCore
 struct MenuBarGlassPanel: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.openWindow) private var openWindow
+    @Environment(\.openSettings) private var openSettings
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let navigation: MainWindowNavigation
     let store: MenuPanelStore
@@ -339,8 +340,7 @@ struct MenuBarGlassPanel: View {
             Button(MenuWords.manageRules) { openMain(.settings) }
             Button(MenuWords.settings) {
                 NSApp.activate(ignoringOtherApps: true)
-                openWindow(id: WindowID.monitor)
-                navigation.requestSettings()
+                openSettings()
             }
             Button(MenuWords.quit) { NSApp.terminate(nil) }
         }

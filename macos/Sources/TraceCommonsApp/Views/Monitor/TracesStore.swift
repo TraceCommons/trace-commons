@@ -19,6 +19,19 @@ final class TracesStore {
 
     private(set) var phase: Phase = .loading
     private(set) var tree = TracesTree(tools: [], unplaced: [])
+    /// Whether the tree draws folders set to ignore (the View menu's "Show
+    /// ignored folders"; hidden by default, as #1146). Changing it redraws
+    /// the tree from the last read, without asking the core again.
+    var showsIgnored = false {
+        didSet {
+            guard showsIgnored != oldValue, let read = lastRead else { return }
+            tree = TracesTree.build(
+                entries: read.entries, projects: read.projects, settings: read.settings,
+                scansWhenUnset: Self.scansWhenUnset, showsIgnored: showsIgnored)
+        }
+    }
+    /// The last successful read the tree was built from.
+    @ObservationIgnored private var lastRead: (entries: [DaemonData.QueueEntry], projects: [ProjectRow], settings: DaemonData.Settings?)?
     /// The `set_project_mode` write in flight, by folder id.
     private(set) var writing: Set<String> = []
     /// The last `status` read; nil when it has not been read or failed. The
@@ -125,6 +138,7 @@ final class TracesStore {
         generation += 1
         phase = .loading
         tree = TracesTree(tools: [], unplaced: [])
+        lastRead = nil
         status = nil
         destinations = nil
         lastContributedFolder = nil
@@ -294,14 +308,16 @@ final class TracesStore {
             async let settings = try? client.settings()
             async let status = try? client.status()
             async let destinations = try? client.toolDestinations()
+            let read = (entries: try await entries, projects: try await projects.projects, settings: await settings)
             let built = TracesTree.build(
-                entries: try await entries, projects: try await projects.projects, settings: await settings,
-                scansWhenUnset: Self.scansWhenUnset)
-            let read = await status
+                entries: read.entries, projects: read.projects, settings: read.settings,
+                scansWhenUnset: Self.scansWhenUnset, showsIgnored: showsIgnored)
+            let statusRead = await status
             let routes = await destinations
             guard mine == generation else { return }
             tree = built
-            self.status = read
+            lastRead = read
+            self.status = statusRead
             self.destinations = routes
             phase = .loaded
         } catch {

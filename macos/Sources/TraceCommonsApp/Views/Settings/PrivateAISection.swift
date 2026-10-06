@@ -11,10 +11,6 @@ import TCShellCore
 struct PrivateAISection: View {
     @EnvironmentObject private var model: AppModel
     var navigation: MainWindowNavigation?
-    /// Where the pointer goes when Settings is the Monitor's modal: it closes
-    /// the modal and opens the Inference tab (Ron's #1146). Nil in the main
-    /// window, whose own Private AI destination the pointer opens.
-    var onPointer: (() -> Void)? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
@@ -28,11 +24,7 @@ struct PrivateAISection: View {
                         // The label is the destination's own, so the sidebar
                         // and this pointer can never name it differently.
                         Button(copy.destination) {
-                            if let onPointer {
-                                onPointer()
-                            } else {
-                                navigation?.section = .privateInference
-                            }
+                            navigation?.section = .privateInference
                         }
                         .buttonStyle(GlassButtonStyle(.link))
                     }
@@ -44,7 +36,7 @@ struct PrivateAISection: View {
                     RouteDisclosureGlassBody(disclosure: disclosure)
                 }
             case .loading:
-                ProgressView().controlSize(.small)
+                GlassSpinner(standalone: true)
             case .unreadable:
                 GlassEyebrowCard(RouteDisclosureUnreadableGlassLine.text(
                     line: nil, fallback: model.routeDisclosureUnreadableCopy?.title,
@@ -129,10 +121,8 @@ struct RouteDisclosureUnreadableGlassLine: View {
     var body: some View {
         let words = Self.text(line: line, fallback: fallback, unknown: Self.unknown)
         HStack(alignment: .firstTextBaseline, spacing: GlassTokens.Space.s3) {
-            Image(systemName: "exclamationmark.triangle.fill")
-                .imageScale(.small)
+            GlassWarningGlyph()
                 .foregroundStyle(GlassColor.textSecondary)
-                .accessibilityHidden(true)
             GlassStatusLabel(words, status: .ask)
         }
         .accessibilityElement(children: .combine)

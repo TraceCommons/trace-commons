@@ -1,6 +1,7 @@
 import AppKit
 import SwiftUI
 import TCBridge
+import TCDesign
 import TCShellCore
 
 /// Hosts Ron's first run (#1030): Quick setup (Join, Folders, Uses) and
@@ -78,7 +79,7 @@ struct OnboardingCoordinatorView: View {
                     copy: copy, runner: runner, onStep: onStep, takesInvites: takesInvites,
                     offersJoin: offersJoin, onComplete: onComplete)
             } else {
-                ProgressView().controlSize(.small)
+                GlassSpinner(standalone: true)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }

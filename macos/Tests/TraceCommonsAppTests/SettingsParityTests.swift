@@ -82,7 +82,7 @@ final class SettingsParityTests: XCTestCase {
                 copySources: ["ProjectArmingCopy.decode(fromJSON: TCCoreCopy.armingOfferCopyJSON(",
                               "ProjectCopy.unresolvedBucketNote", "TCCoreCopy.contributionModeCopyJSON()",
                               "SettingsLegacyWords.noProjectsYet"],
-                confirmations: [".confirmationDialog(", "presenting: armingCandidate"],
+                confirmations: [".glassModal(isPresented:", "GlassConfirmation(", "if let project = armingCandidate"],
                 accessibility: ["GlassPicker("],
                 forbidden: ["ProjectCopy.modeChoiceLabel"]),
         Section(glass: "Views/Settings/ChangesSection.swift",
@@ -107,7 +107,7 @@ final class SettingsParityTests: XCTestCase {
                               "PublicProfileCopy.goPublicAcknowledgement", "PublicProfileCopyCheck.failures()",
                               "SettingsLegacyWords.publishedLines", "SettingsLegacyWords.neverLines",
                               "SettingsLegacyWords.doNotTrustProfileWording"],
-                confirmations: ["GlassSheet("],
+                confirmations: ["GlassModal(", ".glassModal(isPresented: $showingGoPublic)"],
                 accessibility: [".accessibilityLabel(", "GlassCheckboxStyle()"]),
         Section(glass: "Views/Settings/WatchedFoldersSection.swift",
                 bindings: ["TCSourceChecks.settingsCopy()", "SourceKind.allCases", "TCDiscovery.sourcesJSON()",
@@ -166,9 +166,9 @@ final class SettingsParityTests: XCTestCase {
                               "storage.scopeNote", "storage.cleanupLabel", "storage.discardLabel", "storage.confirmLabel",
                               "storage.discardConfirmation"],
                 confirmations: ["showingInferenceDisclosure", "showingTokenDisclosure", "showingTokenCapture", "showingTokenDiscard",
-                                ".confirmationDialog("],
+                                ".glassModal(isPresented:", "GlassConfirmation("],
                 accessibility: [".accessibilityLabel(copy.urlTitle)", ".accessibilityLabel(copy.signingAddressTitle)",
-                                ".accessibilityLabel(copy.measurementsTitle)", ".accessibilityElement(children: .combine)"]),
+                                "GlassTextArea(copy.measurementsTitle,", ".accessibilityElement(children: .combine)"]),
         Section(glass: "Views/Settings/GlassSourceRow.swift",
                 bindings: ["SourceRowState.answer(", "FolderPanel.choose()"],
                 copySources: ["copy.watchCandidate", "tool.decline", "tool.chooseFolder"],
@@ -234,12 +234,16 @@ final class SettingsParityTests: XCTestCase {
         let closure = String(source[appear.upperBound...].prefix(while: { $0 != "}" }))
         XCTAssertTrue(closure.contains("model.refreshWitness()"), "onAppear does not refresh")
         XCTAssertEqual(source.components(separatedBy: "model.refreshWitness()").count - 1, 1)
-        XCTAssertEqual(source.components(separatedBy: "role: .cancel").count - 1, 4)
-        XCTAssertEqual(source.components(separatedBy: "role: .destructive").count - 1, 2)
+        // Four whole-window confirmations, each with its cancel; Discard is
+        // the one destructive answer (and its button reads destructive).
+        XCTAssertEqual(source.components(separatedBy: ".cancel(").count - 1, 4)
+        XCTAssertEqual(source.components(separatedBy: ".destructive(storage.confirmLabel)").count - 1, 1)
+        XCTAssertEqual(source.components(separatedBy: "role: .destructive").count - 1, 1)
         XCTAssertTrue(source.contains(".accessibilityHidden(copy.tokenHeading == nil)"))
         XCTAssertTrue(source.contains(".opacity(copy.tokenHeading == nil ? 0 : 1)"))
         XCTAssertTrue(source.contains(".disabled(copy.tokenHeading == nil)"))
-        XCTAssertEqual(source.components(separatedBy: ".confirmationDialog(").count - 1, 4)
+        XCTAssertEqual(source.components(separatedBy: ".glassModal(isPresented:").count - 1, 4)
+        XCTAssertFalse(source.contains(".confirmationDialog("))
         XCTAssertTrue(source.contains("GlassNotice(tone: .outside)"))
         XCTAssertFalse(source.contains("NativeFlowNotice"))
         XCTAssertEqual(WitnessSection.tone(.refused), .outside)
@@ -270,7 +274,7 @@ final class SettingsParityTests: XCTestCase {
         }
         XCTAssertTrue(source.contains("GlassStatusLabel(words, status: .ask)"),
                       "unreadable is not drawn with a glyph and words")
-        XCTAssertTrue(source.contains("ProgressView().controlSize(.small)"))
+        XCTAssertTrue(source.contains("GlassSpinner(standalone: true)"))
         XCTAssertFalse(source.lowercased().contains("private inference"))
         XCTAssertFalse(source.contains("MonitorWords"))
     }
@@ -284,7 +288,7 @@ final class SettingsParityTests: XCTestCase {
         XCTAssertEqual(Line.text(line: nil, fallback: nil, unknown: "unk"), "unk")
         XCTAssertFalse(Line.text(line: nil, fallback: nil, unknown: nil).isEmpty)
         let source = try? Self.text("Views/Settings/PrivateAISection.swift")
-        XCTAssertTrue(source?.contains("Image(systemName: \"exclamationmark.triangle.fill\")") ?? false)
+        XCTAssertTrue(source?.contains("GlassWarningGlyph()") ?? false)
         XCTAssertTrue(source?.contains(".accessibilityLabel(words)") ?? false)
     }
 
@@ -330,7 +334,7 @@ final class SettingsParityTests: XCTestCase {
         .watchedFolders: ("WatchedFoldersSection", [("if model.daemonSettings == nil {", "Text(copy.unavailable)")]),
         .tools: ("ToolsSection", [("if model.daemonSettings == nil {", "SettingsAwaiting()")]),
         .witness: ("WitnessSection", [("if model.daemonSettings == nil {", "SettingsAwaiting()")]),
-        .privateAI: ("PrivateAISection", [("case .loading:", "ProgressView()")]),
+        .privateAI: ("PrivateAISection", [("case .loading:", "GlassSpinner(standalone: true)")]),
         .projects: ("ProjectsSection", [("if !model.status.answered {", "SettingsAwaiting()")]),
         .changes: ("ChangesSection", [("if !model.status.answered {", "SettingsAwaiting()")]),
     ]
@@ -362,10 +366,11 @@ final class SettingsParityTests: XCTestCase {
                     "\(entry.file)'s `\(marker)` branch draws only a hidden frame")
             }
         }
-        // The shared state is the system's own progress indicator (R-20).
+        // The shared state is the glass spinner, a progress indicator to
+        // VoiceOver (R-20).
         let awaiting = try Self.text("Views/Settings/SettingsStateRow.swift")
         XCTAssertTrue(awaiting.contains("struct SettingsAwaiting: View"))
-        XCTAssertTrue(awaiting.contains("ProgressView()"))
+        XCTAssertTrue(awaiting.contains("GlassSpinner(standalone: true)"))
         // `.unknown` is the placeholder held until the first answer; a real
         // status always carries a schema version.
         XCTAssertFalse(DaemonStatus.unknown.answered)
@@ -398,17 +403,13 @@ final class SettingsParityTests: XCTestCase {
         XCTAssertFalse(source.contains("} content: {"))
     }
 
-    /// Settings (the Monitor's modal since #1241 Task 10) draws the glass
-    /// content and nothing else.
+    /// The window draws the glass content and nothing else.
     func test_theWindowDrawsGlassContent() throws {
-        for rel in ["Views/Monitor/SettingsModal.swift", "Views/MonitorWindowView.swift"] {
-            let source = try Self.text(rel)
-            // The glass view's name ends in the legacy one's, so the legacy
-            // call is looked for with the glass calls taken out.
-            XCTAssertFalse(source.replacingOccurrences(of: "GlassSettingsContent(", with: "").contains("SettingsContent("), rel)
-            XCTAssertFalse(source.contains(".tcScreen()"), rel)
-        }
-        let modal = try Self.text("Views/Monitor/SettingsModal.swift")
-        XCTAssertTrue(modal.contains("GlassSettingsContent(navigation: navigation, section: item, onPrivateAI: onPrivateAI)"))
+        let window = try Self.text("Views/MonitorWindowView.swift")
+        XCTAssertTrue(window.contains("GlassSettingsContent(navigation: navigation, section: section)"))
+        // The glass view's name ends in the legacy one's, so the legacy call
+        // is looked for with the glass calls taken out.
+        XCTAssertFalse(window.replacingOccurrences(of: "GlassSettingsContent(", with: "").contains("SettingsContent("))
+        XCTAssertFalse(window.contains(".tcScreen()"))
     }
 }

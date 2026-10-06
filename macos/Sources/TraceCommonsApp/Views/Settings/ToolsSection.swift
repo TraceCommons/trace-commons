@@ -177,10 +177,9 @@ struct ToolsSection: View {
                 .foregroundStyle(GlassColor.textPrimary)
                 .padding(.horizontal, 10)
                 .frame(maxWidth: 120, minHeight: GlassTokens.Size.controlLarge, alignment: .leading)
-                .background(
-                    RoundedRectangle(cornerRadius: GlassTokens.Radius.control, style: .continuous)
-                        .fill(GlassTokens.Color.fieldFill.color)
-                )
+                // `GlassTextField`'s well; the field itself stays a number
+                // field, which commits a whole port rather than each digit.
+                .glassFieldWell(invalid: false)
                 .labelsHidden()
                 .accessibilityLabel(copy.portTitle)
                 Text(copy.portNote)

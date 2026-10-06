@@ -130,22 +130,14 @@ struct WitnessSection: View {
                 }
                 // One measurement set per line. Emptying the box and saving
                 // is refused by the ABI; there is no keep-what-is-there mode.
-                GlassWell {
-                    TextEditor(text: Binding(
-                        get: { form.measurements },
-                        set: { value in
-                            var next = form
-                            next.measurements = value
-                            witnessDraft = next
-                        }
-                    ))
-                    .glassType(GlassTokens.TypeScale.mono)
-                    .foregroundStyle(GlassColor.textPrimary)
-                    .scrollContentBackground(.hidden)
-                    .frame(minHeight: 64)
-                    .padding(GlassTokens.Space.s2)
-                    .accessibilityLabel(copy.measurementsTitle)
-                }
+                GlassTextArea(copy.measurementsTitle, text: Binding(
+                    get: { form.measurements },
+                    set: { value in
+                        var next = form
+                        next.measurements = value
+                        witnessDraft = next
+                    }
+                ), showsLabel: false)
                 note(copy.measurementsNote)
             }
 
@@ -189,13 +181,18 @@ struct WitnessSection: View {
                 }
             }
         }
-        .confirmationDialog(copy.inferenceHeading, isPresented: $showingInferenceDisclosure, titleVisibility: .visible) {
-            Button(copy.inferenceConfirm) {
-                Task { await model.setInferenceEvidence(true, disclosureConfirmed: true) }
-            }
-            Button(copy.inferenceCancel, role: .cancel) { }
-        } message: {
-            Text([copy.inferenceDisclosure, copy.inferenceCaptureNote, copy.inferenceScopeNote].joined(separator: "\n\n"))
+        .glassModal(isPresented: $showingInferenceDisclosure) {
+            GlassConfirmation(
+                title: copy.inferenceHeading,
+                message: [copy.inferenceDisclosure, copy.inferenceCaptureNote, copy.inferenceScopeNote].joined(separator: "\n\n"),
+                actions: [
+                    .cancel(copy.inferenceCancel) { showingInferenceDisclosure = false },
+                    GlassModalAction(copy.inferenceConfirm, isDefault: true) {
+                        showingInferenceDisclosure = false
+                        Task { await model.setInferenceEvidence(true, disclosureConfirmed: true) }
+                    },
+                ],
+                onCancel: { showingInferenceDisclosure = false })
         }
     }
 
@@ -234,13 +231,18 @@ struct WitnessSection: View {
         .opacity(copy.tokenHeading == nil ? 0 : 1)
         .disabled(copy.tokenHeading == nil)
         .accessibilityHidden(copy.tokenHeading == nil)
-        .confirmationDialog((copy.tokenHeading ?? ""), isPresented: $showingTokenDisclosure, titleVisibility: .visible) {
-            Button((copy.tokenConfirm ?? "")) {
-                Task { await model.setTokenContribution(true, disclosureConfirmed: true) }
-            }
-            Button((copy.tokenCancel ?? ""), role: .cancel) { }
-        } message: {
-            Text([(copy.tokenDisclosure ?? ""), (copy.tokenCaptureNote ?? ""), (copy.tokenScopeNote ?? "")].joined(separator: "\n\n"))
+        .glassModal(isPresented: $showingTokenDisclosure) {
+            GlassConfirmation(
+                title: copy.tokenHeading ?? "",
+                message: [(copy.tokenDisclosure ?? ""), (copy.tokenCaptureNote ?? ""), (copy.tokenScopeNote ?? "")].joined(separator: "\n\n"),
+                actions: [
+                    .cancel(copy.tokenCancel ?? "") { showingTokenDisclosure = false },
+                    GlassModalAction(copy.tokenConfirm ?? "", isDefault: true) {
+                        showingTokenDisclosure = false
+                        Task { await model.setTokenContribution(true, disclosureConfirmed: true) }
+                    },
+                ],
+                onCancel: { showingTokenDisclosure = false })
         }
     }
 
@@ -254,10 +256,18 @@ struct WitnessSection: View {
             }
             .buttonStyle(GlassButtonStyle(.glass))
             .disabled(model.tokenContributionBusy)
-            .confirmationDialog(label, isPresented: $showingTokenCapture, titleVisibility: .visible) {
-                Button(label) { Task { await model.setLocalTokenCapture(true) } }
-                Button(storage.cancelLabel, role: .cancel) { }
-            } message: { Text(storage.captureConfirmation ?? "") }
+            .glassModal(isPresented: $showingTokenCapture) {
+                GlassConfirmation(
+                    title: label, message: storage.captureConfirmation ?? "",
+                    actions: [
+                        .cancel(storage.cancelLabel) { showingTokenCapture = false },
+                        GlassModalAction(label, isDefault: true) {
+                            showingTokenCapture = false
+                            Task { await model.setLocalTokenCapture(true) }
+                        },
+                    ],
+                    onCancel: { showingTokenCapture = false })
+            }
         }
         prose(storage.stateLine)
         prose(storage.scopeNote)
@@ -265,13 +275,22 @@ struct WitnessSection: View {
             Button(storage.cleanupLabel) { Task { await model.cleanTokenStorage(discard: false) } }
                 .buttonStyle(GlassButtonStyle(.glass))
             Button(storage.discardLabel, role: .destructive) { showingTokenDiscard = true }
-                .buttonStyle(GlassButtonStyle(.glass))
+                .buttonStyle(GlassButtonStyle(.destructive))
         }
         .disabled(model.tokenContributionBusy)
-        .confirmationDialog(storage.discardLabel, isPresented: $showingTokenDiscard, titleVisibility: .visible) {
-            Button(storage.confirmLabel, role: .destructive) { Task { await model.cleanTokenStorage(discard: true) } }
-            Button(storage.cancelLabel, role: .cancel) { }
-        } message: { Text(storage.discardConfirmation) }
+        // Discard is destructive: right-most, never on Return.
+        .glassModal(isPresented: $showingTokenDiscard) {
+            GlassConfirmation(
+                title: storage.discardLabel, message: storage.discardConfirmation,
+                actions: [
+                    .cancel(storage.cancelLabel) { showingTokenDiscard = false },
+                    .destructive(storage.confirmLabel) {
+                        showingTokenDiscard = false
+                        Task { await model.cleanTokenStorage(discard: true) }
+                    },
+                ],
+                onCancel: { showingTokenDiscard = false })
+        }
         if !model.tokenStorageNotice.isEmpty { note(model.tokenStorageNotice) }
     }
 

@@ -81,6 +81,9 @@ struct TraceCommonsShell: App {
         Window("Trace Commons", id: WindowID.main) {
             MainWindowView(navigation: navigation, missionDrafts: missionDrafts,
                            insightsStoreSelection: insightsStoreSelection)
+                // The shared screens it draws raise glass modals; they
+                // cover the whole window.
+                .glassModalHost()
                 .environmentObject(model)
                 .environment(compute)
                 .frame(minWidth: 760, minHeight: 520)
@@ -102,17 +105,16 @@ struct TraceCommonsShell: App {
             MainWindowCommands(model: model, compute: compute, navigation: navigation,
                                missionDrafts: missionDrafts)
             #if DEBUG
-            MonitorWindowCommands(navigation: navigation)
+            MonitorWindowCommands()
             #endif
         }
 
         #if DEBUG
-        // The glass monitor window (R5 of #1173), in debug builds until the
-        // screens it frames match the design. Settings is a modal inside it
-        // (Ron's #1146; #1241 Task 10), not a window of its own.
+        // The glass monitor window and the Settings window (R5 of #1173),
+        // in debug builds until the screens they frame match the design.
         // TRACE_COMMONS_MONITOR=1 opens the monitor at launch.
         Window("Monitor", id: WindowID.monitor) {
-            MonitorWindowView(navigation: navigation)
+            MonitorWindowView()
                 .environmentObject(model)
                 // The monitor reads the daemon whatever the main window
                 // shows (Insights defers services).
@@ -121,9 +123,13 @@ struct TraceCommonsShell: App {
                 .tint(TC.accent)
         }
         .windowStyle(.hiddenTitleBar)
+        // Every pane at its default width. The panes set the window's
+        // limits (without the map it is exactly its panes), and showing or
+        // hiding a pane grows or shrinks the window on its right
+        // (`GlassPaneLayout`), so the window follows its content's size.
         .defaultSize(width: GlassThreePane<EmptyView, EmptyView, EmptyView>.defaultWidth,
                      height: GlassTokens.Size.windowHeight)
-        .windowResizability(.contentMinSize)
+        .windowResizability(.contentSize)
 
         // The menu-bar item and popover in a window (R13 of #1173), for
         // review on a menu bar with no room for the item.
@@ -144,38 +150,28 @@ struct TraceCommonsShell: App {
         }
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 860, height: 760)
+
+        Settings {
+            MonitorSettingsWindow(navigation: navigation)
+                .environmentObject(model)
+                // Settings loads and saves through the daemon; opened with
+                // ⌘, while the main window rests on Insights it would
+                // otherwise show nothing and drop edits.
+                .onAppear { navigation.activateServicesForWindow() }
+                .environment(compute)
+                .tint(TC.accent)
+        }
         #endif
     }
 }
 
 #if DEBUG
-/// Window ▸ Monitor, to open the glass monitor window in a debug build, and
-/// the app menu's Settings (Cmd-comma), which opens the Monitor and asks it
-/// for its Settings modal (#1241 Task 10). The Monitor reads the daemon
-/// whatever the main window shows, so services start as it opens.
+/// Window ▸ Monitor, to open the glass monitor window in a debug build.
 private struct MonitorWindowCommands: Commands {
-    let navigation: MainWindowNavigation
-
     var body: some Commands {
         CommandGroup(after: .windowList) {
             OpenMonitorButton()
         }
-        CommandGroup(replacing: .appSettings) {
-            OpenSettingsModalButton(navigation: navigation)
-        }
-    }
-}
-
-private struct OpenSettingsModalButton: View {
-    let navigation: MainWindowNavigation
-    @Environment(\.openWindow) private var openWindow
-
-    var body: some View {
-        Button(MonitorWords.table?.settings ?? "") {
-            openWindow(id: WindowID.monitor)
-            navigation.requestSettings()
-        }
-        .keyboardShortcut(",", modifiers: .command)
     }
 }
 

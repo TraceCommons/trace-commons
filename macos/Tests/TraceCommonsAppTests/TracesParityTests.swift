@@ -111,7 +111,7 @@ final class TracesParityTests: XCTestCase {
         let inspector = try XCTUnwrap(tree.range(of: "struct PreviewSlot"))
         let treeBody = tree[treeView.lowerBound..<inspector.lowerBound]
         let failed = try XCTUnwrap(treeBody.range(of: "if case .failed(let error) = store.phase"))
-        let spinner = try XCTUnwrap(treeBody.range(of: "ProgressView()"))
+        let spinner = try XCTUnwrap(treeBody.range(of: "GlassSpinner(standalone: true)"))
         XCTAssertLessThan(failed.lowerBound, spinner.lowerBound, "the core-down line precedes the spinner and the tree")
     }
 
@@ -185,19 +185,23 @@ final class TracesParityTests: XCTestCase {
             "Button(words.prepareAdmission) { preparingAdmission = true }\n"
                 + "                            .buttonStyle(GlassButtonStyle(.glass))\n",
             "SheetNotice(title: copy.heading, detail: copy.working)",
-            "GlassSheet(title: copy.heading) {",
-            "GlassSheet(title: words.prepareAdmission) {",
-            "Button(copy.cancel, role: .cancel) { dismiss() }",
-            "Button(copy.confirm) { dismiss(); onConfirm() }",
-            ".toggleStyle(GlassCheckboxStyle())",
+            // The witness consent is a narrow glass modal whose title is the
+            // core's heading: cancel (Escape) left, confirm prominent but
+            // never on Return, and armed only by Ron's tick.
+            "GlassModal(\n            title: copy.heading, width: .narrow,",
+            ".cancel(copy.cancel, action: onCancel),",
+            "GlassModalAction(copy.confirm, isEnabled: confirmLine != nil && confirmed, isProminent: true) {",
+            "GlassCheckRow(confirmLine, isOn: $confirmed)",
+            // Prepare admission, in a narrow glass modal over the preview.
+            "title: words.prepareAdmission, width: .narrow,",
+            // The preview itself, in a regular glass modal over the window.
+            "struct PreviewModal: View {",
+            "PreviewSheet(entry: entry, onClose: onClose)",
             ".accessibilityIdentifier(\"transcript-copy-all\")",
             // A notice with no title is drawn without one, never as a bare dot.
             "GlassNotice(tone: .ask, title: title?.isEmpty == false ? title : nil) {",
-            // The witness consent: Escape cancels, and the pane fills the sheet.
-            "Button(copy.cancel, role: .cancel) { dismiss() }\n"
-                + "                    .buttonStyle(GlassButtonStyle(.glass))\n"
-                + "                    .keyboardShortcut(.cancelAction)\n",
-            "}\n            Spacer(minLength: 0)\n            HStack {",
+            // The witness consent's body scrolls once it no longer fits.
+            "GlassModalBody { disclosure }",
         ] {
             XCTAssertTrue(sheet.contains(needle), "PreviewSheet.swift lacks \(needle)")
         }
@@ -208,7 +212,9 @@ final class TracesParityTests: XCTestCase {
         let consent = String(sheet[consentStart...])
         XCTAssertFalse(consent.contains("Text(copy.heading)"))
         XCTAssertFalse(consent.contains(".tcScreen()"))
-        XCTAssertTrue(consent.contains(".frame(width: 560, height: 390)"))
+        XCTAssertFalse(consent.contains(".sheet("))
+        XCTAssertFalse(sheet.contains(".sheet("), "the preview's own questions are glass modals")
+        XCTAssertFalse(sheet.contains(".alert("), "the correction refusal is a glass confirmation")
     }
 
     /// The per-session send disclosure is glass, its unreadable state is the
@@ -243,7 +249,7 @@ final class TracesParityTests: XCTestCase {
         let sheet = try Self.text("Views/PreviewSheet.swift")
         for needle in [
             "preview.search(needle)", "searchOriginal(needle)", "RecentSearches.remember(", "RecentSearches.load()",
-            "OriginalSearchOutcome.classify(", "document.snippet(around:", ".onSubmit(commit)", ".focused($focused)",
+            "OriginalSearchOutcome.classify(", "document.snippet(around:", ".onSubmit(commit)", "focus: $focused",
             "\"transcript-copy-all\"", "document.wholeText()", "RedactionMarks.spoken(",
             "TranscriptResidentChunks", "TranscriptRowIndex(", "GlassTokens.TypeScale.mono",
         ] {
@@ -270,8 +276,8 @@ final class TracesParityTests: XCTestCase {
             "GlassStatusLabel(outcome.sentence, status: Self.status(for: outcome.emphasis))",
             "GlassStatusLabel(\"0 matches\", status: .on)",
             "GlassStatusLabel(Self.matchCount(offsets!.count), status: .ask)",
-            ".textFieldStyle(.plain)\n                    .glassType(GlassTokens.TypeScale.label.weight(.regular))\n",
-            ".fill(GlassTokens.Color.fieldFill.color)",
+            "GlassTextField(prompt, text: $needle, prompt: prompt, showsLabel: false, focus: $focused)",
+            ".glassFieldWell(invalid: false)",
             "GlassCard(quiet: true) {\n                            Text(highlighting(snippet, term: needle))\n"
                 + "                                .glassType(GlassTokens.TypeScale.mono)\n",
             // Transcript: Ron's caption from the core, the body in mono
@@ -383,8 +389,10 @@ final class TracesParityTests: XCTestCase {
             of: "    var body: some View {\n", range: armingCard.upperBound..<offers.endIndex))
         XCTAssertTrue(offers[armingBody.upperBound...].hasPrefix("        if let copy {\n"))
         XCTAssertTrue(offers.contains("Button(copy.confirm) { confirming = true }"))
-        XCTAssertTrue(offers.contains(".confirmationDialog(copy.question, isPresented: $confirming"))
-        XCTAssertTrue(offers.contains("Text(copy.body)"))
+        // A whole-window glass confirmation (Ron's GlassModal), in the
+        // core's words.
+        XCTAssertTrue(offers.contains(".glassModal(isPresented: $confirming)"))
+        XCTAssertTrue(offers.contains("title: copy.question, message: copy.body,"))
         XCTAssertEqual(offers.components(separatedBy: "onArm()").count - 1, 1, "only the confirmation arms")
         // No control without words: an absent core word falls back to an
         // existing one, never to an empty title.
@@ -536,8 +544,8 @@ final class TracesParityTests: XCTestCase {
                        "ScrubbingCaveat.rowLine(redactionCount: removed)",
                        "ScrubbingCaveat.status(redactionCount: removed)",
                        "SubagentCopy.line(count: entry.subagentCount ?? 0, dropped: entry.subagentsDropped ?? 0)",
-                       ".sheet(item: $previewing)",
-                       "PreviewSheet(entry: $0)", "@EnvironmentObject private var model: AppModel",
+                       ".glassModal(item: $previewing)",
+                       "PreviewModal(entry: $0) { previewing = nil }", "@EnvironmentObject private var model: AppModel",
                        #"ProcessInfo.processInfo.environment["TRACE_COMMONS_DEMO_PREVIEW"] == "1","#,
                        ".onChange(of: model.awaitingDecision.count)", "previewing == nil,"] {
             XCTAssertTrue(body.contains(needle), "SessionReviewCard lacks \(needle)")
@@ -550,15 +558,17 @@ final class TracesParityTests: XCTestCase {
                                 .buttonStyle(GlassButtonStyle(.glass))
                         }
         """), "Look inside must be drawn only inside the legacyEntry guard")
-        // The sheet and the demo hook hang off the always-present container,
-        // not the selected-session branch.
+        // The preview modal and the demo hook hang off the always-present
+        // container, not the selected-session branch.
         XCTAssertTrue(body.contains("""
                         Spacer(minLength: 0)
                     }
                 }
-                .sheet(item: $previewing) { PreviewSheet(entry: $0).environmentObject(model) }
+                // Over the whole window (`glassModalHost` at its root), not a sheet.
+                .glassModal(item: $previewing) { PreviewModal(entry: $0) { previewing = nil }.environmentObject(model) }
                 .onChange(of: model.awaitingDecision.count) { _, _ in
-        """), "the sheet and the demo hook must sit on the inspector's outer VStack")
+        """), "the preview modal and the demo hook must sit on the inspector's outer VStack")
+        XCTAssertFalse(body.contains(".sheet("), "the preview is a glass modal, never a stock sheet")
         XCTAssertTrue(try Self.text("Views/Monitor/TracesStore.swift")
             .contains("TCCoreCopy.residualSecretLine(count: total,"))
     }

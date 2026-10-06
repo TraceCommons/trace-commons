@@ -131,15 +131,8 @@ struct SkillLearningView: View {
                     count: validation?.descriptionChars,
                     maximum: validation?.descriptionMaxChars
                 )
-                GlassWell {
-                    TextEditor(text: $draft.description)
-                        .glassType(GlassTokens.TypeScale.body)
-                        .foregroundStyle(GlassColor.textPrimary)
-                        .scrollContentBackground(.hidden)
-                        .frame(minHeight: 96)
-                        .accessibilityLabel(copy.applicability)
-                        .padding(GlassTokens.Space.s4)
-                }
+                GlassTextArea(copy.applicability, text: $draft.description, showsLabel: false)
+                    .frame(minHeight: 96)
             }
 
             VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
@@ -148,15 +141,8 @@ struct SkillLearningView: View {
                     count: validation?.procedureChars,
                     maximum: validation?.procedureMaxChars
                 )
-                GlassWell {
-                    TextEditor(text: $draft.procedure)
-                        .glassType(GlassTokens.TypeScale.mono)
-                        .foregroundStyle(GlassColor.textPrimary)
-                        .scrollContentBackground(.hidden)
-                        .frame(minHeight: 240)
-                        .accessibilityLabel(copy.procedure)
-                        .padding(GlassTokens.Space.s4)
-                }
+                GlassTextArea(copy.procedure, text: $draft.procedure, showsLabel: false)
+                    .frame(minHeight: 240)
             }
 
             GlassExpander(copy.sourceEvidence, isOpen: $showsEvidence)

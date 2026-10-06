@@ -195,16 +195,20 @@ struct ArmingOfferGlassCard: View {
                 }
             }
             .accessibilityElement(children: .contain)
-            .confirmationDialog(copy.question, isPresented: $confirming, titleVisibility: .visible) {
-                // Declining here closes the confirmation only; the offer
-                // stays until it is answered on the card.
-                Button(copy.decline, role: .cancel) { confirming = false }
-                Button(copy.confirm) {
-                    confirming = false
-                    onArm()
-                }
-            } message: {
-                Text(copy.body)
+            // A whole-window confirmation. Declining here closes the
+            // confirmation only; the offer stays until it is answered on
+            // the card.
+            .glassModal(isPresented: $confirming) {
+                GlassConfirmation(
+                    title: copy.question, message: copy.body,
+                    actions: [
+                        .cancel(copy.decline) { confirming = false },
+                        GlassModalAction(copy.confirm, isDefault: true) {
+                            confirming = false
+                            onArm()
+                        },
+                    ],
+                    onCancel: { confirming = false })
             }
         }
     }

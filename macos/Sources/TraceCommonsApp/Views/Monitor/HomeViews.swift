@@ -27,15 +27,18 @@ struct HomeTabView: View {
     /// The opened History row's submission id; empty for none. History
     /// draws its details below the list, in this pane.
     @Binding var selection: String
-    /// Ron's "Open Traces": switch the window to the Traces tab.
-    let openTraces: () -> Void
+    /// The status card's "Open Traces" link: switches the window's tab.
+    var openTraces: () -> Void = {}
 
     var body: some View {
+        // History and Missions are reached from here and lead back here; the
+        // breadcrumb that says so is the shell's, under the tabs
+        // (`MonitorWindowView.breadcrumb`), as #1146 draws it.
         switch page {
         case .overview:
             HomeOverview(
-                store: store, traces: traces, statusLabel: statusLabel,
-                openHistory: { page = .history }, openMissions: { page = .missions }, openTraces: openTraces)
+                store: store, traces: traces, statusLabel: statusLabel, openTraces: openTraces,
+                openHistory: { page = .history }, openMissions: { page = .missions })
         case .history:
             HistoryPage(store: store, statusLabel: statusLabel, selection: $selection, back: { page = .overview })
         case .missions:
@@ -48,9 +51,9 @@ private struct HomeOverview: View {
     let store: HomeStore
     let traces: TracesStore
     let statusLabel: (String?) -> String?
+    let openTraces: () -> Void
     let openHistory: () -> Void
     let openMissions: () -> Void
-    let openTraces: () -> Void
 
     /// The rollup, or nil after a failed `history_rollup` read
     /// (`SummaryFacts.fresh`): a stale one is not shown as current.
@@ -68,22 +71,7 @@ private struct HomeOverview: View {
         ScrollView {
             VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
                 watching
-                // Ron's three stat cards. Pending credit is a figure only
-                // beside the commons' statement of what it waits on (D6).
-                HStack(spacing: GlassTokens.Space.s3) {
-                    // The Traces store's count, the one the status card's
-                    // line and the Traces badge read: one waiting number.
-                    GlassLegendCell(MonitorWords.waiting, value: HomeFormat.count(traces.decisionsOwed), status: .ask)
-                    // A failed rollup read is a dash, never the earlier counts.
-                    GlassLegendCell(MonitorWords.contributed, value: HomeFormat.count(freshRollup?.allTime?.accepted), status: .shared)
-                    GlassLegendCell(MonitorWords.pending, value: HomeFormat.pendingFigure(freshRollup?.creditPending, credit: freshCredit), status: .ask)
-                }
-                if let condition = HomeFormat.pendingCondition(freshCredit) {
-                    Text(condition)
-                        .glassType(GlassTokens.TypeScale.caption)
-                        .foregroundStyle(GlassColor.textTertiary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
+                stats
                 GlassEyebrowCard(MonitorWords.missions, action: openMissions) {
                     Image(systemName: "chevron.right")
                         .glassGlyph(10, weight: .semibold)
@@ -116,65 +104,81 @@ private struct HomeOverview: View {
         HomeFormat.watchingState(store)
     }
 
-    /// Ron's status card: the watching state, what is waiting in the
-    /// Traces badge's own words, and the way into Traces.
-    private var watching: some View {
-        GlassCard {
-            HStack(alignment: .firstTextBaseline, spacing: GlassTokens.Space.s4) {
-                VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
-                    watchingLine
-                    if let waiting = MonitorWindowView.tracesDescription(
-                        traces.decisionsOwed, shield: traces.shield, secondLook: traces.words?.secondLookWaiting) {
-                        Text(waiting)
-                            .glassType(GlassTokens.TypeScale.caption)
-                            .foregroundStyle(GlassColor.textSecondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                }
-                .accessibilityElement(children: .combine)
-                Spacer(minLength: 0)
-                Button(action: openTraces) {
-                    HStack(spacing: GlassTokens.Space.inlineGap) {
-                        Text(MonitorWindowView.Tab.traces.title)
-                        Image(systemName: "chevron.right")
-                            .glassGlyph(10, weight: .semibold)
-                    }
-                }
-                .buttonStyle(GlassButtonStyle(.link))
-                .frame(minHeight: 44)
+    /// Waiting, contributed and pending credit (#1146 `home-view.tsx`), each
+    /// from the core: waiting is decisions owed, contributed the rollup's
+    /// accepted count. Pending credit is a figure only beside the commons'
+    /// statement of what it waits on (D6), drawn under the tiles; without
+    /// that statement it is a dash, never a bare number that reads as owed.
+    ///
+    /// Waiting is the Traces store's count, the one the Traces badge reads:
+    /// one waiting number. A failed rollup or credit read is a dash, never
+    /// the store's earlier value (`freshRollup`, `freshCredit`).
+    private var stats: some View {
+        let condition = HomeFormat.pendingCondition(freshCredit)
+        return VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
+            HStack(spacing: GlassTokens.Space.s3) {
+                HomeStatTile(label: MonitorWords.waiting, value: HomeFormat.count(traces.decisionsOwed))
+                HomeStatTile(label: MonitorWords.contributed, value: HomeFormat.count(freshRollup?.allTime?.accepted))
+                HomeStatTile(label: HomeFormat.creditPendingWord,
+                             value: HomeFormat.pendingFigure(freshRollup?.creditPending, condition: condition))
+            }
+            if let condition {
+                Text(condition)
+                    .glassType(GlassTokens.TypeScale.caption)
+                    .foregroundStyle(GlassColor.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
     }
 
-    private var watchingLine: some View {
+    private var watching: some View {
         let state = state
-        return HStack(spacing: GlassTokens.Space.s4) {
-            switch state {
-            case .ready:
-                switch HomeFormat.watching(store.status, destinations: store.destinations) {
-                case .signedOut:
-                    GlassStatusDot(.ask, ring: true)
-                    Text(MonitorWords.signedOut)
-                case .unhealthy(let label):
-                    GlassStatusDot(.outside, ring: true)
-                    Text(HealthCopy.core(label: label, maxQueueEntries: nil).title)
-                case .watching(let tools):
-                    GlassStatusDot(.on, ring: true)
-                    Text(FlowMapScene.pair(MonitorWords.watching, tools))
+        return GlassCard {
+            HStack(spacing: GlassTokens.Space.s4) {
+                status(state)
+                    .accessibilityElement(children: .combine)
+                Spacer(minLength: 0)
+                // The way into the tree, as #1146's status card has it.
+                Button(action: openTraces) {
+                    HStack(spacing: GlassTokens.Space.s1) {
+                        Text(HomeFormat.openTracesWord)
+                        Image(systemName: "chevron.right").glassGlyph(9, weight: .semibold).accessibilityHidden(true)
+                    }
                 }
-            case .paused:
-                GlassStatusDot(.ask, ring: true)
-                Text(MonitorWords.paused)
-            case .coreDown:
-                GlassStatusDot(.outside, ring: true)
-                Text(store.failures["status"].flatMap { MonitorWords.table?.line(for: $0) } ?? "—")
-            case .loading, .unknown:
-                // No dot: unknown is never drawn as on, or as off.
-                Text("—").accessibilityLabel(MonitorWords.unknown)
+                .buttonStyle(GlassButtonStyle(.link))
             }
+            .glassType(GlassTokens.TypeScale.bodyStrong)
+            .foregroundStyle(GlassColor.textPrimary)
         }
-        .glassType(GlassTokens.TypeScale.bodyStrong)
-        .foregroundStyle(GlassColor.textPrimary)
+    }
+
+    @ViewBuilder
+    private func status(_ state: ScreenState) -> some View {
+        HStack(spacing: GlassTokens.Space.s4) {
+                switch state {
+                case .ready:
+                    switch HomeFormat.watching(store.status, destinations: store.destinations) {
+                    case .signedOut:
+                        GlassStatusDot(.ask, ring: true)
+                        Text(MonitorWords.signedOut)
+                    case .unhealthy(let label):
+                        GlassStatusDot(.outside, ring: true)
+                        Text(HealthCopy.core(label: label, maxQueueEntries: nil).title)
+                    case .watching(let tools):
+                        GlassStatusDot(.on, ring: true)
+                        Text(FlowMapScene.pair(MonitorWords.watching, tools))
+                    }
+                case .paused:
+                    GlassStatusDot(.ask, ring: true)
+                    Text(MonitorWords.paused)
+                case .coreDown:
+                    GlassStatusDot(.outside, ring: true)
+                    Text(store.failures["status"].flatMap { MonitorWords.table?.line(for: $0) } ?? "—")
+                case .loading, .unknown:
+                    // No dot: unknown is never drawn as on, or as off.
+                    Text("—").accessibilityLabel(MonitorWords.unknown)
+                }
+        }
     }
 
     @ViewBuilder
@@ -213,9 +217,6 @@ private struct HistoryPage: View {
     // daemon's view, not the one it had at launch (the legacy screen's rule).
     var body: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
-            GlassBreadcrumb(
-                [GlassCrumb(MonitorWindowView.Tab.home.title, action: back), GlassCrumb(MonitorWords.history)],
-                backLabel: MonitorWindowView.Tab.home.title, onBack: back)
             ScrollViewReader { proxy in
                 ScrollView {
                     VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
@@ -252,6 +253,8 @@ private struct HistoryPage: View {
             model.refreshHistory()
             model.refreshAccountSession()
         }
+        // Escape goes back to Home, as the shell's breadcrumb does.
+        .onExitCommand(perform: back)
     }
 
     /// The rollup, or nil after a failed `history_rollup` read: a stale one
@@ -357,7 +360,7 @@ private struct HistoryPage: View {
                 }
             }
         } else if store.failures["list_history"] == nil {
-            ProgressView().controlSize(.small).frame(maxWidth: .infinity)
+            GlassSpinner(MonitorWords.history).frame(maxWidth: .infinity)
         }
     }
 
@@ -773,6 +776,31 @@ struct HistoryCreditCard: View {
     }
 }
 
+/// One of Home's three counts: its word over its figure.
+private struct HomeStatTile: View {
+    let label: String
+    let value: String
+
+    var body: some View {
+        GlassCard(quiet: true) {
+            VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
+                Text(label)
+                    .glassType(GlassTokens.TypeScale.eyebrow)
+                    .foregroundStyle(GlassColor.textTertiary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+                Text(value)
+                    .glassType(GlassTokens.TypeScale.title)
+                    .monospacedDigit()
+                    .foregroundStyle(GlassColor.textPrimary)
+                    .lineLimit(1)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .accessibilityElement(children: .combine)
+    }
+}
+
 /// Formatting for Home and History. Pure, so the rules are tested.
 enum HomeFormat {
     /// A count, or a dash when the core did not say. Zero is a number.
@@ -784,12 +812,23 @@ enum HomeFormat {
         value.map { $0.formatted(.number.precision(.fractionLength(1))) } ?? "—"
     }
 
-    /// Pending credit as a figure only when the commons has said what it
-    /// waits on (D6); a dash otherwise, never a bare number that reads as
-    /// owed.
-    static func pendingFigure(_ pending: Double?, credit: DaemonData.CommonsCreditSummary?) -> String {
-        pendingCondition(credit) == nil ? "—" : points(pending)
+    /// Home's pending-credit tile: the figure only with the commons'
+    /// statement of what it waits on (D6), a dash otherwise.
+    static func pendingFigure(_ value: Double?, condition: String?) -> String {
+        condition == nil ? "—" : points(value)
     }
+
+    /// The same rule from the commons' credit summary: a figure only when
+    /// the commons has said what it waits on (D6); a dash otherwise, never
+    /// a bare number that reads as owed.
+    static func pendingFigure(_ pending: Double?, credit: DaemonData.CommonsCreditSummary?) -> String {
+        pendingFigure(pending, condition: pendingCondition(credit))
+    }
+
+    /// Home's pending-credit tile and status-card link, in the core's words.
+    static var creditPendingWord: String { MonitorWords.table?.creditPending ?? "" }
+
+    static var openTracesWord: String { MonitorWords.table?.openTraces ?? "" }
 
     /// What pending credit waits on, in the commons' own words: the only
     /// condition the shell may show it with. Nil when the commons has not

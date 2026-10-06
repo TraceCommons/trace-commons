@@ -746,6 +746,24 @@ pub struct MonitorScreensCopy {
     pub settings_sections: &'static str,
     /// Closes a modal.
     pub close: &'static str,
+    /// The Monitor toolbar's View menu (Ron's native shell after #1146's
+    /// `monitor-toolbar.tsx`).
+    pub view: &'static str,
+    /// The toolbar's toggle for the Traces graph.
+    pub graph: &'static str,
+    /// The View menu item that draws folders set to ignore.
+    pub show_ignored_folders: &'static str,
+    /// The Traces graph's button that focuses the map on one tool.
+    pub focus: &'static str,
+    /// The Traces graph's step to the previous period.
+    pub previous: &'static str,
+    /// The Traces graph's step to the next period.
+    pub next: &'static str,
+    /// Home's pending-credit count (shown only beside the commons'
+    /// statement of what it waits on, D6).
+    pub credit_pending: &'static str,
+    /// Home's status-card link to the Traces tab.
+    pub open_traces: &'static str,
     /// Quits the app.
     pub quit: &'static str,
     /// The core did not answer; see [`MONITOR_CORE_UNREACHABLE`].
@@ -851,6 +869,14 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
         settings_subtitle: "What this machine watches, and what your traces are allowed to do.",
         settings_sections: "Settings sections",
         close: "Close",
+        view: "View",
+        graph: "Graph",
+        show_ignored_folders: "Show ignored folders",
+        focus: "Focus",
+        previous: "Previous",
+        next: "Next",
+        credit_pending: "Credit pending",
+        open_traces: "Open Traces",
         quit: "Quit…",
         core_unreachable: MONITOR_CORE_UNREACHABLE,
         request_failed: MONITOR_REQUEST_FAILED,
@@ -954,6 +980,19 @@ mod tests {
         assert_ne!(copy.settings_title, copy.settings);
         assert!(copy.settings_subtitle.ends_with('.'));
         assert!(!copy.settings_sections.is_empty() && !copy.close.is_empty());
+        // Ron's native shell words: the toolbar, the Traces graph and Home.
+        for word in [
+            copy.view,
+            copy.graph,
+            copy.show_ignored_folders,
+            copy.focus,
+            copy.previous,
+            copy.next,
+            copy.credit_pending,
+            copy.open_traces,
+        ] {
+            assert!(!word.is_empty() && !word.ends_with('.'), "{word}");
+        }
     }
 
     #[test]
