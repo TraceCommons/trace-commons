@@ -137,14 +137,14 @@ final class AppModel: ObservableObject {
         // not `PendingInvite.shared.value`. Delivered on the main actor:
         // `PendingInvite` is main-actor isolated.
         inviteLinks = PendingInvite.shared.$value.sink { [weak self] invite in
-            guard invite != nil else { return }
-            MainActor.assumeIsolated { self?.inviteLinkArrived() }
+            guard let invite else { return }
+            MainActor.assumeIsolated { self?.inviteLinkArrived(invite) }
         }
     }
     private var inviteLinks: AnyCancellable?
-    /// An invite link arrived before the config directory was known, so the
-    /// watch-only marker it takes back is cleared once it is.
-    private var inviteAwaitsConfigDirectory = false
+    /// An invite link that arrived before the config directory was known,
+    /// so the watch-only marker it takes back is cleared once it is.
+    private var inviteAwaitingConfigDirectory: String?
     @Published private(set) var status: DaemonStatus = .unknown {
         didSet {
             // Worded across the ABI once per notice the daemon sends, not on
@@ -1079,9 +1079,9 @@ final class AppModel: ObservableObject {
     /// it.
     private(set) var configDirectory: String = "" {
         didSet {
-            guard inviteAwaitsConfigDirectory, !configDirectory.isEmpty else { return }
-            inviteAwaitsConfigDirectory = false
-            inviteLinkArrived()
+            guard let invite = inviteAwaitingConfigDirectory, !configDirectory.isEmpty else { return }
+            inviteAwaitingConfigDirectory = nil
+            inviteLinkArrived(invite)
         }
     }
 
@@ -3324,10 +3324,17 @@ extension AppModel: FirstRunDaemon {
     /// finished watcher could never join, since the first run is the only
     /// place a link is applied. An enrolled daemon's marker is the tenant's
     /// and is left alone. Announced, as `markWatchOnlyComplete` is.
-    func inviteLinkArrived() {
+    ///
+    /// Only an invite does this: a link carries any string, and the
+    /// coordinator discards one the core does not accept as an invite
+    /// (`OnboardingNavigation.receive`), so the same `TCInvite.issuerHost`
+    /// check runs here, and a finished watcher is not sent back to Join
+    /// with nothing to apply.
+    func inviteLinkArrived(_ invite: String) {
         guard !status.loggedIn else { return }
+        guard TCInvite.issuerHost(invite) != nil else { return }
         guard let key = Self.watchOnlyCompleteKey(configDirectory) else {
-            inviteAwaitsConfigDirectory = true
+            inviteAwaitingConfigDirectory = invite
             return
         }
         guard UserDefaults.standard.bool(forKey: key) else { return }

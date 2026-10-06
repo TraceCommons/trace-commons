@@ -128,6 +128,53 @@ final class FirstRunDaemonAdaptorTests: XCTestCase {
         XCTAssertTrue(launching.requiresOnboarding)
     }
 
+    /// Only an invite takes back the marker: `DeepLink` parks any
+    /// `tracecommons://enroll?invite=` value, and the coordinator discards
+    /// one the core does not accept as an invite (`TCInvite.issuerHost`),
+    /// so clearing on it would drop a finished watcher back into a first
+    /// run with nothing to apply. Applies to a link parked before the
+    /// config directory is known too.
+    func test_aLinkThatIsNotAnInviteLeavesAFinishedWatchOnlyRunAlone() async {
+        let watching = model(["status": #"{"result":{"logged_in":false,"consent_scopes":[],"health":{}}}"#])
+        watching.setStartupForTesting(.running)
+        watching.setConfigDirectoryForTesting("/tmp/first-run-adaptor-\(UUID().uuidString)")
+        defer {
+            watching.clearWatchOnlyMarkerForTesting()
+            _ = PendingInvite.shared.take()
+        }
+        let done = await watching.markWatchOnlyComplete()
+        XCTAssertTrue(done)
+
+        PendingInvite.shared.set("not-an-invite")
+
+        XCTAssertNil(TCInvite.issuerHost("not-an-invite"))
+        XCTAssertTrue(watching.isWatchOnlyComplete)
+        XCTAssertFalse(watching.requiresOnboarding)
+    }
+
+    func test_aLinkThatIsNotAnInviteBeforeTheConfigDirectoryLeavesTheMarker() async {
+        let directory = "/tmp/first-run-adaptor-\(UUID().uuidString)"
+        do {
+            let earlier = model(["status": #"{"result":{"logged_in":false,"consent_scopes":[],"health":{}}}"#])
+            earlier.setStartupForTesting(.running)
+            earlier.setConfigDirectoryForTesting(directory)
+            let done = await earlier.markWatchOnlyComplete()
+            XCTAssertTrue(done)
+        }
+
+        let launching = model(["status": #"{"result":{"logged_in":false,"consent_scopes":[],"health":{}}}"#])
+        launching.setStartupForTesting(.running)
+        defer {
+            launching.clearWatchOnlyMarkerForTesting()
+            _ = PendingInvite.shared.take()
+        }
+        PendingInvite.shared.set("https://example.com/not-an-invite")
+        launching.setConfigDirectoryForTesting(directory)
+
+        XCTAssertTrue(launching.isWatchOnlyComplete)
+        XCTAssertFalse(launching.requiresOnboarding)
+    }
+
     /// An enrolled daemon's marker is the tenant's; a link leaves the
     /// watch-only one alone.
     func test_anInviteLinkLeavesAnEnrolledDaemonsMarkersAlone() async {
