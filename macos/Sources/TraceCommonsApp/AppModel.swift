@@ -2790,8 +2790,13 @@ final class AppModel: ObservableObject {
     /// public-run editor drawn from it, or the draft typed there. An account
     /// change still clears it (`clearAccountOwnedContent`).
     func loadSessionDetail(_ record: HistoryRecord) {
-        guard let client else { return }
         let id = record.submissionID
+        guard let client else {
+            // The core is down: say the read could not be made, with the
+            // core's line and Retry, rather than leave the detail empty.
+            sessionDetailErrors[id] = TCPublicRun.sessionDetailErrorLine(label: "daemon-unavailable")
+            return
+        }
         guard !loadingSessionDetails.contains(id) else { return }
         guard !publicRunWorking.contains(id) else { return }
         sessionDetailRequestSequence &+= 1
