@@ -120,9 +120,13 @@ struct TraceCommonsShell: App {
                 .tint(TC.accent)
         }
         .windowStyle(.hiddenTitleBar)
+        // Every pane at its default width. The panes set the window's
+        // limits (without the map it is exactly its panes), and showing or
+        // hiding a pane grows or shrinks the window on its right
+        // (`GlassPaneLayout`), so the window follows its content's size.
         .defaultSize(width: GlassThreePane<EmptyView, EmptyView, EmptyView>.defaultWidth,
                      height: GlassTokens.Size.windowHeight)
-        .windowResizability(.contentMinSize)
+        .windowResizability(.contentSize)
 
         // The menu-bar item and popover in a window (R13 of #1173), for
         // review on a menu bar with no room for the item.

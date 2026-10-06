@@ -386,7 +386,9 @@ public enum GlassTokens {
         public static let toolLogoLarge: CGFloat = 20
         public static let listRow: CGFloat = 40
         public static let paneLeftWidth: CGFloat = 400
+        public static let paneLeftCompactWidth: CGFloat = 360
         public static let mapWidth: CGFloat = 600
+        public static let mapMinWidth: CGFloat = 360
         public static let inspectorWidth: CGFloat = 300
         public static let windowWidth: CGFloat = 1320
         public static let windowHeight: CGFloat = 760
@@ -429,7 +431,9 @@ public enum GlassTokens {
             "toolLogoLarge": toolLogoLarge,
             "listRow": listRow,
             "paneLeftWidth": paneLeftWidth,
+            "paneLeftCompactWidth": paneLeftCompactWidth,
             "mapWidth": mapWidth,
+            "mapMinWidth": mapMinWidth,
             "inspectorWidth": inspectorWidth,
             "windowWidth": windowWidth,
             "windowHeight": windowHeight,
