@@ -306,6 +306,12 @@ struct FlowMapScene: Equatable {
         "\(word) \(count.map(String.init) ?? "—")"
     }
 
+    /// A heading and a count the core may not have reported, set apart by
+    /// a spaced dot: "Worth a second look · 3", a dash in place of the count.
+    static func dotPair(_ word: String, _ count: Int?) -> String {
+        "\(word) · \(count.map(String.init) ?? "—")"
+    }
+
     private static func curve(from: CGPoint, to: CGPoint, style: Arc.Style, dim: Double) -> Arc {
         let midX = (from.x + to.x) / 2
         return Arc(from: from, control1: CGPoint(x: midX, y: from.y), control2: CGPoint(x: midX, y: to.y), to: to, style: style, dim: dim)

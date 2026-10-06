@@ -343,7 +343,7 @@ struct MenuBarGlassPanel: View {
             hairline
             Button { openMain(.queue) } label: {
                 HStack {
-                    Text("\(MenuWords.flagged) · \(store.stale ? "—" : String(MenuPanelData.flagged(store.pending)))")
+                    Text(FlowMapScene.dotPair(MenuWords.flagged, store.stale ? nil : MenuPanelData.flagged(store.pending)))
                     Spacer(minLength: 0)
                     Image(systemName: "chevron.right").glassGlyph(10, weight: .semibold)
                 }
