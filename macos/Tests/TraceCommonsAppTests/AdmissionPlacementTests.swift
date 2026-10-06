@@ -10,8 +10,11 @@ import XCTest
 /// inference evidence" -- a session without evidence previews perfectly well,
 /// because it is only a transcript, and the refusal arrives later. So a
 /// contributor who wanted evidence had to attempt a review, have it fail, and
-/// only then find the control. The GTK shell has always drawn it in the
-/// footer, on every preview, and that is the placement all three now share.
+/// only then find the control. The GTK shell has always drawn it on every
+/// preview, and that is the placement all three now share. Since Look inside
+/// became read-only (#1241, Ron's `PreviewInspector`) it is drawn in the
+/// native-review block at the head of the sheet, above the tabs, beside
+/// Request witness review; the footer is Close only.
 ///
 /// A SwiftUI `body` holding `@State` and an `@EnvironmentObject` cannot be
 /// built or reflected outside a running window, so these read the view's own
@@ -24,8 +27,8 @@ private enum PreviewSheetSource {
         .deletingLastPathComponent()  // macos
         .appendingPathComponent("Sources/TraceCommonsApp/Views/PreviewSheet.swift")
 
-    static func footer(file: StaticString = #filePath, line: UInt = #line) -> String? {
-        declaration("private var footer: some View {", file: file, line: line)
+    static func nativeReview(file: StaticString = #filePath, line: UInt = #line) -> String? {
+        declaration("private var nativeReview: some View {", file: file, line: line)
     }
 
     static func content(file: StaticString = #filePath, line: UInt = #line) -> String? {
@@ -80,13 +83,13 @@ private enum PreviewSheetSource {
 }
 
 final class AdmissionPlacementTests: XCTestCase {
-    /// Drawn with the rest of the footer, so it is on screen for every
+    /// Drawn in the native-review block, so it is on screen for every
     /// preview a contributor opens -- not only the ones that broke.
-    func testTheFooterDrawsTheAdmissionPreparationControl() throws {
-        let footer = try XCTUnwrap(PreviewSheetSource.footer())
+    func testTheNativeReviewDrawsTheAdmissionPreparationControl() throws {
+        let review = try XCTUnwrap(PreviewSheetSource.nativeReview())
         XCTAssertTrue(
-            footer.contains("AdmissionPreparationView"),
-            "the footer no longer draws the admission-preparation control")
+            review.contains("AdmissionPreparationView"),
+            "the native review no longer draws the admission-preparation control")
     }
 
     /// The other half, and the one that would have caught the defect: it is
@@ -104,13 +107,13 @@ final class AdmissionPlacementTests: XCTestCase {
 
     /// Moving it must not have widened who is offered it. The enrolment gate
     /// this shell reads is `admissionEvidenceOffered`; `DaemonFieldDecodingTests`
-    /// holds what that answers, and this holds that the footer still asks.
+    /// holds what that answers, and this holds that the native review still asks.
     func testTheMovedControlIsStillGatedOnTheEnrolment() throws {
-        let footer = try XCTUnwrap(PreviewSheetSource.footer())
+        let review = try XCTUnwrap(PreviewSheetSource.nativeReview())
         let gate = try XCTUnwrap(
-            footer.range(of: "admissionEvidenceOffered"),
-            "the footer draws the control without consulting the enrolment")
-        let control = try XCTUnwrap(footer.range(of: "AdmissionPreparationView"))
+            review.range(of: "admissionEvidenceOffered"),
+            "the native review draws the control without consulting the enrolment")
+        let control = try XCTUnwrap(review.range(of: "AdmissionPreparationView"))
         XCTAssertTrue(
             gate.upperBound < control.lowerBound,
             "the enrolment is consulted after the control is drawn, which is not a gate")

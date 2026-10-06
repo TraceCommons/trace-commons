@@ -723,27 +723,13 @@ const ALLOWED: &[(&str, &str, &str)] = &[
         "This covers sessions that reached the queue.",
         "legacy queue window; #1241 moves only the monitor to the core's words",
     ),
-    // Look inside's own words, until #1241 Task 7 makes it Ron's read-only
-    // view on the core's `look_inside` and `session_review` tables.
-    (
-        "TraceCommonsApp/Views/PreviewSheet.swift",
-        "Exactly what would be sent",
-        "Look inside until #1241 Task 7",
-    ),
+    // Look inside's one remaining sentence of its own: #1241 Task 7 made it
+    // Ron's read-only view on the core's `look_inside` table, and this is
+    // what it says when it cannot show the session.
     (
         "TraceCommonsApp/Views/PreviewSheet.swift",
         "This one can't be shown.",
-        "Look inside until #1241 Task 7",
-    ),
-    (
-        "TraceCommonsApp/Views/PreviewSheet.swift",
-        "Nothing has been sent, and nothing will be until it can be shown to you.",
-        "Look inside until #1241 Task 7",
-    ),
-    (
-        "TraceCommonsApp/Views/PreviewSheet.swift",
-        "Found, and still in what would be sent",
-        "Look inside until #1241 Task 7",
+        "Look inside's cannot-show notice (#1241 Task 7)",
     ),
     // Not a copy: the scanner matches substrings, and "N waiting for your
     // decision" contains Ron's "N waiting for you".
@@ -874,9 +860,12 @@ const SURFACES: &[(&str, &str, &str, &str, &str)] = &[
         "TCBridge/TCConsentCopy.swift",
         "tc_consent_copy",
     ),
+    // Look inside is read-only since #1241 Task 7: Contribute, and its
+    // tooltip, are the inspector's session card. Task 6 moves the card to
+    // `Views/Monitor/SessionReviewCard.swift`; Task 9 re-points this there.
     (
         "consent gate help",
-        "TraceCommonsApp/Views/PreviewSheet.swift",
+        "TraceCommonsApp/Views/Monitor/TracesViews.swift",
         "TCConsentCopy.gateHelp",
         "TCBridge/TCConsentCopy.swift",
         "tc_consent_gate_help",
@@ -1007,9 +996,11 @@ const SURFACES: &[(&str, &str, &str, &str, &str)] = &[
         "TCBridge/TCCoreCopy.swift",
         "tc_residual_secret_line_text",
     ),
+    // Look inside's What's in it tab left with #1241 Task 7; the scrubbing
+    // panel is the session card's (see the gate help above).
     (
         "scrubbing panel",
-        "TraceCommonsApp/Views/PreviewSheet.swift",
+        "TraceCommonsApp/Views/Monitor/TracesViews.swift",
         "TCCoreCopy.redactionSummaryJSON",
         "TCBridge/TCCoreCopy.swift",
         "tc_redaction_summary_json",

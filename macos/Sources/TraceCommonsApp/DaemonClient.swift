@@ -941,6 +941,15 @@ final class DaemonClient {
         try daemon.openPreview(entryID: entryID)
     }
 
+    /// The turn index over the body whose digest is `bodyDigest`, or nil
+    /// when the core refused (a changed body among them) or this client is
+    /// not over a live daemon. Nil is never an empty index.
+    func previewTurns(entryID: String, bodyDigest: String) -> PreviewTurns? {
+        guard let live = daemon as? TCDaemon else { return nil }
+        return PreviewTurns.decode(
+            fromJSON: TCPreviewTurns.turnsJSON(daemon: live, entryID: entryID, bodyDigest: bodyDigest))
+    }
+
     // MARK: - Plumbing
 
     /// Shared by focused protocol extensions while raw daemon framing stays

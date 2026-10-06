@@ -8,25 +8,24 @@ import TCShellCore
 /// trace content, because consent to send something you cannot see is not
 /// consent.
 ///
-/// Four tabs, in the spec's order. **Search is first and focused** on
-/// purpose: "does this mention my client's name?" is a question a
-/// contributor can answer in five seconds. Judging redaction quality by eye
-/// is not, and this interface never asks them to.
+/// **Read-only** (#1241, Ron's #1146 `PreviewInspector`). The inspector's
+/// session card is the review: it carries the verdict, the correction and
+/// the product's one approve control. This sheet shows what would be sent
+/// and offers the native review actions; its footer is Close and nothing
+/// else. It used to carry Contribute, Not this one, the verdict and the
+/// correction too, which made two approve controls for one session.
 ///
-/// **One sheet, one session, one decision.** Both decisions close it and put
-/// the contributor back on the queue. It used to load the next waiting
-/// session into itself with `Contribute` under the same pixels, which made a
-/// second click -- or a second Return, since the button was the default
-/// action -- send a transcript nobody had looked at, with the recovery bar
-/// stranded behind the sheet where it could not be seen.
+/// Ron's order, top to bottom: the eyebrow, title and description, the
+/// gate statement, what would be sent against what is on disk, the
+/// per-session send disclosure, the native review (Prepare admission, and
+/// Request witness review whenever the session supports one -- up front,
+/// not only after a preview failed), then the tabs: Exactly what would be
+/// sent (a page at a time, with turn separators), Search original (a
+/// count), Turn index. Native's search of the redacted text stays beside
+/// them, with Command-F, and so does Copy everything.
 ///
-/// `Contribute` waits only on a loaded preview (see `TCShellCore.ReadGate`)
-/// and is bound to no keyboard shortcut at all.
-///
-/// The layout follows `design-import/DESIGN-SPEC.md` §5.2 (`1b` preview
-/// sheet) and §5.10 (`4a` transcript renderer), which are the same shell:
-/// header bar, tab strip, body, footer bar, with the header's second field
-/// and the body swapping when the transcript tab is active.
+/// Every word on it that is Ron's comes from the core
+/// (`MonitorLookInsideCopy`).
 struct PreviewSheet: View {
     /// Content already loaded elsewhere, so the sheet can be rendered
     /// without running its `task`. Used only by the screenshot hook, which
@@ -47,6 +46,7 @@ struct PreviewSheet: View {
 
     @State private var witnessSupported = false
     @State private var confirmingWitness = false
+    @State private var preparingAdmission = false
     @State private var witnessRequested = false
     @State private var witnessWorking = false
     @State private var preview: TCPreview?
@@ -54,12 +54,20 @@ struct PreviewSheet: View {
     @State private var transcriptText: String
     /// The transcript cut into chunks, built once when the body arrives.
     ///
-    /// One document serves both tabs that need to walk the body: the
-    /// transcript tab pages through its chunks, and the search tab cuts its
-    /// context snippets out of its bytes. The search tab used to build
-    /// `Array(transcript.utf8)` inside a computed property -- a full copy of
-    /// the body per keystroke, 17.5 MB at a time on a real session.
+    /// One document serves every tab that walks the body: the transcript
+    /// tab pages through its chunks, and the redacted search cuts its
+    /// context snippets out of its bytes.
     @State private var document: TranscriptDocument?
+    /// `LookInside.bodyDigest` of the body on screen: the anchor the turn
+    /// index is asked for and checked against.
+    @State private var digest: String?
+    /// The core's turn index for that body, once asked for. Nil is "not
+    /// asked" or "refused", never an empty index.
+    @State private var turns: PreviewTurns?
+    @State private var turnsFailed = false
+    @State private var loadingTurns = false
+    /// Pages of the body shown so far (Ron's Load more).
+    @State private var pages = 1
     @State private var failure: String?
     /// The daemon's sentence for a review it refused.
     ///
@@ -72,58 +80,28 @@ struct PreviewSheet: View {
     @State private var witnessBusyRetry: String?
     @State private var loading: Bool
 
-    /// The contributor's answer to `VerdictCopy.question`, or `nil` for the
-    /// answer they did not give.
-    ///
-    /// `nil` is the starting state and a perfectly good ending one: it never
-    /// gates `Contribute`, and it is sent as an ABSENT `outcome`, not an
-    /// empty one. One sheet is one session's decision, and the sheet is
-    /// rebuilt per entry, so no verdict can carry into the next.
-    @State private var verdict: ContributorVerdict?
-
-    /// What the contributor wrote in the correction box.
-    ///
-    /// Shown only under `.partly` and `.failed` -- you cannot correct a run
-    /// you have just called successful, and that gate is a guard as much as
-    /// it is semantics: it halves the surface for correction-shaped credit
-    /// farming and puts the field only where a correction means something.
-    ///
-    /// Optional throughout, and it never gates `Contribute`. Emptied when
-    /// the answer moves off those two, because text left in a hidden box
-    /// would ride along on an approval without ever being on screen again.
-    @State private var correction: String = ""
-
-    /// Set when the daemon refused this submission because the correction
-    /// contains something credential-shaped. The sheet stays open with the
-    /// text still in the box: the next thing the contributor has to do is
-    /// edit it.
-    @State private var correctionRefused = false
-
-    // MARK: - The read gate
-    //
-    // There is no longer a read gate. `Contribute` used to wait on the
-    // transcript tab having been on screen AND an acknowledgement checkbox
-    // ticked by hand; both are gone, and `TCShellCore.ReadGate` records why
-    // and holds the sentence that took their place. What survives here is
-    // the one condition that was never friction: a preview has to have
-    // loaded, because that is what an approval binds to.
-
-    /// Search first, always: it is the question a contributor can actually
-    /// answer in five seconds.
-    @State private var tab: Tab = .search
+    /// Ron's first tab is what would be sent.
+    @State private var tab: Tab = .transcript
 
     enum Tab: String, CaseIterable, Identifiable {
-        case search, whatsInIt, transcript, permissions
+        case transcript, searchOriginal, turnIndex, search
         var id: String { rawValue }
-        var title: String {
+
+        /// Ron's three tabs in the core's words; native's redacted search
+        /// keeps its own one-word label.
+        func title(_ words: MonitorLookInsideCopy?) -> String {
             switch self {
+            case .transcript: return words?.title ?? ""
+            case .searchOriginal: return words?.searchOriginal ?? ""
+            case .turnIndex: return words?.turnIndex ?? ""
             case .search: return "Search"
-            case .whatsInIt: return "What's in it"
-            case .transcript: return "Exactly what would be sent"
-            case .permissions: return "Permissions"
             }
         }
     }
+
+    /// How much of the body one Load more adds: the transcript's resident
+    /// ceiling, so a page is never more than the tab keeps typeset.
+    static let pageBytes = TranscriptPaging.retainedLimitBytes
 
     init(entry: QueueEntry, preloaded: Preloaded? = nil) {
         self.entry = entry
@@ -131,12 +109,46 @@ struct PreviewSheet: View {
         _summary = State(initialValue: preloaded?.summary)
         _transcriptText = State(initialValue: preloaded?.transcript ?? "")
         _document = State(initialValue: preloaded.map { TranscriptDocument($0.transcript) })
+        _digest = State(initialValue: preloaded.map { LookInside.bodyDigest($0.transcript) })
         _loading = State(initialValue: preloaded == nil)
     }
 
     /// Bumped by Command-F. `SearchTab` watches it and takes focus, so the
     /// shortcut works from any tab and from anywhere on the search tab.
     @State private var searchFocusRequest = 0
+
+    /// The Monitor's Traces words, decoded once.
+    private static let traces = MonitorTracesCopy.decode(fromJSON: TCCoreCopy.monitorTracesCopyJSON())
+
+    /// Ron's Look-inside words, or nil when the core's table did not
+    /// decode -- in which case the sheet draws no words of Ron's rather
+    /// than any of its own.
+    private var words: MonitorLookInsideCopy? { Self.traces?.lookInside }
+
+    /// The core's other Close, for a sheet whose Look-inside table did not
+    /// decode: the footer's one control is never drawn without a name.
+    private static let fallbackClose = TCCoreCopy.firstRunCopyJSON().flatMap(FirstRunCopy.decode)?.passkey.close
+
+    /// Close in the core's words: the Look-inside table's, else the other.
+    private var closeWord: String? { words?.close ?? Self.fallbackClose }
+
+    /// The one sentence this sheet says when it cannot show the session.
+    private static let cannotShow = "This one can't be shown."
+
+    /// The core's line under that sentence, or nothing when its table did
+    /// not decode. Every failure that is not a witness refusal reads this:
+    /// `failure` can hold the local preview build's raw error text.
+    private var cannotShowDetail: String { Self.traces?.sessionReview.cannotShowBody ?? "" }
+
+    /// Whether the session holds a certificate now. `entry` is the copy the
+    /// sheet opened with, and a witness review that succeeds while it is
+    /// open earns one, so the live queue row is read, and the body the
+    /// review reopened on.
+    private var holdsCertificate: Bool {
+        LookInside.holdsCertificate(
+            liveRow: (model.awaitingDecision.first(where: { $0.entryID == entry.entryID }) ?? entry).holdsCertificate,
+            envelopeDigest: summary?.envelopeDigest)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -168,6 +180,17 @@ struct PreviewSheet: View {
             .frame(width: 0, height: 0)
             .accessibilityHidden(true)
             .focusable(false)
+            // With no Close word from the core the footer draws no control,
+            // so Escape hangs from an unseen one here instead.
+            if closeWord == nil {
+                Button("") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                    .buttonStyle(.plain)
+                    .opacity(0)
+                    .frame(width: 0, height: 0)
+                    .accessibilityHidden(true)
+                    .focusable(false)
+            }
         }
         .glassTier(.pane)
         .task(id: entry.entryID) {
@@ -178,146 +201,129 @@ struct PreviewSheet: View {
         .onDisappear { closePreview() }
         .sheet(isPresented: $confirmingWitness) {
             if let copy = model.witnessCopy?.review {
-                WitnessReviewConsent(copy: copy) { Task { await prepareWitness() } }
+                WitnessReviewConsent(copy: copy, confirmLine: words?.witnessConfirmLine,
+                                     confirmLabel: words?.witnessConfirmLabel) { Task { await prepareWitness() } }
             }
-        }
-        // The credential refusal, as its own alert rather than a line in
-        // the submit toast: it is the one submit failure the contributor
-        // caused and the only one they can fix, and it asks them to do two
-        // things -- edit the text, and rotate what they typed. Neither
-        // string is derived from the response, so no correction text and no
-        // detected value can reach the screen a second time.
-        .alert(
-            CorrectionCopy.credentialHeadline,
-            isPresented: $correctionRefused
-        ) {
-            Button("Close", role: .cancel) {}
-        } message: {
-            Text(CorrectionCopy.credentialBody)
         }
     }
 
     // MARK: - Chrome
 
-    /// The same identity line and the same labelled figures as a queue card,
-    /// in the same order. Recognising the card you just clicked is one of
-    /// the quieter things that makes a preview trustworthy.
-    ///
-    /// The second field is not fixed: §5.10 replaces the "nothing sent yet"
-    /// lock with what scrubbing actually found while the transcript is on
-    /// screen, because that is the number a person reads the body against.
+    /// Ron's head of the inspector: what this is, the gate statement, the
+    /// sizes, the send disclosure, and the native review actions.
     private var header: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
-            if let copy = model.publicRunCopy {
-                Text(copy.sessionDetail)
+            if let words {
+                Text(words.eyebrow)
+                    .glassType(GlassTokens.TypeScale.eyebrow)
+                    .foregroundStyle(GlassColor.textTertiary)
+                Text(words.title)
                     .glassType(GlassTokens.TypeScale.title)
                     .foregroundStyle(GlassColor.textPrimary)
-            }
-            HStack(alignment: .firstTextBaseline, spacing: GlassTokens.Space.s4) {
-                Text(entry.projectLabel)
-                    .glassType(GlassTokens.TypeScale.bodyStrong)
-                    .foregroundStyle(GlassColor.textPrimary)
-                Text(entry.agentName)
-                    .glassType(GlassTokens.TypeScale.caption)
-                    .foregroundStyle(GlassColor.textSecondary)
-                Spacer(minLength: GlassTokens.Space.s6)
-                Text(Format.when(entry.discoveredAt))
+                Text(words.description)
                     .glassType(GlassTokens.TypeScale.caption)
                     .foregroundStyle(GlassColor.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
-            HStack(alignment: .firstTextBaseline, spacing: GlassTokens.Space.s10) {
-                if let summary {
-                    VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
-                        Text("Would send")
-                            .glassType(GlassTokens.TypeScale.eyebrow)
-                            .foregroundStyle(GlassColor.textTertiary)
-                        HStack(alignment: .firstTextBaseline, spacing: GlassTokens.Space.s3) {
-                            Text(Format.bytes(summary.wouldSendBytes))
-                                .glassType(GlassTokens.TypeScale.label)
-                                .monospacedDigit()
-                                .foregroundStyle(GlassColor.textPrimary)
-                            if tab == .transcript {
-                                Text("(the session file on disk is \(Format.bytes(summary.rawSessionBytes)))")
-                                    .glassType(GlassTokens.TypeScale.caption)
-                                    .foregroundStyle(GlassColor.textSecondary)
-                            }
-                        }
-                    }
-                    .accessibilityElement(children: .combine)
-                }
-                if tab == .transcript, let summary {
-                    VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
-                        Text("Scrubbing found")
-                            .glassType(GlassTokens.TypeScale.eyebrow)
-                            .foregroundStyle(GlassColor.textTertiary)
-                        // Nothing matched is the case worth slowing down on,
-                        // so it is a tag in the ask tone, carrying its words.
-                        if RedactionLabels.removals(summary.redactions).isEmpty {
-                            GlassTag(Self.scrubbingFound(summary), tone: .ask)
-                        } else {
-                            Text(Self.scrubbingFound(summary))
-                                .glassType(GlassTokens.TypeScale.label)
-                                .foregroundStyle(GlassColor.textPrimary)
-                        }
-                    }
-                    .accessibilityElement(children: .combine)
-                } else {
-                    VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
-                        Text("Status")
-                            .glassType(GlassTokens.TypeScale.eyebrow)
-                            .foregroundStyle(GlassColor.textTertiary)
-                        GlassTag("nothing sent yet", tone: .neutral)
-                    }
-                    .accessibilityElement(children: .combine)
-                }
-                Spacer(minLength: 0)
-            }
-            // K11: what leaves this computer for this session, before and
-            // after redaction, and what its witness was checked against.
+            gateStatement
             if let summary {
+                sizes(summary)
+                // K11: what leaves this computer for this session, before
+                // and after redaction, and what its witness was checked
+                // against.
                 SessionSendDisclosureView(
                     entry: entry,
                     rawSessionBytes: summary.rawSessionBytes,
                     wouldSendBytes: summary.wouldSendBytes)
             }
-            if let summary, let copy = model.publicRunCopy {
-                VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
-                    Text(copy.task)
-                        .glassType(GlassTokens.TypeScale.eyebrow)
-                        .foregroundStyle(GlassColor.textTertiary)
-                    Text(summary.openingPrompt.isEmpty ? copy.noTask : summary.openingPrompt)
-                        .glassType(GlassTokens.TypeScale.body)
-                        .foregroundStyle(
-                            summary.openingPrompt.isEmpty ? GlassColor.textSecondary : GlassColor.textPrimary
-                        )
-                        .lineLimit(3)
-                        .textSelection(.enabled)
-                }
-            }
-            Text("Nothing has been sent. This is what would be.")
-                .glassType(GlassTokens.TypeScale.caption)
-                .foregroundStyle(GlassColor.textSecondary)
+            nativeReview
         }
         .padding(.horizontal, GlassTokens.Space.s9)
         .padding(.vertical, GlassTokens.Space.s8)
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    /// "12 secrets · 4 file paths · 2 email addresses" -- category labels and
-    /// counts, in the daemon's own words, largest first. The contract
-    /// guarantees this map never carries matched text.
-    private static func scrubbingFound(_ summary: PreviewSummary) -> String {
-        // Removals only. `redactions` also carries `residual_secret_at:*`,
-        // which counts a secret that was DETECTED AND LEFT IN, and this line
-        // sits under a heading that says the opposite. See
-        // `RedactionLabels`; the survivor is stated separately, in the
-        // attention tone, rather than dropped.
-        let removals = RedactionLabels.removals(summary.redactions)
-        guard !removals.isEmpty else { return "nothing matched" }
-        return removals
-            .sorted { $0.value == $1.value ? $0.key < $1.key : $0.value > $1.value }
-            .map { "\($0.value) \($0.key.replacingOccurrences(of: "_", with: " "))" }
-            .joined(separator: " · ")
+    /// Ron's quiet card: the session's tool and folder, and what would be
+    /// sent against the file on disk.
+    private func sizes(_ summary: PreviewSummary) -> some View {
+        GlassCard(quiet: true) {
+            HStack(alignment: .firstTextBaseline, spacing: GlassTokens.Space.s4) {
+                Text(entry.agentName)
+                    .glassType(GlassTokens.TypeScale.bodyStrong)
+                    .foregroundStyle(GlassColor.textPrimary)
+                Text(entry.projectLabel)
+                    .glassType(GlassTokens.TypeScale.caption)
+                    .foregroundStyle(GlassColor.textSecondary)
+                Spacer(minLength: GlassTokens.Space.s6)
+                if let words {
+                    Text(FirstRunCopy.fill(words.wouldSend, ["size": Format.bytes(summary.wouldSendBytes)])
+                        + " · " + FirstRunCopy.fill(words.onDisk, ["size": Format.bytes(summary.rawSessionBytes)]))
+                        .glassType(GlassTokens.TypeScale.caption)
+                        .monospacedDigit()
+                        .foregroundStyle(GlassColor.textSecondary)
+                }
+            }
+            .accessibilityElement(children: .combine)
+        }
+    }
+
+    /// Ron's `NativeReviewActions`: optional checks that stay local until
+    /// confirmed. Drawn on every preview that has one to offer -- the
+    /// witness review is no longer reached by a preview failing first --
+    /// and never for a session that already holds a certificate.
+    ///
+    /// Prepare admission is still gated on the enrolment, and gated nowhere
+    /// else: an invited contributor has no evidence-bearing path, so the
+    /// control could only refuse them and is absent instead.
+    @ViewBuilder
+    private var nativeReview: some View {
+        let admission = model.daemonSettings?.admissionEvidenceOffered == true
+        let holdsCertificate = self.holdsCertificate
+        let witness = LookInside.offersWitnessReview(
+            supported: witnessSupported, witnessPinned: model.witnessStateCode == 1,
+            holdsCertificate: holdsCertificate)
+        if let words,
+           LookInside.showsNativeReview(
+               admissionOffered: admission, offersWitness: witness, holdsCertificate: holdsCertificate)
+        {
+            VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
+                Divider().overlay(GlassColor.hairline)
+                Text(words.nativeReview)
+                    .glassType(GlassTokens.TypeScale.eyebrow)
+                    .foregroundStyle(GlassColor.textTertiary)
+                Text(words.nativeReviewCaption)
+                    .glassType(GlassTokens.TypeScale.caption)
+                    .foregroundStyle(GlassColor.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: GlassTokens.Space.s4) {
+                    if admission {
+                        Button(words.prepareAdmission) { preparingAdmission = true }
+                            .buttonStyle(GlassButtonStyle(.glass))
+                    }
+                    if witness {
+                        Button(witnessWorking ? words.witnessReviewing : words.requestWitnessReview) {
+                            confirmingWitness = true
+                        }
+                        .buttonStyle(GlassButtonStyle(.glass))
+                        .disabled(witnessWorking || model.witnessCopy?.review == nil)
+                    }
+                    Spacer(minLength: 0)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .sheet(isPresented: $preparingAdmission) {
+                GlassSheet(title: words.prepareAdmission) {
+                    ScrollView { AdmissionPreparationView(entryID: entry.entryID) }
+                    HStack {
+                        Spacer()
+                        Button(words.close) { preparingAdmission = false }
+                            .buttonStyle(GlassButtonStyle(.glass))
+                            .keyboardShortcut(.cancelAction)
+                    }
+                }
+                .frame(width: 560, height: 480)
+            }
+        }
     }
 
     @ViewBuilder
@@ -325,54 +331,55 @@ struct PreviewSheet: View {
         if witnessWorking, let copy = model.witnessCopy?.review {
             SheetNotice(title: copy.heading, detail: copy.working)
         } else if loading {
-            SheetNotice(
-                title: "Scrubbing it locally…",
-                detail: "Reading the session and running the redaction pass."
-            )
-        } else if let failure {
-            VStack(spacing: GlassTokens.Space.s8) {
-                // A refusal the daemon classified wins; otherwise the one
-                // fixed sentence, which is also what a failure that is not a
-                // refusal gets -- `failure` can hold raw local error text and
-                // must not reach a screen on this path.
-                if witnessRequested, let retry = witnessBusyRetry {
-                    // A busy witness judged nothing: not a refusal. The
-                    // daemon's busy sentence, and when to try again.
-                    SheetNotice(
-                        title: model.witnessCopy?.review?.heading,
-                        detail: [witnessRefusal ?? failure, retry].joined(separator: "\n")
-                    )
-                } else {
-                    SheetNotice(
-                        title: "This one can't be shown.",
-                        detail: witnessRequested
-                            ? (witnessRefusal ?? model.witnessCopy?.review?.failed ?? failure)
-                            : failure
-                    )
-                }
-                if witnessSupported, model.witnessStateCode == 1, let copy = model.witnessCopy?.review {
-                    Text(copy.disclosure)
-                        .glassType(GlassTokens.TypeScale.caption)
-                        .foregroundStyle(GlassColor.textSecondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                    Button(copy.action) { confirmingWitness = true }
-                        .buttonStyle(GlassButtonStyle(.glass))
-                }
-            }.padding(GlassTokens.Space.s9)
-        } else if let summary {
-            // A segmented control rather than a TabView: inside a sheet this
-            // is the standard macOS treatment, and Search has to be able to
-            // start selected and focused.
-            //
-            // `GlassSegmentedTabs` rather than `Picker(.segmented)` because
-            // a segment has to carry a count -- the number of things
-            // scrubbing removed sits on "What's in it", so a person can see
-            // there is something to look at before they click the tab. A
-            // stock segmented picker takes labels only.
+            // Without the core's Look-inside table there is no loading line,
+            // and the tabs will not draw: said now, not an empty notice.
+            if let words {
+                SheetNotice(title: nil, detail: words.loadingTranscript)
+            } else {
+                SheetNotice(title: Self.cannotShow, detail: cannotShowDetail)
+            }
+        } else if failure != nil {
+            // A refusal the daemon classified wins; otherwise the one fixed
+            // sentence over the core's cannot-show line, which is also what
+            // a failure that is not a refusal gets -- `failure` can hold raw
+            // local error text and never reaches a screen.
+            if witnessRequested, let retry = witnessBusyRetry {
+                // A busy witness judged nothing: not a refusal. The
+                // daemon's busy sentence, and when to try again.
+                SheetNotice(
+                    title: model.witnessCopy?.review?.heading,
+                    detail: [witnessRefusal ?? model.witnessCopy?.review?.failed ?? cannotShowDetail, retry]
+                        .joined(separator: "\n")
+                )
+            } else {
+                SheetNotice(
+                    title: Self.cannotShow,
+                    detail: witnessRequested
+                        ? (witnessRefusal ?? model.witnessCopy?.review?.failed ?? cannotShowDetail)
+                        : cannotShowDetail
+                )
+            }
+        } else if summary != nil, let words, let document {
             VStack(alignment: .leading, spacing: GlassTokens.Space.s6) {
-                tabBar(summary)
-
+                tabBar(words)
                 switch tab {
+                case .transcript:
+                    TranscriptTab(
+                        document: document,
+                        words: words,
+                        turns: turns?.turns ?? [],
+                        shownChunks: shownChunks(document),
+                        onLoadMore: { pages += 1 },
+                        onAddSeparators: fullyShown(document) && turns == nil && !loadingTurns
+                            ? { Task { await loadTurns() } } : nil
+                    )
+                    .id(turns?.turnCount ?? -1)
+                case .searchOriginal:
+                    OriginalSearchTab(words: words) { needle in
+                        model.searchOriginal(entryID: entry.entryID, needle: needle)
+                    }
+                case .turnIndex:
+                    turnIndexTab(words, document: document)
                 case .search:
                     SearchTab(
                         document: document,
@@ -384,123 +391,92 @@ struct PreviewSheet: View {
                         initialOffsets: preloaded?.offsets,
                         focusRequest: searchFocusRequest
                     )
-                case .whatsInIt:
-                    WhatsInItTab(entry: entry, summary: summary)
-                case .transcript:
-                    // Fail closed rather than cutting a fresh document on
-                    // every layout pass. Unreachable in practice -- the
-                    // document is built in the same step that decodes the
-                    // summary, and this branch only renders once the
-                    // summary exists.
-                    if let document {
-                        TranscriptTab(document: document)
-                    } else {
-                        SheetNotice(
-                            title: "The transcript isn't ready.",
-                            detail: """
-                            Nothing has been sent, and nothing will be until it can be \
-                            shown to you.
-                            """
-                        )
-                    }
-                case .permissions:
-                    PermissionsTab(summary: summary, options: model.consentScopes)
                 }
                 Spacer(minLength: 0)
             }
             .padding(.horizontal, GlassTokens.Space.s9)
             .padding(.vertical, GlassTokens.Space.s8)
+        } else if summary != nil {
+            // A summary with no body to show, or the core's Look-inside
+            // table would not decode: said, never a blank pane or a row of
+            // unnamed tabs.
+            SheetNotice(title: Self.cannotShow, detail: cannotShowDetail)
         }
     }
 
-    /// The core's word for the review this sheet is: the tab group's name
-    /// when the public-run copy does not decode, so the group is never
-    /// nameless.
-    private static let reviewWord = MonitorTracesCopy.decode(fromJSON: TCCoreCopy.monitorTracesCopyJSON())?.review
-
-    /// The four tabs, in the spec's order. The one that has something to
-    /// report says so on its face; the segment carries the selected trait.
-    private func tabBar(_ summary: PreviewSummary) -> some View {
-        GlassSegmentedTabs(model.publicRunCopy?.sessionDetail ?? Self.reviewWord ?? tab.title, selection: $tab,
-                           segments: Tab.allCases.map { item in
-                               GlassSegment(item.title, value: item,
-                                            badge: badge(for: item, summary: summary).flatMap { Int($0) })
-                           })
+    /// The tabs, in Ron's order, with native's redacted search after them.
+    private func tabBar(_ words: MonitorLookInsideCopy) -> some View {
+        GlassSegmentedTabs(tab.title(words), selection: $tab,
+                           segments: Tab.allCases.map { item in GlassSegment(item.title(words), value: item) })
     }
 
-    private func badge(for item: Tab, summary: PreviewSummary) -> String? {
-        switch item {
-        case .whatsInIt:
-            let removed = summary.redactions.values.reduce(0, +)
-            return removed == 0 ? nil : "\(removed)"
-        case .permissions:
-            return "\(summary.consentScopes.count)"
-        default:
-            return nil
-        }
+    private func shownChunks(_ document: TranscriptDocument) -> Int {
+        LookInside.shownChunks(document, pages: pages, pageBytes: Self.pageBytes)
     }
 
-    /// The one irreversible click in the product, and the one place the
-    /// scrubbing caveat is repeated verbatim on purpose -- see
-    /// `ScrubbingCaveat`.
-    private var footer: some View {
-        VStack(alignment: .leading, spacing: GlassTokens.Space.s5) {
-            // §5.10 drops this line from the transcript tab's footer. It is
-            // kept on every tab here: it is the sentence everything else on
-            // this sheet is qualified by, and the tab a person is standing
-            // on when they reach for Contribute is not a reason to stop
-            // saying it.
-            ScrubbingCaveatAtCommit()
-            admissibility
-            gateStatement
-            if model.witnessStateCode == 1 || witnessRequested || witnessWorking, let copy = model.witnessCopy?.review {
-                Text(copy.immutable)
+    /// Ron's `loaded`: every page of the body is on screen.
+    private func fullyShown(_ document: TranscriptDocument) -> Bool {
+        LookInside.remainingBytes(document, shownChunks: shownChunks(document)) == 0
+    }
+
+    /// Ron's Turn index tab: once the whole body has been shown, the core's
+    /// index over it, one row per turn.
+    @ViewBuilder
+    private func turnIndexTab(_ words: MonitorLookInsideCopy, document: TranscriptDocument) -> some View {
+        VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
+            if !fullyShown(document) {
+                Text(words.turnsNeedFullRead)
+                    .glassType(GlassTokens.TypeScale.body)
+                    .foregroundStyle(GlassColor.textTertiary)
+            } else if turns == nil {
+                Button(words.loadTurnIndex) { Task { await loadTurns() } }
+                    .buttonStyle(GlassButtonStyle(.primary))
+                    .disabled(loadingTurns)
+            }
+            if turnsFailed, let line = Self.traces?.requestFailed {
+                Text(line)
                     .glassType(GlassTokens.TypeScale.caption)
                     .foregroundStyle(GlassColor.textSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
             }
-            verdictQuestion.disabled(model.witnessStateCode == 1 || witnessRequested || witnessWorking)
-            if correctionIsOffered {
-                correctionField.disabled(model.witnessStateCode == 1 || witnessRequested || witnessWorking)
-            }
-            // Drawn on every preview, in the place GTK has always drawn it,
-            // rather than only where one failed. It arms this session's NEXT
-            // call -- "continue the agent task and return here to review" --
-            // so it is something a contributor comes here to do, not a
-            // remedy for the sheet in front of them. Reaching it used to
-            // require a witness review that failed first.
-            //
-            // Still gated on the enrolment, and gated nowhere else: an
-            // invited contributor has no evidence-bearing path, so the
-            // control could only refuse them and is absent instead.
-            if model.daemonSettings?.admissionEvidenceOffered == true {
-                AdmissionPreparationView(entryID: entry.entryID)
-            }
-            HStack(spacing: GlassTokens.Space.s4) {
-                // A glass pill like "Close", never filled: it must not read
-                // as a second way to approve.
-                Button("Not this one") {
-                    model.dismiss(entry)
-                    dismiss()
+            if let turns, !turns.turns.isEmpty {
+                Text(words.turnIndexEyebrow)
+                    .glassType(GlassTokens.TypeScale.eyebrow)
+                    .foregroundStyle(GlassColor.textTertiary)
+                CaptureSafeScroll {
+                    LazyVStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
+                        ForEach(turns.turns, id: \.index) { turn in
+                            VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
+                                Text(LookInside.turnTitle(turn))
+                                    .glassType(GlassTokens.TypeScale.bodyStrong)
+                                    .foregroundStyle(GlassColor.textPrimary)
+                                Text(LookInside.turnDetail(turn, words: words))
+                                    .glassType(GlassTokens.TypeScale.caption)
+                                    .monospacedDigit()
+                                    .foregroundStyle(GlassColor.textSecondary)
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .accessibilityElement(children: .combine)
+                        }
+                    }
                 }
-                .buttonStyle(GlassButtonStyle(.glass))
-                Spacer(minLength: GlassTokens.Space.s6)
-                // Escape closes the sheet. The only other binding on this
-                // sheet is Command-F below; Return stays unbound.
-                Button("Close") { dismiss() }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// Close, and nothing else: this sheet approves nothing. The one
+    /// approve control is the inspector card's. Escape closes it; Return is
+    /// bound to nothing.
+    private var footer: some View {
+        HStack(spacing: GlassTokens.Space.s4) {
+            Spacer(minLength: 0)
+            // Never an unnamed control: with no Close word from the core
+            // there is no visible control, and Escape still closes (an
+            // unseen control in the sheet's background carries it).
+            if let close = closeWord {
+                Button(close) { dismiss() }
                     .buttonStyle(GlassButtonStyle(.glass))
                     .keyboardShortcut(.cancelAction)
-                // The ONLY approve control in the product. It is behind the
-                // preview by design -- it cannot arm until one has loaded --
-                // and it has NO keyboard shortcut: this used to be
-                // `.defaultAction`, which put an irreversible send one
-                // Return away from a hand resting on the keyboard.
-                Button("Contribute") {
-                    contribute()
-                }
-                .buttonStyle(GlassButtonStyle(.primary))
-                .disabled(!canContribute)
-                .help(gateHelp)
             }
         }
         .padding(.horizontal, GlassTokens.Space.s9)
@@ -508,291 +484,13 @@ struct PreviewSheet: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    // MARK: - What arms Contribute
+    // MARK: - The gate statement
 
     /// The consent surface's sentences, read once. Nil if the payload did
     /// not arrive or would not parse, in which case the sheet shows no claim
     /// rather than a blank one -- see `ConsentCopy.decode`.
     private var consent: ConsentCopy? {
         TCConsentCopy.copyJSON().flatMap(ConsentCopy.decode(fromJSON:))
-    }
-
-    /// This session's row AS THE QUEUE HOLDS IT NOW, not as it was when the
-    /// sheet opened.
-    ///
-    /// `entry` is a `let` captured at open time, and this sheet can stay up
-    /// across any number of snapshots -- including the one carrying a
-    /// submit-time failure written back into the row. Reading the opening
-    /// copy would apply the eligibility gate once and then never again,
-    /// which is the same defect as never applying it.
-    ///
-    /// ONLY the eligibility gate and its sentence read this. Everything the
-    /// sheet approves still goes through `entry`, whose id is the same
-    /// either way -- what a preview pinned must not start moving under a
-    /// contributor who is reading it.
-    private var liveEntry: QueueEntry {
-        EligibilitySurface.current(entry, in: model.awaitingDecision, id: \.entryID)
-    }
-
-    /// What the daemon said about contributing THIS session, or nothing at
-    /// all for a contributor who has no eligibility question.
-    private var eligibility: ContributionEligibility? { liveEntry.contributionEligibility }
-
-    /// Whether the shared table offers a send control for this session.
-    ///
-    /// Answers `true` for an entry that carried no `eligibility` key: an
-    /// invited contributor's queue is entirely contributable and the sheet is
-    /// the sheet they always had. Nothing here branches on a state string.
-    private var eligibilityOffersContribute: Bool {
-        EligibilitySurface.offersContribute(eligibility, calls: model.eligibilityCalls)
-    }
-
-    private var canContribute: Bool {
-        // `enrolled`, not `summary != nil`. An approval binds to the
-        // envelope a preview pinned, and a preview built without an
-        // enrollment pinned nothing -- which is the condition the shared
-        // sentence names and the one the other two shells already test.
-        //
-        // And no claim, no approval: the statement above the button is the
-        // whole of what a contributor is told before pressing it, so a
-        // build that cannot read it must not arm the button either.
-        //
-        // And the daemon's own answer about this session. DISARMED HERE
-        // RATHER THAN REMOVED, which is the opposite of the queue card: the
-        // sheet's Contribute is already on screen and under a person's
-        // cursor when the sentence above it is read, and a primary control
-        // that vanished mid-read is its own confusion. On the card the
-        // button is drawn fresh or not at all, so there is nothing to
-        // vanish. Both routes go through the same shared table.
-        consent != nil && ReadGate.canContribute(hasPinnedPreview: summary?.enrolled == true)
-            && eligibilityOffersContribute
-    }
-
-    /// Whether this session can be contributed at all, above the statement
-    /// the sheet already makes.
-    ///
-    /// Drawn WHEREVER Contribute is disarmed for this reason and never
-    /// separated from it: a disarmed primary button with nothing beside it
-    /// is a contributor hunting for a setting that would arm it. Absent
-    /// entirely when the entry carried no `eligibility` key.
-    @ViewBuilder
-    private var admissibility: some View {
-        if let copy = model.privateInferenceCopy,
-           let line = EligibilitySurface.stateLine(
-               eligibility, copy: copy, calls: model.eligibilityCalls)
-        {
-            // A dot and the core's line beside it: the state is never the
-            // colour alone.
-            VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
-                GlassStatusLabel(line, status: PrivateInferenceIndicator.status(
-                    EligibilitySurface.tone(eligibility, calls: model.eligibilityCalls) ?? .neutral))
-                    .fixedSize(horizontal: false, vertical: true)
-                if let reason = EligibilitySurface.reasonLine(
-                    eligibility, calls: model.eligibilityCalls)
-                {
-                    Text(reason)
-                        .glassType(GlassTokens.TypeScale.caption)
-                        .foregroundStyle(GlassColor.textSecondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .accessibilityElement(children: .combine)
-        }
-    }
-
-    /// The tooltip that explains the current answer, chosen by the ABI.
-    ///
-    /// Empty when the sentences are unavailable -- the same condition that
-    /// disarms `canContribute`, so nothing is claimed and nothing is
-    /// pressable. Without the guard a build whose bundle would not decode
-    /// but whose `tc_consent_gate_help` still answered would paint a
-    /// disarmed button with the not-connected sentence, which is a claim
-    /// about the device rather than about the missing copy.
-    private var gateHelp: String {
-        guard consent != nil else { return "" }
-        return TCConsentCopy.gateHelp(pinned: canContribute) ?? ""
-    }
-
-    /// The sentence the acknowledgement checkbox used to carry, printed
-    /// where the tick used to be asked for.
-    ///
-    /// Plain text and no control: it is a statement the app makes, not a
-    /// question it asks. The words come from `consent_copy.rs` across the
-    /// ABI rather than being a literal here, because the Linux and Windows
-    /// sheets print the same sentence and a copy in a view is a copy that
-    /// drifts. Empty when the payload would not decode: the button is
-    /// disarmed in that case, so nothing is claimed and nothing is
-    /// pressable.
-    /// The outcome question, its three answers, and the disclosure under
-    /// them.
-    ///
-    /// Nothing here gates anything. There is no default selection, no
-    /// fourth "didn't answer" option, and `Contribute` is armed by
-    /// `ReadGate` alone -- a contributor who ignores this entire block
-    /// contributes exactly as before, and the approval simply omits
-    /// `outcome`. Tapping the selected answer again clears it, which is the
-    /// only way back to unanswered once an answer is given.
-    ///
-    /// The caption is `VerdictCopy.caption` verbatim: it is where the sheet
-    /// discloses that these fields sit outside its "exactly what would be
-    /// sent" guarantee, which is the one thing on this sheet the preview
-    /// cannot show.
-    /// Whether the correction control is on screen: only under `Partly`
-    /// and `Failed`.
-    private var correctionIsOffered: Bool {
-        verdict == .partly || verdict == .failed
-    }
-
-    /// What would actually be sent, or `nil` for a box that is hidden or
-    /// holds nothing but whitespace.
-    ///
-    /// The visibility check is deliberate rather than redundant. The box is
-    /// emptied when it is hidden, so this would answer `nil` anyway; the
-    /// check states the rule -- a hidden control contributes nothing -- so
-    /// it survives a future change that stops emptying on hide.
-    private var correctionToSend: String? {
-        guard correctionIsOffered else { return nil }
-        return CorrectionCopy.toSend(correction)
-    }
-
-    /// Approve, and decide when the sheet goes away.
-    ///
-    /// With no correction, this is exactly what it was before the box
-    /// existed: fire and dismiss. Back to the queue, never on to the next
-    /// session -- the sheet used to load the next entry with the button
-    /// under the same pixels, so a second keystroke or a second click sent
-    /// a transcript nobody had looked at, with the recovery bar stranded
-    /// behind the sheet. One sheet, one session, one decision.
-    ///
-    /// With a correction, the dismiss waits for the answer, because one of
-    /// the answers is "that correction contains a credential" and the
-    /// contributor needs the text still in front of them to act on it.
-    private func contribute() {
-        // THE PRESS DECIDES WHAT IS SENT. `canContribute` decided what was
-        // offered, at the last render; a snapshot landing between that
-        // render and this tap leaves the button acting on what was drawn.
-        // Asking again here costs nothing and closes the window. Declining
-        // leaves the sheet up, which repaints against the queue's current
-        // answer and says why.
-        guard EligibilitySurface.mayProceed(
-            entry, in: model.awaitingDecision, id: \.entryID,
-            eligibility: { $0.contributionEligibility }, calls: model.eligibilityCalls)
-        else { return }
-        guard let text = correctionToSend else {
-            model.approve(entry, verdict: verdict)
-            dismiss()
-            return
-        }
-        model.approve(entry, verdict: verdict, correction: text) { refused in
-            if refused {
-                correctionRefused = true
-            } else {
-                dismiss()
-            }
-        }
-    }
-
-    /// The correction box and the disclosure under it.
-    ///
-    /// `CorrectionCopy.caption` is printed verbatim and in full. Until the
-    /// published policy page carves a correction out of its "redacted
-    /// locally, re-applied on the server" promise, that sentence is the
-    /// only place a contributor is told their own words are stored as they
-    /// typed them. It is not shortened for layout.
-    private var correctionField: some View {
-        VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
-            Text(CorrectionCopy.question)
-                .glassType(GlassTokens.TypeScale.caption)
-                .foregroundStyle(GlassColor.textSecondary)
-            // A plain editor on the field fill: `GlassTextField` has no seam
-            // for the character cap below.
-            TextEditor(text: $correction)
-                .glassType(GlassTokens.TypeScale.label.weight(.regular))
-                .foregroundStyle(GlassColor.textPrimary)
-                .frame(minHeight: 64, maxHeight: 140)
-                .scrollContentBackground(.hidden)
-                .padding(.horizontal, GlassTokens.Space.s5)
-                .padding(.vertical, GlassTokens.Space.s3)
-                .background(
-                    RoundedRectangle(cornerRadius: GlassTokens.Radius.control, style: .continuous)
-                        .fill(GlassTokens.Color.fieldFill.color))
-                .accessibilityLabel(CorrectionCopy.question)
-                .accessibilityHint(CorrectionCopy.placeholder)
-                // Capped where the person can see it, so an over-long
-                // correction is shortened at the keyboard rather than
-                // refused as `correction-too-long` after the click.
-                .onChange(of: correction) { _, latest in
-                    if latest.count > CorrectionCopy.maxCharacters {
-                        correction = String(latest.prefix(CorrectionCopy.maxCharacters))
-                    }
-                }
-            Text(CorrectionCopy.caption)
-                .glassType(GlassTokens.TypeScale.caption)
-                .foregroundStyle(GlassColor.textTertiary)
-                .fixedSize(horizontal: false, vertical: true)
-                .multilineTextAlignment(.leading)
-                .frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    private var verdictQuestion: some View {
-        VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
-            Text(VerdictCopy.question)
-                .glassType(GlassTokens.TypeScale.caption)
-                .foregroundStyle(GlassColor.textSecondary)
-            HStack(spacing: GlassTokens.Space.s2) {
-                ForEach(ContributorVerdict.allCases, id: \.rawValue) { option in
-                    verdictOption(option)
-                }
-                Spacer(minLength: 0)
-            }
-            Text(VerdictCopy.caption)
-                .glassType(GlassTokens.TypeScale.caption)
-                .foregroundStyle(GlassColor.textTertiary)
-                .fixedSize(horizontal: false, vertical: true)
-                .multilineTextAlignment(.leading)
-                .frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    /// One answer, a glass pill. The chosen one sits on the selected fill,
-    /// leads with a checkmark, is drawn in the strong weight and carries the
-    /// selected trait, so which is chosen is never the fill alone.
-    ///
-    /// Drawn as `GlassSegmentedTabs` draws a segment (its own tier under
-    /// `GlassPressStyle`) rather than in `GlassButtonStyle(.glass)`, whose
-    /// own control fill would sit over the selected one and hide it.
-    private func verdictOption(_ option: ContributorVerdict) -> some View {
-        let selected = verdict == option
-        return Button {
-            verdict = selected ? nil : option
-            // A contributor who wrote a correction under `Failed` and then
-            // answered `Worked` has withdrawn it. Clearing it here is what
-            // stops text nobody can see any more from riding along on the
-            // approval.
-            if !correctionIsOffered {
-                correction = ""
-            }
-        } label: {
-            HStack(spacing: GlassTokens.Space.s2) {
-                if selected {
-                    Image(systemName: "checkmark")
-                        .imageScale(.small)
-                        .accessibilityHidden(true)
-                }
-                Text(option.label)
-            }
-            .glassType(GlassTokens.TypeScale.label.weight(selected ? .semibold : .regular))
-            .foregroundStyle(selected ? GlassColor.textPrimary : GlassColor.textSecondary)
-            .padding(.horizontal, GlassTokens.Space.s6)
-            .frame(minHeight: GlassTokens.Size.control)
-            .glassTier(selected ? .controlSelected : .control)
-        }
-        .buttonStyle(GlassPressStyle())
-        .accessibilityAddTraits(selected ? [.isSelected, .isButton] : .isButton)
     }
 
     private var gateStatement: some View {
@@ -803,6 +501,8 @@ struct PreviewSheet: View {
             .multilineTextAlignment(.leading)
             .frame(maxWidth: .infinity, alignment: .leading)
     }
+
+    // MARK: - Loading
 
     private func prepareWitness() async {
         guard witnessSupported, !witnessWorking else { return }
@@ -827,6 +527,23 @@ struct PreviewSheet: View {
         }
     }
 
+    /// Asks the core for the turn index over the body on screen, and keeps
+    /// it only if it indexes that body: offsets against another body would
+    /// still look like a transcript.
+    private func loadTurns() async {
+        guard let digest, !loadingTurns else { return }
+        loadingTurns = true
+        turnsFailed = false
+        let index = await model.previewTurns(entryID: entry.entryID, bodyDigest: digest)
+        loadingTurns = false
+        guard self.digest == digest else { return }
+        if let index, index.indexes(bodyDigest: digest) {
+            turns = index
+        } else {
+            turnsFailed = true
+        }
+    }
+
     private func load() async {
         loading = true
         failure = nil
@@ -834,8 +551,15 @@ struct PreviewSheet: View {
         switch outcome {
         case .opened(let opened):
             preview = opened
-            transcriptText = opened.body
-            document = TranscriptDocument(opened.body)
+            let body = opened.body
+            transcriptText = body
+            document = TranscriptDocument(body)
+            // A witness review reopens the preview on a new body: its index,
+            // its pages and its anchor start over.
+            digest = LookInside.bodyDigest(body)
+            turns = nil
+            turnsFailed = false
+            pages = 1
             if let data = opened.summaryJSON.data(using: .utf8),
                let decoded = try? DaemonDecoding.decoder().decode(PreviewSummary.self, from: data)
             {
@@ -855,6 +579,82 @@ struct PreviewSheet: View {
         preview = nil
     }
 }
+
+/// Ron's Search original tab: the original session is searched locally and
+/// answers with a count, never with text.
+private struct OriginalSearchTab: View {
+    let words: MonitorLookInsideCopy
+    /// How many times a term appears in the PRE-redaction session, or nil
+    /// when that could not be checked -- which is never zero.
+    let search: (String) -> Int?
+
+    @State private var needle = ""
+    @State private var matches: Int?
+    @State private var failed = false
+
+    private static let requestFailed = MonitorTracesCopy.decode(fromJSON: TCCoreCopy.monitorTracesCopyJSON())?.requestFailed
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
+            Text(words.searchCaption)
+                .glassType(GlassTokens.TypeScale.caption)
+                .foregroundStyle(GlassColor.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Text(words.searchLabel)
+                .glassType(GlassTokens.TypeScale.label)
+                .foregroundStyle(GlassColor.textPrimary)
+            HStack(spacing: GlassTokens.Space.s4) {
+                Group {
+                    if CaptureMode.isRendering {
+                        Text(needle.isEmpty ? words.searchPlaceholder : needle)
+                            .foregroundStyle(needle.isEmpty ? GlassColor.textTertiary : GlassColor.textPrimary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    } else {
+                        TextField(words.searchPlaceholder, text: $needle)
+                            .textFieldStyle(.plain)
+                            .foregroundStyle(GlassColor.textPrimary)
+                            .onSubmit(check)
+                            .onChange(of: needle) { _, _ in
+                                matches = nil
+                                failed = false
+                            }
+                            .accessibilityLabel(words.searchLabel)
+                    }
+                }
+                .glassType(GlassTokens.TypeScale.label.weight(.regular))
+                .padding(.horizontal, GlassTokens.Space.s5)
+                .frame(minHeight: GlassTokens.Size.controlLarge)
+                .background(
+                    RoundedRectangle(cornerRadius: GlassTokens.Radius.control, style: .continuous)
+                        .fill(GlassTokens.Color.fieldFill.color))
+                Button(words.checkCount, action: check)
+                    .buttonStyle(GlassButtonStyle(.glass))
+                    .disabled(trimmed.isEmpty)
+            }
+            if let matches {
+                Text(LookInside.originalMatches(matches, words: words))
+                    .glassType(GlassTokens.TypeScale.bodyStrong)
+                    .monospacedDigit()
+                    .foregroundStyle(GlassColor.textPrimary)
+            } else if failed, let line = Self.requestFailed {
+                Text(line)
+                    .glassType(GlassTokens.TypeScale.caption)
+                    .foregroundStyle(GlassColor.textSecondary)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var trimmed: String { needle.trimmingCharacters(in: .whitespacesAndNewlines) }
+
+    private func check() {
+        guard !trimmed.isEmpty else { return }
+        let count = search(trimmed)
+        matches = count
+        failed = count == nil
+    }
+}
+
 
 // MARK: - Sheet parts
 //
@@ -1190,171 +990,6 @@ struct SearchTab: View {
     }
 }
 
-struct WhatsInItTab: View {
-    let entry: QueueEntry
-    let summary: PreviewSummary
-
-    var body: some View {
-        CaptureSafeScroll {
-            VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
-                GlassKeyValueList(items)
-                if let probabilities = summary.tokenDistributionSummary {
-                    Text(probabilities)
-                        .glassType(GlassTokens.TypeScale.caption)
-                        .foregroundStyle(GlassColor.textSecondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                Text("""
-                "Would send" is usually larger than the file on disk: a redacted \
-                envelope also carries schema, consent and privacy metadata the raw \
-                session file does not.
-                """)
-                .glassType(GlassTokens.TypeScale.caption)
-                .foregroundStyle(GlassColor.textSecondary)
-                .fixedSize(horizontal: false, vertical: true)
-
-                removedPanel
-
-                if !summary.piiLabelsPresent.isEmpty {
-                    GlassSectionRule("Personal-information categories seen")
-                    Text(summary.piiLabelsPresent.joined(separator: ", "))
-                        .glassType(GlassTokens.TypeScale.body)
-                        .foregroundStyle(GlassColor.textPrimary)
-                    Text("Categories only. The matched text is never reported here.")
-                        .glassType(GlassTokens.TypeScale.caption)
-                        .foregroundStyle(GlassColor.textSecondary)
-                }
-
-                GlassSectionRule("Residual risk")
-                Text(summary.residualRisk.replacingOccurrences(of: "_", with: " "))
-                    .glassType(GlassTokens.TypeScale.body)
-                    .foregroundStyle(GlassColor.textPrimary)
-                Text("""
-                Files touched and tools invoked are not in this contract's preview \
-                summary, so they are not shown rather than guessed at.
-                """)
-                .glassType(GlassTokens.TypeScale.caption)
-                .foregroundStyle(GlassColor.textTertiary)
-                .fixedSize(horizontal: false, vertical: true)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }
-    }
-
-    /// The session's figures, one labelled value each.
-    private var items: [GlassKeyValueList.Item] {
-        [
-            GlassKeyValueList.Item("Agent", entry.agentName),
-            GlassKeyValueList.Item("Project", entry.projectLabel),
-            GlassKeyValueList.Item("Turns recorded", "\(summary.eventCount)"),
-            GlassKeyValueList.Item("Session on disk", Format.bytes(summary.rawSessionBytes)),
-            GlassKeyValueList.Item("Would send", Format.bytes(summary.wouldSendBytes)),
-        ]
-    }
-
-    /// Grouped by family, described in words, and split into what left and
-    /// what did not.
-    ///
-    /// This section used to print the daemon's count map one raw label per
-    /// line -- which put `residual_secret_at:events.3.correction` under the
-    /// heading "What scrubbing removed", stating the exact opposite of what
-    /// happened about a secret that is still in the payload. See
-    /// `RedactionSummary` and `RedactionLabels`. The grouping, the split and
-    /// every description are the core's (`tc_redaction_summary_json`); nil
-    /// when its answer cannot be read, and then the panel lists nothing
-    /// rather than claiming nothing matched.
-    private var rows: (removed: [RedactionSummaryRow], stillPresent: [RedactionSummaryRow])? {
-        RedactionSummary.rows(fromJSON: TCCoreCopy.redactionSummaryJSON(
-            occurrences: summary.redactions,
-            distinct: summary.redactionsDistinct
-        ))
-    }
-
-    @ViewBuilder
-    private var removedPanel: some View {
-        if let rows = self.rows {
-            removedPanel(rows)
-        }
-    }
-
-    @ViewBuilder
-    private func removedPanel(
-        _ rows: (removed: [RedactionSummaryRow], stillPresent: [RedactionSummaryRow])
-    ) -> some View {
-        GlassSectionRule("What scrubbing removed")
-        if rows.removed.isEmpty {
-            nothingMatchedCard
-        } else {
-            ForEach(rows.removed, id: \.family) { row in
-                summaryRow(row)
-            }
-        }
-
-        if !rows.stillPresent.isEmpty {
-            GlassSectionRule("Found, and still in what would be sent")
-            ForEach(rows.stillPresent, id: \.family) { row in
-                // The ask dot carries the row's own words: still present is
-                // a state, and a state is never the colour alone.
-                VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
-                    GlassStatusLabel(row.description, status: .ask)
-                        .fixedSize(horizontal: false, vertical: true)
-                    // Schema paths, never transcript text: the redactor
-                    // guarantees the shape of these labels where it
-                    // mints them.
-                    if !row.detail.isEmpty {
-                        Text(row.detail.joined(separator: ", "))
-                            .glassType(GlassTokens.TypeScale.caption)
-                            .foregroundStyle(GlassColor.textSecondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .accessibilityElement(children: .combine)
-            }
-        }
-
-        // A panel that enumerates categories makes the app look more
-        // thorough than it is, which is exactly when this sentence earns its
-        // place.
-        ScrubbingCaveatNote()
-            .padding(.top, GlassTokens.Space.s2)
-    }
-
-    private func summaryRow(_ row: RedactionSummaryRow) -> some View {
-        VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
-            Text(row.countLine)
-                .glassType(GlassTokens.TypeScale.body)
-                .foregroundStyle(GlassColor.textPrimary)
-            Text(row.description)
-                .glassType(GlassTokens.TypeScale.caption)
-                .foregroundStyle(GlassColor.textSecondary)
-                .fixedSize(horizontal: false, vertical: true)
-            if !row.detail.isEmpty {
-                Text(row.detail.joined(separator: ", "))
-                    .glassType(GlassTokens.TypeScale.caption)
-                    .foregroundStyle(GlassColor.textTertiary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .accessibilityElement(children: .combine)
-    }
-
-    /// The one card in this tab that is drawn to be found: a session where
-    /// no pattern fired is the session most worth a second look, and it is
-    /// the case a count of removals cannot state. The sentence says so
-    /// itself; the notice has no title, so it draws no dot.
-    private var nothingMatchedCard: some View {
-        GlassNotice(tone: .ask) {
-            Text("""
-            Nothing matched. On a session that touched credentials, that is \
-            itself worth a second look.
-            """)
-            .fixedSize(horizontal: false, vertical: true)
-        }
-    }
-}
-
 /// The redacted transcript exactly as it would be sent, set as flat
 /// monospace text and deliberately not as chat bubbles: these are the
 /// literal bytes an approval covers, not a conversation to be enjoyed.
@@ -1379,6 +1014,17 @@ struct WhatsInItTab: View {
 /// a chunk that is not laid out holds its place by an estimate.
 struct TranscriptTab: View {
     let document: TranscriptDocument
+    /// Ron's Look-inside words: the caption, Load more and Add turn
+    /// separators. Nil draws none of them.
+    var words: MonitorLookInsideCopy? = nil
+    /// The core's turn index over this body, drawn as separators. Empty
+    /// until asked for.
+    var turns: [PreviewTurns.Turn] = []
+    /// How many chunks are shown (Ron's pages); the rest wait on Load more.
+    var shownChunks: Int? = nil
+    var onLoadMore: () -> Void = {}
+    /// Asks for the turn index; nil when it cannot be asked yet or is in.
+    var onAddSeparators: (() -> Void)? = nil
     /// The chunks that are typeset right now, and the eviction that keeps
     /// that set under the ceiling. The policy lives in `TCShellCore` so it
     /// can be asserted against real byte counts without a running app.
@@ -1399,15 +1045,12 @@ struct TranscriptTab: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.s5) {
-            Text(TranscriptMarkers.chipped(Self.caption, font: GlassTokens.TypeScale.caption.font))
-                .glassType(GlassTokens.TypeScale.caption)
-                .foregroundStyle(GlassColor.textSecondary)
-                .fixedSize(horizontal: false, vertical: true)
-
-            HStack(spacing: GlassTokens.Space.s4) {
-                Text("\(Format.bytes(document.totalBytes)), all of it.")
+            HStack(alignment: .firstTextBaseline, spacing: GlassTokens.Space.s4) {
+                // Ron's caption, from the core.
+                Text(words?.transcriptCaption ?? "")
                     .glassType(GlassTokens.TypeScale.caption)
                     .foregroundStyle(GlassColor.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
                 Spacer(minLength: 0)
                 Button(copied ? "Copied" : "Copy everything", action: copyAll)
                     .buttonStyle(GlassButtonStyle(.glass))
@@ -1435,7 +1078,50 @@ struct TranscriptTab: View {
                 .onAppear { measure(width: geometry.size.width) }
                 .onChange(of: geometry.size.width) { _, width in measure(width: width) }
             }
+
+            // Ron's Load more, naming what is left, and his link to the
+            // turn separators once the whole body is shown.
+            if let words, remaining > 0 || onAddSeparators != nil {
+                HStack(spacing: GlassTokens.Space.s4) {
+                    if remaining > 0 {
+                        Button(FirstRunCopy.fill(words.loadMore, ["size": Format.bytes(remaining)]), action: onLoadMore)
+                            .buttonStyle(GlassButtonStyle(.glass))
+                    }
+                    if let onAddSeparators {
+                        Button(words.addTurnSeparators, action: onAddSeparators)
+                            .buttonStyle(GlassButtonStyle(.link))
+                    }
+                    Spacer(minLength: 0)
+                }
+            }
         }
+    }
+
+    /// The chunks on screen: all of them, or as many as the pages so far.
+    private var shown: Int { min(document.chunkCount, max(0, shownChunks ?? document.chunkCount)) }
+
+    /// The bytes still behind Load more.
+    private var remaining: Int { LookInside.remainingBytes(document, shownChunks: shown) }
+
+    /// A turn's separator, drawn where the turn opens in the body: a
+    /// hairline and the core's index row for it.
+    private func separator(_ turn: PreviewTurns.Turn) -> some View {
+        VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
+            Divider().overlay(GlassColor.hairline)
+            HStack(spacing: GlassTokens.Space.s3) {
+                Text(LookInside.turnTitle(turn))
+                    .glassType(GlassTokens.TypeScale.label)
+                    .foregroundStyle(GlassColor.textSecondary)
+                if let words {
+                    Text(LookInside.turnDetail(turn, words: words))
+                        .glassType(GlassTokens.TypeScale.caption)
+                        .monospacedDigit()
+                        .foregroundStyle(GlassColor.textTertiary)
+                }
+            }
+            .accessibilityElement(children: .combine)
+        }
+        .padding(.vertical, GlassTokens.Space.s2)
     }
 
     /// Which chunks exist as views at all.
@@ -1447,25 +1133,33 @@ struct TranscriptTab: View {
     /// window -- a capture of the first screen, which is what a capture
     /// shows anyway.
     private var laidOutIndices: Range<Int> {
-        guard CaptureMode.isRendering else { return 0..<document.chunkCount }
-        return TranscriptResidency.window(document, visible: 0..<1)
+        guard CaptureMode.isRendering else { return 0..<shown }
+        let window = TranscriptResidency.window(document, visible: 0..<1)
+        return window.lowerBound..<min(window.upperBound, shown)
     }
 
     @ViewBuilder
     private func chunkRow(_ index: Int) -> some View {
         Group {
             if let chunk = resident.rendered[index] {
-                Text(chunk.text)
-                    .glassType(GlassTokens.TypeScale.mono)
-                    .textSelection(.enabled)
-                    .foregroundStyle(GlassColor.textPrimary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    // The chips are named here and nowhere else: SwiftUI has
-                    // no per-run accessibility label inside a `Text`, and a
-                    // marker left unnamed is spelled out as punctuation and
-                    // capitals in the middle of a sentence. See
-                    // `RedactionMarks`.
-                    .accessibilityLabel(chunk.spoken)
+                VStack(alignment: .leading, spacing: 0) {
+                    ForEach(Array(chunk.segments.enumerated()), id: \.offset) { _, segment in
+                        if let turn = segment.turn {
+                            separator(turn)
+                        }
+                        Text(segment.text)
+                            .glassType(GlassTokens.TypeScale.mono)
+                            .textSelection(.enabled)
+                            .foregroundStyle(GlassColor.textPrimary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            // The chips are named here and nowhere else:
+                            // SwiftUI has no per-run accessibility label
+                            // inside a `Text`, and a marker left unnamed is
+                            // spelled out as punctuation and capitals in the
+                            // middle of a sentence. See `RedactionMarks`.
+                            .accessibilityLabel(segment.spoken)
+                    }
+                }
             } else {
                 // Holds the chunk's place so the scroll extent is the whole
                 // body's, not the resident window's.
@@ -1488,12 +1182,31 @@ struct TranscriptTab: View {
     /// for 4 KB with chips, inside a 16.7 ms frame.
     private func refresh() {
         let index = anchor
+        let turns = self.turns
         resident.update(document: document, visible: index..<(index + 1)) { chunk in
             let text = document.text(of: chunk)
-            return ChippedChunk(
-                text: TranscriptMarkers.chipped(text, font: GlassTokens.TypeScale.mono.font),
-                spoken: RedactionMarks.spoken(text)
-            )
+            let meta = document.chunks[chunk]
+            let segments = LookInside.segments(of: meta, turns: turns)
+            guard segments.count > 1 || segments.first?.turn != nil else {
+                return ChippedChunk(segments: [ChippedSegment(
+                    turn: nil,
+                    text: TranscriptMarkers.chipped(text, font: GlassTokens.TypeScale.mono.font),
+                    spoken: RedactionMarks.spoken(text)
+                )])
+            }
+            // Cut at each turn's byte offset. The offsets fall between
+            // events, never inside a character or a redaction marker.
+            let bytes = Array(text.utf8)
+            return ChippedChunk(segments: segments.map { segment in
+                let lower = segment.byteRange.lowerBound - meta.byteOffset
+                let upper = segment.byteRange.upperBound - meta.byteOffset
+                let piece = String(decoding: bytes[lower..<upper], as: UTF8.self)
+                return ChippedSegment(
+                    turn: segment.turn,
+                    text: TranscriptMarkers.chipped(piece, font: GlassTokens.TypeScale.mono.font),
+                    spoken: RedactionMarks.spoken(piece)
+                )
+            })
         }
     }
 
@@ -1532,13 +1245,6 @@ struct TranscriptTab: View {
     /// `glassType` adds to reach the step's line height.
     private static let rowHeight =
         NSLayoutManager().defaultLineHeight(for: font) + GlassTokens.TypeScale.mono.lineSpacing
-
-    /// Spec copy, with the sample marker rendered as a live chip so the
-    /// sentence demonstrates the thing it describes.
-    private static let caption = """
-        These are the exact bytes an approval covers. Marks like <PRIVATE_SECRET_1> \
-        show where scrubbing fired — legible as chips, not holes.
-        """
 }
 
 /// One resident chunk: what it draws as, and what it reads as aloud.
@@ -1548,8 +1254,15 @@ struct TranscriptTab: View {
 /// anyway -- and a chunk that is evicted drops both together rather than
 /// leaving a name behind for text nobody is holding.
 private struct ChippedChunk {
+    /// The chunk, cut where a turn opens inside it; one piece when none does.
+    let segments: [ChippedSegment]
+}
+
+/// One piece of a resident chunk, and the turn that opens it, if any.
+private struct ChippedSegment {
+    let turn: PreviewTurns.Turn?
     let text: AttributedString
-    /// The chunk with each marker replaced by its name. See `RedactionMarks`.
+    /// The piece with each marker replaced by its name. See `RedactionMarks`.
     let spoken: String
 }
 
@@ -1590,44 +1303,6 @@ private enum TranscriptMarkers {
     }
 }
 
-/// The consent scopes this upload will carry, restated at the moment of
-/// consent rather than only at onboarding.
-struct PermissionsTab: View {
-    let summary: PreviewSummary
-    let options: [ConsentScope]
-
-    var body: some View {
-        CaptureSafeScroll {
-            VStack(alignment: .leading, spacing: GlassTokens.Space.s5) {
-                GlassSectionRule("What this upload asks for")
-                ForEach(summary.consentScopes, id: \.self) { scope in
-                    VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
-                        Text(ScopeCopy.title(for: scope, options: options))
-                            .glassType(GlassTokens.TypeScale.bodyStrong)
-                            .foregroundStyle(GlassColor.textPrimary)
-                        if let description = options.first(where: { $0.name == scope })?.description {
-                            Text(description)
-                                .glassType(GlassTokens.TypeScale.caption)
-                                .foregroundStyle(GlassColor.textSecondary)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                    }
-                }
-                Text("""
-                These are the permissions this device requests. Trace Commons can \
-                narrow them, never widen them -- and if your permissions change \
-                between now and sending, this approval stops applying and you are \
-                asked again.
-                """)
-                .glassType(GlassTokens.TypeScale.caption)
-                .foregroundStyle(GlassColor.textSecondary)
-                .fixedSize(horizontal: false, vertical: true)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }
-    }
-}
-
 enum ScopeCopy {
     /// The first words of each label carry the distinction, because that is
     /// all most people read.
@@ -1654,8 +1329,22 @@ enum ScopeCopy {
 /// Confirm, and Cancel (or Escape) leaves the preview exactly as it was.
 struct WitnessReviewConsent: View {
     let copy: WitnessReviewCopy
+    /// Ron's confirmation tick (#1146 `WitnessReviewOverlay`), in the
+    /// core's words: Confirm waits on it. Nil draws no tick and Confirm
+    /// stays disabled: a caller without the core's words cannot confirm.
+    let confirmLine: String?
+    let confirmLabel: String?
     let onConfirm: () -> Void
     @Environment(\.dismiss) private var dismiss
+    @State private var confirmed = false
+
+    init(copy: WitnessReviewCopy, confirmLine: String? = nil, confirmLabel: String? = nil,
+         onConfirm: @escaping () -> Void) {
+        self.copy = copy
+        self.confirmLine = confirmLine
+        self.confirmLabel = confirmLabel
+        self.onConfirm = onConfirm
+    }
 
     var body: some View {
         GlassSheet(title: copy.heading) {
@@ -1671,6 +1360,7 @@ struct WitnessReviewConsent: View {
                     .keyboardShortcut(.cancelAction)
                 Button(copy.confirm) { dismiss(); onConfirm() }
                     .buttonStyle(GlassButtonStyle(.primary))
+                    .disabled(confirmLine == nil || !confirmed)
             }
         }
         .frame(width: 560, height: 390)
@@ -1686,6 +1376,11 @@ struct WitnessReviewConsent: View {
                 .glassType(GlassTokens.TypeScale.body)
                 .foregroundStyle(GlassColor.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
+            if let confirmLine {
+                Toggle(confirmLine, isOn: $confirmed)
+                    .toggleStyle(GlassCheckboxStyle())
+                    .accessibilityLabel(confirmLabel ?? confirmLine)
+            }
         }.frame(maxWidth: .infinity, alignment: .leading)
     }
 }

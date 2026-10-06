@@ -2641,6 +2641,16 @@ final class AppModel: ObservableObject {
         client?.searchOriginal(entryID: entryID, needle: needle)
     }
 
+    /// The core's turn index over an open preview's body, anchored to that
+    /// body's digest (`LookInside.bodyDigest`). Off the main actor: the
+    /// core re-resolves the preview to check the anchor.
+    func previewTurns(entryID: String, bodyDigest: String) async -> PreviewTurns? {
+        guard let client else { return nil }
+        return await Task.detached(priority: .userInitiated) {
+            client.previewTurns(entryID: entryID, bodyDigest: bodyDigest)
+        }.value
+    }
+
     /// Opens the in-process preview off the main actor -- the redaction pass
     /// blocks -- and hands the open handle back on the main actor.
     func supportsWitnessReview() async -> Bool {

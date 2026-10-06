@@ -136,69 +136,61 @@ final class TracesParityTests: XCTestCase {
     }
 
     /// The sheet's chrome keeps every binding, confirmation and core-copy
-    /// source the legacy sheet had, and the gate still decides Contribute.
+    /// source Look inside still has. It is read-only (#1241, Ron's
+    /// `PreviewInspector`): the verdict, the correction, Contribute and Not
+    /// this one left for the inspector's session card, and
+    /// `PreviewSheetTests.test_lookInsideHasNoApproveControl` holds that they
+    /// did. What stays is what shows the session and the native review.
     func test_thePreviewSheetChromeKeepsEveryBinding() throws {
         let sheet = try Self.text("Views/PreviewSheet.swift")
         for needle in [
-            // bindings and writes
+            // bindings
             "model.openPreview(entryID:", "model.supportsWitnessReview()", "model.witnessReviewOutcome(entryID:",
-            "model.dismiss(entry)", "model.approve(entry, verdict: verdict)", "model.approve(entry, verdict: verdict, correction: text)",
             "model.daemonSettings?.admissionEvidenceOffered == true", "AdmissionPreparationView(entryID:",
             "SessionSendDisclosureView(", "model.witnessStateCode == 1",
-            // the gate
-            "ReadGate.canContribute(hasPinnedPreview: summary?.enrolled == true)", "EligibilitySurface.mayProceed(",
-            "EligibilitySurface.current(", "TCConsentCopy.copyJSON()", "TCConsentCopy.gateHelp(pinned:",
-            // confirmations and alerts
-            "CorrectionCopy.credentialHeadline", "CorrectionCopy.credentialBody", "WitnessReviewConsent(copy:",
-            // verdict and correction
-            "VerdictCopy.question", "VerdictCopy.caption", "CorrectionCopy.question", "CorrectionCopy.placeholder",
-            "CorrectionCopy.caption", "CorrectionCopy.maxCharacters", "CorrectionCopy.toSend(",
+            // Look inside: Ron's words, the turn index, the original search,
+            // the paging and the witness offer
+            "MonitorTracesCopy.decode(fromJSON: TCCoreCopy.monitorTracesCopyJSON())",
+            "model.previewTurns(entryID: entry.entryID, bodyDigest: digest)", "LookInside.bodyDigest(",
+            "model.searchOriginal(entryID: entry.entryID, needle: needle)", "LookInside.shownChunks(",
+            "LookInside.offersWitnessReview(", "LookInside.showsNativeReview(", "LookInside.holdsCertificate(",
+            // the gate statement
+            "TCConsentCopy.copyJSON()", "consent?.gateStatement",
+            // confirmations
+            "WitnessReviewConsent(copy:", "confirmLine: words?.witnessConfirmLine",
             // keyboard
             ".keyboardShortcut(\"f\", modifiers: .command)", ".keyboardShortcut(.cancelAction)",
             // glass
-            "GlassSegmentedTabs(", "GlassButtonStyle(.primary", "ScrubbingCaveatAtCommit()",
+            "GlassSegmentedTabs(", "GlassButtonStyle(.primary",
         ] {
             XCTAssertTrue(sheet.contains(needle), "PreviewSheet.swift lacks \(needle)")
         }
         XCTAssertFalse(sheet.contains(".tcScreen()"))
         XCTAssertFalse(sheet.contains("CenteredNotice("))
         XCTAssertFalse(sheet.contains("struct SheetSecondaryButtonStyle"))
-        // Contribute has no keyboard shortcut: an irreversible send is never one keystroke away.
-        let contribute = try XCTUnwrap(sheet.range(of: "contribute()\n"))
-        XCTAssertFalse(sheet[contribute.upperBound...].prefix(240).contains(".keyboardShortcut("))
         try LegacySymbols.assertClean("Views/SessionSendDisclosureView.swift")
     }
 
     /// The chrome is drawn with glass parts, each pinned by its exact call:
-    /// the tabs carry the selection, the eligibility line is a dot with its
-    /// words, the verdict chips say which is chosen, and the witness consent
-    /// is a glass sheet whose heading is the core's.
+    /// the tabs carry the selection in the core's words, the native review's
+    /// controls are glass buttons, a notice with no title has no dot, and
+    /// the witness consent is a glass sheet whose heading is the core's.
     func test_thePreviewSheetChromeIsDrawnOnGlass() throws {
         let sheet = try Self.text("Views/PreviewSheet.swift")
         for needle in [
             ".glassTier(.pane)",
             "Divider().overlay(GlassColor.hairline)",
-            "GlassSegmentedTabs(model.publicRunCopy?.sessionDetail ?? Self.reviewWord ?? tab.title, selection: $tab,",
-            "private static let reviewWord = MonitorTracesCopy.decode(fromJSON: TCCoreCopy.monitorTracesCopyJSON())?.review",
-            "GlassStatusLabel(line, status: PrivateInferenceIndicator.status(",
-            ".accessibilityAddTraits(selected ? [.isSelected, .isButton] : .isButton)",
-            "GlassTag(\"nothing sent yet\", tone: .neutral)",
-            "GlassTag(Self.scrubbingFound(summary), tone: .ask)",
+            "GlassSegmentedTabs(tab.title(words), selection: $tab,",
+            "segments: Tab.allCases.map { item in GlassSegment(item.title(words), value: item) })",
+            "Button(words.prepareAdmission) { preparingAdmission = true }\n"
+                + "                            .buttonStyle(GlassButtonStyle(.glass))\n",
             "SheetNotice(title: copy.heading, detail: copy.working)",
             "GlassSheet(title: copy.heading) {",
+            "GlassSheet(title: words.prepareAdmission) {",
             "Button(copy.cancel, role: .cancel) { dismiss() }",
             "Button(copy.confirm) { dismiss(); onConfirm() }",
+            ".toggleStyle(GlassCheckboxStyle())",
             ".accessibilityIdentifier(\"transcript-copy-all\")",
-            // The two questions are sentences, not field labels: never the
-            // uppercased eyebrow.
-            "Text(VerdictCopy.question)\n                .glassType(GlassTokens.TypeScale.caption)",
-            "Text(CorrectionCopy.question)\n                .glassType(GlassTokens.TypeScale.caption)",
-            // The one irreversible control: primary, disarmed by the gate,
-            // its tooltip the gate's own, and nothing after it.
-            "Button(\"Contribute\") {\n                    contribute()\n                }\n"
-                + "                .buttonStyle(GlassButtonStyle(.primary))\n"
-                + "                .disabled(!canContribute)\n"
-                + "                .help(gateHelp)\n            }\n",
             // A notice with no title is drawn without one, never as a bare dot.
             "GlassNotice(tone: .ask, title: title?.isEmpty == false ? title : nil) {",
             // The witness consent: Escape cancels, and the pane fills the sheet.
@@ -243,27 +235,30 @@ final class TracesParityTests: XCTestCase {
         XCTAssertEqual(PrivateInferenceIndicator.status(.neutral), .off)
     }
 
-    /// The four tabs keep their searches, their figures, the whole body and
-    /// the copy-all control, and the sheet is off the legacy palette.
+    /// The tabs keep their searches, the whole body and the copy-all
+    /// control, and the sheet is off the legacy palette. What's in it and
+    /// Permissions left Look inside with #1241: their facts are the session
+    /// card's (the redaction summary, residual risk, consent scopes).
     func test_thePreviewSheetTabsKeepEveryBinding() throws {
         let sheet = try Self.text("Views/PreviewSheet.swift")
         for needle in [
             "preview.search(needle)", "searchOriginal(needle)", "RecentSearches.remember(", "RecentSearches.load()",
             "OriginalSearchOutcome.classify(", "document.snippet(around:", ".onSubmit(commit)", ".focused($focused)",
-            "TCCoreCopy.redactionSummaryJSON(", "summary.piiLabelsPresent", "summary.residualRisk", "summary.tokenDistributionSummary",
-            "ScrubbingCaveatNote()", "\"transcript-copy-all\"", "document.wholeText()", "RedactionMarks.spoken(",
-            "TranscriptResidentChunks", "TranscriptRowIndex(", "ScopeCopy.title(for:", "summary.consentScopes",
-            "GlassTokens.TypeScale.mono",
+            "\"transcript-copy-all\"", "document.wholeText()", "RedactionMarks.spoken(",
+            "TranscriptResidentChunks", "TranscriptRowIndex(", "GlassTokens.TypeScale.mono",
         ] {
             XCTAssertTrue(sheet.contains(needle), "PreviewSheet.swift lacks \(needle)")
+        }
+        for gone in ["struct WhatsInItTab", "struct PermissionsTab"] {
+            XCTAssertFalse(sheet.contains(gone), "PreviewSheet.swift still declares \(gone), which nothing draws")
         }
         try LegacySymbols.assertClean("Views/PreviewSheet.swift")
     }
 
     /// The tabs are drawn with glass parts, each pinned by its exact call:
     /// the search highlight and the redaction chip on the existing tokens
-    /// (no new token), every outcome a dot with its words, the figures a
-    /// key-value list, and the sheet held to the glass surface rules.
+    /// (no new token), every outcome a dot with its words, and the sheet
+    /// held to the glass surface rules.
     func test_thePreviewSheetTabsAreDrawnOnGlass() throws {
         let sheet = try Self.text("Views/PreviewSheet.swift")
         for needle in [
@@ -279,28 +274,19 @@ final class TracesParityTests: XCTestCase {
             ".fill(GlassTokens.Color.fieldFill.color)",
             "GlassCard(quiet: true) {\n                            Text(highlighting(snippet, term: needle))\n"
                 + "                                .glassType(GlassTokens.TypeScale.mono)\n",
-            // What's in it
-            "GlassKeyValueList(items)",
-            "GlassKeyValueList.Item(\"Agent\", entry.agentName)",
-            "GlassKeyValueList.Item(\"Would send\", Format.bytes(summary.wouldSendBytes))",
-            "GlassSectionRule(\"What scrubbing removed\")",
-            "GlassSectionRule(\"Found, and still in what would be sent\")",
-            "GlassSectionRule(\"Personal-information categories seen\")",
-            "GlassSectionRule(\"Residual risk\")",
-            "GlassStatusLabel(row.description, status: .ask)",
-            "GlassNotice(tone: .ask) {",
-            // Transcript
-            "Text(TranscriptMarkers.chipped(Self.caption, font: GlassTokens.TypeScale.caption.font))\n"
-                + "                .glassType(GlassTokens.TypeScale.caption)\n",
+            // Transcript: Ron's caption from the core, the body in mono
+            // with its chips, and his Load more and turn separators.
+            "Text(words?.transcriptCaption ?? \"\")\n"
+                + "                    .glassType(GlassTokens.TypeScale.caption)\n",
             "chip.backgroundColor = GlassTokens.Color.controlSelected.color\n"
                 + "            chip.foregroundColor = GlassColor.textPrimary\n",
-            ".glassType(GlassTokens.TypeScale.mono)\n                    .textSelection(.enabled)\n",
+            "Text(segment.text)\n                            .glassType(GlassTokens.TypeScale.mono)\n"
+                + "                            .textSelection(.enabled)\n",
             "TranscriptMarkers.chipped(text, font: GlassTokens.TypeScale.mono.font)",
             "NSLayoutManager().defaultLineHeight(for: font) + GlassTokens.TypeScale.mono.lineSpacing",
             "GlassCard(quiet: true, flush: true) {",
-            // Permissions
-            "GlassSectionRule(\"What this upload asks for\")",
-            "Text(ScopeCopy.title(for: scope, options: options))\n                            .glassType(GlassTokens.TypeScale.bodyStrong)\n",
+            "Button(words.addTurnSeparators, action: onAddSeparators)\n"
+                + "                            .buttonStyle(GlassButtonStyle(.link))\n",
         ] {
             XCTAssertTrue(sheet.contains(needle), "PreviewSheet.swift lacks \(needle)")
         }
