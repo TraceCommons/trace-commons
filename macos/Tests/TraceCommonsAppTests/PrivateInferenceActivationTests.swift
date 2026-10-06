@@ -65,7 +65,7 @@ final class PrivateInferenceActivationTests: XCTestCase {
         let question = firstRun.folders.watchQuestion.replacingOccurrences(of: "{tool}", with: "Codex")
         let folders = try await settledWords(hosting) { $0.contains(question) }
         XCTAssertTrue(folders.contains(question),
-                      "Private AI must ask the first run's Folders")
+                      "Private AI must ask the first run's Folders; read: \(folders)")
         XCTAssertEqual(model.startup, .needsRoots, "showing Folders starts nothing")
         XCTAssertFalse(model.isStartingDaemon)
         // Each row's answer is a `GlassPicker` menu, which a synthesised
@@ -99,7 +99,7 @@ final class PrivateInferenceActivationTests: XCTestCase {
         XCTAssertEqual(action, .obtain)
         let label = try XCTUnwrap(CredentialSurface.actionLabel(action, copy: copy))
         let words = try await settledWords(hosting) { $0.contains(label) }
-        XCTAssertTrue(words.contains(label), "The fresh profile must have an actionable Cloud sign-in")
+        XCTAssertTrue(words.contains(label), "The fresh profile must have an actionable Cloud sign-in; read: \(words)")
     }
 
     /// The window's words once `ready` holds, reading again for up to two
