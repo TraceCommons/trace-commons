@@ -55,6 +55,7 @@ struct FirstRunTitle: View {
         Text("\(Text(light))\(Text(bold).fontWeight(.bold))")
             .glassType(GlassTokens.TypeScale.display.weight(.regular))
             .foregroundStyle(GlassColor.textPrimary)
+            .accessibilityAddTraits(.isHeader)
     }
 }
 
