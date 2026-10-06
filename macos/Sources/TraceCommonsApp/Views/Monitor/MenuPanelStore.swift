@@ -87,7 +87,30 @@ final class MenuPanelStore {
         confirming = copy
     }
 
+    /// Mixed was pressed while an override is in force. Clearing hands
+    /// every folder back to its own setting, so when any folder's own
+    /// setting is Automatic (or is not known) the core's clear confirmation
+    /// is shown first, as for an override: unattended sending never resumes
+    /// from a single menu press. Otherwise the override is cleared at once.
+    /// Without the core's confirmation nothing is cleared.
+    func chooseMixed() async {
+        guard canChooseOverride, status?.contributionOverride != nil else { return }
+        overrideRefusal = nil
+        guard MenuPanelData.clearNeedsConfirmation(projects) else {
+            await writeOverride { _ = try await $0.clearContributionOverride() }
+            return
+        }
+        let copy = ContributionOverrideConfirmCopy.decode(
+            fromJSON: TCCoreCopy.contributionOverrideConfirmJSON(mode: ContributionOverrideConfirmCopy.clearMode, configDir: nil))
+        guard let copy, copy.mode == ContributionOverrideConfirmCopy.clearMode else {
+            overrideRefusal = TCCoreCopy.contributionOverrideRefusalLine(label: "")
+            return
+        }
+        confirming = copy
+    }
+
     /// The confirmation was answered. Cancel sends nothing; confirm sends
+    /// `clear_contribution_override` for the clear confirmation, or else
     /// `set_contribution_override`, with `confirm: true` for Auto
     /// contribute (the core's arming disclosure was just shown), then
     /// re-reads `status`: the pill shows what the daemon says, never a guess.
@@ -95,11 +118,17 @@ final class MenuPanelStore {
         guard let copy = confirming else { return }
         confirming = nil
         guard confirmed else { return }
+        if copy.mode == ContributionOverrideConfirmCopy.clearMode {
+            await writeOverride { _ = try await $0.clearContributionOverride() }
+            return
+        }
         guard let mode = ProjectMode(rawValue: copy.mode) else { return }
         await writeOverride { try await $0.setContributionOverride(mode: mode, confirm: mode == .autoUpload) }
     }
 
-    /// The core's clear action: every folder back on its own setting.
+    /// The core's clear action, unconfirmed: every folder back on its own
+    /// setting. The panel goes through `chooseMixed`, which confirms first
+    /// when a folder is Automatic.
     func clearOverride() async {
         guard canChooseOverride else { return }
         overrideRefusal = nil
@@ -211,6 +240,15 @@ enum MenuPanelData {
         case .none: return "—"
         case .ask, .armed, .never: return copy.choice(for: mode)?.label ?? "—"
         }
+    }
+
+    /// Whether clearing the override needs the core's confirmation: some
+    /// folder's own setting is Automatic, so clearing resumes unattended
+    /// sending there. An unread folder list, or a folder whose own setting
+    /// the daemon did not report, needs it too (fail closed).
+    static func clearNeedsConfirmation(_ projects: [ProjectRow]?) -> Bool {
+        guard let projects else { return true }
+        return projects.contains { $0.folderMode == nil || $0.folderMode == .autoUpload }
     }
 
     /// Whether the pill's list checks a row: an override's own mode while

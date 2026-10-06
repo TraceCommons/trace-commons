@@ -5312,6 +5312,20 @@ fn the_contribution_override_confirmation_crosses_the_abi() {
         unsafe { tc_contribution_override_confirm_json(auto.as_ptr(), cstr(dir.path()).as_ptr()) }
             .is_null()
     );
+    // Clearing has its own confirmation, with no arming disclosure.
+    let clear = cstr_str("clear");
+    let value = json_owned(unsafe {
+        tc_contribution_override_confirm_json(clear.as_ptr(), std::ptr::null())
+    });
+    assert_eq!(
+        value,
+        serde_json::to_value(
+            trace_commons_contributor::project_copy::contribution_override_clear_confirm_copy()
+        )
+        .unwrap()
+    );
+    assert_eq!(value["mode"], "clear");
+    assert!(value["arming"].is_null());
     let unknown = cstr_str("always");
     assert!(
         unsafe { tc_contribution_override_confirm_json(unknown.as_ptr(), std::ptr::null()) }

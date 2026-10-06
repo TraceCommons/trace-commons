@@ -248,6 +248,62 @@ final class MenuBarGlassPanelTests: XCTestCase {
         XCTAssertNil(store.status?.contributionOverride)
     }
 
+    /// Mixed clears an override at once when no folder's own setting is
+    /// Automatic, and does nothing while no override is in force.
+    func test_mixedClearsAtOnceWhenNoFolderIsAutomatic() async throws {
+        let (store, client) = await loadedStore(.normalDay)
+        await store.chooseMixed()
+        XCTAssertEqual(client.overrideCalls, [], "nothing to clear")
+        store.choose("ignore")
+        await store.resolveConfirmation(confirmed: true)
+        await store.chooseMixed()
+        XCTAssertNil(store.confirming)
+        XCTAssertEqual(client.overrideCalls.last, "clear_contribution_override")
+        XCTAssertNil(store.status?.contributionOverride)
+    }
+
+    /// When a folder's own setting is Automatic, Mixed shows the core's
+    /// clear confirmation and sends nothing; cancel keeps the override;
+    /// confirm clears it.
+    func test_mixedConfirmsBeforeAnAutomaticFolderSendsAgain() async throws {
+        let (store, client) = await loadedStore(.armedFolder)
+        store.choose("ignore")
+        await store.resolveConfirmation(confirmed: true)
+        XCTAssertEqual(store.status?.contributionOverride?.mode, "ignore")
+        let sent = client.overrideCalls
+
+        await store.chooseMixed()
+        let confirming = try XCTUnwrap(store.confirming)
+        XCTAssertEqual(confirming.mode, ContributionOverrideConfirmCopy.clearMode)
+        XCTAssertEqual(confirming, ContributionOverrideConfirmCopy.decode(
+            fromJSON: TCCoreCopy.contributionOverrideConfirmJSON(mode: "clear", configDir: nil)))
+        XCTAssertNil(confirming.arming)
+        XCTAssertEqual(client.overrideCalls, sent, "choosing Mixed sent nothing")
+
+        await store.resolveConfirmation(confirmed: false)
+        XCTAssertEqual(client.overrideCalls, sent, "a cancelled clear sent a write")
+        XCTAssertEqual(store.status?.contributionOverride?.mode, "ignore")
+
+        await store.chooseMixed()
+        await store.resolveConfirmation(confirmed: true)
+        XCTAssertEqual(client.overrideCalls.last, "clear_contribution_override")
+        XCTAssertNil(store.status?.contributionOverride)
+    }
+
+    /// Clearing is confirmed when a folder is Automatic, and when the
+    /// folders or a folder's own setting are not known (fail closed).
+    func test_clearNeedsConfirmationFailsClosed() {
+        let ask = ProjectRow(projectId: "a", projectLabel: "a", mode: .ignore, folderMode: .ask)
+        let never = ProjectRow(projectId: "n", projectLabel: "n", mode: .ignore, folderMode: .ignore)
+        let auto = ProjectRow(projectId: "u", projectLabel: "u", mode: .ignore, folderMode: .autoUpload)
+        let unknown = ProjectRow(projectId: "x", projectLabel: "x", mode: .ignore)
+        XCTAssertFalse(MenuPanelData.clearNeedsConfirmation([]))
+        XCTAssertFalse(MenuPanelData.clearNeedsConfirmation([ask, never]))
+        XCTAssertTrue(MenuPanelData.clearNeedsConfirmation([ask, auto]))
+        XCTAssertTrue(MenuPanelData.clearNeedsConfirmation([ask, unknown]))
+        XCTAssertTrue(MenuPanelData.clearNeedsConfirmation(nil))
+    }
+
     /// Automatic's confirmation carries the arming disclosure, and its
     /// confirm sends `confirm: true`.
     func test_autoContributeConfirmsWithTheArmingDisclosure() async throws {

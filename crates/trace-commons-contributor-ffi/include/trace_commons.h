@@ -2390,9 +2390,10 @@ char*       tc_contribution_mode_copy_json(void);
 
 /* The confirmation for one contribution override (#1173, project_copy::
  * contribution_override_confirm_copy): {mode, title, body, confirm, cancel,
- * arming}. mode is "notify_only", "auto_upload" or "ignore". arming is the
+ * arming}. mode is "notify_only", "auto_upload" or "ignore", or "clear" for
+ * the confirmation before clear_contribution_override. arming is the
  * arming disclosure for auto_upload, read for the configuration in
- * config_dir, and null otherwise; config_dir may be NULL for the other two.
+ * config_dir, and null otherwise; config_dir may be NULL for the others.
  * NULL for an unknown or unreadable mode, for auto_upload with an unreadable
  * config_dir or configuration, and on a caught panic.
  */
