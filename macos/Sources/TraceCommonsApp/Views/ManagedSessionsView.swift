@@ -32,10 +32,19 @@ struct ManagedSessionsSection: View {
                 }
             }
         }
-        .sheet(isPresented: $adding) { ManagedAccountSheet().environmentObject(model) }
-        .sheet(isPresented: $launching) { ManagedLaunchSheet().environmentObject(model) }
-        .sheet(item: $renaming) { account in ManagedRenameSheet(account: account).environmentObject(model) }
-        .sheet(item: $removing) { account in ManagedRemoveSheet(account: account).environmentObject(model) }
+        // Glass modals over the whole window, not stock sheets.
+        .glassModal(isPresented: $adding) {
+            ManagedAccountSheet(onClose: { adding = false }).environmentObject(model)
+        }
+        .glassModal(isPresented: $launching) {
+            ManagedLaunchSheet(onClose: { launching = false }).environmentObject(model)
+        }
+        .glassModal(item: $renaming) { account in
+            ManagedRenameSheet(account: account, onClose: { renaming = nil }).environmentObject(model)
+        }
+        .glassModal(item: $removing) { account in
+            ManagedRemoveSheet(account: account, onClose: { removing = nil }).environmentObject(model)
+        }
         // Kept: `managed_changed` is published only when a request changes
         // the session revision, so an expiry or a reconciled exit is seen
         // on the next read.
@@ -276,32 +285,6 @@ enum ManagedWords {
 
 // MARK: - Dialogs
 
-/// The one frame every managed dialog uses: a glass sheet with its buttons
-/// on the right. When `GlassModal` lands (#1241) this is the only view to
-/// change.
-struct ManagedDialog<Content: View, Footer: View>: View {
-    private let title: String
-    private let content: Content
-    private let footer: Footer
-
-    init(_ title: String, @ViewBuilder content: () -> Content, @ViewBuilder footer: () -> Footer) {
-        self.title = title
-        self.content = content()
-        self.footer = footer()
-    }
-
-    var body: some View {
-        GlassSheet(title: title) {
-            content
-            HStack(spacing: GlassTokens.Space.s3) {
-                Spacer(minLength: 0)
-                footer
-            }
-        }
-        .frame(width: 460)
-    }
-}
-
 /// An eyebrow label over a control, as `GlassTextField` lays out its own.
 private struct ManagedField<Content: View>: View {
     let label: String
@@ -315,79 +298,11 @@ private struct ManagedField<Content: View>: View {
     }
 }
 
-/// The key field: `GlassTextField`'s inset well, secure.
-private struct ManagedSecureField: View {
-    let label: String
-    @Binding var text: String
+/// A caption under a dialog's fields.
+private struct ManagedNote: View {
+    let text: String
 
     var body: some View {
-        ManagedField(label: label) {
-            SecureField(label, text: $text)
-                .textFieldStyle(.plain)
-                .glassType(GlassTokens.TypeScale.label.weight(.regular))
-                .foregroundStyle(GlassColor.textPrimary)
-                .padding(.horizontal, 10)
-                .frame(minHeight: GlassTokens.Size.controlLarge)
-                .background(
-                    RoundedRectangle(cornerRadius: GlassTokens.Radius.control, style: .continuous)
-                        .fill(GlassTokens.Color.fieldFill.color)
-                )
-                .labelsHidden()
-        }
-    }
-}
-
-struct ManagedAccountSheet: View {
-    @EnvironmentObject private var model: AppModel
-    @Environment(\.dismiss) private var dismiss
-    @State private var tool = "claude"
-    @State private var connection = "subscription"
-    @State private var label = ""
-    @State private var key = ""
-
-    private var subscription: Bool { connection == "subscription" }
-
-    var body: some View {
-        ManagedDialog(model.managedText("save_title")) {
-            HStack(alignment: .top, spacing: GlassTokens.Space.s5) {
-                ManagedField(label: model.managedText("tool")) {
-                    GlassPicker(
-                        model.managedText("tool"),
-                        selection: Binding(get: { tool }, set: { if let value = $0 { tool = value } }),
-                        options: ["claude", "codex"].map { GlassPickerOption(model.managedText($0), value: $0) },
-                        placeholder: model.managedText("tool"))
-                }
-                ManagedField(label: model.managedText("connection")) {
-                    GlassPicker(
-                        model.managedText("connection"),
-                        selection: Binding(get: { connection }, set: { if let value = $0 { connection = value } }),
-                        options: ["subscription", "api_key", "near_ai"].map { GlassPickerOption(model.managedText($0), value: $0) },
-                        placeholder: model.managedText("connection"))
-                }
-            }
-            GlassTextField(model.managedText("label"), text: $label, prompt: model.managedText("label_placeholder"))
-            if subscription {
-                note(model.managedText("login_description"))
-            } else {
-                ManagedSecureField(label: model.managedText("api_key"), text: $key)
-                note(model.managedText("key_storage"))
-            }
-        } footer: {
-            Button(model.managedText("cancel"), role: .cancel) { dismiss() }
-                .buttonStyle(GlassButtonStyle(.glass))
-                .keyboardShortcut(.cancelAction)
-            Button(subscription ? model.managedText("save_login") : model.managedText("save_account")) {
-                model.managedAction("managed_account_add", params: ["tool": tool, "connection": connection, "label": label], openTerminal: subscription, newAccountKey: subscription ? nil : key)
-                key = ""
-                dismiss()
-            }
-            .buttonStyle(GlassButtonStyle(.primary))
-            .keyboardShortcut(.defaultAction)
-            .disabled(label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || (!subscription && key.isEmpty) || (subscription && model.managedSnapshot?.capabilities.terminalLaunch != true))
-        }
-    }
-
-    private func note(_ text: String) -> some View {
         Text(text)
             .glassType(GlassTokens.TypeScale.caption)
             .foregroundStyle(GlassColor.textSecondary)
@@ -395,111 +310,170 @@ struct ManagedAccountSheet: View {
     }
 }
 
-struct ManagedLaunchSheet: View {
+struct ManagedAccountSheet: View {
+    let onClose: () -> Void
     @EnvironmentObject private var model: AppModel
-    @Environment(\.dismiss) private var dismiss
+    @State private var tool = "claude"
+    @State private var connection = "subscription"
+    @State private var label = ""
+    @State private var key = ""
+
+    private var subscription: Bool { connection == "subscription" }
+
+    private var canSave: Bool {
+        !label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && (subscription || !key.isEmpty)
+            && (!subscription || model.managedSnapshot?.capabilities.terminalLaunch == true)
+    }
+
+    var body: some View {
+        GlassModal(
+            title: model.managedText("save_title"), width: .narrow,
+            actions: [
+                .cancel(model.managedText("cancel"), action: onClose),
+                GlassModalAction(
+                    subscription ? model.managedText("save_login") : model.managedText("save_account"),
+                    isDefault: true, isEnabled: canSave, id: "save", action: save),
+            ],
+            onCancel: onClose
+        ) {
+            GlassModalBody {
+                HStack(alignment: .top, spacing: GlassTokens.Space.s5) {
+                    ManagedField(label: model.managedText("tool")) {
+                        GlassSelect(
+                            model.managedText("tool"), selection: $tool,
+                            options: ["claude", "codex"].map { GlassPickerOption(model.managedText($0), value: $0) })
+                    }
+                    ManagedField(label: model.managedText("connection")) {
+                        GlassSelect(
+                            model.managedText("connection"), selection: $connection,
+                            options: ["subscription", "api_key", "near_ai"].map { GlassPickerOption(model.managedText($0), value: $0) })
+                    }
+                }
+                GlassTextField(model.managedText("label"), text: $label, prompt: model.managedText("label_placeholder"))
+                if subscription {
+                    ManagedNote(text: model.managedText("login_description"))
+                } else {
+                    GlassTextField(model.managedText("api_key"), text: $key, secure: true)
+                    ManagedNote(text: model.managedText("key_storage"))
+                }
+            }
+        }
+    }
+
+    private func save() {
+        guard canSave else { return }
+        model.managedAction("managed_account_add", params: ["tool": tool, "connection": connection, "label": label], openTerminal: subscription, newAccountKey: subscription ? nil : key)
+        key = ""
+        onClose()
+    }
+}
+
+struct ManagedLaunchSheet: View {
+    let onClose: () -> Void
+    @EnvironmentObject private var model: AppModel
     @State private var accountID = ""
     @State private var project: URL?
 
     var body: some View {
-        ManagedDialog(model.managedText("launch")) {
-            ManagedField(label: model.managedText("saved_account")) {
-                GlassPicker(
-                    model.managedText("saved_account"),
-                    selection: Binding(get: { accountID.isEmpty ? nil : accountID }, set: { accountID = $0 ?? "" }),
-                    options: (model.managedSnapshot?.accounts ?? []).map { account in
-                        GlassPickerOption(
-                            [ManagedWords.tool(account.tool, model: model), account.label, model.managedText(account.connection)]
-                                .compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · "),
-                            value: account.id)
-                    },
-                    placeholder: model.managedText("choose_account"))
-            }
-            HStack(spacing: GlassTokens.Space.s4) {
-                Text(project?.path ?? model.managedText("project_placeholder"))
-                    .glassType(project == nil ? GlassTokens.TypeScale.label.weight(.regular) : GlassTokens.TypeScale.mono)
-                    .foregroundStyle(project == nil ? GlassColor.textTertiary : GlassColor.textPrimary)
-                    .lineLimit(2)
-                    .truncationMode(.middle)
-                    .textSelection(.enabled)
-                Spacer(minLength: 0)
-                GlassFolderButton(model.managedText("choose_folder")) {
-                    let panel = NSOpenPanel()
-                    panel.canChooseDirectories = true; panel.canChooseFiles = false; panel.allowsMultipleSelection = false
-                    if panel.runModal() == .OK { project = panel.url }
+        GlassModal(
+            title: model.managedText("launch"), width: .narrow,
+            actions: [
+                .cancel(model.managedText("cancel"), action: onClose),
+                GlassModalAction(
+                    model.managedText("launch_short"), isDefault: true,
+                    isEnabled: !accountID.isEmpty && project != nil && !model.managedBusy, id: "launch", action: launch),
+            ],
+            onCancel: onClose
+        ) {
+            GlassModalBody {
+                ManagedField(label: model.managedText("saved_account")) {
+                    GlassPicker(
+                        model.managedText("saved_account"),
+                        selection: Binding(get: { accountID.isEmpty ? nil : accountID }, set: { accountID = $0 ?? "" }),
+                        options: (model.managedSnapshot?.accounts ?? []).map { account in
+                            GlassPickerOption(
+                                [ManagedWords.tool(account.tool, model: model), account.label, model.managedText(account.connection)]
+                                    .compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · "),
+                                value: account.id)
+                        },
+                        placeholder: model.managedText("choose_account"))
                 }
+                HStack(spacing: GlassTokens.Space.s4) {
+                    Text(project?.path ?? model.managedText("project_placeholder"))
+                        .glassType(project == nil ? GlassTokens.TypeScale.label.weight(.regular) : GlassTokens.TypeScale.mono)
+                        .foregroundStyle(project == nil ? GlassColor.textTertiary : GlassColor.textPrimary)
+                        .lineLimit(2)
+                        .truncationMode(.middle)
+                        .textSelection(.enabled)
+                    Spacer(minLength: 0)
+                    GlassFolderButton(model.managedText("choose_folder")) {
+                        let panel = NSOpenPanel()
+                        panel.canChooseDirectories = true; panel.canChooseFiles = false; panel.allowsMultipleSelection = false
+                        if panel.runModal() == .OK { project = panel.url }
+                    }
+                }
+                ManagedNote(text: model.managedText("launch_scope").replacingOccurrences(of: "{destination}", with: model.managedSnapshot?.capabilities.terminalDestination ?? model.managedText("terminal")))
             }
-            Text(model.managedText("launch_scope").replacingOccurrences(of: "{destination}", with: model.managedSnapshot?.capabilities.terminalDestination ?? model.managedText("terminal")))
-                .glassType(GlassTokens.TypeScale.caption)
-                .foregroundStyle(GlassColor.textSecondary)
-                .fixedSize(horizontal: false, vertical: true)
-        } footer: {
-            Button(model.managedText("cancel"), role: .cancel) { dismiss() }
-                .buttonStyle(GlassButtonStyle(.glass))
-                .keyboardShortcut(.cancelAction)
-            Button(model.managedText("launch_short")) { launch() }
-                .buttonStyle(GlassButtonStyle(.primary))
-                .keyboardShortcut(.defaultAction)
-                .disabled(accountID.isEmpty || project == nil || model.managedBusy)
         }
     }
 
     private func launch() {
-        guard let snapshot = model.managedSnapshot, let account = snapshot.accounts.first(where: { $0.id == accountID }), let project else { return }
+        guard !model.managedBusy, let snapshot = model.managedSnapshot, let account = snapshot.accounts.first(where: { $0.id == accountID }), let project else { return }
         model.managedAction("managed_launch_prepare", params: ["request_id": UUID().uuidString, "purpose": "coding", "tool": account.tool, "connection": account.connection, "account_id": account.id, "cwd": project.path, "expected_generation": snapshot.generations[account.tool] ?? 0, "save_default": false], openTerminal: true)
-        dismiss()
+        onClose()
     }
 }
 
 struct ManagedRenameSheet: View {
     let account: ManagedAccount
+    let onClose: () -> Void
     @EnvironmentObject private var model: AppModel
-    @Environment(\.dismiss) private var dismiss
     @State private var label: String
 
-    init(account: ManagedAccount) {
+    init(account: ManagedAccount, onClose: @escaping () -> Void) {
         self.account = account
+        self.onClose = onClose
         _label = State(initialValue: account.label)
     }
 
     var body: some View {
-        ManagedDialog(model.managedText("rename")) {
-            GlassTextField(model.managedText("label"), text: $label, prompt: model.managedText("label_placeholder"))
-        } footer: {
-            Button(model.managedText("cancel"), role: .cancel) { dismiss() }
-                .buttonStyle(GlassButtonStyle(.glass))
-                .keyboardShortcut(.cancelAction)
-            Button(model.managedText("save")) {
-                model.managedAction("managed_account_rename", params: ["account_id": account.id, "label": label])
-                dismiss()
+        GlassModal(
+            title: model.managedText("rename"), width: .narrow,
+            actions: [
+                .cancel(model.managedText("cancel"), action: onClose),
+                GlassModalAction(model.managedText("save"), isDefault: true, id: "save") {
+                    model.managedAction("managed_account_rename", params: ["account_id": account.id, "label": label])
+                    onClose()
+                },
+            ],
+            onCancel: onClose
+        ) {
+            GlassModalBody {
+                GlassTextField(model.managedText("label"), text: $label, prompt: model.managedText("label_placeholder"))
             }
-            .buttonStyle(GlassButtonStyle(.primary))
-            .keyboardShortcut(.defaultAction)
         }
     }
 }
 
-/// The removal confirmation: cancel first, the destructive action on the right.
+/// The removal confirmation: cancel first, the destructive action on the
+/// right, never one Return away.
 struct ManagedRemoveSheet: View {
     let account: ManagedAccount
+    let onClose: () -> Void
     @EnvironmentObject private var model: AppModel
-    @Environment(\.dismiss) private var dismiss
 
     var body: some View {
-        ManagedDialog(model.managedText("remove_question")) {
-            Text(model.managedText("remove_description"))
-                .glassType(GlassTokens.TypeScale.label.weight(.regular))
-                .foregroundStyle(GlassColor.textSecondary)
-                .fixedSize(horizontal: false, vertical: true)
-        } footer: {
-            Button(model.managedText("cancel"), role: .cancel) { dismiss() }
-                .buttonStyle(GlassButtonStyle(.glass))
-                .keyboardShortcut(.cancelAction)
-            Button(model.managedText("remove"), role: .destructive) {
-                model.managedAction("managed_account_remove", params: ["account_id": account.id])
-                dismiss()
-            }
-            .buttonStyle(GlassButtonStyle(.primary))
-        }
+        GlassConfirmation(
+            title: model.managedText("remove_question"),
+            message: model.managedText("remove_description"),
+            actions: [
+                .cancel(model.managedText("cancel"), action: onClose),
+                .destructive(model.managedText("remove")) {
+                    model.managedAction("managed_account_remove", params: ["account_id": account.id])
+                    onClose()
+                },
+            ],
+            onCancel: onClose)
     }
 }
