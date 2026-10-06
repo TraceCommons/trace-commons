@@ -63,13 +63,27 @@ struct FirstContributionGlassNote: View {
 /// queue, and the scope note says so.
 struct NotOfferedGlassDisclosure: View {
     let counts: [String: Int]
+    /// The Summary's words from the core (`summary_panel`); nil keeps the
+    /// legacy queue's.
+    var words: MonitorSummaryCopy? = nil
 
     @State private var expanded = false
+
+    /// The expander's title: the core's summary line when it is in hand.
+    static func title(_ count: Int, words: MonitorSummaryCopy?) -> String {
+        guard let words else { return QueueLegacyWords.noLongerWaiting(count) }
+        return FirstRunCopy.fill(words.noLongerWaiting, ["count": String(count)])
+    }
+
+    /// What the counts cover: the sessions that reached the queue.
+    static func scope(words: MonitorSummaryCopy?) -> String {
+        words?.noLongerWaitingScope ?? QueueLegacyWords.notOfferedScope
+    }
 
     var body: some View {
         if !counts.isEmpty {
             VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
-                GlassExpander(QueueLegacyWords.noLongerWaiting(counts.values.reduce(0, +)), isOpen: $expanded)
+                GlassExpander(Self.title(counts.values.reduce(0, +), words: words), isOpen: $expanded)
                 if expanded {
                     VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
                         ForEach(counts.sorted(by: { $0.key < $1.key }), id: \.key) { label, count in
@@ -80,7 +94,7 @@ struct NotOfferedGlassDisclosure: View {
                             .glassType(GlassTokens.TypeScale.caption)
                             .foregroundStyle(GlassColor.textSecondary)
                         }
-                        Text(QueueLegacyWords.notOfferedScope)
+                        Text(Self.scope(words: words))
                             .glassType(GlassTokens.TypeScale.caption)
                             .foregroundStyle(GlassColor.textTertiary)
                             .fixedSize(horizontal: false, vertical: true)

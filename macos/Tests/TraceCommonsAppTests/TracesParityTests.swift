@@ -349,6 +349,8 @@ final class TracesParityTests: XCTestCase {
         let prompts = try Self.text("Views/Monitor/InspectorPrompts.swift")
         let offers = try Self.text("Views/Monitor/TracesOffers.swift")
         let host = try Self.text("Views/Monitor/TracesInspectorHost.swift")
+        // The Summary draws the certificates and the outcomes (Task 4).
+        let summary = try Self.text("Views/Monitor/SummaryInspector.swift")
         for needle in [
             "if let undo = model.undo {", "approvalUndo(undo)", "{ model.undoApproval() }", "{ model.dismissUndo() }",
             "QueueLegacyWords.undoWillSend", "QueueLegacyWords.closeNoticeStillSends", "QueueLegacyWords.closeNotice)",
@@ -371,7 +373,8 @@ final class TracesParityTests: XCTestCase {
         ] {
             XCTAssertTrue(offers.contains(needle), "TracesOffers.swift lacks \(needle)")
         }
-        XCTAssertTrue(host.contains("NotOfferedGlassDisclosure(counts: model.outcomeCounts)"))
+        XCTAssertTrue(summary.contains("NotOfferedGlassDisclosure(counts: outcomeCounts, words: words?.summaryPanel)"))
+        XCTAssertTrue(host.contains("queueAnswered: model.queueAnswered, outcomeCounts: model.outcomeCounts)"))
         // Both undos are drawn by the prompts' body, not merely defined.
         let promptsBody = try XCTUnwrap(prompts.range(of: "    var body: some View {"))
         let firstHelper = try XCTUnwrap(prompts.range(of: "    private func approvalUndo("))
@@ -411,14 +414,15 @@ final class TracesParityTests: XCTestCase {
         // An unread list is not an empty one: the certificate list and the
         // first-contribution note wait for the daemon's answer, and draw
         // nothing before it (standing rule: fail closed).
-        let flatHost = host.split(whereSeparator: \.isWhitespace).joined(separator: " ")
-        XCTAssertTrue(flatHost.contains("if model.queueAnswered { CertificateSection(entries: model.awaitingDecision) }"))
+        let flatSummary = summary.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        XCTAssertTrue(flatSummary.contains("if queueAnswered { CertificateSection(entries: awaitingDecision) }"))
         let flatPrompts = prompts.split(whereSeparator: \.isWhitespace).joined(separator: " ")
         XCTAssertTrue(flatPrompts.contains(
             "if model.historyAnswered, model.queueAnswered, model.history.isEmpty, "
                 + "let copy = model.witnessCopy?.onboarding { "
                 + "FirstContributionGlassNote(copy: copy, reviewing: !model.awaitingDecision.isEmpty) }"))
-        XCTAssertEqual(host.components(separatedBy: "CertificateSection(").count - 1, 1)
+        XCTAssertEqual(summary.components(separatedBy: "CertificateSection(").count - 1, 1)
+        XCTAssertFalse(host.contains("CertificateSection("))
         XCTAssertEqual(prompts.components(separatedBy: "FirstContributionGlassNote(copy:").count - 1, 1)
         for rel in ["Views/Monitor/TracesOffers.swift", "Views/Monitor/InspectorPrompts.swift"] {
             try LegacySymbols.assertClean(rel)

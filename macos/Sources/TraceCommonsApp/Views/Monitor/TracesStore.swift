@@ -410,7 +410,14 @@ final class TracesStore {
 
     /// `maxQueueEntries` is the daemon's configured queue limit, which only
     /// the queue-full line counts from (`HealthCopy.core`).
-    static func safeguards(_ status: DaemonData.Status?, maxQueueEntries: Int? = nil) -> [Safeguard] {
+    ///
+    /// `capacityUnreadable` is the screens table's line for a capacity this
+    /// build cannot read; without it the core's witness-saturated line says
+    /// the capacity instead, never nothing.
+    static func safeguards(
+        _ status: DaemonData.Status?, maxQueueEntries: Int? = nil,
+        capacityUnreadable: String? = MonitorWords.table?.safeguards.capacityUnreadable
+    ) -> [Safeguard] {
         guard let status else { return [] }
         var out: [Safeguard] = []
         var said: Set<String> = []
@@ -421,12 +428,33 @@ final class TracesStore {
                 severity: .waiting))
             said.insert("daily-cap-reached")
         }
-        if let capacity = status.witnessCapacity, (capacity.waitingSessions ?? 0) > 0,
-            let wire = Self.wire(capacity),
-            let notice = TCConsentCopy.witnessCapacityNoticeJSON(forCapacity: wire).flatMap(WitnessCapacityNotice.decode(fromJSON:))
-        {
-            out.append(Safeguard(title: notice.title, body: notice.body, severity: .waiting))
-            said.insert("witness-saturated")
+        if let capacity = status.witnessCapacity {
+            // Reported but not readable (no count, a negative one, or one
+            // the core could not word) is never "none waiting" (Ron's
+            // `QueueStatusPanel`): sessions may be held, so it is said.
+            let waiting = capacity.waitingSessions
+            if let waiting, waiting == 0 {
+                // None waiting.
+            } else if let waiting, waiting > 0, let wire = Self.wire(capacity),
+                let notice = TCConsentCopy.witnessCapacityNoticeJSON(forCapacity: wire)
+                    .flatMap(WitnessCapacityNotice.decode(fromJSON:))
+            {
+                out.append(Safeguard(title: notice.title, body: notice.body, severity: .waiting))
+                said.insert("witness-saturated")
+            } else {
+                if let unreadable = capacityUnreadable {
+                    out.append(Safeguard(title: unreadable, body: nil, severity: .waiting))
+                } else {
+                    // No screens table: the core's saturated line, which is
+                    // always there, rather than a silence read as "none
+                    // waiting".
+                    let saturated = HealthCopy.core(label: "witness-saturated", maxQueueEntries: maxQueueEntries)
+                    out.append(Safeguard(title: saturated.title, body: saturated.detail, severity: .waiting))
+                }
+                // It says what the saturated label would; that line steps
+                // aside for it (Ron's `saturatedShownByNotice`).
+                said.insert("witness-saturated")
+            }
         }
         if let held = status.automaticContributionHeld, (held.heldSessions ?? 0) > 0,
             let wire = Self.wire(held),

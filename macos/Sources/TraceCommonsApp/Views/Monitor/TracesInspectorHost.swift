@@ -59,19 +59,13 @@ struct TracesInspectorHost: View {
         }
     }
 
-    /// The Summary: the certificates held, why sessions stopped waiting,
-    /// and the record as a whole.
+    /// The Summary (Ron's `SummaryInspector`): what is waiting, what went,
+    /// the safeguards, the certificates held and why sessions stopped
+    /// waiting.
     private var summary: some View {
-        VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
-            // An unread queue is not an empty one: before the daemon has
-            // answered, nothing (`CertificateSection` says when there are
-            // none).
-            if model.queueAnswered {
-                CertificateSection(entries: model.awaitingDecision)
-            }
-            NotOfferedGlassDisclosure(counts: model.outcomeCounts)
-            HomeSummaryInspector(store: home)
-        }
+        SummaryInspector(
+            traces: traces, home: home, awaitingDecision: model.awaitingDecision,
+            queueAnswered: model.queueAnswered, outcomeCounts: model.outcomeCounts)
     }
 }
 

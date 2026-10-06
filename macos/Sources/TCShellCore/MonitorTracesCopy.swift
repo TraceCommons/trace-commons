@@ -432,6 +432,9 @@ public struct MonitorSafeguardsCopy: MonitorWordTable {
     public let daemonOwned: String
     public let rowsUnavailableOne: String
     public let rowsUnavailable: String
+    public let remaining: String
+    public let heldByLimitOne: String
+    public let heldByLimit: String
     public let capacityUnreadable: String
 
     enum CodingKeys: String, CodingKey, CaseIterable {
@@ -442,6 +445,9 @@ public struct MonitorSafeguardsCopy: MonitorWordTable {
         case daemonOwned = "daemon_owned"
         case rowsUnavailableOne = "rows_unavailable_one"
         case rowsUnavailable = "rows_unavailable"
+        case remaining
+        case heldByLimitOne = "held_by_limit_one"
+        case heldByLimit = "held_by_limit"
         case capacityUnreadable = "capacity_unreadable"
     }
 

@@ -214,9 +214,22 @@ pub struct MonitorTracesCopy {
 
 /// Every placeholder the monitor tables use, each written `{name}`:
 /// Ron's, and History's and Inference's (`shown`, `hours`) before them.
+/// `uploads` and `megabytes` are the daily limit's two remainders.
 pub const MONITOR_PLACEHOLDERS: &[&str] = &[
-    "count", "total", "max", "tool", "label", "seconds", "when", "size", "start", "end", "shown",
+    "count",
+    "total",
+    "max",
+    "tool",
+    "label",
+    "seconds",
+    "when",
+    "size",
+    "start",
+    "end",
+    "shown",
     "hours",
+    "uploads",
+    "megabytes",
 ];
 
 /// The Traces tree (`traces-tree.tsx`).
@@ -402,6 +415,12 @@ pub struct MonitorSafeguardsCopy {
     pub daemon_owned: &'static str,
     pub rows_unavailable_one: &'static str,
     pub rows_unavailable: &'static str,
+    /// The daily limit row: uploads and megabytes left today. The shell
+    /// fills both numbers and adds no unit.
+    pub remaining: &'static str,
+    /// Approved sessions the spent limit holds back: one, then counted.
+    pub held_by_limit_one: &'static str,
+    pub held_by_limit: &'static str,
     /// `witness_capacity` was reported but could not be read: never "none
     /// waiting".
     pub capacity_unreadable: &'static str,
@@ -815,6 +834,9 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             daemon_owned: "daemon-owned",
             rows_unavailable_one: "1 row unavailable",
             rows_unavailable: "{count} rows unavailable",
+            remaining: "{uploads} uploads left \u{00b7} {megabytes} MB left",
+            held_by_limit_one: "1 queued session held by limit",
+            held_by_limit: "{count} queued sessions held by limit",
             capacity_unreadable: "Some approved sessions may be waiting and have not been sent, \
                 but this build could not read how many or why.",
         },
@@ -919,6 +941,15 @@ mod tests {
     fn rons_counted_lines_hold_their_numbers() {
         let traces = monitor_traces_copy();
         assert_eq!(traces.tree.submit_count, "Submit \u{00b7} {count}");
+        // `queue-status-panel.tsx`'s daily limit row and its held line.
+        assert_eq!(
+            monitor_screens_copy().safeguards.remaining,
+            "{uploads} uploads left \u{00b7} {megabytes} MB left"
+        );
+        assert_eq!(
+            monitor_screens_copy().safeguards.held_by_limit,
+            "{count} queued sessions held by limit"
+        );
         assert_eq!(traces.optional_automation, "OPTIONAL AUTOMATION");
         assert_eq!(
             traces.inspector.apply_outcome,
