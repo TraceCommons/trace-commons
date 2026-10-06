@@ -342,10 +342,10 @@ pub const CONTRIBUTION_OVERRIDE_CANCEL: &str = "Cancel";
 /// `clear_contribution_override`.
 pub const CONTRIBUTION_OVERRIDE_CLEAR_MODE: &str = "clear";
 
-/// **DRAFT, NEEDS APPROVAL.** The confirmation for clearing an override
-/// while a folder's own setting is Automatic: clearing hands that folder
-/// back to unattended sending, so it is confirmed like an override is
-/// (#1254 review), never done from a single menu press.
+/// The confirmation for clearing an override while a folder's own setting
+/// is Automatic: clearing hands that folder back to unattended sending, so
+/// it is confirmed like an override is (#1254 review), never done from a
+/// single menu press. Approved 2026-10-06.
 pub const CONTRIBUTION_OVERRIDE_CLEAR_TITLE: &str = "Use each folder's setting?";
 /// Held to `clear_contribution_override`: every folder returns to its own
 /// mode, and a folder set to Automatic sends its finished sessions without
