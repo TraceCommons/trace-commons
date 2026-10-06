@@ -192,6 +192,10 @@ private struct GlassMenuRowBody: View {
                     .glassPressedFill()
             )
             .environment(\.glassPressed, configuration.isPressed && isEnabled)
+            // Clear room above and below the selection, inside the button:
+            // rows stack with no gap, so the pointer is always over one, and
+            // the hit rect clears 28pt while the highlight keeps its size.
+            .padding(.vertical, GlassTokens.Space.s2)
             .contentShape(Rectangle())
             .onHover { hovering = $0 }
     }

@@ -172,12 +172,18 @@ struct MenuBarGlassPanel: View {
         }
     }
 
-    /// The overrides, in the core's words, with the core's roll-up checked,
-    /// its partial line under Auto contribute, and its override line and
-    /// clear action while one is in force. Choosing one shows that
-    /// override's core confirmation in place of the choices; only its
-    /// confirm button writes. While the core is down, loading or stale the
-    /// choices are disabled (`MenuPanelStore.canChooseOverride`).
+    /// The overrides, in the core's words, then the Mixed row (each folder
+    /// on its own setting, sub-lined with the core's `clear` description).
+    /// The checked row agrees with the pill (`MenuPanelData.listChecks`):
+    /// an override in force, else the core's roll-up; nothing while the
+    /// core is down. Auto contribute carries the core's partial line, and
+    /// the override line shows while one is in force. Choosing an override
+    /// shows its core confirmation in place of the choices; only its
+    /// confirm button writes. Choosing Mixed clears an override in one
+    /// press, unconfirmed by decision (#1254 review): clearing arms nothing
+    /// that each folder's own setting does not. While the core is down,
+    /// loading or stale every row is disabled
+    /// (`MenuPanelStore.canChooseOverride`).
     @ViewBuilder
     private var modeOptions: some View {
         if let copy = Self.modeCopy {
@@ -199,7 +205,7 @@ struct MenuBarGlassPanel: View {
                             choice.label,
                             sub: sub,
                             fill: .solid(Self.modeFill(choice.mode)),
-                            checked: MenuPanelData.listChecks(choice.mode, status: store.status)) {
+                            checked: MenuPanelData.listChecks(choice.mode, status: store.status, stale: store.stale)) {
                                 store.choose(choice.mode)
                             }
                             .accessibilityLabel(choice.label)
@@ -211,7 +217,7 @@ struct MenuBarGlassPanel: View {
                         copy.mixed,
                         sub: copy.clear,
                         fill: .mixed,
-                        checked: MenuPanelData.listChecks(nil, status: store.status)) {
+                        checked: MenuPanelData.listChecks(nil, status: store.status, stale: store.stale)) {
                             if store.status?.contributionOverride != nil {
                                 Task { await store.clearOverride() }
                             } else {
@@ -336,9 +342,12 @@ struct MenuBarGlassPanel: View {
     // MARK: Menu items
 
     /// The handoff spaces these rows like the popover's own children: 8pt
-    /// between each row and hairline, for a row pitch of at least 28pt.
+    /// between each row's selection and the next. The rows stack with no
+    /// gap; each carries its own clear 4pt above and below
+    /// (`GlassMenuRowStyle`), so its hit rect is 32pt and a click between
+    /// two selections still lands on a row.
     private var menuItems: some View {
-        VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
+        VStack(alignment: .leading, spacing: 0) {
             hairline
             Button { openMain(.queue) } label: {
                 HStack {
@@ -361,6 +370,7 @@ struct MenuBarGlassPanel: View {
 
     private var hairline: some View {
         Rectangle().fill(GlassColor.ink(0.12)).frame(height: 1)
+            .padding(.vertical, GlassTokens.Space.s2)
             .accessibilityHidden(true)
     }
 
