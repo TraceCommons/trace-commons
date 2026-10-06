@@ -233,7 +233,7 @@ account keys; every account read and write requires a transaction-local
 `trace_commons.trace_tenant_id` set to that account's tenant. It cannot record
 facts or directly modify evaluations, accounts, admission rows, or budgets.
 
-Inside a `REPEATABLE READ` transaction, read
+Inside a `REPEATABLE READ` (or `SERIALIZABLE`) transaction, read
 `trace_account_trust_input_generation(TEXT tenant, UUID account)` and the
 account's fact inputs from the same snapshot. Cluster selection and membership
 exclude nonfinite decisions and decisions later than `transaction_timestamp()`.
@@ -256,7 +256,10 @@ Mode is explicitly `shadow` or `applied`. The digest uses
 tenant. The returned boolean indicates a tier change within the same account,
 policy and mode; unchanged tiers still create an evaluation. The writer refuses
 closed accounts, future/nonfinite timestamps, wrong tenant scope, and changed
-input generations. Roll back the entire batch on a database failure or changed
+input generations. It also enforces the snapshot rule above: a call from a
+`READ COMMITTED` transaction is refused with
+`account_trust_evaluation_snapshot_required`, and any call while external
+growth is switched off (below) with `account_trust_external_growth_disabled`. Roll back the entire batch on a database failure or changed
 inputs; PostgreSQL serialization failures require a new snapshot. Do not reuse
 an evaluation computed from an earlier generation when retrying.
 
@@ -268,6 +271,21 @@ until reservation commit; the login gains no frontier write privilege. The
 writer locks account before frontier, matching admission's order. Legacy
 feature fields are nullable for compact rows; the original shadow writer and
 feature decoder continue to handle only complete legacy evaluations.
+
+The gate-write invalidation is switched off until external growth is enabled,
+so a `growth_rule:none` deployment pays nothing for it: a gate write takes no
+dependency lock and scans no facts, the writer refuses, and admission and status
+read no evaluation. An ingest started with an external policy turns it on
+(`trace_account_trust_enable_external_growth()`, granted to
+`trace_account_admission_runtime`) before its readiness check. The first enable
+advances every frontier, so nothing recorded before it is consumed; later calls
+change nothing. The runtime has no path back. Turning it off again is an owner
+action, safe only once no ingest runs an external policy, and the next enable
+invalidates every evaluation again.
+
+Contribution status reads the generation through the non-locking
+`trace_account_trust_input_generation`; only a reservation takes the frontier
+lock.
 
 External startup additionally checks the role, writer/read contract, grants and
 forced RLS. Missing controls refuse startup with
@@ -289,3 +307,16 @@ ordinary tenant-readable tables. Dependency and account frontier locks are
 acquired in deterministic key order within each trigger; the trigger acquires
 no account row locks afterward. Multi-row transactions must still roll back and
 retry on PostgreSQL serialization or deadlock failures.
+
+The enumeration uses partial indexes on the gate facts by
+`(tenant_id, submission_id)` and `(tenant_id, source_id)`, and an index on
+`trace_gate_decisions(dedup_cluster_id)`.
+
+Dependency lock rows carry `touched_at`. The retention worker
+(`POST /v1/workers/retention-maintenance`, when account admission is
+configured) calls `trace_account_trust_prune_dependency_locks(limit, dry_run)`,
+which removes at most 1000 rows per run that nothing has touched for seven days
+(a dry run counts them). A row only serializes writes that overlap in time, so
+one idle that long guards no transaction still running. Deleting an account
+deletes its frontier row; principal and fact changes only advance an existing
+one.

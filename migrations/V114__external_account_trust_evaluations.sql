@@ -53,9 +53,27 @@ CREATE POLICY trace_corpus_tenant_isolation ON trace_account_trust_frontiers
 -- Definer triggers must also work for operator writes and retention without a tenant GUC.
 CREATE POLICY account_trust_frontier_guard ON trace_account_trust_frontiers
     TO trace_account_trust_evaluation_guard USING (TRUE) WITH CHECK (TRUE);
-GRANT SELECT,INSERT,UPDATE ON trace_account_trust_frontiers TO trace_account_trust_evaluation_guard;
+GRANT SELECT,INSERT,UPDATE,DELETE ON trace_account_trust_frontiers TO trace_account_trust_evaluation_guard;
 GRANT SELECT(tenant_id,account_id,closed_at),UPDATE(created_at) ON trace_accounts TO trace_account_trust_evaluation_guard;
 ALTER TABLE trace_account_trust_evaluations ADD COLUMN input_generation BIGINT CHECK (input_generation >= 0);
+
+-- External growth is off until an ingest configured for it turns it on
+-- (trace_account_trust_enable_external_growth). While it is off a gate write
+-- takes no dependency locks and scans no facts, nothing can record an
+-- evaluation, and admission reads none, so a growth_rule:none deployment pays
+-- nothing for this contract. One row; the runtime can only turn it on.
+CREATE TABLE trace_account_trust_external_growth (
+    singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton),
+    enabled BOOLEAN NOT NULL DEFAULT FALSE,
+    enabled_at TIMESTAMPTZ,
+    CHECK (enabled = (enabled_at IS NOT NULL))
+);
+INSERT INTO trace_account_trust_external_growth(singleton) VALUES (TRUE);
+ALTER TABLE trace_account_trust_external_growth ENABLE ROW LEVEL SECURITY;
+ALTER TABLE trace_account_trust_external_growth FORCE ROW LEVEL SECURITY;
+CREATE POLICY account_trust_external_growth_guard ON trace_account_trust_external_growth
+    TO trace_account_trust_evaluation_guard USING(TRUE) WITH CHECK(TRUE);
+GRANT SELECT,UPDATE ON trace_account_trust_external_growth TO trace_account_trust_evaluation_guard;
 
 CREATE FUNCTION trace_account_trust_advance_frontier() RETURNS TRIGGER
 LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $$
@@ -67,10 +85,17 @@ BEGIN
             CASE WHEN TG_OP<>'DELETE' THEN NEW.tenant_id END,
             CASE WHEN TG_OP<>'DELETE' THEN NEW.submission_id END);
     END IF;
-        IF TG_OP <> 'INSERT' THEN
-            INSERT INTO public.trace_account_trust_frontiers(tenant_id,account_id,generation)
-            VALUES(OLD.tenant_id,OLD.account_id,1)
-            ON CONFLICT(tenant_id,account_id) DO UPDATE SET generation=trace_account_trust_frontiers.generation+1;
+        IF TG_TABLE_NAME='trace_accounts' AND TG_OP='DELETE' THEN
+            -- An erased account keeps no frontier. Its facts and evaluations
+            -- reference it without cascade, so they are already gone.
+            DELETE FROM public.trace_account_trust_frontiers
+             WHERE tenant_id=OLD.tenant_id AND account_id=OLD.account_id;
+        ELSIF TG_OP <> 'INSERT' THEN
+            -- Advance, never create: every live account already has a row, and
+            -- a principal removed by the account's own cascade must not
+            -- recreate the row its account's delete removed.
+            UPDATE public.trace_account_trust_frontiers SET generation=generation+1
+             WHERE tenant_id=OLD.tenant_id AND account_id=OLD.account_id;
         END IF;
         IF TG_OP='INSERT' OR (TG_OP='UPDATE' AND (OLD.tenant_id,OLD.account_id) IS DISTINCT FROM (NEW.tenant_id,NEW.account_id)) THEN
             INSERT INTO public.trace_account_trust_frontiers(tenant_id,account_id,generation)
@@ -88,8 +113,9 @@ CREATE TRIGGER account_trust_account_frontier AFTER INSERT OR UPDATE OR DELETE O
 
 CREATE FUNCTION trace_account_trust_input_generation(p_tenant TEXT,p_account UUID) RETURNS BIGINT
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog AS $$
-    SELECT generation FROM public.trace_account_trust_frontiers
-    WHERE tenant_id=p_tenant AND account_id=p_account AND p_tenant=public.trace_current_tenant_id();
+    SELECT f.generation FROM public.trace_account_trust_frontiers f
+    WHERE f.tenant_id=p_tenant AND f.account_id=p_account AND p_tenant=public.trace_current_tenant_id()
+      AND EXISTS(SELECT 1 FROM public.trace_account_trust_external_growth g WHERE g.enabled);
 $$;
 CREATE FUNCTION trace_account_trust_lock_input_generation(p_tenant TEXT,p_account UUID) RETURNS BIGINT
 LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $$
@@ -97,6 +123,9 @@ DECLARE v_generation BIGINT;
 BEGIN
     IF p_tenant IS DISTINCT FROM public.trace_current_tenant_id() THEN
         RAISE EXCEPTION USING MESSAGE='account_trust_evaluation_unauthorized';
+    END IF;
+    IF NOT EXISTS(SELECT 1 FROM public.trace_account_trust_external_growth WHERE enabled) THEN
+        RETURN NULL;
     END IF;
     SELECT generation INTO v_generation FROM public.trace_account_trust_frontiers
     WHERE tenant_id=p_tenant AND account_id=p_account FOR SHARE;
@@ -112,6 +141,17 @@ DECLARE v_previous INTEGER; v_generation BIGINT;
 BEGIN
     IF p_tenant IS NULL OR p_tenant IS DISTINCT FROM public.trace_current_tenant_id() THEN
         RAISE EXCEPTION USING MESSAGE='account_trust_evaluation_unauthorized';
+    END IF;
+    -- The generation binds the evaluation to the inputs it read only if every
+    -- read shares one snapshot.
+    IF pg_catalog.current_setting('transaction_isolation') NOT IN ('repeatable read','serializable') THEN
+        RAISE EXCEPTION USING MESSAGE='account_trust_evaluation_snapshot_required';
+    END IF;
+    -- Shared row lock: enabling waits for this transaction, and a snapshot
+    -- older than the enabling commit fails to serialize rather than record.
+    PERFORM 1 FROM public.trace_account_trust_external_growth WHERE enabled FOR SHARE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION USING MESSAGE='account_trust_external_growth_disabled';
     END IF;
     IF p_mode IS NULL OR p_mode NOT IN ('shadow','applied') OR p_as_of IS NULL
        OR NOT pg_catalog.isfinite(p_as_of) OR p_as_of > pg_catalog.transaction_timestamp() THEN
@@ -147,13 +187,39 @@ BEGIN
     END IF;
     RETURN FALSE;
 END $$;
+CREATE FUNCTION trace_account_trust_enable_external_growth() RETURNS BOOLEAN
+LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $$
+BEGIN
+    -- The row update waits for every in-flight gate, fact or evaluation write
+    -- that read the switch, so none of them straddles the change.
+    UPDATE public.trace_account_trust_external_growth
+       SET enabled=TRUE, enabled_at=pg_catalog.transaction_timestamp()
+     WHERE singleton AND NOT enabled;
+    IF NOT FOUND THEN
+        RETURN FALSE;
+    END IF;
+    -- Nothing invalidated evaluations while the switch was off.
+    UPDATE public.trace_account_trust_frontiers SET generation=generation+1;
+    RETURN TRUE;
+END $$;
+CREATE FUNCTION trace_account_trust_external_growth_enabled() RETURNS BOOLEAN
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog AS $$
+    SELECT COALESCE((SELECT enabled FROM public.trace_account_trust_external_growth), FALSE);
+$$;
 GRANT CREATE ON SCHEMA public TO trace_account_trust_evaluation_guard;
+ALTER FUNCTION trace_account_trust_enable_external_growth() OWNER TO trace_account_trust_evaluation_guard;
+ALTER FUNCTION trace_account_trust_external_growth_enabled() OWNER TO trace_account_trust_evaluation_guard;
 ALTER FUNCTION trace_account_trust_advance_frontier() OWNER TO trace_account_trust_evaluation_guard;
 ALTER FUNCTION trace_account_trust_input_generation(TEXT,UUID) OWNER TO trace_account_trust_evaluation_guard;
 ALTER FUNCTION trace_account_trust_lock_input_generation(TEXT,UUID) OWNER TO trace_account_trust_evaluation_guard;
 REVOKE ALL ON FUNCTION trace_account_trust_advance_frontier(),trace_account_trust_input_generation(TEXT,UUID),trace_account_trust_lock_input_generation(TEXT,UUID) FROM PUBLIC;
+REVOKE ALL ON FUNCTION trace_account_trust_enable_external_growth(),trace_account_trust_external_growth_enabled() FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION trace_account_trust_input_generation(TEXT,UUID) TO trace_account_trust_evaluator;
+-- Status reads the generation without the reservation's frontier lock.
+GRANT EXECUTE ON FUNCTION trace_account_trust_input_generation(TEXT,UUID) TO trace_account_admission_runtime;
 GRANT EXECUTE ON FUNCTION trace_account_trust_lock_input_generation(TEXT,UUID) TO trace_account_admission_runtime;
+GRANT EXECUTE ON FUNCTION trace_account_trust_enable_external_growth(),
+    trace_account_trust_external_growth_enabled() TO trace_account_admission_runtime;
 ALTER FUNCTION trace_record_external_account_trust_evaluation(TEXT,UUID,UUID,TEXT,TEXT,TIMESTAMPTZ,INTEGER,BIGINT,TEXT,BIGINT)
     OWNER TO trace_account_trust_evaluation_guard;
 REVOKE CREATE ON SCHEMA public FROM trace_account_trust_evaluation_guard;
@@ -206,13 +272,30 @@ GRANT trace_account_trust_evaluation_guard TO CURRENT_USER;
 GRANT USAGE ON SCHEMA public TO trace_account_trust_input_guard;
 CREATE TABLE trace_account_trust_dependency_locks (
     dependency_key TEXT PRIMARY KEY,
-    revision BIGINT NOT NULL DEFAULT 0 CHECK(revision >= 0)
+    revision BIGINT NOT NULL DEFAULT 0 CHECK(revision >= 0),
+    -- Retention prunes rows idle for a week (trace_account_trust_prune_dependency_locks).
+    touched_at TIMESTAMPTZ NOT NULL DEFAULT pg_catalog.transaction_timestamp()
 );
+CREATE INDEX trace_account_trust_dependency_locks_touched
+    ON trace_account_trust_dependency_locks(touched_at);
 ALTER TABLE trace_account_trust_dependency_locks ENABLE ROW LEVEL SECURITY;
 ALTER TABLE trace_account_trust_dependency_locks FORCE ROW LEVEL SECURITY;
 CREATE POLICY account_trust_dependency_guard ON trace_account_trust_dependency_locks
     TO trace_account_trust_input_guard USING(TRUE) WITH CHECK(TRUE);
-GRANT SELECT,INSERT,UPDATE ON trace_account_trust_dependency_locks TO trace_account_trust_input_guard;
+GRANT SELECT,INSERT,UPDATE,DELETE ON trace_account_trust_dependency_locks TO trace_account_trust_input_guard;
+-- The input guard only reads the switch, under a shared row lock; PostgreSQL
+-- asks for UPDATE on some column for that, so it gets the one column the
+-- CHECK pins to TRUE.
+GRANT SELECT,UPDATE(singleton) ON trace_account_trust_external_growth TO trace_account_trust_input_guard;
+CREATE POLICY account_trust_external_growth_input ON trace_account_trust_external_growth
+    TO trace_account_trust_input_guard USING(TRUE) WITH CHECK(TRUE);
+-- Dependency enumeration probes; without them each gate write scans every fact.
+CREATE INDEX trace_account_trust_facts_gate_submission
+    ON trace_account_trust_facts(tenant_id, submission_id) WHERE source_kind='gate_evaluation';
+CREATE INDEX trace_account_trust_facts_gate_source
+    ON trace_account_trust_facts(tenant_id, source_id) WHERE source_kind='gate_evaluation';
+CREATE INDEX trace_gate_decisions_dedup_cluster
+    ON trace_gate_decisions(dedup_cluster_id) WHERE dedup_cluster_id IS NOT NULL;
 GRANT SELECT(tenant_id,submission_id,decision_id,dedup_cluster_id) ON trace_gate_decisions TO trace_account_trust_input_guard;
 CREATE POLICY account_trust_input_gate_keys ON trace_gate_decisions
     FOR SELECT TO trace_account_trust_input_guard USING(TRUE);
@@ -231,8 +314,9 @@ BEGIN
         -- Unlike an advisory lock, updating a versioned row also aborts a
         -- REPEATABLE READ mutation whose snapshot predates a competing writer.
         INSERT INTO public.trace_account_trust_dependency_locks(dependency_key,revision)
-        VALUES(v_key,1) ON CONFLICT(dependency_key) DO UPDATE
-        SET revision=trace_account_trust_dependency_locks.revision+1;
+        VALUES(v_key,1) ON CONFLICT(dependency_key) DO UPDATE SET
+            revision=trace_account_trust_dependency_locks.revision+1,
+            touched_at=pg_catalog.transaction_timestamp();
     END LOOP;
 END $$;
 CREATE FUNCTION trace_account_trust_lock_fact_dependencies(
@@ -240,6 +324,10 @@ CREATE FUNCTION trace_account_trust_lock_fact_dependencies(
 RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $$
 DECLARE v_keys TEXT[];
 BEGIN
+    PERFORM 1 FROM public.trace_account_trust_external_growth WHERE enabled FOR SHARE;
+    IF NOT FOUND THEN
+        RETURN;
+    END IF;
     SELECT pg_catalog.array_agg(k) INTO v_keys FROM (
         SELECT 'submission:' || p_old_tenant || ':' || p_old_submission::text AS k
         UNION SELECT 'submission:' || p_new_tenant || ':' || p_new_submission::text
@@ -261,6 +349,11 @@ BEGIN
         (NEW.tenant_id,NEW.submission_id,NEW.decision_id,NEW.credit_quality_micros,
          NEW.credit_quality_calibration_version,NEW.dedup_signal_version,NEW.dedup_cluster_id,NEW.decided_at)
     THEN RETURN NULL; END IF;
+    -- Off until external growth is enabled: no locks, no fact scan.
+    PERFORM 1 FROM public.trace_account_trust_external_growth WHERE enabled FOR SHARE;
+    IF NOT FOUND THEN
+        RETURN NULL;
+    END IF;
     IF TG_OP<>'INSERT' THEN
         v_old_tenant:=OLD.tenant_id; v_old_submission:=OLD.submission_id;
         v_old_decision:=OLD.decision_id; v_old_cluster:=OLD.dedup_cluster_id;
@@ -282,15 +375,25 @@ BEGIN
     PERFORM public.trace_account_trust_lock_dependencies(v_keys);
     -- No account or gate-row locks after dependency/frontier locks. Read only
     -- dependency keys and advance every affected account in deterministic order.
+    -- Three indexed probes, not one OR: by submission, by decision, and by
+    -- every member of an affected cluster.
     FOR v_account IN
-        SELECT DISTINCT f.tenant_id COLLATE "C" AS tenant_id,f.account_id FROM public.trace_account_trust_facts f
-         WHERE f.source_kind='gate_evaluation' AND (
-             (f.tenant_id,f.submission_id) IN ((v_old_tenant,v_old_submission),(v_new_tenant,v_new_submission))
-             OR (f.tenant_id,f.source_id) IN ((v_old_tenant,v_old_decision),(v_new_tenant,v_new_decision))
-             OR EXISTS(SELECT 1 FROM public.trace_gate_decisions g
-                  WHERE g.tenant_id=f.tenant_id AND g.submission_id=f.submission_id
-                    AND g.dedup_cluster_id=ANY(v_clusters)))
-         ORDER BY f.tenant_id COLLATE "C",f.account_id
+        SELECT DISTINCT a.tenant_id COLLATE "C" AS tenant_id,a.account_id FROM (
+            SELECT f.tenant_id,f.account_id FROM public.trace_account_trust_facts f
+             WHERE f.source_kind='gate_evaluation'
+               AND (f.tenant_id,f.submission_id) IN ((v_old_tenant,v_old_submission),(v_new_tenant,v_new_submission))
+            UNION ALL
+            SELECT f.tenant_id,f.account_id FROM public.trace_account_trust_facts f
+             WHERE f.source_kind='gate_evaluation'
+               AND (f.tenant_id,f.source_id) IN ((v_old_tenant,v_old_decision),(v_new_tenant,v_new_decision))
+            UNION ALL
+            SELECT f.tenant_id,f.account_id FROM public.trace_gate_decisions g
+              JOIN public.trace_account_trust_facts f
+                ON f.tenant_id=g.tenant_id AND f.submission_id=g.submission_id
+               AND f.source_kind='gate_evaluation'
+             WHERE g.dedup_cluster_id=ANY(v_clusters)
+        ) a
+         ORDER BY 1,2
     LOOP
         UPDATE public.trace_account_trust_frontiers SET generation=generation+1
          WHERE tenant_id=v_account.tenant_id AND account_id=v_account.account_id;
@@ -299,14 +402,45 @@ BEGIN
 END $$;
 CREATE TRIGGER account_trust_gate_frontier AFTER INSERT OR UPDATE OR DELETE ON trace_gate_decisions
     FOR EACH ROW EXECUTE FUNCTION trace_account_trust_advance_gate_frontiers();
+-- A row serializes gate and fact writes that run concurrently. One untouched
+-- for a week guards no transaction still running, so retention removes it.
+-- Bounded per call; a dry run counts. Returns a count only.
+CREATE FUNCTION trace_account_trust_prune_dependency_locks(p_limit INTEGER,p_dry_run BOOLEAN)
+RETURNS BIGINT LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $$
+DECLARE v_count BIGINT;
+BEGIN
+    IF p_limit IS NULL OR p_limit < 1 OR p_limit > 10000 OR p_dry_run IS NULL THEN
+        RAISE EXCEPTION USING MESSAGE='account_trust_retention_invalid';
+    END IF;
+    IF p_dry_run THEN
+        SELECT pg_catalog.count(*) INTO v_count FROM (
+            SELECT 1 FROM public.trace_account_trust_dependency_locks
+             WHERE touched_at < pg_catalog.transaction_timestamp() - interval '7 days'
+             LIMIT p_limit) idle;
+        RETURN v_count;
+    END IF;
+    -- SKIP LOCKED leaves a row a writer holds; the recheck keeps one it touched.
+    DELETE FROM public.trace_account_trust_dependency_locks d
+     USING (SELECT dependency_key FROM public.trace_account_trust_dependency_locks
+             WHERE touched_at < pg_catalog.transaction_timestamp() - interval '7 days'
+             LIMIT p_limit FOR UPDATE SKIP LOCKED) idle
+     WHERE d.dependency_key=idle.dependency_key
+       AND d.touched_at < pg_catalog.transaction_timestamp() - interval '7 days';
+    GET DIAGNOSTICS v_count = ROW_COUNT;
+    RETURN v_count;
+END $$;
 GRANT CREATE ON SCHEMA public TO trace_account_trust_input_guard;
 ALTER FUNCTION trace_account_trust_lock_dependencies(TEXT[]) OWNER TO trace_account_trust_input_guard;
 ALTER FUNCTION trace_account_trust_lock_fact_dependencies(TEXT,UUID,TEXT,UUID) OWNER TO trace_account_trust_input_guard;
 ALTER FUNCTION trace_account_trust_advance_gate_frontiers() OWNER TO trace_account_trust_input_guard;
+ALTER FUNCTION trace_account_trust_prune_dependency_locks(INTEGER,BOOLEAN) OWNER TO trace_account_trust_input_guard;
 REVOKE CREATE ON SCHEMA public FROM trace_account_trust_input_guard;
 REVOKE ALL ON FUNCTION trace_account_trust_lock_dependencies(TEXT[]),
     trace_account_trust_lock_fact_dependencies(TEXT,UUID,TEXT,UUID),
-    trace_account_trust_advance_gate_frontiers() FROM PUBLIC;
+    trace_account_trust_advance_gate_frontiers(),
+    trace_account_trust_prune_dependency_locks(INTEGER,BOOLEAN) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION trace_account_trust_prune_dependency_locks(INTEGER,BOOLEAN)
+    TO trace_account_admission_runtime;
 GRANT EXECUTE ON FUNCTION trace_account_trust_lock_fact_dependencies(TEXT,UUID,TEXT,UUID)
     TO trace_account_trust_evaluation_guard;
 REVOKE trace_account_trust_input_guard FROM CURRENT_USER;

@@ -48,6 +48,24 @@ async fn publish_current(evaluator: &mut tokio_postgres::Client, tenant: &str, a
     tx.commit().await.unwrap();
 }
 
+async fn repeatable_read(
+    evaluator: &mut tokio_postgres::Client,
+) -> tokio_postgres::Transaction<'_> {
+    evaluator
+        .build_transaction()
+        .isolation_level(tokio_postgres::IsolationLevel::RepeatableRead)
+        .start()
+        .await
+        .unwrap()
+}
+
+fn refusal(error: &tokio_postgres::Error) -> String {
+    error
+        .as_db_error()
+        .map(|db| db.message().to_string())
+        .unwrap_or_else(|| error.to_string())
+}
+
 async fn cluster_first(
     evaluator: &mut tokio_postgres::Client,
     tenant: &str,
@@ -106,6 +124,10 @@ async fn external_evaluation_scope_freshness_clamps_and_spend() {
         String::from(url)
     };
     let runtime = PgBackend::new(&config(login_url("external_admission_login")))
+        .await
+        .unwrap();
+    runtime
+        .enable_external_account_trust_growth()
         .await
         .unwrap();
     assert!(
@@ -238,14 +260,22 @@ async fn external_evaluation_scope_freshness_clamps_and_spend() {
     );
     // Writer fails closed for wrong tenant and future timestamps, without touching rows.
     for (scope, offset) in [("other-tenant", 0_i64), (tenant.as_str(), 3600)] {
-        let tx = evaluator.transaction().await.unwrap();
+        let tx = repeatable_read(&mut evaluator).await;
         tx.query_one(
             "SELECT set_config('trace_commons.trace_tenant_id',$1,true)",
             &[&scope],
         )
         .await
         .unwrap();
-        assert!(tx.query_one("SELECT trace_record_external_account_trust_evaluation($1,$2,$3,'growth-fixture','applied',transaction_timestamp()+make_interval(secs=>$4::bigint::double precision),1,30,$5,0)", &[&tenant,&Uuid::new_v4(),&account_id,&offset,&format!("sha256:{}","1".repeat(64))]).await.is_err());
+        let refused = tx.query_one("SELECT trace_record_external_account_trust_evaluation($1,$2,$3,'growth-fixture','applied',transaction_timestamp()+make_interval(secs=>$4::bigint::double precision),1,30,$5,0)", &[&tenant,&Uuid::new_v4(),&account_id,&offset,&format!("sha256:{}","1".repeat(64))]).await.unwrap_err();
+        assert_eq!(
+            refusal(&refused),
+            if offset == 0 {
+                "account_trust_evaluation_unauthorized"
+            } else {
+                "account_trust_evaluation_invalid"
+            }
+        );
         tx.rollback().await.unwrap();
     }
     let tx = evaluator.transaction().await.unwrap();
@@ -348,7 +378,7 @@ async fn external_evaluation_scope_freshness_clamps_and_spend() {
     let high_digest = format!("sha256:{}", "3".repeat(64));
     for (id, tier, allowance, hash) in [(high, 2_i32, 99_i64, &high_digest), (low, 1, 20, &digest)]
     {
-        let tx = evaluator.transaction().await.unwrap();
+        let tx = repeatable_read(&mut evaluator).await;
         tx.query_one(
             "SELECT set_config('trace_commons.trace_tenant_id',$1,true)",
             &[&tenant],
@@ -400,7 +430,7 @@ async fn external_evaluation_scope_freshness_clamps_and_spend() {
             .ready,
         "identity mutation invalidates fresh applied evidence"
     );
-    let tx = evaluator.transaction().await.unwrap();
+    let tx = repeatable_read(&mut evaluator).await;
     tx.query_one(
         "SELECT set_config('trace_commons.trace_tenant_id',$1,true)",
         &[&tenant],
@@ -465,16 +495,21 @@ async fn external_evaluation_scope_freshness_clamps_and_spend() {
     merge_tx.commit().await.unwrap();
     let refreshed_generation: i64=admin.query_one("SELECT generation FROM trace_account_trust_frontiers WHERE tenant_id=$1 AND account_id=$2", &[&tenant,&account_id]).await.unwrap().get(0);
     assert_eq!(refreshed_generation, old_generation + 3);
-    let tx = evaluator.transaction().await.unwrap();
+    let tx = repeatable_read(&mut evaluator).await;
     tx.query_one(
         "SELECT set_config('trace_commons.trace_tenant_id',$1,true)",
         &[&tenant],
     )
     .await
     .unwrap();
-    assert!(tx.query_one("SELECT trace_record_external_account_trust_evaluation($1,$2,$3,'growth-fixture','applied',transaction_timestamp(),2,30,$4,$5)", &[&tenant,&Uuid::new_v4(),&account_id,&digest,&old_generation]).await.is_err(),"stale batch generation refused without a repeatable-read transaction too");
+    let refused = tx.query_one("SELECT trace_record_external_account_trust_evaluation($1,$2,$3,'growth-fixture','applied',transaction_timestamp(),2,30,$4,$5)", &[&tenant,&Uuid::new_v4(),&account_id,&digest,&old_generation]).await.unwrap_err();
+    assert_eq!(
+        refusal(&refused),
+        "account_trust_evaluation_inputs_changed",
+        "a stale batch generation is refused for its generation, not its isolation"
+    );
     tx.rollback().await.unwrap();
-    let tx = evaluator.transaction().await.unwrap();
+    let tx = repeatable_read(&mut evaluator).await;
     tx.query_one(
         "SELECT set_config('trace_commons.trace_tenant_id',$1,true)",
         &[&tenant],
@@ -505,7 +540,7 @@ async fn external_evaluation_scope_freshness_clamps_and_spend() {
     assert_eq!(evidence.get::<_, Option<i32>>(0), Some(2));
     assert_eq!(evidence.get::<_, Option<String>>(1), Some(high_digest));
     // A newer below-base evaluation cannot erase previously charged spend.
-    let tx = evaluator.transaction().await.unwrap();
+    let tx = repeatable_read(&mut evaluator).await;
     tx.query_one(
         "SELECT set_config('trace_commons.trace_tenant_id',$1,true)",
         &[&tenant],
@@ -882,5 +917,431 @@ async fn external_evaluation_scope_freshness_clamps_and_spend() {
     assert_eq!(
         late_generation, 2,
         "newly committed dependency is included after gate lock wait"
+    );
+}
+
+/// One migrated database, the two narrow logins, and a seeded live account.
+/// Each property below gets its own test over this fixture; the switch that
+/// gates external growth is global, so the suite runs single-threaded (as CI
+/// runs it) and each test sets the switch state it needs.
+struct Fixture {
+    admin_db: PgBackend,
+    admin: deadpool_postgres::Object,
+    runtime: PgBackend,
+    evaluator: tokio_postgres::Client,
+    tenant: String,
+    account_id: Uuid,
+    principal: String,
+}
+
+impl Fixture {
+    async fn new() -> Self {
+        let url = std::env::var("TRACE_COMMONS_ACCOUNT_ADMISSION_PG_TEST_URL").unwrap();
+        let parsed = url.parse::<tokio_postgres::Config>().unwrap();
+        assert!(
+            matches!(parsed.get_hosts().first(), Some(tokio_postgres::config::Host::Tcp(host)) if host == "127.0.0.1")
+        );
+        assert!(parsed.get_dbname().unwrap().starts_with("admission_test"));
+        let admin_db = PgBackend::new(&config(url.clone())).await.unwrap();
+        admin_db.run_migrations().await.unwrap();
+        let admin = admin_db
+            .raw_pool_for_tests_and_diagnostics()
+            .get()
+            .await
+            .unwrap();
+        admin.batch_execute("DO $$ BEGIN
+            IF NOT EXISTS(SELECT 1 FROM pg_roles WHERE rolname='external_admission_login') THEN CREATE ROLE external_admission_login LOGIN NOSUPERUSER NOBYPASSRLS; END IF;
+            IF NOT EXISTS(SELECT 1 FROM pg_roles WHERE rolname='external_evaluator_login') THEN CREATE ROLE external_evaluator_login LOGIN NOSUPERUSER NOBYPASSRLS; END IF;
+            END $$;
+            GRANT trace_account_admission_runtime TO external_admission_login;
+            GRANT trace_account_trust_evaluator TO external_evaluator_login;").await.unwrap();
+        let runtime = PgBackend::new(&config(Self::login(&url, "external_admission_login")))
+            .await
+            .unwrap();
+        let (evaluator, conn) = tokio_postgres::connect(
+            &Self::login(&url, "external_evaluator_login"),
+            tokio_postgres::NoTls,
+        )
+        .await
+        .unwrap();
+        tokio::spawn(async move {
+            conn.await.unwrap();
+        });
+        let tenant = format!("near-{}", Uuid::new_v4().simple().to_string().repeat(2));
+        let account_id = Uuid::new_v4();
+        let principal = format!("sha256:{}", Uuid::new_v4().simple().to_string().repeat(2));
+        let device = format!("sha256:{}", Uuid::new_v4().simple().to_string().repeat(2));
+        let anchor = format!("sha256:{}", Uuid::new_v4().simple().to_string().repeat(2));
+        admin
+            .execute(
+                "INSERT INTO trace_tenants(tenant_id) VALUES($1)",
+                &[&tenant],
+            )
+            .await
+            .unwrap();
+        admin
+            .execute(
+                "INSERT INTO trace_accounts(tenant_id,account_id) VALUES($1,$2)",
+                &[&tenant, &account_id],
+            )
+            .await
+            .unwrap();
+        admin.execute("INSERT INTO trace_near_account_anchors(tenant_id,account_id,anchor_hash,sealed_account_name,index_pepper_ref,account_name_key_ref) VALUES($1,$2,$3,$4,'fixture-pepper','fixture-key')", &[&tenant,&account_id,&anchor,&serde_json::json!({"fixture":true})]).await.unwrap();
+        admin.execute("INSERT INTO device_keys(device_key_id,tenant_id,public_key,invite_subject_hash,onboarding_origin) VALUES($1,$2,'fixture-key',NULL,'near')", &[&device,&tenant]).await.unwrap();
+        admin.execute("INSERT INTO trace_account_principals(tenant_id,account_id,principal_ref) VALUES($1,$2,$3)", &[&tenant,&account_id,&principal]).await.unwrap();
+        admin.execute("INSERT INTO trace_near_provisioned_devices(tenant_id,principal_ref,account_id,device_key_id,anchor_hash) VALUES($1,$2,$3,$4,$5)", &[&tenant,&principal,&account_id,&device,&anchor]).await.unwrap();
+        Self {
+            admin_db,
+            admin,
+            runtime,
+            evaluator,
+            tenant,
+            account_id,
+            principal,
+        }
+    }
+
+    fn login(url: &str, name: &str) -> String {
+        let mut url = reqwest::Url::parse(url).unwrap();
+        url.set_username(name).unwrap();
+        String::from(url)
+    }
+
+    /// The owner sets the switch directly: the runtime can only turn it on.
+    async fn set_growth_switch(&self, enabled: bool) {
+        self.admin
+            .execute(
+                "UPDATE trace_account_trust_external_growth SET enabled=$1,enabled_at=CASE WHEN $1 THEN clock_timestamp() END",
+                &[&enabled],
+            )
+            .await
+            .unwrap();
+    }
+
+    async fn generation(&self) -> Option<i64> {
+        self.admin
+            .query_opt(
+                "SELECT generation FROM trace_account_trust_frontiers WHERE tenant_id=$1 AND account_id=$2",
+                &[&self.tenant, &self.account_id],
+            )
+            .await
+            .unwrap()
+            .map(|row| row.get(0))
+    }
+
+    async fn dependency_rows(&self, tenant: &str) -> i64 {
+        self.admin
+            .query_one(
+                "SELECT count(*) FROM trace_account_trust_dependency_locks WHERE dependency_key LIKE 'submission:' || $1 || ':%'",
+                &[&tenant],
+            )
+            .await
+            .unwrap()
+            .get(0)
+    }
+
+    /// Records through the writer at `isolation`, returning the database's
+    /// refusal message if it refuses.
+    async fn record(
+        &mut self,
+        isolation: tokio_postgres::IsolationLevel,
+        generation: Option<i64>,
+    ) -> Result<(), String> {
+        let tx = self
+            .evaluator
+            .build_transaction()
+            .isolation_level(isolation)
+            .start()
+            .await
+            .unwrap();
+        tx.query_one(
+            "SELECT set_config('trace_commons.trace_tenant_id',$1,true)",
+            &[&self.tenant],
+        )
+        .await
+        .unwrap();
+        let generation = match generation {
+            Some(generation) => Some(generation),
+            None => tx
+                .query_one(
+                    "SELECT trace_account_trust_input_generation($1,$2)",
+                    &[&self.tenant, &self.account_id],
+                )
+                .await
+                .unwrap()
+                .get(0),
+        };
+        let result = tx.query_one("SELECT trace_record_external_account_trust_evaluation($1,$2,$3,'growth-fixture','applied',transaction_timestamp(),2,30,$4,$5)", &[&self.tenant,&Uuid::new_v4(),&self.account_id,&format!("sha256:{}","6".repeat(64)),&generation]).await;
+        match result {
+            Ok(_) => {
+                tx.commit().await.unwrap();
+                Ok(())
+            }
+            Err(error) => Err(refusal(&error)),
+        }
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires isolated TRACE_COMMONS_ACCOUNT_ADMISSION_PG_TEST_URL"]
+async fn gate_writes_cost_nothing_until_external_growth_is_enabled() {
+    let mut f = Fixture::new().await;
+    f.set_growth_switch(false).await;
+    assert!(
+        !f.runtime
+            .external_account_trust_runtime_ready()
+            .await
+            .unwrap(),
+        "external growth cannot be ready while its invalidation is switched off"
+    );
+    let submission = Uuid::new_v4();
+    f.admin.execute("INSERT INTO trace_submissions(tenant_id,submission_id,trace_id,auth_principal_ref,schema_version,consent_policy_version,retention_policy_id,status,privacy_risk,redaction_pipeline_version,redaction_hash) VALUES($1,$2,$3,$4,'v1','v1','test','accepted','low','test',$5)", &[&f.tenant,&submission,&Uuid::new_v4(),&f.principal,&"a".repeat(64)]).await.unwrap();
+    let gate = seed_dependency_gate(&f.admin, &f.tenant, submission, Uuid::new_v4(), false).await;
+    f.admin.execute("INSERT INTO trace_account_trust_facts(tenant_id,account_id,source_kind,source_id,submission_id,outcome,evaluator_version,occurred_at) VALUES($1,$2,'gate_evaluation',$3,$4,'evaluated_passed','gate-fixture',clock_timestamp())", &[&f.tenant,&f.account_id,&gate,&submission]).await.unwrap();
+    let before = f.generation().await;
+    f.admin
+        .execute(
+            "UPDATE trace_gate_decisions SET credit_quality_micros=credit_quality_micros+1 WHERE tenant_id=$1 AND decision_id=$2",
+            &[&f.tenant, &gate],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        f.dependency_rows(&f.tenant).await,
+        0,
+        "a deployment without external growth keeps no dependency rows"
+    );
+    assert_eq!(
+        f.generation().await,
+        before,
+        "a gate write does not scan facts while growth is off"
+    );
+    assert_eq!(
+        f.record(tokio_postgres::IsolationLevel::RepeatableRead, before)
+            .await
+            .unwrap_err(),
+        "account_trust_external_growth_disabled",
+        "nothing may record an evaluation that gate writes would not invalidate"
+    );
+
+    f.runtime
+        .enable_external_account_trust_growth()
+        .await
+        .unwrap();
+    assert!(
+        f.runtime
+            .external_account_trust_runtime_ready()
+            .await
+            .unwrap()
+    );
+    let enabled = f.generation().await;
+    assert!(
+        enabled > before,
+        "enabling invalidates every evaluation recorded before it"
+    );
+    f.admin
+        .execute(
+            "UPDATE trace_gate_decisions SET credit_quality_micros=credit_quality_micros+1 WHERE tenant_id=$1 AND decision_id=$2",
+            &[&f.tenant, &gate],
+        )
+        .await
+        .unwrap();
+    assert!(f.dependency_rows(&f.tenant).await > 0);
+    assert!(f.generation().await > enabled);
+    // Enabling twice is a no-op, not a second invalidation.
+    let settled = f.generation().await;
+    f.runtime
+        .enable_external_account_trust_growth()
+        .await
+        .unwrap();
+    assert_eq!(f.generation().await, settled);
+}
+
+#[tokio::test]
+#[ignore = "requires isolated TRACE_COMMONS_ACCOUNT_ADMISSION_PG_TEST_URL"]
+async fn evaluation_writer_requires_a_repeatable_read_snapshot() {
+    let mut f = Fixture::new().await;
+    f.runtime
+        .enable_external_account_trust_growth()
+        .await
+        .unwrap();
+    assert_eq!(
+        f.record(tokio_postgres::IsolationLevel::ReadCommitted, None)
+            .await
+            .unwrap_err(),
+        "account_trust_evaluation_snapshot_required"
+    );
+    f.record(tokio_postgres::IsolationLevel::RepeatableRead, None)
+        .await
+        .unwrap();
+    f.record(tokio_postgres::IsolationLevel::Serializable, None)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires isolated TRACE_COMMONS_ACCOUNT_ADMISSION_PG_TEST_URL"]
+async fn gate_dependency_lookups_are_indexed() {
+    let f = Fixture::new().await;
+    for (table, columns) in [
+        ("trace_account_trust_facts", "(tenant_id, submission_id)"),
+        ("trace_account_trust_facts", "(tenant_id, source_id)"),
+        ("trace_gate_decisions", "(dedup_cluster_id)"),
+    ] {
+        let indexed: bool = f
+            .admin
+            .query_one(
+                "SELECT EXISTS(SELECT 1 FROM pg_indexes WHERE schemaname='public' AND tablename=$1 AND indexdef LIKE '%' || $2 || '%')",
+                &[&table, &columns],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert!(indexed, "{table} {columns} is not indexed");
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires isolated TRACE_COMMONS_ACCOUNT_ADMISSION_PG_TEST_URL"]
+async fn retention_prunes_only_idle_dependency_rows() {
+    let f = Fixture::new().await;
+    f.runtime
+        .enable_external_account_trust_growth()
+        .await
+        .unwrap();
+    let submission = Uuid::new_v4();
+    let gate = seed_dependency_gate(&f.admin, &f.tenant, submission, Uuid::new_v4(), false).await;
+    f.admin
+        .execute(
+            "UPDATE trace_gate_decisions SET credit_quality_micros=credit_quality_micros+1 WHERE tenant_id=$1 AND decision_id=$2",
+            &[&f.tenant, &gate],
+        )
+        .await
+        .unwrap();
+    let fresh = f.dependency_rows(&f.tenant).await;
+    assert!(fresh > 0);
+    let idle_key = format!("submission:{}:{}", f.tenant, Uuid::new_v4());
+    f.admin
+        .execute(
+            "INSERT INTO trace_account_trust_dependency_locks(dependency_key,revision,touched_at) VALUES($1,1,clock_timestamp()-interval '8 days')",
+            &[&idle_key],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        f.runtime
+            .prune_account_trust_dependency_locks(1000, true)
+            .await
+            .unwrap(),
+        f.admin.query_one("SELECT count(*) FROM trace_account_trust_dependency_locks WHERE touched_at < clock_timestamp()-interval '7 days'", &[]).await.unwrap().get::<_, i64>(0) as u64,
+        "a dry run counts what it would prune"
+    );
+    assert_eq!(
+        f.dependency_rows(&f.tenant).await,
+        fresh + 1,
+        "a dry run deletes nothing"
+    );
+    assert!(
+        f.runtime
+            .prune_account_trust_dependency_locks(1000, false)
+            .await
+            .unwrap()
+            >= 1
+    );
+    assert_eq!(
+        f.dependency_rows(&f.tenant).await,
+        fresh,
+        "the idle row goes and every recently touched row stays"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires isolated TRACE_COMMONS_ACCOUNT_ADMISSION_PG_TEST_URL"]
+async fn status_read_does_not_wait_on_the_frontier_lock() {
+    let f = Fixture::new().await;
+    f.runtime
+        .enable_external_account_trust_growth()
+        .await
+        .unwrap();
+    let account = resolve_contribution_account(&f.runtime, &f.tenant, &f.principal)
+        .await
+        .unwrap();
+    let policy = parse_bounded_policy(r#"{"version":"external-fixture","processing_cost_bound":10,"bounded_allowance":10,"period":{"mode":"lifetime"},"growth_rule":"external","growth_policy_version":"growth-fixture","allowance_ceiling":30,"evaluation_max_age_seconds":60}"#, &["external-fixture"]).unwrap();
+    // An evaluator holding the frontier for update, as the writer does.
+    let mut holder = f
+        .admin_db
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .unwrap();
+    let hold = holder.transaction().await.unwrap();
+    hold.execute(
+        "SELECT 1 FROM trace_account_trust_frontiers WHERE tenant_id=$1 AND account_id=$2 FOR UPDATE",
+        &[&f.tenant, &f.account_id],
+    )
+    .await
+    .unwrap();
+    let status = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        f.runtime
+            .account_admission_status(&account, &f.principal, &policy),
+    )
+    .await
+    .expect("an advisory status read must not block behind the evaluator")
+    .unwrap();
+    assert!(status.is_some());
+    hold.rollback().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires isolated TRACE_COMMONS_ACCOUNT_ADMISSION_PG_TEST_URL"]
+async fn deleting_an_account_removes_its_frontier() {
+    let f = Fixture::new().await;
+    // A second principal stays behind for the account delete to cascade over.
+    let spare = format!("sha256:{}", Uuid::new_v4().simple().to_string().repeat(2));
+    f.admin
+        .execute(
+            "INSERT INTO trace_account_principals(tenant_id,account_id,principal_ref) VALUES($1,$2,$3)",
+            &[&f.tenant, &f.account_id, &spare],
+        )
+        .await
+        .unwrap();
+    let principal_frontier = f.generation().await.unwrap();
+    f.admin
+        .execute(
+            "DELETE FROM trace_near_provisioned_devices WHERE tenant_id=$1 AND account_id=$2",
+            &[&f.tenant, &f.account_id],
+        )
+        .await
+        .unwrap();
+    f.admin
+        .execute(
+            "DELETE FROM trace_account_principals WHERE tenant_id=$1 AND account_id=$2 AND principal_ref=$3",
+            &[&f.tenant, &f.account_id, &f.principal],
+        )
+        .await
+        .unwrap();
+    assert!(
+        f.generation().await.unwrap() > principal_frontier,
+        "an identity change still advances the frontier"
+    );
+    f.admin
+        .execute(
+            "DELETE FROM trace_near_account_anchors WHERE tenant_id=$1 AND account_id=$2",
+            &[&f.tenant, &f.account_id],
+        )
+        .await
+        .unwrap();
+    f.admin
+        .execute(
+            "DELETE FROM trace_accounts WHERE tenant_id=$1 AND account_id=$2",
+            &[&f.tenant, &f.account_id],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        f.generation().await,
+        None,
+        "an erased account leaves no frontier row behind, cascaded principals included"
     );
 }

@@ -338,7 +338,14 @@ impl PgBackend {
         let ready = if authority == "invited" {
             true
         } else {
-            let allowance = account_effective_allowance(&tx, tenant, account_id, policy).await?;
+            let allowance = account_effective_allowance(
+                &tx,
+                tenant,
+                account_id,
+                policy,
+                FrontierRead::Advisory,
+            )
+            .await?;
             used.checked_add(policy.processing_cost_bound())
                 .is_some_and(|next| next <= allowance.limit)
         };
@@ -473,7 +480,8 @@ impl PgBackend {
         }
         let charged = authority != "invited";
         let allowance = if charged {
-            account_effective_allowance(&tx, tenant, account, &r.policy).await?
+            account_effective_allowance(&tx, tenant, account, &r.policy, FrontierRead::Locked)
+                .await?
         } else {
             EffectiveAllowance {
                 limit: r.policy.bounded_allowance(),
@@ -620,7 +628,50 @@ impl PgBackend {
         }
         Ok(changed)
     }
-    /// Checks the runtime login itself, then the boolean-only fleet linkage seam.
+    /// Turns on the gate-write invalidation that external growth depends on.
+    ///
+    /// Until this runs, a gate write takes no dependency locks and scans no
+    /// facts, and the evaluation writer refuses. The first call advances every
+    /// frontier, so no evaluation recorded before it can be consumed; later
+    /// calls change nothing. There is deliberately no runtime path back.
+    pub async fn enable_external_account_trust_growth(&self) -> Result<(), DatabaseError> {
+        let client = self
+            .trace_pool()
+            .get()
+            .await
+            .map_err(|_| database_refused())?;
+        client
+            .query_one("SELECT trace_account_trust_enable_external_growth()", &[])
+            .await
+            .map_err(|_| database_refused())?;
+        Ok(())
+    }
+
+    /// Deletes dependency-lock rows nobody has touched for a week, at most
+    /// `limit` of them; a dry run only counts them. The rows exist to
+    /// serialize concurrent gate and fact writes, so a row idle that long
+    /// guards no transaction still running. Returns a count only.
+    pub async fn prune_account_trust_dependency_locks(
+        &self,
+        limit: i32,
+        dry_run: bool,
+    ) -> Result<u64, DatabaseError> {
+        let client = self
+            .trace_pool()
+            .get()
+            .await
+            .map_err(|_| database_refused())?;
+        let count: i64 = client
+            .query_one(
+                "SELECT trace_account_trust_prune_dependency_locks($1,$2)",
+                &[&limit, &dry_run],
+            )
+            .await
+            .map_err(|_| database_refused())?
+            .get(0);
+        u64::try_from(count).map_err(|_| database_refused())
+    }
+
     /// Additional contract checks only required by an external growth policy.
     pub async fn external_account_trust_runtime_ready(&self) -> Result<bool, DatabaseError> {
         let client = self
@@ -636,6 +687,10 @@ impl PgBackend {
             AND has_function_privilege(e.oid,to_regprocedure('public.trace_account_trust_evaluation_inputs(text,uuid)'),'EXECUTE')
             AND has_function_privilege(e.oid,to_regprocedure('public.trace_account_trust_input_generation(text,uuid)'),'EXECUTE')
             AND has_function_privilege(current_user,to_regprocedure('public.trace_account_trust_lock_input_generation(text,uuid)'),'EXECUTE')
+            AND has_function_privilege(current_user,to_regprocedure('public.trace_account_trust_input_generation(text,uuid)'),'EXECUTE')
+            AND has_function_privilege(current_user,to_regprocedure('public.trace_account_trust_prune_dependency_locks(integer,boolean)'),'EXECUTE')
+            AND COALESCE(has_function_privilege(current_user,to_regprocedure('public.trace_account_trust_external_growth_enabled()'),'EXECUTE')
+                AND public.trace_account_trust_external_growth_enabled(),FALSE)
             AND has_function_privilege(e.oid,f.oid,'EXECUTE')
             AND f.prosecdef AND f.proowner=to_regrole('trace_account_trust_evaluation_guard')
             AND NOT has_function_privilege(current_user,f.oid,'EXECUTE')
@@ -664,6 +719,7 @@ impl PgBackend {
         Ok(ready == Some(true))
     }
 
+    /// Checks the runtime login itself, then the boolean-only fleet linkage seam.
     pub async fn account_admission_runtime_ready(&self) -> Result<bool, DatabaseError> {
         let client = self
             .trace_pool()
@@ -888,6 +944,17 @@ struct EffectiveAllowance {
     digest: Option<String>,
 }
 
+/// How a read binds to the account's input frontier.
+#[derive(Clone, Copy)]
+enum FrontierRead {
+    /// Reservation: holds the frontier `FOR SHARE` until the debit commits,
+    /// so no evaluation can be invalidated underneath it.
+    Locked,
+    /// Status: advisory, so it takes no lock and never makes the evaluator
+    /// or a fact or gate trigger wait.
+    Advisory,
+}
+
 /// Reads only the configured policy's applied evaluations, on the transaction
 /// clock. The budget's stored limit stays at the base: growth never erases spend.
 async fn account_effective_allowance(
@@ -895,6 +962,7 @@ async fn account_effective_allowance(
     tenant: &str,
     account: Uuid,
     policy: &BoundedPolicy,
+    read: FrontierRead,
 ) -> Result<EffectiveAllowance, DatabaseError> {
     let mut allowance = EffectiveAllowance {
         limit: policy.bounded_allowance(),
@@ -907,7 +975,10 @@ async fn account_effective_allowance(
     allowance.tier = Some(0);
     let generation: Option<i64> = tx
         .query_one(
-            "SELECT trace_account_trust_lock_input_generation($1,$2)",
+            match read {
+                FrontierRead::Locked => "SELECT trace_account_trust_lock_input_generation($1,$2)",
+                FrontierRead::Advisory => "SELECT trace_account_trust_input_generation($1,$2)",
+            },
             &[&tenant, &account],
         )
         .await

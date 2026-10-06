@@ -4336,6 +4336,13 @@ impl AppState {
             {
                 anyhow::bail!("account_admission_permissions_or_linkage_not_ready");
             }
+            if account_config.policy.external_growth().is_some() {
+                // Gate writes invalidate evaluations only once this is on;
+                // the readiness check below refuses if it did not take.
+                db.enable_external_account_trust_growth()
+                    .await
+                    .map_err(|_| anyhow::anyhow!("external_account_trust_readiness_unavailable"))?;
+            }
             if account_config.policy.external_growth().is_some()
                 && !db
                     .external_account_trust_runtime_ready()
@@ -55181,6 +55188,24 @@ async fn retention_maintenance_handler(
                 api_error(
                     StatusCode::SERVICE_UNAVAILABLE,
                     "onboarding_retention_unavailable",
+                )
+            })?;
+    }
+    if state.account_admission.is_some() {
+        let db = state.db_mirror.as_ref().ok_or_else(|| {
+            api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "account_trust_retention_unavailable",
+            )
+        })?;
+        // Internal lock rows only exist once external growth is on; the
+        // database prunes those idle for a week. Same fixed batch bound.
+        db.prune_account_trust_dependency_locks(1000, body.dry_run)
+            .await
+            .map_err(|_| {
+                api_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "account_trust_retention_unavailable",
                 )
             })?;
     }

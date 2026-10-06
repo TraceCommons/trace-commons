@@ -161,6 +161,13 @@ pub struct PgBackend {
     invite_registry_pool: Option<Pool>,
 }
 
+/// Global internal lock state; these tables have guard-only forced RLS and
+/// deliberately carry no tenant-readable rows or ordinary login grants.
+pub const TRACE_COMMONS_INTERNAL_RLS_TABLES: &[&str] = &[
+    "trace_account_trust_dependency_locks",
+    "trace_account_trust_external_growth",
+];
+
 /// Tables whose tenant isolation `trace_corpus_rls_diagnostics` attests to.
 ///
 /// Public so RLS tests assert against this list rather than a hand-maintained
@@ -178,10 +185,6 @@ pub struct PgBackend {
 /// see the exclusion notes at the bottom of
 /// `migrations/V56__community_withdrawal_eviction_rls.sql` for why that is
 /// opt-in published data and does not change the answer.
-/// Global internal lock state; these tables have guard-only forced RLS and
-/// deliberately carry no tenant-readable rows or ordinary login grants.
-pub const TRACE_COMMONS_INTERNAL_RLS_TABLES: &[&str] = &["trace_account_trust_dependency_locks"];
-
 pub const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
     "trace_tenants",
     "trace_tenant_policies",
@@ -2001,6 +2004,18 @@ impl Database for PgBackend {
 
     async fn external_account_trust_runtime_ready(&self) -> Result<bool, DatabaseError> {
         PgBackend::external_account_trust_runtime_ready(self).await
+    }
+
+    async fn enable_external_account_trust_growth(&self) -> Result<(), DatabaseError> {
+        PgBackend::enable_external_account_trust_growth(self).await
+    }
+
+    async fn prune_account_trust_dependency_locks(
+        &self,
+        limit: i32,
+        dry_run: bool,
+    ) -> Result<u64, DatabaseError> {
+        PgBackend::prune_account_trust_dependency_locks(self, limit, dry_run).await
     }
 
     async fn account_admission_runtime_ready(&self) -> Result<bool, DatabaseError> {

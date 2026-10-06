@@ -6577,7 +6577,7 @@ See `docs/superpowers/specs/2026-10-02-configured-activity-missions-design.md`
 for the operator policy and qualification rules. The policy is optional; this
 adapter does not choose thresholds or activate economics.
 
-### Explicit account contribution controls
+## Explicit account contribution controls
 
 `status` includes nullable `account_scope`, an opaque local account lifecycle and
 configuration identifier. It changes on sign-in/replacement (including a new
