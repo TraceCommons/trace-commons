@@ -594,7 +594,11 @@ pub unsafe extern "C" fn tc_daemon_start(
     guarded_scalar(err, std::ptr::null_mut(), || {
         let store_result: anyhow::Result<ConfigStore> = (|| {
             let dir = unsafe { borrow_str(config_dir) }?;
+            // K2 (#1173): under a debug build's dev dry run, the separate
+            // dry-run store, so neither the pre-start settings nor the
+            // daemon ever write the real one.
             ConfigStore::open(std::path::PathBuf::from(dir))
+                .and_then(trace_commons_contributor::daemon::dev_dry_run_store)
         })();
         let store = match store_result {
             Ok(store) => store,
@@ -890,7 +894,11 @@ pub unsafe extern "C" fn tc_daemon_start_with_settings(
     guarded_scalar(err, std::ptr::null_mut(), || {
         let store_result: anyhow::Result<ConfigStore> = (|| {
             let dir = unsafe { borrow_str(config_dir) }?;
+            // K2 (#1173): under a debug build's dev dry run, the separate
+            // dry-run store, so neither the pre-start settings nor the
+            // daemon ever write the real one.
             ConfigStore::open(std::path::PathBuf::from(dir))
+                .and_then(trace_commons_contributor::daemon::dev_dry_run_store)
         })();
         let store = match store_result {
             Ok(store) => store,
@@ -5530,6 +5538,23 @@ pub unsafe extern "C" fn tc_contribution_override_refusal_text(
         Ok(to_owned_cstring(
             trace_commons_contributor::project_copy::contribution_override_refusal_line(label),
         ))
+    })
+}
+
+/// The Missions disclosure (M4, #1173; `consent_copy::missions_disclosure_copy`):
+/// a JSON object `{title, matching, nothing_sent, credit}` -- matching
+/// happens on this Mac, nothing is sent because of a mission, and a
+/// mission's credit is projected until the commons records it, then
+/// pending. Shown the first time Missions is opened and in Settings. DRAFT,
+/// NEEDS APPROVAL, every sentence.
+///
+/// Returns an owned JSON string; free it with [`tc_string_free`]. NULL only
+/// on a caught panic.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_missions_disclosure_copy_json() -> *mut c_char {
+    guarded_string_no_err(|| {
+        let copy = trace_commons_contributor::consent_copy::missions_disclosure_copy();
+        Ok(to_owned_cstring(&serde_json::to_string(&copy)?))
     })
 }
 
