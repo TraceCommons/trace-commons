@@ -50,11 +50,16 @@ final class DaemonDataContractTests: XCTestCase {
                 _ = try await client.toolDestinations()
                 _ = try await client.inferenceCalls(limit: 50, cursor: nil)
                 _ = try await client.inferenceSummary()
+                _ = try await client.networkInferenceSummary()
                 _ = try await client.inferenceCallProof(callId: 414)
                 _ = try await client.modelSpend()
                 _ = try await client.privateAI()
                 _ = try await client.setPrivateAI(on: true)
+                let shown = try await client.networkPrivateAI()
+                _ = try await client.setNetworkPrivateAI(
+                    on: true, consent: DaemonData.PrivateAIConsent(acknowledging: shown))
                 _ = try await client.missionCatalogue()
+                _ = try await client.networkMissionCatalogue()
                 _ = try await client.lookupInvite(code: "c")
                 _ = try await client.passkeyState()
                 _ = try await client.accountState()
@@ -239,11 +244,15 @@ final class DaemonDataContractTests: XCTestCase {
             ("toolDestinations", { _ = try await client.toolDestinations() }),
             ("inferenceCalls", { _ = try await client.inferenceCalls(limit: 5, cursor: nil) }),
             ("inferenceSummary", { _ = try await client.inferenceSummary() }),
+            ("networkInferenceSummary", { _ = try await client.networkInferenceSummary() }),
             ("inferenceCallProof", { _ = try await client.inferenceCallProof(callId: 1) }),
             ("modelSpend", { _ = try await client.modelSpend() }),
             ("privateAI", { _ = try await client.privateAI() }),
             ("setPrivateAI", { _ = try await client.setPrivateAI(on: false) }),
+            ("networkPrivateAI", { _ = try await client.networkPrivateAI() }),
+            ("setNetworkPrivateAI", { _ = try await client.setNetworkPrivateAI(on: false, consent: nil) }),
             ("missionCatalogue", { _ = try await client.missionCatalogue() }),
+            ("networkMissionCatalogue", { _ = try await client.networkMissionCatalogue() }),
             ("lookupInvite", { _ = try await client.lookupInvite(code: "c") }),
             ("passkeyState", { _ = try await client.passkeyState() }),
             ("accountState", { _ = try await client.accountState() }),
@@ -327,6 +336,30 @@ final class DaemonDataContractTests: XCTestCase {
             XCTAssertEqual(error as? DaemonDataError, .notAvailableYet(method: "mission_catalogue"))
         }
         XCTAssertTrue(transport.calls.isEmpty, "nothing is sent for a method the daemon does not have")
+    }
+
+    /// An older attached daemon that predates a network method answers
+    /// `unknown_method`; the live client keeps that refusal rather than
+    /// turning it into `notAvailableYet` or an empty answer.
+    func testLiveClientKeepsUnknownMethodForAnOlderDaemon() async {
+        let transport = FakeTransport(response: #"{"id":1,"error":{"code":"unknown_method","message":"unknown-method"}}"#)
+        let client = LiveDaemonClient(transport: transport)
+        do {
+            _ = try await client.networkMissionCatalogue()
+            XCTFail("an unsupported method answered")
+        } catch {
+            XCTAssertEqual(error as? DaemonDataError, .daemon(code: "unknown_method", message: "unknown-method"))
+            XCTAssertEqual((error as? DaemonDataError)?.isNotServed, true)
+        }
+        XCTAssertEqual(transport.calls.first?.method, "mission_catalogue")
+    }
+
+    func testOnlyAnUnservedMethodIsNotServed() {
+        XCTAssertTrue(DaemonDataError.notAvailableYet(method: "mission_catalogue").isNotServed)
+        XCTAssertTrue(DaemonDataError.daemon(code: "unknown_method", message: "unknown-method").isNotServed)
+        XCTAssertFalse(DaemonDataError.daemon(code: "unavailable", message: "activity-missions-unavailable").isNotServed)
+        XCTAssertFalse(DaemonDataError.unreachable.isNotServed)
+        XCTAssertFalse(DaemonDataError.undecodable(method: "mission_catalogue").isNotServed)
     }
 
     func testLiveEventsDeliverParsedFrames() async {

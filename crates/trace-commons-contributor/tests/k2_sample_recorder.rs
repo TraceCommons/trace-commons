@@ -36,12 +36,18 @@
 //!   `set` for them), so each is recorded once, from `normal_day`, into
 //!   `RecordedSamples/shared/`.
 //!
-//! Zaki's provisional network methods (`inference_summary`, `model_spend`,
-//! `private_ai`, `mission_catalogue`, `invite_lookup`, `passkey_state`,
-//! `account_session_status`) have no source on `main` yet and stay
-//! hand-written in `SampleDaemonData.swift`, marked `"_sample":"no source
-//! yet"`. `coreDown` stays hand-written too: it answers `nil` for every
-//! method by construction, nothing to record.
+//! The network methods (C3, #1187: `inference_summary`,
+//! `inference_call_proof`, `model_spend`, `private_ai`, `mission_catalogue`,
+//! `invite_lookup`, `passkey_state`, `account_session_status`,
+//! `activity_missions_catalogue`) are not recorded here: they answer from
+//! the network, and this recorder's temp store has none behind it. They stay
+//! hand-written in `SampleDaemonData.swift` in the shapes the daemon
+//! serves, marked `"_sample":"hand-written"`; emitting them as fixtures from
+//! #1187's own mock-server tests is a follow-up. The PROVISIONAL shapes the
+//! Inference and Missions screens still read are hand-written there too,
+//! marked `"_sample":"no source yet"`. `coreDown` stays hand-written as
+//! well: it answers `nil` for every method by construction, nothing to
+//! record.
 //!
 //! Some recordings cannot be the raw real capture either, because the
 //! screen each feeds needs a state a temp store cannot exhibit (a live

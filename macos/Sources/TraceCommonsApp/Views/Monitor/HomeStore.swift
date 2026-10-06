@@ -22,8 +22,12 @@ final class HomeStore {
     /// The commons' own credit figures. Its `unknown` halves are nil, never zero.
     private(set) var credit: DaemonData.CommonsCreditSummary?
     /// The mission catalogue (R10): one list for the whole commons, the same
-    /// request for every contributor (#1174 M1). PROVISIONAL (Zaki's C3): the
-    /// live client throws `notAvailableYet`, which is not a failure to show.
+    /// request for every contributor (#1174 M1). PROVISIONAL: the live client
+    /// throws `notAvailableYet` for this shape, which is not a failure to
+    /// show; the daemon's real reply is `networkMissionCatalogue()`, and
+    /// moving this store to it is a follow-up. Once it reads that method,
+    /// an older daemon's `unknown_method` is drawn the same way
+    /// (`isNotServed`); today the live client sends nothing for it.
     private(set) var missions: DaemonData.MissionCatalogue?
     /// The last read that failed, by method; cleared when it next succeeds.
     private(set) var failures: [String: DaemonDataError] = [:]
@@ -150,7 +154,7 @@ final class HomeStore {
         case .success(let value):
             failures[method] = nil
             apply(value)
-        case .failure(.notAvailableYet):
+        case .failure(let error) where error.isNotServed:
             failures[method] = nil
             apply(nil)
         case .failure(let error):
