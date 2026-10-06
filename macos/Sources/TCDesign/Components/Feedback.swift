@@ -9,15 +9,25 @@ import SwiftUI
 /// Under Reduce Motion the arc stands still. To assistive tech it is a
 /// native indeterminate progress view named by `label`, the caller's word;
 /// with no label it is hidden, for a spinner beside words that already say
-/// what is happening.
+/// what is happening. `standalone` keeps an unlabelled spinner that stands
+/// alone, as the stock one did, so VoiceOver still hears that something is
+/// in progress.
 public struct GlassSpinner: View {
     private let label: String
     private let size: CGFloat
+    private let standalone: Bool
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    public init(_ label: String = "", size: CGFloat = GlassTokens.Size.spinner) {
+    public init(_ label: String = "", size: CGFloat = GlassTokens.Size.spinner, standalone: Bool = false) {
         self.label = label
         self.size = size
+        self.standalone = standalone
+    }
+
+    /// Whether assistive tech skips it: only an unlabelled spinner beside
+    /// its words.
+    static func isHidden(label: String, standalone: Bool) -> Bool {
+        label.isEmpty && !standalone
     }
 
     /// The arc's turn, in degrees, at `time`: a full turn per
@@ -44,7 +54,7 @@ public struct GlassSpinner: View {
         .accessibilityRepresentation {
             ProgressView { Text(label) }
         }
-        .accessibilityHidden(label.isEmpty)
+        .accessibilityHidden(Self.isHidden(label: label, standalone: standalone))
     }
 }
 

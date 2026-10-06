@@ -20,20 +20,25 @@ public struct GlassModalAction: Identifiable {
     public let role: Role
     public let isDefault: Bool
     public let isEnabled: Bool
+    /// Drawn as the primary button without being the default: an action
+    /// that must never be one Return away (an irreversible send).
+    public let isProminent: Bool
     public let action: () -> Void
 
     /// `isDefault` makes this the action Return takes, drawn as the primary
     /// button; a destructive action is never the default, whatever it asks.
+    /// `isProminent` draws a standard action as the primary with no key.
     /// `id` defaults to the title.
     public init(
         _ title: String, role: Role = .standard, isDefault: Bool = false, isEnabled: Bool = true,
-        id: String? = nil, action: @escaping () -> Void
+        isProminent: Bool = false, id: String? = nil, action: @escaping () -> Void
     ) {
         self.id = id ?? title
         self.title = title
         self.role = role
         self.isDefault = isDefault
         self.isEnabled = isEnabled
+        self.isProminent = isProminent
         self.action = action
     }
 
@@ -65,7 +70,7 @@ public struct GlassModalAction: Identifiable {
         switch action.role {
         case .destructive: .destructive
         case .cancel: .glass
-        case .standard: isDefault ? .primary : .glass
+        case .standard: isDefault || action.isProminent ? .primary : .glass
         }
     }
 }
@@ -225,6 +230,35 @@ public struct GlassConfirmation: View {
                     .padding(.horizontal, 18)
             }
         }
+    }
+}
+
+/// A modal's body at the modal's own insets: as tall as its content while
+/// that fits the window, and scrolling once it does not, so a short body
+/// never stretches the modal to the window's height.
+public struct GlassModalBody<Content: View>: View {
+    private let spacing: CGFloat
+    private let content: Content
+
+    public init(spacing: CGFloat = GlassTokens.Space.s6, @ViewBuilder content: () -> Content) {
+        self.spacing = spacing
+        self.content = content()
+    }
+
+    public var body: some View {
+        ViewThatFits(in: .vertical) {
+            padded
+            ScrollView { padded }
+        }
+    }
+
+    private var padded: some View {
+        VStack(alignment: .leading, spacing: spacing) {
+            content
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.vertical, GlassTokens.Space.s7)
+        .padding(.horizontal, 18)
     }
 }
 

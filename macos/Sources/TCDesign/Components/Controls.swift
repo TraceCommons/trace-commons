@@ -649,12 +649,15 @@ public struct GlassTextField: View {
     private let secure: Bool
     private let invalid: Bool
     private let showsLabel: Bool
+    private let focus: FocusState<Bool>.Binding?
     @Binding private var text: String
     @Environment(\.isEnabled) private var isEnabled
 
+    /// `focus` binds the field's keyboard focus, for a caller that moves
+    /// focus into it (a search field taking Command-F).
     public init(
         _ label: String, text: Binding<String>, prompt: String? = nil, secure: Bool = false,
-        invalid: Bool = false, showsLabel: Bool = true
+        invalid: Bool = false, showsLabel: Bool = true, focus: FocusState<Bool>.Binding? = nil
     ) {
         self.label = label
         self._text = text
@@ -662,6 +665,7 @@ public struct GlassTextField: View {
         self.secure = secure
         self.invalid = invalid
         self.showsLabel = showsLabel
+        self.focus = focus
     }
 
     /// The ring an invalid entry draws inside the field, or none.
@@ -678,7 +682,7 @@ public struct GlassTextField: View {
             if showsLabel {
                 Text(label).glassType(GlassTokens.TypeScale.eyebrow).foregroundStyle(GlassColor.textTertiary)
             }
-            field
+            focused(field)
                 .textFieldStyle(.plain)
                 .glassType(GlassTokens.TypeScale.label.weight(.regular))
                 .foregroundStyle(GlassColor.textPrimary)
@@ -687,6 +691,15 @@ public struct GlassTextField: View {
                 .glassFieldWell(invalid: invalid)
                 .labelsHidden()
                 .opacity(isEnabled ? 1 : GlassTokens.Opacity.disabled)
+        }
+    }
+
+    @ViewBuilder
+    private func focused(_ field: some View) -> some View {
+        if let focus {
+            field.focused(focus)
+        } else {
+            field
         }
     }
 
@@ -701,7 +714,7 @@ public struct GlassTextField: View {
     }
 }
 
-extension View {
+public extension View {
     /// The field well under a text field or text area: the field fill, the
     /// well's inner edge, and the invalid ring when there is one.
     func glassFieldWell(invalid: Bool) -> some View {

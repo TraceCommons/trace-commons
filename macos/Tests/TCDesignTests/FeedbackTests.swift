@@ -15,6 +15,14 @@ final class FeedbackTests: XCTestCase {
         XCTAssertEqual(GlassSpinner.angle(at: period / 4, reduceMotion: true), 0)
     }
 
+    /// Hidden only when unlabelled beside its words; a standalone spinner
+    /// stays a progress indicator to VoiceOver, as the stock one was.
+    func test_onlyAnUnlabelledSpinnerBesideWordsIsHidden() {
+        XCTAssertTrue(GlassSpinner.isHidden(label: "", standalone: false))
+        XCTAssertFalse(GlassSpinner.isHidden(label: "", standalone: true))
+        XCTAssertFalse(GlassSpinner.isHidden(label: "Loading", standalone: false))
+    }
+
     func test_theSkeletonPulsesOnTheTokenCurveAndNotUnderReduceMotion() {
         XCTAssertNil(GlassSkeleton.pulse(true))
         XCTAssertNotNil(GlassSkeleton.pulse(false))

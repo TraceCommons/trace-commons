@@ -38,6 +38,21 @@ final class ModalTests: XCTestCase {
         XCTAssertEqual(GlassModalAction.kind(action("s", .standard), isDefault: false), .glass)
     }
 
+    /// A prominent action draws as the primary and takes no key.
+    func test_aProminentActionIsPrimaryWithNoKey() {
+        let send = GlassModalAction("send", isProminent: true) {}
+        XCTAssertEqual(GlassModalAction.kind(send, isDefault: false), .primary)
+        XCTAssertNil(GlassModalAction.defaultAction(in: [send]))
+        XCTAssertNil(GlassModal<EmptyView>.shortcut(for: send, isDefault: false, isTopmost: true))
+    }
+
+    /// A body that fits lays out no taller than its content.
+    func test_aShortBodyDoesNotFillTheWindow() {
+        let modal = GlassModal(title: "t", onCancel: {}) { GlassModalBody { Text("b") } }
+        let host = NSHostingView(rootView: modal.frame(maxHeight: 700))
+        XCTAssertLessThan(host.fittingSize.height, 300)
+    }
+
     /// Only the topmost modal answers Return and Escape.
     func test_onlyTheTopmostModalAnswersTheKeyboard() {
         let save = action("save", .standard, isDefault: true)
