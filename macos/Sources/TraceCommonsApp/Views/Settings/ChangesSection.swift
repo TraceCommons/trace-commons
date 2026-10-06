@@ -8,10 +8,11 @@ struct ChangesSection: View {
     var body: some View {
         GlassEyebrowCard(SettingsLegacyWords.auditHeading) {
             VStack(alignment: .leading, spacing: 0) {
-                // The log defaults to empty; before the daemon answers,
-                // "nothing changed" would be a count nothing reported.
-                if !model.status.answered {
-                    SettingsAwaiting()
+                // The log defaults to empty, and a failed `list_audit` keeps
+                // it so; until that call answers, "nothing changed" would be
+                // a count nothing reported. `status` answering is not it.
+                if model.auditRead != .answered {
+                    SettingsReadNotice(model.auditRead, retry: model.refreshAudit)
                 } else if model.audit.isEmpty {
                     Text(SettingsLegacyWords.nothingChanged)
                         .glassType(GlassTokens.TypeScale.caption)

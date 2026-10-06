@@ -84,7 +84,8 @@ struct RouteDisclosureGlassBody: View {
             if let line = copy.attestedBodies { sentence(line) }
             if let line = copy.receipts { sentence(line) }
         }
-        .accessibilityElement(children: .combine)
+        // Each paragraph and each witness row is its own VoiceOver stop.
+        .accessibilityElement(children: .contain)
     }
 
     /// The measurements row is left out when nothing is pinned, never drawn

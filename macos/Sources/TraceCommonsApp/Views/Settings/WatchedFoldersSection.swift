@@ -11,8 +11,9 @@ import TCShellCore
 struct WatchedFoldersSection: View {
     @EnvironmentObject private var model: AppModel
     @State private var candidates: [SourceCandidate] = []
-    @State private var busy = false
-    @State private var saveFailed = false
+    // The write's in-flight flag and refusal are the model's
+    // (`sourceRootBusy`, `sourceRootSaveFailed`): this view is thrown away
+    // when the section changes (G8 of #1229).
 
     var body: some View {
         // The container is always present, so `.onAppear` runs even when the
@@ -25,7 +26,7 @@ struct WatchedFoldersSection: View {
                             .glassType(GlassTokens.TypeScale.caption)
                             .foregroundStyle(GlassColor.textSecondary)
                             .fixedSize(horizontal: false, vertical: true)
-                        if saveFailed {
+                        if model.sourceRootSaveFailed {
                             GlassNotice(tone: .outside) { Text(copy.saveFailed) }
                         }
                         if model.daemonSettings == nil {
@@ -44,26 +45,20 @@ struct WatchedFoldersSection: View {
                                     onDecline: { save(kind, .off) })
                             }
                         }
-                        if saveFailed || model.daemonSettings == nil {
+                        if model.sourceRootSaveFailed || model.daemonSettings == nil {
                             Button(copy.retry) { model.refreshSettings() }
                                 .buttonStyle(GlassButtonStyle(.glass))
                         }
                     }
                 }
-                .disabled(busy)
+                .disabled(model.sourceRootBusy)
             }
         }
         .onAppear(perform: discover)
     }
 
     private func save(_ kind: SourceKind, _ choice: SourceChoice) {
-        guard !busy else { return }
-        busy = true
-        saveFailed = false
-        Task {
-            saveFailed = !(await model.setSourceRoot(kind, choice))
-            busy = false
-        }
+        Task { await model.saveSourceRoot(kind, choice) }
     }
 
     /// The daemon's answer for one source. The path is deliberately absent:

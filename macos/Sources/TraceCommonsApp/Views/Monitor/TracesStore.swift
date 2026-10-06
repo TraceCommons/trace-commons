@@ -67,6 +67,16 @@ final class TracesStore {
     /// Each load's number; a load that finishes after a newer one started is
     /// dropped, so an older read never overwrites a newer tree.
     private var generation = 0
+    /// Bumped only by `attach`, not by a load: a write that started against
+    /// an older client is dropped when it answers, whatever it says, so its
+    /// refusal, notice or undo is never drawn on the new client's tab. (A
+    /// load on the same client must not drop a write's answer.)
+    private var attachment = 0
+    /// True while no client is attached because the daemon is still
+    /// starting (set by `attach`). `run` then reads nothing and the screen
+    /// stays loading: start-up is not the core being down. Any other nil
+    /// client fails as an unreachable core.
+    private(set) var awaiting = false
 
     /// The tab's words, from the core (`tc_monitor_traces_copy_json`),
     /// decoded once rather than on every redraw. Nil leaves a label out
@@ -131,17 +141,29 @@ final class TracesStore {
     /// Follows a new client (or none). Nothing the old one reported is
     /// drawn or acted on: the tree empties, the badge and routes read
     /// unknown, and the tab is loading until the new client answers; a load
-    /// still in flight from the old one is dropped. (A failed read from the
-    /// same client still keeps the last tree.)
-    func attach(_ client: (any DaemonDataClient)?) {
+    /// or write still in flight from the old one is dropped. Its refusals,
+    /// notices and undo offers go too: Undo would otherwise send `cancel` to
+    /// the new daemon. (A failed read from the same client still keeps the
+    /// last tree.)
+    func attach(_ client: (any DaemonDataClient)?, awaiting: Bool = false) {
         self.client = client
+        self.awaiting = awaiting && client == nil
         generation += 1
+        attachment += 1
         phase = .loading
         tree = TracesTree(tools: [], unplaced: [])
         lastRead = nil
         status = nil
         destinations = nil
+        acting = []
+        writing = []
+        lastKept = nil
+        lastContributed = nil
         lastContributedFolder = nil
+        submittingFolder = nil
+        correctionRefused = nil
+        actionError = nil
+        writeErrors = [:]
         folderNotice = nil
     }
 
@@ -268,8 +290,10 @@ final class TracesStore {
     /// Loads, then follows the event stream for as long as the calling task
     /// runs. Call it from a view's `.task`: when the view goes, the task is
     /// cancelled and the stream with it. With no client the load fails as
-    /// an unreachable core, and there is no stream to follow.
+    /// an unreachable core, and there is no stream to follow -- unless the
+    /// daemon is still starting (`awaiting`), when the tab stays loading.
     func run() async {
+        guard !awaiting else { return }
         await load()
         guard let client else { return }
         for await event in client.events() {
@@ -386,7 +410,8 @@ final class TracesStore {
     }
 
     /// One review action on one session, then a reload. Nothing is applied
-    /// optimistically: the tree redraws from the core's answer.
+    /// optimistically: the tree redraws from the core's answer. An answer
+    /// from a client that has since been replaced changes nothing.
     ///
     /// `verdict` and `correction` go with `.contribute` only: the review
     /// card's answer to the outcome question, and what it wrote under
@@ -395,8 +420,9 @@ final class TracesStore {
         _ action: ReviewAction, on entryId: String, verdict: ContributorVerdict? = nil, correction: String? = nil
     ) async {
         guard !acting.contains(entryId) else { return }
+        let mine = attachment
         acting.insert(entryId)
-        defer { acting.remove(entryId) }
+        defer { if mine == attachment { acting.remove(entryId) } }
         actionError = nil
         if correctionRefused == entryId { correctionRefused = nil }
         do {
@@ -407,6 +433,7 @@ final class TracesStore {
                 // the hold Undo can still reach. A skipped approve throws
                 // `notApproved` and is said as a refusal, never as success.
                 let response = try await client.approve(entryId: entryId, verdict: verdict, correction: correction)
+                guard mine == attachment else { return }
                 lastContributed = Contributed(entryId: entryId, toast: response.toast)
                 // One undo slot: a single-session contribute ends the folder's undo.
                 lastContributedFolder = nil
@@ -414,18 +441,23 @@ final class TracesStore {
                 lastKept = nil
             case .undoContribute:
                 try await client.cancel(entryId: entryId)
+                guard mine == attachment else { return }
                 lastContributed = nil
             case .keep:
                 _ = try await client.keep(entryId: entryId)
+                guard mine == attachment else { return }
                 lastKept = entryId
             case .undoKeep:
                 _ = try await client.undoKeep(entryId: entryId)
+                guard mine == attachment else { return }
                 lastKept = nil
             case .dismiss:
                 try await client.dismiss(entryId: entryId)
+                guard mine == attachment else { return }
                 lastKept = nil
             }
         } catch {
+            guard mine == attachment else { return }
             let error = error as? DaemonDataError ?? .undecodable(method: "\(action)")
             // A core that did not answer is the tab's state, and its last
             // count is no longer known.
@@ -549,15 +581,18 @@ final class TracesStore {
     /// names the folder chosen for it. The core's answer is reloaded.
     func setSource(_ kind: SourceKind, _ choice: SourceChoice) async {
         guard !writing.contains(kind.rawValue) else { return }
+        let mine = attachment
         writing.insert(kind.rawValue)
-        defer { writing.remove(kind.rawValue) }
+        defer { if mine == attachment { writing.remove(kind.rawValue) } }
         writeErrors[kind.rawValue] = nil
         do {
             _ = try await attached().setSource(kind, choice)
         } catch {
+            guard mine == attachment else { return }
             refused(kind.rawValue, error, method: "set_settings")
             return
         }
+        guard mine == attachment else { return }
         await load()
     }
 
@@ -567,12 +602,14 @@ final class TracesStore {
     /// named; the core's `purged` is the authority, and a difference is said.
     func setFolderMode(_ folder: TracesTree.FolderNode, _ mode: ProjectMode, promised: Int) async {
         guard !writing.contains(folder.id) else { return }
+        let mine = attachment
         writing.insert(folder.id)
-        defer { writing.remove(folder.id) }
+        defer { if mine == attachment { writing.remove(folder.id) } }
         folderNotice = nil
         writeErrors[folder.id] = nil
         do {
             let result = try await attached().setProjectMode(projectId: folder.id, mode: mode, includeBacklog: nil)
+            guard mine == attachment else { return }
             if mode == .ignore {
                 folderNotice = TCCoreCopy.projectIgnoreReconciled(
                     project: folder.label, promised: promised, purged: result.purged ?? promised)
@@ -580,6 +617,7 @@ final class TracesStore {
         } catch {
             // The picker redraws from the core's answer, so a refused write
             // shows the folder as it still is; the error is kept beside it.
+            guard mine == attachment else { return }
             refused(folder.id, error, method: "set_project_mode")
             return
         }
@@ -610,22 +648,27 @@ final class TracesStore {
     /// what it left out as ineligible is said in the core's words.
     func contributeFolder(_ folder: TracesTree.FolderNode, verdict: ContributorVerdict?) async {
         guard !writing.contains(folder.id), mayContributeFolder(folder), let client else { return }
+        let mine = attachment
         writing.insert(folder.id)
         submittingFolder = folder.id
         defer {
-            writing.remove(folder.id)
-            submittingFolder = nil
+            if mine == attachment {
+                writing.remove(folder.id)
+                submittingFolder = nil
+            }
         }
         folderNotice = nil
         writeErrors[folder.id] = nil
         do {
             let response = try await client.approveFolder(projectId: folder.id, verdict: verdict)
+            guard mine == attachment else { return }
             lastContributedFolder = ContributedFolder(projectId: folder.id, toast: response.toast)
             lastContributed = nil
             folderNotice = Self.eligibilityCalls
                 .withheldLine(Int64(clamping: response.excludedIneligible ?? 0))
                 .flatMap { $0.isEmpty ? nil : $0 }
         } catch {
+            guard mine == attachment else { return }
             refused(folder.id, error, method: "approve")
             return
         }
@@ -636,13 +679,16 @@ final class TracesStore {
     /// beside the folder and the contribution stands.
     func undoFolder(_ projectId: String) async {
         guard !writing.contains(projectId), let client else { return }
+        let mine = attachment
         writing.insert(projectId)
-        defer { writing.remove(projectId) }
+        defer { if mine == attachment { writing.remove(projectId) } }
         writeErrors[projectId] = nil
         do {
             _ = try await client.cancelFolder(projectId: projectId)
+            guard mine == attachment else { return }
             lastContributedFolder = nil
         } catch {
+            guard mine == attachment else { return }
             refused(projectId, error, method: "cancel")
             return
         }

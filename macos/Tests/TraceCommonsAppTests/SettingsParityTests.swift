@@ -57,10 +57,14 @@ final class SettingsParityTests: XCTestCase {
                 accessibility: ["GlassToggleStyle(.settings)"]),
         Section(glass: "Views/Settings/ConsentSection.swift",
                 bindings: ["model.consentScopes", "model.status.consentScopes", "model.status.loggedIn",
-                           "model.setConsentScopes(", "ConsentScopeRows.nextScopes(",
+                           // The write and its `nextScopes` list are the model's
+                           // (`AppModel.toggleConsentScope`), so a section switch
+                           // cannot drop them; `SettingsSectionStateTests` pins it.
+                           "model.toggleConsentScope(", "model.consentWriteRefused",
                            "ConsentScopeRows.isOn(scope: scope, granted: granted, unavailable: unavailable)",
-                           "ConsentScopeRows.isEnabled(scope: scope, busy: busy, unavailable: unavailable)"],
+                           "ConsentScopeRows.isEnabled(scope: scope, busy: model.consentWriteBusy, unavailable: unavailable)"],
                 copySources: ["ScopeCopy.title(for:", "scope.description", "settingsCopy()?.consentSaveFailed",
+                              "ConsentScopeRows.refusalLine(", "MonitorScreensCopy.decode(",
                               "SettingsLegacyWords.consentHeading", "SettingsLegacyWords.appliesFromNow",
                               "SettingsLegacyWords.alwaysIncluded", "SettingsLegacyWords.optionalEachOne",
                               "SettingsLegacyWords.credit", "SettingsLegacyWords.nothingPreselected"],
@@ -111,7 +115,8 @@ final class SettingsParityTests: XCTestCase {
                 accessibility: [".accessibilityLabel(", "GlassCheckboxStyle()"]),
         Section(glass: "Views/Settings/WatchedFoldersSection.swift",
                 bindings: ["TCSourceChecks.settingsCopy()", "SourceKind.allCases", "TCDiscovery.sourcesJSON()",
-                           "SourceCandidate.decodeList(", "model.setSourceRoot(", "model.refreshSettings()",
+                           "SourceCandidate.decodeList(", "model.saveSourceRoot(", "model.sourceRootBusy",
+                           "model.sourceRootSaveFailed", "model.refreshSettings()",
                            "routingSourceModes", "opencodeSourceMode", "GlassSourceRow("],
                 copySources: ["copy.heading", "copy.explanation", "copy.saveFailed", "copy.unavailable", "copy.retry"],
                 confirmations: [],
@@ -244,7 +249,21 @@ final class SettingsParityTests: XCTestCase {
         XCTAssertTrue(source.contains(".disabled(copy.tokenHeading == nil)"))
         XCTAssertEqual(source.components(separatedBy: ".glassModal(isPresented:").count - 1, 4)
         XCTAssertFalse(source.contains(".confirmationDialog("))
-        XCTAssertTrue(source.contains("GlassNotice(tone: .outside)"))
+        // A save failure keeps the core's refusal glyph and tone, as legacy
+        // `NativeFlowNotice` did; a missing wallet copy is still a refusal.
+        XCTAssertFalse(source.contains("GlassNotice(tone: .outside)"), "the save failure's tone is chosen in Swift")
+        XCTAssertTrue(source.contains(
+            "GlassFlowNotice(message: copy.inferenceSaveFailed, glyph: copy.wallet?.refusedGlyph ?? \"\", tone: copy.wallet?.refusedTone)"))
+        XCTAssertTrue(source.contains(
+            "GlassFlowNotice(message: copy.tokenSaveFailed ?? \"\", glyph: copy.wallet?.refusedGlyph ?? \"\", tone: copy.wallet?.refusedTone)"))
+        XCTAssertEqual(GlassFlowNotice.status(forTone: "refused"), .outside)
+        XCTAssertEqual(GlassFlowNotice.status(forTone: "neutral"), .off)
+        XCTAssertEqual(GlassFlowNotice.status(forTone: ""), .off)
+        XCTAssertEqual(GlassFlowNotice.status(forTone: nil), .outside, "an unread tone is drawn as healthy")
+        let notice = try Self.text("Views/Settings/GlassFlowNotice.swift")
+        XCTAssertTrue(notice.contains("if !glyph.isEmpty { Text(glyph) }"), "the core's glyph is not drawn")
+        XCTAssertTrue(notice.contains("let ink = status == .outside ? status.textColor : GlassColor.textSecondary"))
+        XCTAssertTrue(notice.contains(".foregroundStyle(ink)"), "the tone never reaches the words")
         XCTAssertFalse(source.contains("NativeFlowNotice"))
         XCTAssertEqual(WitnessSection.tone(.refused), .outside)
         XCTAssertEqual(WitnessSection.tone(.attention), .ask)
@@ -292,6 +311,17 @@ final class SettingsParityTests: XCTestCase {
         XCTAssertTrue(source?.contains(".accessibilityLabel(words)") ?? false)
     }
 
+    /// The route disclosure is read paragraph by paragraph: its body
+    /// contains its children rather than merging them into one utterance.
+    func test_routeDisclosureBodyIsNavigableLineByLine() throws {
+        let source = try Self.text("Views/Settings/PrivateAISection.swift")
+        let start = try XCTUnwrap(source.range(of: "struct RouteDisclosureGlassBody: View"))
+        let end = try XCTUnwrap(source.range(of: "struct RouteDisclosureUnreadableGlassLine", range: start.upperBound..<source.endIndex))
+        let body = String(source[start.upperBound..<end.lowerBound])
+        XCTAssertFalse(body.contains(".accessibilityElement(children: .combine)"), "the disclosure is one VoiceOver element")
+        XCTAssertTrue(body.contains(".accessibilityElement(children: .contain)"))
+    }
+
     func test_measurementsRowIsOmittedWhenNothingIsPinned() throws {
         func items(_ pins: [String]) throws -> [GlassKeyValueList.Item] {
             let pinsJSON = pins.map { "\"\($0)\"" }.joined(separator: ",")
@@ -325,18 +355,23 @@ final class SettingsParityTests: XCTestCase {
     /// first, so the text up to its closing brace is exactly what it draws.
     static let daemonAbsentBranches: [SettingsSection: (file: String, branches: [(marker: String, draws: String)])] = [
         .connection: ("ConnectionSection", [
-            ("if !model.status.answered {", "SettingsAwaiting()"),
-            ("if model.daemonSettings == nil {", "SettingsAwaiting()"),
+            ("if model.statusRead != .answered {", "SettingsReadNotice(model.statusRead"),
+            ("if model.daemonSettings == nil {", "SettingsReadNotice(model.settingsRead"),
         ]),
-        .watching: ("WatchingSection", [("if model.daemonSettings == nil {", "SettingsAwaiting()")]),
-        .consent: ("ConsentSection", [("if !model.status.answered {", "SettingsAwaiting()")]),
-        .publicProfile: ("PublicProfileSection", [("} else if !model.status.answered {", "SettingsAwaiting()")]),
+        .watching: ("WatchingSection", [("if model.daemonSettings == nil {", "SettingsReadNotice(model.settingsRead")]),
+        .consent: ("ConsentSection", [("if model.statusRead != .answered {", "SettingsReadNotice(model.statusRead")]),
+        .publicProfile: ("PublicProfileSection", [
+            ("} else if model.publicProfileRead != .answered {", "SettingsReadNotice(model.publicProfileRead"),
+        ]),
         .watchedFolders: ("WatchedFoldersSection", [("if model.daemonSettings == nil {", "Text(copy.unavailable)")]),
-        .tools: ("ToolsSection", [("if model.daemonSettings == nil {", "SettingsAwaiting()")]),
-        .witness: ("WitnessSection", [("if model.daemonSettings == nil {", "SettingsAwaiting()")]),
+        .tools: ("ToolsSection", [("if model.daemonSettings == nil {", "SettingsReadNotice(model.settingsRead")]),
+        .witness: ("WitnessSection", [
+            ("if model.witnessRead != .answered {", "SettingsReadNotice(model.witnessRead"),
+            ("if model.daemonSettings == nil {", "SettingsReadNotice(model.settingsRead"),
+        ]),
         .privateAI: ("PrivateAISection", [("case .loading:", "GlassSpinner(standalone: true)")]),
-        .projects: ("ProjectsSection", [("if !model.status.answered {", "SettingsAwaiting()")]),
-        .changes: ("ChangesSection", [("if !model.status.answered {", "SettingsAwaiting()")]),
+        .projects: ("ProjectsSection", [("if model.projectsRead != .answered {", "SettingsReadNotice(model.projectsRead")]),
+        .changes: ("ChangesSection", [("if model.auditRead != .answered {", "SettingsReadNotice(model.auditRead")]),
     ]
 
     /// Every section that reads the daemon draws its own loading or
@@ -367,10 +402,21 @@ final class SettingsParityTests: XCTestCase {
             }
         }
         // The shared state is the glass spinner, a progress indicator to
-        // VoiceOver (R-20).
+        // VoiceOver (R-20), while a read is in flight, and the core's failure
+        // line once it has failed or the core is down: never a spinner that
+        // runs for good.
         let awaiting = try Self.text("Views/Settings/SettingsStateRow.swift")
         XCTAssertTrue(awaiting.contains("struct SettingsAwaiting: View"))
         XCTAssertTrue(awaiting.contains("GlassSpinner(standalone: true)"))
+        XCTAssertTrue(awaiting.contains("struct SettingsReadNotice: View"))
+        let awaitingArm = try XCTUnwrap(awaiting.range(of: "case .awaiting:"))
+        let failedArm = try XCTUnwrap(awaiting.range(of: "case .failed, .coreDown:"))
+        let answeredArm = try XCTUnwrap(awaiting.range(of: "case .answered:"))
+        XCTAssertTrue(awaiting[awaitingArm.upperBound..<failedArm.lowerBound].contains("SettingsAwaiting()"))
+        let failedDraws = awaiting[failedArm.upperBound..<answeredArm.lowerBound]
+        XCTAssertTrue(failedDraws.contains("SettingsUnavailable("), "a failed read draws no failure line")
+        XCTAssertFalse(failedDraws.contains("SettingsAwaiting") || failedDraws.contains("ProgressView"),
+                       "a failed read spins")
         // `.unknown` is the placeholder held until the first answer; a real
         // status always carries a schema version.
         XCTAssertFalse(DaemonStatus.unknown.answered)
@@ -380,17 +426,26 @@ final class SettingsParityTests: XCTestCase {
     /// "Not connected", "No projects seen yet." and "Nothing has been changed."
     /// would otherwise state a value nothing reported.
     func test_defaultReadAnswersFollowTheAbsentBranch() throws {
-        for (file, answer) in [
-            ("ConnectionSection", "SettingsLegacyWords.notConnected"),
-            ("ConnectionSection", "SettingsLegacyWords.queuedNothingSent"),
-            ("ProjectsSection", "SettingsLegacyWords.noProjectsYet"),
-            ("ChangesSection", "SettingsLegacyWords.nothingChanged"),
-            ("PublicProfileSection", "optInCard\n"),
+        // Each answer waits on the read it is drawn from: `status` answering
+        // says nothing about `list_audit`, `list_projects` or the profile.
+        for (file, gate, answer) in [
+            ("ConnectionSection", "model.statusRead != .answered {", "SettingsLegacyWords.notConnected"),
+            ("ConnectionSection", "model.statusRead != .answered {", "SettingsLegacyWords.queuedNothingSent"),
+            ("ProjectsSection", "model.projectsRead != .answered {", "SettingsLegacyWords.noProjectsYet"),
+            ("ChangesSection", "model.auditRead != .answered {", "SettingsLegacyWords.nothingChanged"),
+            ("PublicProfileSection", "model.publicProfileRead != .answered {", "optInCard\n"),
         ] {
             let source = try Self.text("Views/Settings/\(file).swift")
-            let branch = try XCTUnwrap(source.range(of: "!model.status.answered {"), "\(file) has no absent branch")
+            let branch = try XCTUnwrap(source.range(of: gate), "\(file) has no `\(gate)` branch")
             let drawn = try XCTUnwrap(source.range(of: answer), "\(file) no longer draws \(answer)")
-            XCTAssertLessThan(branch.lowerBound, drawn.lowerBound, "\(file) draws \(answer) before the daemon answers")
+            XCTAssertLessThan(branch.lowerBound, drawn.lowerBound, "\(file) draws \(answer) before its read answers")
+        }
+        // The placeholder comparison is not an answer to anything a section
+        // draws; the per-read states replace it.
+        for section in SettingsSection.allCases {
+            guard let entry = Self.daemonAbsentBranches[section] else { continue }
+            let source = try Self.text("Views/Settings/\(entry.file).swift")
+            XCTAssertFalse(source.contains("model.status.answered"), "\(entry.file) still gates on status.answered")
         }
     }
 

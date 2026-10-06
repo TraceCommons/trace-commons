@@ -8,7 +8,7 @@ struct WatchingSection: View {
         GlassEyebrowCard(SettingsWords.watching) {
             VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
                 if model.daemonSettings == nil {
-                    SettingsAwaiting()
+                    SettingsReadNotice(model.settingsRead, retry: model.refreshSettings)
                 } else if let settings = model.daemonSettings {
                     line(SettingsLegacyWords.sessionFinishedAfter(settings.quiescenceSecs))
                     line(SettingsLegacyWords.atMostOneNotification(settings.digestIntervalSecs / 3600))

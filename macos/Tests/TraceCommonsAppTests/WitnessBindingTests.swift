@@ -389,7 +389,7 @@ final class WitnessBindingTests: XCTestCase {
                 XCTAssertEqual(String(line), setting + ")", "\(control) is gated on `\(line)`")
             }
             XCTAssertTrue(
-                body.contains("if model.daemonSettings == nil {\n                    SettingsAwaiting()\n"),
+                body.contains("if model.daemonSettings == nil {\n                    SettingsReadNotice(model.settingsRead, retry: model.refreshSettings)\n"),
                 "the status line is drawn before the daemon answers")
         }
     }
@@ -548,7 +548,7 @@ final class WitnessBindingTests: XCTestCase {
     func testAWriteRepublishesWhatWasReadBack() throws {
         let write = try XCTUnwrap(
             WitnessCard.modelDeclaration(
-                "private func writeWitness(_ work: @escaping @Sendable (String) -> TCWitness.Outcome) {"
+                "private func writeWitness(clearsDraft: Bool = false, _ work: @escaping @Sendable (String) -> TCWitness.Outcome) {"
             ))
         XCTAssertTrue(
             write.contains("TCWitness.trustState(configDir: dir)"),

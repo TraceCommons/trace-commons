@@ -196,11 +196,14 @@ struct MainWindowView: View {
         case .settings:
             // Every section in the list's order, until Phase 4 retires this
             // window; Compute is a destination of its own here.
+            // On a glass ground: the sections' colours do not all clear on
+            // the window's TC ground (`ReleaseSettingsGround`).
             ScrollView {
                 ForEach(SettingsSection.allCases.filter { $0 != .compute }) {
                     GlassSettingsContent(navigation: navigation, section: $0)
                 }
             }
+            .background(ReleaseSettingsGround.fill.color)
         case .compute: EmptyView()
         case .privateInference: EmptyView()
         case .insights: EmptyView()

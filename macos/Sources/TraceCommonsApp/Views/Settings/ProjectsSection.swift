@@ -38,19 +38,24 @@ struct ProjectsSection: View {
                         Text(error)
                             .fixedSize(horizontal: false, vertical: true)
                             .frame(maxWidth: .infinity, alignment: .leading)
-                        // An error is never undismissable: without the
-                        // core's word the banner's own word names it.
-                        Button(ActionMessageBanner.coreDismissWord ?? ActionMessageBanner.dismissWord) { model.lastActionError = nil }
-                            .buttonStyle(GlassButtonStyle(.glass))
+                        // An error is never undismissable, and is put away
+                        // the way every action message is: an x named by
+                        // the banner's word, never Traces' dismiss verb.
+                        Button { model.lastActionError = nil } label: {
+                            Image(systemName: "xmark").imageScale(.small)
+                        }
+                        .buttonStyle(GlassButtonStyle(.glass))
+                        .accessibilityLabel(ActionMessageBanner.dismissWord)
                     }
                 }
             }
             GlassEyebrowCard(SettingsWords.projects) {
                 VStack(alignment: .leading, spacing: 0) {
-                    // The list defaults to empty; before the daemon answers,
+                    // The list defaults to empty, and a failed
+                    // `list_projects` keeps it so; until that call answers,
                     // "none yet" would be a count nothing reported.
-                    if !model.status.answered {
-                        SettingsAwaiting()
+                    if model.projectsRead != .answered {
+                        SettingsReadNotice(model.projectsRead, retry: model.refreshProjects)
                     } else if model.projects.isEmpty {
                         Text(SettingsLegacyWords.noProjectsYet)
                             .glassType(GlassTokens.TypeScale.caption)

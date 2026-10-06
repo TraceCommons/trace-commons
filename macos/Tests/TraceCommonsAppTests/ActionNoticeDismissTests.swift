@@ -34,8 +34,10 @@ import XCTest
 ///   surface saying nothing about a state that still holds.
 /// - `AppModel.summaryErrors[id]`, `credentialAttempt` and
 ///   `harnessExposureRequest` are each cleared on their own completion path.
-/// - `StartupSection.loginItemActionError`, `ConsentSection.saveError` and
-///   `PreviewSheet.failure` are view-local `@State`, cleared at the top of
+/// - `AppModel.loginItemActionError` and `AppModel.consentWriteRefused` are
+///   cleared at the top of each attempt, like the readouts above; they live
+///   on the model only so that switching Settings section cannot drop them.
+/// - `PreviewSheet.failure` is view-local `@State`, cleared at the top of
 ///   each attempt and gone with the view.
 /// - `FirstRunRunner.failure` lives as long as the first-run host and is
 ///   cleared at the start of each commit; what must outlive the host is
@@ -105,14 +107,21 @@ final class ActionNoticeDismissTests: XCTestCase {
     }
 
     /// The Projects error notice is never undismissable: its button is drawn
-    /// unconditionally, with the core's word or the banner's own.
+    /// unconditionally, in the banner's own shape -- an x whose name is the
+    /// banner's word. It never borrows Traces' dismiss verb, which removes a
+    /// session for good, and never draws the VoiceOver sentence as its text.
     func testTheProjectsErrorNoticeAlwaysHasADismissButton() throws {
         let sources = try Self.appSources()
         let text = try XCTUnwrap(sources["Views/Settings/ProjectsSection.swift"])
         XCTAssertTrue(text.contains("if let error = model.lastActionError {"))
-        XCTAssertTrue(
-            text.contains("Button(ActionMessageBanner.coreDismissWord ?? ActionMessageBanner.dismissWord) { model.lastActionError = nil }"),
-            "the dismiss button must not depend on the core's word loading")
+        XCTAssertTrue(text.contains("Button { model.lastActionError = nil } label: {"),
+                      "the dismiss button must be drawn unconditionally and clear the error")
+        XCTAssertTrue(text.contains("Image(systemName: \"xmark\")"))
+        XCTAssertTrue(text.contains(".accessibilityLabel(ActionMessageBanner.dismissWord)"))
+        XCTAssertFalse(text.contains("MonitorTracesCopy"), "the Traces dismiss verb is borrowed")
+        XCTAssertFalse(text.contains("dismissLabel"))
+        XCTAssertFalse(text.contains("Button(ActionMessageBanner.dismissWord"),
+                       "the VoiceOver sentence is drawn as visible text")
     }
 
     /// The dismiss closure's own precondition: the notice is externally

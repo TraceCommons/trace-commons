@@ -31,8 +31,8 @@ struct ActionMessageBanner: View {
     let text: String
     let onDismiss: () -> Void
 
-    /// The dismiss control's name, reachable so a glass notice that cannot
-    /// reach the core's word still names its control.
+    /// The dismiss control's name, reachable so a glass notice carrying the
+    /// same message names its x the same way.
     static let dismissWord = "Dismiss this message"
 
     /// The core's word for dismissing a notice, for every glass notice that

@@ -724,13 +724,16 @@ final class AppModel: ObservableObject {
     /// judgement of what was left rather than a certificate. The card says
     /// so, in the Rust's words.
     func clearWitness() {
-        writeWitness { TCWitness.clear(configDir: $0) }
+        writeWitness(clearsDraft: true) { TCWitness.clear(configDir: $0) }
     }
 
     /// Nothing is applied optimistically. The write's own answer decides
     /// only whether a refusal label is shown; what the card renders is the
     /// state and status read back afterwards.
-    private func writeWitness(_ work: @escaping @Sendable (String) -> TCWitness.Outcome) {
+    ///
+    /// `clearsDraft`: a clear that succeeds leaves nothing for an edited
+    /// field to describe, so the fields read the daemon again.
+    private func writeWitness(clearsDraft: Bool = false, _ work: @escaping @Sendable (String) -> TCWitness.Outcome) {
         let dir = configDirectory
         guard !dir.isEmpty else { return }
         witnessBusy = true
@@ -741,6 +744,7 @@ final class AppModel: ObservableObject {
             let read = TCWitness.statusJSON(configDir: dir)
             await MainActor.run {
                 self.witnessBusy = false
+                if clearsDraft, case .done = wrote { self.witnessDraft = nil }
                 self.publishWitness(code: code, read: read, wrote: wrote)
             }
         }
@@ -1137,6 +1141,7 @@ final class AppModel: ObservableObject {
         switch event {
         case .snapshot(let pending, let status):
             applyPendingUpdate(pending)
+            recordRead("status", answered: true)
             publishIfChanged(\.status, status)
         case .previewReady(let result):
             applyPreviewOutcome(result)
@@ -1488,6 +1493,9 @@ final class AppModel: ObservableObject {
         routingChecking = form.on
         perform("set_settings", work: { try $0.setIronWire(form) }) { view in
             self.publishIfChanged(\.daemonSettings, view)
+            // The daemon now holds this form, so the card reads it again --
+            // unless the person has edited past it while the write was out.
+            if self.routingDraft == form { self.routingDraft = nil }
             guard form.on else {
                 self.routingChecking = false
                 return
@@ -1790,10 +1798,71 @@ final class AppModel: ObservableObject {
             refreshStatus()
             refreshAudit()
         } else if let confirmed = await Task.detached(operation: { try? client.status() }).value {
+            recordRead("status", answered: true)
             publishIfChanged(\.status, confirmed)
         }
         return outcome
     }
+
+    // MARK: - Settings section state
+    //
+    // The Settings window draws a fresh section view per section
+    // (`.id(section)`), so a section's `@State` is thrown away by switching
+    // section. What must survive that -- a write in flight, its refusal, a
+    // half-typed draft -- lives here, where every section view reads it and
+    // none owns it (G8 of #1229).
+
+    /// A Settings consent write is in flight. While it is, every consent row
+    /// is disabled, wherever it is drawn.
+    @Published private(set) var consentWriteBusy = false
+    /// The last Settings consent write was refused. The words are the core's,
+    /// chosen when drawn (`ConsentScopeRows.refusalLine`).
+    @Published private(set) var consentWriteRefused = false
+
+    /// Adds or removes one optional scope from Settings, sending the daemon's
+    /// own list with this one changed. The list is built when the write
+    /// starts, from what the daemon reported, and no second write starts
+    /// until the first has answered: a list built while one is in flight
+    /// would still hold the scope that write withdraws.
+    func toggleConsentScope(_ scope: ConsentScope, granted: Bool, options: [ConsentScope]) async {
+        guard !consentWriteBusy, status.loggedIn, !scope.alwaysOn else { return }
+        let scopes = ConsentScopeRows.nextScopes(
+            reported: status.consentScopes, options: options, toggling: scope, granted: granted)
+        consentWriteRefused = false
+        consentWriteBusy = true
+        if case .failed = await setConsentScopes(Array(scopes)) {
+            consentWriteRefused = true
+        }
+        consentWriteBusy = false
+    }
+
+    /// A Watched folders write is in flight; the card is disabled until it
+    /// answers.
+    @Published private(set) var sourceRootBusy = false
+    /// The last Watched folders write was refused.
+    @Published private(set) var sourceRootSaveFailed = false
+
+    func saveSourceRoot(_ kind: SourceKind, _ choice: SourceChoice) async {
+        guard !sourceRootBusy else { return }
+        sourceRootBusy = true
+        sourceRootSaveFailed = false
+        sourceRootSaveFailed = !(await setSourceRoot(kind, choice))
+        sourceRootBusy = false
+    }
+
+    /// The login item's last refusal, in the words it was drawn with.
+    @Published var loginItemActionError: String?
+    /// The routing card's edited form; `nil` means nothing has been edited
+    /// and the card reads the daemon's answer.
+    @Published var routingDraft: RoutingForm?
+    /// The witness card's edited fields; `nil` means nothing has been edited.
+    @Published var witnessDraft: WitnessForm?
+    /// The public profile's edited handle and bio; `nil` means that field
+    /// has not been edited and reads the daemon's answer. On the model so a
+    /// section switch keeps an edit, and so a background refresh of the
+    /// profile cannot rewrite what is being typed.
+    @Published var profileHandleDraft: String?
+    @Published var profileBioDraft: String?
 
     @Published private(set) var inferenceEvidenceBusy = false
     @Published private(set) var inferenceEvidenceSaveFailed = false
@@ -1958,6 +2027,7 @@ final class AppModel: ObservableObject {
     }
 
     func setStatusForTesting(_ status: DaemonStatus) {
+        recordRead("status", answered: true)
         publishIfChanged(\.status, status)
     }
     #endif
@@ -2366,8 +2436,19 @@ final class AppModel: ObservableObject {
             let outcome = try? client.publicProfile()
             await MainActor.run {
                 // A failure -- `not-logged-in` above all -- is the
-                // off-the-roster state, not an error worth a banner.
-                self.publicProfile = (outcome?.onRoster ?? false) ? outcome : nil
+                // off-the-roster state, not an error worth a banner. Whether
+                // it may be drawn as one is `publicProfileRead`'s call.
+                if let outcome {
+                    self.publicProfile = outcome.onRoster ? outcome : nil
+                } else if self.statusRead == .answered, !self.status.loggedIn {
+                    // Signed out by the daemon's own answer: nothing is
+                    // claimed, so the cache goes.
+                    self.publicProfile = nil
+                }
+                // Otherwise a refused refresh keeps the cached profile: an
+                // answered read stays answered, and dropping the cache here
+                // would draw an on-roster contributor the opt-in card.
+                self.recordRead("get_public_profile", answered: outcome != nil)
             }
         }
     }
@@ -2402,6 +2483,13 @@ final class AppModel: ObservableObject {
                     // cache miss that may not have happened, on a profile
                     // that is public either way.
                     self.profileOutcome = .published(cached: profile.handlePersisted ?? true)
+                    // The daemon now holds this profile, in its stored form,
+                    // so the fields read it again -- unless the person has
+                    // edited past what was sent while the write was out.
+                    if (self.profileHandleDraft ?? handle) == handle, (self.profileBioDraft ?? bio) == bio {
+                        self.profileHandleDraft = nil
+                        self.profileBioDraft = nil
+                    }
                     self.refreshStatus()
                     self.refreshAudit()
                 case .failure(let error):
@@ -2425,6 +2513,9 @@ final class AppModel: ObservableObject {
                 case .success(let profile):
                     self.publicProfile = profile.onRoster ? profile : nil
                     self.profileOutcome = .left(cached: profile.handlePersisted ?? true)
+                    // Off the roster there is no profile for an edit to be of.
+                    self.profileHandleDraft = nil
+                    self.profileBioDraft = nil
                     self.refreshStatus()
                     self.refreshAudit()
                 case .failure(let error):
@@ -2928,6 +3019,58 @@ final class AppModel: ObservableObject {
         case failed(String)
     }
 
+    // MARK: - Where each Settings read stands
+
+    /// Labels of the reads that have answered at least once. Kept apart from
+    /// the data: a list that answered empty and one that never answered are
+    /// both `[]`, and only this tells them apart.
+    @Published private(set) var answeredReads: Set<String> = []
+    /// Labels of the reads whose last call failed. A later success clears it.
+    @Published private(set) var failedReads: Set<String> = []
+
+    private func recordRead(_ label: String, answered: Bool) {
+        if answered {
+            if !answeredReads.contains(label) { answeredReads.insert(label) }
+            if failedReads.contains(label) { failedReads.remove(label) }
+        } else if !failedReads.contains(label) {
+            failedReads.insert(label)
+        }
+    }
+
+    private func read(_ label: String, answered: Bool = false) -> SettingsRead {
+        SettingsRead.resolve(
+            answered: answered || answeredReads.contains(label),
+            failed: failedReads.contains(label),
+            startup: startup)
+    }
+
+    /// `status`. The placeholder comparison stays for answers that reach the
+    /// model some other way; the recorded answer covers a signed-out status
+    /// that decodes equal to the placeholder.
+    var statusRead: SettingsRead { read("status", answered: status.answered) }
+    /// `get_settings`, or any write that handed back the settings.
+    var settingsRead: SettingsRead { read("get_settings", answered: daemonSettings != nil) }
+    /// `list_audit`: what "Nothing has been changed." waits on.
+    var auditRead: SettingsRead { read("list_audit") }
+    /// `list_projects`: what "No projects seen yet." waits on.
+    var projectsRead: SettingsRead { read("list_projects") }
+    /// The cached public profile. A failed read while signed in may be
+    /// hiding a roster entry, so it is a failure; signed out (by the
+    /// daemon's own answer) it is the daemon saying nothing is claimed.
+    var publicProfileRead: SettingsRead {
+        let signedOutRefusal = failedReads.contains("get_public_profile")
+            && statusRead == .answered && !status.loggedIn
+        return read("get_public_profile", answered: publicProfile != nil || signedOutRefusal)
+    }
+    /// The witness state. It is read from the config directory, not the
+    /// daemon, so it answers even when the daemon refused -- unless the
+    /// directory never resolved, when no read can ever run.
+    var witnessRead: SettingsRead {
+        if witnessStateCode != nil { return .answered }
+        if configDirectory.isEmpty, read("witness") == .coreDown { return .coreDown }
+        return .awaiting
+    }
+
     // MARK: - Plumbing
 
     private func perform<T>(
@@ -2941,8 +3084,10 @@ final class AppModel: ObservableObject {
             await MainActor.run {
                 switch outcome {
                 case .success(let value):
+                    self.recordRead(label, answered: true)
                     onSuccess(value)
                 case .failure(let error):
+                    self.recordRead(label, answered: false)
                     // `error.message` is a fixed label by contract, never a
                     // path, a token, or a server response body.
                     if let failure = error as? DaemonClient.Failure {

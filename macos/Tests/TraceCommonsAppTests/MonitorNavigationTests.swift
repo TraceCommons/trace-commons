@@ -13,24 +13,42 @@ final class MonitorNavigationTests: XCTestCase {
         try String(contentsOf: root.appendingPathComponent(rel), encoding: .utf8)
     }
 
+    /// The whole file is debug-only, so a nested `#if DEBUG` with a
+    /// `#else return nil` branch describes a Release path that never compiles.
+    func test_theMonitorWindowHasOneDebugGuardAndNoReleaseBranch() throws {
+        let window = try Self.text("Views/MonitorWindowView.swift")
+        XCTAssertTrue(window.hasPrefix("#if DEBUG\n"), "the file-level guard moved")
+        XCTAssertEqual(window.components(separatedBy: "#if DEBUG").count - 1, 1, "a nested #if DEBUG is redundant")
+        XCTAssertEqual(window.components(separatedBy: "#else").count - 1, 0, "an #else under the file guard never compiles")
+    }
+
     /// The Monitor's three stores read the app's live client, re-attached
     /// whenever the daemon restarts; sample data is debug-only and opt-in.
     func test_theMonitorUsesTheLiveClient() throws {
         let window = try Self.text("Views/MonitorWindowView.swift")
         XCTAssertFalse(window.contains("DaemonDataWiring.sample(choice.set)"), "a store is built on sample data")
         for store in ["traces", "inference", "home"] {
-            XCTAssertTrue(window.contains("\(store).attach(client)"), "\(store) is never attached to the live client")
+            XCTAssertTrue(
+                window.contains("\(store).attach(client, awaiting: attachment.awaiting)"),
+                "\(store) is never attached to the live client")
         }
-        XCTAssertTrue(window.contains(".task(id: model.liveData.map(ObjectIdentifier.init))"))
-        // The function's body: from its signature to the `#endif` that
-        // closes its debug-only branch.
+        // Re-attached when the client changes AND when start-up ends, so a
+        // daemon that never starts is said to be down rather than awaited.
+        XCTAssertTrue(window.contains(".task(id: Attachment(model)) {"))
+        XCTAssertTrue(window.contains("live = model.liveData.map(ObjectIdentifier.init)"))
+        XCTAssertTrue(window.contains("awaiting = MonitorWindowView.awaitingDaemon(model.startup)"))
+        // The function's body: from its signature to the next declaration.
+        // Sample data is debug-only because the whole file is: it opens with
+        // `#if DEBUG` and its only `#endif` is the last line.
         let sample = try XCTUnwrap(window.range(of: "static func sampleClient()"))
-        let end = try XCTUnwrap(window.range(of: "#endif", range: sample.upperBound ..< window.endIndex))
-        let body = window[sample.lowerBound ..< end.upperBound]
-        XCTAssertFalse(body.dropFirst().contains("static func"), "the scan ran past sampleClient()")
-        XCTAssertTrue(body.contains("#if DEBUG"), "sample data must be debug-only")
+        let end = try XCTUnwrap(window.range(of: "static func", range: sample.upperBound ..< window.endIndex))
+        let body = window[sample.lowerBound ..< end.lowerBound]
         XCTAssertTrue(body.contains("TRACE_COMMONS_SAMPLE"))
-        XCTAssertTrue(body.contains("#else\n        return nil"), "a release build has no sample client")
+        XCTAssertTrue(body.contains("DaemonDataWiring.sample(set)"))
+        XCTAssertTrue(window.hasPrefix("#if DEBUG\n"), "sample data must be debug-only")
+        XCTAssertEqual(window.components(separatedBy: "#endif").count - 1, 1)
+        XCTAssertTrue(window.trimmingCharacters(in: .whitespacesAndNewlines).hasSuffix("#endif"),
+                      "a release build has no sample client")
     }
 
     // MARK: No client: the core is down, never empty and healthy
@@ -57,6 +75,39 @@ final class MonitorNavigationTests: XCTestCase {
         XCTAssertEqual(store.failures["inference_calls"], .unreachable)
         XCTAssertEqual(store.failures["harness_list"], .unreachable)
         XCTAssertNil(store.calls)
+    }
+
+    // MARK: At launch, before the daemon has started: loading, not down (G26)
+
+    /// The Monitor opened before the daemon is up is normal start-up, not a
+    /// fault: each store is loading, never "the watcher isn't answering".
+    func test_whileTheDaemonStartsEachStoreIsLoadingNotDown() async {
+        let traces = TracesStore(client: nil)
+        traces.attach(nil, awaiting: true)
+        await traces.run()
+        XCTAssertEqual(traces.phase, .loading, "start-up is drawn as the core being down")
+        XCTAssertNil(traces.decisionsOwed)
+
+        let home = HomeStore(client: nil)
+        home.attach(nil, awaiting: true)
+        await home.run()
+        XCTAssertTrue(home.failures.isEmpty, "start-up is drawn as the core being down")
+        XCTAssertEqual(HomeFormat.watchingState(home), .loading)
+
+        let inference = InferenceStore(client: nil)
+        inference.attach(nil, awaiting: true)
+        await inference.run()
+        XCTAssertTrue(inference.failures.isEmpty, "start-up is drawn as the core being down")
+        XCTAssertNil(inference.calls)
+    }
+
+    /// Only a daemon still starting is awaited. One that was refused, needs
+    /// its folders, or has gone is down, and says so.
+    func test_onlyAStartingDaemonIsAwaited() {
+        XCTAssertTrue(MonitorWindowView.awaitingDaemon(.starting))
+        XCTAssertFalse(MonitorWindowView.awaitingDaemon(.running))
+        XCTAssertFalse(MonitorWindowView.awaitingDaemon(.needsRoots))
+        XCTAssertFalse(MonitorWindowView.awaitingDaemon(.refused("no")))
     }
 
     // MARK: Attaching a new client: loading again, nothing from the old one as current
@@ -132,6 +183,86 @@ final class MonitorNavigationTests: XCTestCase {
         XCTAssertNil(store.destinations)
         XCTAssertNil(store.privateAI, "the old daemon's Private AI switch is drawn after a restart")
         XCTAssertTrue(store.failures.isEmpty, "an old read's outcome is recorded against the new client")
+    }
+
+    // MARK: Traces: nothing the old daemon said survives an attach
+
+    /// After a daemon restart the old daemon's refusals, notices and undo
+    /// offers are not drawn on the new one's tab, and Undo never reaches it.
+    func test_attachClearsTheOldDaemonsNoticesAndUndo() async throws {
+        let store = TracesStore(client: SampleDaemonClient(.normalDay))
+        await store.load()
+        let id = try XCTUnwrap(store.tree.allSessions.first?.entryId)
+        await store.perform(.contribute, on: id)
+        XCTAssertNotNil(store.lastContributed)
+        // The sample core refuses the cancel, so a refusal is kept.
+        await store.perform(.undoContribute, on: id)
+        XCTAssertNotNil(store.actionError)
+        await store.perform(.keep, on: id)
+        XCTAssertEqual(store.lastKept, id)
+        await store.setSource(.codex, .watch(path: ""))
+        XCTAssertFalse(store.writeErrors.isEmpty)
+        let folder = TracesTree.FolderNode(id: "p1", label: "docs", mode: .ask, offerableModes: [.ask, .ignore], sessions: [])
+        await store.setFolderMode(folder, .ignore, promised: 3)
+        XCTAssertNotNil(store.folderNotice)
+
+        store.attach(SampleDaemonClient(.busyQueue))
+        XCTAssertNil(store.lastContributed, "the old daemon's Undo would send cancel to the new one")
+        XCTAssertNil(store.lastKept)
+        XCTAssertNil(store.actionError)
+        XCTAssertTrue(store.writeErrors.isEmpty)
+        XCTAssertNil(store.folderNotice)
+        XCTAssertTrue(store.acting.isEmpty)
+        XCTAssertTrue(store.writing.isEmpty)
+    }
+
+    /// A gated old client, a write started on it, then a restart (attach)
+    /// before the old daemon answers.
+    private func staleWrite(
+        _ write: @escaping @MainActor (TracesStore) async -> Void
+    ) async -> TracesStore {
+        let entered = expectation(description: "the write reached the old daemon")
+        entered.assertForOverFulfill = false
+        let gate = GatedTransport(.normalDay, entered: entered)
+        let store = TracesStore(client: LiveDaemonClient(transport: gate))
+        let writing = Task { await write(store) }
+        await fulfillment(of: [entered], timeout: 10)
+        store.attach(nil)
+        gate.open()
+        await writing.value
+        return store
+    }
+
+    func test_aReviewActionTheOldDaemonRefusesAfterAttachIsDropped() async {
+        // `cancel` is refused by the sample transport.
+        let store = await staleWrite { await $0.perform(.undoContribute, on: "e1") }
+        XCTAssertNil(store.actionError, "the old daemon's refusal is drawn on the new one's tab")
+        XCTAssertTrue(store.acting.isEmpty)
+        XCTAssertEqual(store.phase, .loading, "a stale answer moved the new client's tab")
+    }
+
+    func test_aReviewActionTheOldDaemonTakesAfterAttachIsDropped() async {
+        let store = await staleWrite { await $0.perform(.keep, on: "e1") }
+        XCTAssertNil(store.lastKept, "the old daemon's undo is offered against the new one")
+        XCTAssertNil(store.actionError)
+        XCTAssertEqual(store.phase, .loading)
+    }
+
+    func test_aSourceWriteTheOldDaemonRefusesAfterAttachIsDropped() async {
+        // `set_settings` is refused by the sample transport.
+        let store = await staleWrite { await $0.setSource(.codex, .off) }
+        XCTAssertTrue(store.writeErrors.isEmpty, "the old daemon's refusal is drawn beside the new one's row")
+        XCTAssertTrue(store.writing.isEmpty)
+        XCTAssertEqual(store.phase, .loading)
+    }
+
+    func test_aFolderWriteTheOldDaemonAnswersAfterAttachIsDropped() async {
+        let folder = TracesTree.FolderNode(id: "p1", label: "docs", mode: .ask, offerableModes: [.ask, .ignore], sessions: [])
+        let store = await staleWrite { await $0.setFolderMode(folder, .ignore, promised: 3) }
+        XCTAssertNil(store.folderNotice, "the old daemon's notice is drawn on the new one's tab")
+        XCTAssertTrue(store.writeErrors.isEmpty)
+        XCTAssertTrue(store.writing.isEmpty)
+        XCTAssertEqual(store.phase, .loading)
     }
 
     // MARK: The live client's provisional methods (notAvailableYet)
