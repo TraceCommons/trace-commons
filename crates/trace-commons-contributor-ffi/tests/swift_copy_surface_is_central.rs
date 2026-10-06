@@ -731,13 +731,14 @@ const ALLOWED: &[(&str, &str, &str)] = &[
         "This covers sessions that reached the queue.",
         "legacy queue window; #1241 moves only the monitor to the core's words",
     ),
-    // Look inside's one remaining sentence of its own: #1241 Task 7 made it
-    // Ron's read-only view on the core's `look_inside` table, and this is
-    // what it says when it cannot show the session.
+    // Not a sentence of its own: Look inside reads the core's
+    // `session_review.cannot_show_title`, and this verbatim copy of it is
+    // the fallback for a table that did not decode, so the cannot-show
+    // notice is never drawn without a title (`HealthCopy.onHoldFallback`).
     (
         "TraceCommonsApp/Views/PreviewSheet.swift",
         "This one can't be shown.",
-        "Look inside's cannot-show notice (#1241 Task 7)",
+        "fallback copy of the core's cannot_show_title (#1241 Task 7)",
     ),
     // Not a copy: the scanner matches substrings, and "N waiting for your
     // decision" contains Ron's "N waiting for you".
@@ -849,7 +850,7 @@ const SURFACES: &[(&str, &str, &str, &str, &str)] = &[
     ),
     (
         "monitor screens words",
-        "TraceCommonsApp/Views/Monitor/InferenceViews.swift",
+        "TraceCommonsApp/Views/Monitor/MonitorWords.swift",
         "TCCoreCopy.monitorScreensCopyJSON",
         "TCBridge/TCCoreCopy.swift",
         "tc_monitor_screens_copy_json",
@@ -869,11 +870,11 @@ const SURFACES: &[(&str, &str, &str, &str, &str)] = &[
         "tc_consent_copy",
     ),
     // Look inside is read-only since #1241 Task 7: Contribute, and its
-    // tooltip, are the inspector's session card. Task 6 moves the card to
-    // `Views/Monitor/SessionReviewCard.swift`; Task 9 re-points this there.
+    // tooltip, are the inspector's session card (`SessionReviewCard`,
+    // #1241 Task 6).
     (
         "consent gate help",
-        "TraceCommonsApp/Views/Monitor/TracesViews.swift",
+        "TraceCommonsApp/Views/Monitor/SessionReviewCard.swift",
         "TCConsentCopy.gateHelp",
         "TCBridge/TCConsentCopy.swift",
         "tc_consent_gate_help",
@@ -1008,7 +1009,7 @@ const SURFACES: &[(&str, &str, &str, &str, &str)] = &[
     // panel is the session card's (see the gate help above).
     (
         "scrubbing panel",
-        "TraceCommonsApp/Views/Monitor/TracesViews.swift",
+        "TraceCommonsApp/Views/Monitor/SessionReviewCard.swift",
         "TCCoreCopy.redactionSummaryJSON",
         "TCBridge/TCCoreCopy.swift",
         "tc_redaction_summary_json",

@@ -31,7 +31,7 @@ final class ToolFolderInspectorTests: XCTestCase {
             sessions: folder.sessions, pendingCount: folder.pendingCount, contributableCount: folder.contributableCount)
         XCTAssertFalse(FolderInspector.offersSubmitAll(never, store: store))
         // The rule is shown, in the core's word for Never.
-        let labels = try XCTUnwrap(FolderInspector.disclosure).folderModeLabels
+        let labels = try XCTUnwrap(TracesStore.disclosureCopy).folderModeLabels
         XCTAssertEqual(FolderInspector.ruleLabel(.ignore), labels["ignore"])
         XCTAssertEqual(FolderInspector.ruleLabel(.ask), labels["notify_only"])
         XCTAssertEqual(FolderInspector.ruleLabel(.autoUpload), labels["auto_upload"])
@@ -125,6 +125,28 @@ final class ToolFolderInspectorTests: XCTestCase {
         let many = FolderInspector.applyLine(3, words: words)
         XCTAssertTrue(many.contains("3"), many)
         XCTAssertFalse(many.contains("{"), many)
+    }
+
+    /// The disclosure bundle is decoded in one place, `TracesStore`: the
+    /// folder inspector, the tree's folder rows and History read that one
+    /// copy, so the three can never hold different words.
+    func test_theDisclosureBundleIsDecodedOnce() async throws {
+        let walker = try XCTUnwrap(FileManager.default.enumerator(
+            at: ReleaseBuildGateTests.root, includingPropertiesForKeys: nil))
+        var decoders: [String] = []
+        for case let url as URL in walker where url.pathExtension == "swift" {
+            let text = try String(contentsOf: url, encoding: .utf8)
+            if text.contains("contributorDisclosureCopyJSON()") { decoders.append(url.lastPathComponent) }
+        }
+        XCTAssertEqual(decoders, ["TracesStore.swift"])
+        let (store, _) = try await loaded()
+        XCTAssertEqual(store.disclosure, TracesStore.disclosureCopy)
+        let folders = try TracesParityTests.text("Views/Monitor/ToolFolderInspectors.swift")
+        XCTAssertTrue(folders.contains("store.disclosure?.outcome"))
+        let tree = try TracesParityTests.text("Views/Monitor/TracesViews.swift")
+        XCTAssertTrue(tree.contains("modeLabels: store.disclosure?.folderModeLabels"))
+        let home = try TracesParityTests.text("Views/Monitor/HomeViews.swift")
+        XCTAssertTrue(home.contains("HistoryList.labels(disclosure: TracesStore.disclosureCopy"))
     }
 }
 

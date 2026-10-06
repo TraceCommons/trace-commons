@@ -179,6 +179,19 @@ final class PreviewSheetTests: XCTestCase {
         XCTAssertFalse(content.contains("words?.title ?? tab.title(words)"))
     }
 
+    /// The cannot-show sentence is the core's (`session_review`'s
+    /// `cannot_show_title`). The literal is only the fallback for a table
+    /// that did not decode, verbatim the core's, so the notice is never
+    /// drawn without a title (the `HealthCopy.onHoldFallback` precedent).
+    func test_theCannotShowSentenceIsTheCores() throws {
+        let sheet = Self.code(try Self.sheet())
+        let cannotShow = try Self.declaration("private static var cannotShow: String {", in: sheet)
+        XCTAssertTrue(cannotShow.contains("Self.traces?.sessionReview.cannotShowTitle ?? Self.cannotShowFallback"),
+                      "the sentence is not the core's: \(cannotShow)")
+        let core = try XCTUnwrap(MonitorTracesCopy.decode(fromJSON: TCCoreCopy.monitorTracesCopyJSON()))
+        XCTAssertEqual(PreviewSheet.cannotShowFallback, core.sessionReview.cannotShowTitle)
+    }
+
     /// Loading with no Look-inside table has no loading line to say: it
     /// says it cannot show the session, never an empty notice.
     func test_aMissingTableIsNeverAnEmptyNotice() throws {

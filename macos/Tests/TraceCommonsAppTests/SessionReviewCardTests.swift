@@ -186,6 +186,21 @@ final class SessionReviewCardTests: XCTestCase {
         XCTAssertTrue(prompts.contains("store.perform(.undoKeep, on: kept)"))
     }
 
+    /// The token distribution line, which the deleted What's-in-it tab drew,
+    /// is one of the card's kept native facts, and lives only there. It is
+    /// the daemon's sentence, drawn only when the daemon sent one.
+    func test_theTokenDistributionLineIsOnTheCard() throws {
+        let card = try Self.text(Self.card)
+        let kept = try XCTUnwrap(card.range(of: "private func keptLines"))
+        let actions = try XCTUnwrap(card.range(of: "// MARK: Actions"))
+        let body = String(card[kept.lowerBound..<actions.lowerBound])
+        XCTAssertTrue(body.contains("if let line = summary?.tokenDistributionSummary, !line.isEmpty"),
+                      "the card's kept facts lack the token distribution line")
+        XCTAssertTrue(body.contains("caption(line)"), "the token distribution line is not drawn as a caption")
+        let sheet = try Self.text("Views/PreviewSheet.swift")
+        XCTAssertFalse(sheet.contains("tokenDistributionSummary"), "Look inside still draws the token distribution")
+    }
+
     /// Contribute on the card is the one approve control in the Monitor:
     /// no other Monitor file contributes a single session, and the store's
     /// single `approve` is the only one that reaches the daemon.

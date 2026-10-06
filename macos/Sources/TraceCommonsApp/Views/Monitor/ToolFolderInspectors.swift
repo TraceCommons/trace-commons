@@ -26,12 +26,6 @@ struct FolderInspector: View {
     /// Whether Submit all as's modal is open.
     @State private var choosingVerdict = false
 
-    /// The disclosure bundle's outcome words and folder mode names, decoded
-    /// once. Nil when the core's bundle will not decode: then the picker
-    /// names nothing and Submit all as is not offered.
-    static let disclosure: ContributorDisclosureCopy? = ContributorDisclosureCopy.decode(
-        fromJSON: TCCoreCopy.contributorDisclosureCopyJSON())
-
     var body: some View {
         if let words = store.words {
             VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
@@ -130,7 +124,7 @@ struct FolderInspector: View {
                 }
                 .buttonStyle(GlassButtonStyle(.glass))
                 .help(TracesTreeView.submitHelp(offer.withheldLine, words: words))
-                if let outcome = Self.disclosure?.outcome {
+                if let outcome = store.disclosure?.outcome {
                     Button(outcome.submitAllAs) { choosingVerdict = true }
                         .buttonStyle(GlassButtonStyle(.glass))
                         .help(outcome.submitAllAsTooltip)
@@ -149,7 +143,7 @@ struct FolderInspector: View {
     /// in the core's words, or Cancel.
     @ViewBuilder
     private func submitAllAsSheet(_ words: MonitorTracesCopy) -> some View {
-        if let outcome = Self.disclosure?.outcome {
+        if let outcome = store.disclosure?.outcome {
             let busy = store.writing.contains(folder.id)
             GlassSheet(title: outcome.submitAllAs, subtitle: outcome.submitAllAsTooltip) {
                 Text(Self.applyLine(store.groupOffer(folder).count, words: words))
@@ -236,9 +230,11 @@ struct FolderInspector: View {
         await store.contributeFolder(folder, verdict: verdict)
     }
 
-    /// A mode's one name, from the disclosure bundle's `folder_mode_labels`.
+    /// A mode's one name, from the disclosure bundle's `folder_mode_labels`
+    /// (`TracesStore.disclosureCopy`). Nil when the bundle will not decode:
+    /// then the picker names nothing and Submit all as is not offered.
     static func ruleLabel(_ mode: ProjectMode) -> String? {
-        disclosure?.folderModeLabels[mode.rawValue]
+        TracesStore.disclosureCopy?.folderModeLabels[mode.rawValue]
     }
 
     /// The modal's count line, filled.

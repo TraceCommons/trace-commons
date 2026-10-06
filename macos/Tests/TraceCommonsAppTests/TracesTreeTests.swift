@@ -788,7 +788,7 @@ final class TracesFolderFirstTreeTests: XCTestCase {
 
         let source = try TracesParityTests.text("Views/Monitor/TracesViews.swift")
         let treeView = try XCTUnwrap(source.range(of: "struct TracesTreeView"))
-        let inspector = try XCTUnwrap(source.range(of: "struct SessionInspectorView"))
+        let inspector = try XCTUnwrap(source.range(of: "struct PreviewSlot"))
         let body = source[treeView.lowerBound..<inspector.lowerBound]
         for gone in ["toolRow(", "depth: .tool", "ForEach(store.tree.tools)", "ForEach(store.tree.unplaced)",
                      "requestSource(", "store.setSource(", "SourceChange"] {
@@ -871,7 +871,7 @@ final class TracesFolderFirstTreeTests: XCTestCase {
         XCTAssertTrue(tree.tools.isEmpty)
         XCTAssertTrue(tree.unplaced.isEmpty)
 
-        let labels = try XCTUnwrap(FolderInspector.disclosure).folderModeLabels
+        let labels = try XCTUnwrap(TracesStore.disclosureCopy).folderModeLabels
         XCTAssertEqual(TracesTreeView.folderSub(folder, words: words, modeLabels: labels), words.tree.ignoredFolder)
         // The switch on is Ask me, a direct write; off is Never, which asks
         // first when sessions are waiting.
@@ -909,7 +909,7 @@ final class TracesFolderFirstTreeTests: XCTestCase {
 
         let source = try TracesParityTests.text("Views/Monitor/TracesViews.swift")
         let treeView = try XCTUnwrap(source.range(of: "struct TracesTreeView"))
-        let inspector = try XCTUnwrap(source.range(of: "struct SessionInspectorView"))
+        let inspector = try XCTUnwrap(source.range(of: "struct PreviewSlot"))
         let tree = String(source[treeView.lowerBound..<inspector.lowerBound])
         XCTAssertEqual(tree.components(separatedBy: "perform(.dismiss").count - 1, 1, "one dismiss, in the confirmation")
         let title = try XCTUnwrap(tree.range(of: "GlassSheet(title: words.tree.dismissSessionTitle"))

@@ -43,8 +43,10 @@ final class HomeViewTests: XCTestCase {
     func test_homeStatCardsKeepD6() throws {
         let home = try Self.flat("Views/Monitor/HomeViews.swift")
         XCTAssertTrue(home.contains(
-            "GlassLegendCell(MonitorWords.pending, value: HomeFormat.pendingFigure(store.rollup?.creditPending, credit: store.credit), status: .ask)"))
-        XCTAssertTrue(home.contains("if let condition = HomeFormat.pendingCondition(store.credit) { Text(condition)"))
+            "GlassLegendCell(MonitorWords.pending, value: HomeFormat.pendingFigure(freshRollup?.creditPending, credit: freshCredit), status: .ask)"))
+        // The credit summary after a failed read is no summary (D6 then
+        // shows a dash and no condition), never the earlier sentence.
+        XCTAssertTrue(home.contains("if let condition = HomeFormat.pendingCondition(freshCredit) { Text(condition)"))
         XCTAssertEqual(HomeFormat.pendingFigure(3, credit: nil), "—")
         XCTAssertEqual(HomeFormat.pendingFigure(nil, credit: nil), "—")
         let reply = try XCTUnwrap(SampleDaemonData.reply("commons_credit_summary", in: .normalDay))

@@ -400,6 +400,11 @@ struct SessionReviewCard: View {
             GlassKeyValueList(Self.rows(
                 entry, summary, words: words, attestation: store.attestationValue(entry)))
         }
+        // The token distribution, the daemon's own line, which the deleted
+        // What's-in-it tab drew. Absent draws nothing: no fact is invented.
+        if let line = summary?.tokenDistributionSummary, !line.isEmpty {
+            caption(line)
+        }
     }
 
     // MARK: Actions

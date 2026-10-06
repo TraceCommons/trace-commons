@@ -63,12 +63,17 @@ final class TracesStore {
     /// every redraw. Without them Contribute stays disarmed: the shell never
     /// words consent itself.
     let consent: ConsentCopy? = TCConsentCopy.copyJSON().flatMap(ConsentCopy.decode(fromJSON:))
-    /// The review card's verdict and correction words, and the longest
-    /// correction the daemon accepts, from the core's disclosure bundle
-    /// (`tc_contributor_disclosure_copy_json`). Without them the card draws
-    /// no verdict and Contribute stays disarmed.
-    let disclosure: ContributorDisclosureCopy? =
+    /// The core's disclosure bundle (`tc_contributor_disclosure_copy_json`),
+    /// decoded once for the whole app: the review card's verdict and
+    /// correction words and the longest correction the daemon accepts, the
+    /// folder inspector's and the tree's folder mode names, Submit all as's
+    /// outcome words, and History's filter labels. Every one of those reads
+    /// this copy, so no two can hold different words. Without it the card
+    /// draws no verdict and Contribute stays disarmed.
+    static let disclosureCopy: ContributorDisclosureCopy? =
         ContributorDisclosureCopy.decode(fromJSON: TCCoreCopy.contributorDisclosureCopyJSON())
+    /// `disclosureCopy`, for a view that holds this store.
+    var disclosure: ContributorDisclosureCopy? { Self.disclosureCopy }
     /// The session whose last Contribute the daemon refused because its
     /// correction looked like it held a credential. Nothing was sent; the
     /// card says the core's headline and body for it, in place of the

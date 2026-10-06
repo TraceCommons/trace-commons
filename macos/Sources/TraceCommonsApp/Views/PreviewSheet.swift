@@ -132,8 +132,17 @@ struct PreviewSheet: View {
     /// Close in the core's words: the Look-inside table's, else the other.
     private var closeWord: String? { words?.close ?? Self.fallbackClose }
 
-    /// The one sentence this sheet says when it cannot show the session.
-    private static let cannotShow = "This one can't be shown."
+    /// The one sentence this sheet says when it cannot show the session:
+    /// the core's (`session_review.cannot_show_title`), the same the
+    /// session card reads.
+    private static var cannotShow: String {
+        Self.traces?.sessionReview.cannotShowTitle ?? Self.cannotShowFallback
+    }
+
+    /// The core's `cannot_show_title`, verbatim. Read only when the core's
+    /// table does not decode, so the notice is never drawn without a title
+    /// (the `HealthCopy.onHoldFallback` precedent).
+    static let cannotShowFallback = "This one can't be shown."
 
     /// The core's line under that sentence, or nothing when its table did
     /// not decode. Every failure that is not a witness refusal reads this:

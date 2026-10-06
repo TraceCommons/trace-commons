@@ -20,6 +20,48 @@ final class HistoryParityTests: XCTestCase {
         XCTAssertFalse(ContributionStatusPresentation.offersWithdraw("withdrawn"))
     }
 
+    /// A failed `history_rollup` read shows a dash in every History cell the
+    /// rollup feeds, never the store's stale value, and History says the
+    /// read failed (the Summary inspector's `SummaryFacts.fresh` rule).
+    func test_aFailedRollupReadIsNeverShownAsCurrent() throws {
+        let source = try Self.text("Views/Monitor/HomeViews.swift")
+        let fresh = #"SummaryFacts.fresh(store.rollup, unless: store.failures["history_rollup"])"#
+        for name in ["HistoryStats", "HistoryCommunityCard", "HistoryCreditCard"] {
+            let start = try XCTUnwrap(source.range(of: "struct \(name): View {"), "\(name) is gone")
+            let end = source.range(of: "\n}\n", range: start.upperBound..<source.endIndex)?.lowerBound ?? source.endIndex
+            let body = String(source[start.upperBound..<end])
+            XCTAssertTrue(body.contains(fresh), "\(name) does not read the rollup through SummaryFacts.fresh")
+            XCTAssertFalse(body.contains("store.rollup?"), "\(name) reads store.rollup directly")
+        }
+        let page = try XCTUnwrap(source.range(of: "private struct HistoryPage: View {"))
+        let pageEnd = try XCTUnwrap(source.range(of: "\n}\n", range: page.upperBound..<source.endIndex))
+        let pageBody = String(source[page.upperBound..<pageEnd.lowerBound])
+        XCTAssertTrue(pageBody.contains(#"if let failure = store.failures["history_rollup"] {"#),
+                      "History draws no notice for a failed history_rollup read")
+        XCTAssertFalse(pageBody.contains("store.rollup?"), "HistoryPage reads store.rollup directly")
+        XCTAssertFalse(pageBody.contains("rollup: store.rollup)"), "HistoryPage reads store.rollup directly")
+        // Home's stat cards read the same rollup, by the same rule.
+        XCTAssertFalse(source.contains("store.rollup?"), "HomeViews.swift reads store.rollup directly")
+    }
+
+    /// A failed `commons_credit_summary` read shows neither the earlier
+    /// settlement sentence nor a pending figure beside it: Home's stat
+    /// cards, History's stat cards and the credit record read the summary
+    /// through `SummaryFacts.fresh`, as the Summary inspector does.
+    /// `HomeStore.read` keeps the old value when a read fails.
+    func test_aFailedCreditReadIsNeverShownAsCurrent() throws {
+        let source = try Self.text("Views/Monitor/HomeViews.swift")
+        let fresh = #"SummaryFacts.fresh(store.credit, unless: store.failures["commons_credit_summary"])"#
+        for name in ["private struct HomeOverview", "private struct HistoryStats", "struct HistoryCreditCard"] {
+            let start = try XCTUnwrap(source.range(of: "\(name): View {"), "\(name) is gone")
+            let end = source.range(of: "\n}\n", range: start.upperBound..<source.endIndex)?.lowerBound ?? source.endIndex
+            let body = String(source[start.upperBound..<end])
+            XCTAssertTrue(body.contains(fresh), "\(name) does not read the credit summary through SummaryFacts.fresh")
+        }
+        XCTAssertFalse(source.contains("credit: store.credit"), "HomeViews.swift reads store.credit directly")
+        XCTAssertFalse(source.contains("pendingCondition(store.credit"), "HomeViews.swift reads store.credit directly")
+    }
+
     /// The overview's processing status reads the core's unavailable word
     /// for a status it does not name, the same word History's rows read.
     func test_anUnknownStatusReadsStatusUnavailable() throws {
@@ -282,7 +324,7 @@ final class HistoryParityTests: XCTestCase {
         let homeFlat = home.split(whereSeparator: \.isWhitespace).joined(separator: " ")
         for needle in [
             // Never an empty title or sentence: only with the core's words.
-            "if (store.rollup?.quarantined ?? 0) > 0, let words = MonitorWords.table { "
+            "if (rollup?.quarantined ?? 0) > 0, let words = MonitorWords.table { "
                 + "GlassNotice(tone: .ask, title: words.heldForReview) {",
             "Text(words.heldExplanation)", "Text(HistoryLegacyWords.typicalWait)",
             // Every record the app holds, not the list's capped page.
@@ -605,6 +647,28 @@ final class HistoryParityTests: XCTestCase {
         XCTAssertFalse(labels.values.contains(where: \.isEmpty))
         XCTAssertTrue(Self.flat(try Self.text("Views/Monitor/HomeViews.swift")).contains(
             "HistoryFolders.folders( HistoryList.rows(rows, filter: shownFilter),"), "rows grouped by project")
+    }
+
+    /// The record by period, which Home's summary inspector drew until Ron's
+    /// Summary replaced it (#1241 Task 4), lives in History's stat cards:
+    /// the week's and month's accepted counts and the withdrawn count, all
+    /// from the rollup (never a count of the loaded page), beside the
+    /// all-time and held counts already there.
+    func test_theRecordByPeriodLivesInHistory() throws {
+        let home = try Self.text("Views/Monitor/HomeViews.swift")
+        let start = try XCTUnwrap(home.range(of: "private struct HistoryStats: View"))
+        let end = try XCTUnwrap(home[start.upperBound...].range(of: "\n}\n"))
+        let stats = Self.flat(String(home[start.lowerBound..<end.lowerBound]))
+        for needle in [
+            ".init(MonitorWords.week, HomeFormat.count(rollup?.week?.accepted))",
+            ".init(MonitorWords.month, HomeFormat.count(rollup?.month?.accepted))",
+            ".init(MonitorWords.withdrawn, HomeFormat.count(rollup?.takenBack))",
+            "GlassLegendCell(MonitorWords.contributed, value: HomeFormat.count(rollup?.allTime?.accepted)",
+            "GlassLegendCell(MonitorWords.held, value: HomeFormat.count(rollup?.quarantined)",
+        ] {
+            XCTAssertTrue(stats.contains(needle), "History's stat cards lack \(needle)")
+        }
+        XCTAssertFalse(home.contains("struct HomeSummaryInspector"), "Ron's Summary replaced Home's")
     }
 
     /// Opening a row draws its details in the left pane, below the list,

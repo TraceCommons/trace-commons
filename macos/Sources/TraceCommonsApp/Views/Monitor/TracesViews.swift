@@ -354,7 +354,7 @@ struct TracesTreeView: View {
             title: folder.label,
             // The mode's word and the count waiting; an ignored folder says so.
             sub: words.flatMap {
-                Self.folderSub(folder, words: $0, modeLabels: FolderInspector.disclosure?.folderModeLabels ?? [:])
+                Self.folderSub(folder, words: $0, modeLabels: store.disclosure?.folderModeLabels ?? [:])
             },
             selected: selection == .folder(projectID: folder.id),
             off: folder.mode == .ignore,
@@ -472,13 +472,7 @@ struct TracesTreeView: View {
     // MARK: Formatting
 
     static func glassTool(_ kind: SourceKind) -> GlassTool {
-        switch kind {
-        case .claudeCode: .claudeCode
-        case .codex: .codex
-        case .geminiCli: .geminiCLI
-        case .cline: .cline
-        case .opencode: .openCode
-        }
+        kind.glassTool
     }
 
     /// The tool a session came from, as the tree's majority rule reads it:

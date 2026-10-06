@@ -52,6 +52,18 @@ private struct HomeOverview: View {
     let openMissions: () -> Void
     let openTraces: () -> Void
 
+    /// The rollup, or nil after a failed `history_rollup` read
+    /// (`SummaryFacts.fresh`): a stale one is not shown as current.
+    private var freshRollup: DaemonData.HistoryRollup? {
+        SummaryFacts.fresh(store.rollup, unless: store.failures["history_rollup"])
+    }
+
+    /// The credit summary, or nil after a failed `commons_credit_summary`
+    /// read: the earlier settlement sentence is not shown as current.
+    private var freshCredit: DaemonData.CommonsCreditSummary? {
+        SummaryFacts.fresh(store.credit, unless: store.failures["commons_credit_summary"])
+    }
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
@@ -62,10 +74,11 @@ private struct HomeOverview: View {
                     // The Traces store's count, the one the status card's
                     // line and the Traces badge read: one waiting number.
                     GlassLegendCell(MonitorWords.waiting, value: HomeFormat.count(traces.decisionsOwed), status: .ask)
-                    GlassLegendCell(MonitorWords.contributed, value: HomeFormat.count(store.rollup?.allTime?.accepted), status: .shared)
-                    GlassLegendCell(MonitorWords.pending, value: HomeFormat.pendingFigure(store.rollup?.creditPending, credit: store.credit), status: .ask)
+                    // A failed rollup read is a dash, never the earlier counts.
+                    GlassLegendCell(MonitorWords.contributed, value: HomeFormat.count(freshRollup?.allTime?.accepted), status: .shared)
+                    GlassLegendCell(MonitorWords.pending, value: HomeFormat.pendingFigure(freshRollup?.creditPending, credit: freshCredit), status: .ask)
                 }
-                if let condition = HomeFormat.pendingCondition(store.credit) {
+                if let condition = HomeFormat.pendingCondition(freshCredit) {
                     Text(condition)
                         .glassType(GlassTokens.TypeScale.caption)
                         .foregroundStyle(GlassColor.textTertiary)
@@ -206,6 +219,11 @@ private struct HistoryPage: View {
             ScrollViewReader { proxy in
                 ScrollView {
                     VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
+                        // A failed rollup read says so; the cells it feeds
+                        // read a dash, never the store's earlier counts.
+                        if let failure = store.failures["history_rollup"] {
+                            GlassNotice(tone: .outside, title: MonitorWords.table?.line(for: failure) ?? "") { EmptyView() }
+                        }
                         HistoryStats(store: store)
                         HistoryCommunityCard(store: store)
                         // `accessory:` by name: a first trailing closure
@@ -234,6 +252,12 @@ private struct HistoryPage: View {
             model.refreshHistory()
             model.refreshAccountSession()
         }
+    }
+
+    /// The rollup, or nil after a failed `history_rollup` read: a stale one
+    /// is not shown as current (`SummaryFacts.fresh`).
+    private var rollup: DaemonData.HistoryRollup? {
+        SummaryFacts.fresh(store.rollup, unless: store.failures["history_rollup"])
     }
 
     /// The opened row, while it is still in the list.
@@ -277,7 +301,7 @@ private struct HistoryPage: View {
     /// The core's filter labels, or none at all: a filter with an empty
     /// segment is never drawn, and then every row is shown.
     private var labels: [HistoryList.Filter: String]? {
-        HistoryList.labels(disclosure: HistoryList.disclosure, publicRun: model.publicRunCopy)
+        HistoryList.labels(disclosure: TracesStore.disclosureCopy, publicRun: model.publicRunCopy)
     }
 
     private var shownFilter: HistoryList.Filter {
@@ -290,7 +314,7 @@ private struct HistoryPage: View {
             GlassNotice(tone: .outside, title: MonitorWords.table?.line(for: failure) ?? "") { EmptyView() }
         }
         if let rows = store.history {
-            if let cap = HomeFormat.cap(rows.count, rollup: store.rollup) {
+            if let cap = HomeFormat.cap(rows.count, rollup: rollup) {
                 Text(cap)
                     .glassType(GlassTokens.TypeScale.caption)
                     .foregroundStyle(GlassColor.textTertiary)
@@ -360,7 +384,7 @@ private struct HistoryPage: View {
     /// record the app holds, not the list's capped page.
     @ViewBuilder
     private var held: some View {
-        if (store.rollup?.quarantined ?? 0) > 0, let words = MonitorWords.table {
+        if (rollup?.quarantined ?? 0) > 0, let words = MonitorWords.table {
             GlassNotice(tone: .ask, title: words.heldForReview) {
                 VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
                     Text(words.heldExplanation)
@@ -540,13 +564,23 @@ private struct HistoryStats: View {
     let store: HomeStore
 
     var body: some View {
+        // A failed read is a dash in every cell, never the earlier counts.
+        let rollup = SummaryFacts.fresh(store.rollup, unless: store.failures["history_rollup"])
+        let credit = SummaryFacts.fresh(store.credit, unless: store.failures["commons_credit_summary"])
         VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
             HStack(spacing: GlassTokens.Space.s3) {
-                GlassLegendCell(MonitorWords.pending, value: HomeFormat.pendingFigure(store.rollup?.creditPending, credit: store.credit), status: .ask)
-                GlassLegendCell(MonitorWords.contributed, value: HomeFormat.count(store.rollup?.allTime?.accepted), status: .shared)
-                GlassLegendCell(MonitorWords.held, value: HomeFormat.count(store.rollup?.quarantined), status: .ask)
+                GlassLegendCell(MonitorWords.pending, value: HomeFormat.pendingFigure(rollup?.creditPending, credit: credit), status: .ask)
+                GlassLegendCell(MonitorWords.contributed, value: HomeFormat.count(rollup?.allTime?.accepted), status: .shared)
+                GlassLegendCell(MonitorWords.held, value: HomeFormat.count(rollup?.quarantined), status: .ask)
             }
-            if let condition = HomeFormat.pendingCondition(store.credit) {
+            // The record by period and what was withdrawn, from the rollup
+            // (what Home's summary inspector drew before Ron's Summary).
+            GlassKeyValueList([
+                .init(MonitorWords.week, HomeFormat.count(rollup?.week?.accepted)),
+                .init(MonitorWords.month, HomeFormat.count(rollup?.month?.accepted)),
+                .init(MonitorWords.withdrawn, HomeFormat.count(rollup?.takenBack)),
+            ])
+            if let condition = HomeFormat.pendingCondition(credit) {
                 Text(condition)
                     .glassType(GlassTokens.TypeScale.caption)
                     .foregroundStyle(GlassColor.textTertiary)
@@ -570,9 +604,6 @@ enum HistoryList {
 
     /// Where the opened row's details are drawn, for scrolling to them.
     static let detailAnchor = "history.detail"
-
-    /// The core's disclosure bundle, decoded once; nil when it will not.
-    static let disclosure = ContributorDisclosureCopy.decode(fromJSON: TCCoreCopy.contributorDisclosureCopyJSON())
 
     static func counts(_ rows: [DaemonData.HistoryRow]) -> [Filter: Int] {
         var counts: [Filter: Int] = [.all: rows.count]
@@ -696,7 +727,8 @@ struct HistoryCommunityCard: View {
     let store: HomeStore
 
     var body: some View {
-        if let community = store.rollup?.community {
+        // Nothing after a failed read: not the earlier standing.
+        if let community = SummaryFacts.fresh(store.rollup, unless: store.failures["history_rollup"])?.community {
             GlassEyebrowCard(MonitorWords.community) {
                 GlassKeyValueList([
                     .init(MonitorWords.rank, community.rank.map { "#\($0)" } ?? "—"),
@@ -714,12 +746,15 @@ struct HistoryCreditCard: View {
     let store: HomeStore
 
     var body: some View {
-        let condition = HomeFormat.pendingCondition(store.credit)
+        // A failed read is a dash, never the earlier figures or sentence.
+        let credit = SummaryFacts.fresh(store.credit, unless: store.failures["commons_credit_summary"])
+        let condition = HomeFormat.pendingCondition(credit)
+        let rollup = SummaryFacts.fresh(store.rollup, unless: store.failures["history_rollup"])
         GlassEyebrowCard(MonitorWords.credit) {
             VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
                 GlassKeyValueList([
-                    .init(MonitorWords.final, HomeFormat.points(store.rollup?.creditFinal)),
-                    .init(MonitorWords.pending, HomeFormat.pendingFigure(store.rollup?.creditPending, credit: store.credit)),
+                    .init(MonitorWords.final, HomeFormat.points(rollup?.creditFinal)),
+                    .init(MonitorWords.pending, HomeFormat.pendingFigure(rollup?.creditPending, credit: credit)),
                 ])
                 if let condition {
                     Text(condition)
