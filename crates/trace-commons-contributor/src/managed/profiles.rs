@@ -255,17 +255,7 @@ pub(crate) fn private_directory(path: &Path) -> Result<(), ManagedError> {
             return Err(ManagedError::StorageUnavailable);
         }
         Ok(_) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            let mut builder = std::fs::DirBuilder::new();
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::DirBuilderExt;
-                builder.mode(0o700);
-            }
-            builder
-                .create(path)
-                .map_err(|_| ManagedError::StorageUnavailable)?;
-        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => create_private_directory(path)?,
         Err(_) => return Err(ManagedError::StorageUnavailable),
     }
     #[cfg(unix)]
@@ -275,6 +265,30 @@ pub(crate) fn private_directory(path: &Path) -> Result<(), ManagedError> {
             .map_err(|_| ManagedError::StorageUnavailable)?;
     }
     Ok(())
+}
+
+/// Create `path` owner-only. Two launches can race here; the loser's
+/// create fails with AlreadyExists, and the directory the winner made is
+/// accepted only as a real directory, never a symlink or a file.
+fn create_private_directory(path: &Path) -> Result<(), ManagedError> {
+    let builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    let builder = {
+        use std::os::unix::fs::DirBuilderExt;
+        let mut builder = builder;
+        builder.mode(0o700);
+        builder
+    };
+    match builder.create(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            match std::fs::symlink_metadata(path) {
+                Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => Ok(()),
+                _ => Err(ManagedError::StorageUnavailable),
+            }
+        }
+        Err(_) => Err(ManagedError::StorageUnavailable),
+    }
 }
 
 /// Project configuration can outrank the isolated profile. Never claim a
@@ -400,4 +414,58 @@ pub fn find_native(tool: ToolId) -> Result<PathBuf, ManagedError> {
         }
     }
     Err(ManagedError::UnsupportedVersion)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_directory_another_launch_just_made_is_accepted() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("profile");
+        std::fs::create_dir(&path).unwrap();
+        assert!(create_private_directory(&path).is_ok());
+    }
+
+    #[test]
+    fn a_file_in_the_directory_s_place_is_refused() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("profile");
+        std::fs::write(&path, b"").unwrap();
+        assert!(matches!(
+            create_private_directory(&path),
+            Err(ManagedError::StorageUnavailable)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_in_the_directory_s_place_is_refused() {
+        let home = tempfile::tempdir().unwrap();
+        let target = home.path().join("elsewhere");
+        std::fs::create_dir(&target).unwrap();
+        let path = home.path().join("profile");
+        std::os::unix::fs::symlink(&target, &path).unwrap();
+        assert!(matches!(
+            create_private_directory(&path),
+            Err(ManagedError::StorageUnavailable)
+        ));
+    }
+
+    #[test]
+    fn concurrent_creates_all_succeed() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("profile");
+        let results: Vec<_> = (0..8)
+            .map(|_| {
+                let path = path.clone();
+                std::thread::spawn(move || private_directory(&path))
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect();
+        assert!(results.iter().all(Result::is_ok), "{results:?}");
+    }
 }

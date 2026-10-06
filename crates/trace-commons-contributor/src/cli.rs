@@ -396,6 +396,20 @@ enum DaemonAction {
 /// Entry point shared by the `trace-commons-contributor` and `near-ai`
 /// binaries. Invoked as `near-ai`, the help names the canonical CLI.
 pub fn run() -> std::process::ExitCode {
+    // Windows gives the main thread 1 MiB, and a debug build's `daemon
+    // preview` frames outgrow it even with the dispatch future boxed. Run
+    // the whole CLI on a thread whose stack is ours to size.
+    const CLI_STACK_BYTES: usize = 8 * 1024 * 1024;
+    std::thread::Builder::new()
+        .name("cli".into())
+        .stack_size(CLI_STACK_BYTES)
+        .spawn(run_on_this_thread)
+        .expect("spawn the CLI thread")
+        .join()
+        .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+}
+
+fn run_on_this_thread() -> std::process::ExitCode {
     use clap::CommandFactory;
     let canonical = std::env::args_os()
         .next()

@@ -234,7 +234,7 @@ async fn two_managed_accounts_and_a_standard_session_run_together() {
         ids.push(account["id"].as_str().unwrap().to_owned());
         let project = home.path().join(label);
         std::fs::create_dir(&project).unwrap();
-        children.push(ChildGuard(Command::new("python3").args(["-c", "import os,pty,sys; sys.exit(os.waitstatus_to_exitcode(pty.spawn(sys.argv[1:])))", env!("CARGO_BIN_EXE_near-ai")]).arg("--config-dir").arg(&state).args(["launch","claude","--account",label,"--cwd"]).arg(&project).env("PATH",format!("{}:{}",bin.display(),std::env::var("PATH").unwrap())).env("ANTHROPIC_API_KEY","ordinary-fixture-key").env("CLAUDE_CONFIG_DIR","ordinary-profile").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap()));
+        children.push(ChildGuard(Command::new("python3").args(["-c", "import os,pty,sys; sys.exit(os.waitstatus_to_exitcode(pty.spawn(sys.argv[1:])))", env!("CARGO_BIN_EXE_near-ai")]).arg("--config-dir").arg(&state).args(["launch","claude","--account",label,"--cwd"]).arg(&project).env("PATH",format!("{}:{}",bin.display(),std::env::var("PATH").unwrap())).env("ANTHROPIC_API_KEY","ordinary-fixture-key").env("CLAUDE_CONFIG_DIR","ordinary-profile").stdin(Stdio::null()).stdout(Stdio::from(std::fs::File::create(home.path().join(format!("{label}.out"))).unwrap())).stderr(Stdio::from(std::fs::File::create(home.path().join(format!("{label}.err"))).unwrap())).spawn().unwrap()));
         projects.push(project);
     }
     let standard = home.path().join("Standard");
@@ -250,7 +250,30 @@ async fn two_managed_accounts_and_a_standard_session_run_together() {
     projects.push(standard.clone());
     let deadline = Instant::now() + Duration::from_secs(15);
     while projects.iter().any(|p| !p.join("inherited-key").exists()) {
-        assert!(Instant::now() < deadline);
+        // On a timeout, say which launches never reached the tool and what
+        // they printed: the children's output is otherwise discarded.
+        if Instant::now() >= deadline {
+            let waiting: Vec<_> = projects
+                .iter()
+                .filter(|p| !p.join("inherited-key").exists())
+                .collect();
+            let output: Vec<_> = ["Personal", "Work"]
+                .iter()
+                .flat_map(|label| {
+                    ["out", "err"].map(|kind| {
+                        format!(
+                            "{label}.{kind}: {}",
+                            std::fs::read_to_string(home.path().join(format!("{label}.{kind}")))
+                                .unwrap_or_default()
+                        )
+                    })
+                })
+                .collect();
+            panic!(
+                "launches never reached the tool: {waiting:?}\n{}",
+                output.join("\n")
+            );
+        }
         tokio::time::sleep(Duration::from_millis(30)).await;
     }
     loop {
