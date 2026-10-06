@@ -406,7 +406,7 @@ final class InferenceParityTests: XCTestCase {
                       "an unanswered list must not read as an empty one")
     }
 
-    func test_theInspectorCarriesTheAccountTheSwitchAndTheTools() throws {
+    func test_theMainPaneCarriesTheAccountTheSwitchAndTheTools() throws {
         let views = try Self.text("Views/Monitor/InferenceViews.swift")
         XCTAssertTrue(views.contains("InferenceAccountSection(store: store)"))
         for needle in ["case .needsRoots", "OnboardingCoordinatorView(startAt: .folders, takesInvites: false, offersJoin: false", "case .refused(let",
@@ -468,8 +468,8 @@ final class InferenceParityTests: XCTestCase {
     /// the first run's Folders step when folders are owed (outside the ledger's scroll,
     /// so it never nests one), a spinner while starting, the core's down
     /// title over the refusal's sentence, the ledger only while running;
-    /// and the refresh sits on the always-present stack. The inspector's
-    /// account, whose controls need the daemon, is drawn only while running.
+    /// and the refresh sits on the always-present stack. The account, whose
+    /// controls need the daemon, is drawn in the ledger, only while running.
     func test_theTabGatesOnTheDaemonsStartup() throws {
         let views = try Self.text("Views/Monitor/InferenceViews.swift")
         for needle in ["        VStack(alignment: .leading, spacing: 0) {\n"
@@ -488,9 +488,15 @@ final class InferenceParityTests: XCTestCase {
                            + "        }\n"
                            + "        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)\n"
                            + "        .onAppear { model.refreshAll() }\n",
-                       "                if case .running = model.startup {\n"
-                           + "                    InferenceAccountSection(store: store)\n"
-                           + "                }\n"] {
+                       // The account, the tools and the switch sit in the
+                       // main pane above the ledger (owner ruling on #1241,
+                       // after #1146's Private AI page), which is drawn only
+                       // while the daemon runs.
+                       "    private var ledger: some View {\n"
+                           + "        ScrollView {\n"
+                           + "            VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {\n",
+                       "                InferenceAccountSection(store: store)\n"
+                           + "                // The stack-wide rule (ScreenState)"] {
             XCTAssertTrue(views.contains(needle), "InferenceViews.swift lacks \(needle)")
         }
         XCTAssertEqual(views.components(separatedBy: ".onAppear").count - 1, 1)
