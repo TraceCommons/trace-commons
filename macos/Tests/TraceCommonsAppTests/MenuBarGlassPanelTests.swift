@@ -46,24 +46,41 @@ final class MenuBarGlassPanelTests: XCTestCase {
         XCTAssertTrue(source.contains("store.status?.contributionMode"))
     }
 
-    /// The pill's list checks Mixed while no override is in force, and the
-    /// override's own mode, alone, while one is. Clearing it goes back to
-    /// Mixed. Nothing is checked before the status is read.
-    func test_theListChecksMixedUnlessAnOverrideIsInForce() async throws {
+    /// The list agrees with the pill: with no override it checks the
+    /// core's roll-up (Mixed only when the folders differ, otherwise that
+    /// mode's row), and while one is in force it checks the override's own
+    /// mode alone. Nothing is checked before the status is read or while
+    /// the core is down, even with a status still in hand.
+    func test_theListChecksTheRollupUnlessAnOverrideIsInForce() async throws {
         let client = SampleDaemonClient(.normalDay)
         let modes: [String?] = [nil, "notify_only", "auto_upload", "ignore"]
-        func checked(_ status: DaemonData.Status?) -> [String?] {
-            modes.filter { MenuPanelData.listChecks($0, status: status) }
+        func checked(_ status: DaemonData.Status?, stale: Bool = false) -> [String?] {
+            modes.filter { MenuPanelData.listChecks($0, status: status, stale: stale) }
         }
         XCTAssertEqual(checked(nil), [])
         let before = try await client.status()
-        XCTAssertEqual(checked(before), [nil])
+        XCTAssertEqual(before.contributionMode, "notify_only")
+        XCTAssertEqual(checked(before), ["notify_only"], "every folder on Ask me checks Ask me, not Mixed")
+        XCTAssertEqual(checked(try Self.status(before, contributionMode: "mixed")), [nil])
+        XCTAssertEqual(checked(try Self.status(before, contributionMode: "auto_upload")), ["auto_upload"])
+        XCTAssertEqual(checked(before, stale: true), [])
         _ = try await client.setContributionOverride(mode: .ignore, confirm: false)
         let overridden = try await client.status()
         XCTAssertEqual(checked(overridden), ["ignore"])
+        XCTAssertEqual(checked(overridden, stale: true), [], "a core-down panel shows no override as known")
         _ = try await client.clearContributionOverride()
         let cleared = try await client.status()
-        XCTAssertEqual(checked(cleared), [nil])
+        XCTAssertEqual(checked(cleared), ["notify_only"])
+    }
+
+    /// `status` with the core's roll-up replaced, through its own coding.
+    private static func status(_ status: DaemonData.Status, contributionMode: String) throws -> DaemonData.Status {
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(status)) as? [String: Any])
+        let key = try XCTUnwrap(object.first { $0.value as? String == status.contributionMode && $0.key.lowercased().hasPrefix("contribution") }?.key)
+        object[key] = contributionMode
+        let patched = try JSONDecoder().decode(DaemonData.Status.self, from: JSONSerialization.data(withJSONObject: object))
+        XCTAssertEqual(patched.contributionMode, contributionMode)
+        return patched
     }
 
     // MARK: Day graph

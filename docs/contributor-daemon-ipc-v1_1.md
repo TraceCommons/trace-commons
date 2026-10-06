@@ -1742,8 +1742,12 @@ other roll-up. A shell shows the copy's `auto_partial` line under the
 label exactly when it is `true`.
 
 **Copy.** `tc_contribution_mode_copy_json` is the pill (title, `Mixed`, the
-three choices with their sub-list lines, the override line, the clear
-action, and `auto_partial`). `tc_contribution_override_confirm_json(mode, config_dir)` is each
+three choices with their sub-list lines, the override line, `clear`, and
+`auto_partial`). `clear` describes the Mixed row, whose choice clears an
+override in force; it is a sub-line, not a button label. A shell's list
+checks what the pill shows: the override's own mode while one is in force,
+otherwise the roll-up (the Mixed row only for `mixed`), and nothing while the
+status is unread or the daemon is down. `tc_contribution_override_confirm_json(mode, config_dir)` is each
 confirmation; for `auto_upload` it carries `arming`, the Flow 1 grant
 screens' disclosure table for the configuration in `config_dir`. Every new
 sentence is DRAFT, NEEDS APPROVAL (`project_copy.rs`).

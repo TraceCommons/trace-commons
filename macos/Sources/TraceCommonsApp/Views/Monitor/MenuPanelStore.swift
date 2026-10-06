@@ -213,14 +213,21 @@ enum MenuPanelData {
         }
     }
 
-    /// Whether the pill's list checks a row: an override's own mode while
-    /// one is in force, and the Mixed row (`mode` nil, each folder on its
-    /// own setting) while none is. Nothing is checked before the status
-    /// has been read.
-    static func listChecks(_ mode: String?, status: DaemonData.Status?) -> Bool {
-        guard let status else { return false }
-        guard let active = status.contributionOverride else { return mode == nil }
-        return mode != nil && active.mode == mode
+    /// Whether the pill's list checks a row, agreeing with the pill: an
+    /// override's own mode while one is in force; with none, the core's
+    /// roll-up, which is the Mixed row (`mode` nil) only when the folders
+    /// differ. Nothing is checked before the status has been read, or while
+    /// the core is down: a status kept from before is not a known mode.
+    static func listChecks(_ mode: String?, status: DaemonData.Status?, stale: Bool) -> Bool {
+        guard !stale, let status else { return false }
+        if let active = status.contributionOverride {
+            return mode != nil && active.mode == mode
+        }
+        switch rollup(status.contributionMode) {
+        case .mixed: return mode == nil
+        case .none: return false
+        case .ask, .armed, .never: return mode != nil && status.contributionMode == mode
+        }
     }
 
     /// The core's partial line, under Auto contribute exactly when the
