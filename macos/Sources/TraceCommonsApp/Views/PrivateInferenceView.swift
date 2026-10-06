@@ -73,6 +73,10 @@ struct PrivateInferenceContent: View {
             // Sign-in comes first so setup starts with the account needed
             // to connect tools. The section shows account controls once signed in.
             GlassCard { CredentialSection(copy: copy, prominent: true) }
+            // Saved model accounts and managed sessions follow account
+            // setup and lead the tool list.
+            ManagedSessionsSection()
+            ManagedGlobalSettingsHeader()
             GlassCard { HarnessListSection(copy: copy) }
             // The switch, below the list and unchanged: a kill switch, which
             // is what it always was. A switch the daemon has not reported
