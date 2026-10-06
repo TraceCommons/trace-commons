@@ -2637,7 +2637,15 @@ final class AppModel: ObservableObject {
     @Published private(set) var publicRunWorking: Set<String> = []
     @Published var skillLearningStore = SkillLearningStore()
     private var accountOwnedContentScope: String?
+    /// Stamps each detail read in the order it started. Any number of rows
+    /// may be read at once, and each read lands for its own row; one row is
+    /// never read twice at once (`loadingSessionDetails`).
     private var sessionDetailRequestSequence: UInt64 = 0
+    /// The stamp of the newest read that decided the account content belongs
+    /// to: the one that set `accountOwnedContentScope`, or cleared it. A read
+    /// that started before it and answers for another account is stale
+    /// (#869): it neither replaces nor clears what that newer read decided.
+    private var sessionDetailScopeSequence: UInt64 = 0
     @Published private(set) var skillLearningCopy: SkillLearningCopy? = SkillLearningCopy.decode(
         fromJSON: TCSkillLearning.copyJSON() ?? ""
     )
@@ -2807,17 +2815,29 @@ final class AppModel: ObservableObject {
             let result = Result { try client.sessionDetail(submissionID: id) }
             await MainActor.run {
                 self.loadingSessionDetails.remove(id)
-                guard requestSequence == self.sessionDetailRequestSequence else { return }
+                let superseded = requestSequence < self.sessionDetailScopeSequence
                 switch result {
                 case .success(let detail):
+                    if superseded, let scope = detail.ownerScopeSHA256, scope != self.accountOwnedContentScope {
+                        // Read under an account a newer read has replaced:
+                        // not shown, and the row says so, with Retry,
+                        // rather than drawing nothing.
+                        self.sessionDetailErrors[id] = TCPublicRun.sessionDetailErrorLine(label: "session-owner-changed")
+                        return
+                    }
+                    if detail.ownerScopeSHA256 != nil {
+                        self.sessionDetailScopeSequence = max(self.sessionDetailScopeSequence, requestSequence)
+                    }
                     self.reconcileAccountOwnedContent(scope: detail.ownerScopeSHA256)
                     self.sessionDetails[id] = detail
                 case .failure(let error):
                     let label = (error as? DaemonClient.Failure)?.message ?? ""
-                    if label == "account-session-required"
-                        || label == "session-detail-not-found"
-                        || label == "session-owner-changed"
+                    if !superseded,
+                        label == "account-session-required"
+                            || label == "session-detail-not-found"
+                            || label == "session-owner-changed"
                     {
+                        self.sessionDetailScopeSequence = requestSequence
                         self.clearAccountOwnedContent()
                     }
                     self.sessionDetailErrors[id] = TCPublicRun.sessionDetailErrorLine(label: label)
