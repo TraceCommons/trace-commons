@@ -135,6 +135,13 @@ final class FlowMapSceneTests: XCTestCase {
                        FlowMapScene.pair(ProjectCopy.modeChoiceLabel(.autoUpload), nil as Int?))
     }
 
+    /// The menu's second-look row sets its count apart with a spaced dot,
+    /// and an unread count is a dash, as `pair` draws it.
+    func test_dotPairSpacesTheCountAndDashesAnUnreadOne() {
+        XCTAssertEqual(FlowMapScene.dotPair("Worth a second look", 3), "Worth a second look · 3")
+        XCTAssertEqual(FlowMapScene.dotPair("Worth a second look", nil), "Worth a second look · —")
+    }
+
     /// An off tool never flows, even with an armed folder under it.
     func test_anOffToolNeverFlows() async throws {
         let open = try await gate(.armedFolder)

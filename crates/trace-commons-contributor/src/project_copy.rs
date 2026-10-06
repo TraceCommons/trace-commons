@@ -283,9 +283,9 @@ pub const CONTRIBUTION_MODE_AUTO_PARTIAL: &str = "Except folders set to Never. S
 pub const CONTRIBUTION_OVERRIDE_ACTIVE: &str =
     "This setting is overriding each folder's own setting.";
 
-/// The action that clears the override
-/// (`clear_contribution_override`).
-pub const CONTRIBUTION_OVERRIDE_CLEAR: &str = "Use each folder's own setting";
+/// The action that clears the override (`clear_contribution_override`):
+/// the sub-line of the pill list's Mixed row, under `CONTRIBUTION_MODE_MIXED`.
+pub const CONTRIBUTION_OVERRIDE_CLEAR: &str = "Use each folder's setting";
 
 /// The "Ask me" override's confirmation.
 pub const CONTRIBUTION_OVERRIDE_ASK_TITLE: &str = "Ask before contributing from every folder?";

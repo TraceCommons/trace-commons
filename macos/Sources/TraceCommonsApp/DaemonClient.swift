@@ -953,6 +953,15 @@ final class DaemonClient {
             fromJSON: TCPreviewTurns.turnsJSON(daemon: live, entryID: entryID, bodyDigest: bodyDigest))
     }
 
+    #if DEBUG
+    /// K2 (#1173): whether this daemon is running a developer dry run, as
+    /// its own `status` reports it. False when the call fails.
+    func devDryRunActive() -> Bool {
+        guard let data = try? rawResult("status") else { return false }
+        return DaemonDataWiring.devDryRun(fromStatus: data)
+    }
+    #endif
+
     // MARK: - Plumbing
 
     /// Shared by focused protocol extensions while raw daemon framing stays

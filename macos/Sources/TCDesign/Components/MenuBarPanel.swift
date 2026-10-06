@@ -104,12 +104,12 @@ public struct GlassSubListHeader: View {
 
     public var body: some View {
         Button(action: onClose) {
-            HStack(spacing: GlassTokens.Space.s4) {
+            HStack(spacing: GlassTokens.Space.s5) {
                 Image(systemName: "chevron.left")
-                    .glassGlyph(13, weight: .semibold)
+                    .glassGlyph(14, weight: .medium)
                     .foregroundStyle(GlassColor.textSecondary)
                 Text(title)
-                    .glassType(GlassTokens.TypeScale.title)
+                    .glassType(GlassTokens.TypeScale.title.weight(.bold))
                     .foregroundStyle(GlassColor.textPrimary)
                 Spacer(minLength: 0)
             }
@@ -359,7 +359,7 @@ public struct GlassMenuBarStrip: View {
         let grey = Self.grey(condition)
         HStack(spacing: 2) {
             ForEach(Array(columns.enumerated()), id: \.element.id) { index, _ in
-                VStack(spacing: 0) {
+                VStack(spacing: 1) {
                     RoundedRectangle(cornerRadius: 1)
                         .fill(grey ? GlassTokens.Color.menuBarsPaused.color : GlassTokens.Color.dataShared.color)
                         .frame(width: 2.5, height: bars[index].up)
@@ -367,7 +367,7 @@ public struct GlassMenuBarStrip: View {
                         .fill(grey ? GlassTokens.Color.menuBarsPaused.color : GlassTokens.Color.dataKept.color)
                         .frame(width: 2.5, height: bars[index].down)
                 }
-                .frame(height: 18, alignment: .center)
+                .frame(height: 20, alignment: .center)
             }
         }
         .padding(.horizontal, 4)

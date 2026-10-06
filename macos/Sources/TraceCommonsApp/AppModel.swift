@@ -1087,6 +1087,20 @@ final class AppModel: ObservableObject {
                 self.startup = .running
                 self.subscribe()
                 self.refreshAll()
+                #if DEBUG
+                // K2 (#1173): console-only, so a developer can confirm the
+                // dry run took before trusting the screens. Asked of the
+                // daemon, not read from the environment, so it matches the
+                // daemon's own mode. A label, not a sentence
+                // (`ShellWordingTests`).
+                if let client = self.client {
+                    Task.detached {
+                        if client.devDryRunActive() {
+                            NSLog("TraceCommons: status.dev_dry_run=true")
+                        }
+                    }
+                }
+                #endif
             case .failure(TCDaemon.TCError.rootsNotDeclared):
                 self.startup = .needsRoots
             case .failure(let error):

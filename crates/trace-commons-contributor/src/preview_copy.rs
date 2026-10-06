@@ -862,7 +862,7 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
         shared: "shared",
         kept: "kept",
         recent_activity: "Recent activity",
-        flagged: "Flagged",
+        flagged: SECOND_LOOK_HEADING,
         manage_rules: "Manage rules…",
         settings: "Trace Commons Settings…",
         settings_title: "Settings",

@@ -246,6 +246,88 @@ impl EmbeddedDaemon {
     }
 }
 
+/// The environment variable that turns on the K2 (#1173) developer dry run.
+/// Debug builds only: a release build has neither this name nor the code
+/// that reads it, so `macos/scripts/check-dev-dry-run-release.sh` can check
+/// the release dylib for the string.
+#[cfg(debug_assertions)]
+const DEV_DRY_RUN_ENV: &str = "TC_DEV_DRY_RUN";
+
+/// Whether this process runs the K2 (#1173) developer dry run: a daemon
+/// that watches and queues real sessions as usual, in its own state store
+/// (see [`dev_dry_run_store`]), and that refuses every IPC method that is
+/// not local (`ipc::DEV_DRY_RUN_LOCAL_METHODS`) and never drains the queue.
+///
+/// Read by `start_embedded` before `DaemonShared`'s `Arc` is ever cloned,
+/// and by the C ABI's start calls to pick the state store. A later change
+/// to the environment has no effect until the daemon restarts.
+///
+/// Always `false` in a release build, whatever the environment says.
+pub fn dev_dry_run_enabled() -> bool {
+    #[cfg(debug_assertions)]
+    {
+        dev_dry_run_value(std::env::var(DEV_DRY_RUN_ENV).ok().as_deref())
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        false
+    }
+}
+
+/// `1` or `true` in any case. Anything else, or no value, is off.
+#[cfg(debug_assertions)]
+fn dev_dry_run_value(value: Option<&str>) -> bool {
+    value.is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+}
+
+/// The folder a developer dry run keeps its state in, in place of the real
+/// state directory: `~/Library/Caches/TraceCommons/dev-dry-run/` on macOS.
+pub fn dev_dry_run_dir() -> Result<std::path::PathBuf> {
+    Ok(dirs::cache_dir()
+        .context("could not determine a cache directory for this platform")?
+        .join("TraceCommons")
+        .join("dev-dry-run"))
+}
+
+/// The state store to start a daemon against: `real` normally, and under a
+/// developer dry run a separate store in [`dev_dry_run_dir`].
+///
+/// A dry run may read the real store, but never writes it. Its queue,
+/// policy, history and audit log are its own, so nothing a dry run does can
+/// change what the real daemon later sends. Idempotent: given the dry-run
+/// store itself, it returns it unchanged.
+pub fn dev_dry_run_store(real: ConfigStore) -> Result<ConfigStore> {
+    if !dev_dry_run_enabled() {
+        return Ok(real);
+    }
+    isolate_dev_dry_run_store(&real, dev_dry_run_dir()?)
+}
+
+/// Open `dir` as the dry-run store. The first time, seed it with a copy of
+/// the real store's enrolment terms (`contributor.json`) and settings (the
+/// declared session roots among them), so the dry run reads the same
+/// sessions and builds the same envelopes. Nothing else is copied: no
+/// device key, account session, queue, policy or history.
+fn isolate_dev_dry_run_store(real: &ConfigStore, dir: std::path::PathBuf) -> Result<ConfigStore> {
+    if real.dir() == dir.as_path() {
+        return ConfigStore::open(dir);
+    }
+    let dry = ConfigStore::open(dir).context("opening the dev dry-run state directory")?;
+    for name in [
+        crate::config::CONFIG_FILE,
+        crate::config::DAEMON_SETTINGS_FILE,
+    ] {
+        if dry.daemon_path(name).exists() {
+            continue;
+        }
+        if let Ok(bytes) = std::fs::read(real.daemon_path(name)) {
+            dry.write_daemon_file(name, &bytes)
+                .context("seeding the dev dry-run state directory")?;
+        }
+    }
+    Ok(dry)
+}
+
 /// Take the daemon's exclusive lock, build the shared state, and bind and
 /// spawn the socket server -- everything `run` does before it starts the
 /// supervise loop, returned as pieces instead of run to completion.
@@ -267,6 +349,9 @@ impl EmbeddedDaemon {
 /// `try_lock`: that file belongs to the daemon holding it, and this function
 /// must not touch it.
 pub async fn start_embedded(store: ConfigStore) -> Result<EmbeddedDaemon> {
+    // K2 (#1173): a dev dry run never opens the real state directory for
+    // writing -- not even its lock file.
+    let store = dev_dry_run_store(store)?;
     let lock_path = store.daemon_path(DAEMON_LOCK_FILE);
     let lock = std::fs::OpenOptions::new()
         .create(true)
@@ -317,8 +402,17 @@ pub async fn start_embedded(store: ConfigStore) -> Result<EmbeddedDaemon> {
     // a zero-byte `daemon.lock` from a failed start was read as proof the
     // daemon had started, and produced a confident wrong diagnosis.
     let started = async {
-        let shared =
+        let mut shared =
             Arc::new(tokio::task::spawn_blocking(move || ipc::DaemonShared::load(store)).await??);
+        // K2 (#1173): the one place `dev_dry_run` is ever set to `true`.
+        // `Arc::get_mut` succeeds only while this is the sole reference,
+        // which stops being true when `preview_runner` below takes its
+        // first clone, so nothing downstream can change it.
+        if dev_dry_run_enabled() {
+            if let Some(shared_mut) = Arc::get_mut(&mut shared) {
+                shared_mut.dev_dry_run = true;
+            }
+        }
         // Claim this runtime for anything the daemon hosts that outlives one
         // request. This block is `async` and runs on the real daemon runtime
         // in both entry points, which is the whole reason the call belongs
@@ -439,6 +533,9 @@ async fn supervise(shared: Arc<ipc::DaemonShared>, dry_run: bool) -> Result<()> 
 /// The periodic work: watch, expire, and decide about digests, until asked to
 /// stop.
 async fn supervise_passes(shared: &Arc<ipc::DaemonShared>, dry_run: bool) -> Result<()> {
+    // K2 (#1173): a dev dry run is a dry run: no upload, history or
+    // community pass, and no account admission refresh.
+    let dry_run = dry_run || shared.dev_dry_run;
     let poll_interval = {
         let s = shared.settings.lock().expect("settings lock");
         std::time::Duration::from_secs(s.poll_interval_secs.max(1))
@@ -653,6 +750,12 @@ async fn drain_approved(
     // the contributor's own persisted pause setting. See `DaemonShared::
     // quiesced`.
     if shared.quiesced.load(Ordering::Relaxed) {
+        return Ok(());
+    }
+    // K2 (#1173): a dev dry run sends nothing, and leaves every entry as it
+    // is. Refusing an entry here would record a final `Refused`, and an
+    // approved session would never upload once the dry run ended.
+    if shared.dev_dry_run {
         return Ok(());
     }
 
@@ -2561,6 +2664,123 @@ mod tests {
                 Some("session-file-vanished".to_string())
             )),
             "released: the pass reached the send"
+        );
+    }
+
+    /// K2 (#1173): a dev dry run leaves an approved entry exactly as it was
+    /// -- still `Approved`, not `Refused`, with no attempt recorded -- so it
+    /// uploads as approved once the daemon runs without the dry run. The
+    /// same entry is marked `session-file-vanished` by an ordinary pass
+    /// (see the test above), so a pass that reached it would show here.
+    #[tokio::test]
+    async fn a_dev_dry_run_leaves_an_approved_entry_approved() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::config::ConfigStore::open(dir.path().join("state")).unwrap();
+        let mut shared = ipc::DaemonShared::load(store).unwrap();
+        shared.dev_dry_run = true;
+        let shared = Arc::new(shared);
+        let id = seed_contributor_approval(&shared);
+        let before = shared.queue.lock().expect("queue lock").get(id).cloned();
+
+        for _ in 0..3 {
+            drain_approved_for_test(&shared, at("2026-08-08T13:00:00Z"))
+                .await
+                .unwrap();
+        }
+
+        let after = shared.queue.lock().expect("queue lock").get(id).cloned();
+        assert_eq!(after, before, "left exactly as it was");
+        assert_eq!(after.map(|e| e.state), Some(queue::QueueState::Approved));
+    }
+
+    /// Every file under `dir`, by relative path, with its bytes.
+    fn snapshot_dir(dir: &std::path::Path) -> std::collections::BTreeMap<String, Vec<u8>> {
+        fn walk(
+            root: &std::path::Path,
+            dir: &std::path::Path,
+            out: &mut std::collections::BTreeMap<String, Vec<u8>>,
+        ) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    walk(root, &path, out);
+                } else {
+                    let rel = path.strip_prefix(root).unwrap().display().to_string();
+                    out.insert(rel, std::fs::read(&path).unwrap());
+                }
+            }
+        }
+        let mut out = std::collections::BTreeMap::new();
+        walk(dir, dir, &mut out);
+        out
+    }
+
+    /// K2 (#1173): a dev dry run runs against its own store. It is seeded
+    /// with the real enrolment terms and settings, and nothing else, and a
+    /// session that approves, dismisses, pauses, changes settings and
+    /// drains leaves every byte of the real store as it was -- including an
+    /// entry the contributor had already approved there.
+    #[tokio::test]
+    async fn a_dev_dry_run_never_writes_the_real_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = crate::config::ConfigStore::open(dir.path().join("real")).unwrap();
+        let real_approved = {
+            let shared = ipc::DaemonShared::load(real.clone()).unwrap();
+            let id = seed_contributor_approval(&shared);
+            shared.queue.lock().unwrap().save(&shared.store).unwrap();
+            shared.state.lock().unwrap().save(&shared.store).unwrap();
+            id
+        };
+        let before = snapshot_dir(real.dir());
+
+        let dry = isolate_dev_dry_run_store(&real, dir.path().join("dry")).unwrap();
+        assert_ne!(dry.dir(), real.dir());
+        assert!(
+            dry.load_config().unwrap().is_some(),
+            "enrolment terms are copied"
+        );
+        for name in [
+            crate::config::DAEMON_QUEUE_FILE,
+            crate::config::DAEMON_STATE_FILE,
+        ] {
+            assert!(!dry.daemon_path(name).exists(), "{name} is not copied");
+        }
+
+        let mut shared = ipc::DaemonShared::load(dry).unwrap();
+        shared.dev_dry_run = true;
+        let shared = Arc::new(shared);
+        let id = seed_contributor_approval(&shared);
+        for (method, params) in [
+            ("approve", serde_json::json!({ "all": true })),
+            ("dismiss", serde_json::json!({ "entry_id": id })),
+            ("pause", serde_json::json!({})),
+            ("resume", serde_json::json!({})),
+            (
+                "set_settings",
+                serde_json::json!({ "approval_hold_secs": 60 }),
+            ),
+        ] {
+            let request = ipc::Request {
+                id: 1,
+                method: method.to_string(),
+                params,
+            };
+            let _ = ipc::handle_request_async(&shared, &request).await;
+        }
+        drain_approved_for_test(&shared, at("2026-08-08T13:00:00Z"))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            snapshot_dir(real.dir()),
+            before,
+            "the real store is untouched"
+        );
+        let real_queue = queue::Queue::load(&real).unwrap();
+        assert_eq!(
+            real_queue.get(real_approved).map(|e| e.state),
+            Some(queue::QueueState::Approved),
+            "the real approval is still an approval"
         );
     }
 
