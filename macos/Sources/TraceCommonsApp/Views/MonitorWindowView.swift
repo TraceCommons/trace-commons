@@ -38,8 +38,11 @@ struct MonitorWindowView: View {
         case privateAI
     }
 
+    /// Settings is drawn over the panes while `navigation.settingsRequest`
+    /// is set (Ron's #1146 modal; #1241 Task 10).
+    let navigation: MainWindowNavigation
+
     @EnvironmentObject private var model: AppModel
-    @Environment(\.openSettings) private var openSettings
 
     @SceneStorage("monitor.tab") private var tab: Tab = .home
     @SceneStorage("monitor.mapTab") private var mapTab: MapTab = .traces
@@ -54,11 +57,14 @@ struct MonitorWindowView: View {
     @State private var mapFocus = false
     /// What asked for the inspector last time (`InspectorDemand`).
     @State private var lastDemand: Set<String> = []
-    /// The selected session's entry id; empty for none.
-    @SceneStorage("monitor.selectedSession") private var selectedSession = ""
+    /// The Traces tree's selection, a folder or a session; nil for none.
+    /// Restored per window, and read only through `TracesStore.resolve`, so
+    /// one that has gone is the Summary, never a stale card.
+    @SceneStorage("monitor.selection") private var selection: MonitorSelection?
     /// Home's page: the overview or History, restored per window.
     @SceneStorage("monitor.homePage") private var homePage: HomeTabView.Page = .overview
-    /// The selected History row's submission id; empty for none.
+    /// The opened History row's submission id; empty for none. Its details
+    /// are drawn in History's left pane, below the list.
     @SceneStorage("monitor.selectedHistory") private var selectedHistory = ""
 
     /// The screens' data, read through the app's live client
@@ -126,12 +132,17 @@ struct MonitorWindowView: View {
                 showsMap: $showsMap, showsInspector: $showsInspector, showsGraph: $showsGraph,
                 showsIgnored: $showsIgnored,
                 breadcrumb: Self.breadcrumb(tab: tab, homePage: homePage, back: { homePage = .overview }),
-                onSettings: { openSettings() }
+                onSettings: { navigation.requestSettings() }
             ) {
                 switch tab {
                 case .traces:
-                    TracesTreeView(store: traces, selection: $selectedSession) { entryId in
-                        Self.review(entryId, selection: &selectedSession, showsInspector: &showsInspector)
+                    TracesTreeView(
+                        store: traces,
+                        selection: Binding(
+                            get: { selection },
+                            set: { Self.select($0, selection: &selection, showsInspector: &showsInspector) })
+                    ) { entryId in
+                        Self.select(.session(entryID: entryId), selection: &selection, showsInspector: &showsInspector)
                     }
                 case .inference: InferenceTabView(store: inference)
                 case .home:
@@ -139,11 +150,12 @@ struct MonitorWindowView: View {
                         store: home, traces: traces,
                         statusLabel: { HomeFormat.historyStatusLabel(copy: model.publicRunCopy, $0) },
                         page: $homePage,
-                        // Selecting a row shows the inspector, where its
-                        // details are, as a session's Review does.
+                        // Opening a row draws its details in History's own
+                        // pane, below the list (Ron's #1146). The inspector
+                        // keeps the Traces selection's card.
                         selection: Binding(
                             get: { selectedHistory },
-                            set: { Self.review($0, selection: &selectedHistory, showsInspector: &showsInspector) }),
+                            set: { selectedHistory = $0 }),
                         openTraces: { tab = .traces })
                 }
             } footer: {
@@ -163,35 +175,59 @@ struct MonitorWindowView: View {
             GlassPane {
                 // An empty branch would leave the pane nothing to draw, and
                 // it would vanish while the layout still reserved its width.
+                // Ron's #1146: the prompts head the inspector on every tab,
+                // since a demand opens it on every tab. Inference keeps its
+                // own inspector under them; Home, Traces and History host
+                // the health banners, the prompts and the selection's
+                // inspector.
                 switch tab {
-                case .traces:
-                    SessionInspectorView(store: traces, entry: selectedEntry)
                 case .inference:
-                    PrivateAIInspectorView(store: inference, destinationLabel: model.privateInferenceCopy?.destination)
-                case .home:
-                    // History's selected row, while it is still listed; the
-                    // record as a whole otherwise.
-                    if homePage == .history, let row = selectedHistoryRow {
-                        HistoryDetailInspector(row: row)
-                    } else {
-                        HomeSummaryInspector(store: home)
+                    VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
+                        InspectorPrompts(store: traces)
+                        PrivateAIInspectorView(store: inference, destinationLabel: model.privateInferenceCopy?.destination)
                     }
+                case .home, .traces:
+                    // History included: Ron mounts `WaitingPage` there too,
+                    // so the inspector keeps the Traces selection's card
+                    // while History's detail opens in the left pane.
+                    TracesInspectorHost(traces: traces, home: home, selection: selection)
                 }
+            }
+        }
+        // Settings is a modal over all three panes (Ron's #1146): while it is
+        // open the panes take no focus and no clicks, are hidden from
+        // VoiceOver, and are blurred under its scrim.
+        .disabled(navigation.settingsRequest != nil)
+        .accessibilityHidden(navigation.settingsRequest != nil)
+        .blur(radius: navigation.settingsRequest == nil ? 0 : GlassTokens.Size.modalScrimBlur)
+        .overlay {
+            if let request = navigation.settingsRequest {
+                SettingsModal(
+                    request: request, navigation: navigation, paused: traces.status?.paused,
+                    onClose: { navigation.settingsRequest = nil },
+                    onPrivateAI: { Self.openPrivateAI(tab: &tab, navigation: navigation) })
             }
         }
         .glassWindow()
         // Modals and confirmations raised anywhere in the window cover all
-        // of it.
+        // of it, Settings' sections' own included: the Settings modal sits
+        // inside this host.
         .glassModalHost()
-        // The undo window, a folder's Submit all and the core's offers open
-        // the inspector when they appear, so none runs out of sight (#1146
-        // `useInspectorDemand`); they also stay above the tree.
-        .onChange(of: inspectorDemand) { _, current in
+        // Ron's `useInspectorDemand`: a key that was not there before (an
+        // undo, a selected session, a folder's Submit all in flight, the
+        // arming or Private AI offer) opens the inspector, so none runs out
+        // of sight. A key going away closes nothing.
+        .onChange(of: demandKeys) { _, current in
             if InspectorDemand.opens(previous: lastDemand, current: current) { showsInspector = true }
             lastDemand = current
         }
         .onAppear {
-            lastDemand = inspectorDemand
+            // `onChange` sees changes only: a demand already there when the
+            // window appears (an undo made while the Monitor was closed,
+            // over a restored closed inspector) opens it too, as Ron's
+            // effect does on mount.
+            if InspectorDemand.opensOnAppear(keys: demandKeys) { showsInspector = true }
+            lastDemand = demandKeys
             traces.showsIgnored = showsIgnored
         }
         .onChange(of: showsIgnored) { _, shows in traces.showsIgnored = shows }
@@ -239,18 +275,17 @@ struct MonitorWindowView: View {
         return parts.isEmpty ? nil : parts.joined(separator: ", ")
     }
 
-    /// What asks for the inspector now (`InspectorDemand`).
-    private var inspectorDemand: Set<String> {
-        InspectorDemand.keys(
-            approvalUndo: model.undo?.entryIDs, contributed: traces.lastContributed?.entryId, kept: traces.lastKept,
-            contributedFolder: traces.lastContributedFolder?.projectId, submittingFolder: traces.submittingFolder,
-            privateAIOffer: model.showsPrivateInferenceOffer, armingOffer: model.armingOffer?.projectId)
+    /// What the inspector must show right now (`InspectorDemand`).
+    private var demandKeys: Set<String> {
+        InspectorDemand.keys(model: model, traces: traces, selection: selection)
     }
 
-    /// The selected session's tool, when it sits under one: what the graph
-    /// counts and the binoculars focus the map on.
+    /// The selected session's tool: what the graph counts and the
+    /// binoculars focus the map on. The tree has no tool level, so it is
+    /// the session's own tool.
     private var selectedTool: SourceKind? {
-        TracesTreeView.path(to: selectedSession, in: traces.tree)?.tool.flatMap(SourceKind.init(rawValue:))
+        guard let entry = traces.selectedSession(selection) else { return nil }
+        return SourceKind(rawValue: entry.declaredSource ?? entry.source) ?? SourceKind(rawValue: entry.source)
     }
 
     /// The binoculars: focus the map on the selected tool, or back to the
@@ -274,23 +309,20 @@ struct MonitorWindowView: View {
         }
     }
 
-    /// The selected session, while it is still in the tree.
-    private var selectedEntry: DaemonData.QueueEntry? {
-        traces.tree.allSessions.first { $0.entryId == selectedSession }
+    /// A tree selection. A session is a demand on the inspector, as in
+    /// Ron's `useInspectorDemand`: selecting one shows the inspector its
+    /// card lives in. A folder, or nothing, moves the selection only. The
+    /// inspector never closes itself.
+    static func select(_ wanted: MonitorSelection?, selection: inout MonitorSelection?, showsInspector: inout Bool) {
+        selection = wanted
+        if case .session = wanted { showsInspector = true }
     }
 
-    /// The selected History row, while it is still in the list.
-    private var selectedHistoryRow: DaemonData.HistoryRow? {
-        guard !selectedHistory.isEmpty else { return nil }
-        return home.history?.first { $0.submissionId == selectedHistory }
-    }
-
-    /// A session's Review: select it and show the inspector, where its
-    /// review is. With the inspector hidden, selecting alone did nothing a
-    /// person could see. Selecting a History row goes the same way.
-    static func review(_ entryId: String, selection: inout String, showsInspector: inout Bool) {
-        selection = entryId
-        showsInspector = true
+    /// The Settings modal's Private AI pointer: close the modal and open the
+    /// Inference tab, as Ron's `navigate(routePaths["private-ai"])` does.
+    static func openPrivateAI(tab: inout Tab, navigation: MainWindowNavigation) {
+        navigation.settingsRequest = nil
+        tab = .inference
     }
 
     /// The first time this window is shown, open the panes its screen has
@@ -299,7 +331,9 @@ struct MonitorWindowView: View {
         guard !panesSeeded else { return }
         let seed = GlassPaneLayout.firstLaunch(windowWidth: windowWidth)
         showsMap = seed.showsMap
-        showsInspector = seed.showsInspector
+        // A narrow first layout seeds the inspector closed, but never over
+        // something it must show.
+        showsInspector = seed.showsInspector || InspectorDemand.opensOnAppear(keys: demandKeys)
         panesSeeded = true
     }
 
@@ -519,58 +553,24 @@ private struct MonitorMapPane: View {
     }
 }
 
-/// The Settings window (D8; R11 of #1173): the section list and, beside
-/// it, the selected section alone, each scrolling on its own (spec,
-/// "Settings navigation"). The sections are the existing settings, with
-/// their behaviour and the core's copy unchanged; the list only chooses
-/// which one is drawn. The selection is restored, and opening or closing
-/// this window leaves the monitor window as it was.
+/// The name the Settings scene mounted (D8; R11 of #1173), kept because
+/// #1242 still mounts it. Settings is now Ron's modal over the Monitor
+/// (#1241 Task 10, `SettingsModal`), so this draws nothing of its own: it
+/// opens the Monitor, asks it for the modal, and closes itself.
 struct MonitorSettingsWindow: View {
     let navigation: MainWindowNavigation
 
-    @EnvironmentObject private var model: AppModel
-    @Environment(ComputeModel.self) private var compute
-    @SceneStorage("settings.section") private var section: SettingsSection = .connection
+    @Environment(\.openWindow) private var openWindow
+    @Environment(\.dismiss) private var dismiss
 
     var body: some View {
-        NavigationSplitView {
-            // One list with arrow-key selection, not a button per row.
-            List(selection: Binding(get: { section }, set: { if let value = $0 { section = value } })) {
-                ForEach(SettingsSection.allCases) { item in
-                    // A section whose copy has not loaded is a disabled
-                    // placeholder, never a missing row.
-                    let row = item.listRow(.init(model: model, compute: compute.snapshot?.title))
-                    Label(row.text, systemImage: item.symbol)
-                        .lineLimit(2)
-                        .foregroundStyle(row.enabled ? .primary : .secondary)
-                        .accessibilityLabel(row.enabled ? row.text : MonitorWords.unknown)
-                        .selectionDisabled(!row.enabled)
-                        .tag(item)
-                }
+        Color.clear
+            .frame(width: 1, height: 1)
+            .onAppear {
+                openWindow(id: WindowID.monitor)
+                navigation.requestSettings()
+                dismiss()
             }
-            .navigationSplitViewColumnWidth(min: 200, ideal: 230, max: 280)
-        } detail: {
-            Group {
-                switch section {
-                case .compute:
-                    ScrollView {
-                        ComputeView(model: compute)
-                            .padding(GlassTokens.Space.panePadding)
-                            .frame(maxWidth: 560, alignment: .leading)
-                            .frame(maxWidth: .infinity, alignment: .topLeading)
-                    }
-                default:
-                    ScrollView {
-                        GlassSettingsContent(navigation: navigation, section: section)
-                    }
-                }
-            }
-            // A fresh view per section, so the scroll starts at its top.
-            .id(section)
-        }
-        .frame(minWidth: 760, minHeight: 520)
-        // A section's modals and confirmations cover the whole window.
-        .glassModalHost()
     }
 }
 #endif

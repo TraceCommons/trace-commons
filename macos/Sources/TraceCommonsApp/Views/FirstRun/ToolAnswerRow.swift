@@ -105,7 +105,7 @@ struct ToolAnswerRow: View {
         GlassCard {
             VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
                 HStack(spacing: GlassTokens.Space.s6) {
-                    GlassToolTile(.tool(TracesTreeView.glassTool(candidate.source)), large: true)
+                    GlassToolTile(.tool(candidate.source.glassTool), large: true)
                     VStack(alignment: .leading, spacing: 0) {
                         Text(candidate.source.displayName)
                             .glassType(GlassTokens.TypeScale.bodyStrong)

@@ -375,26 +375,4 @@ enum InferenceWords {
         DaemonData.ProofLabel(rawValue: raw).map(proof) ?? "—"
     }
 }
-
-/// The monitor screens' words, read from the core's table
-/// (`MonitorScreensCopy`, `tc_monitor_screens_copy_json`). This shell holds
-/// none of its own: with no table a word is empty, never a Swift fallback.
-enum MonitorWords {
-    /// The core's table, decoded once.
-    static let table: MonitorScreensCopy? = MonitorScreensCopy.decode(fromJSON: TCCoreCopy.monitorScreensCopyJSON())
-
-    static var computer: String { table?.computer ?? "" }
-    static var commons: String { table?.commons ?? "" }
-    static var waiting: String { table?.waiting ?? "" }
-    static var folders: String { table?.folders ?? "" }
-    static var watched: String { table?.watched ?? "" }
-    static var off: String { table?.off ?? "" }
-    static var connected: String { table?.connected ?? "" }
-    static var reduce: String { table?.reduce ?? "" }
-    static var enlarge: String { table?.enlarge ?? "" }
-    static var calls: String { table?.calls ?? "" }
-    static var models: String { table?.models ?? "" }
-    static var priced: String { table?.priced ?? "" }
-    static var unknown: String { table?.unknown ?? "" }
-}
 #endif

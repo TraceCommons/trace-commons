@@ -3,17 +3,17 @@ import SwiftUI
 import TCDesign
 import TCShellCore
 
-/// The selected History row's details (D-7): its status in the core's
+/// The opened History row's details (D-7), drawn in History's left pane
+/// below the list (Ron's #1146 `HistoryPage`): its status in the core's
 /// words, then the session detail the legacy History opens (`SessionDetailView`:
-/// reading and read-failure with Retry, the contribution overview with
-/// Withdraw and its confirmation, Skills behind `SkillLearningGate`, and
-/// the public-run editor), composed rather than drawn a second time.
+/// reading and read-failure with Retry, the contribution overview, Skills
+/// behind `SkillLearningGate`, and the public-run editor), composed rather
+/// than drawn a second time. Withdraw is not drawn here: it is on the row
+/// above (Ron's `HistoryRow`), so History's page has one.
 ///
 /// Everything below the status runs on the app's own record of the
 /// contribution (`AppModel.history`). A row the record does not hold yet
-/// draws its status alone: no Withdraw, no editor, no Skills (fail closed).
-/// Withdraw asks the detail's status, else the record's, never the list
-/// row's optional one, and does not wait for the detail read. Without the
+/// draws its status alone: no editor, no Skills (fail closed). Without the
 /// core's public-run copy (static, not a daemon answer) the session detail
 /// draws nothing, and nothing is offered.
 struct HistoryDetailInspector: View {
@@ -24,27 +24,25 @@ struct HistoryDetailInspector: View {
         HistorySelection.record(for: row.submissionId, in: model.history)
     }
 
-    // The always-present scroll view reads the detail and the installed
-    // skill for the row, again when its record first resolves or its status
-    // moves. The session detail reads it again when the app comes back to
-    // the front.
+    // The always-present stack reads the detail and the installed skill for
+    // the row, again when its record first resolves or its status moves.
+    // The session detail reads it again when the app comes back to the
+    // front. It scrolls with History's page (Ron's #1146 draws the opened
+    // row below the list, in the left pane), so it has no scroll of its own.
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
-                summary
-                defects
-                // A new row is a new detail: its editor draft, withdrawal
-                // confirmation and Skills panel are the record's, and the
-                // pane outlives the selection.
-                if let record {
-                    explanations(record)
-                    SessionDetailView(record: record)
-                        .id(record.submissionID)
-                }
+        VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
+            summary
+            defects
+            // A new row is a new detail: its editor draft, withdrawal
+            // confirmation and Skills panel are the record's, and the
+            // page outlives the selection.
+            if let record {
+                explanations(record)
+                SessionDetailView(record: record, offersWithdrawal: false)
+                    .id(record.submissionID)
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .scrollIndicators(.never)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .task(id: [row.submissionId, record?.status ?? ""]) { load() }
     }
 

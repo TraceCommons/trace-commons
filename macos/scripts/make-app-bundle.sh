@@ -87,6 +87,11 @@ swift build --configuration "$CONFIG" --arch arm64 --arch x86_64
 # .build/apple/Products/<Config, capitalized>.
 CONFIG_CAP="$(tr '[:lower:]' '[:upper:]' <<< "${CONFIG:0:1}")${CONFIG:1}"
 BIN_DIR="$PACKAGE_DIR/.build/apple/Products/$CONFIG_CAP"
+# Newer SwiftPM (the macOS 27 SDK's) writes the same products to
+# .build/out/Products/<Config> instead.
+if [ ! -x "$BIN_DIR/TraceCommonsApp" ] && [ -x "$PACKAGE_DIR/.build/out/Products/$CONFIG_CAP/TraceCommonsApp" ]; then
+  BIN_DIR="$PACKAGE_DIR/.build/out/Products/$CONFIG_CAP"
+fi
 
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Frameworks" "$APP/Contents/Resources"

@@ -258,6 +258,7 @@
     "nodeCardWidth": 260,
     "modalWidth": 780,
     "modalNarrowWidth": 450,
+    "modalNavWidth": 180,
     "modalScrimBlur": 8,
     "spinner": 12,
     "spinnerStroke": 1.5,

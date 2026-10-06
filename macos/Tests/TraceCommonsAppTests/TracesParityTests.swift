@@ -87,16 +87,16 @@ final class TracesParityTests: XCTestCase {
         XCTAssertEqual(lines.dropFirst().first?.title, DailyBudgetCopy.title)
     }
 
-    func test_theTreeDrawsTheBannersAboveItself() throws {
-        let tree = try Self.text("Views/Monitor/TracesViews.swift")
-        let treeView = try XCTUnwrap(tree.range(of: "struct TracesTreeView"))
-        let inspector = try XCTUnwrap(tree.range(of: "struct SessionInspectorView"))
-        let body = tree[treeView.lowerBound..<inspector.lowerBound]
+    /// The banners are the inspector's (Ron's #1146), drawn by the host
+    /// above the prompts and the selection's inspector; the tree keeps only
+    /// the line for a core that does not answer.
+    func test_theInspectorDrawsTheBannersAboveEverything() throws {
+        let body = try TracesInspectorHostTests.hostBody()
         XCTAssertTrue(body.contains("TracesHealth.banners("))
         XCTAssertTrue(body.contains("maxQueueEntries: model.daemonSettings?.maxQueueEntries)"),
                       "the queue-full banner names the configured limit, as the main window does")
         XCTAssertTrue(body.contains("GlassHealthBanner(banner:"))
-        XCTAssertFalse(body.contains("ForEach(store.safeguards"), "safeguards are drawn through the fail-closed banners")
+        XCTAssertFalse(body.contains("ForEach(traces.safeguards"), "safeguards are drawn through the fail-closed banners")
         let banner = try Self.text("Views/Monitor/TracesHealth.swift")
         XCTAssertTrue(banner.contains("GlassNotice(tone: banner.tone, title: banner.title.isEmpty ? nil : banner.title)"),
                       "an empty title would draw a status dot with no words")
@@ -104,8 +104,15 @@ final class TracesParityTests: XCTestCase {
         XCTAssertTrue(banner.contains("TCCoreCopy.healthCopyJSON(reachable: false"))
         XCTAssertTrue(body.contains("coreDown: TracesHealth.coreDownLine,"))
         let banners = try XCTUnwrap(body.range(of: "TracesHealth.banners("))
-        let spinner = try XCTUnwrap(body.range(of: "GlassSpinner(standalone: true)"))
-        XCTAssertLessThan(banners.lowerBound, spinner.lowerBound, "the banners precede the spinner and the tree")
+        let prompts = try XCTUnwrap(body.range(of: "InspectorPrompts(store: traces)"))
+        XCTAssertLessThan(banners.lowerBound, prompts.lowerBound, "the banners precede the prompts and the selection")
+        let tree = try Self.text("Views/Monitor/TracesViews.swift")
+        let treeView = try XCTUnwrap(tree.range(of: "struct TracesTreeView"))
+        let inspector = try XCTUnwrap(tree.range(of: "struct PreviewSlot"))
+        let treeBody = tree[treeView.lowerBound..<inspector.lowerBound]
+        let failed = try XCTUnwrap(treeBody.range(of: "if case .failed(let error) = store.phase"))
+        let spinner = try XCTUnwrap(treeBody.range(of: "GlassSpinner(standalone: true)"))
+        XCTAssertLessThan(failed.lowerBound, spinner.lowerBound, "the core-down line precedes the spinner and the tree")
     }
 
     func test_theCaveatAndTheCertificatesAreOnGlass() throws {
@@ -129,77 +136,68 @@ final class TracesParityTests: XCTestCase {
     }
 
     /// The sheet's chrome keeps every binding, confirmation and core-copy
-    /// source the legacy sheet had, and the gate still decides Contribute.
+    /// source Look inside still has. It is read-only (#1241, Ron's
+    /// `PreviewInspector`): the verdict, the correction, Contribute and Not
+    /// this one left for the inspector's session card, and
+    /// `PreviewSheetTests.test_lookInsideHasNoApproveControl` holds that they
+    /// did. What stays is what shows the session and the native review.
     func test_thePreviewSheetChromeKeepsEveryBinding() throws {
         let sheet = try Self.text("Views/PreviewSheet.swift")
         for needle in [
-            // bindings and writes
+            // bindings
             "model.openPreview(entryID:", "model.supportsWitnessReview()", "model.witnessReviewOutcome(entryID:",
-            "model.dismiss(entry)", "model.approve(entry, verdict: verdict)", "model.approve(entry, verdict: verdict, correction: text)",
             "model.daemonSettings?.admissionEvidenceOffered == true", "AdmissionPreparationView(entryID:",
             "SessionSendDisclosureView(", "model.witnessStateCode == 1",
-            // the gate
-            "ReadGate.canContribute(hasPinnedPreview: summary?.enrolled == true)", "EligibilitySurface.mayProceed(",
-            "EligibilitySurface.current(", "TCConsentCopy.copyJSON()", "TCConsentCopy.gateHelp(pinned:",
-            // confirmations and alerts
-            "CorrectionCopy.credentialHeadline", "CorrectionCopy.credentialBody", "WitnessReviewConsent(copy:",
-            // verdict and correction
-            "VerdictCopy.question", "VerdictCopy.caption", "CorrectionCopy.question", "CorrectionCopy.placeholder",
-            "CorrectionCopy.caption", "CorrectionCopy.maxCharacters", "CorrectionCopy.toSend(",
+            // Look inside: Ron's words, the turn index, the original search,
+            // the paging and the witness offer
+            "MonitorTracesCopy.decode(fromJSON: TCCoreCopy.monitorTracesCopyJSON())",
+            "model.previewTurns(entryID: entry.entryID, bodyDigest: digest)", "LookInside.bodyDigest(",
+            "model.searchOriginal(entryID: entry.entryID, needle: needle)", "LookInside.shownChunks(",
+            "LookInside.offersWitnessReview(", "LookInside.showsNativeReview(", "LookInside.holdsCertificate(",
+            // the gate statement
+            "TCConsentCopy.copyJSON()", "consent?.gateStatement",
+            // confirmations
+            "WitnessReviewConsent(copy:", "confirmLine: words?.witnessConfirmLine",
             // keyboard
             ".keyboardShortcut(\"f\", modifiers: .command)", ".keyboardShortcut(.cancelAction)",
             // glass
-            "GlassSegmentedTabs(", "GlassButtonStyle(.primary", "ScrubbingCaveatAtCommit()",
+            "GlassSegmentedTabs(", "GlassButtonStyle(.primary",
         ] {
             XCTAssertTrue(sheet.contains(needle), "PreviewSheet.swift lacks \(needle)")
         }
         XCTAssertFalse(sheet.contains(".tcScreen()"))
         XCTAssertFalse(sheet.contains("CenteredNotice("))
         XCTAssertFalse(sheet.contains("struct SheetSecondaryButtonStyle"))
-        // Contribute has no keyboard shortcut: an irreversible send is never one keystroke away.
-        let contribute = try XCTUnwrap(sheet.range(of: "contribute()\n"))
-        XCTAssertFalse(sheet[contribute.upperBound...].prefix(240).contains(".keyboardShortcut("))
         try LegacySymbols.assertClean("Views/SessionSendDisclosureView.swift")
     }
 
     /// The chrome is drawn with glass parts, each pinned by its exact call:
-    /// the tabs carry the selection, the eligibility line is a dot with its
-    /// words, the verdict chips say which is chosen, and the witness consent
-    /// is a glass sheet whose heading is the core's.
+    /// the tabs carry the selection in the core's words, the native review's
+    /// controls are glass buttons, a notice with no title has no dot, and
+    /// the witness consent is a glass sheet whose heading is the core's.
     func test_thePreviewSheetChromeIsDrawnOnGlass() throws {
         let sheet = try Self.text("Views/PreviewSheet.swift")
         for needle in [
             ".glassTier(.pane)",
             "Divider().overlay(GlassColor.hairline)",
-            "GlassSegmentedTabs(model.publicRunCopy?.sessionDetail ?? Self.reviewWord ?? tab.title, selection: $tab,",
-            "static let reviewWord = MonitorTracesCopy.decode(fromJSON: TCCoreCopy.monitorTracesCopyJSON())?.review",
-            "GlassStatusLabel(line, status: PrivateInferenceIndicator.status(",
-            ".accessibilityAddTraits(selected ? [.isSelected, .isButton] : .isButton)",
-            "GlassTag(\"nothing sent yet\", tone: .neutral)",
-            "GlassTag(Self.scrubbingFound(summary), tone: .ask)",
+            "GlassSegmentedTabs(tab.title(words), selection: $tab,",
+            "segments: Tab.allCases.map { item in GlassSegment(item.title(words), value: item) })",
+            "Button(words.prepareAdmission) { preparingAdmission = true }\n"
+                + "                            .buttonStyle(GlassButtonStyle(.glass))\n",
             "SheetNotice(title: copy.heading, detail: copy.working)",
             // The witness consent is a narrow glass modal whose title is the
             // core's heading: cancel (Escape) left, confirm prominent but
-            // never on Return.
+            // never on Return, and armed only by Ron's tick.
             "GlassModal(\n            title: copy.heading, width: .narrow,",
             ".cancel(copy.cancel, action: onCancel),",
-            "GlassModalAction(copy.confirm, isProminent: true) { onCancel(); onConfirm() },",
+            "GlassModalAction(copy.confirm, isEnabled: confirmLine != nil && confirmed, isProminent: true) {",
+            "GlassCheckRow(confirmLine, isOn: $confirmed)",
+            // Prepare admission, in a narrow glass modal over the preview.
+            "title: words.prepareAdmission, width: .narrow,",
             // The preview itself, in a regular glass modal over the window.
             "struct PreviewModal: View {",
             "PreviewSheet(entry: entry, onClose: onClose)",
-            // The correction refusal is a whole-window confirmation.
-            "GlassConfirmation(\n                title: CorrectionCopy.credentialHeadline, message: CorrectionCopy.credentialBody,",
             ".accessibilityIdentifier(\"transcript-copy-all\")",
-            // The two questions are sentences, not field labels: never the
-            // uppercased eyebrow.
-            "Text(VerdictCopy.question)\n                .glassType(GlassTokens.TypeScale.caption)",
-            "Text(CorrectionCopy.question)\n                .glassType(GlassTokens.TypeScale.caption)",
-            // The one irreversible control: primary, disarmed by the gate,
-            // its tooltip the gate's own, and nothing after it.
-            "Button(\"Contribute\") {\n                    contribute()\n                }\n"
-                + "                .buttonStyle(GlassButtonStyle(.primary))\n"
-                + "                .disabled(!canContribute)\n"
-                + "                .help(gateHelp)\n            }\n",
             // A notice with no title is drawn without one, never as a bare dot.
             "GlassNotice(tone: .ask, title: title?.isEmpty == false ? title : nil) {",
             // The witness consent's body scrolls once it no longer fits.
@@ -243,27 +241,30 @@ final class TracesParityTests: XCTestCase {
         XCTAssertEqual(PrivateInferenceIndicator.status(.neutral), .off)
     }
 
-    /// The four tabs keep their searches, their figures, the whole body and
-    /// the copy-all control, and the sheet is off the legacy palette.
+    /// The tabs keep their searches, the whole body and the copy-all
+    /// control, and the sheet is off the legacy palette. What's in it and
+    /// Permissions left Look inside with #1241: their facts are the session
+    /// card's (the redaction summary, residual risk, consent scopes).
     func test_thePreviewSheetTabsKeepEveryBinding() throws {
         let sheet = try Self.text("Views/PreviewSheet.swift")
         for needle in [
             "preview.search(needle)", "searchOriginal(needle)", "RecentSearches.remember(", "RecentSearches.load()",
             "OriginalSearchOutcome.classify(", "document.snippet(around:", ".onSubmit(commit)", "focus: $focused",
-            "TCCoreCopy.redactionSummaryJSON(", "summary.piiLabelsPresent", "summary.residualRisk", "summary.tokenDistributionSummary",
-            "ScrubbingCaveatNote()", "\"transcript-copy-all\"", "document.wholeText()", "RedactionMarks.spoken(",
-            "TranscriptResidentChunks", "TranscriptRowIndex(", "ScopeCopy.title(for:", "summary.consentScopes",
-            "GlassTokens.TypeScale.mono",
+            "\"transcript-copy-all\"", "document.wholeText()", "RedactionMarks.spoken(",
+            "TranscriptResidentChunks", "TranscriptRowIndex(", "GlassTokens.TypeScale.mono",
         ] {
             XCTAssertTrue(sheet.contains(needle), "PreviewSheet.swift lacks \(needle)")
+        }
+        for gone in ["struct WhatsInItTab", "struct PermissionsTab"] {
+            XCTAssertFalse(sheet.contains(gone), "PreviewSheet.swift still declares \(gone), which nothing draws")
         }
         try LegacySymbols.assertClean("Views/PreviewSheet.swift")
     }
 
     /// The tabs are drawn with glass parts, each pinned by its exact call:
     /// the search highlight and the redaction chip on the existing tokens
-    /// (no new token), every outcome a dot with its words, the figures a
-    /// key-value list, and the sheet held to the glass surface rules.
+    /// (no new token), every outcome a dot with its words, and the sheet
+    /// held to the glass surface rules.
     func test_thePreviewSheetTabsAreDrawnOnGlass() throws {
         let sheet = try Self.text("Views/PreviewSheet.swift")
         for needle in [
@@ -279,28 +280,19 @@ final class TracesParityTests: XCTestCase {
             ".glassFieldWell(invalid: false)",
             "GlassCard(quiet: true) {\n                            Text(highlighting(snippet, term: needle))\n"
                 + "                                .glassType(GlassTokens.TypeScale.mono)\n",
-            // What's in it
-            "GlassKeyValueList(items)",
-            "GlassKeyValueList.Item(\"Agent\", entry.agentName)",
-            "GlassKeyValueList.Item(\"Would send\", Format.bytes(summary.wouldSendBytes))",
-            "GlassSectionRule(\"What scrubbing removed\")",
-            "GlassSectionRule(\"Found, and still in what would be sent\")",
-            "GlassSectionRule(\"Personal-information categories seen\")",
-            "GlassSectionRule(\"Residual risk\")",
-            "GlassStatusLabel(row.description, status: .ask)",
-            "GlassNotice(tone: .ask) {",
-            // Transcript
-            "Text(TranscriptMarkers.chipped(Self.caption, font: GlassTokens.TypeScale.caption.font))\n"
-                + "                .glassType(GlassTokens.TypeScale.caption)\n",
+            // Transcript: Ron's caption from the core, the body in mono
+            // with its chips, and his Load more and turn separators.
+            "Text(words?.transcriptCaption ?? \"\")\n"
+                + "                    .glassType(GlassTokens.TypeScale.caption)\n",
             "chip.backgroundColor = GlassTokens.Color.controlSelected.color\n"
                 + "            chip.foregroundColor = GlassColor.textPrimary\n",
-            ".glassType(GlassTokens.TypeScale.mono)\n                    .textSelection(.enabled)\n",
+            "Text(segment.text)\n                            .glassType(GlassTokens.TypeScale.mono)\n"
+                + "                            .textSelection(.enabled)\n",
             "TranscriptMarkers.chipped(text, font: GlassTokens.TypeScale.mono.font)",
             "NSLayoutManager().defaultLineHeight(for: font) + GlassTokens.TypeScale.mono.lineSpacing",
             "GlassCard(quiet: true, flush: true) {",
-            // Permissions
-            "GlassSectionRule(\"What this upload asks for\")",
-            "Text(ScopeCopy.title(for: scope, options: options))\n                            .glassType(GlassTokens.TypeScale.bodyStrong)\n",
+            "Button(words.addTurnSeparators, action: onAddSeparators)\n"
+                + "                            .buttonStyle(GlassButtonStyle(.link))\n",
         ] {
             XCTAssertTrue(sheet.contains(needle), "PreviewSheet.swift lacks \(needle)")
         }
@@ -331,23 +323,27 @@ final class TracesParityTests: XCTestCase {
         XCTAssertEqual(SearchTab.matchCount(20), "20 matches")
     }
 
-    /// Undo and the consent offers sit above the tree, so they are on
-    /// screen with the inspector hidden (spec, "Behaviour that must not
-    /// depend on the inspector"), and read the same model members and core
-    /// words the legacy queue does.
-    func test_offersAndUndoLiveAboveTheTree() throws {
+    /// Undo and the consent offers sit at the top of the inspector (Ron's
+    /// `WaitingPrompts`), which opens itself when one appears
+    /// (`InspectorDemand`), and read the same model members and core words
+    /// the legacy queue does.
+    func test_offersAndUndoLiveAtTheTopOfTheInspector() throws {
         let tree = try Self.text("Views/Monitor/TracesViews.swift")
         let treeView = try XCTUnwrap(tree.range(of: "struct TracesTreeView"))
-        let inspector = try XCTUnwrap(tree.range(of: "struct SessionInspectorView"))
-        XCTAssertTrue(tree[treeView.lowerBound..<inspector.lowerBound].contains("TracesOffersBar(store: store)"))
-        XCTAssertFalse(tree[inspector.lowerBound...].contains("pendingUndo"), "undo must not live only in the inspector")
+        let inspector = try XCTUnwrap(tree.range(of: "struct PreviewSlot"))
+        XCTAssertFalse(tree[treeView.lowerBound..<inspector.lowerBound].contains("model.undo"))
         XCTAssertTrue(tree.contains("Text(QueueLegacyWords.nothingWaiting)"))
         XCTAssertTrue(tree.contains("Text(QueueLegacyWords.nothingWaitingDetail)"))
-        // A refused undo is said beside it, by the one helper the inspector
+        // A refused undo is said beside it, by the one helper the card
         // shares.
-        XCTAssertTrue(tree.contains("TracesRefusal(store: store, entryId: entry.entryId)"))
+        XCTAssertTrue(try Self.text("Views/Monitor/SessionReviewCard.swift")
+            .contains("TracesRefusal(store: store, entryId: entry.entryId)"))
 
+        let prompts = try Self.text("Views/Monitor/InspectorPrompts.swift")
         let offers = try Self.text("Views/Monitor/TracesOffers.swift")
+        let host = try Self.text("Views/Monitor/TracesInspectorHost.swift")
+        // The Summary draws the certificates and the outcomes (Task 4).
+        let summary = try Self.text("Views/Monitor/SummaryInspector.swift")
         for needle in [
             "if let undo = model.undo {", "approvalUndo(undo)", "{ model.undoApproval() }", "{ model.dismissUndo() }",
             "QueueLegacyWords.undoWillSend", "QueueLegacyWords.closeNoticeStillSends", "QueueLegacyWords.closeNotice)",
@@ -356,57 +352,77 @@ final class TracesParityTests: XCTestCase {
             "store.perform(.undoContribute, on: contributed.entryId)", "store.perform(.undoKeep, on: kept)",
             "model.showsPrivateInferenceOffer", "model.answerPrivateInferenceOffer(accepted: true)",
             "model.answerPrivateInferenceOffer(accepted: false)", "model.privateInferenceBusy",
-            "copy.offerWhat", "copy.offerExposure", "copy.offerNoRepoint", "copy.offerAskedOnce",
             "model.armingOffer", "model.acceptArmingOffer(", "model.declineArmingOffer(",
-            "TCCoreCopy.armingOfferCopyJSON(", "CertificateSection(entries: model.awaitingDecision)",
-            "model.outcomeCounts", "TCOutcome.line(label:", "QueueLegacyWords.noLongerWaiting(",
-            "QueueLegacyWords.notOfferedScope", "model.lastActionError = nil", "model.lastActionNotice = nil",
-            "model.witnessCopy?.onboarding", "QueueLegacyWords.agentSetup", "QueueLegacyWords.undo)",
-            "ActionMessageBanner.dismissWord",
+            "model.lastActionError = nil", "model.lastActionNotice = nil",
+            "model.witnessCopy?.onboarding", "QueueLegacyWords.undo)", "ActionMessageBanner.dismissWord",
+            "words.undo.approvalSaved", "words.undo.undoing", "store.words?.optionalAutomation",
+        ] {
+            XCTAssertTrue(prompts.contains(needle), "InspectorPrompts.swift lacks \(needle)")
+        }
+        for needle in [
+            "copy.offerWhat", "copy.offerExposure", "copy.offerNoRepoint", "copy.offerAskedOnce",
+            "TCCoreCopy.armingOfferCopyJSON(", "TCOutcome.line(label:", "QueueLegacyWords.noLongerWaiting(",
+            "QueueLegacyWords.notOfferedScope", "QueueLegacyWords.agentSetup",
         ] {
             XCTAssertTrue(offers.contains(needle), "TracesOffers.swift lacks \(needle)")
         }
-        // Both undos are drawn by the bar's body, not merely defined.
-        let barBody = try XCTUnwrap(offers.range(of: "    var body: some View {"))
-        let firstHelper = try XCTUnwrap(offers.range(of: "    private func approvalUndo("))
-        let body = offers[barBody.upperBound..<firstHelper.lowerBound]
+        XCTAssertTrue(summary.contains("NotOfferedGlassDisclosure(counts: outcomeCounts, words: words?.summaryPanel)"))
+        XCTAssertTrue(host.contains("queueAnswered: model.queueAnswered, outcomeCounts: model.outcomeCounts)"))
+        // Both undos are drawn by the prompts' body, not merely defined.
+        let promptsBody = try XCTUnwrap(prompts.range(of: "    var body: some View {"))
+        let firstHelper = try XCTUnwrap(prompts.range(of: "    private func approvalUndo("))
+        let body = prompts[promptsBody.upperBound..<firstHelper.lowerBound]
         XCTAssertTrue(body.contains("approvalUndo(undo)\n"), "the approval undo is not drawn")
         XCTAssertTrue(body.contains("            storeUndo\n"), "the store's undos are not drawn")
         // Return is bound to Undo itself: no other button between the two.
-        let undoButton = try XCTUnwrap(offers.range(
+        let undoButton = try XCTUnwrap(prompts.range(
             of: "Button(store.words?.undoContribute ?? QueueLegacyWords.undo) { model.undoApproval() }"))
-        let shortcut = try XCTUnwrap(offers.range(
-            of: ".keyboardShortcut(.defaultAction)", range: undoButton.upperBound..<offers.endIndex))
-        XCTAssertFalse(offers[undoButton.upperBound..<shortcut.lowerBound].contains("Button("))
-        XCTAssertEqual(offers.components(separatedBy: ".keyboardShortcut(.defaultAction)").count, 2)
-        // The arming card draws nothing without the core's words.
-        let armingCard = try XCTUnwrap(offers.range(of: "private struct ArmingOfferGlassCard"))
+        let shortcut = try XCTUnwrap(prompts.range(
+            of: ".keyboardShortcut(.defaultAction)", range: undoButton.upperBound..<prompts.endIndex))
+        XCTAssertFalse(prompts[undoButton.upperBound..<shortcut.lowerBound].contains("Button("))
+        XCTAssertEqual(prompts.components(separatedBy: ".keyboardShortcut(.defaultAction)").count, 2)
+        XCTAssertFalse(offers.contains(".keyboardShortcut(.defaultAction)"))
+        // The arming card draws nothing without the core's words, and its
+        // confirm only opens the confirmation; arming is the dialog's.
+        let armingCard = try XCTUnwrap(offers.range(of: "struct ArmingOfferGlassCard"))
         let armingBody = try XCTUnwrap(offers.range(
             of: "    var body: some View {\n", range: armingCard.upperBound..<offers.endIndex))
         XCTAssertTrue(offers[armingBody.upperBound...].hasPrefix("        if let copy {\n"))
+        XCTAssertTrue(offers.contains("Button(copy.confirm) { confirming = true }"))
+        // A whole-window glass confirmation (Ron's GlassModal), in the
+        // core's words.
+        XCTAssertTrue(offers.contains(".glassModal(isPresented: $confirming)"))
+        XCTAssertTrue(offers.contains("title: copy.question, message: copy.body,"))
+        XCTAssertEqual(offers.components(separatedBy: "onArm()").count - 1, 1, "only the confirmation arms")
         // No control without words: an absent core word falls back to an
         // existing one, never to an empty title.
-        XCTAssertFalse(offers.contains("?? \"\""), "a control would be wordless without the core")
-        // One dismiss accessor everywhere a glass notice is put away.
-        XCTAssertTrue(offers.contains(
-            "private var dismissWord: String { ActionMessageBanner.coreDismissWord ?? ActionMessageBanner.dismissWord }"))
-        XCTAssertFalse(offers.contains("words?.dismiss"))
+        for text in [prompts, offers, host] {
+            XCTAssertFalse(text.contains("?? \"\""), "a control would be wordless without the core")
+        }
+        // One dismiss accessor everywhere a glass notice is put away, and
+        // never the review's "Not this one".
+        XCTAssertTrue(prompts.contains(
+            "store.words?.dismissAction ?? ActionMessageBanner.coreDismissWord ?? ActionMessageBanner.dismissWord"))
+        for text in [prompts, offers] {
+            XCTAssertNil(text.range(of: #"words\??\.dismiss\b(?!Action)"#, options: .regularExpression))
+        }
         // An unread list is not an empty one: the certificate list and the
         // first-contribution note wait for the daemon's answer, and draw
         // nothing before it (standing rule: fail closed).
-        let flatOffers = offers.split(whereSeparator: \.isWhitespace).joined(separator: " ")
-        for needle in [
-            "if model.queueAnswered { CertificateSection(entries: model.awaitingDecision) }",
+        let flatSummary = summary.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        XCTAssertTrue(flatSummary.contains("if queueAnswered { CertificateSection(entries: awaitingDecision) }"))
+        let flatPrompts = prompts.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        XCTAssertTrue(flatPrompts.contains(
             "if model.historyAnswered, model.queueAnswered, model.history.isEmpty, "
                 + "let copy = model.witnessCopy?.onboarding { "
-                + "FirstContributionGlassNote(copy: copy, reviewing: !model.awaitingDecision.isEmpty) }",
-        ] {
-            XCTAssertTrue(flatOffers.contains(needle), "TracesOffers.swift lacks \(needle)")
+                + "FirstContributionGlassNote(copy: copy, reviewing: !model.awaitingDecision.isEmpty) }"))
+        XCTAssertEqual(summary.components(separatedBy: "CertificateSection(").count - 1, 1)
+        XCTAssertFalse(host.contains("CertificateSection("))
+        XCTAssertEqual(prompts.components(separatedBy: "FirstContributionGlassNote(copy:").count - 1, 1)
+        for rel in ["Views/Monitor/TracesOffers.swift", "Views/Monitor/InspectorPrompts.swift"] {
+            try LegacySymbols.assertClean(rel)
+            XCTAssertTrue(GlassSurfaceRulesTests.files.contains(rel))
         }
-        XCTAssertEqual(offers.components(separatedBy: "CertificateSection(").count - 1, 1)
-        XCTAssertEqual(offers.components(separatedBy: "FirstContributionGlassNote(copy:").count - 1, 1)
-        try LegacySymbols.assertClean("Views/Monitor/TracesOffers.swift")
-        XCTAssertTrue(GlassSurfaceRulesTests.files.contains("Views/Monitor/TracesOffers.swift"))
 
         // The legacy queue reads the same table, one literal per sentence.
         let queue = try Self.text("Views/QueueView.swift")
@@ -459,23 +475,31 @@ final class TracesParityTests: XCTestCase {
         XCTAssertFalse(offers[privateAI.lowerBound..<arming.lowerBound].contains("GlassButtonStyle(.primary"))
     }
 
-    /// The folder row offers Submit all and Submit all as only when the
-    /// shared table offers Contribute, with the daemon's counts, and says
-    /// what it withheld.
+    /// The folder row offers Submit all only when the shared table offers
+    /// Contribute, with the daemon's counts, and says what it withheld.
+    /// Submit all as is the Folder inspector's modal (Task 5 of the #1146
+    /// port), in the core's outcome words, with Submit all beside it.
     func test_theFolderRowSubmitsAllAsTheQueueDid() throws {
         let tree = try Self.text("Views/Monitor/TracesViews.swift")
-        for needle in ["store.groupOffer(", "offer.offersContribute", "QueueFolderWords.submitAll(offer.count)",
-                       "QueueFolderWords.submitAllHelp(", "store.contributeFolder(", "VerdictCopy.submitAllAs",
-                       "ContributorVerdict.allCases", "offer.withheldLine", "submitTitle: submits ?", "onSubmit: submits ?",
-                       "onMenu: submits ?", "menuLabel: submits ?", "store.mayContributeFolder(folder)"] {
+        for needle in ["store.groupOffer(", "offer.offersContribute", "Self.submitTitle(offer.count, words: $0)",
+                       "Self.submitHelp(offer.withheldLine, words: words)", "store.contributeFolder(folder, verdict: nil)",
+                       "offer.withheldLine", "submitTitle: submits ?", "onSubmit: submits && !busy ?",
+                       "store.mayContributeFolder(folder)", "words.tree.submitCount", "words?.tree.submitTip"] {
             XCTAssertTrue(tree.contains(needle), "TracesViews.swift lacks \(needle)")
+        }
+        let inspector = try Self.text("Views/Monitor/ToolFolderInspectors.swift")
+        for needle in ["store.groupOffer(folder)", "store.mayContributeFolder(folder)", "outcome.submitAllAs",
+                       "outcome.submitAllAsTooltip", "store.contributeFolder(folder, verdict: verdict)",
+                       "store.contributeFolder(folder, verdict: nil)", "offer.withheldLine",
+                       "TracesTreeView.submitTitle(offer.count, words: words)"] {
+            XCTAssertTrue(inspector.contains(needle), "ToolFolderInspectors.swift lacks \(needle)")
         }
         let store = try Self.text("Views/Monitor/TracesStore.swift")
         for needle in ["approveFolder(projectId: folder.id, verdict: verdict)", "verdict:", "excludedIneligible", "withheldLine(", "cancelFolder(projectId:",
                        "EligibilitySurface.groupSubmit("] {
             XCTAssertTrue(store.contains(needle), "TracesStore.swift lacks \(needle)")
         }
-        XCTAssertTrue(try Self.text("Views/Monitor/TracesOffers.swift").contains("store.lastContributedFolder"))
+        XCTAssertTrue(try Self.text("Views/Monitor/InspectorPrompts.swift").contains("store.lastContributedFolder"))
         XCTAssertTrue(try Self.text("Views/QueueFolderRow.swift").contains("enum QueueFolderWords"))
     }
 
@@ -512,10 +536,9 @@ final class TracesParityTests: XCTestCase {
     /// the surviving secret, the scrubbing caption, the subagent line, and
     /// Look inside opening the preview sheet for this session only.
     func test_theInspectorSaysWhatTheQueueCardSaid() throws {
-        let tree = try Self.text("Views/Monitor/TracesViews.swift")
-        let inspector = try XCTUnwrap(tree.range(of: "struct SessionInspectorView"))
-        let end = try XCTUnwrap(tree.range(of: "struct PreviewSlot", range: inspector.upperBound..<tree.endIndex))
-        let body = tree[inspector.lowerBound..<end.lowerBound]
+        let card = try Self.text("Views/Monitor/SessionReviewCard.swift")
+        let inspector = try XCTUnwrap(card.range(of: "struct SessionReviewCard: View"))
+        let body = card[inspector.lowerBound...]
         for needle in ["TracesStore.survivorLine(summary)", "GlassStatusLabel(survivor, status: .ask)",
                        "RedactionLabels.removedTotal(redactions)",
                        "ScrubbingCaveat.rowLine(redactionCount: removed)",
@@ -525,15 +548,15 @@ final class TracesParityTests: XCTestCase {
                        "PreviewModal(entry: $0) { previewing = nil }", "@EnvironmentObject private var model: AppModel",
                        #"ProcessInfo.processInfo.environment["TRACE_COMMONS_DEMO_PREVIEW"] == "1","#,
                        ".onChange(of: model.awaitingDecision.count)", "previewing == nil,"] {
-            XCTAssertTrue(body.contains(needle), "SessionInspectorView lacks \(needle)")
+            XCTAssertTrue(body.contains(needle), "SessionReviewCard lacks \(needle)")
         }
         // Look inside is absent, not disabled, when the legacy queue does not
         // hold this session: the guard and the button are one needle.
         XCTAssertTrue(body.contains("""
-                                if let legacy = QueueEntryBridge.legacyEntry(for: entry.entryId, in: model.awaitingDecision) {
-                                    Button(QueueLegacyWords.lookInside) { previewing = legacy }
-                                        .buttonStyle(GlassButtonStyle(.glass))
-                                }
+                        if let legacy = QueueEntryBridge.legacyEntry(for: entry.entryId, in: model.awaitingDecision) {
+                            Button(review.lookInside) { previewing = legacy }
+                                .buttonStyle(GlassButtonStyle(.glass))
+                        }
         """), "Look inside must be drawn only inside the legacyEntry guard")
         // The preview modal and the demo hook hang off the always-present
         // container, not the selected-session branch.
@@ -548,6 +571,63 @@ final class TracesParityTests: XCTestCase {
         XCTAssertFalse(body.contains(".sheet("), "the preview is a glass modal, never a stock sheet")
         XCTAssertTrue(try Self.text("Views/Monitor/TracesStore.swift")
             .contains("TCCoreCopy.residualSecretLine(count: total,"))
+    }
+
+    // MARK: Selection (Task 2 of the #1146 inspector port)
+
+    /// Ron's `useInspectorDemand` opens the inspector for a selected
+    /// session only: selecting a folder moves the selection and leaves the
+    /// inspector as the person set it. A session opens it, as Review does.
+    func test_selectingAFolderDoesNotOpenTheInspector() throws {
+        var selection: MonitorSelection?
+        var showsInspector = false
+        MonitorWindowView.select(.folder(projectID: "p1"), selection: &selection, showsInspector: &showsInspector)
+        XCTAssertEqual(selection, .folder(projectID: "p1"))
+        XCTAssertFalse(showsInspector, "a folder is not a demand to open the inspector")
+
+        MonitorWindowView.select(.session(entryID: "e1"), selection: &selection, showsInspector: &showsInspector)
+        XCTAssertEqual(selection, .session(entryID: "e1"))
+        XCTAssertTrue(showsInspector, "a session is")
+
+        // Never closes itself: back to a folder, or to nothing, it stays open.
+        MonitorWindowView.select(.folder(projectID: "p1"), selection: &selection, showsInspector: &showsInspector)
+        XCTAssertTrue(showsInspector)
+        MonitorWindowView.select(nil, selection: &selection, showsInspector: &showsInspector)
+        XCTAssertNil(selection)
+        XCTAssertTrue(showsInspector)
+
+        // The tree routes its selection through that rule, and Return opens
+        // a review only for a session.
+        let window = try Self.text("Views/MonitorWindowView.swift")
+        XCTAssertTrue(window.contains("Self.select($0, selection: &selection, showsInspector: &showsInspector)"))
+        let tree = try Self.text("Views/Monitor/TracesViews.swift")
+        XCTAssertTrue(tree.contains("guard case .session(let entryID) = selection else { return .ignored }"))
+    }
+
+    /// The selection is restored per window under one key, through a
+    /// stored form that round-trips both kinds and refuses anything else.
+    func test_theSelectionIsRestoredPerWindow() throws {
+        let window = try Self.text("Views/MonitorWindowView.swift")
+        XCTAssertTrue(window.contains("@SceneStorage(\"monitor.selection\") private var selection: MonitorSelection?"))
+        XCTAssertFalse(window.contains("monitor.selectedSession"), "the session-only key is retired")
+
+        for value: MonitorSelection in [
+            .folder(projectID: "/Users/me/api"), .session(entryID: "e1"), .session(entryID: "with:colon"),
+        ] {
+            XCTAssertEqual(MonitorSelection(rawValue: value.rawValue), value)
+            let coded = try JSONDecoder().decode(MonitorSelection.self, from: JSONEncoder().encode(value))
+            XCTAssertEqual(coded, value)
+        }
+        XCTAssertNil(MonitorSelection(rawValue: ""))
+        XCTAssertNil(MonitorSelection(rawValue: "tool:claude-code"), "the tree has no tool level")
+        XCTAssertNil(MonitorSelection(rawValue: "e1"), "a bare id from the old key is not a selection")
+
+        // The inspector reads the resolved selection, never the stored one:
+        // the window hands the stored one to the host, which resolves it.
+        XCTAssertTrue(window.contains("TracesInspectorHost(traces: traces, home: home, selection: selection"))
+        XCTAssertTrue(try Self.text("Views/Monitor/TracesInspectorHost.swift")
+            .contains("traces.selectedSession(selection)"))
+        XCTAssertFalse(window.contains("selectedEntry"), "no entry is picked by the raw stored selection")
     }
 }
 #endif

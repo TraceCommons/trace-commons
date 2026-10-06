@@ -401,6 +401,7 @@ public enum GlassTokens {
         public static let nodeCardWidth: CGFloat = 260
         public static let modalWidth: CGFloat = 780
         public static let modalNarrowWidth: CGFloat = 450
+        public static let modalNavWidth: CGFloat = 180
         public static let modalScrimBlur: CGFloat = 8
         public static let spinner: CGFloat = 12
         public static let spinnerStroke: CGFloat = 1.5
@@ -446,6 +447,7 @@ public enum GlassTokens {
             "nodeCardWidth": nodeCardWidth,
             "modalWidth": modalWidth,
             "modalNarrowWidth": modalNarrowWidth,
+            "modalNavWidth": modalNavWidth,
             "modalScrimBlur": modalScrimBlur,
             "spinner": spinner,
             "spinnerStroke": spinnerStroke,

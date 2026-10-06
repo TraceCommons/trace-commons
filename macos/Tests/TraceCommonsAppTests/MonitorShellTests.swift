@@ -118,10 +118,15 @@ final class MonitorShellTests: XCTestCase {
         let window = try Self.text("Views/MonitorWindowView.swift")
         XCTAssertTrue(window.contains(
             "if InspectorDemand.opens(previous: lastDemand, current: current) { showsInspector = true }"))
+        // The window's keys are the port's `keys(model:traces:selection:)`
+        // (#1241), which reads the shell's inputs and adds the selected
+        // session and the approval's time.
+        XCTAssertTrue(window.contains("InspectorDemand.keys(model: model, traces: traces, selection: selection)"))
+        let demand = try Self.text("Views/Monitor/TracesInspectorHost.swift")
         for input in ["model.undo?.entryIDs", "traces.lastContributed?.entryId", "traces.lastKept",
                       "traces.lastContributedFolder?.projectId", "traces.submittingFolder",
                       "model.showsPrivateInferenceOffer", "model.armingOffer?.projectId"] {
-            XCTAssertTrue(window.contains(input), "the demand does not read \(input)")
+            XCTAssertTrue(demand.contains(input), "the demand does not read \(input)")
         }
     }
 

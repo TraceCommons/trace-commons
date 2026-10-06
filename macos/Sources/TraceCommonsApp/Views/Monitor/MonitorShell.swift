@@ -7,17 +7,16 @@ import TCShellCore
 /// `monitor-shell.tsx` and `monitor-toolbar.tsx`: the View menu, the Traces
 /// graph footer and the rule that opens the inspector on demand.
 ///
-/// Every label here is a single word, a short name, a formatted number or
-/// date, or a word from the Rust core (`ShellWordingTests`).
+/// Every label here is a formatted number or date, or a word from the Rust
+/// core's Monitor screens table (`ShellWordingTests`; no view under
+/// Views/Monitor authors a label).
 enum MonitorShellWords {
-    static var view: String { String(localized: "View", comment: "Monitor toolbar View menu") }
-    static var graph: String { String(localized: "Graph", comment: "Monitor toolbar: Traces graph toggle") }
-    static var showIgnoredFolders: String {
-        String(localized: "Show ignored folders", comment: "Monitor View menu item: ignored folders shown")
-    }
-    static var focus: String { String(localized: "Focus", comment: "Traces graph: map focus button") }
-    static var previous: String { String(localized: "Previous", comment: "Traces graph: previous period") }
-    static var next: String { String(localized: "Next", comment: "Traces graph: next period") }
+    static var view: String { MonitorWords.table?.view ?? "" }
+    static var graph: String { MonitorWords.table?.graph ?? "" }
+    static var showIgnoredFolders: String { MonitorWords.table?.showIgnoredFolders ?? "" }
+    static var focus: String { MonitorWords.table?.focus ?? "" }
+    static var previous: String { MonitorWords.table?.previous ?? "" }
+    static var next: String { MonitorWords.table?.next ?? "" }
 }
 
 // MARK: Inspector demand

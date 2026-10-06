@@ -46,6 +46,26 @@ final class MenuBarGlassPanelTests: XCTestCase {
         XCTAssertTrue(source.contains("store.status?.contributionMode"))
     }
 
+    /// The pill's list checks Mixed while no override is in force, and the
+    /// override's own mode, alone, while one is. Clearing it goes back to
+    /// Mixed. Nothing is checked before the status is read.
+    func test_theListChecksMixedUnlessAnOverrideIsInForce() async throws {
+        let client = SampleDaemonClient(.normalDay)
+        let modes: [String?] = [nil, "notify_only", "auto_upload", "ignore"]
+        func checked(_ status: DaemonData.Status?) -> [String?] {
+            modes.filter { MenuPanelData.listChecks($0, status: status) }
+        }
+        XCTAssertEqual(checked(nil), [])
+        let before = try await client.status()
+        XCTAssertEqual(checked(before), [nil])
+        _ = try await client.setContributionOverride(mode: .ignore, confirm: false)
+        let overridden = try await client.status()
+        XCTAssertEqual(checked(overridden), ["ignore"])
+        _ = try await client.clearContributionOverride()
+        let cleared = try await client.status()
+        XCTAssertEqual(checked(cleared), [nil])
+    }
+
     // MARK: Day graph
 
     /// Contributions go up and kept sessions go down, on the day they

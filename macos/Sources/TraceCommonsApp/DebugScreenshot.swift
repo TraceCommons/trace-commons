@@ -1,6 +1,8 @@
 import AppKit
 import Foundation
 import SwiftUI
+import TCBridge
+import TCShellCore
 
 /// Writes PNGs of the shell's real views, driven by the real running daemon,
 /// when `TRACE_COMMONS_SCREENSHOT_DIR` is set.
@@ -71,8 +73,12 @@ enum DebugScreenshot {
                 )
             }
             if let copy = model.witnessCopy?.review {
+                // Ron's tick, in the core's words, as Look inside draws it.
+                let lookInside = MonitorTracesCopy.decode(fromJSON: TCCoreCopy.monitorTracesCopyJSON())?.lookInside
                 render(
-                    WitnessReviewConsent(copy: copy, onCancel: {}, onConfirm: {}),
+                    WitnessReviewConsent(
+                        copy: copy, confirmLine: lookInside?.witnessConfirmLine,
+                        confirmLabel: lookInside?.witnessConfirmLabel, onCancel: {}, onConfirm: {}),
                     to: directory + "/macos-shell-witness-review-consent.png",
                     size: CGSize(width: 560, height: 390)
                 )

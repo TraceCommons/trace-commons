@@ -166,6 +166,13 @@ public enum TCCoreCopy {
         take(label.withCString { tc_contribution_override_refusal_text($0) })
     }
 
+    /// `tc_contributor_disclosure_copy_json`: the disclosure bundle. The
+    /// monitor decodes its verdict, History and folder-mode tables with
+    /// `TCShellCore.ContributorDisclosureCopy`.
+    public static func contributorDisclosureCopyJSON() -> String? {
+        take(tc_contributor_disclosure_copy_json())
+    }
+
     /// `tc_monitor_screens_copy_json`: the monitor's other screens' words.
     /// Decoded by `TCShellCore.MonitorScreensCopy`.
     public static func monitorScreensCopyJSON() -> String? {
