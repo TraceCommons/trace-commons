@@ -396,29 +396,55 @@ pub async fn account_login(store: &ConfigStore, no_browser: bool, json: bool) ->
     Ok(())
 }
 
-/// Report whether a live account session is stored, WITHOUT printing it.
+/// Report whether a live account session is stored, and when it expires,
+/// WITHOUT printing it; then, when enrolled, fetch contribution readiness.
+///
+/// The local half never depends on the network. If the fetch fails -- ingest
+/// unreachable, a refusal, the session changing mid-call -- the report keeps
+/// `signed_in` and `expires_at`, sets `contribution_status` to null, and names
+/// the failure in `contribution_status_error` by label only.
 pub(crate) async fn account_status_value(store: &ConfigStore) -> Result<serde_json::Value> {
     let loaded =
         crate::daemon::run_blocking(|| crate::account_auth::try_load_session_with_snapshot(store))?;
     let Some(loaded) = loaded else {
         return Ok(
-            serde_json::json!({"schema_version":"trace_commons.account_status.v1", "signed_in":false, "expires_at":null, "contribution_status":null}),
+            serde_json::json!({"schema_version":"trace_commons.account_status.v1", "signed_in":false, "expires_at":null, "contribution_status":null, "contribution_status_error":null}),
         );
     };
-    let scope = crate::daemon::commons_credentials::scope_for_snapshot(&loaded.snapshot)?;
-    let status = match store.load_config()? {
-        Some(cfg) => {
-            let operation = crate::account_contribution::Operation::open(store, &cfg).await?;
-            if operation.scope != scope {
-                anyhow::bail!("account-session-changed");
-            }
-            Some(operation.status().await?)
-        }
-        None => None,
+    let (status, error) = match store.load_config()? {
+        Some(cfg) => match contribution_status_for(store, &cfg, &loaded.snapshot).await {
+            Ok(status) => (Some(status), None),
+            Err(error) => (None, Some(contribution_status_error_label(&error))),
+        },
+        None => (None, None),
     };
     Ok(
-        serde_json::json!({"schema_version":"trace_commons.account_status.v1", "signed_in":true, "expires_at":loaded.session.expires_at, "contribution_status":status}),
+        serde_json::json!({"schema_version":"trace_commons.account_status.v1", "signed_in":true, "expires_at":loaded.session.expires_at, "contribution_status":status, "contribution_status_error":error}),
     )
+}
+
+async fn contribution_status_for(
+    store: &ConfigStore,
+    cfg: &crate::config::ContributorConfig,
+    snapshot: &crate::daemon::commons_credentials::Snapshot,
+) -> Result<crate::account_contribution::ContributionStatus> {
+    let scope = crate::daemon::commons_credentials::scope_for_snapshot(snapshot)?;
+    let operation = crate::account_contribution::Operation::open(store, cfg).await?;
+    if operation.scope != scope {
+        anyhow::bail!("account-session-changed");
+    }
+    operation.status().await
+}
+
+/// A fixed label, never the error's own text: that can carry a URL or a
+/// transport message.
+fn contribution_status_error_label(error: &anyhow::Error) -> &'static str {
+    match error.to_string().as_str() {
+        "account-session-changed" => "account-session-changed",
+        "account-sign-in-required" => "account-sign-in-required",
+        "account-contribution-refused" => "account-contribution-refused",
+        _ => "account-contribution-unavailable",
+    }
 }
 pub async fn account_status(store: &ConfigStore, json: bool) -> Result<()> {
     let value = account_status_value(store).await?;

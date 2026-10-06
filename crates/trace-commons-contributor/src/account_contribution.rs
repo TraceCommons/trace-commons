@@ -6,6 +6,21 @@ pub const UNAVAILABLE_LINE: &str =
     "Sign in to your account and retry. Contribution status or invite redemption is unavailable.";
 pub const PENDING_CREDIT_LINE: &str =
     "Accepted contributions may earn pending credit. Credit redemption is not available.";
+pub const READY_LINE: &str = "Ready to contribute. Accepted contributions may earn pending credit.";
+pub const NOT_READY_LINE: &str =
+    "Contributions are currently unavailable. Refresh status or redeem an invite.";
+/// **DRAFT, NEEDS APPROVAL.** What a commons that does not use account
+/// admission (the server answers `legacy_evidence`) tells a contributor.
+pub const LEGACY_EVIDENCE_LINE: &str = "This commons does not use account admission. Your contributions go through the standard review.";
+/// **DRAFT, NEEDS APPROVAL.** The card's heading and controls, so no shell
+/// types its own.
+pub const HEADING: &str = "Account contributions";
+/// **DRAFT, NEEDS APPROVAL.**
+pub const REFRESH_ACTION: &str = "Refresh status";
+/// **DRAFT, NEEDS APPROVAL.**
+pub const INVITE_CODE_LABEL: &str = "Invite code";
+/// **DRAFT, NEEDS APPROVAL.**
+pub const REDEEM_ACTION: &str = "Redeem invite";
 
 use crate::{
     account_auth,
@@ -29,12 +44,18 @@ pub struct ContributionStatus {
 }
 impl ContributionStatus {
     pub fn line(&self) -> &'static str {
-        if self.ready {
-            "Ready to contribute. Accepted contributions may earn pending credit."
-        } else if self.refusal_label.as_deref() == Some("account_limit_reached") {
-            crate::private_inference_copy::queue_outcome_line("account_limit_reached")
-        } else {
-            "Contributions are currently unavailable. Refresh status or redeem an invite."
+        match self.authority.as_str() {
+            // The default deployment: no account admission, standard review.
+            "legacy_evidence" => LEGACY_EVIDENCE_LINE,
+            "bounded" | "invited" if self.ready => READY_LINE,
+            "bounded" | "invited"
+                if self.refusal_label.as_deref() == Some("account_limit_reached") =>
+            {
+                crate::private_inference_copy::queue_outcome_line("account_limit_reached")
+            }
+            "bounded" | "invited" => NOT_READY_LINE,
+            // An authority this build does not know is not a verdict.
+            _ => crate::history_copy::STATUS_UNAVAILABLE,
         }
     }
 }
@@ -100,8 +121,11 @@ async fn call<B: Serialize + ?Sized, T: DeserializeOwned>(
     if let Some(token) = reply.response_header {
         crate::daemon::run_blocking(|| account_auth::store_rotated_token(store, &loaded, token))?;
     }
-    if reply.status != Some(reqwest::StatusCode::OK) {
-        bail!("account-contribution-refused");
+    match reply.status {
+        Some(reqwest::StatusCode::OK) => {}
+        Some(_) => bail!("account-contribution-refused"),
+        // No answer at all is not a refusal.
+        None => bail!("account-contribution-unavailable"),
     }
     reply
         .result
@@ -452,6 +476,29 @@ mod tests {
         assert_eq!(report["signed_in"], true);
         assert!(report["expires_at"].is_string());
         assert_eq!(report["contribution_status"]["ready"], true);
+        assert!(report["contribution_status_error"].is_null());
+    }
+    /// `account status` answers "am I signed in?" from local state alone; an
+    /// unreachable ingest costs only the contribution half, reported as a
+    /// label with no URL or error text.
+    #[tokio::test]
+    async fn cli_status_reports_the_local_session_when_ingest_is_unreachable() {
+        let (_dir, store, mut cfg) = fixture();
+        // Bound and dropped: nothing listens on this loopback port.
+        let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        cfg.ingest_url = format!("http://{}", closed.local_addr().unwrap());
+        drop(closed);
+        store.save_config(&cfg).unwrap();
+        publish_native_session(&store, "account-a");
+        let report = crate::commands::account_status_value(&store).await.unwrap();
+        assert_eq!(report["signed_in"], true);
+        assert!(report["expires_at"].is_string());
+        assert!(report["contribution_status"].is_null());
+        assert_eq!(
+            report["contribution_status_error"],
+            "account-contribution-unavailable"
+        );
+        assert!(!report.to_string().contains("127.0.0.1"));
     }
     #[tokio::test]
     async fn composed_redemption_accepts_rotation_but_rejects_between_call_changes() {
@@ -571,6 +618,36 @@ mod tests {
         let fresh = shared.status_value();
         assert_ne!(fresh["account_scope"], first);
         assert_eq!(fresh["tenant_id"], cfg.tenant_id);
+    }
+    fn status_line(authority: &str, ready: bool) -> &'static str {
+        serde_json::from_value::<ContributionStatus>(
+            serde_json::json!({"authority":authority,"ready":ready,"refusal_label":null}),
+        )
+        .unwrap()
+        .line()
+    }
+    /// The default deployment answers `legacy_evidence`, not ready. That is
+    /// not an outage: contributions go through the standard review path.
+    #[test]
+    fn legacy_evidence_is_not_reported_as_unavailable() {
+        let line = status_line("legacy_evidence", false);
+        assert_eq!(line, LEGACY_EVIDENCE_LINE);
+        assert_ne!(line, NOT_READY_LINE);
+        assert!(!line.to_ascii_lowercase().contains("unavailable"));
+    }
+    /// An authority this build does not know says nothing it cannot back:
+    /// not ready, not unavailable, just unknown.
+    #[test]
+    fn an_unknown_authority_reads_as_status_unavailable() {
+        for ready in [false, true] {
+            assert_eq!(
+                status_line("tiered_v9", ready),
+                crate::history_copy::STATUS_UNAVAILABLE
+            );
+        }
+        assert_eq!(status_line("bounded", true), READY_LINE);
+        assert_eq!(status_line("invited", true), READY_LINE);
+        assert_eq!(status_line("bounded", false), NOT_READY_LINE);
     }
     #[test]
     fn account_limit_copy_is_shared_and_has_no_invented_quota() {

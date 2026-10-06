@@ -29,7 +29,8 @@ use crate::copy;
 use crate::copy::SourceTool;
 use crate::model::{Project, Settings, Status};
 use trace_commons_contributor::account_contribution::{
-    CHECKING_LINE, PENDING_CREDIT_LINE, REFRESH_LINE, UNAVAILABLE_LINE,
+    CHECKING_LINE, HEADING as CONTRIBUTION_HEADING, INVITE_CODE_LABEL, PENDING_CREDIT_LINE,
+    REDEEM_ACTION, REFRESH_ACTION, REFRESH_LINE, UNAVAILABLE_LINE,
 };
 use trace_commons_contributor::config::{ConfigStore, WitnessSettings};
 use trace_commons_contributor::witness::status::{WitnessStatus, WitnessTrustState};
@@ -273,7 +274,7 @@ impl SettingsView {
         state_card.append(&pause_button);
         content.append(&state_card);
 
-        content.append(&style::section("Account contributions"));
+        content.append(&style::section(CONTRIBUTION_HEADING));
         let contribution_card = style::card(gtk::Orientation::Vertical, space::M);
         let contribution_status = gtk::Label::builder()
             .label(REFRESH_LINE)
@@ -281,14 +282,14 @@ impl SettingsView {
             .wrap(true)
             .build();
         contribution_card.append(&contribution_status);
-        let contribution_refresh = gtk::Button::with_label("Refresh status");
+        let contribution_refresh = gtk::Button::with_label(REFRESH_ACTION);
         contribution_card.append(&contribution_refresh);
         let invite_code = gtk::Entry::builder()
-            .placeholder_text("Invite code")
+            .placeholder_text(INVITE_CODE_LABEL)
             .visibility(false)
             .build();
         contribution_card.append(&invite_code);
-        let invite_redeem = gtk::Button::with_label("Redeem invite");
+        let invite_redeem = gtk::Button::with_label(REDEEM_ACTION);
         contribution_card.append(&invite_redeem);
         style::append_body(&contribution_card, PENDING_CREDIT_LINE);
         content.append(&contribution_card);

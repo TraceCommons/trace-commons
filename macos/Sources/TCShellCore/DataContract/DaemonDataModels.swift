@@ -298,7 +298,9 @@ extension DaemonData {
         public let schemaVersion: String?
         public let loggedIn: Bool?
         public let tenantId: String?
-        /// Opaque account binding supplied by the daemon; absent before account admission.
+        /// Opaque account binding; present whenever the daemon can derive a
+        /// scope from its store, signed in or not. Not proof of sign-in: read
+        /// `loggedIn` for that.
         public let accountScope: String?
         public let consentScopes: [String]?
         public let paused: Bool?

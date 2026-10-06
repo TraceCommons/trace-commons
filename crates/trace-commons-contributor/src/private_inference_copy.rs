@@ -592,6 +592,12 @@ pub struct PrivateInferenceCopy {
     pub account_contribution_checking: &'static str,
     pub account_contribution_unavailable: &'static str,
     pub account_contribution_pending_credit: &'static str,
+    /// The account contribution card's heading and controls (DRAFT, NEEDS
+    /// APPROVAL), so no shell types its own.
+    pub account_contribution_heading: &'static str,
+    pub account_contribution_refresh_action: &'static str,
+    pub account_contribution_invite_code: &'static str,
+    pub account_contribution_redeem_action: &'static str,
     /// The ten refusals, in the daemon's order.
     pub near_ai_enroll_already_enrolled: &'static str,
     /// [`NEAR_AI_ENROLL_NO_SESSION_LINE`].
@@ -2140,6 +2146,10 @@ pub fn private_inference_copy() -> PrivateInferenceCopy {
         account_contribution_checking: crate::account_contribution::CHECKING_LINE,
         account_contribution_unavailable: crate::account_contribution::UNAVAILABLE_LINE,
         account_contribution_pending_credit: crate::account_contribution::PENDING_CREDIT_LINE,
+        account_contribution_heading: crate::account_contribution::HEADING,
+        account_contribution_refresh_action: crate::account_contribution::REFRESH_ACTION,
+        account_contribution_invite_code: crate::account_contribution::INVITE_CODE_LABEL,
+        account_contribution_redeem_action: crate::account_contribution::REDEEM_ACTION,
         near_ai_enroll_already_enrolled: NEAR_AI_ENROLL_ALREADY_ENROLLED_LINE,
         near_ai_enroll_no_session: NEAR_AI_ENROLL_NO_SESSION_LINE,
         near_ai_enroll_endpoint_refused: NEAR_AI_ENROLL_ENDPOINT_REFUSED_LINE,
@@ -4494,7 +4504,7 @@ mod tests {
         let fields = payload.as_object().expect("a JSON object");
         assert_eq!(
             fields.len(),
-            145,
+            149,
             "the payload's field count changed -- update the shells' decoders \
              and the tests that pin the set"
         );

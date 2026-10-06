@@ -324,5 +324,14 @@ pub(crate) async fn account_invite_redeem(
 #[tauri::command]
 pub(crate) fn account_contribution_copy() -> serde_json::Value {
     use trace_commons_contributor::account_contribution as copy;
-    serde_json::json!({"refresh": copy::REFRESH_LINE, "checking": copy::CHECKING_LINE, "unavailable": copy::UNAVAILABLE_LINE, "pendingCredit": copy::PENDING_CREDIT_LINE})
+    serde_json::json!({
+        "heading": copy::HEADING,
+        "refresh": copy::REFRESH_LINE,
+        "refreshAction": copy::REFRESH_ACTION,
+        "inviteCode": copy::INVITE_CODE_LABEL,
+        "redeemAction": copy::REDEEM_ACTION,
+        "checking": copy::CHECKING_LINE,
+        "unavailable": copy::UNAVAILABLE_LINE,
+        "pendingCredit": copy::PENDING_CREDIT_LINE,
+    })
 }

@@ -300,7 +300,9 @@ enum AccountAction {
     },
     /// Read current contribution readiness from your account
     Status,
-    /// Redeem an invite; retain the same idempotency key when retrying
+    /// Redeem an invite code read from standard input (input is echoed; pipe
+    /// the code in to keep it off the screen). Keep the same idempotency key
+    /// when retrying
     Redeem {
         #[arg(long)]
         idempotency_key: uuid::Uuid,
