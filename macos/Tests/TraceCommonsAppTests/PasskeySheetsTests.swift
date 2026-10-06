@@ -341,12 +341,15 @@ final class PasskeySheetsTests: XCTestCase {
         let source = try Self.source()
         for imitation in [
             "Simulated", "Touch ID", "Save a passkey", "Save in", "1Password", "Passwords",
-            "More Options", "Sign In", "touchid", "fingerprint", "PasskeyStore",
+            "More Options", "Sign In", "PasskeyStore",
         ] {
             XCTAssertFalse(source.contains(imitation), "found \(imitation)")
         }
-        // The four sheets are glass sheets; the system ones go through the coordinator.
-        XCTAssertEqual(source.components(separatedBy: "GlassSheet(").count - 1, 4)
+        // The one Touch ID glyph is P-7's own tinted circle (Ron's
+        // `WelcomeBack`), named once in the popup layout, never a button.
+        XCTAssertEqual(source.components(separatedBy: "\"touchid\"").count - 1, 1)
+        // The four popups are the app's; the system ones go through the coordinator.
+        XCTAssertEqual(source.components(separatedBy: "        popup(.").count - 1, 4)
         XCTAssertTrue(source.contains("coordinator.perform("))
         XCTAssertTrue(source.contains("accountBind()") || source.contains("connectNearAI()"))
         // Every word on the sheets is the core's.
@@ -477,5 +480,31 @@ final class PasskeySheetsTests: XCTestCase {
         XCTAssertEqual(PasskeySignInResult(bindingState: "legacy"), .alreadyBound)
         XCTAssertEqual(PasskeySignInResult(bindingState: "closed"), .unrecognised)
         XCTAssertEqual(PasskeySignInResult(bindingState: ""), .unrecognised)
+    }
+
+    /// Ron's review of #1235, item 14: P-1 and P-2 carry the passkey icon
+    /// and P-5 the lock, in the round tinted circle; P-7 its tinted Touch ID
+    /// circle and a display-size title. Headings are centred, and Back and
+    /// Close are round icon buttons in the corners (Close on P-1, Back and
+    /// Close on P-2, none on P-5 and P-7, as Ron's). P-5's Verify is the
+    /// outlined button.
+    func test_thePopupsFollowRonsDesign() throws {
+        XCTAssertEqual(PasskeyPopupLayout.icon(.choose), .passkey)
+        XCTAssertEqual(PasskeyPopupLayout.icon(.name), .passkey)
+        XCTAssertEqual(PasskeyPopupLayout.icon(.verify), .lock)
+        XCTAssertNil(PasskeyPopupLayout.icon(.welcomeBack), "P-7's circle sits in its card")
+        XCTAssertEqual(PasskeyPopupLayout.corners(.choose), PasskeyPopupLayout.Corners(back: false, close: true))
+        XCTAssertEqual(PasskeyPopupLayout.corners(.name), PasskeyPopupLayout.Corners(back: true, close: true))
+        XCTAssertEqual(PasskeyPopupLayout.corners(.verify), PasskeyPopupLayout.Corners(back: false, close: false))
+        XCTAssertEqual(PasskeyPopupLayout.corners(.welcomeBack), PasskeyPopupLayout.Corners(back: false, close: false))
+
+        let source = try Self.source()
+        XCTAssertTrue(source.contains("GlassRoundButton(backLabel"))
+        XCTAssertTrue(source.contains("GlassRoundButton(closeLabel"))
+        XCTAssertFalse(source.contains("Button(copy.passkey.back)"))
+        XCTAssertFalse(source.contains("Button(copy.passkey.close)"))
+        XCTAssertTrue(source.contains(".multilineTextAlignment(.center)"))
+        XCTAssertTrue(source.contains("GlassTokens.TypeScale.display"))
+        XCTAssertTrue(source.contains(".passkeyOutlined()"))
     }
 }
