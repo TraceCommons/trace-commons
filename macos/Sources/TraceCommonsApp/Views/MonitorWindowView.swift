@@ -38,8 +38,11 @@ struct MonitorWindowView: View {
         case privateAI
     }
 
+    /// Settings is drawn over the panes while `navigation.settingsRequest`
+    /// is set (Ron's #1146 modal; #1241 Task 10).
+    let navigation: MainWindowNavigation
+
     @EnvironmentObject private var model: AppModel
-    @Environment(\.openSettings) private var openSettings
 
     @SceneStorage("monitor.tab") private var tab: Tab = .home
     @SceneStorage("monitor.mapTab") private var mapTab: MapTab = .traces
@@ -129,7 +132,7 @@ struct MonitorWindowView: View {
                 showsMap: $showsMap, showsInspector: $showsInspector, showsGraph: $showsGraph,
                 showsIgnored: $showsIgnored,
                 breadcrumb: Self.breadcrumb(tab: tab, homePage: homePage, back: { homePage = .overview }),
-                onSettings: { openSettings() }
+                onSettings: { navigation.requestSettings() }
             ) {
                 switch tab {
                 case .traces:
@@ -191,9 +194,24 @@ struct MonitorWindowView: View {
                 }
             }
         }
+        // Settings is a modal over all three panes (Ron's #1146): while it is
+        // open the panes take no focus and no clicks, are hidden from
+        // VoiceOver, and are blurred under its scrim.
+        .disabled(navigation.settingsRequest != nil)
+        .accessibilityHidden(navigation.settingsRequest != nil)
+        .blur(radius: navigation.settingsRequest == nil ? 0 : GlassTokens.Size.modalScrimBlur)
+        .overlay {
+            if let request = navigation.settingsRequest {
+                SettingsModal(
+                    request: request, navigation: navigation, paused: traces.status?.paused,
+                    onClose: { navigation.settingsRequest = nil },
+                    onPrivateAI: { Self.openPrivateAI(tab: &tab, navigation: navigation) })
+            }
+        }
         .glassWindow()
         // Modals and confirmations raised anywhere in the window cover all
-        // of it.
+        // of it, Settings' sections' own included: the Settings modal sits
+        // inside this host.
         .glassModalHost()
         // Ron's `useInspectorDemand`: a key that was not there before (an
         // undo, a selected session, a folder's Submit all in flight, the
@@ -298,6 +316,13 @@ struct MonitorWindowView: View {
     static func select(_ wanted: MonitorSelection?, selection: inout MonitorSelection?, showsInspector: inout Bool) {
         selection = wanted
         if case .session = wanted { showsInspector = true }
+    }
+
+    /// The Settings modal's Private AI pointer: close the modal and open the
+    /// Inference tab, as Ron's `navigate(routePaths["private-ai"])` does.
+    static func openPrivateAI(tab: inout Tab, navigation: MainWindowNavigation) {
+        navigation.settingsRequest = nil
+        tab = .inference
     }
 
     /// The first time this window is shown, open the panes its screen has
@@ -528,58 +553,24 @@ private struct MonitorMapPane: View {
     }
 }
 
-/// The Settings window (D8; R11 of #1173): the section list and, beside
-/// it, the selected section alone, each scrolling on its own (spec,
-/// "Settings navigation"). The sections are the existing settings, with
-/// their behaviour and the core's copy unchanged; the list only chooses
-/// which one is drawn. The selection is restored, and opening or closing
-/// this window leaves the monitor window as it was.
+/// The name the Settings scene mounted (D8; R11 of #1173), kept because
+/// #1242 still mounts it. Settings is now Ron's modal over the Monitor
+/// (#1241 Task 10, `SettingsModal`), so this draws nothing of its own: it
+/// opens the Monitor, asks it for the modal, and closes itself.
 struct MonitorSettingsWindow: View {
     let navigation: MainWindowNavigation
 
-    @EnvironmentObject private var model: AppModel
-    @Environment(ComputeModel.self) private var compute
-    @SceneStorage("settings.section") private var section: SettingsSection = .connection
+    @Environment(\.openWindow) private var openWindow
+    @Environment(\.dismiss) private var dismiss
 
     var body: some View {
-        NavigationSplitView {
-            // One list with arrow-key selection, not a button per row.
-            List(selection: Binding(get: { section }, set: { if let value = $0 { section = value } })) {
-                ForEach(SettingsSection.allCases) { item in
-                    // A section whose copy has not loaded is a disabled
-                    // placeholder, never a missing row.
-                    let row = item.listRow(.init(model: model, compute: compute.snapshot?.title))
-                    Label(row.text, systemImage: item.symbol)
-                        .lineLimit(2)
-                        .foregroundStyle(row.enabled ? .primary : .secondary)
-                        .accessibilityLabel(row.enabled ? row.text : MonitorWords.unknown)
-                        .selectionDisabled(!row.enabled)
-                        .tag(item)
-                }
+        Color.clear
+            .frame(width: 1, height: 1)
+            .onAppear {
+                openWindow(id: WindowID.monitor)
+                navigation.requestSettings()
+                dismiss()
             }
-            .navigationSplitViewColumnWidth(min: 200, ideal: 230, max: 280)
-        } detail: {
-            Group {
-                switch section {
-                case .compute:
-                    ScrollView {
-                        ComputeView(model: compute)
-                            .padding(GlassTokens.Space.panePadding)
-                            .frame(maxWidth: 560, alignment: .leading)
-                            .frame(maxWidth: .infinity, alignment: .topLeading)
-                    }
-                default:
-                    ScrollView {
-                        GlassSettingsContent(navigation: navigation, section: section)
-                    }
-                }
-            }
-            // A fresh view per section, so the scroll starts at its top.
-            .id(section)
-        }
-        .frame(minWidth: 760, minHeight: 520)
-        // A section's modals and confirmations cover the whole window.
-        .glassModalHost()
     }
 }
 #endif

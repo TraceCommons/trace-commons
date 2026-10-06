@@ -403,13 +403,17 @@ final class SettingsParityTests: XCTestCase {
         XCTAssertFalse(source.contains("} content: {"))
     }
 
-    /// The window draws the glass content and nothing else.
+    /// Settings (the Monitor's modal since #1241 Task 10) draws the glass
+    /// content and nothing else.
     func test_theWindowDrawsGlassContent() throws {
-        let window = try Self.text("Views/MonitorWindowView.swift")
-        XCTAssertTrue(window.contains("GlassSettingsContent(navigation: navigation, section: section)"))
-        // The glass view's name ends in the legacy one's, so the legacy call
-        // is looked for with the glass calls taken out.
-        XCTAssertFalse(window.replacingOccurrences(of: "GlassSettingsContent(", with: "").contains("SettingsContent("))
-        XCTAssertFalse(window.contains(".tcScreen()"))
+        for rel in ["Views/Monitor/SettingsModal.swift", "Views/MonitorWindowView.swift"] {
+            let source = try Self.text(rel)
+            // The glass view's name ends in the legacy one's, so the legacy
+            // call is looked for with the glass calls taken out.
+            XCTAssertFalse(source.replacingOccurrences(of: "GlassSettingsContent(", with: "").contains("SettingsContent("), rel)
+            XCTAssertFalse(source.contains(".tcScreen()"), rel)
+        }
+        let modal = try Self.text("Views/Monitor/SettingsModal.swift")
+        XCTAssertTrue(modal.contains("GlassSettingsContent(navigation: navigation, section: item, onPrivateAI: onPrivateAI)"))
     }
 }
