@@ -82,6 +82,10 @@ final class TracesStore {
     }
 
     private(set) var lastContributedFolder: ContributedFolder?
+    /// The folder whose Submit all is in flight, apart from `writing`,
+    /// which a mode change also holds: only a bulk approve is a demand on
+    /// the inspector (Ron's `submit:` key in `useInspectorDemand`).
+    private(set) var submittingFolder: String?
 
     /// The sample set drawn, in a debug build over sample data; nil over
     /// the daemon. `sampleUnknown` is a `TRACE_COMMONS_SAMPLE` that named no
@@ -525,7 +529,11 @@ final class TracesStore {
     func contributeFolder(_ folder: TracesTree.FolderNode, verdict: ContributorVerdict?) async {
         guard !writing.contains(folder.id), mayContributeFolder(folder), let client else { return }
         writing.insert(folder.id)
-        defer { writing.remove(folder.id) }
+        submittingFolder = folder.id
+        defer {
+            writing.remove(folder.id)
+            submittingFolder = nil
+        }
         folderNotice = nil
         writeErrors[folder.id] = nil
         do {
@@ -557,6 +565,17 @@ final class TracesStore {
             return
         }
         await load()
+    }
+
+    /// Closes the contribution's undo card (Ron's `UndoBar` Dismiss). The
+    /// contribution stands; only the offer to take it back goes.
+    func dismissContributed() {
+        lastContributed = nil
+    }
+
+    /// Closes the folder's Submit all undo card. The contribution stands.
+    func dismissContributedFolder() {
+        lastContributedFolder = nil
     }
 
     /// A refused write is said beside its row. A core that did not answer

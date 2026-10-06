@@ -4,136 +4,15 @@ import TCBridge
 import TCDesign
 import TCShellCore
 
-/// What the legacy queue draws above its list, drawn above the Traces tree:
-/// the action messages, both undos, the certificate list, the two consent
-/// offers, the first-contribution note and why sessions stopped waiting.
-///
-/// Above the tree rather than in the inspector, so hiding the inspector
-/// never hides an Undo that can still take something back or an offer
-/// waiting on an answer. Every sentence is the core's or `QueueLegacyWords`'.
-struct TracesOffersBar: View {
-    @EnvironmentObject private var model: AppModel
-    let store: TracesStore
-
-    /// The core's Dismiss, or the word the legacy banner already says: the
-    /// one accessor every glass notice reads.
-    private var dismissWord: String { ActionMessageBanner.coreDismissWord ?? ActionMessageBanner.dismissWord }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
-            if let error = model.lastActionError {
-                GlassNotice(tone: .outside, title: error) {
-                    Button(dismissWord) { model.lastActionError = nil }
-                        .buttonStyle(GlassButtonStyle(.glass))
-                }
-            }
-            if let notice = model.lastActionNotice {
-                GlassNotice(tone: .ask, title: notice) {
-                    Button(dismissWord) { model.lastActionNotice = nil }
-                        .buttonStyle(GlassButtonStyle(.glass))
-                }
-            }
-            if let undo = model.undo {
-                approvalUndo(undo)
-            }
-            storeUndo
-
-            // The sessions a witness certificate is held for, once the
-            // daemon has answered the queue (`CertificateSection` says when
-            // there are none). An unread queue is not an empty one: before
-            // the answer, nothing.
-            if model.queueAnswered {
-                CertificateSection(entries: model.awaitingDecision)
-            }
-
-            if model.showsPrivateInferenceOffer, let copy = model.privateInferenceCopy {
-                PrivateAIOfferGlassCard(
-                    copy: copy,
-                    onAccept: { model.answerPrivateInferenceOffer(accepted: true) },
-                    onDecline: { model.answerPrivateInferenceOffer(accepted: false) }
-                )
-                .disabled(model.privateInferenceBusy)
-            }
-            if let offer = model.armingOffer {
-                ArmingOfferGlassCard(
-                    offer: offer,
-                    onArm: { model.acceptArmingOffer(offer) },
-                    onDecline: { model.declineArmingOffer(offer) }
-                )
-            }
-            // Only on an answered, empty history; whether anything is under
-            // review reads the answered queue.
-            if model.historyAnswered, model.queueAnswered, model.history.isEmpty,
-               let copy = model.witnessCopy?.onboarding {
-                FirstContributionGlassNote(copy: copy, reviewing: !model.awaitingDecision.isEmpty)
-            }
-            NotOfferedGlassDisclosure(counts: model.outcomeCounts)
-        }
-    }
-
-    /// The submit toast and, when something was approved, its Undo. No
-    /// timer removes it: the deadline is the daemon's next upload sweep,
-    /// which nothing here can observe (`UndoBar`).
-    private func approvalUndo(_ undo: AppModel.Undo) -> some View {
-        GlassNotice(tone: .ask, title: undo.toastLine) {
-            if undo.offerUndo {
-                Text(QueueLegacyWords.undoWillSend)
-                    .fixedSize(horizontal: false, vertical: true)
-                Text(QueueLegacyWords.approvedAgo(undo.heldSeconds))
-                    .monospacedDigit()
-            }
-            HStack(spacing: GlassTokens.Space.s3) {
-                if undo.offerUndo {
-                    // The app's one Return binding, on the safe action: a
-                    // keystroke pulls a transcript back.
-                    Button(store.words?.undoContribute ?? QueueLegacyWords.undo) { model.undoApproval() }
-                        .buttonStyle(GlassButtonStyle(.primary))
-                        .keyboardShortcut(.defaultAction)
-                }
-                Button(dismissWord) { model.dismissUndo() }
-                    .buttonStyle(GlassButtonStyle(.glass))
-                    .help(undo.offerUndo ? QueueLegacyWords.closeNoticeStillSends : QueueLegacyWords.closeNotice)
-            }
-        }
-    }
-
-    /// The contribution and the keep that can still be taken back, each
-    /// with the core's words and any refusal of its undo.
-    @ViewBuilder
-    private var storeUndo: some View {
-        if let contributed = store.lastContributed, let words = store.words {
-            GlassNotice(tone: .ask, title: contributed.toast.line) {
-                if contributed.toast.offerUndo {
-                    Button(words.undoContribute) {
-                        Task { await store.perform(.undoContribute, on: contributed.entryId) }
-                    }
-                    .buttonStyle(GlassButtonStyle(.glass))
-                    .disabled(store.acting.contains(contributed.entryId))
-                }
-            }
-            TracesRefusal(store: store, entryId: contributed.entryId)
-        }
-        if let folder = store.lastContributedFolder, let words = store.words {
-            GlassNotice(tone: .ask, title: folder.toast.line) {
-                if folder.toast.offerUndo {
-                    Button(words.undoContribute) { Task { await store.undoFolder(folder.projectId) } }
-                        .buttonStyle(GlassButtonStyle(.glass))
-                        .disabled(store.writing.contains(folder.projectId))
-                }
-            }
-            // A refused undo is said beside the folder (`folderNotes`).
-        }
-        if let kept = store.lastKept, let words = store.words {
-            Button(words.undoKeep) { Task { await store.perform(.undoKeep, on: kept) } }
-                .buttonStyle(GlassButtonStyle(.glass))
-                .disabled(store.acting.contains(kept))
-            TracesRefusal(store: store, entryId: kept)
-        }
-    }
-}
+// The pieces the inspector's prompts draw (`InspectorPrompts`): the two
+// consent offers, the first-contribution note, why sessions stopped
+// waiting, and a refused action in the core's words. They were the offers
+// bar above the Traces tree; Ron's #1146 puts them at the top of the
+// inspector, which opens itself when one appears (`InspectorDemand`).
+// Every sentence is the core's or `QueueLegacyWords`'.
 
 /// The core's words for a refused action on `entryId`, if there is one.
-/// The bar and the inspector both say a refusal through this.
+/// The prompts and the session card both say a refusal through this.
 struct TracesRefusal: View {
     let store: TracesStore
     let entryId: String
@@ -146,7 +25,7 @@ struct TracesRefusal: View {
 }
 
 /// The first-contribution note, until anything has been contributed.
-private struct FirstContributionGlassNote: View {
+struct FirstContributionGlassNote: View {
     let copy: FirstContributionCopy
     /// Whether a session is already waiting, which picks the line that
     /// points at it over the one that says how to start.
@@ -182,7 +61,7 @@ private struct FirstContributionGlassNote: View {
 /// Why some entries are not waiting on a decision. Scoped as the legacy
 /// disclosure is: `queue_outcome_counts` covers entries that reached the
 /// queue, and the scope note says so.
-private struct NotOfferedGlassDisclosure: View {
+struct NotOfferedGlassDisclosure: View {
     let counts: [String: Int]
 
     @State private var expanded = false
@@ -216,7 +95,7 @@ private struct NotOfferedGlassDisclosure: View {
 /// The offer to answer model calls on this computer, in the core's words
 /// only. Declining comes first and neither answer is the primary action:
 /// this question opens a listener anything on the machine can use.
-private struct PrivateAIOfferGlassCard: View {
+struct PrivateAIOfferGlassCard: View {
     let copy: PrivateInferenceCopy
     let onAccept: () -> Void
     let onDecline: () -> Void
@@ -256,10 +135,18 @@ private struct PrivateAIOfferGlassCard: View {
 /// it is offered only in the core's words (`tc_arming_offer_copy_json`) and
 /// nothing is drawn without them. Evidence first, question second; declining
 /// first and neither answer emphasised, since previews from the project stop.
-private struct ArmingOfferGlassCard: View {
+/// Ron's shape (#1146 `ArmingOffer`): the eyebrow over the card, and the
+/// card's confirm opens a confirmation with the core's body before anything
+/// is armed.
+struct ArmingOfferGlassCard: View {
     let offer: ArmingOffer
+    /// The core's "OPTIONAL AUTOMATION"; nil draws no eyebrow.
+    let eyebrow: String?
     let onArm: () -> Void
     let onDecline: () -> Void
+
+    /// The confirmation is open: nothing arms until it is answered.
+    @State private var confirming = false
 
     private var copy: ProjectArmingCopy? {
         ProjectArmingCopy.decode(fromJSON: TCCoreCopy.armingOfferCopyJSON(
@@ -272,6 +159,11 @@ private struct ArmingOfferGlassCard: View {
         if let copy {
             GlassCard {
                 VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
+                    if let eyebrow {
+                        Text(eyebrow)
+                            .glassType(GlassTokens.TypeScale.eyebrow)
+                            .foregroundStyle(GlassColor.textTertiary)
+                    }
                     Text(copy.evidence)
                         .glassType(GlassTokens.TypeScale.caption)
                         .foregroundStyle(GlassColor.textSecondary)
@@ -283,12 +175,23 @@ private struct ArmingOfferGlassCard: View {
                     HStack(spacing: GlassTokens.Space.s3) {
                         Button(copy.decline, action: onDecline)
                             .buttonStyle(GlassButtonStyle(.glass))
-                        Button(copy.confirm, action: onArm)
+                        Button(copy.confirm) { confirming = true }
                             .buttonStyle(GlassButtonStyle(.glass))
                     }
                 }
             }
             .accessibilityElement(children: .contain)
+            .confirmationDialog(copy.question, isPresented: $confirming, titleVisibility: .visible) {
+                // Declining here closes the confirmation only; the offer
+                // stays until it is answered on the card.
+                Button(copy.decline, role: .cancel) { confirming = false }
+                Button(copy.confirm) {
+                    confirming = false
+                    onArm()
+                }
+            } message: {
+                Text(copy.body)
+            }
         }
     }
 }

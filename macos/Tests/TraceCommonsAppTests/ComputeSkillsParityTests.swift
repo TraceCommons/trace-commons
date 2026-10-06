@@ -220,8 +220,11 @@ final class ComputeSkillsParityTests: XCTestCase {
         // A new row is a new panel: the draft and the install status are per
         // record, and the inspector pane outlives a change of selection.
         XCTAssertTrue(inspector.contains(".id(record.submissionID)"))
+        // The selected row's details are drawn by the inspector host, under
+        // the health banners and the prompts.
+        let host = try Self.text("Views/Monitor/TracesInspectorHost.swift")
+        XCTAssertTrue(host.contains("HistoryDetailInspector(row: row)"))
         let window = try Self.text("Views/MonitorWindowView.swift")
-        XCTAssertTrue(window.contains("HistoryDetailInspector(row: row)"))
         XCTAssertTrue(window.contains("@SceneStorage(\"monitor.selectedHistory\") private var selectedHistory = \"\""))
         let home = try Self.text("Views/Monitor/HomeViews.swift")
         XCTAssertTrue(home.contains("HistoryPage(store: store, statusLabel: statusLabel, selection: $selection,"))

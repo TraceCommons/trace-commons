@@ -1936,6 +1936,7 @@ final class AppModel: ObservableObject {
     }
     func setDaemonSettingsForTesting(_ settings: DaemonSettingsView) { publishIfChanged(\.daemonSettings, settings) }
     func setStartupForTesting(_ startup: Startup) { self.startup = startup }
+    func setArmingOfferForTesting(_ offer: ArmingOffer?) { publishIfChanged(\.armingOffer, offer) }
     func setConfigDirectoryForTesting(_ path: String) { configDirectory = path }
     func clearWatchOnlyMarkerForTesting() {
         guard let key = Self.watchOnlyCompleteKey(configDirectory) else { return }

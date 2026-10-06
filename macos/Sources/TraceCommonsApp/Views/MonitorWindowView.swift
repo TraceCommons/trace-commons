@@ -152,23 +152,40 @@ struct MonitorWindowView: View {
             GlassPane {
                 // An empty branch would leave the pane nothing to draw, and
                 // it would vanish while the layout still reserved its width.
+                // Ron's #1146: the prompts head the inspector on every tab,
+                // since a demand opens it on every tab. Inference keeps its
+                // own inspector under them; Home, Traces and History host
+                // the health banners, the prompts and the selection's
+                // inspector.
                 switch tab {
-                case .traces:
-                    SessionInspectorView(store: traces, entry: traces.selectedSession(selection))
                 case .inference:
-                    PrivateAIInspectorView(store: inference, destinationLabel: model.privateInferenceCopy?.destination)
-                case .home:
-                    // History's selected row, while it is still listed; the
-                    // record as a whole otherwise.
-                    if homePage == .history, let row = selectedHistoryRow {
-                        HistoryDetailInspector(row: row)
-                    } else {
-                        HomeSummaryInspector(store: home)
+                    VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
+                        InspectorPrompts(store: traces)
+                        PrivateAIInspectorView(store: inference, destinationLabel: model.privateInferenceCopy?.destination)
                     }
+                case .home, .traces:
+                    // Until History's detail moves into the left pane (Task 8
+                    // of the #1146 port), the selected History row's details
+                    // are the host's, under its banners and prompts.
+                    TracesInspectorHost(
+                        traces: traces, home: home, selection: selection,
+                        historyRow: tab == .home && homePage == .history ? selectedHistoryRow : nil)
                 }
             }
         }
         .glassWindow()
+        // Ron's `useInspectorDemand`: a key that was not there before (an
+        // undo, a selected session, a folder's Submit all in flight, the
+        // arming or Private AI offer) opens the inspector, so none runs out
+        // of sight. A key going away closes nothing.
+        .onChange(of: demandKeys) { old, new in
+            if InspectorDemand.opens(previous: old, current: new) { showsInspector = true }
+        }
+        // `onChange` sees changes only: a demand already there when the
+        // window appears (an undo made while the Monitor was closed, over a
+        // restored closed inspector) opens it too, as Ron's effect does on
+        // mount.
+        .onAppear { if InspectorDemand.opensOnAppear(keys: demandKeys) { showsInspector = true } }
         // The app's live client, re-attached whenever the daemon restarts;
         // with none, each store draws the core as down.
         .task(id: model.liveData.map(ObjectIdentifier.init)) {
@@ -213,6 +230,11 @@ struct MonitorWindowView: View {
         return parts.isEmpty ? nil : parts.joined(separator: ", ")
     }
 
+    /// What the inspector must show right now (`InspectorDemand`).
+    private var demandKeys: Set<String> {
+        InspectorDemand.keys(model: model, traces: traces, selection: selection)
+    }
+
     /// The selected History row, while it is still in the list.
     private var selectedHistoryRow: DaemonData.HistoryRow? {
         guard !selectedHistory.isEmpty else { return nil }
@@ -241,7 +263,9 @@ struct MonitorWindowView: View {
         guard !panesSeeded else { return }
         let seed = GlassPaneLayout.firstLaunch(windowWidth: windowWidth)
         showsMap = seed.showsMap
-        showsInspector = seed.showsInspector
+        // A narrow first layout seeds the inspector closed, but never over
+        // something it must show.
+        showsInspector = seed.showsInspector || InspectorDemand.opensOnAppear(keys: demandKeys)
         panesSeeded = true
     }
 

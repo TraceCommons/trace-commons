@@ -12,9 +12,6 @@ import TCShellCore
 /// carries (`ShellWordingTests`).
 struct TracesTreeView: View {
     let store: TracesStore
-    /// Only for the queue's configured limit, which the queue-full banner
-    /// names (the store's data contract does not carry it).
-    @EnvironmentObject private var model: AppModel
     /// The folder or session selected; nil for none.
     @Binding var selection: MonitorSelection?
     /// A session's Review pill: select it and show the inspector its review
@@ -78,17 +75,13 @@ struct TracesTreeView: View {
             if let notice = store.folderNotice {
                 GlassNotice(tone: .ask) { Text(notice) }
             }
-            // Why approved sessions are not moving, or that the core is not
-            // answering, beside the tree and before Contribute is reached.
-            // The last good tree stays below a failed refresh. An unread
-            // status is never drawn as healthy.
-            ForEach(TracesHealth.banners(
-                phase: store.phase, status: store.status, words: store.words, coreDown: TracesHealth.coreDownLine,
-                maxQueueEntries: model.daemonSettings?.maxQueueEntries)
-            ) { GlassHealthBanner(banner: $0) }
-            // Undo and the consent offers, here rather than in the
-            // inspector, so they are on screen with the inspector hidden.
-            TracesOffersBar(store: store)
+            // A core that does not answer, or a read it refused, is said
+            // beside the tree too, so the pane never reads as current over a
+            // last good tree with the inspector hidden. The safeguards and
+            // the prompts are the inspector's (`TracesInspectorHost`).
+            if case .failed(let error) = store.phase, let line = store.words?.line(for: error) {
+                GlassNotice(tone: .outside, title: line) { EmptyView() }
+            }
             if store.phase == .loading && isEmpty {
                 ProgressView().controlSize(.small).frame(maxWidth: .infinity)
             } else if isEmpty && store.phase == .loaded {

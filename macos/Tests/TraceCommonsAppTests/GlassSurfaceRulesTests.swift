@@ -58,6 +58,9 @@ final class GlassSurfaceRulesTests: XCTestCase {
         "Views/HarnessListView.swift",
         "Views/Monitor/InferenceAccount.swift",
         "Views/Monitor/InferenceViews.swift",
+        // Ron's inspector host and its prompts (#1146, Task 3 of #1241).
+        "Views/Monitor/TracesInspectorHost.swift",
+        "Views/Monitor/InspectorPrompts.swift",
     ]
 
     static func text(_ rel: String) throws -> String {
