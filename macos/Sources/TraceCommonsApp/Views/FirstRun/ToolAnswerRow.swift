@@ -14,31 +14,30 @@ enum ToolAnswer: Hashable {
 /// Every write goes through `FirstRunState.answer(_:_:)`, which keeps one
 /// answer per kind.
 enum ToolAnswerRowLayout {
-    /// A found tool offers both answers. A missing one still asks, but can
-    /// only be answered "I don't use it" (owner, 2026-10-04): Continue waits
-    /// for it, and its `off` is the person's, never written unasked.
-    static func options(for candidate: SourceCandidate) -> [ToolAnswer] {
-        candidate.exists ? [.watch, .dontUse] : [.dontUse]
+    /// Whether the row asks at all. A tool not on this Mac is not asked
+    /// (spec rule 1, the owner's reversal in Ron's review of #1235); a
+    /// missing one the state already watches -- a restored state -- still
+    /// asks, so the picker can show the answer Continue counts.
+    static func asks(_ candidate: SourceCandidate, in state: FirstRunState) -> Bool {
+        if candidate.exists { return true }
+        if case .watch = state.sessionRoots[candidate.source] { return true }
+        return false
     }
 
-    /// The options as the row offers them: a missing tool the state already
-    /// watches (a restored state, or a folder added on Custom's Tools) also
-    /// offers Watch, so the picker can show the answer Continue counts.
+    /// The answers a row offers: both on a row that asks, none otherwise.
     static func options(for candidate: SourceCandidate, in state: FirstRunState) -> [ToolAnswer] {
-        let base = options(for: candidate)
-        if base.contains(.watch) { return base }
-        if case .watch = state.sessionRoots[candidate.source] { return [.watch] + base }
-        return base
+        asks(candidate, in: state) ? [.watch, .dontUse] : []
     }
 
-    /// Ron's folder button sits on a found tool's row only.
-    static func offersFolderChoice(_ candidate: SourceCandidate) -> Bool {
-        candidate.exists
+    /// Ron's folder button sits on a row that asks.
+    static func offersFolderChoice(_ candidate: SourceCandidate, in state: FirstRunState) -> Bool {
+        asks(candidate, in: state)
     }
 
-    /// "Get {tool}" sits on a missing tool's row only.
-    static func offersGetTool(_ candidate: SourceCandidate) -> Bool {
-        !candidate.exists
+    /// "Get {tool}" sits on a row that does not ask, and only when the core
+    /// gave the tool an install page (Ron's `tool.installUrl ? ... : null`).
+    static func offersGetTool(_ candidate: SourceCandidate, installURL: URL?, in state: FirstRunState) -> Bool {
+        !asks(candidate, in: state) && installURL != nil
     }
 
     /// What the row shows as answered, read from the same declaration
@@ -91,7 +90,7 @@ enum ToolAnswerRowLayout {
 ///
 /// `meta` is the trailing line; Folders passes the evidence line, and the
 /// Tools screen may pass a shorter one. `installURL` names where "Get
-/// {tool}" leads; with none the button is shown but cannot be pressed.
+/// {tool}" leads; with none there is no button.
 struct ToolAnswerRow: View {
     let copy: FirstRunCopy.Folders
     /// What the picker reads while unanswered: the core's "Choose…".
@@ -126,32 +125,41 @@ struct ToolAnswerRow: View {
                         .lineLimit(1)
                 }
                 HStack(spacing: GlassTokens.Space.s4) {
-                    if ToolAnswerRowLayout.offersGetTool(candidate) {
+                    if ToolAnswerRowLayout.asks(candidate, in: state) {
+                        Spacer(minLength: 0)
+                        GlassPicker(
+                            ToolAnswerRowLayout.fill(copy.watchQuestion, tool: candidate.source),
+                            selection: answer,
+                            options: options,
+                            placeholder: choose
+                        )
+                        if ToolAnswerRowLayout.offersFolderChoice(candidate, in: state) {
+                            GlassFolderButton(ToolAnswerRowLayout.fill(copy.chooseFolder, tool: candidate.source)) {
+                                if let path = FolderPanel.choose() {
+                                    chosenFolder = path
+                                    ToolAnswerRowLayout.choose(folder: path, for: candidate, in: &state)
+                                }
+                            }
+                        }
+                    } else {
+                        // Not on this Mac: not asked. Ron's install line, and
+                        // "Get {tool}" only with an install page.
                         Text(copy.notInstalled)
                             .glassType(GlassTokens.TypeScale.caption)
                             .foregroundStyle(GlassColor.textTertiary)
                             .frame(maxWidth: .infinity, alignment: .leading)
-                        Button(ToolAnswerRowLayout.fill(copy.getTool, tool: candidate.source)) {
-                            if let installURL { NSWorkspace.shared.open(installURL) }
-                        }
-                        .buttonStyle(GlassButtonStyle(.secondary))
-                        .disabled(installURL == nil)
-                        .help(ToolAnswerRowLayout.fill(copy.downloadTool, tool: candidate.source))
-                    } else {
-                        Spacer(minLength: 0)
-                    }
-                    GlassPicker(
-                        ToolAnswerRowLayout.fill(copy.watchQuestion, tool: candidate.source),
-                        selection: answer,
-                        options: options,
-                        placeholder: choose
-                    )
-                    if ToolAnswerRowLayout.offersFolderChoice(candidate) {
-                        GlassFolderButton(ToolAnswerRowLayout.fill(copy.chooseFolder, tool: candidate.source)) {
-                            if let path = FolderPanel.choose() {
-                                chosenFolder = path
-                                ToolAnswerRowLayout.choose(folder: path, for: candidate, in: &state)
+                        if ToolAnswerRowLayout.offersGetTool(candidate, installURL: installURL, in: state),
+                            let installURL
+                        {
+                            Button {
+                                NSWorkspace.shared.open(installURL)
+                            } label: {
+                                Label(
+                                    ToolAnswerRowLayout.fill(copy.getTool, tool: candidate.source),
+                                    systemImage: "arrow.down.to.line")
                             }
+                            .buttonStyle(GlassButtonStyle(.secondary, small: true))
+                            .help(ToolAnswerRowLayout.fill(copy.downloadTool, tool: candidate.source))
                         }
                     }
                 }

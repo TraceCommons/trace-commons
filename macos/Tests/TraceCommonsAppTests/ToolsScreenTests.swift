@@ -66,7 +66,7 @@ final class ToolsScreenTests: XCTestCase {
         let codex = try XCTUnwrap(rows.first { $0.source == .codex })
         XCTAssertTrue(codex.exists)
         XCTAssertEqual(codex.path, path)
-        XCTAssertFalse(ToolAnswerRowLayout.offersGetTool(codex))
+        XCTAssertFalse(ToolAnswerRowLayout.offersGetTool(codex, installURL: URL(string: "https://example.com"), in: state))
         XCTAssertEqual(ToolAnswerRowLayout.answer(in: state, for: codex), .watch)
         XCTAssertEqual(ToolsScreenLayout.meta(for: codex, in: state, discovered: discovered, copy: copy, now: Date()), copy.tools.addedByYou)
 
@@ -295,7 +295,7 @@ final class ToolsScreenTests: XCTestCase {
         let codex = try XCTUnwrap(ToolsScreenLayout.rows([missing], state: state).first { $0.source == .codex })
         XCTAssertTrue(codex.exists)
         XCTAssertEqual(codex.path, "/c")
-        XCTAssertFalse(ToolAnswerRowLayout.offersGetTool(codex))
+        XCTAssertFalse(ToolAnswerRowLayout.offersGetTool(codex, installURL: URL(string: "https://example.com"), in: state))
     }
 
     func test_aLaterOffDropsTheAddedFolder() throws {

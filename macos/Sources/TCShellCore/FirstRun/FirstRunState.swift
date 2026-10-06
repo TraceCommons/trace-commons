@@ -119,6 +119,10 @@ public struct FirstRunState: Codable, Equatable, Sendable {
     public var enrolledInvite: String?
     /// The near.ai sign-in completed; going forward again does not reopen it.
     public var signedIn: Bool
+    /// The tools discovery last reported not on this Mac
+    /// (`recordDiscovery`). Such a tool is not asked (spec rule 1); see
+    /// `sessionRoots` for how it is declared.
+    public var notFound: Set<SourceKind>
 
     public init(
         tier: FirstRunTier = .quick,
@@ -138,7 +142,8 @@ public struct FirstRunState: Codable, Equatable, Sendable {
         daemonStarted: Bool = false,
         startedSettingsJSON: String? = nil,
         enrolledInvite: String? = nil,
-        signedIn: Bool = false
+        signedIn: Bool = false,
+        notFound: Set<SourceKind> = []
     ) {
         self.tier = tier
         self.step = step
@@ -158,6 +163,14 @@ public struct FirstRunState: Codable, Equatable, Sendable {
         self.startedSettingsJSON = startedSettingsJSON
         self.enrolledInvite = enrolledInvite
         self.signedIn = signedIn
+        self.notFound = notFound
+    }
+
+    /// Record what discovery found. A tool not on this Mac is not asked,
+    /// and Continue counts only the tools found here (spec rule 1, the
+    /// owner's reversal in Ron's review of #1235).
+    public mutating func recordDiscovery(_ candidates: [SourceCandidate]) {
+        notFound = Set(candidates.filter { !$0.exists }.map(\.source))
     }
 
     /// Whether the daemon holds an enrolment for this first run, which is
@@ -203,10 +216,20 @@ public struct FirstRunState: Codable, Equatable, Sendable {
     /// for a tool is that tool's answer; a later one replaces an earlier one.
     /// Both Continue on Folders/Tools and the daemon start read this, so they
     /// cannot disagree about what is answered.
+    ///
+    /// A tool not on this Mac is not asked, so it has no answer. Claude Code
+    /// and Codex must be declared for the daemon to start, and an absent
+    /// declaration of either reads its conventional folder, which would read
+    /// the tool unasked once it is installed; a missing Claude Code or Codex
+    /// the person did not answer is therefore declared `off`, watch nothing.
+    /// A missing optional tool stays undeclared, which constructs no adapter.
     public var sessionRoots: SessionRoots {
         var roots = SessionRoots()
         for (kind, choice) in toolAnswers {
             roots[kind] = choice
+        }
+        for kind in [SourceKind.claudeCode, .codex] where notFound.contains(kind) && !roots[kind].isAnswered {
+            roots[kind] = .off
         }
         for folder in addedFolders {
             switch folder.kind {

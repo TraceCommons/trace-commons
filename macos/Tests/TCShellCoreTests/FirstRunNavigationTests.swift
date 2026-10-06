@@ -33,26 +33,56 @@ final class FirstRunNavigationTests: XCTestCase {
         XCTAssertEqual(state.step, .folders)
     }
 
-    func test_aMissingToolMustBeAnswered() {
-        let candidates = [candidate(.claudeCode), candidate(.codex, exists: false)]
+    /// Spec rule 1, the owner's reversal in Ron's design review of #1235:
+    /// a tool not found on this Mac is not asked, and Continue counts only
+    /// the tools found here.
+    func test_aMissingToolIsNotAsked() {
+        let candidates = [candidate(.claudeCode), candidate(.codex, exists: false), candidate(.cline, exists: false)]
         var state = FirstRunState(tier: .quick, step: .folders)
-        state.toolAnswers[.claudeCode] = .watch(path: "/Users/someone/claude-code")
-
-        XCTAssertFalse(
-            FirstRunNavigation.canContinue(state, candidates: candidates, requiredScope: nil),
-            "a tool that is not installed still needs an answer"
-        )
-
-        state.toolAnswers[.codex] = .undecided
+        state.recordDiscovery(candidates)
         XCTAssertFalse(FirstRunNavigation.canContinue(state, candidates: candidates, requiredScope: nil))
 
-        state.toolAnswers[.codex] = .off
+        state.toolAnswers[.claudeCode] = .watch(path: "/Users/someone/claude-code")
+        XCTAssertTrue(
+            FirstRunNavigation.canContinue(state, candidates: candidates, requiredScope: nil),
+            "a tool that is not installed is not asked")
+        XCTAssertNil(state.toolAnswers[.codex], "nothing is written for the missing tool")
+    }
+
+    /// The rule a missing tool is declared by. Claude Code and Codex must be
+    /// declared for the daemon to start, and an absent declaration of
+    /// either reads its conventional folder, so a tool not on this Mac
+    /// would be read unasked the day it is installed. A missing Claude Code
+    /// or Codex is declared `off`: watch nothing. A missing optional tool
+    /// is left undeclared, which constructs no adapter. An answer the
+    /// person did give always wins.
+    func test_aMissingClaudeOrCodexIsDeclaredOffAndAnOptionalOneNothing() throws {
+        let candidates = [candidate(.claudeCode, exists: false), candidate(.codex), candidate(.cline, exists: false)]
+        var state = FirstRunState(tier: .quick, step: .folders)
+        state.recordDiscovery(candidates)
+        state.toolAnswers[.codex] = .watch(path: "/Users/someone/codex")
         XCTAssertTrue(FirstRunNavigation.canContinue(state, candidates: candidates, requiredScope: nil))
+
+        let json = try XCTUnwrap(state.sessionRoots.settingsJSON())
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: [String: String]])
+        XCTAssertEqual(object["claude_source"], ["mode": "off"])
+        XCTAssertEqual(object["codex_source"]?["mode"], "watch")
+        XCTAssertNil(object["cline_source"])
+        XCTAssertEqual(
+            FirstRunPlan.calls(for: state, at: .leaveRoots).first, .startDaemon(settingsJSON: json))
+
+        // Found again later (installed while the app was away): it is asked.
+        state.recordDiscovery([candidate(.claudeCode), candidate(.codex), candidate(.cline, exists: false)])
+        XCTAssertFalse(
+            FirstRunNavigation.canContinue(
+                state, candidates: [candidate(.claudeCode), candidate(.codex)], requiredScope: nil))
+        XCTAssertNil(state.sessionRoots.settingsJSON())
     }
 
     func test_anOptionalOfferedToolMustBeAnsweredToo() {
-        let candidates = [candidate(.claudeCode), candidate(.codex), candidate(.cline, exists: false)]
+        let candidates = [candidate(.claudeCode), candidate(.codex), candidate(.cline)]
         var state = FirstRunState(tier: .custom, step: .tools)
+        state.recordDiscovery(candidates)
         state.toolAnswers[.claudeCode] = .off
         state.toolAnswers[.codex] = .off
         XCTAssertFalse(FirstRunNavigation.canContinue(state, candidates: candidates, requiredScope: nil))

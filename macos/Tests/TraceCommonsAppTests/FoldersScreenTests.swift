@@ -34,29 +34,35 @@ final class FoldersScreenTests: XCTestCase {
         try XCTUnwrap(FirstRunCopy.decode(try XCTUnwrap(TCCoreCopy.firstRunCopyJSON())))
     }
 
-    func test_aMissingToolStillAsksForAnAnswer() throws {
+    /// Spec rule 1, as the owner reversed it in Ron's design review of
+    /// #1235: a tool not on this Mac is not asked. Its row reads only the
+    /// core's install line and, when there is an install page, "Get
+    /// {tool}"; no picker and no folder button. Continue counts only the
+    /// tools found here.
+    func test_aMissingToolIsNotAsked() throws {
         let missing = Self.candidate(.codex, exists: false)
         let found = Self.candidate(.claudeCode, exists: true)
 
-        // A found tool offers both answers; a missing one only "I don't use
-        // it" -- still a question, never a pre-filled `off`.
-        XCTAssertEqual(ToolAnswerRowLayout.options(for: found), [.watch, .dontUse])
-        XCTAssertEqual(ToolAnswerRowLayout.options(for: missing), [.dontUse])
-        XCTAssertTrue(ToolAnswerRowLayout.offersGetTool(missing))
-        XCTAssertFalse(ToolAnswerRowLayout.offersGetTool(found))
-        XCTAssertFalse(ToolAnswerRowLayout.offersFolderChoice(missing))
-        XCTAssertTrue(ToolAnswerRowLayout.offersFolderChoice(found))
+        let state = FirstRunState(step: .folders)
+        XCTAssertEqual(ToolAnswerRowLayout.options(for: found, in: state), [.watch, .dontUse])
+        XCTAssertEqual(ToolAnswerRowLayout.options(for: missing, in: state), [])
+        XCTAssertFalse(ToolAnswerRowLayout.asks(missing, in: state))
+        XCTAssertTrue(ToolAnswerRowLayout.asks(found, in: state))
+        let url = URL(string: "https://example.com/codex")
+        XCTAssertTrue(ToolAnswerRowLayout.offersGetTool(missing, installURL: url, in: state))
+        XCTAssertFalse(ToolAnswerRowLayout.offersGetTool(missing, installURL: nil, in: state))
+        XCTAssertFalse(ToolAnswerRowLayout.offersGetTool(found, installURL: url, in: state))
+        XCTAssertFalse(ToolAnswerRowLayout.offersFolderChoice(missing, in: state))
+        XCTAssertTrue(ToolAnswerRowLayout.offersFolderChoice(found, in: state))
 
-        // Opening the screen writes nothing.
-        var state = FirstRunState(step: .folders)
-        XCTAssertNil(ToolAnswerRowLayout.answer(in: state, for: missing))
-        XCTAssertNil(state.toolAnswers[.codex])
-        XCTAssertFalse(
-            FirstRunNavigation.canContinue(state, candidates: [found, missing], requiredScope: nil))
-
-        ToolAnswerRowLayout.select(.dontUse, for: missing, in: &state)
-        XCTAssertEqual(state.toolAnswers[.codex], .off)
-        XCTAssertEqual(ToolAnswerRowLayout.answer(in: state, for: missing), .dontUse)
+        // Opening the screen writes nothing, and only the found tool holds
+        // Continue.
+        var answered = state
+        answered.recordDiscovery([found, missing])
+        XCTAssertNil(answered.toolAnswers[.codex])
+        XCTAssertFalse(FirstRunNavigation.canContinue(answered, candidates: [found, missing], requiredScope: nil))
+        ToolAnswerRowLayout.select(.dontUse, for: found, in: &answered)
+        XCTAssertTrue(FirstRunNavigation.canContinue(answered, candidates: [found, missing], requiredScope: nil))
 
         // The row's words are the core's: Ron's install line and "Get {tool}".
         let folders = try copy().folders
@@ -64,26 +70,29 @@ final class FoldersScreenTests: XCTestCase {
         XCTAssertTrue(row.contains("copy.notInstalled"))
         XCTAssertTrue(row.contains("copy.getTool"))
         XCTAssertTrue(folders.getTool.contains("{tool}"))
-        XCTAssertTrue(row.contains("GlassToolTile(.tool("))
+        XCTAssertTrue(row.contains("GlassToolTile("))
         XCTAssertTrue(row.contains("large: true"))
         XCTAssertTrue(row.contains("GlassPicker("))
         XCTAssertTrue(row.contains("GlassFolderButton("))
+        // Both screens record discovery, which declares the missing tools.
+        for screen in ["FoldersScreen.swift", "ToolsScreen.swift"] {
+            XCTAssertTrue(try Self.source(screen).contains("recordDiscovery("), screen)
+        }
     }
 
-    func test_continueIsDisabledUntilEveryRowIsAnswered() {
+    func test_continueIsDisabledUntilEveryFoundRowIsAnswered() {
         let claude = Self.candidate(.claudeCode, exists: true)
         let codex = Self.candidate(.codex, exists: false)
         let cline = Self.candidate(.cline, exists: true)
         let candidates = [claude, codex, cline]
 
         var state = FirstRunState(step: .folders)
+        state.recordDiscovery(candidates)
         XCTAssertFalse(FirstRunNavigation.canContinue(state, candidates: candidates, requiredScope: nil))
 
         ToolAnswerRowLayout.select(.watch, for: claude, in: &state)
-        XCTAssertFalse(FirstRunNavigation.canContinue(state, candidates: candidates, requiredScope: nil))
-        ToolAnswerRowLayout.select(.dontUse, for: codex, in: &state)
-        // Claude Code and Codex are answered, so the daemon would start, but
-        // Cline is offered and unanswered.
+        // Codex is not on this Mac and is not asked, but Cline is found and
+        // unanswered.
         XCTAssertFalse(FirstRunNavigation.canContinue(state, candidates: candidates, requiredScope: nil))
         ToolAnswerRowLayout.select(.dontUse, for: cline, in: &state)
         XCTAssertTrue(FirstRunNavigation.canContinue(state, candidates: candidates, requiredScope: nil))
@@ -302,11 +311,14 @@ final class FoldersScreenTests: XCTestCase {
     func test_aWatchedMissingToolOffersWatch() {
         let missing = Self.candidate(.codex, exists: false)
         var state = FirstRunState(step: .folders)
-        XCTAssertEqual(ToolAnswerRowLayout.options(for: missing, in: state), [.dontUse])
+        XCTAssertEqual(ToolAnswerRowLayout.options(for: missing, in: state), [])
 
+        // A restored state that watches it: the row asks, so the picker can
+        // show the answer Continue counts.
         state.answer(.codex, .watch(path: "/Volumes/work/codex"))
         XCTAssertEqual(ToolAnswerRowLayout.answer(in: state, for: missing), .watch)
         XCTAssertEqual(ToolAnswerRowLayout.options(for: missing, in: state), [.watch, .dontUse])
+        XCTAssertTrue(ToolAnswerRowLayout.asks(missing, in: state))
         XCTAssertEqual(ToolAnswerRowLayout.shownPath(in: state, for: missing), "/Volumes/work/codex")
 
         let row = (try? Self.source("ToolAnswerRow.swift")) ?? ""

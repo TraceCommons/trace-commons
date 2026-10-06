@@ -163,8 +163,12 @@ struct FoldersScreen: View {
         }
     }
 
+    /// Discovery's rows, and what they say is not on this Mac: such a tool
+    /// is not asked (`FirstRunState.recordDiscovery`). Not recorded while a
+    /// commit holds the state it started from.
     private func refreshDiscovery() {
         discovery = FoldersScreenLayout.discovered(TCDiscovery.sourcesJSON(), keeping: discovery)
+        if let rows = discovery.rows, !runner.isCommitting { runner.state.recordDiscovery(rows) }
     }
 
     private var canContinue: Bool {
