@@ -17,6 +17,9 @@ final class ManagedSessionsRenderTests: XCTestCase {
         try render(ManagedSessionsSection().environmentObject(model), size: CGSize(width: 720, height: 480), to: directory.appendingPathComponent("managed-sessions.png"))
         try render(ManagedAccountSheet().environmentObject(model), size: CGSize(width: 520, height: 360), to: directory.appendingPathComponent("managed-add-account.png"))
         try render(ManagedLaunchSheet().environmentObject(model), size: CGSize(width: 580, height: 300), to: directory.appendingPathComponent("managed-launch.png"))
+        let account = try XCTUnwrap(model.managedSnapshot?.accounts.first)
+        try render(ManagedRenameSheet(account: account).environmentObject(model), size: CGSize(width: 520, height: 240), to: directory.appendingPathComponent("managed-rename.png"))
+        try render(ManagedRemoveSheet(account: account).environmentObject(model), size: CGSize(width: 520, height: 240), to: directory.appendingPathComponent("managed-remove.png"))
     }
 
     @MainActor

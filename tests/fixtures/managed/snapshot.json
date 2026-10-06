@@ -89,6 +89,16 @@
     "global_title": "Change global settings",
     "global_scope": "Changes below affect standard sessions after restarting the tool.",
     "launch_unknown": "Refresh sessions before retrying.",
-    "action_failed": "Managed action failed."
+    "action_failed": "Managed action failed.",
+    "accounts_title": "Saved accounts",
+    "state_starting": "Starting",
+    "state_running": "Running",
+    "state_exited": "Exited",
+    "state_failed": "Failed",
+    "state_unknown": "Unknown",
+    "auth_sign_in_required": "Sign-in required",
+    "auth_checking": "Checking",
+    "auth_ready": "Ready",
+    "auth_unavailable": "Unavailable"
   }
 }

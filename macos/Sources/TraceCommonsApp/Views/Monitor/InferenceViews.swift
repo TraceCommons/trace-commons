@@ -16,6 +16,9 @@ struct InferenceTabView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
+                // Saved model accounts and managed sessions lead the tab (#1146's
+                // private-AI page): accounts, then sessions.
+                ManagedSessionsSection()
                 // The stack-wide rule (ScreenState): a core that is down or a
                 // failed read is said in the core's words over the last page,
                 // never as the error's fixed label and never as current.
@@ -266,6 +269,9 @@ struct PrivateAIInspectorView: View {
                 Text(destinationLabel ?? MonitorWindowView.Tab.inference.title)
                     .glassType(GlassTokens.TypeScale.title)
                     .foregroundStyle(GlassColor.textPrimary)
+                // The standard tool settings below are global; managed
+                // launches never edit them.
+                ManagedGlobalSettingsHeader()
                 if let failure = store.failures["harness_list"] {
                     GlassNotice(tone: .outside, title: MonitorWords.table?.line(for: failure) ?? "") { EmptyView() }
                 }

@@ -10,11 +10,18 @@ import TCShellCore
 /// back before touching any published property.
 @MainActor
 final class AppModel: ObservableObject {
-    @Published var managedSnapshot: ManagedSnapshot?
+    @Published var managedSnapshot: ManagedSnapshot? {
+        didSet { if let copy = managedSnapshot?.copy { managedCopy = copy } }
+    }
     @Published var managedBusy = false
-    @Published var managedError: String?
+    /// The copy key of the last failed managed action (`ManagedSurface.errorKey`),
+    /// never the daemon's code.
+    @Published var managedErrorKey: String?
+    /// The last copy table the daemon sent, kept when a later read fails so
+    /// the connecting and failure states still have their words.
+    private var managedCopy: [String: String] = [:]
 
-    func managedText(_ key: String) -> String { managedSnapshot?.copy?[key] ?? "" }
+    func managedText(_ key: String) -> String { managedCopy[key] ?? "" }
 
     func refreshManagedSessions() {
         perform("managed_snapshot", work: { try $0.managedSnapshot() }) { snapshot in
@@ -25,7 +32,7 @@ final class AppModel: ObservableObject {
     func managedAction(_ method: String, params: [String: Any], openTerminal: Bool = false, newAccountKey: String? = nil) {
         guard let client, !managedBusy else { return }
         managedBusy = true
-        managedError = nil
+        managedErrorKey = nil
         Task.detached(priority: .userInitiated) {
             let result = Result {
                 var response = try client.managedAction(method, params: params)
@@ -47,7 +54,8 @@ final class AppModel: ObservableObject {
             await MainActor.run {
                 self.managedBusy = false
                 if case .failure(let error) = result {
-                    self.managedError = (error as? DaemonClient.Failure)?.message ?? self.managedText("action_failed")
+                    let failure = error as? DaemonClient.Failure
+                    self.managedErrorKey = ManagedSurface.errorKey(code: failure?.code, message: failure?.message)
                 }
                 self.refreshManagedSessions()
             }
