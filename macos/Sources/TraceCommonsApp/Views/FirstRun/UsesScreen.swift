@@ -68,14 +68,20 @@ enum UsesScreenLayout {
     enum StartRoute: Equatable {
         /// The two disclosures, then the core's answer, then the commit.
         case disclose
+        /// Private AI on without Automatic: the witness disclosure, then
+        /// the commit, which asks for no grant.
+        case discloseWitness
         /// Straight to the commit.
         case commit
     }
 
-    /// Automatic, on an account that can choose it, goes through the
-    /// disclosures; everything else commits directly.
+    /// Automatic, on an account that can choose it, goes through both
+    /// disclosures; Private AI turned on otherwise goes through the witness
+    /// disclosure (spec rule 10); everything else commits directly.
     static func startRoute(_ state: FirstRunState) -> StartRoute {
-        SharingDisclosureFlow.isNeeded(for: state) ? .disclose : .commit
+        if SharingDisclosureFlow.isNeeded(for: state) { return .disclose }
+        if SharingDisclosureFlow.isWitnessOnlyNeeded(for: state) { return .discloseWitness }
+        return .commit
     }
 
     /// Ron's footer note, while the required use is unticked.
@@ -410,6 +416,8 @@ struct UsesScreen: View {
         switch UsesScreenLayout.startRoute(runner.state) {
         case .disclose:
             disclosure = SharingDisclosureFlow()
+        case .discloseWitness:
+            disclosure = SharingDisclosureFlow(witnessOnly: true)
         case .commit:
             Task { pendingRefusal = await UsesStart.plainStart(runner: runner, pending: pendingRefusal) }
         }
@@ -419,6 +427,12 @@ struct UsesScreen: View {
     /// A not-ready answer finishes on Ask me; its failure is shown after
     /// the commit, which clears failures when it begins.
     private func finish(_ flow: SharingDisclosureFlow) {
+        // The Private AI path saw the witness disclosure and asks for no
+        // grant: Start as on Ask me.
+        if flow.witnessOnly {
+            Task { pendingRefusal = await UsesStart.plainStart(runner: runner, pending: pendingRefusal) }
+            return
+        }
         let request = SharingDisclosureFlow.grantRequest(
             flow.progress(connected: model.status.loggedIn, scopes: runner.state.scopes))
         Task { pendingRefusal = await UsesStart.finish(runner: runner, request: request, pending: pendingRefusal) }
