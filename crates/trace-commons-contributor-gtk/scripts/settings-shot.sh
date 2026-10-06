@@ -3,7 +3,7 @@
 # Photograph the Settings projects list, with a mode selector open.
 #
 # The thing worth looking at is that the unresolvable bucket's selector has no
-# "Contribute automatically" in it while an ordinary project's does. Collapsed,
+# "Automatic" in it while an ordinary project's does. Collapsed,
 # both selectors look identical, so a screenshot of the resting screen proves
 # nothing about the defect this guards.
 #

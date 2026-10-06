@@ -353,6 +353,10 @@ pub struct PipelineOperationalSummary {
     pub pending_invalidation_count: u64,
     pub failed_invalidation_count: u64,
     pub incomplete_export_count: u64,
+    /// The tenant's policies whose status row is not runnable (OPS-003):
+    /// suspended by an operator, in any bundle and phase. A count only; the
+    /// intervention records say which and why.
+    pub suspended_policy_count: u64,
     pub tenant_isolation_control_passed: bool,
     pub audit_immutability_control_passed: bool,
 }
@@ -1304,7 +1308,10 @@ impl PipelineProductStore {
                         AS failed_invalidation,
                     (SELECT COUNT(*) FROM pipeline_export_snapshots
                       WHERE tenant_id = $1 AND state = 'ready')
-                        AS incomplete_exports",
+                        AS incomplete_exports,
+                    (SELECT COUNT(*) FROM pipeline_bundle_policy_status
+                      WHERE tenant_id = $1 AND NOT runnable)
+                        AS suspended_policies",
                 &[&tenant_id],
             )
             .await?;
@@ -1359,6 +1366,7 @@ impl PipelineProductStore {
             pending_invalidation_count: count_from_row(&summary, "pending_invalidation")?,
             failed_invalidation_count: count_from_row(&summary, "failed_invalidation")?,
             incomplete_export_count: count_from_row(&summary, "incomplete_exports")?,
+            suspended_policy_count: count_from_row(&summary, "suspended_policies")?,
             tenant_isolation_control_passed: controls.tenant_isolation_passed,
             audit_immutability_control_passed: controls.audit_immutability_passed,
         })
@@ -2072,7 +2080,7 @@ mod tests {
     }
 
     /// The tenant-isolation control covers every versioned-pipeline table:
-    /// the list read from `TRACE_COMMONS_RLS_TABLES` is the thirteen tables
+    /// the list read from `TRACE_COMMONS_RLS_TABLES` is the twenty tables
     /// the migrations define.
     #[test]
     fn the_isolation_control_covers_every_pipeline_table() {
@@ -2093,6 +2101,13 @@ mod tests {
                 "pipeline_index_invalidations",
                 "pipeline_export_snapshots",
                 "pipeline_export_snapshot_items",
+                "pipeline_bundle_qualifications",
+                "pipeline_attempt_artifacts",
+                "pipeline_tenant_routing",
+                "pipeline_activation_events",
+                "pipeline_receipt_ownership",
+                "pipeline_policy_interventions",
+                "pipeline_index_rebuild_fences",
             ])
         );
     }

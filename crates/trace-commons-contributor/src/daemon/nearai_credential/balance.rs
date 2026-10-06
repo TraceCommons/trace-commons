@@ -28,7 +28,7 @@
 //! Nothing here logs a token, an account name, or an organization id. The
 //! states are labels, and the numbers are numbers.
 
-use super::api::{CloudApi, OrganizationBalance};
+use super::api::{CloudApi, OrganizationBalance, OrganizationModelUsage};
 use super::loopback::SessionTokens;
 use crate::daemon::ipc::DaemonShared;
 use crate::daemon::settings::NearAiSession;
@@ -186,6 +186,7 @@ struct Cached {
     /// nothing on disk to gain.
     access_token: Option<(String, Instant)>,
     balance: Option<(BalanceReading, Instant)>,
+    model_spend: Option<(serde_json::Value, Instant)>,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -272,6 +273,28 @@ pub async fn read(shared: &DaemonShared) -> BalanceReport {
 /// stub rather than asserted about by reading it. `read` is the only shipping
 /// caller and it passes the pinned live client.
 async fn read_with(shared: &DaemonShared, api: &CloudApi) -> BalanceReport {
+    match read_account(shared, api, false).await {
+        Ok(AccountReading::Balance(reading)) => BalanceReport::Known(reading),
+        Err(report) => report,
+        _ => BalanceReport::Unavailable,
+    }
+}
+
+enum AccountReading {
+    Balance(BalanceReading),
+    Models(serde_json::Value),
+}
+
+enum Fetched {
+    Balance(OrganizationBalance),
+    Models(OrganizationModelUsage),
+}
+
+async fn read_account(
+    shared: &DaemonShared,
+    api: &CloudApi,
+    models: bool,
+) -> Result<AccountReading, BalanceReport> {
     let dir = shared.store.dir().to_path_buf();
     let mut map = cache().lock().await;
     let entry = map.entry(dir).or_default();
@@ -280,27 +303,37 @@ async fn read_with(shared: &DaemonShared, api: &CloudApi) -> BalanceReport {
         Ok(Some(connection)) => connection,
         Ok(None) => {
             *entry = Cached::default();
-            return BalanceReport::NoSession;
+            return Err(BalanceReport::NoSession);
         }
         Err(_) => {
             *entry = Cached::default();
-            return BalanceReport::Unavailable;
+            return Err(BalanceReport::Unavailable);
         }
     };
     if entry.connection.as_ref() != Some(&connection) {
         *entry = Cached::default();
     }
 
-    if let Some((reading, at)) = entry.balance
+    if !models
+        && let Some((reading, at)) = entry.balance
         && at.elapsed() < BALANCE_TTL
     {
-        return BalanceReport::Known(reading);
+        return Ok(AccountReading::Balance(reading));
     }
     // Whatever happens below, the previous figure is not what this call
     // returns. Cleared here rather than on each failure path so no branch can
     // forget to, which is the mistake the ironwire spend figure was written to
     // avoid.
-    entry.balance = None;
+    if models {
+        if let Some((reading, at)) = &entry.model_spend
+            && at.elapsed() < BALANCE_TTL
+        {
+            return Ok(AccountReading::Models(reading.clone()));
+        }
+        entry.model_spend = None;
+    } else {
+        entry.balance = None;
+    }
 
     // A refresh token whose recorded expiry has passed is still offered to the
     // service rather than refused locally. The expiry we hold came from an
@@ -316,7 +349,7 @@ async fn read_with(shared: &DaemonShared, api: &CloudApi) -> BalanceReport {
                 connection.session = rotated.retained;
                 rotated.access_token
             }
-            Err(error) => return report_for(&error),
+            Err(error) => return Err(report_for(&error)),
         },
     };
 
@@ -328,28 +361,38 @@ async fn read_with(shared: &DaemonShared, api: &CloudApi) -> BalanceReport {
             // access token, and this field exists only because the type does.
             refresh_token: String::new(),
         };
-        match fetch(api, &session, connection.organization.as_deref()).await {
+        match fetch(api, &session, connection.organization.as_deref(), models).await {
             Ok(balance) => {
                 // A network result belongs to the connection that requested
                 // it, even if a browser changed accounts while it was pending.
                 match stored_connection(shared) {
                     Ok(Some(current)) if current == connection => {}
-                    Ok(None) => return BalanceReport::NoSession,
-                    _ => return BalanceReport::Unavailable,
+                    Ok(None) => return Err(BalanceReport::NoSession),
+                    _ => return Err(BalanceReport::Unavailable),
                 }
-                let reading = BalanceReading {
-                    remaining_nanos: balance.remaining,
-                    spend_limit_nanos: balance.spend_limit,
-                    total_spent_nanos: balance.total_spent,
-                    total_requests: balance.total_requests,
-                    total_tokens: balance.total_tokens,
-                    observed_at: Utc::now(),
+                let reading = match balance {
+                    Fetched::Balance(balance) => AccountReading::Balance(BalanceReading {
+                        remaining_nanos: balance.remaining,
+                        spend_limit_nanos: balance.spend_limit,
+                        total_spent_nanos: balance.total_spent,
+                        total_requests: balance.total_requests,
+                        total_tokens: balance.total_tokens,
+                        observed_at: Utc::now(),
+                    }),
+                    Fetched::Models(usage) => AccountReading::Models(model_spend_value(usage)),
                 };
                 let entry = map.entry(shared.store.dir().to_path_buf()).or_default();
                 entry.connection = Some(connection.clone());
                 entry.access_token = Some((access_token, Instant::now()));
-                entry.balance = Some((reading, Instant::now()));
-                return BalanceReport::Known(reading);
+                match &reading {
+                    AccountReading::Balance(value) => {
+                        entry.balance = Some((*value, Instant::now()))
+                    }
+                    AccountReading::Models(value) => {
+                        entry.model_spend = Some((value.clone(), Instant::now()))
+                    }
+                }
+                return Ok(reading);
             }
             // A 401 on a management call with a reused access token means the
             // token aged out, not that the session is gone. One exchange and
@@ -366,10 +409,10 @@ async fn read_with(shared: &DaemonShared, api: &CloudApi) -> BalanceReport {
                         connection.session = rotated.retained;
                         access_token = rotated.access_token;
                     }
-                    Err(error) => return report_for(&error),
+                    Err(error) => return Err(report_for(&error)),
                 }
             }
-            Err(error) => return report_for(&error),
+            Err(error) => return Err(report_for(&error)),
         }
     }
 }
@@ -380,12 +423,21 @@ async fn fetch(
     api: &CloudApi,
     session: &SessionTokens,
     organization: Option<&str>,
-) -> Result<OrganizationBalance> {
+    models: bool,
+) -> Result<Fetched> {
     let organization = match organization {
         Some(organization) => organization.to_owned(),
         None => api.first_active_organization(session).await?,
     };
-    api.organization_balance(session, &organization).await
+    if models {
+        api.organization_model_usage(session, &organization)
+            .await
+            .map(Fetched::Models)
+    } else {
+        api.organization_balance(session, &organization)
+            .await
+            .map(Fetched::Balance)
+    }
 }
 
 #[cfg(test)]
@@ -824,3 +876,49 @@ mod tests {
         }
     }
 }
+
+/// Provider usage cost for the connected organization. The balance cache lock
+/// also serializes this read, because both calls rotate the same refresh token.
+pub async fn read_model_spend(shared: &DaemonShared) -> serde_json::Value {
+    match CloudApi::live() {
+        Ok(api) => read_model_spend_with(shared, &api).await,
+        Err(_) => unknown_model_spend(BalanceReport::Unavailable),
+    }
+}
+
+async fn read_model_spend_with(shared: &DaemonShared, api: &CloudApi) -> serde_json::Value {
+    match read_account(shared, api, true).await {
+        Ok(AccountReading::Models(value)) => value,
+        Err(report) => unknown_model_spend(report),
+        _ => unknown_model_spend(BalanceReport::Unavailable),
+    }
+}
+
+fn unknown_model_spend(report: BalanceReport) -> serde_json::Value {
+    serde_json::json!({"known":false,"scope":"near_ai_organization",
+        "source":"near_ai_usage_by_model","currency":"USD","scale":9,
+        "window_hours":24,"since":null,"observed_at":null,"models":[],
+        "reason_label":"billed-model-spend-unavailable","state":report.state()})
+}
+
+fn model_spend_value(usage: OrganizationModelUsage) -> serde_json::Value {
+    let models: Vec<_> = usage
+        .data
+        .into_iter()
+        .map(|row| {
+            // Division first avoids overflow at i64::MAX; the exact native amount
+            // remains present alongside the explicitly rounded compatibility unit.
+            let micros = row.total_cost / 1000 + i64::from(row.total_cost % 1000 >= 500);
+            serde_json::json!({"model":crate::daemon::inference_map::model_label(Some(&row.model)),
+            "billed_nanos":row.total_cost,"billed_micros":micros,
+            "rounding":"nearest_micro_half_up","calls":row.request_count})
+        })
+        .collect();
+    serde_json::json!({"known":true,"scope":"near_ai_organization",
+        "source":"near_ai_usage_by_model","currency":"USD","scale":9,
+        "window_hours":24,"since":usage.start_date,"observed_at":Utc::now(),"models":models})
+}
+
+#[cfg(test)]
+#[path = "model_spend_tests.rs"]
+mod model_spend_tests;

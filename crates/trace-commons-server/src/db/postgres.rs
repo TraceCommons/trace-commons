@@ -260,6 +260,13 @@ pub const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
     "pipeline_index_invalidations",
     "pipeline_export_snapshots",
     "pipeline_export_snapshot_items",
+    "pipeline_bundle_qualifications",
+    "pipeline_attempt_artifacts",
+    "pipeline_tenant_routing",
+    "pipeline_activation_events",
+    "pipeline_receipt_ownership",
+    "pipeline_policy_interventions",
+    "pipeline_index_rebuild_fences",
     "trace_public_runs",
     "trace_reward_operators",
     "trace_reward_programs",
@@ -1655,6 +1662,69 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         106,
         "versioned_pipeline_exports",
         include_str!("../../../../migrations/V106__versioned_pipeline_exports.sql"),
+    ),
+    // V107 (PR 4) adds the immutable production-qualification table the
+    // qualification store writes; the qualified activation gate
+    // (`PipelineQualificationStore::activate_qualified_bundle_in`, PR 5)
+    // reads it, and V112 widens its key to one row for each bundle and code
+    // revision. No cross-tenant claim function, same as V105/V106.
+    (
+        107,
+        "versioned_pipeline_qualification",
+        include_str!("../../../../migrations/V107__versioned_pipeline_qualification.sql"),
+    ),
+    // V108 (PR 4) adds the table that tracks each pipeline phase attempt's
+    // objects, staged before they are published and committed with the
+    // phase commit, so the worker can sweep the objects of an attempt that
+    // crashed, lost its lease, or had its commit refused. A committed
+    // attempt's objects are object refs of the submission, which the
+    // withdrawal and main's revocation-propagation worker delete. No
+    // cross-tenant claim function, same as V105/V106/V107.
+    (
+        108,
+        "versioned_pipeline_attempt_artifacts",
+        include_str!("../../../../migrations/V108__versioned_pipeline_attempt_artifacts.sql"),
+    ),
+    // V110 (PR 5) adds each tenant's committed routing record, the immutable
+    // activation event history, and the permanent per-submission receipt
+    // owner, which the upload route reads before it chooses the legacy or the
+    // pipeline path. No cross-tenant claim function, same as
+    // V105/V106/V107/V108.
+    (
+        110,
+        "versioned_pipeline_activation",
+        include_str!("../../../../migrations/V110__versioned_pipeline_activation.sql"),
+    ),
+    // V111 (PR 5) adds the operator's policy interventions: an `operational_status`
+    // column beside V93's `runnable` (the two kept equal by a check), the
+    // immutable intervention record, and the runtime's UPDATE on the status
+    // row, which nothing wrote before. No cross-tenant claim function, same as
+    // V105/V106/V107/V108/V110.
+    (
+        111,
+        "versioned_pipeline_policy_interventions",
+        include_str!("../../../../migrations/V111__versioned_pipeline_policy_interventions.sql"),
+    ),
+    // V112 (PR 5) is the qualified activation gate's migration: V107's
+    // qualification key gains the code revision (one qualification for each
+    // bundle and revision), and the runtime gets the one UPDATE the gate
+    // needs on the active bundle. It adds no table. No cross-tenant claim
+    // function, same as V105/V106/V107/V108/V110/V111.
+    (
+        112,
+        "versioned_pipeline_activation_gate",
+        include_str!("../../../../migrations/V112__versioned_pipeline_activation_gate.sql"),
+    ),
+    // V113 (PR 5) adds the committed index rebuild fence: one row per
+    // rebuild, and while a tenant has an unexpired row no worker in any
+    // process claims that tenant's index invalidations. The table is
+    // mutable (a rebuild extends and deletes its row), so it has no
+    // append-only trigger. No cross-tenant claim function, same as
+    // V105/V106/V107/V108/V110/V111/V112.
+    (
+        113,
+        "versioned_pipeline_rebuild_fence",
+        include_str!("../../../../migrations/V113__versioned_pipeline_rebuild_fence.sql"),
     ),
 ];
 
@@ -7011,6 +7081,12 @@ mod tests {
         (95, 4),
         (105, 4),
         (106, 4),
+        (107, 4),
+        (108, 4),
+        (110, 4),
+        (111, 4),
+        (112, 4),
+        (113, 4),
     ];
 
     /// Every `.sql` file in `migrations/`, as `(version, file_stem)`, read at
@@ -7752,6 +7828,14 @@ mod tests {
             include_str!("../../../../migrations/V95__versioned_pipeline_receipt_content.sql"),
             include_str!("../../../../migrations/V105__versioned_pipeline_review_invalidation.sql"),
             include_str!("../../../../migrations/V106__versioned_pipeline_exports.sql"),
+            include_str!("../../../../migrations/V107__versioned_pipeline_qualification.sql"),
+            include_str!("../../../../migrations/V108__versioned_pipeline_attempt_artifacts.sql"),
+            include_str!("../../../../migrations/V110__versioned_pipeline_activation.sql"),
+            include_str!(
+                "../../../../migrations/V111__versioned_pipeline_policy_interventions.sql"
+            ),
+            include_str!("../../../../migrations/V112__versioned_pipeline_activation_gate.sql"),
+            include_str!("../../../../migrations/V113__versioned_pipeline_rebuild_fence.sql"),
             include_str!("../../../../migrations/V71__reward_participant_access.sql"),
             include_str!("../../../../migrations/V18__trace_central_rls_tenant_predicate.sql"),
             include_str!("../../../../migrations/V21__trace_near_credit_account_outbox.sql"),
@@ -7785,6 +7869,14 @@ mod tests {
             include_str!("../../../../migrations/V95__versioned_pipeline_receipt_content.sql"),
             include_str!("../../../../migrations/V105__versioned_pipeline_review_invalidation.sql"),
             include_str!("../../../../migrations/V106__versioned_pipeline_exports.sql"),
+            include_str!("../../../../migrations/V107__versioned_pipeline_qualification.sql"),
+            include_str!("../../../../migrations/V108__versioned_pipeline_attempt_artifacts.sql"),
+            include_str!("../../../../migrations/V110__versioned_pipeline_activation.sql"),
+            include_str!(
+                "../../../../migrations/V111__versioned_pipeline_policy_interventions.sql"
+            ),
+            include_str!("../../../../migrations/V112__versioned_pipeline_activation_gate.sql"),
+            include_str!("../../../../migrations/V113__versioned_pipeline_rebuild_fence.sql"),
             include_str!("../../../../migrations/V71__reward_participant_access.sql"),
             include_str!("../../../../migrations/V6__trace_force_rls.sql"),
             include_str!("../../../../migrations/V11__trace_ranking_worker_runs.sql"),
@@ -7870,6 +7962,10 @@ mod tests {
         let review_invalidation =
             include_str!("../../../../migrations/V105__versioned_pipeline_review_invalidation.sql");
         let exports = include_str!("../../../../migrations/V106__versioned_pipeline_exports.sql");
+        let qualification =
+            include_str!("../../../../migrations/V107__versioned_pipeline_qualification.sql");
+        let attempt_artifacts =
+            include_str!("../../../../migrations/V108__versioned_pipeline_attempt_artifacts.sql");
         for required in [
             "UNIQUE (tenant_id, request_idempotency_key)",
             "UNIQUE (tenant_id, run_id, phase)",
@@ -7987,6 +8083,381 @@ mod tests {
                 "V106 must not contain `{forbidden}`"
             );
         }
+        for required in [
+            "CREATE TABLE pipeline_bundle_qualifications",
+            "reject_pipeline_bundle_qualification_mutation",
+            "CREATE TRIGGER pipeline_bundle_qualifications_reject_update",
+            "CREATE TRIGGER pipeline_bundle_qualifications_reject_delete",
+            "ON DELETE CASCADE",
+            "ALTER TABLE pipeline_bundle_qualifications FORCE ROW LEVEL SECURITY;",
+            "CREATE POLICY trace_corpus_tenant_isolation ON pipeline_bundle_qualifications",
+            "GRANT SELECT, INSERT ON pipeline_bundle_qualifications TO trace_ingest_runtime;",
+        ] {
+            assert!(
+                qualification.contains(required),
+                "V107 is missing `{required}`"
+            );
+        }
+        for forbidden in ["SECURITY DEFINER", "SET search_path", "ON DELETE RESTRICT"] {
+            assert!(
+                !qualification.contains(forbidden),
+                "V107 must not contain `{forbidden}`"
+            );
+        }
+        for required in [
+            "CREATE TABLE pipeline_attempt_artifacts",
+            "artifact IN ('approved', 'index-command', 'score-neighbors')",
+            // Rebase 10, option D: a compatibility Score stages its rows
+            // before its tenant lock, with no hash; a committed row always
+            // has one.
+            "ciphertext_sha256 TEXT CHECK (ciphertext_sha256 ~ '^[0-9a-f]{64}$')",
+            "OR (state = 'committed' AND committed_at IS NOT NULL AND ciphertext_sha256 IS NOT NULL)",
+            // Rebase 10 review, M8: an `approved` row always has its hash.
+            "CONSTRAINT pipeline_attempt_artifacts_approved_hash\n        CHECK (ciphertext_sha256 IS NOT NULL OR artifact <> 'approved')",
+            "state TEXT NOT NULL DEFAULT 'staged' CHECK (state IN ('staged', 'committed'))",
+            "PRIMARY KEY (tenant_id, run_id, lease_token, artifact)",
+            "UNIQUE (tenant_id, object_key)",
+            "ON DELETE CASCADE",
+            "CREATE INDEX pipeline_attempt_artifacts_due",
+            // Final review M6: a row moves only from `staged` to
+            // `committed`, so a committed object never reaches the sweep.
+            "guard_pipeline_attempt_artifact_update",
+            "CREATE TRIGGER pipeline_attempt_artifacts_guard_update",
+            "BEFORE UPDATE ON pipeline_attempt_artifacts",
+            "IF OLD.state = 'staged'\n        AND NEW.state = 'committed'\n        AND NEW.committed_at IS NOT NULL",
+            "(OLD.ciphertext_sha256 IS NOT NULL\n                AND NEW.ciphertext_sha256 = OLD.ciphertext_sha256)",
+            "OR (OLD.ciphertext_sha256 IS NULL\n                AND NEW.ciphertext_sha256 ~ '^[0-9a-f]{64}$')",
+            "ALTER TABLE pipeline_attempt_artifacts FORCE ROW LEVEL SECURITY;",
+            "CREATE POLICY trace_corpus_tenant_isolation ON pipeline_attempt_artifacts",
+            "GRANT SELECT, INSERT, DELETE ON pipeline_attempt_artifacts TO trace_ingest_runtime;",
+            "GRANT UPDATE (state, committed_at, ciphertext_sha256) ON pipeline_attempt_artifacts\n    TO trace_ingest_runtime;",
+        ] {
+            assert!(
+                attempt_artifacts.contains(required),
+                "V108 is missing `{required}`"
+            );
+        }
+        // Controller ruling R2-1: a committed attempt's objects are object
+        // refs of the submission, which the withdrawal and main's
+        // revocation-propagation worker delete, so V108 has no `deleted`
+        // state for the sweep to record a second deletion in.
+        for forbidden in [
+            "SECURITY DEFINER",
+            "SET search_path",
+            "ON DELETE RESTRICT",
+            "'deleted'",
+            "deleted_at",
+        ] {
+            assert!(
+                !attempt_artifacts.contains(forbidden),
+                "V108 must not contain `{forbidden}`"
+            );
+        }
+    }
+
+    /// V110 (delivery PR 5) adds the routing record, the activation event
+    /// history, and the receipt ownership record. Each is a forced-RLS table
+    /// with the tenant policy, the two immutable tables carry the V107-shaped
+    /// triggers and an append-only grant, and the migration holds no
+    /// `SECURITY DEFINER` function, no role attribute change, and nothing
+    /// that a later PR 5 migration adds. The routing row is bound to its
+    /// event (review round 1): a deferred foreign key to the event, a
+    /// generation column on both tables that a row trigger assigns on every
+    /// update (an insert keeps a supplied value from 1 to 2^62, for a
+    /// data-only restore, gets 1 below that, and is refused above it, so
+    /// that the counter cannot be put at the end of its type), and a
+    /// deferred constraint
+    /// trigger that compares the state and the generation. The events come
+    /// first, the runtime gets no grant on the row's generation, the events'
+    /// generation is not unique, and no function sets a parameter of its
+    /// own.
+    #[test]
+    fn v110_defines_routing_events_and_ownership() {
+        let activation =
+            include_str!("../../../../migrations/V110__versioned_pipeline_activation.sql");
+        for required in [
+            "CREATE TABLE pipeline_tenant_routing",
+            "CREATE TABLE pipeline_activation_events",
+            "CREATE TABLE pipeline_receipt_ownership",
+            "CREATE TRIGGER pipeline_activation_events_reject_update",
+            "CREATE TRIGGER pipeline_receipt_ownership_reject_update",
+            "GRANT SELECT, INSERT ON pipeline_activation_events TO trace_ingest_runtime;",
+            "GRANT SELECT, INSERT ON pipeline_receipt_ownership TO trace_ingest_runtime;",
+            "GRANT SELECT, INSERT ON pipeline_tenant_routing TO trace_ingest_runtime;",
+            "GRANT UPDATE (routing_state, activation_record_id, actor_principal_ref,\n              reason_code, evidence_hash, recorded_at)\n    ON pipeline_tenant_routing TO trace_ingest_runtime;",
+            "routing_generation BIGINT NOT NULL CHECK (routing_generation >= 1),",
+            "routing_generation BIGINT NOT NULL DEFAULT 1,",
+            "FOREIGN KEY (tenant_id, activation_record_id)\n        REFERENCES pipeline_activation_events (tenant_id, event_id)\n        DEFERRABLE INITIALLY DEFERRED",
+            "CREATE FUNCTION assign_pipeline_routing_generation()",
+            "IF TG_OP = 'INSERT' THEN\n        IF NEW.routing_generation > 4611686018427387904 THEN\n            RAISE EXCEPTION 'pipeline routing generation is out of range';\n        END IF;\n        IF NEW.routing_generation IS NULL OR NEW.routing_generation < 1 THEN\n            NEW.routing_generation := 1;\n        END IF;\n    ELSE",
+            "IF NEW.activation_record_id = OLD.activation_record_id THEN\n            RAISE EXCEPTION 'pipeline routing change needs a new activation event';",
+            "NEW.routing_generation := OLD.routing_generation + 1;",
+            "CREATE TRIGGER pipeline_tenant_routing_assign_generation\n    BEFORE INSERT OR UPDATE ON pipeline_tenant_routing\n    FOR EACH ROW EXECUTE FUNCTION assign_pipeline_routing_generation();",
+            "CREATE FUNCTION check_pipeline_routing_event()",
+            "WHERE e.tenant_id = NEW.tenant_id\n           AND e.event_id = NEW.activation_record_id\n           AND e.resulting_state = NEW.routing_state\n           AND e.routing_generation = NEW.routing_generation",
+            "RAISE EXCEPTION 'pipeline routing row does not match its activation event';",
+            "CREATE CONSTRAINT TRIGGER pipeline_tenant_routing_event_match\n    AFTER INSERT OR UPDATE ON pipeline_tenant_routing\n    DEFERRABLE INITIALLY DEFERRED\n    FOR EACH ROW EXECUTE FUNCTION check_pipeline_routing_event();",
+        ] {
+            assert!(
+                activation.contains(required),
+                "V110 is missing `{required}`"
+            );
+        }
+        assert!(
+            activation.find("CREATE TABLE pipeline_activation_events")
+                < activation.find("CREATE TABLE pipeline_tenant_routing"),
+            "V110 creates the events before the routing row that names one"
+        );
+        for table in [
+            "pipeline_tenant_routing",
+            "pipeline_activation_events",
+            "pipeline_receipt_ownership",
+        ] {
+            let force = format!("ALTER TABLE {table} FORCE ROW LEVEL SECURITY;");
+            assert_eq!(
+                activation.matches(&force).count(),
+                1,
+                "V110 must force RLS on {table} exactly once"
+            );
+            let policy = format!("CREATE POLICY trace_corpus_tenant_isolation ON {table}\n");
+            assert_eq!(
+                activation.matches(&policy).count(),
+                1,
+                "V110 must create the tenant policy on {table} exactly once"
+            );
+        }
+        for forbidden in [
+            "SECURITY DEFINER",
+            "BYPASSRLS",
+            "pipeline_bundle_qualifications",
+            "pipeline_active_bundles",
+            "pipeline_legacy_owned_work",
+            "pipeline_legacy_writer_status",
+            "ledger_source_key",
+            // The routing binding: no function-level parameter (#974), no
+            // schema-qualified name in a function body, no rule on a time,
+            // no unique generation on the events (an event that no row
+            // names would then block the next change), and no grant that
+            // lets a writer choose the generation of an update (an insert
+            // may supply it up to 2^62, for a restore; the commit check
+            // binds it).
+            "SET search_path",
+            "public.",
+            "UNIQUE",
+            "GRANT UPDATE ON",
+            "GRANT DELETE",
+            "GRANT ALL",
+        ] {
+            assert!(
+                !activation.contains(forbidden),
+                "V110 must not contain `{forbidden}`"
+            );
+        }
+        // No trigger function reads a time, and the only UPDATE grant is the
+        // six columns above.
+        for function in [
+            "assign_pipeline_routing_generation",
+            "check_pipeline_routing_event",
+        ] {
+            let start = activation
+                .find(&format!("CREATE FUNCTION {function}()"))
+                .expect("the function is defined");
+            let body = &activation[start..start + activation[start..].find("$$;").unwrap()];
+            for time in ["recorded_at", "NOW()", "clock_timestamp", "SET "] {
+                assert!(!body.contains(time), "{function} must not contain `{time}`");
+            }
+        }
+        assert_eq!(
+            activation.matches("GRANT UPDATE").count(),
+            1,
+            "V110 grants the runtime one UPDATE, on six columns of the routing row"
+        );
+    }
+
+    /// V111 (delivery PR 5) adds the operator's policy interventions: the
+    /// intervention record (an immutable, forced-RLS table with the tenant
+    /// policy and the V107-shaped triggers), an `operational_status` column on
+    /// V93's status row that a check keeps equal to `runnable`, and the
+    /// runtime's grants (an UPDATE on four columns of the status row and an
+    /// append-only grant on the record). It holds no `SECURITY DEFINER`
+    /// function and no role attribute change, and it grants the runtime no
+    /// DELETE and no UPDATE on the record, nor an UPDATE on a status column
+    /// other than the four.
+    #[test]
+    fn v111_defines_policy_interventions() {
+        let interventions = include_str!(
+            "../../../../migrations/V111__versioned_pipeline_policy_interventions.sql"
+        );
+        for required in [
+            "CREATE TABLE pipeline_policy_interventions",
+            "ADD COLUMN operational_status TEXT NOT NULL DEFAULT 'runnable'",
+            "CHECK (operational_status IN ('runnable', 'suspended', 'terminated'))",
+            "ADD CONSTRAINT pipeline_bundle_policy_status_runnable_shape CHECK (\n        runnable = (operational_status = 'runnable')\n    );",
+            "CREATE FUNCTION reject_pipeline_policy_intervention_mutation()",
+            "IF TG_OP = 'DELETE' AND pg_trigger_depth() > 1 THEN",
+            "CREATE TRIGGER pipeline_policy_interventions_reject_update",
+            "CREATE TRIGGER pipeline_policy_interventions_reject_delete",
+            "ALTER TABLE pipeline_policy_interventions ENABLE ROW LEVEL SECURITY;",
+            "GRANT UPDATE (runnable, operational_status, error_label, updated_at)\n    ON pipeline_bundle_policy_status TO trace_ingest_runtime;",
+            "GRANT SELECT, INSERT ON pipeline_policy_interventions TO trace_ingest_runtime;",
+        ] {
+            assert!(
+                interventions.contains(required),
+                "V111 is missing `{required}`"
+            );
+        }
+        let force = "ALTER TABLE pipeline_policy_interventions FORCE ROW LEVEL SECURITY;";
+        assert_eq!(
+            interventions.matches(force).count(),
+            1,
+            "V111 must force RLS on pipeline_policy_interventions exactly once"
+        );
+        let policy =
+            "CREATE POLICY trace_corpus_tenant_isolation ON pipeline_policy_interventions\n";
+        assert_eq!(
+            interventions.matches(policy).count(),
+            1,
+            "V111 must create the tenant policy on pipeline_policy_interventions exactly once"
+        );
+        for forbidden in [
+            "SECURITY DEFINER",
+            "BYPASSRLS",
+            "SET search_path",
+            "ON DELETE RESTRICT",
+            "GRANT UPDATE ON",
+            "GRANT DELETE",
+            "GRANT ALL",
+            "updated_by_principal_ref",
+            "pipeline_tenant_routing",
+            "pipeline_index_rebuild_fences",
+        ] {
+            assert!(
+                !interventions.contains(forbidden),
+                "V111 must not contain `{forbidden}`"
+            );
+        }
+        // The only statements that write grants name the intervention record
+        // (SELECT, INSERT) or the four status columns (UPDATE).
+        for grant in interventions
+            .lines()
+            .filter(|line| line.trim_start().starts_with("GRANT "))
+        {
+            assert!(
+                grant.starts_with("GRANT SELECT, INSERT ON pipeline_policy_interventions ")
+                    || grant.starts_with("GRANT UPDATE (runnable, operational_status, "),
+                "V111 grants something the pins do not list: `{grant}`"
+            );
+        }
+    }
+
+    /// V112 (delivery PR 5) is the activation gate's migration: it widens
+    /// the qualification key to one row for each bundle and code revision
+    /// (P5-D10) and grants the runtime the one UPDATE the gate needs on the
+    /// active bundle (P5-D11). It creates no table, holds no `SECURITY
+    /// DEFINER` function and no role attribute change, and grants nothing
+    /// else.
+    #[test]
+    fn v112_widens_the_qualification_key_and_grants_the_bundle_switch() {
+        let gate =
+            include_str!("../../../../migrations/V112__versioned_pipeline_activation_gate.sql");
+        for required in [
+            "ALTER TABLE pipeline_bundle_qualifications",
+            "DROP CONSTRAINT pipeline_bundle_qualifications_pkey,",
+            "ADD PRIMARY KEY (tenant_id, bundle_id, code_revision_hash);",
+            "GRANT UPDATE (bundle_id, selected_at) ON pipeline_active_bundles TO trace_ingest_runtime;",
+        ] {
+            assert!(gate.contains(required), "V112 is missing `{required}`");
+        }
+        for forbidden in [
+            "CREATE TABLE",
+            "SECURITY DEFINER",
+            "BYPASSRLS",
+            "SUPERUSER",
+            "SET search_path",
+            "GRANT UPDATE ON",
+            "GRANT DELETE",
+            "GRANT ALL",
+            "DISABLE TRIGGER",
+            "pipeline_index_rebuild_fences",
+        ] {
+            assert!(
+                !gate.contains(forbidden),
+                "V112 must not contain `{forbidden}`"
+            );
+        }
+        let grants: Vec<&str> = gate
+            .lines()
+            .filter(|line| line.trim_start().starts_with("GRANT "))
+            .collect();
+        assert_eq!(
+            grants,
+            vec![
+                "GRANT UPDATE (bundle_id, selected_at) ON pipeline_active_bundles TO trace_ingest_runtime;"
+            ],
+            "V112 grants the bundle switch and nothing else"
+        );
+    }
+
+    /// V113 (delivery PR 5) adds the committed index rebuild fence: a
+    /// forced-RLS table with the tenant policy, one row per rebuild (keyed by
+    /// the tenant and the rebuild's fence id), and the runtime's grants on
+    /// V92's terms: read, insert, and delete the rows, and update only
+    /// `fenced_until`. The rows are updated and deleted, so it carries no
+    /// append-only trigger; it holds no `SECURITY DEFINER` function and no
+    /// role attribute change.
+    #[test]
+    fn v113_defines_the_rebuild_fence() {
+        let fence =
+            include_str!("../../../../migrations/V113__versioned_pipeline_rebuild_fence.sql");
+        for required in [
+            "CREATE TABLE pipeline_index_rebuild_fences",
+            "PRIMARY KEY (tenant_id, fence_id)",
+            "REFERENCES trace_tenants(tenant_id) ON DELETE CASCADE",
+            "ALTER TABLE pipeline_index_rebuild_fences ENABLE ROW LEVEL SECURITY;",
+            "RAISE EXCEPTION 'V113: trace_ingest_runtime is missing; V90 creates it';",
+        ] {
+            assert!(fence.contains(required), "V113 is missing `{required}`");
+        }
+        let force = "ALTER TABLE pipeline_index_rebuild_fences FORCE ROW LEVEL SECURITY;";
+        assert_eq!(
+            fence.matches(force).count(),
+            1,
+            "V113 must force RLS on pipeline_index_rebuild_fences exactly once"
+        );
+        let policy =
+            "CREATE POLICY trace_corpus_tenant_isolation ON pipeline_index_rebuild_fences\n";
+        assert_eq!(
+            fence.matches(policy).count(),
+            1,
+            "V113 must create the tenant policy on pipeline_index_rebuild_fences exactly once"
+        );
+        for forbidden in [
+            "SECURITY DEFINER",
+            "BYPASSRLS",
+            "SUPERUSER",
+            "SET search_path",
+            "CREATE TRIGGER",
+            "GRANT UPDATE ON",
+            "GRANT ALL",
+            "PRIMARY KEY (tenant_id)",
+        ] {
+            assert!(
+                !fence.contains(forbidden),
+                "V113 must not contain `{forbidden}`"
+            );
+        }
+        let grants: Vec<&str> = fence
+            .lines()
+            .filter(|line| line.trim_start().starts_with("GRANT "))
+            .collect();
+        assert_eq!(
+            grants,
+            vec![
+                "GRANT SELECT, INSERT, DELETE ON pipeline_index_rebuild_fences TO trace_ingest_runtime;",
+                "GRANT UPDATE (fenced_until) ON pipeline_index_rebuild_fences TO trace_ingest_runtime;",
+            ],
+            "V113 grants what the fence code reads and writes and nothing else"
+        );
     }
 
     /// The eviction drain is the one write path on

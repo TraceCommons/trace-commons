@@ -25,7 +25,7 @@ use trace_commons_gate_api::pipeline::{
 };
 use trace_commons_gate_api::{
     IdentifiedEmbedder, IdentifiedIndexReader, IdentifiedIndexWriter, IdentifiedPerplexityScorer,
-    IndexWriteError, SettlementError, SettlementReceipt, SettlementRequest,
+    IndexUpsertResult, IndexWriteError, SettlementError, SettlementReceipt, SettlementRequest,
 };
 use trace_commons_protocol::trace_contribution::{
     ConsentScope, ResidualPiiRisk, ResidualRiskCondition, TraceAllowedUse,
@@ -48,6 +48,7 @@ use crate::trace_corpus_storage::{
     TraceCreditSettlementNearStatus, TraceObjectArtifactKind, TraceObjectRefWrite,
     TraceSubmissionWrite, TraceWitnessProvenanceClass, safe_residual_risk_basis_labels,
 };
+use crate::versioned_pipeline_activation::RoutingState;
 use crate::versioned_pipeline_authority::{
     PIPELINE_AUTHORITY_CONTROL_MISSING_LABEL, PIPELINE_PRIVACY_CLASSIFICATION_FAILED_LABEL,
     PIPELINE_PRIVACY_CONTROL_MISSING_LABEL, PipelineAuthorityProvider, PipelinePrivacyBoundary,
@@ -68,6 +69,7 @@ use crate::versioned_pipeline_credit::{
     pipeline_ledger_source_key, pipeline_near_outbox_line_id, pipeline_novelty_utility_reason,
     pipeline_settlement_batch_id, source_list_hash,
 };
+use crate::versioned_pipeline_qualification::package_digests;
 
 /// The lifecycle half of every pipeline operability check, over the
 /// `trace_submissions` row aliased `s` (Zaki review 1, round 2,
@@ -134,7 +136,59 @@ pub const PIPELINE_OPERATIONAL_ERROR_LABEL: &str = "minimal_policy_failed";
 pub const PIPELINE_ATTEMPTS_EXHAUSTED_LABEL: &str = "attempts_exhausted";
 pub const PIPELINE_BUNDLE_MISSING_LABEL: &str = "bundle_package_missing";
 pub const PIPELINE_POLICY_NOT_RUNNABLE_LABEL: &str = "bundle_policy_not_runnable";
+/// `intervene_policy` accepts `suspend` and `resume`. `terminate` has a
+/// database state (V111) but no behavior: no specification says what happens
+/// to a run bound to a terminated policy (CMP-003), so it is refused and
+/// writes nothing.
+pub const PIPELINE_POLICY_INTERVENTION_NOT_SUPPORTED_LABEL: &str =
+    "policy_intervention_not_supported";
+/// An unknown action, or an actor or reason that fails the operator-action
+/// rule (`validate_actor`).
+pub const PIPELINE_POLICY_INTERVENTION_INVALID_LABEL: &str = "policy_intervention_invalid";
+/// An intervention that waited `PIPELINE_ADMIN_LOCK_TIMEOUT` for its policy
+/// row and did not get it (a phase commit, a payout, or another intervention
+/// holds it): nothing is written, and the operator repeats the request.
+pub const PIPELINE_POLICY_INTERVENTION_BUSY_LABEL: &str = "policy_intervention_busy";
+/// How long an operator's action waits for a lock (final fix wave G15): a
+/// routing change (`PipelineActivationStore`) for the tenant's routing lock
+/// and the rows it locks after it, and a policy intervention for its policy
+/// row. Set with `SET LOCAL lock_timeout` in the action's own transaction,
+/// so it bounds no other transaction: a receipt and a phase commit keep no
+/// lock timeout, and never fail because an operator's action waits.
+pub(crate) const PIPELINE_ADMIN_LOCK_TIMEOUT_SQL: &str = "SET LOCAL lock_timeout = '5s'";
+/// A `suspend` of a policy that is not runnable, or a `resume` of one that is.
+pub const PIPELINE_POLICY_INTERVENTION_NO_TRANSITION_LABEL: &str =
+    "policy_intervention_no_transition";
 pub const PIPELINE_INDEX_UNAVAILABLE_LABEL: &str = "index_unavailable";
+/// An index rebuild whose committed fence (V113,
+/// `PgPipelineStore::set_index_rebuild_fence`) could not be written before a
+/// run's writes: the rebuild stops before that run's first write
+/// (`PipelineService::rebuild_index_run`).
+pub const PIPELINE_INDEX_REBUILD_FENCE_UNAVAILABLE_LABEL: &str = "index_rebuild_fence_unavailable";
+/// A phase commit, or a receipt's final transaction, found no `staged`
+/// attempt row naming the object it is about to record (or the row names
+/// another object or hash). Only an out-of-band change or a defect gets
+/// there: the commit is refused, and a phase records it as a charged retry
+/// under this label (wave 2, fix round 1; review I2, I3).
+pub const PIPELINE_ATTEMPT_ARTIFACT_MISSING_LABEL: &str = "pipeline_attempt_artifact_missing";
+/// Safe label of a receipt for a submission id that the legacy path owns
+/// (`PipelineReceiptResult::LegacyOwned`): the ownership row names the legacy
+/// path, or a legacy submission row holds the id. A conflict with a legacy
+/// owner at the receipt's own inserts (`insert_receipt_records`) carries this
+/// label to `commit_receipt_attempt`, which turns it into the result. A
+/// conflict with a pipeline owner does not: it is
+/// `PIPELINE_SUBMISSION_BOUND_MESSAGE`, an error.
+pub const PIPELINE_LEGACY_RECEIPT_OWNED_LABEL: &str = "legacy_receipt_owned";
+/// `main`'s error for a receipt whose submission id is already bound to
+/// another receipt. `insert_receipt_records` returns it when a pipeline run
+/// owns the id (a second idempotency key for the same submission id): the id
+/// is not the legacy path's, so the receipt is an error, not `LegacyOwned`.
+const PIPELINE_SUBMISSION_BOUND_MESSAGE: &str =
+    "submission identity is already bound to another receipt";
+/// A bundle whose own configuration is not qualifiable
+/// (`PipelineBundleQualification::configuration_qualifiable`).
+pub const PIPELINE_BUNDLE_CONFIGURATION_NOT_QUALIFIABLE_LABEL: &str =
+    "bundle_configuration_not_qualifiable";
 /// Safe label of an object-store call in the run path that failed (an
 /// outage, not a decode or hash mismatch): the uncharged suspension of
 /// ruling FR3 (multi-lens review L2-2).
@@ -348,6 +402,26 @@ const PIPELINE_RECEIPT_OBJECT_TASK_FAILED_LABEL: &str = "receipt_object_task_fai
 /// returned (Zaki review 1, round 2, N-6). Fails closed.
 const PIPELINE_BLOCKING_CALL_FAILED_LABEL: &str = "blocking_call_failed";
 
+/// The artifact store cannot derive an object key before the content
+/// exists (`TraceArtifactStore::serialized_json_object_key`'s default
+/// refusal), which a compatibility Score needs before its tenant lock
+/// (rebase 10, option D). A failed store call like any other
+/// (`artifact_store_call`), so the uncharged suspension of ruling FR3
+/// (rebase 10 review, M2); it keeps its own label, since it names a store
+/// that lacks the capability rather than one that is down.
+const PIPELINE_OBJECT_KEY_UNAVAILABLE_LABEL: &str = "serialized_json_object_key_unavailable";
+/// The key the store prepared a compatibility Score's object under differs
+/// from the key it derived, and the attempt staged, before the tenant lock;
+/// publishing it would leave an object no row names, so nothing is
+/// published. The store's own inconsistency, not a check of the content it
+/// returned, so it is suspended uncharged as a failed store call is
+/// (`artifact_store_call`; rebase 10 review, M2).
+const PIPELINE_ATTEMPT_OBJECT_KEY_MISMATCH_LABEL: &str = "pipeline_attempt_object_key_mismatch";
+/// Store refusals `artifact_store_call` reports under their own label
+/// rather than `artifact_store_unavailable`: each names a capability the
+/// store lacks, which an operator fixes by configuration, not by waiting.
+const ARTIFACT_STORE_CAPABILITY_LABELS: &[&str] = &[PIPELINE_OBJECT_KEY_UNAVAILABLE_LABEL];
+
 /// Runs `call`, a synchronous dependency call (an object store or an index:
 /// file or network I/O), on the blocking pool, so it never parks a runtime
 /// worker thread (Zaki review 1, round 2, N-6). A caller may hold a
@@ -362,31 +436,48 @@ where
         .map_err(|_| anyhow::anyhow!(PIPELINE_BLOCKING_CALL_FAILED_LABEL))?
 }
 
-/// Runs `call`, an object-store call of the run path (Review's source read
-/// and approved write, Score's approved read and object writes), on the
-/// blocking pool, and reports the store's own
+/// Runs `call`, an object-store call of the run path (Review's source read,
+/// and its approved object's prepare and publish; Score's approved read,
+/// its object keys' derivation before the tenant lock, and each object's
+/// prepare and publish), on the blocking pool, and reports the store's own
 /// error as the uncharged suspension `artifact_store_unavailable`
 /// (multi-lens review L2-2, ruling FR3): a store call that fails is an
 /// outage, not the trace's fault. `TraceArtifactStore` errors are untyped,
 /// so an integrity failure the store itself reports is suspended the same
 /// way; it stays visible by its label and retries at most once an hour.
-/// The caller's own checks of what the store returned (a decode, a hash or
-/// a revision mismatch) stay charged, and a lost blocking task keeps
-/// `blocking_call_failed`.
+/// A refusal in `ARTIFACT_STORE_CAPABILITY_LABELS` is suspended the same
+/// way under its own label.
+///
+/// This is the pipeline's one rule for its object store (wave 2, merging
+/// PR 3's c8d65fcb with PR 4's 6dace131): a failure of the store itself --
+/// a failed call, a capability it lacks, or a key it does not keep
+/// (`PIPELINE_ATTEMPT_OBJECT_KEY_MISMATCH_LABEL`, raised by the caller as
+/// the same transient `PolicyError`) -- is never charged to the trace. The
+/// caller's own checks of the content the store returned (a decode, a hash
+/// or a revision mismatch) stay charged, and a lost blocking task keeps
+/// `blocking_call_failed`. The attempt sweep has no run to charge: a store
+/// call of the sweep that fails keeps its row for the next pass
+/// (`PipelineService::sweep_attempt_artifacts`).
 async fn artifact_store_call<T, F>(call: F) -> anyhow::Result<T>
 where
     F: FnOnce() -> anyhow::Result<T> + Send + 'static,
     T: Send + 'static,
 {
-    on_blocking_pool(move || {
-        call().map_err(|_| {
-            anyhow::Error::from(
-                PolicyError::transient(PIPELINE_ARTIFACT_STORE_UNAVAILABLE_LABEL)
-                    .expect("static label"),
-            )
-        })
-    })
-    .await
+    on_blocking_pool(move || call().map_err(|error| artifact_store_failure(&error).into())).await
+}
+
+/// The uncharged suspension `artifact_store_call` reports for a store
+/// call's `error`: the store's own refusal when it is one of
+/// `ARTIFACT_STORE_CAPABILITY_LABELS`, else `artifact_store_unavailable`.
+/// Nothing else of the store's message reaches the run.
+fn artifact_store_failure(error: &anyhow::Error) -> PolicyError {
+    let message = error.to_string();
+    let label = ARTIFACT_STORE_CAPABILITY_LABELS
+        .iter()
+        .copied()
+        .find(|label| *label == message)
+        .unwrap_or(PIPELINE_ARTIFACT_STORE_UNAVAILABLE_LABEL);
+    PolicyError::transient(label).expect("static label")
 }
 
 /// The SQL form of `settlement_leg_is_unresolved`, over a row aliased `s`.
@@ -520,9 +611,16 @@ fn is_external_receipt_reuse_error(error: &anyhow::Error) -> bool {
 /// the first worker's own stale write runs, `record_lease_expired`'s
 /// token-only fence finds no row under the first worker's now-superseded
 /// token and changes nothing -- that attempt is silently lost, recorded
-/// neither as `lease_expired` nor as a charge reversed. Lease renewal (PR 4)
-/// is what closes both gaps, by extending a live lease before it expires
-/// rather than discovering the expiry after the fact.
+/// neither as `lease_expired` nor as a charge reversed.
+///
+/// `PipelineLeaseRenewal` closes only the second gap, and only for a live
+/// worker: it extends the lease before it expires, so no other worker can
+/// reclaim a phase that is merely slow. The first gap stays: a crashed
+/// worker still records nothing, and its run is reclaimed as a charged
+/// attempt once its last lease expires. The second gap reopens when a live
+/// worker's lease expires anyway: its phase runs past
+/// `PIPELINE_LEASE_RENEWAL_CAP_FACTOR` phase leases (renewal stops at the
+/// cap), or its renewal does not get to run before the lease expires.
 pub const PIPELINE_LEASE_EXPIRED_LABEL: &str = "lease_expired";
 /// Safe label `PipelineLeaseConfig::new` refuses with when a phase's
 /// configured lease falls outside [1 second, 2 hours].
@@ -532,6 +630,17 @@ const PIPELINE_LEASE_MAX_SECONDS: i64 = 2 * 60 * 60;
 const PIPELINE_LEASE_DEFAULT_REVIEW_SECONDS: i64 = 5 * 60;
 const PIPELINE_LEASE_DEFAULT_SCORE_SECONDS: i64 = 30 * 60;
 const PIPELINE_LEASE_DEFAULT_SETTLE_SECONDS: i64 = 5 * 60;
+/// A lease is renewed at most until this many phase leases after its claim
+/// (`PipelineLeaseRenewal::start`'s `lease_cap`): an honest phase that is
+/// merely slow keeps being renewed, but a phase that never comes back at all
+/// still surrenders its claim within a bounded multiple of its own
+/// configured lease, rather than being renewed forever.
+pub const PIPELINE_LEASE_RENEWAL_CAP_FACTOR: i32 = 4;
+/// How long past the latest moment a phase attempt's lease can still be
+/// live (`PipelineService::attempt_artifact_lease_bound`) its staged
+/// objects wait before the sweep may remove them: time for the commit
+/// itself to land once the phase work is done.
+const PIPELINE_ATTEMPT_ARTIFACT_COMMIT_MARGIN: Duration = Duration::hours(1);
 
 /// Each pipeline phase gets
 /// its own claim-lease length, sized for how long that phase can actually
@@ -541,9 +650,10 @@ const PIPELINE_LEASE_DEFAULT_SETTLE_SECONDS: i64 = 5 * 60;
 /// exceeds a short fixed lease, which used to make `commit_score` and the
 /// following `mark_retry` both fail on a stale lease and burn an attempt
 /// every time. The defaults below give Score six times the headroom Review
-/// and Settle get. Lease renewal mid-phase (extending a lease the phase
-/// still holds) is PR 4 and out of scope here -- this only sizes the one
-/// lease a phase gets when it is claimed.
+/// and Settle get. `PipelineLeaseRenewal` extends a lease the phase still
+/// holds, up to `PIPELINE_LEASE_RENEWAL_CAP_FACTOR` times the length set
+/// here -- this struct only sizes the one lease a phase gets when it is
+/// claimed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PipelineLeaseConfig {
     review: Duration,
@@ -583,6 +693,16 @@ impl PipelineLeaseConfig {
     pub fn settle(&self) -> Duration {
         self.settle
     }
+
+    /// The lease a claim of `phase` gets; Admission never runs as a claim and
+    /// falls back to Review, as the claim SQL's `ELSE` arm does.
+    pub fn for_phase(&self, phase: Phase) -> Duration {
+        match phase {
+            Phase::Score => self.score,
+            Phase::Settle => self.settle,
+            Phase::Admission | Phase::Review => self.review,
+        }
+    }
 }
 
 impl Default for PipelineLeaseConfig {
@@ -601,6 +721,40 @@ impl Default for PipelineLeaseConfig {
 /// holding a second copy.
 pub(crate) fn sha256_prefixed(bytes: &[u8]) -> String {
     format!("sha256:{:x}", Sha256::digest(bytes))
+}
+
+/// Whether `value` has the shape of a bundle id: `sha256:` and 64 lowercase
+/// hex digits, the shape the tables check. An operator action checks it
+/// before the id reaches a query or an error string (`intervene_policy`,
+/// ingest's admin routes).
+pub fn is_bundle_id(value: &str) -> bool {
+    value.strip_prefix("sha256:").is_some_and(|hex| {
+        hex.len() == 64 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+    })
+}
+
+/// The rule for who an operator action is recorded under and why, shared by
+/// every operator action of the pipeline (a routing change in
+/// `versioned_pipeline_activation.rs`, a policy intervention here). The actor
+/// is the credential's `principal_ref`, already a hash-derived reference on
+/// `main`: 1 to 160 of `A-Za-z0-9_:.-`, the shape the tables check. The
+/// reason is a safe label. Either failing is a `Constraint` carrying
+/// `refusal_label`, which each caller chooses, so a refusal names the action
+/// that was refused. Nothing of the actor or the reason is in the error.
+pub(crate) fn validate_actor(
+    actor_principal_ref: &str,
+    reason_code: &str,
+    refusal_label: &str,
+) -> Result<(), DatabaseError> {
+    let actor_ok = !actor_principal_ref.is_empty()
+        && actor_principal_ref.len() <= 160
+        && actor_principal_ref
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b':' | b'.' | b'-'));
+    if !actor_ok || !crate::versioned_pipeline_qualification::is_safe_label(reason_code) {
+        return Err(DatabaseError::Constraint(refusal_label.to_string()));
+    }
+    Ok(())
 }
 
 fn enum_string<T: Serialize>(value: &T) -> anyhow::Result<String> {
@@ -856,6 +1010,58 @@ pub struct PhaseOutcomeRecord {
     pub recorded_at: DateTime<Utc>,
 }
 
+/// Why a bound policy is or is not runnable (V111). `runnable` (V93) stays
+/// the flag every reader uses; the database keeps the two equal
+/// (`runnable = (operational_status = 'runnable')`). `Terminated` is a state
+/// the schema holds and no code writes: `terminate` is refused
+/// (`PIPELINE_POLICY_INTERVENTION_NOT_SUPPORTED_LABEL`).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PolicyOperationalStatus {
+    Runnable,
+    Suspended,
+    Terminated,
+}
+
+impl PolicyOperationalStatus {
+    fn as_db(self) -> &'static str {
+        match self {
+            Self::Runnable => "runnable",
+            Self::Suspended => "suspended",
+            Self::Terminated => "terminated",
+        }
+    }
+
+    fn from_db(value: &str) -> Result<Self, DatabaseError> {
+        match value {
+            "runnable" => Ok(Self::Runnable),
+            "suspended" => Ok(Self::Suspended),
+            "terminated" => Ok(Self::Terminated),
+            _ => Err(DatabaseError::Serialization(
+                "unknown policy operational status".to_string(),
+            )),
+        }
+    }
+}
+
+/// One operator intervention on a bound policy, as recorded: hash-only and
+/// label-only. The actor is the credential's `principal_ref`, the reason a
+/// safe label, and `evidence_hash` the SHA-256 of the intervention's fields.
+/// The tenant is the caller's, never part of the record.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PipelinePolicyInterventionRecord {
+    pub intervention_id: Uuid,
+    pub bundle_id: String,
+    pub phase: Phase,
+    pub action: String,
+    pub actor_principal_ref: String,
+    pub reason_code: String,
+    pub previous_status: PolicyOperationalStatus,
+    pub resulting_status: PolicyOperationalStatus,
+    pub evidence_hash: String,
+    pub recorded_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PipelineSettlementRecord {
     #[serde(skip_serializing, default)]
@@ -914,10 +1120,18 @@ pub struct PipelineCreditAuditItem {
 /// account, found under the account lock, rolled the credit transaction
 /// back -- the caller then records the row as `held` and no ledger row is
 /// written -- or the submission stopped being operable under that same
-/// lock, which also rolls the transaction back with nothing written.
+/// lock, which also rolls the transaction back with nothing written -- or
+/// the Settle policy was no longer runnable under its status row's lock, which
+/// rolls the transaction back with nothing written as well.
 enum InternalCreditResult {
     Complete,
     Held,
+    /// The Settle policy of the run's bundle was suspended (GRD-004), found
+    /// under `lock_runnable_policy` inside this same transaction, after the
+    /// run, account, and submission locks and before the first write. The
+    /// transaction rolled back with nothing written -- no ledger row, no
+    /// batch. The leg's adapter call, if it was made, is not retracted.
+    PolicyNotRunnable,
     /// The submission-operability re-check taken under the
     /// submission row's own lock, inside this same transaction, found the
     /// submission no longer operable (withdrawn, revoked, purged, expired,
@@ -1117,14 +1331,52 @@ enum ReceiptStage {
 enum ReceiptCommit {
     Created(PipelineRunRecord),
     /// A refusal found by the final re-checks (a run another attempt
-    /// created, or a tombstone). This attempt's object is not referenced.
+    /// created, a legacy owner, a routing that no longer serves the tenant,
+    /// or a tombstone). This attempt's object is not referenced.
     Refused(PipelineReceiptResult),
     /// This attempt's row is no longer `staged` (the sweeper removed it) or
     /// is due (a sweep that failed may have deleted its object), so it
     /// cannot commit.
     StagingMissing,
+    /// The Admission policy of the run's bound bundle was suspended after the
+    /// staging transaction read it (GRD-004). Nothing was written, so the
+    /// attempt's object and row are discarded, and the receipt is the error
+    /// `bundle_policy_not_runnable`, as when the staging transaction finds it.
+    PolicyNotRunnable,
 }
 
+/// The run half of index-rebuild eligibility, over `pipeline_runs p`:
+/// complete, included in the index, with a completed index write that no
+/// invalidation has touched since, and a stored command reference and hash
+/// to rebuild from. `PgPipelineStore::list_rebuildable_index_runs` lists by
+/// it and `PgPipelineStore::lock_rebuildable_index_run_on_tx` re-checks it
+/// under the run's lock, so the two cannot drift. The submission half is
+/// `PgPipelineStore::submission_guard_on_tx` itself, read per run under
+/// that lock (final review I1 and M8).
+///
+/// A run's invalidation state is its `pipeline_index_invalidations` row's
+/// state, `none` without a row (PR 3, 62cc2768: `pipeline_runs` keeps no
+/// copy), so "no invalidation has touched it" is "it has no row", whatever
+/// that row's state.
+macro_rules! rebuildable_index_run_predicate {
+    () => {
+        "p.state = 'complete'
+         AND p.index_membership = 'included'
+         AND p.index_write_state = 'complete'
+         AND NOT EXISTS (
+             SELECT 1 FROM pipeline_index_invalidations i
+              WHERE i.tenant_id = p.tenant_id AND i.run_id = p.run_id
+         )
+         AND p.index_command_ref IS NOT NULL
+         AND p.index_command_hash IS NOT NULL"
+    };
+}
+
+/// Cheap to clone: the pool it wraps is already an `Arc`.
+/// `PipelineLeaseRenewal::start` clones one into its own background task,
+/// which takes its own short connection checkout rather than sharing the
+/// caller's.
+#[derive(Clone)]
 pub struct PgPipelineStore {
     backend: Arc<PgBackend>,
 }
@@ -1139,6 +1391,34 @@ impl PgPipelineStore {
         tenant_id: &str,
     ) -> Result<Transaction<'a>, DatabaseError> {
         let tx = client.transaction().await?;
+        tx.execute(
+            "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+            &[&tenant_id],
+        )
+        .await?;
+        Ok(tx)
+    }
+
+    /// `tenant_transaction` that states its isolation level, READ COMMITTED,
+    /// when it begins (`START TRANSACTION ISOLATION LEVEL READ COMMITTED`),
+    /// whatever `default_transaction_isolation` the database or the role
+    /// sets (final fix wave G14). For a transaction whose correctness rests
+    /// on a statement that reads what committed while an earlier statement
+    /// waited for a lock: the receipt's staging and commit transactions (the
+    /// routing read after the shared routing lock), the index rebuild's
+    /// re-check of a run after it locks the run row, and the invalidation
+    /// claim. Under REPEATABLE READ such a statement would read the snapshot
+    /// of the transaction's first statement, taken before the wait, and no
+    /// error would say so: an advisory lock has no row version.
+    pub(crate) async fn read_committed_tenant_transaction<'a>(
+        client: &'a mut deadpool_postgres::Client,
+        tenant_id: &str,
+    ) -> Result<Transaction<'a>, DatabaseError> {
+        let tx = client
+            .build_transaction()
+            .isolation_level(tokio_postgres::IsolationLevel::ReadCommitted)
+            .start()
+            .await?;
         tx.execute(
             "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
             &[&tenant_id],
@@ -1239,40 +1519,13 @@ impl PgPipelineStore {
         Ok(())
     }
 
-    /// Switches a tenant to a different, already-registered bundle. This is
-    /// an operator action: no ingest route calls it, only
-    /// `activate_bundle_if_none` (below) does, and the ingest runtime login
-    /// holds no `UPDATE` on `pipeline_active_bundles`, so this call fails
-    /// with a database permission error unless it runs through a role that
-    /// has been separately granted on the table.
-    pub async fn activate_bundle(
-        &self,
-        tenant_id: &str,
-        bundle_id: &str,
-    ) -> Result<(), DatabaseError> {
-        let mut client = self.backend.trace_pool().get().await?;
-        let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
-        let row_count = tx
-            .execute(
-                "INSERT INTO pipeline_active_bundles (tenant_id, bundle_id)
-                 SELECT $1, bundle_id
-                 FROM pipeline_bundle_packages
-                 WHERE tenant_id = $1 AND bundle_id = $2
-                 ON CONFLICT (tenant_id) DO UPDATE
-                 SET bundle_id = EXCLUDED.bundle_id, selected_at = NOW()",
-                &[&tenant_id, &bundle_id],
-            )
-            .await?;
-        if row_count != 1 {
-            return Err(DatabaseError::NotFound {
-                entity: "pipeline_bundle".to_string(),
-                id: bundle_id.to_string(),
-            });
-        }
-        tx.commit().await?;
-        Ok(())
-    }
-
+    /// Selects `bundle_id` as the tenant's active bundle only when the tenant
+    /// has none (an `INSERT ... ON CONFLICT DO NOTHING`, which needs no
+    /// `UPDATE`): the default bundle's registration at start. It never
+    /// replaces a selection, so a start after an activation or a rollback
+    /// leaves the selected bundle. The ingest runtime switches a tenant's
+    /// bundle only through the qualified activation gate
+    /// (`PipelineQualificationStore::activate_qualified_bundle_in`, V112).
     pub async fn activate_bundle_if_none(
         &self,
         tenant_id: &str,
@@ -1358,6 +1611,216 @@ impl PgPipelineStore {
             .unwrap_or(false);
         tx.commit().await?;
         Ok(runnable)
+    }
+
+    /// An operator suspends or resumes one policy of a bound bundle (port
+    /// `ef97a459` lines 678 to 829, with `terminate` refused). The status row
+    /// is the only row it locks (`FOR UPDATE`), so it takes no lock a phase
+    /// commit takes before the policy row, and it waits for every transaction
+    /// that holds the row `FOR SHARE` (`lock_runnable_policy`): a transaction
+    /// that passed its guard lands before the suspension returns, and one that
+    /// starts after it is refused.
+    ///
+    /// What a suspension stops, once it has returned: each phase's commit
+    /// (Admission at the receipt, Review, Score, Settle); in Settle, a new
+    /// selection, the index write, each leg's external call, and the credit
+    /// event with its batch; and a payout dispatch (a submit to the NEAR
+    /// adapter, never a confirmation lookup). A run bound to the policy waits
+    /// in `retry`, uncharged, under the same bundle, and continues from what it
+    /// has stored after the resume.
+    ///
+    /// What it does not stop: an external call that is already in flight (a
+    /// guard does not claim to retract an accepted operation: an index write
+    /// that holds the policy row finishes first, a leg's adapter call that was
+    /// accepted stays accepted, and a NEAR submit already made stays made); a
+    /// payout confirmation; and the failure and withdrawal paths, which write
+    /// no outcome and run in every policy state. A `resume` does not wake the
+    /// released runs at once: each waits for its retry backoff (the age of its
+    /// phase, at most one hour).
+    ///
+    /// How long a `suspend` can wait: for the commit transactions, a moment;
+    /// for the credit transaction of a Settle leg, its own few statements; and
+    /// for a Settle index dispatch, which holds the run row, the submission
+    /// row, and the policy row through every upsert to the commit of
+    /// `index_write_state`, at most the earlier of the Settle lease's end and
+    /// `PIPELINE_INDEX_DISPATCH_BUDGET_SECONDS` (30 seconds): past that the
+    /// dispatch stops writing and rolls back. The intervention itself waits
+    /// at most 5 seconds for the row (`PIPELINE_ADMIN_LOCK_TIMEOUT_SQL`), then
+    /// fails with `policy_intervention_busy` and writes nothing: the operator
+    /// repeats it (an index dispatch can hold the row for longer than that).
+    ///
+    /// Only `suspend` of a runnable policy and `resume` of a suspended one
+    /// are transitions. `terminate` is `policy_intervention_not_supported`;
+    /// any other action, a `bundle_id` that is not `sha256:` and 64 lowercase
+    /// hex digits, and an actor or reason that fails `validate_actor`, are
+    /// `policy_intervention_invalid` (no text of the caller is in the error);
+    /// and a transition that does not exist is
+    /// `policy_intervention_no_transition`. Each refusal, and a well-formed
+    /// bundle the tenant has no policy row for (`NotFound`), writes nothing.
+    ///
+    /// A suspension keeps `runnable` and `operational_status` equal (V111's
+    /// check) and puts the reason in `error_label`, which a resume clears.
+    /// It changes no run and no bundle. The record's `recorded_at` is the
+    /// database clock at the write, not the transaction's start, so a resume
+    /// that waited for a suspension is never listed before it.
+    pub async fn intervene_policy(
+        &self,
+        tenant_id: &str,
+        bundle_id: &str,
+        phase: Phase,
+        action: &str,
+        actor_principal_ref: &str,
+        reason_code: &str,
+    ) -> Result<PipelinePolicyInterventionRecord, DatabaseError> {
+        validate_actor(
+            actor_principal_ref,
+            reason_code,
+            PIPELINE_POLICY_INTERVENTION_INVALID_LABEL,
+        )?;
+        // The shape the table checks, refused before the id can reach a
+        // query or an error string (`NotFound` names the bundle).
+        if !is_bundle_id(bundle_id) {
+            return Err(DatabaseError::Constraint(
+                PIPELINE_POLICY_INTERVENTION_INVALID_LABEL.to_string(),
+            ));
+        }
+        let resulting = match action {
+            "suspend" => PolicyOperationalStatus::Suspended,
+            "resume" => PolicyOperationalStatus::Runnable,
+            "terminate" => {
+                return Err(DatabaseError::Constraint(
+                    PIPELINE_POLICY_INTERVENTION_NOT_SUPPORTED_LABEL.to_string(),
+                ));
+            }
+            _ => {
+                return Err(DatabaseError::Constraint(
+                    PIPELINE_POLICY_INTERVENTION_INVALID_LABEL.to_string(),
+                ));
+            }
+        };
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
+        // The wait for the policy row is bounded (G15); a wait that runs out
+        // is `policy_intervention_busy`, and nothing is written.
+        tx.batch_execute(PIPELINE_ADMIN_LOCK_TIMEOUT_SQL).await?;
+        let row = tx
+            .query_opt(
+                "SELECT operational_status
+                   FROM pipeline_bundle_policy_status
+                  WHERE tenant_id = $1 AND bundle_id = $2 AND phase = $3
+                  FOR UPDATE",
+                &[&tenant_id, &bundle_id, &phase_as_db(Some(phase))],
+            )
+            .await
+            .map_err(|error| {
+                lock_timeout_as(error.into(), PIPELINE_POLICY_INTERVENTION_BUSY_LABEL)
+            })?
+            .ok_or_else(|| DatabaseError::NotFound {
+                entity: "pipeline_bundle_policy".to_string(),
+                id: format!("{bundle_id}:{}", phase_as_db(Some(phase))),
+            })?;
+        let previous =
+            PolicyOperationalStatus::from_db(row.get::<_, String>("operational_status").as_str())?;
+        if !matches!(
+            (previous, resulting),
+            (
+                PolicyOperationalStatus::Runnable,
+                PolicyOperationalStatus::Suspended
+            ) | (
+                PolicyOperationalStatus::Suspended,
+                PolicyOperationalStatus::Runnable
+            )
+        ) {
+            return Err(DatabaseError::Constraint(
+                PIPELINE_POLICY_INTERVENTION_NO_TRANSITION_LABEL.to_string(),
+            ));
+        }
+        let evidence_hash = sha256_prefixed(
+            format!(
+                "trace-commons-policy-intervention\0{tenant_id}\0{bundle_id}\0{}\0{action}\0{actor_principal_ref}\0{reason_code}\0{}\0{}",
+                phase_as_db(Some(phase)),
+                previous.as_db(),
+                resulting.as_db()
+            )
+            .as_bytes(),
+        );
+        let runnable = resulting == PolicyOperationalStatus::Runnable;
+        let error_label = (!runnable).then_some(reason_code);
+        tx.execute(
+            "UPDATE pipeline_bundle_policy_status
+                SET runnable = $4, operational_status = $5, error_label = $6,
+                    updated_at = clock_timestamp()
+              WHERE tenant_id = $1 AND bundle_id = $2 AND phase = $3",
+            &[
+                &tenant_id,
+                &bundle_id,
+                &phase_as_db(Some(phase)),
+                &runnable,
+                &resulting.as_db(),
+                &error_label,
+            ],
+        )
+        .await?;
+        let intervention_id = Uuid::new_v4();
+        let recorded_at: DateTime<Utc> = tx
+            .query_one(
+                "INSERT INTO pipeline_policy_interventions (
+                    tenant_id, intervention_id, bundle_id, phase, action,
+                    actor_principal_ref, reason_code, previous_status,
+                    resulting_status, evidence_hash, recorded_at
+                 ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10, clock_timestamp())
+                 RETURNING recorded_at",
+                &[
+                    &tenant_id,
+                    &intervention_id,
+                    &bundle_id,
+                    &phase_as_db(Some(phase)),
+                    &action,
+                    &actor_principal_ref,
+                    &reason_code,
+                    &previous.as_db(),
+                    &resulting.as_db(),
+                    &evidence_hash,
+                ],
+            )
+            .await?
+            .get("recorded_at");
+        tx.commit().await?;
+        Ok(PipelinePolicyInterventionRecord {
+            intervention_id,
+            bundle_id: bundle_id.to_string(),
+            phase,
+            action: action.to_string(),
+            actor_principal_ref: actor_principal_ref.to_string(),
+            reason_code: reason_code.to_string(),
+            previous_status: previous,
+            resulting_status: resulting,
+            evidence_hash,
+            recorded_at,
+        })
+    }
+
+    /// The interventions on `bundle_id`'s policies, oldest first.
+    pub async fn list_policy_interventions(
+        &self,
+        tenant_id: &str,
+        bundle_id: &str,
+    ) -> Result<Vec<PipelinePolicyInterventionRecord>, DatabaseError> {
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
+        let rows = tx
+            .query(
+                "SELECT intervention_id, bundle_id, phase, action, actor_principal_ref,
+                        reason_code, previous_status, resulting_status, evidence_hash,
+                        recorded_at
+                   FROM pipeline_policy_interventions
+                  WHERE tenant_id = $1 AND bundle_id = $2
+                  ORDER BY recorded_at ASC, intervention_id ASC",
+                &[&tenant_id, &bundle_id],
+            )
+            .await?;
+        tx.commit().await?;
+        rows.iter().map(policy_intervention_from_row).collect()
     }
 
     pub async fn get_run(
@@ -1649,6 +2112,62 @@ impl PgPipelineStore {
         Ok(())
     }
 
+    /// Extends a lease this claim still holds. Never shortens it, never
+    /// extends past `lease_cap`, and changes nothing when the token no longer
+    /// matches or the lease already expired -- the same token-plus-liveness
+    /// fence every other lease-checked write uses, so a lost lease is simply
+    /// never renewed rather than renewed onto a run another worker now holds.
+    /// Called only by `PipelineLeaseRenewal`'s background task, on its own
+    /// connection checkout, never inside another transaction.
+    ///
+    /// Liveness is decided only once the run row is held (wave 2; rebase 10
+    /// review, M7; fix round 1, review M4): the transaction first locks the
+    /// row (`SELECT ... FOR NO KEY UPDATE`, the mode the UPDATE itself takes,
+    /// so it does not also wait on a child row's foreign-key `FOR KEY SHARE`;
+    /// fix round 2), waiting out any holder, and the UPDATE
+    /// that follows compares `lease_expires_at` with `clock_timestamp()`,
+    /// the time it runs, not `NOW()`, the transaction's start. A lease that
+    /// expired while the renewal waited is then not renewed, whether the
+    /// holder updated the row or only locked it (a lock-only holder gives
+    /// no re-check of a waiting UPDATE's `WHERE`, which is why the lock comes
+    /// first). The new expiry still counts from `NOW()`, which can only make
+    /// it earlier. Lock order: the run row only, as every lease-checked
+    /// write takes it.
+    pub async fn renew_lease(
+        &self,
+        tenant_id: &str,
+        run_id: Uuid,
+        lease_token: Uuid,
+        extension: Duration,
+        lease_cap: DateTime<Utc>,
+    ) -> Result<Option<DateTime<Utc>>, DatabaseError> {
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
+        let extension_ms = extension.num_milliseconds();
+        tx.query_opt(
+            "SELECT 1 FROM pipeline_runs
+              WHERE tenant_id = $1 AND run_id = $2 FOR NO KEY UPDATE",
+            &[&tenant_id, &run_id],
+        )
+        .await?;
+        let row = tx
+            .query_opt(
+                "UPDATE pipeline_runs
+                    SET lease_expires_at = GREATEST(
+                            lease_expires_at,
+                            LEAST(NOW() + ($4::bigint * INTERVAL '1 millisecond'), $5)
+                        ),
+                        updated_at = NOW()
+                  WHERE tenant_id = $1 AND run_id = $2 AND state = 'leased'
+                    AND lease_token = $3 AND lease_expires_at > clock_timestamp()
+                  RETURNING lease_expires_at",
+                &[&tenant_id, &run_id, &lease_token, &extension_ms, &lease_cap],
+            )
+            .await?;
+        tx.commit().await?;
+        Ok(row.map(|row| row.get(0)))
+    }
+
     /// Commits the Review outcome together with its approved-content
     /// provenance and the phase transition, in one transaction (decision
     /// D7). On approval: the approved object ref, its `trace_derived_records`
@@ -1676,6 +2195,12 @@ impl PgPipelineStore {
     /// commit (`PIPELINE_SUBMISSION_INOPERABLE_LABEL`) rather than resurrect
     /// the trace: no object ref, no derived record, no status change, no
     /// outcome, no run update.
+    ///
+    /// The same holds for the Review policy (GRD-004): the commit locks its
+    /// status row `FOR SHARE` after those two guards and refuses with
+    /// `PIPELINE_POLICY_NOT_RUNNABLE_LABEL`, writing nothing, when an operator
+    /// suspended the policy while the attempt ran. The worker releases the run
+    /// uncharged, and it commits after the resume.
     pub async fn commit_review(
         &self,
         run: &PipelineRunRecord,
@@ -1692,7 +2217,7 @@ impl PgPipelineStore {
         let tx = Self::tenant_transaction(&mut client, &run.tenant_id).await?;
         // Lock order: the run row (`ensure_current_lease`), then the
         // submission row (below) -- held the same way everywhere both are
-        // touched.
+        // touched -- then the policy row (`lock_runnable_policy`).
         ensure_current_lease(&tx, run, lease_token).await?;
 
         // Fix round 1, finding I2 / Ruling T3-8: this re-check used to
@@ -1706,6 +2231,16 @@ impl PgPipelineStore {
         if !review_submission_is_operable(&tx, &run.tenant_id, run.submission_id).await? {
             return Err(DatabaseError::Constraint(
                 PIPELINE_SUBMISSION_INOPERABLE_LABEL.to_string(),
+            ));
+        }
+        // GRD-004: the Review policy must still be runnable, and stays so
+        // until this commit ends (`lock_runnable_policy`, the last lock before
+        // the first write). A policy suspended while this attempt ran refuses
+        // the commit as the checks above do: no object ref, no derived record,
+        // no status change, no outcome, no run update.
+        if !lock_runnable_policy(&tx, &run.tenant_id, &run.bundle_id, Phase::Review).await? {
+            return Err(DatabaseError::Constraint(
+                PIPELINE_POLICY_NOT_RUNNABLE_LABEL.to_string(),
             ));
         }
 
@@ -1836,6 +2371,59 @@ impl PgPipelineStore {
             )
             .await?;
         let updated = pipeline_run_from_row(&row)?;
+        // PR 4: the attempt's staged object -- the approved content, when
+        // this commit approved one -- moves to `committed` in this same
+        // transaction, the one that records it as an object ref of the
+        // submission; from here on the withdrawal, not the attempt sweep,
+        // owns its deletion. A refused commit above already returned without
+        // reaching here, so this never runs for one.
+        //
+        // An approval must move exactly the one `approved` row that names
+        // the object it records (its key, and its hash); a rejection staged
+        // no object and must move none (wave 2, fix round 1; review I3).
+        // Anything else is `pipeline_attempt_artifact_missing`, which rolls
+        // this transaction back; the caller deletes the approved object
+        // (`phase_commit_refused`), as for any refused commit.
+        let moved = match &approved {
+            Some(approved) => {
+                let ciphertext_sha256 = approved
+                    .object_ref
+                    .content_sha256
+                    .strip_prefix("sha256:")
+                    .unwrap_or(&approved.object_ref.content_sha256);
+                tx.execute(
+                    "UPDATE pipeline_attempt_artifacts
+                        SET state = 'committed', committed_at = NOW()
+                      WHERE tenant_id = $1 AND run_id = $2 AND lease_token = $3
+                        AND artifact = 'approved' AND state = 'staged'
+                        AND object_key = $4
+                        AND (ciphertext_sha256 IS NULL OR ciphertext_sha256 = $5)",
+                    &[
+                        &run.tenant_id,
+                        &run.run_id,
+                        &lease_token,
+                        &approved.object_ref.object_key,
+                        &ciphertext_sha256,
+                    ],
+                )
+                .await?
+            }
+            None => {
+                tx.execute(
+                    "UPDATE pipeline_attempt_artifacts
+                        SET state = 'committed', committed_at = NOW()
+                      WHERE tenant_id = $1 AND run_id = $2 AND lease_token = $3
+                        AND state = 'staged'",
+                    &[&run.tenant_id, &run.run_id, &lease_token],
+                )
+                .await?
+            }
+        };
+        if moved != u64::from(approved.is_some()) {
+            return Err(DatabaseError::Constraint(
+                PIPELINE_ATTEMPT_ARTIFACT_MISSING_LABEL.to_string(),
+            ));
+        }
         tx.commit().await?;
         Ok(updated)
     }
@@ -2083,7 +2671,7 @@ impl PgPipelineStore {
             let resolved_admission_reason = admission_reason
                 .as_ref()
                 .is_some_and(|reason| resolved.iter().any(|item| item.as_str() == reason));
-            if !resolved_admission_reason && !(admission_reason.is_none() && !resolved.is_empty()) {
+            if !resolved_admission_reason && (admission_reason.is_some() || resolved.is_empty()) {
                 return Err(DatabaseError::Constraint(
                     "quarantine reason is unresolved".to_string(),
                 ));
@@ -2312,6 +2900,11 @@ impl PgPipelineStore {
     /// refuses the whole commit with `PIPELINE_SUBMISSION_INOPERABLE_LABEL`:
     /// no outcome, no settlement rows, no run update.
     ///
+    /// The Score policy gets the same guard (GRD-004): after the submission
+    /// guard, the commit locks the policy's status row `FOR SHARE` and refuses
+    /// with `PIPELINE_POLICY_NOT_RUNNABLE_LABEL`, writing nothing, when the
+    /// policy is no longer runnable.
+    ///
     /// The commit resets `attempt_count` to 0, so Settle has the run's whole
     /// `max_attempts` budget (multi-lens review L2-1; see `commit_review`).
     #[allow(clippy::too_many_arguments)]
@@ -2369,6 +2962,15 @@ impl PgPipelineStore {
             // Dropping the transaction rolls it back: nothing was written.
             return Err(DatabaseError::Constraint(
                 PIPELINE_SUBMISSION_INOPERABLE_LABEL.to_string(),
+            ));
+        }
+        // GRD-004: the Score policy must still be runnable, and stays so
+        // until this commit ends. The policy row comes after the run row, the
+        // submission row, and (for a compatibility Score) the tenant's Score
+        // lock, and before the first write; a refusal writes nothing.
+        if !lock_runnable_policy(&tx, &run.tenant_id, &run.bundle_id, Phase::Score).await? {
+            return Err(DatabaseError::Constraint(
+                PIPELINE_POLICY_NOT_RUNNABLE_LABEL.to_string(),
             ));
         }
 
@@ -2459,6 +3061,84 @@ impl PgPipelineStore {
             )
             .await?;
         let updated = pipeline_run_from_row(&row)?;
+        // PR 4: the attempt's staged objects -- `index-command` and/or
+        // `score-neighbors`, whichever this commit wrote -- move to
+        // `committed` in this same transaction, the one that records each as
+        // an object ref of the submission (above); from here on the
+        // withdrawal, not the attempt sweep, owns their deletion. A refused
+        // commit above already returned without reaching here.
+        //
+        // Rebase 10, option D: a compatibility Score staged both rows before
+        // its tenant lock, with no hash. The commit sets a written row's
+        // hash from the object ref it records (`object_key#ciphertext_sha256`;
+        // a row staged with its hash keeps it, which V108's guard enforces),
+        // and deletes the row of an artifact this Score did not write, since
+        // no object exists for it. Only a row with no hash is deleted: a row
+        // with a hash was staged just before its object was published.
+        //
+        // Each written artifact must move exactly one row, the one that names
+        // its object: the same key, and either no hash yet or the same hash
+        // (wave 2; rebase 10 review, M4; fix round 1, review I2). An object
+        // no committed row names would be the attempt sweep's to delete
+        // although the run's object ref names it. The lease was found live
+        // above, and the sweep removes a `staged` row only once its
+        // `cleanup_after`, past any lease this attempt can hold, has passed,
+        // so a missing or mismatched row is an out-of-band change or a
+        // defect: `pipeline_attempt_artifact_missing`, the label the Review
+        // commit and the receipt use, which rolls this transaction back; the
+        // caller deletes the attempt's objects (`phase_commit_refused`).
+        for (artifact, stored) in [("index-command", command), ("score-neighbors", neighbor)] {
+            match stored {
+                Some((stored_ref, _, _)) => {
+                    let ciphertext_sha256 = stored_ref
+                        .rsplit_once('#')
+                        .map(|(_, ciphertext_sha256)| ciphertext_sha256)
+                        .ok_or_else(|| {
+                            DatabaseError::Constraint("score_outcome_invalid".to_string())
+                        })?;
+                    let object_key = stored_ref
+                        .rsplit_once('#')
+                        .map(|(object_key, _)| object_key)
+                        .ok_or_else(|| {
+                            DatabaseError::Constraint("score_outcome_invalid".to_string())
+                        })?;
+                    let committed = tx
+                        .execute(
+                            "UPDATE pipeline_attempt_artifacts
+                                SET ciphertext_sha256 = COALESCE(ciphertext_sha256, $5),
+                                    state = 'committed', committed_at = NOW()
+                              WHERE tenant_id = $1 AND run_id = $2 AND lease_token = $3
+                                AND artifact = $4 AND state = 'staged'
+                                AND object_key = $6
+                                AND (ciphertext_sha256 IS NULL OR ciphertext_sha256 = $5)",
+                            &[
+                                &run.tenant_id,
+                                &run.run_id,
+                                &lease_token,
+                                &artifact,
+                                &ciphertext_sha256,
+                                &object_key,
+                            ],
+                        )
+                        .await?;
+                    if committed != 1 {
+                        return Err(DatabaseError::Constraint(
+                            PIPELINE_ATTEMPT_ARTIFACT_MISSING_LABEL.to_string(),
+                        ));
+                    }
+                }
+                None => {
+                    tx.execute(
+                        "DELETE FROM pipeline_attempt_artifacts
+                          WHERE tenant_id = $1 AND run_id = $2 AND lease_token = $3
+                            AND artifact = $4 AND state = 'staged'
+                            AND ciphertext_sha256 IS NULL",
+                        &[&run.tenant_id, &run.run_id, &lease_token, &artifact],
+                    )
+                    .await?;
+                }
+            }
+        }
         tx.commit().await?;
         Ok(updated)
     }
@@ -2815,6 +3495,77 @@ impl PgPipelineStore {
         Ok(requeued)
     }
 
+    /// Sets, or extends, the index rebuild fence `fence_id` of `tenant_id`
+    /// (`pipeline_index_rebuild_fences`, V113) to end `duration` from now:
+    /// one statement in a tenant transaction of its own, committed before
+    /// this returns. While any fence of the tenant is unexpired, the
+    /// invalidation claim takes none of the tenant's invalidations
+    /// (`claim_due_index_invalidations`). There is one row per rebuild,
+    /// keyed by `fence_id`: a later set of the same fence never moves its
+    /// end earlier (`GREATEST`), and a set never touches another rebuild's
+    /// row. The database computes the end from its own clock
+    /// (`clock_timestamp()` plus `duration`), the clock the claim compares it
+    /// with (`NOW()`), so a skew between the application's clock and the
+    /// database's cannot end a fence early.
+    pub async fn set_index_rebuild_fence(
+        &self,
+        tenant_id: &str,
+        fence_id: Uuid,
+        duration: std::time::Duration,
+    ) -> Result<(), DatabaseError> {
+        let mut client = self.backend.trace_pool().get().await?;
+        Self::set_index_rebuild_fence_on(&mut client, tenant_id, fence_id, duration).await
+    }
+
+    /// `set_index_rebuild_fence` on a connection the caller already holds,
+    /// outside any transaction of its own: the rebuild sets each run's fence
+    /// on the connection that then opens the run's transaction, so it never
+    /// holds two pooled connections at once.
+    async fn set_index_rebuild_fence_on(
+        client: &mut deadpool_postgres::Client,
+        tenant_id: &str,
+        fence_id: Uuid,
+        duration: std::time::Duration,
+    ) -> Result<(), DatabaseError> {
+        let milliseconds = i64::try_from(duration.as_millis()).unwrap_or(i64::MAX);
+        let tx = Self::tenant_transaction(client, tenant_id).await?;
+        tx.execute(
+            "INSERT INTO pipeline_index_rebuild_fences (tenant_id, fence_id, fenced_until)
+             VALUES ($1, $2, clock_timestamp() + ($3::bigint * INTERVAL '1 millisecond'))
+             ON CONFLICT (tenant_id, fence_id) DO UPDATE
+                SET fenced_until = GREATEST(pipeline_index_rebuild_fences.fenced_until,
+                                            EXCLUDED.fenced_until)",
+            &[&tenant_id, &fence_id, &milliseconds],
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Deletes the index rebuild fence `fence_id` of `tenant_id`, and the
+    /// tenant's expired fences, which hold nothing back, so the row a lost
+    /// rebuild leaves does not stay for ever: one statement in a tenant
+    /// transaction of its own. It never deletes another rebuild's unexpired
+    /// fence. A rebuild calls it once no write of its own is still running
+    /// (`PipelineService::rebuild_index_from_authoritative_commands`).
+    pub async fn clear_index_rebuild_fence(
+        &self,
+        tenant_id: &str,
+        fence_id: Uuid,
+    ) -> Result<(), DatabaseError> {
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
+        tx.execute(
+            "DELETE FROM pipeline_index_rebuild_fences
+              WHERE tenant_id = $1
+                AND (fence_id = $2 OR fenced_until <= clock_timestamp())",
+            &[&tenant_id, &fence_id],
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
     /// Claims up to `limit` (clamped to 1..=500) of `tenant_id`'s index
     /// invalidations that are due -- `pending`, not held by a claim's lease
     /// or waiting out a retry's backoff, and with an attempt left, oldest due
@@ -2824,6 +3575,31 @@ impl PgPipelineStore {
     /// `next_attempt_at` to the lease's end. A row another claim has locked
     /// is skipped, and a row it claimed is no longer due, so two claims at
     /// once never get the same row. Only `tenant_id`'s own queue is read.
+    ///
+    /// It claims nothing while the tenant has an unexpired index rebuild
+    /// fence (`pipeline_index_rebuild_fences`, V113;
+    /// `set_index_rebuild_fence`). The fence's `NOT EXISTS` is in the `due`
+    /// CTE, so the fences and the invalidations are read in one statement,
+    /// with one snapshot, and that is enough. An invalidation this claim can
+    /// see was queued by a withdrawal that committed before the claim's
+    /// snapshot. A rebuild commits a run's fence before it locks the run
+    /// (`PipelineService::rebuild_index_run`). If that fence is not visible
+    /// in the snapshot, the withdrawal committed before the fence, so the
+    /// rebuild's own lock of that run sees the queued invalidation and skips
+    /// the run: `lock_rebuildable_index_run_on_tx` takes the run row
+    /// `FOR SHARE` and then, in a second statement whose snapshot is taken
+    /// after that lock and after the fence, reads
+    /// `rebuildable_index_run_predicate!`, whose `NOT EXISTS` on
+    /// `pipeline_index_invalidations` sees the invalidation. If the
+    /// withdrawal committed after the fence, the claim sees the fence. A
+    /// fence holds nothing back once it has expired or been deleted, and
+    /// then no write it covered is running: a row expires at the deadline of
+    /// the last run it covered plus the write fence margin, while a write
+    /// starts only before that deadline and returns within the margin; a
+    /// rebuild deletes its own row only once none of its writes is running,
+    /// and another rebuild's row only once it has expired.
+    /// `NOW()` is the claim transaction's start, no later than the
+    /// statement's snapshot, so a fence is never read as expired early.
     ///
     /// The claim charges no attempt: only `fail_index_invalidation` charges
     /// one, for a failure that waiting cannot heal. An index outage
@@ -2841,7 +3617,9 @@ impl PgPipelineStore {
         let limit = i64::try_from(limit.clamp(1, 500)).unwrap_or(500);
         let lease_milliseconds = lease.num_milliseconds().max(1);
         let mut client = self.backend.trace_pool().get().await?;
-        let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
+        // READ COMMITTED, stated (G14): the claim's one statement takes its
+        // snapshot when it runs, not at the transaction's first statement.
+        let tx = Self::read_committed_tenant_transaction(&mut client, tenant_id).await?;
         let rows = tx
             .query(
                 // A materialized CTE, not `IN (SELECT ... LIMIT ...)`: the
@@ -2852,6 +3630,10 @@ impl PgPipelineStore {
                     SELECT run_id FROM pipeline_index_invalidations
                      WHERE tenant_id = $1 AND state = 'pending'
                        AND next_attempt_at <= NOW() AND attempt_count < max_attempts
+                       AND NOT EXISTS (
+                           SELECT 1 FROM pipeline_index_rebuild_fences f
+                            WHERE f.tenant_id = $1 AND f.fenced_until > NOW()
+                       )
                      ORDER BY next_attempt_at, run_id
                      LIMIT $2
                      FOR UPDATE SKIP LOCKED
@@ -3646,6 +4428,14 @@ impl PgPipelineStore {
     /// `persist_settle_selection`; this call sets it again on the same row
     /// as part of the same transition guard the other `commit_*` methods
     /// use, together with the outcome row and the terminal state change.
+    ///
+    /// After its lease check the commit locks the Settle policy's status row
+    /// `FOR SHARE` (GRD-004) and refuses with
+    /// `PIPELINE_POLICY_NOT_RUNNABLE_LABEL`, writing nothing, when the policy
+    /// is no longer runnable. The row is held for this short transaction
+    /// only, not over the Settle phase's index write or settlement legs, which
+    /// run before it: a suspension waits for a commit that is already in
+    /// flight and takes effect on the next one.
     pub async fn commit_settle(
         &self,
         run: &PipelineRunRecord,
@@ -3660,7 +4450,17 @@ impl PgPipelineStore {
         let lease_token = required_lease_token(run)?;
         let mut client = self.backend.trace_pool().get().await?;
         let tx = Self::tenant_transaction(&mut client, &run.tenant_id).await?;
+        // Lock order: the run row, then the policy row.
         ensure_current_lease(&tx, run, lease_token).await?;
+        // GRD-004: the Settle policy must still be runnable, and stays so
+        // until this commit ends. A refusal writes nothing; the legs the
+        // attempt completed stay complete, and the run's next attempt, after
+        // the policy resumes, commits from them.
+        if !lock_runnable_policy(&tx, &run.tenant_id, &run.bundle_id, Phase::Settle).await? {
+            return Err(DatabaseError::Constraint(
+                PIPELINE_POLICY_NOT_RUNNABLE_LABEL.to_string(),
+            ));
+        }
         insert_outcome(
             &tx,
             &run.tenant_id,
@@ -3834,6 +4634,15 @@ impl PgPipelineStore {
     /// `PIPELINE_SCORE_LOCK_BUSY_RETRY_MILLISECONDS`, not the phase-age
     /// backoff, since the run waited for nothing of its own. Fenced by the
     /// lease like `mark_transient_retry`.
+    ///
+    /// The Score staged its attempt rows before it tried the lock (rebase
+    /// 10, option D; `stage_score_artifacts_before_lock`), with no hash, and
+    /// published nothing, so no object is stored at their keys. The same
+    /// transaction deletes them, so a busy try, which repeats every
+    /// `PIPELINE_SCORE_LOCK_BUSY_RETRY_MILLISECONDS` while another Score of
+    /// the tenant runs, leaves no rows for the attempt sweep. A release the
+    /// lease fence refuses deletes nothing; the sweep removes those rows
+    /// after their `cleanup_after`.
     pub async fn release_score_lock_busy(
         &self,
         run: &PipelineRunRecord,
@@ -3863,6 +4672,13 @@ impl PgPipelineStore {
             .await?
             .ok_or_else(stale_lease_error)?;
         let updated = pipeline_run_from_row(&row)?;
+        tx.execute(
+            "DELETE FROM pipeline_attempt_artifacts
+              WHERE tenant_id = $1 AND run_id = $2 AND lease_token = $3
+                AND state = 'staged' AND ciphertext_sha256 IS NULL",
+            &[&run.tenant_id, &run.run_id, &lease_token],
+        )
+        .await?;
         tx.commit().await?;
         Ok(updated)
     }
@@ -3984,13 +4800,108 @@ impl PgPipelineStore {
         rows.iter().map(pipeline_settlement_from_row).collect()
     }
 
+    /// The runs an index rebuild considers, from their own sealed commands
+    /// (port `ef97a459` lines 618 to 655, adapted): every run that meets
+    /// `rebuildable_index_run_predicate!` -- complete, included in the
+    /// index, with a completed index write that no invalidation has touched
+    /// since, and a stored command reference and hash to rebuild from.
+    /// Ordered by `created_at, run_id` so a rebuild applies commands in the
+    /// same order Settle originally committed them.
+    ///
+    /// A listing only. Whether the run's submission is still operable is not
+    /// decided here: the rebuild reads `submission_guard_on_tx` for each run
+    /// under that run's lock, immediately before it writes the run's
+    /// entries (`lock_rebuildable_index_run_on_tx`), since a withdrawal can
+    /// commit at any point after this read (final review I1). Reading the
+    /// guard itself, rather than a copy of its predicate, keeps the two from
+    /// drifting (M8).
+    pub async fn list_rebuildable_index_runs(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<PipelineRunRecord>, DatabaseError> {
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
+        let rows = tx
+            .query(
+                concat!(
+                    "SELECT p.* FROM pipeline_runs p WHERE p.tenant_id = $1 AND ",
+                    rebuildable_index_run_predicate!(),
+                    " ORDER BY p.created_at, p.run_id"
+                ),
+                &[&tenant_id],
+            )
+            .await?;
+        tx.commit().await?;
+        rows.iter().map(pipeline_run_from_row).collect()
+    }
+
+    /// Locks `run`'s row on the caller's transaction and re-checks, under
+    /// that lock, everything an index rebuild needs before it writes the
+    /// run's entries: the run still meets `rebuildable_index_run_predicate!`
+    /// with the same `index_command_hash` the rebuild listed and loaded, and
+    /// its submission is still operable (`submission_guard_on_tx`, which
+    /// holds the submission row `FOR SHARE`). `false` when either no longer
+    /// holds; the caller writes nothing for the run then.
+    ///
+    /// Lock order: the run row, then the submission row -- the order a
+    /// withdrawal also takes (`withdraw_submission`) and Settle's index
+    /// dispatch holds. Both locks last until the caller's transaction ends,
+    /// so a withdrawal of the submission waits for the rebuild's writes to
+    /// commit, and the invalidation it then queues covers them. The run row
+    /// is locked `FOR SHARE`: two rebuilds of one run may overlap (their
+    /// writes are idempotent), and a withdrawal's `FOR UPDATE` waits for
+    /// both.
+    ///
+    /// Two statements, lock first, read second, as the submission guard
+    /// does: the predicate is read with a snapshot taken after the run lock
+    /// is held, so it sees an invalidation row that a holder of the run lock
+    /// committed while the lock was awaited. One locking statement would
+    /// not: the invalidation lives in its own table (PR 3, 62cc2768), and
+    /// PostgreSQL re-evaluates a locked row's predicate only when the
+    /// holder updated that row, which queuing an invalidation does not.
+    pub async fn lock_rebuildable_index_run_on_tx(
+        tx: &Transaction<'_>,
+        run: &PipelineRunRecord,
+    ) -> Result<bool, DatabaseError> {
+        let Some(command_hash) = run.index_command_hash.as_deref() else {
+            return Ok(false);
+        };
+        let locked = tx
+            .query_opt(
+                "SELECT 1 FROM pipeline_runs
+                  WHERE tenant_id = $1 AND run_id = $2
+                  FOR SHARE",
+                &[&run.tenant_id, &run.run_id],
+            )
+            .await?;
+        if locked.is_none() {
+            return Ok(false);
+        }
+        let rebuildable = tx
+            .query_opt(
+                concat!(
+                    "SELECT 1 FROM pipeline_runs p
+                      WHERE p.tenant_id = $1 AND p.run_id = $2 AND p.index_command_hash = $3 AND ",
+                    rebuildable_index_run_predicate!()
+                ),
+                &[&run.tenant_id, &run.run_id, &command_hash],
+            )
+            .await?;
+        if rebuildable.is_none() {
+            return Ok(false);
+        }
+        Ok(Self::submission_guard_on_tx(tx, run).await?.operable)
+    }
+
     /// The payout pass's work list (P3-D11): up to `limit` complete runs of
     /// `tenant_id` whose completed `trace_credit` leg is on the `near` rail,
     /// carries its settlement batch, and has a payout still to make
     /// (`pending`) or to confirm (`submitted`), least recently updated
     /// first. A leg without a batch -- a compatibility run's
     /// `NoveltyUtility` event, which `main` never pays -- is never listed
-    /// (Ruling S8), nor is a `disabled`, `confirmed`, or `failed` payout.
+    /// (Ruling S8), nor is a `disabled`, `confirmed`, or `failed` payout, nor
+    /// a `pending` one whose bundle's Settle policy is not runnable
+    /// (`list_payout_work_on`).
     pub async fn list_runs_with_pending_payout(
         &self,
         tenant_id: &str,
@@ -4015,6 +4926,18 @@ impl PgPipelineStore {
     /// label -- an account hold (`none_enrolled`, `ambiguous_no_designation`)
     /// -- which waits out the same interval before the account is resolved
     /// again (Zaki review 1, round 2, item 2).
+    ///
+    /// A leg that would only be dispatched -- a `pending` one -- is listed
+    /// only while the Settle policy of its run's bundle is runnable (GRD-004;
+    /// no status row is not runnable). A dispatch that the policy holds back
+    /// changes nothing, so the leg keeps its place in the order, and listed
+    /// anyway the held legs would fill the list: with `limit` of them the
+    /// pass would list only those and process nothing, and the legs of other
+    /// bundles, and every confirmation behind them, would never be reached.
+    /// A `submitted` leg is listed whatever the policy says, since a
+    /// confirmation is not a dispatch. The dispatch guard
+    /// (`settle_policy_allows_dispatch`) stays the authority: a suspension
+    /// that lands after the listing is still held back there.
     async fn list_payout_work_on(
         client: &mut deadpool_postgres::Client,
         tenant_id: &str,
@@ -4040,6 +4963,17 @@ impl PgPipelineStore {
                             AND (
                                 s.last_error_label IS NULL
                                 OR s.updated_at <= NOW() - make_interval(secs => $3)
+                            )
+                            AND EXISTS (
+                                SELECT 1
+                                  FROM pipeline_runs r
+                                  JOIN pipeline_bundle_policy_status ps
+                                    ON ps.tenant_id = r.tenant_id
+                                   AND ps.bundle_id = r.bundle_id
+                                   AND ps.phase = 'settle'
+                                 WHERE r.tenant_id = s.tenant_id
+                                   AND r.run_id = s.run_id
+                                   AND ps.runnable
                             )
                         )
                         OR (
@@ -4337,6 +5271,105 @@ impl PgPipelineStore {
         tx.commit().await?;
         Ok(())
     }
+
+    /// Records a pipeline phase attempt's object before it is written (PR 4,
+    /// the same shape as `stage_receipt_artifact`): its own tenant
+    /// transaction, committing before the caller publishes the object the
+    /// row names. Whatever happens after the write -- the rest of the phase
+    /// failing, a refused commit, a lost lease, a process crash -- the
+    /// `staged` row still names the object, and
+    /// `PipelineService::sweep_attempt_artifacts` deletes both once
+    /// `cleanup_after` passes. `commit_review` and `commit_score` move the
+    /// row to `committed` in the same transaction as the phase commit; a
+    /// refused commit rolls that back with everything else, leaving the row
+    /// `staged` for the sweep.
+    ///
+    /// `ON CONFLICT DO NOTHING` on the row's own primary key makes a repeat
+    /// call for the same attempt a no-op -- safe because
+    /// `pipeline_attempt_object_id` is a deterministic function of `(run_id,
+    /// lease_token, artifact)`, so a retry for the same triple always
+    /// prepares the same object key. A caller that ever computed a different
+    /// object key for the same triple would collide instead on `UNIQUE
+    /// (tenant_id, object_key)`, which this `INSERT` does not suppress, and
+    /// surfaces as an ordinary constraint error.
+    pub async fn stage_attempt_artifact(
+        &self,
+        run: &PipelineRunRecord,
+        artifact: PipelineAttemptArtifact,
+        object_key: &str,
+        ciphertext_sha256: &str,
+        cleanup_after: DateTime<Utc>,
+    ) -> Result<(), DatabaseError> {
+        let lease_token = required_lease_token(run)?;
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = Self::tenant_transaction(&mut client, &run.tenant_id).await?;
+        tx.execute(
+            "INSERT INTO pipeline_attempt_artifacts (
+                tenant_id, run_id, lease_token, artifact, object_key,
+                ciphertext_sha256, cleanup_after
+             ) VALUES ($1,$2,$3,$4,$5,$6,$7)
+             ON CONFLICT (tenant_id, run_id, lease_token, artifact) DO NOTHING",
+            &[
+                &run.tenant_id,
+                &run.run_id,
+                &lease_token,
+                &artifact.as_str(),
+                &object_key,
+                &ciphertext_sha256,
+                &cleanup_after,
+            ],
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Stages a compatibility Score attempt's rows before its object
+    /// content exists (rebase 10, option D): one row for each `(artifact,
+    /// object_key)` in `artifacts`, with the key the write will use and
+    /// `ciphertext_sha256` NULL, in one tenant transaction that commits and
+    /// returns its connection to the pool before the Score takes its
+    /// tenant's Score lock. So the Score holds one pooled connection at a
+    /// time while it holds the lock, and every object it later publishes
+    /// already has a committed `staged` row. `commit_score_in` sets each
+    /// written row's hash as it commits it, and deletes the row of an
+    /// artifact the Score did not write; the sweep deletes the object of a
+    /// due row with no hash at its key (`sweep_attempt_artifacts`).
+    ///
+    /// Locks: the foreign key check takes `FOR KEY SHARE` on the run's
+    /// `pipeline_runs` row for this short transaction; it takes no other
+    /// row lock and holds no lock when it ends, before the Score lock is
+    /// requested. `ON CONFLICT DO NOTHING` as `stage_attempt_artifact`.
+    pub async fn stage_unhashed_attempt_artifacts(
+        &self,
+        run: &PipelineRunRecord,
+        artifacts: &[(PipelineAttemptArtifact, String)],
+        cleanup_after: DateTime<Utc>,
+    ) -> Result<(), DatabaseError> {
+        let lease_token = required_lease_token(run)?;
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = Self::tenant_transaction(&mut client, &run.tenant_id).await?;
+        for (artifact, object_key) in artifacts {
+            tx.execute(
+                "INSERT INTO pipeline_attempt_artifacts (
+                    tenant_id, run_id, lease_token, artifact, object_key,
+                    ciphertext_sha256, cleanup_after
+                 ) VALUES ($1,$2,$3,$4,$5,NULL,$6)
+                 ON CONFLICT (tenant_id, run_id, lease_token, artifact) DO NOTHING",
+                &[
+                    &run.tenant_id,
+                    &run.run_id,
+                    &lease_token,
+                    &artifact.as_str(),
+                    object_key,
+                    &cleanup_after,
+                ],
+            )
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
 }
 
 /// The run a receipt's idempotency key already created, if any.
@@ -4389,6 +5422,88 @@ async fn receipt_key_refusal(
         .await?
         .get(0);
     Ok(staged_with_other_content.then_some(PipelineReceiptResult::ContentConflict))
+}
+
+/// Why a new receipt may not start a run for `tenant_id` now, read inside
+/// `tx`: the tenant is contained, the legacy path owns the submission id, or
+/// the tenant's routing does not send new receipts to the pipeline, in that
+/// order. `None` when the receipt may go on.
+/// With `lock`, the tenant's routing lock is held shared for the rest of
+/// `tx`, so a routing change waits for this transaction and no later one
+/// misses the change. The lock is the one `PipelineActivationStore` takes
+/// exclusively: the same key (`pipeline_routing_lock`) and the same seed
+/// (`PIPELINE_ROUTING_LOCK_SEED`).
+///
+/// A caller asks only after it found no run for the receipt's key, so a retry
+/// of an existing receipt is answered from its run in every routing state.
+/// One statement of single-row reads by primary key (the owner and the
+/// routing state together), and one lock request with `lock`.
+async fn new_receipt_refusal_in(
+    tx: &Transaction<'_>,
+    tenant_id: &str,
+    submission_id: Uuid,
+    unqualified_routing: bool,
+    lock: bool,
+) -> Result<Option<PipelineReceiptResult>, DatabaseError> {
+    if lock {
+        tx.execute(
+            "SELECT pg_advisory_xact_lock_shared(hashtextextended($1, $2))",
+            &[
+                &pipeline_routing_lock(tenant_id),
+                &PIPELINE_ROUTING_LOCK_SEED,
+            ],
+        )
+        .await?;
+    }
+    // The legacy path owns the id when its ownership row says so, or when a
+    // submission row holds the id and no pipeline run does (a legacy receipt
+    // from before ownership rows). A pipeline-owned id has a run. The owner
+    // and the routing state are one statement (final fix wave G26): the
+    // staging transaction runs it inside the tenant's quota lock, and the
+    // statement is after the routing lock, so it reads what a routing change
+    // committed before the lock was granted.
+    let row = tx
+        .query_one(
+            "SELECT EXISTS (
+                 SELECT 1 FROM pipeline_receipt_ownership
+                  WHERE tenant_id = $1 AND submission_id = $2 AND owner = 'legacy'
+             ) OR EXISTS (
+                 SELECT 1 FROM trace_submissions s
+                  WHERE s.tenant_id = $1 AND s.submission_id = $2
+                    AND NOT EXISTS (
+                        SELECT 1 FROM pipeline_runs r
+                         WHERE r.tenant_id = s.tenant_id
+                           AND r.submission_id = s.submission_id
+                    )
+             ) AS legacy_owned,
+             (SELECT routing_state FROM pipeline_tenant_routing
+               WHERE tenant_id = $1) AS routing_state",
+            &[&tenant_id, &submission_id],
+        )
+        .await?;
+    let state = row
+        .get::<_, Option<String>>("routing_state")
+        .map(|state| RoutingState::from_db(state.as_str()))
+        .transpose()?;
+    // Containment is answered before the owner (review round 1, point 7): a
+    // legacy-owned id with no legacy record (a claim whose write failed)
+    // would else go back to the handler as `LegacyOwned`, and the handler's
+    // legacy path would write for a tenant whose containment committed after
+    // the handler's own routing read.
+    if state == Some(RoutingState::Contained) {
+        return Ok(Some(PipelineReceiptResult::NotRouted(
+            RoutingState::Contained,
+        )));
+    }
+    if row.get::<_, bool>("legacy_owned") {
+        return Ok(Some(PipelineReceiptResult::LegacyOwned));
+    }
+    Ok(match state {
+        Some(RoutingState::Pipeline) => None,
+        Some(other) => Some(PipelineReceiptResult::NotRouted(other)),
+        None if unqualified_routing => None,
+        None => Some(PipelineReceiptResult::NotRouted(RoutingState::Legacy)),
+    })
 }
 
 /// The quota a receipt that counts would exceed, if any. A key that already
@@ -4674,12 +5789,29 @@ async fn insert_outcome(
 }
 
 /// Commits the receipt's durable records inside the caller's tenant
-/// transaction: the submission, its source object ref, the run itself, the
-/// Admission outcome, and the attempt's staging row's transition to
-/// `committed` -- which requires the row to be `staged` and to name exactly
-/// the object the object ref records. Unlike the port, this does not insert
-/// a `pipeline_receipt_ownership` row (PR 5 / cross-pipeline ownership is
-/// deferred).
+/// transaction: the pipeline's ownership row for the submission id, the
+/// submission, its source object ref, the run itself, the Admission outcome,
+/// and the attempt's staging row's transition to `committed` -- which
+/// requires the row to be `staged` and to name exactly the object the object
+/// ref records.
+///
+/// The ownership row is the first statement. Its primary key is the one place
+/// where the legacy path's claim (`PipelineActivationStore::claim_legacy_receipt`)
+/// and this insert meet, so exactly one of them succeeds for a submission id:
+/// a concurrent claim makes this insert wait for its outcome. The row names a
+/// run that does not exist yet; its foreign key is deferred, so it is checked
+/// when the transaction commits.
+///
+/// A conflict is answered by who owns the id, and the caller rolls the
+/// transaction back either way. At the ownership row: a `legacy` owner ends in
+/// `DatabaseError::Constraint(PIPELINE_LEGACY_RECEIPT_OWNED_LABEL)`, which
+/// `commit_receipt_attempt` turns into `LegacyOwned`; a `pipeline` owner (a
+/// second key for an id a run owns) ends in `main`'s error
+/// (`PIPELINE_SUBMISSION_BOUND_MESSAGE`), which stays an error. At the
+/// submission row, where no ownership row existed: a pipeline run for the id
+/// (a run from before ownership rows) is the same error, and no run means a
+/// legacy submission from before the tenant came into scope, which is the
+/// legacy label.
 async fn insert_receipt_records(
     tx: &Transaction<'_>,
     run: &NewPipelineRun,
@@ -4706,6 +5838,35 @@ async fn insert_receipt_records(
         .map_err(|_| {
             DatabaseError::Serialization("trace residual risk basis encode failed".to_string())
         })?;
+    let owned = tx
+        .execute(
+            "INSERT INTO pipeline_receipt_ownership (tenant_id, submission_id, owner, run_id)
+             VALUES ($1, $2, 'pipeline', $3)
+             ON CONFLICT (tenant_id, submission_id) DO NOTHING",
+            &[&run.tenant_id, &run.submission_id, &run.run_id],
+        )
+        .await?;
+    if owned != 1 {
+        // The id has an owner. Its row, committed by the time this insert
+        // returned, says whose: only a legacy owner makes the receipt
+        // `LegacyOwned`.
+        let owner: String = tx
+            .query_one(
+                "SELECT owner FROM pipeline_receipt_ownership
+                  WHERE tenant_id = $1 AND submission_id = $2",
+                &[&run.tenant_id, &run.submission_id],
+            )
+            .await?
+            .get(0);
+        return Err(DatabaseError::Constraint(
+            if owner == "legacy" {
+                PIPELINE_LEGACY_RECEIPT_OWNED_LABEL
+            } else {
+                PIPELINE_SUBMISSION_BOUND_MESSAGE
+            }
+            .to_string(),
+        ));
+    }
     let (submission_status, admission_decision, admission_reason, next_phase, run_state) =
         match admission {
             AdmissionDecision::Admit => ("received", "admit", None, "review", "pending"),
@@ -4766,8 +5927,25 @@ async fn insert_receipt_records(
         )
         .await?;
     if inserted != 1 {
+        // No ownership row existed, so the submission row is a pipeline run's
+        // from before ownership rows, or a legacy receipt's.
+        let pipeline_run_exists: bool = tx
+            .query_one(
+                "SELECT EXISTS (
+                     SELECT 1 FROM pipeline_runs
+                      WHERE tenant_id = $1 AND submission_id = $2
+                 )",
+                &[&run.tenant_id, &run.submission_id],
+            )
+            .await?
+            .get(0);
         return Err(DatabaseError::Constraint(
-            "submission identity is already bound to another receipt".to_string(),
+            if pipeline_run_exists {
+                PIPELINE_SUBMISSION_BOUND_MESSAGE
+            } else {
+                PIPELINE_LEGACY_RECEIPT_OWNED_LABEL
+            }
+            .to_string(),
         ));
     }
     tx.execute(
@@ -4843,15 +6021,18 @@ async fn insert_receipt_records(
             ],
         )
         .await?;
+    // The same rule as a phase commit's attempt rows (wave 2, fix round 1;
+    // review I2): no `staged` row naming this object is a refusal under
+    // `pipeline_attempt_artifact_missing`.
     if committed != 1 {
         return Err(DatabaseError::Constraint(
-            "receipt artifact staging record is missing".to_string(),
+            PIPELINE_ATTEMPT_ARTIFACT_MISSING_LABEL.to_string(),
         ));
     }
     Ok(())
 }
 
-async fn load_bundle_from_transaction(
+pub(crate) async fn load_bundle_from_transaction(
     tx: &Transaction<'_>,
     tenant_id: &str,
     bundle_id: &str,
@@ -4930,6 +6111,47 @@ async fn ensure_current_lease(
         return Err(stale_lease_error());
     }
     Ok(())
+}
+
+/// Whether the policy of `phase` in `bundle_id` is runnable, with its status
+/// row locked `FOR SHARE` for the rest of `tx`: an intervention waits for
+/// this commit, and a commit that starts after a suspension is refused
+/// (GRD-004). A bundle with no status row is not runnable, as at the start of
+/// a phase (`policy_is_runnable`).
+///
+/// Every phase commit calls this once, after its own lease, submission, and
+/// routing guards and before its first write, so the policy row is the last
+/// lock before the writes. An intervention takes only this row, so no
+/// transaction that holds it waits for a lock an intervention holds.
+pub(crate) async fn lock_runnable_policy(
+    tx: &Transaction<'_>,
+    tenant_id: &str,
+    bundle_id: &str,
+    phase: Phase,
+) -> Result<bool, DatabaseError> {
+    Ok(tx
+        .query_opt(
+            "SELECT runnable FROM pipeline_bundle_policy_status
+              WHERE tenant_id = $1 AND bundle_id = $2 AND phase = $3
+              FOR SHARE",
+            &[&tenant_id, &bundle_id, &phase_as_db(Some(phase))],
+        )
+        .await?
+        .is_some_and(|row| row.get::<_, bool>("runnable")))
+}
+
+/// `error` as the refusal `label` when it is a lock wait that ran out its
+/// `lock_timeout` (`lock_not_available`, SQLSTATE 55P03); any other error as
+/// it is. For an operator's action that set `PIPELINE_ADMIN_LOCK_TIMEOUT_SQL`.
+pub(crate) fn lock_timeout_as(error: DatabaseError, label: &str) -> DatabaseError {
+    match error {
+        DatabaseError::Postgres(error)
+            if error.code() == Some(&tokio_postgres::error::SqlState::LOCK_NOT_AVAILABLE) =>
+        {
+            DatabaseError::Constraint(label.to_string())
+        }
+        other => other,
+    }
 }
 
 /// The one Review-phase submission-operability predicate: neither pre-review
@@ -5503,6 +6725,29 @@ fn pipeline_settlement_from_row(row: &Row) -> Result<PipelineSettlementRecord, D
     })
 }
 
+fn policy_intervention_from_row(
+    row: &Row,
+) -> Result<PipelinePolicyInterventionRecord, DatabaseError> {
+    Ok(PipelinePolicyInterventionRecord {
+        intervention_id: row.get("intervention_id"),
+        bundle_id: row.get("bundle_id"),
+        phase: phase_from_db(row.get("phase"))?.ok_or_else(|| {
+            DatabaseError::Serialization("intervention phase cannot be none".to_string())
+        })?,
+        action: row.get("action"),
+        actor_principal_ref: row.get("actor_principal_ref"),
+        reason_code: row.get("reason_code"),
+        previous_status: PolicyOperationalStatus::from_db(
+            row.get::<_, String>("previous_status").as_str(),
+        )?,
+        resulting_status: PolicyOperationalStatus::from_db(
+            row.get::<_, String>("resulting_status").as_str(),
+        )?,
+        evidence_hash: row.get("evidence_hash"),
+        recorded_at: row.get("recorded_at"),
+    })
+}
+
 fn phase_outcome_from_row(row: &Row) -> Result<PhaseOutcomeRecord, DatabaseError> {
     let version: i32 = row.get("outcome_schema_version");
     let schema_id: String = row.get("outcome_schema_id");
@@ -5710,15 +6955,26 @@ pub struct SubmissionGuard {
     pub operable: bool,
 }
 
-/// Whether each held dependency is production-qualified. `scorer` and
-/// `embedder` are true only when every scorer/embedder the service holds is
-/// (decision P4); a bundle can name any one of them by content hash, so a
-/// single unqualified reference dependency disqualifies the whole set.
-/// `authority` and `privacy` follow the same shape (Ruling T2-2): true only
-/// when the held object is `production_qualified()`, false when the service
-/// holds none at all (`submit` already fails closed on that case before any
-/// dependency check runs). `payout` is the same for the NEAR payout adapter:
-/// true only when the service holds one and it is `production_qualified()`.
+/// Whether each held dependency is production-qualified, across *every*
+/// dependency the service holds -- regardless of whether any bundle actually
+/// uses it. `scorer` and `embedder` are true only when every scorer/embedder
+/// the service holds is (decision P4 as first shipped); a bundle can name
+/// any one of them by content hash, so a single unqualified reference
+/// dependency disqualifies the whole set. `authority` and `privacy` follow
+/// the same shape (Ruling T2-2): true only when the held object is
+/// `production_qualified()`, false when the service holds none at all
+/// (`submit` already fails closed on that case before any dependency check
+/// runs). `payout` is the same for the NEAR payout adapter: true only when
+/// the service holds one and it is `production_qualified()`.
+///
+/// Startup does not read this field-by-field check: see
+/// [`PipelineService::bundle_qualification`], which scopes qualification to
+/// the one bundle a runtime actually starts (decision P4-D7), and whose
+/// `configuration_qualifiable` term carries the bundle's configuration
+/// (wave 2; the `bundle` field this struct had is gone). The
+/// `NoveltyUtility` production-gate check in `novelty_utility_withheld_reason`
+/// still reads this method directly -- that check is about every dependency
+/// the service could ever route a compatibility receipt to, not one bundle.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PipelineDependencyQualification {
     pub scorer: bool,
@@ -5729,11 +6985,91 @@ pub struct PipelineDependencyQualification {
     pub authority: bool,
     pub privacy: bool,
     pub payout: bool,
-    /// Whether the default bundle may run for real tenants: a compatibility
-    /// bundle's configuration is qualifiable
-    /// (`CompatibilityBundleConfig::is_qualifiable`; Zaki review 1, round 2,
-    /// finding 11). Any other bundle carries no such configuration.
-    pub bundle: bool,
+}
+
+/// One dependency's identity and production-qualification state, as
+/// [`PipelineService::bundle_qualification`] reports it for a single bundle.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PipelineDependencyCheck {
+    pub identity: String,
+    pub production_qualified: bool,
+}
+
+/// Whether every dependency one bundle package actually uses is
+/// production-qualified (decision P4-D7). Unlike
+/// [`PipelineDependencyQualification`], which reports every dependency the
+/// service holds, this reports only: the scorer and embedder the package
+/// names among the held dependencies (resolved the same way
+/// [`PipelineService::construct`] resolves them); the held index reader and
+/// writer (every bundle uses the one pair the service holds -- a bundle does
+/// not name these independently); one settlement-adapter check per
+/// instrument the package pins (an instrument with no registered adapter
+/// reports identity `settlement_adapter_missing`, unqualified); `authority`
+/// and `privacy` (unconditional -- every bundle needs both); and `payout`,
+/// which is `None` while payout is disabled and otherwise `Some` of the held
+/// NEAR adapter's own qualification, for every package: payout pays the
+/// complete runs of every bundle, so it is service-wide like the index
+/// writer (final review M5). `configuration_qualifiable` is the package's
+/// own configuration term: a compatibility package whose configuration is
+/// not qualifiable (`CompatibilityBundleConfig::is_qualifiable`: the local
+/// reference's all-zero floors, say) is never production-qualified, so
+/// neither startup nor `qualify_bundle` accepts it (wave 2; rebase 9
+/// review, M2). A package of another family carries no such configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PipelineBundleQualification {
+    pub bundle_id: String,
+    pub scorer: PipelineDependencyCheck,
+    pub embedder: PipelineDependencyCheck,
+    pub index_reader: PipelineDependencyCheck,
+    pub index_writer: PipelineDependencyCheck,
+    pub settlement_adapters: BTreeMap<String, PipelineDependencyCheck>,
+    pub authority: bool,
+    pub privacy: bool,
+    pub payout: Option<bool>,
+    pub configuration_qualifiable: bool,
+    pub dependency_digest: String,
+}
+
+impl PipelineBundleQualification {
+    /// The safe labels naming every blocked dependency this qualification
+    /// found; empty exactly when [`Self::is_production_qualified`] is true.
+    pub fn blockers(&self) -> Vec<&'static str> {
+        let mut blockers = Vec::new();
+        for (check, label) in [
+            (&self.scorer, "runtime_scorer_not_production"),
+            (&self.embedder, "runtime_embedder_not_production"),
+            (&self.index_reader, "runtime_index_reader_not_production"),
+            (&self.index_writer, "runtime_index_writer_not_production"),
+        ] {
+            if !check.production_qualified {
+                blockers.push(label);
+            }
+        }
+        if self
+            .settlement_adapters
+            .values()
+            .any(|check| !check.production_qualified)
+        {
+            blockers.push("runtime_settlement_not_production");
+        }
+        if !self.authority {
+            blockers.push("runtime_authority_not_production");
+        }
+        if !self.privacy {
+            blockers.push("runtime_privacy_not_production");
+        }
+        if self.payout == Some(false) {
+            blockers.push("runtime_payout_not_production");
+        }
+        if !self.configuration_qualifiable {
+            blockers.push(PIPELINE_BUNDLE_CONFIGURATION_NOT_QUALIFIABLE_LABEL);
+        }
+        blockers
+    }
+
+    pub fn is_production_qualified(&self) -> bool {
+        self.blockers().is_empty()
+    }
 }
 
 /// The per-tenant and per-principal hourly receipt limits. A limit of `0` is
@@ -5784,6 +7120,20 @@ pub enum PipelineReceiptResult {
     /// committed: nothing is recorded, as `main`'s receipt refuses it
     /// (`source_session_withdrawn`).
     SourceSessionWithdrawn,
+    /// The legacy path owns the submission id: its ownership row says so, or
+    /// a legacy submission row holds the id. The pipeline never gives such an
+    /// id a run, and the receipt stored nothing
+    /// (`PIPELINE_LEGACY_RECEIPT_OWNED_LABEL`). A contained tenant is
+    /// answered `NotRouted(Contained)` before this, whoever owns the id.
+    LegacyOwned,
+    /// The tenant's routing does not send new receipts to the pipeline: its
+    /// committed routing row is `legacy` or `contained`, or it has no row and
+    /// the service does not allow unqualified routing
+    /// (`PipelineServiceBuilder::with_unqualified_routing`), which reads as
+    /// `Legacy`. The receipt stored nothing. A retry of a receipt that
+    /// already has a run is never answered this way: it replays in every
+    /// routing state.
+    NotRouted(RoutingState),
 }
 
 /// `PipelineService::replay_receipt`'s result: the outcome for the retried
@@ -5802,6 +7152,56 @@ pub struct PipelineInspection {
     pub outcomes: Vec<PhaseOutcomeRecord>,
     pub settlements: Vec<PipelineSettlementRecord>,
 }
+
+/// What one pass of [`PipelineService::rebuild_index_from_authoritative_commands`]
+/// did: how many sealed commands it replayed, how many entries it upserted
+/// across all of them, how many of those the writer already held
+/// (`IndexUpsertResult::Unchanged`), how many listed runs it skipped
+/// because, re-checked under their own lock, they were no longer operable
+/// (a withdrawal or an invalidation that committed after the listing), and
+/// a hash of the exact set of command hashes it rebuilt from -- so a caller
+/// can tell two rebuilds apart, or confirm a repeat rebuilt from the same
+/// authoritative set.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PipelineIndexRebuildReport {
+    pub command_count: usize,
+    pub entry_count: usize,
+    pub unchanged_entry_count: usize,
+    pub skipped_run_count: usize,
+    pub command_set_hash: String,
+}
+
+/// What `PipelineService::rebuild_index_run` did for one listed run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PipelineIndexRebuildRun {
+    /// The run's sealed command was replayed: its hash, the entries upserted,
+    /// and how many of them the writer already held.
+    Rebuilt {
+        command_hash: String,
+        entry_count: usize,
+        unchanged_entry_count: usize,
+    },
+    /// Re-checked under its lock, the run was no longer operable; nothing was
+    /// written for it.
+    Skipped,
+}
+
+/// The error of a rebuilt run whose deadline passed with an index call
+/// still running once the write fence margin had passed too
+/// (`PipelineService::rebuild_index_run`). Its text is `index_unavailable`,
+/// the same as any run past its deadline, so callers and the route see no
+/// difference; `rebuild_index_from_authoritative_commands` reads the type
+/// to leave the rebuild's fence to expire instead of clearing it.
+#[derive(Debug)]
+struct IndexRebuildWriteInFlight;
+
+impl std::fmt::Display for IndexRebuildWriteInFlight {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(PIPELINE_INDEX_UNAVAILABLE_LABEL)
+    }
+}
+
+impl std::error::Error for IndexRebuildWriteInFlight {}
 
 /// Builds a [`PipelineService`]. Scorers and embedders are registered by
 /// content hash (`with_scorer`/`with_embedder`) so `PipelineService::submit`
@@ -5824,6 +7224,8 @@ pub struct PipelineServiceBuilder {
     privacy: Option<Arc<dyn PipelinePrivacyBoundary>>,
     payout: Option<(Arc<dyn NearPayoutAdapter>, PipelinePayoutConfig)>,
     novelty_utility_checks: PipelineNoveltyUtilityChecks,
+    unqualified_routing: bool,
+    index_rebuild_fence_margin: std::time::Duration,
 }
 
 impl PipelineServiceBuilder {
@@ -5854,6 +7256,10 @@ impl PipelineServiceBuilder {
             privacy: None,
             payout: None,
             novelty_utility_checks: PipelineNoveltyUtilityChecks::default(),
+            unqualified_routing: false,
+            index_rebuild_fence_margin: std::time::Duration::from_secs(
+                PIPELINE_INDEX_WRITE_FENCE_MARGIN_SECONDS.unsigned_abs(),
+            ),
         }
     }
 
@@ -5931,6 +7337,32 @@ impl PipelineServiceBuilder {
     /// requirement when not called.
     pub fn with_novelty_utility_checks(mut self, checks: PipelineNoveltyUtilityChecks) -> Self {
         self.novelty_utility_checks = checks;
+        self
+    }
+
+    /// Whether a new receipt of a tenant that has no committed routing row
+    /// may start a run. Defaults to `false`: a tenant with no row is a legacy
+    /// tenant until an operator activates it, and its receipt is
+    /// `PipelineReceiptResult::NotRouted`. A committed row always decides
+    /// first, whatever this says. This is for tests (decision P5-D5): test
+    /// bundles cannot be qualified, so the harnesses set it to route a tenant
+    /// they invent without a row.
+    pub fn with_unqualified_routing(mut self, allowed: bool) -> Self {
+        self.unqualified_routing = allowed;
+        self
+    }
+
+    /// The write fence margin of the index rebuild
+    /// (`PipelineService::rebuild_index_run`): how long a run past its
+    /// deadline waits for the index call in flight, and how far past the
+    /// run's deadline its committed fence reaches. Defaults to
+    /// `PIPELINE_INDEX_WRITE_FENCE_MARGIN_SECONDS`, the margin every index
+    /// writer call must return within. For tests only: a shorter margin lets
+    /// a test see a lost rebuild's fence expire. Settle's own fence keeps the
+    /// constant.
+    #[doc(hidden)]
+    pub fn with_index_rebuild_fence_margin(mut self, margin: std::time::Duration) -> Self {
+        self.index_rebuild_fence_margin = margin;
         self
     }
 
@@ -6035,12 +7467,105 @@ impl PipelineServiceBuilder {
             privacy: self.privacy,
             payout: self.payout,
             novelty_utility_checks: self.novelty_utility_checks,
+            unqualified_routing: self.unqualified_routing,
+            index_rebuild_fence_margin: self.index_rebuild_fence_margin,
             follow_ups: std::sync::Mutex::new(BTreeMap::new()),
         };
         service
             .construct(service.default_package.clone())
             .map_err(|label| anyhow::anyhow!(label))?;
         Ok(service)
+    }
+}
+
+/// Truncates to microsecond precision, the resolution a PostgreSQL
+/// `TIMESTAMPTZ` column actually stores (and what `postgres-types` round-trips
+/// on the wire). An in-memory `DateTime<Utc>` built from `Utc::now()` can
+/// carry nanoseconds (notably on Linux); comparing that untruncated value
+/// against one read back from the database can then never observe equality,
+/// even when the two represent the database's own idea of "the same instant."
+/// `PipelineLeaseRenewal::start` truncates `lease_cap` here so a capped
+/// `renew_lease` result compares equal to it and the early exit actually
+/// fires, instead of paying for a few extra no-op renewals until the lease
+/// naturally expires.
+fn truncate_to_microseconds(instant: DateTime<Utc>) -> DateTime<Utc> {
+    DateTime::from_timestamp_micros(instant.timestamp_micros()).unwrap_or(instant)
+}
+
+/// Renews a claim's lease while its phase runs. Stopped when the phase ends,
+/// at the cap, or when the lease is lost. The commit fences
+/// (`ensure_current_lease`, `ensure_live_lease`, every lease-checked `UPDATE`)
+/// stay the only authority: renewal only keeps an honest slow phase from
+/// being reclaimed out from under it before it finishes, never a substitute
+/// for those checks.
+struct PipelineLeaseRenewal {
+    stop: tokio::sync::watch::Sender<bool>,
+    join: tokio::task::JoinHandle<()>,
+}
+
+impl PipelineLeaseRenewal {
+    /// `None` when `run` carries no phase to renew for or no lease token --
+    /// both should be impossible for a just-claimed run, but this is a
+    /// best-effort background helper, not a correctness gate, so it declines
+    /// quietly rather than panicking or failing the claim.
+    fn start(
+        store: PgPipelineStore,
+        run: &PipelineRunRecord,
+        config: PipelineLeaseConfig,
+    ) -> Option<Self> {
+        let phase = run.next_phase?;
+        let lease_token = run.lease_token?;
+        let lease = config.for_phase(phase);
+        let lease_cap =
+            truncate_to_microseconds(Utc::now() + lease * PIPELINE_LEASE_RENEWAL_CAP_FACTOR);
+        let interval = std::cmp::max(lease / 3, Duration::milliseconds(100))
+            .to_std()
+            .ok()?;
+        let tenant_id = run.tenant_id.clone();
+        let run_id = run.run_id;
+        let (stop, mut stopped) = tokio::sync::watch::channel(false);
+        let join = tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = tokio::time::sleep(interval) => {}
+                    _ = stopped.changed() => return,
+                }
+                match store
+                    .renew_lease(&tenant_id, run_id, lease_token, lease, lease_cap)
+                    .await
+                {
+                    Ok(Some(expires_at)) if expires_at < lease_cap => {}
+                    // Either the cap was reached (no point renewing further:
+                    // the phase gives back its claim on its own next
+                    // lease-checked write, same as if this task never ran) or
+                    // the lease is already gone (lost to a reclaim, or the
+                    // phase itself already finished and cleared it) -- either
+                    // way, nothing left for this task to do.
+                    Ok(_) => return,
+                    Err(_) => tracing::warn!(
+                        label = "pipeline_lease_renewal_failed",
+                        "a lease renewal failed; the next interval tries again"
+                    ),
+                }
+            }
+        });
+        Some(Self { stop, join })
+    }
+
+    /// Signals the background task to stop and waits for it to actually
+    /// exit, so no renewal ever races the caller's own next claim of this
+    /// run.
+    async fn stop(self) {
+        let _ = self.stop.send(true);
+        if self.join.await.is_err() {
+            // Label-only: never log the panic payload (or any other
+            // `JoinError` detail) -- a panic message can carry whatever the
+            // panicking code formatted into it.
+            tracing::warn!(
+                label = "pipeline_lease_renewal_task_failed",
+                "the lease renewal background task did not exit cleanly"
+            );
+        }
     }
 }
 
@@ -6065,6 +7590,12 @@ pub struct PipelineService {
     privacy: Option<Arc<dyn PipelinePrivacyBoundary>>,
     payout: Option<(Arc<dyn NearPayoutAdapter>, PipelinePayoutConfig)>,
     novelty_utility_checks: PipelineNoveltyUtilityChecks,
+    /// Whether a tenant with no committed routing row may start new runs
+    /// (`PipelineServiceBuilder::with_unqualified_routing`).
+    unqualified_routing: bool,
+    /// The index rebuild's write fence margin
+    /// (`PipelineServiceBuilder::with_index_rebuild_fence_margin`).
+    index_rebuild_fence_margin: std::time::Duration,
     /// The follow-up steps this service queued work for, per tenant, since
     /// the worker last took them (`take_follow_ups`).
     follow_ups: std::sync::Mutex<BTreeMap<String, PipelineFollowUps>>,
@@ -6073,6 +7604,15 @@ pub struct PipelineService {
 impl PipelineService {
     pub fn bundle_id(&self) -> &str {
         &self.default_package.bundle_id
+    }
+
+    /// The package this service registers as every rollout tenant's active
+    /// bundle (`register_default_bundle`) and the one
+    /// `pipeline_runtime_is_production_qualified` checks at startup: startup
+    /// qualification is scoped to the bundle a runtime actually starts
+    /// (decision P4-D7), not every dependency the service happens to hold.
+    pub fn default_package(&self) -> &BundlePackage {
+        &self.default_package
     }
 
     /// The `trace_object_refs.object_store` label this service records.
@@ -6084,6 +7624,12 @@ impl PipelineService {
     /// use.
     pub fn lease_config(&self) -> PipelineLeaseConfig {
         self.lease_config
+    }
+
+    /// Whether a tenant with no committed routing row may start new runs
+    /// (`PipelineServiceBuilder::with_unqualified_routing`).
+    pub fn unqualified_routing(&self) -> bool {
+        self.unqualified_routing
     }
 
     /// How many times the Settle policy actually ran for this service. A
@@ -6118,10 +7664,6 @@ impl PipelineService {
                 .payout
                 .as_ref()
                 .is_some_and(|(adapter, _)| adapter.production_qualified()),
-            bundle: crate::versioned_pipeline_bundle::package_compatibility_config(
-                &self.default_package,
-            )
-            .is_none_or(|config| config.is_qualifiable()),
         }
     }
 
@@ -6236,13 +7778,6 @@ impl PipelineService {
         Ok(())
     }
 
-    /// An operator action; see `PgPipelineStore::activate_bundle`. A service
-    /// built with the ingest runtime login cannot call this successfully.
-    pub async fn activate_bundle(&self, tenant_id: &str, bundle_id: &str) -> anyhow::Result<()> {
-        self.store.activate_bundle(tenant_id, bundle_id).await?;
-        Ok(())
-    }
-
     pub async fn inspect(
         &self,
         tenant_id: &str,
@@ -6263,6 +7798,15 @@ impl PipelineService {
     #[doc(hidden)]
     pub fn store(&self) -> &PgPipelineStore {
         &self.store
+    }
+
+    /// The index writer Settle's own index dispatch writes through
+    /// (`PipelineServiceBuilder::new`). Exposed so a caller -- the index
+    /// rebuild worker route -- can rebuild through the exact same writer a
+    /// live run would dispatch to, rather than a second one constructed
+    /// independently.
+    pub fn index_writer(&self) -> Arc<dyn IdentifiedIndexWriter> {
+        self.index_writer.clone()
     }
 
     pub async fn withdraw_submission(
@@ -6480,17 +8024,59 @@ impl PipelineService {
         Ok(())
     }
 
+    /// `PgPipelineStore::intervene_policy`: suspend or resume one policy of a
+    /// bound bundle.
+    pub async fn intervene_policy(
+        &self,
+        tenant_id: &str,
+        bundle_id: &str,
+        phase: Phase,
+        action: &str,
+        actor_principal_ref: &str,
+        reason_code: &str,
+    ) -> anyhow::Result<PipelinePolicyInterventionRecord> {
+        Ok(self
+            .store
+            .intervene_policy(
+                tenant_id,
+                bundle_id,
+                phase,
+                action,
+                actor_principal_ref,
+                reason_code,
+            )
+            .await?)
+    }
+
+    /// `PgPipelineStore::list_policy_interventions`: the interventions on a
+    /// bundle's policies, oldest first.
+    pub async fn list_policy_interventions(
+        &self,
+        tenant_id: &str,
+        bundle_id: &str,
+    ) -> anyhow::Result<Vec<PipelinePolicyInterventionRecord>> {
+        Ok(self
+            .store
+            .list_policy_interventions(tenant_id, bundle_id)
+            .await?)
+    }
+
     /// The startup checks of every bundle a worker may run for `tenant_id`
     /// (multi-lens review L5-2, Zaki review 3, Z3-2): its active bundle and
     /// the bundle of each run in flight (`runnable_bundle_ids`), which a
     /// tenant keeps when the default package changes
     /// (`activate_bundle_if_none`). Each gets the checks ingest gives the
     /// default package at assembly: its dependencies resolve (`construct`),
-    /// and a compatibility package holds `main`'s gate configuration
-    /// (`main_gate`), has the pipeline's credit issuer, and, with
-    /// `require_qualifiable`, is qualifiable. The error is the first
-    /// failure's label, the default package check's where they share one;
-    /// ingest refuses to start on it.
+    /// a compatibility package holds `main`'s gate configuration
+    /// (`main_gate`) and has the pipeline's credit issuer, and, with
+    /// `require_qualifiable`, the package passes the default package's
+    /// qualification gate: its own bundle qualification
+    /// (`bundle_qualification`, decision P4-D7), every dependency it names
+    /// and its configuration term. P4-D7 lets the service hold a dependency
+    /// that is not production-qualified while the default package does not
+    /// name it, so a tenant bundle that names one is refused here. The error
+    /// is the first failure's label, the default package check's where they
+    /// share one; ingest refuses to start on it.
     pub async fn check_tenant_bundles(
         &self,
         tenant_id: &str,
@@ -6515,8 +8101,12 @@ impl PipelineService {
         Ok(())
     }
 
-    /// `check_tenant_bundles`'s checks of one package.
-    fn check_runnable_package(
+    /// `check_tenant_bundles`'s checks of one package. The activation route
+    /// runs them for the bundle it activates, before the store's gate
+    /// (`PipelineActivationStore::activate_tenant`, `rollback_bundle`), so
+    /// the startup checks of a tenant bundle also hold for a bundle that is
+    /// activated after start: the gate itself holds no service.
+    pub fn check_runnable_package(
         &self,
         package: &BundlePackage,
         main_gate: &crate::versioned_pipeline_compat::MainGateConfig,
@@ -6538,9 +8128,16 @@ impl PipelineService {
             if self.novelty_utility_checks.issuer_principal_ref.is_none() {
                 return Err("pipeline_credit_issuer_principal_missing");
             }
-            if require_qualifiable && !config.is_qualifiable() {
-                return Err("pipeline_runtime_dependencies_not_production_qualified");
-            }
+        }
+        // The default package's gate (`pipeline_runtime_is_production_qualified`
+        // in ingest): the bundle qualification of this package, which also
+        // carries the configuration term (`bundle_configuration_not_qualifiable`).
+        if require_qualifiable
+            && !self
+                .bundle_qualification(package)
+                .is_ok_and(|qualification| qualification.is_production_qualified())
+        {
+            return Err("pipeline_runtime_dependencies_not_production_qualified");
         }
         Ok(())
     }
@@ -6587,18 +8184,26 @@ impl PipelineService {
         Ok(())
     }
 
-    /// Resolve the dependencies the package names and construct its bundle.
-    /// A hash the service does not hold fails closed.
-    fn construct(&self, package: BundlePackage) -> Result<MinimalPolicyBundle, &'static str> {
-        self.construct_with_index_reader(package, self.index_reader.clone())
-    }
-
-    /// `construct`, with `index_reader` as the index the Score policy reads.
-    fn construct_with_index_reader(
+    /// Resolves the scorer and embedder `package` names among the held
+    /// dependencies, by content hash -- the same hash `with_scorer`/
+    /// `with_embedder` index by. A hash the service does not hold, whether
+    /// because it holds none at all or because a same-labeled dependency's
+    /// content changed, fails closed with `bundle_dependency_missing`.
+    /// Shared by `construct_with_index_reader` (which builds the runnable
+    /// bundle from the result, for `construct` and for a compatibility
+    /// Score's serialized read) and `bundle_qualification` (which only
+    /// needs the resolved objects' identity and qualification, never a
+    /// runnable bundle).
+    fn resolve_score_dependencies(
         &self,
-        package: BundlePackage,
-        index_reader: Arc<dyn IdentifiedIndexReader>,
-    ) -> Result<MinimalPolicyBundle, &'static str> {
+        package: &BundlePackage,
+    ) -> Result<
+        (
+            Arc<dyn IdentifiedPerplexityScorer>,
+            Arc<dyn IdentifiedEmbedder>,
+        ),
+        &'static str,
+    > {
         let named = &package.manifest.score.data_artifact_hashes;
         let scorer = named
             .iter()
@@ -6611,12 +8216,110 @@ impl PipelineService {
         let (Some(scorer), Some(embedder)) = (scorer, embedder) else {
             return Err(PIPELINE_DEPENDENCY_MISSING_LABEL);
         };
+        Ok((scorer, embedder))
+    }
+
+    /// Resolve the dependencies the package names and construct its bundle.
+    /// A hash the service does not hold fails closed.
+    fn construct(&self, package: BundlePackage) -> Result<MinimalPolicyBundle, &'static str> {
+        self.construct_with_index_reader(package, self.index_reader.clone())
+    }
+
+    /// `construct`, with `index_reader` as the index the Score policy reads.
+    fn construct_with_index_reader(
+        &self,
+        package: BundlePackage,
+        index_reader: Arc<dyn IdentifiedIndexReader>,
+    ) -> Result<MinimalPolicyBundle, &'static str> {
+        let (scorer, embedder) = self.resolve_score_dependencies(&package)?;
         MinimalPolicyBundle::from_package_with_runtime(package, scorer, embedder, index_reader)
             .map_err(|error| match error.to_string().as_str() {
                 PIPELINE_DEPENDENCY_MISSING_LABEL => PIPELINE_DEPENDENCY_MISSING_LABEL,
                 "bundle_policy_not_runnable" => PIPELINE_POLICY_NOT_RUNNABLE_LABEL,
                 _ => PIPELINE_BUNDLE_INVALID_LABEL,
             })
+    }
+
+    /// Whether every dependency the package `package` actually uses is
+    /// production-qualified (decision P4-D7): the scorer and embedder it
+    /// names, the held index reader and writer, one settlement-adapter check
+    /// per instrument it pins, `authority` and `privacy`, and `payout`
+    /// whenever payout is enabled (service-wide, final review M5).
+    /// `pipeline_runtime_is_production_qualified` calls this with
+    /// `default_package()` at startup, so an unqualified scorer, embedder,
+    /// or settlement adapter the default bundle never touches no longer
+    /// blocks boot.
+    ///
+    /// `Err("bundle_package_invalid")` when `package` itself does not
+    /// validate (`package_digests`); `Err("bundle_dependency_missing")` when
+    /// it names a scorer or embedder hash the service does not hold -- the
+    /// same two failure labels `construct` can return for the same reasons.
+    pub fn bundle_qualification(
+        &self,
+        package: &BundlePackage,
+    ) -> Result<PipelineBundleQualification, &'static str> {
+        let digests = package_digests(package).map_err(|_| PIPELINE_BUNDLE_INVALID_LABEL)?;
+        let (scorer, embedder) = self.resolve_score_dependencies(package)?;
+        let settlement_adapters = package
+            .manifest
+            .instruments
+            .keys()
+            .map(|instrument_id| {
+                let check = match self.settlement_adapters.get(instrument_id) {
+                    Some(adapter) => PipelineDependencyCheck {
+                        identity: adapter.adapter_identity().to_string(),
+                        production_qualified: adapter.production_qualified(),
+                    },
+                    None => PipelineDependencyCheck {
+                        identity: PIPELINE_SETTLEMENT_ADAPTER_MISSING_LABEL.to_string(),
+                        production_qualified: false,
+                    },
+                };
+                (instrument_id.as_str().to_string(), check)
+            })
+            .collect();
+        // Payout is service-wide, like the index writer: `process_payouts`
+        // pays the complete runs of every bundle, including runs bound to
+        // an earlier default package. So an enabled payout's adapter counts
+        // for every package, not only one that pins `trace_credit` (final
+        // review M5, reversing the payout part of P4-D7).
+        let payout = self.payout_enabled().then(|| {
+            self.payout
+                .as_ref()
+                .is_some_and(|(adapter, _)| adapter.production_qualified())
+        });
+        Ok(PipelineBundleQualification {
+            bundle_id: package.bundle_id.clone(),
+            scorer: PipelineDependencyCheck {
+                identity: scorer.dependency_identity().to_string(),
+                production_qualified: scorer.production_qualified(),
+            },
+            embedder: PipelineDependencyCheck {
+                identity: embedder.dependency_identity().to_string(),
+                production_qualified: embedder.production_qualified(),
+            },
+            index_reader: PipelineDependencyCheck {
+                identity: self.index_reader.dependency_identity().to_string(),
+                production_qualified: self.index_reader.production_qualified(),
+            },
+            index_writer: PipelineDependencyCheck {
+                identity: self.index_writer.dependency_identity().to_string(),
+                production_qualified: self.index_writer.production_qualified(),
+            },
+            settlement_adapters,
+            authority: self
+                .authority
+                .as_ref()
+                .is_some_and(|authority| authority.production_qualified()),
+            privacy: self
+                .privacy
+                .as_ref()
+                .is_some_and(|privacy| privacy.production_qualified()),
+            payout,
+            configuration_qualifiable:
+                crate::versioned_pipeline_bundle::package_configuration_is_qualifiable(package),
+            dependency_digest: digests.dependency_digest,
+        })
     }
 
     /// Loads and constructs the bundle a run is bound to, checking the
@@ -6654,10 +8357,11 @@ impl PipelineService {
     ///    boundary fails closed with `privacy_control_missing`. Neither
     ///    creates a run or a staging row.
     /// 2. A read-only check with no advisory lock (`precheck_receipt`)
-    ///    refuses the common cases -- replay, content conflict, tombstone,
-    ///    quota -- before any encryption. The staging transaction repeats
-    ///    every check, so this one only saves work. A replayed key returns
-    ///    here, so a replay never calls the privacy boundary again.
+    ///    refuses the common cases -- replay, content conflict, a legacy-owned
+    ///    submission id, a tenant that is not routed to the pipeline,
+    ///    tombstone, quota -- before any encryption. The staging transaction
+    ///    repeats every check, so this one only saves work. A replayed key
+    ///    returns here, so a replay never calls the privacy boundary again.
     /// 3. The rescrub: the privacy boundary transforms a clone of the
     ///    server envelope and returns any residual-risk conditions it found,
     ///    merged into the caller's own basis. From here on the transformed
@@ -6673,9 +8377,10 @@ impl PipelineService {
     ///    id), which fixes its object key and ciphertext hash. Nothing is
     ///    stored.
     /// 5. The staging transaction (`stage_receipt_attempt`) checks replay, an
-    ///    attempt for the key staged with other content, the bound bundle,
-    ///    tombstones, and the quota -- in that order -- counts the quota,
-    ///    and inserts the attempt's `staged` row naming the object. It
+    ///    attempt for the key staged with other content, the legacy owner and
+    ///    the tenant's routing (under the routing lock, shared), the bound
+    ///    bundle, tombstones, and the quota -- in that order -- counts the
+    ///    quota, and inserts the attempt's `staged` row naming the object. It
     ///    commits before anything is stored, so every refusal there stores
     ///    nothing.
     /// 6. The object is written and Admission runs, with no transaction
@@ -6683,10 +8388,17 @@ impl PipelineService {
     ///    `staged` row naming the object; `sweep_staged_receipts` deletes
     ///    both once the row's `cleanup_after` passes.
     /// 7. The final transaction (`commit_receipt_attempt`) re-checks an
-    ///    existing run for the key and the tombstones, requires the
-    ///    attempt's row to be still `staged` and not yet due, and commits
-    ///    the records and the row's move to `committed` together. On a
-    ///    refusal there, the attempt deletes its own object and row
+    ///    existing run for the key, the legacy owner and the tenant's routing
+    ///    (under the routing lock, shared, so a containment that committed
+    ///    during the write is seen and one that is waiting waits for this
+    ///    transaction), and the tombstones, requires the attempt's row to be
+    ///    still `staged` and not yet due, takes the Admission policy's status
+    ///    row of the bound bundle `FOR SHARE` as its last lock and refuses with
+    ///    `bundle_policy_not_runnable` when the policy was suspended while the
+    ///    object was written (an operator's suspension waits for this
+    ///    transaction), and commits the records, the pipeline's ownership row
+    ///    among them, and the row's move to `committed` together. On a refusal
+    ///    there, the attempt deletes its own object and row
     ///    (`discard_receipt_attempt`).
     ///
     /// Each attempt writes its own object, so two concurrent receipts for
@@ -6949,6 +8661,10 @@ impl PipelineService {
                 self.discard_receipt_attempt(&attempt).await;
                 Err(anyhow::anyhow!(PIPELINE_RECEIPT_STAGING_MISSING_LABEL))
             }
+            ReceiptCommit::PolicyNotRunnable => {
+                self.discard_receipt_attempt(&attempt).await;
+                Err(anyhow::anyhow!(PIPELINE_POLICY_NOT_RUNNABLE_LABEL))
+            }
         }
     }
 
@@ -7016,16 +8732,18 @@ impl PipelineService {
         }))
     }
 
-    /// The receipt's early refusal check (`submit` step 1): one short
+    /// The receipt's early refusal check (`submit` step 2): one short
     /// tenant transaction that only reads and takes no
     /// advisory lock. It refuses the common cases -- an existing run for
-    /// the key, an attempt staged with other content, a tombstone, and the
-    /// quota (for a key not yet counted) -- before the attempt's object is
-    /// encrypted, so a refused receipt costs no encryption and, on a remote
-    /// store, no key-wrap call. It decides nothing on its own: the staging
-    /// transaction repeats every check under its locks, since the state can
-    /// change in between. Its connection returns to the pool before the
-    /// next step checks one out.
+    /// the key, an attempt staged with other content, a legacy-owned
+    /// submission id or a tenant that is not routed to the pipeline (after
+    /// the check for an existing run, so a retry is answered in every
+    /// routing state), a tombstone, and the quota (for a key not yet
+    /// counted) -- before the attempt's object is encrypted, so a refused
+    /// receipt costs no encryption and, on a remote store, no key-wrap call.
+    /// It decides nothing on its own: the staging transaction repeats every
+    /// check under its locks, since the state can change in between. Its
+    /// connection returns to the pool before the next step checks one out.
     async fn precheck_receipt(
         &self,
         request: &PipelineReceiptRequest<'_>,
@@ -7043,6 +8761,18 @@ impl PipelineService {
         )
         .await?
         {
+            Some(refused)
+        } else if let Some(refused) = new_receipt_refusal_in(
+            &tx,
+            tenant_id,
+            request.server_envelope.submission_id,
+            self.unqualified_routing,
+            false,
+        )
+        .await?
+        {
+            // A legacy-owned id or a tenant that is not routed here is
+            // refused before the rescrub, so it costs no classifier call.
             Some(refused)
         } else if receipt_is_tombstoned(
             &tx,
@@ -7065,19 +8795,34 @@ impl PipelineService {
         Ok(refused)
     }
 
-    /// The receipt's staging transaction (`submit` step 3). It takes the
+    /// The receipt's staging transaction (`submit` step 5). It takes the
     /// receipt lock and then the tenant quota lock -- transaction-scoped
     /// advisory locks that serialize concurrent receipts for one key (or
     /// one tenant's quota) without a row lock that would block other
     /// tenants -- and releases both when it commits, before the object is
     /// written. In order: an existing run for the key (`Replayed` or
     /// `ContentConflict`); an attempt for the key staged with other content
-    /// (`ContentConflict`); the bound bundle; tombstones (`Tombstoned`); the
-    /// quota (`QuotaExceeded`). The quota is counted here
+    /// (`ContentConflict`); the tenant's routing lock, taken shared, and the
+    /// refusal of a new receipt (`NotRouted(Contained)` for a contained
+    /// tenant, then `LegacyOwned` when the legacy path owns the submission
+    /// id, then `NotRouted` when the tenant's routing does not send new
+    /// receipts to the pipeline: `new_receipt_refusal_in`); the bound bundle;
+    /// tombstones (`Tombstoned`); the quota (`QuotaExceeded`). The routing
+    /// lock is the last lock this transaction takes, after the receipt lock
+    /// and the quota lock, and it is held to the commit: a routing change
+    /// (`PipelineActivationStore`, exclusive) waits for this transaction, and
+    /// a receipt staged after the change reads it. The quota is counted here
     /// (`pipeline_admission_usage`, once per key), so a receipt that fails
     /// after its write stays counted, and a retry of that key is neither
-    /// counted again nor refused for its own earlier count. Last, the
-    /// attempt's `staged` row.
+    /// counted again nor refused for its own earlier count; a receipt that
+    /// this transaction's routing check refuses is not counted. A receipt
+    /// that the commit transaction refuses afterwards (`NotRouted`,
+    /// `LegacyOwned`, `PolicyNotRunnable`: a routing change, a legacy claim,
+    /// or a suspension that committed while the object was written) keeps
+    /// the usage row this transaction inserted, so the hourly quota counts
+    /// it, as it counts every receipt that fails after its write: the
+    /// runtime role has no `DELETE` on the table (V95). Last, the attempt's
+    /// `staged` row.
     async fn stage_receipt_attempt(
         &self,
         request: &PipelineReceiptRequest<'_>,
@@ -7085,7 +8830,9 @@ impl PipelineService {
     ) -> anyhow::Result<ReceiptStage> {
         let tenant_id = request.tenant_id;
         let mut client = self.backend.trace_pool().get().await?;
-        let tx = PgPipelineStore::tenant_transaction(&mut client, tenant_id).await?;
+        // READ COMMITTED, stated (G14): the routing read below must see a
+        // routing change that committed while this waited for the lock.
+        let tx = PgPipelineStore::read_committed_tenant_transaction(&mut client, tenant_id).await?;
         tx.execute(
             "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
             &[&pipeline_receipt_lock(
@@ -7113,8 +8860,26 @@ impl PipelineService {
             return Ok(ReceiptStage::Refused(refused));
         }
 
+        // The routing lock, shared, and the refusal of a new receipt. After
+        // the key's own refusal, so a retry of an existing receipt is
+        // answered in every routing state, and before anything is read or
+        // written for this key, so a refusal stores nothing.
+        if let Some(refused) = new_receipt_refusal_in(
+            &tx,
+            tenant_id,
+            request.server_envelope.submission_id,
+            self.unqualified_routing,
+            true,
+        )
+        .await?
+        {
+            tx.commit().await?;
+            return Ok(ReceiptStage::Refused(refused));
+        }
+
         // Bound bundle: the active bundle id (from pipeline_active_bundles
-        // only -- routing-table lookups are PR 5), then construct it.
+        // only -- the routing row decides whether a new receipt may start,
+        // above, and selects no bundle), then construct it.
         let bundle_id: String = tx
             .query_opt(
                 "SELECT bundle_id FROM pipeline_active_bundles WHERE tenant_id = $1",
@@ -7189,26 +8954,52 @@ impl PipelineService {
         Ok(ReceiptStage::Staged { bundle_id, bundle })
     }
 
-    /// The receipt's final transaction (`submit` step 5). It takes the
-    /// receipt lock again -- its only advisory lock -- so it commits one
-    /// attempt for the key at a time: the attempt that comes second finds
-    /// the first one's run and returns `Replayed` rather than failing on
-    /// the run's unique key or the submission id. With a source session
+    /// The receipt's final transaction (`submit` step 7). It takes the
+    /// receipt lock again, so it commits one attempt for the key at a time:
+    /// the attempt that comes second finds the first one's run and returns
+    /// `Replayed` rather than failing on the run's unique key or the
+    /// submission id. With a source session
     /// (`PipelineReceiptRequest::source_session`), it then locks the
     /// session row and refuses a withdrawn session
-    /// (`SourceSessionWithdrawn`). Then it re-checks the
+    /// (`SourceSessionWithdrawn`). After the check for an existing run it
+    /// takes the tenant's routing lock, shared, and repeats the refusal of a
+    /// new receipt (`LegacyOwned`, `NotRouted`: `new_receipt_refusal_in`):
+    /// the routing can change, and the legacy path can claim the id, while
+    /// the object is written, and a routing change (`PipelineActivationStore`,
+    /// exclusive) waits for this transaction, so no receipt commits after it.
+    /// The routing lock comes after the receipt lock and the session row
+    /// lock, and it is held to the commit. A refusal commits nothing, and
+    /// `submit` discards the attempt's object and row; the
+    /// `pipeline_admission_usage` row that the staging transaction inserted
+    /// stays, so a receipt refused here is counted by the hourly quota. Then
+    /// it re-checks the
     /// tombstones (one can arrive while the object is written), locks the
     /// attempt's row, which must still be `staged` and not due
-    /// (`lock_committable_receipt_artifact`), and inserts the records and
-    /// the row's move to `committed` together.
+    /// (`lock_committable_receipt_artifact`), takes the Admission policy row
+    /// of the bound bundle `FOR SHARE` and refuses when the policy is no
+    /// longer runnable (`ReceiptCommit::PolicyNotRunnable`: the policy can be
+    /// suspended while the object is written, and an intervention waits for
+    /// this transaction), and inserts the records and the row's move to
+    /// `committed` together. The locks, in order: the receipt lock, the
+    /// session row, the routing lock, the attempt's row, the policy row.
     ///
     /// Retention is derived on the server, as the legacy receipt derives it
     /// (`retention_policy_for_trace` over the envelope's allowed uses and
     /// consent; expiry `received_at + max_age_days`), never taken from the
     /// envelope's own `trace_card.retention_policy`. `received_at` is the
     /// column default, this transaction's `NOW()`, read here so the expiry
-    /// is anchored to the exact stored receipt time. No
-    /// `pipeline_receipt_ownership` row is inserted (PR 5).
+    /// is anchored to the exact stored receipt time.
+    ///
+    /// The records include the pipeline's `pipeline_receipt_ownership` row
+    /// (`insert_receipt_records` inserts it first). When the legacy path
+    /// claimed or recorded the id after the checks above (a conflict on the
+    /// ownership row or the submission row with a legacy owner), the
+    /// transaction rolls back -- its deferred foreign key to the run is never
+    /// checked -- and the result is `LegacyOwned`. A conflict with a pipeline
+    /// owner (a second key for an id a run owns) is not the legacy path's: it
+    /// is `main`'s "already bound to another receipt" error, as before PR 5,
+    /// and like every error from this transaction it leaves the attempt's
+    /// object and `staged` row to the sweeper.
     async fn commit_receipt_attempt(
         &self,
         request: &PipelineReceiptRequest<'_>,
@@ -7221,7 +9012,8 @@ impl PipelineService {
         let tenant_id = request.tenant_id;
         let envelope = request.server_envelope;
         let mut client = self.backend.trace_pool().get().await?;
-        let tx = PgPipelineStore::tenant_transaction(&mut client, tenant_id).await?;
+        // READ COMMITTED, stated (G14), as the staging transaction.
+        let tx = PgPipelineStore::read_committed_tenant_transaction(&mut client, tenant_id).await?;
         tx.execute(
             "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
             &[&pipeline_receipt_lock(
@@ -7263,6 +9055,22 @@ impl PipelineService {
                 &attempt.request_content_hash,
             )));
         }
+        // The routing lock, shared, and the refusal of a new receipt, again:
+        // containment, a deactivation, or a legacy claim may have committed
+        // since the staging transaction. After the existing-run check, so a
+        // replay is answered in every routing state.
+        if let Some(refused) = new_receipt_refusal_in(
+            &tx,
+            tenant_id,
+            envelope.submission_id,
+            self.unqualified_routing,
+            true,
+        )
+        .await?
+        {
+            tx.commit().await?;
+            return Ok(ReceiptCommit::Refused(refused));
+        }
         if receipt_is_tombstoned(&tx, tenant_id, envelope, &attempt.request_content_hash).await? {
             tx.commit().await?;
             return Ok(ReceiptCommit::Refused(PipelineReceiptResult::Tombstoned));
@@ -7270,6 +9078,17 @@ impl PipelineService {
         if !PgPipelineStore::lock_committable_receipt_artifact(&tx, attempt).await? {
             tx.commit().await?;
             return Ok(ReceiptCommit::StagingMissing);
+        }
+        // GRD-004: the Admission policy of the bundle the run is bound to must
+        // still be runnable, and stays so until this transaction ends. The
+        // staging transaction read the flag without a lock, and a suspension
+        // can land while the object is written. This is the last lock before
+        // the first write, after the receipt lock, the session row, the
+        // routing lock, and the attempt's row; an intervention takes only the
+        // policy row. A refusal commits nothing.
+        if !lock_runnable_policy(&tx, tenant_id, &run.bundle_id, Phase::Admission).await? {
+            tx.commit().await?;
+            return Ok(ReceiptCommit::PolicyNotRunnable);
         }
 
         let retention_policy = retention_policy_for_trace(envelope);
@@ -7315,7 +9134,7 @@ impl PipelineService {
             compression: None,
             created_by_job_id: None,
         };
-        insert_receipt_records(
+        match insert_receipt_records(
             &tx,
             run,
             attempt,
@@ -7324,7 +9143,20 @@ impl PipelineService {
             stored,
             admission,
         )
-        .await?;
+        .await
+        {
+            Ok(()) => {}
+            Err(DatabaseError::Constraint(label))
+                if label == PIPELINE_LEGACY_RECEIPT_OWNED_LABEL =>
+            {
+                // The legacy path took the id since the check above. Dropping
+                // the transaction rolls it back, ownership row included, and
+                // the deferred run foreign key is never checked.
+                drop(tx);
+                return Ok(ReceiptCommit::Refused(PipelineReceiptResult::LegacyOwned));
+            }
+            Err(error) => return Err(error.into()),
+        }
         let row = tx
             .query_one(
                 "SELECT * FROM pipeline_runs WHERE tenant_id = $1 AND run_id = $2",
@@ -7444,6 +9276,310 @@ impl PipelineService {
         Ok(removed)
     }
 
+    /// How long a phase attempt's staged object outlives its own lease
+    /// before the sweep may remove it: `PIPELINE_LEASE_RENEWAL_CAP_FACTOR`
+    /// times `phase`'s configured lease -- the same bound
+    /// `PipelineLeaseRenewal::start` caps a live renewal at, so an attempt
+    /// still legitimately renewing its lease never has its own object swept
+    /// out from under it -- plus one hour of margin for the commit itself to
+    /// land once the phase work is done.
+    fn attempt_artifact_cleanup_after(&self, phase: Phase) -> DateTime<Utc> {
+        self.attempt_artifact_lease_bound(phase) + PIPELINE_ATTEMPT_ARTIFACT_COMMIT_MARGIN
+    }
+
+    /// Now plus `PIPELINE_LEASE_RENEWAL_CAP_FACTOR` times `phase`'s lease:
+    /// no lease claimed before now is still live after it, however often it
+    /// is renewed. A compatibility Score that staged its rows before its
+    /// tenant lock publishes nothing after this bound (rebase 10, option D):
+    /// by then its lease is certainly gone and its commit would be refused,
+    /// and the sweep may remove its rows `PIPELINE_ATTEMPT_ARTIFACT_COMMIT_MARGIN`
+    /// later, so a later publish could leave an object no row names.
+    fn attempt_artifact_lease_bound(&self, phase: Phase) -> DateTime<Utc> {
+        truncate_to_microseconds(
+            Utc::now() + self.lease_config.for_phase(phase) * PIPELINE_LEASE_RENEWAL_CAP_FACTOR,
+        )
+    }
+
+    /// Deletes the objects of pipeline phase attempts that never committed
+    /// (PR 4): each `staged` row whose `cleanup_after` has passed -- an
+    /// attempt that crashed, lost its lease, failed between two of its
+    /// writes, or had its commit refused -- loses its object and then the
+    /// row itself.
+    ///
+    /// Who owns which deletion (controller ruling R2-1): a `staged` row's
+    /// object is named by no object ref, so no withdrawal ever deletes it;
+    /// this sweep owns it. A `committed` row's object is an object ref of
+    /// the submission, recorded by the same phase commit that committed the
+    /// row (Review's approved revision, Score's index command and neighbour
+    /// set), so deleting it belongs to the withdrawal: the withdrawal
+    /// invalidates the ref and queues its payload deletion in the same
+    /// transaction as the tombstone, and `main`'s revocation-propagation
+    /// worker deletes it. This sweep never touches a `committed` row. A
+    /// phase attempt whose commit is refused, for any reason, deletes the
+    /// objects it wrote itself, best effort (Review its approved object,
+    /// Score its index command and neighbour set; PR 3), and so does a Score
+    /// attempt whose second write fails after its first; their `staged`
+    /// rows stay, and this sweep later finds each object absent and drops
+    /// the row, or deletes an object that path failed to delete. The
+    /// objects only this sweep deletes are those of an attempt that stopped
+    /// after writing and before any commit or refusal (a crashed process),
+    /// and those a lost connection kept because the commit may have landed
+    /// when it did not.
+    ///
+    /// One tenant transaction, `FOR UPDATE SKIP LOCKED`, removing up to
+    /// `limit` rows. It reads the due rows oldest first, a page at a time,
+    /// with a keyset cursor on `(cleanup_after, run_id, lease_token,
+    /// artifact)`, so a row it keeps does not stop it: it goes on past kept
+    /// rows to later ones, examining at most
+    /// `PIPELINE_ATTEMPT_SWEEP_EXAMINED_PER_REMOVAL` times `limit` rows in
+    /// one pass (wave 2; follow-up review, m2). The pass holds its pooled
+    /// connection and the locks of the rows it read across every store call
+    /// it makes, up to about two per row examined (fix round 1, review M6).
+    /// For each row with a hash, a store that confirms the object
+    /// absent (`Some(false)`) needs no delete; a store that reports it
+    /// present, or cannot tell (`None`), gets one. A row with no hash (a
+    /// compatibility Score staged it before its tenant lock and never
+    /// committed it; rebase 10, option D) gets
+    /// `delete_artifact_at_object_key` at its key, but only when the store
+    /// derives that same key from the row's artifact, run and lease token
+    /// (rebase 10 review, M1); a row whose key differs is kept, with its
+    /// object, and logs `pipeline_attempt_sweep_key_mismatch`. A delete
+    /// failure (or a presence check or key derivation that itself errors)
+    /// logs `pipeline_attempt_sweep_delete_failed`, with the store's own
+    /// refusal when that is a label (`store_refusal_label`), and keeps the
+    /// row for the next pass; otherwise the row is deleted. A kept row keeps
+    /// its `cleanup_after` (V108's guard moves nothing), so it is examined
+    /// again on each pass. Every store call runs on the blocking pool.
+    /// The run's own `pipeline_runs` row, and its committed objects, are
+    /// never touched here. Returns how many rows it removed.
+    ///
+    /// This pass starts at the oldest due row; see
+    /// [`Self::sweep_attempt_artifacts_from`] for a pass that resumes where
+    /// an earlier one stopped.
+    pub async fn sweep_attempt_artifacts(
+        &self,
+        tenant_id: &str,
+        limit: usize,
+    ) -> anyhow::Result<usize> {
+        Ok(self
+            .sweep_attempt_artifacts_from(tenant_id, limit, None)
+            .await?
+            .removed)
+    }
+
+    /// `sweep_attempt_artifacts`, starting after `resume_after` (the due
+    /// rows before it wait for a later pass) instead of at the oldest due
+    /// row. The pass's `resume_after` is where the next pass resumes: the
+    /// last row it examined when it stopped at its limit or its bound, and
+    /// `None` when it reached the end of the due rows, so the next pass
+    /// starts over at the oldest. The worker carries it from one pass to the
+    /// next for each tenant (wave 2; follow-up review, m2): however many
+    /// rows a tenant's sweep keeps, every due row is examined within a few
+    /// passes, so kept rows never stall the tenant.
+    pub async fn sweep_attempt_artifacts_from(
+        &self,
+        tenant_id: &str,
+        limit: usize,
+        resume_after: Option<AttemptSweepCursor>,
+    ) -> anyhow::Result<AttemptSweepPass> {
+        let examine_bound = limit.saturating_mul(PIPELINE_ATTEMPT_SWEEP_EXAMINED_PER_REMOVAL);
+        let tenant_storage_ref = pipeline_tenant_storage_ref(tenant_id);
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = PgPipelineStore::tenant_transaction(&mut client, tenant_id).await?;
+
+        let mut cursor = resume_after;
+        let mut removed = 0usize;
+        let mut examined = 0usize;
+        let mut reached_the_end = false;
+        'pages: while removed < limit && examined < examine_bound {
+            let page_size = limit.min(examine_bound - examined);
+            let rows = tx
+                .query(
+                    "SELECT run_id, lease_token, artifact, object_key, ciphertext_sha256,
+                            cleanup_after
+                       FROM pipeline_attempt_artifacts
+                      WHERE tenant_id = $1 AND state = 'staged' AND cleanup_after <= NOW()
+                        AND ($3::TIMESTAMPTZ IS NULL
+                             OR (cleanup_after, run_id, lease_token, artifact)
+                                > ($3::TIMESTAMPTZ, $4::UUID, $5::UUID, $6::TEXT))
+                      ORDER BY cleanup_after, run_id, lease_token, artifact
+                      LIMIT $2
+                      FOR UPDATE SKIP LOCKED",
+                    &[
+                        &tenant_id,
+                        &i64::try_from(page_size).unwrap_or(i64::MAX),
+                        &cursor.as_ref().map(|cursor| cursor.cleanup_after),
+                        &cursor.as_ref().map(|cursor| cursor.run_id),
+                        &cursor.as_ref().map(|cursor| cursor.lease_token),
+                        &cursor.as_ref().map(|cursor| cursor.artifact.as_str()),
+                    ],
+                )
+                .await?;
+            let page_was_full = rows.len() == page_size;
+            for row in &rows {
+                if removed >= limit {
+                    break 'pages;
+                }
+                examined += 1;
+                let run_id: Uuid = row.get("run_id");
+                let lease_token: Uuid = row.get("lease_token");
+                let artifact: String = row.get("artifact");
+                let object_key: String = row.get("object_key");
+                let ciphertext_sha256: Option<String> = row.get("ciphertext_sha256");
+                cursor = Some(AttemptSweepCursor {
+                    cleanup_after: row.get("cleanup_after"),
+                    run_id,
+                    lease_token,
+                    artifact: artifact.clone(),
+                });
+                // The column is CHECK-constrained to the three known artifacts,
+                // so this should never fire; if it ever does (a future migration
+                // loosens the constraint, or direct DB tampering), fail this
+                // sweep pass closed -- an error the caller logs and retries next
+                // pass -- rather than panic the worker's supervised task.
+                let attempt_artifact =
+                    PipelineAttemptArtifact::from_db_str(&artifact).ok_or_else(|| {
+                        anyhow::anyhow!("pipeline_attempt_artifact_kind_unrecognized")
+                    })?;
+                let artifact_kind = attempt_artifact.store_kind();
+
+                // The store calls are synchronous, so they run on the blocking
+                // pool while this transaction keeps the rows locked, as every
+                // other object-store call of the pipeline does (PR 3, e2873401,
+                // N-6). A blocking task that did not return counts as a failed
+                // delete: the row stays for the next pass.
+                let store = self.artifact_store.clone();
+                let tenant = tenant_storage_ref.clone();
+                let key = object_key.clone();
+                let outcome = on_blocking_pool(move || {
+                    Ok(match ciphertext_sha256 {
+                        // Rebase 10, option D: a row a compatibility Score staged
+                        // before its tenant lock and never committed has no
+                        // hash. Its object, if the attempt published one, is at
+                        // the key the store derives from the row's own artifact,
+                        // run and lease token (`pipeline_attempt_object_id`), and
+                        // the lease token is the attempt's own, so no other
+                        // object is ever stored there. The sweep derives that key
+                        // again and deletes only when the row names it (rebase
+                        // 10 review, M1): a row whose key names another object is
+                        // kept, and that object is never deleted by key alone.
+                        // `Ok(false)` from the delete is an attempt that
+                        // published nothing.
+                        None => match store.serialized_json_object_key(
+                            tenant.as_str(),
+                            artifact_kind.clone(),
+                            &pipeline_attempt_object_id(
+                                attempt_artifact.as_str(),
+                                run_id,
+                                lease_token,
+                            ),
+                        ) {
+                            Ok(derived) if derived == key => {
+                                match store.delete_artifact_at_object_key(
+                                    tenant.as_str(),
+                                    artifact_kind,
+                                    &key,
+                                ) {
+                                    Ok(_) => AttemptSweepRow::Remove,
+                                    Err(error) => AttemptSweepRow::Keep(
+                                        PIPELINE_ATTEMPT_SWEEP_DELETE_FAILED,
+                                        store_refusal_label(&error),
+                                    ),
+                                }
+                            }
+                            Ok(_) => {
+                                AttemptSweepRow::Keep(PIPELINE_ATTEMPT_SWEEP_KEY_MISMATCH, None)
+                            }
+                            Err(error) => AttemptSweepRow::Keep(
+                                PIPELINE_ATTEMPT_SWEEP_DELETE_FAILED,
+                                store_refusal_label(&error),
+                            ),
+                        },
+                        Some(ciphertext_sha256) => {
+                            let present = store.artifact_present_by_object_key(
+                                tenant.as_str(),
+                                artifact_kind.clone(),
+                                &key,
+                                &ciphertext_sha256,
+                            );
+                            // `Some(false)` -- confirmed absent -- is the only
+                            // answer that skips the delete outright.
+                            // `Some(true)` and `None` ("the store cannot tell",
+                            // the trait's documented default, and what
+                            // `GcsRemoteTraceArtifactProvider` answers today
+                            // since it does not override this method) both
+                            // attempt the delete: a store that cannot report
+                            // presence may still hold the object, and a store
+                            // whose delete errors on an absent object keeps the
+                            // row for the next pass rather than mistaking
+                            // "unknown" for "gone".
+                            let deleted = match present {
+                                Ok(Some(false)) => Ok(()),
+                                Ok(Some(true)) | Ok(None) => {
+                                    let receipt = EncryptedTraceArtifactReceipt {
+                                        tenant_storage_ref: tenant.as_str().to_string(),
+                                        artifact_kind,
+                                        object_key: key,
+                                        ciphertext_sha256,
+                                        encrypted_at: Utc::now(),
+                                    };
+                                    store.delete_artifact(tenant.as_str(), &receipt).map(|_| ())
+                                }
+                                Err(error) => Err(error),
+                            };
+                            match deleted {
+                                Ok(()) => AttemptSweepRow::Remove,
+                                Err(error) => AttemptSweepRow::Keep(
+                                    PIPELINE_ATTEMPT_SWEEP_DELETE_FAILED,
+                                    store_refusal_label(&error),
+                                ),
+                            }
+                        }
+                    })
+                })
+                .await
+                .unwrap_or(AttemptSweepRow::Keep(
+                    PIPELINE_ATTEMPT_SWEEP_DELETE_FAILED,
+                    None,
+                ));
+                if let AttemptSweepRow::Keep(label, store_label) = outcome {
+                    if label == PIPELINE_ATTEMPT_SWEEP_KEY_MISMATCH {
+                        tracing::warn!(
+                            label,
+                            "a pipeline attempt row names an object key other than its own; \
+                         the row and that object are kept"
+                        );
+                    } else {
+                        tracing::warn!(
+                            label,
+                            store_label = store_label.as_deref(),
+                            "a pipeline attempt object could not be deleted; its row is kept \
+                         for the next pass"
+                        );
+                    }
+                    continue;
+                }
+                tx.execute(
+                    "DELETE FROM pipeline_attempt_artifacts
+                  WHERE tenant_id = $1 AND run_id = $2 AND lease_token = $3 AND artifact = $4
+                    AND state = 'staged'",
+                    &[&tenant_id, &run_id, &lease_token, &artifact],
+                )
+                .await?;
+                removed += 1;
+            }
+            if !page_was_full {
+                reached_the_end = true;
+                break;
+            }
+        }
+        tx.commit().await?;
+        Ok(AttemptSweepPass {
+            removed,
+            resume_after: if reached_the_end { None } else { cursor },
+        })
+    }
+
     /// Loads a run's committed outcome for `phase` and decodes its decision.
     async fn committed_decision<T: serde::de::DeserializeOwned>(
         &self,
@@ -7456,6 +9592,23 @@ impl PipelineService {
             .await?
             .ok_or_else(|| anyhow::anyhow!("{phase:?} outcome is missing"))?;
         serde_json::from_value(outcome.decision)
+            .map_err(|_| anyhow::anyhow!("{phase:?} outcome is malformed"))
+    }
+
+    /// Loads a run's committed outcome for `phase` and decodes its evidence.
+    /// Alongside `committed_decision`, which decodes the same outcome's
+    /// decision instead.
+    async fn committed_evidence<T: serde::de::DeserializeOwned>(
+        &self,
+        run: &PipelineRunRecord,
+        phase: Phase,
+    ) -> anyhow::Result<T> {
+        let outcome = self
+            .store
+            .outcome_for_phase(&run.tenant_id, run.run_id, phase)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("{phase:?} outcome is missing"))?;
+        serde_json::from_value(outcome.evidence)
             .map_err(|_| anyhow::anyhow!("{phase:?} outcome is malformed"))
     }
 
@@ -7631,21 +9784,325 @@ impl PipelineService {
         Ok(command)
     }
 
+    /// Rebuilds `writer`'s index for `tenant_id` from the sealed index
+    /// commands Settle already wrote and committed -- no new outcome, no
+    /// evaluation of any policy, and no credit. Meant for after a restore,
+    /// once the pipeline's own rows are back but the vector index is a
+    /// fresh, empty store: replays exactly what Settle already settled,
+    /// through the same command validation (`load_index_command`, keyed
+    /// against each run's own committed Score evidence) and the same key
+    /// derivation Settle's own index dispatch uses
+    /// (`SealedIndexCommand::keyed_entries`), so a rebuilt index matches
+    /// what the pipeline actually settled, bit for bit.
+    ///
+    /// Reads `PgPipelineStore::list_rebuildable_index_runs` for the run
+    /// list -- complete runs, included in the index, with a completed index
+    /// write no invalidation has touched -- in `created_at, run_id` order,
+    /// the same order Settle committed them in, then rebuilds each run with
+    /// `rebuild_index_run`, which re-checks the run and its submission under
+    /// the run's lock and holds both through that run's writes. A run
+    /// withdrawn or invalidated after the listing is skipped
+    /// (`skipped_run_count`), never written (final review I1).
+    ///
+    /// The rebuild holds a committed fence of its own (V113): one
+    /// `fence_id`, which `rebuild_index_run` sets again before each run's
+    /// writes. While it is unexpired, no worker in any process claims the
+    /// tenant's invalidations (`PgPipelineStore::claim_due_index_invalidations`).
+    /// When the rebuild returns `Ok`, or an error once every write it started
+    /// has returned, it clears its fence. When a run fails as
+    /// `index_unavailable` with an index call still in flight, the fence is
+    /// left to expire, at that run's deadline plus the write fence margin. A
+    /// clear that fails is logged and changes nothing else: the row expires
+    /// on its own, and the next clear of the tenant deletes it.
+    ///
+    /// A run whose stored command fails validation (a tampered
+    /// `index_command_hash`, or a mismatched revision, index, or model)
+    /// fails the whole rebuild closed with `index_command_invalid` before
+    /// writing anything from that run; entries an earlier run in the same
+    /// pass already wrote are not rolled back, since a fail-closed rebuild
+    /// is meant to be re-run after the operator resolves the tampered row,
+    /// and every entry write is idempotent (`writer.upsert`'s `Unchanged`
+    /// result) so a re-run never double-counts what an earlier attempt
+    /// already applied.
+    pub async fn rebuild_index_from_authoritative_commands(
+        &self,
+        tenant_id: &str,
+        writer: Arc<dyn IdentifiedIndexWriter>,
+    ) -> anyhow::Result<PipelineIndexRebuildReport> {
+        let fence_id = Uuid::new_v4();
+        let rebuilt = self.rebuild_index_runs(tenant_id, &writer, fence_id).await;
+        let write_in_flight = rebuilt
+            .as_ref()
+            .is_err_and(|error| error.is::<IndexRebuildWriteInFlight>());
+        if !write_in_flight
+            && self
+                .store
+                .clear_index_rebuild_fence(tenant_id, fence_id)
+                .await
+                .is_err()
+        {
+            tracing::warn!(
+                label = "pipeline_index_rebuild_fence_clear_failed",
+                "could not clear an index rebuild's fence; it expires on its own"
+            );
+        }
+        rebuilt
+    }
+
+    /// The runs of `rebuild_index_from_authoritative_commands`, each under
+    /// the fence `fence_id`.
+    async fn rebuild_index_runs(
+        &self,
+        tenant_id: &str,
+        writer: &Arc<dyn IdentifiedIndexWriter>,
+        fence_id: Uuid,
+    ) -> anyhow::Result<PipelineIndexRebuildReport> {
+        let runs = self.store.list_rebuildable_index_runs(tenant_id).await?;
+        let mut command_hashes = Vec::with_capacity(runs.len());
+        let mut entry_count = 0usize;
+        let mut unchanged_entry_count = 0usize;
+        let mut skipped_run_count = 0usize;
+        for run in runs {
+            match self.rebuild_index_run(&run, writer, fence_id).await? {
+                PipelineIndexRebuildRun::Rebuilt {
+                    command_hash,
+                    entry_count: run_entries,
+                    unchanged_entry_count: run_unchanged,
+                } => {
+                    entry_count += run_entries;
+                    unchanged_entry_count += run_unchanged;
+                    command_hashes.push(command_hash);
+                }
+                PipelineIndexRebuildRun::Skipped => skipped_run_count += 1,
+            }
+        }
+        let command_set_hash = sha256_prefixed(
+            trace_commons_protocol::canonical_json::to_canonical_vec(&serde_json::json!(
+                command_hashes
+            ))?
+            .as_slice(),
+        );
+        Ok(PipelineIndexRebuildReport {
+            command_count: command_hashes.len(),
+            entry_count,
+            unchanged_entry_count,
+            skipped_run_count,
+            command_set_hash,
+        })
+    }
+
+    /// Rebuilds one listed run's entries into `writer`, under the guard
+    /// (final review I1, the shape of Settle's index dispatch under P3-D9):
+    /// one tenant transaction locks the run row, re-checks that the run is
+    /// still rebuildable with the command hash it was listed with and that
+    /// its submission is still operable
+    /// (`PgPipelineStore::lock_rebuildable_index_run_on_tx`), and holds both
+    /// locks through every upsert, then commits. A withdrawal locks the run
+    /// row `FOR UPDATE` first, so it either committed before the re-check
+    /// (the run is `Skipped`) or waits until these writes are done, and the
+    /// invalidation it queues then removes them.
+    ///
+    /// Before that transaction opens, the rebuild sets its committed fence
+    /// `fence_id` (`PgPipelineStore::set_index_rebuild_fence`, V113) to the
+    /// run's deadline (below) plus the write fence margin
+    /// (`PIPELINE_INDEX_WRITE_FENCE_MARGIN_SECONDS`), on the connection that
+    /// then opens the transaction. While the fence is unexpired, no worker in
+    /// any process claims the tenant's invalidations
+    /// (`PgPipelineStore::claim_due_index_invalidations`, which says why one
+    /// statement is enough). A fence write that fails stops the rebuild
+    /// before the run's first write, as `index_rebuild_fence_unavailable`.
+    ///
+    /// The committed Score evidence and the sealed command are read before
+    /// the fence and the transaction, so it never holds two pooled
+    /// connections at once. The command's error is raised only once the
+    /// re-check lets the write go ahead: a skipped run does not need its
+    /// command, which the withdrawal's own object deletion may already have
+    /// removed.
+    ///
+    /// The writes are synchronous index calls, so they run on the blocking
+    /// pool while the transaction keeps both rows locked, as Settle's index
+    /// writes do (PR 3, e2873401, N-6): the rebuild runs inside ingest's
+    /// worker route and never parks a runtime worker the routes share.
+    ///
+    /// A blocking task is not cancelled when the future awaiting it is
+    /// dropped. If this future is dropped while the writes run, the
+    /// transaction rolls back and releases both locks, and the writes go on.
+    /// The rebuild route therefore runs the rebuild in a task of its own, so
+    /// a client disconnect does not drop it (review of the follow-up wave,
+    /// m1), as Settle's index dispatch runs in a task that owns its
+    /// transaction (PR 3, b14d25e9). The route also runs one rebuild per
+    /// tenant at a time and its shutdown waits for running rebuilds with the
+    /// worker's grace period (`PipelineIndexRebuilds` in ingest; Zaki's
+    /// re-review of #1166, Low). Four cases still release the locks while a
+    /// write goes on: a lost database session, a rebuild aborted past the
+    /// shutdown grace period, the process exit, and a deadline that passes
+    /// with a call in flight. In each, a withdrawal can commit and queue the
+    /// run's invalidation at once, since the run is `complete` and holds no
+    /// lease for Settle's fence to wait out. The committed fence closes
+    /// these cases: no worker, in this process or in another replica,
+    /// claims that invalidation until the fence has expired, and it expires
+    /// only after the last write the deadline let start has returned, as
+    /// long as each index call returns within the margin. Withdrawals come
+    /// from clients, from `main`'s retention maintenance and from the
+    /// revocation-propagation reconciler, so the guarantee is not that none
+    /// happens: it is that none is removed from the index before the
+    /// rebuild's last write lands. A lost rebuild's fence delays the
+    /// tenant's invalidations by at most the run deadline plus the margin
+    /// (90 seconds at the defaults).
+    ///
+    /// The rows are held no longer than a deadline, as Settle's dispatch
+    /// holds its rows (merge review I1; PR 3, 82d276c1): the smaller of
+    /// Settle's configured lease and `PIPELINE_INDEX_DISPATCH_BUDGET_SECONDS`.
+    /// Since PR 5 the deadline starts just before the fence write, not once
+    /// both locks are held: the fence's end, which the database reads from
+    /// its own clock after that, then reaches past the deadline plus the
+    /// margin, and the lock wait counts against the deadline. A run whose
+    /// lock wait outlasts the deadline fails as `index_unavailable` and
+    /// writes nothing; a run never writes later than before. The deadline
+    /// is monotonic (`std::time::Instant`), so a step of the application's
+    /// wall clock cannot let an upsert start after the fence's end. No upsert
+    /// starts past the deadline. At the deadline the transaction rolls back
+    /// at once, so the rows are free, the rebuild waits at most the margin
+    /// for the call in flight, and it fails closed as `index_unavailable`
+    /// without writing the later runs. A rerun is safe: every upsert is
+    /// idempotent. So a slow index holds a withdrawal of the run (and the
+    /// session's uploads queued behind it) no longer than the deadline.
+    ///
+    /// What stays: ingest's rebuild route refuses a tenant its own process
+    /// routes or drains (`pipeline_index_rebuild_tenant_active`, merge
+    /// review M1), because a Score of that tenant must not read a partly
+    /// rebuilt index. That refusal reaches only its own process, so the
+    /// restore runbook still starts every process with both tenant lists
+    /// unset for the rebuild (`backup-restore.md`, step 3).
+    async fn rebuild_index_run(
+        &self,
+        run: &PipelineRunRecord,
+        writer: &Arc<dyn IdentifiedIndexWriter>,
+        fence_id: Uuid,
+    ) -> anyhow::Result<PipelineIndexRebuildRun> {
+        let command = match self
+            .committed_evidence::<ScoreEvidence>(run, Phase::Score)
+            .await
+        {
+            Ok(evidence) => self.load_index_command(run, &evidence).await,
+            Err(error) => Err(error),
+        };
+        let mut client = self.backend.trace_pool().get().await?;
+        // Merge review I1, as Settle's dispatch (PR 3, 82d276c1): the rows
+        // are held no longer than the smaller of Settle's lease and the
+        // dispatch budget, and no upsert starts past that deadline. PR 5:
+        // the deadline starts before the fence write, so the fence's end,
+        // read from the database's clock after this, reaches past the
+        // deadline plus the margin. The deadline is on the monotonic clock,
+        // so a step of the wall clock cannot let an upsert start after the
+        // fence's end.
+        let run_deadline = self
+            .lease_config
+            .settle()
+            .min(Duration::seconds(PIPELINE_INDEX_DISPATCH_BUDGET_SECONDS))
+            .to_std()
+            .unwrap_or_default();
+        let deadline = std::time::Instant::now() + run_deadline;
+        let margin = self.index_rebuild_fence_margin;
+        PgPipelineStore::set_index_rebuild_fence_on(
+            &mut client,
+            &run.tenant_id,
+            fence_id,
+            run_deadline + margin,
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!(PIPELINE_INDEX_REBUILD_FENCE_UNAVAILABLE_LABEL))?;
+        // READ COMMITTED, stated (G14): the re-check of the run, a statement
+        // after the lock of the run row, must see an invalidation that
+        // committed before that lock was granted.
+        let tx =
+            PgPipelineStore::read_committed_tenant_transaction(&mut client, &run.tenant_id).await?;
+        if !PgPipelineStore::lock_rebuildable_index_run_on_tx(&tx, run).await? {
+            tx.commit().await?;
+            return Ok(PipelineIndexRebuildRun::Skipped);
+        }
+        let command = command?.ok_or_else(|| anyhow::anyhow!("index_command_invalid"))?;
+        let command_hash = run
+            .index_command_hash
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("index_command_invalid"))?;
+        let tenant = pipeline_tenant_storage_ref(&run.tenant_id);
+        let entries = command
+            .keyed_entries(&tenant)
+            .map(|(key, entry)| (key, entry.embedding.clone(), entry.content_hash.clone()))
+            .collect::<Vec<_>>();
+        let writer = writer.clone();
+        let mut writes = tokio::task::spawn_blocking(move || {
+            let mut entry_count = 0usize;
+            let mut unchanged_entry_count = 0usize;
+            for (key, embedding, content_hash) in &entries {
+                if std::time::Instant::now() >= deadline {
+                    return Err(anyhow::anyhow!(PIPELINE_INDEX_UNAVAILABLE_LABEL));
+                }
+                match writer.upsert(key, embedding, content_hash) {
+                    Ok(IndexUpsertResult::Inserted) => {}
+                    Ok(IndexUpsertResult::Unchanged) => unchanged_entry_count += 1,
+                    Err(error) => return Err(anyhow::anyhow!("index rebuild failed: {error}")),
+                }
+                entry_count += 1;
+            }
+            Ok((entry_count, unchanged_entry_count))
+        });
+        let budget = deadline.saturating_duration_since(std::time::Instant::now());
+        let (entry_count, unchanged_entry_count) =
+            match tokio::time::timeout(budget, &mut writes).await {
+                Ok(joined) => {
+                    joined.map_err(|_| anyhow::anyhow!(PIPELINE_BLOCKING_CALL_FAILED_LABEL))??
+                }
+                Err(_) => {
+                    // Past the deadline: roll back at once, so the rows are
+                    // free, then wait (bounded by the fence margin) for the
+                    // call in flight to return. A call that has not returned
+                    // by then is reported as such, so the rebuild leaves its
+                    // fence to expire rather than clearing it.
+                    drop(tx);
+                    drop(client);
+                    if tokio::time::timeout(margin, writes).await.is_err() {
+                        return Err(anyhow::Error::new(IndexRebuildWriteInFlight));
+                    }
+                    return Err(anyhow::anyhow!(PIPELINE_INDEX_UNAVAILABLE_LABEL));
+                }
+            };
+        tx.commit().await?;
+        Ok(PipelineIndexRebuildRun::Rebuilt {
+            command_hash,
+            entry_count,
+            unchanged_entry_count,
+        })
+    }
+
     /// Claims the next due run for `tenant_id` and advances it one phase.
     /// The claim itself picks the lease by the claimed row's own
-    /// `next_phase`; see `PgPipelineStore::claim_next`.
+    /// `next_phase`; see `PgPipelineStore::claim_next`. A background task
+    /// renews that lease for as long as the phase actually runs (bounded by
+    /// `PIPELINE_LEASE_RENEWAL_CAP_FACTOR`), so a phase slower than its own
+    /// claim's lease is not mistaken for a crashed worker mid-run; the
+    /// renewal task never runs inside this call's own transactions, and is
+    /// always stopped before this call returns.
     pub async fn process_one(&self, tenant_id: &str) -> anyhow::Result<Option<PipelineRunRecord>> {
         let Some(run) = self.store.claim_next(tenant_id, self.lease_config).await? else {
             return Ok(None);
         };
-        self.process_claimed_run(run).await
+        let renewal = PipelineLeaseRenewal::start(self.store.clone(), &run, self.lease_config);
+        let result = self.process_claimed_run(run).await;
+        if let Some(renewal) = renewal {
+            renewal.stop().await;
+        }
+        result
     }
 
     /// Claims a specific run and advances it one phase. The claim itself
     /// picks the lease by the row's own `next_phase` in SQL -- there is no
     /// separate read of the run before the claim, so a phase commit that
     /// lands concurrently can
-    /// never hand out a lease sized for a phase the row is no longer in.
+    /// never hand out a lease sized for a phase the row is no longer in. As
+    /// with `process_one`, a background task renews that lease for as long
+    /// as the phase runs, stopped before this call returns.
     pub async fn process_run(
         &self,
         tenant_id: &str,
@@ -7658,7 +10115,12 @@ impl PipelineService {
         else {
             return Ok(None);
         };
-        self.process_claimed_run(run).await
+        let renewal = PipelineLeaseRenewal::start(self.store.clone(), &run, self.lease_config);
+        let result = self.process_claimed_run(run).await;
+        if let Some(renewal) = renewal {
+            renewal.stop().await;
+        }
+        result
     }
 
     /// Loads the run's bound bundle and dispatches its current phase,
@@ -7753,6 +10215,20 @@ impl PipelineService {
                         )
                         .await;
                 }
+                // GRD-004 / FR3: the phase's own commit found its bound policy
+                // no longer runnable -- an operator suspended it after the
+                // load-time check above passed. The commit wrote nothing, so
+                // this is the same uncharged suspension with backoff as a
+                // policy that was not runnable at load: the run keeps its
+                // bundle and continues under it after the resume.
+                if label == PIPELINE_POLICY_NOT_RUNNABLE_LABEL {
+                    return self
+                        .mark_transient_retry_or_record_lease_expired(
+                            &run,
+                            PIPELINE_POLICY_NOT_RUNNABLE_LABEL,
+                        )
+                        .await;
+                }
                 // D9 / FR3: a typed `PolicyError` raised while a
                 // phase runs is budgeted by kind, ahead of the P2 string
                 // allowlist below -- a transient failure (an outage or a
@@ -7788,7 +10264,11 @@ impl PipelineService {
                 // Ruling FR3: a settlement adapter the service does not hold
                 // is a deployment gap, not the trace's fault -- the same
                 // uncharged suspension as a missing bound dependency. So is
-                // a missing per-instrument cap.
+                // a missing per-instrument cap. (An artifact store that
+                // cannot derive a compatibility Score's object key, or
+                // prepares the object under another key, is a failed store
+                // call: the typed transient `PolicyError` above, from
+                // `artifact_store_call`.)
                 if let Some(gap) = [
                     PIPELINE_SETTLEMENT_ADAPTER_MISSING_LABEL,
                     PIPELINE_SETTLEMENT_CAP_MISSING_LABEL,
@@ -7812,7 +10292,8 @@ impl PipelineService {
                     | "score_outcome_invalid"
                     | "settlement_operation_mismatch"
                     | "review_output_invalid"
-                    | "submission_inoperable" => label.as_str(),
+                    | "submission_inoperable"
+                    | PIPELINE_ATTEMPT_ARTIFACT_MISSING_LABEL => label.as_str(),
                     _ => PIPELINE_OPERATIONAL_ERROR_LABEL,
                 };
                 self.mark_retry_or_record_lease_expired(&run, retry_label)
@@ -8133,15 +10614,17 @@ impl PipelineService {
                             "review_output_invalid"
                         );
                         let object_id = pipeline_attempt_object_id(
-                            "approved",
+                            PipelineAttemptArtifact::Approved.as_str(),
                             run.run_id,
                             required_lease_token(run)?,
                         );
                         let wrapper = encode_pipeline_artifact_bytes(content.bytes())?;
+                        // Prepared, staged (PR 4), then published; both
+                        // object-store calls run on the blocking pool (N-6).
                         let store = self.artifact_store.clone();
                         let tenant = pipeline_tenant_storage_ref(&run.tenant_id);
-                        let receipt = artifact_store_call(move || {
-                            store.put_serialized_json(
+                        let prepared = artifact_store_call(move || {
+                            store.prepare_serialized_json(
                                 tenant.as_str(),
                                 TraceArtifactKind::ContributionEnvelope,
                                 &object_id,
@@ -8149,6 +10632,19 @@ impl PipelineService {
                             )
                         })
                         .await?;
+                        self.store
+                            .stage_attempt_artifact(
+                                run,
+                                PipelineAttemptArtifact::Approved,
+                                &prepared.receipt().object_key,
+                                &prepared.receipt().ciphertext_sha256,
+                                self.attempt_artifact_cleanup_after(Phase::Review),
+                            )
+                            .await?;
+                        let store = self.artifact_store.clone();
+                        let receipt =
+                            artifact_store_call(move || store.publish_serialized_json(&prepared))
+                                .await?;
                         self.inject_crash(PipelineCrashPoint::AfterReviewArtifactStorage)?;
                         written_receipt = Some(receipt.clone());
                         Some(ApprovedRevision {
@@ -8201,9 +10697,11 @@ impl PipelineService {
                         // inoperable refusal the same way.
                         return Err(match error {
                             DatabaseError::Constraint(label)
-                                if label == PIPELINE_SUBMISSION_INOPERABLE_LABEL =>
+                                if label == PIPELINE_SUBMISSION_INOPERABLE_LABEL
+                                    || label == PIPELINE_ATTEMPT_ARTIFACT_MISSING_LABEL
+                                    || label == PIPELINE_POLICY_NOT_RUNNABLE_LABEL =>
                             {
-                                anyhow::anyhow!(PIPELINE_SUBMISSION_INOPERABLE_LABEL)
+                                anyhow::anyhow!(label)
                             }
                             error => error.into(),
                         });
@@ -8249,6 +10747,20 @@ impl PipelineService {
     /// releases its run uncharged (`release_score_lock_busy`), and a lease
     /// that has passed stops the Score before it scores (uncharged, as a
     /// stale lease). Another family's Score (the minimal one) takes no lock.
+    ///
+    /// Rebase 10, option D: a compatibility Score also stages its attempt
+    /// rows (PR 4) before it opens that transaction
+    /// (`stage_score_artifacts_before_lock`): one row for each artifact it
+    /// can write, under the object key the store derives for the attempt's
+    /// lease token before any content exists, with no hash yet, on a short
+    /// transaction of its own that commits and returns its connection
+    /// first. So it still holds one pooled connection at a time, and every
+    /// object it publishes already has a committed `staged` row. That
+    /// transaction takes only the foreign key's `FOR KEY SHARE` on the run
+    /// row and ends before the Score lock is requested, so it adds no
+    /// lock-order pair. A Score that then finds the lock held has published
+    /// nothing, so the transaction that releases its run also deletes those
+    /// rows (`release_score_lock_busy`).
     async fn commit_score_phase(
         &self,
         run: &PipelineRunRecord,
@@ -8261,9 +10773,10 @@ impl PipelineService {
         let reviewed_artifact = self.load_approved_bytes(run).await?;
         if bundle.package.manifest.score.implementation_id != COMPATIBILITY_SCORE_IMPLEMENTATION {
             return self
-                .score_and_commit(run, bundle, revision_id, reviewed_artifact, None)
+                .score_and_commit(run, bundle, revision_id, reviewed_artifact, None, None)
                 .await;
         }
+        let prestaged = self.stage_score_artifacts_before_lock(run).await?;
         let mut client = self.backend.trace_pool().get().await?;
         let lock = PgPipelineStore::tenant_transaction(&mut client, &run.tenant_id).await?;
         // Multi-lens review L3-2: the lock is tried, never waited for. A
@@ -8315,13 +10828,76 @@ impl PipelineService {
         let bundle = self
             .construct_with_index_reader(bundle.package.clone(), reader)
             .map_err(|label| anyhow::anyhow!(label))?;
-        self.score_and_commit(run, &bundle, revision_id, reviewed_artifact, Some(lock))
-            .await
+        self.score_and_commit(
+            run,
+            &bundle,
+            revision_id,
+            reviewed_artifact,
+            Some(lock),
+            Some(&prestaged),
+        )
+        .await
+    }
+
+    /// Stages a compatibility Score attempt's rows before it takes its
+    /// tenant's Score lock (rebase 10, option D): derives the object key of
+    /// each artifact it can write (`index-command`, `score-neighbors`) from
+    /// the run and its lease token (`pipeline_attempt_object_id`) through
+    /// the store, before any content exists, and stages a row with that key
+    /// and no hash (`PgPipelineStore::stage_unhashed_attempt_artifacts`). A
+    /// store that cannot derive a key refuses
+    /// (`serialized_json_object_key_unavailable`), and one whose derivation
+    /// fails otherwise reports `artifact_store_unavailable`: the Score stops
+    /// before it scores, and the run waits in retry without being charged,
+    /// as any failed store call does (`artifact_store_call`, ruling FR3;
+    /// rebase 10 review, M2).
+    async fn stage_score_artifacts_before_lock(
+        &self,
+        run: &PipelineRunRecord,
+    ) -> anyhow::Result<PrestagedScoreArtifacts> {
+        let lease_token = required_lease_token(run)?;
+        let tenant = pipeline_tenant_storage_ref(&run.tenant_id);
+        let run_id = run.run_id;
+        // The derivation is a synchronous store call, so it runs on the
+        // blocking pool, as every other object-store call of a phase does
+        // (PR 3, e2873401, N-6), and its failure is the uncharged
+        // suspension of every failed store call (PR 3, c8d65fcb).
+        let store = self.artifact_store.clone();
+        let object_keys = artifact_store_call(move || {
+            [
+                PipelineAttemptArtifact::IndexCommand,
+                PipelineAttemptArtifact::ScoreNeighbors,
+            ]
+            .into_iter()
+            .map(|artifact| {
+                store
+                    .serialized_json_object_key(
+                        tenant.as_str(),
+                        artifact.store_kind(),
+                        &pipeline_attempt_object_id(artifact.as_str(), run_id, lease_token),
+                    )
+                    .map(|object_key| (artifact, object_key))
+            })
+            .collect::<anyhow::Result<Vec<_>>>()
+        })
+        .await?;
+        let publish_deadline = self.attempt_artifact_lease_bound(Phase::Score);
+        let cleanup_after = publish_deadline + PIPELINE_ATTEMPT_ARTIFACT_COMMIT_MARGIN;
+        self.store
+            .stage_unhashed_attempt_artifacts(run, &object_keys, cleanup_after)
+            .await?;
+        Ok(PrestagedScoreArtifacts {
+            object_keys,
+            publish_deadline,
+        })
     }
 
     /// `commit_score_phase`'s Score and commit over `reviewed_artifact`.
     /// The commit runs on `lock` when the caller holds the tenant's Score
-    /// lock on it, and on a transaction of its own otherwise.
+    /// lock on it, and on a transaction of its own otherwise. `prestaged`
+    /// is the rows a compatibility Score staged before that lock (rebase 10,
+    /// option D); with none, each object's row is staged here, with its
+    /// hash, just before the object is published.
     async fn score_and_commit(
         &self,
         run: &PipelineRunRecord,
@@ -8329,6 +10905,7 @@ impl PipelineService {
         revision_id: Uuid,
         reviewed_artifact: Vec<u8>,
         lock: Option<Transaction<'_>>,
+        prestaged: Option<&PrestagedScoreArtifacts>,
     ) -> anyhow::Result<PipelineRunRecord> {
         let tenant = pipeline_tenant_storage_ref(&run.tenant_id);
         let output = bundle
@@ -8357,6 +10934,7 @@ impl PipelineService {
         // artifact is stored, rather than at the database CHECK.
         ensure_trace_credit_awards_fit_the_ledger(result.decision.awards())?;
         let lease_token = required_lease_token(run)?;
+        let cleanup_after = self.attempt_artifact_cleanup_after(Phase::Score);
         let command_bytes = match &command {
             None => None,
             Some(command) => {
@@ -8368,8 +10946,14 @@ impl PipelineService {
             }
         };
         // Each stored object is `(artifact, stored ref, hash, object ref,
-        // receipt)`. A write that fails deletes the objects stored before it
-        // (best effort), as a refused commit does below.
+        // receipt)`. Each has a committed `staged` row (PR 4) before it is
+        // published: staged here, with its hash, for a Score that takes no
+        // tenant lock, or before the lock, with no hash, for a compatibility
+        // Score (`prestaged`). A write that fails deletes the objects stored
+        // before it (best effort), as a refused commit does below; an
+        // attempt that crashes before its commit leaves every object it
+        // stored named by a `staged` row that `sweep_attempt_artifacts`
+        // removes once `cleanup_after` passes.
         let mut written: Vec<(
             &str,
             String,
@@ -8380,31 +10964,78 @@ impl PipelineService {
         for (artifact, bytes, hash) in [
             command_bytes
                 .as_ref()
-                .map(|(bytes, hash)| ("index-command", bytes, hash.clone())),
-            neighbor
-                .as_ref()
-                .map(|bytes| ("score-neighbors", bytes, sha256_prefixed(bytes))),
+                .map(|(bytes, hash)| (PipelineAttemptArtifact::IndexCommand, bytes, hash.clone())),
+            neighbor.as_ref().map(|bytes| {
+                (
+                    PipelineAttemptArtifact::ScoreNeighbors,
+                    bytes,
+                    sha256_prefixed(bytes),
+                )
+            }),
         ]
         .into_iter()
         .flatten()
         {
-            let put = match encode_pipeline_artifact_bytes(bytes) {
-                Ok(wrapper) => {
-                    let store = self.artifact_store.clone();
-                    let tenant = tenant.clone();
-                    let object_id = pipeline_attempt_object_id(artifact, run.run_id, lease_token);
-                    artifact_store_call(move || {
-                        store.put_serialized_json(
-                            tenant.as_str(),
-                            TraceArtifactKind::VectorPayload,
-                            &object_id,
-                            &wrapper,
-                        )
-                    })
-                    .await
+            // Stage the object's row (PR 4), then publish it. A failure here
+            // deletes the objects this attempt already published, best
+            // effort, as a refused commit does below; their `staged` rows
+            // stay for `sweep_attempt_artifacts`. Both object-store calls
+            // run on the blocking pool (N-6).
+            let put: anyhow::Result<EncryptedTraceArtifactReceipt> = async {
+                let wrapper = encode_pipeline_artifact_bytes(bytes)?;
+                let store = self.artifact_store.clone();
+                let prepare_tenant = tenant.clone();
+                let object_id =
+                    pipeline_attempt_object_id(artifact.as_str(), run.run_id, lease_token);
+                let prepared = artifact_store_call(move || {
+                    store.prepare_serialized_json(
+                        prepare_tenant.as_str(),
+                        TraceArtifactKind::VectorPayload,
+                        &object_id,
+                        &wrapper,
+                    )
+                })
+                .await?;
+                match prestaged {
+                    // Rebase 10, option D: the row was staged before the
+                    // tenant lock, under the key the store derived then. A
+                    // prepared key that differs would publish an object no
+                    // row names, so it fails closed before the publish, as
+                    // the uncharged suspension of a failed store call
+                    // (`artifact_store_call`). Past `publish_deadline` the
+                    // attempt's lease is certainly gone and the sweep may
+                    // soon remove its rows, so it publishes nothing and stops
+                    // as a stale lease.
+                    Some(prestaged) => {
+                        if prestaged.object_key(artifact)
+                            != Some(prepared.receipt().object_key.as_str())
+                        {
+                            return Err(PolicyError::transient(
+                                PIPELINE_ATTEMPT_OBJECT_KEY_MISMATCH_LABEL,
+                            )
+                            .expect("static label")
+                            .into());
+                        }
+                        if Utc::now() >= prestaged.publish_deadline {
+                            return Err(stale_lease_error().into());
+                        }
+                    }
+                    None => {
+                        self.store
+                            .stage_attempt_artifact(
+                                run,
+                                artifact,
+                                &prepared.receipt().object_key,
+                                &prepared.receipt().ciphertext_sha256,
+                                cleanup_after,
+                            )
+                            .await?;
+                    }
                 }
-                Err(error) => Err(error),
-            };
+                let store = self.artifact_store.clone();
+                artifact_store_call(move || store.publish_serialized_json(&prepared)).await
+            }
+            .await;
             let receipt = match put {
                 Ok(receipt) => receipt,
                 Err(error) => {
@@ -8419,13 +11050,13 @@ impl PipelineService {
             };
             let object_ref = score_object_ref(
                 run,
-                artifact,
+                artifact.as_str(),
                 &receipt,
                 bytes.len(),
                 &self.object_store_name,
             );
             written.push((
-                artifact,
+                artifact.as_str(),
                 format!("{}#{}", receipt.object_key, receipt.ciphertext_sha256),
                 hash,
                 object_ref,
@@ -8480,7 +11111,11 @@ impl PipelineService {
                 // whatever refused the commit -- an inoperable submission, a
                 // stale lease, `settlement_adapter_missing`, or anything else
                 // (Zaki review 1, round 2, finding 4). Best effort: a failed
-                // delete never masks the refusal.
+                // delete never masks the refusal. Their `staged` rows (PR 4)
+                // stay, because the commit that would have committed them
+                // rolled back; once `cleanup_after` passes,
+                // `sweep_attempt_artifacts` finds each object absent and drops
+                // its row, or deletes an object whose delete failed here.
                 if phase_commit_refused(&error) {
                     self.delete_attempt_objects(
                         &run.tenant_id,
@@ -8496,7 +11131,9 @@ impl PipelineService {
                 return Err(match error {
                     DatabaseError::Constraint(label)
                         if label == PIPELINE_SETTLEMENT_ADAPTER_MISSING_LABEL
-                            || label == PIPELINE_SUBMISSION_INOPERABLE_LABEL =>
+                            || label == PIPELINE_SUBMISSION_INOPERABLE_LABEL
+                            || label == PIPELINE_ATTEMPT_ARTIFACT_MISSING_LABEL
+                            || label == PIPELINE_POLICY_NOT_RUNNABLE_LABEL =>
                     {
                         anyhow::anyhow!(label)
                     }
@@ -8678,6 +11315,18 @@ impl PipelineService {
                 };
                 let stored = StoredPhaseResult::from_result(Phase::Settle, &result)?;
                 let selection_hash = sha256_prefixed(&serde_json::to_vec(&stored)?);
+                // GRD-004: a run that reaches this point under a suspended
+                // Settle policy stores no new selection. A selection that is
+                // already stored is not read here, and is reused after the
+                // resume. The read takes its own pooled connection, and this
+                // attempt holds none.
+                if !self
+                    .store
+                    .policy_is_runnable(&run.tenant_id, &run.bundle_id, Phase::Settle)
+                    .await?
+                {
+                    return Err(anyhow::anyhow!(PIPELINE_POLICY_NOT_RUNNABLE_LABEL));
+                }
                 run = self
                     .store
                     .persist_settle_selection(&run, &stored, &selection_hash, membership)
@@ -8736,6 +11385,14 @@ impl PipelineService {
                     );
                 }
                 IndexDispatchOutcome::Complete(updated) => run = updated,
+                // GRD-004: the Settle policy was suspended before the dispatch
+                // transaction took its row. No upsert started and nothing was
+                // written (`pending` stays), so the run is released uncharged,
+                // bare, as `process_claimed_run` classifies it, and the retry
+                // after the resume dispatches from the stored selection.
+                IndexDispatchOutcome::PolicyNotRunnable => {
+                    return Err(anyhow::anyhow!(PIPELINE_POLICY_NOT_RUNNABLE_LABEL));
+                }
                 IndexDispatchOutcome::WriteFailed(
                     IndexWriteError::Uncertain | IndexWriteError::Failed,
                 ) => {
@@ -9003,6 +11660,21 @@ impl PipelineService {
                 // still holds, the same check Step 5 runs before the index
                 // write.
                 self.ensure_live_lease(&run).await?;
+                // GRD-004: the policy guard of the external call, beside the
+                // lease fence and before the leg is marked leased: no call
+                // is dispatched under a Settle policy that is not runnable.
+                // The read takes its own pooled connection, as the lease
+                // fence does, and this attempt holds none here. A leg whose
+                // call is already in flight is not retracted; this leg stays
+                // as it is and the run is released uncharged
+                // (`process_claimed_run`), to continue after the resume.
+                if !self
+                    .store
+                    .policy_is_runnable(&run.tenant_id, &run.bundle_id, Phase::Settle)
+                    .await?
+                {
+                    return Err(anyhow::anyhow!(PIPELINE_POLICY_NOT_RUNNABLE_LABEL));
+                }
                 // The leg is `leased` under this attempt's lease
                 // while its adapter call is in flight, and `dispatched_at`
                 // records that it was dispatched -- a failed run reconciles
@@ -9101,6 +11773,18 @@ impl PipelineService {
                                 .await?;
                             held = true;
                             continue;
+                        }
+                        // GRD-004: the Settle policy was suspended while this
+                        // leg's adapter call was in flight. The call is not
+                        // retracted and the leg stays as it is (`leased`, as
+                        // after a crash between the call and this
+                        // transaction), the ledger transaction wrote nothing,
+                        // and the run is released uncharged, bare, as
+                        // `process_claimed_run` classifies it. After the
+                        // resume the retry repeats the idempotent call and
+                        // this transaction.
+                        Ok(InternalCreditResult::PolicyNotRunnable) => {
+                            return Err(anyhow::anyhow!(PIPELINE_POLICY_NOT_RUNNABLE_LABEL));
                         }
                         // The ledger transaction's own
                         // submission re-check found the submission
@@ -9384,10 +12068,25 @@ impl PipelineService {
             evaluation,
         };
         let outcome = StoredPhaseResult::from_result(Phase::Settle, &result)?;
-        let updated = self
+        let updated = match self
             .store
             .commit_settle(run, outcome, final_membership)
-            .await?;
+            .await
+        {
+            Ok(updated) => updated,
+            // GRD-004: the Settle policy was suspended while the phase ran.
+            // The store's `Display` prefixes every `Constraint` error, which
+            // would not match the label `process_claimed_run` classifies
+            // verbatim (as for Review and Score above), so it is re-raised
+            // bare. The commit wrote nothing; the legs this attempt completed
+            // stay complete, and the retry after the resume commits from them.
+            Err(DatabaseError::Constraint(label))
+                if label == PIPELINE_POLICY_NOT_RUNNABLE_LABEL =>
+            {
+                return Err(anyhow::anyhow!(label));
+            }
+            Err(error) => return Err(error.into()),
+        };
         self.inject_crash(PipelineCrashPoint::AfterSettleCommit)?;
         Ok(updated)
     }
@@ -9507,13 +12206,19 @@ impl PipelineService {
     ///    is only a snapshot; a withdrawal can land in the gap between that
     ///    read and this transaction, and must forfeit the pending award
     ///    rather than let it be paid);
-    /// 5. inserts the ledger row idempotently (the event id is derived from
+    /// 5. locks the Settle policy's status row `FOR SHARE` as the last lock
+    ///    (`lock_runnable_policy`, GRD-004) and, when the policy is no longer
+    ///    runnable, returns `PolicyNotRunnable` and rolls the transaction back
+    ///    with nothing written: a suspension that returned to the operator
+    ///    stops the credit event and its batch, and one that is waiting for
+    ///    this transaction waits for it to end;
+    /// 6. inserts the ledger row idempotently (the event id is derived from
     ///    the run and its Score outcome);
-    /// 6. if that event is already final, reuses the one finalized batch that
+    /// 7. if that event is already final, reuses the one finalized batch that
     ///    carries it; otherwise composes the batch from the account's pending
     ///    events, writes it finalized, sets its `instrument_id`, and marks
     ///    those events final;
-    /// 7. completes the settlement row with the receipt's result reference
+    /// 8. completes the settlement row with the receipt's result reference
     ///    and external receipt hash, the event, and the batch. A receipt hash
     ///    another leg already recorded is refused here, and the whole
     ///    transaction rolls back.
@@ -9669,6 +12374,18 @@ impl PipelineService {
         if !submission_operable {
             // Dropping the transaction rolls it back: nothing was written.
             return Ok(InternalCreditResult::Inoperable);
+        }
+        // GRD-004: the Settle policy of the run's bundle must still be
+        // runnable, and stays so until this transaction ends. The load-time
+        // check and the leg's own dispatch check are snapshots, and a
+        // suspension can land after both; this one is under the policy row's
+        // lock, the last lock taken (run row, account lock, submission row,
+        // policy row) and before the first write, so a suspension that
+        // returned to the operator before this point writes no credit event
+        // and no batch, and one that has not yet returned waits for this
+        // transaction. Dropping the transaction rolls it back.
+        if !lock_runnable_policy(&tx, &run.tenant_id, &run.bundle_id, Phase::Settle).await? {
+            return Ok(InternalCreditResult::PolicyNotRunnable);
         }
         // Rulings T15-6 and T15-12: `main` appends a `NoveltyUtility` event
         // only when its credit checks pass. A compatibility leg one of them
@@ -10060,7 +12777,8 @@ impl PipelineService {
     /// after Settle, outside any run lease, and never writes a phase
     /// outcome.
     ///
-    /// The work list (`PgPipelineStore::list_payout_work_on`) is split in
+    /// The work list (`PgPipelineStore::list_payout_work_on`, which leaves out
+    /// a `pending` leg whose bundle's Settle policy is not runnable) is split in
     /// two:
     ///
     /// - A `submitted` leg only needs its confirmation looked up, which can
@@ -10079,6 +12797,18 @@ impl PipelineService {
     ///   is something to submit, and the locked work runs on the lock's own
     ///   connection, never on a second one (the pool-size-one rule). Every
     ///   path to `NearPayoutAdapter::submit` runs under this lock.
+    /// - Before each submit to the adapter -- a first submit, never a
+    ///   confirmation lookup -- the pass reads the Settle policy of the run's
+    ///   own bundle (GRD-004; `settle_policy_allows_dispatch`, called from
+    ///   `dispatch_near_settlements`). A submit that the policy holds back
+    ///   writes nothing, charges nothing, and leaves the payout as it was, so
+    ///   the run is due again in a later pass; the run is not counted, and the
+    ///   pass goes on to its other runs. A `submitted` payout is still
+    ///   confirmed while the policy is suspended: the policy guards what is
+    ///   dispatched, and an operation the adapter already accepted is
+    ///   neither retracted nor left unconfirmed. The read is made on the
+    ///   connection the pass holds, so the guard takes no second connection
+    ///   (the pool-size-one rule).
     ///
     /// Ruling T10-5: an error in one run's payout -- a missing batch, a
     /// call that cannot be built, confirmation evidence that is not
@@ -10145,6 +12875,13 @@ impl PipelineService {
     /// pass, this also takes up a `failed` payout again, does not wait for
     /// the confirmation interval, and returns a per-run error to its caller
     /// instead of recording it.
+    ///
+    /// It shares the pass's dispatch guard (GRD-004): a submit, a retry of a
+    /// `failed` payout included, is held back while the Settle policy of the
+    /// run's bundle is not runnable. Then nothing is written, charged, or
+    /// called, and the run is returned untouched, as for a run that has
+    /// nothing to pay now. A confirmation lookup of a `submitted` payout is
+    /// not a dispatch and proceeds.
     pub async fn process_payout(
         &self,
         tenant_id: &str,
@@ -10165,6 +12902,12 @@ impl PipelineService {
             Some(client) => {
                 self.process_payout_on(client, tenant_id, run_id, true, true)
                     .await
+                    .map(|attempt| match attempt {
+                        PayoutAttempt::NoRun => None,
+                        // A held run is returned as a run with nothing to pay
+                        // now is: untouched.
+                        PayoutAttempt::Done(run) | PayoutAttempt::Held(run) => Some(run),
+                    })
             }
             None => Err(anyhow::anyhow!(PIPELINE_PAYOUT_LOCK_HELD_LABEL)),
         };
@@ -10190,6 +12933,8 @@ impl PipelineService {
     /// connection that holds the tenant's NEAR submit lock. The pass never
     /// takes up a `failed` payout again (Ruling F-I3), including one that
     /// failed after the pass listed it: only `process_payout` retries one.
+    /// A run that does not exist, or whose dispatch the Settle policy held
+    /// back, is not counted, and does not stop the runs after it.
     async fn pay_out_runs_on(
         &self,
         client: &mut deadpool_postgres::Client,
@@ -10203,11 +12948,8 @@ impl PipelineService {
                 .process_payout_on(client, tenant_id, run_id, may_submit, false)
                 .await
             {
-                Ok(run) => {
-                    if run.is_some() {
-                        processed += 1;
-                    }
-                }
+                Ok(PayoutAttempt::Done(_)) => processed += 1,
+                Ok(PayoutAttempt::NoRun | PayoutAttempt::Held(_)) => {}
                 Err(error)
                     if error.to_string() == INJECTED_PIPELINE_CRASH
                         || is_database_error(&error) =>
@@ -10232,6 +12974,8 @@ impl PipelineService {
 
     /// `process_payout`'s body, on `client`. `may_submit` as in
     /// `pay_out_runs_on`; `retry_failed` as in `dispatch_near_settlements`.
+    /// `Held` when `dispatch_near_settlements` held a submit back because the
+    /// Settle policy of the run's bundle is not runnable (GRD-004).
     async fn process_payout_on(
         &self,
         client: &mut deadpool_postgres::Client,
@@ -10239,7 +12983,7 @@ impl PipelineService {
         run_id: Uuid,
         may_submit: bool,
         retry_failed: bool,
-    ) -> anyhow::Result<Option<PipelineRunRecord>> {
+    ) -> anyhow::Result<PayoutAttempt> {
         let tx = PgPipelineStore::tenant_transaction(client, tenant_id).await?;
         let row = tx
             .query_opt(
@@ -10249,7 +12993,7 @@ impl PipelineService {
             .await?;
         tx.commit().await?;
         let Some(run) = row.as_ref().map(pipeline_run_from_row).transpose()? else {
-            return Ok(None);
+            return Ok(PayoutAttempt::NoRun);
         };
         // Zaki review 1, round 2, finding 16: a leg Settle completed and
         // ledgered is final, whatever the run did afterwards -- a run that
@@ -10257,9 +13001,14 @@ impl PipelineService {
         // own commit on its last attempt) still pays its completed leg, as a
         // withdrawal does not stop one. `dispatch_near_settlements` pays only
         // complete, payout-eligible legs.
-        self.dispatch_near_settlements(client, &run, may_submit, retry_failed)
+        let held = self
+            .dispatch_near_settlements(client, &run, may_submit, retry_failed)
             .await?;
-        Ok(Some(run))
+        Ok(if held {
+            PayoutAttempt::Held(run)
+        } else {
+            PayoutAttempt::Done(run)
+        })
     }
 
     /// Port lines 5114 to 5309, for PR 3. For each completed `trace_credit`
@@ -10306,15 +13055,29 @@ impl PipelineService {
     ///   re-read here sees that.
     /// - Confirmation evidence is hash-only (else `near_confirmation_invalid`);
     ///   the evidence and the `confirmed` status commit together.
+    /// - The one policy guard (GRD-004) sits at the dispatch, where a line
+    ///   would be sent to the adapter -- a first submit, or a new submit of a
+    ///   `failed` line under `retry_failed` -- and before anything that
+    ///   belongs to it is written (the outbox line, the payout state): the
+    ///   Settle policy of the run's bundle must be runnable
+    ///   (`settle_policy_allows_dispatch`). A line held back is left as it
+    ///   was, and the settlement's payout state is not recomputed, because a
+    ///   line without a row would otherwise read as paid. A confirmation
+    ///   lookup of a `submitted` line is not a dispatch and is never guarded;
+    ///   it records what the adapter reports. Both callers reach the submit
+    ///   here, so no path dispatches around the guard.
+    ///
+    /// Returns whether any submit was held back by the guard.
     async fn dispatch_near_settlements(
         &self,
         client: &mut deadpool_postgres::Client,
         run: &PipelineRunRecord,
         may_submit: bool,
         retry_failed: bool,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<bool> {
+        let mut any_held = false;
         let Some((injected, config)) = self.payout.as_ref() else {
-            return Ok(());
+            return Ok(false);
         };
         // `main`'s NEAR settlement mode picks who pays, as it picks the
         // submitter and confirmer `main`'s outbox worker drives (Zaki review
@@ -10322,7 +13085,7 @@ impl PipelineService {
         // dry-run adapter under `dry_run`, and the injected one under `http`.
         let dry_run = DryRunNearPayoutAdapter;
         let adapter: &dyn NearPayoutAdapter = match config.controls.settlement_mode {
-            PipelineNearSettlementMode::Disabled => return Ok(()),
+            PipelineNearSettlementMode::Disabled => return Ok(false),
             PipelineNearSettlementMode::DryRun => &dry_run,
             PipelineNearSettlementMode::Http => injected.as_ref(),
         };
@@ -10398,6 +13161,7 @@ impl PipelineService {
 
             let mut contract_changed = false;
             let mut held_payout = None;
+            let mut dispatch_held = false;
             for (line, call, outbox_id, status) in &work {
                 let outbox_id = *outbox_id;
                 match status.as_deref() {
@@ -10406,6 +13170,13 @@ impl PipelineService {
                     Some("submitted") => {}
                     _ => {
                         if !may_submit {
+                            continue;
+                        }
+                        // GRD-004: the dispatch guard, before the contract
+                        // check, the outbox line, and the submit. A held line
+                        // changes nothing; it goes in a later pass.
+                        if !settle_policy_allows_dispatch(client, run).await? {
+                            dispatch_held = true;
                             continue;
                         }
                         if call.contract_id != near_contract_id {
@@ -10499,6 +13270,13 @@ impl PipelineService {
                 tx.commit().await?;
                 self.inject_crash(PipelineCrashPoint::AfterNearConfirm)?;
             }
+            if dispatch_held {
+                // A line was held back, so the lines that have a row do not
+                // say how the payout stands; its state stays as it was until
+                // the pass that dispatches the line.
+                any_held = true;
+                continue;
+            }
             if contract_changed {
                 set_payout_state_on(
                     client,
@@ -10524,8 +13302,53 @@ impl PipelineService {
                 record_payout_state_on(client, run, batch_id).await?;
             }
         }
-        Ok(())
+        Ok(any_held)
     }
+}
+
+/// What one run's payout attempt came to (`process_payout_on`).
+enum PayoutAttempt {
+    /// The run does not exist.
+    NoRun,
+    /// The attempt ran to its end: a confirmation lookup, a submit, or
+    /// nothing that was due.
+    Done(PipelineRunRecord),
+    /// A submit was held back because the Settle policy of the run's bundle
+    /// is not runnable (GRD-004). The run's payout is as it was; the pass
+    /// does not count it.
+    Held(PipelineRunRecord),
+}
+
+/// The payout's policy guard (GRD-004: the NEAR worker repeats its policy
+/// guard before dispatch): whether the Settle policy of the run's own bundle
+/// is runnable, so that a line may be sent to the adapter. No status row is
+/// not runnable, as at the start of a phase (`policy_is_runnable`). It is
+/// called immediately before a submit, by the one function both payout
+/// callers reach the submit through (`dispatch_near_settlements`), and
+/// never before a confirmation lookup.
+///
+/// The read is a short tenant transaction on `client`, the connection the
+/// payout already holds, so it takes no second connection (the pool-size-one
+/// rule) and no lock: the tenant's NEAR submit lock, which the caller holds
+/// across every submit, is unchanged, and nothing is held over the adapter
+/// call. A suspension that lands after the read takes effect at the next
+/// dispatch; a guard does not claim to retract an operation the adapter
+/// already accepted.
+async fn settle_policy_allows_dispatch(
+    client: &mut deadpool_postgres::Client,
+    run: &PipelineRunRecord,
+) -> anyhow::Result<bool> {
+    let tx = PgPipelineStore::tenant_transaction(client, &run.tenant_id).await?;
+    let runnable = tx
+        .query_opt(
+            "SELECT runnable FROM pipeline_bundle_policy_status
+              WHERE tenant_id = $1 AND bundle_id = $2 AND phase = 'settle'",
+            &[&run.tenant_id, &run.bundle_id],
+        )
+        .await?
+        .is_some_and(|row| row.get::<_, bool>("runnable"));
+    tx.commit().await?;
+    Ok(runnable)
 }
 
 /// The payout's result once the tenant's NEAR submit lock is released
@@ -10886,6 +13709,123 @@ fn decode_pipeline_artifact_bytes(wrapper: &serde_json::Value) -> anyhow::Result
         .map_err(|_| anyhow::anyhow!("pipeline_artifact_wrapper_invalid"))
 }
 
+/// One of the (at most three) objects a pipeline phase attempt writes under
+/// its own lease-token key (`pipeline_attempt_object_id`): Review's
+/// `approved` content, and Score's `index-command` and `score-neighbors`
+/// (PR 4). `as_str` is the exact string the `artifact` column of
+/// `pipeline_attempt_artifacts` stores and `pipeline_attempt_object_id`
+/// embeds in the object id; `from_db_str` is its inverse for a reader that
+/// only has the column's value, and `store_kind` is the `TraceArtifactKind`
+/// its write site stores it under (`ContributionEnvelope` for `approved`,
+/// `VectorPayload` for the two Score artifacts).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PipelineAttemptArtifact {
+    Approved,
+    IndexCommand,
+    ScoreNeighbors,
+}
+
+impl PipelineAttemptArtifact {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Approved => "approved",
+            Self::IndexCommand => "index-command",
+            Self::ScoreNeighbors => "score-neighbors",
+        }
+    }
+
+    fn from_db_str(value: &str) -> Option<Self> {
+        match value {
+            "approved" => Some(Self::Approved),
+            "index-command" => Some(Self::IndexCommand),
+            "score-neighbors" => Some(Self::ScoreNeighbors),
+            _ => None,
+        }
+    }
+
+    fn store_kind(&self) -> TraceArtifactKind {
+        match self {
+            Self::Approved => TraceArtifactKind::ContributionEnvelope,
+            Self::IndexCommand | Self::ScoreNeighbors => TraceArtifactKind::VectorPayload,
+        }
+    }
+}
+
+/// How many due rows one attempt sweep pass examines for each row it may
+/// remove (`PipelineService::sweep_attempt_artifacts`'s `limit`): enough to
+/// go on past rows it keeps, and a bound on one pass's work.
+pub const PIPELINE_ATTEMPT_SWEEP_EXAMINED_PER_REMOVAL: usize = 4;
+
+/// The key of the last due attempt row a sweep pass examined, in the
+/// sweep's order: the keyset cursor its next page, or the next pass
+/// (`PipelineService::sweep_attempt_artifacts_from`), reads after. Opaque
+/// outside this module; it holds no tenant id and is never logged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttemptSweepCursor {
+    cleanup_after: DateTime<Utc>,
+    run_id: Uuid,
+    lease_token: Uuid,
+    artifact: String,
+}
+
+/// What one attempt sweep pass did
+/// (`PipelineService::sweep_attempt_artifacts_from`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttemptSweepPass {
+    /// How many rows it removed.
+    pub removed: usize,
+    /// Where the next pass resumes; `None` to start at the oldest due row.
+    pub resume_after: Option<AttemptSweepCursor>,
+}
+
+/// The sweep could not delete a due attempt row's object (or could not
+/// tell whether it is gone); the row stays for the next pass.
+const PIPELINE_ATTEMPT_SWEEP_DELETE_FAILED: &str = "pipeline_attempt_sweep_delete_failed";
+/// A due attempt row with no hash names an object key other than the one
+/// the store derives from the row's artifact, run and lease token (rebase
+/// 10 review, M1); the row and that object stay.
+const PIPELINE_ATTEMPT_SWEEP_KEY_MISMATCH: &str = "pipeline_attempt_sweep_key_mismatch";
+
+/// What `PipelineService::sweep_attempt_artifacts` does with one due row
+/// once it has handled the row's object.
+enum AttemptSweepRow {
+    /// The object is gone; the row is deleted.
+    Remove,
+    /// The row stays, and the sweep logs this label, with the store's own
+    /// refusal label when it gave one.
+    Keep(&'static str, Option<String>),
+}
+
+/// The store's own refusal, when its text is a label (`^[a-z0-9_]{1,64}$`):
+/// the sweep logs it beside `pipeline_attempt_sweep_delete_failed`, so an
+/// operator can tell `artifact_delete_at_object_key_unavailable`,
+/// `remote_trace_artifact_delete_at_key_unavailable`, and a store's other
+/// refusals apart (review of the follow-up wave, m2). Any other error text
+/// is left out: operational output is label-only.
+fn store_refusal_label(error: &anyhow::Error) -> Option<String> {
+    let text = error.to_string();
+    crate::versioned_pipeline_qualification::is_safe_label(&text).then_some(text)
+}
+
+/// The attempt rows a compatibility Score staged before it took its
+/// tenant's Score lock (rebase 10, option D;
+/// `PipelineService::stage_score_artifacts_before_lock`): each artifact's
+/// object key, and the moment after which the attempt publishes nothing
+/// (`PipelineService::attempt_artifact_lease_bound`).
+struct PrestagedScoreArtifacts {
+    object_keys: Vec<(PipelineAttemptArtifact, String)>,
+    publish_deadline: DateTime<Utc>,
+}
+
+impl PrestagedScoreArtifacts {
+    fn object_key(&self, artifact: PipelineAttemptArtifact) -> Option<&str> {
+        self.object_keys
+            .iter()
+            .find(|(staged, _)| *staged == artifact)
+            .map(|(_, object_key)| object_key.as_str())
+    }
+}
+
 /// The object id a claim stores one of its run's phase artifacts under
 /// (`artifact` is `approved`, `index-command`, or `score-neighbors`).
 ///
@@ -10897,9 +13837,11 @@ fn decode_pipeline_artifact_bytes(wrapper: &serde_json::Value) -> anyhow::Result
 /// matching the stored object. The database refs a commit records stay
 /// deterministic (the approved object ref id is derived from the run id
 /// alone); only the object key moves per claim. A phase attempt that
-/// crashes before its commit leaves its objects unreferenced (not tracked
-/// in PR 2). The receipt's source object is tracked: see
-/// `pipeline_receipt_object_id`.
+/// crashes before its commit, loses its lease, or has its commit refused
+/// leaves its objects named by a `pipeline_attempt_artifacts` `staged` row
+/// (PR 4); `PipelineService::sweep_attempt_artifacts` deletes both once the
+/// row's `cleanup_after` passes. The receipt's source object is tracked
+/// separately: see `pipeline_receipt_object_id`.
 pub fn pipeline_attempt_object_id(artifact: &str, run_id: Uuid, lease_token: Uuid) -> String {
     format!("pipeline-{artifact}-{run_id}-{lease_token}")
 }
@@ -10947,11 +13889,17 @@ enum IndexDispatchOutcome {
     Cancelled(PipelineRunRecord),
     Complete(PipelineRunRecord),
     WriteFailed(IndexWriteError),
+    /// The Settle policy of the run's bundle was not runnable under its
+    /// status row's lock (GRD-004): no upsert started, the transaction wrote
+    /// nothing, and `pending` stays.
+    PolicyNotRunnable,
 }
 
 /// Settle's index dispatch (Step 5), run in a task of its own (multi-lens
-/// review L4-3). One transaction locks the run row (`ensure_current_lease`)
-/// and then the submission row (the guard), and holds both through every
+/// review L4-3). One transaction locks the run row (`ensure_current_lease`),
+/// then the submission row (the guard), then the Settle policy's status row
+/// `FOR SHARE` (GRD-004: a policy that is not runnable starts no upsert, and a
+/// suspension waits for this transaction), and holds all three through every
 /// upsert to the commit of the `index_write_state` it records. A withdrawal
 /// locks the submission row `FOR UPDATE`, so it either commits before the
 /// guard read (the dispatch then sees it, cancels, and queues an
@@ -10985,7 +13933,7 @@ async fn dispatch_index_write(dispatch: IndexDispatch) -> anyhow::Result<IndexDi
     let mut client = backend.trace_pool().get().await?;
     let tx = PgPipelineStore::tenant_transaction(&mut client, &run.tenant_id).await?;
     // Lock order: the run row (`ensure_current_lease`), then the submission
-    // row (the guard).
+    // row (the guard), then the Settle policy row (below).
     ensure_current_lease(&tx, &run, required_lease_token(&run)?).await?;
     let guard = PgPipelineStore::submission_guard_on_tx(&tx, &run).await?;
     if !guard.operable {
@@ -11004,6 +13952,18 @@ async fn dispatch_index_write(dispatch: IndexDispatch) -> anyhow::Result<IndexDi
         let run = PgPipelineStore::set_index_write_state_on_tx(&tx, &run, "cancelled").await?;
         tx.commit().await?;
         return Ok(IndexDispatchOutcome::Cancelled(run));
+    }
+    // GRD-004: the Settle policy's status row, `FOR SHARE`, after the run row
+    // and the submission row, held through every upsert to the commit of the
+    // `index_write_state` -- the same span as those two rows, so a suspension
+    // waits for a dispatch in flight (at most the earlier of the lease's end
+    // and the dispatch budget) and a dispatch that starts after one starts
+    // no upsert. An inoperable submission cancels above whatever the policy
+    // says: that path ends the write and queues its invalidation, and must run
+    // in every policy state.
+    if !lock_runnable_policy(&tx, &run.tenant_id, &run.bundle_id, Phase::Settle).await? {
+        tx.commit().await?;
+        return Ok(IndexDispatchOutcome::PolicyNotRunnable);
     }
     let command = command?.ok_or_else(|| anyhow::anyhow!("index_command_invalid"))?;
     // Multi-lens review L4-1: the rows are held no longer than the earlier
@@ -11072,6 +14032,21 @@ fn pipeline_compatibility_score_lock(tenant_id: &str) -> String {
 /// staging and final transactions.
 fn pipeline_receipt_lock(tenant_id: &str, request_idempotency_key: &str) -> String {
     format!("pipeline-receipt:{tenant_id}:{request_idempotency_key}")
+}
+
+/// The `hashtextextended` seed of the routing lock. A seed names a lock
+/// class: the receipt lock uses 0, the quota and bundle registry locks use 1,
+/// so a tenant's routing lock key can never collide with one of those.
+/// Exclusive holders (`PipelineActivationStore`) and shared holders (a
+/// receipt's transactions) both bind this constant, so they cannot disagree.
+pub(crate) const PIPELINE_ROUTING_LOCK_SEED: i64 = 2;
+
+/// The transaction-scoped advisory lock key of a tenant's routing. A routing
+/// change takes it exclusively; a receipt's staging and commit transactions
+/// take it shared, so a routing change waits for the receipts in those
+/// transactions and no later receipt misses it.
+pub(crate) fn pipeline_routing_lock(tenant_id: &str) -> String {
+    format!("pipeline-routing:{tenant_id}")
 }
 
 /// Builds the `trace_object_refs` write for the approved content a Review
@@ -11208,6 +14183,75 @@ pub fn is_pipeline_artifact_wrapper(wrapper: &serde_json::Value) -> bool {
 mod tests {
     use super::*;
 
+    #[test]
+    fn the_sweep_logs_a_store_refusal_only_when_it_is_a_label() {
+        assert_eq!(
+            store_refusal_label(&anyhow::anyhow!(
+                "artifact_delete_at_object_key_unavailable"
+            )),
+            Some("artifact_delete_at_object_key_unavailable".to_string())
+        );
+        assert_eq!(
+            store_refusal_label(&anyhow::anyhow!(
+                "remote_trace_artifact_delete_at_key_unavailable"
+            )),
+            Some("remote_trace_artifact_delete_at_key_unavailable".to_string())
+        );
+        for unsafe_text in [
+            "failed to delete gs://bucket/tenants/abc/object",
+            "Permission denied (os error 13)",
+            "",
+            &"a".repeat(65),
+        ] {
+            assert_eq!(
+                store_refusal_label(&anyhow::anyhow!(unsafe_text.to_string())),
+                None,
+                "{unsafe_text}"
+            );
+        }
+        // A wrapped refusal's outer text is what is tested, never its cause.
+        let wrapped = anyhow::anyhow!("artifact_delete_at_object_key_unavailable")
+            .context("deleting tenant-a's object at a key");
+        assert_eq!(store_refusal_label(&wrapped), None);
+    }
+
+    /// Wave 2 (PR 3's c8d65fcb with PR 4's 6dace131): every failed store
+    /// call of the run path is one transient `PolicyError`, the uncharged
+    /// suspension. A capability the store lacks keeps its own label; any
+    /// other failure, a safe-looking label included, is
+    /// `artifact_store_unavailable`, and no other store text reaches the run.
+    #[test]
+    fn a_failed_store_call_is_one_uncharged_suspension() {
+        for (message, label) in [
+            (
+                PIPELINE_OBJECT_KEY_UNAVAILABLE_LABEL,
+                PIPELINE_OBJECT_KEY_UNAVAILABLE_LABEL,
+            ),
+            (
+                "object store unavailable",
+                PIPELINE_ARTIFACT_STORE_UNAVAILABLE_LABEL,
+            ),
+            (
+                "artifact_delete_at_object_key_unavailable",
+                PIPELINE_ARTIFACT_STORE_UNAVAILABLE_LABEL,
+            ),
+            (
+                "failed to write gs://bucket/tenants/abc/object",
+                PIPELINE_ARTIFACT_STORE_UNAVAILABLE_LABEL,
+            ),
+        ] {
+            let failure = artifact_store_failure(&anyhow::anyhow!(message.to_string()));
+            assert!(failure.is_transient(), "{message}");
+            assert_eq!(failure.label(), label, "{message}");
+        }
+        let wrapped = anyhow::anyhow!(PIPELINE_OBJECT_KEY_UNAVAILABLE_LABEL)
+            .context("deriving tenant-a's object key");
+        assert_eq!(
+            artifact_store_failure(&wrapped).label(),
+            PIPELINE_ARTIFACT_STORE_UNAVAILABLE_LABEL
+        );
+    }
+
     /// Zaki review 1, item 1: `main`'s revocation-propagation worker checks a
     /// `worker_intermediate` object as a pipeline object only when its ref
     /// is one `score_object_ref` builds. A vector payload ref of `main`'s,
@@ -11234,6 +14278,24 @@ mod tests {
             pipeline_score_object_ref_id(run_id, "approved"),
             Some(run_id)
         ));
+    }
+
+    /// `truncate_to_microseconds` drops any nanosecond remainder (what a
+    /// Linux clock can hand `Utc::now()`, and what a `TIMESTAMPTZ` column
+    /// cannot store) while leaving a value already at microsecond precision
+    /// -- the shape a value read back from PostgreSQL always has -- alone,
+    /// so the two can compare equal.
+    #[test]
+    fn truncate_to_microseconds_drops_the_sub_microsecond_remainder() {
+        let with_nanos = DateTime::from_timestamp(1_700_000_000, 123_456_789).unwrap();
+        let truncated = truncate_to_microseconds(with_nanos);
+        assert_eq!(truncated.timestamp_micros(), 1_700_000_000_123_456);
+        assert_eq!(truncated.timestamp_subsec_nanos(), 123_456_000);
+        assert!(truncated <= with_nanos);
+
+        // Already at microsecond precision (as anything read back from
+        // PostgreSQL is): truncating again changes nothing.
+        assert_eq!(truncate_to_microseconds(truncated), truncated);
     }
 
     /// Ruling F-M5: the payout's own result comes first. A lock release that
@@ -11695,5 +14757,36 @@ mod tests {
         assert!(is_transient_database_error(&bare.into()));
         let wrapped: anyhow::Error = DatabaseError::Postgres(refused().await).into();
         assert!(is_transient_database_error(&wrapped));
+    }
+
+    /// The operator-action rule is one function for every caller, and a
+    /// refusal carries the label its caller passed, never text of the actor
+    /// or the reason.
+    #[test]
+    fn the_operator_action_rule_refuses_with_the_callers_label() {
+        let actor = format!("operator_sha256:{}", "a".repeat(64));
+        assert!(validate_actor(&actor, "suspend_policy", "any_label").is_ok());
+        let too_long = "a".repeat(161);
+        for (actor, reason) in [
+            (actor.as_str(), "Bad Reason"),
+            (actor.as_str(), ""),
+            (actor.as_str(), "has space"),
+            ("", "suspend_policy"),
+            ("an actor with spaces", "suspend_policy"),
+            ("actor/with/slashes", "suspend_policy"),
+            (too_long.as_str(), "suspend_policy"),
+        ] {
+            for label in [
+                PIPELINE_POLICY_INTERVENTION_INVALID_LABEL,
+                "activation_actor_invalid",
+            ] {
+                let refused = validate_actor(actor, reason, label)
+                    .expect_err("an invalid actor or reason is refused");
+                assert!(
+                    matches!(&refused, DatabaseError::Constraint(text) if text == label),
+                    "actor {actor:?} with reason {reason:?} is refused under {label}: {refused:?}"
+                );
+            }
+        }
     }
 }

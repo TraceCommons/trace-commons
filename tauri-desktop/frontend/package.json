@@ -49,5 +49,16 @@
     "tailwindcss": "4.3.3",
     "typescript": "7.0.2",
     "vite": "8.3.0"
+  },
+  "pnpm": {
+    "auditConfig": {
+      "ignoreGhsas": [
+        "GHSA-vfj7-8cjw-p6xm"
+      ]
+    },
+    "overrides": {
+      "proxy-addr": "^2.0.8",
+      "source-map-js": "^1.2.2"
+    }
   }
 }

@@ -22,7 +22,7 @@ use super::*;
 #[path = "../../../tests/support/pilot_runtime_grants.rs"]
 mod pilot_runtime_grants;
 #[path = "../../../tests/support/pilot_runtime_login.rs"]
-mod pilot_runtime_login;
+pub(super) mod pilot_runtime_login;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -44,6 +44,7 @@ use trace_commons_server::versioned_pipeline::{
     PipelineCaps, PipelineCrashPoint, PipelinePayoutConfig, PipelineRunState,
     PipelineServiceBuilder,
 };
+use trace_commons_server::versioned_pipeline_activation::ReceiptOwner;
 use trace_commons_server::versioned_pipeline_authority::{
     PipelinePrivacyBoundary, StaticPipelineAuthorityProvider,
 };
@@ -57,13 +58,14 @@ use trace_commons_server::versioned_pipeline_credit::{
     RecordingNearAdapter, RecordingSettlementAdapter, SettlementAdapterRegistry,
 };
 use trace_commons_server::versioned_pipeline_index::IsolatedPipelineIndex;
+use trace_commons_server::versioned_pipeline_qualification::PipelineCheckEmitter;
 use trace_commons_server::witness_service;
 
 /// This suite's own runtime login, distinct from `trace_pipeline_runtime_test`
 /// (`tests/versioned_pipeline_runtime_pg.rs`). Like that one, its only
 /// privilege sources are membership in `trace_ingest_runtime`, the ingest
 /// runtime group V90 names, and in `trace_account_admission_runtime` (V77).
-const PIPELINE_HTTP_RUNTIME_ROLE: &str = "trace_pipeline_http_runtime_test";
+pub(super) const PIPELINE_HTTP_RUNTIME_ROLE: &str = "trace_pipeline_http_runtime_test";
 static PIPELINE_HTTP_DATABASE: tokio::sync::OnceCell<String> = tokio::sync::OnceCell::const_new();
 
 /// The database this suite runs in, created once per process: a sibling of
@@ -82,7 +84,7 @@ static PIPELINE_HTTP_DATABASE: tokio::sync::OnceCell<String> = tokio::sync::Once
 /// Two test processes pointed at the same `TRACE_COMMONS_PG_TEST_DATABASE_URL`
 /// at once would each force-drop the sibling database the other is mid-setup
 /// on or already running against -- do not run this suite that way.
-async fn pipeline_http_database_url() -> Option<String> {
+pub(super) async fn pipeline_http_database_url() -> Option<String> {
     let url = std::env::var("TRACE_COMMONS_PG_TEST_DATABASE_URL").ok()?;
     Some(
         PIPELINE_HTTP_DATABASE
@@ -149,9 +151,17 @@ async fn pipeline_http_database_url() -> Option<String> {
 /// legacy ingest path (`state.db_mirror`, the NEAR admission functions) and
 /// the pipeline as this login, so both are held to what
 /// `trace_ingest_runtime` is granted.
-async fn runtime_backend(pool_size: usize) -> Option<Arc<PgBackend>> {
+pub(super) async fn runtime_backend(pool_size: usize) -> Option<Arc<PgBackend>> {
     let url = pipeline_http_database_url().await?;
-    let mut runtime_url = reqwest::Url::parse(&url).expect("parse test URL");
+    Some(runtime_backend_at(&url, pool_size).await)
+}
+
+/// `runtime_backend` for a database the caller names: connects to `url` as
+/// this suite's runtime login and checks that the login is neither
+/// `SUPERUSER` nor `BYPASSRLS`. The restore drill's resume
+/// (`pipeline_restore_pg_tests`) connects to the restored database this way.
+pub(super) async fn runtime_backend_at(url: &str, pool_size: usize) -> Arc<PgBackend> {
+    let mut runtime_url = reqwest::Url::parse(url).expect("parse test URL");
     runtime_url
         .set_username(PIPELINE_HTTP_RUNTIME_ROLE)
         .expect("set runtime user");
@@ -176,7 +186,7 @@ async fn runtime_backend(pool_size: usize) -> Option<Arc<PgBackend>> {
         !row.get::<_, bool>(0) && !row.get::<_, bool>(1),
         "runtime role must not bypass RLS"
     );
-    Some(Arc::new(backend))
+    Arc::new(backend)
 }
 
 /// Pinned per amendments-971 ruling A4: an off-chain credit account, whole
@@ -195,7 +205,7 @@ fn storage_rebate_descriptor() -> InstrumentDescriptor {
 /// `versioned_pipeline_runtime_pg.rs`'s `PassThroughPipelinePrivacyBoundary`
 /// (test doubles live in the test files, so this file holds its own copy
 /// rather than sharing one).
-struct PassThroughPipelinePrivacyBoundary;
+pub(super) struct PassThroughPipelinePrivacyBoundary;
 
 #[async_trait::async_trait]
 impl PipelinePrivacyBoundary for PassThroughPipelinePrivacyBoundary {
@@ -227,6 +237,8 @@ fn local_artifacts(dir: &tempfile::TempDir) -> Arc<LocalEncryptedTraceArtifactSt
 /// fills in, exercised here with reference dependencies instead.
 struct TestAssembler {
     index: Arc<IsolatedPipelineIndex>,
+    /// The service's index writer when it is not `index` itself.
+    writer: Option<Arc<dyn trace_commons_gate_api::IdentifiedIndexWriter>>,
     adapters: Vec<Arc<dyn SettlementAdapter>>,
     crash_point: Option<PipelineCrashPoint>,
 }
@@ -238,19 +250,7 @@ impl IngestPipelineRuntimeAssembler for TestAssembler {
     ) -> anyhow::Result<Arc<PipelineService>> {
         let scorer = Arc::new(ReferencePerplexityScorer::new());
         let embedder = Arc::new(ReferenceEmbedder::new());
-        let package = MinimalPolicyBundle::minimal_package(
-            &PipelineBundleConfig {
-                instrument_awards: vec![PipelineInstrumentAwardConfig {
-                    instrument_id: "storage_rebate".into(),
-                    atomic_units: AtomicUnits::from_raw(5),
-                    descriptor: storage_rebate_descriptor(),
-                }],
-                include_index: true,
-                variant: None,
-            },
-            scorer.as_ref(),
-            embedder.as_ref(),
-        )?;
+        let package = minimal_storage_rebate_package(scorer.as_ref(), embedder.as_ref())?;
         let registry = SettlementAdapterRegistry::new(self.adapters.clone())?;
         let caps = PipelineCaps {
             per_instrument_atomic_units: BTreeMap::from([
@@ -269,7 +269,7 @@ impl IngestPipelineRuntimeAssembler for TestAssembler {
             context.artifact_store,
             package,
             self.index.clone(),
-            self.index.clone(),
+            self.writer.clone().unwrap_or_else(|| self.index.clone()),
             registry,
             caps,
         )
@@ -278,7 +278,8 @@ impl IngestPipelineRuntimeAssembler for TestAssembler {
         .with_object_store_name(context.object_store_name)
         .with_novelty_utility_checks(context.novelty_utility_checks)
         .with_authority(allow_all_test_authority())
-        .with_privacy(Arc::new(PassThroughPipelinePrivacyBoundary));
+        .with_privacy(Arc::new(PassThroughPipelinePrivacyBoundary))
+        .with_unqualified_routing(context.unqualified_routing_allowed);
         if let Some(crash_point) = self.crash_point {
             builder = builder.with_crash_point(crash_point);
         }
@@ -286,9 +287,69 @@ impl IngestPipelineRuntimeAssembler for TestAssembler {
     }
 }
 
+/// PR 2's minimal package with the `storage_rebate` award (5 whole units),
+/// naming `scorer` and `embedder`: the package `TestAssembler` serves, and
+/// the `minimal` bundle of `pipeline.py run` (`pipeline_corpus_pg_tests`).
+pub(super) fn minimal_storage_rebate_package(
+    scorer: &ReferencePerplexityScorer,
+    embedder: &ReferenceEmbedder,
+) -> anyhow::Result<trace_commons_gate_api::pipeline::BundlePackage> {
+    MinimalPolicyBundle::minimal_package(
+        &PipelineBundleConfig {
+            instrument_awards: vec![PipelineInstrumentAwardConfig {
+                instrument_id: "storage_rebate".into(),
+                atomic_units: AtomicUnits::from_raw(5),
+                descriptor: storage_rebate_descriptor(),
+            }],
+            include_index: true,
+            variant: None,
+        },
+        scorer,
+        embedder,
+    )
+}
+
+/// The compatibility package over `CompatibilityBundleConfig::local_reference()`
+/// with the given `NoveltyUtility` delta, naming `scorer` and `embedder`: the
+/// package `CompatibilityTestAssembler` serves, and (with 2_500_000) the
+/// `compatibility` bundle of `pipeline.py run` (`pipeline_corpus_pg_tests`).
+pub(super) fn compatibility_reference_package(
+    novelty_utility_microcredits: u64,
+    scorer: &ReferencePerplexityScorer,
+    embedder: &ReferenceEmbedder,
+) -> anyhow::Result<trace_commons_gate_api::pipeline::BundlePackage> {
+    MinimalPolicyBundle::compatibility_package(
+        &compatibility_test_config(novelty_utility_microcredits),
+        scorer,
+        embedder,
+    )
+}
+
+/// The one package a qualification run names (P5-D15): the compatibility
+/// bundle over `CompatibilityBundleConfig::local_reference()` with the
+/// corpus harness's `NoveltyUtility` delta, the reference scorer, and the
+/// reference embedder. Four checks test the candidate and pass it to
+/// `PipelineCheckEmitter`: the `compatibility` and `hf_local` corpus runs
+/// (`corpus_bundle_package`), the restore drill, and the bundle
+/// qualification, whose test in `tests/versioned_pipeline_runtime_pg.rs`
+/// repeats this construction (`qualification_candidate_config` there, which
+/// `compatibility_test_service` builds with the same scorer and embedder; a
+/// suite in `tests/` cannot import this module). Every other check is a
+/// mechanics check and names no package. Nothing in-process compares the two
+/// constructions; a drift between them is seen by a `pipeline.py qualify`
+/// run, whose `require_one_package` refuses results that name two packages.
+pub(super) fn qualification_candidate_package()
+-> anyhow::Result<trace_commons_gate_api::pipeline::BundlePackage> {
+    compatibility_reference_package(
+        super::pipeline_corpus_pg_tests::COMPATIBILITY_NOVELTY_UTILITY_MICROCREDITS,
+        &ReferencePerplexityScorer::new(),
+        &ReferenceEmbedder::new(),
+    )
+}
+
 /// The authority every test service in this file holds: each tenant gets
 /// empty allowlists, which restrict nothing, and no tenant policy.
-fn allow_all_test_authority() -> Arc<StaticPipelineAuthorityProvider> {
+pub(super) fn allow_all_test_authority() -> Arc<StaticPipelineAuthorityProvider> {
     Arc::new(StaticPipelineAuthorityProvider::test_only(
         SubmissionAuthority {
             tenant: SubmissionAllowlists::default(),
@@ -320,8 +381,55 @@ fn assemble_test_pipeline_service(
     adapters: Vec<Arc<dyn SettlementAdapter>>,
     crash_point: Option<PipelineCrashPoint>,
 ) -> Arc<PipelineService> {
+    assemble_test_pipeline_service_with_writer(
+        backend,
+        artifacts,
+        index,
+        None,
+        adapters,
+        crash_point,
+    )
+}
+
+/// `assemble_test_pipeline_service`, with `writer` as the service's index
+/// writer when one is given (`index` stays its reader).
+fn assemble_test_pipeline_service_with_writer(
+    backend: Arc<PgBackend>,
+    artifacts: Arc<LocalEncryptedTraceArtifactStore>,
+    index: Arc<IsolatedPipelineIndex>,
+    writer: Option<Arc<dyn trace_commons_gate_api::IdentifiedIndexWriter>>,
+    adapters: Vec<Arc<dyn SettlementAdapter>>,
+    crash_point: Option<PipelineCrashPoint>,
+) -> Arc<PipelineService> {
+    assemble_test_pipeline_service_configured(
+        backend,
+        artifacts,
+        index,
+        writer,
+        adapters,
+        crash_point,
+        true,
+    )
+}
+
+/// `assemble_test_pipeline_service_with_writer`, with the process's
+/// unqualified-routing setting (`unqualified_routing_allowed`) given: the
+/// suite's services start with it on, so that a tenant with no routing row
+/// on the receipts list is routed to the pipeline; a test of production
+/// routing (the setting off) builds its service, and sets its state, with
+/// `false`.
+fn assemble_test_pipeline_service_configured(
+    backend: Arc<PgBackend>,
+    artifacts: Arc<LocalEncryptedTraceArtifactStore>,
+    index: Arc<IsolatedPipelineIndex>,
+    writer: Option<Arc<dyn trace_commons_gate_api::IdentifiedIndexWriter>>,
+    adapters: Vec<Arc<dyn SettlementAdapter>>,
+    crash_point: Option<PipelineCrashPoint>,
+    unqualified_routing_allowed: bool,
+) -> Arc<PipelineService> {
     let assembler = TestAssembler {
         index,
+        writer,
         adapters,
         crash_point,
     };
@@ -338,6 +446,7 @@ fn assemble_test_pipeline_service(
         trace_commons_server::versioned_pipeline::PipelineLeaseConfig::default(),
         true,
         true,
+        unqualified_routing_allowed,
         None,
         TEST_NEAR_CONFIRMATION_INTERVAL,
         TEST_NEAR_PAYOUT_CONTROLS,
@@ -351,7 +460,7 @@ fn assemble_test_pipeline_service(
 /// Opens a tenant-scoped transaction the way every raw-SQL helper below
 /// needs one: `set_config('trace_commons.trace_tenant_id', ...)` first, so
 /// RLS admits only `tenant_id`'s own rows.
-async fn tenant_tx<'a>(
+pub(super) async fn tenant_tx<'a>(
     client: &'a mut deadpool_postgres::Client,
     tenant_id: &str,
 ) -> deadpool_postgres::Transaction<'a> {
@@ -370,7 +479,7 @@ async fn tenant_tx<'a>(
 /// test learns app 1's worker reached and durably committed the Settle
 /// selection -- immediately before the injected `AfterSettleSelection`
 /// crash -- without calling the processor directly.
-async fn wait_for_settle_selection(
+pub(super) async fn wait_for_settle_selection(
     backend: &Arc<PgBackend>,
     tenant_id: &str,
     submission_id: uuid::Uuid,
@@ -411,7 +520,7 @@ async fn wait_for_settle_selection(
 /// 60 s, then panics with a clear message. This is how the test learns app
 /// 2's worker reclaimed the expired lease and drove the run to completion on
 /// its own -- no manual `process_run` call.
-async fn wait_for_run_complete(
+pub(super) async fn wait_for_run_complete(
     backend: &Arc<PgBackend>,
     tenant_id: &str,
     submission_id: uuid::Uuid,
@@ -451,7 +560,7 @@ async fn wait_for_run_complete(
 /// up to 10 s -- bounded so a broken worker fails the test instead of
 /// hanging it, generous enough to absorb the gap between a freshly spawned
 /// worker task and its first readiness probe.
-async fn wait_for_pipeline_ready(client: &reqwest::Client, base: &str) {
+pub(super) async fn wait_for_pipeline_ready(client: &reqwest::Client, base: &str) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
         let response = client
@@ -476,7 +585,11 @@ async fn wait_for_pipeline_ready(client: &reqwest::Client, base: &str) {
 /// lease directly, in a tenant-scoped transaction, only when it is still
 /// `leased` -- exactly what a real lease does on its own once its duration
 /// elapses, done immediately instead of waiting it out.
-async fn expire_run_lease(backend: &Arc<PgBackend>, tenant_id: &str, submission_id: uuid::Uuid) {
+pub(super) async fn expire_run_lease(
+    backend: &Arc<PgBackend>,
+    tenant_id: &str,
+    submission_id: uuid::Uuid,
+) {
     let mut client = backend
         .trace_pool_for_test()
         .get()
@@ -551,7 +664,7 @@ fn reqwest_headers(headers: axum::http::HeaderMap) -> reqwest::header::HeaderMap
 /// stop-and-join path: `run_pipeline_app` asks the worker to stop only
 /// after HTTP has finished shutting down, and bounds the wait on the same
 /// grace period ingest itself uses.
-async fn serve_pipeline_app(
+pub(super) async fn serve_pipeline_app(
     state: Arc<AppState>,
 ) -> (
     String,
@@ -577,7 +690,7 @@ async fn serve_pipeline_app(
 /// serve future itself returned. Used to assert app 1's join returns `Ok`
 /// within the shutdown grace period after the stop signal, and to shut app
 /// 2 down cleanly at the end of the test.
-async fn join_within(
+pub(super) async fn join_within(
     server: tokio::task::JoinHandle<anyhow::Result<()>>,
     timeout_secs: u64,
     label: &str,
@@ -644,6 +757,7 @@ async fn startup_registers_the_default_bundle_for_rollout_tenants() {
     );
     let state_mut = Arc::make_mut(&mut state);
     state_mut.pipeline_service = Some(service.clone());
+    state_mut.pipeline_activation = routing_store(&backend);
     state_mut.tenant_rollout_gates = TraceTenantRolloutGates::for_feature(
         TraceTenantRolloutFeature::PipelineReceipts,
         &[tenant.as_str()],
@@ -738,6 +852,7 @@ async fn real_http_receipt_completes_and_resumes_after_restart() {
         );
         let state_mut = Arc::make_mut(&mut state);
         state_mut.pipeline_service = Some(service);
+        state_mut.pipeline_activation = routing_store(&backend);
         state_mut.tenant_rollout_gates = TraceTenantRolloutGates::for_feature(
             TraceTenantRolloutFeature::PipelineReceipts,
             &["tenant-a"],
@@ -780,7 +895,8 @@ async fn real_http_receipt_completes_and_resumes_after_restart() {
     expire_run_lease(&backend, "tenant-a", envelope.submission_id).await;
 
     // ---- App 2: same database, artifact root, index, and adapters; no crash point ----
-    let (base, stop, server) = serve_pipeline_app(start(None)).await;
+    let resumed_state = start(None);
+    let (base, stop, server) = serve_pipeline_app(resumed_state).await;
 
     // Readiness is live while app 2 runs.
     wait_for_pipeline_ready(&client, &base).await;
@@ -939,6 +1055,20 @@ async fn real_http_receipt_completes_and_resumes_after_restart() {
 
     stop.send(()).expect("send shutdown to app 2");
     join_within(server, 20, "app 2").await;
+
+    // A mechanics check: it serves a test bundle and names no package
+    // (P5-D15).
+    PipelineCheckEmitter::emit_pass_from_env(
+        "pipeline_http_restart_recovery",
+        None,
+        serde_json::json!({
+            "phase_outcomes": 4,
+            "replay_status": 200,
+            "conflict_status": 409,
+            "bad_credential_status": 403,
+            "other_tenant_rows": 0,
+        }),
+    );
 }
 
 // ----------------------------------------------------------------------------
@@ -1246,6 +1376,7 @@ async fn real_http_pipeline_receipt_replays_on_retry() {
     state_mut.require_db_mirror_writes = true;
     state_mut.accept_medium_risk_submissions = true;
     state_mut.pipeline_service = Some(service);
+    state_mut.pipeline_activation = routing_store(&backend);
     state_mut.tenant_rollout_gates = TraceTenantRolloutGates::for_feature(
         TraceTenantRolloutFeature::PipelineReceipts,
         &[tenant.as_str()],
@@ -1411,6 +1542,7 @@ async fn a_drain_tenant_retry_replays_its_pipeline_receipt() {
     state_mut.require_db_mirror_writes = true;
     state_mut.accept_medium_risk_submissions = true;
     state_mut.pipeline_service = Some(service);
+    state_mut.pipeline_activation = routing_store(&backend);
     state_mut.tenant_rollout_gates = TraceTenantRolloutGates::for_feature(
         TraceTenantRolloutFeature::PipelineReceipts,
         &[tenant.as_str()],
@@ -1543,6 +1675,7 @@ async fn real_http_pipeline_receipt_refuses_a_different_devices_retry() {
     state_mut.require_db_mirror_writes = true;
     state_mut.accept_medium_risk_submissions = true;
     state_mut.pipeline_service = Some(service);
+    state_mut.pipeline_activation = routing_store(&backend);
     state_mut.tenant_rollout_gates = TraceTenantRolloutGates::for_feature(
         TraceTenantRolloutFeature::PipelineReceipts,
         &[tenant.as_str()],
@@ -1671,6 +1804,7 @@ async fn real_http_pipeline_receipt_checks_ownership_on_replay() {
     );
     let state_mut = Arc::make_mut(&mut state);
     state_mut.pipeline_service = Some(service);
+    state_mut.pipeline_activation = routing_store(&backend);
     state_mut.tenant_rollout_gates = TraceTenantRolloutGates::for_feature(
         TraceTenantRolloutFeature::PipelineReceipts,
         &["tenant-a"],
@@ -1771,6 +1905,19 @@ async fn real_http_pipeline_receipt_checks_ownership_on_replay() {
 
     stop.send(()).expect("send shutdown");
     join_within(server, 20, "ownership-on-replay test server").await;
+
+    // A mechanics check: it serves a test bundle and names no package
+    // (P5-D15).
+    PipelineCheckEmitter::emit_pass_from_env(
+        "pipeline_http_receipt_ownership",
+        None,
+        serde_json::json!({
+            "other_principal_refusals": 2,
+            "refusal_status": 409,
+            "owner_replay_status": 200,
+            "owner_replay_same_receipt": true,
+        }),
+    );
 }
 
 /// Requirement in the completed-admission branch when the tenant is routed
@@ -1841,6 +1988,7 @@ async fn real_http_pipeline_receipt_falls_back_to_legacy_record_without_a_run() 
     state_mut.require_db_mirror_writes = true;
     state_mut.accept_medium_risk_submissions = true;
     state_mut.pipeline_service = Some(service);
+    state_mut.pipeline_activation = routing_store(&backend);
     state_mut.tenant_rollout_gates = TraceTenantRolloutGates::for_feature(
         TraceTenantRolloutFeature::PipelineReceipts,
         &[tenant.as_str()],
@@ -1934,7 +2082,7 @@ async fn mark_admission_completed(
 /// resolver URL the database configuration reads names the configured test
 /// database, so its database is replaced with that one. Panics on any setup
 /// failure once `TRACE_COMMONS_PG_TEST_DATABASE_URL` is set.
-async fn account_owner_backend() -> Option<Arc<PgBackend>> {
+pub(super) async fn account_owner_backend() -> Option<Arc<PgBackend>> {
     let url = pipeline_http_database_url().await?;
     let login_resolver_url = DatabaseConfig::login_resolver_url_from_env().map(|resolver| {
         let mut resolver_url =
@@ -1971,11 +2119,17 @@ async fn account_owner_backend() -> Option<Arc<PgBackend>> {
 /// never as the owner superuser (Zaki review 1, round 2, finding 17).
 /// Fixture writes that are not the ingest runtime's go through
 /// `account_owner_backend` instead.
-async fn mains_database() -> Arc<dyn Database> {
+pub(super) async fn mains_database() -> Arc<dyn Database> {
     let url = pipeline_http_database_url()
         .await
         .expect("the same variable runtime_backend read is set");
-    let mut runtime_url = reqwest::Url::parse(&url).expect("parse test URL");
+    mains_database_at(&url).await
+}
+
+/// `mains_database` for a database the caller names: the restore drill's
+/// resume serves `main` from the restored database this way.
+pub(super) async fn mains_database_at(url: &str) -> Arc<dyn Database> {
+    let mut runtime_url = reqwest::Url::parse(url).expect("parse test URL");
     runtime_url
         .set_username(PIPELINE_HTTP_RUNTIME_ROLE)
         .expect("set runtime user");
@@ -2083,6 +2237,7 @@ async fn withdrawal_fixture_with(
     let state_mut = Arc::make_mut(&mut state);
     state_mut.tokens = Arc::new(tokens);
     state_mut.pipeline_service = Some(service.clone());
+    state_mut.pipeline_activation = routing_store(&runtime);
     Some(WithdrawalFixture {
         state,
         service,
@@ -2829,6 +2984,287 @@ async fn the_worker_drain_removes_a_withdrawn_revision_from_the_index() {
     );
 }
 
+/// The number of `run_id`'s attempt rows for `artifact` in `state`.
+async fn attempt_rows_in_state(
+    backend: &Arc<PgBackend>,
+    tenant_id: &str,
+    run_id: Uuid,
+    artifact: &str,
+    state: &str,
+) -> i64 {
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, tenant_id).await;
+    let count = tx
+        .query_one(
+            "SELECT COUNT(*) FROM pipeline_attempt_artifacts
+              WHERE tenant_id = $1 AND run_id = $2 AND artifact = $3 AND state = $4",
+            &[&tenant_id, &run_id, &artifact, &state],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    tx.commit().await.unwrap();
+    count
+}
+
+/// Rebase 9 review, M3 (wave 2): the worker's tenant drain
+/// (`drain_pipeline_tenant`) runs the attempt sweep, so a cadence change
+/// cannot gate it unnoticed. A Score attempt of a completed run that
+/// crashed after publishing its index command leaves a `staged` row whose
+/// `cleanup_after` has passed (staged here under an earlier lease token,
+/// with the object published at that attempt's own key); one drain, with no
+/// direct call into the sweep, deletes the object and the row, and leaves
+/// the run's committed rows alone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_worker_drain_sweeps_a_due_attempt_artifact() {
+    use trace_commons_server::versioned_pipeline::{
+        PipelineAttemptArtifact, pipeline_attempt_object_id, pipeline_tenant_storage_ref,
+    };
+
+    let Some(runtime) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().expect("temp dir");
+    let artifacts = local_artifacts(&dir);
+    let service = assemble_test_pipeline_service(
+        runtime.clone(),
+        artifacts.clone(),
+        IsolatedPipelineIndex::new(),
+        vec![RecordingSettlementAdapter::new(
+            InstrumentId::new("storage_rebate").unwrap(),
+            "recording_storage_rebate_drain_sweep_test_only",
+            "none",
+        ) as Arc<dyn SettlementAdapter>],
+        None,
+    );
+    let suffix = Uuid::new_v4().simple().to_string();
+    let tenant = format!("tenant-worker-attempt-sweep-{suffix}");
+    let principal = static_token_principal_ref(&format!("token-worker-attempt-sweep-{suffix}"));
+    let tenant_ref = pipeline_tenant_storage_ref(&tenant);
+    let run = completed_pipeline_run(&service, &tenant, &principal).await;
+    let committed_before =
+        attempt_rows_in_state(&runtime, &tenant, run.run_id, "index-command", "committed").await;
+    assert_eq!(committed_before, 1, "the completed Score committed its row");
+
+    let mut crashed = run.clone();
+    crashed.lease_token = Some(Uuid::new_v4());
+    let object_id = pipeline_attempt_object_id(
+        PipelineAttemptArtifact::IndexCommand.as_str(),
+        run.run_id,
+        crashed.lease_token.unwrap(),
+    );
+    let prepared = artifacts
+        .prepare_serialized_json(
+            tenant_ref.as_str(),
+            TraceArtifactKind::VectorPayload,
+            &object_id,
+            br#"{"probe":"crashed_score_attempt"}"#,
+        )
+        .expect("prepare the crashed attempt's object");
+    service
+        .store()
+        .stage_attempt_artifact(
+            &crashed,
+            PipelineAttemptArtifact::IndexCommand,
+            &prepared.receipt().object_key,
+            &prepared.receipt().ciphertext_sha256,
+            chrono::Utc::now() - chrono::Duration::seconds(1),
+        )
+        .await
+        .expect("stage the crashed attempt's row, already due");
+    let receipt = artifacts
+        .publish_serialized_json(&prepared)
+        .expect("publish the crashed attempt's object");
+    let present = || {
+        artifacts
+            .artifact_present_by_object_key(
+                tenant_ref.as_str(),
+                TraceArtifactKind::VectorPayload,
+                &receipt.object_key,
+                &receipt.ciphertext_sha256,
+            )
+            .unwrap()
+    };
+    assert_eq!(present(), Some(true));
+    assert_eq!(
+        attempt_rows_in_state(&runtime, &tenant, run.run_id, "index-command", "staged").await,
+        1
+    );
+
+    let cadence = Arc::new(std::sync::Mutex::new(
+        pipeline_runtime::PipelineFollowUpCadence::default(),
+    ));
+    let state = test_state_with_options(
+        dir.path().to_path_buf(),
+        Some(mains_database().await),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+    pipeline_runtime::drain_pipeline_tenant(state, service.clone(), tenant.clone(), cadence).await;
+
+    assert_eq!(
+        present(),
+        Some(false),
+        "the drain's sweep deleted the object"
+    );
+    assert_eq!(
+        attempt_rows_in_state(&runtime, &tenant, run.run_id, "index-command", "staged").await,
+        0,
+        "and then its row"
+    );
+    assert_eq!(
+        attempt_rows_in_state(&runtime, &tenant, run.run_id, "index-command", "committed").await,
+        committed_before,
+        "the run's committed row is not the sweep's"
+    );
+}
+
+/// Wave 2 (follow-up review, m2): the worker carries each tenant's attempt
+/// sweep position from one drain to the next. With more kept rows due than
+/// one pass examines (`PIPELINE_ATTEMPT_SWEEP_EXAMINED_PER_REMOVAL` times
+/// the worker's limit, 128) ahead of a deletable row, the first drain keeps
+/// all it examines and leaves the row; the second, on the same worker
+/// cadence, resumes where the first stopped and deletes it with its object.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_worker_drain_resumes_the_attempt_sweep_past_kept_rows() {
+    use trace_commons_server::versioned_pipeline::{
+        PIPELINE_ATTEMPT_SWEEP_EXAMINED_PER_REMOVAL, PipelineAttemptArtifact,
+        pipeline_attempt_object_id, pipeline_tenant_storage_ref,
+    };
+
+    let Some(runtime) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().expect("temp dir");
+    let artifacts = local_artifacts(&dir);
+    let service = assemble_test_pipeline_service(
+        runtime.clone(),
+        artifacts.clone(),
+        IsolatedPipelineIndex::new(),
+        vec![RecordingSettlementAdapter::new(
+            InstrumentId::new("storage_rebate").unwrap(),
+            "recording_storage_rebate_drain_resume_test_only",
+            "none",
+        ) as Arc<dyn SettlementAdapter>],
+        None,
+    );
+    let suffix = Uuid::new_v4().simple().to_string();
+    let tenant = format!("tenant-worker-sweep-resume-{suffix}");
+    let principal = static_token_principal_ref(&format!("token-worker-sweep-resume-{suffix}"));
+    let tenant_ref = pipeline_tenant_storage_ref(&tenant);
+    let run = completed_pipeline_run(&service, &tenant, &principal).await;
+
+    // More kept rows than one pass examines: no hash, and keys that are not
+    // the keys the store derives for them, so the sweep keeps each one.
+    let examined_per_pass = PIPELINE_ATTEMPT_SWEEP_EXAMINED_PER_REMOVAL
+        * pipeline_runtime::PIPELINE_WORKER_MAX_SWEPT_ATTEMPT_ARTIFACTS_PER_TENANT;
+    let kept = i32::try_from(examined_per_pass + 1).unwrap();
+    {
+        let mut client = runtime.trace_pool_for_test().get().await.unwrap();
+        let tx = tenant_tx(&mut client, &tenant).await;
+        tx.execute(
+            "INSERT INTO pipeline_attempt_artifacts (
+                 tenant_id, run_id, lease_token, artifact, object_key,
+                 ciphertext_sha256, cleanup_after
+             )
+             SELECT $1, $2, gen_random_uuid(), 'index-command', 'kept-object-' || g, NULL,
+                    NOW() - make_interval(secs => 1000 - g)
+               FROM generate_series(1, $3) AS g",
+            &[&tenant, &run.run_id, &kept],
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+    }
+    // Behind them, a crashed attempt's row at its own key, with its object.
+    let mut crashed = run.clone();
+    crashed.lease_token = Some(Uuid::new_v4());
+    let prepared = artifacts
+        .prepare_serialized_json(
+            tenant_ref.as_str(),
+            TraceArtifactKind::VectorPayload,
+            &pipeline_attempt_object_id(
+                PipelineAttemptArtifact::IndexCommand.as_str(),
+                run.run_id,
+                crashed.lease_token.unwrap(),
+            ),
+            br#"{"probe":"crashed_score_attempt"}"#,
+        )
+        .expect("prepare the crashed attempt's object");
+    service
+        .store()
+        .stage_attempt_artifact(
+            &crashed,
+            PipelineAttemptArtifact::IndexCommand,
+            &prepared.receipt().object_key,
+            &prepared.receipt().ciphertext_sha256,
+            chrono::Utc::now() - chrono::Duration::seconds(1),
+        )
+        .await
+        .expect("stage the crashed attempt's row, already due");
+    let receipt = artifacts
+        .publish_serialized_json(&prepared)
+        .expect("publish the crashed attempt's object");
+    let present = || {
+        artifacts
+            .artifact_present_by_object_key(
+                tenant_ref.as_str(),
+                TraceArtifactKind::VectorPayload,
+                &receipt.object_key,
+                &receipt.ciphertext_sha256,
+            )
+            .unwrap()
+    };
+
+    let cadence = Arc::new(std::sync::Mutex::new(
+        pipeline_runtime::PipelineFollowUpCadence::default(),
+    ));
+    let state = test_state_with_options(
+        dir.path().to_path_buf(),
+        Some(mains_database().await),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+    pipeline_runtime::drain_pipeline_tenant(
+        state.clone(),
+        service.clone(),
+        tenant.clone(),
+        cadence.clone(),
+    )
+    .await;
+    assert_eq!(
+        present(),
+        Some(true),
+        "the first drain examined only kept rows"
+    );
+    assert!(
+        cadence
+            .lock()
+            .unwrap()
+            .attempt_sweep_resume_after(&tenant)
+            .is_some(),
+        "the worker kept where the first pass stopped"
+    );
+
+    pipeline_runtime::drain_pipeline_tenant(state, service.clone(), tenant.clone(), cadence).await;
+    assert_eq!(
+        present(),
+        Some(false),
+        "the second drain resumed past the kept rows and deleted the object"
+    );
+    assert_eq!(
+        attempt_rows_in_state(&runtime, &tenant, run.run_id, "index-command", "staged").await,
+        i64::from(kept),
+        "only the kept rows stay"
+    );
+}
+
 /// Zaki review 1, item 1: Score stores the index command (embeddings and
 /// content hashes) and the neighbour set as objects of their own. A run of
 /// the compatibility bundle has both. The run is withdrawn after Score and
@@ -3082,6 +3518,183 @@ async fn the_worker_drains_a_tenant_on_the_drain_list() {
     join_within(server, 20, "the drain app").await;
 }
 
+/// Controller ruling R2-2: every object a complete pipeline run stored is an
+/// object ref of its submission -- the receipt's source envelope, Review's
+/// approved revision, and Score's index command and neighbour set -- so
+/// once the owner withdraws the submission, one pass of `main`'s
+/// revocation-propagation worker deletes all four from the service-owned
+/// store and marks each ref deleted. The pipeline's own attempt sweep
+/// (`sweep_attempt_artifacts`) never runs here and is not needed: it sweeps
+/// only attempts that never committed (ruling R2-1).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_revocation_worker_deletes_every_object_of_a_withdrawn_complete_run() {
+    let Some(runtime) = runtime_backend(4).await else {
+        return;
+    };
+    let owner = account_owner_backend()
+        .await
+        .expect("the same variable runtime_backend read is set");
+    let suffix = Uuid::new_v4().simple().to_string();
+    let tenant = format!("tenant-complete-objects-{suffix}");
+    let principal = static_token_principal_ref(&format!("token-complete-objects-{suffix}"));
+    let dir = tempfile::tempdir().expect("temp dir");
+    let artifacts = local_artifacts(&dir);
+    let configured_store = || {
+        ConfiguredTraceArtifactStore::new(
+            TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE,
+            artifacts.clone(),
+        )
+    };
+    let service = assemble_compatibility_pipeline_service(
+        runtime.clone(),
+        &configured_store(),
+        IsolatedPipelineIndex::new(),
+        2_500_000,
+        Arc::new(PassThroughPipelinePrivacyBoundary),
+    );
+    let mut state = test_state_with_options(
+        dir.path().to_path_buf(),
+        Some(mains_database().await),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+    Arc::make_mut(&mut state).artifact_store = Some(configured_store());
+
+    service
+        .register_default_bundle(&tenant)
+        .await
+        .expect("register the bundle");
+    let mut envelope = model_training_envelope().await;
+    envelope.submission_id = Uuid::new_v4();
+    let raw = serde_json::to_vec(&envelope).unwrap();
+    let key = envelope.submission_id.to_string();
+    let PipelineReceiptResult::Created(created) = service
+        .submit(PipelineReceiptRequest {
+            source_session: None,
+            tenant_id: &tenant,
+            actor_principal_ref: &principal,
+            counts_toward_quota: true,
+            request_idempotency_key: &key,
+            request_bytes: &raw,
+            server_envelope: &envelope,
+            residual_risk_basis: &[],
+            limits: PipelineAdmissionLimits {
+                max_per_tenant_per_hour: 0,
+                max_per_principal_per_hour: 0,
+            },
+        })
+        .await
+        .expect("the receipt succeeds")
+    else {
+        panic!("the receipt creates a run")
+    };
+    for _ in 0..3 {
+        service
+            .process_run(&tenant, created.run_id)
+            .await
+            .expect("the phase runs");
+    }
+    let settled = service
+        .store()
+        .get_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("the run exists");
+    assert_eq!(settled.state, PipelineRunState::Complete);
+    assert!(
+        settled.index_command_ref.is_some() && settled.score_neighbor_ref.is_some(),
+        "Score stored both of its objects"
+    );
+
+    let object_refs = owner
+        .list_trace_object_refs(&tenant, settled.submission_id)
+        .await
+        .unwrap();
+    let mut kinds: Vec<StorageTraceObjectArtifactKind> = object_refs
+        .iter()
+        .map(|object_ref| object_ref.artifact_kind)
+        .collect();
+    kinds.sort_by_key(|kind| format!("{kind:?}"));
+    assert_eq!(
+        kinds,
+        vec![
+            StorageTraceObjectArtifactKind::ReviewSnapshot,
+            StorageTraceObjectArtifactKind::SubmittedEnvelope,
+            StorageTraceObjectArtifactKind::WorkerIntermediate,
+            StorageTraceObjectArtifactKind::WorkerIntermediate,
+        ],
+        "the source, the approved revision, and the two Score objects are object refs"
+    );
+    let tenant_ref = tenant_storage_ref(&tenant);
+    // The local store answers presence from the object key alone.
+    let present = |object_key: &str| {
+        artifacts
+            .artifact_present_by_object_key(
+                &tenant_ref,
+                TraceArtifactKind::VectorPayload,
+                object_key,
+                "",
+            )
+            .expect("the store answers")
+    };
+    for object_ref in &object_refs {
+        assert_eq!(
+            present(&object_ref.object_key),
+            Some(true),
+            "{:?} is stored before the withdrawal",
+            object_ref.artifact_kind
+        );
+    }
+
+    let outcome = service
+        .withdraw_submission(&tenant, settled.submission_id, &principal, None)
+        .await
+        .expect("the owner withdraws the submission");
+    assert_eq!(
+        outcome.revocation_propagation,
+        PipelineWithdrawalFollowUpState::Pending
+    );
+    let auth = revocation_worker_tenant_auth(&tenant);
+    let pass = run_revocation_propagation_worker(
+        state.as_ref(),
+        &auth,
+        TraceRevocationPropagationWorkerRequest {
+            purpose: Some("complete run object deletion".to_string()),
+            dry_run: false,
+            limit: 100,
+        },
+    )
+    .await
+    .expect("the worker runs");
+    assert_eq!(
+        (pass.checked, pass.completed, pass.failed, pass.skipped),
+        (4, 4, 0, 0),
+        "one completed deletion per object"
+    );
+
+    let after = owner
+        .list_trace_object_refs(&tenant, settled.submission_id)
+        .await
+        .unwrap();
+    assert_eq!(after.len(), object_refs.len());
+    for object_ref in &after {
+        assert_eq!(
+            present(&object_ref.object_key),
+            Some(false),
+            "{:?} is deleted from the store",
+            object_ref.artifact_kind
+        );
+        assert!(
+            object_ref.deleted_at.is_some(),
+            "{:?} is marked deleted",
+            object_ref.artifact_kind
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Pipeline product routes through the router: the status block, the score
 // attestation, exports, and the administrator reads, with the product store
@@ -3291,6 +3904,397 @@ async fn the_operator_route_requeues_the_tenants_failed_invalidations() {
         "{metadata}"
     );
     assert!(!metadata.to_string().contains(&run.run_id.to_string()));
+}
+
+/// Final review M4 (ruling FR-7): `POST /v1/workers/pipeline/index-rebuild`
+/// rebuilds the caller's tenant's index from its sealed commands and appends
+/// one hash-only, label-only index maintenance audit row: `main`'s
+/// `vector_index` action, the fixed purpose `pipeline_index_rebuild` as a
+/// hash, and the report's counts, with no run or submission id. A
+/// contributor is refused and appends nothing.
+///
+/// Merge review M1: the route also refuses, and appends nothing for, a
+/// tenant this process drains (or routes), with `409`
+/// `pipeline_index_rebuild_tenant_active`; the rebuild runs once the tenant
+/// is on neither list, as the restore runbook's step 3 sets it up.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_index_rebuild_route_appends_an_audit_row() {
+    let Some(fixture) = product_fixture().await else {
+        return;
+    };
+    let state = &fixture.base.state;
+    let tenant = fixture.base.tenant.as_str();
+    let principal = static_token_principal_ref(&fixture.base.token);
+    let run = completed_pipeline_run(&fixture.base.service, tenant, &principal).await;
+    let uri = "/v1/workers/pipeline/index-rebuild";
+
+    let (status, _) = route_request(
+        state.clone(),
+        "POST",
+        uri,
+        auth_headers(&fixture.base.token),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "a contributor is refused");
+
+    assert!(
+        state.pipeline_drain_tenant_ids.contains(tenant),
+        "the product fixture drains its tenant"
+    );
+    let (status, body) = route_request(
+        state.clone(),
+        "POST",
+        uri,
+        auth_headers(&fixture.admin_token),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(
+        body["error"], "pipeline_index_rebuild_tenant_active",
+        "{body}"
+    );
+    let mut routed = state.clone();
+    let routed_mut = Arc::make_mut(&mut routed);
+    routed_mut.pipeline_drain_tenant_ids = Arc::new(BTreeSet::new());
+    routed_mut.tenant_rollout_gates = TraceTenantRolloutGates::for_feature(
+        TraceTenantRolloutFeature::PipelineReceipts,
+        &[tenant],
+    );
+    let (status, body) = route_request(
+        routed,
+        "POST",
+        uri,
+        auth_headers(&fixture.admin_token),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(
+        body["error"], "pipeline_index_rebuild_tenant_active",
+        "a routed tenant is refused too: {body}"
+    );
+
+    // The restore runbook's step 3: the tenant on neither list.
+    let mut quiet = state.clone();
+    Arc::make_mut(&mut quiet).pipeline_drain_tenant_ids = Arc::new(BTreeSet::new());
+    let state = &quiet;
+    let (status, body) = route_request(
+        state.clone(),
+        "POST",
+        uri,
+        auth_headers(&fixture.admin_token),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["command_count"], 1, "{body}");
+    assert_eq!(body["skipped_run_count"], 0, "{body}");
+    let entry_count = body["entry_count"].as_u64().expect("an entry count");
+    assert!(entry_count > 0, "{body}");
+    assert_eq!(
+        body["unchanged_entry_count"].as_u64(),
+        Some(entry_count),
+        "the live index already holds every entry Settle wrote"
+    );
+
+    let mut client = fixture
+        .base
+        .owner
+        .trace_pool_for_test()
+        .get()
+        .await
+        .unwrap();
+    let tx = tenant_tx(&mut client, tenant).await;
+    let rows = tx
+        .query(
+            "SELECT action, metadata_json FROM trace_audit_events
+              WHERE tenant_id = $1
+                AND metadata_json->'action_counts' ? 'pipeline_index_commands_replayed'
+              ORDER BY audit_sequence",
+            &[&tenant],
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(rows.len(), 1, "one row for the one admitted call");
+    assert_eq!(rows[0].get::<_, String>("action"), "vector_index");
+    let metadata: serde_json::Value = rows[0].get("metadata_json");
+    let counts = &metadata["action_counts"];
+    assert_eq!(counts["pipeline_index_commands_replayed"], 1, "{metadata}");
+    assert_eq!(
+        counts["pipeline_index_entries_written"], entry_count,
+        "{metadata}"
+    );
+    assert_eq!(
+        counts["pipeline_index_entries_unchanged"], entry_count,
+        "{metadata}"
+    );
+    assert_eq!(counts["pipeline_index_runs_skipped"], 0, "{metadata}");
+    assert_eq!(
+        metadata["purpose_hash"],
+        sha256_prefixed("pipeline_index_rebuild"),
+        "{metadata}"
+    );
+    let text = metadata.to_string();
+    assert!(!text.contains(&run.run_id.to_string()));
+    assert!(!text.contains(&run.submission_id.to_string()));
+}
+
+/// An index writer over a real `IsolatedPipelineIndex` whose next `upsert`
+/// after `arm` is held until the test releases it; every other call goes
+/// straight to the index underneath.
+struct HeldRebuildWriter {
+    inner: Arc<IsolatedPipelineIndex>,
+    armed: std::sync::atomic::AtomicBool,
+    entered: tokio::sync::Notify,
+    release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+}
+
+impl HeldRebuildWriter {
+    fn new(inner: Arc<IsolatedPipelineIndex>) -> (Arc<Self>, std::sync::mpsc::Sender<()>) {
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let writer = Arc::new(Self {
+            inner,
+            armed: std::sync::atomic::AtomicBool::new(false),
+            entered: tokio::sync::Notify::new(),
+            release: std::sync::Mutex::new(release_rx),
+        });
+        (writer, release_tx)
+    }
+}
+
+impl trace_commons_gate_api::VectorIndexWriter for HeldRebuildWriter {
+    fn upsert(
+        &self,
+        key: &trace_commons_gate_api::IndexEntryKey,
+        embedding: &[f32],
+        content_hash: &str,
+    ) -> Result<trace_commons_gate_api::IndexUpsertResult, trace_commons_gate_api::IndexWriteError>
+    {
+        if self.armed.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            self.entered.notify_one();
+            self.release
+                .lock()
+                .unwrap()
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .expect("the test releases the held write within 30 s");
+        }
+        self.inner.upsert(key, embedding, content_hash)
+    }
+
+    fn invalidate_revision(
+        &self,
+        tenant_storage_ref: &trace_commons_gate_api::pipeline::TenantStorageRef,
+        index_id: &str,
+        revision_id: Uuid,
+    ) -> Result<bool, trace_commons_gate_api::IndexWriteError> {
+        self.inner
+            .invalidate_revision(tenant_storage_ref, index_id, revision_id)
+    }
+}
+
+impl trace_commons_gate_api::IdentifiedIndexWriter for HeldRebuildWriter {
+    fn dependency_identity(&self) -> &str {
+        "held_rebuild_writer_test_only"
+    }
+}
+
+/// Whether another transaction holds a lock on the run's row that a
+/// withdrawal's `FOR UPDATE` would wait for.
+async fn run_row_locked(runtime: &Arc<PgBackend>, tenant: &str, run_id: Uuid) -> bool {
+    let mut client = runtime.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, tenant).await;
+    let locked = match tx
+        .query_opt(
+            "SELECT 1 FROM pipeline_runs WHERE tenant_id = $1 AND run_id = $2 FOR UPDATE NOWAIT",
+            &[&tenant, &run_id],
+        )
+        .await
+    {
+        Ok(row) => {
+            assert!(row.is_some(), "the run row exists");
+            false
+        }
+        Err(error) => {
+            assert_eq!(
+                error.code(),
+                Some(&tokio_postgres::error::SqlState::LOCK_NOT_AVAILABLE),
+                "{error}"
+            );
+            true
+        }
+    };
+    drop(tx);
+    locked
+}
+
+/// Review of the follow-up wave, m1: a client that disconnects in the middle
+/// of `POST /v1/workers/pipeline/index-rebuild` drops the handler's future,
+/// but not the rebuild. While the rebuild's write is held, the run row stays
+/// locked, so a withdrawal's `FOR UPDATE` waits for the write; once it is
+/// released the rebuild commits and still appends its audit row. Before the
+/// handler spawned the rebuild, dropping it rolled the transaction back and
+/// released the lock while the write went on.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_dropped_index_rebuild_request_keeps_its_run_locked_until_its_writes_commit() {
+    let index = IsolatedPipelineIndex::new();
+    let (writer, release) = HeldRebuildWriter::new(index.clone());
+    let service_writer = writer.clone();
+    let Some(mut fixture) = withdrawal_fixture_with(
+        move |runtime, artifacts| {
+            assemble_test_pipeline_service_with_writer(
+                runtime,
+                artifacts,
+                index,
+                Some(service_writer as Arc<dyn trace_commons_gate_api::IdentifiedIndexWriter>),
+                vec![RecordingSettlementAdapter::new(
+                    InstrumentId::new("storage_rebate").unwrap(),
+                    "recording_storage_rebate_withdrawal_test_only",
+                    "none",
+                ) as Arc<dyn SettlementAdapter>],
+                None,
+            )
+        },
+        false,
+    )
+    .await
+    else {
+        return;
+    };
+    let tenant = fixture.tenant.clone();
+    let principal = static_token_principal_ref(&fixture.token);
+    let run = completed_pipeline_run(&fixture.service, &tenant, &principal).await;
+    let admin = format!("token-admin-{}", Uuid::new_v4().simple());
+    let mut tokens = (*fixture.state.tokens).clone();
+    insert_token(&mut tokens, &tenant, &admin, TokenRole::Admin);
+    Arc::make_mut(&mut fixture.state).tokens = Arc::new(tokens);
+    assert!(!run_row_locked(&fixture.runtime, &tenant, run.run_id).await);
+
+    writer
+        .armed
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let mut request = Box::pin(pipeline_index_rebuild_handler(
+        State(fixture.state.clone()),
+        auth_headers(&admin),
+    ));
+    tokio::select! {
+        _ = request.as_mut() => panic!("the rebuild returned while its write was held"),
+        () = writer.entered.notified() => {}
+    }
+    // The client disconnects.
+    drop(request);
+
+    // A second's worth of checks: a dropped transaction would have rolled
+    // back, and released the lock, well within it.
+    for _ in 0..10 {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(
+            run_row_locked(&fixture.runtime, &tenant, run.run_id).await,
+            "the run row stays locked while the rebuild's write runs"
+        );
+    }
+
+    release.send(()).expect("the held write is waiting");
+    let audit_rows = || async {
+        let mut client = fixture.owner.trace_pool_for_test().get().await.unwrap();
+        let tx = tenant_tx(&mut client, &tenant).await;
+        let count: i64 = tx
+            .query_one(
+                "SELECT COUNT(*) FROM trace_audit_events
+                  WHERE tenant_id = $1
+                    AND metadata_json->'action_counts' ? 'pipeline_index_commands_replayed'",
+                &[&tenant],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        tx.commit().await.unwrap();
+        count
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while run_row_locked(&fixture.runtime, &tenant, run.run_id).await || audit_rows().await == 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the released rebuild commits and appends its audit row"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert_eq!(audit_rows().await, 1, "one audit row for the one rebuild");
+}
+
+/// Zaki's re-review of #1166, Low: `POST /v1/workers/pipeline/index-rebuild`
+/// runs one rebuild per tenant. While a tenant's rebuild is held at its
+/// write, a second request for that tenant is refused with `409`
+/// `pipeline_index_rebuild_in_progress` and starts nothing; once the first
+/// ends, the tenant can be rebuilt again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_second_index_rebuild_of_a_tenant_is_refused_while_one_runs() {
+    let index = IsolatedPipelineIndex::new();
+    let (writer, release) = HeldRebuildWriter::new(index.clone());
+    let service_writer = writer.clone();
+    let Some(mut fixture) = withdrawal_fixture_with(
+        move |runtime, artifacts| {
+            assemble_test_pipeline_service_with_writer(
+                runtime,
+                artifacts,
+                index,
+                Some(service_writer as Arc<dyn trace_commons_gate_api::IdentifiedIndexWriter>),
+                vec![RecordingSettlementAdapter::new(
+                    InstrumentId::new("storage_rebate").unwrap(),
+                    "recording_storage_rebate_withdrawal_test_only",
+                    "none",
+                ) as Arc<dyn SettlementAdapter>],
+                None,
+            )
+        },
+        false,
+    )
+    .await
+    else {
+        return;
+    };
+    let tenant = fixture.tenant.clone();
+    let principal = static_token_principal_ref(&fixture.token);
+    completed_pipeline_run(&fixture.service, &tenant, &principal).await;
+    let admin = format!("token-admin-{}", Uuid::new_v4().simple());
+    let mut tokens = (*fixture.state.tokens).clone();
+    insert_token(&mut tokens, &tenant, &admin, TokenRole::Admin);
+    Arc::make_mut(&mut fixture.state).tokens = Arc::new(tokens);
+
+    writer
+        .armed
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let first = tokio::spawn(pipeline_index_rebuild_handler(
+        State(fixture.state.clone()),
+        auth_headers(&admin),
+    ));
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        writer.entered.notified(),
+    )
+    .await
+    .expect("the first rebuild reaches its write");
+
+    let refused =
+        pipeline_index_rebuild_handler(State(fixture.state.clone()), auth_headers(&admin))
+            .await
+            .expect_err("a second rebuild of the tenant is refused while one runs");
+    assert_eq!(refused.0, StatusCode::CONFLICT);
+    assert_eq!(refused.1.0.error, "pipeline_index_rebuild_in_progress");
+
+    release.send(()).expect("the held write is waiting");
+    let report = tokio::time::timeout(std::time::Duration::from_secs(10), first)
+        .await
+        .expect("the first rebuild ends once released")
+        .expect("the first rebuild did not panic")
+        .expect("the first rebuild succeeds");
+    assert_eq!(report.0.command_count, 1);
+    let again = pipeline_index_rebuild_handler(State(fixture.state.clone()), auth_headers(&admin))
+        .await
+        .expect("the tenant can be rebuilt again once its rebuild ended");
+    assert_eq!(again.0.command_count, 1);
 }
 
 /// `POST /v1/pipeline/exports` for `use`, with `limit`, keyed by `key`.
@@ -4411,6 +5415,7 @@ fn trace_credit_payout_service(
         .with_embedder(embedder)
         .with_authority(allow_all_test_authority())
         .with_privacy(Arc::new(PassThroughPipelinePrivacyBoundary))
+        .with_unqualified_routing(true)
         .with_payout(
             near,
             PipelinePayoutConfig {
@@ -4624,12 +5629,16 @@ async fn db_reconciliation_leaves_pipeline_rows_out_of_the_file_comparison() {
 /// P5: `TestAssembler` with the compatibility bundle instead of the minimal
 /// one: `CompatibilityBundleConfig::local_reference()` with the given
 /// `NoveltyUtility` delta, the reference scorer and embedder, the isolated
-/// index, one `trace_credit` recording adapter on payout rail `none`, and
-/// the given privacy boundary. Payout stays disabled (the default).
+/// index, the given settlement adapters (one `trace_credit` recording
+/// adapter on payout rail `none` unless a caller shares its own), the given
+/// privacy boundary, and an optional crash point. Payout stays disabled
+/// (the default).
 struct CompatibilityTestAssembler {
     index: Arc<IsolatedPipelineIndex>,
     novelty_utility_microcredits: u64,
     privacy: Arc<dyn PipelinePrivacyBoundary>,
+    adapters: Vec<Arc<dyn SettlementAdapter>>,
+    crash_point: Option<PipelineCrashPoint>,
 }
 
 impl IngestPipelineRuntimeAssembler for CompatibilityTestAssembler {
@@ -4645,19 +5654,14 @@ impl IngestPipelineRuntimeAssembler for CompatibilityTestAssembler {
             scorer.as_ref(),
             embedder.as_ref(),
         )?;
-        let trace_credit: Arc<dyn SettlementAdapter> = RecordingSettlementAdapter::new(
-            InstrumentId::trace_credit(),
-            "recording_trace_credit_compatibility_http_test_only",
-            "none",
-        );
-        let registry = SettlementAdapterRegistry::new(vec![trace_credit])?;
+        let registry = SettlementAdapterRegistry::new(self.adapters.clone())?;
         let caps = PipelineCaps {
             per_instrument_atomic_units: BTreeMap::from([(
                 InstrumentId::trace_credit().as_str().to_string(),
                 AtomicUnits::from_raw(u128::MAX),
             )]),
         };
-        let service = PipelineServiceBuilder::new(
+        let mut builder = PipelineServiceBuilder::new(
             context.backend,
             context.artifact_store,
             package,
@@ -4672,14 +5676,17 @@ impl IngestPipelineRuntimeAssembler for CompatibilityTestAssembler {
         .with_novelty_utility_checks(context.novelty_utility_checks)
         .with_authority(allow_all_test_authority())
         .with_privacy(self.privacy.clone())
-        .build()?;
-        Ok(Arc::new(service))
+        .with_unqualified_routing(context.unqualified_routing_allowed);
+        if let Some(crash_point) = self.crash_point {
+            builder = builder.with_crash_point(crash_point);
+        }
+        Ok(Arc::new(builder.build()?))
     }
 }
 
 /// The pipeline credit issuer the compatibility HTTP tests configure
 /// (`TRACE_COMMONS_PIPELINE_CREDIT_ISSUER_PRINCIPAL_REF`).
-const TEST_PIPELINE_CREDIT_ISSUER: &str =
+pub(super) const TEST_PIPELINE_CREDIT_ISSUER: &str =
     "principal_sha256:1111111111111111111111111111111111111111111111111111111111111111";
 
 /// The configuration `CompatibilityTestAssembler` binds: the local reference,
@@ -4820,7 +5827,8 @@ async fn a_busy_tenant_score_lock_ends_the_tenants_worker_batch() {
 
 /// `assemble_test_pipeline_service` for `CompatibilityTestAssembler`: the
 /// service comes out of `assemble_ingest_pipeline_runtime`, the seam ingest's
-/// real boot uses, over `configured_store`.
+/// real boot uses, over `configured_store`, with its own `trace_credit`
+/// recording adapter and no crash point.
 fn assemble_compatibility_pipeline_service(
     backend: Arc<PgBackend>,
     configured_store: &ConfiguredTraceArtifactStore,
@@ -4828,10 +5836,42 @@ fn assemble_compatibility_pipeline_service(
     novelty_utility_microcredits: u64,
     privacy: Arc<dyn PipelinePrivacyBoundary>,
 ) -> Arc<PipelineService> {
+    let trace_credit: Arc<dyn SettlementAdapter> = RecordingSettlementAdapter::new(
+        InstrumentId::trace_credit(),
+        "recording_trace_credit_compatibility_http_test_only",
+        "none",
+    );
+    assemble_compatibility_pipeline_service_with(
+        backend,
+        configured_store,
+        index,
+        novelty_utility_microcredits,
+        privacy,
+        vec![trace_credit],
+        None,
+    )
+}
+
+/// `assemble_compatibility_pipeline_service` with the caller's settlement
+/// adapters and crash point: the restore drill's seed shares one recording
+/// adapter across two app lifetimes and crashes the second one
+/// (`pipeline_restore_pg_tests`), as `TestAssembler` does for the minimal
+/// bundle.
+pub(super) fn assemble_compatibility_pipeline_service_with(
+    backend: Arc<PgBackend>,
+    configured_store: &ConfiguredTraceArtifactStore,
+    index: Arc<IsolatedPipelineIndex>,
+    novelty_utility_microcredits: u64,
+    privacy: Arc<dyn PipelinePrivacyBoundary>,
+    adapters: Vec<Arc<dyn SettlementAdapter>>,
+    crash_point: Option<PipelineCrashPoint>,
+) -> Arc<PipelineService> {
     let assembler = CompatibilityTestAssembler {
         index,
         novelty_utility_microcredits,
         privacy,
+        adapters,
+        crash_point,
     };
     let connections = TraceCorpusDbConnections {
         database: backend.clone() as Arc<dyn Database>,
@@ -4843,6 +5883,7 @@ fn assemble_compatibility_pipeline_service(
         Some(configured_store),
         false,
         trace_commons_server::versioned_pipeline::PipelineLeaseConfig::default(),
+        true,
         true,
         true,
         None,
@@ -4873,7 +5914,7 @@ async fn model_training_envelope() -> TraceContributionEnvelope {
 
 /// `method uri` through `app()` with `headers` (and a JSON `body`), returning
 /// the status and the body, parsed as JSON when it is JSON.
-async fn route_request(
+pub(super) async fn route_request(
     state: Arc<AppState>,
     method: &str,
     uri: &str,
@@ -4941,6 +5982,7 @@ async fn compatibility_credit_rows_stay_readable_by_mains_database_reads() {
     let state_mut = Arc::make_mut(&mut state);
     state_mut.tokens = Arc::new(tokens);
     state_mut.pipeline_service = Some(service.clone());
+    state_mut.pipeline_activation = routing_store(&runtime);
     state_mut.pipeline_product = Some(Arc::new(PipelineProductStore::new(runtime.clone())));
     let principal = static_token_principal_ref(&token);
     let first = completed_run_of(
@@ -5123,6 +6165,7 @@ async fn compatibility_status_reads_as_mains_under_both_read_modes() {
         let state_mut = Arc::make_mut(&mut state);
         state_mut.tokens = Arc::new(tokens.clone());
         state_mut.pipeline_service = Some(service.clone());
+        state_mut.pipeline_activation = routing_store(&runtime);
         state_mut.pipeline_product = Some(Arc::new(PipelineProductStore::new(runtime.clone())));
         state_mut.pipeline_drain_tenant_ids = Arc::new(BTreeSet::from([tenant.clone()]));
         let (status, documents) = route_request(
@@ -5291,6 +6334,7 @@ async fn a_status_request_for_several_compatibility_runs_matches_one_request_per
         let state_mut = Arc::make_mut(&mut state);
         state_mut.tokens = Arc::new(tokens.clone());
         state_mut.pipeline_service = Some(service.clone());
+        state_mut.pipeline_activation = routing_store(&runtime);
         state_mut.pipeline_product = Some(Arc::new(PipelineProductStore::new(runtime.clone())));
         state_mut.pipeline_drain_tenant_ids = Arc::new(BTreeSet::from([tenant.clone()]));
         let ask = |submission_ids: Vec<Uuid>| {
@@ -5387,6 +6431,7 @@ async fn the_status_route_reads_the_pipeline_only_for_a_routed_or_drained_tenant
         let state_mut = Arc::make_mut(&mut state);
         state_mut.tokens = Arc::new(tokens.clone());
         state_mut.pipeline_service = Some(service.clone());
+        state_mut.pipeline_activation = routing_store(&runtime);
         state_mut.pipeline_product = Some(Arc::new(PipelineProductStore::new(runtime.clone())));
         if receipts {
             state_mut.tenant_rollout_gates = TraceTenantRolloutGates::for_feature(
@@ -5521,7 +6566,7 @@ async fn run_of_submission(
 /// Sends `body` (JSON, when given) to `url` over real HTTP with `headers`,
 /// and returns the status and the response body, parsed as JSON when it is
 /// JSON and as a string otherwise.
-async fn send_http(
+pub(super) async fn send_http(
     client: &reqwest::Client,
     method: reqwest::Method,
     url: String,
@@ -5547,7 +6592,7 @@ async fn send_http(
 }
 
 /// `POST /v1/traces` of `body` with `token`.
-async fn post_trace(
+pub(super) async fn post_trace(
     client: &reqwest::Client,
     base: &str,
     token: &str,
@@ -5569,7 +6614,7 @@ async fn post_trace(
 
 /// `POST /v1/contributors/me/submission-status` for `submission_ids` with
 /// `token`.
-async fn post_submission_status(
+pub(super) async fn post_submission_status(
     client: &reqwest::Client,
     base: &str,
     token: &str,
@@ -5683,6 +6728,7 @@ async fn compatibility_bundle_through_http_with_review_privacy_withdrawal_and_ex
     let state_mut = Arc::make_mut(&mut state);
     state_mut.tokens = Arc::new(tokens);
     state_mut.pipeline_service = Some(service.clone());
+    state_mut.pipeline_activation = routing_store(&runtime);
     state_mut.pipeline_product = Some(Arc::new(PipelineProductStore::new(runtime.clone())));
     state_mut.tenant_rollout_gates = TraceTenantRolloutGates::for_feature(
         TraceTenantRolloutFeature::PipelineReceipts,
@@ -6271,6 +7317,7 @@ async fn legacy_and_pipeline_tenants_match_under_equivalent_configuration() {
     ));
     state_mut.novelty_utility_credit_points_delta = LEGACY_NOVELTY_UTILITY_CREDIT_POINTS_DELTA;
     state_mut.pipeline_service = Some(service.clone());
+    state_mut.pipeline_activation = routing_store(&runtime);
     state_mut.pipeline_product = Some(Arc::new(PipelineProductStore::new(runtime.clone())));
     state_mut.tenant_rollout_gates = TraceTenantRolloutGates::for_feature(
         TraceTenantRolloutFeature::PipelineReceipts,
@@ -7584,6 +8631,7 @@ async fn a_pipeline_credit_event_carries_its_witness_label_and_mains_audit_event
     let state_mut = Arc::make_mut(&mut state);
     state_mut.tokens = Arc::new(tokens);
     state_mut.pipeline_service = Some(service.clone());
+    state_mut.pipeline_activation = routing_store(&runtime);
     let principal = static_token_principal_ref(&token);
     let run = completed_run_of(
         &service,
@@ -7821,4 +8869,2032 @@ async fn a_runtime_less_build_queues_the_pipeline_follow_up_through_the_database
         deletions >= 2,
         "a payload deletion per live object ({deletions})"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Upload routing (PR 5): a new upload goes where its tenant's committed
+// routing row sends it -- the pipeline, the legacy path with a legacy
+// ownership claim, or a 503 refusal -- and each submission id keeps the owner
+// that first took it. The receipts list is the scope of a process; the row
+// decides inside it. These tests run through the real router (and, where the
+// worker matters, `run_pipeline_app`) with static-token credentials.
+// ---------------------------------------------------------------------------
+
+/// Writes `tenant_id`'s routing row as an operator, through an owner
+/// connection, with the statement of `write_routing_in`, and the event that
+/// V110 requires for it: the same id, the state, and the row's generation,
+/// in the same transaction. These tests need a routing state, not the
+/// history of how a tenant came to it, so the event names no earlier state
+/// and no bundle. A copy of the runtime suite's helper of the same name
+/// (`tests/versioned_pipeline_runtime_pg.rs`), which a binary's test module
+/// cannot import. `state` is `legacy`, `pipeline`, or `contained`.
+pub(super) async fn write_routing_as_operator(tenant_id: &str, state: &str) {
+    let url = pipeline_http_database_url()
+        .await
+        .expect("the suite's database variable is set");
+    let (mut owner, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
+        .await
+        .expect("connect as the database owner");
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    let tx = owner.transaction().await.expect("open the owner tx");
+    tx.execute(
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+        &[&tenant_id],
+    )
+    .await
+    .expect("set tenant for the owner tx");
+    tx.execute(
+        "INSERT INTO trace_tenants (tenant_id) VALUES ($1)
+         ON CONFLICT (tenant_id) DO NOTHING",
+        &[&tenant_id],
+    )
+    .await
+    .expect("seed the tenant for a routing row");
+    let event_id = Uuid::new_v4();
+    let actor = format!("principal_sha256:{}", "ab".repeat(32));
+    let evidence_hash = sha256_prefixed("test-routing-state");
+    let generation: i64 = tx
+        .query_one(
+            "INSERT INTO pipeline_tenant_routing (
+                tenant_id, routing_state, activation_record_id,
+                actor_principal_ref, reason_code, evidence_hash, recorded_at
+             ) VALUES ($1, $2, $3, $4, $5, $6, clock_timestamp())
+             ON CONFLICT (tenant_id) DO UPDATE
+             SET routing_state = EXCLUDED.routing_state,
+                 activation_record_id = EXCLUDED.activation_record_id,
+                 actor_principal_ref = EXCLUDED.actor_principal_ref,
+                 reason_code = EXCLUDED.reason_code,
+                 evidence_hash = EXCLUDED.evidence_hash,
+                 recorded_at = EXCLUDED.recorded_at
+             RETURNING routing_generation",
+            &[
+                &tenant_id,
+                &state,
+                &event_id,
+                &actor,
+                &"test_routing_state",
+                &evidence_hash,
+            ],
+        )
+        .await
+        .expect("write the routing row as the operator")
+        .get(0);
+    let action = match state {
+        "pipeline" => "activate",
+        "contained" => "contain",
+        _ => "deactivate",
+    };
+    tx.execute(
+        "INSERT INTO pipeline_activation_events (
+            tenant_id, event_id, action, previous_state, resulting_state,
+            actor_principal_ref, reason_code, evidence_hash, routing_generation
+         ) VALUES ($1, $2, $3, 'unselected', $4, $5, 'test_routing_state', $6, $7)",
+        &[
+            &tenant_id,
+            &event_id,
+            &action,
+            &state,
+            &actor,
+            &evidence_hash,
+            &generation,
+        ],
+    )
+    .await
+    .expect("write the routing row's event as the operator");
+    tx.commit().await.expect("commit the routing row");
+}
+
+/// Records, as an operator through an owner connection, that `tenant_id`'s
+/// active bundle is qualified on `revision`: one `pipeline_bundle_qualifications`
+/// row for the tenant, its active bundle, and the revision (review round 1,
+/// amendment A7). The route decision reads only that the row exists, so the
+/// row's digests are fixture values; a test of the gate itself qualifies
+/// through the route (`pipeline_activation_pg_tests`). It panics for a tenant
+/// with no active bundle.
+pub(super) async fn qualify_active_bundle_as_operator(tenant_id: &str, revision: &str) {
+    let url = pipeline_http_database_url()
+        .await
+        .expect("the suite's database variable is set");
+    let (mut owner, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
+        .await
+        .expect("connect as the database owner");
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    let tx = owner.transaction().await.expect("open the owner tx");
+    tx.execute(
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+        &[&tenant_id],
+    )
+    .await
+    .expect("set tenant for the owner tx");
+    let digest = sha256_prefixed("test-qualification-fixture");
+    let inserted = tx
+        .execute(
+            "INSERT INTO pipeline_bundle_qualifications (
+                tenant_id, bundle_id, package_hash, signing_key_id,
+                signature_hash, corpus_digest, input_digest,
+                configuration_digest, code_revision_hash,
+                runtime_dependency_digest, evidence_hash
+             )
+             SELECT active.tenant_id, active.bundle_id, $3, 'test_fixture_key',
+                    $3, $3, $3, $3, $2, $3, $3
+               FROM pipeline_active_bundles active
+              WHERE active.tenant_id = $1",
+            &[&tenant_id, &revision, &digest],
+        )
+        .await
+        .expect("write the qualification row as the operator");
+    assert_eq!(inserted, 1, "the tenant has an active bundle to qualify");
+    tx.commit().await.expect("commit the qualification row");
+}
+
+/// Writes a legacy quarantine record of `envelope` for `tenant`, owned by
+/// the principal of the static token `token`, as a file record only (no
+/// ownership row, no `trace_submissions` row): what a remediation of the
+/// same id by that principal finds.
+fn seed_legacy_quarantine_record(
+    root: &std::path::Path,
+    tenant: &str,
+    token: &str,
+    envelope: &TraceContributionEnvelope,
+) {
+    let record: TraceCommonsSubmissionRecord = serde_json::from_value(serde_json::json!({
+        "tenant_id": tenant,
+        "tenant_storage_ref": tenant_storage_ref(tenant),
+        "auth_principal_ref": static_token_principal_ref(token),
+        "submission_id": envelope.submission_id,
+        "trace_id": envelope.trace_id,
+        "status": "quarantined",
+        "privacy_risk": "medium",
+        "submission_score": 0.0,
+        "credit_points_pending": 0.0,
+        "consent_scopes": [],
+        "received_at": chrono::Utc::now().to_rfc3339(),
+        "object_key": "obj/legacy-quarantine-fixture",
+    }))
+    .expect("legacy quarantine record fixture deserialises");
+    write_submission_record(root, &record).expect("write the legacy record");
+}
+
+/// Two tenants with a contributor token each, over one database, one
+/// artifact store, and one in-memory index: `tenant` is the one the tests
+/// route, `control_tenant` a bystander. `replica` builds one process's
+/// `AppState` over them, as often as a test needs one (two replicas share
+/// everything but their connections and their service).
+struct RoutingFixture {
+    runtime: Arc<PgBackend>,
+    tenant: String,
+    token: String,
+    control_tenant: String,
+    control_token: String,
+    dir: tempfile::TempDir,
+    artifacts: Arc<LocalEncryptedTraceArtifactStore>,
+    index: Arc<IsolatedPipelineIndex>,
+    adapters: Vec<Arc<dyn SettlementAdapter>>,
+}
+
+impl RoutingFixture {
+    async fn new() -> Option<Self> {
+        let runtime = runtime_backend(6).await?;
+        let suffix = Uuid::new_v4().simple().to_string();
+        let dir = tempfile::tempdir().expect("temp dir");
+        let artifacts = local_artifacts(&dir);
+        let adapters: Vec<Arc<dyn SettlementAdapter>> = vec![
+            RecordingSettlementAdapter::new(
+                InstrumentId::new("storage_rebate").unwrap(),
+                "recording_storage_rebate_routing_test_only",
+                "none",
+            ) as Arc<dyn SettlementAdapter>,
+            RecordingSettlementAdapter::new(
+                InstrumentId::trace_credit(),
+                "recording_trace_credit_routing_test_only",
+                "none",
+            ) as Arc<dyn SettlementAdapter>,
+        ];
+        Some(Self {
+            runtime,
+            tenant: format!("tenant-routing-{suffix}"),
+            token: format!("token-routing-{suffix}"),
+            control_tenant: format!("tenant-routing-control-{suffix}"),
+            control_token: format!("token-routing-control-{suffix}"),
+            dir,
+            artifacts,
+            index: IsolatedPipelineIndex::new(),
+            adapters,
+        })
+    }
+
+    /// One replica: a pipeline service assembled as a boot assembles one
+    /// (with `unqualified_routing` as the process's setting, in the service
+    /// and in the state), the routing store over the replica's own database
+    /// connection, `main`'s database mirror on the runtime login, and
+    /// `tenant` on the receipts list when `listed`. The default bundle is
+    /// registered, as startup registers it for a listed tenant, so a plain
+    /// router can take a receipt before any worker runs.
+    async fn replica(&self, listed: bool, unqualified_routing: bool) -> Arc<AppState> {
+        let connection = runtime_backend(6)
+            .await
+            .expect("the suite's database variable is set");
+        let service = assemble_test_pipeline_service_configured(
+            connection.clone(),
+            self.artifacts.clone(),
+            self.index.clone(),
+            None,
+            self.adapters.clone(),
+            None,
+            unqualified_routing,
+        );
+        service
+            .register_default_bundle(&self.tenant)
+            .await
+            .expect("register the default bundle");
+        let mut tokens = BTreeMap::new();
+        insert_token(
+            &mut tokens,
+            &self.tenant,
+            &self.token,
+            TokenRole::Contributor,
+        );
+        insert_token(
+            &mut tokens,
+            &self.control_tenant,
+            &self.control_token,
+            TokenRole::Contributor,
+        );
+        let mut state = test_state_with_options(
+            self.dir.path().to_path_buf(),
+            Some(mains_database().await),
+            Some(self.artifacts.clone()),
+            false,
+            false,
+            false,
+            false,
+        );
+        let state_mut = Arc::make_mut(&mut state);
+        state_mut.tokens = Arc::new(tokens);
+        state_mut.require_db_mirror_writes = true;
+        state_mut.pipeline_service = Some(service);
+        state_mut.pipeline_activation = routing_store(&connection);
+        state_mut.pipeline_unqualified_routing = unqualified_routing;
+        if listed {
+            state_mut.tenant_rollout_gates = TraceTenantRolloutGates::for_feature(
+                TraceTenantRolloutFeature::PipelineReceipts,
+                &[self.tenant.as_str()],
+            );
+        }
+        state
+    }
+
+    /// One process with no pipeline runtime over the fixture's database, as
+    /// the stock binary runs with a database (review round 1, G25): no
+    /// service, the tenant on no list, and both stores that
+    /// `AppState::from_env` builds whenever it has a database (the pipeline
+    /// store and the routing store). `main`'s own suites never run this
+    /// shape: their base state has neither store.
+    async fn stock(&self) -> Arc<AppState> {
+        let mut state = self.replica(false, false).await;
+        let state_mut = Arc::make_mut(&mut state);
+        state_mut.pipeline_service = None;
+        state_mut.pipeline_store = Some(Arc::new(PgPipelineStore::new(self.runtime.clone())));
+        assert!(state_mut.pipeline_activation.is_some());
+        state
+    }
+
+    /// The owner of `submission_id` in `tenant`, read through the routing
+    /// store.
+    async fn owner(&self, tenant: &str, submission_id: Uuid) -> Option<ReceiptOwner> {
+        routing_store(&self.runtime)
+            .expect("a routing store")
+            .ownership(tenant, submission_id)
+            .await
+            .expect("read the ownership row")
+            .map(|row| row.owner)
+    }
+
+    /// How many `table` rows `submission_id` has in `tenant` (`table` is one
+    /// of this file's own literals, never input).
+    async fn rows(&self, table: &str, tenant: &str, submission_id: Uuid) -> i64 {
+        let mut client = self.runtime.trace_pool_for_test().get().await.unwrap();
+        let tx = tenant_tx(&mut client, tenant).await;
+        let count = tx
+            .query_one(
+                &format!(
+                    "SELECT COUNT(*) FROM {table} WHERE tenant_id = $1 AND submission_id = $2"
+                ),
+                &[&tenant, &submission_id],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        tx.commit().await.unwrap();
+        count
+    }
+
+    /// The pipeline runs of `submission_id`.
+    async fn runs(&self, tenant: &str, submission_id: Uuid) -> i64 {
+        self.rows("pipeline_runs", tenant, submission_id).await
+    }
+
+    /// Whether the legacy path wrote anything for `submission_id`: its file
+    /// record or its `trace_submissions` row. A pipeline receipt writes the
+    /// row too, so a caller asks this only about an id that no run holds.
+    async fn legacy_record_exists(&self, tenant: &str, submission_id: Uuid) -> bool {
+        read_submission_record(self.dir.path(), tenant, submission_id)
+            .expect("read the legacy file record")
+            .is_some()
+            || self.rows("trace_submissions", tenant, submission_id).await > 0
+    }
+}
+
+/// A metadata-only, Low-risk envelope under a fresh submission id and a
+/// distinguishing tool name, so several of them in one tenant do not compete
+/// with each other as copies.
+async fn routing_envelope(tool_name: &str) -> TraceContributionEnvelope {
+    let mut envelope = sample_envelope().await;
+    envelope.submission_id = Uuid::new_v4();
+    envelope.trace_id = Uuid::new_v4();
+    make_metadata_only_low_risk(&mut envelope);
+    set_metadata_only_tool_name(&mut envelope, tool_name);
+    envelope
+}
+
+/// `POST /v1/traces` of the exact bytes `body` through a plain router over
+/// `state` (no worker, no listener), returning the status and the parsed
+/// body.
+pub(super) async fn route_trace(
+    state: &Arc<AppState>,
+    token: &str,
+    body: &[u8],
+) -> (StatusCode, serde_json::Value) {
+    use tower::ServiceExt;
+
+    let mut request = axum::http::Request::builder()
+        .method("POST")
+        .uri("/v1/traces")
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(body.to_vec()))
+        .unwrap();
+    request.headers_mut().extend(auth_headers(token));
+    let response = app(state.clone()).oneshot(request).await.unwrap();
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), 1 << 20).await.unwrap();
+    let text = String::from_utf8_lossy(&bytes).to_string();
+    (
+        status,
+        serde_json::from_str(&text).unwrap_or(serde_json::Value::String(text)),
+    )
+}
+
+/// Review Focus 1: a retry goes to the first owner of its submission id,
+/// whatever the routing row says now. The tenant is switched from the legacy
+/// path to the pipeline and back; every retry returns what the first attempt
+/// returned, the legacy receipts never get a run, and the pipeline receipt
+/// keeps its one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mixed_receipts_replay_to_their_first_owner_across_every_switch() {
+    let Some(fixture) = RoutingFixture::new().await else {
+        return;
+    };
+    let tenant = fixture.tenant.as_str();
+    let (base, stop, server) = serve_pipeline_app(fixture.replica(true, true).await).await;
+    let client = reqwest::Client::new();
+    let body_of = |envelope: &TraceContributionEnvelope| serde_json::to_vec(envelope).unwrap();
+    let l1 = routing_envelope("mixed_l1").await;
+    let p1 = routing_envelope("mixed_p1").await;
+    let l2 = routing_envelope("mixed_l2").await;
+
+    // (1) The row says `legacy`: L1 takes the legacy path.
+    write_routing_as_operator(tenant, "legacy").await;
+    let (status, l1_receipt) = post_trace(&client, &base, &fixture.token, &body_of(&l1)).await;
+    assert_eq!(status, StatusCode::OK, "{l1_receipt}");
+    assert_ne!(l1_receipt["status"], "processing", "L1 is a legacy receipt");
+    assert_eq!(fixture.runs(tenant, l1.submission_id).await, 0);
+    assert_eq!(
+        fixture.owner(tenant, l1.submission_id).await,
+        Some(ReceiptOwner::Legacy)
+    );
+
+    // (2) The row says `pipeline`: P1 takes the pipeline.
+    write_routing_as_operator(tenant, "pipeline").await;
+    let (status, p1_receipt) = post_trace(&client, &base, &fixture.token, &body_of(&p1)).await;
+    assert_eq!(status, StatusCode::OK, "{p1_receipt}");
+    assert_eq!(p1_receipt["status"], "processing");
+    assert_eq!(fixture.runs(tenant, p1.submission_id).await, 1);
+    assert_eq!(
+        fixture.owner(tenant, p1.submission_id).await,
+        Some(ReceiptOwner::Pipeline)
+    );
+
+    // (3) L1 retried: the legacy receipt of (1), and still no run.
+    let (status, again) = post_trace(&client, &base, &fixture.token, &body_of(&l1)).await;
+    assert_eq!(status, StatusCode::OK, "{again}");
+    assert_eq!(again, l1_receipt, "the retry returns the first receipt");
+    assert_eq!(fixture.runs(tenant, l1.submission_id).await, 0);
+
+    // (4) P1 retried: `processing`, still one run; another body under the
+    // same id is a content conflict.
+    let (status, again) = post_trace(&client, &base, &fixture.token, &body_of(&p1)).await;
+    assert_eq!(status, StatusCode::OK, "{again}");
+    assert_eq!(again["status"], "processing");
+    assert_eq!(fixture.runs(tenant, p1.submission_id).await, 1);
+    let mut changed = p1.clone();
+    changed.privacy.warnings.push("changed-content".to_string());
+    let (status, conflict) = post_trace(&client, &base, &fixture.token, &body_of(&changed)).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{conflict}");
+    assert_eq!(
+        conflict["error"],
+        "receipt id reused with different content"
+    );
+
+    // (5) Back to `legacy`: the pipeline still answers its own receipt, and
+    // L2 takes the legacy path.
+    write_routing_as_operator(tenant, "legacy").await;
+    let (status, again) = post_trace(&client, &base, &fixture.token, &body_of(&p1)).await;
+    assert_eq!(status, StatusCode::OK, "{again}");
+    assert_eq!(again["status"], "processing");
+    assert_eq!(fixture.runs(tenant, p1.submission_id).await, 1);
+    let (status, l2_receipt) = post_trace(&client, &base, &fixture.token, &body_of(&l2)).await;
+    assert_eq!(status, StatusCode::OK, "{l2_receipt}");
+    assert_ne!(l2_receipt["status"], "processing", "L2 is a legacy receipt");
+    assert_eq!(fixture.runs(tenant, l2.submission_id).await, 0);
+
+    // (6) Forward to `pipeline`: L2 is still the legacy receipt.
+    write_routing_as_operator(tenant, "pipeline").await;
+    let (status, again) = post_trace(&client, &base, &fixture.token, &body_of(&l2)).await;
+    assert_eq!(status, StatusCode::OK, "{again}");
+    assert_eq!(again, l2_receipt, "the retry returns the first receipt");
+    assert_eq!(fixture.runs(tenant, l2.submission_id).await, 0);
+
+    // (7) Two legacy owners and one pipeline owner; the legacy receipts have
+    // no pipeline ledger row.
+    let mut client_db = fixture.runtime.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client_db, tenant).await;
+    let owners: Vec<(String, i64)> = tx
+        .query(
+            "SELECT owner, COUNT(*) FROM pipeline_receipt_ownership
+              WHERE tenant_id = $1 GROUP BY owner ORDER BY owner",
+            &[&tenant],
+        )
+        .await
+        .unwrap()
+        .iter()
+        .map(|row| (row.get(0), row.get(1)))
+        .collect();
+    assert_eq!(
+        owners,
+        vec![("legacy".to_string(), 2), ("pipeline".to_string(), 1)]
+    );
+    let legacy_ids = vec![l1.submission_id, l2.submission_id];
+    let pipeline_ledger_rows: i64 = tx
+        .query_one(
+            "SELECT COUNT(*) FROM trace_credit_ledger
+              WHERE tenant_id = $1 AND submission_id = ANY($2)
+                AND pipeline_run_id IS NOT NULL",
+            &[&tenant, &legacy_ids],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    tx.commit().await.unwrap();
+    assert_eq!(pipeline_ledger_rows, 0);
+
+    stop.send(()).expect("send shutdown");
+    join_within(server, 20, "mixed receipts test server").await;
+}
+
+/// Review Focus 1: a remediation rewrites a legacy record the handler has in
+/// hand, so the legacy path owns it also when the routing row says `pipeline`
+/// (on a process that serves the tenant): after the
+/// tenant is switched to the pipeline, the same principal's changed body
+/// under the same id is `main`'s remediation answer, no run is created, and
+/// the legacy record holds the new body's redaction hash.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_remediation_of_a_legacy_quarantine_stays_on_the_legacy_path() {
+    let Some(fixture) = RoutingFixture::new().await else {
+        return;
+    };
+    let tenant = fixture.tenant.as_str();
+    let state = fixture.replica(true, true).await;
+    let (base, stop, server) = serve_pipeline_app(state).await;
+    let client = reqwest::Client::new();
+
+    // The legacy fixture of `main`'s quarantine tests: the consent flags
+    // declare text and payloads, and the risk is Medium, so the first landing
+    // is quarantined. Unlike `routing_envelope`, it keeps its message text,
+    // so the corrected (metadata-only) body has another redaction hash.
+    let mut first = sample_envelope().await;
+    first.submission_id = Uuid::new_v4();
+    first.trace_id = Uuid::new_v4();
+    set_metadata_only_tool_name(&mut first, "remediation");
+    first.consent.message_text_included = true;
+    first.consent.tool_payloads_included = true;
+    first.privacy.residual_pii_risk = ResidualPiiRisk::Medium;
+    write_routing_as_operator(tenant, "legacy").await;
+    let (status, receipt) = post_trace(
+        &client,
+        &base,
+        &fixture.token,
+        &serde_json::to_vec(&first).unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{receipt}");
+    assert_eq!(receipt["status"], "quarantined");
+
+    // The tenant is switched; the corrected body is the same id, low risk.
+    write_routing_as_operator(tenant, "pipeline").await;
+    let mut corrected = first.clone();
+    make_metadata_only_low_risk(&mut corrected);
+    corrected.privacy.residual_pii_risk = ResidualPiiRisk::Low;
+    let (status, remediated) = post_trace(
+        &client,
+        &base,
+        &fixture.token,
+        &serde_json::to_vec(&corrected).unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{remediated}");
+    assert_eq!(
+        remediated["status"], "accepted",
+        "`main`'s remediation answer, not `processing`"
+    );
+    assert_eq!(fixture.runs(tenant, first.submission_id).await, 0);
+    assert_eq!(
+        fixture.owner(tenant, first.submission_id).await,
+        Some(ReceiptOwner::Legacy)
+    );
+
+    // The server's own scrub is what the legacy record stores: the new
+    // body's hash, not the first body's.
+    let scrubbed_hash = |envelope: &TraceContributionEnvelope| {
+        let mut scrubbed = envelope.clone();
+        rescrub_trace_envelope(&mut scrubbed).expect("rescrub");
+        scrubbed.privacy.redaction_hash
+    };
+    let (first_hash, corrected_hash) = (scrubbed_hash(&first), scrubbed_hash(&corrected));
+    assert_ne!(first_hash, corrected_hash, "the fixture changes the hash");
+    let mut client_db = fixture.runtime.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client_db, tenant).await;
+    let stored: String = tx
+        .query_one(
+            "SELECT redaction_hash FROM trace_submissions
+              WHERE tenant_id = $1 AND submission_id = $2",
+            &[&tenant, &first.submission_id],
+        )
+        .await
+        .expect("the legacy submission row")
+        .get(0);
+    tx.commit().await.unwrap();
+    assert_eq!(stored, corrected_hash);
+
+    stop.send(()).expect("send shutdown");
+    join_within(server, 20, "remediation test server").await;
+}
+
+/// The remediation guard on its own: a legacy quarantine record that
+/// predates ownership rows has only its file record -- no ownership row and
+/// no `trace_submissions` row -- so nothing in the receipt transaction would
+/// tell the pipeline that the legacy path owns the id. With the row `pipeline`
+/// and the tenant on the list, the same principal's corrected body is still
+/// `main`'s remediation answer, no run is created, and the remediation claims
+/// the id for the legacy path.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_remediation_of_a_record_with_no_ownership_row_never_reaches_the_pipeline() {
+    let Some(fixture) = RoutingFixture::new().await else {
+        return;
+    };
+    let tenant = fixture.tenant.as_str();
+    let mut state = fixture.replica(true, true).await;
+    // The seeded record has no mirror row to remediate in the database.
+    Arc::make_mut(&mut state).require_db_mirror_writes = false;
+
+    let mut quarantined = routing_envelope("pre_ownership_quarantine").await;
+    quarantined.privacy.residual_pii_risk = ResidualPiiRisk::Medium;
+    let id = quarantined.submission_id;
+    let record: TraceCommonsSubmissionRecord = serde_json::from_value(serde_json::json!({
+        "tenant_id": tenant,
+        "tenant_storage_ref": tenant_storage_ref(tenant),
+        "auth_principal_ref": static_token_principal_ref(&fixture.token),
+        "submission_id": id,
+        "trace_id": quarantined.trace_id,
+        "status": "quarantined",
+        "privacy_risk": "medium",
+        "submission_score": 0.0,
+        "credit_points_pending": 0.0,
+        "consent_scopes": [],
+        "received_at": chrono::Utc::now().to_rfc3339(),
+        "object_key": "obj/pre-ownership-quarantine-fixture",
+    }))
+    .expect("legacy quarantine record fixture deserialises");
+    write_submission_record(fixture.dir.path(), &record).expect("write the legacy record");
+    assert_eq!(fixture.owner(tenant, id).await, None);
+    assert_eq!(fixture.rows("trace_submissions", tenant, id).await, 0);
+
+    write_routing_as_operator(tenant, "pipeline").await;
+    let mut corrected = quarantined.clone();
+    corrected.privacy.residual_pii_risk = ResidualPiiRisk::Low;
+    let (status, remediated) = route_trace(
+        &state,
+        &fixture.token,
+        &serde_json::to_vec(&corrected).unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{remediated}");
+    assert_eq!(
+        remediated["status"], "accepted",
+        "`main`'s remediation answer, not `processing`"
+    );
+    assert_eq!(fixture.runs(tenant, id).await, 0);
+    assert_eq!(fixture.owner(tenant, id).await, Some(ReceiptOwner::Legacy));
+    let record = read_submission_record(fixture.dir.path(), tenant, id)
+        .expect("read the record")
+        .expect("the legacy record");
+    assert_eq!(record.status, TraceCorpusStatus::Accepted);
+}
+
+/// Review Focus 2 (it emits the check `pipeline_activation_containment`):
+/// containment refuses new receipts and keeps pending work. Two replicas
+/// serve the tenant. A receipt taken before containment stays answerable on
+/// both and is completed by the worker while the row is `contained`; a new
+/// upload through either replica is a 503 that writes no legacy record, no
+/// submission row, no ownership row, and no run, and is accepted when the row
+/// says `pipeline` again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn containment_refuses_new_receipts_and_keeps_pending_work() {
+    let Some(fixture) = RoutingFixture::new().await else {
+        return;
+    };
+    let tenant = fixture.tenant.as_str();
+    let replica_1 = fixture.replica(true, true).await;
+    let replica_2 = fixture.replica(true, true).await;
+    let store = routing_store(&fixture.runtime).expect("a routing store");
+    let body_of = |envelope: &TraceContributionEnvelope| serde_json::to_vec(envelope).unwrap();
+    let p1 = routing_envelope("containment_p1").await;
+    let p2 = routing_envelope("containment_p2").await;
+    let p3 = routing_envelope("containment_p3").await;
+
+    // (1) P1 through replica 1: `processing`, and its run waits (no worker).
+    write_routing_as_operator(tenant, "pipeline").await;
+    let (status, receipt) = route_trace(&replica_1, &fixture.token, &body_of(&p1)).await;
+    assert_eq!(status, StatusCode::OK, "{receipt}");
+    assert_eq!(receipt["status"], "processing");
+    let run_state = |submission_id: Uuid| {
+        let runtime = fixture.runtime.clone();
+        async move {
+            let mut client = runtime.trace_pool_for_test().get().await.unwrap();
+            let tx = tenant_tx(&mut client, tenant).await;
+            let state: Option<String> = tx
+                .query_opt(
+                    "SELECT state FROM pipeline_runs WHERE tenant_id = $1 AND submission_id = $2",
+                    &[&tenant, &submission_id],
+                )
+                .await
+                .unwrap()
+                .map(|row| row.get(0));
+            tx.commit().await.unwrap();
+            state
+        }
+    };
+    assert_eq!(
+        run_state(p1.submission_id).await.as_deref(),
+        Some("pending")
+    );
+
+    // (2) Containment.
+    store
+        .contain(
+            tenant,
+            &format!("principal_sha256:{}", "ab".repeat(32)),
+            "contain_for_test",
+        )
+        .await
+        .expect("contain the tenant");
+
+    // (3) New uploads are refused on both replicas, and nothing is written.
+    for (replica, envelope, case) in [
+        (&replica_1, &p2, "P2 through replica 1"),
+        (&replica_2, &p3, "P3 through replica 2"),
+    ] {
+        let (status, refused) = route_trace(replica, &fixture.token, &body_of(envelope)).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{case}: {refused}");
+        assert_eq!(
+            refused["error"], "pipeline_receipt_intake_contained",
+            "{case}"
+        );
+        let id = envelope.submission_id;
+        assert_eq!(fixture.runs(tenant, id).await, 0, "{case}: no run");
+        assert!(
+            !fixture.legacy_record_exists(tenant, id).await,
+            "{case}: no legacy record and no submission row"
+        );
+        assert_eq!(fixture.owner(tenant, id).await, None, "{case}: no owner");
+    }
+
+    // (4) P1 retried through replica 2: still its pipeline receipt.
+    let (status, replayed) = route_trace(&replica_2, &fixture.token, &body_of(&p1)).await;
+    assert_eq!(status, StatusCode::OK, "{replayed}");
+    assert_eq!(replayed["status"], "processing");
+    assert_eq!(fixture.runs(tenant, p1.submission_id).await, 1);
+
+    // (5) The worker (replica 1's state, with the row still `contained`)
+    // completes the pending run.
+    let (base, stop, server) = serve_pipeline_app(replica_1).await;
+    wait_for_run_complete(&fixture.runtime, tenant, p1.submission_id).await;
+    assert_eq!(
+        store
+            .routing(tenant)
+            .await
+            .unwrap()
+            .expect("the routing row")
+            .routing_state,
+        trace_commons_server::versioned_pipeline_activation::RoutingState::Contained,
+        "the run completed while the tenant was contained"
+    );
+
+    // (6) The row says `pipeline` again: P2, refused above, is accepted. A
+    // static-token upload has no admission attempt, so there is none to
+    // release here; the refusals of an upload with admission release their
+    // attempt (`a_contained_upload_releases_its_admission_attempt`).
+    write_routing_as_operator(tenant, "pipeline").await;
+    let client = reqwest::Client::new();
+    let (status, accepted) = post_trace(&client, &base, &fixture.token, &body_of(&p2)).await;
+    assert_eq!(status, StatusCode::OK, "{accepted}");
+    assert_eq!(accepted["status"], "processing");
+    assert_eq!(fixture.runs(tenant, p2.submission_id).await, 1);
+
+    stop.send(()).expect("send shutdown");
+    join_within(server, 20, "containment test server").await;
+
+    PipelineCheckEmitter::emit_pass_from_env(
+        "pipeline_activation_containment",
+        None,
+        serde_json::json!({
+            "refused_new_receipts": 2,
+            "replayed": 1,
+            "completed_while_contained": 1,
+            "legacy_records_for_refused": 0,
+        }),
+    );
+}
+
+/// STA-002: an upload under a suspended Admission policy is refused with its
+/// safe label, not as an internal error. The receipt stores nothing (no run,
+/// no legacy record, no submission row, no ownership row), the answer is a 503
+/// that names `bundle_policy_not_runnable` as the containment refusal names
+/// its label, and after `resume` the same upload is accepted with one run.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_upload_under_a_suspended_admission_policy_is_refused_with_its_label() {
+    let Some(fixture) = RoutingFixture::new().await else {
+        return;
+    };
+    let tenant = fixture.tenant.as_str();
+    let state = fixture.replica(true, true).await;
+    let service = state
+        .pipeline_service
+        .clone()
+        .expect("the replica serves a pipeline service");
+    let bundle_id = service.bundle_id().to_string();
+    let actor = format!("operator_sha256:{}", "ab".repeat(32));
+    let envelope = routing_envelope("suspended_admission").await;
+    let body = serde_json::to_vec(&envelope).unwrap();
+    let id = envelope.submission_id;
+
+    write_routing_as_operator(tenant, "pipeline").await;
+    service
+        .intervene_policy(
+            tenant,
+            &bundle_id,
+            Phase::Admission,
+            "suspend",
+            &actor,
+            "hold_intake",
+        )
+        .await
+        .expect("suspend the Admission policy");
+    let (status, refused) = route_trace(&state, &fixture.token, &body).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{refused}");
+    assert_eq!(refused["error"], "bundle_policy_not_runnable");
+    assert_eq!(fixture.runs(tenant, id).await, 0, "no run");
+    assert!(
+        !fixture.legacy_record_exists(tenant, id).await,
+        "no legacy record and no submission row"
+    );
+    assert_eq!(fixture.owner(tenant, id).await, None, "no owner");
+
+    service
+        .intervene_policy(
+            tenant,
+            &bundle_id,
+            Phase::Admission,
+            "resume",
+            &actor,
+            "release_intake",
+        )
+        .await
+        .expect("resume the Admission policy");
+    let (status, accepted) = route_trace(&state, &fixture.token, &body).await;
+    assert_eq!(status, StatusCode::OK, "{accepted}");
+    assert_eq!(accepted["status"], "processing");
+    assert_eq!(fixture.runs(tenant, id).await, 1, "one run");
+}
+
+/// A tenant whose routing row says `pipeline` but that is not on the
+/// receipts list of this process is refused, never sent to the legacy path:
+/// the list is the scope of the process and the row cannot widen it. A
+/// tenant that is neither in scope nor has a row is untouched (it takes the
+/// legacy path and claims nothing); one that has a row but is not in scope
+/// is claimed for the legacy path when its row says `legacy`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_activated_tenant_off_the_receipts_list_is_refused_not_sent_to_legacy() {
+    let Some(fixture) = RoutingFixture::new().await else {
+        return;
+    };
+    let tenant = fixture.tenant.as_str();
+    let state = fixture.replica(false, true).await;
+    let body_of = |envelope: &TraceContributionEnvelope| serde_json::to_vec(envelope).unwrap();
+
+    write_routing_as_operator(tenant, "pipeline").await;
+    let refused_envelope = routing_envelope("not_served").await;
+    let (status, refused) = route_trace(&state, &fixture.token, &body_of(&refused_envelope)).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{refused}");
+    assert_eq!(refused["error"], "pipeline_tenant_not_served");
+    let id = refused_envelope.submission_id;
+    assert_eq!(fixture.runs(tenant, id).await, 0);
+    assert!(!fixture.legacy_record_exists(tenant, id).await);
+    assert_eq!(fixture.owner(tenant, id).await, None);
+
+    // The bystander: no row, not in scope. Legacy path, no claim.
+    let control = routing_envelope("not_served_control").await;
+    let (status, receipt) = route_trace(&state, &fixture.control_token, &body_of(&control)).await;
+    assert_eq!(status, StatusCode::OK, "{receipt}");
+    assert_ne!(receipt["status"], "processing");
+    assert!(
+        fixture
+            .legacy_record_exists(&fixture.control_tenant, control.submission_id)
+            .await
+    );
+    assert_eq!(
+        fixture
+            .owner(&fixture.control_tenant, control.submission_id)
+            .await,
+        None,
+        "a tenant out of scope with no row claims nothing"
+    );
+
+    // The bystander with a `legacy` row: out of scope, but a row exists, so
+    // the legacy path claims the id before it writes.
+    write_routing_as_operator(&fixture.control_tenant, "legacy").await;
+    let claimed = routing_envelope("not_served_control_claimed").await;
+    let (status, receipt) = route_trace(&state, &fixture.control_token, &body_of(&claimed)).await;
+    assert_eq!(status, StatusCode::OK, "{receipt}");
+    assert_ne!(receipt["status"], "processing");
+    assert_eq!(
+        fixture
+            .owner(&fixture.control_tenant, claimed.submission_id)
+            .await,
+        Some(ReceiptOwner::Legacy)
+    );
+}
+
+/// "Production routing stays off": a process without the test setting
+/// routes a tenant with no routing row to the legacy path even when the
+/// tenant is on the receipts list, and the legacy path claims the id. And a
+/// process with no pipeline runtime (the stock binary) reads the routing
+/// with its run read, and claims nothing for a tenant with no row.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_tenant_with_no_row_stays_on_the_legacy_path_without_the_test_flag() {
+    let Some(fixture) = RoutingFixture::new().await else {
+        return;
+    };
+    let tenant = fixture.tenant.as_str();
+    let body_of = |envelope: &TraceContributionEnvelope| serde_json::to_vec(envelope).unwrap();
+
+    // The setting off, the tenant on the list, no row.
+    let production = fixture.replica(true, false).await;
+    assert!(!production.pipeline_unqualified_routing);
+    assert!(
+        !production
+            .pipeline_service
+            .as_ref()
+            .unwrap()
+            .unqualified_routing()
+    );
+    let (base, stop, server) = serve_pipeline_app(production).await;
+    let client = reqwest::Client::new();
+    let envelope = routing_envelope("no_row").await;
+    let (status, receipt) = post_trace(&client, &base, &fixture.token, &body_of(&envelope)).await;
+    assert_eq!(status, StatusCode::OK, "{receipt}");
+    assert_ne!(receipt["status"], "processing", "a legacy receipt");
+    assert_eq!(fixture.runs(tenant, envelope.submission_id).await, 0);
+    assert!(
+        fixture
+            .legacy_record_exists(tenant, envelope.submission_id)
+            .await
+    );
+    assert_eq!(
+        fixture.owner(tenant, envelope.submission_id).await,
+        Some(ReceiptOwner::Legacy),
+        "a tenant in scope is claimed for the legacy path"
+    );
+    stop.send(()).expect("send shutdown");
+    join_within(server, 20, "production routing test server").await;
+
+    // No runtime, as the stock binary runs: the routing store exists (the
+    // database does), the tenant has no row, and nothing is claimed.
+    let mut stock = fixture.replica(true, false).await;
+    Arc::make_mut(&mut stock).pipeline_service = None;
+    assert!(stock.pipeline_activation.is_some());
+    let stock_envelope = routing_envelope("no_runtime").await;
+    let (status, receipt) = route_trace(&stock, &fixture.token, &body_of(&stock_envelope)).await;
+    assert_eq!(status, StatusCode::OK, "{receipt}");
+    assert_ne!(receipt["status"], "processing");
+    assert!(
+        fixture
+            .legacy_record_exists(tenant, stock_envelope.submission_id)
+            .await
+    );
+    assert_eq!(
+        fixture.owner(tenant, stock_envelope.submission_id).await,
+        None,
+        "with no runtime and no row nothing is claimed"
+    );
+}
+
+/// A routing row that cannot be read is a refusal, never the legacy path: a
+/// store whose database is down, and a runtime with no routing store at all,
+/// answer `503 pipeline_routing_unavailable` and write nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_routing_read_refuses_the_upload_and_never_reaches_the_legacy_path() {
+    let Some(fixture) = RoutingFixture::new().await else {
+        return;
+    };
+    let tenant = fixture.tenant.as_str();
+    write_routing_as_operator(tenant, "legacy").await;
+    let mut down = fixture.replica(true, true).await;
+    Arc::make_mut(&mut down).pipeline_activation =
+        routing_store(&pg_backend_without_a_database().await);
+    let mut missing = fixture.replica(true, true).await;
+    Arc::make_mut(&mut missing).pipeline_activation = None;
+
+    for (state, case) in [
+        (down, "the routing store's database is down"),
+        (missing, "no routing store"),
+    ] {
+        let envelope = routing_envelope("routing_read").await;
+        let (status, refused) = route_trace(
+            &state,
+            &fixture.token,
+            &serde_json::to_vec(&envelope).unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{case}: {refused}");
+        assert_eq!(refused["error"], "pipeline_routing_unavailable", "{case}");
+        let id = envelope.submission_id;
+        assert_eq!(fixture.runs(tenant, id).await, 0, "{case}");
+        assert!(!fixture.legacy_record_exists(tenant, id).await, "{case}");
+    }
+}
+
+/// The legacy claim of an id that a pipeline run owns is answered as a retry
+/// of that receipt is. Here no run is found under the key when the handler
+/// first looks (an ownership row names the pipeline, as it does in the
+/// instant between a concurrent receipt's ownership insert and its run), so
+/// the claim is what finds the owner: the upload is `409
+/// submission_owned_by_pipeline_run`, and the legacy path writes nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_claim_that_finds_a_pipeline_owner_is_refused_as_a_pipeline_owned_id() {
+    let Some(fixture) = RoutingFixture::new().await else {
+        return;
+    };
+    let tenant = fixture.tenant.as_str();
+    let state = fixture.replica(true, true).await;
+    let body_of = |envelope: &TraceContributionEnvelope| serde_json::to_vec(envelope).unwrap();
+
+    // A real pipeline receipt gives the ownership row a run to name.
+    write_routing_as_operator(tenant, "pipeline").await;
+    let owned = routing_envelope("claim_owner_run").await;
+    let (status, receipt) = route_trace(&state, &fixture.token, &body_of(&owned)).await;
+    assert_eq!(status, StatusCode::OK, "{receipt}");
+    let run_id = routing_store(&fixture.runtime)
+        .unwrap()
+        .ownership(tenant, owned.submission_id)
+        .await
+        .unwrap()
+        .and_then(|row| row.run_id)
+        .expect("the pipeline receipt's ownership row names its run");
+
+    // A second id, owned by the pipeline in the ownership table only.
+    let contested = routing_envelope("claim_owner_contested").await;
+    let url = pipeline_http_database_url().await.unwrap();
+    let (owner, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
+        .await
+        .expect("connect as the database owner");
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    owner
+        .execute(
+            "INSERT INTO pipeline_receipt_ownership (tenant_id, submission_id, owner, run_id)
+             VALUES ($1, $2, 'pipeline', $3)",
+            &[&tenant, &contested.submission_id, &run_id],
+        )
+        .await
+        .expect("seed the pipeline ownership row");
+    write_routing_as_operator(tenant, "legacy").await;
+    let (status, refused) = route_trace(&state, &fixture.token, &body_of(&contested)).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{refused}");
+    assert_eq!(refused["error"], "submission_owned_by_pipeline_run");
+    assert!(
+        !fixture
+            .legacy_record_exists(tenant, contested.submission_id)
+            .await
+    );
+    assert_eq!(fixture.runs(tenant, contested.submission_id).await, 0);
+}
+
+/// An id the legacy path claimed stays the legacy path's, even when its
+/// first attempt failed before it wrote anything: with the row switched to
+/// `pipeline`, the retry gets a legacy receipt (the receipt transaction
+/// answers `LegacyOwned`, and the handler goes on to the legacy path) and no
+/// run is created.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_id_the_legacy_path_claimed_stays_legacy_after_a_failed_first_attempt() {
+    let Some(fixture) = RoutingFixture::new().await else {
+        return;
+    };
+    let tenant = fixture.tenant.as_str();
+    let state = fixture.replica(true, true).await;
+    let envelope = routing_envelope("claimed_then_failed").await;
+    let id = envelope.submission_id;
+
+    // The claim of a legacy attempt that died before its first write.
+    assert_eq!(
+        routing_store(&fixture.runtime)
+            .unwrap()
+            .claim_legacy_receipt(tenant, id)
+            .await
+            .unwrap(),
+        ReceiptOwner::Legacy
+    );
+    assert!(!fixture.legacy_record_exists(tenant, id).await);
+
+    write_routing_as_operator(tenant, "pipeline").await;
+    let (status, receipt) = route_trace(
+        &state,
+        &fixture.token,
+        &serde_json::to_vec(&envelope).unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{receipt}");
+    assert_ne!(receipt["status"], "processing", "a legacy receipt");
+    assert_eq!(fixture.runs(tenant, id).await, 0);
+    assert!(fixture.legacy_record_exists(tenant, id).await);
+    assert_eq!(fixture.owner(tenant, id).await, Some(ReceiptOwner::Legacy));
+}
+
+/// The receipt transaction checks the routing again, and its answer is the
+/// one that holds. A state whose setting differs from its service's (the
+/// assembly refuses that pair at boot; here it stands for a row that changed
+/// between the handler's read and the receipt) sends a tenant with no row to
+/// the service, which answers `NotRouted(Legacy)`: the handler claims the id
+/// for the legacy path and the upload takes it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_receipt_transactions_routing_answer_wins_over_the_handlers_read() {
+    let Some(fixture) = RoutingFixture::new().await else {
+        return;
+    };
+    let tenant = fixture.tenant.as_str();
+    let mut state = fixture.replica(true, false).await;
+    Arc::make_mut(&mut state).pipeline_unqualified_routing = true;
+    let envelope = routing_envelope("routing_changed").await;
+    let (status, receipt) = route_trace(
+        &state,
+        &fixture.token,
+        &serde_json::to_vec(&envelope).unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{receipt}");
+    assert_ne!(receipt["status"], "processing", "a legacy receipt");
+    let id = envelope.submission_id;
+    assert_eq!(fixture.runs(tenant, id).await, 0);
+    assert!(fixture.legacy_record_exists(tenant, id).await);
+    assert_eq!(fixture.owner(tenant, id).await, Some(ReceiptOwner::Legacy));
+}
+
+/// `POST /v1/traces` of `envelope` by the fixture's contributor through
+/// `state`, expecting a `503` with `label` that wrote nothing: no run, no
+/// legacy submission row, and no owner.
+async fn assert_upload_refused(
+    fixture: &RoutingFixture,
+    state: &Arc<AppState>,
+    envelope: &TraceContributionEnvelope,
+    label: &str,
+    case: &str,
+) {
+    let tenant = fixture.tenant.as_str();
+    let (status, refused) = route_trace(
+        state,
+        &fixture.token,
+        &serde_json::to_vec(envelope).unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{case}: {refused}");
+    assert_eq!(refused["error"], label, "{case}");
+    let id = envelope.submission_id;
+    assert_eq!(fixture.runs(tenant, id).await, 0, "{case}: no run");
+    assert_eq!(
+        fixture.rows("trace_submissions", tenant, id).await,
+        0,
+        "{case}: no submission row"
+    );
+    assert_eq!(fixture.owner(tenant, id).await, None, "{case}: no owner");
+}
+
+/// Review round 1, point 4b: a process with no pipeline runtime reads the
+/// tenant's routing row and refuses a contained tenant's upload, as a process
+/// with a runtime does. Nothing is written.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_process_with_no_runtime_refuses_a_contained_tenant() {
+    let Some(fixture) = RoutingFixture::new().await else {
+        return;
+    };
+    let stock = fixture.stock().await;
+    write_routing_as_operator(&fixture.tenant, "contained").await;
+    let envelope = routing_envelope("no_runtime_contained").await;
+    assert_upload_refused(
+        &fixture,
+        &stock,
+        &envelope,
+        "pipeline_receipt_intake_contained",
+        "no runtime, contained",
+    )
+    .await;
+    assert!(
+        !fixture
+            .legacy_record_exists(&fixture.tenant, envelope.submission_id)
+            .await
+    );
+}
+
+/// Review round 1, point 4b: a process with no pipeline runtime serves no
+/// tenant, so a tenant whose row says `pipeline` is refused there as not
+/// served, never written on the legacy path.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_process_with_no_runtime_refuses_a_pipeline_tenant_as_not_served() {
+    let Some(fixture) = RoutingFixture::new().await else {
+        return;
+    };
+    let stock = fixture.stock().await;
+    write_routing_as_operator(&fixture.tenant, "pipeline").await;
+    let envelope = routing_envelope("no_runtime_pipeline").await;
+    assert_upload_refused(
+        &fixture,
+        &stock,
+        &envelope,
+        "pipeline_tenant_not_served",
+        "no runtime, pipeline",
+    )
+    .await;
+    assert!(
+        !fixture
+            .legacy_record_exists(&fixture.tenant, envelope.submission_id)
+            .await
+    );
+}
+
+/// A process with no pipeline runtime takes the upload of a tenant whose row
+/// says `legacy` on the legacy path, and claims the id for it first: the
+/// tenant has a routing row, so a process that serves it must find the owner.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_process_with_no_runtime_takes_a_legacy_tenant_and_claims_the_id() {
+    let Some(fixture) = RoutingFixture::new().await else {
+        return;
+    };
+    let tenant = fixture.tenant.as_str();
+    let stock = fixture.stock().await;
+    write_routing_as_operator(tenant, "legacy").await;
+    let envelope = routing_envelope("no_runtime_legacy").await;
+    let (status, receipt) = route_trace(
+        &stock,
+        &fixture.token,
+        &serde_json::to_vec(&envelope).unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{receipt}");
+    assert_ne!(receipt["status"], "processing", "a legacy receipt");
+    let id = envelope.submission_id;
+    assert!(fixture.legacy_record_exists(tenant, id).await);
+    assert_eq!(fixture.runs(tenant, id).await, 0);
+    assert_eq!(fixture.owner(tenant, id).await, Some(ReceiptOwner::Legacy));
+}
+
+/// A process with no pipeline runtime and a tenant with no routing row: the
+/// legacy path with no claim, as `main`. And the run read that the routing
+/// read now rides on still answers: an id that a pipeline run owns is `409
+/// submission_owned_by_pipeline_run` there, and the legacy path writes
+/// nothing for it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_process_with_no_runtime_and_no_row_stays_on_the_legacy_path_with_no_claim() {
+    let Some(fixture) = RoutingFixture::new().await else {
+        return;
+    };
+    let tenant = fixture.tenant.as_str();
+    let stock = fixture.stock().await;
+    let body_of = |envelope: &TraceContributionEnvelope| serde_json::to_vec(envelope).unwrap();
+
+    let envelope = routing_envelope("no_runtime_no_row").await;
+    let (status, receipt) = route_trace(&stock, &fixture.token, &body_of(&envelope)).await;
+    assert_eq!(status, StatusCode::OK, "{receipt}");
+    assert_ne!(receipt["status"], "processing", "a legacy receipt");
+    let id = envelope.submission_id;
+    assert!(fixture.legacy_record_exists(tenant, id).await);
+    assert_eq!(fixture.owner(tenant, id).await, None, "no row: no claim");
+    // The retry is `main`'s answer for an existing record.
+    let (status, again) = route_trace(&stock, &fixture.token, &body_of(&envelope)).await;
+    assert_eq!(status, StatusCode::OK, "{again}");
+    assert_eq!(again["status"], receipt["status"]);
+
+    // A pipeline receipt of the same tenant, taken by a process started for
+    // tests (no row, on the list): its id is the pipeline's on the stock
+    // process too.
+    let owned = routing_envelope("no_runtime_pipeline_owned").await;
+    let served = fixture.replica(true, true).await;
+    let (status, receipt) = route_trace(&served, &fixture.token, &body_of(&owned)).await;
+    assert_eq!(status, StatusCode::OK, "{receipt}");
+    assert_eq!(receipt["status"], "processing");
+    let (status, refused) = route_trace(&stock, &fixture.token, &body_of(&owned)).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{refused}");
+    assert_eq!(refused["error"], "submission_owned_by_pipeline_run");
+    assert_eq!(fixture.runs(tenant, owned.submission_id).await, 1);
+}
+
+/// Amendment A11: on a process with no pipeline runtime the routing rides on
+/// the run read that `main` already makes for a new upload, so a read that
+/// fails answers what `main` answers for its failed run read (`500`, the
+/// fixed text), not a new label. The upload does not reach the legacy path.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_read_on_a_process_with_no_runtime_answers_as_main_does() {
+    let Some(fixture) = RoutingFixture::new().await else {
+        return;
+    };
+    let tenant = fixture.tenant.as_str();
+    let mut down = fixture.stock().await;
+    Arc::make_mut(&mut down).pipeline_activation =
+        routing_store(&pg_backend_without_a_database().await);
+    let envelope = routing_envelope("no_runtime_read_failed").await;
+    let (status, refused) = route_trace(
+        &down,
+        &fixture.token,
+        &serde_json::to_vec(&envelope).unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{refused}");
+    assert_eq!(refused["error"], "trace commons operation failed");
+    assert!(
+        !fixture
+            .legacy_record_exists(tenant, envelope.submission_id)
+            .await
+    );
+}
+
+/// A process with a runtime and a tenant on neither pipeline list makes the
+/// same combined read, and answers a failed one as it answers every routing
+/// row that it cannot read: `503 pipeline_routing_unavailable`, with no
+/// legacy record and no run (review of the fix wave, C5). `main` answered
+/// `500` here, from the run read. Only the process with no runtime keeps
+/// `main`'s answer (the test above).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_read_for_an_unlisted_tenant_on_a_process_with_a_runtime_is_unavailable() {
+    let Some(fixture) = RoutingFixture::new().await else {
+        return;
+    };
+    let tenant = fixture.tenant.as_str();
+    for unqualified_routing in [true, false] {
+        let mut down = fixture.replica(false, unqualified_routing).await;
+        assert!(down.pipeline_service.is_some(), "the process has a runtime");
+        Arc::make_mut(&mut down).pipeline_activation =
+            routing_store(&pg_backend_without_a_database().await);
+        let envelope = routing_envelope("unlisted_read_failed").await;
+        let (status, refused) = route_trace(
+            &down,
+            &fixture.token,
+            &serde_json::to_vec(&envelope).unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{refused}");
+        assert_eq!(refused["error"], "pipeline_routing_unavailable");
+        let id = envelope.submission_id;
+        assert_eq!(fixture.runs(tenant, id).await, 0);
+        assert!(!fixture.legacy_record_exists(tenant, id).await);
+    }
+}
+
+/// Review round 1, point 4a: a remediation of a legacy quarantine record
+/// reads the routing row first. For a contained tenant it is refused with the
+/// containment label, on a process with a runtime and on one with none, and
+/// the record stays quarantined. (An operator's rescrub of the record is not
+/// an upload and stays open.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_remediation_for_a_contained_tenant_is_refused() {
+    let Some(fixture) = RoutingFixture::new().await else {
+        return;
+    };
+    let tenant = fixture.tenant.as_str();
+    write_routing_as_operator(tenant, "contained").await;
+    for (state, case) in [
+        (fixture.replica(true, true).await, "a runtime"),
+        (fixture.stock().await, "no runtime"),
+    ] {
+        let mut quarantined = routing_envelope("contained_remediation").await;
+        quarantined.privacy.residual_pii_risk = ResidualPiiRisk::Medium;
+        seed_legacy_quarantine_record(fixture.dir.path(), tenant, &fixture.token, &quarantined);
+        let mut corrected = quarantined.clone();
+        corrected.privacy.residual_pii_risk = ResidualPiiRisk::Low;
+        assert_upload_refused(
+            &fixture,
+            &state,
+            &corrected,
+            "pipeline_receipt_intake_contained",
+            case,
+        )
+        .await;
+        let record = read_submission_record(fixture.dir.path(), tenant, quarantined.submission_id)
+            .expect("read the record")
+            .expect("the legacy record");
+        assert_eq!(record.status, TraceCorpusStatus::Quarantined, "{case}");
+    }
+}
+
+/// Review round 1, point 4a: a remediation for a tenant whose row says
+/// `pipeline` on a process that does not serve the tenant (a runtime without
+/// the tenant on its receipts list, or no runtime) is refused as not served.
+/// On a process that serves the tenant a remediation stays on the legacy path
+/// (`a_remediation_of_a_legacy_quarantine_stays_on_the_legacy_path`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_remediation_for_a_pipeline_tenant_that_is_not_served_is_refused() {
+    let Some(fixture) = RoutingFixture::new().await else {
+        return;
+    };
+    let tenant = fixture.tenant.as_str();
+    write_routing_as_operator(tenant, "pipeline").await;
+    for (state, case) in [
+        (
+            fixture.replica(false, true).await,
+            "a runtime, not on the list",
+        ),
+        (fixture.stock().await, "no runtime"),
+    ] {
+        let mut quarantined = routing_envelope("not_served_remediation").await;
+        quarantined.privacy.residual_pii_risk = ResidualPiiRisk::Medium;
+        seed_legacy_quarantine_record(fixture.dir.path(), tenant, &fixture.token, &quarantined);
+        let mut corrected = quarantined.clone();
+        corrected.privacy.residual_pii_risk = ResidualPiiRisk::Low;
+        assert_upload_refused(
+            &fixture,
+            &state,
+            &corrected,
+            "pipeline_tenant_not_served",
+            case,
+        )
+        .await;
+        let record = read_submission_record(fixture.dir.path(), tenant, quarantined.submission_id)
+            .expect("read the record")
+            .expect("the legacy record");
+        assert_eq!(record.status, TraceCorpusStatus::Quarantined, "{case}");
+    }
+}
+
+/// Review round 1, G22: a runtime with no routing store cannot read the
+/// rows, so it refuses a remediation too (`503 pipeline_routing_unavailable`),
+/// as it refuses a new upload.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_remediation_on_a_runtime_with_no_routing_store_is_refused() {
+    let Some(fixture) = RoutingFixture::new().await else {
+        return;
+    };
+    let tenant = fixture.tenant.as_str();
+    let mut missing = fixture.replica(true, true).await;
+    Arc::make_mut(&mut missing).pipeline_activation = None;
+    let mut quarantined = routing_envelope("no_store_remediation").await;
+    quarantined.privacy.residual_pii_risk = ResidualPiiRisk::Medium;
+    seed_legacy_quarantine_record(fixture.dir.path(), tenant, &fixture.token, &quarantined);
+    let mut corrected = quarantined.clone();
+    corrected.privacy.residual_pii_risk = ResidualPiiRisk::Low;
+    assert_upload_refused(
+        &fixture,
+        &missing,
+        &corrected,
+        "pipeline_routing_unavailable",
+        "a runtime and no routing store",
+    )
+    .await;
+    let record = read_submission_record(fixture.dir.path(), tenant, quarantined.submission_id)
+        .expect("read the record")
+        .expect("the legacy record");
+    assert_eq!(record.status, TraceCorpusStatus::Quarantined);
+}
+
+/// One NEAR-anchored tenant whose uploads go through the admission ledger
+/// (`state.admission`: the evidence-verified reservation the replay tests
+/// use), with a pipeline service, over a real HTTP server. The upload's
+/// bytes and evidence headers are built once and reused for every POST, so a
+/// retry is the same request. `listed` puts the tenant on the receipts list.
+struct AdmissionRoutingFixture {
+    admin: PgBackend,
+    backend: Arc<PgBackend>,
+    /// The default bundle of the served runtime (the tenant's active bundle).
+    bundle_id: String,
+    tenant: String,
+    anchor: String,
+    submission_id: Uuid,
+    token: String,
+    body: Vec<u8>,
+    evidence_headers: HeaderMap,
+    base: String,
+    stop: tokio::sync::oneshot::Sender<()>,
+    server: tokio::task::JoinHandle<anyhow::Result<()>>,
+    _dir: tempfile::TempDir,
+}
+
+impl AdmissionRoutingFixture {
+    async fn new(token: &str, listed: bool) -> Option<Self> {
+        Self::new_with(token, listed, |_, _| {}).await
+    }
+
+    /// `new`, with `configure` applied to the state (and given the runtime
+    /// backend) before the upload is built and the server starts: a process
+    /// with unqualified routing off, with a code revision, or with no
+    /// runtime.
+    async fn new_with(
+        token: &str,
+        listed: bool,
+        configure: impl FnOnce(&mut AppState, &Arc<PgBackend>),
+    ) -> Option<Self> {
+        let backend = runtime_backend(4).await?;
+        let url = pipeline_http_database_url()
+            .await
+            .expect("checked by runtime_backend, which already returned Some");
+        let admin = PgBackend::new(&DatabaseConfig::from_postgres_url(&url, 2))
+            .await
+            .expect("connect as the migration owner for the near-account fixture rows");
+        let principal = o1_principal_for(token);
+        let (tenant, anchor, _device) =
+            admission_pg_tests::provision_synthetic_near_account(&admin, &principal).await;
+        let mut tokens = BTreeMap::new();
+        insert_token(&mut tokens, &tenant, token, TokenRole::Contributor);
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let service = o1_pipeline_service(backend.clone(), &dir);
+        let bundle_id = service.bundle_id().to_string();
+        let (provider, provider_key, signer, trust) = o1_evidence_identity();
+        let mut state = test_state_with_tokens(dir.path().to_path_buf(), tokens);
+        let state_mut = Arc::make_mut(&mut state);
+        state_mut.db_mirror = Some(backend.clone() as Arc<dyn Database>);
+        state_mut.require_db_mirror_writes = true;
+        state_mut.accept_medium_risk_submissions = true;
+        state_mut.pipeline_service = Some(service);
+        state_mut.pipeline_activation = routing_store(&backend);
+        if listed {
+            state_mut.tenant_rollout_gates = TraceTenantRolloutGates::for_feature(
+                TraceTenantRolloutFeature::PipelineReceipts,
+                &[tenant.as_str()],
+            );
+        }
+        state_mut.admission = Some(admission::AdmissionConfig {
+            limits: o1_admission_limits(),
+            providers: trust.clone(),
+        });
+        configure(state_mut, &backend);
+        let (body, evidence_headers, policy_version) = evidenced_upload(
+            &state,
+            token,
+            &anchor,
+            &signer,
+            &provider,
+            &provider_key,
+            trust,
+            None,
+            "the routed upload",
+        )
+        .await;
+        Arc::make_mut(&mut state).witness_bypass =
+            trace_commons_server::redaction_witness::config::witness_bypass_config_from_values(
+                Some("true"),
+                Some(&signer.address()),
+                Some("synthetic-admission-measurement"),
+                Some(&policy_version),
+                None,
+            )
+            .unwrap();
+        let submission_id = first_receipt_submission_id(&body);
+        let (base, stop, server) = serve_pipeline_app(state).await;
+        Some(Self {
+            admin,
+            backend,
+            bundle_id,
+            tenant,
+            anchor,
+            submission_id,
+            token: token.to_string(),
+            body,
+            evidence_headers,
+            base,
+            stop,
+            server,
+            _dir: dir,
+        })
+    }
+
+    /// The upload, with its evidence headers: the same request every time.
+    async fn post(&self) -> (StatusCode, serde_json::Value) {
+        let response = reqwest::Client::new()
+            .post(format!("{}/v1/traces", self.base))
+            .headers(reqwest_headers(auth_headers(&self.token)))
+            .headers(reqwest_headers(self.evidence_headers.clone()))
+            .header("content-type", "application/json")
+            .body(self.body.clone())
+            .send()
+            .await
+            .expect("upload over real HTTP");
+        let status = response.status();
+        let text = response.text().await.expect("a response body");
+        (
+            status,
+            serde_json::from_str(&text).unwrap_or(serde_json::Value::String(text)),
+        )
+    }
+
+    /// The admission ledger row's status for the upload's submission id.
+    async fn ledger_status(&self) -> Option<String> {
+        self.admin
+            .trace_pool_for_test()
+            .get()
+            .await
+            .unwrap()
+            .query_opt(
+                "SELECT status FROM trace_admission_submissions
+                  WHERE tenant_id = $1 AND submission_id = $2",
+                &[&self.tenant, &self.submission_id],
+            )
+            .await
+            .unwrap()
+            .map(|row| row.get(0))
+    }
+
+    /// The cost bound the tenant's admission account holds, and the one the
+    /// whole ledger holds: a reservation adds the processing cost bound to
+    /// both, and only a release (from `reserved`) gives it back.
+    async fn cost_bound_used(&self) -> (i64, i64) {
+        let client = self.admin.trace_pool_for_test().get().await.unwrap();
+        let account = client
+            .query_opt(
+                "SELECT cost_bound_used FROM trace_admission_accounts
+                  WHERE tenant_id = $1 AND anchor_hash = $2",
+                &[&self.tenant, &self.anchor],
+            )
+            .await
+            .unwrap()
+            .map_or(0, |row| row.get(0));
+        let global = client
+            .query_opt(
+                "SELECT cost_bound_used FROM trace_admission_global_budget WHERE singleton",
+                &[],
+            )
+            .await
+            .unwrap()
+            .map_or(0, |row| row.get(0));
+        (account, global)
+    }
+
+    async fn runs(&self) -> i64 {
+        self.admin
+            .trace_pool_for_test()
+            .get()
+            .await
+            .unwrap()
+            .query_one(
+                "SELECT COUNT(*) FROM pipeline_runs WHERE tenant_id = $1",
+                &[&self.tenant],
+            )
+            .await
+            .unwrap()
+            .get(0)
+    }
+
+    async fn shutdown(self) {
+        self.stop.send(()).expect("send shutdown");
+        join_within(self.server, 20, "admission routing test server").await;
+    }
+}
+
+/// A refusal of a new upload that the route decision makes leaves the
+/// admission attempt `reserved`, so the handler's `attempt.finish(false)`
+/// releases it: the ledger row is `released` (not `processing`, which holds a
+/// live lease and refuses a retry as in progress, and not `completed`), and
+/// the cost bound the reservation took is given back. An immediate retry is
+/// refused again for its own reason, never as in progress, and is accepted
+/// once the row says `pipeline`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_contained_upload_releases_its_admission_attempt() {
+    let Some(fixture) = AdmissionRoutingFixture::new("near-contained-release-token", true).await
+    else {
+        return;
+    };
+    let tenant = fixture.tenant.as_str();
+    write_routing_as_operator(tenant, "pipeline").await;
+    routing_store(&fixture.backend)
+        .expect("a routing store")
+        .contain(
+            tenant,
+            &format!("principal_sha256:{}", "ab".repeat(32)),
+            "contain_for_test",
+        )
+        .await
+        .expect("contain the tenant");
+    assert_eq!(
+        fixture.ledger_status().await,
+        None,
+        "nothing is reserved yet"
+    );
+    let (_, global_before) = fixture.cost_bound_used().await;
+
+    let (status, refused) = fixture.post().await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{refused}");
+    assert_eq!(refused["error"], "pipeline_receipt_intake_contained");
+    assert_eq!(
+        fixture.ledger_status().await.as_deref(),
+        Some("released"),
+        "the attempt was reserved, not processing, and `finish(false)` released it"
+    );
+    assert_eq!(
+        fixture.cost_bound_used().await,
+        (0, global_before),
+        "the reservation's cost bound is given back"
+    );
+    assert_eq!(fixture.runs().await, 0);
+
+    // Immediately again: the same refusal, not `409` in progress.
+    let (status, refused) = fixture.post().await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{refused}");
+    assert_eq!(refused["error"], "pipeline_receipt_intake_contained");
+    assert_eq!(fixture.ledger_status().await.as_deref(), Some("released"));
+    assert_eq!(fixture.cost_bound_used().await, (0, global_before));
+
+    // The row says `pipeline` again: the retry is accepted and completes.
+    write_routing_as_operator(tenant, "pipeline").await;
+    let (status, accepted) = fixture.post().await;
+    assert_eq!(status, StatusCode::OK, "{accepted}");
+    assert_eq!(accepted["status"], "processing");
+    assert_eq!(fixture.runs().await, 1);
+    assert_eq!(fixture.ledger_status().await.as_deref(), Some("completed"));
+
+    fixture.shutdown().await;
+}
+
+/// The same release for a tenant whose row says `pipeline` but that is not on
+/// this process's receipts list: `503 pipeline_tenant_not_served`, the
+/// attempt released, its cost bound given back, and a retry refused for the
+/// same reason, not as in progress.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_not_served_upload_releases_its_admission_attempt() {
+    let Some(fixture) = AdmissionRoutingFixture::new("near-not-served-release-token", false).await
+    else {
+        return;
+    };
+    let tenant = fixture.tenant.as_str();
+    write_routing_as_operator(tenant, "pipeline").await;
+    let (_, global_before) = fixture.cost_bound_used().await;
+
+    for attempt in ["first", "retry"] {
+        let (status, refused) = fixture.post().await;
+        assert_eq!(
+            status,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "{attempt}: {refused}"
+        );
+        assert_eq!(refused["error"], "pipeline_tenant_not_served", "{attempt}");
+        assert_eq!(
+            fixture.ledger_status().await.as_deref(),
+            Some("released"),
+            "{attempt}"
+        );
+        assert_eq!(
+            fixture.cost_bound_used().await,
+            (0, global_before),
+            "{attempt}"
+        );
+        assert_eq!(fixture.runs().await, 0, "{attempt}");
+    }
+
+    fixture.shutdown().await;
+}
+
+/// Final fix wave (G1): the same release for an upload under a suspended
+/// Admission policy of the tenant's active bundle. The route decision reads
+/// the policy and refuses with `503 bundle_policy_not_runnable` before the
+/// attempt is marked `processing`, so the attempt is `released`, its cost
+/// bound is given back, and a retry is refused for the same reason, not as in
+/// progress. After `resume` the retry is accepted and completes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_suspended_admission_upload_releases_its_admission_attempt() {
+    let Some(fixture) =
+        AdmissionRoutingFixture::new("near-suspended-admission-release-token", true).await
+    else {
+        return;
+    };
+    let tenant = fixture.tenant.as_str();
+    write_routing_as_operator(tenant, "pipeline").await;
+    // The server registers the tenant's default bundle before it serves.
+    let health = reqwest::get(format!("{}/health", fixture.base))
+        .await
+        .expect("the server answers");
+    assert!(health.status().is_success());
+    let store = PgPipelineStore::new(fixture.backend.clone());
+    let actor = format!("principal_sha256:{}", "ab".repeat(32));
+    store
+        .intervene_policy(
+            tenant,
+            &fixture.bundle_id,
+            Phase::Admission,
+            "suspend",
+            &actor,
+            "hold_intake",
+        )
+        .await
+        .expect("suspend the Admission policy");
+    let (_, global_before) = fixture.cost_bound_used().await;
+
+    for attempt in ["first", "retry"] {
+        let (status, refused) = fixture.post().await;
+        assert_eq!(
+            status,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "{attempt}: {refused}"
+        );
+        assert_eq!(refused["error"], "bundle_policy_not_runnable", "{attempt}");
+        assert_eq!(
+            fixture.ledger_status().await.as_deref(),
+            Some("released"),
+            "{attempt}: the attempt was reserved, not processing, and released"
+        );
+        assert_eq!(
+            fixture.cost_bound_used().await,
+            (0, global_before),
+            "{attempt}: the reservation's cost bound is given back"
+        );
+        assert_eq!(fixture.runs().await, 0, "{attempt}");
+    }
+
+    store
+        .intervene_policy(
+            tenant,
+            &fixture.bundle_id,
+            Phase::Admission,
+            "resume",
+            &actor,
+            "release_intake",
+        )
+        .await
+        .expect("resume the Admission policy");
+    let (status, accepted) = fixture.post().await;
+    assert_eq!(status, StatusCode::OK, "{accepted}");
+    assert_eq!(accepted["status"], "processing");
+    assert_eq!(fixture.runs().await, 1);
+    assert_eq!(fixture.ledger_status().await.as_deref(), Some("completed"));
+
+    fixture.shutdown().await;
+}
+
+impl AdmissionRoutingFixture {
+    /// The upload is refused with `503` `label`, twice (a retry is refused
+    /// for the same reason, never as in progress), and each time the attempt
+    /// is `released` with its cost bound given back and no run.
+    async fn assert_refused_and_released(&self, label: &str, global_before: i64) {
+        for attempt in ["first", "retry"] {
+            let (status, refused) = self.post().await;
+            assert_eq!(
+                status,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "{attempt}: {refused}"
+            );
+            assert_eq!(refused["error"], label, "{attempt}");
+            assert_eq!(
+                self.ledger_status().await.as_deref(),
+                Some("released"),
+                "{attempt}: the attempt was reserved, not processing, and released"
+            );
+            assert_eq!(
+                self.cost_bound_used().await,
+                (0, global_before),
+                "{attempt}: the reservation's cost bound is given back"
+            );
+            assert_eq!(self.runs().await, 0, "{attempt}");
+        }
+    }
+
+    /// Waits until the served process registered the tenant's default bundle
+    /// (it does before it serves).
+    async fn served(&self) {
+        let health = reqwest::get(format!("{}/health", self.base))
+            .await
+            .expect("the server answers");
+        assert!(health.status().is_success());
+    }
+}
+
+/// Review round 1, point 3: a tenant whose row says `pipeline` on a process
+/// that is not started for unqualified routing needs a qualification row of
+/// its active bundle for the revision the process was built from. Without
+/// one the upload is `503 pipeline_bundle_not_qualified`, before the attempt
+/// is marked `processing`: the attempt is `released`, its cost bound is given
+/// back, there is no run, and a retry is refused for the same reason. A
+/// qualification on another revision does not count. Once the bundle is
+/// qualified on the process's revision the retry is accepted, with no routing
+/// change.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_upload_for_a_bundle_not_qualified_on_the_revision_releases_its_attempt() {
+    let revision = sha256_prefixed("pr5r1-deployed-revision");
+    let deployed = revision.clone();
+    let Some(fixture) = AdmissionRoutingFixture::new_with(
+        "near-not-qualified-release-token",
+        true,
+        move |state, _| {
+            state.pipeline_unqualified_routing = false;
+            state.pipeline_code_revision_hash = Some(deployed);
+        },
+    )
+    .await
+    else {
+        return;
+    };
+    let tenant = fixture.tenant.as_str();
+    fixture.served().await;
+    write_routing_as_operator(tenant, "pipeline").await;
+    qualify_active_bundle_as_operator(tenant, &sha256_prefixed("pr5r1-earlier-revision")).await;
+    let (_, global_before) = fixture.cost_bound_used().await;
+
+    fixture
+        .assert_refused_and_released("pipeline_bundle_not_qualified", global_before)
+        .await;
+
+    qualify_active_bundle_as_operator(tenant, &revision).await;
+    let (status, accepted) = fixture.post().await;
+    assert_eq!(status, StatusCode::OK, "{accepted}");
+    assert_eq!(accepted["status"], "processing");
+    assert_eq!(fixture.runs().await, 1);
+    assert_eq!(fixture.ledger_status().await.as_deref(), Some("completed"));
+
+    fixture.shutdown().await;
+}
+
+/// Review round 1, G20: a build with no code revision cannot hold a
+/// qualification, and `qualify` cannot fix it, so the upload of a `pipeline`
+/// tenant is refused there with the label that names the cause (`503
+/// bundle_runtime_revision_unknown`), not `pipeline_bundle_not_qualified`,
+/// whatever qualification rows the bundle has. The attempt is released.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pipeline_tenant_with_no_build_revision_is_refused() {
+    let Some(fixture) =
+        AdmissionRoutingFixture::new_with("near-no-revision-release-token", true, |state, _| {
+            state.pipeline_unqualified_routing = false;
+            state.pipeline_code_revision_hash = None;
+        })
+        .await
+    else {
+        return;
+    };
+    let tenant = fixture.tenant.as_str();
+    fixture.served().await;
+    write_routing_as_operator(tenant, "pipeline").await;
+    qualify_active_bundle_as_operator(tenant, &sha256_prefixed("pr5r1-some-revision")).await;
+    let (_, global_before) = fixture.cost_bound_used().await;
+
+    fixture
+        .assert_refused_and_released("bundle_runtime_revision_unknown", global_before)
+        .await;
+
+    fixture.shutdown().await;
+}
+
+/// Review round 1, G25: the containment refusal of a process with no
+/// pipeline runtime comes before the attempt is marked `processing`, as on a
+/// process with a runtime: the attempt is released and its cost bound is
+/// given back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_no_runtime_contained_upload_releases_its_admission_attempt() {
+    let Some(fixture) = AdmissionRoutingFixture::new_with(
+        "near-no-runtime-contained-release-token",
+        false,
+        |state, backend| {
+            state.pipeline_service = None;
+            state.pipeline_store = Some(Arc::new(PgPipelineStore::new(backend.clone())));
+        },
+    )
+    .await
+    else {
+        return;
+    };
+    write_routing_as_operator(&fixture.tenant, "contained").await;
+    let (_, global_before) = fixture.cost_bound_used().await;
+
+    fixture
+        .assert_refused_and_released("pipeline_receipt_intake_contained", global_before)
+        .await;
+
+    fixture.shutdown().await;
+}
+
+/// Review round 1, G25: the refusal of a remediation for a contained tenant
+/// releases its admission attempt too. The legacy quarantine record is a file
+/// record of the same principal with no admission row (a record from before
+/// the account had admission), so the upload reserves an attempt and reaches
+/// the remediation branch.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_contained_remediation_releases_its_admission_attempt() {
+    let token = "near-contained-remediation-release-token";
+    let Some(fixture) = AdmissionRoutingFixture::new(token, true).await else {
+        return;
+    };
+    let tenant = fixture.tenant.as_str();
+    let envelope: TraceContributionEnvelope =
+        serde_json::from_slice(&fixture.body).expect("the upload is an envelope");
+    assert_eq!(envelope.submission_id, fixture.submission_id);
+    seed_legacy_quarantine_record(fixture._dir.path(), tenant, token, &envelope);
+    write_routing_as_operator(tenant, "contained").await;
+    let (_, global_before) = fixture.cost_bound_used().await;
+
+    fixture
+        .assert_refused_and_released("pipeline_receipt_intake_contained", global_before)
+        .await;
+    let record = read_submission_record(fixture._dir.path(), tenant, fixture.submission_id)
+        .expect("read the record")
+        .expect("the legacy record");
+    assert_eq!(record.status, TraceCorpusStatus::Quarantined);
+
+    fixture.shutdown().await;
+}
+
+/// A withdrawal of a pipeline submission does not depend on the tenant's
+/// routing: with a completed run and the row `pipeline`, `contained`, or
+/// `legacy`, the pipeline withdrawal route answers as it does without a row
+/// (`pipeline_withdrawal_route_withdraws_through_the_account_session`) and
+/// queues the index invalidation.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_withdrawal_of_a_pipeline_submission_works_in_every_routing_state() {
+    use tower::ServiceExt;
+
+    for routing in ["pipeline", "contained", "legacy"] {
+        let Some(fixture) = withdrawal_fixture().await else {
+            return;
+        };
+        let tenant = fixture.tenant.as_str();
+        let principal = static_token_principal_ref(&fixture.token);
+        let session = account_session_headers(&fixture.state, &fixture.token).await;
+        let run = completed_pipeline_run(&fixture.service, tenant, &principal).await;
+        write_routing_as_operator(tenant, routing).await;
+
+        let mut request = axum::http::Request::builder()
+            .method("POST")
+            .uri(format!(
+                "/v1/contributors/me/pipeline-submissions/{}/withdraw",
+                run.submission_id
+            ))
+            .body(axum::body::Body::empty())
+            .unwrap();
+        request.headers_mut().extend(session);
+        let response = app(fixture.state.clone()).oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "routing {routing}");
+        let body = to_bytes(response.into_body(), 1 << 16).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            body["submission_id"],
+            run.submission_id.to_string(),
+            "{routing}"
+        );
+        assert_eq!(body["prior_status"], "accepted", "{routing}");
+        assert_eq!(
+            body["distribution_reach"], "commons_not_distributed",
+            "{routing}"
+        );
+        assert_eq!(body["credit_retained"], true, "{routing}");
+        assert_eq!(body["index_invalidation"], "pending", "{routing}");
+        assert_eq!(body["revocation_propagation"], "pending", "{routing}");
+        assert_eq!(
+            queued_index_invalidation(&fixture.runtime, tenant, run.run_id).await,
+            (1, "pending".to_string()),
+            "routing {routing}: the index invalidation is queued"
+        );
+        assert_eq!(
+            routing_store(&fixture.runtime)
+                .unwrap()
+                .ownership(tenant, run.submission_id)
+                .await
+                .unwrap()
+                .map(|row| row.owner),
+            Some(ReceiptOwner::Pipeline),
+            "routing {routing}: the owner of the receipt is unchanged"
+        );
+    }
 }

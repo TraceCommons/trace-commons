@@ -154,6 +154,24 @@ pub struct OrganizationBalance {
     pub total_tokens: i64,
 }
 
+/// Organization-wide provider usage costs, never registry price estimates.
+#[derive(Clone, Deserialize)]
+pub struct OrganizationModelUsage {
+    pub period: String,
+    pub start_date: String,
+    pub data: Vec<OrganizationModelCost>,
+}
+
+#[derive(Clone, Deserialize)]
+pub struct OrganizationModelCost {
+    pub model: String,
+    pub total_cost: i64,
+    pub request_count: i64,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub total_tokens: i64,
+}
+
 /// A minted inference credential, and enough context to say where it came from
 /// without saying what it is.
 pub struct MintedKey {
@@ -587,6 +605,48 @@ impl CloudApi {
             None,
         )
         .await
+    }
+    /// Rolling 24-hour usage from the selected organization, in native nanoUSD.
+    pub async fn organization_model_usage(
+        &self,
+        session: &SessionTokens,
+        organization_id: &str,
+    ) -> Result<OrganizationModelUsage> {
+        if organization_id.is_empty() {
+            bail!("near_ai_credential_no_organization")
+        }
+        if !organization_id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        {
+            bail!("near_ai_credential_unexpected")
+        }
+        let usage: OrganizationModelUsage = self
+            .call(
+                reqwest::Method::GET,
+                &format!("/v1/organizations/{organization_id}/usage/by-model?period=day"),
+                session,
+                None,
+            )
+            .await?;
+        let since = DateTime::parse_from_rfc3339(&usage.start_date)
+            .map_err(|_| anyhow!("near_ai_credential_unexpected"))?;
+        if usage.period != "day"
+            || since.offset().local_minus_utc() != 0
+            || since > Utc::now()
+            || usage.data.len() > 4096
+            || usage.data.iter().any(|row| {
+                row.total_cost < 0
+                    || row.request_count < 0
+                    || row.input_tokens < 0
+                    || row.output_tokens < 0
+                    || row.total_tokens < 0
+                    || row.input_tokens.checked_add(row.output_tokens) != Some(row.total_tokens)
+            })
+        {
+            bail!("near_ai_credential_unexpected")
+        }
+        Ok(usage)
     }
 }
 

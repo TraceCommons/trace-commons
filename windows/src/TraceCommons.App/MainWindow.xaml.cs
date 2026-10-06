@@ -177,22 +177,6 @@ public sealed partial class MainWindow : Window
         _visibilityDebounceTimer.Tick += (_, _) => RecomputeVisiblePreviews();
     }
 
-    /// <summary>
-    /// What quitting costs, said before it happens.
-    /// </summary>
-    /// <remarks>
-    /// Transcribed from the shared design spec, which gives two wordings and
-    /// is explicit that picking the wrong one "is a lie about whether the
-    /// machine is still watching". This app HOSTS the daemon in-process --
-    /// <see cref="DaemonHost"/> owns it and <see cref="OnClosed"/> tears it
-    /// down -- so the hosting wording is the true one. The Linux shell says
-    /// the other thing, correctly, because there a systemd unit keeps
-    /// running.
-    /// </remarks>
-    private const string QuitBody =
-        "Quitting stops Trace Commons watching for finished sessions. Nothing is queued or "
-        + "sent until you open it again. Anything already waiting stays waiting.";
-
     /// <summary>Hide to a reachable tray; otherwise confirm before stopping the daemon.</summary>
     private async void OnAppWindowClosing(
         Microsoft.UI.Windowing.AppWindow sender,
@@ -223,21 +207,36 @@ public sealed partial class MainWindow : Window
             return;
         }
 
+        // What quitting costs, said before it happens, in the core's words
+        // (quit_copy.rs, via tc_quit_prompt_json). Picking the wrong sentence
+        // "is a lie about whether the machine is still watching", so the core
+        // chooses it from the handle: this app HOSTS the daemon in-process,
+        // so while it runs the prompt says quitting stops the watcher, and
+        // with none started it says only what is true without one. This
+        // window used to hand-type the hosting sentence for both cases.
+        //
+        // Null only if the core could not produce a prompt at all. That is
+        // refused like any other failure to confirm below: a quit that was
+        // never confirmed is not read as a yes.
+        if (_host.QuitPrompt() is not { } prompt)
+        {
+            return;
+        }
+
         var dialog = new Microsoft.UI.Xaml.Controls.ContentDialog
         {
             XamlRoot = Content.XamlRoot,
-            Title = "Quit Trace Commons?",
-            // The extra sentence is the Rust's, not this file's, and it is
-            // added only while the switch is on: with the listener inside
-            // this process, quitting stops answering model calls as well as
-            // stopping the watcher, and QuitBody above does not cover that.
-            // A contributor who never turned it on is not warned about
-            // losing it.
+            Title = prompt.Title,
+            // The extra sentence is the Rust's too, and it is added only
+            // while the switch is on: with the listener inside this process,
+            // quitting stops answering model calls as well as stopping the
+            // watcher, and the quit body does not cover that. A contributor
+            // who never turned it on is not warned about losing it.
             Content = ViewModel.PrivateInferenceQuitDetail is { } stopsRouting
-                ? QuitBody + "\n\n" + stopsRouting
-                : QuitBody,
-            PrimaryButtonText = "Quit",
-            CloseButtonText = "Cancel",
+                ? prompt.Body + "\n\n" + stopsRouting
+                : prompt.Body,
+            PrimaryButtonText = prompt.Confirm,
+            CloseButtonText = prompt.Cancel,
             DefaultButton = Microsoft.UI.Xaml.Controls.ContentDialogButton.Close,
         };
 
@@ -990,7 +989,7 @@ public sealed partial class MainWindow : Window
         await ViewModel.AcknowledgeArmingRewordingAsync(card);
     }
 
-    /// <summary>"Ask me first" on a rewording notice.</summary>
+    /// <summary>"Ask me" on a rewording notice.</summary>
     private async void OnAskFirstArmingRewording(object sender, RoutedEventArgs e)
     {
         ArmingRewordingCard? card = sender is FrameworkElement element
@@ -1014,7 +1013,7 @@ public sealed partial class MainWindow : Window
         }
     }
 
-    /// <summary>"Ask me first" on one folder of the held notice.</summary>
+    /// <summary>"Ask me" on one folder of the held notice.</summary>
     private async void OnAskFirstHeldProject(object sender, RoutedEventArgs e)
     {
         GateHeldProjectNotice? project = sender is FrameworkElement element

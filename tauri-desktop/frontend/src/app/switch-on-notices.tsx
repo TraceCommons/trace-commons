@@ -19,7 +19,7 @@ import {
 } from "../lib/tauri/use-contributor-copy";
 
 /**
- * "Ask me first" is the Settings call, unchanged: `set_project_mode` with
+ * "Ask me" is the Settings call, unchanged: `set_project_mode` with
  * the project's id and `notify_only`. The daemon answers the rewording
  * notice itself, and a refusal changes nothing.
  */

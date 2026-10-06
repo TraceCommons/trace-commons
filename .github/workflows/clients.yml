@@ -19,6 +19,10 @@ on:
   pull_request:
     paths:
       - "macos/**"
+      # The glass design tokens and their generator: a JSON-only change has
+      # to run the drift guard below and TokenDriftTests.
+      - "design-tokens/**"
+      - "scripts/design-tokens/**"
       - "windows/**"
       - "installer/**"
       - "scripts/windows/**"
@@ -26,6 +30,8 @@ on:
       - "scripts/make-appinstaller.ps1"
       - "scripts/ci/verify-macos-entitlements.sh"
       - "scripts/ci/test-verify-macos-entitlements.sh"
+      - "scripts/ci/native-passkey-entitlements.py"
+      - "scripts/ci/tests/test_native_passkey_entitlements.py"
       # The fixture test also reads the Tauri app's entitlements.
       - "tauri-desktop/src-tauri/entitlements.plist"
       - "crates/trace-commons-contributor/**"
@@ -105,12 +111,61 @@ jobs:
       # trap the cargo-test-default job records.
       - name: Verify compute signature tools with the system verifier
         run: python3 -m unittest discover -s macos/scripts -p 'test_*.py'
+      # The generated Swift tokens must match design-tokens/glass.tokens.json.
+      # TokenDriftTests compares values; this also catches a hand edit to the
+      # generated file's layout and a generator change nobody re-ran.
+      - name: Glass tokens are generated from their source
+        run: python3 scripts/design-tokens/generate.py --check
       - name: swift test
         working-directory: macos
         run: swift test
       # Last, so every step above still has its binaries; see the action for
       # what is removed and why. Only a finished job saves its cache, so this
       # runs exactly when a save is about to happen.
+      - uses: ./.github/actions/trim-cargo-cache
+
+  # The glass design system's pre-Liquid Glass fallback. Every other macOS
+  # job runs on macos-26, where `GlassMaterial.current` always answers
+  # `.liquidGlass`, so the vibrancy branch -- the one every Mac from the
+  # macOS 14 floor to 25 draws -- had executed nowhere. This job runs the
+  # TCDesign tests on macOS 15 so that branch runs.
+  #
+  # Advisory: not a required check. It builds with an Xcode 26 SDK, because
+  # `NSGlassEffectView` only exists in the 26 SDK even though the code that
+  # uses it is behind `#available(macOS 26.0, *)`.
+  macos-15-fallback-tests:
+    name: macOS 15 fallback tests
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-macos-15-fallback-tests-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-macos-15-fallback-tests-
+      # The newest Xcode 26 the image carries. Fails, rather than quietly
+      # building with an older SDK, when there is none.
+      - name: Select an Xcode 26 toolchain
+        run: |
+          xcode="$(ls -d /Applications/Xcode_26*.app | sort -V | tail -n 1)"
+          test -n "$xcode"
+          sudo xcode-select -s "$xcode"
+          xcodebuild -version
+          swift --version
+      # The package links the FFI dylib for every target, TCDesign's tests
+      # included, so it has to exist first; see macos-app-tests.
+      - name: Build the FFI dylib
+        run: cargo build -p trace-commons-contributor-ffi
+      - name: swift test (TCDesign)
+        working-directory: macos
+        run: swift test --filter TCDesignTests
       - uses: ./.github/actions/trim-cargo-cache
 
   windows-pipe-acl:

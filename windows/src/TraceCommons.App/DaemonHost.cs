@@ -133,6 +133,14 @@ public sealed class DaemonHost : IAsyncDisposable
     /// <summary>Whether a daemon is currently running in this process.</summary>
     public bool IsRunning => _daemon is not null;
 
+    /// <summary>
+    /// The core's quit prompt for this process: the hosting one while the
+    /// daemon runs here, the no-watcher one when none was started. Null only
+    /// if the core could not produce one.
+    /// </summary>
+    public Interop.QuitPrompt? QuitPrompt() =>
+        _daemon is { } daemon ? daemon.QuitPrompt() : Interop.QuitPrompt.WithoutWatcher();
+
     /// <summary>Changes whenever the running daemon connection is replaced or stopped.</summary>
     public long ConnectionGeneration { get; private set; }
 
