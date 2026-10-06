@@ -61,9 +61,7 @@ struct FirstRunWindowView: View {
                     case .starting:
                         SettingsAwaiting()
                     case .refused(let sentence):
-                        GlassHealthBanner(banner: .init(
-                            title: TracesHealth.coreDownLine?.title ?? TracesHealth.unknownWord ?? "",
-                            detail: sentence, tone: .outside))
+                        StartupRefusedBanner(sentence: sentence)
                     case .needsRoots, .running:
                         EmptyView()
                     }
@@ -82,6 +80,21 @@ struct FirstRunWindowView: View {
             dismissWindow(id: WindowID.firstRun)
             OpenMonitor.request(LaunchRouting.handOff(pending: navigation.pending))
         }
+    }
+}
+
+/// A daemon that refused to start, said as the Inference tab says it: the
+/// core's down title over the refusal's sentence. First run, the Monitor's
+/// pane and a writing Settings section all draw this one, never the
+/// onboarding notice: a refusal says nothing about whether the person
+/// finished onboarding.
+struct StartupRefusedBanner: View {
+    let sentence: String
+
+    var body: some View {
+        GlassHealthBanner(banner: .init(
+            title: TracesHealth.coreDownLine?.title ?? TracesHealth.unknownWord ?? "",
+            detail: sentence, tone: .outside))
     }
 }
 

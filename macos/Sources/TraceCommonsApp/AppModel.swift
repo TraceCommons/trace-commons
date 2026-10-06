@@ -122,9 +122,12 @@ final class AppModel: ObservableObject {
     @Published private(set) var tooLarge: [String: PreviewTooLarge] = [:]
     @Published private(set) var history: [HistoryRecord] = []
     /// Whether the last `status` read failed. Until a status answers, a
-    /// failed read is the launch's answer: `LaunchRouting.onboardingKnown`
+    /// failed read is the gates' answer: `LaunchRouting.onboardingKnown`
     /// takes it as known, and the unanswered status requires onboarding, so
-    /// first run opens rather than nothing (fail closed).
+    /// every write surface stays closed (fail closed). The launch does not
+    /// open first run on it (`LaunchRouting.launchOpening`): the next status
+    /// event re-reads, and an onboarded install is not sent to Welcome by a
+    /// transient failure.
     @Published private(set) var statusReadFailed = false
     /// Whether the daemon has answered `list_pending` (or sent a snapshot)
     /// and `list_history`. Until then `pending` and `history` are
@@ -1883,6 +1886,11 @@ final class AppModel: ObservableObject {
     /// the Monitor's gates and every request's routing.
     var onboardingKnown: Bool {
         LaunchRouting.onboardingKnown(startup: startup, statusAnswered: status.answered, statusFailed: statusReadFailed)
+    }
+
+    /// What the launch's own request opens (`LaunchRouting.launchOpening`).
+    var launchOpening: LaunchRouting.LaunchOpening {
+        LaunchRouting.launchOpening(startup: startup, statusAnswered: status.answered, requiresOnboarding: requiresOnboarding)
     }
 
     /// Whether the first run has been finished (Start on the Uses screen)

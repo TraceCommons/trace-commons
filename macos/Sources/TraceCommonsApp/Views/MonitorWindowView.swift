@@ -194,14 +194,16 @@ struct MonitorWindowView: View {
         // The app's own reads (settings, the tools, the credential, the
         // change log) refresh when someone looks, on this always-present
         // container, as the legacy window did.
-        .onChange(of: navigation.pending, initial: true) { _, destination in
+        .onChange(of: navigation.requests, initial: true) { _, _ in
             // An outside opener's destination, consumed once; initially
-            // too, for a request that opened this window.
-            guard let destination else { return }
-            Self.land(destination, tab: &tab, homePage: &homePage,
-                      selectedSession: &selectedSession, showsInspector: &showsInspector)
-            navigation.pending = nil
+            // too, for a request that opened this window. Each request,
+            // not `pending`'s value: first run's hand-off asks again for
+            // the destination already waiting.
+            consumePending()
         }
+        // A destination this window could not show yet (before the core
+        // said) is taken once it can.
+        .onChange(of: model.onboardingKnown) { _, _ in consumePending() }
         // The app's live client, re-attached whenever the daemon restarts;
         // with none, each store draws the core as down.
         .task(id: model.liveData.map(ObjectIdentifier.init)) {
@@ -216,6 +218,19 @@ struct MonitorWindowView: View {
             async let c: () = home.run()
             _ = await (a, b, c)
         }
+    }
+
+    /// Lands the waiting destination, if this window can show it now
+    /// (`LaunchRouting.monitorConsumes`). One it cannot (Home or Traces
+    /// while onboarding is required) stays for first run's hand-off.
+    private func consumePending() {
+        guard let destination = navigation.pending,
+              LaunchRouting.monitorConsumes(destination, requiresOnboarding: model.requiresOnboarding,
+                                            onboardingKnown: model.onboardingKnown)
+        else { return }
+        Self.land(destination, tab: &tab, homePage: &homePage,
+                  selectedSession: &selectedSession, showsInspector: &showsInspector)
+        navigation.pending = nil
     }
 
     /// The sentence one tool's row shows (`HarnessSurface.rowSentence`): a
@@ -351,10 +366,12 @@ private struct MonitorMainPane<Content: View>: View {
                             showsInspector.toggle()
                         }
                     }
-                    // No consent surface before onboarding: Settings writes
-                    // what first run is there to ask.
+                    // Open before onboarding too: Settings gates each section
+                    // itself (R-43), so Connection, Startup, Notifications,
+                    // Updates, Private AI and Compute are reachable, and a
+                    // section that writes what first run asks draws the
+                    // onboarding notice.
                     GlassRoundButton(String(localized: "Settings", comment: "Settings button"), systemImage: "gearshape", small: true, action: onSettings)
-                        .disabled(model.requiresOnboarding)
                 }
                 // Clearance for the real traffic lights, not an origin.
                 .padding(.leading, GlassTokens.Space.windowControlsWidth - GlassTokens.Space.panePadding)
@@ -374,15 +391,25 @@ private struct MonitorMainPane<Content: View>: View {
                 // (R-38); its own startup handling (roots, starting, refused)
                 // is its gate. The button opens first run, which is where
                 // every other request goes until then. Before the core says,
-                // the placeholder status is not "signed out".
-                if !model.onboardingKnown {
+                // the placeholder status is not "signed out", and a daemon
+                // that refused to start is said as a refusal, not as
+                // "signed out", whoever is at the keyboard (`MonitorGate`).
+                let gate = MonitorGate.of(
+                    startup: model.startup, onboardingKnown: model.onboardingKnown,
+                    requiresOnboarding: model.requiresOnboarding)
+                if gate == .awaiting {
                     SettingsAwaiting()
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
-                    if model.requiresOnboarding {
+                    switch gate {
+                    case .down(let sentence):
+                        StartupRefusedBanner(sentence: sentence)
+                    case .signedOut:
                         GlassNotice(tone: .ask, title: MonitorWords.signedOut) {
                             Button(MonitorWindowView.openFirstRun) { OpenMonitor.request() }
                         }
+                    case .awaiting, .open:
+                        EmptyView()
                     }
                     GlassSegmentedTabs(
                         String(localized: "Monitor", comment: "Monitor tabs name"),
@@ -539,14 +566,27 @@ struct MonitorSettingsWindow: View {
                 // Before onboarding, no write surface outside first run
                 // (R-43): a section that writes what first run asks draws
                 // the Monitor's onboarding notice instead, whose button
-                // opens first run.
-                if model.requiresOnboarding && !section.availableBeforeOnboarding {
+                // opens first run. As in the Monitor's pane, it waits until
+                // the core has said, and a refused daemon is said as a
+                // refusal (`MonitorGate`).
+                switch MonitorGate.of(
+                    startup: model.startup, onboardingKnown: model.onboardingKnown,
+                    requiresOnboarding: model.requiresOnboarding
+                ).forSettings(availableBeforeOnboarding: section.availableBeforeOnboarding) {
+                case .awaiting:
+                    SettingsAwaiting()
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                case .down(let sentence):
+                    StartupRefusedBanner(sentence: sentence)
+                        .padding(GlassTokens.Space.panePadding)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                case .signedOut:
                     GlassNotice(tone: .ask, title: MonitorWords.signedOut) {
                         Button(MonitorWindowView.openFirstRun) { OpenMonitor.request() }
                     }
                     .padding(GlassTokens.Space.panePadding)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-                } else {
+                case .open:
                     switch section {
                     case .compute:
                         ScrollView {

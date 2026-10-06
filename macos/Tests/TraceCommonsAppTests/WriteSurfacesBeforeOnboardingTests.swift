@@ -27,11 +27,22 @@ final class WriteSurfacesBeforeOnboardingTests: XCTestCase {
     func test_theSettingsWindowDrawsWriteSectionsAsUnavailable() throws {
         let window = try MonitorNavigationTests.text("Views/MonitorWindowView.swift")
         XCTAssertTrue(window.contains("""
-                        if model.requiresOnboarding && !section.availableBeforeOnboarding {
+                        switch MonitorGate.of(
+                            startup: model.startup, onboardingKnown: model.onboardingKnown,
+                            requiresOnboarding: model.requiresOnboarding
+                        ).forSettings(availableBeforeOnboarding: section.availableBeforeOnboarding) {
+        """), "a write section must be gated before onboarding")
+        XCTAssertTrue(window.contains("""
+                        case .signedOut:
                             GlassNotice(tone: .ask, title: MonitorWords.signedOut) {
                                 Button(MonitorWindowView.openFirstRun) { OpenMonitor.request() }
                             }
         """), "a write section must not draw before onboarding")
+        // The section itself is drawn only when the gate is open.
+        let gate = try XCTUnwrap(window.range(of: ".forSettings(availableBeforeOnboarding: section.availableBeforeOnboarding) {"))
+        let open = try XCTUnwrap(window.range(of: "case .open:", range: gate.upperBound ..< window.endIndex))
+        let compute = try XCTUnwrap(window.range(of: "ComputeView(model: compute)", range: gate.upperBound ..< window.endIndex))
+        XCTAssertLessThan(open.lowerBound, compute.lowerBound)
     }
 
     /// The override rows are disabled while onboarding is required, beside
@@ -46,7 +57,7 @@ final class WriteSurfacesBeforeOnboardingTests: XCTestCase {
     func test_manageRulesOpensFirstRunBeforeOnboarding() throws {
         XCTAssertNil(MenuPanelData.manageRules(requiresOnboarding: true))
         XCTAssertEqual(MenuPanelData.manageRules(requiresOnboarding: false), .settings(.watchedFolders))
-        let routed = LaunchRouting.opening(MenuPanelData.manageRules(requiresOnboarding: true), requiresOnboarding: true, onboardingKnown: true)
+        let routed = LaunchRouting.opening(MenuPanelData.manageRules(requiresOnboarding: true), startup: .running, requiresOnboarding: true, onboardingKnown: true)
         XCTAssertEqual(routed.window, .firstRun)
         XCTAssertNil(routed.settings)
         let panel = try MonitorNavigationTests.text("Views/Monitor/MenuBarGlassPanel.swift")

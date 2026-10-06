@@ -25,7 +25,7 @@ final class ComputeNavigationTests: XCTestCase {
         // contributor (the launcher's pin: MonitorNavigationTests
         // test_theLauncherOpensSettingsOutsideTheWindowSwitch).
         XCTAssertTrue(trace.requiresOnboarding)
-        XCTAssertEqual(LaunchRouting.opening(.settings(.compute), requiresOnboarding: trace.requiresOnboarding, onboardingKnown: true).settings, .compute)
+        XCTAssertEqual(LaunchRouting.opening(.settings(.compute), startup: trace.startup, requiresOnboarding: trace.requiresOnboarding, onboardingKnown: true).settings, .compute)
         XCTAssertEqual(trace.startup, .starting)
         XCTAssertFalse(trace.status.loggedIn)
         XCTAssertFalse(trace.isOnboardingComplete)
@@ -53,10 +53,10 @@ final class ComputeNavigationTests: XCTestCase {
         let compute = ComputeModel()
         await compute.start(configDirectory: root.path)
         // Compute is reached while the roots gate holds onboarding open.
-        XCTAssertEqual(LaunchRouting.opening(.settings(.compute), requiresOnboarding: trace.requiresOnboarding, onboardingKnown: true).settings, .compute)
+        XCTAssertEqual(LaunchRouting.opening(.settings(.compute), startup: trace.startup, requiresOnboarding: trace.requiresOnboarding, onboardingKnown: true).settings, .compute)
         XCTAssertNotNil(compute.snapshot)
         for destination: MonitorDestination in [.traces(entryId: nil), .home(.history), .settings(.watchedFolders)] {
-            XCTAssertNotEqual(LaunchRouting.opening(destination, requiresOnboarding: trace.requiresOnboarding, onboardingKnown: true).settings, .compute)
+            XCTAssertNotEqual(LaunchRouting.opening(destination, startup: trace.startup, requiresOnboarding: trace.requiresOnboarding, onboardingKnown: true).settings, .compute)
             XCTAssertEqual(trace.startup, .needsRoots)
             XCTAssertFalse(trace.traceNavigationReady)
             XCTAssertFalse(trace.isOnboardingComplete)
@@ -90,7 +90,7 @@ final class ComputeNavigationTests: XCTestCase {
         let compute = ComputeModel()
         await compute.start(configDirectory: root.path)
         // Invalid Compute settings do not stop a request reaching Compute.
-        XCTAssertEqual(LaunchRouting.opening(.settings(.compute), requiresOnboarding: true, onboardingKnown: true).settings, .compute)
+        XCTAssertEqual(LaunchRouting.opening(.settings(.compute), startup: .running, requiresOnboarding: true, onboardingKnown: true).settings, .compute)
         XCTAssertNotNil(compute.copy)
         XCTAssertNil(compute.snapshot)
         XCTAssertNotNil(compute.failureLabel)

@@ -12,8 +12,45 @@ import TCShellCore
 /// not a reliable way to reach an app -- on a notched display with a full
 /// menu bar it is assigned a frame that never draws, and there was no other
 /// door.
+///
+/// The launch is quiet (R-44): an onboarded install puts no window on
+/// screen. SwiftUI opens the first `Window` scene, the Monitor, on a normal
+/// launch; from macOS 15 that scene's launch is suppressed, and the launch
+/// opens what it needs itself (`Launcher.openAtLaunch`). A scene modifier
+/// cannot be applied under `if #available` without dropping the scene on
+/// the older system (`SceneBuilder` has no `else`), so the policy is a type
+/// chosen once, here, rather than a branch in `body`. On macOS 14 the
+/// Monitor still comes up on a normal launch, as the main window did
+/// before R15, and is closed when the launch opens first run instead.
 @main
-struct TraceCommonsShell: App {
+enum TraceCommonsEntry {
+    static func main() {
+        if #available(macOS 15, *) {
+            TraceCommonsShell<MonitorLaunchSuppressed>.main()
+        } else {
+            TraceCommonsShell<MonitorLaunchAutomatic>.main()
+        }
+    }
+}
+
+/// Whether SwiftUI opens the Monitor by itself at launch.
+protocol MonitorLaunchPolicy {
+    associatedtype Launched: Scene
+    @MainActor static func launch(_ monitor: MonitorScene) -> Launched
+}
+
+/// macOS 14: SwiftUI's own launch window, which cannot be suppressed there.
+enum MonitorLaunchAutomatic: MonitorLaunchPolicy {
+    static func launch(_ monitor: MonitorScene) -> MonitorScene { monitor }
+}
+
+/// macOS 15 and later: no Monitor unless something asks for it.
+@available(macOS 15, *)
+enum MonitorLaunchSuppressed: MonitorLaunchPolicy {
+    static func launch(_ monitor: MonitorScene) -> some Scene { monitor.defaultLaunchBehavior(.suppressed) }
+}
+
+struct TraceCommonsShell<MonitorLaunch: MonitorLaunchPolicy>: App {
     private let insightsStoreSelection: InsightsStoreSelection
     @StateObject private var model = AppModel()
     @State private var compute = ComputeModel()
@@ -55,31 +92,9 @@ struct TraceCommonsShell: App {
 
         // The main window (R5 of #1173, the release default since R15).
         // `OpenMonitor` opens it, or first run while onboarding is required.
-        Window("Monitor", id: WindowID.monitor) {
-            MonitorWindowView(navigation: navigation, insightsStoreSelection: insightsStoreSelection, missionDrafts: missionDrafts)
-                .environmentObject(model)
-                // The monitor reads the daemon, so it starts services on
-                // appear (D-11).
-                .onAppear { navigation.activateServicesForWindow() }
-                .environment(compute)
-                // The brand purple (D3), not the platform blue. Overriding the
-                // user's chosen accent colour is a real departure from macOS
-                // convention and it is made on purpose: the accent is the
-                // single strongest cue that this app is the Trace product.
-                // Everything else about the controls -- shape, focus ring,
-                // keyboard behaviour -- stays stock.
-                .tint(GlassTokens.Color.purpleSoft.color)
-        }
-        .windowStyle(.hiddenTitleBar)
-        .defaultSize(width: GlassThreePane<EmptyView, EmptyView, EmptyView>.defaultWidth,
-                     height: GlassTokens.Size.windowHeight)
-        .windowResizability(.contentMinSize)
-        // Cmd-1..3 for the three tabs, and Cmd-Shift-M for the one switch
-        // worth reaching without the window. Menu items, so they are in-app
-        // only; see `MonitorCommands`.
-        .commands {
-            MonitorCommands(model: model)
-        }
+        MonitorLaunch.launch(MonitorScene(
+            model: model, compute: compute, navigation: navigation,
+            insightsStoreSelection: insightsStoreSelection, missionDrafts: missionDrafts))
 
         #if DEBUG
         // The menu-bar item and popover in a window (R13 of #1173), for
@@ -113,6 +128,44 @@ struct TraceCommonsShell: App {
                 .onAppear { navigation.activateServicesForWindow() }
                 .environment(compute)
                 .tint(GlassTokens.Color.purpleSoft.color)
+        }
+    }
+}
+
+/// The Monitor's window scene, named so the launch policy
+/// (`MonitorLaunchPolicy`) has a type to take.
+struct MonitorScene: Scene {
+    let model: AppModel
+    let compute: ComputeModel
+    let navigation: MainWindowNavigation
+    let insightsStoreSelection: InsightsStoreSelection
+    let missionDrafts: MissionDraftsModel
+
+    var body: some Scene {
+        Window("Monitor", id: WindowID.monitor) {
+            MonitorWindowView(navigation: navigation, insightsStoreSelection: insightsStoreSelection, missionDrafts: missionDrafts)
+                .environmentObject(model)
+                // The monitor reads the daemon, so it starts services on
+                // appear (D-11).
+                .onAppear { navigation.activateServicesForWindow() }
+                .environment(compute)
+                // The brand purple (D3), not the platform blue. Overriding the
+                // user's chosen accent colour is a real departure from macOS
+                // convention and it is made on purpose: the accent is the
+                // single strongest cue that this app is the Trace product.
+                // Everything else about the controls -- shape, focus ring,
+                // keyboard behaviour -- stays stock.
+                .tint(GlassTokens.Color.purpleSoft.color)
+        }
+        .windowStyle(.hiddenTitleBar)
+        .defaultSize(width: GlassThreePane<EmptyView, EmptyView, EmptyView>.defaultWidth,
+                     height: GlassTokens.Size.windowHeight)
+        .windowResizability(.contentMinSize)
+        // Cmd-1..3 for the three tabs, and Cmd-Shift-M for the one switch
+        // worth reaching without the window. Menu items, so they are in-app
+        // only; see `MonitorCommands`.
+        .commands {
+            MonitorCommands(model: model)
         }
     }
 }
@@ -213,6 +266,7 @@ private struct Launcher: View {
     let menuPanel: MenuPanelStore
     @Environment(\.openWindow) private var openWindow
     @Environment(\.openSettings) private var openSettings
+    @Environment(\.dismissWindow) private var dismissWindow
 
     /// Whether the launch has made its one `OpenMonitor` request.
     @State private var openedAtLaunch = false
@@ -220,8 +274,8 @@ private struct Launcher: View {
     var body: some View {
         MenuBarStripLabel(model: model, store: menuPanel)
             .task { launch() }
-            .onChange(of: model.onboardingKnown, initial: true) { _, ready in
-                openAtLaunch(ready)
+            .onChange(of: model.launchOpening, initial: true) { _, opening in
+                openAtLaunch(opening)
             }
     }
 
@@ -282,10 +336,9 @@ private struct Launcher: View {
 
         // Used by scripts/run-demo.sh to bring the window up, activated, for
         // a screenshot: the Monitor, or first run while onboarding is
-        // required. The launch's own request (`openAtLaunch`) opens the same
-        // window but activates the app only when onboarding is required, so
-        // a login launch or `open -g` of an onboarded install comes up
-        // without taking focus (R-44); this hook always activates.
+        // required. The launch's own request (`openAtLaunch`) opens no
+        // window for an onboarded install, so a login launch or `open -g`
+        // puts nothing on screen (R-44); this hook always opens one.
         if ProcessInfo.processInfo.environment["TRACE_COMMONS_SHOW_WINDOW"] == "1" {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
                 OpenMonitor.request()
@@ -302,34 +355,45 @@ private struct Launcher: View {
         SelfTest.runIfRequested(model: model)
     }
 
-    /// The launch's window, once the core has said whether onboarding is
-    /// required (`AppModel.onboardingKnown`), so the choice is never made
-    /// from the placeholder status. Once, and not over an opener that got
-    /// there first: an invite link or a notification's Review has already
-    /// opened a window, and its destination waits in `navigation.pending`
-    /// for the Monitor, which a plain request would overwrite. Quietly
-    /// unless onboarding is required (R-44): launch behaviour is uniform
-    /// (`AppDelegate`), so an onboarded launch, a login launch among them,
-    /// does not take focus; a fresh install raises first run.
+    /// The launch's window (`LaunchRouting.launchOpening`), once, when the
+    /// core has said enough, and not over an opener that got there first:
+    /// an invite link or a notification's Review has already opened a
+    /// window, and its destination waits in `navigation.pending`. An
+    /// onboarded install opens nothing (R-44). First run opens activated,
+    /// alone: the Monitor SwiftUI may have opened at launch (macOS 14,
+    /// or an earlier plain request) is closed. A refused daemon opens the
+    /// Monitor at the refusal, without taking focus.
     @MainActor
-    private func openAtLaunch(_ ready: Bool) {
-        guard ready, !openedAtLaunch else { return }
+    private func openAtLaunch(_ opening: LaunchRouting.LaunchOpening) {
+        guard opening != .wait, !openedAtLaunch else { return }
         openedAtLaunch = true
         guard navigation.pending == nil else { return }
-        OpenMonitor.request(activate: LaunchRouting.launchActivates(requiresOnboarding: model.requiresOnboarding))
+        switch opening {
+        case .firstRun:
+            dismissWindow(id: WindowID.monitor)
+            OpenMonitor.request()
+        case .monitor:
+            OpenMonitor.request(activate: false)
+        case .nothing, .wait:
+            break
+        }
     }
 
     /// One `OpenMonitor` request: first run while onboarding is required,
     /// the Monitor otherwise (and before the core has said, which the
-    /// Monitor waits on), which consumes `navigation.pending`; a Settings
-    /// destination also opens Settings at its section.
+    /// Monitor waits on, and over a refused daemon), which consumes
+    /// `navigation.pending` once it can show it; a Settings destination
+    /// opens Settings alone, at its section.
     @MainActor
     private func open(_ destination: MonitorDestination?) {
-        navigation.pending = destination
-        let opening = LaunchRouting.opening(destination, requiresOnboarding: model.requiresOnboarding, onboardingKnown: model.onboardingKnown)
+        navigation.leave(destination)
+        let opening = LaunchRouting.opening(
+            destination, startup: model.startup, requiresOnboarding: model.requiresOnboarding,
+            onboardingKnown: model.onboardingKnown)
         switch opening.window {
         case .firstRun: openWindow(id: WindowID.firstRun)
         case .monitor: openWindow(id: WindowID.monitor)
+        case nil: break
         }
         if let section = opening.settings {
             navigation.settingsSection = section
