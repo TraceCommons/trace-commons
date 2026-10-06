@@ -19,11 +19,14 @@ final class NativeOnboardingRenderTests: XCTestCase {
                 try? FileManager.default.removeItem(at: directory)
             }
         }
-        try render(WitnessReviewConsent(copy: copy) { confirmed = true },
+        let lookInside = try XCTUnwrap(
+            MonitorTracesCopy.decode(fromJSON: TCCoreCopy.monitorTracesCopyJSON())?.lookInside)
+        try render(WitnessReviewConsent(copy: copy, confirmLine: lookInside.witnessConfirmLine,
+                                        confirmLabel: lookInside.witnessConfirmLabel, onCancel: {}) { confirmed = true },
                    size: CGSize(width: 560, height: 390), to: directory.appendingPathComponent("native-witness-consent.png"))
         // Constructing this model does not start a daemon or inspect sessions.
         let model = AppModel()
-        try render(TracesTreeView(store: TracesStore(client: nil), selection: .constant("")).environmentObject(model),
+        try render(TracesTreeView(store: TracesStore(client: nil), selection: .constant(MonitorSelection?.none)).environmentObject(model),
                    size: CGSize(width: 860, height: 640), to: directory.appendingPathComponent("native-first-contribution.png"))
         try render(NearAccountConnectView(onEnrolled: {}).environmentObject(model),
                    size: CGSize(width: 680, height: 300), to: directory.appendingPathComponent("native-wallet-connect.png"))

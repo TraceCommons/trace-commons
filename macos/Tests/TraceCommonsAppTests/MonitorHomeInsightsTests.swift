@@ -35,7 +35,9 @@ final class MonitorHomeInsightsTests: XCTestCase {
     func test_theHomeCardsTakeTheirHeadingsFromTheCore() throws {
         let home = try MonitorNavigationTests.text("Views/Monitor/HomeViews.swift")
         XCTAssertTrue(home.contains("private static let insightsCopy = TCInsights.copy()"))
-        XCTAssertEqual(home.components(separatedBy: #"Self.insightsCopy?["title"]"#).count - 1, 2)
+        // One reading: the card and the shell's breadcrumb both take it from
+        // `HomeTabView.hostedHeading` (Ron's breadcrumb, #1241).
+        XCTAssertEqual(home.components(separatedBy: #"Self.insightsCopy?["title"]"#).count - 1, 1)
         XCTAssertTrue(home.contains(#"missionDrafts.copy["title"]"#))
         XCTAssertNil(HomeFormat.cardHeading(nil))
         XCTAssertNil(HomeFormat.cardHeading(""))
@@ -61,14 +63,16 @@ final class MonitorHomeInsightsTests: XCTestCase {
         ]
         for (path, count) in errorSites {
             let source = try MonitorNavigationTests.text(path)
-            XCTAssertEqual(source.components(separatedBy: ".foregroundStyle(GlassTokens.Color.statusOutsideText.color)").count - 1,
+            // Ron's rebuilds (#1241) say the status text token through
+            // `GlassStatus.textColor`.
+            XCTAssertEqual(source.components(separatedBy: ".foregroundStyle(GlassStatus.outside.textColor)").count - 1,
                            count, path)
             XCTAssertFalse(source.contains(".foregroundStyle(GlassColor.textPrimary)"), path)
         }
         for path in ["Views/InsightsEpisodesView.swift", "Views/ComparisonTasksView.swift",
                      "Views/ComparisonSpecificationsView.swift"] {
             let source = try MonitorNavigationTests.text(path)
-            XCTAssertEqual(source.components(separatedBy: ".foregroundStyle(GlassTokens.Color.statusOnText.color)").count - 1, 1, path)
+            XCTAssertEqual(source.components(separatedBy: ".foregroundStyle(GlassStatus.on.textColor)").count - 1, 1, path)
         }
     }
 

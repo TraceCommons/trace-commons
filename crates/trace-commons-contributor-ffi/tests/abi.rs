@@ -5446,10 +5446,25 @@ fn the_legacy_migration_offer_and_refusal_cross_the_abi() {
 fn the_monitor_traces_copy_crosses_the_abi() {
     use trace_commons_contributor::preview_copy::{decisions_owed_text, monitor_traces_copy};
     use trace_commons_contributor_ffi::{tc_decisions_owed_text, tc_monitor_traces_copy_json};
-    assert_eq!(
-        json_owned(tc_monitor_traces_copy_json()),
-        serde_json::to_value(monitor_traces_copy()).unwrap()
-    );
+    let value = json_owned(tc_monitor_traces_copy_json());
+    assert_eq!(value, serde_json::to_value(monitor_traces_copy()).unwrap());
+    // Ron's #1146 inspector words (#1241) cross as nested tables.
+    for (pointer, word) in [
+        ("/tree/submit_count", "Submit \u{00b7} {count}"),
+        ("/tree/dismiss_session_title", "Dismiss this session?"),
+        ("/inspector/contribution_rule", "Contribution rule"),
+        ("/summary_panel/statistics", "Statistics"),
+        ("/session_review/heading", "What would leave this computer"),
+        ("/look_inside/turn_index", "Turn index"),
+        ("/undo/approval_saved", "APPROVAL SAVED"),
+        ("/optional_automation", "OPTIONAL AUTOMATION"),
+    ] {
+        assert_eq!(
+            value.pointer(pointer).and_then(|v| v.as_str()),
+            Some(word),
+            "{pointer}"
+        );
+    }
     let text = |count: i64| take_owned(tc_decisions_owed_text(count));
     assert_eq!(text(-1), decisions_owed_text(None));
     assert_eq!(text(0), "");
@@ -5806,9 +5821,13 @@ fn the_withdrawal_confirmation_prompt_crosses_the_abi() {
 fn the_monitor_screens_copy_crosses_the_abi() {
     use trace_commons_contributor::preview_copy::monitor_screens_copy;
     use trace_commons_contributor_ffi::tc_monitor_screens_copy_json;
+    let value = json_owned(tc_monitor_screens_copy_json());
+    assert_eq!(value, serde_json::to_value(monitor_screens_copy()).unwrap());
     assert_eq!(
-        json_owned(tc_monitor_screens_copy_json()),
-        serde_json::to_value(monitor_screens_copy()).unwrap()
+        value
+            .pointer("/safeguards/heading")
+            .and_then(|v| v.as_str()),
+        Some("Contribution safeguards")
     );
 }
 
@@ -5826,6 +5845,11 @@ fn the_disclosure_bundle_crosses_the_abi_with_the_state_map() {
     use trace_commons_contributor_ffi::tc_contributor_disclosure_copy_json;
     let value = json_owned(tc_contributor_disclosure_copy_json());
     assert_eq!(value, contributor_disclosure_copy());
+    // The three tables the macOS bridge decodes (`ContributorDisclosureCopy`).
+    assert_eq!(value["outcome"]["submit_all_as"], "Submit all as...");
+    assert!(value["outcome"]["max_correction_chars"].is_u64());
+    assert!(value["history_ui"]["status_labels"].is_object());
+    assert!(value["folder_mode_labels"].is_object());
     let states = value["private_inference"]["states"].as_object().unwrap();
     assert_eq!(states.len(), STATE_LABELS.len());
     assert_eq!(states[LABEL_RUNNING]["working"], true);

@@ -72,20 +72,21 @@ struct HarnessListSection: View {
                 }
             }
         }
-        .sheet(isPresented: exposureBinding) {
+        // Glass modals over the whole window, not stock sheets.
+        .glassModal(isPresented: exposureBinding) {
             HarnessExposureSheet(copy: copy)
         }
-        .sheet(isPresented: previewBinding) {
+        .glassModal(isPresented: previewBinding) {
             if let plan = model.harnessPreview {
                 HarnessPreviewSheet(plan: plan, copy: copy)
             }
         }
     }
 
-    /// Dismissing either sheet is the same as saying no. The exposure
-    /// question left unanswered connects nothing and records nothing; the
-    /// preview left unconfirmed writes nothing and the plan expires where it
-    /// was minted.
+    /// Dismissing either modal (Escape, or its cancel) is the same as
+    /// saying no. The exposure question left unanswered connects nothing and
+    /// records nothing; the preview left unconfirmed writes nothing and the
+    /// plan expires where it was minted.
     private var exposureBinding: Binding<Bool> {
         Binding(
             get: { model.harnessExposureRequest != nil },
@@ -209,7 +210,33 @@ private struct HarnessPreviewSheet: View {
     let copy: PrivateInferenceCopy
 
     var body: some View {
-        GlassSheet(title: copy.harnessPreviewTitle) {
+        GlassModal(
+            title: copy.harnessPreviewTitle, width: .narrow, actions: actions,
+            onCancel: { model.cancelHarnessPreview() }
+        ) {
+            GlassModalBody { details }
+        }
+    }
+
+    /// Saying no leaves the file with every value it has, which is what
+    /// its own words say. Confirm is absent for every outcome that is not
+    /// committable, so an empty plan can never be confirmed into nothing;
+    /// it is the default (Return) and waits on busy.
+    private var actions: [GlassModalAction] {
+        var actions: [GlassModalAction] = [
+            .cancel(copy.harnessPreviewCancel) { model.cancelHarnessPreview() },
+        ]
+        if HarnessSurface.canCommit(plan, calls: model.harnessCalls) {
+            actions.append(GlassModalAction(
+                copy.harnessPreviewConfirm, isDefault: true, isEnabled: !model.harnessBusy
+            ) { model.confirmHarnessPreview() })
+        }
+        return actions
+    }
+
+    @ViewBuilder
+    private var details: some View {
+        VStack(alignment: .leading, spacing: GlassTokens.Space.s6) {
             if let path = plan.path {
                 Text(path)
                     .glassType(GlassTokens.TypeScale.mono)
@@ -257,24 +284,8 @@ private struct HarnessPreviewSheet: View {
                     }
                 }
             }
-            HStack(spacing: GlassTokens.Space.s4) {
-                Spacer(minLength: GlassTokens.Space.s6)
-                // Saying no leaves the file with every value it has, which
-                // is what this button's own words say.
-                Button(copy.harnessPreviewCancel) { model.cancelHarnessPreview() }
-                    .buttonStyle(GlassButtonStyle(.glass))
-                    .keyboardShortcut(.cancelAction)
-                // Absent for every outcome that is not committable, so an
-                // empty plan can never be confirmed into nothing.
-                if HarnessSurface.canCommit(plan, calls: model.harnessCalls) {
-                    Button(copy.harnessPreviewConfirm) { model.confirmHarnessPreview() }
-                        .buttonStyle(GlassButtonStyle(.primary))
-                        .keyboardShortcut(.defaultAction)
-                        .disabled(model.harnessBusy)
-                }
-            }
         }
-        .frame(minWidth: 460)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -288,8 +299,25 @@ private struct HarnessExposureSheet: View {
     @EnvironmentObject private var model: AppModel
     let copy: PrivateInferenceCopy
 
+    /// Decline is the cancel (Escape); Accept is the default (Return) and
+    /// waits on busy.
     var body: some View {
-        GlassSheet(title: copy.offerTitle) {
+        GlassModal(
+            title: copy.offerTitle, width: .narrow,
+            actions: [
+                .cancel(copy.offerDecline) { model.answerHarnessExposure(accepted: false) },
+                GlassModalAction(copy.offerAccept, isDefault: true, isEnabled: !model.harnessBusy) {
+                    model.answerHarnessExposure(accepted: true)
+                },
+            ],
+            onCancel: { model.answerHarnessExposure(accepted: false) }
+        ) {
+            GlassModalBody { question }
+        }
+    }
+
+    private var question: some View {
+        VStack(alignment: .leading, spacing: GlassTokens.Space.s6) {
             Text(copy.offerWhat)
                 .glassType(GlassTokens.TypeScale.body)
                 .foregroundStyle(GlassColor.textPrimary)
@@ -311,18 +339,8 @@ private struct HarnessExposureSheet: View {
             // asks again; and the switch now lives on this destination, with
             // Settings holding only a pointer. It remains true on the
             // first-run offer, which is the sentence's home.
-            HStack(spacing: GlassTokens.Space.s4) {
-                Spacer(minLength: GlassTokens.Space.s6)
-                Button(copy.offerDecline) { model.answerHarnessExposure(accepted: false) }
-                    .buttonStyle(GlassButtonStyle(.glass))
-                    .keyboardShortcut(.cancelAction)
-                Button(copy.offerAccept) { model.answerHarnessExposure(accepted: true) }
-                    .buttonStyle(GlassButtonStyle(.primary))
-                    .keyboardShortcut(.defaultAction)
-                    .disabled(model.harnessBusy)
-            }
         }
-        .frame(minWidth: 460)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 

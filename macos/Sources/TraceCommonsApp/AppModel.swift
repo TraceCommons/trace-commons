@@ -1095,6 +1095,20 @@ final class AppModel: ObservableObject {
                 self.startup = .running
                 self.subscribe()
                 self.refreshAll()
+                #if DEBUG
+                // K2 (#1173): console-only, so a developer can confirm the
+                // dry run took before trusting the screens. Asked of the
+                // daemon, not read from the environment, so it matches the
+                // daemon's own mode. A label, not a sentence
+                // (`ShellWordingTests`).
+                if let client = self.client {
+                    Task.detached {
+                        if client.devDryRunActive() {
+                            NSLog("TraceCommons: status.dev_dry_run=true")
+                        }
+                    }
+                }
+                #endif
             case .failure(TCDaemon.TCError.rootsNotDeclared):
                 self.startup = .needsRoots
             case .failure(let error):
@@ -1959,6 +1973,7 @@ final class AppModel: ObservableObject {
     }
     func setDaemonSettingsForTesting(_ settings: DaemonSettingsView) { publishIfChanged(\.daemonSettings, settings) }
     func setStartupForTesting(_ startup: Startup) { self.startup = startup }
+    func setArmingOfferForTesting(_ offer: ArmingOffer?) { publishIfChanged(\.armingOffer, offer) }
     func setConfigDirectoryForTesting(_ path: String) { configDirectory = path }
     func clearWatchOnlyMarkerForTesting() {
         guard let key = Self.watchOnlyCompleteKey(configDirectory) else { return }
@@ -2518,9 +2533,110 @@ final class AppModel: ObservableObject {
                     self.withdrawals[id] = label == "account-session-required"
                         ? .noAccountSession
                         : .failed(label)
+                    // The commons rejected the stored session: History's
+                    // rows ask for sign-in rather than offer a Retry that
+                    // would be refused again.
+                    if label == "account-session-required" { self.accountSession = .signedOut }
                 }
             }
         }
+    }
+
+    /// What the app knows of the account session Withdraw needs (Ron's
+    /// #1146 `accountSignedIn`). Only `signedIn` lets a History row offer
+    /// Withdraw; anything else offers sign-in, and `checking` says so while
+    /// the session is first read.
+    enum AccountSessionRead: Equatable {
+        case unread
+        case checking
+        case signedIn
+        case signedOut
+    }
+
+    /// Why the last sign-in from History did not leave an active session.
+    enum AccountSignInFailure: Equatable {
+        /// Sign-in returned, and the session read again is not active.
+        case inactive
+        /// Sign-in returned, and the session could not be read again.
+        case unverified
+        /// Sign-in did not finish.
+        case failed
+    }
+
+    /// Where History's refresh request (Ron's #1146 refresh control) stands.
+    enum HistoryRefreshState: Equatable {
+        case idle
+        case requesting
+        case requested
+        case failed
+    }
+
+    @Published private(set) var accountSession: AccountSessionRead = .unread
+    @Published private(set) var accountSigningIn = false
+    @Published private(set) var accountSignInFailure: AccountSignInFailure?
+    @Published private(set) var historyRefresh: HistoryRefreshState = .idle
+
+    /// Reads the account session (`account_session_status`). An answer
+    /// that does not say signed in, or no answer, is not signed in.
+    func refreshAccountSession() {
+        if accountSession == .unread { accountSession = .checking }
+        Task {
+            let read = await firstRunCall { try $0.accountSessionStatus() }
+            if case .success(let session) = read, session.signedIn == true {
+                accountSession = .signedIn
+            } else {
+                accountSession = .signedOut
+            }
+        }
+    }
+
+    /// Signs in through the native identity path (`account_sign_in`, which
+    /// opens the browser), then reads the session again and trusts only
+    /// that read, as Ron's History does.
+    func signInToWithdraw() async {
+        guard !accountSigningIn else { return }
+        accountSigningIn = true
+        accountSignInFailure = nil
+        defer { accountSigningIn = false }
+        guard case .success = await firstRunCall({ try $0.accountSignIn() }) else {
+            accountSignInFailure = .failed
+            return
+        }
+        switch await firstRunCall({ try $0.accountSessionStatus() }) {
+        case .success(let session) where session.signedIn == true:
+            accountSession = .signedIn
+            // The refusals sign-in answers are forgotten: those rows offer
+            // Withdraw again, which asks first.
+            withdrawals = withdrawals.filter { $0.value != .noAccountSession }
+        case .success:
+            accountSession = .signedOut
+            accountSignInFailure = .inactive
+        case .failure, nil:
+            accountSession = .signedOut
+            accountSignInFailure = .unverified
+        }
+    }
+
+    /// The refresh control (Ron's #1146 HistoryRefreshControl): asks the daemon's poller to check
+    /// the server sooner (`refresh_history`), then reads History again.
+    /// True only when the daemon said the refresh was requested.
+    @discardableResult
+    func requestHistoryRefresh() async -> Bool {
+        guard historyRefresh != .requesting else { return false }
+        historyRefresh = .requesting
+        guard case .success(true) = await firstRunCall({ try $0.refreshHistory() }) else {
+            historyRefresh = .failed
+            return false
+        }
+        historyRefresh = .requested
+        refreshHistory()
+        return true
+    }
+
+    /// Forgets the last refresh request's outcome, so a later visit to
+    /// History does not show it. A request in flight is left alone.
+    func clearHistoryRefresh() {
+        if historyRefresh != .requesting { historyRefresh = .idle }
     }
 
     /// Reads a session's detail. The detail already held stays until the
@@ -2664,6 +2780,16 @@ final class AppModel: ObservableObject {
     /// a count, with no redaction pass to block on.
     func searchOriginal(entryID: String, needle: String) -> Int? {
         client?.searchOriginal(entryID: entryID, needle: needle)
+    }
+
+    /// The core's turn index over an open preview's body, anchored to that
+    /// body's digest (`LookInside.bodyDigest`). Off the main actor: the
+    /// core re-resolves the preview to check the anchor.
+    func previewTurns(entryID: String, bodyDigest: String) async -> PreviewTurns? {
+        guard let client else { return nil }
+        return await Task.detached(priority: .userInitiated) {
+            client.previewTurns(entryID: entryID, bodyDigest: bodyDigest)
+        }.value
     }
 
     /// Opens the in-process preview off the main actor -- the redaction pass

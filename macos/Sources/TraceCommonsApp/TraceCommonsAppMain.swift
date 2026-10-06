@@ -81,7 +81,7 @@ struct TraceCommonsShell<MonitorLaunch: MonitorLaunchPolicy>: App {
         // since R15. Its label is the `Launcher`, which starts the app's
         // services.
         MenuBarExtra {
-            MenuBarGlassPanel(store: menuPanel)
+            MenuBarGlassPanel(navigation: navigation, store: menuPanel)
                 .environmentObject(model)
                 .tint(GlassTokens.Color.purpleSoft.color)
         } label: {
@@ -101,7 +101,7 @@ struct TraceCommonsShell<MonitorLaunch: MonitorLaunchPolicy>: App {
         // review on a menu bar with no room for the item. Debug builds only
         // (D-18). TRACE_COMMONS_MENU_PREVIEW=1 opens it at launch.
         Window("Menu bar", id: WindowID.menuPreview) {
-            MenuBarPreviewWindow(store: menuPanel)
+            MenuBarPreviewWindow(navigation: navigation, store: menuPanel)
                 .environmentObject(model)
                 .tint(GlassTokens.Color.purpleSoft.color)
         }
@@ -119,16 +119,6 @@ struct TraceCommonsShell<MonitorLaunch: MonitorLaunchPolicy>: App {
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 860, height: 760)
 
-        Settings {
-            MonitorSettingsWindow(navigation: navigation)
-                .environmentObject(model)
-                // Settings loads and saves through the daemon; opened
-                // before services started it would otherwise show nothing
-                // and drop edits.
-                .onAppear { navigation.activateServicesForWindow() }
-                .environment(compute)
-                .tint(GlassTokens.Color.purpleSoft.color)
-        }
     }
 }
 
@@ -160,12 +150,16 @@ struct MonitorScene: Scene {
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: GlassThreePane<EmptyView, EmptyView, EmptyView>.defaultWidth,
                      height: GlassTokens.Size.windowHeight)
-        .windowResizability(.contentMinSize)
+        // The panes set the window's limits (without the map it is exactly
+        // its panes), and showing or hiding a pane grows or shrinks the
+        // window on its right (`GlassPaneLayout`), so the window follows its
+        // content's size.
+        .windowResizability(.contentSize)
         // Cmd-1..3 for the three tabs, and Cmd-Shift-M for the one switch
         // worth reaching without the window. Menu items, so they are in-app
         // only; see `MonitorCommands`.
         .commands {
-            MonitorCommands(model: model)
+            MonitorCommands(model: model, navigation: navigation)
         }
     }
 }
@@ -185,6 +179,7 @@ struct MonitorScene: Scene {
 /// where Private AI sign-in is (R-38).
 struct MonitorCommands: Commands {
     @ObservedObject var model: AppModel
+    let navigation: MainWindowNavigation
 
     /// Cmd-N for the Nth tab.
     static let tabModifiers: EventModifiers = [.command]
@@ -221,6 +216,11 @@ struct MonitorCommands: Commands {
             Divider()
             toggle
         }
+        // Cmd-comma: Settings is Ron's modal over the Monitor (#1146; #1241
+        // Task 10), not a window of its own.
+        CommandGroup(replacing: .appSettings) {
+            OpenSettingsModalButton(navigation: navigation)
+        }
     }
 
     /// The switch, under the same asymmetry the menu-bar row follows.
@@ -253,9 +253,22 @@ struct MonitorCommands: Commands {
     }
 }
 
+private struct OpenSettingsModalButton: View {
+    let navigation: MainWindowNavigation
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        Button(MonitorWords.table?.settings ?? "") {
+            openWindow(id: WindowID.monitor)
+            navigation.requestSettings()
+        }
+        .keyboardShortcut(",", modifiers: .command)
+    }
+}
+
 /// The menu-bar label, plus the one-time launch work. It lives in a view
-/// rather than in `App` so it can reach `openWindow` and `openSettings`,
-/// which every `OpenMonitor` request needs.
+/// rather than in `App` so it can reach `openWindow`, which every
+/// `OpenMonitor` request needs.
 private struct Launcher: View {
     @ObservedObject var model: AppModel
     let compute: ComputeModel
@@ -265,7 +278,6 @@ private struct Launcher: View {
     /// The glass menu-bar item's data (R13), drawn as its strip.
     let menuPanel: MenuPanelStore
     @Environment(\.openWindow) private var openWindow
-    @Environment(\.openSettings) private var openSettings
     @Environment(\.dismissWindow) private var dismissWindow
 
     /// Whether the launch has made its one `OpenMonitor` request.
@@ -383,7 +395,7 @@ private struct Launcher: View {
     /// the Monitor otherwise (and before the core has said, which the
     /// Monitor waits on, and over a refused daemon), which consumes
     /// `navigation.pending` once it can show it; a Settings destination
-    /// opens Settings alone, at its section.
+    /// opens the Monitor's Settings modal alone, at its section.
     @MainActor
     private func open(_ destination: MonitorDestination?) {
         navigation.leave(destination)
@@ -395,9 +407,12 @@ private struct Launcher: View {
         case .monitor: openWindow(id: WindowID.monitor)
         case nil: break
         }
+        // Settings is the Monitor's modal (#1241 Task 10): a Settings
+        // destination raises the Monitor and asks it for Settings at the
+        // section.
         if let section = opening.settings {
-            navigation.settingsSection = section
-            openSettings()
+            openWindow(id: WindowID.monitor)
+            navigation.requestSettings(at: section)
         }
     }
 }

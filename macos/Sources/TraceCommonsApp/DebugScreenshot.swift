@@ -1,7 +1,9 @@
 import AppKit
 import Foundation
 import SwiftUI
+import TCBridge
 import TCDesign
+import TCShellCore
 
 /// Writes PNGs of the shell's real views, driven by the real running daemon,
 /// when `TRACE_COMMONS_SCREENSHOT_DIR` is set.
@@ -36,22 +38,24 @@ enum DebugScreenshot {
             let traces = TracesStore(client: nil)
             traces.attach(model.daemonData)
             await traces.load()
+            // The first session selected, as Ron's inspector shows it.
+            let first = traces.tree.allSessions.first.map { MonitorSelection.session(entryID: $0.entryId) }
+            let home = HomeStore(client: nil)
+            home.attach(model.daemonData)
+            await home.load()
             render(
-                TracesTreeView(store: traces, selection: .constant(traces.tree.allSessions.first?.entryId ?? ""))
+                TracesTreeView(store: traces, selection: .constant(first))
                     .environmentObject(model),
                 to: directory + "/macos-shell-traces-tree.png",
                 size: CGSize(width: 760, height: 720)
             )
             render(
-                SessionInspectorView(store: traces, entry: traces.tree.allSessions.first)
+                TracesInspectorHost(traces: traces, home: home, selection: first)
                     .padding(GlassTokens.Space.cardGap)
                     .environmentObject(model),
                 to: directory + "/macos-shell-session-inspector.png",
                 size: CGSize(width: 420, height: 720)
             )
-            let home = HomeStore(client: nil)
-            home.attach(model.daemonData)
-            await home.load()
             if let row = home.history?.first {
                 render(
                     HistoryDetailInspector(row: row)
@@ -78,7 +82,7 @@ enum DebugScreenshot {
             menuPanel.attach(model.daemonData, configDirectory: model.configDirectory)
             await menuPanel.load()
             render(
-                MenuBarPreviewWindow(store: menuPanel).environmentObject(model),
+                MenuBarPreviewWindow(navigation: MainWindowNavigation(), store: menuPanel).environmentObject(model),
                 to: directory + "/macos-shell-menu-bar.png",
                 size: CGSize(width: 480, height: 760)
             )
@@ -114,8 +118,12 @@ enum DebugScreenshot {
                 )
             }
             if let copy = model.witnessCopy?.review {
+                // Ron's tick, in the core's words, as Look inside draws it.
+                let lookInside = MonitorTracesCopy.decode(fromJSON: TCCoreCopy.monitorTracesCopyJSON())?.lookInside
                 render(
-                    WitnessReviewConsent(copy: copy, onConfirm: {}),
+                    WitnessReviewConsent(
+                        copy: copy, confirmLine: lookInside?.witnessConfirmLine,
+                        confirmLabel: lookInside?.witnessConfirmLabel, onCancel: {}, onConfirm: {}),
                     to: directory + "/macos-shell-witness-review-consent.png",
                     size: CGSize(width: 560, height: 390)
                 )

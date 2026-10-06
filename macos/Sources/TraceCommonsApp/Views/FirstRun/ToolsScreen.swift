@@ -274,7 +274,7 @@ struct ToolsScreen: View {
                     }
                 case .loading:
                     HStack(spacing: GlassTokens.Space.s4) {
-                        ProgressView().controlSize(.small)
+                        GlassSpinner()
                         Text(copy.folders.loading)
                             .glassType(GlassTokens.TypeScale.body)
                             .foregroundStyle(GlassColor.textSecondary)

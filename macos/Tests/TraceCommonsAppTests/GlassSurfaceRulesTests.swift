@@ -69,6 +69,20 @@ final class GlassSurfaceRulesTests: XCTestCase {
         "Views/ComparisonTasksView.swift",
         "Views/ComparisonSpecificationsView.swift",
         "Views/MissionDraftsView.swift",
+        // Ron's inspector host and its prompts (#1146, Task 3 of #1241).
+        "Views/Monitor/TracesInspectorHost.swift",
+        "Views/Monitor/InspectorPrompts.swift",
+        // Ron's summary inspector (#1146, Task 4 of #1241).
+        "Views/Monitor/SummaryInspector.swift",
+        // Ron's folder inspector (#1146, Task 5 of #1241).
+        "Views/Monitor/ToolFolderInspectors.swift",
+        // History's left pane (#1241 Task 8) now lives here: its stat cards,
+        // credit card, community card and list.
+        "Views/Monitor/HomeViews.swift",
+        // Ron's session review card (#1146, Task 6 of #1241).
+        "Views/Monitor/SessionReviewCard.swift",
+        // Settings as Ron's modal over the Monitor (#1146, Task 10 of #1241).
+        "Views/Monitor/SettingsModal.swift",
     ]
 
     static func text(_ rel: String) throws -> String {
@@ -133,11 +147,32 @@ final class GlassSurfaceRulesTests: XCTestCase {
 
     /// Every status dot and status label carries words: a colour alone is
     /// not a state (HIG, and the owner's fail-closed rule).
+    /// A dot drawn directly is paired with its sentence: the very next line
+    /// is the `Text` it sits beside (Home's watching line draws a ringed
+    /// dot that `GlassStatusLabel` cannot).
     func test_everyDotHasWords() throws {
         for rel in Self.files {
-            let source = try Self.text(rel)
-            XCTAssertFalse(source.contains("GlassStatusDot("),
-                           "\(rel) draws a bare dot; use GlassStatusLabel or pair the dot with its sentence")
+            for line in Self.bareDots(in: try Self.text(rel)) {
+                XCTFail("\(rel):\(line) draws a bare dot; use GlassStatusLabel or pair the dot with its sentence")
+            }
         }
+    }
+
+    /// The pairing rule still refuses a dot with no sentence beside it, and
+    /// a dot that ends the file.
+    func test_aBareDotIsStillRefused() {
+        XCTAssertEqual(Self.bareDots(in: "GlassStatusDot(.on)\n    Spacer()\nGlassStatusDot(.ask)"), [1, 3])
+        XCTAssertEqual(Self.bareDots(in: "GlassStatusDot(.on, ring: true)\n    Text(words)"), [])
+    }
+
+    /// The 1-based lines that draw `GlassStatusDot(` without a `Text(` on
+    /// the next line.
+    static func bareDots(in source: String) -> [Int] {
+        let lines = source.components(separatedBy: "\n")
+        return lines.indices.filter { index in
+            guard lines[index].contains("GlassStatusDot(") else { return false }
+            let next = index + 1 < lines.count ? lines[index + 1].trimmingCharacters(in: .whitespaces) : ""
+            return !next.hasPrefix("Text(")
+        }.map { $0 + 1 }
     }
 }

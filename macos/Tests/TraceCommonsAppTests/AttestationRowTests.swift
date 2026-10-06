@@ -95,7 +95,8 @@ final class AttestationRowTests: XCTestCase {
                      "mark: entry.attestation ?? \"\"", "entry.attestationReason"] {
             XCTAssertTrue(body.contains(call), "attestationValue never reads \(call)")
         }
-        let inspector = try Self.source("TraceCommonsApp/Views/Monitor/TracesViews.swift")
+        // Ron's session review card (#1241) is the session inspector.
+        let inspector = try Self.source("TraceCommonsApp/Views/Monitor/SessionReviewCard.swift")
         XCTAssertTrue(
             inspector.contains("attestation: store.attestationValue(entry)"),
             "the inspector must draw the mark of the entry it is showing")
@@ -108,7 +109,7 @@ final class AttestationRowTests: XCTestCase {
     /// feature is for. The two rows are siblings, each gated on its own
     /// optional.
     func testTheMarkIsNotNestedUnderTheEligibilityLine() throws {
-        let source = try Self.source("TraceCommonsApp/Views/Monitor/TracesViews.swift")
+        let source = try Self.source("TraceCommonsApp/Views/Monitor/SessionReviewCard.swift")
         XCTAssertTrue(source.contains("""
                     if let eligibility { rows.append(.init(words.eligibility, eligibility)) }
                     if let attestation { rows.append(.init(words.attestation, attestation)) }

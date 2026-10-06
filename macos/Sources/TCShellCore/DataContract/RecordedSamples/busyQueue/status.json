@@ -53,5 +53,6 @@
   "contribution_override": null,
   "contribution_mode": "notify_only",
   "contribution_mode_partial": false,
+  "dev_dry_run": false,
   "_sample": "private AI, routing and budget need a live IronWire"
 }

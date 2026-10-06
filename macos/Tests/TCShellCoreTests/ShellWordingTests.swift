@@ -74,7 +74,13 @@ final class ShellWordingTests: XCTestCase {
         // Lowered from 11: the AppKit menu left the shell with the glass menu
         // bar (R15); the three pause choices stay in `MenuBarWords` (D-12).
         "TraceCommonsApp/Views/MenuBarView.swift": 3,
-        "TraceCommonsApp/Views/PreviewSheet.swift": 38,
+        // Lowered from 38: Look inside is read-only (#1241 Task 7) -- its
+        // verdict, correction, Contribute and header lines left, and Ron's
+        // words come from the core's `look_inside` table. Then 24 -> 14:
+        // the What's in it and Permissions tabs, which nothing drew any
+        // more, were deleted (their facts are the session card's). Then
+        // 14 -> 13: Ron's glass search field states its prompt once.
+        "TraceCommonsApp/Views/PreviewSheet.swift": 13,
         "TraceCommonsApp/Views/PublicProfileCopy.swift": 46,
         // Back to 3: the withheld line briefly lived here and is now
         // `tc_contribution_withheld_line`, assembled in the Rust and shared

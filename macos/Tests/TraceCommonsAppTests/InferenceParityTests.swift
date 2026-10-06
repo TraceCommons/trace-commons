@@ -271,7 +271,7 @@ final class InferenceParityTests: XCTestCase {
                        "model.answerHarnessExposure(accepted: true)", "model.cancelHarnessPreview()", "model.confirmHarnessPreview()",
                        "HarnessSurface.canCommit(", "HarnessSurface.outcomeSentence(", "HarnessSurface.occupiedSentence(",
                        "CredentialSurface.harnessNotice(", "HarnessSurface.spendSentence(", "copy.harnessesSpendScope",
-                       "copy.harnessesNoneFound", "copy.offerExposure", ".keyboardShortcut(.cancelAction)", "model.harnessBusy"] {
+                       "copy.harnessesNoneFound", "copy.offerExposure", ".cancel(copy.offerDecline)", "model.harnessBusy"] {
             XCTAssertTrue(source.contains(needle), "HarnessListView.swift lacks \(needle)")
         }
         XCTAssertFalse(source.contains("copy.offerAskedOnce"), "the asked-once sentence is false on this surface")
@@ -285,10 +285,11 @@ final class InferenceParityTests: XCTestCase {
     func test_bothSheetsArePresentedFromTheAlwaysPresentStack() throws {
         let source = try Self.text("Views/HarnessListView.swift")
         for needle in ["            }\n        }\n"
-                           + "        .sheet(isPresented: exposureBinding) {\n"
+                           + "        // Glass modals over the whole window, not stock sheets.\n"
+                           + "        .glassModal(isPresented: exposureBinding) {\n"
                            + "            HarnessExposureSheet(copy: copy)\n"
                            + "        }\n"
-                           + "        .sheet(isPresented: previewBinding) {\n"
+                           + "        .glassModal(isPresented: previewBinding) {\n"
                            + "            if let plan = model.harnessPreview {\n"
                            + "                HarnessPreviewSheet(plan: plan, copy: copy)\n",
                        "get: { model.harnessExposureRequest != nil },\n"
@@ -297,7 +298,8 @@ final class InferenceParityTests: XCTestCase {
                            + "            set: { if !$0 { model.cancelHarnessPreview() } })"] {
             XCTAssertTrue(source.contains(needle), "HarnessListView.swift lacks \(needle)")
         }
-        XCTAssertEqual(source.components(separatedBy: ".sheet(").count - 1, 2, "exactly the two questions")
+        XCTAssertEqual(source.components(separatedBy: ".glassModal(").count - 1, 2, "exactly the two questions")
+        XCTAssertFalse(source.contains(".sheet("), "both questions are glass modals")
         XCTAssertFalse(source.contains(".task(") || source.contains(".onAppear") || source.contains(".onReceive("),
                        "the list is refreshed by the model, not by a view that may not be drawn")
     }
@@ -309,32 +311,30 @@ final class InferenceParityTests: XCTestCase {
         let source = try Self.text("Views/HarnessListView.swift")
         // The exposure body is pinned whole, in order, in
         // `test_theExposureBodyAndTheToolDetailsArePinnedWhole`.
-        for needle in ["Button(copy.offerDecline) { model.answerHarnessExposure(accepted: false) }\n"
-                           + "                    .buttonStyle(GlassButtonStyle(.glass))\n"
-                           + "                    .keyboardShortcut(.cancelAction)\n",
-                       "Button(copy.offerAccept) { model.answerHarnessExposure(accepted: true) }\n"
-                           + "                    .buttonStyle(GlassButtonStyle(.primary))\n"
-                           + "                    .keyboardShortcut(.defaultAction)\n"
-                           + "                    .disabled(model.harnessBusy)\n",
-                       "GlassSheet(title: copy.harnessPreviewTitle) {\n",
-                       "Button(copy.harnessPreviewCancel) { model.cancelHarnessPreview() }\n"
-                           + "                    .buttonStyle(GlassButtonStyle(.glass))\n"
-                           + "                    .keyboardShortcut(.cancelAction)\n",
+        // Decline and Cancel are the modal's cancel (Escape); Accept and
+        // Confirm are its default (Return) and wait on busy.
+        for needle in [".cancel(copy.offerDecline) { model.answerHarnessExposure(accepted: false) },\n",
+                       "GlassModalAction(copy.offerAccept, isDefault: true, isEnabled: !model.harnessBusy) {\n"
+                           + "                    model.answerHarnessExposure(accepted: true)\n",
+                       "onCancel: { model.answerHarnessExposure(accepted: false) }",
+                       "title: copy.harnessPreviewTitle, width: .narrow, actions: actions,\n",
+                       ".cancel(copy.harnessPreviewCancel) { model.cancelHarnessPreview() },\n",
+                       "onCancel: { model.cancelHarnessPreview() }",
                        "if HarnessSurface.canCommit(plan, calls: model.harnessCalls) {\n"
-                           + "                    Button(copy.harnessPreviewConfirm) { model.confirmHarnessPreview() }\n"
-                           + "                        .buttonStyle(GlassButtonStyle(.primary))\n"
-                           + "                        .keyboardShortcut(.defaultAction)\n"
-                           + "                        .disabled(model.harnessBusy)\n",
+                           + "            actions.append(GlassModalAction(\n"
+                           + "                copy.harnessPreviewConfirm, isDefault: true, isEnabled: !model.harnessBusy\n"
+                           + "            ) { model.confirmHarnessPreview() })\n",
                        "if !plan.occupied.isEmpty {\n"
                            + "                Text(HarnessSurface.occupiedSentence(copy: copy))",
                        "ForEach(Array(plan.changes.enumerated()), id: \\.offset) { _, change in\n"
                            + "                Text(change)",
-                       ".frame(minWidth: 460)"] {
+                       "GlassModalBody { details }", "GlassModalBody { question }"] {
             XCTAssertTrue(source.contains(needle), "HarnessListView.swift lacks \(needle)")
         }
-        XCTAssertEqual(source.components(separatedBy: ".frame(minWidth: 460)").count - 1, 2, "both sheets keep their width")
-        XCTAssertEqual(source.components(separatedBy: "Button(").count - 1, 5,
-                       "the row's action and the four sheet answers, and nothing that would take a slot over")
+        XCTAssertEqual(source.components(separatedBy: "width: .narrow").count - 1, 2, "both modals keep one width")
+        XCTAssertEqual(source.components(separatedBy: "Button(").count - 1, 1,
+                       "the row's action, and nothing that would take a slot over")
+        XCTAssertEqual(source.components(separatedBy: "GlassModalAction(").count - 1, 2, "the two answers that act")
     }
 
     /// A row's state is the shared tone on a worded label, the only primary
@@ -392,7 +392,7 @@ final class InferenceParityTests: XCTestCase {
                       "an unanswered list must not read as an empty one")
     }
 
-    func test_theInspectorCarriesTheAccountTheSwitchAndTheTools() throws {
+    func test_theMainPaneCarriesTheAccountTheSwitchAndTheTools() throws {
         let views = try Self.text("Views/Monitor/InferenceViews.swift")
         XCTAssertTrue(views.contains("InferenceAccountSection(store: store)"))
         for needle in ["case .needsRoots", "OnboardingCoordinatorView(startAt: .folders, takesInvites: false, offersJoin: false", "case .refused(let",
@@ -454,8 +454,8 @@ final class InferenceParityTests: XCTestCase {
     /// the first run's Folders step when folders are owed (outside the ledger's scroll,
     /// so it never nests one), a spinner while starting, the core's down
     /// title over the refusal's sentence, the ledger only while running;
-    /// and the refresh sits on the always-present stack. The inspector's
-    /// account, whose controls need the daemon, is drawn only while running.
+    /// and the refresh sits on the always-present stack. The account, whose
+    /// controls need the daemon, is drawn in the ledger, only while running.
     func test_theTabGatesOnTheDaemonsStartup() throws {
         let views = try Self.text("Views/Monitor/InferenceViews.swift")
         for needle in ["        VStack(alignment: .leading, spacing: 0) {\n"
@@ -474,9 +474,15 @@ final class InferenceParityTests: XCTestCase {
                            + "        }\n"
                            + "        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)\n"
                            + "        .onAppear { model.refreshAll() }\n",
-                       "                if case .running = model.startup {\n"
-                           + "                    InferenceAccountSection(store: store)\n"
-                           + "                }\n"] {
+                       // The account, the tools and the switch sit in the
+                       // main pane above the ledger (owner ruling on #1241,
+                       // after #1146's Private AI page), which is drawn only
+                       // while the daemon runs.
+                       "    private var ledger: some View {\n"
+                           + "        ScrollView {\n"
+                           + "            VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {\n",
+                       "                InferenceAccountSection(store: store)\n"
+                           + "                // The stack-wide rule (ScreenState)"] {
             XCTAssertTrue(views.contains(needle), "InferenceViews.swift lacks \(needle)")
         }
         XCTAssertEqual(views.components(separatedBy: ".onAppear").count - 1, 1)
@@ -492,7 +498,9 @@ final class InferenceParityTests: XCTestCase {
     /// command, both selectable.
     func test_theExposureBodyAndTheToolDetailsArePinnedWhole() throws {
         let source = try Self.text("Views/HarnessListView.swift")
-        for needle in ["GlassSheet(title: copy.offerTitle) {\n"
+        for needle in ["GlassModalBody { question }",
+                       "private var question: some View {\n"
+                           + "        VStack(alignment: .leading, spacing: GlassTokens.Space.s6) {\n"
                            + "            Text(copy.offerWhat)\n"
                            + "                .glassType(GlassTokens.TypeScale.body)\n"
                            + "                .foregroundStyle(GlassColor.textPrimary)\n"

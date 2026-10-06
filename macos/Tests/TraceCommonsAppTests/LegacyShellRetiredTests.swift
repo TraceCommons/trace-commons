@@ -33,7 +33,9 @@ final class LegacyShellRetiredTests: XCTestCase {
         for flag in ["TRACE_COMMONS_GLASS_MENU", "TRACE_COMMONS_MONITOR\"", "TRACE_COMMONS_FIRST_RUN", "WindowID.main", "MainWindowView("] {
             XCTAssertFalse(main.contains(flag), "\(flag) survives")
         }
-        for scene in ["MonitorWindowView(", "MonitorSettingsWindow(", "FirstRunWindowView(", "MenuBarGlassPanel(store: menuPanel)"] {
+        // No Settings scene: Settings is Ron's modal over the Monitor
+        // (#1241 Task 10; `SettingsModalTests`).
+        for scene in ["MonitorWindowView(", "FirstRunWindowView(", "MenuBarGlassPanel(navigation: navigation, store: menuPanel)"] {
             let at = try XCTUnwrap(main.range(of: scene)).lowerBound
             let before = main[..<at]
             let opens = before.components(separatedBy: "#if DEBUG").count - 1
@@ -106,7 +108,10 @@ final class LegacyShellRetiredTests: XCTestCase {
             XCTAssertFalse(navigation.contains(remnant), "\(remnant) survives")
         }
         let panel = try MonitorNavigationTests.text("Views/Monitor/MenuBarGlassPanel.swift")
-        XCTAssertFalse(panel.contains("MainWindowNavigation"), "the panel opens through OpenMonitor")
+        // The panel holds the navigation only to ask for the Settings modal
+        // (#1241 Task 10); every window it opens goes through OpenMonitor.
+        XCTAssertFalse(panel.contains("navigation.section"), "the panel opens through OpenMonitor")
+        XCTAssertFalse(panel.contains("openMain("), "the panel opens through OpenMonitor")
     }
 
     /// The legacy palette and design system are gone from the app target: no

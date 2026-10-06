@@ -15,39 +15,38 @@ struct NearAccountConnectView: View {
     var onEnrolled: () -> Void
     private var busy: Bool { pending || flow?.busy == true }
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
+        Group {
             if let copy = model.witnessCopy?.wallet, let flow, flow.state != "Unsupported" {
-                GlassCard {
-                    VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
-                        Text(copy.heading)
-                            .glassType(GlassTokens.TypeScale.label.weight(.semibold))
-                            .foregroundStyle(GlassColor.textPrimary)
-                        Text(copy.disclosure)
-                            .glassType(GlassTokens.TypeScale.body)
+                VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
+                    Text(copy.heading)
+                        .glassType(GlassTokens.TypeScale.bodyStrong)
+                        .foregroundStyle(GlassColor.textPrimary)
+                    Text(copy.disclosure)
+                        .glassType(GlassTokens.TypeScale.label.weight(.regular))
+                        .foregroundStyle(GlassColor.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    GlassTextField(copy.commons, text: $commons).disabled(busy || !flow.canEdit)
+                    Button(copy.check) { run("check") }
+                        .buttonStyle(GlassButtonStyle(.glass))
+                        .disabled(pending || !flow.canCheck)
+                    if flow.canStart {
+                        GlassTextField(copy.account, text: $account).disabled(busy)
+                        Button(copy.start) { run("start") }
+                            .buttonStyle(GlassButtonStyle(.primary))
+                            .disabled(pending)
+                    }
+                    if busy { GlassSpinner(standalone: true) }
+                    if transportFailed { notice(copy.failed, glyph: copy.refusedGlyph) }
+                    else if flow.tone == "refused" { notice(flow.message, glyph: flow.glyph) }
+                    else if !flow.message.isEmpty {
+                        Text(flow.message)
+                            .glassType(GlassTokens.TypeScale.label.weight(.regular))
                             .foregroundStyle(GlassColor.textSecondary)
                             .fixedSize(horizontal: false, vertical: true)
-                        GlassTextField(copy.commons, text: $commons).disabled(busy || !flow.canEdit)
-                        Button(copy.check) { run("check") }
+                    }
+                    if flow.canCancel {
+                        Button(copy.cancel, role: .cancel) { run("cancel") }
                             .buttonStyle(GlassButtonStyle(.glass))
-                            .disabled(pending || !flow.canCheck)
-                        if flow.canStart {
-                            GlassTextField(copy.account, text: $account).disabled(busy)
-                            Button(copy.start) { run("start") }
-                                .buttonStyle(GlassButtonStyle(.primary))
-                                .disabled(pending)
-                        }
-                        if busy { ProgressView().controlSize(.small) }
-                        if transportFailed { NativeFlowNotice(message: copy.failed, glyph: copy.refusedGlyph, tone: copy.refusedTone) }
-                        else if flow.tone == "refused" { NativeFlowNotice(message: flow.message, glyph: flow.glyph, tone: flow.tone) }
-                        else if !flow.message.isEmpty {
-                            Text(flow.message)
-                                .glassType(GlassTokens.TypeScale.body)
-                                .foregroundStyle(GlassColor.textSecondary)
-                        }
-                        if flow.canCancel {
-                            Button(copy.cancel, role: .cancel) { run("cancel") }
-                                .buttonStyle(GlassButtonStyle(.glass))
-                        }
                     }
                 }
             }
@@ -59,6 +58,12 @@ struct NearAccountConnectView: View {
         .onChange(of: busy) { _, value in onBusyChanged(value) }
         .onDisappear { closed = true; Task { await cancel() } }
     }
+    /// A refusal: the core's glyph beside its sentence, in the outside tone.
+    private func notice(_ message: String, glyph: String) -> some View {
+        GlassStatusLabel([glyph, message].filter { !$0.isEmpty }.joined(separator: " "), status: .outside)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
     private func cancel() async {
         guard let flow else { return }
         self.flow = await model.nativeWalletFlow(action: "cancel", flowID: flow.flowID, commons: "", account: "") ?? flow

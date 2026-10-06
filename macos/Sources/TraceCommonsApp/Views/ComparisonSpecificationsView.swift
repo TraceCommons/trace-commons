@@ -11,48 +11,49 @@ struct ComparisonSpecificationsView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Text(text("comparison_specification_title")).font(.title2)
+                Text(text("comparison_specification_title")).insightsTitle()
                 Spacer(); Button(text("comparison_specification_refresh")) { model.refresh() }
-                if model.busy { ProgressView().controlSize(.small) }
+                if model.busy { GlassSpinner() }
             }
-            Text(text("comparison_retrospective_notice")).foregroundStyle(.secondary)
-            if let notice = model.notice { Text(text(notice)).foregroundStyle(GlassTokens.Color.statusOnText.color) }
-            if let error = model.error { Text(text(error)).foregroundStyle(GlassTokens.Color.statusOutsideText.color) }
+            Text(text("comparison_retrospective_notice")).foregroundStyle(GlassColor.textSecondary)
+            if let notice = model.notice { Text(text(notice)).foregroundStyle(GlassStatus.on.textColor) }
+            if let error = model.error { Text(text(error)).foregroundStyle(GlassStatus.outside.textColor) }
             draft
             if let specification = model.previewSpecification, let result = model.previewResult {
-                Divider(); Text(text("comparison_preview_notice")).font(.headline)
+                InsightsRule(); Text(text("comparison_preview_notice")).insightsHeading()
                 specificationView(specification); resultView(result)
                 Button(text("comparison_specification_save")) { model.save() }
             }
-            Divider(); saved
+            InsightsRule(); saved
         }.disabled(model.busy)
+        .insightsSurface()
     }
 
     private var draft: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text(text("comparison_specification_draft")).font(.headline)
+            Text(text("comparison_specification_draft")).insightsHeading()
             if model.options.isEmpty { Text(text("comparison_specification_need_context")) }
-            Picker(text("comparison_specification_stratum"), selection: Binding(
-                get: { model.selectedStratumID }, set: model.selectStratum)) {
-                ForEach(model.options) { option in
-                    Text("\(option.label) · \(option.taskIDs.count) \(text("comparison_specification_matching_tasks"))")
-                        .tag(option.id)
-                }
-            }
+            GlassSelect(text("comparison_specification_stratum"), selection: Binding(
+                get: { model.selectedStratumID }, set: model.selectStratum),
+                options: model.options.map { option in
+                    GlassPickerOption(
+                        "\(option.label) · \(option.taskIDs.count) \(text("comparison_specification_matching_tasks"))",
+                        value: option.id)
+                })
             if let option = model.selectedOption {
-                DisclosureGroup(text("comparison_task_advanced_evidence")) {
-                    Text(option.stratum.project_id).font(.caption.monospaced())
-                    Text(option.stratum.configuration_fingerprint).font(.caption.monospaced())
+                InsightsDisclosure(text("comparison_task_advanced_evidence")) {
+                    Text(option.stratum.project_id).insightsMono()
+                    Text(option.stratum.configuration_fingerprint).insightsMono()
                 }
-                Text(text("comparison_specification_candidate_declarations")).font(.headline)
-                Text(text("comparison_cohort_declaration_notice")).font(.caption).foregroundStyle(.secondary)
+                Text(text("comparison_specification_candidate_declarations")).insightsHeading()
+                Text(text("comparison_cohort_declaration_notice")).insightsCaption()
                 if option.cohortCandidates.count < 2 {
                     Text(text("comparison_specification_need_cohorts"))
                 }
                 ForEach(option.cohortCandidates, id: \.self) { label in
                     Toggle("\(label) \(text("comparison_cohort_declared_not_verified"))",
                         isOn: Binding(get: { model.selectedCohorts.contains(label) },
-                        set: { model.setCohort(label, selected: $0) })).toggleStyle(.checkbox)
+                        set: { model.setCohort(label, selected: $0) })).toggleStyle(GlassCheckboxStyle())
                 }
             }
             DatePicker(text("comparison_specification_date_start"), selection: $model.dateStart,
@@ -60,7 +61,7 @@ struct ComparisonSpecificationsView: View {
             DatePicker(text("comparison_specification_date_end"), selection: $model.dateEnd,
                        displayedComponents: .date)
             DatePicker(text("comparison_specification_cutoff"), selection: $model.evidenceCutoff)
-            Text(text("comparison_specification_cutoff_notice")).font(.caption).foregroundStyle(.secondary)
+            Text(text("comparison_specification_cutoff_notice")).insightsCaption()
             Button(text("comparison_specification_preview")) { model.preview() }.disabled(!model.canDraft)
         }.onChange(of: model.dateStart) { _, _ in model.draftChanged() }
          .onChange(of: model.dateEnd) { _, _ in model.draftChanged() }
@@ -69,13 +70,15 @@ struct ComparisonSpecificationsView: View {
 
     private var saved: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text(text("comparison_specification_saved")).font(.headline)
+            Text(text("comparison_specification_saved")).insightsHeading()
             if model.specifications.isEmpty { Text(text("comparison_specifications_empty")) }
             ForEach(model.specifications) { spec in
                 Button { model.select(spec.id) } label: {
                     Text("\(spec.date_start) – \(spec.date_end) · \(spec.cohort_labels.joined(separator: " / "))")
                         .frame(maxWidth: .infinity, alignment: .leading)
+                        .insightsRowCard()
                 }
+                .buttonStyle(GlassPressStyle())
             }
             if let selected = model.selected {
                 specificationView(selected)
@@ -92,33 +95,33 @@ struct ComparisonSpecificationsView: View {
 
     private func specificationView(_ spec: ComparisonSpecification) -> some View {
         VStack(alignment: .leading, spacing: 5) {
-            Text("\(spec.date_start) – \(spec.date_end)").font(.headline)
+            Text("\(spec.date_start) – \(spec.date_end)").insightsHeading()
             Text("\(spec.cohort_labels.joined(separator: " / ")) \(text("comparison_cohort_declared_not_verified"))")
             Text("\(text("comparison_specification_cutoff")): \(InsightsDate.label(spec.evidence_cutoff))")
-            Text(text("comparison_specification_cutoff_evidence")).font(.headline)
+            Text(text("comparison_specification_cutoff_evidence")).insightsHeading()
             ForEach(spec.cutoff_task_evidence) { evidence in
                 Button { openTask(evidence.task_id) } label: {
                     Text("\(model.taskLabel(evidence.task_id)) · \(outcomeLabel(evidence.outcome)) · \(evidence.outcome_recorded_at.map(InsightsDate.label) ?? text("comparison_task_unknown"))")
                 }
             }
-            DisclosureGroup(text("comparison_task_advanced_evidence")) {
+            InsightsDisclosure(text("comparison_task_advanced_evidence")) {
                 Text(spec.id); Text(spec.specification_digest); Text(spec.saved_record_digest)
                 ForEach(spec.cutoff_task_evidence) { evidence in
                     Text(evidence.task_id); Text(evidence.material_digest); Text(evidence.substantive_material_digest)
                 }
-            }.font(.caption.monospaced()).textSelection(.enabled)
+            }.insightsMono().textSelection(.enabled)
         }
     }
 
     private func resultView(_ result: DescriptiveComparisonResult) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text(text("comparison_specification_result")).font(.headline)
+            Text(text("comparison_specification_result")).insightsHeading()
             Text(text(result.exact_estimation == nil ? "comparison_descriptive_notice" : "comparison_exact_notice"))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(GlassColor.textSecondary)
             if result.included_task_ids.isEmpty { Text(text("comparison_no_eligible_evidence")) }
             ForEach(result.cohorts) { cohort in
                 VStack(alignment: .leading) {
-                    Text("\(cohort.cohort_label) \(text("comparison_cohort_declared_not_verified"))").font(.headline)
+                    Text("\(cohort.cohort_label) \(text("comparison_cohort_declared_not_verified"))").insightsHeading()
                     Text("\(text("comparison_specification_included")): \(cohort.included_tasks)")
                     ForEach(DescriptiveOutcome.allCases, id: \.self) { outcome in
                         Text("\(outcomeLabel(outcome)): \(count(outcome, in: cohort.outcomes))")
@@ -127,17 +130,17 @@ struct ComparisonSpecificationsView: View {
                     Text("\(text("comparison_specification_usage_observed")): \(cohort.usage.tasks_with_observed_attributed_tokens)")
                     Text("\(text("comparison_specification_usage_unavailable")): \(cohort.usage.tasks_without_observed_attributed_tokens)")
                     Text("\(text("comparison_specification_observed_tokens")): \(cohort.usage.observed_attributed_tokens)")
-                }.padding(8).background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
+                }.insightsCard()
             }
-            Text(text("comparison_denominator_notice")).font(.caption).foregroundStyle(.secondary)
+            Text(text("comparison_denominator_notice")).insightsCaption()
             if let exact = result.exact_estimation { exactResult(exact, cohorts: result.cohorts) }
             if !result.included_task_ids.isEmpty {
-                Text(text("comparison_specification_included")).font(.headline)
+                Text(text("comparison_specification_included")).insightsHeading()
                 ForEach(result.included_task_ids, id: \.self) { id in
                     Button(model.taskLabel(id)) { openTask(id) }
                 }
             }
-            if !result.excluded_tasks.isEmpty { Text(text("comparison_specification_exclusions")).font(.headline) }
+            if !result.excluded_tasks.isEmpty { Text(text("comparison_specification_exclusions")).insightsHeading() }
             ForEach(result.excluded_tasks) { excluded in
                 VStack(alignment: .leading) {
                     Button(model.taskLabel(excluded.task_id)) { openTask(excluded.task_id) }
@@ -146,17 +149,17 @@ struct ComparisonSpecificationsView: View {
                     }
                 }
             }
-            DisclosureGroup(text("comparison_task_advanced_evidence")) {
+            InsightsDisclosure(text("comparison_task_advanced_evidence")) {
                 Text(result.audit_digest); Text(result.estimation_input_digest)
-            }.font(.caption.monospaced()).textSelection(.enabled)
+            }.insightsMono().textSelection(.enabled)
         }
     }
     private func exactResult(_ exact: QualifiedExactEstimation,
                              cohorts: [CohortDescriptiveResult]) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Text("\(exact.cohort_labels[1]) \(text("comparison_exact_minus")) \(exact.cohort_labels[0])")
-                .font(.headline)
-            Text(text("comparison_exact_orientation")).font(.caption).foregroundStyle(.secondary)
+                .insightsHeading()
+            Text(text("comparison_exact_orientation")).insightsCaption()
             ForEach(Array(zip(exact.assessed_counts, cohorts).enumerated()), id: \.offset) { _, row in
                 Text("\(row.1.cohort_label): \(text("comparison_specification_assessed")): \(row.0.total) / \(text("comparison_specification_included")): \(row.1.included_tasks)")
             }
@@ -168,18 +171,18 @@ struct ComparisonSpecificationsView: View {
                     let first = exact.assessed_counts[0]; let second = exact.assessed_counts[1]
                     let firstCount = assessedCount(row.0, first); let secondCount = assessedCount(row.0, second)
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(outcomeLabel(row.0)).font(.headline)
+                        Text(outcomeLabel(row.0)).insightsHeading()
                         Text("\(firstCount)/\(first.total) (\(percent(firstCount, first.total))) \(text("comparison_exact_versus")) \(secondCount)/\(second.total) (\(percent(secondCount, second.total)))")
                         Text("\(text("comparison_exact_observed_difference")): \(observedPoints(firstCount, first.total, secondCount, second.total)) \(text("comparison_exact_percentage_points"))")
                         Text("\(text("comparison_exact_interval")): [\(points(row.1.lower_millionths)), \(points(row.1.upper_millionths))] \(text("comparison_exact_percentage_points"))")
-                        Text(text(decisionKey(row.1.decision))).foregroundStyle(.secondary)
+                        Text(text(decisionKey(row.1.decision))).foregroundStyle(GlassColor.textSecondary)
                     }.padding(.vertical, 3).id(index)
                 }
-                Text(text("comparison_exact_positive_direction")).font(.caption).foregroundStyle(.secondary)
+                Text(text("comparison_exact_positive_direction")).insightsCaption()
             }
-            DisclosureGroup(text("comparison_task_advanced_evidence")) {
+            InsightsDisclosure(text("comparison_task_advanced_evidence")) {
                 Text(exact.output_digest)
-            }.font(.caption.monospaced()).textSelection(.enabled)
+            }.insightsMono().textSelection(.enabled)
         }
     }
     private func assessedCount(_ outcome: DescriptiveOutcome, _ counts: AssessedCategoricalCounts) -> UInt64 {

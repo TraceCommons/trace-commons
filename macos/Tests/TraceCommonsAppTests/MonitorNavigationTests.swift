@@ -361,9 +361,12 @@ final class MonitorNavigationTests: XCTestCase {
                 case .monitor: openWindow(id: WindowID.monitor)
                 case nil: break
                 }
+                // Settings is the Monitor's modal (#1241 Task 10): a Settings
+                // destination raises the Monitor and asks it for Settings at the
+                // section.
                 if let section = opening.settings {
-                    navigation.settingsSection = section
-                    openSettings()
+                    openWindow(id: WindowID.monitor)
+                    navigation.requestSettings(at: section)
                 }
             }
         """), "Settings must open from the opening, outside the window switch")
@@ -375,11 +378,11 @@ final class MonitorNavigationTests: XCTestCase {
     func test_eachDestinationLandsOnItsTab() {
         var tab = MonitorWindowView.Tab.home
         var page = HomeTabView.Page.overview
-        var session = ""
+        var session: MonitorSelection?
         var inspector = false
         func land(_ destination: MonitorDestination) {
             MonitorWindowView.land(destination, tab: &tab, homePage: &page,
-                                   selectedSession: &session, showsInspector: &inspector)
+                                   selection: &session, showsInspector: &inspector)
         }
 
         land(.inference)
@@ -389,18 +392,18 @@ final class MonitorNavigationTests: XCTestCase {
         inspector = false
         land(.traces(entryId: nil))
         XCTAssertEqual(tab, .traces)
-        XCTAssertEqual(session, "", "no id selects nothing")
+        XCTAssertNil(session, "no id selects nothing")
         XCTAssertFalse(inspector)
 
         land(.traces(entryId: "entry-7"))
-        XCTAssertEqual(session, "entry-7")
+        XCTAssertEqual(session, .session(entryID: "entry-7"))
         XCTAssertTrue(inspector)
 
         land(.home(.history))
         XCTAssertEqual(tab, .home)
         XCTAssertEqual(page, .history)
 
-        // Settings is its own window: the Monitor's tabs stay as they were.
+        // Settings is the Monitor's modal: the tabs stay as they were.
         land(.settings(.compute))
         XCTAssertEqual(tab, .home)
         XCTAssertEqual(page, .history)
@@ -427,7 +430,7 @@ final class MonitorNavigationTests: XCTestCase {
         XCTAssertEqual(main.components(separatedBy: "MenuBarExtra {").count - 1, 1, "exactly one menu-bar item")
         XCTAssertFalse(main.contains("MenuBarExtra("))
         XCTAssertTrue(main.contains(".menuBarExtraStyle(.window)"))
-        XCTAssertTrue(main.contains("MenuBarGlassPanel(store: menuPanel)"))
+        XCTAssertTrue(main.contains("MenuBarGlassPanel(navigation: navigation, store: menuPanel)"))
         XCTAssertTrue(main.contains("MenuBarStripLabel(model: model, store: menuPanel)"))
         // R15: a release build draws the same panel and strip; no branch
         // of its own stands in for them (ruling R-35's transitional
@@ -442,7 +445,10 @@ final class MonitorNavigationTests: XCTestCase {
         XCTAssertTrue(menu.contains("enum MenuBarWords"))
         let panel = try Self.text("Views/Monitor/MenuBarGlassPanel.swift")
         XCTAssertFalse(panel.contains("MenuBarContent."))
-        XCTAssertFalse(panel.contains("let navigation: MainWindowNavigation"), "the panel opens through OpenMonitor")
+        // The panel holds the navigation only to ask for the Settings modal
+        // (#1241 Task 10); every window it opens goes through OpenMonitor.
+        XCTAssertFalse(panel.contains("navigation.section"), "the panel opens through OpenMonitor")
+        XCTAssertTrue(panel.contains("navigation.requestSettings()"))
         XCTAssertTrue(panel.contains("PrivateInferenceTray.perform("))
         XCTAssertTrue(panel.contains("MenuBarWords.pauseUntil(index)"))
     }
@@ -487,7 +493,9 @@ final class MonitorNavigationTests: XCTestCase {
             XCTAssertTrue(panel.contains(needle), "the menu panel never opens \(needle)")
         }
         let pointer = try Self.text("Views/Settings/PrivateAISection.swift")
-        XCTAssertTrue(pointer.contains("Button(copy.destination) {\n                            OpenMonitor.request(.inference)\n"))
+        // Outside the Settings modal (which closes itself and opens the
+        // Inference tab, `SettingsModalTests`), the pointer opens the Monitor.
+        XCTAssertTrue(pointer.contains("} else {\n                                OpenMonitor.request(.inference)\n"))
         // The Monitor consumes the destination on an always-present
         // container, initially too, per request rather than per value, and
         // lands Inference on its inspector.
@@ -511,7 +519,10 @@ final class MonitorNavigationTests: XCTestCase {
         let inference = try XCTUnwrap(window.range(of: "case .inference:", range: land.upperBound ..< window.endIndex))
         XCTAssertTrue(window[inference.upperBound...].prefix(200).contains("showsInspector = true"),
                       "the Private AI switch and sign-in live in the Inference inspector")
-        XCTAssertTrue(window.contains(".onChange(of: navigation.settingsSection, initial: true) {"),
+        // Settings is the Monitor's modal (#1241 Task 10): a request while
+        // it is open is a new request, and the modal scrolls to it.
+        let modal = try Self.text("Views/Monitor/SettingsModal.swift")
+        XCTAssertTrue(modal.contains(".onChange(of: request) { _, new in Self.scroll(to: new.section, proxy) }"),
                       "Settings already open must still move to the asked-for section")
     }
 
@@ -647,15 +658,17 @@ final class MonitorNavigationTests: XCTestCase {
         """
         XCTAssertTrue(window.contains(button))
         XCTAssertFalse(window.contains(button + "\n                        .disabled("), "the gear is dead before onboarding")
-        XCTAssertTrue(window.contains("""
-                        ).forSettings(availableBeforeOnboarding: section.availableBeforeOnboarding) {
-                        case .awaiting:
-                            SettingsAwaiting()
+        // The sections are gated in Ron's Settings modal (#1241 Task 10).
+        let modal = try Self.text("Views/Monitor/SettingsModal.swift")
+        XCTAssertTrue(modal.contains("""
+                ).forSettings(availableBeforeOnboarding: item.availableBeforeOnboarding) {
+                case .awaiting:
+                    SettingsAwaiting()
         """), "a writing section waits for the core, then gates (M2)")
-        XCTAssertTrue(window.contains("""
-                        case .down(let sentence):
-                            StartupRefusedBanner(sentence: sentence)
-                                .padding(GlassTokens.Space.panePadding)
+        XCTAssertTrue(modal.contains("""
+                case .down(let sentence):
+                    StartupRefusedBanner(sentence: sentence)
+                        .padding(GlassTokens.Space.panePadding)
         """), "a writing section says a refused daemon as a refusal (B1)")
     }
 
@@ -708,7 +721,10 @@ final class MonitorNavigationTests: XCTestCase {
         let window = try Self.text("Views/MonitorWindowView.swift")
         XCTAssertTrue(firstRun.contains("struct StartupRefusedBanner: View"))
         XCTAssertEqual(firstRun.components(separatedBy: "StartupRefusedBanner(sentence: sentence)").count - 1, 1)
-        XCTAssertEqual(window.components(separatedBy: "StartupRefusedBanner(sentence: sentence)").count - 1, 2)
+        // The Monitor's pane, and Settings (Ron's modal over it, #1241 Task 10).
+        let modal = try Self.text("Views/Monitor/SettingsModal.swift")
+        XCTAssertEqual(window.components(separatedBy: "StartupRefusedBanner(sentence: sentence)").count - 1, 1)
+        XCTAssertEqual(modal.components(separatedBy: "StartupRefusedBanner(sentence: sentence)").count - 1, 1)
         XCTAssertEqual((firstRun + window).components(separatedBy: "GlassHealthBanner(").count - 1, 1)
     }
 
@@ -722,7 +738,7 @@ final class MonitorNavigationTests: XCTestCase {
         navigation.activateServicesForWindow()
         XCTAssertEqual(starts, 1)
         XCTAssertNil(navigation.pending)
-        XCTAssertNil(navigation.settingsSection)
+        XCTAssertNil(navigation.settingsRequest)
     }
 }
 

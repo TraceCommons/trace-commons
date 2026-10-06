@@ -23,7 +23,9 @@ final class InferenceDuringOnboardingTests: XCTestCase {
 
         let copy = try XCTUnwrap(model.privateInferenceCopy)
         let image = try render(
-            PrivateAIInspectorView(store: InferenceStore(client: nil), destinationLabel: copy.destination)
+            // The account (sign-in) is in the Inference main pane since
+            // Ron's #1146 placement (#1241), not the inspector.
+            InferenceAccountSection(store: InferenceStore(client: nil))
                 .environmentObject(model)
                 .environment(\.colorScheme, .light))
         let words = try recognizedWords(image)

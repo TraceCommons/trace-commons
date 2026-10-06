@@ -10,6 +10,10 @@ import TCShellCore
 /// refresh. Unreadable is said as such and never drawn as some other route.
 struct PrivateAISection: View {
     @EnvironmentObject private var model: AppModel
+    /// Where the pointer goes when Settings is the Monitor's modal: it closes
+    /// the modal and opens the Inference tab (Ron's #1146). With none, the
+    /// pointer opens the Monitor at Inference (`OpenMonitor`).
+    var onPointer: (() -> Void)? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
@@ -25,7 +29,11 @@ struct PrivateAISection: View {
                         // It lands on the Inference inspector, where the
                         // switch is.
                         Button(copy.destination) {
-                            OpenMonitor.request(.inference)
+                            if let onPointer {
+                                onPointer()
+                            } else {
+                                OpenMonitor.request(.inference)
+                            }
                         }
                         .buttonStyle(GlassButtonStyle(.link))
                     }
@@ -37,7 +45,7 @@ struct PrivateAISection: View {
                     RouteDisclosureGlassBody(disclosure: disclosure)
                 }
             case .loading:
-                ProgressView().controlSize(.small)
+                GlassSpinner(standalone: true)
             case .unreadable:
                 GlassEyebrowCard(RouteDisclosureUnreadableGlassLine.text(
                     line: nil, fallback: model.routeDisclosureUnreadableCopy?.title,
@@ -122,10 +130,8 @@ struct RouteDisclosureUnreadableGlassLine: View {
     var body: some View {
         let words = Self.text(line: line, fallback: fallback, unknown: Self.unknown)
         HStack(alignment: .firstTextBaseline, spacing: GlassTokens.Space.s3) {
-            Image(systemName: "exclamationmark.triangle.fill")
-                .imageScale(.small)
+            GlassWarningGlyph()
                 .foregroundStyle(GlassColor.textSecondary)
-                .accessibilityHidden(true)
             GlassStatusLabel(words, status: .ask)
         }
         .accessibilityElement(children: .combine)

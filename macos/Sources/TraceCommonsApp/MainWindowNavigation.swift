@@ -1,3 +1,4 @@
+import Foundation
 import Observation
 
 /// The services gate and the destination an `OpenMonitor` request left for
@@ -10,10 +11,6 @@ final class MainWindowNavigation {
     /// can show it (`LaunchRouting.monitorConsumes`). Until then it waits,
     /// and first run hands it off (`LaunchRouting.handOff`).
     var pending: MonitorDestination?
-    /// The Settings section a request asked for, until the Settings window
-    /// selects it. `@SceneStorage` is per scene and cannot be written from
-    /// outside, so the request is parked here.
-    var settingsSection: SettingsSection?
     /// Bumped by every request that leaves a destination, and observed by
     /// the Monitor rather than `pending` itself: first run's hand-off asks
     /// for the destination already waiting, which an open Monitor would
@@ -23,7 +20,7 @@ final class MainWindowNavigation {
     /// Leaves one request's destination for the Monitor. A request with
     /// none (a Dock click, an invite link) leaves a waiting destination in
     /// place rather than clearing it, and a Settings destination is the
-    /// Settings window's (`settingsSection`), never the Monitor's.
+    /// Settings modal's (`requestSettings(at:)`), never the Monitor's.
     func leave(_ destination: MonitorDestination?) {
         guard let destination, destination.settingsSection == nil else { return }
         pending = destination
@@ -47,12 +44,31 @@ final class MainWindowNavigation {
         serviceStart = start
     }
 
-    /// The Settings window and the monitor read and write the daemon, so
-    /// opening one starts services. Once, shared with
+    /// The monitor, and the Settings modal over it, read and write the
+    /// daemon, so opening the monitor starts services. Once, shared with
     /// `activateServicesIfNeeded`.
     func activateServicesForWindow() {
         guard !servicesActivated, let serviceStart else { return }
         servicesActivated = true
         serviceStart()
     }
+
+    /// Settings, asked for: the Monitor draws it as Ron's #1146 modal over
+    /// its panes while this is set, and closing the modal clears it (#1241
+    /// Task 10). Cmd-comma, the Monitor's gear and the menu-bar popover each
+    /// set it; nil is closed.
+    var settingsRequest: SettingsRequest?
+
+    /// Ask for Settings, opened at `section` (scrolled straight to it), or
+    /// at the top for nil. Each request is new, so asking again for the
+    /// same section while the modal is open scrolls to it again.
+    func requestSettings(at section: SettingsSection? = nil) {
+        settingsRequest = SettingsRequest(section: section)
+    }
+}
+
+/// One ask for Settings: the section to open at, if any.
+struct SettingsRequest: Equatable, Identifiable {
+    let id = UUID()
+    let section: SettingsSection?
 }

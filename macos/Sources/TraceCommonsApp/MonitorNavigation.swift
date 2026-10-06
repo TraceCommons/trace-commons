@@ -122,8 +122,9 @@ enum LaunchRouting {
 
     /// What one request opens: its window, and the Settings section it
     /// opens. A Settings destination (a quit refusal's Compute, "Manage
-    /// rules") opens Settings alone, whatever onboarding says: no window
-    /// behind it, which a Settings destination has nothing to show in.
+    /// rules") opens Settings alone, whatever onboarding says: no tab or
+    /// first run behind it. The Launcher raises the Monitor for Ron's
+    /// Settings modal over it (#1241 Task 10).
     struct Opening: Equatable {
         let window: Window?
         let settings: SettingsSection?
@@ -144,7 +145,7 @@ enum LaunchRouting {
     /// Home or Traces destination stays pending for first run to hand off
     /// (`handOff`), rather than being consumed by a Monitor that draws
     /// Inference alone. Inference is shown either way; a Settings
-    /// destination is the Settings window's and never waits here.
+    /// destination is the Settings modal's and never waits here.
     static func monitorConsumes(_ destination: MonitorDestination, requiresOnboarding: Bool, onboardingKnown: Bool) -> Bool {
         if destination.settingsSection != nil || destination == .inference { return true }
         return onboardingKnown && !requiresOnboarding

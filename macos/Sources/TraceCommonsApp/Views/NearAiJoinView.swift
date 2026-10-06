@@ -79,7 +79,7 @@ struct NearAiJoinView: View {
                     }
 
                     if pending {
-                        ProgressView().controlSize(.small)
+                        GlassSpinner()
                         Text(copy.nearAiEnrollWorking)
                             .glassType(GlassTokens.TypeScale.body)
                             .foregroundStyle(GlassColor.textSecondary)

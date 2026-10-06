@@ -19,6 +19,19 @@ final class TracesStore {
 
     private(set) var phase: Phase = .loading
     private(set) var tree = TracesTree(tools: [], unplaced: [])
+    /// Whether the tree draws folders set to ignore (the View menu's "Show
+    /// ignored folders"; hidden by default, as #1146). Changing it redraws
+    /// the tree from the last read, without asking the core again.
+    var showsIgnored = false {
+        didSet {
+            guard showsIgnored != oldValue, let read = lastRead else { return }
+            tree = TracesTree.build(
+                entries: read.entries, projects: read.projects, settings: read.settings,
+                scansWhenUnset: Self.scansWhenUnset, showsIgnored: showsIgnored)
+        }
+    }
+    /// The last successful read the tree was built from.
+    @ObservationIgnored private var lastRead: (entries: [DaemonData.QueueEntry], projects: [ProjectRow], settings: DaemonData.Settings?)?
     /// The `set_project_mode` write in flight, by folder id.
     private(set) var writing: Set<String> = []
     /// The last `status` read; nil when it has not been read or failed. The
@@ -63,6 +76,22 @@ final class TracesStore {
     /// every redraw. Without them Contribute stays disarmed: the shell never
     /// words consent itself.
     let consent: ConsentCopy? = TCConsentCopy.copyJSON().flatMap(ConsentCopy.decode(fromJSON:))
+    /// The core's disclosure bundle (`tc_contributor_disclosure_copy_json`),
+    /// decoded once for the whole app: the review card's verdict and
+    /// correction words and the longest correction the daemon accepts, the
+    /// folder inspector's and the tree's folder mode names, Submit all as's
+    /// outcome words, and History's filter labels. Every one of those reads
+    /// this copy, so no two can hold different words. Without it the card
+    /// draws no verdict and Contribute stays disarmed.
+    static let disclosureCopy: ContributorDisclosureCopy? =
+        ContributorDisclosureCopy.decode(fromJSON: TCCoreCopy.contributorDisclosureCopyJSON())
+    /// `disclosureCopy`, for a view that holds this store.
+    var disclosure: ContributorDisclosureCopy? { Self.disclosureCopy }
+    /// The session whose last Contribute the daemon refused because its
+    /// correction looked like it held a credential. Nothing was sent; the
+    /// card says the core's headline and body for it, in place of the
+    /// generic refusal, until the next action on that session.
+    private(set) var correctionRefused: String?
 
     /// A Contribute the core took, while its hold lets it be taken back:
     /// the core's toast for it, and whether Undo (`cancel`) is offered.
@@ -82,6 +111,10 @@ final class TracesStore {
     }
 
     private(set) var lastContributedFolder: ContributedFolder?
+    /// The folder whose Submit all is in flight, apart from `writing`,
+    /// which a mode change also holds: only a bulk approve is a demand on
+    /// the inspector (Ron's `submit:` key in `useInspectorDemand`).
+    private(set) var submittingFolder: String?
 
     /// The sample set drawn, in a debug build over sample data; nil over
     /// the daemon. `sampleUnknown` is a `TRACE_COMMONS_SAMPLE` that named no
@@ -105,6 +138,7 @@ final class TracesStore {
         generation += 1
         phase = .loading
         tree = TracesTree(tools: [], unplaced: [])
+        lastRead = nil
         status = nil
         destinations = nil
         lastContributedFolder = nil
@@ -280,14 +314,16 @@ final class TracesStore {
             async let settings = try? client.settings()
             async let status = try? client.status()
             async let destinations = try? client.toolDestinations()
+            let read = (entries: try await entries, projects: try await projects.projects, settings: await settings)
             let built = TracesTree.build(
-                entries: try await entries, projects: try await projects.projects, settings: await settings,
-                scansWhenUnset: Self.scansWhenUnset)
-            let read = await status
+                entries: read.entries, projects: read.projects, settings: read.settings,
+                scansWhenUnset: Self.scansWhenUnset, showsIgnored: showsIgnored)
+            let statusRead = await status
             let routes = await destinations
             guard mine == generation else { return }
             tree = built
-            self.status = read
+            lastRead = read
+            self.status = statusRead
             self.destinations = routes
             phase = .loaded
         } catch {
@@ -297,6 +333,32 @@ final class TracesStore {
             status = nil
             destinations = nil
         }
+    }
+
+    // MARK: Selection
+
+    /// The selection while it names something in the current tree; nil
+    /// otherwise, and then the inspector shows the Summary. While a new
+    /// client's tree loads nothing resolves, and the stored selection is
+    /// kept for when it does.
+    func resolve(_ selection: MonitorSelection?) -> MonitorSelection? {
+        tree.resolve(selection)
+    }
+
+    /// The selected session's queue entry while it is still waiting; nil for
+    /// a folder, for nothing, and for a session that has gone. Its card and
+    /// Contribute are drawn only from this.
+    func selectedSession(_ selection: MonitorSelection?) -> DaemonData.QueueEntry? {
+        guard let entryID = resolve(selection)?.entryID else { return nil }
+        return tree.allSessions.first { $0.entryId == entryID }
+    }
+
+    /// The selected folder while it is still in the tree; nil for a
+    /// session, for nothing, and for a folder that has gone. Its inspector
+    /// is drawn only from this.
+    func selectedFolder(_ selection: MonitorSelection?) -> TracesTree.FolderNode? {
+        guard let projectID = resolve(selection)?.projectID else { return nil }
+        return tree.folders.first { $0.id == projectID }
     }
 
     // MARK: Review (R7)
@@ -331,11 +393,18 @@ final class TracesStore {
 
     /// One review action on one session, then a reload. Nothing is applied
     /// optimistically: the tree redraws from the core's answer.
-    func perform(_ action: ReviewAction, on entryId: String) async {
+    ///
+    /// `verdict` and `correction` go with `.contribute` only: the review
+    /// card's answer to the outcome question, and what it wrote under
+    /// Partly or Failed (nil sends no key, never an empty one).
+    func perform(
+        _ action: ReviewAction, on entryId: String, verdict: ContributorVerdict? = nil, correction: String? = nil
+    ) async {
         guard !acting.contains(entryId) else { return }
         acting.insert(entryId)
         defer { acting.remove(entryId) }
         actionError = nil
+        if correctionRefused == entryId { correctionRefused = nil }
         do {
             let client = try attached()
             switch action {
@@ -343,7 +412,7 @@ final class TracesStore {
                 // The core's answer is kept, not thrown away: its toast, and
                 // the hold Undo can still reach. A skipped approve throws
                 // `notApproved` and is said as a refusal, never as success.
-                let response = try await client.approve(entryId: entryId)
+                let response = try await client.approve(entryId: entryId, verdict: verdict, correction: correction)
                 lastContributed = Contributed(entryId: entryId, toast: response.toast)
                 // One undo slot: a single-session contribute ends the folder's undo.
                 lastContributedFolder = nil
@@ -367,6 +436,13 @@ final class TracesStore {
             // A core that did not answer is the tab's state, and its last
             // count is no longer known.
             if case .unreachable = error { lost() }
+            // A credential in the correction is the one refusal the
+            // contributor caused and can fix: said in its own words, not
+            // as the generic refusal.
+            if action == .contribute, error == .notApproved(reasonLabel: CorrectionCopy.credentialRefusalLabel) {
+                correctionRefused = entryId
+                return
+            }
             actionError = (entryId, error)
             return
         }
@@ -394,7 +470,14 @@ final class TracesStore {
 
     /// `maxQueueEntries` is the daemon's configured queue limit, which only
     /// the queue-full line counts from (`HealthCopy.core`).
-    static func safeguards(_ status: DaemonData.Status?, maxQueueEntries: Int? = nil) -> [Safeguard] {
+    ///
+    /// `capacityUnreadable` is the screens table's line for a capacity this
+    /// build cannot read; without it the core's witness-saturated line says
+    /// the capacity instead, never nothing.
+    static func safeguards(
+        _ status: DaemonData.Status?, maxQueueEntries: Int? = nil,
+        capacityUnreadable: String? = MonitorWords.table?.safeguards.capacityUnreadable
+    ) -> [Safeguard] {
         guard let status else { return [] }
         var out: [Safeguard] = []
         var said: Set<String> = []
@@ -405,12 +488,33 @@ final class TracesStore {
                 severity: .waiting))
             said.insert("daily-cap-reached")
         }
-        if let capacity = status.witnessCapacity, (capacity.waitingSessions ?? 0) > 0,
-            let wire = Self.wire(capacity),
-            let notice = TCConsentCopy.witnessCapacityNoticeJSON(forCapacity: wire).flatMap(WitnessCapacityNotice.decode(fromJSON:))
-        {
-            out.append(Safeguard(title: notice.title, body: notice.body, severity: .waiting))
-            said.insert("witness-saturated")
+        if let capacity = status.witnessCapacity {
+            // Reported but not readable (no count, a negative one, or one
+            // the core could not word) is never "none waiting" (Ron's
+            // `QueueStatusPanel`): sessions may be held, so it is said.
+            let waiting = capacity.waitingSessions
+            if let waiting, waiting == 0 {
+                // None waiting.
+            } else if let waiting, waiting > 0, let wire = Self.wire(capacity),
+                let notice = TCConsentCopy.witnessCapacityNoticeJSON(forCapacity: wire)
+                    .flatMap(WitnessCapacityNotice.decode(fromJSON:))
+            {
+                out.append(Safeguard(title: notice.title, body: notice.body, severity: .waiting))
+                said.insert("witness-saturated")
+            } else {
+                if let unreadable = capacityUnreadable {
+                    out.append(Safeguard(title: unreadable, body: nil, severity: .waiting))
+                } else {
+                    // No screens table: the core's saturated line, which is
+                    // always there, rather than a silence read as "none
+                    // waiting".
+                    let saturated = HealthCopy.core(label: "witness-saturated", maxQueueEntries: maxQueueEntries)
+                    out.append(Safeguard(title: saturated.title, body: saturated.detail, severity: .waiting))
+                }
+                // It says what the saturated label would; that line steps
+                // aside for it (Ron's `saturatedShownByNotice`).
+                said.insert("witness-saturated")
+            }
         }
         if let held = status.automaticContributionHeld, (held.heldSessions ?? 0) > 0,
             let wire = Self.wire(held),
@@ -513,7 +617,11 @@ final class TracesStore {
     func contributeFolder(_ folder: TracesTree.FolderNode, verdict: ContributorVerdict?) async {
         guard !writing.contains(folder.id), mayContributeFolder(folder), let client else { return }
         writing.insert(folder.id)
-        defer { writing.remove(folder.id) }
+        submittingFolder = folder.id
+        defer {
+            writing.remove(folder.id)
+            submittingFolder = nil
+        }
         folderNotice = nil
         writeErrors[folder.id] = nil
         do {
@@ -545,6 +653,17 @@ final class TracesStore {
             return
         }
         await load()
+    }
+
+    /// Closes the contribution's undo card (Ron's `UndoBar` Dismiss). The
+    /// contribution stands; only the offer to take it back goes.
+    func dismissContributed() {
+        lastContributed = nil
+    }
+
+    /// Closes the folder's Submit all undo card. The contribution stands.
+    func dismissContributedFolder() {
+        lastContributedFolder = nil
     }
 
     /// A refused write is said beside its row. A core that did not answer

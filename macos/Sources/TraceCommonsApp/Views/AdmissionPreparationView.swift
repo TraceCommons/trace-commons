@@ -11,37 +11,41 @@ struct AdmissionPreparationView: View {
 
     var body: some View {
         if let copy = model.witnessCopy?.admission {
-            GlassCard {
-                VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
-                    Text(copy.heading)
-                        .glassType(GlassTokens.TypeScale.label.weight(.semibold))
-                        .foregroundStyle(GlassColor.textPrimary)
-                    Text(copy.disclosure)
-                        .glassType(GlassTokens.TypeScale.body)
-                        .foregroundStyle(GlassColor.textSecondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                    Text(copy.prerequisite)
-                        .glassType(GlassTokens.TypeScale.label.weight(.regular))
-                        .foregroundStyle(GlassColor.textSecondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                    HStack(alignment: .bottom, spacing: GlassTokens.Space.s4) {
-                        GlassTextField(copy.backend, text: $backend).disabled(working)
-                        Button(copy.confirm, action: prepare)
-                            .buttonStyle(GlassButtonStyle(.primary))
-                            .disabled(working || backend.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.daemonSettings?.inferenceEvidenceEnabled != true)
-                    }
-                    if model.daemonSettings?.inferenceEvidenceEnabled != true {
-                        SettingsLink { Text(copy.permission) }
-                    }
-                    if working { ProgressView().controlSize(.small) }
-                    if refused { NativeFlowNotice(message: message, glyph: copy.refusedGlyph, tone: copy.refusedTone) }
-                    else if !message.isEmpty {
-                        Text(message)
-                            .glassType(GlassTokens.TypeScale.body)
-                            .foregroundStyle(GlassColor.textSecondary)
-                    }
-                }
+        VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
+            Text(copy.heading)
+                .glassType(GlassTokens.TypeScale.bodyStrong)
+                .foregroundStyle(GlassColor.textPrimary)
+            Text(copy.disclosure)
+                .glassType(GlassTokens.TypeScale.label.weight(.regular))
+                .foregroundStyle(GlassColor.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Text(copy.prerequisite)
+                .glassType(GlassTokens.TypeScale.caption)
+                .foregroundStyle(GlassColor.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack(alignment: .bottom, spacing: GlassTokens.Space.s4) {
+                GlassTextField(copy.backend, text: $backend, prompt: copy.backend, showsLabel: false)
+                    .disabled(working)
+                Button(copy.confirm, action: prepare)
+                    .buttonStyle(GlassButtonStyle(.glass))
+                    .disabled(working || backend.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.daemonSettings?.inferenceEvidenceEnabled != true)
             }
+            if model.daemonSettings?.inferenceEvidenceEnabled != true {
+                SettingsLink { Text(copy.permission) }
+                    .buttonStyle(GlassButtonStyle(.link))
+            }
+            if working { GlassSpinner(standalone: true) }
+            if refused {
+                // The core's glyph beside its sentence, in the outside tone.
+                GlassStatusLabel([copy.refusedGlyph, message].filter { !$0.isEmpty }.joined(separator: " "), status: .outside)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else if !message.isEmpty {
+                Text(message)
+                    .glassType(GlassTokens.TypeScale.label.weight(.regular))
+                    .foregroundStyle(GlassColor.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
         }
     }
 

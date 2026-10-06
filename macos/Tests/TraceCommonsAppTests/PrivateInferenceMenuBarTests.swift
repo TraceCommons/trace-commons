@@ -108,7 +108,7 @@ final class PrivateInferenceMenuBarTests: XCTestCase {
         XCTAssertEqual(MonitorCommands.destination(.traces), .traces(entryId: nil))
         let main = try MonitorNavigationTests.text("TraceCommonsAppMain.swift")
         XCTAssertTrue(main.contains("Button(tab.title) { OpenMonitor.request(Self.destination(tab)) }"))
-        XCTAssertTrue(main.contains(".commands {\n            MonitorCommands(model: model)\n        }"))
+        XCTAssertTrue(main.contains(".commands {\n            MonitorCommands(model: model, navigation: navigation)\n        }"))
         XCTAssertFalse(main.contains("MainWindowCommands"))
     }
 }

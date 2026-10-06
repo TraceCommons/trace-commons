@@ -44,6 +44,12 @@ struct InferenceTabView: View {
     private var ledger: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
+                // Sign-in with balance and funding, the tools with their
+                // connect action, and the Private AI switch, in the main pane
+                // above the ledger as #1146's Private AI page has them (owner
+                // ruling on #1241). Drawn only while the daemon runs, which
+                // every one of them needs: the ledger is.
+                InferenceAccountSection(store: store)
                 // The stack-wide rule (ScreenState): a core that is down or a
                 // failed read is said in the core's words over the last page,
                 // never as the error's fixed label and never as current.
@@ -61,7 +67,7 @@ struct InferenceTabView: View {
                         unreadable
                     }
                 } else if store.failures["inference_calls"] == nil {
-                    ProgressView().controlSize(.small).frame(maxWidth: .infinity)
+                    GlassSpinner(standalone: true).frame(maxWidth: .infinity)
                 }
             }
         }
@@ -281,10 +287,11 @@ struct InferenceTabView: View {
     }
 }
 
-/// The inspector on the Inference tab: sign-in, the tools (each with its
-/// connect action and the core's sentence for its state) and the Private AI
-/// switch. Every one of them needs the daemon, so they are drawn only while
-/// it runs; the tab says why when it does not.
+/// The inspector on the Inference tab: the Private AI summary, as #1146's
+/// `inference-inspector.tsx` draws it. How many tools point at it, the
+/// listener's state in the core's sentence (never the switch: what was asked
+/// for is not what happened), the credential's state, and which tools are
+/// connected. Its controls are in the main pane (`InferenceAccountSection`).
 struct PrivateAIInspectorView: View {
     let store: InferenceStore
     let destinationLabel: String?
@@ -296,12 +303,42 @@ struct PrivateAIInspectorView: View {
                 Text(destinationLabel ?? MonitorWindowView.Tab.inference.title)
                     .glassType(GlassTokens.TypeScale.title)
                     .foregroundStyle(GlassColor.textPrimary)
-                if case .running = model.startup {
-                    InferenceAccountSection(store: store)
+                if case .running = model.startup, let copy = model.privateInferenceCopy {
+                    summary(copy)
                 }
             }
         }
         .scrollIndicators(.never)
+    }
+
+    private func summary(_ copy: PrivateInferenceCopy) -> some View {
+        let rows = store.harnesses?.harnesses
+        let connected = rows?.filter(\.connected) ?? []
+        let state = PrivateAISwitchCard.stateLabel(
+            state: InferenceAccountSection.surfaceState(store.privateAI?.state), copy: copy,
+            calls: model.privateInferenceCalls)
+        return VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
+            // A list nobody could read is a dash, never zero connected.
+            GlassLegendCell(MonitorWords.connected, value: Self.connectedCount(rows), status: .on)
+            GlassStatusLabel(state.line, status: state.status)
+                .fixedSize(horizontal: false, vertical: true)
+            GlassKeyValueList([
+                .init(copy.credentialTitle,
+                      CredentialSurface.stateLine(model.credentialStatus, copy: copy, calls: model.credentialCalls)),
+                .init(copy.harnessesTitle, rows == nil ? "—" : Self.names(connected)),
+            ])
+        }
+    }
+
+    /// Connected over listed, or a dash when the list was not read.
+    static func connectedCount(_ rows: [HarnessRow]?) -> String {
+        guard let rows else { return "—" }
+        return "\(rows.filter(\.connected).count)/\(rows.count)"
+    }
+
+    /// The connected tools' names as the core reports them; a dash for none.
+    static func names(_ rows: [HarnessRow]) -> String {
+        rows.isEmpty ? "—" : rows.map(\.name).joined(separator: ", ")
     }
 }
 
@@ -329,26 +366,4 @@ enum InferenceWords {
     static func proof(_ raw: String) -> String {
         DaemonData.ProofLabel(rawValue: raw).map(proof) ?? "—"
     }
-}
-
-/// The monitor screens' words, read from the core's table
-/// (`MonitorScreensCopy`, `tc_monitor_screens_copy_json`). This shell holds
-/// none of its own: with no table a word is empty, never a Swift fallback.
-enum MonitorWords {
-    /// The core's table, decoded once.
-    static let table: MonitorScreensCopy? = MonitorScreensCopy.decode(fromJSON: TCCoreCopy.monitorScreensCopyJSON())
-
-    static var computer: String { table?.computer ?? "" }
-    static var commons: String { table?.commons ?? "" }
-    static var waiting: String { table?.waiting ?? "" }
-    static var folders: String { table?.folders ?? "" }
-    static var watched: String { table?.watched ?? "" }
-    static var off: String { table?.off ?? "" }
-    static var connected: String { table?.connected ?? "" }
-    static var reduce: String { table?.reduce ?? "" }
-    static var enlarge: String { table?.enlarge ?? "" }
-    static var calls: String { table?.calls ?? "" }
-    static var models: String { table?.models ?? "" }
-    static var priced: String { table?.priced ?? "" }
-    static var unknown: String { table?.unknown ?? "" }
 }

@@ -247,22 +247,22 @@ struct RulesScreen: View {
         // One dialog for the list, named by whichever folder is being armed.
         // Not presented without the core's words: arming is never confirmed
         // against a sentence this shell wrote.
-        .confirmationDialog(
-            armingCandidate.flatMap(armingCopy)?.question ?? "",
-            isPresented: Binding(
-                get: { armingCandidate.flatMap(armingCopy) != nil },
-                set: { if !$0 { armingCandidate = nil } }),
-            titleVisibility: .visible,
-            presenting: armingCandidate
-        ) { project in
-            let words = armingCopy(project)
-            Button(words?.confirm ?? "") {
-                _ = RulesScreenLayout.confirmArming(&runner.state, project: project)
-                armingCandidate = nil
+        .glassModal(isPresented: Binding(
+            get: { armingCandidate.flatMap(armingCopy) != nil },
+            set: { if !$0 { armingCandidate = nil } })
+        ) {
+            if let project = armingCandidate, let words = armingCopy(project) {
+                GlassConfirmation(
+                    title: words.question, message: words.body,
+                    actions: [
+                        .cancel(words.decline) { armingCandidate = nil },
+                        GlassModalAction(words.confirm, isDefault: true) {
+                            _ = RulesScreenLayout.confirmArming(&runner.state, project: project)
+                            armingCandidate = nil
+                        },
+                    ],
+                    onCancel: { armingCandidate = nil })
             }
-            Button(words?.decline ?? "", role: .cancel) { armingCandidate = nil }
-        } message: { project in
-            Text(armingCopy(project)?.body ?? "")
         }
     }
 
@@ -296,7 +296,7 @@ struct RulesScreen: View {
             }
         } else {
             HStack(spacing: GlassTokens.Space.s4) {
-                ProgressView().controlSize(.small)
+                GlassSpinner()
                 Text(copy.rules.loading)
                     .glassType(GlassTokens.TypeScale.body)
                     .foregroundStyle(GlassColor.textSecondary)

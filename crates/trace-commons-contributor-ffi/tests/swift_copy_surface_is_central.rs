@@ -348,11 +348,17 @@ macro_rules! json {
 /// A first-run sentence with each `{name}` placeholder replaced by [`HOLE`],
 /// so it compares equal to the Swift literal that interpolates the argument.
 fn holed(text: String) -> String {
+    placeholders().fold(text, |text, name| {
+        text.replace(&format!("{{{name}}}"), HOLE)
+    })
+}
+
+/// Every `{name}` a pinned table may carry: the first run's and the
+/// monitor's (#1241).
+fn placeholders() -> impl Iterator<Item = &'static &'static str> {
     trace_commons_contributor::first_run_copy::PLACEHOLDERS
         .iter()
-        .fold(text, |text, name| {
-            text.replace(&format!("{{{name}}}"), HOLE)
-        })
+        .chain(trace_commons_contributor::preview_copy::MONITOR_PLACEHOLDERS)
 }
 
 /// The core sentences no Swift literal may hold, by where they come from.
@@ -435,6 +441,40 @@ fn pinned_sentences() -> Vec<(&'static str, String)> {
         .map(holed)
         .collect(),
     );
+    // Ron's #1146 inspector words (#1241), the parts of the monitor tables
+    // that carry them. The tables' older single words are not pinned here.
+    {
+        let traces = json!(preview_copy::monitor_traces_copy());
+        let screens = json!(preview_copy::monitor_screens_copy());
+        let mut ron = Vec::new();
+        for key in [
+            "tree",
+            "counts",
+            "inspector",
+            "summary_panel",
+            "session_review",
+            "look_inside",
+            "undo",
+            "optional_automation",
+            "dismiss_action",
+        ] {
+            ron.extend(table(traces[key].clone()));
+        }
+        ron.extend(table(screens["safeguards"].clone()));
+        assert!(ron.len() > 100, "Ron's inspector words are not being read");
+        add(
+            "preview_copy::monitor_*_copy (#1146 inspector)",
+            ron.into_iter().map(holed).collect(),
+        );
+        // History's refresh and sign-in controls, in native words (#1241).
+        add(
+            "preview_copy::monitor_screens_copy history_actions",
+            table(screens["history_actions"].clone())
+                .into_iter()
+                .map(holed)
+                .collect(),
+        );
+    }
     // The menu-bar Contribution mode pill, its override confirmations and
     // their refusal lines (#1173).
     add(
@@ -659,6 +699,38 @@ const ALLOWED: &[(&str, &str, &str)] = &[
     // The legacy History rollup tallies and the queue's week figures, which
     // held the core's status words as headings, left the shell with the
     // legacy screens (R15); their allowances went with them.
+    //
+    // Ron's #1146 inspector words (#1241) that native screens already say
+    // in Swift. Each goes when its screen reads the core's table instead.
+    //
+    // The legacy queue's no-longer-waiting group, held verbatim in
+    // QueueView.swift since R15 until the core exports it.
+    (
+        "TraceCommonsApp/Views/QueueView.swift",
+        "Sessions no longer waiting (",
+        "legacy queue window; #1241 moves only the monitor to the core's words",
+    ),
+    (
+        "TraceCommonsApp/Views/QueueView.swift",
+        "This covers sessions that reached the queue.",
+        "legacy queue window; #1241 moves only the monitor to the core's words",
+    ),
+    // Not a sentence of its own: Look inside reads the core's
+    // `session_review.cannot_show_title`, and this verbatim copy of it is
+    // the fallback for a table that did not decode, so the cannot-show
+    // notice is never drawn without a title (`HealthCopy.onHoldFallback`).
+    (
+        "TraceCommonsApp/Views/PreviewSheet.swift",
+        "This one can't be shown.",
+        "fallback copy of the core's cannot_show_title (#1241 Task 7)",
+    ),
+    // Not a copy: the scanner matches substrings, and "N waiting for your
+    // decision" contains Ron's "N waiting for you".
+    (
+        "TCShellCore/MenuBarStatus.swift",
+        "waiting for you",
+        "substring of a different sentence (\"waiting for your decision\")",
+    ),
 ];
 
 #[test]
@@ -722,11 +794,7 @@ fn a_placeholder_sentence_is_pinned_the_way_swift_interpolates_it() {
     let braced: Vec<&String> = pinned
         .iter()
         .map(|(_, sentence)| sentence)
-        .filter(|sentence| {
-            trace_commons_contributor::first_run_copy::PLACEHOLDERS
-                .iter()
-                .any(|name| sentence.contains(&format!("{{{name}}}")))
-        })
+        .filter(|sentence| placeholders().any(|name| sentence.contains(&format!("{{{name}}}"))))
         .collect();
     assert!(
         braced.is_empty(),
@@ -761,7 +829,7 @@ const SURFACES: &[(&str, &str, &str, &str, &str)] = &[
     ),
     (
         "monitor screens words",
-        "TraceCommonsApp/Views/Monitor/InferenceViews.swift",
+        "TraceCommonsApp/Views/Monitor/MonitorWords.swift",
         "TCCoreCopy.monitorScreensCopyJSON",
         "TCBridge/TCCoreCopy.swift",
         "tc_monitor_screens_copy_json",
@@ -780,9 +848,12 @@ const SURFACES: &[(&str, &str, &str, &str, &str)] = &[
         "TCBridge/TCConsentCopy.swift",
         "tc_consent_copy",
     ),
+    // Look inside is read-only since #1241 Task 7: Contribute, and its
+    // tooltip, are the inspector's session card (`SessionReviewCard`,
+    // #1241 Task 6).
     (
         "consent gate help",
-        "TraceCommonsApp/Views/PreviewSheet.swift",
+        "TraceCommonsApp/Views/Monitor/SessionReviewCard.swift",
         "TCConsentCopy.gateHelp",
         "TCBridge/TCConsentCopy.swift",
         "tc_consent_gate_help",
@@ -899,9 +970,11 @@ const SURFACES: &[(&str, &str, &str, &str, &str)] = &[
         "TCBridge/TCCoreCopy.swift",
         "tc_residual_secret_line_text",
     ),
+    // Look inside's What's in it tab left with #1241 Task 7; the scrubbing
+    // panel is the session card's (see the gate help above).
     (
         "scrubbing panel",
-        "TraceCommonsApp/Views/PreviewSheet.swift",
+        "TraceCommonsApp/Views/Monitor/SessionReviewCard.swift",
         "TCCoreCopy.redactionSummaryJSON",
         "TCBridge/TCCoreCopy.swift",
         "tc_redaction_summary_json",

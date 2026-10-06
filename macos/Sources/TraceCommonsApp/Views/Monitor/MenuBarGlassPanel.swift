@@ -22,8 +22,9 @@ import TCShellCore
 /// - No projected credit, and the badge is decisions owed.
 struct MenuBarGlassPanel: View {
     @EnvironmentObject private var model: AppModel
-    @Environment(\.openSettings) private var openSettings
+    @Environment(\.openWindow) private var openWindow
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    let navigation: MainWindowNavigation
     let store: MenuPanelStore
     /// Whether the panel draws its own glass. Inside `MenuBarExtra` the
     /// system window already carries its material, and a second layer of
@@ -67,7 +68,7 @@ struct MenuBarGlassPanel: View {
 
     private var pills: some View {
         HStack(spacing: GlassTokens.Space.s3) {
-            pill(.mode, caption: Self.modeCaption, value: modeValue, image: "bell.fill", fill: modeFill)
+            pill(.mode, caption: Self.modeCaption, value: modeValue, image: "bell", fill: modeFill)
             pill(.watch, caption: MonitorWords.watching, value: watchValue,
                  image: watchState == .paused ? "eye.slash" : "eye",
                  fill: .solid(watchState == .ready ? GlassTokens.Color.blue : GlassTokens.Color.menuPillOff))
@@ -215,17 +216,27 @@ struct MenuBarGlassPanel: View {
                             choice.label,
                             sub: sub,
                             fill: .solid(Self.modeFill(choice.mode)),
-                            checked: MenuPanelData.rollup(choice.mode) == rollup) {
+                            checked: MenuPanelData.listChecks(choice.mode, status: store.status)) {
                                 store.choose(choice.mode)
                             }
                             .accessibilityLabel(choice.label)
                             .accessibilityHint(sub)
                     }
-                    if store.status?.contributionOverride != nil {
-                        Button(copy.clear) { Task { await store.clearOverride() } }
-                            .buttonStyle(GlassButtonStyle(.link, small: true))
-                            .accessibilityLabel(copy.clear)
-                    }
+                    // Mixed: no override, so each folder keeps its own
+                    // setting. Choosing it clears an override in force.
+                    GlassOptionRow(
+                        copy.mixed,
+                        sub: copy.clear,
+                        fill: .mixed,
+                        checked: MenuPanelData.listChecks(nil, status: store.status)) {
+                            if store.status?.contributionOverride != nil {
+                                Task { await store.clearOverride() }
+                            } else {
+                                sub = nil
+                            }
+                        }
+                        .accessibilityLabel(copy.mixed)
+                        .accessibilityHint(copy.clear)
                 }
                 // No override before onboarding is done (R-43): it is a
                 // grant, and first run is where consent is asked.
@@ -343,12 +354,14 @@ struct MenuBarGlassPanel: View {
 
     // MARK: Menu items
 
+    /// The handoff spaces these rows like the popover's own children: 8pt
+    /// between each row and hairline, for a row pitch of at least 28pt.
     private var menuItems: some View {
-        VStack(alignment: .leading, spacing: 0) {
+        VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
             hairline
             Button { open(.traces(entryId: nil)) } label: {
                 HStack {
-                    Text(FlowMapScene.pair(MenuWords.flagged, store.stale ? nil : MenuPanelData.flagged(store.pending)))
+                    Text(FlowMapScene.dotPair(MenuWords.flagged, store.stale ? nil : MenuPanelData.flagged(store.pending)))
                     Spacer(minLength: 0)
                     Image(systemName: "chevron.right").glassGlyph(10, weight: .semibold)
                 }
@@ -357,7 +370,8 @@ struct MenuBarGlassPanel: View {
             Button(MenuWords.manageRules) { open(MenuPanelData.manageRules(requiresOnboarding: model.requiresOnboarding)) }
             Button(MenuWords.settings) {
                 NSApp.activate(ignoringOtherApps: true)
-                openSettings()
+                openWindow(id: WindowID.monitor)
+                navigation.requestSettings()
             }
             Button(MenuWords.quit) { NSApp.terminate(nil) }
         }
@@ -366,7 +380,6 @@ struct MenuBarGlassPanel: View {
 
     private var hairline: some View {
         Rectangle().fill(GlassColor.ink(0.12)).frame(height: 1)
-            .padding(.vertical, GlassTokens.Space.s2)
             .accessibilityHidden(true)
     }
 
@@ -516,6 +529,7 @@ enum MenuWords {
 /// on the same store, for reviewing them where the menu bar has no room.
 struct MenuBarPreviewWindow: View {
     @EnvironmentObject private var model: AppModel
+    let navigation: MainWindowNavigation
     let store: MenuPanelStore
 
     var body: some View {
@@ -523,7 +537,7 @@ struct MenuBarPreviewWindow: View {
             MenuBarStripLabel(model: model, store: store)
                 .padding(.horizontal, GlassTokens.Space.s4)
                 .background(Capsule().fill(GlassColor.ink(0.12)))
-            MenuBarGlassPanel(store: store, ownsSurface: true)
+            MenuBarGlassPanel(navigation: navigation, store: store, ownsSurface: true)
         }
         .padding(GlassTokens.Space.s10)
         .background(LinearGradient(colors: [GlassTokens.Color.sceneWarm.color, GlassTokens.Color.sceneBase.color], startPoint: .top, endPoint: .bottom))

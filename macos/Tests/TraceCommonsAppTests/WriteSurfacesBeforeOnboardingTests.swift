@@ -25,21 +25,23 @@ final class WriteSurfacesBeforeOnboardingTests: XCTestCase {
     /// onboarding notice (the core's signed-out word and first run's Continue, which
     /// opens first run), never the section itself. No new sentence.
     func test_theSettingsWindowDrawsWriteSectionsAsUnavailable() throws {
-        let window = try MonitorNavigationTests.text("Views/MonitorWindowView.swift")
+        // Settings is Ron's modal over the Monitor (#1241 Task 10); each
+        // section of its body is gated.
+        let window = try MonitorNavigationTests.text("Views/Monitor/SettingsModal.swift")
         XCTAssertTrue(window.contains("""
-                        switch MonitorGate.of(
-                            startup: model.startup, onboardingKnown: model.onboardingKnown,
-                            requiresOnboarding: model.requiresOnboarding
-                        ).forSettings(availableBeforeOnboarding: section.availableBeforeOnboarding) {
+                switch MonitorGate.of(
+                    startup: model.startup, onboardingKnown: model.onboardingKnown,
+                    requiresOnboarding: model.requiresOnboarding
+                ).forSettings(availableBeforeOnboarding: item.availableBeforeOnboarding) {
         """), "a write section must be gated before onboarding")
         XCTAssertTrue(window.contains("""
-                        case .signedOut:
-                            GlassNotice(tone: .ask, title: MonitorWords.signedOut) {
-                                Button(MonitorWindowView.openFirstRun) { OpenMonitor.request() }
-                            }
+                case .signedOut:
+                    GlassNotice(tone: .ask, title: MonitorWords.signedOut) {
+                        Button(MonitorWindowView.openFirstRun) { OpenMonitor.request() }
+                    }
         """), "a write section must not draw before onboarding")
         // The section itself is drawn only when the gate is open.
-        let gate = try XCTUnwrap(window.range(of: ".forSettings(availableBeforeOnboarding: section.availableBeforeOnboarding) {"))
+        let gate = try XCTUnwrap(window.range(of: ".forSettings(availableBeforeOnboarding: item.availableBeforeOnboarding) {"))
         let open = try XCTUnwrap(window.range(of: "case .open:", range: gate.upperBound ..< window.endIndex))
         let compute = try XCTUnwrap(window.range(of: "ComputeView(model: compute)", range: gate.upperBound ..< window.endIndex))
         XCTAssertLessThan(open.lowerBound, compute.lowerBound)

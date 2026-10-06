@@ -275,7 +275,7 @@ struct UsesScreen: View {
                 grantRead = true
             }
         }
-        .sheet(isPresented: Binding(get: { disclosure != nil }, set: { if !$0 { disclosure = nil } })) {
+        .glassModal(isPresented: Binding(get: { disclosure != nil }, set: { if !$0 { disclosure = nil } })) {
             if let grant {
                 SharingDisclosureSheet(copy: copy, grant: grant, flow: $disclosure, onFinish: finish)
                     .environmentObject(model)

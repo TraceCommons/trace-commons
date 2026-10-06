@@ -70,6 +70,8 @@ struct FirstRunWindowView: View {
             }
         }
         .frame(minWidth: FirstRunProgress.paneWidth + 80, minHeight: 640)
+        // A screen's modals and confirmations cover the whole window.
+        .glassModalHost()
         .onAppear { model.refreshAll() }
         // Finishing first run hands off to the Monitor: at the destination
         // an earlier opener left waiting, on Home otherwise. Initially too:
