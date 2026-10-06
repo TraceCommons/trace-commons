@@ -1,0 +1,14 @@
+{
+  "_fixture_kind": "SAMPLE: synthetic contract fixture, not a pilot recording",
+  "enabled": true,
+  "receipts": true,
+  "since": "2026-10-01T00:00:00Z",
+  "groups": [{
+    "model": "example-model", "backend": "nearai", "route": "routed",
+    "work_kind": null, "calls": 3, "priced_calls": 2, "cost_usd": 0.02,
+    "proof": {"verified":1,"gateway_only":1,"unattested":0,"pending":1,"unavailable":0,"failed":0,"outside":0,"unrecorded":0}
+  }],
+  "routed": {"calls":3,"priced_calls":2,"cost_usd":0.02,"proof":{"verified":1,"gateway_only":1,"unattested":0,"pending":1,"unavailable":0,"failed":0,"outside":0,"unrecorded":0}},
+  "outside": {"calls":0,"priced_calls":0,"cost_usd":0,"proof":{"verified":0,"gateway_only":0,"unattested":0,"pending":0,"unavailable":0,"failed":0,"outside":0,"unrecorded":0}},
+  "unknown": {"calls":0,"priced_calls":0,"cost_usd":0,"proof":{"verified":0,"gateway_only":0,"unattested":0,"pending":0,"unavailable":0,"failed":0,"outside":0,"unrecorded":0}}
+}

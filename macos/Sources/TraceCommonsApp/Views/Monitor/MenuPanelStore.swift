@@ -213,6 +213,16 @@ enum MenuPanelData {
         }
     }
 
+    /// Whether the pill's list checks a row: an override's own mode while
+    /// one is in force, and the Mixed row (`mode` nil, each folder on its
+    /// own setting) while none is. Nothing is checked before the status
+    /// has been read.
+    static func listChecks(_ mode: String?, status: DaemonData.Status?) -> Bool {
+        guard let status else { return false }
+        guard let active = status.contributionOverride else { return mode == nil }
+        return mode != nil && active.mode == mode
+    }
+
     /// The core's partial line, under Auto contribute exactly when the
     /// status says it is partial (#1208).
     static func partialLine(_ mode: String, status: DaemonData.Status?, copy: ContributionModeCopy) -> String? {
