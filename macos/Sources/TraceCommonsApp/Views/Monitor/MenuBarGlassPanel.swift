@@ -207,14 +207,16 @@ struct MenuBarGlassPanel: View {
                             .accessibilityHint(sub)
                     }
                     // Mixed: no override, so each folder keeps its own
-                    // setting. Choosing it clears an override in force.
+                    // setting. Choosing it clears an override in force,
+                    // after the core's confirmation when a folder's own
+                    // setting is Automatic (`MenuPanelStore.chooseMixed`).
                     GlassOptionRow(
                         copy.mixed,
                         sub: copy.clear,
                         fill: .mixed,
                         checked: MenuPanelData.listChecks(nil, status: store.status)) {
                             if store.status?.contributionOverride != nil {
-                                Task { await store.clearOverride() }
+                                Task { await store.chooseMixed() }
                             } else {
                                 sub = nil
                             }
