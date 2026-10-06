@@ -24,6 +24,7 @@
   "codex_source_mode": "watch",
   "gemini_source_mode": "unset",
   "near_ai_session_retained": false,
+  "cline_source_mode": "unset",
   "ironwire_attested_bodies": false,
   "token_distributions_contribution": false,
   "token_capture_enabled": null,
@@ -32,7 +33,7 @@
   "scrub_check": "automatic",
   "near_ai_configured": false,
   "near_ai_inference_configured": false,
-  "cline_source_mode": "unset",
+  "trajectory_source_mode": "unset",
   "claude_root_configured": true,
   "codex_root_configured": true,
   "private_inference_state": {

@@ -4,6 +4,7 @@ import Foundation
 public struct TCOnboardingCopy: Decodable, Sendable {
     public let welcomeBody: String
     public let doneBody: String
+    public let watcherStartFailed: String
     public let notificationPurpose: String
     public let notificationHeading: String
     public let notificationOffer: String

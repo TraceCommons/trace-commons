@@ -171,6 +171,283 @@ pub struct MonitorTracesCopy {
     pub core_unreachable: &'static str,
     /// A request failed; see [`MONITOR_REQUEST_FAILED`].
     pub request_failed: &'static str,
+    /// Ron's plain Dismiss (#1146): the undo bar's, the Dismiss-session
+    /// confirmation's and the review card's. Apart from [`Self::dismiss`],
+    /// native's "Not this one", which this does not replace.
+    pub dismiss_action: &'static str,
+    /// The arming offer's eyebrow, over the core's arming copy.
+    pub optional_automation: &'static str,
+    /// The Traces tree's rows and the Dismiss-session confirmation.
+    pub tree: MonitorTreeCopy,
+    /// Counts the tree, the inspectors and the summary share.
+    pub counts: MonitorCountsCopy,
+    /// The tool, folder and session inspectors' headings, and Submit-all-as.
+    pub inspector: MonitorInspectorCopy,
+    /// The summary inspector shown when nothing is selected.
+    pub summary_panel: MonitorSummaryCopy,
+    /// The session review card (Ron's `WaitingReview`).
+    pub session_review: MonitorSessionReviewCopy,
+    /// Look inside, read-only (Ron's `PreviewInspector`), with the native
+    /// review actions and the witness consent line.
+    pub look_inside: MonitorLookInsideCopy,
+    /// The undo bar after an approve (Ron's `UndoBar`).
+    pub undo: MonitorUndoCopy,
+}
+
+// ---------------------------------------------------------------------------
+// Ron's #1146 inspector (#1241). His strings verbatim from
+// `origin/claude/tc-monitor-frontend-refactor-8ecf22`
+// (`tauri-desktop/frontend/src/features/waiting/`), with these departures:
+//
+// - Each number is a `{name}` hole from [`MONITOR_PLACEHOLDERS`]; the shell
+//   fills it and adds nothing else. Where Ron pluralised with a helper, the
+//   singular is its own line.
+// - A word a table already holds keeps its key: Contribute, Undo, Size,
+//   Tool, Folder, Residual risk here; Watching, On, Off, Folders, Waiting,
+//   Summary on [`MonitorScreensCopy`].
+// - No credit, history, community or withdrawal words, and none of Ron's
+//   routing state labels: those stay on the core tables native already
+//   reads (`history_copy`, `routing_copy`). Ron's "credit pending" beside
+//   the contributed count is left out for that reason.
+// - No "Share automatically": the folder rule is Ask me / Automatic /
+//   Never, from `project_copy::FOLDER_MODE_LABELS`.
+
+/// Every placeholder the monitor tables use, each written `{name}`:
+/// Ron's, and History's and Inference's (`shown`, `hours`) before them.
+/// `uploads` and `megabytes` are the daily limit's two remainders.
+pub const MONITOR_PLACEHOLDERS: &[&str] = &[
+    "count",
+    "total",
+    "max",
+    "tool",
+    "label",
+    "seconds",
+    "when",
+    "size",
+    "start",
+    "end",
+    "shown",
+    "hours",
+    "uploads",
+    "megabytes",
+];
+
+/// The Traces tree (`traces-tree.tsx`).
+#[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
+pub struct MonitorTreeCopy {
+    /// The tree's accessible name.
+    pub tree_label: &'static str,
+    /// While the queue is first read.
+    pub reading_queue: &'static str,
+    /// A folder's Submit pill with nothing eligible, with `{count}`
+    /// eligible, and while it sends.
+    pub submit: &'static str,
+    pub submit_count: &'static str,
+    pub submitting: &'static str,
+    /// The folder Submit pill's tip.
+    pub submit_tip: &'static str,
+    /// Beside the core's withheld line under a folder.
+    pub eligible_count: &'static str,
+    /// A session's pill while its review is open, and the pill's tip.
+    pub reviewing: &'static str,
+    pub review_tip: &'static str,
+    /// An ignored folder's sub line.
+    pub ignored_folder: &'static str,
+    /// The folder row menu's one item.
+    pub ignore_folder: &'static str,
+    /// The folder and tool switches' accessible names.
+    pub watch_folder: &'static str,
+    pub watch_tool: &'static str,
+    /// The session row menu's one item, and its confirmation.
+    pub dismiss_session: &'static str,
+    pub dismiss_session_title: &'static str,
+    /// `{when}` is the session's start, `{size}` its size.
+    pub dismiss_session_body: &'static str,
+    pub dismiss_session_keep: &'static str,
+    pub dismissing: &'static str,
+    pub dismiss_session_failed: &'static str,
+}
+
+/// Counted lines the tree, the inspectors and the summary share.
+#[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
+pub struct MonitorCountsCopy {
+    pub sessions_waiting_one: &'static str,
+    pub sessions_waiting: &'static str,
+    pub waiting_count: &'static str,
+    pub contributed_count: &'static str,
+    pub project_count_one: &'static str,
+    pub project_count: &'static str,
+}
+
+/// The tool, folder and session inspectors (`waiting-page.tsx`) and
+/// Submit-all-as (`submit-all-as-control.tsx`).
+#[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
+pub struct MonitorInspectorCopy {
+    pub decisions: &'static str,
+    /// A tool whose watching the core has not been told.
+    pub not_set: &'static str,
+    pub sessions_folder: &'static str,
+    pub project: &'static str,
+    /// The folder and session headers' sub lines; `{tool}` is the tool.
+    pub project_of: &'static str,
+    pub session_of: &'static str,
+    pub path: &'static str,
+    pub contribution_rule: &'static str,
+    pub no_rule: &'static str,
+    /// Submit-all-as's sentence, over the core's `outcome` words.
+    pub apply_outcome_one: &'static str,
+    pub apply_outcome: &'static str,
+    pub cancel: &'static str,
+}
+
+/// The summary inspector (`waiting-page.tsx`'s `SummaryInspector` and
+/// `queue-outcome-disclosure.tsx`).
+#[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
+pub struct MonitorSummaryCopy {
+    pub tools_watched: &'static str,
+    pub waiting_for_you: &'static str,
+    pub worth_a_second_look: &'static str,
+    pub uploads_today: &'static str,
+    pub statistics: &'static str,
+    pub top_projects: &'static str,
+    pub top_tools: &'static str,
+    pub no_longer_waiting: &'static str,
+    /// What the no-longer-waiting counts cover.
+    pub no_longer_waiting_scope: &'static str,
+}
+
+/// The session review card (`waiting-review.tsx`). The verdict and
+/// correction words are the core's `outcome` table.
+#[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
+pub struct MonitorSessionReviewCopy {
+    pub eyebrow: &'static str,
+    pub heading: &'static str,
+    pub enrolled: &'static str,
+    pub not_enrolled: &'static str,
+    pub no_opening_prompt: &'static str,
+    /// `{size}`: the redacted payload's size.
+    pub redacted_payload: &'static str,
+    pub events: &'static str,
+    pub building_preview: &'static str,
+    pub cannot_show_title: &'static str,
+    pub cannot_show_body: &'static str,
+    pub preparing_redactions: &'static str,
+    pub redactions_unavailable: &'static str,
+    pub removed: &'static str,
+    pub nothing_removed: &'static str,
+    pub still_present: &'static str,
+    pub residual_unavailable: &'static str,
+    pub residual_loading: &'static str,
+    pub consent_scopes: &'static str,
+    pub eligibility_failed: &'static str,
+    pub eligibility_checking: &'static str,
+    pub outcome_unavailable: &'static str,
+    pub outcome_loading: &'static str,
+    pub look_inside: &'static str,
+    /// Contribute's label when it cannot be pressed.
+    pub enroll_to_approve: &'static str,
+    pub not_eligible: &'static str,
+    pub checking_eligibility: &'static str,
+}
+
+/// Look inside (`preview-inspector.tsx`, `native-review-actions.tsx`, and
+/// the witness consent line of `witness-review-overlay.tsx`).
+#[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
+pub struct MonitorLookInsideCopy {
+    pub eyebrow: &'static str,
+    pub title: &'static str,
+    pub description: &'static str,
+    pub would_send: &'static str,
+    pub on_disk: &'static str,
+    pub load_transcript: &'static str,
+    pub loading_transcript: &'static str,
+    pub search_original: &'static str,
+    pub turn_index: &'static str,
+    pub transcript_caption: &'static str,
+    /// `{size}`: what is left to load.
+    pub load_more: &'static str,
+    pub add_turn_separators: &'static str,
+    pub search_caption: &'static str,
+    pub search_label: &'static str,
+    pub search_placeholder: &'static str,
+    pub check_count: &'static str,
+    pub original_match_one: &'static str,
+    pub original_matches: &'static str,
+    pub turns_need_full_read: &'static str,
+    pub load_turn_index: &'static str,
+    pub turn_index_eyebrow: &'static str,
+    /// A turn that names no tool.
+    pub turn_event: &'static str,
+    /// `{start}` and `{end}`: the turn's byte range.
+    pub turn_bytes: &'static str,
+    pub close: &'static str,
+    pub native_review: &'static str,
+    pub native_review_caption: &'static str,
+    pub prepare_admission: &'static str,
+    pub request_witness_review: &'static str,
+    /// The witness consent checkbox's line and accessible name.
+    pub witness_confirm_line: &'static str,
+    pub witness_confirm_label: &'static str,
+    pub witness_reviewing: &'static str,
+}
+
+/// The undo bar (`undo-bar.tsx`). Undo itself is
+/// [`MonitorTracesCopy::undo_contribute`].
+#[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
+pub struct MonitorUndoCopy {
+    pub approval_saved: &'static str,
+    /// `{label}`: what was approved.
+    pub approved: &'static str,
+    pub unavailable: &'static str,
+    pub within: &'static str,
+    pub may_have_started: &'static str,
+    pub undoing: &'static str,
+}
+
+/// The queue's safeguards panel (`queue-status-panel.tsx`): the labels
+/// `HealthCopy`, `DailyBudgetCopy` and `routing_copy` do not already hold.
+#[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
+pub struct MonitorSafeguardsCopy {
+    pub eyebrow: &'static str,
+    pub heading: &'static str,
+    pub daily_limit: &'static str,
+    pub inference_routing: &'static str,
+    pub daemon_owned: &'static str,
+    pub rows_unavailable_one: &'static str,
+    pub rows_unavailable: &'static str,
+    /// The daily limit row: uploads and megabytes left today. The shell
+    /// fills both numbers and adds no unit.
+    pub remaining: &'static str,
+    /// Approved sessions the spent limit holds back: one, then counted.
+    pub held_by_limit_one: &'static str,
+    pub held_by_limit: &'static str,
+    /// `witness_capacity` was reported but could not be read: never "none
+    /// waiting".
+    pub capacity_unreadable: &'static str,
+}
+
+/// History's refresh and account sign-in controls: the controls Ron's
+/// #1146 `history-refresh-control.tsx` and `account-sign-in-control.tsx`
+/// draw, in native words rather than his (History and withdrawal copy keep
+/// native's voice). They name no machinery and promise no timing.
+#[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
+pub struct MonitorHistoryActionsCopy {
+    /// Asks the daemon to check the server sooner (`refresh_history`).
+    pub request_refresh: &'static str,
+    pub requesting: &'static str,
+    pub refresh_requested: &'static str,
+    pub refresh_failed: &'static str,
+    /// The account session has not been read yet.
+    pub checking_account: &'static str,
+    /// In Withdraw's place on a row while no account session is active.
+    pub sign_in_to_withdraw: &'static str,
+    pub waiting_for_sign_in: &'static str,
+    pub complete_sign_in: &'static str,
+    /// Sign-in returned, and the re-read session is not active.
+    pub sign_in_inactive: &'static str,
+    /// Sign-in returned, and the session could not be re-read.
+    pub sign_in_unverified: &'static str,
+    pub sign_in_failed: &'static str,
 }
 
 /// The one table of the monitor's Traces words. See [`MonitorTracesCopy`].
@@ -202,6 +479,139 @@ pub fn monitor_traces_copy() -> MonitorTracesCopy {
         undo_keep: customize.undo_keep,
         core_unreachable: MONITOR_CORE_UNREACHABLE,
         request_failed: MONITOR_REQUEST_FAILED,
+        dismiss_action: "Dismiss",
+        optional_automation: "OPTIONAL AUTOMATION",
+        tree: MonitorTreeCopy {
+            tree_label: "Tools, folders and sessions",
+            reading_queue: "Reading local queue\u{2026}",
+            submit: "Submit",
+            submit_count: "Submit \u{00b7} {count}",
+            submitting: "Submitting\u{2026}",
+            submit_tip: "Sends every eligible waiting session here.",
+            eligible_count: "{count} eligible",
+            reviewing: "Reviewing",
+            review_tip: "Opens what would be sent. Nothing leaves until you contribute.",
+            ignored_folder: "ignored \u{00b7} never queued",
+            ignore_folder: "Ignore folder / repo",
+            watch_folder: "Watch this folder",
+            watch_tool: "Watch {tool}",
+            dismiss_session: "Dismiss session",
+            dismiss_session_title: "Dismiss this session?",
+            dismiss_session_body: "{when} \u{00b7} {size}. Dismissing removes it from the sessions \
+                waiting for you, without sending it.",
+            dismiss_session_keep: "Keep it",
+            dismissing: "Dismissing\u{2026}",
+            dismiss_session_failed: "Could not dismiss session.",
+        },
+        counts: MonitorCountsCopy {
+            sessions_waiting_one: "1 session waiting",
+            sessions_waiting: "{count} sessions waiting",
+            waiting_count: "{count} waiting",
+            contributed_count: "{count} contributed",
+            project_count_one: "1 project",
+            project_count: "{count} projects",
+        },
+        inspector: MonitorInspectorCopy {
+            decisions: "Decisions",
+            not_set: "Not set",
+            sessions_folder: "Sessions folder",
+            project: "Project",
+            project_of: "Project \u{00b7} {tool}",
+            session_of: "Session \u{00b7} {tool}",
+            path: "Path",
+            contribution_rule: "Contribution rule",
+            no_rule: "This folder has no rule of its own yet.",
+            apply_outcome_one: "Apply one outcome to 1 eligible session.",
+            apply_outcome: "Apply one outcome to {count} eligible sessions.",
+            cancel: "Cancel",
+        },
+        summary_panel: MonitorSummaryCopy {
+            tools_watched: "{count} of {total} tools watched",
+            waiting_for_you: "{count} waiting for you",
+            worth_a_second_look: "{count} worth a second look",
+            uploads_today: "{count} of {max} uploads today",
+            statistics: "Statistics",
+            top_projects: "Top projects",
+            top_tools: "Top tools",
+            no_longer_waiting: "Sessions no longer waiting ({count})",
+            no_longer_waiting_scope: "This covers sessions that reached the queue. \
+                Sessions never queued are not counted here.",
+        },
+        session_review: MonitorSessionReviewCopy {
+            eyebrow: "LOCAL PREVIEW",
+            heading: "What would leave this computer",
+            enrolled: "Enrolled",
+            not_enrolled: "Not enrolled",
+            no_opening_prompt: "No opening prompt",
+            redacted_payload: "{size} redacted payload",
+            events: "{count} events",
+            building_preview: "Building local privacy preview\u{2026}",
+            cannot_show_title: "This one can't be shown.",
+            cannot_show_body: "The session file changed while it was being read. Nothing has been \
+                sent, and nothing will be until it can be shown to you.",
+            preparing_redactions: "Preparing redaction summary\u{2026}",
+            redactions_unavailable: "Redaction summary unavailable. Contribution is disabled.",
+            removed: "Removed",
+            nothing_removed: "Nothing matched for removal.",
+            still_present: "Found, and still in what would be sent",
+            residual_unavailable: "Residual secret warning unavailable. Contribution is disabled.",
+            residual_loading: "Loading residual secret warning\u{2026}",
+            consent_scopes: "Consent scopes",
+            eligibility_failed: "Contribution eligibility could not be checked. Approval is disabled.",
+            eligibility_checking: "Checking contribution eligibility\u{2026}",
+            outcome_unavailable: "Outcome and correction disclosure unavailable. \
+                Contribution is disabled.",
+            outcome_loading: "Loading outcome and correction disclosure\u{2026}",
+            look_inside: "Look inside",
+            enroll_to_approve: "Enroll to approve",
+            not_eligible: "Not eligible",
+            checking_eligibility: "Checking eligibility\u{2026}",
+        },
+        look_inside: MonitorLookInsideCopy {
+            eyebrow: "LOOK INSIDE",
+            title: "Exactly what would be sent",
+            description: "This is the redacted envelope. It stays local while you read it. \
+                Original-session search returns only a count; it never returns raw text.",
+            would_send: "{size} would send",
+            on_disk: "{size} on disk",
+            load_transcript: "Load redacted transcript",
+            loading_transcript: "Loading bounded transcript\u{2026}",
+            search_original: "Search original",
+            turn_index: "Turn index",
+            transcript_caption: "These are the exact redacted bytes an approval covers. \
+                Markers show where local scrubbing fired.",
+            load_more: "Load more ({size} remaining)",
+            add_turn_separators: "Add turn separators",
+            search_caption: "Search checks the original session locally and returns a count \
+                only. It never renders original text.",
+            search_label: "Search original session",
+            search_placeholder: "Client, hostname, token label\u{2026}",
+            check_count: "Check count",
+            original_match_one: "1 original match",
+            original_matches: "{count} original matches",
+            turns_need_full_read: "Read transcript fully before loading turn index.",
+            load_turn_index: "Load turn index",
+            turn_index_eyebrow: "TURN INDEX",
+            turn_event: "event",
+            turn_bytes: "bytes {start}\u{2013}{end}",
+            close: "Close",
+            native_review: "NATIVE REVIEW",
+            native_review_caption: "Optional daemon-backed checks stay local until you \
+                explicitly confirm.",
+            prepare_admission: "Prepare admission",
+            request_witness_review: "Request witness review",
+            witness_confirm_line: "I understand and want to send this session for review.",
+            witness_confirm_label: "Confirm sending unredacted session to witness",
+            witness_reviewing: "Reviewing\u{2026}",
+        },
+        undo: MonitorUndoCopy {
+            approval_saved: "APPROVAL SAVED",
+            approved: "{label} approved",
+            unavailable: "Undo unavailable",
+            within: "Undo within {seconds}s before upload starts.",
+            may_have_started: "Upload may already have started.",
+            undoing: "Undoing\u{2026}",
+        },
     }
 }
 
@@ -327,6 +737,33 @@ pub struct MonitorScreensCopy {
     pub manage_rules: &'static str,
     /// Opens Settings.
     pub settings: &'static str,
+    /// The Settings modal's title (Ron's #1146 `SettingsModal`), over the
+    /// Monitor.
+    pub settings_title: &'static str,
+    /// The Settings modal's subtitle.
+    pub settings_subtitle: &'static str,
+    /// The name of the Settings modal's section list.
+    pub settings_sections: &'static str,
+    /// Closes a modal.
+    pub close: &'static str,
+    /// The Monitor toolbar's View menu (Ron's native shell after #1146's
+    /// `monitor-toolbar.tsx`).
+    pub view: &'static str,
+    /// The toolbar's toggle for the Traces graph.
+    pub graph: &'static str,
+    /// The View menu item that draws folders set to ignore.
+    pub show_ignored_folders: &'static str,
+    /// The Traces graph's button that focuses the map on one tool.
+    pub focus: &'static str,
+    /// The Traces graph's step to the previous period.
+    pub previous: &'static str,
+    /// The Traces graph's step to the next period.
+    pub next: &'static str,
+    /// Home's pending-credit count (shown only beside the commons'
+    /// statement of what it waits on, D6).
+    pub credit_pending: &'static str,
+    /// Home's status-card link to the Traces tab.
+    pub open_traces: &'static str,
     /// Quits the app.
     pub quit: &'static str,
     /// The core did not answer; see [`MONITOR_CORE_UNREACHABLE`].
@@ -369,6 +806,10 @@ pub struct MonitorScreensCopy {
     /// History's sentence, moved here; never "Submitted", which reads as
     /// done.
     pub history_submitted: &'static str,
+    /// The queue's safeguards panel (Ron's #1146 `QueueStatusPanel`).
+    pub safeguards: MonitorSafeguardsCopy,
+    /// History's refresh and account sign-in controls (#1146).
+    pub history_actions: MonitorHistoryActionsCopy,
 }
 
 /// The one table of the monitor screens' words. See [`MonitorScreensCopy`].
@@ -424,6 +865,18 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
         flagged: SECOND_LOOK_HEADING,
         manage_rules: "Manage rules…",
         settings: "Trace Commons Settings…",
+        settings_title: "Settings",
+        settings_subtitle: "What this machine watches, and what your traces are allowed to do.",
+        settings_sections: "Settings sections",
+        close: "Close",
+        view: "View",
+        graph: "Graph",
+        show_ignored_folders: "Show ignored folders",
+        focus: "Focus",
+        previous: "Previous",
+        next: "Next",
+        credit_pending: "Credit pending",
+        open_traces: "Open Traces",
         quit: "Quit…",
         core_unreachable: MONITOR_CORE_UNREACHABLE,
         request_failed: MONITOR_REQUEST_FAILED,
@@ -438,6 +891,35 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             It is not earned until a contribution is accepted and scored.",
         window_last_hours: "Last {hours} hours",
         history_submitted: crate::history_copy::WAITING_TO_BE_SCORED,
+        safeguards: MonitorSafeguardsCopy {
+            eyebrow: "RUNTIME",
+            heading: "Contribution safeguards",
+            daily_limit: "Daily limit",
+            inference_routing: "Inference routing",
+            daemon_owned: "daemon-owned",
+            rows_unavailable_one: "1 row unavailable",
+            rows_unavailable: "{count} rows unavailable",
+            remaining: "{uploads} uploads left \u{00b7} {megabytes} MB left",
+            held_by_limit_one: "1 queued session held by limit",
+            held_by_limit: "{count} queued sessions held by limit",
+            capacity_unreadable: "Some approved sessions may be waiting and have not been sent, \
+                but this build could not read how many or why.",
+        },
+        history_actions: MonitorHistoryActionsCopy {
+            request_refresh: "Check for updates",
+            requesting: "Checking for updates\u{2026}",
+            refresh_requested: "Asked Trace Commons for the latest results. Changes show here when they arrive.",
+            refresh_failed: "Could not ask for updates. Nothing changed; try again.",
+            checking_account: "Reading your account\u{2026}",
+            sign_in_to_withdraw: "Sign in to your account",
+            waiting_for_sign_in: "Signing in\u{2026}",
+            complete_sign_in: "Finish signing in in your browser, then come back here.",
+            sign_in_inactive: "Sign-in finished, but this device is still signed out of your \
+                Trace Commons account. Sign in again to withdraw.",
+            sign_in_unverified: "Sign-in finished, but your account could not be checked. \
+                Sign in again before withdrawing.",
+            sign_in_failed: "Sign-in did not finish. Nothing was withdrawn; sign in again to withdraw.",
+        },
     }
 }
 
@@ -445,12 +927,30 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
 mod tests {
     use super::*;
 
+    /// Every string leaf of a copy table, by its path.
+    fn leaves(value: &serde_json::Value, path: &str, out: &mut Vec<(String, String)>) {
+        match value {
+            serde_json::Value::String(word) => out.push((path.to_owned(), word.clone())),
+            serde_json::Value::Object(map) => {
+                for (key, value) in map {
+                    leaves(value, &format!("{path}/{key}"), out);
+                }
+            }
+            other => panic!("{path} is neither a word nor a table: {other}"),
+        }
+    }
+
+    fn words_of<T: serde::Serialize>(copy: &T) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        leaves(&serde_json::to_value(copy).unwrap(), "", &mut out);
+        out
+    }
+
     #[test]
     fn the_monitor_screens_copy_is_whole_and_shares_the_traces_lines() {
         let copy = monitor_screens_copy();
-        let value = serde_json::to_value(&copy).unwrap();
-        for (key, word) in value.as_object().unwrap() {
-            assert!(!word.as_str().unwrap().is_empty(), "{key} is empty");
+        for (key, word) in words_of(&copy) {
+            assert!(!word.is_empty(), "{key} is empty");
         }
         let traces = monitor_traces_copy();
         assert_eq!(copy.core_unreachable, traces.core_unreachable);
@@ -474,19 +974,167 @@ mod tests {
         assert!(copy.projected_note.contains("not earned"));
         // Held is said in full, and never as rejected.
         assert!(copy.held_explanation.contains("not been rejected"));
+        // Ron's #1146 settings modal (#1241 Task 10): its title is not the
+        // menu item that opens it, and its subtitle is a sentence.
+        assert_eq!(copy.settings_title, "Settings");
+        assert_ne!(copy.settings_title, copy.settings);
+        assert!(copy.settings_subtitle.ends_with('.'));
+        assert!(!copy.settings_sections.is_empty() && !copy.close.is_empty());
+        // Ron's native shell words: the toolbar, the Traces graph and Home.
+        for word in [
+            copy.view,
+            copy.graph,
+            copy.show_ignored_folders,
+            copy.focus,
+            copy.previous,
+            copy.next,
+            copy.credit_pending,
+            copy.open_traces,
+        ] {
+            assert!(!word.is_empty() && !word.ends_with('.'), "{word}");
+        }
     }
 
     #[test]
     fn the_monitor_traces_copy_is_whole_and_shares_customize_words() {
         let copy = monitor_traces_copy();
-        let value = serde_json::to_value(&copy).unwrap();
-        for (key, word) in value.as_object().unwrap() {
-            assert!(!word.as_str().unwrap().is_empty(), "{key} is empty");
+        for (key, word) in words_of(&copy) {
+            assert!(!word.is_empty(), "{key} is empty");
         }
         let customize = crate::project_copy::customize_copy();
         assert_eq!(copy.keep, customize.keep);
         assert_eq!(copy.undo_keep, customize.undo_keep);
         assert_eq!(copy.core_unreachable, MONITOR_CORE_UNREACHABLE);
+    }
+
+    /// Ron's #1146 inspector words (#1241): every one is there, and none of
+    /// them offers "Share automatically" -- the folder rule is Ask me /
+    /// Automatic / Never (`project_copy::contribution_mode_copy`).
+    #[test]
+    fn rons_inspector_words_are_whole_and_never_say_share_automatically() {
+        let mut words = words_of(&monitor_traces_copy());
+        words.extend(words_of(&monitor_screens_copy()));
+        for (key, word) in &words {
+            assert!(!word.trim().is_empty(), "{key} is empty");
+            assert!(!word.contains("Share automatically"), "{key}: {word}");
+        }
+        for table in [
+            "/tree/",
+            "/counts/",
+            "/inspector/",
+            "/summary_panel/",
+            "/session_review/",
+            "/look_inside/",
+            "/undo/",
+            "/safeguards/",
+            "/history_actions/",
+        ] {
+            assert!(
+                words.iter().any(|(key, _)| key.starts_with(table)),
+                "{table} is missing"
+            );
+        }
+    }
+
+    /// Ron's lines verbatim, with his numbers as `{name}` holes.
+    #[test]
+    fn rons_counted_lines_hold_their_numbers() {
+        let traces = monitor_traces_copy();
+        assert_eq!(traces.tree.submit_count, "Submit \u{00b7} {count}");
+        // `queue-status-panel.tsx`'s daily limit row and its held line.
+        assert_eq!(
+            monitor_screens_copy().safeguards.remaining,
+            "{uploads} uploads left \u{00b7} {megabytes} MB left"
+        );
+        assert_eq!(
+            monitor_screens_copy().safeguards.held_by_limit,
+            "{count} queued sessions held by limit"
+        );
+        assert_eq!(traces.optional_automation, "OPTIONAL AUTOMATION");
+        assert_eq!(
+            traces.inspector.apply_outcome,
+            "Apply one outcome to {count} eligible sessions."
+        );
+        assert_eq!(
+            traces.inspector.no_rule,
+            "This folder has no rule of its own yet."
+        );
+        assert_eq!(
+            traces.undo.within,
+            "Undo within {seconds}s before upload starts."
+        );
+        assert_eq!(traces.undo.approved, "{label} approved");
+        assert_eq!(
+            traces.look_inside.witness_confirm_line,
+            "I understand and want to send this session for review."
+        );
+        assert!(traces.summary_panel.no_longer_waiting.contains("{count}"));
+        assert_eq!(
+            traces.summary_panel.no_longer_waiting_scope,
+            "This covers sessions that reached the queue. Sessions never queued are not counted here."
+        );
+        // A singular is its own line, never a plural with a 1 in it.
+        assert!(!traces.counts.sessions_waiting_one.contains('{'));
+        assert!(!traces.counts.project_count_one.contains('{'));
+    }
+
+    /// History's refresh and sign-in controls are native words, not Ron's
+    /// #1146 literals: History and withdrawal copy keep native's voice. They
+    /// name no machinery (daemon, core, server) and promise no timing.
+    #[test]
+    fn history_actions_speak_in_native_voice() {
+        let words = words_of(&monitor_screens_copy().history_actions);
+        assert_eq!(words.len(), 11, "every history action is read");
+        let ron = [
+            "Request server refresh",
+            "Sign in to withdraw",
+            "Refresh requested. The daemon checks server results asynchronously.",
+            "Refresh request failed. Try again when the core is available.",
+            "Checking account session\u{2026}",
+            "Waiting for sign-in\u{2026}",
+            "Complete sign-in in your browser. This may take up to five minutes.",
+        ];
+        for (key, word) in &words {
+            assert!(!word.is_empty(), "{key} is empty");
+            assert!(
+                !ron.contains(&word.as_str()),
+                "{key} is Ron's literal: {word}"
+            );
+            let lower = word.to_lowercase();
+            for machinery in ["daemon", "core", "server", "asynchronous", "minute"] {
+                assert!(!lower.contains(machinery), "{key} says {machinery}: {word}");
+            }
+        }
+    }
+
+    /// Every `{...}` in the monitor tables is one [`MONITOR_PLACEHOLDERS`]
+    /// lists, and every one listed is used, so a shell knows each hole it
+    /// fills.
+    #[test]
+    fn every_monitor_placeholder_is_a_documented_one() {
+        let mut words = words_of(&monitor_traces_copy());
+        words.extend(words_of(&monitor_screens_copy()));
+        let mut unknown = Vec::new();
+        for (key, word) in &words {
+            let mut rest = word.as_str();
+            while let Some(open) = rest.find('{') {
+                rest = &rest[open + 1..];
+                let Some(close) = rest.find('}') else { break };
+                let name = &rest[..close];
+                if !MONITOR_PLACEHOLDERS.contains(&name) {
+                    unknown.push(format!("{key}: {{{name}}}"));
+                }
+            }
+        }
+        assert!(unknown.is_empty(), "undocumented placeholders: {unknown:?}");
+        for name in MONITOR_PLACEHOLDERS {
+            assert!(
+                words
+                    .iter()
+                    .any(|(_, word)| word.contains(&format!("{{{name}}}"))),
+                "{{{name}}} is documented but no string carries it"
+            );
+        }
     }
 
     #[test]

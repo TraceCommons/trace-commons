@@ -1,4 +1,4 @@
-// INTEGRATION: shared by HistoryView, SessionDetailView, DaemonClient, and
+// INTEGRATION: shared by the History inspector, SessionDetailView, DaemonClient, and
 // AppModel for account-owned session detail and reviewed public workflows.
 
 import Foundation

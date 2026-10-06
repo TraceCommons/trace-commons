@@ -28,7 +28,7 @@ use trace_commons_contributor_ffi::{
     tc_contribution_eligibility_control, tc_contribution_eligibility_line,
     tc_contribution_eligibility_reason_line, tc_contribution_eligibility_tone,
     tc_contribution_group_control, tc_contribution_withheld_line, tc_daemon_start,
-    tc_daemon_start_with_settings, tc_daemon_stop, tc_discover_opencode_export,
+    tc_daemon_start_with_settings, tc_daemon_stop, tc_describe_folder, tc_discover_opencode_export,
     tc_discover_sources, tc_grant_void_notice, tc_handle, tc_handle_free, tc_invite_issuer_host,
     tc_last_error, tc_legacy_migration_notice, tc_near_ai_credential_action,
     tc_near_ai_credential_state_line, tc_near_ai_credential_state_tone, tc_near_ai_enroll_line,
@@ -1927,6 +1927,54 @@ fn discover_opencode_export_reports_a_missing_folder_as_absent() {
     let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
     assert_eq!(parsed["exists"], serde_json::json!(false));
     assert_eq!(parsed["session_count"], serde_json::json!(0));
+}
+
+/// A folder the contributor picked is recognised by its layout and comes
+/// back as an array of rows, one per kind whose layout matches.
+#[test]
+fn describe_folder_recognises_a_picked_codex_store() {
+    let dir = tempfile::tempdir().unwrap();
+    let day = dir.path().join("2026/08/20");
+    std::fs::create_dir_all(&day).unwrap();
+    std::fs::write(day.join("rollout-2026-08-20T10-00-00-abc.jsonl"), b"{}\n").unwrap();
+
+    let out = unsafe { tc_describe_folder(cstr(dir.path()).as_ptr()) };
+    assert!(!out.is_null());
+    let json = unsafe { CStr::from_ptr(out) }
+        .to_string_lossy()
+        .into_owned();
+    unsafe { tc_string_free(out) };
+
+    let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+    let rows = parsed.as_array().expect("an array");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["source"], serde_json::json!("codex"));
+    assert_eq!(rows[0]["session_count"], serde_json::json!(1));
+    assert_eq!(rows[0]["exists"], serde_json::json!(true));
+}
+
+/// A folder that matches no layout, or is not there, is an empty array --
+/// never NULL, never a guessed row.
+#[test]
+fn describe_folder_reports_an_unrelated_or_missing_folder_as_empty() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("notes.txt"), b"x").unwrap();
+    for path in [dir.path().to_path_buf(), dir.path().join("not-there")] {
+        let out = unsafe { tc_describe_folder(cstr(&path).as_ptr()) };
+        assert!(!out.is_null());
+        let json = unsafe { CStr::from_ptr(out) }
+            .to_string_lossy()
+            .into_owned();
+        unsafe { tc_string_free(out) };
+        assert_eq!(json, "[]");
+    }
+}
+
+#[test]
+fn describe_folder_refuses_a_null_path() {
+    let out = unsafe { tc_describe_folder(std::ptr::null()) };
+    assert!(out.is_null());
+    assert_eq!(last_error().as_deref(), Some("null-pointer"));
 }
 
 #[test]
@@ -5398,10 +5446,25 @@ fn the_legacy_migration_offer_and_refusal_cross_the_abi() {
 fn the_monitor_traces_copy_crosses_the_abi() {
     use trace_commons_contributor::preview_copy::{decisions_owed_text, monitor_traces_copy};
     use trace_commons_contributor_ffi::{tc_decisions_owed_text, tc_monitor_traces_copy_json};
-    assert_eq!(
-        json_owned(tc_monitor_traces_copy_json()),
-        serde_json::to_value(monitor_traces_copy()).unwrap()
-    );
+    let value = json_owned(tc_monitor_traces_copy_json());
+    assert_eq!(value, serde_json::to_value(monitor_traces_copy()).unwrap());
+    // Ron's #1146 inspector words (#1241) cross as nested tables.
+    for (pointer, word) in [
+        ("/tree/submit_count", "Submit \u{00b7} {count}"),
+        ("/tree/dismiss_session_title", "Dismiss this session?"),
+        ("/inspector/contribution_rule", "Contribution rule"),
+        ("/summary_panel/statistics", "Statistics"),
+        ("/session_review/heading", "What would leave this computer"),
+        ("/look_inside/turn_index", "Turn index"),
+        ("/undo/approval_saved", "APPROVAL SAVED"),
+        ("/optional_automation", "OPTIONAL AUTOMATION"),
+    ] {
+        assert_eq!(
+            value.pointer(pointer).and_then(|v| v.as_str()),
+            Some(word),
+            "{pointer}"
+        );
+    }
     let text = |count: i64| take_owned(tc_decisions_owed_text(count));
     assert_eq!(text(-1), decisions_owed_text(None));
     assert_eq!(text(0), "");
@@ -5758,9 +5821,13 @@ fn the_withdrawal_confirmation_prompt_crosses_the_abi() {
 fn the_monitor_screens_copy_crosses_the_abi() {
     use trace_commons_contributor::preview_copy::monitor_screens_copy;
     use trace_commons_contributor_ffi::tc_monitor_screens_copy_json;
+    let value = json_owned(tc_monitor_screens_copy_json());
+    assert_eq!(value, serde_json::to_value(monitor_screens_copy()).unwrap());
     assert_eq!(
-        json_owned(tc_monitor_screens_copy_json()),
-        serde_json::to_value(monitor_screens_copy()).unwrap()
+        value
+            .pointer("/safeguards/heading")
+            .and_then(|v| v.as_str()),
+        Some("Contribution safeguards")
     );
 }
 
@@ -5778,6 +5845,11 @@ fn the_disclosure_bundle_crosses_the_abi_with_the_state_map() {
     use trace_commons_contributor_ffi::tc_contributor_disclosure_copy_json;
     let value = json_owned(tc_contributor_disclosure_copy_json());
     assert_eq!(value, contributor_disclosure_copy());
+    // The three tables the macOS bridge decodes (`ContributorDisclosureCopy`).
+    assert_eq!(value["outcome"]["submit_all_as"], "Submit all as...");
+    assert!(value["outcome"]["max_correction_chars"].is_u64());
+    assert!(value["history_ui"]["status_labels"].is_object());
+    assert!(value["folder_mode_labels"].is_object());
     let states = value["private_inference"]["states"].as_object().unwrap();
     assert_eq!(states.len(), STATE_LABELS.len());
     assert_eq!(states[LABEL_RUNNING]["working"], true);
@@ -6011,4 +6083,13 @@ fn the_regrant_void_notice_crosses_the_abi_only_on_the_grants_notice() {
     let not_an_object = cstr_str(r#""project""#);
     assert!(unsafe { tc_grant_void_notice_regrant_json(not_an_object.as_ptr()) }.is_null());
     assert!(unsafe { tc_grant_void_notice_regrant_json(std::ptr::null()) }.is_null());
+}
+
+#[test]
+fn the_first_run_copy_crosses_the_abi() {
+    use trace_commons_contributor::first_run_copy::first_run_copy;
+    use trace_commons_contributor_ffi::tc_first_run_copy_json;
+    let value = json_owned(tc_first_run_copy_json());
+    assert_eq!(value, serde_json::to_value(first_run_copy()).unwrap());
+    assert_eq!(value["frame"]["quick_setup"], "Quick setup");
 }

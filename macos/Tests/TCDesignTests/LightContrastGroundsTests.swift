@@ -59,15 +59,30 @@ final class LightContrastGroundsTests: XCTestCase {
         }
     }
 
-    /// The text-safe status colours are the status colours in dark: no
-    /// dark value moved.
-    func test_theStatusTextColoursAreUnchangedInDark() {
+    /// The on and ask text-safe colours are the status colours in dark.
+    /// Outside is not: its text is lighter, because the status colour on
+    /// its own tint over a card on the opaque pane was 3.61:1 (#1229).
+    func test_theOnAndAskTextColoursAreTheStatusColoursInDark() {
         let c = GlassTokens.Color.self
         XCTAssertEqual(c.statusOnText.dark, c.statusOn.dark)
         XCTAssertEqual(c.statusAskText.dark, c.statusAsk.dark)
-        XCTAssertEqual(c.statusOutsideText.dark, c.statusOutside.dark)
         XCTAssertEqual(c.badgeFill.dark, c.statusOutside.dark)
         XCTAssertEqual(c.menuHoverText.dark, c.textPrimary.dark)
+    }
+
+    /// The outside tag's text on its tint, over every card stop on the
+    /// opaque pane, reaches 4.5:1 in dark: the tag is drawn at micro, so
+    /// the large-text floor does not apply.
+    func test_theDarkOutsideTagReachesFourPointFiveOnTheOpaquePane() {
+        let c = GlassTokens.Color.self
+        let pane = Self.solid(c.paneOpaque.dark)
+        for gradient in [GlassTokens.Gradient.cardFill, GlassTokens.Gradient.cardFillQuiet] {
+            for stop in gradient.stops {
+                let pill = Self.over(c.tintOutside.dark, Self.over(stop.color.dark, pane))
+                let ratio = Self.contrast(Self.solid(c.statusOutsideText.dark), pill)
+                XCTAssertGreaterThanOrEqual(ratio, 4.5, "dark outside tag at \(stop.location): \(ratio)")
+            }
+        }
     }
 
     /// White on the call-to-action, secondary and checkbox fills reaches
