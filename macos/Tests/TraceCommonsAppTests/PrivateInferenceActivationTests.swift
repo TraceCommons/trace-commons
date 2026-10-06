@@ -58,14 +58,12 @@ final class PrivateInferenceActivationTests: XCTestCase {
         window.orderFront(nil)
         let firstRun = try XCTUnwrap(FirstRunCopy.decode(try XCTUnwrap(TCCoreCopy.firstRunCopyJSON())))
         // The first run's Folders step, every row unanswered, and nothing
-        // started by showing it. Read by its Quick setup eyebrow and a row's
-        // question: the footer's links are too faint to read back, so
-        // Continue is not pressed here and its disabled rule is
+        // started by showing it. Read by a row's question, which only Folders
+        // asks: the eyebrow and the footer's links are too faint to read
+        // back, so Continue is not pressed here and its disabled rule is
         // `FoldersScreenTests.test_continueIsDisabledUntilEveryRowIsAnswered`.
         let question = firstRun.folders.watchQuestion.replacingOccurrences(of: "{tool}", with: "Codex")
         let folders = try await settledWords(hosting) { $0.contains(question) }
-        XCTAssertTrue(folders.localizedCaseInsensitiveContains(firstRun.frame.eyebrow(for: .quick)),
-                      "Private AI must open the first run's Quick setup")
         XCTAssertTrue(folders.contains(question),
                       "Private AI must ask the first run's Folders")
         XCTAssertEqual(model.startup, .needsRoots, "showing Folders starts nothing")
