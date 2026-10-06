@@ -19,8 +19,9 @@ final class InferenceStore {
     /// The per-model summary. PROVISIONAL: the live client throws
     /// `notAvailableYet` for this shape, and the tab then shows the calls
     /// alone; the daemon's real reply is `networkInferenceSummary()`, and
-    /// moving this store to it is a follow-up. An older daemon's
-    /// `unknown_method` is drawn the same way (`isNotServed`).
+    /// moving this store to it is a follow-up. Once it reads that method,
+    /// an older daemon's `unknown_method` is drawn the same way
+    /// (`isNotServed`); today the live client sends nothing for it.
     private(set) var summary: DaemonData.InferenceSummary?
     /// `tool_destinations`: its per-tool counts (K14) are the core's call
     /// totals for the window, which one page of calls is not.

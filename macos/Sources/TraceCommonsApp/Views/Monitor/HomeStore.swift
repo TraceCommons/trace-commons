@@ -25,8 +25,9 @@ final class HomeStore {
     /// request for every contributor (#1174 M1). PROVISIONAL: the live client
     /// throws `notAvailableYet` for this shape, which is not a failure to
     /// show; the daemon's real reply is `networkMissionCatalogue()`, and
-    /// moving this store to it is a follow-up. An older daemon's
-    /// `unknown_method` is drawn the same way (`isNotServed`).
+    /// moving this store to it is a follow-up. Once it reads that method,
+    /// an older daemon's `unknown_method` is drawn the same way
+    /// (`isNotServed`); today the live client sends nothing for it.
     private(set) var missions: DaemonData.MissionCatalogue?
     /// The last read that failed, by method; cleared when it next succeeds.
     private(set) var failures: [String: DaemonDataError] = [:]
