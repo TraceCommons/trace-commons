@@ -277,7 +277,9 @@ enum JoinScreenLayout {
         return trimmed.isEmpty ? nil : FirstRunCopy.fill(copy.passkeyReady, ["name": trimmed])
     }
 
-    /// Record how the passkey sheets ended. A sign-in carries no name
+    /// Record how the passkey sheets ended. A sign-in ends them only once
+    /// Verify bound its account (`PasskeySheetOutcome.signedIn`), so every
+    /// held passkey is an enrolment. It carries no name
     /// (`NativePasskeyCoordinator.perform(.login)` returns none), so its
     /// passkey is held with an empty one, which `passkeyLine` never shows.
     static func apply(

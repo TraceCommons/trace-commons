@@ -212,6 +212,8 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
         public let otherOptions: String
         /// A refused ceremony; its label is never shown.
         public let refused: String
+        /// An existing passkey's account is bound on another Mac; signed out.
+        public let boundElsewhere: String
     }
 
     public struct PrivateAi: Decodable, Equatable, Sendable {

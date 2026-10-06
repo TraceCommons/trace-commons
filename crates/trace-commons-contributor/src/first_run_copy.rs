@@ -31,7 +31,9 @@
 //!   account of its own, so the two are not combined.
 //! - Uses adds Start's failures (`sharing_refused`, `scopes_failed`,
 //!   `rules_failed`, `private_ai_failed`, `complete_failed`), and the passkey
-//!   sheets add `refused`, so no daemon label is ever shown.
+//!   sheets add `refused`, so no daemon label is ever shown, and
+//!   `bound_elsewhere` for an existing passkey whose account this Mac cannot
+//!   join yet.
 //! - One string has one key: the session count and Undo, shared by more than
 //!   one screen, live in `frame`.
 //! - Preview-only strings (the mock-data tag, the simulated system sheets
@@ -291,6 +293,11 @@ pub struct PasskeyCopy {
     /// A passkey ceremony the daemon or the system refused; its label is
     /// never shown.
     pub refused: &'static str,
+    /// "Use existing passkey" signed in to an account already bound (on
+    /// another Mac, or a legacy account). Enrolling a further Mac into it is
+    /// not built, so the sheet signed out and stays on Choose.
+    /// **DRAFT, NEEDS APPROVAL**
+    pub bound_elsewhere: &'static str,
 }
 
 /// The Private AI card's fallbacks only; its words are
@@ -463,6 +470,7 @@ pub fn first_run_copy() -> FirstRunCopy {
             welcome_sign_in: "Sign in with passkey",
             other_options: "Other sign-in options",
             refused: "The passkey step didn't go through. Try again, or close this and choose another way to join.",
+            bound_elsewhere: "This passkey's account is already set up on another Mac, and adding this Mac to it isn't possible yet, so you were signed out here. Close this to choose another way to join, or to watch only.",
         },
         private_ai: PrivateAiCopy {
             loading: "Loading disclosure…",
@@ -659,6 +667,17 @@ mod tests {
         assert_ne!(join.near_ai_needs_invite, join.near_ai_text);
         assert_ne!(join.invite_or_passkey, join.passkey_text);
         assert_ne!(join.near_ai_needs_invite, join.invite_or_passkey);
+    }
+
+    /// An existing passkey whose account is already bound elsewhere cannot
+    /// be enrolled from this Mac yet; the sheet signs out and says so, in
+    /// words of its own rather than the generic refusal.
+    #[test]
+    fn a_passkey_bound_elsewhere_has_its_own_line() {
+        let passkey = first_run_copy().passkey;
+        assert_ne!(passkey.bound_elsewhere, passkey.refused);
+        assert!(passkey.bound_elsewhere.contains("another Mac"));
+        assert!(passkey.bound_elsewhere.contains("signed out"));
     }
 
     /// A refused passkey ceremony is worded here: the daemon's label never

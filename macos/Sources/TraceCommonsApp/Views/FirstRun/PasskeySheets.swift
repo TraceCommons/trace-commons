@@ -18,7 +18,9 @@ enum PasskeySheetStep: Equatable {
 enum PasskeySheetOutcome: Equatable {
     /// A passkey was created and bound to the account (`bound`).
     case created(name: String)
-    /// An existing passkey signed in.
+    /// An existing passkey signed in to an account no Mac had bound, and
+    /// Verify bound it (`bound`), enrolling this Mac. A sign-in alone holds
+    /// no enrolment and never ends the sheets with this.
     case signedIn
     /// Verify's bind answered `existing_account`: the daemon switched to an
     /// account that already existed and makes no claim that the new passkey
@@ -75,6 +77,27 @@ enum PasskeyBindResult: Equatable {
     }
 }
 
+/// What "Use existing passkey" answered: the daemon's `binding_state` for
+/// the account it signed in to, or why it did not sign in.
+enum PasskeySignInResult: Equatable {
+    /// No Mac has bound the account yet: Verify binds it and enrols this one.
+    case unbound
+    /// Bound already, on another Mac or as a legacy account. Enrolling a
+    /// further Mac into it is not built, so it fails closed.
+    case alreadyBound
+    /// A `binding_state` this build does not know. Fails closed.
+    case unrecognised
+    case failed(PasskeyCallResult)
+
+    init(bindingState: String) {
+        switch bindingState {
+        case "unbound": self = .unbound
+        case "bound", "legacy": self = .alreadyBound
+        default: self = .unrecognised
+        }
+    }
+}
+
 /// The account calls behind the sheets. `LivePasskeyAccount` is the real
 /// one; tests record.
 @MainActor
@@ -82,6 +105,9 @@ protocol PasskeyAccount: AnyObject {
     /// Raise the system sheet for `action` (P-3 and P-4 for create, P-6 for
     /// login) and complete the ceremony with the daemon.
     func ceremony(_ action: NativePasskeyAction, label: String?) async -> PasskeyCallResult
+    /// P-6: the system sign-in sheet, completed with the daemon, answering
+    /// the signed-in account's `binding_state`.
+    func signIn() async -> PasskeySignInResult
     /// P-5: bind the passkey to the near.ai account (`account_bind`).
     func bind() async -> PasskeyBindResult
     /// Cancelling P-5 signs out (`account_sign_out`).
@@ -111,6 +137,14 @@ final class LivePasskeyAccount: PasskeyAccount {
             return .done
         } catch {
             return PasskeyCallResult(error: error)
+        }
+    }
+
+    func signIn() async -> PasskeySignInResult {
+        do {
+            return PasskeySignInResult(bindingState: try await coordinator.perform(.login).bindingState)
+        } catch {
+            return .failed(PasskeyCallResult(error: error))
         }
     }
 
@@ -174,11 +208,16 @@ final class PasskeySheetModel: ObservableObject {
     @Published private(set) var busy = false
     @Published private(set) var refusal: String?
     @Published private(set) var outcome: PasskeySheetOutcome?
+    /// "Use existing passkey" reached an account bound elsewhere and the
+    /// daemon confirmed the sign-out (`PasskeySheets.noticeLine`).
+    @Published private(set) var boundElsewhere = false
 
     private let copy: FirstRunCopy.Passkey
     private let account: any PasskeyAccount
     /// The trimmed name the created passkey carries.
     private var createdName: String?
+    /// Verify follows a sign-in to an unbound account rather than a Create.
+    private var verifyingSignIn = false
 
     /// Ron's P-7 for a returning person: a Mac whose daemon holds a passkey for
     /// this account opens at Welcome back. None, or no answer, opens at P-1,
@@ -217,13 +256,45 @@ final class PasskeySheetModel: ObservableObject {
         outcome = .closed
     }
 
-    /// P-1 Use existing and P-7 Sign in: the system sign-in sheet.
+    /// P-1 Use existing and P-7 Sign in: the system sign-in sheet. A
+    /// sign-in holds no enrolment, so it never ends the sheets by itself:
+    /// an account no Mac has bound goes to Verify, whose bind enrols this
+    /// Mac; one bound already is signed out again, fail closed, since
+    /// enrolling a further Mac into it is not built.
     func useExisting() async {
         guard !busy, step == .choose || step == .welcomeBack else { return }
-        switch await run({ await $0.ceremony(.login, label: nil) }) {
-        case .done: outcome = .signedIn
-        case .cancelled: move(to: .choose)
-        case .refused: break
+        busy = true
+        refusal = nil
+        boundElsewhere = false
+        defer { busy = false }
+        switch await account.signIn() {
+        case .unbound:
+            verifyingSignIn = true
+            move(to: .verify)
+        case .alreadyBound:
+            await signOutAfterSignIn(boundElsewhere: true)
+        case .unrecognised:
+            await signOutAfterSignIn(boundElsewhere: false)
+        case .failed(.cancelled):
+            move(to: .choose)
+        case .failed(.refused(let label)):
+            refusal = label
+        case .failed(.done):
+            refusal = "account-sign-in-invalid"
+        }
+    }
+
+    /// The daemon holds a session this Mac cannot enrol under: sign it out
+    /// and stay on Choose. Bound elsewhere says so only once the sign-out is
+    /// confirmed; otherwise the refusal is shown.
+    private func signOutAfterSignIn(boundElsewhere elsewhere: Bool) async {
+        let signedOut = await account.signOut()
+        move(to: .choose)
+        switch signedOut {
+        case .done:
+            if elsewhere { boundElsewhere = true } else { refusal = "account-binding-unrecognised" }
+        case .refused(let label): refusal = label
+        case .cancelled: refusal = "account-sign-out-failed"
         }
     }
 
@@ -242,14 +313,14 @@ final class PasskeySheetModel: ObservableObject {
         }
     }
 
-    /// P-5 Verify.
+    /// P-5 Verify, after Create or after a sign-in to an unbound account.
     func verify() async {
-        guard !busy, step == .verify, let createdName else { return }
+        guard !busy, step == .verify, createdName != nil || verifyingSignIn else { return }
         busy = true
         refusal = nil
         defer { busy = false }
         switch await account.bind() {
-        case .bound: outcome = .created(name: createdName)
+        case .bound: outcome = createdName.map { .created(name: $0) } ?? .signedIn
         case .existingAccount: outcome = .existingAccount
         case .failed(.refused(let label)): refusal = label
         case .failed: break
@@ -273,6 +344,7 @@ final class PasskeySheetModel: ObservableObject {
 
     private func move(to next: PasskeySheetStep) {
         refusal = nil
+        boundElsewhere = false
         step = next
     }
 
@@ -435,9 +507,15 @@ struct PasskeySheets: View {
         refusal == nil ? nil : copy.refused
     }
 
+    /// The sheet's notice: the core's bound-elsewhere line once that
+    /// sign-out is confirmed, else the refusal's sentence, else nothing.
+    static func noticeLine(_ model: PasskeySheetModel, copy: FirstRunCopy.Passkey) -> String? {
+        model.boundElsewhere ? copy.boundElsewhere : refusalLine(model.refusal, copy: copy)
+    }
+
     @ViewBuilder
     private var refusalNotice: some View {
-        if let line = PasskeySheets.refusalLine(model.refusal, copy: copy.passkey) {
+        if let line = PasskeySheets.noticeLine(model, copy: copy.passkey) {
             GlassNotice(tone: .outside) { Text(line) }
         }
     }
