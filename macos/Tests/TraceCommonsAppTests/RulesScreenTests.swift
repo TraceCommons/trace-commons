@@ -270,7 +270,8 @@ final class RulesScreenTests: XCTestCase {
     /// on colour, Never on the off colour. Settings' picker is unchanged.
     func test_theRulesPickerShowsItsStatusDots() throws {
         let modes = try XCTUnwrap(ContributionModeCopy.decode(fromJSON: TCCoreCopy.contributionModeCopyJSON()))
-        let options = ProjectModeChoices.options(for: [.ask, .autoUpload, .ignore], copy: modes, dots: true)
+        let options = ProjectModeChoices.options(
+            for: [.ask, .autoUpload, .ignore], copy: modes, dot: RulesScreenLayout.dot(for:))
         XCTAssertEqual(options.map(\.value), [.ask, .autoUpload, .ignore])
         XCTAssertEqual(options.map(\.dot), [.ask, .on, .off])
         XCTAssertEqual(
@@ -279,7 +280,7 @@ final class RulesScreenTests: XCTestCase {
             contentsOf: URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
                 .deletingLastPathComponent().appendingPathComponent(
                     "Sources/TraceCommonsApp/Views/FirstRun/RulesScreen.swift"), encoding: .utf8)
-        XCTAssertTrue(screen.contains("copy: modeCopy, dots: true)"))
+        XCTAssertTrue(screen.contains("copy: modeCopy, dot: RulesScreenLayout.dot(for:))"))
     }
 
     /// "{selected} of {total} selected" counts folders that are not Never.

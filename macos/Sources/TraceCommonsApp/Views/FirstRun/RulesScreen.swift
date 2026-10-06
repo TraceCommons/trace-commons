@@ -258,6 +258,16 @@ enum RulesScreenLayout {
         return ListFormatter.localizedString(byJoining: watched.map(\.displayName))
     }
 
+    /// Ron's #1030 `RULE_DOTS`: Ask me on the ask colour, Automatic on the
+    /// on colour, Never on the off colour.
+    static func dot(for mode: ProjectMode) -> GlassStatus? {
+        switch mode {
+        case .ask: return .ask
+        case .autoUpload: return .on
+        case .ignore: return .off
+        }
+    }
+
     /// The folder as a row names it: its path, or its label without one.
     static func folder(_ project: ProjectRow) -> String {
         project.projectPath.isEmpty ? project.displayLabel : project.projectPath
@@ -414,7 +424,7 @@ struct RulesScreen: View {
                         }),
                     options: ProjectModeChoices.options(
                         for: RulesScreenLayout.offeredModes(project, state: runner.state),
-                        copy: modeCopy, dots: true),
+                        copy: modeCopy, dot: RulesScreenLayout.dot(for:)),
                     placeholder: copy.frame.choose)
             }
         }

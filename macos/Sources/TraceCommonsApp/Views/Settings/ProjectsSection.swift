@@ -7,23 +7,13 @@ import TCShellCore
 /// the words are the core's contribution-mode table, by the daemon's own
 /// mode string, and a mode the table does not name is not offered.
 enum ProjectModeChoices {
-    /// `dots` adds each mode's status dot, as the first run's Rules draws
-    /// them (Ron's #1030 `RULE_DOTS`): Ask me ask, Automatic on, Never off.
+    /// `dot` gives each mode a status dot, as the first run's Rules draws
+    /// them (`RulesScreenLayout.dot`); Settings draws none.
     static func options(
-        for modes: [ProjectMode], copy: ContributionModeCopy, dots: Bool = false
+        for modes: [ProjectMode], copy: ContributionModeCopy, dot: (ProjectMode) -> GlassStatus? = { _ in nil }
     ) -> [GlassPickerOption<ProjectMode>] {
         modes.compactMap { mode in
-            copy.choice(for: mode.rawValue).map {
-                GlassPickerOption($0.label, value: mode, dot: dots ? dot(for: mode) : nil)
-            }
-        }
-    }
-
-    static func dot(for mode: ProjectMode) -> GlassStatus {
-        switch mode {
-        case .ask: return .ask
-        case .autoUpload: return .on
-        case .ignore: return .off
+            copy.choice(for: mode.rawValue).map { GlassPickerOption($0.label, value: mode, dot: dot(mode)) }
         }
     }
 }
