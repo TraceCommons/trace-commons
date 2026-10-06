@@ -109,9 +109,21 @@ public enum FirstRunPlan {
     /// to one: no consent scopes (the daemon keeps them in the enrolment's
     /// config and refuses them without it), no grant, and the watch-only
     /// marker instead of the tenant's. Custom's folder rules, past sessions
-    /// and Private AI are local to the daemon and are sent either way.
+    /// and Private AI are local to the daemon and are sent either way: for
+    /// watching only, picked past sessions are queued on this Mac as pending
+    /// offers and none is sent, which the Rules card says
+    /// (`rules.past_sessions_watch_only`).
+    ///
+    /// A passkey chosen on Join and not yet created holds no account, so
+    /// Start reopens its sheets and sends nothing else: the sheets are not
+    /// awaited, and nothing may run behind them. Any other account answer
+    /// without an enrolment the daemon holds sends nothing at all, since
+    /// scopes, the grant and the marker all belong to one (`canContinue`
+    /// keeps Start off for it).
     private static func start(_ state: FirstRunState) -> [FirstRunCall] {
+        if state.account == .passkeyChosen { return [.openPasskeySheets] }
         let watchOnly = state.account == .watchOnly
+        guard watchOnly || state.holdsEnrolment else { return [] }
         var calls: [FirstRunCall] = watchOnly ? [] : [.setConsentScopes(state.scopes.sorted())]
         if state.tier == .custom {
             for projectID in state.rules.keys.sorted() {
@@ -131,7 +143,7 @@ public enum FirstRunPlan {
         }
         // Automatic alone is not enough: only the core's ready answer after
         // both disclosures (`grantReady`) sends the grant.
-        if state.sharing == .automatic, state.grantReady, FirstRunNavigation.canChooseAutomatic(state.account) {
+        if state.sharing == .automatic, state.grantReady, FirstRunNavigation.canChooseAutomatic(state) {
             calls.append(.grantAutomatic(witness: state.witnessSigningAddress))
         }
         calls.append(watchOnly ? .markWatchOnlyComplete : .markComplete)

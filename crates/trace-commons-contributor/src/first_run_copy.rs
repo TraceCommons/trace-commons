@@ -14,21 +14,26 @@
 //!   tools it used to name are not read (owner decision, 2026-10-04), and a
 //!   folder that matches nothing is refused with `tools.add_tool_refused`.
 //! - The invite placeholder carries no code: Ron's preview showed a mock one.
-//! - Tools adds two lines for a folder that matches more than one kind:
-//!   `which_kind` asks which, and `trajectory_label` names the
-//!   exported-traces option and its row.
+//! - Tools adds three lines for a folder that matches more than one kind:
+//!   `which_kind` asks which, `trajectory_label` names the exported-traces
+//!   option and its row, and `neither` dismisses the question.
 //! - Folders adds three lines Ron's preview had no need for, since its data
 //!   was mocked: `discovery_failed` and `retry` for a discovery that returns
 //!   nothing readable, and `enroll_refused` for an enroll refused after the
 //!   invite was accepted. It also carries `lookup_unavailable` and
 //!   `sign_in_failed` (the core's existing sign-in line), so leaving Folders
-//!   or Tools never stops in silence.
+//!   or Tools never stops in silence, and `settings_failed` for a changed
+//!   folder declaration the running daemon refused.
+//! - Rules adds `past_sessions_watch_only`: watching only queues the picked
+//!   past sessions on this Mac, and the card says they wait there.
 //! - Join adds `near_ai_needs_invite` and `invite_or_passkey`: near.ai signs
 //!   in to the account an invite enrolls, and a new passkey creates an
 //!   account of its own, so the two are not combined.
 //! - Uses adds Start's failures (`sharing_refused`, `scopes_failed`,
 //!   `rules_failed`, `private_ai_failed`, `complete_failed`), and the passkey
-//!   sheets add `refused`, so no daemon label is ever shown.
+//!   sheets add `refused`, so no daemon label is ever shown, and
+//!   `bound_elsewhere` for an existing passkey whose account this Mac cannot
+//!   join yet.
 //! - One string has one key: the session count and Undo, shared by more than
 //!   one screen, live in `frame`.
 //! - Preview-only strings (the mock-data tag, the simulated system sheets
@@ -169,6 +174,11 @@ pub struct FoldersCopy {
     /// The near.ai sign-in did not finish: the core's existing sign-in line
     /// (`consent_copy::INFERENCE_SIGN_IN_FAILED`), not a second wording.
     pub sign_in_failed: &'static str,
+    /// The daemon is running and refused a changed folder declaration on a
+    /// later Continue (`set_settings`). Watching goes on with the folders it
+    /// already had, so this is not `watcher_start_failed`.
+    /// **DRAFT, NEEDS APPROVAL**
+    pub settings_failed: &'static str,
 }
 
 /// Tools, Custom setup's tool list and the add tile (`tool-screens.tsx`).
@@ -186,6 +196,10 @@ pub struct ToolsCopy {
     pub which_kind: &'static str,
     /// A folder of exported traces, as an option and as its row's name.
     pub trajectory_label: &'static str,
+    /// The last option of `which_kind`'s picker: the folder is neither kind.
+    /// It closes the question and adds the folder as nothing.
+    /// **DRAFT, NEEDS APPROVAL**
+    pub neither: &'static str,
 }
 
 /// Rules and the past-session picker (`rules-screen.tsx`).
@@ -210,6 +224,11 @@ pub struct RulesCopy {
     pub unavailable: &'static str,
     /// One folder's past sessions could not be read.
     pub sessions_unavailable: &'static str,
+    /// Watching only: the past-session card's note. Start queues the picked
+    /// sessions on this Mac as pending offers and sends none of them, since
+    /// there is no enrolment to send them under.
+    /// **DRAFT, NEEDS APPROVAL**
+    pub past_sessions_watch_only: &'static str,
 }
 
 /// Uses: data use, Sharing and starting (`uses-screen.tsx`).
@@ -274,6 +293,11 @@ pub struct PasskeyCopy {
     /// A passkey ceremony the daemon or the system refused; its label is
     /// never shown.
     pub refused: &'static str,
+    /// "Use existing passkey" signed in to an account already bound (on
+    /// another Mac, or a legacy account). Enrolling a further Mac into it is
+    /// not built, so the sheet signed out and stays on Choose.
+    /// **DRAFT, NEEDS APPROVAL**
+    pub bound_elsewhere: &'static str,
 }
 
 /// The Private AI card's fallbacks only; its words are
@@ -370,6 +394,7 @@ pub fn first_run_copy() -> FirstRunCopy {
             enroll_refused: "Your invite was found, but joining with it did not go through. Press Continue to try again.",
             lookup_unavailable: "Your invite couldn't be checked just now. Press Continue to try again.",
             sign_in_failed: crate::consent_copy::INFERENCE_SIGN_IN_FAILED,
+            settings_failed: "Your folder changes couldn't be saved. Watching goes on with the folders you chose before. Press Continue to try again.",
         },
         tools: ToolsCopy {
             title_light: "Connect your ",
@@ -380,6 +405,7 @@ pub fn first_run_copy() -> FirstRunCopy {
             added_by_you: "Added by you",
             which_kind: "What does {folder} hold?",
             trajectory_label: "Exported traces",
+            neither: "Neither",
         },
         rules: RulesCopy {
             title_light: "Set your ",
@@ -398,6 +424,7 @@ pub fn first_run_copy() -> FirstRunCopy {
             never_label: "{folder}: rule is Never",
             unavailable: "Couldn't read repos from your sessions. Go back, then continue to try again.",
             sessions_unavailable: "Past sessions unavailable",
+            past_sessions_watch_only: "You're watching only, so the sessions you pick wait on this Mac, unsent, until you join.",
         },
         uses: UsesCopy {
             title_light: "How your data is ",
@@ -443,6 +470,7 @@ pub fn first_run_copy() -> FirstRunCopy {
             welcome_sign_in: "Sign in with passkey",
             other_options: "Other sign-in options",
             refused: "The passkey step didn't go through. Try again, or close this and choose another way to join.",
+            bound_elsewhere: "This passkey's account is already set up on another Mac, and adding this Mac to it isn't possible yet, so you were signed out here. Close this to choose another way to join, or to watch only.",
         },
         private_ai: PrivateAiCopy {
             loading: "Loading disclosure…",
@@ -531,6 +559,17 @@ mod tests {
         }
     }
 
+    /// Watching only queues picked past sessions on this Mac and sends
+    /// nothing, so the card says they wait there, and never that they are
+    /// shared.
+    #[test]
+    fn watching_only_says_past_sessions_wait_on_this_mac() {
+        let rules = first_run_copy().rules;
+        assert!(rules.past_sessions_watch_only.contains("this Mac"));
+        assert!(rules.past_sessions_watch_only.contains("join"));
+        assert_ne!(rules.past_sessions_watch_only, rules.past_sessions);
+    }
+
     /// Enroll runs only after the invite was looked up and accepted, so its
     /// refusal must not read as the Join screen's "not an invite link".
     #[test]
@@ -562,6 +601,9 @@ mod tests {
         );
         assert!(!tools.trajectory_label.trim().is_empty());
         assert_ne!(tools.trajectory_label, tools.add_tool_caption);
+        // The question can be dismissed: the folder is neither kind.
+        assert!(!tools.neither.trim().is_empty());
+        assert_ne!(tools.neither, tools.trajectory_label);
     }
 
     /// Start's failures each have a sentence that is true when it is shown.
@@ -608,6 +650,13 @@ mod tests {
         assert_ne!(copy.folders.lookup_unavailable, copy.join.invite_error);
         assert_ne!(copy.folders.lookup_unavailable, copy.folders.enroll_refused);
         assert!(!copy.folders.lookup_unavailable.contains("not an invite"));
+        // A refused change of folders on a second Continue: the daemon is
+        // running, so it never reads as the watcher failing to start.
+        assert_ne!(
+            copy.folders.settings_failed,
+            crate::onboarding_copy::WATCHER_START_FAILED
+        );
+        assert!(copy.folders.settings_failed.contains("Continue"));
     }
 
     /// near.ai signs in to the account an invite enrolls, and a new passkey
@@ -618,6 +667,17 @@ mod tests {
         assert_ne!(join.near_ai_needs_invite, join.near_ai_text);
         assert_ne!(join.invite_or_passkey, join.passkey_text);
         assert_ne!(join.near_ai_needs_invite, join.invite_or_passkey);
+    }
+
+    /// An existing passkey whose account is already bound elsewhere cannot
+    /// be enrolled from this Mac yet; the sheet signs out and says so, in
+    /// words of its own rather than the generic refusal.
+    #[test]
+    fn a_passkey_bound_elsewhere_has_its_own_line() {
+        let passkey = first_run_copy().passkey;
+        assert_ne!(passkey.bound_elsewhere, passkey.refused);
+        assert!(passkey.bound_elsewhere.contains("another Mac"));
+        assert!(passkey.bound_elsewhere.contains("signed out"));
     }
 
     /// A refused passkey ceremony is worded here: the daemon's label never

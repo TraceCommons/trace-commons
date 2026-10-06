@@ -26,7 +26,8 @@ enum ComputeAllowance {
     }
 }
 
-/// The same content renders in a native scroll view and in CPU screenshot QA.
+/// The same content renders in the Settings window's scroll view and in CPU
+/// screenshot QA (`ComputeNavigationTests`, through `ImageRenderer`).
 /// Every sentence is the core's (`ComputeCopy`); this file authors none.
 struct ComputeContent: View {
     let model: ComputeModel
@@ -68,9 +69,9 @@ struct ComputeContent: View {
                                 Text(String(value))
                                     .glassType(GlassTokens.TypeScale.number)
                                     .foregroundStyle(GlassColor.textPrimary)
-                            } else if let unknown = Self.unknown {
+                            } else {
                                 // No allowance answered: absent, never zero.
-                                Text(unknown)
+                                Text(Self.unknownWord)
                                     .glassType(GlassTokens.TypeScale.body)
                                     .foregroundStyle(GlassColor.textTertiary)
                             }
@@ -101,9 +102,7 @@ struct ComputeContent: View {
                 // Failed: the core's sentence for it, else its unknown word;
                 // never a spinner, which would read as working.
                 let copy = model.copy
-                if let line = copy?.unavailable ?? Self.unknown {
-                    refusal(line)
-                }
+                refusal(Self.failureLine(copy?.unavailable))
                 if let retry = copy?.retry {
                     Button(retry) { Task { await model.retryOpen() } }
                         .buttonStyle(GlassButtonStyle(.glass))
@@ -120,6 +119,20 @@ struct ComputeContent: View {
 
     /// The core's word for an answer it does not have.
     static let unknown: String? = MonitorScreensCopy.decode(fromJSON: TCCoreCopy.monitorScreensCopyJSON())?.unknown
+
+    /// The unknown word, or a dash, not a sentence, if the core's word
+    /// could not be read: a label is never left with nothing under it.
+    static var unknownWord: String { unknownWord(unknown) }
+    static func unknownWord(_ unknown: String?) -> String {
+        RouteDisclosureUnreadableGlassLine.text(line: nil, fallback: nil, unknown: unknown)
+    }
+
+    /// A failure always has words: the core's line, else its unknown word,
+    /// else a dash (`RouteDisclosureUnreadableGlassLine.text`).
+    static func failureLine(_ unavailable: String?) -> String { failureLine(unavailable, unknown: unknown) }
+    static func failureLine(_ unavailable: String?, unknown: String?) -> String {
+        RouteDisclosureUnreadableGlassLine.text(line: unavailable, fallback: nil, unknown: unknown)
+    }
 
     private func refusal(_ line: String) -> some View {
         GlassNotice(tone: .outside) { Text(line).fixedSize(horizontal: false, vertical: true) }

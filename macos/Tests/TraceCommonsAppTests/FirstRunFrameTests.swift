@@ -151,4 +151,13 @@ final class FirstRunFrameTests: XCTestCase {
             FirstRunCopy.fill("{count} of {total} in {folder}", ["count": "2", "total": "5", "folder": "app"]),
             "2 of 5 in app")
     }
+
+    /// Every first-run screen's title is a VoiceOver heading, so heading
+    /// navigation (VO-Command-H) finds it.
+    func test_theScreenTitleIsAVoiceOverHeading() throws {
+        let source = try Self.source()
+        let title = try XCTUnwrap(source.range(of: "struct FirstRunTitle: View {"))
+        let body = String(source[title.upperBound...].prefix(400))
+        XCTAssertTrue(body.contains(".accessibilityAddTraits(.isHeader)"), "FirstRunTitle must carry the header trait")
+    }
 }

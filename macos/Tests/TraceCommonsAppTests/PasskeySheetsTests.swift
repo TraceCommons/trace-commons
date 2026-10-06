@@ -19,6 +19,7 @@ final class PasskeySheetsTests: XCTestCase {
         var ceremonyAnswer: PasskeyCallResult = .done
         var bindAnswer: PasskeyBindResult = .bound
         var signOutAnswer: PasskeyCallResult = .done
+        var signInAnswer: PasskeySignInResult = .unbound
 
         func ceremony(_ action: NativePasskeyAction, label: String?) async -> PasskeyCallResult {
             calls.append("ceremony:\(action.rawValue)")
@@ -29,6 +30,11 @@ final class PasskeySheetsTests: XCTestCase {
         func bind() async -> PasskeyBindResult {
             calls.append("bind")
             return bindAnswer
+        }
+
+        func signIn() async -> PasskeySignInResult {
+            calls.append("signIn")
+            return signInAnswer
         }
 
         func cancel() {
@@ -184,7 +190,7 @@ final class PasskeySheetsTests: XCTestCase {
         let running = Task { await busyModel.useExisting() }
         while !busyModel.busy { await Task.yield() }
         busyModel.disappeared()
-        XCTAssertEqual(blocking.calls, ["ceremony:login", "cancel"])
+        XCTAssertEqual(blocking.calls, ["signIn", "cancel"])
         gate.continuation.yield()
         gate.continuation.finish()
         await running.value
@@ -199,8 +205,12 @@ final class PasskeySheetsTests: XCTestCase {
 
         func ceremony(_ action: NativePasskeyAction, label: String?) async -> PasskeyCallResult {
             calls.append("ceremony:\(action.rawValue)")
-            for await _ in release { break }
             return .cancelled
+        }
+        func signIn() async -> PasskeySignInResult {
+            calls.append("signIn")
+            for await _ in release { break }
+            return .failed(.cancelled)
         }
         func bind() async -> PasskeyBindResult { .bound }
         func signOut() async -> PasskeyCallResult { .done }
@@ -233,20 +243,24 @@ final class PasskeySheetsTests: XCTestCase {
         XCTAssertEqual(model.step, .choose)
 
         // Use existing: the system sign-in sheet; cancelled returns to Choose.
-        account.ceremonyAnswer = .cancelled
+        account.signInAnswer = .failed(.cancelled)
         await model.useExisting()
-        XCTAssertEqual(account.calls, ["ceremony:login"])
+        XCTAssertEqual(account.calls, ["signIn"])
         XCTAssertEqual(model.step, .choose)
         XCTAssertNil(model.refusal)
         XCTAssertNil(model.outcome)
 
-        account.ceremonyAnswer = .refused(label: "passkey-authorization-failed")
+        account.signInAnswer = .failed(.refused(label: "passkey-authorization-failed"))
         await model.useExisting()
         XCTAssertEqual(model.step, .choose)
         XCTAssertEqual(model.refusal, "passkey-authorization-failed")
 
-        account.ceremonyAnswer = .done
+        // A sign-in is not an account on this Mac: Verify binds it first.
+        account.signInAnswer = .unbound
         await model.useExisting()
+        XCTAssertEqual(model.step, .verify)
+        XCTAssertNil(model.outcome)
+        await model.verify()
         XCTAssertEqual(model.outcome, .signedIn)
 
         // A cancelled save sheet returns to Name.
@@ -271,11 +285,15 @@ final class PasskeySheetsTests: XCTestCase {
         closing.close()
         XCTAssertEqual(closing.outcome, .closed)
 
-        // Welcome back: sign in raises the system sheet; other options closes.
+        // Welcome back: sign in raises the system sheet, then Verify binds;
+        // other options closes.
         let returning = PasskeySheetModel(start: .welcomeBack, copy: copy.passkey, account: account)
         account.calls = []
+        account.bindAnswer = .bound
         await returning.useExisting()
-        XCTAssertEqual(account.calls, ["ceremony:login"])
+        XCTAssertEqual(returning.step, .verify)
+        await returning.verify()
+        XCTAssertEqual(account.calls, ["signIn", "bind"])
         XCTAssertEqual(returning.outcome, .signedIn)
         let elsewhere = PasskeySheetModel(start: .welcomeBack, copy: copy.passkey, account: account)
         elsewhere.close()
@@ -312,7 +330,8 @@ final class PasskeySheetsTests: XCTestCase {
         }
         XCTAssertNil(PasskeySheets.refusalLine(nil, copy: copy.passkey))
         let source = try Self.source()
-        XCTAssertTrue(source.contains("PasskeySheets.refusalLine(model.refusal"))
+        XCTAssertTrue(source.contains("PasskeySheets.noticeLine(model"))
+        XCTAssertTrue(source.contains("refusalLine(model.refusal"))
         XCTAssertFalse(source.contains("Text(refusal)"))
     }
 
@@ -373,5 +392,90 @@ final class PasskeySheetsTests: XCTestCase {
         let source = try Self.source()
         XCTAssertTrue(source.contains("await account.existingPasskeys()"))
         XCTAssertTrue(source.contains("PasskeySheetModel.startStep(existingPasskeys:"))
+    }
+
+    /// Kristi's #1235 B1, decision (a): "Use existing passkey" signs in, and
+    /// a sign-in alone holds no enrolment. An account no Mac has bound goes
+    /// through Verify, whose bind enrols this Mac; only then is the outcome
+    /// `.signedIn`, which Join records as a held passkey. Cancelling that
+    /// Verify signs out, as it does after Create.
+    func test_anUnboundExistingPasskeyIsBoundThroughVerify() async throws {
+        let copy = try coreCopy()
+        let account = RecordingAccount()
+        account.signInAnswer = .unbound
+        let model = PasskeySheetModel(copy: copy.passkey, account: account)
+        await model.useExisting()
+        XCTAssertEqual(model.step, .verify)
+        XCTAssertNil(model.outcome, "no outcome before the bind")
+        XCTAssertEqual(account.calls, ["signIn"])
+
+        account.bindAnswer = .failed(.refused(label: "near_ai_enroll_no_session"))
+        await model.verify()
+        XCTAssertNil(model.outcome)
+        XCTAssertEqual(model.refusal, "near_ai_enroll_no_session")
+
+        account.bindAnswer = .bound
+        await model.verify()
+        XCTAssertEqual(model.outcome, .signedIn)
+        XCTAssertEqual(account.calls, ["signIn", "bind", "bind"])
+
+        // bind switched to an account that already existed.
+        let switching = PasskeySheetModel(copy: copy.passkey, account: account)
+        account.bindAnswer = .existingAccount
+        await switching.useExisting()
+        await switching.verify()
+        XCTAssertEqual(switching.outcome, .existingAccount)
+
+        // Cancel at Verify signs out.
+        let cancelling = PasskeySheetModel(copy: copy.passkey, account: account)
+        await cancelling.useExisting()
+        await cancelling.cancelVerify()
+        XCTAssertEqual(cancelling.outcome, .signedOut)
+    }
+
+    /// Kristi's #1235 B1, decision (b), deferred: an account already bound
+    /// (on another Mac, or a legacy one) cannot be enrolled from this Mac yet,
+    /// so the sign-in fails closed. The daemon's session is signed out, so
+    /// nothing half-held survives, and the sheet says why with the core's
+    /// line. No outcome is reported, so Join records no account.
+    func test_anAccountBoundElsewhereIsSignedOutAndSaysSo() async throws {
+        let copy = try coreCopy()
+        let account = RecordingAccount()
+        account.signInAnswer = .alreadyBound
+        let model = PasskeySheetModel(start: .welcomeBack, copy: copy.passkey, account: account)
+        await model.useExisting()
+        XCTAssertEqual(account.calls, ["signIn", "signOut"])
+        XCTAssertNil(model.outcome)
+        XCTAssertEqual(model.step, .choose)
+        XCTAssertNil(model.refusal)
+        XCTAssertEqual(PasskeySheets.noticeLine(model, copy: copy.passkey), copy.passkey.boundElsewhere)
+        XCTAssertNotEqual(copy.passkey.boundElsewhere, copy.passkey.refused)
+
+        // Moving on clears the line.
+        model.createNew()
+        XCTAssertNil(PasskeySheets.noticeLine(model, copy: copy.passkey))
+
+        // A sign-out the daemon refuses is said as a refusal: the session
+        // may still be held, so the bound-elsewhere line would not be true.
+        let stuck = PasskeySheetModel(copy: copy.passkey, account: account)
+        account.signOutAnswer = .refused(label: "account-session-changed")
+        await stuck.useExisting()
+        XCTAssertNil(stuck.outcome)
+        XCTAssertEqual(stuck.refusal, "account-session-changed")
+        XCTAssertEqual(PasskeySheets.noticeLine(stuck, copy: copy.passkey), copy.passkey.refused)
+
+        let source = try Self.source()
+        XCTAssertTrue(source.contains("PasskeySheets.noticeLine(model"))
+    }
+
+    /// The daemon's `binding_state` after a passkey sign-in. Only `unbound`
+    /// can be bound here; `bound` and `legacy` are bound already; anything
+    /// else is not a state this build knows and fails closed.
+    func test_aSignInsBindingStateDecidesTheNextStep() {
+        XCTAssertEqual(PasskeySignInResult(bindingState: "unbound"), .unbound)
+        XCTAssertEqual(PasskeySignInResult(bindingState: "bound"), .alreadyBound)
+        XCTAssertEqual(PasskeySignInResult(bindingState: "legacy"), .alreadyBound)
+        XCTAssertEqual(PasskeySignInResult(bindingState: "closed"), .unrecognised)
+        XCTAssertEqual(PasskeySignInResult(bindingState: ""), .unrecognised)
     }
 }

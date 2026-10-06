@@ -52,8 +52,11 @@ protocol FirstRunDaemon: AnyObject {
 /// Why a commit stopped. The screens map each case to a core sentence; the
 /// labels are the daemon's own, never a message body.
 enum FirstRunFailure: Equatable {
-    /// The daemon did not start, or did not take a changed declaration.
+    /// The daemon did not start.
     case startFailed
+    /// The running daemon refused a changed declaration (`set_settings`) on
+    /// a later Continue. It keeps watching what it held before.
+    case settingsFailed
     /// The invite was refused when it was looked up; the person is back on
     /// Join.
     case inviteDead(label: String)
@@ -159,7 +162,7 @@ final class FirstRunRunner: ObservableObject {
             state.daemonStarted = true
             state.startedSettingsJSON = json
         case .setSourceSettings(let changed):
-            guard await daemon.setSourceSettings(settingsJSON: changed) else { return fail(.startFailed) }
+            guard await daemon.setSourceSettings(settingsJSON: changed) else { return fail(.settingsFailed) }
             // The daemon merged the change, so it now holds the whole
             // current declaration, not just the part that was sent.
             state.startedSettingsJSON = state.sessionRoots.settingsJSON()

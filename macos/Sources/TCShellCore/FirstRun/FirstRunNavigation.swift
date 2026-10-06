@@ -55,8 +55,10 @@ public enum FirstRunNavigation {
     /// - Folders / Tools: every offered tool answered, missing ones included,
     ///   and a declaration the daemon would start with.
     /// - Rules: always; every choice there is optional.
-    /// - Uses: the required use ticked. With no required use known, Start
-    ///   stays disabled.
+    /// - Uses: the required use ticked, and something Start can do: finish
+    ///   watching only, reopen a chosen passkey's sheets, or finish an
+    ///   enrolment the daemon holds. With no required use known, Start stays
+    ///   disabled.
     public static func canContinue(
         _ state: FirstRunState,
         candidates: [SourceCandidate],
@@ -73,25 +75,22 @@ public enum FirstRunNavigation {
             return true
         case .uses:
             guard let requiredScope else { return false }
-            return state.scopes.contains(requiredScope)
+            let startable = state.account == .watchOnly || state.account == .passkeyChosen || state.holdsEnrolment
+            return startable && state.scopes.contains(requiredScope)
         }
     }
 
-    /// Whether this account can share automatically. Automatic needs an
-    /// account: a passkey the daemon holds, an enrolment it held before this
-    /// first run, or near.ai, which the Folders or Tools commit signs in
-    /// before Uses is reached. Watching only, no
-    /// answer, and a passkey chosen but not yet created cannot.
-    public static func canChooseAutomatic(_ account: AccountAnswer) -> Bool {
-        switch account {
-        case .passkey, .nearAI, .enrolled: return true
-        case .none, .watchOnly, .passkeyChosen: return false
-        }
+    /// Whether this first run can share automatically: only with an
+    /// enrolment the daemon holds (`FirstRunState.holdsEnrolment`). Watching
+    /// only, no answer, a passkey chosen but not created, and near.ai whose
+    /// invite has not enrolled cannot.
+    public static func canChooseAutomatic(_ state: FirstRunState) -> Bool {
+        state.holdsEnrolment
     }
 
     /// The sharing paths the Uses picker offers.
-    public static func sharingPaths(for account: AccountAnswer) -> [SharingPath] {
-        canChooseAutomatic(account) ? [.askMe, .automatic] : [.askMe]
+    public static func sharingPaths(for state: FirstRunState) -> [SharingPath] {
+        canChooseAutomatic(state) ? [.askMe, .automatic] : [.askMe]
     }
 
     private static func move(_ state: FirstRunState, by offset: Int) -> FirstRunState {

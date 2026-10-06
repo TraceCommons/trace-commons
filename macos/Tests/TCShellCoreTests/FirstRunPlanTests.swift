@@ -13,6 +13,17 @@ final class FirstRunPlanTests: XCTestCase {
         return state
     }
 
+    /// `answered` on Uses, after leaving the roots enrolled its invite: the
+    /// enrolment Start's scopes, grant and marker belong to.
+    private func onUses(tier: FirstRunTier = .quick) -> FirstRunState {
+        var state = answered(tier: tier)
+        state.step = .uses
+        state.daemonStarted = true
+        state.enrolledInvite = "INVITE-1"
+        state.signedIn = true
+        return state
+    }
+
     private func settings(_ call: FirstRunCall?) throws -> [String: Any] {
         guard case .startDaemon(let json)? = call else {
             XCTFail("expected startDaemon, got \(String(describing: call))")
@@ -219,8 +230,7 @@ final class FirstRunPlanTests: XCTestCase {
     }
 
     func test_scopesAreSavedBeforeTheGrant() {
-        var state = answered(tier: .custom)
-        state.step = .uses
+        var state = onUses(tier: .custom)
         state.scopes = ["research", "evaluation"]
         state.rules = ["p2": .ask, "p1": .autoUpload]
         state.pastSelections = ["p1": ["s2", "s1"]]
@@ -243,8 +253,7 @@ final class FirstRunPlanTests: XCTestCase {
     /// Automatic is not enough on its own: the grant is sent only once the
     /// core answered ready after both disclosures, which sets `grantReady`.
     func test_automaticWithoutTheCoresReadyAnswerNeverGrants() {
-        var state = answered()
-        state.step = .uses
+        var state = onUses()
         state.scopes = ["research"]
         state.sharing = .automatic
         state.witnessSigningAddress = "witness-1"
@@ -266,8 +275,7 @@ final class FirstRunPlanTests: XCTestCase {
     }
 
     func test_askMeNeverGrants() {
-        var state = answered()
-        state.step = .uses
+        var state = onUses()
         state.scopes = ["research"]
         XCTAssertEqual(FirstRunPlan.calls(for: state, at: .start),
             [.setConsentScopes(["research"]), .markComplete])
@@ -303,8 +311,7 @@ final class FirstRunPlanTests: XCTestCase {
     }
 
     func test_quickNeverSetsARuleOrIncludesPastSessions() {
-        var state = answered()
-        state.step = .uses
+        var state = onUses()
         state.scopes = ["research"]
         state.rules = ["p1": .autoUpload]
         state.pastSelections = ["p1": ["s1"]]
@@ -314,8 +321,7 @@ final class FirstRunPlanTests: XCTestCase {
     }
 
     func test_aNeverFolderIncludesNothing() {
-        var state = answered(tier: .custom)
-        state.step = .uses
+        var state = onUses(tier: .custom)
         state.scopes = ["research"]
         state.rules = ["p1": .ignore]
         state.pastSelections = ["p1": ["s1"], "p2": []]
@@ -326,5 +332,44 @@ final class FirstRunPlanTests: XCTestCase {
             .markComplete,
         ])
         XCTAssertFalse(FirstRunPlan.calls(for: state, at: .start).contains(where: isGrant))
+    }
+
+    /// Kristi's #1235 I1, as decided: a passkey chosen on Join but never
+    /// created reaches Start without an account. Start reopens the sheets
+    /// and sends nothing else -- no scopes, no grant, no marker -- since the
+    /// sheets are not awaited and nothing after them may run.
+    func test_aChosenPasskeyAtStartReopensTheSheetsAndNothingElse() {
+        var state = answered(tier: .custom)
+        state.invite = ""
+        state.step = .uses
+        state.account = .passkeyChosen
+        state.daemonStarted = true
+        state.scopes = ["research"]
+        state.rules = ["p1": .ask]
+        state.pastSelections = ["p1": ["s1"]]
+        state.sharing = .automatic
+        state.grantReady = true
+        XCTAssertEqual(FirstRunPlan.calls(for: state, at: .start), [.openPasskeySheets])
+    }
+
+    /// Kristi's #1235 B1 floor: scopes, the grant and the enrolment's
+    /// marker belong to an enrolment the daemon holds. An account answer
+    /// without one sends none of them.
+    func test_noEnrolmentNoScopesGrantOrMarker() {
+        var state = answered()
+        state.step = .uses
+        state.scopes = ["research"]
+        state.sharing = .automatic
+        state.grantReady = true
+        state.witnessSigningAddress = "witness-1"
+        XCTAssertNil(state.enrolledInvite)
+        XCTAssertFalse(state.holdsEnrolment)
+        XCTAssertEqual(FirstRunPlan.calls(for: state, at: .start), [])
+
+        state.enrolledInvite = "INVITE-1"
+        XCTAssertTrue(state.holdsEnrolment)
+        XCTAssertEqual(FirstRunPlan.calls(for: state, at: .start), [
+            .setConsentScopes(["research"]), .grantAutomatic(witness: "witness-1"), .markComplete,
+        ])
     }
 }

@@ -57,7 +57,9 @@ final class ComputeSkillsParityTests: XCTestCase {
         let end = try XCTUnwrap(source.range(of: "            } else {\n", range: start.upperBound..<source.endIndex))
         let branch = String(source[start.upperBound..<end.lowerBound])
         XCTAssertFalse(branch.contains("SettingsAwaiting"))
-        XCTAssertTrue(branch.contains("if let line = copy?.unavailable ?? Self.unknown {\n"))
+        // Never a failure without words: the core's line, its unknown
+        // word, and a dash only if neither could be read.
+        XCTAssertTrue(branch.contains("refusal(Self.failureLine(copy?.unavailable))\n"))
         XCTAssertTrue(branch.contains("if let retry = copy?.retry {\n"))
         XCTAssertTrue(source.contains(
             "static let unknown: String? = MonitorScreensCopy.decode(fromJSON: TCCoreCopy.monitorScreensCopyJSON())?.unknown"))
@@ -65,7 +67,18 @@ final class ComputeSkillsParityTests: XCTestCase {
         // absent (the core's unknown word), never zero.
         XCTAssertTrue(source.contains(
             "} else {\n                            Text(snapshot.copy.allowanceLabel)\n"))
-        XCTAssertTrue(source.contains("} else if let unknown = Self.unknown {\n"))
+        XCTAssertTrue(source.contains("} else {\n                                // No allowance answered: absent, never zero.\n                                Text(Self.unknownWord)\n"))
+    }
+
+    /// Neither the failure branch nor the allowance value is ever left
+    /// without words when the monitor-screens copy fails to decode: the
+    /// same chain `RouteDisclosureUnreadableGlassLine.text` ends in.
+    func test_computeNeverDrawsALabelOrFailureWithoutWords() {
+        XCTAssertEqual(ComputeContent.failureLine("unavailable", unknown: "unknown"), "unavailable")
+        XCTAssertEqual(ComputeContent.failureLine(nil, unknown: "unknown"), "unknown")
+        XCTAssertEqual(ComputeContent.failureLine(nil, unknown: nil), "\u{2014}")
+        XCTAssertEqual(ComputeContent.unknownWord("unknown"), "unknown")
+        XCTAssertEqual(ComputeContent.unknownWord(nil), "\u{2014}")
     }
 
     /// Lifecycle modifiers sit on always-present containers, adjacent.
@@ -79,10 +92,15 @@ final class ComputeSkillsParityTests: XCTestCase {
         XCTAssertTrue(inspector.contains(
             "var body: some View {\n        VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {\n"))
         XCTAssertTrue(inspector.contains(
-            "        .frame(maxWidth: .infinity, alignment: .leading)\n"
-                + "        .task(id: [row.submissionId, record?.status ?? \"\"]) { load() }\n    }\n"))
-        // The reload on activation is the session detail's own, once.
-        XCTAssertFalse(inspector.contains("didBecomeActiveNotification"))
+            "        .frame(maxWidth: .infinity, alignment: .leading)\n    }\n"))
+        // Every read is the session detail's own, once, on legacy's
+        // triggers: the detail when it appears and on activation, the
+        // installed skill only for a terminal or unaccepted row. The
+        // inspector adds none beside it -- no reload when the status moves,
+        // no install-status read on every row.
+        for absent in ["didBecomeActiveNotification", ".task(", "loadSessionDetail", "ensureLocalInstalledSkillStatus"] {
+            XCTAssertFalse(inspector.contains(absent), "HistoryInspector.swift reads on its own: \(absent)")
+        }
         let skills = try Self.text("Views/SkillLearningView.swift")
         XCTAssertTrue(skills.contains("        GlassEyebrowCard(copy.heading) {\n"))
         XCTAssertTrue(skills.contains(
@@ -207,7 +225,7 @@ final class ComputeSkillsParityTests: XCTestCase {
         let inspector = try Self.text("Views/Monitor/HistoryInspector.swift")
         XCTAssertTrue(inspector.contains("SessionDetailView(record: record, offersWithdrawal: false)\n"))
         XCTAssertFalse(inspector.contains("SkillLearningGate."))
-        XCTAssertTrue(inspector.contains("model.loadSessionDetail(record)"))
+        XCTAssertFalse(inspector.contains("model.loadSessionDetail(record)"))
         let window = try Self.text("Views/MonitorWindowView.swift")
         XCTAssertTrue(window.contains("set: { selectedHistory = $0 }"))
     }

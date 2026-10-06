@@ -112,6 +112,8 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
         public let lookupUnavailable: String
         /// The near.ai sign-in did not finish.
         public let signInFailed: String
+        /// A changed folder declaration the running daemon refused.
+        public let settingsFailed: String
     }
 
     public struct Tools: Decodable, Equatable, Sendable {
@@ -125,6 +127,8 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
         public let whichKind: String
         /// A folder of exported traces, as an option and as its row's name.
         public let trajectoryLabel: String
+        /// The ambiguous folder's last option: neither kind.
+        public let neither: String
     }
 
     public struct Rules: Decodable, Equatable, Sendable {
@@ -153,6 +157,8 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
         public let unavailable: String
         /// One folder's past sessions could not be read.
         public let sessionsUnavailable: String
+        /// Watching only: picked past sessions wait on this Mac.
+        public let pastSessionsWatchOnly: String
     }
 
     public struct Uses: Decodable, Equatable, Sendable {
@@ -206,6 +212,8 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
         public let otherOptions: String
         /// A refused ceremony; its label is never shown.
         public let refused: String
+        /// An existing passkey's account is bound on another Mac; signed out.
+        public let boundElsewhere: String
     }
 
     public struct PrivateAi: Decodable, Equatable, Sendable {

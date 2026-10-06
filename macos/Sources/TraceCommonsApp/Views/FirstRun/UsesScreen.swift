@@ -87,7 +87,7 @@ enum UsesScreenLayout {
     /// The path the screen shows: Automatic only for an account that can
     /// choose it, so a watch-only state never reads Automatic's words.
     static func effectiveSharing(_ state: FirstRunState) -> SharingPath {
-        FirstRunNavigation.canChooseAutomatic(state.account) ? state.sharing : .askMe
+        FirstRunNavigation.canChooseAutomatic(state) ? state.sharing : .askMe
     }
 
     /// The Sharing card's line: the core's words for the path chosen, the
@@ -113,9 +113,9 @@ enum UsesScreenLayout {
     /// The picker's options, named by the contribution mode table (Ask me,
     /// Automatic), and Automatic only for an account that can choose it.
     static func sharingOptions(
-        for account: AccountAnswer, modes: ContributionModeCopy?
+        for state: FirstRunState, modes: ContributionModeCopy?
     ) -> [GlassPickerOption<SharingPath>] {
-        FirstRunNavigation.sharingPaths(for: account).compactMap { path in
+        FirstRunNavigation.sharingPaths(for: state).compactMap { path in
             let mode: ProjectMode = path == .automatic ? .autoUpload : .ask
             guard let title = modes?.label(for: mode) else { return nil }
             return GlassPickerOption(title, value: path, dot: path == .automatic ? .on : .ask)
@@ -144,7 +144,8 @@ enum UsesScreenLayout {
         // line, never the refused grant's "Setup finished".
         case .completeFailed: return uses.completeFailed
         // Leaving the roots' failures, which never stop Start.
-        case .startFailed, .inviteDead, .lookupUnavailable, .enrollFailed, .signInFailed: return nil
+        case .startFailed, .settingsFailed, .inviteDead, .lookupUnavailable, .enrollFailed, .signInFailed:
+            return nil
         }
     }
 
@@ -364,7 +365,7 @@ struct UsesScreen: View {
                     selection: Binding(
                         get: { UsesScreenLayout.effectiveSharing(runner.state) },
                         set: { if let path = $0 { runner.state.sharing = path } }),
-                    options: UsesScreenLayout.sharingOptions(for: runner.state.account, modes: ProjectModeWords.table),
+                    options: UsesScreenLayout.sharingOptions(for: runner.state, modes: ProjectModeWords.table),
                     placeholder: copy.uses.sharing)
                 .disabled(grant == nil)
             }

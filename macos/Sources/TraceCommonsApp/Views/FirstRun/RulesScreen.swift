@@ -48,20 +48,21 @@ enum RulesScreenLayout {
         case refused
     }
 
-    /// The modes a folder's picker offers. Automatic needs an account, so a
-    /// watch-only person is not offered it; a folder the daemon already
+    /// The modes a folder's picker offers. Automatic needs an enrolment the
+    /// daemon holds (`FirstRunState.holdsEnrolment`), so a person without
+    /// one -- watching only, a passkey not yet bound -- is not offered it; a folder the daemon already
     /// arms keeps it, so the picker can show what is in force, and picking
     /// it again is not a change.
-    static func offeredModes(_ project: ProjectRow, account: AccountAnswer) -> [ProjectMode] {
+    static func offeredModes(_ project: ProjectRow, state: FirstRunState) -> [ProjectMode] {
         let modes = project.offerableModes
-        guard !FirstRunNavigation.canChooseAutomatic(account), project.mode != .autoUpload else { return modes }
+        guard !FirstRunNavigation.canChooseAutomatic(state), project.mode != .autoUpload else { return modes }
         return modes.filter { $0 != .autoUpload }
     }
 
     /// A pick on a folder's picker. The daemon's own mode clears the
     /// folder's answer, so it is not sent again. Automatic is a grant, so
     /// it is never silent: it waits for the arming confirmation, and a
-    /// watch-only person is refused it.
+    /// person without an enrolment is refused it.
     static func pick(_ state: inout FirstRunState, project: ProjectRow, wanted: ProjectMode) -> PickOutcome {
         let id = project.projectId
         if wanted == project.mode {
@@ -71,17 +72,17 @@ enum RulesScreenLayout {
         }
         guard project.offerableModes.contains(wanted) else { return .refused }
         if wanted == .autoUpload {
-            return FirstRunNavigation.canChooseAutomatic(state.account) ? .needsConfirmation : .refused
+            return FirstRunNavigation.canChooseAutomatic(state) ? .needsConfirmation : .refused
         }
         setRule(&state, projectID: id, mode: wanted)
         return .applied
     }
 
     /// The arming confirmation was accepted: the only writer of Automatic.
-    /// Refused for a watch-only person and for a folder the daemon will
+    /// Refused for a person without an enrolment and for a folder the daemon will
     /// not arm, whatever the view asked.
     static func confirmArming(_ state: inout FirstRunState, project: ProjectRow) -> Bool {
-        guard FirstRunNavigation.canChooseAutomatic(state.account),
+        guard FirstRunNavigation.canChooseAutomatic(state),
             project.offerableModes.contains(.autoUpload)
         else { return false }
         state.rules[project.projectId] = .autoUpload
@@ -97,6 +98,13 @@ enum RulesScreenLayout {
         if mode == .ignore {
             state.pastSelections[projectID] = nil
         }
+    }
+
+    /// The past-session card's note. Watching only has no enrolment, so the
+    /// sessions picked here are queued on this Mac and none is sent; the
+    /// core's line says they wait there. Nil for every other account.
+    static func pastSessionsNote(_ state: FirstRunState, copy: FirstRunCopy.Rules) -> String? {
+        state.account == .watchOnly ? copy.pastSessionsWatchOnly : nil
     }
 
     static func groupState(_ state: FirstRunState, projectID: String, sessions: [PastSession]) -> GroupState {
@@ -347,7 +355,7 @@ struct RulesScreen: View {
                             }
                         }),
                     options: ProjectModeChoices.options(
-                        for: RulesScreenLayout.offeredModes(project, account: runner.state.account),
+                        for: RulesScreenLayout.offeredModes(project, state: runner.state),
                         copy: modeCopy),
                     placeholder: modeCopy.title)
             }
@@ -380,6 +388,12 @@ struct RulesScreen: View {
                     )
                     .glassType(GlassTokens.TypeScale.caption)
                     .foregroundStyle(GlassColor.textTertiary)
+                }
+                if let note = RulesScreenLayout.pastSessionsNote(runner.state, copy: copy.rules) {
+                    Text(note)
+                        .glassType(GlassTokens.TypeScale.caption)
+                        .foregroundStyle(GlassColor.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 ForEach(projects) { project in
                     folderSessions(project)

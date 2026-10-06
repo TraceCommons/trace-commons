@@ -170,14 +170,14 @@ final class AppModel: ObservableObject {
         // not `PendingInvite.shared.value`. Delivered on the main actor:
         // `PendingInvite` is main-actor isolated.
         inviteLinks = PendingInvite.shared.$value.sink { [weak self] invite in
-            guard invite != nil else { return }
-            MainActor.assumeIsolated { self?.inviteLinkArrived() }
+            guard let invite else { return }
+            MainActor.assumeIsolated { self?.inviteLinkArrived(invite) }
         }
     }
     private var inviteLinks: AnyCancellable?
-    /// An invite link arrived before the config directory was known, so the
-    /// watch-only marker it takes back is cleared once it is.
-    private var inviteAwaitsConfigDirectory = false
+    /// An invite link that arrived before the config directory was known,
+    /// so the watch-only marker it takes back is cleared once it is.
+    private var inviteAwaitingConfigDirectory: String?
     @Published private(set) var status: DaemonStatus = .unknown {
         didSet {
             if status.accountScope != oldValue.accountScope {
@@ -1116,9 +1116,9 @@ final class AppModel: ObservableObject {
     /// it.
     private(set) var configDirectory: String = "" {
         didSet {
-            guard inviteAwaitsConfigDirectory, !configDirectory.isEmpty else { return }
-            inviteAwaitsConfigDirectory = false
-            inviteLinkArrived()
+            guard let invite = inviteAwaitingConfigDirectory, !configDirectory.isEmpty else { return }
+            inviteAwaitingConfigDirectory = nil
+            inviteLinkArrived(invite)
         }
     }
 
@@ -2674,7 +2674,15 @@ final class AppModel: ObservableObject {
     @Published private(set) var publicRunWorking: Set<String> = []
     @Published var skillLearningStore = SkillLearningStore()
     private var accountOwnedContentScope: String?
+    /// Stamps each detail read in the order it started. Any number of rows
+    /// may be read at once, and each read lands for its own row; one row is
+    /// never read twice at once (`loadingSessionDetails`).
     private var sessionDetailRequestSequence: UInt64 = 0
+    /// The stamp of the newest read that decided the account content belongs
+    /// to: the one that set `accountOwnedContentScope`, or cleared it. A read
+    /// that started before it and answers for another account is stale
+    /// (#869): it neither replaces nor clears what that newer read decided.
+    private var sessionDetailScopeSequence: UInt64 = 0
     @Published private(set) var skillLearningCopy: SkillLearningCopy? = SkillLearningCopy.decode(
         fromJSON: TCSkillLearning.copyJSON() ?? ""
     )
@@ -2827,8 +2835,13 @@ final class AppModel: ObservableObject {
     /// public-run editor drawn from it, or the draft typed there. An account
     /// change still clears it (`clearAccountOwnedContent`).
     func loadSessionDetail(_ record: HistoryRecord) {
-        guard let client else { return }
         let id = record.submissionID
+        guard let client else {
+            // The core is down: say the read could not be made, with the
+            // core's line and Retry, rather than leave the detail empty.
+            sessionDetailErrors[id] = TCPublicRun.sessionDetailErrorLine(label: "daemon-unavailable")
+            return
+        }
         guard !loadingSessionDetails.contains(id) else { return }
         guard !publicRunWorking.contains(id) else { return }
         sessionDetailRequestSequence &+= 1
@@ -2839,17 +2852,29 @@ final class AppModel: ObservableObject {
             let result = Result { try client.sessionDetail(submissionID: id) }
             await MainActor.run {
                 self.loadingSessionDetails.remove(id)
-                guard requestSequence == self.sessionDetailRequestSequence else { return }
+                let superseded = requestSequence < self.sessionDetailScopeSequence
                 switch result {
                 case .success(let detail):
+                    if superseded, let scope = detail.ownerScopeSHA256, scope != self.accountOwnedContentScope {
+                        // Read under an account a newer read has replaced:
+                        // not shown, and the row says so, with Retry,
+                        // rather than drawing nothing.
+                        self.sessionDetailErrors[id] = TCPublicRun.sessionDetailErrorLine(label: "session-owner-changed")
+                        return
+                    }
+                    if detail.ownerScopeSHA256 != nil {
+                        self.sessionDetailScopeSequence = max(self.sessionDetailScopeSequence, requestSequence)
+                    }
                     self.reconcileAccountOwnedContent(scope: detail.ownerScopeSHA256)
                     self.sessionDetails[id] = detail
                 case .failure(let error):
                     let label = (error as? DaemonClient.Failure)?.message ?? ""
-                    if label == "account-session-required"
-                        || label == "session-detail-not-found"
-                        || label == "session-owner-changed"
+                    if !superseded,
+                        label == "account-session-required"
+                            || label == "session-detail-not-found"
+                            || label == "session-owner-changed"
                     {
+                        self.sessionDetailScopeSequence = requestSequence
                         self.clearAccountOwnedContent()
                     }
                     self.sessionDetailErrors[id] = TCPublicRun.sessionDetailErrorLine(label: label)
@@ -3361,10 +3386,17 @@ extension AppModel: FirstRunDaemon {
     /// finished watcher could never join, since the first run is the only
     /// place a link is applied. An enrolled daemon's marker is the tenant's
     /// and is left alone. Announced, as `markWatchOnlyComplete` is.
-    func inviteLinkArrived() {
+    ///
+    /// Only an invite does this: a link carries any string, and the
+    /// coordinator discards one the core does not accept as an invite
+    /// (`OnboardingNavigation.receive`), so the same `TCInvite.issuerHost`
+    /// check runs here, and a finished watcher is not sent back to Join
+    /// with nothing to apply.
+    func inviteLinkArrived(_ invite: String) {
         guard !status.loggedIn else { return }
+        guard TCInvite.issuerHost(invite) != nil else { return }
         guard let key = Self.watchOnlyCompleteKey(configDirectory) else {
-            inviteAwaitsConfigDirectory = true
+            inviteAwaitingConfigDirectory = invite
             return
         }
         guard UserDefaults.standard.bool(forKey: key) else { return }
