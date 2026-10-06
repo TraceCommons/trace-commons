@@ -366,7 +366,7 @@ struct UsesScreen: View {
                         get: { UsesScreenLayout.effectiveSharing(runner.state) },
                         set: { if let path = $0 { runner.state.sharing = path } }),
                     options: UsesScreenLayout.sharingOptions(for: runner.state, modes: ProjectModeWords.table),
-                    placeholder: copy.uses.sharing)
+                    placeholder: copy.frame.choose)
                 .disabled(grant == nil)
             }
         }

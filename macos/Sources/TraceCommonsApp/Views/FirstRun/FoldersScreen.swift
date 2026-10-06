@@ -124,6 +124,7 @@ struct FoldersScreen: View {
                             ForEach(candidates, id: \.source) { candidate in
                                 ToolAnswerRow(
                                     copy: copy.folders,
+                                    choose: copy.frame.choose,
                                     candidate: candidate,
                                     meta: candidate.evidence(now: Date()),
                                     state: $runner.state,

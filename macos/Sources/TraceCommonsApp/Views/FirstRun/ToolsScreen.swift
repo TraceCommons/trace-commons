@@ -255,6 +255,7 @@ struct ToolsScreen: View {
                                 candidate in
                                 ToolAnswerRow(
                                     copy: copy.folders,
+                                    choose: copy.frame.choose,
                                     candidate: candidate,
                                     meta: ToolsScreenLayout.meta(
                                         for: candidate, in: runner.state, discovered: discovered,
@@ -274,7 +275,7 @@ struct ToolsScreen: View {
                                             GlassPickerOption(copy.folders.watch, value: ToolAnswer.watch, dot: .on),
                                             GlassPickerOption(copy.folders.dontUse, value: ToolAnswer.dontUse, dot: .off),
                                         ],
-                                        placeholder: question
+                                        placeholder: copy.frame.choose
                                     )
                                 }
                             }
@@ -285,7 +286,7 @@ struct ToolsScreen: View {
                                         question,
                                         selection: pendingChoice,
                                         options: ToolsScreenLayout.pendingOptions(pending.kinds, copy: copy.tools),
-                                        placeholder: question
+                                        placeholder: copy.frame.choose
                                     )
                                 }
                             }

@@ -282,6 +282,23 @@ final class FoldersScreenTests: XCTestCase {
 
     /// A missing tool the state already watches (restored, or added on
     /// Custom's Tools) offers Watch, so the picker shows what Continue reads.
+    /// Ron's design review of #1235, item 7: an unanswered picker reads
+    /// the core's "Choose…", never its question; the question stays the
+    /// picker's accessible label. Every first-run picker draws its
+    /// placeholder from that one word.
+    func test_anUnansweredPickerReadsChoose() throws {
+        XCTAssertEqual(try self.copy().frame.choose, "Choose…")
+        for file in ["ToolAnswerRow.swift", "ToolsScreen.swift", "RulesScreen.swift", "UsesScreen.swift"] {
+            let lines = try Self.source(file).split(separator: "\n").filter {
+                $0.contains("placeholder:") && !$0.trimmingCharacters(in: .whitespaces).hasPrefix("///")
+            }
+            XCTAssertFalse(lines.isEmpty, file)
+            for line in lines {
+                XCTAssertTrue(line.contains("placeholder: choose") || line.contains("frame.choose"), "\(file): \(line)")
+            }
+        }
+    }
+
     func test_aWatchedMissingToolOffersWatch() {
         let missing = Self.candidate(.codex, exists: false)
         var state = FirstRunState(step: .folders)

@@ -94,6 +94,8 @@ enum ToolAnswerRowLayout {
 /// {tool}" leads; with none the button is shown but cannot be pressed.
 struct ToolAnswerRow: View {
     let copy: FirstRunCopy.Folders
+    /// What the picker reads while unanswered: the core's "Choose…".
+    let choose: String
     let candidate: SourceCandidate
     let meta: String
     @Binding var state: FirstRunState
@@ -142,7 +144,7 @@ struct ToolAnswerRow: View {
                         ToolAnswerRowLayout.fill(copy.watchQuestion, tool: candidate.source),
                         selection: answer,
                         options: options,
-                        placeholder: ToolAnswerRowLayout.fill(copy.watchQuestion, tool: candidate.source)
+                        placeholder: choose
                     )
                     if ToolAnswerRowLayout.offersFolderChoice(candidate) {
                         GlassFolderButton(ToolAnswerRowLayout.fill(copy.chooseFolder, tool: candidate.source)) {

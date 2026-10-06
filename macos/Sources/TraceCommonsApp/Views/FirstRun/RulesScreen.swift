@@ -375,7 +375,7 @@ struct RulesScreen: View {
                     options: ProjectModeChoices.options(
                         for: RulesScreenLayout.offeredModes(project, state: runner.state),
                         copy: modeCopy),
-                    placeholder: modeCopy.title)
+                    placeholder: copy.frame.choose)
             }
         }
     }
