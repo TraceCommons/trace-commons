@@ -172,7 +172,8 @@ enum JoinScreenLayout {
         if state.enrolledInvite != nil {
             return .joined(
                 FirstRunCopy.fill(
-                    copy.inviteJoined, ["host": state.issuerHost ?? dash, "pay_range": payRange(lookup, copy: copy)]))
+                    copy.inviteJoined,
+                    ["host": state.issuerHost ?? copy.unknown, "pay_range": payRange(lookup, copy: copy)]))
         }
         if passkeyDone(state) { return .note(copy.inviteOrPasskey) }
         if refused { return .error(copy.inviteError) }
@@ -184,12 +185,12 @@ enum JoinScreenLayout {
         return .hidden
     }
 
-    /// The invite's credit range in the core's words, or a dash when the
-    /// daemon gave none or gave a unit this build cannot word: an unknown
-    /// range never reads as a figure, and the wire label never reaches the
-    /// screen.
+    /// The invite's credit range in the core's words, or the core's
+    /// `unknown` when the daemon gave none or gave a unit this build cannot
+    /// word: an unknown range never reads as a figure, and the wire label
+    /// never reaches the screen.
     static func payRange(_ lookup: DaemonData.InviteLookup?, copy: FirstRunCopy.Join) -> String {
-        guard let range = lookup?.creditRange, range.unit == pointsPerAcceptedTrace else { return dash }
+        guard let range = lookup?.creditRange, range.unit == pointsPerAcceptedTrace else { return copy.unknown }
         if range.min == range.max {
             return FirstRunCopy.fill(copy.payRangePointsOne, ["min": "\(range.min)"])
         }
@@ -290,8 +291,6 @@ enum JoinScreenLayout {
         }
         return (applied, outcome.joinNotice(copy))
     }
-
-    private static let dash = "—"
 }
 
 /// Ron's Join (#1030 `join-screen.tsx`) in glass: the title, the invite card,

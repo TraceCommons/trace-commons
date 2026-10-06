@@ -71,24 +71,35 @@ final class JoinScreenTests: XCTestCase {
         if case .joined(let text) = line { XCTAssertFalse(text.contains("_"), text) }
 
         // One figure reads as one figure; a unit this build cannot word reads
-        // as a dash, never as the wire label.
+        // as the core's Unknown, never as the wire label or a dash.
         let one = try Self.lookup(
             #"{"valid":true,"credit_range":{"min":5,"max":5,"unit":"points_per_accepted_trace"}}"#)
         XCTAssertEqual(
             JoinScreenLayout.payRange(one, copy: copy.join),
             copy.join.payRangePointsOne.replacingOccurrences(of: "{min}", with: "5"))
         let foreign = try Self.lookup(#"{"valid":true,"credit_range":{"min":1,"max":2,"unit":"dollars"}}"#)
-        XCTAssertEqual(JoinScreenLayout.payRange(foreign, copy: copy.join), "—")
+        XCTAssertEqual(JoinScreenLayout.payRange(foreign, copy: copy.join), copy.join.unknown)
+        XCTAssertEqual(copy.join.unknown, "Unknown")
         XCTAssertFalse(JoinScreenLayout.inviteIsEditable(state))
 
-        // An unknown range reads as a dash, never as zero.
+        // An unknown range reads as Unknown, never as zero or a dash.
         let noRange = try Self.lookup(#"{"valid":true}"#)
         XCTAssertEqual(
             JoinScreenLayout.inviteLine(state, lookup: noRange, failure: nil, copy: copy.join),
             .joined(
                 copy.join.inviteJoined
                     .replacingOccurrences(of: "{host}", with: "issuer.example")
-                    .replacingOccurrences(of: "{pay_range}", with: "—")))
+                    .replacingOccurrences(of: "{pay_range}", with: copy.join.unknown)))
+        // An unknown host reads as Unknown too.
+        var hostless = state
+        hostless.issuerHost = nil
+        XCTAssertEqual(
+            JoinScreenLayout.inviteLine(hostless, lookup: noRange, failure: nil, copy: copy.join),
+            .joined(
+                copy.join.inviteJoined
+                    .replacingOccurrences(of: "{host}", with: copy.join.unknown)
+                    .replacingOccurrences(of: "{pay_range}", with: copy.join.unknown)))
+        XCTAssertFalse(try Self.source().contains("\"—\""))
 
         // The screen's own host function is the core's (`TCInvite.issuerHost`),
         // so a real invite shows its issuer's host before the daemon runs.
