@@ -71,6 +71,39 @@ enum ToolsScreenLayout {
         state.add(AddedFolder(kind: kind, path: path))
     }
 
+    /// One option on an ambiguous folder's picker: a kind it matched, by its
+    /// index in the question's kinds, or the core's "Neither".
+    enum PendingAnswer: Hashable {
+        case kind(Int)
+        case neither
+    }
+
+    /// The ambiguous folder's options: each kind it matched, then the
+    /// core's `neither`, which closes the question with nothing added.
+    static func pendingOptions(
+        _ kinds: [AddedFolder.Kind], copy: FirstRunCopy.Tools
+    ) -> [GlassPickerOption<PendingAnswer>] {
+        kinds.indices.map { GlassPickerOption(name(kinds[$0], copy: copy), value: .kind($0)) }
+            + [GlassPickerOption(copy.neither, value: .neither, dot: .off)]
+    }
+
+    /// Answer an ambiguous folder. A kind is added as `choose` adds it;
+    /// Neither leaves the state as it is, so the folder is attributed to no
+    /// tool. True when the question is closed; an index the picker never
+    /// offered keeps it open and writes nothing.
+    static func answer(
+        _ answer: PendingAnswer, path: String, kinds: [AddedFolder.Kind], in state: inout FirstRunState
+    ) -> Bool {
+        switch answer {
+        case .neither:
+            return true
+        case .kind(let index):
+            guard kinds.indices.contains(index) else { return false }
+            choose(kinds[index], path: path, in: &state)
+            return true
+        }
+    }
+
     /// The core's line for a refused folder.
     static func refusal(_ copy: FirstRunCopy.Tools) -> String {
         copy.addToolRefused
@@ -251,10 +284,7 @@ struct ToolsScreen: View {
                                     GlassPicker(
                                         question,
                                         selection: pendingChoice,
-                                        options: pending.kinds.indices.map {
-                                            GlassPickerOption(
-                                                ToolsScreenLayout.name(pending.kinds[$0], copy: copy.tools), value: $0)
-                                        },
+                                        options: ToolsScreenLayout.pendingOptions(pending.kinds, copy: copy.tools),
                                         placeholder: question
                                     )
                                 }
@@ -397,12 +427,13 @@ struct ToolsScreen: View {
         )
     }
 
-    private var pendingChoice: Binding<Int?> {
+    private var pendingChoice: Binding<ToolsScreenLayout.PendingAnswer?> {
         Binding(
             get: { nil },
-            set: { index in
-                guard let index, let pending, pending.kinds.indices.contains(index) else { return }
-                ToolsScreenLayout.choose(pending.kinds[index], path: pending.path, in: &runner.state)
+            set: { answer in
+                guard let answer, let pending,
+                    ToolsScreenLayout.answer(answer, path: pending.path, kinds: pending.kinds, in: &runner.state)
+                else { return }
                 self.pending = nil
             }
         )

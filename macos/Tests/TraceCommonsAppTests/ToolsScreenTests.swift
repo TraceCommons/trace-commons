@@ -156,6 +156,45 @@ final class ToolsScreenTests: XCTestCase {
         XCTAssertNil(ToolsScreenLayout.trajectoryFolder(in: state))
     }
 
+    /// Kristi's #1235 M2: the ambiguous folder's picker offers the core's
+    /// "Neither" after the kinds. It closes the question without adding the
+    /// folder as either, so Continue is no longer held by it.
+    func test_neitherDismissesAnAmbiguousFolder() throws {
+        let tools = try firstRunCopy().tools
+        let path = "/Users/someone/exports"
+        let kinds: [AddedFolder.Kind] = [.source(.opencode), .trajectory]
+        let options = ToolsScreenLayout.pendingOptions(kinds, copy: tools)
+        XCTAssertEqual(
+            options.map(\.title),
+            [SourceKind.opencode.displayName, tools.trajectoryLabel, tools.neither])
+        XCTAssertEqual(options.map(\.value), [.kind(0), .kind(1), .neither])
+
+        let discovered = [Self.candidate(.claudeCode, exists: true)]
+        var state = FirstRunState(tier: .custom, step: .tools)
+        state.answer(.claudeCode, .watch(path: "/Users/someone/.claude/projects"))
+        state.answer(.codex, .off)
+        let before = state
+        XCTAssertFalse(
+            ToolsScreenLayout.canContinue(discovered: discovered, state: state, pending: true, isCommitting: false))
+
+        XCTAssertTrue(ToolsScreenLayout.answer(.neither, path: path, kinds: kinds, in: &state))
+        XCTAssertEqual(state, before, "Neither attributes the folder to no tool")
+        XCTAssertTrue(
+            ToolsScreenLayout.canContinue(discovered: discovered, state: state, pending: false, isCommitting: false))
+
+        // A kind is still added as before; an index the picker never offered
+        // keeps the question open.
+        XCTAssertTrue(ToolsScreenLayout.answer(.kind(1), path: path, kinds: kinds, in: &state))
+        XCTAssertEqual(state.sessionRoots.trajectory, .watch(path: path))
+        var untouched = before
+        XCTAssertFalse(ToolsScreenLayout.answer(.kind(7), path: path, kinds: kinds, in: &untouched))
+        XCTAssertEqual(untouched, before)
+
+        let screen = try Self.source("ToolsScreen.swift")
+        XCTAssertTrue(screen.contains("ToolsScreenLayout.pendingOptions("))
+        XCTAssertTrue(screen.contains("ToolsScreenLayout.answer("))
+    }
+
     /// The trajectory row is withdrawn with "I don't use it" on its picker.
     func test_theTrajectoryRowCanBeWithdrawn() throws {
         var state = FirstRunState(tier: .custom, step: .tools)

@@ -127,6 +127,8 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
         public let whichKind: String
         /// A folder of exported traces, as an option and as its row's name.
         public let trajectoryLabel: String
+        /// The ambiguous folder's last option: neither kind.
+        public let neither: String
     }
 
     public struct Rules: Decodable, Equatable, Sendable {

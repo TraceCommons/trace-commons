@@ -14,9 +14,9 @@
 //!   tools it used to name are not read (owner decision, 2026-10-04), and a
 //!   folder that matches nothing is refused with `tools.add_tool_refused`.
 //! - The invite placeholder carries no code: Ron's preview showed a mock one.
-//! - Tools adds two lines for a folder that matches more than one kind:
-//!   `which_kind` asks which, and `trajectory_label` names the
-//!   exported-traces option and its row.
+//! - Tools adds three lines for a folder that matches more than one kind:
+//!   `which_kind` asks which, `trajectory_label` names the exported-traces
+//!   option and its row, and `neither` dismisses the question.
 //! - Folders adds three lines Ron's preview had no need for, since its data
 //!   was mocked: `discovery_failed` and `retry` for a discovery that returns
 //!   nothing readable, and `enroll_refused` for an enroll refused after the
@@ -192,6 +192,10 @@ pub struct ToolsCopy {
     pub which_kind: &'static str,
     /// A folder of exported traces, as an option and as its row's name.
     pub trajectory_label: &'static str,
+    /// The last option of `which_kind`'s picker: the folder is neither kind.
+    /// It closes the question and adds the folder as nothing.
+    /// **DRAFT, NEEDS APPROVAL**
+    pub neither: &'static str,
 }
 
 /// Rules and the past-session picker (`rules-screen.tsx`).
@@ -387,6 +391,7 @@ pub fn first_run_copy() -> FirstRunCopy {
             added_by_you: "Added by you",
             which_kind: "What does {folder} hold?",
             trajectory_label: "Exported traces",
+            neither: "Neither",
         },
         rules: RulesCopy {
             title_light: "Set your ",
@@ -569,6 +574,9 @@ mod tests {
         );
         assert!(!tools.trajectory_label.trim().is_empty());
         assert_ne!(tools.trajectory_label, tools.add_tool_caption);
+        // The question can be dismissed: the folder is neither kind.
+        assert!(!tools.neither.trim().is_empty());
+        assert_ne!(tools.neither, tools.trajectory_label);
     }
 
     /// Start's failures each have a sentence that is true when it is shown.
