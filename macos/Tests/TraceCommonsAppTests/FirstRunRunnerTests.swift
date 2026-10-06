@@ -68,7 +68,8 @@ final class RecordingFirstRunDaemon: FirstRunDaemon {
 /// The failure each call reports when the daemon refuses it.
 private func expectedFailure(for call: FirstRunCall) -> FirstRunFailure? {
     switch call {
-    case .startDaemon, .setSourceSettings: return .startFailed
+    case .startDaemon: return .startFailed
+    case .setSourceSettings: return .settingsFailed
     case .lookupInvite: return .inviteDead(label: "invite-invalid")
     case .enroll: return .enrollFailed
     case .signInNearAI: return .signInFailed
@@ -457,5 +458,29 @@ final class FirstRunRunnerTests: XCTestCase {
         XCTAssertEqual(daemon.log.count, 1, "nothing is enrolled or signed in twice")
         XCTAssertEqual(runner.state.startedSettingsJSON, runner.state.sessionRoots.settingsJSON())
         XCTAssertEqual(runner.state.step, .uses)
+    }
+
+    /// Kristi's #1235 M3: the daemon is running, so a refused change of
+    /// folders on a second Continue is not a failed watcher start. It is its
+    /// own failure, the step stays, and the daemon is still held to the
+    /// declaration it had.
+    func test_aRefusedSettingsChangeIsNotAFailedStart() async {
+        let daemon = RecordingFirstRunDaemon()
+        var state = onFolders()
+        state.daemonStarted = true
+        state.startedSettingsJSON = state.sessionRoots.settingsJSON()
+        state.enrolledInvite = "INVITE-1"
+        state.signedIn = true
+        let held = state.startedSettingsJSON
+        state.answer(.codex, .watch(path: "/Users/someone/.codex/sessions"))
+        daemon.failing = { if case .setSourceSettings = $0 { return true }; return false }
+        let runner = FirstRunRunner(state: state, daemon: daemon)
+
+        await runner.commit(.leaveRoots)
+
+        XCTAssertEqual(runner.failure, .settingsFailed)
+        XCTAssertNotEqual(runner.failure, .startFailed)
+        XCTAssertEqual(runner.state.startedSettingsJSON, held)
+        XCTAssertEqual(runner.state.step, .folders)
     }
 }

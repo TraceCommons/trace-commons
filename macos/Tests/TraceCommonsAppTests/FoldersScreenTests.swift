@@ -112,6 +112,20 @@ final class FoldersScreenTests: XCTestCase {
         XCTAssertNil(FoldersScreenLayout.notice(for: .startFailed, copy: firstRun, onboarding: nil))
     }
 
+    /// Kristi's #1235 M3: a refused change of folders reads its own core
+    /// line, never the watcher's, and needs no onboarding copy to be said.
+    func test_aRefusedSettingsChangeReadsItsOwnLine() throws {
+        let onboarding = try XCTUnwrap(TCOnboardingCopy.load())
+        let firstRun: FirstRunCopy = try copy()
+        XCTAssertEqual(
+            FoldersScreenLayout.notice(for: .settingsFailed, copy: firstRun, onboarding: onboarding),
+            firstRun.folders.settingsFailed)
+        XCTAssertEqual(
+            FoldersScreenLayout.notice(for: .settingsFailed, copy: firstRun, onboarding: nil),
+            firstRun.folders.settingsFailed)
+        XCTAssertNotEqual(firstRun.folders.settingsFailed, onboarding.watcherStartFailed)
+    }
+
     /// Every way `.leaveRoots` can stop while the person stays on Folders
     /// shows a core line, so Continue never does nothing in silence. A
     /// near.ai sign-in that did not finish reads the core's sign-in line;
@@ -164,8 +178,8 @@ final class FoldersScreenTests: XCTestCase {
             guard runner.state.step == .folders else { continue }
             let notice = FoldersScreenLayout.notice(for: failure, copy: firstRun, onboarding: onboarding)
             switch failure {
-            case .startFailed, .inviteDead, .lookupUnavailable, .enrollFailed, .signInFailed, .scopesFailed,
-                .rulesFailed, .privateAIFailed, .grantRefused:
+            case .startFailed, .settingsFailed, .inviteDead, .lookupUnavailable, .enrollFailed, .signInFailed,
+                .scopesFailed, .rulesFailed, .privateAIFailed, .grantRefused:
                 XCTAssertNotNil(notice, "\(failure)")
             // Leaving the roots never marks completion.
             case .completeFailed:

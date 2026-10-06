@@ -112,6 +112,8 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
         public let lookupUnavailable: String
         /// The near.ai sign-in did not finish.
         public let signInFailed: String
+        /// A changed folder declaration the running daemon refused.
+        public let settingsFailed: String
     }
 
     public struct Tools: Decodable, Equatable, Sendable {

@@ -144,7 +144,8 @@ enum UsesScreenLayout {
         // line, never the refused grant's "Setup finished".
         case .completeFailed: return uses.completeFailed
         // Leaving the roots' failures, which never stop Start.
-        case .startFailed, .inviteDead, .lookupUnavailable, .enrollFailed, .signInFailed: return nil
+        case .startFailed, .settingsFailed, .inviteDead, .lookupUnavailable, .enrollFailed, .signInFailed:
+            return nil
         }
     }
 

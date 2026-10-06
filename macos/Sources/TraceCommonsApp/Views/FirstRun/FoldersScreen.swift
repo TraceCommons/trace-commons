@@ -55,7 +55,8 @@ enum FoldersScreenLayout {
     }
 
     /// The core's sentence for a failure this step can show. A failed start
-    /// reads `watcher_start_failed` and the step stays. A failed enroll reads
+    /// reads `watcher_start_failed` and the step stays; a changed
+    /// declaration the running daemon refused reads `settings_failed`. A failed enroll reads
     /// `enroll_refused`: lookup has already accepted the invite, so Join's
     /// `invite_error` ("not an invite link") would be false, and the daemon
     /// never says why enroll refused. An invite the issuer could not be asked
@@ -68,6 +69,7 @@ enum FoldersScreenLayout {
     ) -> String? {
         switch failure {
         case .startFailed?: return onboarding?.watcherStartFailed
+        case .settingsFailed?: return copy.folders.settingsFailed
         case .enrollFailed?: return copy.folders.enrollRefused
         case .lookupUnavailable?: return copy.folders.lookupUnavailable
         case .signInFailed?: return copy.folders.signInFailed

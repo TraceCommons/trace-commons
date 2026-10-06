@@ -22,7 +22,8 @@
 //!   nothing readable, and `enroll_refused` for an enroll refused after the
 //!   invite was accepted. It also carries `lookup_unavailable` and
 //!   `sign_in_failed` (the core's existing sign-in line), so leaving Folders
-//!   or Tools never stops in silence.
+//!   or Tools never stops in silence, and `settings_failed` for a changed
+//!   folder declaration the running daemon refused.
 //! - Join adds `near_ai_needs_invite` and `invite_or_passkey`: near.ai signs
 //!   in to the account an invite enrolls, and a new passkey creates an
 //!   account of its own, so the two are not combined.
@@ -169,6 +170,11 @@ pub struct FoldersCopy {
     /// The near.ai sign-in did not finish: the core's existing sign-in line
     /// (`consent_copy::INFERENCE_SIGN_IN_FAILED`), not a second wording.
     pub sign_in_failed: &'static str,
+    /// The daemon is running and refused a changed folder declaration on a
+    /// later Continue (`set_settings`). Watching goes on with the folders it
+    /// already had, so this is not `watcher_start_failed`.
+    /// **DRAFT, NEEDS APPROVAL**
+    pub settings_failed: &'static str,
 }
 
 /// Tools, Custom setup's tool list and the add tile (`tool-screens.tsx`).
@@ -370,6 +376,7 @@ pub fn first_run_copy() -> FirstRunCopy {
             enroll_refused: "Your invite was found, but joining with it did not go through. Press Continue to try again.",
             lookup_unavailable: "Your invite couldn't be checked just now. Press Continue to try again.",
             sign_in_failed: crate::consent_copy::INFERENCE_SIGN_IN_FAILED,
+            settings_failed: "Your folder changes couldn't be saved. Watching goes on with the folders you chose before. Press Continue to try again.",
         },
         tools: ToolsCopy {
             title_light: "Connect your ",
@@ -608,6 +615,13 @@ mod tests {
         assert_ne!(copy.folders.lookup_unavailable, copy.join.invite_error);
         assert_ne!(copy.folders.lookup_unavailable, copy.folders.enroll_refused);
         assert!(!copy.folders.lookup_unavailable.contains("not an invite"));
+        // A refused change of folders on a second Continue: the daemon is
+        // running, so it never reads as the watcher failing to start.
+        assert_ne!(
+            copy.folders.settings_failed,
+            crate::onboarding_copy::WATCHER_START_FAILED
+        );
+        assert!(copy.folders.settings_failed.contains("Continue"));
     }
 
     /// near.ai signs in to the account an invite enrolls, and a new passkey
