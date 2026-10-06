@@ -599,7 +599,8 @@ fn default_settings() -> DaemonSettings {
 
 /// Keys whose value is a timestamp computed from the real wall clock at call
 /// time (`Utc::now()` inside the handler) rather than from anything this
-/// file authored, and so differs on every run. Everything else either comes
+/// file authored, and so differs on every run. Apart from the opaque account
+/// scope (normalized separately), everything else either comes
 /// from a literal this file chose or is derived from one by a pure function
 /// (`entry_id_for`, `project_id_for`), and is therefore already stable --
 /// except the history rows, which are authored against the real clock and
@@ -632,6 +633,17 @@ fn normalize(value: &mut Value, key: Option<&str>) {
             for v in items.iter_mut() {
                 normalize(v, key);
             }
+        }
+        // The account scope includes the freshly generated credential epoch and
+        // device identity. Preserve its wire type and validate its hash shape,
+        // but do not pin one throwaway store's opaque identity in every sample.
+        Value::String(s) if key == Some("account_scope") => {
+            let digest = s.strip_prefix("sha256:").expect("account scope is SHA-256");
+            assert!(
+                digest.len() == 64 && digest.bytes().all(|b| b.is_ascii_hexdigit()),
+                "account scope carries a complete SHA-256 digest"
+            );
+            *s = format!("sha256:{}", "0".repeat(64));
         }
         Value::String(s) if key.is_some_and(|k| VOLATILE_KEYS.contains(&k)) && !s.is_empty() => {
             *s = VOLATILE_TIMESTAMP_PLACEHOLDER.to_string();
@@ -1407,4 +1419,28 @@ fn first_diff_reports_a_field_added_or_removed_even_when_null() {
         first_diff(&json!({"a": null}), &json!({"a": null}), ""),
         None
     );
+}
+
+#[test]
+fn account_scope_normalization_preserves_presence_and_type() {
+    let mut scope = serde_json::json!({"account_scope": format!("sha256:{}", "a".repeat(64))});
+    normalize(&mut scope, None);
+    assert_eq!(scope["account_scope"], format!("sha256:{}", "0".repeat(64)));
+    for original in [
+        serde_json::json!({}),
+        serde_json::json!({"account_scope": null}),
+        serde_json::json!({"account_scope": 7}),
+    ] {
+        let mut value = original.clone();
+        normalize(&mut value, None);
+        assert_eq!(value, original);
+        assert_ne!(value, scope);
+    }
+}
+
+#[test]
+#[should_panic(expected = "account scope carries a complete SHA-256 digest")]
+fn account_scope_normalization_refuses_a_malformed_digest() {
+    let mut scope = serde_json::json!({"account_scope": "sha256:truncated"});
+    normalize(&mut scope, None);
 }

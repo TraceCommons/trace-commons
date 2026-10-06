@@ -72,6 +72,19 @@ final class SettingsSectionsTests: XCTestCase {
         XCTAssertEqual(drawn.count, Set(drawn).count, "a view is drawn by two sections: \(drawn)")
     }
 
+    /// Connection carries the account contribution card, and the card's
+    /// heading and controls are the core's words, not this shell's.
+    func test_connectionDrawsTheAccountContributionCardInCoreWords() throws {
+        let connection = try SettingsParityTests.text("Views/Settings/ConnectionSection.swift")
+        XCTAssertTrue(connection.contains("ContributionAccountCard()"), "Connection no longer draws the card")
+        for field in [
+            "accountContributionHeading", "accountContributionRefreshAction",
+            "accountContributionInviteCode", "accountContributionRedeemAction",
+        ] {
+            XCTAssertTrue(connection.contains("copy.\(field)"), "the card does not read \(field)")
+        }
+    }
+
     /// Startup no longer hides Notifications and Updates behind its row, and
     /// Private AI draws the route disclosure with its pointer.
     func test_notificationsAndUpdatesAreTheirOwnSections() throws {

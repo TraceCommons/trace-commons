@@ -80,6 +80,11 @@ pub(super) async fn handle_status(shared: &DaemonShared, req: &Request) -> Respo
     // before classifying HTTP, parsing or domain-validation outcomes.
     let rotated = call.rotated_token.is_some();
     if super::public_run::persist_rotated_token(shared, &session, call.rotated_token).is_err() {
+        // A rotation is refused, not lost, when the account was replaced in
+        // flight: that is the account changing, not the store failing.
+        if !original_account_still_current(shared, &config, &session, rotated) {
+            return Response::err(req.id, ERR_UNAVAILABLE, UNAVAILABLE);
+        }
         return Response::err(req.id, ERR_UNAVAILABLE, CREDENTIAL_UNAVAILABLE);
     }
     // A read without a rotation still needs to notice sign-out or identity
