@@ -670,9 +670,11 @@ final class MonitorNavigationTests: XCTestCase {
         XCTAssertTrue(model.status.answered)
     }
 
-    /// The launch request is made once, from the always-present label, and
-    /// never over a destination an earlier opener (an invite link, a
-    /// notification) already asked for.
+    /// The launch request is made once, from the always-present label. It
+    /// is made even when an earlier opener (a notification's Review on a
+    /// cold start) left a destination: the plain request no longer clears
+    /// it (`MainWindowNavigation.leave`), and skipping the request would
+    /// leave a fresh install on the gated Monitor with no first run.
     func test_theLaunchOpensOnceWithoutOverridingAnEarlierRequest() throws {
         let main = try Self.text("TraceCommonsAppMain.swift")
         XCTAssertTrue(main.contains("""
@@ -685,8 +687,10 @@ final class MonitorNavigationTests: XCTestCase {
         XCTAssertTrue(main.contains("""
                 guard opening != .wait, !openedAtLaunch else { return }
                 openedAtLaunch = true
-                guard navigation.pending == nil else { return }
-        """), "the launch must open once, and never over an earlier destination")
+                switch opening {
+        """), "the launch must open once")
+        XCTAssertFalse(main.contains("guard navigation.pending == nil else { return }"),
+                       "a waiting destination must not stop first run from opening at launch")
     }
 
     /// Home reads the core's Insights copy once (M4 of #1242's review):

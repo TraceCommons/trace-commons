@@ -356,18 +356,18 @@ private struct Launcher: View {
     }
 
     /// The launch's window (`LaunchRouting.launchOpening`), once, when the
-    /// core has said enough, and not over an opener that got there first:
-    /// an invite link or a notification's Review has already opened a
-    /// window, and its destination waits in `navigation.pending`. An
-    /// onboarded install opens nothing (R-44). First run opens activated,
-    /// alone: the Monitor SwiftUI may have opened at launch (macOS 14,
-    /// or an earlier plain request) is closed. A refused daemon opens the
-    /// Monitor at the refusal, without taking focus.
+    /// core has said enough. An onboarded install opens nothing (R-44).
+    /// First run opens activated, alone: the Monitor SwiftUI may have
+    /// opened at launch (macOS 14), or that an opener opened before the
+    /// core answered (a cold-start invite link or notification), is
+    /// closed. A destination such an opener left keeps waiting in
+    /// `navigation.pending` for first run's hand-off: this plain request
+    /// does not clear it (`MainWindowNavigation.leave`). A refused daemon
+    /// opens the Monitor at the refusal, without taking focus.
     @MainActor
     private func openAtLaunch(_ opening: LaunchRouting.LaunchOpening) {
         guard opening != .wait, !openedAtLaunch else { return }
         openedAtLaunch = true
-        guard navigation.pending == nil else { return }
         switch opening {
         case .firstRun:
             dismissWindow(id: WindowID.monitor)
