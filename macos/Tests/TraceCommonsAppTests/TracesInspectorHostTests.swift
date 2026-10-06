@@ -128,7 +128,7 @@ final class TracesInspectorHostTests: XCTestCase {
         XCTAssertLessThan(prompts.lowerBound, own.lowerBound, "the prompts sit above Inference's own inspector")
         XCTAssertFalse(inference.contains("TracesHealth.banners("), "the health banners are the Traces inspector's")
         XCTAssertFalse(inference.contains("TracesInspectorHost("))
-        XCTAssertFalse(pane.contains("SessionInspectorView("), "the session card is the host's to draw")
+        XCTAssertFalse(pane.contains("SessionReviewCard("), "the session card is the host's to draw")
         XCTAssertFalse(pane.contains("HomeSummaryInspector("), "Home's summary is the host's to draw")
         XCTAssertEqual(pane.components(separatedBy: "PrivateAIInspectorView(").count - 1, 1)
     }
@@ -273,7 +273,7 @@ final class TracesInspectorHostTests: XCTestCase {
         }
         let tree = try Self.text("Views/Monitor/TracesViews.swift")
         let treeView = try XCTUnwrap(tree.range(of: "struct TracesTreeView"))
-        let inspector = try XCTUnwrap(tree.range(of: "struct SessionInspectorView"))
+        let inspector = try XCTUnwrap(tree.range(of: "struct PreviewSlot"))
         let body = tree[treeView.lowerBound..<inspector.lowerBound]
         for gone in ["TracesHealth.banners(", "GlassHealthBanner(", "model.undo", "store.lastContributed",
                      "model.armingOffer", "CertificateSection("] {

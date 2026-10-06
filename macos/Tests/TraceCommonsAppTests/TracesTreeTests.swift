@@ -93,7 +93,7 @@ final class TracesTreeTests: XCTestCase {
         let client = SampleDaemonClient(.normalDay)
         let pending = try await client.listPending(projectId: nil)
         let entry = try XCTUnwrap(pending.first)
-        let keys = SessionInspectorView.rows(entry, nil, words: words).map(\.label)
+        let keys = SessionReviewCard.rows(entry, nil, words: words).map(\.label)
         XCTAssertEqual(keys, [words.tool, words.folder, words.started, words.length, words.prompts,
                               words.size, words.sends, words.marks, words.unsure])
         // A failure is said in the core's line, not the error's label.
@@ -526,12 +526,12 @@ final class TracesRowWordsTests: XCTestCase {
         let store = TracesStore(client: SampleDaemonClient(.empty))
         let words = try XCTUnwrap(store.words)
         let ineligible = try entry(#""eligibility":"ineligible_permanent""#)
-        let rows = SessionInspectorView.rows(
+        let rows = SessionReviewCard.rows(
             ineligible, nil, words: words,
             eligibility: store.eligibilityValue(ineligible), attestation: store.attestationValue(ineligible))
         XCTAssertTrue(rows.contains { $0.label == words.eligibility })
         XCTAssertTrue(rows.contains { $0.label == words.attestation })
-        let bare = SessionInspectorView.rows(ineligible, nil, words: words)
+        let bare = SessionReviewCard.rows(ineligible, nil, words: words)
         XCTAssertFalse(bare.contains { $0.label == words.eligibility })
     }
 

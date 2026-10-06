@@ -108,7 +108,7 @@ final class TracesParityTests: XCTestCase {
         XCTAssertLessThan(banners.lowerBound, prompts.lowerBound, "the banners precede the prompts and the selection")
         let tree = try Self.text("Views/Monitor/TracesViews.swift")
         let treeView = try XCTUnwrap(tree.range(of: "struct TracesTreeView"))
-        let inspector = try XCTUnwrap(tree.range(of: "struct SessionInspectorView"))
+        let inspector = try XCTUnwrap(tree.range(of: "struct PreviewSlot"))
         let treeBody = tree[treeView.lowerBound..<inspector.lowerBound]
         let failed = try XCTUnwrap(treeBody.range(of: "if case .failed(let error) = store.phase"))
         let spinner = try XCTUnwrap(treeBody.range(of: "ProgressView()"))
@@ -338,13 +338,14 @@ final class TracesParityTests: XCTestCase {
     func test_offersAndUndoLiveAtTheTopOfTheInspector() throws {
         let tree = try Self.text("Views/Monitor/TracesViews.swift")
         let treeView = try XCTUnwrap(tree.range(of: "struct TracesTreeView"))
-        let inspector = try XCTUnwrap(tree.range(of: "struct SessionInspectorView"))
+        let inspector = try XCTUnwrap(tree.range(of: "struct PreviewSlot"))
         XCTAssertFalse(tree[treeView.lowerBound..<inspector.lowerBound].contains("model.undo"))
         XCTAssertTrue(tree.contains("Text(QueueLegacyWords.nothingWaiting)"))
         XCTAssertTrue(tree.contains("Text(QueueLegacyWords.nothingWaitingDetail)"))
         // A refused undo is said beside it, by the one helper the card
         // shares.
-        XCTAssertTrue(tree.contains("TracesRefusal(store: store, entryId: entry.entryId)"))
+        XCTAssertTrue(try Self.text("Views/Monitor/SessionReviewCard.swift")
+            .contains("TracesRefusal(store: store, entryId: entry.entryId)"))
 
         let prompts = try Self.text("Views/Monitor/InspectorPrompts.swift")
         let offers = try Self.text("Views/Monitor/TracesOffers.swift")
@@ -541,10 +542,9 @@ final class TracesParityTests: XCTestCase {
     /// the surviving secret, the scrubbing caption, the subagent line, and
     /// Look inside opening the preview sheet for this session only.
     func test_theInspectorSaysWhatTheQueueCardSaid() throws {
-        let tree = try Self.text("Views/Monitor/TracesViews.swift")
-        let inspector = try XCTUnwrap(tree.range(of: "struct SessionInspectorView"))
-        let end = try XCTUnwrap(tree.range(of: "struct PreviewSlot", range: inspector.upperBound..<tree.endIndex))
-        let body = tree[inspector.lowerBound..<end.lowerBound]
+        let card = try Self.text("Views/Monitor/SessionReviewCard.swift")
+        let inspector = try XCTUnwrap(card.range(of: "struct SessionReviewCard: View"))
+        let body = card[inspector.lowerBound...]
         for needle in ["TracesStore.survivorLine(summary)", "GlassStatusLabel(survivor, status: .ask)",
                        "RedactionLabels.removedTotal(redactions)",
                        "ScrubbingCaveat.rowLine(redactionCount: removed)",
@@ -554,15 +554,15 @@ final class TracesParityTests: XCTestCase {
                        "PreviewSheet(entry: $0)", "@EnvironmentObject private var model: AppModel",
                        #"ProcessInfo.processInfo.environment["TRACE_COMMONS_DEMO_PREVIEW"] == "1","#,
                        ".onChange(of: model.awaitingDecision.count)", "previewing == nil,"] {
-            XCTAssertTrue(body.contains(needle), "SessionInspectorView lacks \(needle)")
+            XCTAssertTrue(body.contains(needle), "SessionReviewCard lacks \(needle)")
         }
         // Look inside is absent, not disabled, when the legacy queue does not
         // hold this session: the guard and the button are one needle.
         XCTAssertTrue(body.contains("""
-                                if let legacy = QueueEntryBridge.legacyEntry(for: entry.entryId, in: model.awaitingDecision) {
-                                    Button(QueueLegacyWords.lookInside) { previewing = legacy }
-                                        .buttonStyle(GlassButtonStyle(.glass))
-                                }
+                        if let legacy = QueueEntryBridge.legacyEntry(for: entry.entryId, in: model.awaitingDecision) {
+                            Button(review.lookInside) { previewing = legacy }
+                                .buttonStyle(GlassButtonStyle(.glass))
+                        }
         """), "Look inside must be drawn only inside the legacyEntry guard")
         // The sheet and the demo hook hang off the always-present container,
         // not the selected-session branch.

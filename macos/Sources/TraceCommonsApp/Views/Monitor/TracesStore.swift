@@ -63,6 +63,17 @@ final class TracesStore {
     /// every redraw. Without them Contribute stays disarmed: the shell never
     /// words consent itself.
     let consent: ConsentCopy? = TCConsentCopy.copyJSON().flatMap(ConsentCopy.decode(fromJSON:))
+    /// The review card's verdict and correction words, and the longest
+    /// correction the daemon accepts, from the core's disclosure bundle
+    /// (`tc_contributor_disclosure_copy_json`). Without them the card draws
+    /// no verdict and Contribute stays disarmed.
+    let disclosure: ContributorDisclosureCopy? =
+        ContributorDisclosureCopy.decode(fromJSON: TCCoreCopy.contributorDisclosureCopyJSON())
+    /// The session whose last Contribute the daemon refused because its
+    /// correction looked like it held a credential. Nothing was sent; the
+    /// card says the core's headline and body for it, in place of the
+    /// generic refusal, until the next action on that session.
+    private(set) var correctionRefused: String?
 
     /// A Contribute the core took, while its hold lets it be taken back:
     /// the core's toast for it, and whether Undo (`cancel`) is offered.
@@ -355,11 +366,18 @@ final class TracesStore {
 
     /// One review action on one session, then a reload. Nothing is applied
     /// optimistically: the tree redraws from the core's answer.
-    func perform(_ action: ReviewAction, on entryId: String) async {
+    ///
+    /// `verdict` and `correction` go with `.contribute` only: the review
+    /// card's answer to the outcome question, and what it wrote under
+    /// Partly or Failed (nil sends no key, never an empty one).
+    func perform(
+        _ action: ReviewAction, on entryId: String, verdict: ContributorVerdict? = nil, correction: String? = nil
+    ) async {
         guard !acting.contains(entryId) else { return }
         acting.insert(entryId)
         defer { acting.remove(entryId) }
         actionError = nil
+        if correctionRefused == entryId { correctionRefused = nil }
         do {
             let client = try attached()
             switch action {
@@ -367,7 +385,7 @@ final class TracesStore {
                 // The core's answer is kept, not thrown away: its toast, and
                 // the hold Undo can still reach. A skipped approve throws
                 // `notApproved` and is said as a refusal, never as success.
-                let response = try await client.approve(entryId: entryId)
+                let response = try await client.approve(entryId: entryId, verdict: verdict, correction: correction)
                 lastContributed = Contributed(entryId: entryId, toast: response.toast)
                 // One undo slot: a single-session contribute ends the folder's undo.
                 lastContributedFolder = nil
@@ -391,6 +409,13 @@ final class TracesStore {
             // A core that did not answer is the tab's state, and its last
             // count is no longer known.
             if case .unreachable = error { lost() }
+            // A credential in the correction is the one refusal the
+            // contributor caused and can fix: said in its own words, not
+            // as the generic refusal.
+            if action == .contribute, error == .notApproved(reasonLabel: CorrectionCopy.credentialRefusalLabel) {
+                correctionRefused = entryId
+                return
+            }
             actionError = (entryId, error)
             return
         }

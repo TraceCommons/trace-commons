@@ -63,6 +63,8 @@ final class GlassSurfaceRulesTests: XCTestCase {
         "Views/Monitor/InspectorPrompts.swift",
         // Ron's summary inspector (#1146, Task 4 of #1241).
         "Views/Monitor/SummaryInspector.swift",
+        // Ron's session review card (#1146, Task 6 of #1241).
+        "Views/Monitor/SessionReviewCard.swift",
     ]
 
     static func text(_ rel: String) throws -> String {

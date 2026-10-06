@@ -55,7 +55,7 @@ struct TracesInspectorHost: View {
             case .history(let row):
                 HistoryDetailInspector(row: row)
             case .session(let entry):
-                SessionInspectorView(store: traces, entry: entry)
+                SessionReviewCard(store: traces, entry: entry)
             case .folder(let folder):
                 FolderInspector(store: traces, folder: folder)
             case .summary:
