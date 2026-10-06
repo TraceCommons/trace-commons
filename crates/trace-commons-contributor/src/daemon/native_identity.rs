@@ -198,9 +198,16 @@ pub(super) async fn authenticated(
     } else if commons_credentials::snapshot(&shared.store, Kind::Account)? != session.snapshot {
         bail!("account-session-changed");
     }
-    response
-        .result
-        .map_err(|_| anyhow!("account-request-refused"))
+    response.result.map_err(|error| {
+        // The one server refusal on these routes a shell words on its own:
+        // an enrolment whose near.ai login is not the one this account is
+        // bound to. It names no account, and nothing was written.
+        if error.server_label() == Some("near_ai_account_mismatch") {
+            anyhow!("account-enrol-mismatch")
+        } else {
+            anyhow!("account-request-refused")
+        }
+    })
 }
 
 fn normalize_options(action: Action, start: &Value) -> Result<Value> {
@@ -718,26 +725,7 @@ pub(super) async fn handle(shared: &DaemonShared, req: &Request) -> Response {
                     json!({"state":"unknown","passkey_count":null,"near_ai_connected":null}),
                 );
             }
-            let label = match error.to_string().as_str() {
-                "passkey-invalid" => "passkey-invalid",
-                "passkey-busy" => "passkey-busy",
-                "passkey-start-refused" => "passkey-start-refused",
-                "passkey-finish-refused" => "passkey-finish-refused",
-                "passkey-ceremony-expired" => "passkey-ceremony-expired",
-                "account-session-required" => "account-session-required",
-                "account-session-changed" => "account-session-changed",
-                "account-origin-required" => "account-origin-required",
-                "account-origin-refused" => "account-origin-refused",
-                "account-enrollment-required" => "account-enrollment-required",
-                "account-sign-in-refused" => "account-sign-in-refused",
-                "account-request-refused" => "account-request-refused",
-                "account-already-enrolled" => "account-already-enrolled",
-                "account-enrollment-mismatch" => "account-enrollment-mismatch",
-                "account-bind-invalid" => "account-bind-invalid",
-                "account-bind-refused" => "account-bind-refused",
-                "near_ai_enroll_no_session" => "near_ai_enroll_no_session",
-                _ => "account-unavailable",
-            };
+            let label = ipc_label(&error.to_string());
             Response::err(
                 req.id,
                 if label == "passkey-invalid" {
@@ -748,6 +736,33 @@ pub(super) async fn handle(shared: &DaemonShared, req: &Request) -> Response {
                 label,
             )
         }
+    }
+}
+
+/// The label an identity call answers with: one of this module's own, or
+/// `account-unavailable`. An error string from a transport or a remote body is
+/// never forwarded.
+fn ipc_label(error: &str) -> &'static str {
+    match error {
+        "passkey-invalid" => "passkey-invalid",
+        "passkey-busy" => "passkey-busy",
+        "passkey-start-refused" => "passkey-start-refused",
+        "passkey-finish-refused" => "passkey-finish-refused",
+        "passkey-ceremony-expired" => "passkey-ceremony-expired",
+        "account-session-required" => "account-session-required",
+        "account-session-changed" => "account-session-changed",
+        "account-origin-required" => "account-origin-required",
+        "account-origin-refused" => "account-origin-refused",
+        "account-enrollment-required" => "account-enrollment-required",
+        "account-sign-in-refused" => "account-sign-in-refused",
+        "account-request-refused" => "account-request-refused",
+        "account-already-enrolled" => "account-already-enrolled",
+        "account-enrollment-mismatch" => "account-enrollment-mismatch",
+        "account-bind-invalid" => "account-bind-invalid",
+        "account-bind-refused" => "account-bind-refused",
+        "account-enrol-mismatch" => "account-enrol-mismatch",
+        "near_ai_enroll_no_session" => "near_ai_enroll_no_session",
+        _ => "account-unavailable",
     }
 }
 
