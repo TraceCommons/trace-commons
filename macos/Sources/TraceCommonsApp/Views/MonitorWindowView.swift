@@ -6,8 +6,9 @@ import TCShellCore
 
 /// The glass monitor window (R5 of #1173): the three-pane shell the native
 /// screens are built into. The main pane holds the tabs and is always shown;
-/// the map and the inspector hide independently (and the map below 1100pt),
-/// and the tab and both preferences are restored per window.
+/// the map and the inspector hide independently, each growing or shrinking
+/// the window on its right (`GlassPaneLayout`), and the tab and every
+/// preference are restored per window.
 ///
 /// Debug builds only, until the screens it frames (R6 onward) match the
 /// design. The shipping window stays `MainWindowView` until then (R15).
@@ -42,10 +43,17 @@ struct MonitorWindowView: View {
 
     @SceneStorage("monitor.tab") private var tab: Tab = .home
     @SceneStorage("monitor.mapTab") private var mapTab: MapTab = .traces
-    /// The person's preferences. The map is also hidden below 1100pt
-    /// without touching this, so widening the window brings it back.
+    /// The person's preferences.
     @SceneStorage("monitor.showsMap") private var showsMap = true
     @SceneStorage("monitor.showsInspector") private var showsInspector = true
+    /// The Traces graph footer (the toolbar's Graph), on by default as #1146.
+    @SceneStorage("monitor.showsGraph") private var showsGraph = true
+    /// The View menu's "Show ignored folders"; hidden by default, as #1146.
+    @SceneStorage("monitor.showsIgnored") private var showsIgnored = false
+    /// The binoculars: the map shows only the selected session's tool.
+    @State private var mapFocus = false
+    /// What asked for the inspector last time (`InspectorDemand`).
+    @State private var lastDemand: Set<String> = []
     /// The selected session's entry id; empty for none.
     @SceneStorage("monitor.selectedSession") private var selectedSession = ""
     /// Home's page: the overview or History, restored per window.
@@ -97,9 +105,9 @@ struct MonitorWindowView: View {
         guard let set = SampleDaemonClient.SampleSet(rawValue: name) else { return (.normalDay, true) }
         return (set, false)
     }
-    /// False until this window has seeded the two preferences from its
-    /// width (map from 1100pt, inspector from 900pt). After that the
-    /// window restores whatever the person chose.
+    /// False until this window has seeded the two preferences from the
+    /// room its screen has (map from 1100pt, inspector from 900pt). After
+    /// that the window restores whatever the person chose.
     @SceneStorage("monitor.panesSeeded") private var panesSeeded = false
 
     var body: some View {
@@ -115,7 +123,9 @@ struct MonitorWindowView: View {
                 tracesDot: traces.shield == .attention ? .ask : nil,
                 tracesDescription: Self.tracesDescription(
                     traces.decisionsOwed, shield: traces.shield, secondLook: traces.words?.secondLookWaiting),
-                showsMap: $showsMap, showsInspector: $showsInspector,
+                showsMap: $showsMap, showsInspector: $showsInspector, showsGraph: $showsGraph,
+                showsIgnored: $showsIgnored,
+                breadcrumb: Self.breadcrumb(tab: tab, homePage: homePage, back: { homePage = .overview }),
                 onSettings: { openSettings() }
             ) {
                 switch tab {
@@ -133,13 +143,21 @@ struct MonitorWindowView: View {
                         // details are, as a session's Review does.
                         selection: Binding(
                             get: { selectedHistory },
-                            set: { Self.review($0, selection: &selectedHistory, showsInspector: &showsInspector) }))
+                            set: { Self.review($0, selection: &selectedHistory, showsInspector: &showsInspector) }),
+                        openTraces: { tab = .traces })
+                }
+            } footer: {
+                // Shared over kept under the tree (#1146 `GraphFooter`).
+                if tab == .traces && showsGraph {
+                    TracesGraphFooter(
+                        history: home.history, sessions: traces.tree.allSessions, tool: selectedTool,
+                        focus: $mapFocus, onFocus: focusMap)
                 }
             }
         } map: {
             MonitorMapPane(
                 mapTab: $mapTab, privateAILabel: model.privateInferenceCopy?.destination,
-                traces: traces, inference: inference,
+                traces: traces, inference: inference, focusTool: mapFocus ? selectedTool?.rawValue : nil,
                 sentence: { Self.rowSentence($0, copy: model.privateInferenceCopy, calls: model.harnessCalls) })
         } inspector: {
             GlassPane {
@@ -162,6 +180,18 @@ struct MonitorWindowView: View {
             }
         }
         .glassWindow()
+        // The undo window, a folder's Submit all and the core's offers open
+        // the inspector when they appear, so none runs out of sight (#1146
+        // `useInspectorDemand`); they also stay above the tree.
+        .onChange(of: inspectorDemand) { _, current in
+            if InspectorDemand.opens(previous: lastDemand, current: current) { showsInspector = true }
+            lastDemand = current
+        }
+        .onAppear {
+            lastDemand = inspectorDemand
+            traces.showsIgnored = showsIgnored
+        }
+        .onChange(of: showsIgnored) { _, shows in traces.showsIgnored = shows }
         // The app's live client, re-attached whenever the daemon restarts;
         // with none, each store draws the core as down.
         .task(id: model.liveData.map(ObjectIdentifier.init)) {
@@ -206,6 +236,41 @@ struct MonitorWindowView: View {
         return parts.isEmpty ? nil : parts.joined(separator: ", ")
     }
 
+    /// What asks for the inspector now (`InspectorDemand`).
+    private var inspectorDemand: Set<String> {
+        InspectorDemand.keys(
+            approvalUndo: model.undo?.entryIDs, contributed: traces.lastContributed?.entryId, kept: traces.lastKept,
+            contributedFolder: traces.lastContributedFolder?.projectId, submittingFolder: traces.submittingFolder,
+            privateAIOffer: model.showsPrivateInferenceOffer, armingOffer: model.armingOffer?.projectId)
+    }
+
+    /// The selected session's tool, when it sits under one: what the graph
+    /// counts and the binoculars focus the map on.
+    private var selectedTool: SourceKind? {
+        TracesTreeView.path(to: selectedSession, in: traces.tree)?.tool.flatMap(SourceKind.init(rawValue:))
+    }
+
+    /// The binoculars: focus the map on the selected tool, or back to the
+    /// whole map. A hidden map is shown, on its Traces view.
+    private func focusMap() {
+        mapFocus.toggle()
+        mapTab = .traces
+        if !showsMap { showsMap = true }
+    }
+
+    /// The breadcrumb under the tabs (#1146 `MonitorTabs`): Home's History
+    /// and Missions pages, with Home to go back to. Nil elsewhere.
+    static func breadcrumb(
+        tab: Tab, homePage: HomeTabView.Page, back: @escaping () -> Void
+    ) -> [GlassCrumb]? {
+        guard tab == .home else { return nil }
+        switch homePage {
+        case .overview: return nil
+        case .history: return [GlassCrumb(Tab.home.title, action: back), GlassCrumb(MonitorWords.history)]
+        case .missions: return [GlassCrumb(Tab.home.title, action: back), GlassCrumb(MonitorWords.missions)]
+        }
+    }
+
     /// The selected session, while it is still in the tree.
     private var selectedEntry: DaemonData.QueueEntry? {
         traces.tree.allSessions.first { $0.entryId == selectedSession }
@@ -225,7 +290,8 @@ struct MonitorWindowView: View {
         showsInspector = true
     }
 
-    /// The first time this window lays out, open the panes its width suits.
+    /// The first time this window is shown, open the panes its screen has
+    /// room for.
     private func seedPanes(windowWidth: CGFloat) {
         guard !panesSeeded else { return }
         let seed = GlassPaneLayout.firstLaunch(windowWidth: windowWidth)
@@ -253,10 +319,11 @@ struct MonitorWindowView: View {
 }
 
 /// The main pane, always shown: clearance for the traffic lights, the
-/// toolbar capsule (map and inspector toggles) and the round Settings
-/// button on the top row, then the tabs. The tabs' screens are R6 (Traces),
-/// R8 (Inference) and R9 (Home).
-private struct MonitorMainPane<Content: View>: View {
+/// toolbar capsule (View menu, Graph, Map, Inspector) and the round Settings
+/// button on the top row (#1146 `monitor-toolbar.tsx`), then the tabs, the
+/// breadcrumb for Home's pages, the tab's screen and, on Traces, the graph
+/// footer. The tabs' screens are R6 (Traces), R8 (Inference) and R9 (Home).
+private struct MonitorMainPane<Content: View, Footer: View>: View {
     @Binding var tab: MonitorWindowView.Tab
     let inferenceDot: GlassStatus?
     let inferenceDescription: String?
@@ -266,11 +333,14 @@ private struct MonitorMainPane<Content: View>: View {
     let tracesDescription: String?
     @Binding var showsMap: Bool
     @Binding var showsInspector: Bool
+    @Binding var showsGraph: Bool
+    @Binding var showsIgnored: Bool
+    /// Home's History or Missions trail; nil for no breadcrumb.
+    let breadcrumb: [GlassCrumb]?
     let onSettings: () -> Void
     @ViewBuilder let content: () -> Content
-    /// The window is too narrow for the map: the toggle shows it hidden and
-    /// cannot show it, and widening the window brings back the preference.
-    @Environment(\.glassMapCompacted) private var mapCompacted
+    @ViewBuilder let footer: () -> Footer
+    @State private var viewMenu = false
     /// Half the unified title bar's 52pt height.
     static var lightsCentre: CGFloat { 26 }
 
@@ -280,10 +350,15 @@ private struct MonitorMainPane<Content: View>: View {
                 HStack(spacing: GlassTokens.Space.s4) {
                     Spacer(minLength: 0)
                     GlassToolbarGroup {
-                        GlassToolbarButton(String(localized: "Map", comment: "Map pane toggle"), systemImage: "map", pressed: showsMap && !mapCompacted) {
+                        GlassToolbarButton(MonitorShellWords.view, systemImage: "line.3.horizontal", expanded: viewMenu) {
+                            viewMenu.toggle()
+                        }
+                        GlassToolbarButton(MonitorShellWords.graph, systemImage: "chart.bar.xaxis", pressed: showsGraph) {
+                            showsGraph.toggle()
+                        }
+                        GlassToolbarButton(String(localized: "Map", comment: "Map pane toggle"), systemImage: "map", pressed: showsMap) {
                             showsMap.toggle()
                         }
-                        .disabled(mapCompacted)
                         GlassToolbarButton(String(localized: "Inspector", comment: "Inspector pane toggle"), systemImage: "sidebar.right", pressed: showsInspector) {
                             showsInspector.toggle()
                         }
@@ -297,6 +372,21 @@ private struct MonitorMainPane<Content: View>: View {
                 // title bar centres 26pt below the window's top edge.
                 .padding(.top, Self.lightsCentre - GlassTokens.Space.windowPadding - GlassTokens.Space.panePadding
                     - GlassTokens.Size.controlLarge / 2)
+                // The View menu drops from the toolbar over the tabs.
+                .overlay(alignment: .topTrailing) {
+                    if viewMenu {
+                        GlassMenu(onDismiss: { viewMenu = false }) {
+                            GlassMenuItem(MonitorShellWords.showIgnoredFolders, checked: showsIgnored) {
+                                showsIgnored.toggle()
+                                viewMenu = false
+                            }
+                        }
+                        .fixedSize()
+                        .padding(.top, GlassTokens.Size.controlLarge + GlassTokens.Space.s2)
+                        .padding(.trailing, GlassTokens.Size.controlLarge + GlassTokens.Space.s4)
+                    }
+                }
+                .zIndex(1)
                 // The same notices the main window puts above everything,
                 // here in the pane that is always shown, so a void or a gate
                 // hold during monitor use is told whatever the map and the
@@ -313,8 +403,13 @@ private struct MonitorMainPane<Content: View>: View {
                             accessibilityValue: item == .inference
                                 ? inferenceDescription : item == .traces ? tracesDescription : nil)
                     })
+                if let breadcrumb {
+                    GlassBreadcrumb(breadcrumb, backLabel: MonitorWindowView.Tab.home.title,
+                                    onBack: breadcrumb.first?.action)
+                }
                 content()
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                footer()
             }
         }
     }
@@ -329,6 +424,8 @@ private struct MonitorMapPane: View {
     let privateAILabel: String?
     let traces: TracesStore
     let inference: InferenceStore
+    /// The tool the binoculars focus the Traces view on; nil for all.
+    let focusTool: String?
     /// The core's sentence for a tool's Private AI state.
     let sentence: (HarnessRow) -> String?
     @EnvironmentObject private var model: AppModel
@@ -358,7 +455,7 @@ private struct MonitorMapPane: View {
         switch shownTab {
         case .traces:
             FlowMapView(
-                scene: .traces(traces.tree, gate: .init(state: tracesState, status: traces.status, destinations: traces.destinations)), legend: [.autoUpload, .ask, .ignore], zoomable: true,
+                scene: .traces(traces.tree.focused(on: focusTool), gate: .init(state: tracesState, status: traces.status, destinations: traces.destinations)), legend: [.autoUpload, .ask, .ignore], zoomable: true,
                 accessibilityName: MonitorWindowView.Tab.traces.title, state: tracesState)
         case .privateAI:
             if let harnesses = inference.harnesses, let privateAILabel {

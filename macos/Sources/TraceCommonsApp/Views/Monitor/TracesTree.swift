@@ -16,7 +16,8 @@ import TCShellCore
 ///   does not yet say which tool a folder belongs to (K11 of #1173); until it
 ///   does, a folder with no waiting session cannot be placed and is listed
 ///   on its own after the tools.
-/// - Ignored folders are left out.
+/// - Ignored folders are left out, unless the View menu's "Show ignored
+///   folders" asks for them (#1146 `showIgnored`, default hidden).
 /// - The unresolvable bucket (sessions whose folder the core cannot name) is
 ///   drawn under its shared name, never its `unknown-project` slug, and is
 ///   never offered automatic.
@@ -95,7 +96,8 @@ struct TracesTree: Equatable {
         entries: [DaemonData.QueueEntry],
         projects: [ProjectRow],
         settings: DaemonData.Settings?,
-        scansWhenUnset: Set<SourceKind>
+        scansWhenUnset: Set<SourceKind>,
+        showsIgnored: Bool = false
     ) -> TracesTree {
         var folders: [String: FolderNode] = [:]
         var order: [String] = []
@@ -122,7 +124,7 @@ struct TracesTree: Equatable {
         var byTool: [SourceKind: [FolderNode]] = [:]
         var unplaced: [FolderNode] = []
         for id in order {
-            guard var node = folders[id], node.mode != .ignore else { continue }
+            guard var node = folders[id], showsIgnored || node.mode != .ignore else { continue }
             node.sessions.sort { ($0.startedAt ?? .distantPast) > ($1.startedAt ?? .distantPast) }
             if let kind = majorityTool(node.sessions) {
                 byTool[kind, default: []].append(node)
@@ -168,6 +170,14 @@ struct TracesTree: Equatable {
         case .cline: return settings.clineSourceMode
         case .opencode: return settings.opencodeSourceMode
         }
+    }
+
+    /// The tree with only one tool, for the map's focus on it (the graph
+    /// footer's binoculars); the whole tree when no tool is named or the
+    /// tool is not in it.
+    func focused(on toolId: String?) -> TracesTree {
+        guard let toolId, tools.contains(where: { $0.id == toolId }) else { return self }
+        return TracesTree(tools: tools.filter { $0.id == toolId }, unplaced: [])
     }
 
     /// Every session in the tree, in drawing order.

@@ -25,12 +25,17 @@ struct HomeTabView: View {
     /// The selected History row's submission id; empty for none. The
     /// inspector shows its details.
     @Binding var selection: String
+    /// The status card's "Open Traces" link: switches the window's tab.
+    var openTraces: () -> Void = {}
 
     var body: some View {
+        // History and Missions are reached from here and lead back here; the
+        // breadcrumb that says so is the shell's, under the tabs
+        // (`MonitorWindowView.breadcrumb`), as #1146 draws it.
         switch page {
         case .overview:
             HomeOverview(
-                store: store, traces: traces, statusLabel: statusLabel,
+                store: store, traces: traces, statusLabel: statusLabel, openTraces: openTraces,
                 openHistory: { page = .history }, openMissions: { page = .missions })
         case .history:
             HistoryPage(store: store, statusLabel: statusLabel, selection: $selection, back: { page = .overview })
@@ -44,6 +49,7 @@ private struct HomeOverview: View {
     let store: HomeStore
     let traces: TracesStore
     let statusLabel: (String?) -> String?
+    let openTraces: () -> Void
     let openHistory: () -> Void
     let openMissions: () -> Void
 
@@ -51,10 +57,7 @@ private struct HomeOverview: View {
         ScrollView {
             VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
                 watching
-                HStack(spacing: GlassTokens.Space.s3) {
-                    GlassLegendCell(MonitorWords.waiting, value: HomeFormat.count(store.status?.decisionsOwed), status: .ask)
-                    GlassLegendCell(MonitorWords.contributed, value: HomeFormat.count(store.rollup?.allTime?.accepted), status: .shared)
-                }
+                stats
                 GlassEyebrowCard(MonitorWords.missions, action: openMissions) {
                     Image(systemName: "chevron.right")
                         .glassGlyph(10, weight: .semibold)
@@ -87,10 +90,53 @@ private struct HomeOverview: View {
         HomeFormat.watchingState(store)
     }
 
+    /// Waiting, contributed and pending credit (#1146 `home-view.tsx`), each
+    /// from the core: waiting is decisions owed, contributed the rollup's
+    /// accepted count. Pending credit is a figure only beside the commons'
+    /// statement of what it waits on (D6), drawn under the tiles; without
+    /// that statement it is a dash, never a bare number that reads as owed.
+    private var stats: some View {
+        let condition = HomeFormat.pendingCondition(store.credit)
+        return VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
+            HStack(spacing: GlassTokens.Space.s3) {
+                HomeStatTile(label: MonitorWords.waiting, value: HomeFormat.count(store.status?.decisionsOwed))
+                HomeStatTile(label: MonitorWords.contributed, value: HomeFormat.count(store.rollup?.allTime?.accepted))
+                HomeStatTile(label: HomeFormat.creditPendingWord,
+                             value: HomeFormat.pendingFigure(store.rollup?.creditPending, condition: condition))
+            }
+            if let condition {
+                Text(condition)
+                    .glassType(GlassTokens.TypeScale.caption)
+                    .foregroundStyle(GlassColor.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
     private var watching: some View {
         let state = state
         return GlassCard {
             HStack(spacing: GlassTokens.Space.s4) {
+                status(state)
+                    .accessibilityElement(children: .combine)
+                Spacer(minLength: 0)
+                // The way into the tree, as #1146's status card has it.
+                Button(action: openTraces) {
+                    HStack(spacing: GlassTokens.Space.s1) {
+                        Text(HomeFormat.openTracesWord)
+                        Image(systemName: "chevron.right").glassGlyph(9, weight: .semibold).accessibilityHidden(true)
+                    }
+                }
+                .buttonStyle(GlassButtonStyle(.link))
+            }
+            .glassType(GlassTokens.TypeScale.bodyStrong)
+            .foregroundStyle(GlassColor.textPrimary)
+        }
+    }
+
+    @ViewBuilder
+    private func status(_ state: ScreenState) -> some View {
+        HStack(spacing: GlassTokens.Space.s4) {
                 switch state {
                 case .ready:
                     switch HomeFormat.watching(store.status, destinations: store.destinations) {
@@ -114,12 +160,7 @@ private struct HomeOverview: View {
                     // No dot: unknown is never drawn as on, or as off.
                     Text("—").accessibilityLabel(MonitorWords.unknown)
                 }
-                Spacer(minLength: 0)
-            }
-            .glassType(GlassTokens.TypeScale.bodyStrong)
-            .foregroundStyle(GlassColor.textPrimary)
         }
-        .accessibilityElement(children: .combine)
     }
 
     @ViewBuilder
@@ -155,9 +196,6 @@ private struct HistoryPage: View {
     // view, not the one it had at launch (the legacy screen's rule).
     var body: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
-            GlassBreadcrumb(
-                [GlassCrumb(MonitorWindowView.Tab.home.title, action: back), GlassCrumb(MonitorWords.history)],
-                backLabel: MonitorWindowView.Tab.home.title, onBack: back)
             ScrollView {
                 VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
                     if let failure = store.failures["list_history"] {
@@ -184,13 +222,15 @@ private struct HistoryPage: View {
                             }
                         }
                     } else if store.failures["list_history"] == nil {
-                        ProgressView().controlSize(.small).frame(maxWidth: .infinity)
+                        GlassSpinner(MonitorWords.history).frame(maxWidth: .infinity)
                     }
                 }
             }
             .scrollIndicators(.never)
         }
         .onAppear { model.refreshHistory() }
+        // Escape goes back to Home, as the shell's breadcrumb does.
+        .onExitCommand(perform: back)
     }
 
     /// Held for review, never as rejected: the core's sentence, no promised
@@ -348,6 +388,31 @@ struct HomeSummaryInspector: View {
     }
 }
 
+/// One of Home's three counts: its word over its figure.
+private struct HomeStatTile: View {
+    let label: String
+    let value: String
+
+    var body: some View {
+        GlassCard(quiet: true) {
+            VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
+                Text(label)
+                    .glassType(GlassTokens.TypeScale.eyebrow)
+                    .foregroundStyle(GlassColor.textTertiary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+                Text(value)
+                    .glassType(GlassTokens.TypeScale.title)
+                    .monospacedDigit()
+                    .foregroundStyle(GlassColor.textPrimary)
+                    .lineLimit(1)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .accessibilityElement(children: .combine)
+    }
+}
+
 /// Formatting for Home and History. Pure, so the rules are tested.
 enum HomeFormat {
     /// A count, or a dash when the core did not say. Zero is a number.
@@ -357,6 +422,20 @@ enum HomeFormat {
 
     static func points(_ value: Double?) -> String {
         value.map { $0.formatted(.number.precision(.fractionLength(1))) } ?? "—"
+    }
+
+    /// Home's pending-credit tile: the figure only with the commons'
+    /// statement of what it waits on (D6), a dash otherwise.
+    static func pendingFigure(_ value: Double?, condition: String?) -> String {
+        condition == nil ? "—" : points(value)
+    }
+
+    static var creditPendingWord: String {
+        String(localized: "Credit pending", comment: "Home stat tile: pending credit")
+    }
+
+    static var openTracesWord: String {
+        String(localized: "Open Traces", comment: "Home status card: Traces tab link")
     }
 
     /// What pending credit waits on, in the commons' own words: the only
