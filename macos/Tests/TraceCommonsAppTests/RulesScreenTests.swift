@@ -265,6 +265,23 @@ final class RulesScreenTests: XCTestCase {
         XCTAssertEqual(RulesScreenLayout.offered([exported], state: state).map(\.projectId), ["p5"])
     }
 
+    /// Ron's review of #1235, item 13: the Rules picker shows its status
+    /// dots, in Ron's order -- Ask me on the ask colour, Automatic on the
+    /// on colour, Never on the off colour. Settings' picker is unchanged.
+    func test_theRulesPickerShowsItsStatusDots() throws {
+        let modes = try XCTUnwrap(ContributionModeCopy.decode(fromJSON: TCCoreCopy.contributionModeCopyJSON()))
+        let options = ProjectModeChoices.options(for: [.ask, .autoUpload, .ignore], copy: modes, dots: true)
+        XCTAssertEqual(options.map(\.value), [.ask, .autoUpload, .ignore])
+        XCTAssertEqual(options.map(\.dot), [.ask, .on, .off])
+        XCTAssertEqual(
+            ProjectModeChoices.options(for: [.ask, .autoUpload, .ignore], copy: modes).map(\.dot), [nil, nil, nil])
+        let screen = try String(
+            contentsOf: URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+                .deletingLastPathComponent().appendingPathComponent(
+                    "Sources/TraceCommonsApp/Views/FirstRun/RulesScreen.swift"), encoding: .utf8)
+        XCTAssertTrue(screen.contains("copy: modeCopy, dots: true)"))
+    }
+
     /// "{selected} of {total} selected" counts folders that are not Never.
     func test_theSummaryLeavesNeverFoldersOut() {
         let sessions = [session("a"), session("b"), session("c")]
