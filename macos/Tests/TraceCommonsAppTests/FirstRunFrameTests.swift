@@ -208,4 +208,35 @@ final class FirstRunFrameTests: XCTestCase {
         let inference = try Self.appSource("Views/Monitor/InferenceViews.swift")
         XCTAssertTrue(inference.contains(".frame(width: FirstRunProgress.paneWidth)"))
     }
+
+    /// Ron's review of #1235, item 15: the smaller visual details.
+    func test_theSmallerDetailsFollowRonsDesign() throws {
+        // The add-tool box: dashed border, a "+" tile, purple while dragged.
+        let tools = try Self.appSource("Views/FirstRun/ToolsScreen.swift")
+        XCTAssertTrue(tools.contains("GlassToolTile(.add, large: true)"))
+        XCTAssertTrue(tools.contains("dash: [4, 3]"))
+        XCTAssertTrue(tools.contains("GlassTokens.Color.purpleText"))
+        XCTAssertFalse(tools.contains(".opacity(dragging"))
+        // "Get {tool}": the small secondary button with the download icon.
+        let row = try Self.appSource("Views/FirstRun/ToolAnswerRow.swift")
+        XCTAssertTrue(row.contains("GlassButtonStyle(.secondary, small: true)"))
+        XCTAssertTrue(row.contains("systemImage: \"arrow.down.to.line\""))
+        // Start sharing shows a spinner while it runs.
+        let uses = try Self.appSource("Views/FirstRun/UsesScreen.swift")
+        XCTAssertTrue(uses.contains("busy: runner.isCommitting"))
+        let frame = try Self.source()
+        XCTAssertTrue(frame.contains("if footer.busy { GlassSpinner() }"))
+        // "required" is inline text in the on colour, not a tag.
+        XCTAssertFalse(uses.contains("GlassTag(copy.uses.required"))
+        XCTAssertTrue(uses.contains("Text(copy.uses.required)"))
+        XCTAssertTrue(uses.contains("GlassTokens.Color.statusOnText"))
+        // The Private AI switch is the settings style.
+        XCTAssertTrue(uses.contains("GlassToggleStyle(.settings, showsLabel: false)"))
+        // Join's bold sentence is in the primary text colour.
+        let join = try Self.appSource("Views/FirstRun/JoinScreen.swift")
+        XCTAssertTrue(join.contains("Text(copy.join.bodyEmphasis).bold().foregroundColor(GlassColor.textPrimary)"))
+        // Never rows on Rules are dimmed.
+        let rules = try Self.appSource("Views/FirstRun/RulesScreen.swift")
+        XCTAssertTrue(rules.contains(".opacity(GlassTokens.Opacity.rowOff)"))
+    }
 }

@@ -9,12 +9,16 @@ struct FirstRunFooter {
     let isEnabled: Bool
     /// The caption on the footer's leading side, when the screen has one.
     let note: String?
+    /// The action is running: the button carries a spinner (Ron's Start
+    /// sharing).
+    let busy: Bool
     let action: () -> Void
 
-    init(title: String, isEnabled: Bool, note: String? = nil, action: @escaping () -> Void) {
+    init(title: String, isEnabled: Bool, note: String? = nil, busy: Bool = false, action: @escaping () -> Void) {
         self.title = title
         self.isEnabled = isEnabled
         self.note = note
+        self.busy = busy
         self.action = action
     }
 }
@@ -170,7 +174,12 @@ struct FirstRunFrame<Header: View, Content: View>: View {
                     .foregroundStyle(GlassColor.textTertiary)
             }
             Spacer(minLength: 0)
-            Button(footer.title, action: footer.action)
+            Button(action: footer.action) {
+                HStack(spacing: GlassTokens.Space.s3) {
+                    if footer.busy { GlassSpinner() }
+                    Text(footer.title)
+                }
+            }
                 .buttonStyle(GlassButtonStyle(.primary))
                 .disabled(!footer.isEnabled)
                 .help(FirstRunFrameLayout.showsAnswerEveryTool(state, footer: footer) ? copy.frame.answerEveryTool : "")

@@ -271,6 +271,7 @@ struct UsesScreen: View {
                     runner.state, uses: copy.uses, requiredScope: required, grant: grant,
                     isCommitting: runner.isCommitting),
                 note: UsesScreenLayout.footerNote(copy.uses, state: runner.state, requiredScope: required),
+                busy: runner.isCommitting,
                 action: start)
         ) {
             FirstRunTitle(light: copy.uses.titleLight, bold: copy.uses.titleBold)
@@ -314,7 +315,10 @@ struct UsesScreen: View {
                         HStack(spacing: GlassTokens.Space.s4) {
                             Toggle(ScopeCopy.title(for: required.name, options: options), isOn: scope(required.name))
                                 .toggleStyle(GlassCheckboxStyle())
-                            GlassTag(copy.uses.required, tone: .on)
+                            // Ron's inline "required" in the on colour.
+                            Text(copy.uses.required)
+                                .glassType(GlassTokens.TypeScale.mono)
+                                .foregroundStyle(GlassTokens.Color.statusOnText.color)
                         }
                         caption(required.description)
                     }
@@ -421,7 +425,7 @@ struct UsesScreen: View {
                         get: { runner.state.privateAI && privateAI != nil },
                         set: { runner.state.privateAI = $0 })
                 )
-                .toggleStyle(GlassToggleStyle(.standard, showsLabel: false))
+                .toggleStyle(GlassToggleStyle(.settings, showsLabel: false))
                 .disabled(privateAI == nil)
             }
         }

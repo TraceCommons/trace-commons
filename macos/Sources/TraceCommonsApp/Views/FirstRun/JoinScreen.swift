@@ -347,7 +347,8 @@ struct JoinScreen: View {
     private var title: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
             FirstRunTitle(light: copy.join.titleLight, bold: copy.join.titleBold)
-            (Text(copy.join.body) + Text(" ") + Text(copy.join.bodyEmphasis).bold())
+            (Text(copy.join.body) + Text(" ")
+                + Text(copy.join.bodyEmphasis).bold().foregroundColor(GlassColor.textPrimary))
                 .glassType(GlassTokens.TypeScale.body)
                 .foregroundStyle(GlassColor.textSecondary)
         }

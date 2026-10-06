@@ -362,33 +362,42 @@ struct ToolsScreen: View {
         }
     }
 
-    /// Ron's add tile: click to pick a folder, or drop one on it.
+    /// Ron's add box (`ftux-add-tool`): a dashed border, a "+" tile, and the
+    /// purple border over a faint fill while a folder is dragged over it.
+    /// Click to pick a folder, or drop one on it.
     private var addTile: some View {
         Button {
             if let path = FolderPanel.choose() { describe(path) }
         } label: {
-            GlassCard {
-                VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
-                    HStack(spacing: GlassTokens.Space.s6) {
-                        GlassToolTile(.folder, large: true)
-                        VStack(alignment: .leading, spacing: 0) {
-                            Text(copy.tools.addTool)
-                                .glassType(GlassTokens.TypeScale.bodyStrong)
-                                .foregroundStyle(GlassColor.textPrimary)
-                            Text(copy.tools.addToolCaption)
-                                .glassType(GlassTokens.TypeScale.caption)
-                                .foregroundStyle(GlassColor.textTertiary)
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                    if refused {
-                        Text(ToolsScreenLayout.refusal(copy.tools))
+            VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
+                HStack(spacing: GlassTokens.Space.s6) {
+                    GlassToolTile(.add, large: true)
+                    VStack(alignment: .leading, spacing: 0) {
+                        Text(copy.tools.addTool)
+                            .glassType(GlassTokens.TypeScale.bodyStrong)
+                            .foregroundStyle(GlassColor.textPrimary)
+                        Text(copy.tools.addToolCaption)
                             .glassType(GlassTokens.TypeScale.caption)
-                            .foregroundStyle(GlassColor.textSecondary)
+                            .foregroundStyle(GlassColor.textTertiary)
                     }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                if refused {
+                    Text(ToolsScreenLayout.refusal(copy.tools))
+                        .glassType(GlassTokens.TypeScale.caption)
+                        .foregroundStyle(GlassColor.textSecondary)
                 }
             }
-            .opacity(dragging ? 0.7 : 1)
+            .padding(.vertical, GlassTokens.Space.cardPaddingVertical)
+            .padding(.horizontal, GlassTokens.Space.cardPaddingHorizontal)
+            .background(
+                RoundedRectangle(cornerRadius: GlassTokens.Radius.card, style: .continuous)
+                    .fill(dragging ? GlassTokens.Color.tintNeutral.color : .clear))
+            .overlay(
+                RoundedRectangle(cornerRadius: GlassTokens.Radius.card, style: .continuous)
+                    .strokeBorder(
+                        dragging ? GlassTokens.Color.purpleText.color : GlassColor.ink(0.28),
+                        style: StrokeStyle(lineWidth: 1, dash: [4, 3])))
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)

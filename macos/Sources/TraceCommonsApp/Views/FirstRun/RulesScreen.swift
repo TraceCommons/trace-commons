@@ -475,18 +475,21 @@ struct RulesScreen: View {
         let folder = RulesScreenLayout.folder(project)
         let rows = sessions[id] ?? []
         if RulesScreenLayout.rule(runner.state, for: project) == .ignore {
+            // Ron's dimmed Never row (`ftux-muted-row`): the list row's off
+            // opacity, over the secondary ink that still reads once faded.
             HStack(spacing: GlassTokens.Space.s4) {
                 GlassCheckMark(checked: false)
                 Text(folder)
                     .glassType(GlassTokens.TypeScale.mono)
-                    .foregroundStyle(GlassColor.textTertiary)
+                    .foregroundStyle(GlassColor.textSecondary)
                     .lineLimit(1)
                     .truncationMode(.middle)
                 Spacer(minLength: 0)
                 Text(FirstRunCopy.fill(copy.rules.neverCount, ["count": String(sessionCount(project) ?? rows.count)]))
                     .glassType(GlassTokens.TypeScale.caption)
-                    .foregroundStyle(GlassColor.textTertiary)
+                    .foregroundStyle(GlassColor.textSecondary)
             }
+            .opacity(GlassTokens.Opacity.rowOff)
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(FirstRunCopy.fill(copy.rules.neverLabel, ["folder": folder]))
         } else if refused.contains(id) {

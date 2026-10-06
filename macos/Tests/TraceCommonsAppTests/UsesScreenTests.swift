@@ -57,10 +57,10 @@ final class UsesScreenTests: XCTestCase {
         XCTAssertTrue(fresh.scopes.isEmpty)
         XCTAssertFalse(UsesScreenLayout.isTicked("debugging_evaluation", in: fresh))
 
-        // The row carries Ron's "required" tag, and nothing in the screen
+        // The row carries Ron's inline "required", and nothing in the screen
         // ticks a scope except the person's own toggle.
         let source = try Self.source()
-        XCTAssertTrue(source.contains("GlassTag(copy.uses.required"))
+        XCTAssertTrue(source.contains("Text(copy.uses.required)"))
         XCTAssertEqual(source.components(separatedBy: "scopes.insert(").count - 1, 1)
         XCTAssertFalse(source.contains("scopes = "))
 
