@@ -1,53 +1,52 @@
 import Foundation
 
-/// The words for arming a project -- setting it to contribute without asking.
+/// The words for arming a project -- setting it to contribute without
+/// asking -- decoded from `tc_arming_offer_copy_json`
+/// (`project_copy::arming_offer_copy`).
 ///
-/// Arming is allowed from the app, but never silently. It is the strongest
-/// thing this window can be set to do: after it, sessions from the project
-/// are scrubbed and sent with nobody reading a preview first. That is a
-/// different promise from ask-first, where a person is the last check, and
-/// the confirmation has to say so rather than leaving it to be discovered
-/// later from a history screen.
+/// One table for both places arming is asked: the offer the queue shows once
+/// a project has been contributed from several times (`evidence`, then
+/// `question`), and the confirmation Settings shows before arming
+/// (`question` as its heading, then `body`). It used to be written here and
+/// in `ArmingOfferCopy`, transcribed from the Linux shell; the core now
+/// holds the one copy every shell renders.
 ///
-/// The wording is the Linux shell's, verbatim
-/// (`crates/trace-commons-contributor-gtk/src/copy.rs`, the `Arming`
-/// section), for the reason `ProjectCopy` gives about the bucket note: two
-/// shells describing the same switch differently is worse than either
-/// wording on its own, and a near-duplicate is how they start disagreeing.
-/// Kept here rather than beside `SettingsView` so that neither surface
-/// becomes the owner and the other the copy -- and so it is testable without
-/// a display, which a SwiftUI view body is not.
-public enum ProjectArmingCopy {
-    /// Names the project, because a confirmation that says "this project"
-    /// makes the reader look behind the sheet to check which one.
-    public static func confirmationTitle(project: String) -> String {
-        "Contribute from \(project) automatically?"
+/// Arming is the strongest thing this window can be set to do, so neither
+/// surface offers it without these words: a nil decode means no offer and no
+/// confirmation, never a Swift-written one.
+public struct ProjectArmingCopy: Decodable, Equatable, Sendable {
+    /// "You've contributed from <project> N times." Stated before the
+    /// question, so someone who reads only the first line learns why they are
+    /// asked. Not rendered by a confirmation that has no count in hand.
+    public let evidence: String
+    /// "Contribute from <project> automatically?"
+    public let question: String
+    /// The button that arms. Carries the action.
+    public let confirm: String
+    /// The button that does not. Declining is a decision about this moment.
+    public let decline: String
+    /// The confirmation for arming from now: the scrubbing, that review
+    /// stops, and the way back, in that order.
+    public let body: String
+    /// The confirmation for arming with the backlog (`include_backlog`).
+    public let bodyWithBacklog: String
+
+    enum CodingKeys: String, CodingKey {
+        case evidence, question, confirm, decline, body
+        case bodyWithBacklog = "body_with_backlog"
     }
 
-    /// States the scrubbing, then what stops, then the way back, in that
-    /// order. The scrubbing is stated first because it is the reassurance;
-    /// the loss of review is stated second because it is the cost, and a
-    /// confirmation that leads with reassurance and buries the cost is not
-    /// asking a real question. The way back is last and unconditional --
-    /// this is reversible, and a sheet that does not say so reads as a door
-    /// that only opens one way.
-    public static let confirmationBody = """
-        Sessions from this project will be scrubbed and contributed without asking \
-        you, including any already waiting. You won't review them first.
-
-        No session is sent until it has been quiet for a day.
-
-        You can turn this off at any time. Anything it hasn't sent yet goes back to \
-        waiting for you, and anything already sent stays sent.
-        """
-
-    /// The confirm button carries the action rather than agreeing in the
-    /// abstract: "OK" would make the reader reconstruct what they had just
-    /// agreed to from the heading.
-    public static let confirm = "Turn on automatic contributing"
-
-    /// "Not now" rather than "Cancel". Declining here is a decision about
-    /// this moment, not an error to back out of, and the row is unchanged
-    /// either way.
-    public static let cancel = "Not now"
+    /// Decode the payload, or nil if it will not parse or a field is empty.
+    public static func decode(fromJSON json: String?) -> ProjectArmingCopy? {
+        guard let data = json?.data(using: .utf8),
+            let copy = try? JSONDecoder().decode(ProjectArmingCopy.self, from: data)
+        else {
+            return nil
+        }
+        let sentences = [
+            copy.evidence, copy.question, copy.confirm, copy.decline, copy.body,
+            copy.bodyWithBacklog,
+        ]
+        return sentences.contains(where: \.isEmpty) ? nil : copy
+    }
 }

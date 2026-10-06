@@ -52,6 +52,40 @@ use trace_commons_contributor::identity::DeviceIdentity;
 use trace_commons_contributor::source::TraceSource;
 use trace_commons_contributor::source::claude_code::ClaudeCodeSource;
 
+fn fixture_config(device_key_id: &str) -> trace_commons_contributor::config::ContributorConfig {
+    trace_commons_contributor::config::ContributorConfig {
+        inference_receipt_endpoint: None,
+        consent_scopes_chosen: false,
+        witness_origin: None,
+        inference_receipt_check_attestation: false,
+        schema_version: trace_commons_contributor::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
+        issuer_url: "http://issuer.invalid".into(),
+        ingest_url: "http://ingest.invalid".into(),
+        audience: "trace-commons-upload".into(),
+        tenant_id: "tenant-abc".into(),
+        instance_id: "instance-1".into(),
+        user_subject: "alice".into(),
+        device_key_id: device_key_id.to_string(),
+        consent_scopes: vec!["debugging_evaluation".into()],
+        pii_filter: None,
+        allowed_hosts: None,
+        display_handle: None,
+        public_bio: None,
+        public_since: None,
+        witness: None,
+    }
+}
+
+fn watch_sessions(store: &ConfigStore, sessions_root: &std::path::Path) {
+    let mut settings = DaemonSettings::load(store).unwrap();
+    settings.claude_source = Some(
+        trace_commons_contributor::daemon::settings::SourceDeclaration::Watch {
+            path: sessions_root.to_path_buf(),
+        },
+    );
+    settings.save(store).unwrap();
+}
+
 struct TestDaemon {
     _dir: tempfile::TempDir,
     store_dir: std::path::PathBuf,
@@ -477,36 +511,10 @@ async fn preview_reports_the_redacted_envelope_not_the_raw_file() {
     let session_ref = TraceSource::discover(&src).unwrap().remove(0);
 
     let device = DeviceIdentity::load_or_generate(&store).unwrap();
-    let cfg = trace_commons_contributor::config::ContributorConfig {
-        inference_receipt_endpoint: None,
-        consent_scopes_chosen: false,
-        witness_origin: None,
-        inference_receipt_check_attestation: false,
-        schema_version: trace_commons_contributor::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
-        issuer_url: "http://issuer.invalid".into(),
-        ingest_url: "http://ingest.invalid".into(),
-        audience: "trace-commons-upload".into(),
-        tenant_id: "tenant-abc".into(),
-        instance_id: "instance-1".into(),
-        user_subject: "alice".into(),
-        device_key_id: device.device_key_id.clone(),
-        consent_scopes: vec!["debugging_evaluation".into()],
-        pii_filter: None,
-        allowed_hosts: None,
-        display_handle: None,
-        public_bio: None,
-        public_since: None,
-        witness: None,
-    };
+    let cfg = fixture_config(&device.device_key_id);
     store.save_config(&cfg).unwrap();
 
-    let mut settings = DaemonSettings::load(&store).unwrap();
-    settings.claude_source = Some(
-        trace_commons_contributor::daemon::settings::SourceDeclaration::Watch {
-            path: sessions_root.clone(),
-        },
-    );
-    settings.save(&store).unwrap();
+    watch_sessions(&store, &sessions_root);
 
     let entry_id = entry_id_for("preview-test-hash");
     let mut queue = Queue::new();
@@ -682,25 +690,10 @@ async fn hello_reports_v1_1_and_still_claims_v1_compatibility() {
 fn write_config(store_dir: &std::path::Path, display_handle: Option<&str>) {
     let store = ConfigStore::open(store_dir.to_path_buf()).unwrap();
     let mut cfg = trace_commons_contributor::config::ContributorConfig {
-        inference_receipt_endpoint: None,
-        consent_scopes_chosen: false,
-        witness_origin: None,
-        inference_receipt_check_attestation: false,
-        schema_version: trace_commons_contributor::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
-        issuer_url: "http://issuer.invalid".into(),
-        ingest_url: "http://ingest.invalid".into(),
-        audience: "trace-commons-upload".into(),
-        tenant_id: "tenant-abc".into(),
-        instance_id: "instance-1".into(),
-        user_subject: "alice".into(),
-        device_key_id: "device-1".into(),
-        consent_scopes: vec!["debugging_evaluation".into()],
-        pii_filter: None,
-        allowed_hosts: None,
         display_handle: display_handle.map(str::to_string),
         public_bio: display_handle.map(|_| "Ships billing systems by day.".to_string()),
         public_since: display_handle.map(|_| chrono::Utc::now()),
-        witness: None,
+        ..fixture_config("device-1")
     };
     cfg.consent_scopes.push("public_attribution".into());
     store.save_config(&cfg).unwrap();
@@ -870,36 +863,10 @@ async fn daemon_with_a_multi_event_entry() -> (tempfile::TempDir, std::path::Pat
     let session_ref = TraceSource::discover(&src).unwrap().remove(0);
 
     let device = DeviceIdentity::load_or_generate(&store).unwrap();
-    let cfg = trace_commons_contributor::config::ContributorConfig {
-        inference_receipt_endpoint: None,
-        consent_scopes_chosen: false,
-        witness_origin: None,
-        inference_receipt_check_attestation: false,
-        schema_version: trace_commons_contributor::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
-        issuer_url: "http://issuer.invalid".into(),
-        ingest_url: "http://ingest.invalid".into(),
-        audience: "trace-commons-upload".into(),
-        tenant_id: "tenant-abc".into(),
-        instance_id: "instance-1".into(),
-        user_subject: "alice".into(),
-        device_key_id: device.device_key_id.clone(),
-        consent_scopes: vec!["debugging_evaluation".into()],
-        pii_filter: None,
-        allowed_hosts: None,
-        display_handle: None,
-        public_bio: None,
-        public_since: None,
-        witness: None,
-    };
+    let cfg = fixture_config(&device.device_key_id);
     store.save_config(&cfg).unwrap();
 
-    let mut settings = DaemonSettings::load(&store).unwrap();
-    settings.claude_source = Some(
-        trace_commons_contributor::daemon::settings::SourceDeclaration::Watch {
-            path: sessions_root.clone(),
-        },
-    );
-    settings.save(&store).unwrap();
+    watch_sessions(&store, &sessions_root);
 
     let entry_id = entry_id_for("turn-index-test-hash");
     let mut queue = Queue::new();
@@ -973,36 +940,10 @@ async fn daemon_with_a_redactable_entry() -> (tempfile::TempDir, std::path::Path
     let session_ref = TraceSource::discover(&src).unwrap().remove(0);
 
     let device = DeviceIdentity::load_or_generate(&store).unwrap();
-    let cfg = trace_commons_contributor::config::ContributorConfig {
-        inference_receipt_endpoint: None,
-        consent_scopes_chosen: false,
-        witness_origin: None,
-        inference_receipt_check_attestation: false,
-        schema_version: trace_commons_contributor::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
-        issuer_url: "http://issuer.invalid".into(),
-        ingest_url: "http://ingest.invalid".into(),
-        audience: "trace-commons-upload".into(),
-        tenant_id: "tenant-abc".into(),
-        instance_id: "instance-1".into(),
-        user_subject: "alice".into(),
-        device_key_id: device.device_key_id.clone(),
-        consent_scopes: vec!["debugging_evaluation".into()],
-        pii_filter: None,
-        allowed_hosts: None,
-        display_handle: None,
-        public_bio: None,
-        public_since: None,
-        witness: None,
-    };
+    let cfg = fixture_config(&device.device_key_id);
     store.save_config(&cfg).unwrap();
 
-    let mut settings = DaemonSettings::load(&store).unwrap();
-    settings.claude_source = Some(
-        trace_commons_contributor::daemon::settings::SourceDeclaration::Watch {
-            path: sessions_root.clone(),
-        },
-    );
-    settings.save(&store).unwrap();
+    watch_sessions(&store, &sessions_root);
 
     let entry_id = entry_id_for("redactable-fixture-hash");
     let mut queue = Queue::new();
@@ -1253,6 +1194,30 @@ async fn an_unpreviewed_approval_pins_the_bytes_that_were_persisted() {
 }
 
 #[tokio::test]
+async fn an_unpreviewed_approval_pins_the_measured_size_of_the_persisted_bytes() {
+    // K10: `would_send_bytes` describes the bytes actually pinned, not an
+    // estimate made some other way. Removing the measurement in
+    // `pin_previewed_envelope` (or threading `None` through it) would leave
+    // this `None` even though an envelope was persisted right beside it.
+    let (_dir, store_dir, entry_id) = daemon_with_a_multi_event_entry().await;
+    let store = ConfigStore::open(store_dir.clone()).unwrap();
+    let mut c = connect_to(&store_dir).await;
+    approve_one(&mut c, entry_id).await;
+
+    let queue = Queue::load(&store).unwrap();
+    let entry = queue.get(entry_id).expect("entry");
+    let would_send_bytes = entry.would_send_bytes.expect("a size must be pinned");
+    let saved = trace_commons_contributor::daemon::approved_envelope::load(&store, entry_id)
+        .expect("load")
+        .expect("an envelope must be on disk");
+    assert_eq!(
+        would_send_bytes,
+        trace_commons_contributor::envelope::envelope_size(&saved).expect("size") as u64,
+        "the pinned size must describe the bytes actually persisted"
+    );
+}
+
+#[tokio::test]
 async fn an_approval_whose_envelope_cannot_be_stored_is_not_reported_as_approved() {
     // The hole a build returning `Ok` hides. `pin_previewed_envelope`
     // declines silently when the envelope cannot be written, so the build
@@ -1446,36 +1411,10 @@ async fn enrolled_daemon_with_sessions_in_two_projects() -> (EnrolledDaemon, Con
     let b1 = ref_for("33333333-3333-3333-3333-333333333333");
 
     let device = DeviceIdentity::load_or_generate(&store).unwrap();
-    let cfg = trace_commons_contributor::config::ContributorConfig {
-        inference_receipt_endpoint: None,
-        consent_scopes_chosen: false,
-        witness_origin: None,
-        inference_receipt_check_attestation: false,
-        schema_version: trace_commons_contributor::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
-        issuer_url: "http://issuer.invalid".into(),
-        ingest_url: "http://ingest.invalid".into(),
-        audience: "trace-commons-upload".into(),
-        tenant_id: "tenant-abc".into(),
-        instance_id: "instance-1".into(),
-        user_subject: "alice".into(),
-        device_key_id: device.device_key_id.clone(),
-        consent_scopes: vec!["debugging_evaluation".into()],
-        pii_filter: None,
-        allowed_hosts: None,
-        display_handle: None,
-        public_bio: None,
-        public_since: None,
-        witness: None,
-    };
+    let cfg = fixture_config(&device.device_key_id);
     store.save_config(&cfg).unwrap();
 
-    let mut settings = DaemonSettings::load(&store).unwrap();
-    settings.claude_source = Some(
-        trace_commons_contributor::daemon::settings::SourceDeclaration::Watch {
-            path: sessions_root.clone(),
-        },
-    );
-    settings.save(&store).unwrap();
+    watch_sessions(&store, &sessions_root);
 
     let mut queue = Queue::new();
     let mut seed =
@@ -1715,36 +1654,10 @@ async fn enrolled_daemon_with_one_good_and_one_oversized_session() -> (EnrolledD
     let oversized_ref = ref_for("55555555-5555-5555-5555-555555555555");
 
     let device = DeviceIdentity::load_or_generate(&store).unwrap();
-    let cfg = trace_commons_contributor::config::ContributorConfig {
-        inference_receipt_endpoint: None,
-        consent_scopes_chosen: false,
-        witness_origin: None,
-        inference_receipt_check_attestation: false,
-        schema_version: trace_commons_contributor::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
-        issuer_url: "http://issuer.invalid".into(),
-        ingest_url: "http://ingest.invalid".into(),
-        audience: "trace-commons-upload".into(),
-        tenant_id: "tenant-abc".into(),
-        instance_id: "instance-1".into(),
-        user_subject: "alice".into(),
-        device_key_id: device.device_key_id.clone(),
-        consent_scopes: vec!["debugging_evaluation".into()],
-        pii_filter: None,
-        allowed_hosts: None,
-        display_handle: None,
-        public_bio: None,
-        public_since: None,
-        witness: None,
-    };
+    let cfg = fixture_config(&device.device_key_id);
     store.save_config(&cfg).unwrap();
 
-    let mut settings = DaemonSettings::load(&store).unwrap();
-    settings.claude_source = Some(
-        trace_commons_contributor::daemon::settings::SourceDeclaration::Watch {
-            path: sessions_root.clone(),
-        },
-    );
-    settings.save(&store).unwrap();
+    watch_sessions(&store, &sessions_root);
 
     let mut queue = Queue::new();
     let mut seed =

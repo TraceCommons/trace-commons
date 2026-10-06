@@ -10,40 +10,43 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use trace_commons_contributor_ffi::{
     TC_CONTRIBUTION_CONTROL_CONTRIBUTE, TC_CONTRIBUTION_CONTROL_NONE, TC_CREDENTIAL_ACTION_CANCEL,
-    TC_CREDENTIAL_ACTION_FORGET, TC_CREDENTIAL_ACTION_NONE, TC_CREDENTIAL_ACTION_OBTAIN,
-    TC_HARNESS_PLAN_CHANGES, TC_HARNESS_PLAN_ENTRY_UNUSABLE, TC_HARNESS_PLAN_NO_CONFIG_PATH,
-    TC_HARNESS_PLAN_NOOP, TC_HARNESS_PLAN_NOT_INSTALLED, TC_HARNESS_PLAN_UNKNOWN,
-    TC_HARNESS_PLAN_UNPARSEABLE, TC_HARNESS_STATE_ACTIVITY_SHARED, TC_HARNESS_STATE_ANSWERING,
-    TC_HARNESS_STATE_CONNECTED_NO_CALLS, TC_HARNESS_STATE_NOT_CONNECTED, TC_HARNESS_STATE_UNKNOWN,
-    TC_PRIVATE_INFERENCE_TONE_ATTENTION, TC_PRIVATE_INFERENCE_TONE_CLEAR,
-    TC_PRIVATE_INFERENCE_TONE_HELD, TC_PRIVATE_INFERENCE_TONE_NEUTRAL,
-    TC_PRIVATE_INFERENCE_TONE_REFUSED, TC_WITNESS_STATE_ABSENT, TC_WITNESS_STATE_NOT_ENROLLED,
-    TC_WITNESS_STATE_PINNED, TC_WITNESS_STATE_REFUSING_INFERENCE_RECEIPTS_MISSING,
-    TC_WITNESS_STATE_REFUSING_PIN_MALFORMED, TC_WITNESS_STATE_REFUSING_UNPINNED,
-    TC_WITNESS_STATE_UNREADABLE, TC_WITNESS_TONE_ATTENTION, TC_WITNESS_TONE_CLEAR,
-    TC_WITNESS_TONE_HELD, TC_WITNESS_TONE_NEUTRAL, TC_WITNESS_TONE_REFUSED, tc_call,
-    tc_certificate_list_title, tc_certificate_row_line, tc_consent_copy, tc_consent_gate_help,
-    tc_contribution_attestation_line, tc_contribution_attestation_reason_line,
-    tc_contribution_attestation_tone, tc_contribution_eligibility_control,
-    tc_contribution_eligibility_line, tc_contribution_eligibility_reason_line,
-    tc_contribution_eligibility_tone, tc_contribution_group_control, tc_contribution_withheld_line,
-    tc_daemon_start, tc_daemon_start_with_settings, tc_daemon_stop, tc_discover_sources,
-    tc_grant_void_notice, tc_handle, tc_handle_free, tc_invite_issuer_host, tc_last_error,
-    tc_legacy_migration_notice, tc_near_ai_credential_action, tc_near_ai_credential_state_line,
-    tc_near_ai_credential_state_tone, tc_near_ai_enroll_line, tc_near_ai_enroll_tone, tc_preview,
-    tc_preview_body, tc_preview_open, tc_preview_search, tc_preview_summary_json,
-    tc_preview_turns_json, tc_private_inference_copy, tc_private_inference_quit_needs_notice,
+    TC_CREDENTIAL_ACTION_FORGET, TC_CREDENTIAL_ACTION_MIGRATE, TC_CREDENTIAL_ACTION_NONE,
+    TC_CREDENTIAL_ACTION_OBTAIN, TC_HARNESS_PLAN_CHANGES, TC_HARNESS_PLAN_ENTRY_UNUSABLE,
+    TC_HARNESS_PLAN_NO_CONFIG_PATH, TC_HARNESS_PLAN_NOOP, TC_HARNESS_PLAN_NOT_INSTALLED,
+    TC_HARNESS_PLAN_UNKNOWN, TC_HARNESS_PLAN_UNPARSEABLE, TC_HARNESS_STATE_ACTIVITY_SHARED,
+    TC_HARNESS_STATE_ANSWERING, TC_HARNESS_STATE_CONNECTED_NO_CALLS,
+    TC_HARNESS_STATE_NOT_CONNECTED, TC_HARNESS_STATE_UNKNOWN, TC_PRIVATE_INFERENCE_TONE_ATTENTION,
+    TC_PRIVATE_INFERENCE_TONE_CLEAR, TC_PRIVATE_INFERENCE_TONE_HELD,
+    TC_PRIVATE_INFERENCE_TONE_NEUTRAL, TC_PRIVATE_INFERENCE_TONE_REFUSED, TC_WITNESS_STATE_ABSENT,
+    TC_WITNESS_STATE_NOT_ENROLLED, TC_WITNESS_STATE_PINNED,
+    TC_WITNESS_STATE_REFUSING_INFERENCE_RECEIPTS_MISSING, TC_WITNESS_STATE_REFUSING_PIN_MALFORMED,
+    TC_WITNESS_STATE_REFUSING_UNPINNED, TC_WITNESS_STATE_UNREADABLE, TC_WITNESS_TONE_ATTENTION,
+    TC_WITNESS_TONE_CLEAR, TC_WITNESS_TONE_HELD, TC_WITNESS_TONE_NEUTRAL, TC_WITNESS_TONE_REFUSED,
+    tc_call, tc_certificate_list_title, tc_certificate_row_line, tc_consent_copy,
+    tc_consent_gate_help, tc_contribution_attestation_line,
+    tc_contribution_attestation_reason_line, tc_contribution_attestation_tone,
+    tc_contribution_eligibility_control, tc_contribution_eligibility_line,
+    tc_contribution_eligibility_reason_line, tc_contribution_eligibility_tone,
+    tc_contribution_group_control, tc_contribution_withheld_line, tc_daemon_start,
+    tc_daemon_start_with_settings, tc_daemon_stop, tc_discover_opencode_export,
+    tc_discover_sources, tc_grant_void_notice, tc_handle, tc_handle_free, tc_invite_issuer_host,
+    tc_last_error, tc_legacy_migration_notice, tc_near_ai_credential_action,
+    tc_near_ai_credential_state_line, tc_near_ai_credential_state_tone, tc_near_ai_enroll_line,
+    tc_near_ai_enroll_tone, tc_preview, tc_preview_body, tc_preview_open, tc_preview_search,
+    tc_preview_summary_json, tc_preview_turns_json, tc_preview_unsure_spans_json,
+    tc_private_inference_copy, tc_private_inference_quit_needs_notice,
     tc_private_inference_serving_line, tc_private_inference_should_offer,
     tc_private_inference_state_line, tc_private_inference_state_tone, tc_public_run_copy,
     tc_public_run_error_line, tc_public_run_validate_editor, tc_routing_copy,
     tc_routing_discovery_line, tc_routing_last_checked, tc_routing_state_line,
     tc_routing_state_tone, tc_routing_token_line, tc_routing_tool_tone, tc_routing_tool_word,
     tc_routing_unreachable_line, tc_scrub_detector_names, tc_search_original,
-    tc_session_detail_error_line, tc_skill_draft_validate, tc_skill_learning_copy,
-    tc_skill_learning_error_line, tc_source_check_line, tc_string_free, tc_subscribe,
-    tc_unsubscribe, tc_witness_clear, tc_witness_configure, tc_witness_copy,
-    tc_witness_last_result_json, tc_witness_last_result_line, tc_witness_last_result_tone,
-    tc_witness_state_line, tc_witness_state_tone, tc_witness_status_json, tc_witness_trust_state,
+    tc_session_detail_error_line, tc_session_notification_copy, tc_skill_draft_validate,
+    tc_skill_learning_copy, tc_skill_learning_error_line, tc_source_check_line, tc_string_free,
+    tc_subscribe, tc_toast_sent_text, tc_unsubscribe, tc_witness_clear, tc_witness_configure,
+    tc_witness_copy, tc_witness_last_result_json, tc_witness_last_result_line,
+    tc_witness_last_result_tone, tc_witness_state_line, tc_witness_state_tone,
+    tc_witness_status_json, tc_witness_trust_state,
 };
 use trace_commons_contributor_ffi::{
     tc_harness_action_available, tc_harness_last_call_line, tc_harness_outcome_line,
@@ -102,10 +105,7 @@ fn start(dir: &Path) -> *mut tc_handle {
     let mut err: *mut c_char = std::ptr::null_mut();
     let h = unsafe { tc_daemon_start(cstr(dir).as_ptr(), &mut err) };
     if h.is_null() {
-        let msg = unsafe { CStr::from_ptr(err) }
-            .to_string_lossy()
-            .into_owned();
-        unsafe { tc_string_free(err) };
+        let msg = take_owned(err);
         panic!("tc_daemon_start failed: {msg}");
     }
     h
@@ -123,11 +123,7 @@ fn stop(h: *mut tc_handle) {
 fn call(h: *mut tc_handle, method: &str, params: &str) -> String {
     let out = unsafe { tc_call(h, cstr_str(method).as_ptr(), cstr_str(params).as_ptr()) };
     assert!(!out.is_null(), "tc_call returned null for {method}");
-    let s = unsafe { CStr::from_ptr(out) }
-        .to_string_lossy()
-        .into_owned();
-    unsafe { tc_string_free(out) };
-    s
+    take_owned(out)
 }
 
 fn last_error() -> Option<String> {
@@ -136,6 +132,15 @@ fn last_error() -> Option<String> {
         return None;
     }
     Some(unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned())
+}
+
+#[track_caller]
+fn assert_last_error_contains(label: &str) {
+    let error = last_error();
+    assert!(
+        error.as_deref().is_some_and(|error| error.contains(label)),
+        "expected {label:?}, got {error:?}"
+    );
 }
 
 #[test]
@@ -147,19 +152,22 @@ fn a_call_returns_json_the_caller_owns() {
     stop(h);
 }
 
+/// K6: the menu-bar badge's exact count crosses the C ABI the same way
+/// `queue_depth` always has -- inside the plain JSON `tc_call(h, "status",
+/// "{}")` already returns. A macOS shell that decodes `status` off this call
+/// reads `decisions_owed` for free; there is no separate per-field ABI
+/// function to add for it, and this asserts that stays true.
 #[test]
-fn a_second_start_against_the_same_directory_fails_on_the_lock() {
+fn status_over_the_c_abi_carries_decisions_owed() {
     let dir = tempfile::tempdir().unwrap();
-    let a = start(dir.path());
-    let mut err: *mut c_char = std::ptr::null_mut();
-    let b = unsafe { tc_daemon_start(cstr(dir.path()).as_ptr(), &mut err) };
+    let h = start(dir.path());
+    let out = call(h, "status", "{}");
+    assert!(out.contains("\"decisions_owed\""), "{out}");
     assert!(
-        b.is_null(),
-        "two daemons must not run against one directory"
+        out.contains("\"queue_depth\""),
+        "queue_depth must stay for compatibility: {out}"
     );
-    assert!(!err.is_null(), "a failure must set the error out-param");
-    unsafe { tc_string_free(err) };
-    stop(a);
+    stop(h);
 }
 
 /// The reproduction that started sub-project G, pinned.
@@ -353,10 +361,7 @@ fn tc_call_null_handle_is_an_error() {
         )
     };
     assert!(!out.is_null());
-    let s = unsafe { CStr::from_ptr(out) }
-        .to_string_lossy()
-        .into_owned();
-    unsafe { tc_string_free(out) };
+    let s = take_owned(out);
     assert!(
         s.contains("error") || s.contains("bad_params") || s.contains("unavailable"),
         "{s}"
@@ -369,10 +374,7 @@ fn tc_call_null_method_is_an_error() {
     let h = start(dir.path());
     let out = unsafe { tc_call(h, std::ptr::null(), cstr_str("{}").as_ptr()) };
     assert!(!out.is_null());
-    let s = unsafe { CStr::from_ptr(out) }
-        .to_string_lossy()
-        .into_owned();
-    unsafe { tc_string_free(out) };
+    let s = take_owned(out);
     assert!(s.contains("bad_params") || s.contains("error"), "{s}");
     stop(h);
 }
@@ -383,10 +385,7 @@ fn tc_call_null_params_is_an_error() {
     let h = start(dir.path());
     let out = unsafe { tc_call(h, cstr_str("status").as_ptr(), std::ptr::null()) };
     assert!(!out.is_null());
-    let s = unsafe { CStr::from_ptr(out) }
-        .to_string_lossy()
-        .into_owned();
-    unsafe { tc_string_free(out) };
+    let s = take_owned(out);
     assert!(s.contains("bad_params") || s.contains("error"), "{s}");
     stop(h);
 }
@@ -808,59 +807,73 @@ fn concurrent_tc_call_and_tc_daemon_stop_do_not_crash() {
 
 // --- Allocation-registry double-free / cross-type-free detection -------
 
+/// A freed address is rejected only until another allocation of the same kind
+/// reuses it (see the public header's registry caveat). Run misuse probes alone
+/// in a child process, so parallel tests cannot turn their stale pointer into a
+/// different live object. Other ABI tests, and these parent tests, stay parallel.
+fn isolated_stale_pointer_probe(test_name: &str, probe: impl FnOnce()) {
+    const CHILD: &str = "TC_FFI_STALE_POINTER_PROBE";
+    let completed = format!("stale-pointer-probe-completed:{test_name}");
+    if std::env::var(CHILD).as_deref() == Ok(test_name) {
+        probe();
+        eprintln!("\n{completed}");
+        return;
+    }
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", test_name, "--nocapture"])
+        .env(CHILD, test_name)
+        .output()
+        .expect("spawn isolated stale-pointer probe");
+    assert!(
+        output.status.success(),
+        "{test_name} child failed:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // A mistyped exact filter runs zero tests and still exits successfully.
+    // Require evidence that this specific probe actually finished its assertions.
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .lines()
+            .any(|line| line == completed),
+        "{test_name} child did not execute its probe"
+    );
+}
+
 #[test]
 fn double_free_of_a_string_is_refused_not_ub() {
-    let dir = tempfile::tempdir().unwrap();
-    let h = start(dir.path());
-    let out = unsafe { tc_call(h, cstr_str("status").as_ptr(), cstr_str("{}").as_ptr()) };
-    assert!(!out.is_null());
-    unsafe { tc_string_free(out) };
-    // Second free of the same pointer: must not double-free.
-    unsafe { tc_string_free(out) };
-    assert!(
-        last_error()
-            .map(|e| e.contains("double-free") || e.contains("unknown-pointer"))
-            .unwrap_or(false)
-    );
-    stop(h);
+    isolated_stale_pointer_probe("double_free_of_a_string_is_refused_not_ub", || {
+        let dir = tempfile::tempdir().unwrap();
+        let h = start(dir.path());
+        let out = unsafe { tc_call(h, cstr_str("status").as_ptr(), cstr_str("{}").as_ptr()) };
+        assert!(!out.is_null());
+        unsafe { tc_string_free(out) };
+        // Second free of the same pointer: must not double-free.
+        unsafe { tc_string_free(out) };
+        assert!(
+            last_error()
+                .map(|e| e.contains("double-free") || e.contains("unknown-pointer"))
+                .unwrap_or(false)
+        );
+        stop(h);
+    });
 }
 
 #[test]
 fn double_free_of_a_handle_is_refused_not_ub() {
-    let dir = tempfile::tempdir().unwrap();
-    let h = start(dir.path());
-    unsafe { tc_daemon_stop(h) };
-    unsafe { tc_handle_free(h) };
-    // Second free of the same handle pointer.
-    unsafe { tc_handle_free(h) };
-    assert!(
-        last_error()
-            .map(|e| e.contains("double-free") || e.contains("unknown-pointer"))
-            .unwrap_or(false)
-    );
-}
-
-#[test]
-fn cross_type_free_of_a_preview_as_a_string_is_refused_not_ub() {
-    let dir = tempfile::tempdir().unwrap();
-    let h = start(dir.path());
-    // Build a session-less config so preview fails cleanly, then instead
-    // exercise cross-type free using a handle's own allocation cast as a
-    // string, which is available regardless of preview/session setup.
-    unsafe { tc_string_free(h as *mut c_char) };
-    assert!(
-        last_error()
-            .map(|e| e.contains("cross-type-free") || e.contains("unknown-pointer"))
-            .unwrap_or(false)
-    );
-    // The handle itself must still be intact. A refusal must not
-    // unregister it: `stop` alone asserts nothing, so prove the handle is
-    // still live by using it.
-    assert!(
-        !call(h, "status", "{}").contains("invalid-handle-pointer"),
-        "a refused cross-type free must leave the handle usable"
-    );
-    stop(h);
+    isolated_stale_pointer_probe("double_free_of_a_handle_is_refused_not_ub", || {
+        let dir = tempfile::tempdir().unwrap();
+        let h = start(dir.path());
+        unsafe { tc_daemon_stop(h) };
+        unsafe { tc_handle_free(h) };
+        // Second free of the same handle pointer.
+        unsafe { tc_handle_free(h) };
+        assert!(
+            last_error()
+                .map(|e| e.contains("double-free") || e.contains("unknown-pointer"))
+                .unwrap_or(false)
+        );
+    });
 }
 
 // --- Preview accessors must consult the registry before dereferencing ---
@@ -882,13 +895,7 @@ fn preview_body_refuses_a_pointer_that_is_not_a_preview() {
         p.is_null(),
         "a non-preview pointer must not be dereferenced"
     );
-    assert!(
-        last_error()
-            .map(|e| e.contains("invalid-preview-pointer"))
-            .unwrap_or(false),
-        "{:?}",
-        last_error()
-    );
+    assert_last_error_contains("invalid-preview-pointer");
     // The handle is untouched by the refusal and still usable.
     let out = call(h, "status", "{}");
     assert!(out.contains("\"logged_in\""), "{out}");
@@ -901,11 +908,7 @@ fn preview_summary_json_refuses_a_pointer_that_is_not_a_preview() {
     let h = start(dir.path());
     let p = unsafe { tc_preview_summary_json(h as *const tc_preview) };
     assert!(p.is_null());
-    assert!(
-        last_error()
-            .map(|e| e.contains("invalid-preview-pointer"))
-            .unwrap_or(false)
-    );
+    assert_last_error_contains("invalid-preview-pointer");
     stop(h);
 }
 
@@ -953,329 +956,230 @@ fn preview_search_refuses_a_pointer_that_is_not_a_preview() {
     let n = unsafe { tc_preview_search(h as *const tc_preview, needle.as_ptr(), &mut matches) };
     assert_eq!(n, -1);
     assert!(matches.is_null(), "nothing to free on the error path");
-    assert!(
-        last_error()
-            .map(|e| e.contains("invalid-preview-pointer"))
-            .unwrap_or(false)
-    );
+    assert_last_error_contains("invalid-preview-pointer");
     stop(h);
 }
 
-// --- Handle entry points must consult the registry before dereferencing -
-//
-// The registry detected invalid frees, and (see above) invalid preview-
-// accessor reads. It was not consulted by any of the six `tc_handle*`-
-// borrowing entry points below -- they null-checked and then dereferenced
-// directly. A stale (already freed by `tc_handle_free`) or cross-type (a
-// `tc_preview*`, or any other kind of pointer this crate allocated)
-// handle was therefore a use-after-free or a type confusion rather than
-// the fixed error the rest of this ABI promises. Each test below passes a
-// live pointer of the WRONG registry kind (a `tc_string*`, obtained from
-// an ordinary `tc_call` and deliberately not yet freed) where a
-// `tc_handle*` is expected -- the same shape of mistake
-// `preview_body_refuses_a_pointer_that_is_not_a_preview` and its siblings
-// already exercise for the preview accessors, mirrored onto the handle
-// entry points. None of these dereference the bad pointer if the fix
-// holds, so none of them may crash.
-
-#[test]
-fn tc_daemon_stop_refuses_a_pointer_that_is_not_a_handle() {
+// Each borrowing entry point must reject both a live allocation of the wrong
+// registry kind and a freed handle before dereferencing either. Keep separate
+// named tests and a fresh daemon for each call: later failures must not inherit
+// an earlier call's thread-local error.
+fn with_wrong_type_handle(check: impl FnOnce(*mut tc_handle)) {
     let dir = tempfile::tempdir().unwrap();
     let h = start(dir.path());
     let out = unsafe { tc_call(h, cstr_str("status").as_ptr(), cstr_str("{}").as_ptr()) };
     assert!(!out.is_null());
-    // A live `tc_string*` deliberately passed where a `tc_handle*` is
-    // expected.
-    unsafe { tc_daemon_stop(out as *mut tc_handle) };
-    assert!(
-        last_error()
-            .map(|e| e.contains("invalid-handle-pointer"))
-            .unwrap_or(false),
-        "{:?}",
-        last_error()
-    );
+    check(out.cast());
     unsafe { tc_string_free(out) };
-    // The real handle is untouched by the refusal and still usable.
     let status = call(h, "status", "{}");
     assert!(status.contains("\"logged_in\""), "{status}");
     stop(h);
 }
 
-#[test]
-fn tc_call_refuses_a_pointer_that_is_not_a_handle() {
+fn with_freed_handle(check: impl FnOnce(*mut tc_handle)) {
     let dir = tempfile::tempdir().unwrap();
     let h = start(dir.path());
-    let out = unsafe { tc_call(h, cstr_str("status").as_ptr(), cstr_str("{}").as_ptr()) };
-    assert!(!out.is_null());
-    // `tc_call` never returns NULL: a stale handle must still produce a
-    // JSON error frame, not a null pointer or a crash.
-    let bad = unsafe {
-        tc_call(
-            out as *mut tc_handle,
-            cstr_str("status").as_ptr(),
-            cstr_str("{}").as_ptr(),
-        )
-    };
-    assert!(!bad.is_null());
-    let s = unsafe { CStr::from_ptr(bad) }
-        .to_string_lossy()
-        .into_owned();
-    unsafe { tc_string_free(bad) };
-    assert!(s.contains("invalid-handle-pointer"), "{s}");
-    assert!(
-        last_error()
-            .map(|e| e.contains("invalid-handle-pointer"))
-            .unwrap_or(false)
-    );
-    unsafe { tc_string_free(out) };
     stop(h);
+    // Reuse only the pointer VALUE; the call must reject it before dereferencing.
+    check(h);
 }
 
-#[test]
-fn tc_subscribe_refuses_a_pointer_that_is_not_a_handle() {
+fn assert_stop_refused(h: *mut tc_handle) {
+    unsafe { tc_daemon_stop(h) };
+    assert_last_error_contains("invalid-handle-pointer");
+}
+
+fn assert_call_refused(h: *mut tc_handle) {
+    // Even for an invalid handle, tc_call owes the caller a non-null JSON frame.
+    let response = call(h, "status", "{}");
+    assert!(response.contains("invalid-handle-pointer"), "{response}");
+    assert_last_error_contains("invalid-handle-pointer");
+}
+
+fn assert_subscribe_refused(h: *mut tc_handle) {
     extern "C" fn noop_cb(_event_json: *const c_char, _ctx: *mut c_void) {}
-
-    let dir = tempfile::tempdir().unwrap();
-    let h = start(dir.path());
-    let out = unsafe { tc_call(h, cstr_str("status").as_ptr(), cstr_str("{}").as_ptr()) };
-    assert!(!out.is_null());
-    let token = unsafe { tc_subscribe(out as *mut tc_handle, Some(noop_cb), std::ptr::null_mut()) };
-    assert_eq!(
-        token, 0,
-        "a stale handle must not yield a subscription token"
-    );
-    assert!(
-        last_error()
-            .map(|e| e.contains("invalid-handle-pointer"))
-            .unwrap_or(false)
-    );
-    unsafe { tc_string_free(out) };
-    stop(h);
-}
-
-#[test]
-fn tc_unsubscribe_refuses_a_pointer_that_is_not_a_handle() {
-    let dir = tempfile::tempdir().unwrap();
-    let h = start(dir.path());
-    let out = unsafe { tc_call(h, cstr_str("status").as_ptr(), cstr_str("{}").as_ptr()) };
-    assert!(!out.is_null());
-    // Any nonzero token: the pointer-liveness check runs before the token
-    // is ever looked up, so no real subscription is needed here.
-    unsafe { tc_unsubscribe(out as *mut tc_handle, 1) };
-    assert!(
-        last_error()
-            .map(|e| e.contains("invalid-handle-pointer"))
-            .unwrap_or(false)
-    );
-    unsafe { tc_string_free(out) };
-    stop(h);
-}
-
-#[test]
-fn tc_preview_open_refuses_a_pointer_that_is_not_a_handle() {
-    let dir = tempfile::tempdir().unwrap();
-    let h = start(dir.path());
-    let out = unsafe { tc_call(h, cstr_str("status").as_ptr(), cstr_str("{}").as_ptr()) };
-    assert!(!out.is_null());
-    let mut err: *mut c_char = std::ptr::null_mut();
-    let p = unsafe {
-        tc_preview_open(
-            out as *mut tc_handle,
-            cstr_str("00000000-0000-0000-0000-000000000000").as_ptr(),
-            &mut err,
-        )
-    };
-    assert!(p.is_null());
-    assert!(!err.is_null());
-    let msg = unsafe { CStr::from_ptr(err) }
-        .to_string_lossy()
-        .into_owned();
-    unsafe { tc_string_free(err) };
-    assert!(msg.contains("invalid-handle-pointer"), "{msg}");
-    assert!(
-        last_error()
-            .map(|e| e.contains("invalid-handle-pointer"))
-            .unwrap_or(false)
-    );
-    unsafe { tc_string_free(out) };
-    stop(h);
-}
-
-#[test]
-fn tc_preview_turns_json_refuses_a_pointer_that_is_not_a_handle() {
-    let dir = tempfile::tempdir().unwrap();
-    let h = start(dir.path());
-    let out = unsafe { tc_call(h, cstr_str("status").as_ptr(), cstr_str("{}").as_ptr()) };
-    assert!(!out.is_null());
-    let mut err: *mut c_char = std::ptr::null_mut();
-    let p = unsafe {
-        tc_preview_turns_json(
-            out as *mut tc_handle,
-            cstr_str("00000000-0000-0000-0000-000000000000").as_ptr(),
-            cstr_str("sha256:irrelevant").as_ptr(),
-            &mut err,
-        )
-    };
-    assert!(p.is_null());
-    assert!(!err.is_null());
-    let msg = unsafe { CStr::from_ptr(err) }
-        .to_string_lossy()
-        .into_owned();
-    unsafe { tc_string_free(err) };
-    assert!(msg.contains("invalid-handle-pointer"), "{msg}");
-    assert!(
-        last_error()
-            .map(|e| e.contains("invalid-handle-pointer"))
-            .unwrap_or(false)
-    );
-    unsafe { tc_string_free(out) };
-    stop(h);
-}
-
-// --- ...and the other shape the doc comment above names: a freed handle -
-//
-// The block above exercises the cross-type half of the threat
-// `handle_pointer_is_live`'s doc names; this one exercises the other half
-// named there -- a handle already freed by `tc_handle_free`. Each test
-// below starts a real handle, stops and frees it exactly as
-// `double_free_of_a_handle_is_refused_not_ub` does, then reuses the same
-// pointer VALUE -- never dereferenced unless the guard under test fails
-// -- as the argument to the entry point under test. For `tc_daemon_stop`,
-// the second stop after the free (the same shape of reuse
-// `double_free_of_a_handle_is_refused_not_ub` makes with
-// `tc_handle_free`) is that call under test.
-
-#[test]
-fn tc_daemon_stop_refuses_a_freed_handle() {
-    let dir = tempfile::tempdir().unwrap();
-    let h = start(dir.path());
-    unsafe { tc_daemon_stop(h) };
-    unsafe { tc_handle_free(h) };
-    // The call under test: a second stop against the same, now-freed,
-    // handle pointer.
-    unsafe { tc_daemon_stop(h) };
-    assert!(
-        last_error()
-            .map(|e| e.contains("invalid-handle-pointer"))
-            .unwrap_or(false),
-        "{:?}",
-        last_error()
-    );
-}
-
-#[test]
-fn tc_call_refuses_a_freed_handle() {
-    let dir = tempfile::tempdir().unwrap();
-    let h = start(dir.path());
-    unsafe { tc_daemon_stop(h) };
-    unsafe { tc_handle_free(h) };
-    // `tc_call` never returns NULL: a freed handle must still produce a
-    // JSON error frame, not a null pointer or a crash.
-    let bad = unsafe { tc_call(h, cstr_str("status").as_ptr(), cstr_str("{}").as_ptr()) };
-    assert!(!bad.is_null());
-    let s = unsafe { CStr::from_ptr(bad) }
-        .to_string_lossy()
-        .into_owned();
-    unsafe { tc_string_free(bad) };
-    assert!(s.contains("invalid-handle-pointer"), "{s}");
-    assert!(
-        last_error()
-            .map(|e| e.contains("invalid-handle-pointer"))
-            .unwrap_or(false)
-    );
-}
-
-#[test]
-fn tc_subscribe_refuses_a_freed_handle() {
-    extern "C" fn noop_cb(_event_json: *const c_char, _ctx: *mut c_void) {}
-
-    let dir = tempfile::tempdir().unwrap();
-    let h = start(dir.path());
-    unsafe { tc_daemon_stop(h) };
-    unsafe { tc_handle_free(h) };
     let token = unsafe { tc_subscribe(h, Some(noop_cb), std::ptr::null_mut()) };
     assert_eq!(
         token, 0,
-        "a freed handle must not yield a subscription token"
+        "an invalid handle must not yield a subscription token"
     );
-    assert!(
-        last_error()
-            .map(|e| e.contains("invalid-handle-pointer"))
-            .unwrap_or(false)
-    );
+    assert_last_error_contains("invalid-handle-pointer");
 }
 
-#[test]
-fn tc_unsubscribe_refuses_a_freed_handle() {
-    let dir = tempfile::tempdir().unwrap();
-    let h = start(dir.path());
-    unsafe { tc_daemon_stop(h) };
-    unsafe { tc_handle_free(h) };
-    // Any nonzero token: the pointer-liveness check runs before the token
-    // is ever looked up, so no real subscription is needed here.
+fn assert_unsubscribe_refused(h: *mut tc_handle) {
+    // A nonzero token ensures liveness is checked before looking up the token.
     unsafe { tc_unsubscribe(h, 1) };
-    assert!(
-        last_error()
-            .map(|e| e.contains("invalid-handle-pointer"))
-            .unwrap_or(false)
-    );
+    assert_last_error_contains("invalid-handle-pointer");
 }
 
-#[test]
-fn tc_preview_open_refuses_a_freed_handle() {
-    let dir = tempfile::tempdir().unwrap();
-    let h = start(dir.path());
-    unsafe { tc_daemon_stop(h) };
-    unsafe { tc_handle_free(h) };
-    let mut err: *mut c_char = std::ptr::null_mut();
-    let p = unsafe {
+fn assert_preview_open_refused(h: *mut tc_handle) {
+    let mut err = std::ptr::null_mut();
+    let preview = unsafe {
         tc_preview_open(
             h,
             cstr_str("00000000-0000-0000-0000-000000000000").as_ptr(),
             &mut err,
         )
     };
-    assert!(p.is_null());
-    assert!(!err.is_null());
-    let msg = unsafe { CStr::from_ptr(err) }
-        .to_string_lossy()
-        .into_owned();
-    unsafe { tc_string_free(err) };
-    assert!(msg.contains("invalid-handle-pointer"), "{msg}");
-    assert!(
-        last_error()
-            .map(|e| e.contains("invalid-handle-pointer"))
-            .unwrap_or(false)
+    assert!(preview.is_null());
+    let message = take_owned(err);
+    assert!(message.contains("invalid-handle-pointer"), "{message}");
+    assert_last_error_contains("invalid-handle-pointer");
+}
+
+fn assert_preview_turns_refused(h: *mut tc_handle) {
+    let mut err = std::ptr::null_mut();
+    let preview = unsafe {
+        tc_preview_turns_json(
+            h,
+            cstr_str("00000000-0000-0000-0000-000000000000").as_ptr(),
+            cstr_str("sha256:irrelevant").as_ptr(),
+            &mut err,
+        )
+    };
+    assert!(preview.is_null());
+    let message = take_owned(err);
+    assert!(message.contains("invalid-handle-pointer"), "{message}");
+    assert_last_error_contains("invalid-handle-pointer");
+}
+
+#[test]
+fn tc_daemon_stop_refuses_a_pointer_that_is_not_a_handle() {
+    with_wrong_type_handle(assert_stop_refused);
+}
+
+#[test]
+fn tc_call_refuses_a_pointer_that_is_not_a_handle() {
+    with_wrong_type_handle(assert_call_refused);
+}
+
+#[test]
+fn tc_subscribe_refuses_a_pointer_that_is_not_a_handle() {
+    with_wrong_type_handle(assert_subscribe_refused);
+}
+
+#[test]
+fn tc_unsubscribe_refuses_a_pointer_that_is_not_a_handle() {
+    with_wrong_type_handle(assert_unsubscribe_refused);
+}
+
+#[test]
+fn tc_preview_open_refuses_a_pointer_that_is_not_a_handle() {
+    with_wrong_type_handle(assert_preview_open_refused);
+}
+
+#[test]
+fn tc_preview_turns_json_refuses_a_pointer_that_is_not_a_handle() {
+    with_wrong_type_handle(assert_preview_turns_refused);
+}
+
+#[test]
+fn tc_daemon_stop_refuses_a_freed_handle() {
+    isolated_stale_pointer_probe("tc_daemon_stop_refuses_a_freed_handle", || {
+        with_freed_handle(assert_stop_refused);
+    });
+}
+
+#[test]
+fn tc_call_refuses_a_freed_handle() {
+    isolated_stale_pointer_probe("tc_call_refuses_a_freed_handle", || {
+        with_freed_handle(assert_call_refused);
+    });
+}
+
+#[test]
+fn tc_subscribe_refuses_a_freed_handle() {
+    isolated_stale_pointer_probe("tc_subscribe_refuses_a_freed_handle", || {
+        with_freed_handle(assert_subscribe_refused);
+    });
+}
+
+#[test]
+fn tc_unsubscribe_refuses_a_freed_handle() {
+    isolated_stale_pointer_probe("tc_unsubscribe_refuses_a_freed_handle", || {
+        with_freed_handle(assert_unsubscribe_refused);
+    });
+}
+
+#[test]
+fn tc_preview_open_refuses_a_freed_handle() {
+    isolated_stale_pointer_probe("tc_preview_open_refuses_a_freed_handle", || {
+        with_freed_handle(assert_preview_open_refused);
+    });
+}
+
+#[test]
+fn tc_preview_unsure_spans_json_refuses_a_bad_or_freed_handle() {
+    isolated_stale_pointer_probe(
+        "tc_preview_unsure_spans_json_refuses_a_bad_or_freed_handle",
+        || {
+            let dir = tempfile::tempdir().unwrap();
+            let h = start(dir.path());
+            let out = unsafe { tc_call(h, cstr_str("status").as_ptr(), cstr_str("{}").as_ptr()) };
+            assert!(!out.is_null());
+            // A string pointer passed where a handle belongs.
+            let mut err: *mut c_char = std::ptr::null_mut();
+            let p = unsafe {
+                tc_preview_unsure_spans_json(
+                    out as *mut tc_handle,
+                    cstr_str("00000000-0000-0000-0000-000000000000").as_ptr(),
+                    cstr_str("sha256:irrelevant").as_ptr(),
+                    &mut err,
+                )
+            };
+            assert!(p.is_null());
+            assert!(!err.is_null());
+            let msg = unsafe { CStr::from_ptr(err) }
+                .to_string_lossy()
+                .into_owned();
+            unsafe { tc_string_free(err) };
+            assert!(msg.contains("invalid-handle-pointer"), "{msg}");
+            unsafe { tc_string_free(out) };
+
+            // A live handle and an entry it does not hold: the same fixed label
+            // the socket method gives.
+            let mut err: *mut c_char = std::ptr::null_mut();
+            let p = unsafe {
+                tc_preview_unsure_spans_json(
+                    h,
+                    cstr_str("00000000-0000-0000-0000-000000000000").as_ptr(),
+                    cstr_str("sha256:irrelevant").as_ptr(),
+                    &mut err,
+                )
+            };
+            assert!(p.is_null());
+            let msg = unsafe { CStr::from_ptr(err) }
+                .to_string_lossy()
+                .into_owned();
+            unsafe { tc_string_free(err) };
+            assert!(msg.contains("unknown-entry-id"), "{msg}");
+
+            unsafe { tc_daemon_stop(h) };
+            unsafe { tc_handle_free(h) };
+            let mut err: *mut c_char = std::ptr::null_mut();
+            let p = unsafe {
+                tc_preview_unsure_spans_json(
+                    h,
+                    cstr_str("00000000-0000-0000-0000-000000000000").as_ptr(),
+                    cstr_str("sha256:irrelevant").as_ptr(),
+                    &mut err,
+                )
+            };
+            assert!(p.is_null());
+            let msg = unsafe { CStr::from_ptr(err) }
+                .to_string_lossy()
+                .into_owned();
+            unsafe { tc_string_free(err) };
+            assert!(msg.contains("invalid-handle-pointer"), "{msg}");
+        },
     );
 }
 
 #[test]
 fn tc_preview_turns_json_refuses_a_freed_handle() {
-    let dir = tempfile::tempdir().unwrap();
-    let h = start(dir.path());
-    unsafe { tc_daemon_stop(h) };
-    unsafe { tc_handle_free(h) };
-    let mut err: *mut c_char = std::ptr::null_mut();
-    let p = unsafe {
-        tc_preview_turns_json(
-            h,
-            cstr_str("00000000-0000-0000-0000-000000000000").as_ptr(),
-            cstr_str("sha256:irrelevant").as_ptr(),
-            &mut err,
-        )
-    };
-    assert!(p.is_null());
-    assert!(!err.is_null());
-    let msg = unsafe { CStr::from_ptr(err) }
-        .to_string_lossy()
-        .into_owned();
-    unsafe { tc_string_free(err) };
-    assert!(msg.contains("invalid-handle-pointer"), "{msg}");
-    assert!(
-        last_error()
-            .map(|e| e.contains("invalid-handle-pointer"))
-            .unwrap_or(false)
-    );
+    isolated_stale_pointer_probe("tc_preview_turns_json_refuses_a_freed_handle", || {
+        with_freed_handle(assert_preview_turns_refused);
+    });
 }
 
 // --- Discriminating token uniqueness for tc_subscribe -------------------
@@ -1379,11 +1283,7 @@ fn tc_preview_open_from_inside_a_subscribe_callback_reports_an_error_not_a_panic
         let msg = if err.is_null() {
             String::new()
         } else {
-            let s = unsafe { CStr::from_ptr(err) }
-                .to_string_lossy()
-                .into_owned();
-            unsafe { tc_string_free(err) };
-            s
+            take_owned(err)
         };
         *OBSERVED.lock().unwrap() = Some(msg);
     }
@@ -1530,10 +1430,7 @@ fn an_unknown_settings_field_is_rejected_not_silently_ignored() {
         "an unrecognized settings field must not silently start the daemon"
     );
     assert!(!err.is_null(), "a failure must set the error out-param");
-    let msg = unsafe { CStr::from_ptr(err) }
-        .to_string_lossy()
-        .into_owned();
-    unsafe { tc_string_free(err) };
+    let msg = take_owned(err);
     assert_eq!(msg, "settings-unknown-field", "{msg}");
 }
 
@@ -1646,10 +1543,7 @@ fn a_daily_cap_above_the_ceiling_is_rejected_on_both_paths() {
         "an out-of-range cap must not silently start the daemon"
     );
     assert!(!err.is_null(), "a failure must set the error out-param");
-    let msg = unsafe { CStr::from_ptr(err) }
-        .to_string_lossy()
-        .into_owned();
-    unsafe { tc_string_free(err) };
+    let msg = take_owned(err);
     assert_eq!(msg, "settings-invalid-value", "{msg}");
 
     // The IPC path, on an otherwise healthy daemon.
@@ -1727,10 +1621,7 @@ fn malformed_settings_json_is_an_error_not_a_panic() {
     };
     assert!(h.is_null());
     assert!(!err.is_null(), "a failure must set the error out-param");
-    let msg = unsafe { CStr::from_ptr(err) }
-        .to_string_lossy()
-        .into_owned();
-    unsafe { tc_string_free(err) };
+    let msg = take_owned(err);
     assert_eq!(msg, "settings-invalid-json", "{msg}");
 }
 
@@ -1753,10 +1644,7 @@ fn a_bad_claude_root_value_never_echoes_the_path_in_the_error() {
     };
     assert!(h.is_null());
     assert!(!err.is_null(), "a failure must set the error out-param");
-    let msg = unsafe { CStr::from_ptr(err) }
-        .to_string_lossy()
-        .into_owned();
-    unsafe { tc_string_free(err) };
+    let msg = take_owned(err);
     assert!(!msg.contains(secret), "path leaked into the error: {msg}");
     assert_eq!(msg, "settings-invalid-value", "{msg}");
 }
@@ -1820,11 +1708,7 @@ fn tc_invite_issuer_host_tolerates_null() {
 /// leaking the owned string each of these tests produces.
 fn take_err(err: *mut c_char) -> String {
     assert!(!err.is_null(), "a refusal must set the error out-param");
-    let msg = unsafe { CStr::from_ptr(err) }
-        .to_string_lossy()
-        .into_owned();
-    unsafe { tc_string_free(err) };
-    msg
+    take_owned(err)
 }
 
 #[test]
@@ -1937,10 +1821,7 @@ fn discovery_answers_without_a_handle_and_describes_every_source() {
     // clearing the refusal that stops a daemon from starting.
     let out = tc_discover_sources();
     assert!(!out.is_null());
-    let json = unsafe { CStr::from_ptr(out) }
-        .to_string_lossy()
-        .into_owned();
-    unsafe { tc_string_free(out) };
+    let json = take_owned(out);
 
     let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
     let items = parsed.as_array().expect("an array");
@@ -1965,7 +1846,87 @@ fn discovery_answers_without_a_handle_and_describes_every_source() {
         assert!(item["session_count"].is_u64());
         assert!(item["relocated_by_env"].is_boolean());
         assert!(item["most_recent"].is_string() || item["most_recent"].is_null());
+        assert!(item["answers_at"].is_string() || item["answers_at"].is_null());
     }
+
+    let answers_at =
+        |source: &str| items.iter().find(|i| i["source"] == source).unwrap()["answers_at"].clone();
+    assert_eq!(answers_at("claude-code"), serde_json::json!("Anthropic"));
+    assert_eq!(answers_at("codex"), serde_json::json!("OpenAI"));
+    assert_eq!(answers_at("gemini-cli"), serde_json::json!("Google"));
+    assert_eq!(
+        answers_at("cline"),
+        serde_json::Value::Null,
+        "Cline ships with no single default vendor to name"
+    );
+}
+
+/// The Antigravity design decision: `~/.gemini/tmp` is Gemini CLI's own
+/// store, so it is reported under Gemini CLI's real name here, never
+/// relabelled `"antigravity"`. See issue #1118 decision #2.
+#[test]
+fn the_gemini_store_is_never_relabelled_antigravity() {
+    let out = tc_discover_sources();
+    assert!(!out.is_null());
+    let json = unsafe { CStr::from_ptr(out) }
+        .to_string_lossy()
+        .into_owned();
+    unsafe { tc_string_free(out) };
+
+    let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+    let sources: Vec<&str> = parsed
+        .as_array()
+        .expect("an array")
+        .iter()
+        .map(|i| i["source"].as_str().unwrap())
+        .collect();
+    assert!(sources.contains(&"gemini-cli"));
+    assert!(!sources.contains(&"antigravity"));
+}
+
+/// An OpenCode export folder the contributor has already named is described
+/// with a real count, not left unreachable through this ABI.
+#[test]
+fn discover_opencode_export_reports_a_named_folders_sessions() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("ses_a.json"), b"{}").unwrap();
+    std::fs::write(dir.path().join("ses_b.json"), b"{}").unwrap();
+
+    let out = unsafe { tc_discover_opencode_export(cstr(dir.path()).as_ptr()) };
+    assert!(!out.is_null());
+    let json = unsafe { CStr::from_ptr(out) }
+        .to_string_lossy()
+        .into_owned();
+    unsafe { tc_string_free(out) };
+
+    let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+    assert_eq!(parsed["source"], serde_json::json!("opencode"));
+    assert_eq!(parsed["exists"], serde_json::json!(true));
+    assert_eq!(parsed["session_count"], serde_json::json!(2));
+    assert_eq!(
+        parsed["answers_at"],
+        serde_json::Value::Null,
+        "OpenCode ships with no single default vendor to name"
+    );
+}
+
+/// A folder named for OpenCode that has not been created yet -- or was
+/// removed -- is reported absent, not hidden or defaulted to zero.
+#[test]
+fn discover_opencode_export_reports_a_missing_folder_as_absent() {
+    let dir = tempfile::tempdir().unwrap();
+    let never_created = dir.path().join("not-there");
+
+    let out = unsafe { tc_discover_opencode_export(cstr(&never_created).as_ptr()) };
+    assert!(!out.is_null());
+    let json = unsafe { CStr::from_ptr(out) }
+        .to_string_lossy()
+        .into_owned();
+    unsafe { tc_string_free(out) };
+
+    let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+    assert_eq!(parsed["exists"], serde_json::json!(false));
+    assert_eq!(parsed["session_count"], serde_json::json!(0));
 }
 
 #[test]
@@ -2393,32 +2354,6 @@ fn the_state_tone_branch_table_crosses_the_abi_and_agrees_with_the_sentence() {
 }
 
 #[test]
-fn one_tone_numbering_serves_both_calls_and_a_tool_word_is_never_held() {
-    // Two numberings would mean two 1s meaning different things on one ABI.
-    // A shell that mapped the wrong one would mispaint a privacy claim
-    // rather than fail, so the shared numbering is asserted rather than
-    // assumed -- and the value a tool word can never take is named.
-    for mode in ["off", "watch", "unset", "", "something_new"] {
-        for wiring in [WIRED, NOT_WIRED, UNKNOWN, 99] {
-            let mode_c = cstr_str(mode);
-            let tone = unsafe { tc_routing_tool_tone(mode_c.as_ptr(), wiring) };
-            assert_ne!(tone, TONE_HELD, "{mode:?}/{wiring} took the held tone");
-            assert!(
-                tone == TONE_NEUTRAL || tone == TONE_CLEAR,
-                "{mode:?}/{wiring}"
-            );
-        }
-    }
-
-    // And the held tone is reachable, from the one thing that may hold.
-    let waiting = cstr_str("awaiting_rows");
-    assert_eq!(
-        unsafe { tc_routing_state_tone(waiting.as_ptr()) },
-        TONE_HELD
-    );
-}
-
-#[test]
 fn a_last_checked_call_with_no_timestamp_is_an_error_and_not_a_half_sentence() {
     // The one routing export that refuses. "Last checked " with nothing
     // after it is worse than no line at all, so this must not be produced.
@@ -2439,10 +2374,7 @@ fn scrub_detector_names_are_generated_from_the_real_table() {
     // true the day a detector is added.
     let out = tc_scrub_detector_names();
     assert!(!out.is_null());
-    let json = unsafe { CStr::from_ptr(out) }
-        .to_string_lossy()
-        .into_owned();
-    unsafe { tc_string_free(out) };
+    let json = take_owned(out);
 
     let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
     let names: Vec<&str> = parsed
@@ -2470,10 +2402,7 @@ fn the_detector_export_never_carries_a_pattern() {
     // actually crosses the boundary rather than trusting the implementation to
     // stay as written.
     let out = tc_scrub_detector_names();
-    let json = unsafe { CStr::from_ptr(out) }
-        .to_string_lossy()
-        .into_owned();
-    unsafe { tc_string_free(out) };
+    let json = take_owned(out);
 
     // Each NAME, not the raw envelope: `[` and `{` are JSON's own delimiters
     // and are always present in a valid array.
@@ -2496,18 +2425,10 @@ fn a_refused_cross_type_free_leaves_the_handle_live_and_freeable() {
     // A caller mistakes the handle for a string. The ABI promises to refuse
     // this harmlessly -- the handle is NOT freed, so it must still work.
     unsafe { tc_string_free(h as *mut c_char) };
-    assert!(
-        last_error()
-            .map(|e| e.contains("cross-type-free"))
-            .unwrap_or(false),
-        "the refusal itself must still be reported"
-    );
+    assert_last_error_contains("cross-type-free");
     let out = unsafe { tc_call(h, cstr_str("status").as_ptr(), cstr_str("{}").as_ptr()) };
     assert!(!out.is_null());
-    let s = unsafe { CStr::from_ptr(out) }
-        .to_string_lossy()
-        .into_owned();
-    unsafe { tc_string_free(out) };
+    let s = take_owned(out);
     assert!(
         !s.contains("invalid-handle-pointer"),
         "a REFUSED cross-type free must not unregister the live handle: {s}"
@@ -2520,20 +2441,20 @@ fn a_refused_cross_type_free_leaves_the_handle_live_and_freeable() {
 /// a binding is told to read `tc_last_error` after every `tc_unsubscribe`.
 #[test]
 fn tc_unsubscribe_refuses_a_freed_handle_even_with_a_zero_token() {
-    let dir = tempfile::tempdir().unwrap();
-    let h = start(dir.path());
-    unsafe { tc_daemon_stop(h) };
-    unsafe { tc_handle_free(h) };
-    // No read of tc_last_error clears it, so there is no way to prove the
-    // label below was recorded by this call rather than left over. What
-    // makes the assertion mean something is that nothing earlier in this
-    // test records "invalid-handle-pointer": the free above succeeds.
-    unsafe { tc_unsubscribe(h, 0) };
-    assert!(
-        last_error()
-            .map(|e| e.contains("invalid-handle-pointer"))
-            .unwrap_or(false),
-        "a zero token must not skip the liveness refusal"
+    isolated_stale_pointer_probe(
+        "tc_unsubscribe_refuses_a_freed_handle_even_with_a_zero_token",
+        || {
+            let dir = tempfile::tempdir().unwrap();
+            let h = start(dir.path());
+            unsafe { tc_daemon_stop(h) };
+            unsafe { tc_handle_free(h) };
+            // No read of tc_last_error clears it, so there is no way to prove the
+            // label below was recorded by this call rather than left over. What
+            // makes the assertion mean something is that nothing earlier in this
+            // test records "invalid-handle-pointer": the free above succeeds.
+            unsafe { tc_unsubscribe(h, 0) };
+            assert_last_error_contains("invalid-handle-pointer");
+        },
     );
 }
 
@@ -3389,6 +3310,48 @@ fn the_consent_bundle_crossing_the_abi_is_the_one_in_the_rust() {
     );
 }
 
+/// K9 (#1118): the per-session notification's copy crosses the ABI as the
+/// payload the crate builds, and its body is the consent sentence itself.
+#[test]
+fn the_session_notification_copy_crosses_the_abi() {
+    use trace_commons_contributor::consent_copy as copy;
+    let json = take_owned(tc_session_notification_copy());
+    let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+    let expected =
+        serde_json::to_value(copy::session_notification_copy()).expect("the payload serialises");
+    assert_eq!(
+        parsed, expected,
+        "the ABI must hand over the payload unchanged"
+    );
+    assert_eq!(parsed["body"], copy::GATE_STATEMENT);
+    assert_eq!(parsed["action"], copy::NOTIFICATION_LOOK_THEN_DECIDE_ACTION);
+    assert_eq!(
+        parsed.as_object().map(|o| o.len()),
+        Some(2),
+        "body and action, nothing else: {json}"
+    );
+}
+
+/// K9 (#1118): the submit toast crosses the ABI unchanged, argument order
+/// intact, and a negative count (nobody's honest answer) clamps to zero
+/// instead of wrapping.
+#[test]
+fn the_sent_toast_crosses_the_abi_and_clamps_negatives() {
+    use trace_commons_contributor::consent_copy as copy;
+    assert_eq!(
+        take_owned(tc_toast_sent_text(7, 20, 1)),
+        copy::toast_sent_text(7, 20, 1)
+    );
+    assert_eq!(
+        take_owned(tc_toast_sent_text(7, 20, 1)),
+        "Sent. 1 left to decide \u{b7} upload limit 7 of 20"
+    );
+    assert_eq!(
+        take_owned(tc_toast_sent_text(-3, -1, -9)),
+        copy::toast_sent_text(0, 0, 0)
+    );
+}
+
 #[test]
 fn the_gate_help_branch_crosses_the_abi() {
     use trace_commons_contributor::consent_copy as copy;
@@ -3469,6 +3432,7 @@ fn the_public_run_payload_and_error_tables_cross_whole_and_finished() {
             "feedback_choices" => Some(3),
             "evidence_kind_choices" => Some(9),
             "contribution_status_choices" => Some(10),
+            "history_status_labels" => Some(11),
             "permitted_use_choices" => Some(6),
             "reuse_permissions" => Some(2),
             _ => None,
@@ -3749,6 +3713,9 @@ fn the_credential_state_crosses_with_its_tone_and_its_action() {
         "failed",
         "cancelled",
         "present",
+        "storage_unavailable",
+        "storage_unentitled",
+        "migration_available",
         "",
         "PRESENT",
         "a_state_from_a_later_daemon",
@@ -3759,6 +3726,7 @@ fn the_credential_state_crosses_with_its_tone_and_its_action() {
             copy::CredentialAction::Obtain => TC_CREDENTIAL_ACTION_OBTAIN,
             copy::CredentialAction::Cancel => TC_CREDENTIAL_ACTION_CANCEL,
             copy::CredentialAction::Forget => TC_CREDENTIAL_ACTION_FORGET,
+            copy::CredentialAction::Migrate => TC_CREDENTIAL_ACTION_MIGRATE,
         };
         assert_eq!(action(state), expected, "{state:?}");
     }
@@ -3768,6 +3736,11 @@ fn the_credential_state_crosses_with_its_tone_and_its_action() {
     assert_eq!(tone("present"), TC_PRIVATE_INFERENCE_TONE_CLEAR);
     assert_eq!(action("present"), TC_CREDENTIAL_ACTION_FORGET);
     assert_eq!(tone("obtaining"), TC_PRIVATE_INFERENCE_TONE_HELD);
+
+    // An upgraded macOS contributor is offered the move, and a build that
+    // cannot reach the store is offered nothing.
+    assert_eq!(action("migration_available"), TC_CREDENTIAL_ACTION_MIGRATE);
+    assert_eq!(action("storage_unentitled"), TC_CREDENTIAL_ACTION_NONE);
 
     // Nothing read offers the button that opens a browser, and no pointer at
     // all is the same answer.
@@ -4037,6 +4010,45 @@ fn the_withheld_line_crosses_and_says_nothing_at_zero() {
     assert!(!line(4).is_empty());
 }
 
+/// `tc_contribution_group_eligible_count` and
+/// `_group_withheld_count` are the arithmetic a caller used to derive by
+/// hand from `pending` and `contributable` -- clamped to `pending`, and the
+/// non-negative remainder -- matching exactly what the core's own
+/// `group_eligibility` computes, and what `tc_contribution_withheld_line`
+/// expects as its `withheld` argument.
+#[test]
+fn the_group_eligible_and_withheld_counts_cross_and_clamp() {
+    use trace_commons_contributor::private_inference_copy::group_eligibility;
+    use trace_commons_contributor_ffi::{
+        tc_contribution_group_eligible_count, tc_contribution_group_withheld_count,
+    };
+
+    for (pending, contributable) in [(7i64, Some(3u64)), (7, None), (7, Some(0)), (3, Some(9))] {
+        let expected = group_eligibility(pending as u64, contributable);
+        assert_eq!(
+            tc_contribution_group_eligible_count(pending, contributable.map_or(-1, |c| c as i64)),
+            expected.eligible_count as i64,
+            "eligible_count for pending={pending} contributable={contributable:?}"
+        );
+        assert_eq!(
+            tc_contribution_group_withheld_count(pending, contributable.map_or(-1, |c| c as i64)),
+            expected.withheld_count as i64,
+            "withheld_count for pending={pending} contributable={contributable:?}"
+        );
+    }
+
+    // `contributable` above `pending` is clamped, not a negative withheld
+    // count -- the same trap `tc_contribution_withheld_line` guards against
+    // by clamping a negative input to zero.
+    assert_eq!(tc_contribution_group_eligible_count(3, 9), 3);
+    assert_eq!(tc_contribution_group_withheld_count(3, 9), 0);
+
+    // A negative `pending` is nobody's honest answer; read as 0, matching
+    // every other scalar in this file's negative-input convention.
+    assert_eq!(tc_contribution_group_eligible_count(-1, 5), 0);
+    assert_eq!(tc_contribution_group_withheld_count(-1, 5), 0);
+}
+
 /// The contribution control numbering shares no number with a credential
 /// action or a tone. Both blocks have a "nothing" member, and one collision
 /// draws a sign-in button on a queue row.
@@ -4051,6 +4063,7 @@ fn the_contribution_controls_share_no_number_with_an_action_or_a_tone() {
             TC_CREDENTIAL_ACTION_OBTAIN,
             TC_CREDENTIAL_ACTION_CANCEL,
             TC_CREDENTIAL_ACTION_FORGET,
+            TC_CREDENTIAL_ACTION_MIGRATE,
             TC_PRIVATE_INFERENCE_TONE_NEUTRAL,
             TC_PRIVATE_INFERENCE_TONE_HELD,
             TC_PRIVATE_INFERENCE_TONE_CLEAR,
@@ -4070,6 +4083,7 @@ fn the_credential_actions_share_no_number_with_a_tone() {
         TC_CREDENTIAL_ACTION_OBTAIN,
         TC_CREDENTIAL_ACTION_CANCEL,
         TC_CREDENTIAL_ACTION_FORGET,
+        TC_CREDENTIAL_ACTION_MIGRATE,
     ] {
         for tone in [
             TONE_NEUTRAL,
@@ -5009,15 +5023,22 @@ fn an_arming_rewording_notice_crosses_the_abi_as_the_rust_builds_it() {
         "id": 4, "project_id": "p-1", "project_label": "api",
         "was": "model_scrubbed", "now": "patterns_only",
     });
-    let arg = CString::new(wire.to_string()).unwrap();
-    let json = take_owned(unsafe {
-        trace_commons_contributor_ffi::tc_arming_reworded_notice(arg.as_ptr())
-    });
-    let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
-    let expected =
-        serde_json::to_value(copy::arming_reworded_notice_for_wire(&wire).expect("readable"))
-            .unwrap();
-    assert_eq!(parsed, expected, "the ABI hands over the notice unchanged");
+    for upgrade in [false, true] {
+        let mut wire = wire.clone();
+        wire["scrub_check_defaulted"] = serde_json::json!(upgrade);
+        let arg = CString::new(wire.to_string()).unwrap();
+        let json = take_owned(unsafe {
+            trace_commons_contributor_ffi::tc_arming_reworded_notice(arg.as_ptr())
+        });
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+        let expected =
+            serde_json::to_value(copy::arming_reworded_notice_for_wire(&wire).expect("readable"))
+                .unwrap();
+        assert_eq!(parsed, expected, "the ABI hands over the notice unchanged");
+        if upgrade {
+            assert_eq!(parsed["title"], "The Scrub check is now Automatic for api");
+        }
+    }
     for text in ["not json", "[]", "\"x\""] {
         let arg = CString::new(text).unwrap();
         assert!(
@@ -5111,4 +5132,883 @@ fn no_legacy_migration_notice_is_null_not_a_guess() {
             "{text}"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// K3 (#1173): the copy commands that reached only Tauri cross the ABI as
+// the core assembles them.
+// ---------------------------------------------------------------------------
+
+fn json_owned(out: *mut c_char) -> serde_json::Value {
+    serde_json::from_str(&take_owned(out)).expect("the export returns JSON")
+}
+
+#[test]
+fn the_residual_secret_line_crosses_the_abi_with_its_sites() {
+    use trace_commons_contributor::preview_copy::residual_secret_line;
+    use trace_commons_contributor_ffi::tc_residual_secret_line_text;
+    let sites = cstr_str(r#"["events.3.correction","events.9.tool_result"]"#);
+    assert_eq!(
+        take_owned(unsafe { tc_residual_secret_line_text(2, sites.as_ptr()) }),
+        residual_secret_line(
+            2,
+            &[
+                "events.3.correction".to_owned(),
+                "events.9.tool_result".to_owned()
+            ]
+        )
+    );
+    assert_eq!(
+        take_owned(unsafe { tc_residual_secret_line_text(1, std::ptr::null()) }),
+        "A secret found here is still in what would be sent"
+    );
+    let not_a_list = cstr_str(r#"{"a":1}"#);
+    assert_eq!(
+        take_owned(unsafe { tc_residual_secret_line_text(3, not_a_list.as_ptr()) }),
+        residual_secret_line(3, &[])
+    );
+}
+
+#[test]
+fn the_redaction_summary_crosses_the_abi_with_both_lists() {
+    use trace_commons_contributor::preview_copy::{
+        REDACTION_CATEGORY_RESIDUAL, REDACTION_CATEGORY_UNKNOWN,
+    };
+    use trace_commons_contributor_ffi::tc_redaction_summary_json;
+    let redactions = cstr_str(
+        r#"{"local_path":5,"secret:aws_key":2,"secret:github":1,"residual_secret_at:events.3.tool_result":1,"future_family":4}"#,
+    );
+    let distinct = cstr_str(r#"{"local_path":2}"#);
+    let value =
+        json_owned(unsafe { tc_redaction_summary_json(redactions.as_ptr(), distinct.as_ptr()) });
+    let removed = value["removed"].as_array().unwrap();
+    let families: Vec<&str> = removed
+        .iter()
+        .map(|row| row["family"].as_str().unwrap())
+        .collect();
+    assert_eq!(families, ["local_path", "future_family", "secret"]);
+    assert_eq!(removed[0]["distinct"], 2);
+    assert_eq!(removed[1]["description"], REDACTION_CATEGORY_UNKNOWN);
+    assert_eq!(removed[2]["occurrences"], 3);
+    assert_eq!(
+        removed[2]["detail"],
+        serde_json::json!(["aws key", "github"])
+    );
+    let still = value["still_present"].as_array().unwrap();
+    assert_eq!(still.len(), 1);
+    assert_eq!(still[0]["description"], REDACTION_CATEGORY_RESIDUAL);
+    assert_eq!(
+        still[0]["detail"],
+        serde_json::json!(["events.3.tool_result"])
+    );
+
+    // No distinct map is "not measured", not a failure; no counts at all is.
+    let no_distinct =
+        json_owned(unsafe { tc_redaction_summary_json(redactions.as_ptr(), std::ptr::null()) });
+    assert_eq!(no_distinct["removed"][0]["distinct"], 0);
+    assert!(unsafe { tc_redaction_summary_json(std::ptr::null(), distinct.as_ptr()) }.is_null());
+    let garbage = cstr_str("not json");
+    assert!(unsafe { tc_redaction_summary_json(garbage.as_ptr(), std::ptr::null()) }.is_null());
+}
+
+#[test]
+fn the_project_ignore_copy_and_its_reconciliation_cross_the_abi() {
+    use trace_commons_contributor::project_copy::{ignore_project_copy, ignore_project_reconciled};
+    use trace_commons_contributor_ffi::{
+        tc_project_ignore_copy_json, tc_project_ignore_reconciled_text,
+    };
+    let label = cstr_str("api");
+    assert_eq!(
+        json_owned(unsafe { tc_project_ignore_copy_json(label.as_ptr(), 3) }),
+        serde_json::to_value(ignore_project_copy("api", 3)).unwrap()
+    );
+    assert_eq!(
+        json_owned(unsafe { tc_project_ignore_copy_json(label.as_ptr(), -4) }),
+        serde_json::to_value(ignore_project_copy("api", 0)).unwrap()
+    );
+    assert!(unsafe { tc_project_ignore_copy_json(std::ptr::null(), 1) }.is_null());
+
+    assert_eq!(
+        take_owned(unsafe { tc_project_ignore_reconciled_text(label.as_ptr(), 3, 3) }),
+        ""
+    );
+    assert_eq!(
+        take_owned(unsafe { tc_project_ignore_reconciled_text(label.as_ptr(), 3, 5) }),
+        ignore_project_reconciled("api", 3, 5).unwrap()
+    );
+    assert!(unsafe { tc_project_ignore_reconciled_text(std::ptr::null(), 1, 2) }.is_null());
+}
+
+#[test]
+fn the_arming_offer_copy_crosses_the_abi() {
+    use trace_commons_contributor::project_copy::{ARMING_BODY, arming_offer_copy};
+    use trace_commons_contributor_ffi::tc_arming_offer_copy_json;
+    let label = cstr_str("api");
+    let value = json_owned(unsafe { tc_arming_offer_copy_json(label.as_ptr(), 4) });
+    assert_eq!(
+        value,
+        serde_json::to_value(arming_offer_copy("api", 4)).unwrap()
+    );
+    assert_eq!(value["body"], ARMING_BODY);
+    assert_eq!(value["question"], "Contribute from api automatically?");
+    assert!(unsafe { tc_arming_offer_copy_json(std::ptr::null(), 1) }.is_null());
+}
+
+#[test]
+fn the_contribution_mode_copy_crosses_the_abi() {
+    use trace_commons_contributor::project_copy::{
+        CONTRIBUTION_MODE_NEVER_LINE, contribution_mode_copy,
+    };
+    use trace_commons_contributor_ffi::tc_contribution_mode_copy_json;
+    let value = json_owned(tc_contribution_mode_copy_json());
+    assert_eq!(
+        value,
+        serde_json::to_value(contribution_mode_copy()).unwrap()
+    );
+    assert_eq!(value["choices"][2]["mode"], "ignore");
+    assert_eq!(value["choices"][2]["line"], CONTRIBUTION_MODE_NEVER_LINE);
+}
+
+#[test]
+fn the_contribution_override_confirmation_crosses_the_abi() {
+    use trace_commons_contributor::daemon::policy::ProjectMode;
+    use trace_commons_contributor::project_copy::contribution_override_confirm_copy;
+    use trace_commons_contributor_ffi::tc_contribution_override_confirm_json;
+    let dir = tempfile::tempdir().unwrap();
+    for (wire, mode) in [
+        ("notify_only", ProjectMode::NotifyOnly),
+        ("ignore", ProjectMode::Ignore),
+    ] {
+        let wire = cstr_str(wire);
+        let value = json_owned(unsafe {
+            tc_contribution_override_confirm_json(wire.as_ptr(), std::ptr::null())
+        });
+        assert_eq!(
+            value,
+            serde_json::to_value(contribution_override_confirm_copy(mode, None)).unwrap()
+        );
+        assert!(value["arming"].is_null());
+    }
+    let auto = cstr_str("auto_upload");
+    let value = json_owned(unsafe {
+        tc_contribution_override_confirm_json(auto.as_ptr(), cstr(dir.path()).as_ptr())
+    });
+    assert_eq!(
+        value,
+        serde_json::to_value(contribution_override_confirm_copy(
+            ProjectMode::AutoUpload,
+            None
+        ))
+        .unwrap()
+    );
+    assert_eq!(value["arming"]["disclosure"], "patterns_only");
+    // The arming disclosure is never guessed: no directory, or one whose
+    // configuration cannot be read, answers NULL.
+    assert!(
+        unsafe { tc_contribution_override_confirm_json(auto.as_ptr(), std::ptr::null()) }.is_null()
+    );
+    std::fs::write(dir.path().join("contributor.json"), "not json").unwrap();
+    assert!(
+        unsafe { tc_contribution_override_confirm_json(auto.as_ptr(), cstr(dir.path()).as_ptr()) }
+            .is_null()
+    );
+    let unknown = cstr_str("always");
+    assert!(
+        unsafe { tc_contribution_override_confirm_json(unknown.as_ptr(), std::ptr::null()) }
+            .is_null()
+    );
+    assert!(
+        unsafe { tc_contribution_override_confirm_json(std::ptr::null(), std::ptr::null()) }
+            .is_null()
+    );
+}
+
+#[test]
+fn the_contribution_override_refusal_line_crosses_the_abi() {
+    use trace_commons_contributor::project_copy::{
+        CONTRIBUTION_OVERRIDE_REFUSED, CONTRIBUTION_OVERRIDE_REFUSED_NO_TERMS,
+    };
+    use trace_commons_contributor_ffi::tc_contribution_override_refusal_text;
+    let line = |label: Option<&str>| {
+        let owned = label.map(cstr_str);
+        take_owned(unsafe {
+            tc_contribution_override_refusal_text(
+                owned.as_ref().map_or(std::ptr::null(), |c| c.as_ptr()),
+            )
+        })
+    };
+    assert_eq!(
+        line(Some("arming-terms-unavailable")),
+        CONTRIBUTION_OVERRIDE_REFUSED_NO_TERMS
+    );
+    assert_eq!(
+        line(Some("policy-write-failed")),
+        CONTRIBUTION_OVERRIDE_REFUSED
+    );
+    assert_eq!(line(None), CONTRIBUTION_OVERRIDE_REFUSED);
+}
+
+#[test]
+fn the_missions_disclosure_crosses_the_abi() {
+    use trace_commons_contributor::consent_copy::{
+        MISSIONS_DISCLOSURE_CREDIT, missions_disclosure_copy,
+    };
+    use trace_commons_contributor_ffi::tc_missions_disclosure_copy_json;
+    let value = json_owned(tc_missions_disclosure_copy_json());
+    assert_eq!(
+        value,
+        serde_json::to_value(missions_disclosure_copy()).unwrap()
+    );
+    assert_eq!(value["credit"], MISSIONS_DISCLOSURE_CREDIT);
+    for key in ["title", "matching", "nothing_sent", "credit"] {
+        assert!(value[key].as_str().is_some_and(|s| !s.is_empty()), "{key}");
+    }
+}
+
+#[test]
+fn the_legacy_migration_offer_and_refusal_cross_the_abi() {
+    use trace_commons_contributor::consent_copy::{
+        legacy_migration_offer, legacy_migration_refusal_line,
+    };
+    use trace_commons_contributor_ffi::{
+        tc_legacy_migration_offer_json, tc_legacy_migration_refusal_text,
+    };
+    assert_eq!(
+        json_owned(tc_legacy_migration_offer_json()),
+        serde_json::to_value(legacy_migration_offer()).unwrap()
+    );
+    for label in [
+        "legacy_migration_tenant_pooled",
+        "legacy_migration_invite_needed",
+        "no-such-label",
+    ] {
+        let c = cstr_str(label);
+        assert_eq!(
+            take_owned(unsafe { tc_legacy_migration_refusal_text(c.as_ptr()) }),
+            legacy_migration_refusal_line(label)
+        );
+    }
+    assert_eq!(
+        take_owned(unsafe { tc_legacy_migration_refusal_text(std::ptr::null()) }),
+        legacy_migration_refusal_line("")
+    );
+}
+
+#[test]
+fn the_monitor_traces_copy_crosses_the_abi() {
+    use trace_commons_contributor::preview_copy::{decisions_owed_text, monitor_traces_copy};
+    use trace_commons_contributor_ffi::{tc_decisions_owed_text, tc_monitor_traces_copy_json};
+    assert_eq!(
+        json_owned(tc_monitor_traces_copy_json()),
+        serde_json::to_value(monitor_traces_copy()).unwrap()
+    );
+    let text = |count: i64| take_owned(tc_decisions_owed_text(count));
+    assert_eq!(text(-1), decisions_owed_text(None));
+    assert_eq!(text(0), "");
+    assert_eq!(text(3), decisions_owed_text(Some(3)));
+}
+
+#[test]
+fn a_named_automatic_disclosure_crosses_the_abi() {
+    use trace_commons_contributor::consent_copy::automatic_grant_copy_named;
+    use trace_commons_contributor_ffi::tc_automatic_grant_copy_json;
+    for name in ["patterns_only", "model_scrubbed"] {
+        let c = std::ffi::CString::new(name).unwrap();
+        assert_eq!(
+            json_owned(unsafe { tc_automatic_grant_copy_json(c.as_ptr()) }),
+            serde_json::to_value(automatic_grant_copy_named(name).unwrap()).unwrap()
+        );
+    }
+    let unknown = std::ffi::CString::new("scrubbed").unwrap();
+    assert!(unsafe { tc_automatic_grant_copy_json(unknown.as_ptr()) }.is_null());
+    assert!(unsafe { tc_automatic_grant_copy_json(std::ptr::null()) }.is_null());
+}
+
+#[test]
+fn the_inference_connection_and_privacy_scan_copy_cross_the_abi() {
+    use trace_commons_contributor::consent_copy::inference_connection_copy;
+    use trace_commons_contributor::privacy_scan_copy::{DISCLOSURE, privacy_scan_copy};
+    use trace_commons_contributor_ffi::{
+        tc_inference_connection_copy_json, tc_privacy_scan_copy_json,
+    };
+    assert_eq!(
+        json_owned(tc_inference_connection_copy_json()),
+        serde_json::to_value(inference_connection_copy()).unwrap()
+    );
+    let scan = json_owned(tc_privacy_scan_copy_json());
+    assert_eq!(scan, serde_json::to_value(privacy_scan_copy()).unwrap());
+    assert_eq!(scan["disclosure"], DISCLOSURE);
+}
+
+#[test]
+fn the_settings_ranges_cross_the_abi_and_match_what_set_settings_enforces() {
+    use trace_commons_contributor::daemon::settings::{self, DaemonSettings, settings_ranges};
+    use trace_commons_contributor_ffi::tc_settings_ranges_json;
+
+    let ranges = json_owned(tc_settings_ranges_json());
+    assert_eq!(ranges, serde_json::to_value(settings_ranges()).unwrap());
+
+    // The exported ceiling is not a number this test invented separately: a
+    // value one past it is the exact value `apply_settings_object` refuses,
+    // and a value at it is the exact value accepted. A drift between the
+    // exported range and the enforced one would show up here as one of
+    // these two assertions failing, not as a silently wrong control bound.
+    let max_uploads = ranges["max_uploads_per_day"]["max"].as_u64().unwrap();
+    let mut s = DaemonSettings::default();
+    assert_eq!(
+        settings::apply_settings_object(
+            &mut s,
+            &serde_json::json!({ "max_uploads_per_day": max_uploads + 1 }),
+        ),
+        Err(settings::ERR_SETTINGS_INVALID_VALUE)
+    );
+    assert_eq!(
+        settings::apply_settings_object(
+            &mut s,
+            &serde_json::json!({ "max_uploads_per_day": max_uploads }),
+        ),
+        Ok(true)
+    );
+}
+
+#[test]
+fn the_health_copy_crosses_the_abi_core_down_and_per_label() {
+    use trace_commons_contributor::daemon::health::{LABEL_NOT_LOGGED_IN, LABEL_QUEUE_FULL};
+    use trace_commons_contributor::health_copy::{
+        core_down_copy, health_copy_for_label, on_hold_copy,
+    };
+    use trace_commons_contributor_ffi::tc_health_copy_json;
+
+    // Unreachable: the core-down sentence, whatever label is passed (even
+    // one that would otherwise answer), because `reachable` governs.
+    let label = cstr_str(LABEL_NOT_LOGGED_IN);
+    assert_eq!(
+        json_owned(unsafe { tc_health_copy_json(0, label.as_ptr(), 500) }),
+        serde_json::to_value(core_down_copy()).unwrap()
+    );
+    assert_eq!(
+        json_owned(unsafe { tc_health_copy_json(0, std::ptr::null(), 0) }),
+        serde_json::to_value(core_down_copy()).unwrap()
+    );
+
+    // Reachable with a known label: the per-label table, with its severity
+    // and action kind.
+    let banner = json_owned(unsafe { tc_health_copy_json(1, label.as_ptr(), 500) });
+    assert_eq!(
+        banner,
+        serde_json::to_value(health_copy_for_label(LABEL_NOT_LOGGED_IN, Some(500))).unwrap()
+    );
+    assert_eq!(banner["severity"], "actionable");
+    assert_eq!(banner["action_kind"], "reconnect");
+
+    // The queue limit crosses: a configured limit is the number shown, and
+    // 0 (unknown) names none.
+    let full = cstr_str(LABEL_QUEUE_FULL);
+    let banner = json_owned(unsafe { tc_health_copy_json(1, full.as_ptr(), 2000) });
+    assert!(
+        banner["detail"].as_str().unwrap().contains("2,000"),
+        "{banner}"
+    );
+    let banner = json_owned(unsafe { tc_health_copy_json(1, full.as_ptr(), 0) });
+    assert_eq!(
+        banner,
+        serde_json::to_value(health_copy_for_label(LABEL_QUEUE_FULL, None)).unwrap()
+    );
+
+    // Reachable with an unrecognised label still gets a banner, never raw
+    // label text.
+    let unknown = cstr_str("a-future-label");
+    let banner = json_owned(unsafe { tc_health_copy_json(1, unknown.as_ptr(), 500) });
+    assert_eq!(banner, serde_json::to_value(on_hold_copy()).unwrap());
+    assert_eq!(banner["title"], "Contributions are on hold.");
+
+    // A label that is not UTF-8 is still a reported condition: the on-hold
+    // banner, never NULL, which a shell would read as healthy.
+    let not_utf8 = std::ffi::CString::new(vec![0xff_u8, 0xfe, b'x']).unwrap();
+    assert_eq!(
+        json_owned(unsafe { tc_health_copy_json(1, not_utf8.as_ptr(), 500) }),
+        serde_json::to_value(on_hold_copy()).unwrap()
+    );
+
+    // Reachable with no label (NULL or empty): nothing is wrong, so there is
+    // no banner to draw.
+    assert!(unsafe { tc_health_copy_json(1, std::ptr::null(), 500) }.is_null());
+    let empty = cstr_str("");
+    assert!(unsafe { tc_health_copy_json(1, empty.as_ptr(), 500) }.is_null());
+}
+
+#[test]
+fn the_second_look_line_crosses_the_abi() {
+    use trace_commons_contributor::daemon::second_look::{
+        REASON_LOOKS_UNSURE, REASON_NOTHING_MATCHED, REASON_TRIMMED_TO_FIT,
+    };
+    use trace_commons_contributor::preview_copy::second_look_line;
+    use trace_commons_contributor_ffi::tc_second_look_line_text;
+
+    for reason in [
+        REASON_NOTHING_MATCHED,
+        REASON_LOOKS_UNSURE,
+        REASON_TRIMMED_TO_FIT,
+    ] {
+        let c = cstr_str(reason);
+        assert_eq!(
+            take_owned(unsafe { tc_second_look_line_text(c.as_ptr()) }),
+            second_look_line(reason).unwrap()
+        );
+    }
+    let unknown = cstr_str("not-a-real-reason");
+    assert!(unsafe { tc_second_look_line_text(unknown.as_ptr()) }.is_null());
+    assert!(unsafe { tc_second_look_line_text(std::ptr::null()) }.is_null());
+}
+
+#[test]
+fn the_automatic_contribution_copy_crosses_the_abi_patterns_only() {
+    use trace_commons_contributor::consent_copy::automatic_contribution_copy;
+    use trace_commons_contributor_ffi::tc_automatic_contribution_copy_json;
+    let dir = tempfile::tempdir().unwrap();
+    let value =
+        json_owned(unsafe { tc_automatic_contribution_copy_json(cstr(dir.path()).as_ptr()) });
+    assert_eq!(
+        value,
+        serde_json::to_value(automatic_contribution_copy(None)).unwrap()
+    );
+    assert_eq!(value["disclosure"], "patterns_only");
+    assert!(value["model_scrubbed"].is_null());
+    assert!(unsafe { tc_automatic_contribution_copy_json(std::ptr::null()) }.is_null());
+
+    // A configuration that cannot be read is not answered with a guess.
+    std::fs::write(dir.path().join("contributor.json"), "not json").unwrap();
+    assert!(unsafe { tc_automatic_contribution_copy_json(cstr(dir.path()).as_ptr()) }.is_null());
+}
+
+#[test]
+fn the_keychain_status_crosses_the_abi_with_no_secret_material() {
+    use trace_commons_contributor::daemon::settings::{
+        DaemonSettings, keychain_status_unavailable_json,
+    };
+    use trace_commons_contributor_ffi::tc_private_ai_keychain_status_json;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut err = std::ptr::null_mut();
+    let value = json_owned(unsafe {
+        tc_private_ai_keychain_status_json(cstr(dir.path()).as_ptr(), &mut err)
+    });
+    assert!(err.is_null(), "no error on success");
+    assert_eq!(
+        value,
+        serde_json::to_value(DaemonSettings::default().keychain_status_json()).unwrap()
+    );
+    assert_eq!(value["state"], "empty");
+    assert_eq!(value["inference_present"], false);
+    assert_eq!(value["session_present"], false);
+
+    // A NULL/non-UTF-8 config_dir is a caller error, not a business state.
+    assert!(
+        unsafe { tc_private_ai_keychain_status_json(std::ptr::null(), std::ptr::null_mut()) }
+            .is_null()
+    );
+
+    // A config_dir that cannot be opened fails the whole call, as Tauri's
+    // private_ai_status does: NULL, with credential-storage-unavailable.
+    let not_a_dir = dir.path().join("a-file");
+    std::fs::write(&not_a_dir, "x").unwrap();
+    let blocked = not_a_dir.join("state");
+    let mut err = std::ptr::null_mut();
+    assert!(
+        unsafe { tc_private_ai_keychain_status_json(cstr(&blocked).as_ptr(), &mut err) }.is_null()
+    );
+    assert_eq!(take_err(err), "credential-storage-unavailable");
+
+    // A settings document this process cannot parse answers the
+    // "unavailable" fallback rather than NULL: the daemon's own IPC answer
+    // already names the storage failure, so this must read as "nothing
+    // here", not as an error with no button.
+    std::fs::write(dir.path().join("daemon-settings.json"), "not json").unwrap();
+    let unavailable = json_owned(unsafe {
+        tc_private_ai_keychain_status_json(cstr(dir.path()).as_ptr(), std::ptr::null_mut())
+    });
+    assert_eq!(
+        unavailable,
+        serde_json::to_value(keychain_status_unavailable_json()).unwrap()
+    );
+    assert_eq!(unavailable["state"], "unavailable");
+}
+
+#[test]
+fn deep_links_cross_the_abi_as_a_typed_action_or_a_refusal_label() {
+    use trace_commons_contributor::deep_link::{DEEP_LINK_INVALID, REVIEW_DEEP_LINK};
+    use trace_commons_contributor_ffi::tc_parse_deep_link_json;
+
+    let mut err: *mut c_char = std::ptr::null_mut();
+    let review = cstr_str(REVIEW_DEEP_LINK);
+    let value = json_owned(unsafe { tc_parse_deep_link_json(review.as_ptr(), &mut err) });
+    assert_eq!(
+        value,
+        serde_json::json!({"kind": "navigate", "path": "/waiting"})
+    );
+    assert!(err.is_null());
+
+    let enroll =
+        cstr_str("tracecommons://enroll?invite=https%3A%2F%2Fissuer.example%2Fonboard%23CODE");
+    let value = json_owned(unsafe { tc_parse_deep_link_json(enroll.as_ptr(), &mut err) });
+    assert_eq!(
+        value,
+        serde_json::json!({
+            "kind": "enroll",
+            "invite": "https://issuer.example/onboard#CODE",
+        })
+    );
+
+    // Unknown, malformed, NULL, and a `javascript:` scheme are all refused
+    // identically, with the one stable label -- never NULL with no `*err`,
+    // and never a different label per failure shape.
+    for garbage in [
+        cstr_str("not-a-deep-link"),
+        cstr_str("javascript:alert(1)"),
+        cstr_str("tracecommons://review@evil.example"),
+    ] {
+        let mut err: *mut c_char = std::ptr::null_mut();
+        assert!(unsafe { tc_parse_deep_link_json(garbage.as_ptr(), &mut err) }.is_null());
+        assert_eq!(take_owned(err), DEEP_LINK_INVALID);
+    }
+    let mut err: *mut c_char = std::ptr::null_mut();
+    assert!(unsafe { tc_parse_deep_link_json(std::ptr::null(), &mut err) }.is_null());
+    assert_eq!(take_owned(err), DEEP_LINK_INVALID);
+    assert_last_error_contains(DEEP_LINK_INVALID);
+}
+
+#[test]
+fn the_external_url_allowlist_crosses_the_abi() {
+    use trace_commons_contributor::external_url::is_allowed;
+    use trace_commons_contributor_ffi::tc_external_url_is_allowed;
+
+    for url in [
+        "http://127.0.0.1:49152/near-ai/callback?state=abc",
+        "https://cloud.near.ai/dashboard/organizations/example/credits",
+        "https://tracecommons.ai/runs/repair-a-stalled-upload",
+        "https://github.com/TraceCommons/trace-commons/commit/b6722426bb4b83d90425494b664ac468d67943b5",
+    ] {
+        assert!(is_allowed(url), "{url}");
+        let c = cstr_str(url);
+        assert_eq!(
+            unsafe { tc_external_url_is_allowed(c.as_ptr()) },
+            1,
+            "{url}"
+        );
+    }
+    for url in [
+        "https://example.com/redirect",
+        "javascript:alert(1)",
+        "https://cloud.near.ai.evil.example/dashboard/organizations/example/credits",
+    ] {
+        assert!(!is_allowed(url), "{url}");
+        let c = cstr_str(url);
+        assert_eq!(
+            unsafe { tc_external_url_is_allowed(c.as_ptr()) },
+            0,
+            "{url}"
+        );
+    }
+    // A NULL/non-UTF-8 url refuses, the safe sentinel, rather than crashing.
+    assert_eq!(unsafe { tc_external_url_is_allowed(std::ptr::null()) }, 0);
+}
+
+#[test]
+fn the_quit_prompt_is_chosen_from_the_handle() {
+    isolated_stale_pointer_probe("the_quit_prompt_is_chosen_from_the_handle", || {
+        use trace_commons_contributor::quit_copy::{QuitRole, quit_prompt};
+        use trace_commons_contributor_ffi::tc_quit_prompt_json;
+        assert_eq!(
+            json_owned(unsafe { tc_quit_prompt_json(std::ptr::null()) }),
+            serde_json::to_value(quit_prompt(QuitRole::Unavailable)).unwrap()
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let h = start(dir.path());
+        let hosting = json_owned(unsafe { tc_quit_prompt_json(h) });
+        assert_eq!(
+            hosting,
+            serde_json::to_value(quit_prompt(QuitRole::Hosting)).unwrap()
+        );
+        assert_eq!(hosting["role"], "hosting");
+        unsafe { tc_daemon_stop(h) };
+        assert_eq!(
+            json_owned(unsafe { tc_quit_prompt_json(h) })["role"],
+            "unavailable"
+        );
+        unsafe { tc_handle_free(h) };
+        // A freed handle is refused, not dereferenced, and has no watcher.
+        assert_eq!(
+            json_owned(unsafe { tc_quit_prompt_json(h) })["role"],
+            "unavailable"
+        );
+        assert_last_error_contains("invalid-handle-pointer");
+    });
+}
+
+#[test]
+fn the_withdrawal_confirmation_prompt_crosses_the_abi() {
+    use trace_commons_contributor::withdraw::confirmation_prompt_unknown;
+    use trace_commons_contributor_ffi::tc_withdrawal_confirmation_prompt_text;
+    let prompt = take_owned(tc_withdrawal_confirmation_prompt_text());
+    assert_eq!(prompt, confirmation_prompt_unknown());
+    assert!(prompt.contains("cannot be recalled"));
+}
+
+#[test]
+fn the_monitor_screens_copy_crosses_the_abi() {
+    use trace_commons_contributor::preview_copy::monitor_screens_copy;
+    use trace_commons_contributor_ffi::tc_monitor_screens_copy_json;
+    assert_eq!(
+        json_owned(tc_monitor_screens_copy_json()),
+        serde_json::to_value(monitor_screens_copy()).unwrap()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// K5 (#1173): the disclosure bundle and the Flow 1 decisions cross the ABI
+// as the core takes them.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_disclosure_bundle_crosses_the_abi_with_the_state_map() {
+    use trace_commons_contributor::disclosure_copy::contributor_disclosure_copy;
+    use trace_commons_contributor::private_inference_copy::{
+        LABEL_CRASHED, LABEL_RUNNING, STATE_LABELS, state_line,
+    };
+    use trace_commons_contributor_ffi::tc_contributor_disclosure_copy_json;
+    let value = json_owned(tc_contributor_disclosure_copy_json());
+    assert_eq!(value, contributor_disclosure_copy());
+    let states = value["private_inference"]["states"].as_object().unwrap();
+    assert_eq!(states.len(), STATE_LABELS.len());
+    assert_eq!(states[LABEL_RUNNING]["working"], true);
+    assert_eq!(states[LABEL_CRASHED]["working"], false);
+    assert_eq!(states[LABEL_CRASHED]["line"], state_line(LABEL_CRASHED));
+}
+
+fn write_config(dir: &std::path::Path, scopes: &[&str], chosen: bool) {
+    let config = serde_json::json!({
+        "schema_version": trace_commons_contributor::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION,
+        "issuer_url": "https://issuer.invalid",
+        "ingest_url": "https://ingest.invalid",
+        "audience": "aud",
+        "tenant_id": "tenant-1",
+        "instance_id": "instance-1",
+        "user_subject": "alice",
+        "device_key_id": "sha256:aa",
+        "consent_scopes": scopes,
+        "consent_scopes_chosen": chosen,
+    });
+    std::fs::write(
+        dir.join("contributor.json"),
+        serde_json::to_vec(&config).unwrap(),
+    )
+    .unwrap();
+}
+
+#[test]
+fn the_grant_precondition_crosses_the_abi_with_its_refusal_labels() {
+    use trace_commons_contributor::flow1::{
+        CONFIG_UNREADABLE, GRANT_CONFIRMATION_REQUIRED, GRANT_NOT_ENROLLED, GRANT_SCOPE_REQUIRED,
+    };
+    use trace_commons_contributor_ffi::tc_grant_precondition_text;
+    let dir = tempfile::tempdir().unwrap();
+    let path = cstr(dir.path());
+    let precondition = |confirmed: i32| {
+        take_owned(unsafe { tc_grant_precondition_text(confirmed, path.as_ptr()) })
+    };
+    // Not enrolled: no configuration at all.
+    assert_eq!(precondition(1), GRANT_NOT_ENROLLED);
+    // The button comes first, and only 1 presses it.
+    assert_eq!(precondition(0), GRANT_CONFIRMATION_REQUIRED);
+    assert_eq!(precondition(2), GRANT_CONFIRMATION_REQUIRED);
+    // A saved floor scope nobody picked is not a choice.
+    write_config(dir.path(), &["debugging_evaluation"], false);
+    assert_eq!(precondition(1), GRANT_SCOPE_REQUIRED);
+    write_config(dir.path(), &["debugging_evaluation"], true);
+    assert_eq!(precondition(1), "");
+    // A configuration that cannot be read is refused, not guessed at.
+    std::fs::write(dir.path().join("contributor.json"), "not json").unwrap();
+    assert_eq!(precondition(1), CONFIG_UNREADABLE);
+    assert!(unsafe { tc_grant_precondition_text(1, std::ptr::null()) }.is_null());
+}
+
+#[test]
+fn the_scope_choice_crosses_the_abi_from_consent_options() {
+    use trace_commons_contributor_ffi::tc_scope_choice_json;
+    let options =
+        serde_json::to_string(&trace_commons_contributor::daemon::enroll::consent_options())
+            .unwrap();
+    let options = cstr_str(&options);
+    let floor = trace_commons_contributor::consent::VALID_SCOPES[0];
+    let choice = |selected: &str| {
+        let selected = cstr_str(selected);
+        json_owned(unsafe { tc_scope_choice_json(options.as_ptr(), selected.as_ptr()) })
+    };
+    let none = choice("[]");
+    assert_eq!(none["can_continue"], false);
+    assert_eq!(none["missing_required"], serde_json::json!([floor]));
+    assert_eq!(choice(&format!("[\"{floor}\"]"))["can_continue"], true);
+    assert_eq!(
+        choice(&format!("[\"{floor}\",\"invented\"]"))["can_continue"],
+        false
+    );
+    // The bare array reads the same as the consent_options object.
+    let array = cstr_str(r#"[{"name":"a","always_on":true}]"#);
+    let selected = cstr_str(r#"["a"]"#);
+    assert_eq!(
+        json_owned(unsafe { tc_scope_choice_json(array.as_ptr(), selected.as_ptr()) })["can_continue"],
+        true
+    );
+    let garbage = cstr_str("not json");
+    assert!(unsafe { tc_scope_choice_json(garbage.as_ptr(), selected.as_ptr()) }.is_null());
+    assert!(unsafe { tc_scope_choice_json(array.as_ptr(), garbage.as_ptr()) }.is_null());
+    assert!(unsafe { tc_scope_choice_json(std::ptr::null(), selected.as_ptr()) }.is_null());
+}
+
+#[test]
+fn the_flow1_steps_cross_the_abi_and_back_undoes_the_disclosures() {
+    use trace_commons_contributor_ffi::{tc_flow1_apply_json, tc_flow1_start_json};
+    let first = json_owned(tc_flow1_start_json(0));
+    assert_eq!(first["step"], "welcome");
+    let regrant = json_owned(tc_flow1_start_json(1));
+    assert_eq!(regrant["step"], "consent");
+    assert_eq!(regrant["progress"]["scopes_saved"], serde_json::Value::Null);
+
+    let apply = |state: &serde_json::Value, event: serde_json::Value| {
+        let state = cstr_str(&state.to_string());
+        let event = cstr_str(&event.to_string());
+        json_owned(unsafe { tc_flow1_apply_json(state.as_ptr(), event.as_ptr()) })
+    };
+    let mut state = regrant;
+    for (event, step) in [
+        (
+            serde_json::json!({"event": "scopes_saved", "scopes": ["debugging_evaluation"]}),
+            "path",
+        ),
+        (
+            serde_json::json!({"event": "choose_path", "path": "automatic", "show_privacy": false}),
+            "inference",
+        ),
+        (
+            serde_json::json!({"event": "inference_finished"}),
+            "disclosure_scrub",
+        ),
+        (
+            serde_json::json!({"event": "scrub_disclosure_read"}),
+            "disclosure_witness",
+        ),
+        (
+            serde_json::json!({"event": "witness_disclosure_read", "signing_address": "0xabc"}),
+            "grant",
+        ),
+    ] {
+        state = apply(&state, event);
+        assert_eq!(state["step"], step);
+    }
+    assert_eq!(state["progress"]["witness_shown"], "0xabc");
+    let back = apply(&state, serde_json::json!({"event": "back"}));
+    assert_eq!(back["step"], "disclosure_witness");
+    assert_eq!(back["progress"]["scrub_disclosure_seen"], false);
+    assert_eq!(back["progress"]["witness_disclosure_seen"], false);
+    assert_eq!(back["progress"]["witness_shown"], serde_json::Value::Null);
+
+    let state_c = cstr_str(&state.to_string());
+    let unknown = cstr_str(r#"{"event": "grant_anyway"}"#);
+    assert!(unsafe { tc_flow1_apply_json(state_c.as_ptr(), unknown.as_ptr()) }.is_null());
+    // A known event the step on screen does not offer moves nothing: the
+    // scrub disclosure "read" from the grant screen, and Back from the
+    // welcome.
+    let scrub = cstr_str(r#"{"event": "scrub_disclosure_read"}"#);
+    assert!(unsafe { tc_flow1_apply_json(state_c.as_ptr(), scrub.as_ptr()) }.is_null());
+    let welcome = cstr_str(&first.to_string());
+    let back_c = cstr_str(r#"{"event": "back"}"#);
+    assert!(unsafe { tc_flow1_apply_json(welcome.as_ptr(), back_c.as_ptr()) }.is_null());
+    assert!(unsafe { tc_flow1_apply_json(std::ptr::null(), unknown.as_ptr()) }.is_null());
+    let garbage = cstr_str("not json");
+    let back_event = cstr_str(r#"{"event": "back"}"#);
+    assert!(unsafe { tc_flow1_apply_json(garbage.as_ptr(), back_event.as_ptr()) }.is_null());
+}
+
+#[test]
+fn the_grant_blockers_and_request_cross_the_abi() {
+    use trace_commons_contributor_ffi::{
+        tc_flow1_grant_blockers_json, tc_flow1_grant_request_json,
+    };
+    let empty = cstr_str("{}");
+    assert_eq!(
+        json_owned(unsafe { tc_flow1_grant_blockers_json(empty.as_ptr()) }),
+        serde_json::json!([
+            "connect",
+            "scope",
+            "path",
+            "scrub_disclosure",
+            "witness_disclosure"
+        ])
+    );
+    let refused = json_owned(unsafe { tc_flow1_grant_request_json(empty.as_ptr()) });
+    assert_eq!(refused["ready"], false);
+    assert_eq!(refused["blockers"].as_array().unwrap().len(), 5);
+    assert_eq!(refused["witness_signing_address"], serde_json::Value::Null);
+
+    let complete = serde_json::json!({
+        "connected": true,
+        "scopes_saved": ["debugging_evaluation"],
+        "path": "automatic",
+        "scrub_disclosure_seen": true,
+        "witness_disclosure_seen": true,
+        "witness_shown": "0xshown",
+    });
+    let complete_c = cstr_str(&complete.to_string());
+    assert_eq!(
+        json_owned(unsafe { tc_flow1_grant_blockers_json(complete_c.as_ptr()) }),
+        serde_json::json!([])
+    );
+    assert_eq!(
+        json_owned(unsafe { tc_flow1_grant_request_json(complete_c.as_ptr()) }),
+        serde_json::json!({"ready": true, "blockers": [], "witness_signing_address": "0xshown"})
+    );
+    // One step undone holds the witness back too.
+    let mut unread = complete.clone();
+    unread["witness_disclosure_seen"] = serde_json::json!(false);
+    let unread = cstr_str(&unread.to_string());
+    assert_eq!(
+        json_owned(unsafe { tc_flow1_grant_request_json(unread.as_ptr()) }),
+        serde_json::json!({
+            "ready": false,
+            "blockers": ["witness_disclosure"],
+            "witness_signing_address": null,
+        })
+    );
+    let garbage = cstr_str("not json");
+    assert!(unsafe { tc_flow1_grant_blockers_json(garbage.as_ptr()) }.is_null());
+    assert!(unsafe { tc_flow1_grant_request_json(std::ptr::null()) }.is_null());
+}
+
+#[test]
+fn the_regrant_void_notice_crosses_the_abi_only_on_the_grants_notice() {
+    use trace_commons_contributor::consent_copy::{
+        VOID_GRANT_REGRANT, VOID_GRANT_REGRANT_ACTION, void_notice_for_wire_with_regrant,
+    };
+    use trace_commons_contributor_ffi::tc_grant_void_notice_regrant_json;
+    let grant = serde_json::json!({
+        "id": 2, "kind": "automatic_grant", "project_id": null, "project_label": null,
+        "reasons": ["witness-changed"], "voided_at": "2026-09-26T00:00:00Z",
+    });
+    let grant_c = cstr_str(&grant.to_string());
+    let notice = json_owned(unsafe { tc_grant_void_notice_regrant_json(grant_c.as_ptr()) });
+    assert_eq!(
+        notice,
+        serde_json::to_value(void_notice_for_wire_with_regrant(&grant).unwrap()).unwrap()
+    );
+    assert_eq!(notice["regrant"], VOID_GRANT_REGRANT);
+    assert_eq!(notice["regrant_action"], VOID_GRANT_REGRANT_ACTION);
+    let project = cstr_str(
+        r#"{"id": 1, "kind": "project", "project_id": "p", "project_label": "api", "reasons": ["witness-changed"]}"#,
+    );
+    let project = json_owned(unsafe { tc_grant_void_notice_regrant_json(project.as_ptr()) });
+    assert!(project["regrant"].is_null());
+    assert!(project["regrant_action"].is_null());
+    let not_an_object = cstr_str(r#""project""#);
+    assert!(unsafe { tc_grant_void_notice_regrant_json(not_an_object.as_ptr()) }.is_null());
+    assert!(unsafe { tc_grant_void_notice_regrant_json(std::ptr::null()) }.is_null());
 }

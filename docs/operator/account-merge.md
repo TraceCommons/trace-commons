@@ -84,6 +84,41 @@ foreign/unknown/double-spent proposal, and a closed surviving or absorbed
 account all reject without leaking which condition tripped (no existence
 oracle).
 
+## Completing a pending withdrawal after merge
+
+A successful merge response can include `withdrawal_completion_pending: true`.
+The merge has committed and its proposal is consumed; do not retry merge
+confirm. The remaining source-session withdrawal work must run for the
+**affected tenant**. The in-process revocation-propagation scheduler authenticates
+with one token and covers only that token's tenant. Other contributor tenants
+need their own worker invocation or external per-tenant schedule.
+
+Scrape `GET /v1/admin/operational-metrics` with an admin credential for each
+tenant and alert when
+`trace_commons_operational_withdrawal_completion_pending == 1`. Its only label
+is the hashed `tenant_storage_ref`. This gauge is re-derived from persisted
+incomplete source-session withdrawals, so a process restart or a worker run
+for another tenant does not clear it. A database read error fails the scrape;
+alert on failed/missing scrapes too, rather than interpreting them as zero.
+
+1. Use a `revocation_worker` (or admin) bearer credential authenticated to the
+   affected tenant. A contributor account-session credential is insufficient;
+   a worker token for the deployment's default tenant cannot recover another
+   tenant. Provision the appropriate tenant-scoped worker credential through
+   the deployment's normal credential management if needed.
+2. Call `POST /v1/workers/revocation-propagation` with that credential and
+   `{"purpose":"complete pending merge withdrawals","dry_run":false,"limit":100}`.
+   Inspect `withdrawal_completions_checked`, `withdrawal_completions_completed`,
+   and `withdrawal_completions_failed`. Repair the failing gate, storage, or DB
+   dependency when failures remain, and rerun this idempotent worker.
+3. Continue bounded runs until `withdrawal_completions_checked` is zero and
+   confirm the affected tenant's operational gauge is zero. A full batch can
+   leave more work; a zero count for another tenant proves nothing about this
+   merge. Keep the incident open while the gauge is one or the scrape fails.
+
+The signal covers source-session-mapped withdrawals, including merge fan-out;
+it does not claim reconciliation for unmapped route withdrawals.
+
 ## Audit surface (hash-only / label-only)
 
 Two audit events bracket the flow. Both are **hash-only / label-only** — they

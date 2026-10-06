@@ -359,73 +359,6 @@ struct RawTraceRlsIds {
     propagation_item_id: Uuid,
 }
 
-#[derive(Debug, PartialEq, Eq)]
-struct RawTraceRlsCounts {
-    submissions: i64,
-    object_refs: i64,
-    derived_records: i64,
-    vector_entries: i64,
-    export_manifests: i64,
-    export_manifest_items: i64,
-    export_access_grants: i64,
-    export_jobs: i64,
-    audit_events: i64,
-    credit_events: i64,
-    utility_attestations: i64,
-    credit_settlement_batches: i64,
-    credit_holds: i64,
-    near_credit_outbox: i64,
-    near_credit_account_outbox: i64,
-    ranking_model_versions: i64,
-    ranking_calibration_datasets: i64,
-    ranking_features: i64,
-    ranking_predictions: i64,
-    ranking_labels: i64,
-    ranking_preference_labels: i64,
-    ranking_calibration_runs: i64,
-    ranking_worker_runs: i64,
-    benchmark_registry_outbox: i64,
-    tombstones: i64,
-    retention_jobs: i64,
-    retention_job_items: i64,
-    revocation_propagation_items: i64,
-}
-
-impl RawTraceRlsCounts {
-    fn all(count: i64) -> Self {
-        Self {
-            submissions: count,
-            object_refs: count,
-            derived_records: count,
-            vector_entries: count,
-            export_manifests: count,
-            export_manifest_items: count,
-            export_access_grants: count,
-            export_jobs: count,
-            audit_events: count,
-            credit_events: count,
-            utility_attestations: count,
-            credit_settlement_batches: count,
-            credit_holds: count,
-            near_credit_outbox: count,
-            near_credit_account_outbox: count,
-            ranking_model_versions: count,
-            ranking_calibration_datasets: count,
-            ranking_features: count,
-            ranking_predictions: count,
-            ranking_labels: count,
-            ranking_preference_labels: count,
-            ranking_calibration_runs: count,
-            ranking_worker_runs: count,
-            benchmark_registry_outbox: count,
-            tombstones: count,
-            retention_jobs: count,
-            retention_job_items: count,
-            revocation_propagation_items: count,
-        }
-    }
-}
-
 fn sample_revocation_propagation_item(
     tenant_id: &str,
     submission_id: Uuid,
@@ -963,94 +896,85 @@ async fn assert_raw_sql_tenants_visible_only_with_matching_tenant_context(
     tenant_a: &str,
     tenant_b: &str,
 ) {
-    let mut client = connect_for_raw_rls_assertion(database_url, "raw tenant RLS assertion").await;
-
-    let tx = client
-        .transaction()
-        .await
-        .expect("start raw tenant no-context assertion transaction");
-    let no_context_count: i64 = tx
-        .query_one(
-            "SELECT COUNT(*) FROM trace_tenants WHERE tenant_id = $1 OR tenant_id = $2",
-            &[&tenant_a, &tenant_b],
-        )
-        .await
-        .expect("count tenants without context")
-        .get(0);
-    assert_eq!(
-        no_context_count, 0,
-        "tenant rows must be invisible without tenant context"
-    );
-    tx.commit()
-        .await
-        .expect("commit raw tenant no-context assertion");
-
-    let tx = client
-        .transaction()
-        .await
-        .expect("start raw tenant A assertion transaction");
-    tx.execute(
-        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
-        &[&tenant_a],
+    assert_raw_sql_tenant_table_visibility(
+        database_url,
+        tenant_a,
+        tenant_b,
+        "trace_tenants",
+        [1, 1],
     )
-    .await
-    .expect("set tenant A context");
-    let tenant_a_visible_count: i64 = tx
-        .query_one(
-            "SELECT COUNT(*) FROM trace_tenants WHERE tenant_id = $1 OR tenant_id = $2",
-            &[&tenant_a, &tenant_b],
-        )
-        .await
-        .expect("count tenants for tenant A")
-        .get(0);
-    let tenant_b_from_a_count: i64 = tx
-        .query_one(
-            "SELECT COUNT(*) FROM trace_tenants WHERE tenant_id = $1",
-            &[&tenant_b],
-        )
-        .await
-        .expect("count tenant B from tenant A context")
-        .get(0);
-    assert_eq!(tenant_a_visible_count, 1);
-    assert_eq!(tenant_b_from_a_count, 0);
-    tx.commit().await.expect("commit raw tenant A assertion");
-
-    let tx = client
-        .transaction()
-        .await
-        .expect("start raw tenant B assertion transaction");
-    tx.execute(
-        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
-        &[&tenant_b],
-    )
-    .await
-    .expect("set tenant B context");
-    let tenant_b_visible_count: i64 = tx
-        .query_one(
-            "SELECT COUNT(*) FROM trace_tenants WHERE tenant_id = $1 OR tenant_id = $2",
-            &[&tenant_a, &tenant_b],
-        )
-        .await
-        .expect("count tenants for tenant B")
-        .get(0);
-    let tenant_a_from_b_count: i64 = tx
-        .query_one(
-            "SELECT COUNT(*) FROM trace_tenants WHERE tenant_id = $1",
-            &[&tenant_a],
-        )
-        .await
-        .expect("count tenant A from tenant B context")
-        .get(0);
-    assert_eq!(tenant_b_visible_count, 1);
-    assert_eq!(tenant_a_from_b_count, 0);
-    tx.commit().await.expect("commit raw tenant B assertion");
+    .await;
 }
 
-async fn raw_trace_rls_counts(
+/// Exercise no context and both tenant directions in separate transactions.
+async fn assert_raw_sql_tenant_table_visibility(
+    database_url: &str,
+    tenant_a: &str,
+    tenant_b: &str,
+    table: &str,
+    expected_counts: [i64; 2],
+) {
+    let mut client = connect_for_raw_rls_assertion(database_url, table).await;
+    // These are test-owned table names, never external input.
+    let visible_sql = if table == "trace_tenants" {
+        format!("SELECT COUNT(*) FROM {table} WHERE tenant_id = $1 OR tenant_id = $2")
+    } else {
+        format!("SELECT COUNT(*) FROM {table}")
+    };
+    let visible_params: &[&(dyn tokio_postgres::types::ToSql + Sync)] = if table == "trace_tenants"
+    {
+        &[&tenant_a, &tenant_b]
+    } else {
+        &[]
+    };
+    let other_sql = format!("SELECT COUNT(*) FROM {table} WHERE tenant_id = $1");
+    for (context, expected) in [
+        (None, 0),
+        (Some((tenant_a, tenant_b)), expected_counts[0]),
+        (Some((tenant_b, tenant_a)), expected_counts[1]),
+    ] {
+        let tx = client
+            .transaction()
+            .await
+            .expect("start raw tenant RLS transaction");
+        if let Some((tenant, _)) = context {
+            tx.execute(
+                "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+                &[&tenant],
+            )
+            .await
+            .expect("set tenant context");
+        }
+        let visible: i64 = tx
+            .query_one(&visible_sql, visible_params)
+            .await
+            .expect("count visible tenant rows")
+            .get(0);
+        assert_eq!(visible, expected, "{table}: context {context:?}");
+        if let Some((_, other_tenant)) = context {
+            let other: i64 = tx
+                .query_one(&other_sql, &[&other_tenant])
+                .await
+                .expect("count other tenant rows")
+                .get(0);
+            assert_eq!(
+                other, 0,
+                "{table}: other tenant must be invisible in {context:?}"
+            );
+        }
+        tx.commit()
+            .await
+            .expect("commit raw tenant RLS transaction");
+    }
+}
+
+async fn assert_raw_trace_rls_counts(
     tx: &tokio_postgres::Transaction<'_>,
     ids: RawTraceRlsIds,
     tenant_id: &str,
-) -> RawTraceRlsCounts {
+    expected: i64,
+    context: &str,
+) {
     let model_version = raw_rls_ranking_model_version(tenant_id);
     let calibration_dataset_hash = raw_rls_ranking_calibration_dataset_hash(tenant_id);
     let row = tx
@@ -1116,35 +1040,18 @@ async fn raw_trace_rls_counts(
         .await
         .expect("count raw Trace Commons rows under RLS");
 
-    RawTraceRlsCounts {
-        submissions: row.get("submissions"),
-        object_refs: row.get("object_refs"),
-        derived_records: row.get("derived_records"),
-        vector_entries: row.get("vector_entries"),
-        export_manifests: row.get("export_manifests"),
-        export_manifest_items: row.get("export_manifest_items"),
-        export_access_grants: row.get("export_access_grants"),
-        export_jobs: row.get("export_jobs"),
-        audit_events: row.get("audit_events"),
-        credit_events: row.get("credit_events"),
-        utility_attestations: row.get("utility_attestations"),
-        credit_settlement_batches: row.get("credit_settlement_batches"),
-        credit_holds: row.get("credit_holds"),
-        near_credit_outbox: row.get("near_credit_outbox"),
-        near_credit_account_outbox: row.get("near_credit_account_outbox"),
-        ranking_model_versions: row.get("ranking_model_versions"),
-        ranking_calibration_datasets: row.get("ranking_calibration_datasets"),
-        ranking_features: row.get("ranking_features"),
-        ranking_predictions: row.get("ranking_predictions"),
-        ranking_labels: row.get("ranking_labels"),
-        ranking_preference_labels: row.get("ranking_preference_labels"),
-        ranking_calibration_runs: row.get("ranking_calibration_runs"),
-        ranking_worker_runs: row.get("ranking_worker_runs"),
-        benchmark_registry_outbox: row.get("benchmark_registry_outbox"),
-        tombstones: row.get("tombstones"),
-        retention_jobs: row.get("retention_jobs"),
-        retention_job_items: row.get("retention_job_items"),
-        revocation_propagation_items: row.get("revocation_propagation_items"),
+    assert_eq!(
+        row.columns().len(),
+        28,
+        "{context}: all RLS counts are present"
+    );
+    for (index, column) in row.columns().iter().enumerate() {
+        assert_eq!(
+            row.get::<_, i64>(index),
+            expected,
+            "{context}: {}",
+            column.name()
+        );
     }
 }
 
@@ -1161,16 +1068,22 @@ async fn assert_raw_sql_trace_rows_visible_only_with_matching_tenant_context(
         .transaction()
         .await
         .expect("start raw no-context RLS assertion transaction");
-    assert_eq!(
-        raw_trace_rls_counts(&tx, tenant_a_ids, tenant_a).await,
-        RawTraceRlsCounts::all(0),
-        "tenant A rows must be invisible without transaction-local tenant context"
-    );
-    assert_eq!(
-        raw_trace_rls_counts(&tx, tenant_b_ids, tenant_b).await,
-        RawTraceRlsCounts::all(0),
-        "tenant B rows must be invisible without transaction-local tenant context"
-    );
+    assert_raw_trace_rls_counts(
+        &tx,
+        tenant_a_ids,
+        tenant_a,
+        0,
+        "tenant A rows must be invisible without transaction-local tenant context",
+    )
+    .await;
+    assert_raw_trace_rls_counts(
+        &tx,
+        tenant_b_ids,
+        tenant_b,
+        0,
+        "tenant B rows must be invisible without transaction-local tenant context",
+    )
+    .await;
     tx.commit()
         .await
         .expect("commit raw no-context RLS assertion");
@@ -1185,16 +1098,22 @@ async fn assert_raw_sql_trace_rows_visible_only_with_matching_tenant_context(
     )
     .await
     .expect("set tenant A context");
-    assert_eq!(
-        raw_trace_rls_counts(&tx, tenant_a_ids, tenant_a).await,
-        RawTraceRlsCounts::all(1),
-        "tenant A rows must be visible with matching tenant context"
-    );
-    assert_eq!(
-        raw_trace_rls_counts(&tx, tenant_b_ids, tenant_b).await,
-        RawTraceRlsCounts::all(0),
-        "tenant B rows must be invisible from tenant A context"
-    );
+    assert_raw_trace_rls_counts(
+        &tx,
+        tenant_a_ids,
+        tenant_a,
+        1,
+        "tenant A rows must be visible with matching tenant context",
+    )
+    .await;
+    assert_raw_trace_rls_counts(
+        &tx,
+        tenant_b_ids,
+        tenant_b,
+        0,
+        "tenant B rows must be invisible from tenant A context",
+    )
+    .await;
     tx.commit()
         .await
         .expect("commit raw tenant A RLS assertion");
@@ -1209,16 +1128,22 @@ async fn assert_raw_sql_trace_rows_visible_only_with_matching_tenant_context(
     )
     .await
     .expect("set tenant B context");
-    assert_eq!(
-        raw_trace_rls_counts(&tx, tenant_b_ids, tenant_b).await,
-        RawTraceRlsCounts::all(1),
-        "tenant B rows must be visible with matching tenant context"
-    );
-    assert_eq!(
-        raw_trace_rls_counts(&tx, tenant_a_ids, tenant_a).await,
-        RawTraceRlsCounts::all(0),
-        "tenant A rows must be invisible from tenant B context"
-    );
+    assert_raw_trace_rls_counts(
+        &tx,
+        tenant_b_ids,
+        tenant_b,
+        1,
+        "tenant B rows must be visible with matching tenant context",
+    )
+    .await;
+    assert_raw_trace_rls_counts(
+        &tx,
+        tenant_a_ids,
+        tenant_a,
+        0,
+        "tenant A rows must be invisible from tenant B context",
+    )
+    .await;
     tx.commit()
         .await
         .expect("commit raw tenant B RLS assertion");
@@ -1229,83 +1154,14 @@ async fn assert_raw_sql_tenant_policies_visible_only_with_matching_tenant_contex
     tenant_a: &str,
     tenant_b: &str,
 ) {
-    let mut client =
-        connect_for_raw_rls_assertion(database_url, "raw tenant policy RLS assertion").await;
-
-    let tx = client
-        .transaction()
-        .await
-        .expect("start raw tenant policy no-context assertion transaction");
-    let no_context_count: i64 = tx
-        .query_one("SELECT COUNT(*) FROM trace_tenant_policies", &[])
-        .await
-        .expect("count tenant policies without context")
-        .get(0);
-    assert_eq!(
-        no_context_count, 0,
-        "tenant policy rows must be invisible without tenant context"
-    );
-    tx.commit()
-        .await
-        .expect("commit raw tenant policy no-context assertion");
-
-    let tx = client
-        .transaction()
-        .await
-        .expect("start raw tenant policy tenant A assertion transaction");
-    tx.execute(
-        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
-        &[&tenant_a],
+    assert_raw_sql_tenant_table_visibility(
+        database_url,
+        tenant_a,
+        tenant_b,
+        "trace_tenant_policies",
+        [1, 1],
     )
-    .await
-    .expect("set tenant A context");
-    let tenant_a_visible_count: i64 = tx
-        .query_one("SELECT COUNT(*) FROM trace_tenant_policies", &[])
-        .await
-        .expect("count tenant policies for tenant A")
-        .get(0);
-    let tenant_b_from_a_count: i64 = tx
-        .query_one(
-            "SELECT COUNT(*) FROM trace_tenant_policies WHERE tenant_id = $1",
-            &[&tenant_b],
-        )
-        .await
-        .expect("count tenant B policy from tenant A context")
-        .get(0);
-    assert_eq!(tenant_a_visible_count, 1);
-    assert_eq!(tenant_b_from_a_count, 0);
-    tx.commit()
-        .await
-        .expect("commit raw tenant policy tenant A assertion");
-
-    let tx = client
-        .transaction()
-        .await
-        .expect("start raw tenant policy tenant B assertion transaction");
-    tx.execute(
-        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
-        &[&tenant_b],
-    )
-    .await
-    .expect("set tenant B context");
-    let tenant_b_visible_count: i64 = tx
-        .query_one("SELECT COUNT(*) FROM trace_tenant_policies", &[])
-        .await
-        .expect("count tenant policies for tenant B")
-        .get(0);
-    let tenant_a_from_b_count: i64 = tx
-        .query_one(
-            "SELECT COUNT(*) FROM trace_tenant_policies WHERE tenant_id = $1",
-            &[&tenant_a],
-        )
-        .await
-        .expect("count tenant A policy from tenant B context")
-        .get(0);
-    assert_eq!(tenant_b_visible_count, 1);
-    assert_eq!(tenant_a_from_b_count, 0);
-    tx.commit()
-        .await
-        .expect("commit raw tenant policy tenant B assertion");
+    .await;
 }
 
 /// The two expected counts are the caller's, because only the caller knows how
@@ -1323,89 +1179,14 @@ async fn assert_raw_sql_tenant_access_grants_visible_only_with_matching_tenant_c
     expected_tenant_a_grants: i64,
     expected_tenant_b_grants: i64,
 ) {
-    let mut client =
-        connect_for_raw_rls_assertion(database_url, "raw tenant access grant RLS assertion").await;
-
-    let tx = client
-        .transaction()
-        .await
-        .expect("start raw tenant access grant no-context assertion transaction");
-    let no_context_count: i64 = tx
-        .query_one("SELECT COUNT(*) FROM trace_tenant_access_grants", &[])
-        .await
-        .expect("count tenant access grants without context")
-        .get(0);
-    assert_eq!(
-        no_context_count, 0,
-        "tenant access grant rows must be invisible without tenant context"
-    );
-    tx.commit()
-        .await
-        .expect("commit raw tenant access grant no-context assertion");
-
-    let tx = client
-        .transaction()
-        .await
-        .expect("start raw tenant access grant tenant A assertion transaction");
-    tx.execute(
-        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
-        &[&tenant_a],
+    assert_raw_sql_tenant_table_visibility(
+        database_url,
+        tenant_a,
+        tenant_b,
+        "trace_tenant_access_grants",
+        [expected_tenant_a_grants, expected_tenant_b_grants],
     )
-    .await
-    .expect("set tenant A context");
-    let tenant_a_visible_count: i64 = tx
-        .query_one("SELECT COUNT(*) FROM trace_tenant_access_grants", &[])
-        .await
-        .expect("count tenant access grants for tenant A")
-        .get(0);
-    let tenant_b_from_a_count: i64 = tx
-        .query_one(
-            "SELECT COUNT(*) FROM trace_tenant_access_grants WHERE tenant_id = $1",
-            &[&tenant_b],
-        )
-        .await
-        .expect("count tenant B access grant from tenant A context")
-        .get(0);
-    assert_eq!(
-        tenant_a_visible_count, expected_tenant_a_grants,
-        "tenant A must see exactly the grants its own fixture wrote"
-    );
-    assert_eq!(tenant_b_from_a_count, 0);
-    tx.commit()
-        .await
-        .expect("commit raw tenant access grant tenant A assertion");
-
-    let tx = client
-        .transaction()
-        .await
-        .expect("start raw tenant access grant tenant B assertion transaction");
-    tx.execute(
-        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
-        &[&tenant_b],
-    )
-    .await
-    .expect("set tenant B context");
-    let tenant_b_visible_count: i64 = tx
-        .query_one("SELECT COUNT(*) FROM trace_tenant_access_grants", &[])
-        .await
-        .expect("count tenant access grants for tenant B")
-        .get(0);
-    let tenant_a_from_b_count: i64 = tx
-        .query_one(
-            "SELECT COUNT(*) FROM trace_tenant_access_grants WHERE tenant_id = $1",
-            &[&tenant_a],
-        )
-        .await
-        .expect("count tenant A access grant from tenant B context")
-        .get(0);
-    assert_eq!(
-        tenant_b_visible_count, expected_tenant_b_grants,
-        "tenant B must see exactly the grants its own fixture wrote"
-    );
-    assert_eq!(tenant_a_from_b_count, 0);
-    tx.commit()
-        .await
-        .expect("commit raw tenant access grant tenant B assertion");
+    .await;
 }
 
 async fn cleanup_trace_tenants(backend: &PgBackend, tenant_ids: &[&str]) {
@@ -1465,75 +1246,124 @@ async fn assert_trace_rls_policies_installed(backend: &PgBackend) {
     assert_eq!(actual_tables, expected_tables);
 }
 
+fn derived_record_fixture() -> TraceDerivedRecordWrite {
+    TraceDerivedRecordWrite {
+        tenant_id: Default::default(),
+        derived_id: Default::default(),
+        submission_id: Default::default(),
+        trace_id: Default::default(),
+        status: TraceDerivedStatus::Current,
+        worker_kind: TraceWorkerKind::DuplicatePrecheck,
+        worker_version: "summary-worker-v1".to_string(),
+        input_object_ref: None,
+        input_hash: Default::default(),
+        output_object_ref: None,
+        canonical_summary: Some("Tenant A summary.".to_string()),
+        canonical_summary_hash: Default::default(),
+        summary_model: "summary-model-v1".to_string(),
+        task_success: Some("success".to_string()),
+        privacy_risk: Some("low".to_string()),
+        event_count: Some(2),
+        tool_sequence: vec!["memory_search".to_string()],
+        tool_categories: vec!["memory".to_string()],
+        coverage_tags: vec!["tool:memory_search".to_string()],
+        duplicate_score: Some(0.1),
+        novelty_score: Some(0.4),
+        cluster_id: Default::default(),
+    }
+}
+
+fn object_ref_fixture() -> TraceObjectRefWrite {
+    TraceObjectRefWrite {
+        tenant_id: Default::default(),
+        object_ref_id: Default::default(),
+        submission_id: Default::default(),
+        artifact_kind: TraceObjectArtifactKind::SubmittedEnvelope,
+        object_store: "s3://private-corpus".to_string(),
+        object_key: "secret/object/key".to_string(),
+        content_sha256: "sha256:gate-cols".to_string(),
+        encryption_key_ref: "kms:gate-cols".to_string(),
+        size_bytes: 128,
+        compression: None,
+        created_by_job_id: None,
+    }
+}
+
+fn vector_entry_fixture() -> TraceVectorEntryWrite {
+    TraceVectorEntryWrite {
+        tenant_id: Default::default(),
+        submission_id: Default::default(),
+        derived_id: Default::default(),
+        vector_entry_id: Default::default(),
+        vector_store: "trace-commons-main".to_string(),
+        embedding_model: "text-embedding-3-small".to_string(),
+        embedding_dimension: 1536,
+        embedding_version: "embedding-v1".to_string(),
+        source_projection: TraceVectorEntrySourceProjection::CanonicalSummary,
+        source_hash: Default::default(),
+        status: TraceVectorEntryStatus::Active,
+        nearest_trace_ids: Default::default(),
+        cluster_id: Default::default(),
+        duplicate_score: Some(0.1),
+        novelty_score: Some(0.4),
+        indexed_at: Default::default(),
+        invalidated_at: None,
+        deleted_at: None,
+    }
+}
+
+fn retention_job_fixture() -> TraceRetentionJobWrite {
+    TraceRetentionJobWrite {
+        tenant_id: Default::default(),
+        retention_job_id: Default::default(),
+        purpose: "test_pg_retention_purge".to_string(),
+        dry_run: false,
+        status: TraceRetentionJobStatus::Complete,
+        requested_by_principal_ref: "principal:retention-worker".to_string(),
+        requested_by_role: "retention_worker".to_string(),
+        purge_expired_before: Default::default(),
+        prune_export_cache: true,
+        max_export_age_hours: Some(24),
+        audit_event_id: Default::default(),
+        action_counts: Default::default(),
+        selected_revoked_count: 0,
+        selected_expired_count: 1,
+        started_at: Default::default(),
+        completed_at: None,
+    }
+}
+
+fn read_migrations(names: &[&str]) -> String {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../migrations");
+    names
+        .iter()
+        .map(|name| {
+            std::fs::read_to_string(root.join(name))
+                .unwrap_or_else(|error| panic!("read {name}: {error}"))
+        })
+        .collect()
+}
+
 #[test]
 fn force_rls_migration_covers_every_trace_rls_table() {
-    let migrations_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../migrations");
-    let mut sql = std::fs::read_to_string(migrations_root.join("V6__trace_force_rls.sql"))
-        .expect("read FORCE RLS production hardening migration");
-    sql.push_str(
-        &std::fs::read_to_string(migrations_root.join("V11__trace_ranking_worker_runs.sql"))
-            .expect("read ranking worker run production hardening migration"),
-    );
-    sql.push_str(
-        &std::fs::read_to_string(migrations_root.join("V14__trace_ranking_preference_labels.sql"))
-            .expect("read ranking preference label production hardening migration"),
-    );
-    sql.push_str(
-        &std::fs::read_to_string(migrations_root.join("V15__trace_benchmark_registry_outbox.sql"))
-            .expect("read benchmark registry outbox production hardening migration"),
-    );
-    sql.push_str(
-        &std::fs::read_to_string(
-            migrations_root.join("V16__trace_ranking_calibration_datasets.sql"),
-        )
-        .expect("read ranking calibration dataset production hardening migration"),
-    );
-    sql.push_str(
-        &std::fs::read_to_string(migrations_root.join("V21__trace_near_credit_account_outbox.sql"))
-            .expect("read NEAR account outbox production hardening migration"),
-    );
-    sql.push_str(
-        &std::fs::read_to_string(migrations_root.join("V38__trace_pii_backstop.sql"))
-            .expect("read PII backstop production hardening migration"),
-    );
-    sql.push_str(
-        &std::fs::read_to_string(migrations_root.join("V26__trace_contributor_profiles.sql"))
-            .expect("read contributor profile production hardening migration"),
-    );
-    sql.push_str(
-        &std::fs::read_to_string(migrations_root.join("V28__device_keys.sql"))
-            .expect("read device key production hardening migration"),
-    );
-    sql.push_str(
-        &std::fs::read_to_string(migrations_root.join("V29__onboarding_invites.sql"))
-            .expect("read onboarding invite production hardening migration"),
-    );
-    sql.push_str(
-        &std::fs::read_to_string(migrations_root.join("V30__trace_accounts.sql"))
-            .expect("read trace account production hardening migration"),
-    );
-    sql.push_str(
-        &std::fs::read_to_string(migrations_root.join("V32__webauthn_credentials.sql"))
-            .expect("read WebAuthn credential production hardening migration"),
-    );
-    sql.push_str(
-        &std::fs::read_to_string(migrations_root.join("V33__near_identities.sql"))
-            .expect("read NEAR identity production hardening migration"),
-    );
-    sql.push_str(
-        &std::fs::read_to_string(migrations_root.join("V34__account_consolidation.sql"))
-            .expect("read account consolidation production hardening migration"),
-    );
-    sql.push_str(
-        &std::fs::read_to_string(migrations_root.join("V43__trace_withdrawal.sql"))
-            .expect("read trace withdrawal production hardening migration"),
-    );
-    sql.push_str(
-        &std::fs::read_to_string(
-            migrations_root.join("V56__community_withdrawal_eviction_rls.sql"),
-        )
-        .expect("read community withdrawal eviction production hardening migration"),
-    );
+    let mut sql = read_migrations(&[
+        "V6__trace_force_rls.sql",
+        "V11__trace_ranking_worker_runs.sql",
+        "V14__trace_ranking_preference_labels.sql",
+        "V15__trace_benchmark_registry_outbox.sql",
+        "V16__trace_ranking_calibration_datasets.sql",
+        "V21__trace_near_credit_account_outbox.sql",
+        "V38__trace_pii_backstop.sql",
+        "V26__trace_contributor_profiles.sql",
+        "V28__device_keys.sql",
+        "V29__onboarding_invites.sql",
+        "V30__trace_accounts.sql",
+        "V32__webauthn_credentials.sql",
+        "V33__near_identities.sql",
+        "V34__account_consolidation.sql",
+        "V43__trace_withdrawal.sql",
+        "V56__community_withdrawal_eviction_rls.sql",
+    ]);
     // Tables introduced after the original hardening migration install their
     // policies in their creation migration; earlier migrations cannot alter them.
     sql.push_str(include_str!(
@@ -1573,6 +1403,45 @@ fn force_rls_migration_covers_every_trace_rls_table() {
     sql.push_str(include_str!(
         "../../../migrations/V91__legacy_invite_link_devices.sql"
     ));
+    sql.push_str(include_str!(
+        "../../../migrations/V92__versioned_pipeline_runs.sql"
+    ));
+    sql.push_str(include_str!(
+        "../../../migrations/V93__versioned_pipeline_durability.sql"
+    ));
+    sql.push_str(include_str!(
+        "../../../migrations/V94__versioned_pipeline_settlement.sql"
+    ));
+    sql.push_str(include_str!(
+        "../../../migrations/V95__versioned_pipeline_receipt_content.sql"
+    ));
+    sql.push_str(include_str!(
+        "../../../migrations/V97__account_bindings.sql"
+    ));
+    sql.push_str(include_str!(
+        "../../../migrations/V105__versioned_pipeline_review_invalidation.sql"
+    ));
+    sql.push_str(include_str!(
+        "../../../migrations/V106__versioned_pipeline_exports.sql"
+    ));
+    sql.push_str(include_str!(
+        "../../../migrations/V107__versioned_pipeline_qualification.sql"
+    ));
+    sql.push_str(include_str!(
+        "../../../migrations/V108__versioned_pipeline_attempt_artifacts.sql"
+    ));
+    sql.push_str(include_str!(
+        "../../../migrations/V110__versioned_pipeline_activation.sql"
+    ));
+    sql.push_str(include_str!(
+        "../../../migrations/V111__versioned_pipeline_policy_interventions.sql"
+    ));
+    sql.push_str(include_str!(
+        "../../../migrations/V112__versioned_pipeline_activation_gate.sql"
+    ));
+    sql.push_str(include_str!(
+        "../../../migrations/V113__versioned_pipeline_rebuild_fence.sql"
+    ));
     // `trace_pii_backstop` carries the same tenant-isolation policy but is not
     // in `TRACE_COMMONS_RLS_TABLES`, so assert it here rather than lose the
     // coverage the hand-maintained table list used to provide.
@@ -1590,58 +1459,20 @@ fn force_rls_migration_covers_every_trace_rls_table() {
 
 #[test]
 fn central_rls_tenant_predicate_migration_covers_every_trace_rls_table() {
-    let migrations_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../migrations");
-    let mut sql = std::fs::read_to_string(
-        migrations_root.join("V18__trace_central_rls_tenant_predicate.sql"),
-    )
-    .expect("read central RLS tenant predicate migration");
-    sql.push_str(
-        &std::fs::read_to_string(migrations_root.join("V21__trace_near_credit_account_outbox.sql"))
-            .expect("read NEAR account outbox central RLS policy migration"),
-    );
-    sql.push_str(
-        &std::fs::read_to_string(migrations_root.join("V38__trace_pii_backstop.sql"))
-            .expect("read PII backstop central RLS policy migration"),
-    );
-    sql.push_str(
-        &std::fs::read_to_string(migrations_root.join("V26__trace_contributor_profiles.sql"))
-            .expect("read contributor profile central RLS policy migration"),
-    );
-    sql.push_str(
-        &std::fs::read_to_string(migrations_root.join("V28__device_keys.sql"))
-            .expect("read device key central RLS policy migration"),
-    );
-    sql.push_str(
-        &std::fs::read_to_string(migrations_root.join("V29__onboarding_invites.sql"))
-            .expect("read onboarding invite central RLS policy migration"),
-    );
-    sql.push_str(
-        &std::fs::read_to_string(migrations_root.join("V30__trace_accounts.sql"))
-            .expect("read trace account central RLS policy migration"),
-    );
-    sql.push_str(
-        &std::fs::read_to_string(migrations_root.join("V32__webauthn_credentials.sql"))
-            .expect("read WebAuthn credential central RLS policy migration"),
-    );
-    sql.push_str(
-        &std::fs::read_to_string(migrations_root.join("V33__near_identities.sql"))
-            .expect("read NEAR identity central RLS policy migration"),
-    );
-    sql.push_str(
-        &std::fs::read_to_string(migrations_root.join("V34__account_consolidation.sql"))
-            .expect("read account consolidation central RLS policy migration"),
-    );
-    sql.push_str(
-        &std::fs::read_to_string(migrations_root.join("V43__trace_withdrawal.sql"))
-            .expect("read trace withdrawal central RLS policy migration"),
-    );
-    sql.push_str(
-        &std::fs::read_to_string(
-            migrations_root.join("V56__community_withdrawal_eviction_rls.sql"),
-        )
-        .expect("read community withdrawal eviction central RLS policy migration"),
-    );
-
+    let mut sql = read_migrations(&[
+        "V18__trace_central_rls_tenant_predicate.sql",
+        "V21__trace_near_credit_account_outbox.sql",
+        "V38__trace_pii_backstop.sql",
+        "V26__trace_contributor_profiles.sql",
+        "V28__device_keys.sql",
+        "V29__onboarding_invites.sql",
+        "V30__trace_accounts.sql",
+        "V32__webauthn_credentials.sql",
+        "V33__near_identities.sql",
+        "V34__account_consolidation.sql",
+        "V43__trace_withdrawal.sql",
+        "V56__community_withdrawal_eviction_rls.sql",
+    ]);
     // Tables introduced after the original hardening migration install their
     // policies in their creation migration; earlier migrations cannot alter them.
     sql.push_str(include_str!(
@@ -1682,8 +1513,47 @@ fn central_rls_tenant_predicate_migration_covers_every_trace_rls_table() {
     sql.push_str(include_str!(
         "../../../migrations/V91__legacy_invite_link_devices.sql"
     ));
+    sql.push_str(include_str!(
+        "../../../migrations/V97__account_bindings.sql"
+    ));
     assert!(sql.contains("RETURNS TEXT"));
     assert!(sql.contains("current_setting('trace_commons.trace_tenant_id', true)"));
+    sql.push_str(include_str!(
+        "../../../migrations/V92__versioned_pipeline_runs.sql"
+    ));
+    sql.push_str(include_str!(
+        "../../../migrations/V93__versioned_pipeline_durability.sql"
+    ));
+    sql.push_str(include_str!(
+        "../../../migrations/V94__versioned_pipeline_settlement.sql"
+    ));
+    sql.push_str(include_str!(
+        "../../../migrations/V95__versioned_pipeline_receipt_content.sql"
+    ));
+    sql.push_str(include_str!(
+        "../../../migrations/V105__versioned_pipeline_review_invalidation.sql"
+    ));
+    sql.push_str(include_str!(
+        "../../../migrations/V106__versioned_pipeline_exports.sql"
+    ));
+    sql.push_str(include_str!(
+        "../../../migrations/V107__versioned_pipeline_qualification.sql"
+    ));
+    sql.push_str(include_str!(
+        "../../../migrations/V108__versioned_pipeline_attempt_artifacts.sql"
+    ));
+    sql.push_str(include_str!(
+        "../../../migrations/V110__versioned_pipeline_activation.sql"
+    ));
+    sql.push_str(include_str!(
+        "../../../migrations/V111__versioned_pipeline_policy_interventions.sql"
+    ));
+    sql.push_str(include_str!(
+        "../../../migrations/V112__versioned_pipeline_activation_gate.sql"
+    ));
+    sql.push_str(include_str!(
+        "../../../migrations/V113__versioned_pipeline_rebuild_fence.sql"
+    ));
     for table in expected_trace_rls_tables()
         .into_iter()
         .chain(["trace_pii_backstop"])
@@ -2896,20 +2766,12 @@ async fn store_facade_preserves_retention_job_scope_and_items() {
         .upsert_trace_retention_job(TraceRetentionJobWrite {
             tenant_id: tenant_alpha.clone(),
             retention_job_id,
-            purpose: "test_pg_retention_purge".to_string(),
-            dry_run: false,
             status: TraceRetentionJobStatus::Running,
-            requested_by_principal_ref: "principal:retention-worker".to_string(),
-            requested_by_role: "retention_worker".to_string(),
             purge_expired_before: Some(Utc::now()),
-            prune_export_cache: true,
-            max_export_age_hours: Some(24),
             audit_event_id: Some(Uuid::new_v4()),
             action_counts: action_counts.clone(),
-            selected_revoked_count: 0,
-            selected_expired_count: 1,
             started_at: Some(Utc::now()),
-            completed_at: None,
+            ..retention_job_fixture()
         })
         .await
         .expect("insert alpha retention job");
@@ -2923,20 +2785,13 @@ async fn store_facade_preserves_retention_job_scope_and_items() {
         .upsert_trace_retention_job(TraceRetentionJobWrite {
             tenant_id: tenant_alpha.clone(),
             retention_job_id,
-            purpose: "test_pg_retention_purge".to_string(),
-            dry_run: false,
-            status: TraceRetentionJobStatus::Complete,
-            requested_by_principal_ref: "principal:retention-worker".to_string(),
-            requested_by_role: "retention_worker".to_string(),
             purge_expired_before: Some(Utc::now()),
-            prune_export_cache: true,
-            max_export_age_hours: Some(24),
             audit_event_id: job.audit_event_id,
             action_counts: action_counts.clone(),
-            selected_revoked_count: 0,
             selected_expired_count: 2,
             started_at: job.started_at,
             completed_at: Some(Utc::now()),
+            ..retention_job_fixture()
         })
         .await
         .expect("idempotently update alpha retention job");
@@ -3530,14 +3385,11 @@ async fn raw_trace_corpus_rls_requires_matching_transaction_local_tenant_context
             tenant_id: tenant_a.clone(),
             object_ref_id: tenant_a_object_ref_id,
             submission_id: tenant_a_submission_id,
-            artifact_kind: TraceObjectArtifactKind::SubmittedEnvelope,
-            object_store: "s3://private-corpus".to_string(),
             object_key: format!("{tenant_a}/submission.json"),
             content_sha256: format!("sha256:{tenant_a}:object"),
             encryption_key_ref: format!("kms:{tenant_a}"),
             size_bytes: 4096,
-            compression: None,
-            created_by_job_id: None,
+            ..object_ref_fixture()
         })
         .await
         .expect("append tenant A object ref");
@@ -3547,14 +3399,11 @@ async fn raw_trace_corpus_rls_requires_matching_transaction_local_tenant_context
             tenant_id: tenant_b.clone(),
             object_ref_id: tenant_b_object_ref_id,
             submission_id: tenant_b_submission_id,
-            artifact_kind: TraceObjectArtifactKind::SubmittedEnvelope,
-            object_store: "s3://private-corpus".to_string(),
             object_key: format!("{tenant_b}/submission.json"),
             content_sha256: format!("sha256:{tenant_b}:object"),
             encryption_key_ref: format!("kms:{tenant_b}"),
             size_bytes: 2048,
-            compression: None,
-            created_by_job_id: None,
+            ..object_ref_fixture()
         })
         .await
         .expect("append tenant B object ref");
@@ -3566,17 +3415,11 @@ async fn raw_trace_corpus_rls_requires_matching_transaction_local_tenant_context
             derived_id: tenant_a_derived_id,
             submission_id: tenant_a_submission_id,
             trace_id: tenant_a_trace_id,
-            status: TraceDerivedStatus::Current,
-            worker_kind: TraceWorkerKind::DuplicatePrecheck,
             worker_version: "raw-rls-derived-v1".to_string(),
-            input_object_ref: None,
             input_hash: format!("sha256:{tenant_a}:derived-input"),
-            output_object_ref: None,
             canonical_summary: Some("tenant A raw RLS summary".to_string()),
             canonical_summary_hash: Some(format!("sha256:{tenant_a}:summary")),
             summary_model: "raw-rls-summary-model".to_string(),
-            task_success: Some("success".to_string()),
-            privacy_risk: Some("low".to_string()),
             event_count: Some(1),
             tool_sequence: vec!["terminal".to_string()],
             tool_categories: vec!["shell".to_string()],
@@ -3584,6 +3427,7 @@ async fn raw_trace_corpus_rls_requires_matching_transaction_local_tenant_context
             duplicate_score: Some(0.01),
             novelty_score: Some(0.9),
             cluster_id: Some(format!("cluster:{tenant_a}")),
+            ..derived_record_fixture()
         })
         .await
         .expect("append tenant A derived record");
@@ -3598,16 +3442,13 @@ async fn raw_trace_corpus_rls_requires_matching_transaction_local_tenant_context
             embedding_model: "raw-rls-embedder".to_string(),
             embedding_dimension: 8,
             embedding_version: "v1".to_string(),
-            source_projection: TraceVectorEntrySourceProjection::CanonicalSummary,
             source_hash: format!("sha256:{tenant_a}:summary"),
-            status: TraceVectorEntryStatus::Active,
             nearest_trace_ids: vec![tenant_a_trace_id.to_string()],
             cluster_id: Some(format!("cluster:{tenant_a}")),
             duplicate_score: Some(0.01),
             novelty_score: Some(0.9),
             indexed_at: Some(Utc::now()),
-            invalidated_at: None,
-            deleted_at: None,
+            ..vector_entry_fixture()
         })
         .await
         .expect("append tenant A vector entry");
@@ -3618,17 +3459,11 @@ async fn raw_trace_corpus_rls_requires_matching_transaction_local_tenant_context
             derived_id: tenant_b_derived_id,
             submission_id: tenant_b_submission_id,
             trace_id: tenant_b_trace_id,
-            status: TraceDerivedStatus::Current,
-            worker_kind: TraceWorkerKind::DuplicatePrecheck,
             worker_version: "raw-rls-derived-v1".to_string(),
-            input_object_ref: None,
             input_hash: format!("sha256:{tenant_b}:derived-input"),
-            output_object_ref: None,
             canonical_summary: Some("tenant B raw RLS summary".to_string()),
             canonical_summary_hash: Some(format!("sha256:{tenant_b}:summary")),
             summary_model: "raw-rls-summary-model".to_string(),
-            task_success: Some("success".to_string()),
-            privacy_risk: Some("low".to_string()),
             event_count: Some(1),
             tool_sequence: vec!["terminal".to_string()],
             tool_categories: vec!["shell".to_string()],
@@ -3636,6 +3471,7 @@ async fn raw_trace_corpus_rls_requires_matching_transaction_local_tenant_context
             duplicate_score: Some(0.02),
             novelty_score: Some(0.8),
             cluster_id: Some(format!("cluster:{tenant_b}")),
+            ..derived_record_fixture()
         })
         .await
         .expect("append tenant B derived record");
@@ -3650,16 +3486,13 @@ async fn raw_trace_corpus_rls_requires_matching_transaction_local_tenant_context
             embedding_model: "raw-rls-embedder".to_string(),
             embedding_dimension: 8,
             embedding_version: "v1".to_string(),
-            source_projection: TraceVectorEntrySourceProjection::CanonicalSummary,
             source_hash: format!("sha256:{tenant_b}:summary"),
-            status: TraceVectorEntryStatus::Active,
             nearest_trace_ids: vec![tenant_b_trace_id.to_string()],
             cluster_id: Some(format!("cluster:{tenant_b}")),
             duplicate_score: Some(0.02),
             novelty_score: Some(0.8),
             indexed_at: Some(Utc::now()),
-            invalidated_at: None,
-            deleted_at: None,
+            ..vector_entry_fixture()
         })
         .await
         .expect("append tenant B vector entry");
@@ -3966,19 +3799,13 @@ async fn raw_trace_corpus_rls_requires_matching_transaction_local_tenant_context
             tenant_id: tenant_a.clone(),
             retention_job_id: tenant_a_retention_job_id,
             purpose: "rls_retention_a".to_string(),
-            dry_run: false,
-            status: TraceRetentionJobStatus::Complete,
             requested_by_principal_ref: format!("principal:{tenant_a}"),
-            requested_by_role: "retention_worker".to_string(),
             purge_expired_before: Some(effective_at),
-            prune_export_cache: true,
-            max_export_age_hours: Some(24),
             audit_event_id: Some(Uuid::new_v4()),
             action_counts: tenant_a_retention_action_counts,
-            selected_revoked_count: 0,
-            selected_expired_count: 1,
             started_at: Some(effective_at),
             completed_at: Some(effective_at),
+            ..retention_job_fixture()
         })
         .await
         .expect("write tenant A retention job");
@@ -4006,19 +3833,13 @@ async fn raw_trace_corpus_rls_requires_matching_transaction_local_tenant_context
             tenant_id: tenant_b.clone(),
             retention_job_id: tenant_b_retention_job_id,
             purpose: "rls_retention_b".to_string(),
-            dry_run: false,
-            status: TraceRetentionJobStatus::Complete,
             requested_by_principal_ref: format!("principal:{tenant_b}"),
-            requested_by_role: "retention_worker".to_string(),
             purge_expired_before: Some(effective_at),
-            prune_export_cache: true,
-            max_export_age_hours: Some(24),
             audit_event_id: Some(Uuid::new_v4()),
             action_counts: tenant_b_retention_action_counts,
-            selected_revoked_count: 0,
-            selected_expired_count: 1,
             started_at: Some(effective_at),
             completed_at: Some(effective_at),
+            ..retention_job_fixture()
         })
         .await
         .expect("write tenant B retention job");
@@ -4268,14 +4089,11 @@ async fn store_facade_invalidates_object_refs_and_tombstones_by_tenant_scope() {
             tenant_id: tenant_a.clone(),
             object_ref_id: tenant_a_first_object_ref_id,
             submission_id,
-            artifact_kind: TraceObjectArtifactKind::SubmittedEnvelope,
-            object_store: "s3://private-corpus".to_string(),
             object_key: format!("{tenant_a}/submission.json"),
             content_sha256: format!("sha256:{tenant_a}:object-1"),
             encryption_key_ref: format!("kms:{tenant_a}"),
             size_bytes: 4096,
-            compression: None,
-            created_by_job_id: None,
+            ..object_ref_fixture()
         })
         .await
         .expect("append tenant A first object ref");
@@ -4288,14 +4106,13 @@ async fn store_facade_invalidates_object_refs_and_tombstones_by_tenant_scope() {
             tenant_id: tenant_a.clone(),
             object_ref_id: tenant_a_latest_object_ref_id,
             submission_id,
-            artifact_kind: TraceObjectArtifactKind::SubmittedEnvelope,
-            object_store: "s3://private-corpus".to_string(),
             object_key: format!("{tenant_a}/submission-v2.json"),
             content_sha256: format!("sha256:{tenant_a}:object-2"),
             encryption_key_ref: format!("kms:{tenant_a}"),
             size_bytes: 8192,
             compression: Some("zstd".to_string()),
             created_by_job_id: Some(Uuid::new_v4()),
+            ..object_ref_fixture()
         })
         .await
         .expect("append tenant A latest object ref");
@@ -4306,14 +4123,11 @@ async fn store_facade_invalidates_object_refs_and_tombstones_by_tenant_scope() {
             tenant_id: tenant_b.clone(),
             object_ref_id: tenant_b_object_ref_id,
             submission_id,
-            artifact_kind: TraceObjectArtifactKind::SubmittedEnvelope,
-            object_store: "s3://private-corpus".to_string(),
             object_key: format!("{tenant_b}/submission.json"),
             content_sha256: format!("sha256:{tenant_b}:object"),
             encryption_key_ref: format!("kms:{tenant_b}"),
             size_bytes: 2048,
-            compression: None,
-            created_by_job_id: None,
+            ..object_ref_fixture()
         })
         .await
         .expect("append tenant B object ref");
@@ -4355,8 +4169,6 @@ async fn store_facade_invalidates_object_refs_and_tombstones_by_tenant_scope() {
             derived_id: tenant_a_derived_id,
             submission_id,
             trace_id: inserted_a.trace_id,
-            status: TraceDerivedStatus::Current,
-            worker_kind: TraceWorkerKind::DuplicatePrecheck,
             worker_version: "duplicate-worker-v1".to_string(),
             input_object_ref: Some(TenantScopedTraceObjectRef {
                 tenant_id: tenant_a.clone(),
@@ -4364,19 +4176,15 @@ async fn store_facade_invalidates_object_refs_and_tombstones_by_tenant_scope() {
                 object_ref_id: tenant_a_first_object_ref_id,
             }),
             input_hash: format!("sha256:{tenant_a}:object-1"),
-            output_object_ref: None,
             canonical_summary: Some("Tenant A canonical summary.".to_string()),
             canonical_summary_hash: Some(format!("sha256:{tenant_a}:summary")),
-            summary_model: "summary-model-v1".to_string(),
-            task_success: Some("success".to_string()),
-            privacy_risk: Some("low".to_string()),
             event_count: Some(3),
             tool_sequence: vec!["calendar_create".to_string()],
             tool_categories: vec!["calendar".to_string()],
             coverage_tags: vec!["tool:calendar_create".to_string()],
-            duplicate_score: Some(0.1),
             novelty_score: Some(0.7),
             cluster_id: Some(format!("cluster:{tenant_a}")),
+            ..derived_record_fixture()
         })
         .await
         .expect("append tenant A derived record");
@@ -4388,8 +4196,6 @@ async fn store_facade_invalidates_object_refs_and_tombstones_by_tenant_scope() {
             derived_id: tenant_b_derived_id,
             submission_id,
             trace_id: inserted_b.trace_id,
-            status: TraceDerivedStatus::Current,
-            worker_kind: TraceWorkerKind::DuplicatePrecheck,
             worker_version: "duplicate-worker-v1".to_string(),
             input_object_ref: Some(TenantScopedTraceObjectRef {
                 tenant_id: tenant_b.clone(),
@@ -4397,19 +4203,12 @@ async fn store_facade_invalidates_object_refs_and_tombstones_by_tenant_scope() {
                 object_ref_id: tenant_b_object_ref_id,
             }),
             input_hash: format!("sha256:{tenant_b}:object"),
-            output_object_ref: None,
             canonical_summary: Some("Tenant B canonical summary.".to_string()),
             canonical_summary_hash: Some(format!("sha256:{tenant_b}:summary")),
-            summary_model: "summary-model-v1".to_string(),
-            task_success: Some("success".to_string()),
-            privacy_risk: Some("low".to_string()),
-            event_count: Some(2),
-            tool_sequence: vec!["memory_search".to_string()],
-            tool_categories: vec!["memory".to_string()],
-            coverage_tags: vec!["tool:memory_search".to_string()],
             duplicate_score: Some(0.2),
             novelty_score: Some(0.5),
             cluster_id: Some(format!("cluster:{tenant_b}")),
+            ..derived_record_fixture()
         })
         .await
         .expect("append tenant B derived record");
@@ -4810,13 +4609,10 @@ async fn store_facade_invalidates_export_manifest_items_by_submission_with_tenan
             object_ref_id: tenant_a_object_ref_id,
             submission_id,
             artifact_kind: TraceObjectArtifactKind::WorkerIntermediate,
-            object_store: "s3://private-corpus".to_string(),
             object_key: format!("{tenant_a}/worker/summary.json"),
             content_sha256: format!("sha256:{tenant_a}:object"),
             encryption_key_ref: format!("kms:{tenant_a}"),
-            size_bytes: 128,
-            compression: None,
-            created_by_job_id: None,
+            ..object_ref_fixture()
         })
         .await
         .expect("insert tenant A object ref");
@@ -4826,28 +4622,16 @@ async fn store_facade_invalidates_export_manifest_items_by_submission_with_tenan
             derived_id: tenant_a_derived_id,
             submission_id,
             trace_id,
-            status: TraceDerivedStatus::Current,
             worker_kind: TraceWorkerKind::Summary,
-            worker_version: "summary-worker-v1".to_string(),
             input_object_ref: Some(TenantScopedTraceObjectRef {
                 tenant_id: tenant_a.clone(),
                 submission_id,
                 object_ref_id: tenant_a_object_ref_id,
             }),
             input_hash: format!("sha256:{tenant_a}:object"),
-            output_object_ref: None,
-            canonical_summary: Some("Tenant A summary.".to_string()),
             canonical_summary_hash: Some(format!("sha256:{tenant_a}:summary")),
-            summary_model: "summary-model-v1".to_string(),
-            task_success: Some("success".to_string()),
-            privacy_risk: Some("low".to_string()),
-            event_count: Some(2),
-            tool_sequence: vec!["memory_search".to_string()],
-            tool_categories: vec!["memory".to_string()],
-            coverage_tags: vec!["tool:memory_search".to_string()],
-            duplicate_score: Some(0.1),
-            novelty_score: Some(0.4),
             cluster_id: Some(format!("cluster:{tenant_a}")),
+            ..derived_record_fixture()
         })
         .await
         .expect("insert tenant A derived record");
@@ -4857,20 +4641,11 @@ async fn store_facade_invalidates_export_manifest_items_by_submission_with_tenan
             submission_id,
             derived_id: tenant_a_derived_id,
             vector_entry_id: tenant_a_vector_entry_id,
-            vector_store: "trace-commons-main".to_string(),
-            embedding_model: "text-embedding-3-small".to_string(),
-            embedding_dimension: 1536,
-            embedding_version: "embedding-v1".to_string(),
-            source_projection: TraceVectorEntrySourceProjection::CanonicalSummary,
             source_hash: format!("sha256:{tenant_a}:summary"),
-            status: TraceVectorEntryStatus::Active,
             nearest_trace_ids: Vec::new(),
             cluster_id: Some(format!("cluster:{tenant_a}")),
-            duplicate_score: Some(0.1),
-            novelty_score: Some(0.4),
             indexed_at: Some(Utc::now()),
-            invalidated_at: None,
-            deleted_at: None,
+            ..vector_entry_fixture()
         })
         .await
         .expect("insert tenant A vector entry");
@@ -5027,13 +4802,10 @@ async fn store_facade_rejects_export_manifest_item_cross_tenant_refs() {
             object_ref_id: tenant_b_object_ref_id,
             submission_id,
             artifact_kind: TraceObjectArtifactKind::WorkerIntermediate,
-            object_store: "s3://private-corpus".to_string(),
             object_key: format!("{tenant_b}/worker/summary.json"),
             content_sha256: format!("sha256:{tenant_b}:object"),
             encryption_key_ref: format!("kms:{tenant_b}"),
-            size_bytes: 128,
-            compression: None,
-            created_by_job_id: None,
+            ..object_ref_fixture()
         })
         .await
         .expect("insert tenant B object ref");
@@ -5043,28 +4815,17 @@ async fn store_facade_rejects_export_manifest_item_cross_tenant_refs() {
             derived_id: tenant_b_derived_id,
             submission_id,
             trace_id,
-            status: TraceDerivedStatus::Current,
             worker_kind: TraceWorkerKind::Summary,
-            worker_version: "summary-worker-v1".to_string(),
             input_object_ref: Some(TenantScopedTraceObjectRef {
                 tenant_id: tenant_b.clone(),
                 submission_id,
                 object_ref_id: tenant_b_object_ref_id,
             }),
             input_hash: format!("sha256:{tenant_b}:object"),
-            output_object_ref: None,
             canonical_summary: Some("Tenant B summary.".to_string()),
             canonical_summary_hash: Some(format!("sha256:{tenant_b}:summary")),
-            summary_model: "summary-model-v1".to_string(),
-            task_success: Some("success".to_string()),
-            privacy_risk: Some("low".to_string()),
-            event_count: Some(2),
-            tool_sequence: vec!["memory_search".to_string()],
-            tool_categories: vec!["memory".to_string()],
-            coverage_tags: vec!["tool:memory_search".to_string()],
-            duplicate_score: Some(0.1),
-            novelty_score: Some(0.4),
             cluster_id: Some(format!("cluster:{tenant_b}")),
+            ..derived_record_fixture()
         })
         .await
         .expect("insert tenant B derived record");
@@ -5074,20 +4835,11 @@ async fn store_facade_rejects_export_manifest_item_cross_tenant_refs() {
             submission_id,
             derived_id: tenant_b_derived_id,
             vector_entry_id: tenant_b_vector_entry_id,
-            vector_store: "trace-commons-main".to_string(),
-            embedding_model: "text-embedding-3-small".to_string(),
-            embedding_dimension: 1536,
-            embedding_version: "embedding-v1".to_string(),
-            source_projection: TraceVectorEntrySourceProjection::CanonicalSummary,
             source_hash: format!("sha256:{tenant_b}:summary"),
-            status: TraceVectorEntryStatus::Active,
             nearest_trace_ids: Vec::new(),
             cluster_id: Some(format!("cluster:{tenant_b}")),
-            duplicate_score: Some(0.1),
-            novelty_score: Some(0.4),
             indexed_at: Some(Utc::now()),
-            invalidated_at: None,
-            deleted_at: None,
+            ..vector_entry_fixture()
         })
         .await
         .expect("insert tenant B vector entry");
@@ -5187,13 +4939,10 @@ async fn store_facade_rejects_derived_record_mismatched_tenant_object_ref() {
             object_ref_id: tenant_b_object_ref_id,
             submission_id,
             artifact_kind: TraceObjectArtifactKind::WorkerIntermediate,
-            object_store: "s3://private-corpus".to_string(),
             object_key: format!("{tenant_b}/worker/summary.json"),
             content_sha256: format!("sha256:{tenant_b}:object"),
             encryption_key_ref: format!("kms:{tenant_b}"),
-            size_bytes: 128,
-            compression: None,
-            created_by_job_id: None,
+            ..object_ref_fixture()
         })
         .await
         .expect("insert tenant B object ref");
@@ -5204,28 +4953,16 @@ async fn store_facade_rejects_derived_record_mismatched_tenant_object_ref() {
             derived_id: Uuid::new_v4(),
             submission_id,
             trace_id,
-            status: TraceDerivedStatus::Current,
             worker_kind: TraceWorkerKind::Summary,
-            worker_version: "summary-worker-v1".to_string(),
             input_object_ref: Some(TenantScopedTraceObjectRef {
                 tenant_id: tenant_b.clone(),
                 submission_id,
                 object_ref_id: tenant_b_object_ref_id,
             }),
             input_hash: format!("sha256:{tenant_b}:object"),
-            output_object_ref: None,
-            canonical_summary: Some("Tenant A summary.".to_string()),
             canonical_summary_hash: Some(format!("sha256:{tenant_a}:summary")),
-            summary_model: "summary-model-v1".to_string(),
-            task_success: Some("success".to_string()),
-            privacy_risk: Some("low".to_string()),
-            event_count: Some(2),
-            tool_sequence: vec!["memory_search".to_string()],
-            tool_categories: vec!["memory".to_string()],
-            coverage_tags: vec!["tool:memory_search".to_string()],
-            duplicate_score: Some(0.1),
-            novelty_score: Some(0.4),
             cluster_id: Some(format!("cluster:{tenant_a}")),
+            ..derived_record_fixture()
         })
         .await
         .expect_err("derived records must reject cross-tenant object refs");
@@ -5296,13 +5033,10 @@ async fn store_facade_rejects_vector_entry_mismatched_submission_derived_id() {
             object_ref_id: object_ref_b_id,
             submission_id: submission_b_id,
             artifact_kind: TraceObjectArtifactKind::WorkerIntermediate,
-            object_store: "s3://private-corpus".to_string(),
             object_key: format!("{tenant_id}/submission-b/summary.json"),
             content_sha256: format!("sha256:{tenant_id}:submission-b-object"),
             encryption_key_ref: format!("kms:{tenant_id}"),
-            size_bytes: 128,
-            compression: None,
-            created_by_job_id: None,
+            ..object_ref_fixture()
         })
         .await
         .expect("insert submission B object ref");
@@ -5312,28 +5046,17 @@ async fn store_facade_rejects_vector_entry_mismatched_submission_derived_id() {
             derived_id: derived_b_id,
             submission_id: submission_b_id,
             trace_id: trace_b_id,
-            status: TraceDerivedStatus::Current,
             worker_kind: TraceWorkerKind::Summary,
-            worker_version: "summary-worker-v1".to_string(),
             input_object_ref: Some(TenantScopedTraceObjectRef {
                 tenant_id: tenant_id.clone(),
                 submission_id: submission_b_id,
                 object_ref_id: object_ref_b_id,
             }),
             input_hash: format!("sha256:{tenant_id}:submission-b-object"),
-            output_object_ref: None,
             canonical_summary: Some("Submission B summary.".to_string()),
             canonical_summary_hash: Some(format!("sha256:{tenant_id}:submission-b-summary")),
-            summary_model: "summary-model-v1".to_string(),
-            task_success: Some("success".to_string()),
-            privacy_risk: Some("low".to_string()),
-            event_count: Some(2),
-            tool_sequence: vec!["memory_search".to_string()],
-            tool_categories: vec!["memory".to_string()],
-            coverage_tags: vec!["tool:memory_search".to_string()],
-            duplicate_score: Some(0.1),
-            novelty_score: Some(0.4),
             cluster_id: Some(format!("cluster:{tenant_id}")),
+            ..derived_record_fixture()
         })
         .await
         .expect("insert submission B derived record");
@@ -5344,20 +5067,11 @@ async fn store_facade_rejects_vector_entry_mismatched_submission_derived_id() {
             submission_id: submission_a_id,
             derived_id: derived_b_id,
             vector_entry_id: Uuid::new_v4(),
-            vector_store: "trace-commons-main".to_string(),
-            embedding_model: "text-embedding-3-small".to_string(),
-            embedding_dimension: 1536,
-            embedding_version: "embedding-v1".to_string(),
-            source_projection: TraceVectorEntrySourceProjection::CanonicalSummary,
             source_hash: format!("sha256:{tenant_id}:submission-a-summary"),
-            status: TraceVectorEntryStatus::Active,
             nearest_trace_ids: Vec::new(),
             cluster_id: Some(format!("cluster:{tenant_id}")),
-            duplicate_score: Some(0.1),
-            novelty_score: Some(0.4),
             indexed_at: Some(Utc::now()),
-            invalidated_at: None,
-            deleted_at: None,
+            ..vector_entry_fixture()
         })
         .await
         .expect_err("vector entries must reject derived ids from another submission");
@@ -5761,14 +5475,8 @@ async fn gate_driver_column_grants_exclude_object_keys_and_wide_columns() {
                     tenant_id: tenant_id.clone(),
                     object_ref_id: Uuid::new_v4(),
                     submission_id,
-                    artifact_kind: TraceObjectArtifactKind::SubmittedEnvelope,
-                    object_store: "s3://private-corpus".to_string(),
-                    object_key: "secret/object/key".to_string(),
-                    content_sha256: "sha256:gate-cols".to_string(),
-                    encryption_key_ref: "kms:gate-cols".to_string(),
                     size_bytes: 1024,
-                    compression: None,
-                    created_by_job_id: None,
+                    ..object_ref_fixture()
                 })
                 .await
                 .expect("seed object ref via corpus store");
@@ -5865,14 +5573,11 @@ async fn list_submissions_needing_gate_decision_excludes_decided_and_capped_subm
                 tenant_id: tenant_id.clone(),
                 object_ref_id: Uuid::new_v4(),
                 submission_id,
-                artifact_kind: TraceObjectArtifactKind::SubmittedEnvelope,
-                object_store: "s3://private-corpus".to_string(),
                 object_key: format!("{tenant_id}/submission.json"),
                 content_sha256: format!("sha256:{tenant_id}:object"),
                 encryption_key_ref: format!("kms:{tenant_id}"),
                 size_bytes: 1024,
-                compression: None,
-                created_by_job_id: None,
+                ..object_ref_fixture()
             })
             .await
             .expect("append submitted-envelope object ref");
@@ -5887,14 +5592,11 @@ async fn list_submissions_needing_gate_decision_excludes_decided_and_capped_subm
             tenant_id: tenant_b.clone(),
             object_ref_id: Uuid::new_v4(),
             submission_id: submission_b,
-            artifact_kind: TraceObjectArtifactKind::SubmittedEnvelope,
-            object_store: "s3://private-corpus".to_string(),
             object_key: format!("{tenant_b}/submission-second.json"),
             content_sha256: format!("sha256:{tenant_b}:object-second"),
             encryption_key_ref: format!("kms:{tenant_b}"),
             size_bytes: 2048,
-            compression: None,
-            created_by_job_id: None,
+            ..object_ref_fixture()
         })
         .await
         .expect("append tenant B second submitted-envelope object ref");

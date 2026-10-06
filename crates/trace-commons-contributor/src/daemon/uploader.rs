@@ -89,6 +89,37 @@ pub enum UploadDecision {
         reason_label: String,
         pin: String,
         attested_inference: Option<crate::witness::inference_record::InferenceAttestationRecord>,
+        /// The serialized size, in bytes, of the certified bytes `pin` names
+        /// (K10) -- the witness's own `envelope_bytes.len()`, measured fresh
+        /// when this decision was reached from a witness response this call
+        /// just received, or carried forward from `QueueEntry::would_send_bytes`
+        /// when it instead re-affirms a pin an earlier pass already measured
+        /// (see `Uploader::upload_entry`'s witness re-affirmation branch).
+        /// `None` only when neither is available.
+        would_send_bytes: Option<u64>,
+    },
+    /// Approved on the contributor's behalf and held for a person by the
+    /// Scrub check (K4 of #1118): under Manual, before anything was built;
+    /// under Automatic, because the envelope just built is worth a second
+    /// look. Nothing was sent to the commons. `reasons` are that envelope's
+    /// `second_look` labels, empty when nothing was built (Manual); labels
+    /// only, for the log.
+    ///
+    /// `pin` is the digest of the built envelope, already saved under the
+    /// entry through the same `approved_envelope::save` a preview pins with,
+    /// and its counts. The queue pins that digest and records the counts
+    /// beside it, so the held entry reads `scrubbed` with its real
+    /// `second_look` and a person's review shows those bytes. `None` when
+    /// nothing was built (Manual), on the witness path, or when the save
+    /// failed: the entry is held all the same, and reads not yet scrubbed.
+    HeldForSecondLook {
+        reason_label: String,
+        reasons: Vec<&'static str>,
+        pin: Option<(String, super::second_look::ScrubCounts)>,
+        /// The serialized size, in bytes, of the envelope `pin` names (K10).
+        /// `Some` only alongside a `Some` pin, and `None` whenever `pin` is
+        /// `None` for any of the reasons documented above.
+        would_send_bytes: Option<u64>,
     },
     /// Network, auth, or transient classifier failure.
     Failed { reason_label: String },
@@ -236,6 +267,10 @@ fn hold_for_review(
     witnessed: crate::witness::transport::WitnessedEnvelope,
     attested_inference: crate::witness::inference_record::InferenceAttestationRecord,
 ) -> UploadDecision {
+    // K10: measured before `witnessed` moves into the artifact below -- the
+    // exact wire bytes this held review's upload will carry, once a person
+    // clears it.
+    let would_send_bytes = Some(witnessed.envelope_bytes.len() as u64);
     let artifact = super::approved_envelope::WitnessReviewArtifact::new(
         witnessed,
         session_hash.to_string(),
@@ -250,10 +285,34 @@ fn hold_for_review(
                 reason_label,
                 pin,
                 attested_inference: Some(attested_inference),
+                would_send_bytes,
             }
         }
         _ => UploadDecision::ApprovalStale { reason_label },
     }
+}
+
+/// Save the envelope the Scrub check held, so the entry can pin it (K4 of
+/// #1118). The same `approved_envelope::save` and `preview::envelope_digest`
+/// a preview pins with, so the held bytes are kept exactly like previewed
+/// ones: swept when the entry resolves, released after the preview age limit
+/// like any pinned `Pending` preview.
+///
+/// `None` when it cannot be saved. The entry is still held, only without
+/// the pin, so it reads not yet scrubbed and a person's review builds again.
+///
+/// Also returns the envelope's serialized size (K10), measured from the
+/// same value the digest and the save both already touch, so a held entry's
+/// `would_send_bytes` is never `Some` without a `pin` beside it.
+fn pin_second_look(
+    store: &ConfigStore,
+    entry_id: Uuid,
+    envelope: &TraceContributionEnvelope,
+) -> Option<(String, u64)> {
+    let digest = super::preview::envelope_digest(envelope).ok()?;
+    super::approved_envelope::save(store, entry_id, envelope).ok()?;
+    let size = crate::envelope::envelope_size(envelope).ok()? as u64;
+    Some((digest, size))
 }
 
 /// Map a pipeline outcome onto a daemon decision, so the queue records a
@@ -299,6 +358,18 @@ fn decision_for(
         SubmitOutcome::HeldForReview { reason_label, .. } => {
             UploadDecision::ApprovalStale { reason_label }
         }
+        // Turned into a decision by `pin_second_look`, which has the entry
+        // the envelope is saved under; never reaches here.
+        SubmitOutcome::HeldForSecondLook {
+            reason_label,
+            reasons,
+            ..
+        } => UploadDecision::HeldForSecondLook {
+            reason_label,
+            reasons,
+            pin: None,
+            would_send_bytes: None,
+        },
     }
 }
 
@@ -453,6 +524,20 @@ impl Uploader<'_, '_> {
         entry: &QueueEntry,
         now: DateTime<Utc>,
     ) -> Result<UploadDecision> {
+        // The Manual Scrub check (K4 of #1118): nothing goes without a
+        // person. The watcher approves nothing on anyone's behalf while it
+        // is set; this catches an approval made before the switch, and
+        // holds it before anything is read, built or sent.
+        if entry.approved_unattended
+            && self.settings.scrub_check == super::settings::ScrubCheck::Manual
+        {
+            return Ok(UploadDecision::HeldForSecondLook {
+                reason_label: super::second_look::REASON_SCRUB_CHECK_MANUAL.to_string(),
+                reasons: Vec::new(),
+                pin: None,
+                would_send_bytes: None,
+            });
+        }
         if !enrollment_is_live(self.store) {
             self.health.fail(LABEL_NOT_LOGGED_IN, now);
             return Ok(UploadDecision::Refused {
@@ -562,6 +647,12 @@ impl Uploader<'_, '_> {
                                     .to_string(),
                                 pin,
                                 attested_inference: entry.attested_inference.clone(),
+                                // Re-affirming an already-pinned review, not
+                                // measuring fresh bytes (K10): carry the
+                                // entry's own recorded figure forward rather
+                                // than reporting `None` for a bound that has
+                                // not actually changed.
+                                would_send_bytes: entry.would_send_bytes,
                             });
                         }
                         return Ok(UploadDecision::ApprovalStale {
@@ -621,6 +712,29 @@ impl Uploader<'_, '_> {
         // never hashed, never compared -- whose bytes went out. A session
         // appended to between the two reads passed the guard and shipped
         // content the guard had never seen.
+        //
+        // The Automatic Scrub check (K4 of #1118), armed last so no early
+        // return above can leave the one-shot flag behind for an unrelated
+        // session. The watcher approved this without building anything, so
+        // its marks were not known then; `submit_loaded` decides the hold on
+        // the envelope it builds, before the send. A person's approval is
+        // never held here: they are the second look.
+        //
+        // Automatic is the default, and a settings file that never chose
+        // loads as it. Manual has already held above, before anything was
+        // read or built.
+        if entry.approved_unattended
+            && self.settings.scrub_check == super::settings::ScrubCheck::Automatic
+        {
+            self.ctx.hold_unless_scrub_is_clear(entry.subagents_dropped);
+        }
+        // K7: the entry's own provenance -- whether a person approved it or
+        // an armed folder sent it without asking, and the verdict if any --
+        // travels onto the receipt this call produces, and from there onto
+        // the history row. Set immediately before the call so it cannot
+        // apply to a submission this context runs later.
+        self.ctx
+            .set_upload_provenance(entry.approved_unattended, entry.approved_verdict.clone());
         let outcome = match self.ctx.submit_loaded(transcript).await {
             Ok(o) => o,
             Err(e) => {
@@ -642,6 +756,21 @@ impl Uploader<'_, '_> {
                 *witnessed,
                 *attested_inference,
             ),
+            SubmitOutcome::HeldForSecondLook {
+                reason_label,
+                reasons,
+                counts,
+                envelope,
+            } => {
+                let pinned = envelope
+                    .and_then(|envelope| pin_second_look(self.store, entry.entry_id, &envelope));
+                UploadDecision::HeldForSecondLook {
+                    reason_label,
+                    reasons,
+                    would_send_bytes: pinned.as_ref().map(|(_, size)| *size),
+                    pin: pinned.map(|(digest, _)| (digest, counts)),
+                }
+            }
             outcome => decision_for(
                 outcome,
                 self.ctx.last_receipt_shipped(),
@@ -717,6 +846,7 @@ mod tests {
             reason_label,
             pin,
             attested_inference,
+            ..
         } = decision
         else {
             panic!("expected a hold, got {decision:?}");
@@ -1120,54 +1250,18 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn upload_refuses_when_a_delegated_transcript_appeared_after_approval() {
-        // The same consent property as the test below, one level out: an
-        // approval covers a conversation, and a conversation that has since
-        // delegated work to a subagent is not the one that was approved. The
-        // group hash is what makes the re-hash guard see it -- with a
-        // parent-only hash this would ship silently.
-        let session = GrowingSession::new();
-        let (_d, store) = temp_store();
-        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
-        let cfg = crate::config::ContributorConfig {
-            inference_receipt_endpoint: None,
-            consent_scopes_chosen: false,
-            witness_origin: None,
-            inference_receipt_check_attestation: false,
-            schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
-            issuer_url: "http://issuer.invalid".into(),
-            ingest_url: "http://ingest.invalid".into(),
-            audience: "trace-commons-upload".into(),
-            tenant_id: "tenant-abc".into(),
-            instance_id: "instance-1".into(),
-            user_subject: "alice".into(),
-            device_key_id: device.device_key_id.clone(),
-            consent_scopes: vec!["debugging_evaluation".into()],
-            pii_filter: None,
-            allowed_hosts: None,
-            // No public profile claimed. These are cache fields, excluded
-            // from the input fingerprint, so they cannot affect what this
-            // test measures -- the re-hash guard seeing a new subagent.
-            display_handle: None,
-            public_bio: None,
-            public_since: None,
-            witness: None,
-        };
-        store.save_config(&cfg).unwrap();
-
-        let offered_hash = session.current_hash();
-        let entry = session.entry_for(&offered_hash, &cfg);
-        session.add_subagent("agent-a");
-
-        let opts = dry_run_opts();
-        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+    async fn upload_fixture(
+        ctx: &mut SubmitContext<'_>,
+        store: &ConfigStore,
+        session: &GrowingSession,
+        entry: &QueueEntry,
+    ) -> (UploadDecision, DaemonState, HealthState) {
         let mut state = DaemonState::new();
         let mut health = HealthState::default();
         let settings = settings();
         let mut up = Uploader {
-            ctx: &mut ctx,
-            store: &store,
+            ctx,
+            store,
             settings: &settings,
             state: &mut state,
             health: &mut health,
@@ -1177,11 +1271,36 @@ mod tests {
             .upload_entry(
                 &session.source(),
                 &session.session_ref(),
-                &entry,
+                entry,
                 at("2026-08-08T16:00:00Z"),
             )
             .await
             .unwrap();
+        (decision, state, health)
+    }
+
+    #[tokio::test]
+    async fn upload_refuses_when_a_delegated_transcript_appeared_after_approval() {
+        // The same consent property as the test below, one level out: an
+        // approval covers a conversation, and a conversation that has since
+        // delegated work to a subagent is not the one that was approved. The
+        // group hash is what makes the re-hash guard see it -- with a
+        // parent-only hash this would ship silently.
+        let session = GrowingSession::new();
+        let (_d, store) = temp_store();
+        // No public profile claimed. These are cache fields, excluded
+        // from the input fingerprint, so they cannot affect what this
+        // test measures -- the re-hash guard seeing a new subagent.
+        let cfg = fixture_cfg(&store);
+        store.save_config(&cfg).unwrap();
+
+        let offered_hash = session.current_hash();
+        let entry = session.entry_for(&offered_hash, &cfg);
+        session.add_subagent("agent-a");
+
+        let opts = dry_run_opts();
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let (decision, state, _health) = upload_fixture(&mut ctx, &store, &session, &entry).await;
 
         match decision {
             UploadDecision::Superseded { new_hash } => {
@@ -1202,28 +1321,7 @@ mod tests {
         // ship one that has since gained an afternoon of work.
         let session = GrowingSession::new();
         let (_d, store) = temp_store();
-        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
-        let cfg = crate::config::ContributorConfig {
-            inference_receipt_endpoint: None,
-            consent_scopes_chosen: false,
-            witness_origin: None,
-            inference_receipt_check_attestation: false,
-            schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
-            issuer_url: "http://issuer.invalid".into(),
-            ingest_url: "http://ingest.invalid".into(),
-            audience: "trace-commons-upload".into(),
-            tenant_id: "tenant-abc".into(),
-            instance_id: "instance-1".into(),
-            user_subject: "alice".into(),
-            device_key_id: device.device_key_id.clone(),
-            consent_scopes: vec!["debugging_evaluation".into()],
-            pii_filter: None,
-            allowed_hosts: None,
-            display_handle: None,
-            public_bio: None,
-            public_since: None,
-            witness: None,
-        };
+        let cfg = fixture_cfg(&store);
         store.save_config(&cfg).unwrap();
 
         let offered_hash = session.current_hash();
@@ -1232,26 +1330,7 @@ mod tests {
 
         let opts = dry_run_opts();
         let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
-        let mut state = DaemonState::new();
-        let mut health = HealthState::default();
-        let settings = settings();
-        let mut up = Uploader {
-            ctx: &mut ctx,
-            store: &store,
-            settings: &settings,
-            state: &mut state,
-            health: &mut health,
-        };
-
-        let decision = up
-            .upload_entry(
-                &session.source(),
-                &session.session_ref(),
-                &entry,
-                at("2026-08-08T16:00:00Z"),
-            )
-            .await
-            .unwrap();
+        let (decision, state, _health) = upload_fixture(&mut ctx, &store, &session, &entry).await;
 
         match decision {
             UploadDecision::Superseded { new_hash } => {
@@ -1270,6 +1349,454 @@ mod tests {
     async fn upload_proceeds_when_the_hash_still_matches() {
         let session = GrowingSession::new();
         let (_d, store) = temp_store();
+        let cfg = fixture_cfg(&store);
+        store.save_config(&cfg).unwrap();
+
+        let entry = session.entry_for(&session.current_hash(), &cfg);
+        let opts = dry_run_opts();
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let (decision, state, health) = upload_fixture(&mut ctx, &store, &session, &entry).await;
+
+        assert!(
+            matches!(decision, UploadDecision::Uploaded { .. }),
+            "got {decision:?}"
+        );
+        assert_eq!(state.uploads_today, 1);
+        assert!(health.ok());
+    }
+
+    // --- the Scrub check (K4 of #1118) ------------------------------------
+
+    /// A one-turn session whose only text is `text`, so a test decides how
+    /// many marks the scrubber will make.
+    fn session_saying(text: &str) -> GrowingSession {
+        let session = GrowingSession::new();
+        std::fs::write(
+            &session.path,
+            format!(
+                "{{\"type\":\"user\",\"message\":{{\"role\":\"user\",\"content\":\"{text}\"}},\
+                 \"cwd\":\"/Users/testuser/code/myproj\",\"timestamp\":\"2026-08-08T10:00:00Z\",\
+                 \"version\":\"2.0.1\",\"sessionId\":\"33333333-3333-3333-3333-333333333333\",\
+                 \"uuid\":\"a1\"}}\n"
+            ),
+        )
+        .unwrap();
+        session
+    }
+
+    /// Text the scrubber finds nothing in, and text it takes an email out of.
+    const NOTHING_TO_MARK: &str = "first question";
+    const ONE_EMAIL: &str = "please write to alice.smith@example.org about it";
+
+    /// Upload `entry` of `session` under `settings`, through the uploader,
+    /// against a store holding `fixture_cfg`.
+    async fn upload_under(
+        session: &GrowingSession,
+        entry_of: impl FnOnce(&GrowingSession, &crate::config::ContributorConfig) -> QueueEntry,
+        settings: DaemonSettings,
+    ) -> (UploadDecision, DaemonState) {
+        let (_d, store) = temp_store();
+        let cfg = fixture_cfg(&store);
+        store.save_config(&cfg).unwrap();
+        upload_in(&store, &cfg, session, entry_of(session, &cfg), settings).await
+    }
+
+    /// [`upload_under`] against a store and config the caller keeps, for a
+    /// test that needs what the upload saved.
+    async fn upload_in(
+        store: &ConfigStore,
+        cfg: &crate::config::ContributorConfig,
+        session: &GrowingSession,
+        entry: QueueEntry,
+        settings: DaemonSettings,
+    ) -> (UploadDecision, DaemonState) {
+        let opts = dry_run_opts();
+        let mut ctx = SubmitContext::new(store, cfg, &opts, None).unwrap();
+        let mut state = DaemonState::new();
+        let mut health = HealthState::default();
+        let decision = Uploader {
+            ctx: &mut ctx,
+            store,
+            settings: &settings,
+            state: &mut state,
+            health: &mut health,
+        }
+        .upload_entry(
+            &session.source(),
+            &session.session_ref(),
+            &entry,
+            at("2026-08-08T16:00:00Z"),
+        )
+        .await
+        .unwrap();
+        (decision, state)
+    }
+
+    /// Approved on the contributor's behalf, as the watcher does in an
+    /// armed folder: nothing built, so no marks recorded.
+    fn armed(session: &GrowingSession, cfg: &crate::config::ContributorConfig) -> QueueEntry {
+        QueueEntry {
+            approved_unattended: true,
+            ..session.entry_for(&session.current_hash(), cfg)
+        }
+    }
+
+    fn manual() -> DaemonSettings {
+        DaemonSettings {
+            scrub_check: crate::daemon::settings::ScrubCheck::Manual,
+            ..DaemonSettings::default()
+        }
+    }
+
+    /// Automatic, stated explicitly. It is also the default
+    /// (`the_default_scrub_check_holds_a_path_only_armed_session`).
+    fn automatic() -> DaemonSettings {
+        DaemonSettings {
+            scrub_check: crate::daemon::settings::ScrubCheck::Automatic,
+            ..DaemonSettings::default()
+        }
+    }
+
+    /// Zaki's decision on #1139: the Scrub check defaults to Automatic. A
+    /// fresh install that never chose, with the project armed, holds a
+    /// session whose only marks are paths for a second look instead of
+    /// sending it.
+    #[tokio::test]
+    async fn the_default_scrub_check_holds_a_path_only_armed_session() {
+        let session =
+            session_saying("open /Users/alice/code/orchard-api/src/main.rs and fix the parser");
+        let (decision, state) = upload_under(&session, armed, DaemonSettings::default()).await;
+        let pin = assert_held(
+            &decision,
+            REASON_SECOND_LOOK_REVIEW_REQUIRED,
+            &[REASON_NOTHING_MATCHED],
+        );
+        assert!(pin.is_some(), "the built envelope is pinned");
+        assert_eq!(state.uploads_today, 0, "nothing was sent");
+    }
+
+    /// A hold under `reason`, decided on `expected` second-look labels.
+    /// Returns the pin, which only the envelope-building holds carry.
+    fn assert_held(
+        decision: &UploadDecision,
+        reason: &str,
+        expected: &[&'static str],
+    ) -> Option<(String, crate::daemon::second_look::ScrubCounts)> {
+        let UploadDecision::HeldForSecondLook {
+            reason_label,
+            reasons,
+            pin,
+            ..
+        } = decision
+        else {
+            panic!("expected a hold, got {decision:?}");
+        };
+        assert_eq!(reason_label, reason);
+        assert_eq!(reasons.as_slice(), expected);
+        pin.clone()
+    }
+
+    use crate::daemon::second_look::{
+        REASON_LOOKS_UNSURE, REASON_NOTHING_MATCHED, REASON_SECOND_LOOK_REVIEW_REQUIRED,
+        REASON_TRIMMED_TO_FIT,
+    };
+
+    /// An address the scrubber takes out, and an obfuscated one it leaves
+    /// and the unsure-span detector flags.
+    const ONE_EMAIL_ONE_UNSURE: &str =
+        "please write to alice.smith@example.org or ops [at] acme [dot] io";
+
+    /// Manual: an armed session with plenty of marks still waits, before
+    /// anything is built.
+    #[tokio::test]
+    async fn manual_holds_an_armed_session_however_clean_its_scrub() {
+        let session = session_saying(ONE_EMAIL);
+        let (decision, state) = upload_under(&session, armed, manual()).await;
+        assert_held(
+            &decision,
+            crate::daemon::second_look::REASON_SCRUB_CHECK_MANUAL,
+            &[],
+        );
+        assert_eq!(state.uploads_today, 0, "nothing was sent");
+    }
+
+    /// Manual holds approvals made on anyone's behalf, never a person's own.
+    #[tokio::test]
+    async fn manual_sends_what_a_person_approved() {
+        let session = session_saying(NOTHING_TO_MARK);
+        let (decision, state) = upload_under(
+            &session,
+            |s, cfg| s.entry_for(&s.current_hash(), cfg),
+            manual(),
+        )
+        .await;
+        assert!(
+            matches!(decision, UploadDecision::Uploaded { .. }),
+            "{decision:?}"
+        );
+        assert_eq!(state.uploads_today, 1);
+    }
+
+    /// Automatic: nothing matched, so it waits.
+    #[tokio::test]
+    async fn automatic_holds_an_armed_session_where_nothing_matched() {
+        let session = session_saying(NOTHING_TO_MARK);
+        let (decision, state) = upload_under(&session, armed, automatic()).await;
+        assert_held(
+            &decision,
+            REASON_SECOND_LOOK_REVIEW_REQUIRED,
+            &[REASON_NOTHING_MATCHED],
+        );
+        assert_eq!(state.uploads_today, 0, "nothing was sent");
+    }
+
+    /// Automatic: something was removed, but the redacted body still holds a
+    /// span that looks like personal data, so it waits.
+    #[tokio::test]
+    async fn automatic_holds_an_armed_session_that_looks_unsure() {
+        let session = session_saying(ONE_EMAIL_ONE_UNSURE);
+        let (decision, state) = upload_under(&session, armed, automatic()).await;
+        assert_held(
+            &decision,
+            REASON_SECOND_LOOK_REVIEW_REQUIRED,
+            &[REASON_LOOKS_UNSURE],
+        );
+        assert_eq!(state.uploads_today, 0, "nothing was sent");
+    }
+
+    /// Reviewed on #1139: path removals alone are not a match. Nearly every
+    /// real session carries absolute paths; a hold that counted them would
+    /// almost never fire. This one was uploaded before the counts came from
+    /// `ScrubCounts::of`.
+    #[tokio::test]
+    async fn automatic_holds_a_session_whose_only_marks_are_paths() {
+        let session =
+            session_saying("open /Users/alice/code/orchard-api/src/main.rs and fix the parser");
+        let (decision, state) = upload_under(&session, armed, automatic()).await;
+        let pin = assert_held(
+            &decision,
+            REASON_SECOND_LOOK_REVIEW_REQUIRED,
+            &[REASON_NOTHING_MATCHED],
+        );
+        let (_, counts) = pin.expect("the built envelope is pinned");
+        assert!(counts.marks > 0, "the path was removed: {counts:?}");
+        assert_eq!(counts.content_marks, 0, "and only the path: {counts:?}");
+        assert_eq!(state.uploads_today, 0, "nothing was sent");
+    }
+
+    /// Reviewed on #1139: a survivor the unsure-span detector flags holds,
+    /// with no content marks as well. This one was uploaded before the body
+    /// was counted.
+    #[tokio::test]
+    async fn automatic_holds_a_session_with_an_unsure_survivor() {
+        let session = session_saying("key from ops [at] acme [dot] io, rotate it tonight");
+        let (decision, state) = upload_under(&session, armed, automatic()).await;
+        assert_held(
+            &decision,
+            REASON_SECOND_LOOK_REVIEW_REQUIRED,
+            &[REASON_NOTHING_MATCHED, REASON_LOOKS_UNSURE],
+        );
+        assert_eq!(state.uploads_today, 0, "nothing was sent");
+    }
+
+    /// Automatic: trimmed to fit waits even with a clean scrub.
+    #[tokio::test]
+    async fn automatic_holds_an_armed_session_trimmed_to_fit() {
+        let session = session_saying(ONE_EMAIL);
+        let (decision, state) = upload_under(
+            &session,
+            |s, cfg| QueueEntry {
+                subagents_dropped: 2,
+                ..armed(s, cfg)
+            },
+            automatic(),
+        )
+        .await;
+        assert_held(
+            &decision,
+            REASON_SECOND_LOOK_REVIEW_REQUIRED,
+            &[REASON_TRIMMED_TO_FIT],
+        );
+        assert_eq!(state.uploads_today, 0, "nothing was sent");
+    }
+
+    /// Automatic: a scrubbed session with marks and nothing trimmed goes.
+    #[tokio::test]
+    async fn automatic_sends_an_armed_session_with_a_clean_scrub() {
+        let session = session_saying(ONE_EMAIL);
+        let (decision, state) = upload_under(&session, armed, automatic()).await;
+        assert!(
+            matches!(decision, UploadDecision::Uploaded { .. }),
+            "{decision:?}"
+        );
+        assert_eq!(state.uploads_today, 1);
+    }
+
+    /// The hold is decided on the envelope actually built, never on the
+    /// entry's own record. The watcher approved this without a preview: the
+    /// entry carries no record, or a stale one claiming a clean scrub of
+    /// some other build. Either way the built envelope has nothing in it, and
+    /// it waits.
+    #[tokio::test]
+    async fn automatic_decides_on_the_built_envelope_not_the_entrys_record() {
+        let clean_elsewhere = crate::daemon::second_look::ScrubRecord {
+            envelope_digest: "sha256:another-build".into(),
+            counts: crate::daemon::second_look::ScrubCounts {
+                marks: 5,
+                content_marks: 5,
+                unsure_spans: 0,
+                unsure_unreadable: false,
+            },
+        };
+        for recorded in [None, Some(clean_elsewhere)] {
+            let session = session_saying(NOTHING_TO_MARK);
+            let (decision, state) = upload_under(
+                &session,
+                |s, cfg| QueueEntry {
+                    scrub: recorded.clone(),
+                    ..armed(s, cfg)
+                },
+                automatic(),
+            )
+            .await;
+            assert_held(
+                &decision,
+                REASON_SECOND_LOOK_REVIEW_REQUIRED,
+                &[REASON_NOTHING_MATCHED],
+            );
+            assert_eq!(
+                state.uploads_today, 0,
+                "recorded {recorded:?}: nothing sent"
+            );
+        }
+    }
+
+    /// The whole round: held, kept held by the queue against unattended
+    /// approval, and sent by a person's approve.
+    #[tokio::test]
+    async fn a_held_session_waits_for_a_person_and_their_approve_sends_it() {
+        let session = session_saying(NOTHING_TO_MARK);
+        let (_d, store) = temp_store();
+        let cfg = fixture_cfg(&store);
+        store.save_config(&cfg).unwrap();
+        let entry = armed(&session, &cfg);
+        let (decision, _) = upload_in(&store, &cfg, &session, entry.clone(), automatic()).await;
+        let pin = assert_held(
+            &decision,
+            REASON_SECOND_LOOK_REVIEW_REQUIRED,
+            &[REASON_NOTHING_MATCHED],
+        );
+        let (digest, counts) = pin.expect("the built envelope is pinned");
+        let saved = crate::daemon::approved_envelope::load(&store, entry.entry_id)
+            .unwrap()
+            .expect("the held bytes are saved under the entry");
+        assert_eq!(
+            crate::daemon::preview::envelope_digest(&saved).unwrap(),
+            digest,
+            "the pin names exactly the saved bytes"
+        );
+
+        // What `drain_approved` does with it.
+        let mut q = crate::daemon::queue::Queue::default();
+        q.upsert(entry.clone(), 10).unwrap();
+        assert!(q.hold_with_scrub_pin(
+            entry.entry_id,
+            REASON_SECOND_LOOK_REVIEW_REQUIRED,
+            Some((digest.as_str(), counts)),
+            None
+        ));
+        let held = q.get(entry.entry_id).unwrap().clone();
+        assert!(held.held_for_review());
+        assert_eq!(
+            held.previewed_envelope_digest.as_deref(),
+            Some(digest.as_str())
+        );
+        assert_eq!(
+            held.scrub(),
+            crate::daemon::second_look::Scrub::Scrubbed(counts),
+            "the scrub record is kept beside the pin"
+        );
+        assert_eq!(held.second_look_reasons(), vec![REASON_NOTHING_MATCHED]);
+        assert!(
+            !q.approve_unattended(entry.entry_id, &cfg.consent_scopes, None),
+            "nobody approves it on the contributor's behalf"
+        );
+
+        // A person.
+        assert!(q.approve(
+            entry.entry_id,
+            &cfg.consent_scopes,
+            entry.approved_inputs.as_deref(),
+            None,
+            None,
+            None
+        ));
+        let approved = q.get(entry.entry_id).unwrap().clone();
+        assert!(!approved.approved_unattended);
+        assert_eq!(
+            approved.previewed_envelope_digest.as_deref(),
+            Some(digest.as_str()),
+            "the person approves the held bytes"
+        );
+        let (decision, state) = upload_in(&store, &cfg, &session, approved, automatic()).await;
+        assert!(
+            matches!(decision, UploadDecision::Uploaded { .. }),
+            "{decision:?}"
+        );
+        assert_eq!(state.uploads_today, 1);
+    }
+
+    async fn spawn_stub(router: axum::Router) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        format!("http://{addr}")
+    }
+
+    fn stub_claim_issuer() -> axum::Router {
+        axum::Router::new().route(
+            "/v1/trace-upload-claim",
+            axum::routing::post(|| async {
+                axum::Json(serde_json::json!({
+                    "access_token": "stub-claim-jwt",
+                    "token_type": "Bearer",
+                    "expires_at": chrono::Utc::now() + chrono::Duration::seconds(300),
+                    "expires_in": 300,
+                    "consent_scopes": ["debugging_evaluation", "model_training"],
+                    "allowed_uses": ["debugging", "evaluation", "model_training", "aggregate_analytics"],
+                }))
+            }),
+        )
+    }
+
+    fn stub_ingest_accepts() -> axum::Router {
+        axum::Router::new().route(
+            "/v1/traces",
+            axum::routing::post(|| async {
+                axum::Json(serde_json::json!({
+                    "status": "accepted",
+                    "credit_points_pending": 0.0,
+                    "explanation": []
+                }))
+            }),
+        )
+    }
+
+    /// K7: `upload_entry` must hand the queue entry's own provenance to the
+    /// submit pipeline before it uploads, so the receipt this real (not
+    /// dry-run) upload writes -- and from it, the history row -- can say
+    /// whether a person approved this session or an armed folder sent it
+    /// without asking. Removing the `set_upload_provenance` call in
+    /// `upload_entry` makes this fail: the receipt would read the default
+    /// `(false, None)` for an entry that was, in fact, sent unattended.
+    #[tokio::test]
+    async fn upload_entry_records_the_entrys_own_provenance_on_the_receipt() {
+        let issuer = spawn_stub(stub_claim_issuer()).await;
+        let ingest = spawn_stub(stub_ingest_accepts()).await;
+        // An address the scrubber removes, so the default (Automatic) Scrub
+        // check lets this armed session through to the receipt.
+        let session = session_saying(ONE_EMAIL);
+        let (_d, store) = temp_store();
         let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
         let cfg = crate::config::ContributorConfig {
             inference_receipt_endpoint: None,
@@ -1277,8 +1804,8 @@ mod tests {
             witness_origin: None,
             inference_receipt_check_attestation: false,
             schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
-            issuer_url: "http://issuer.invalid".into(),
-            ingest_url: "http://ingest.invalid".into(),
+            issuer_url: issuer,
+            ingest_url: ingest,
             audience: "trace-commons-upload".into(),
             tenant_id: "tenant-abc".into(),
             instance_id: "instance-1".into(),
@@ -1294,8 +1821,18 @@ mod tests {
         };
         store.save_config(&cfg).unwrap();
 
-        let entry = session.entry_for(&session.current_hash(), &cfg);
-        let opts = dry_run_opts();
+        let mut entry = session.entry_for(&session.current_hash(), &cfg);
+        entry.approved_unattended = true;
+
+        let opts = crate::submit::SubmitOptions {
+            dry_run: false,
+            pii_filter: None,
+            no_reasoning: false,
+            machine_readable: true,
+            unenrolled_preview: false,
+            remediate_quarantined: false,
+            verdict: None,
+        };
         let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
         let mut state = DaemonState::new();
         let mut health = HealthState::default();
@@ -1317,13 +1854,18 @@ mod tests {
             )
             .await
             .unwrap();
-
         assert!(
             matches!(decision, UploadDecision::Uploaded { .. }),
             "got {decision:?}"
         );
-        assert_eq!(state.uploads_today, 1);
-        assert!(health.ok());
+
+        let receipts = store.load_receipts().unwrap();
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(
+            receipts[0].approved_unattended,
+            Some(true),
+            "the entry was sent by an armed folder, not a person"
+        );
     }
 
     /// The config the fixture sessions above are approved and uploaded
@@ -1382,25 +1924,7 @@ mod tests {
 
         let opts = dry_run_opts();
         let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
-        let mut state = DaemonState::new();
-        let mut health = HealthState::default();
-        let settings = settings();
-        let mut up = Uploader {
-            ctx: &mut ctx,
-            store: &store,
-            settings: &settings,
-            state: &mut state,
-            health: &mut health,
-        };
-        let decision = up
-            .upload_entry(
-                &session.source(),
-                &session.session_ref(),
-                &entry,
-                at("2026-08-08T16:00:00Z"),
-            )
-            .await
-            .unwrap();
+        let (decision, state, _health) = upload_fixture(&mut ctx, &store, &session, &entry).await;
 
         assert_eq!(
             decision,
@@ -1536,25 +2060,7 @@ mod tests {
 
         let opts = dry_run_opts();
         let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
-        let mut state = DaemonState::new();
-        let mut health = HealthState::default();
-        let settings = settings();
-        let mut up = Uploader {
-            ctx: &mut ctx,
-            store: &store,
-            settings: &settings,
-            state: &mut state,
-            health: &mut health,
-        };
-        let decision = up
-            .upload_entry(
-                &session.source(),
-                &session.session_ref(),
-                &entry,
-                at("2026-08-08T16:00:00Z"),
-            )
-            .await
-            .unwrap();
+        let (decision, state, _health) = upload_fixture(&mut ctx, &store, &session, &entry).await;
 
         assert_eq!(
             decision,
@@ -1651,25 +2157,7 @@ mod tests {
 
         let opts = dry_run_opts();
         let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
-        let mut state = DaemonState::new();
-        let mut health = HealthState::default();
-        let settings = settings();
-        let mut up = Uploader {
-            ctx: &mut ctx,
-            store: &store,
-            settings: &settings,
-            state: &mut state,
-            health: &mut health,
-        };
-        let decision = up
-            .upload_entry(
-                &session.source(),
-                &session.session_ref(),
-                &entry,
-                at("2026-08-08T16:00:00Z"),
-            )
-            .await
-            .unwrap();
+        let (decision, state, _health) = upload_fixture(&mut ctx, &store, &session, &entry).await;
 
         assert_eq!(
             decision,
@@ -1717,25 +2205,7 @@ mod tests {
 
         let opts = dry_run_opts();
         let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
-        let mut state = DaemonState::new();
-        let mut health = HealthState::default();
-        let settings = settings();
-        let mut up = Uploader {
-            ctx: &mut ctx,
-            store: &store,
-            settings: &settings,
-            state: &mut state,
-            health: &mut health,
-        };
-        let decision = up
-            .upload_entry(
-                &session.source(),
-                &session.session_ref(),
-                &entry,
-                at("2026-08-08T16:00:00Z"),
-            )
-            .await
-            .unwrap();
+        let (decision, state, _health) = upload_fixture(&mut ctx, &store, &session, &entry).await;
 
         assert!(
             matches!(decision, UploadDecision::Uploaded { .. }),
@@ -1771,25 +2241,7 @@ mod tests {
 
         let opts = dry_run_opts();
         let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
-        let mut state = DaemonState::new();
-        let mut health = HealthState::default();
-        let settings = settings();
-        let mut up = Uploader {
-            ctx: &mut ctx,
-            store: &store,
-            settings: &settings,
-            state: &mut state,
-            health: &mut health,
-        };
-        let decision = up
-            .upload_entry(
-                &session.source(),
-                &session.session_ref(),
-                &entry,
-                at("2026-08-08T16:00:00Z"),
-            )
-            .await
-            .unwrap();
+        let (decision, state, _health) = upload_fixture(&mut ctx, &store, &session, &entry).await;
 
         assert!(
             matches!(decision, UploadDecision::Uploaded { .. }),
@@ -1812,25 +2264,7 @@ mod tests {
 
         let opts = dry_run_opts();
         let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
-        let mut state = DaemonState::new();
-        let mut health = HealthState::default();
-        let settings = settings();
-        let mut up = Uploader {
-            ctx: &mut ctx,
-            store: &store,
-            settings: &settings,
-            state: &mut state,
-            health: &mut health,
-        };
-        let decision = up
-            .upload_entry(
-                &session.source(),
-                &session.session_ref(),
-                &entry,
-                at("2026-08-08T16:00:00Z"),
-            )
-            .await
-            .unwrap();
+        let (decision, state, _health) = upload_fixture(&mut ctx, &store, &session, &entry).await;
 
         assert_eq!(
             decision,
@@ -1846,28 +2280,7 @@ mod tests {
         // A cached claim outlives a logout by minutes.
         let session = GrowingSession::new();
         let (_d, store) = temp_store();
-        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
-        let cfg = crate::config::ContributorConfig {
-            inference_receipt_endpoint: None,
-            consent_scopes_chosen: false,
-            witness_origin: None,
-            inference_receipt_check_attestation: false,
-            schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
-            issuer_url: "http://issuer.invalid".into(),
-            ingest_url: "http://ingest.invalid".into(),
-            audience: "trace-commons-upload".into(),
-            tenant_id: "tenant-abc".into(),
-            instance_id: "instance-1".into(),
-            user_subject: "alice".into(),
-            device_key_id: device.device_key_id.clone(),
-            consent_scopes: vec!["debugging_evaluation".into()],
-            pii_filter: None,
-            allowed_hosts: None,
-            display_handle: None,
-            public_bio: None,
-            public_since: None,
-            witness: None,
-        };
+        let cfg = fixture_cfg(&store);
         store.save_config(&cfg).unwrap();
         let entry = session.entry_for(&session.current_hash(), &cfg);
         let opts = dry_run_opts();
@@ -1876,25 +2289,7 @@ mod tests {
         // Log out underneath the running context.
         store.wipe().unwrap();
 
-        let mut state = DaemonState::new();
-        let mut health = HealthState::default();
-        let settings = settings();
-        let mut up = Uploader {
-            ctx: &mut ctx,
-            store: &store,
-            settings: &settings,
-            state: &mut state,
-            health: &mut health,
-        };
-        let decision = up
-            .upload_entry(
-                &session.source(),
-                &session.session_ref(),
-                &entry,
-                at("2026-08-08T16:00:00Z"),
-            )
-            .await
-            .unwrap();
+        let (decision, state, health) = upload_fixture(&mut ctx, &store, &session, &entry).await;
 
         assert_eq!(
             decision,
@@ -1913,28 +2308,7 @@ mod tests {
     async fn upload_stops_at_the_daily_cap() {
         let session = GrowingSession::new();
         let (_d, store) = temp_store();
-        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
-        let cfg = crate::config::ContributorConfig {
-            inference_receipt_endpoint: None,
-            consent_scopes_chosen: false,
-            witness_origin: None,
-            inference_receipt_check_attestation: false,
-            schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
-            issuer_url: "http://issuer.invalid".into(),
-            ingest_url: "http://ingest.invalid".into(),
-            audience: "trace-commons-upload".into(),
-            tenant_id: "tenant-abc".into(),
-            instance_id: "instance-1".into(),
-            user_subject: "alice".into(),
-            device_key_id: device.device_key_id.clone(),
-            consent_scopes: vec!["debugging_evaluation".into()],
-            pii_filter: None,
-            allowed_hosts: None,
-            display_handle: None,
-            public_bio: None,
-            public_since: None,
-            witness: None,
-        };
+        let cfg = fixture_cfg(&store);
         store.save_config(&cfg).unwrap();
 
         let entry = session.entry_for(&session.current_hash(), &cfg);

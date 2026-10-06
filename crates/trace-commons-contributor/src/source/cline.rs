@@ -179,7 +179,7 @@ impl TraceSource for ClineSource {
     fn discover(&self) -> anyhow::Result<Vec<SessionRef>> {
         let mut sessions = Vec::new();
         let mut skipped = 0usize;
-        let Ok(entries) = std::fs::read_dir(&self.root) else {
+        let Some(entries) = super::read_dir_for_discovery(&self.root)? else {
             return Ok(sessions);
         };
         for entry in entries {

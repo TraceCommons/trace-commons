@@ -19,8 +19,8 @@ use ring::signature::{ED25519, Ed25519KeyPair, KeyPair, UnparsedPublicKey};
 use secrecy::SecretString;
 use std::sync::Arc;
 use trace_commons_protocol::legacy_invite_link::{
-    LegacyInviteLinkRequest, LegacyInviteLinkStatement, legacy_invite_link_record_bytes,
-    legacy_invite_link_statement_bytes,
+    LegacyInviteLinkRecord, LegacyInviteLinkRecordKind, LegacyInviteLinkRequest,
+    LegacyInviteLinkStatement, legacy_invite_link_record_bytes, legacy_invite_link_statement_bytes,
 };
 use trace_commons_protocol::onboarding::device_key_id_from_public_key_bytes;
 use trace_commons_server::config::{DatabaseConfig, SslMode};
@@ -345,6 +345,7 @@ async fn legacy_invite_link_and_coexistence_readiness() {
     assert_eq!(linked.record.statement.account_tenant_id, near_a);
     assert_eq!(linked.record.statement.account_id, account_a);
     assert_eq!(linked.record.server_kid, "ingest-test-1");
+    assert_eq!(linked.record.kind, LegacyInviteLinkRecordKind::Link);
     // The client can check both signatures from the returned record alone.
     UnparsedPublicKey::new(&ED25519, individual_device.key.public_key().as_ref())
         .verify(
@@ -439,6 +440,11 @@ async fn legacy_invite_link_and_coexistence_readiness() {
     assert_eq!(attested.record.statement.account_id, account_a);
     assert_ne!(attested.record.link_id, linked.record.link_id);
     assert_eq!(
+        attested.record.kind,
+        LegacyInviteLinkRecordKind::DeviceAttestation,
+        "an attestation says it is one"
+    );
+    assert_eq!(
         attested.trust_version, 1,
         "no new trust: the link carried it"
     );
@@ -454,6 +460,16 @@ async fn legacy_invite_link_and_coexistence_readiness() {
             &B64.decode(&attested.server_signature).unwrap(),
         )
         .expect("countersigned");
+    // ...under the attestation domain only: presented as a link, it fails.
+    UnparsedPublicKey::new(&ED25519, linker.signer.public_key_bytes())
+        .verify(
+            &legacy_invite_link_record_bytes(&LegacyInviteLinkRecord {
+                kind: LegacyInviteLinkRecordKind::Link,
+                ..attested.record.clone()
+            }),
+            &B64.decode(&attested.server_signature).unwrap(),
+        )
+        .expect_err("an attestation is not countersigned as a link");
     // Idempotent: the same device again gets its first attestation back.
     let attested_again = linker
         .link(
@@ -505,8 +521,9 @@ async fn legacy_invite_link_and_coexistence_readiness() {
     assert_eq!(
         count(
             &admin,
-            "SELECT count(*) FROM trace_account_audit WHERE action='legacy_invite_linked'",
-            &[]
+            "SELECT count(*) FROM trace_account_audit
+              WHERE tenant_id=$1 AND action='legacy_invite_linked'",
+            &[&near_a]
         )
         .await,
         1
@@ -958,6 +975,569 @@ async fn legacy_invite_link_and_coexistence_readiness() {
     assert!(
         !ready(&admin).await,
         "NEAR devices still need live account linkage"
+    );
+}
+
+/// One statement's parameters, as ingest passes them to both functions.
+struct Call<'a> {
+    account_tenant: &'a str,
+    account: Uuid,
+    legacy_tenant: &'a str,
+    invite_hash: &'a str,
+    device: &'a Device,
+    nonce: String,
+    issued_at: i64,
+}
+
+impl<'a> Call<'a> {
+    /// A statement over a fresh challenge issued to the account.
+    async fn new(
+        runtime: &PgBackend,
+        account_tenant: &'a str,
+        account: Uuid,
+        legacy_tenant: &'a str,
+        invite_hash: &'a str,
+        device: &'a Device,
+    ) -> Self {
+        let challenge = issue_challenge(runtime, account_tenant, account)
+            .await
+            .expect("challenge issues");
+        Self {
+            account_tenant,
+            account,
+            legacy_tenant,
+            invite_hash,
+            device,
+            nonce: challenge.nonce,
+            issued_at: challenge.issued_at,
+        }
+    }
+
+    /// The same statement, naming another device.
+    fn by(&self, device: &'a Device) -> Self {
+        Self {
+            device,
+            nonce: self.nonce.clone(),
+            ..*self
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Step {
+    Link,
+    Attest,
+}
+
+/// Calls `trace_link_legacy_invite` and `trace_attest_legacy_invite_device`
+/// directly as the runtime login, in order, in ONE transaction in
+/// `account_tenant`'s context -- no signature checks and no ingest in
+/// between. `pause` sleeps before the last call. Commits, as ingest does on
+/// a refusal, and returns each call's outcome.
+async fn in_one_tx(
+    runtime: &PgBackend,
+    account_tenant: &str,
+    steps: &[(Step, &Call<'_>)],
+    pause: Option<std::time::Duration>,
+) -> Vec<String> {
+    let mut client = runtime
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .unwrap();
+    let tx = client.transaction().await.unwrap();
+    tx.execute(
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+        &[&account_tenant],
+    )
+    .await
+    .unwrap();
+    let mut outcomes = Vec::new();
+    for (index, (step, call)) in steps.iter().enumerate() {
+        if index + 1 == steps.len() {
+            if let Some(pause) = pause {
+                tokio::time::sleep(pause).await;
+            }
+        }
+        let function = match step {
+            Step::Link => "trace_link_legacy_invite",
+            Step::Attest => "trace_attest_legacy_invite_device",
+        };
+        let outcome: String = tx
+            .query_one(
+                &format!(
+                    "SELECT outcome FROM {function}($1,$2,$3,$4,$5,$6,$7,$8,$9,1,
+                                                    'c2ln','ingest-test-1','c2ln')"
+                ),
+                &[
+                    &call.account_tenant,
+                    &call.account,
+                    &call.legacy_tenant,
+                    &call.device.id,
+                    &call.device.key.public_key().as_ref().to_vec(),
+                    &call.invite_hash,
+                    &call.nonce,
+                    &call.issued_at,
+                    &Uuid::new_v4(),
+                ],
+            )
+            .await
+            .unwrap_or_else(|e| panic!("{function}: {e}"))
+            .get(0);
+        outcomes.push(outcome);
+    }
+    tx.commit().await.unwrap();
+    outcomes
+}
+
+/// The link function for `link`, then the attestation function for `attest`,
+/// in one transaction.
+async fn direct(
+    runtime: &PgBackend,
+    link: &Call<'_>,
+    attest: &Call<'_>,
+    pause: Option<std::time::Duration>,
+) -> Vec<String> {
+    in_one_tx(
+        runtime,
+        attest.account_tenant,
+        &[(Step::Link, link), (Step::Attest, attest)],
+        pause,
+    )
+    .await
+}
+
+/// V104: `trace_attest_legacy_invite_device` holds every refusal on its own,
+/// called directly as the runtime login, rather than relying on the link
+/// function having run first. Each case is set up so that the link function
+/// alone would let the attestation through, or would lead it to a different
+/// label: deleting the matching V104 guard turns that case red.
+///
+/// Runs alongside `legacy_invite_link_and_coexistence_readiness` against the
+/// same database, so it creates nothing that affects readiness (no conflict
+/// rows, no orphan accounts) and counts only its own tenants' rows.
+#[tokio::test]
+async fn the_attestation_function_holds_every_refusal_on_its_own() {
+    let Ok(url) = std::env::var(ENV) else {
+        eprintln!("SKIPPED: {ENV} not set");
+        return;
+    };
+    let parsed = reqwest::Url::parse(&url).expect("test database URL");
+    assert_eq!(parsed.host_str(), Some("127.0.0.1"));
+    assert!(
+        parsed
+            .path()
+            .starts_with("/admission_test_legacy_invite_link")
+    );
+    let admin_db = PgBackend::new(&config(url.clone())).await.unwrap();
+    admin_db.run_migrations().await.unwrap();
+    let admin = admin_db
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .unwrap();
+    admin
+        .batch_execute(
+            "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'tc_legacy_attest_runtime')
+             THEN CREATE ROLE tc_legacy_attest_runtime LOGIN NOSUPERUSER NOBYPASSRLS; END IF; END $$;
+             GRANT trace_account_invite_runtime TO tc_legacy_attest_runtime;",
+        )
+        .await
+        .unwrap();
+    let mut runtime_url = reqwest::Url::parse(&url).unwrap();
+    runtime_url
+        .set_username("tc_legacy_attest_runtime")
+        .unwrap();
+    let runtime = Arc::new(PgBackend::new(&config(runtime_url.into())).await.unwrap());
+    let keys = generate_upload_claim_keypair().unwrap();
+    let linker = Linker {
+        db: runtime.clone(),
+        signer: LegacyInviteLinkSigner::from_pem(
+            &keys.private_key_pem,
+            &keys.public_key_pem,
+            "ingest-test-1",
+        )
+        .unwrap(),
+    };
+    let rt = runtime.as_ref();
+    let outcomes = |link: &str, attest: &str| vec![link.to_string(), attest.to_string()];
+
+    let near_a = anchored("near");
+    let account_a = seed_near_account(&admin, &near_a, true).await;
+    let near_b = anchored("nearai");
+    let account_b = seed_near_account(&admin, &near_b, true).await;
+
+    // A tenant linked to A by its first device under invite X. `devices`
+    // joined under X too; `other_invite_device` joined the same tenant under
+    // invite Y; `unredeemed` is registered under an invite Z the tenant has
+    // no `onboarding_invites` row for.
+    let tenant = format!("tenant-v92-{}", Uuid::new_v4().simple());
+    let invite_x = hash(&format!("invite-x:{tenant}"));
+    let invite_y = hash(&format!("invite-y:{tenant}"));
+    let invite_z = hash(&format!("invite-z:{tenant}"));
+    let first = new_device();
+    seed_legacy_tenant(&admin, &tenant, &invite_x, 3, &first).await;
+    let devices: Vec<Device> = (0..5).map(|_| new_device()).collect();
+    for device in &devices {
+        seed_device(&admin, &tenant, &invite_x, device).await;
+    }
+    let other_invite_device = new_device();
+    exec(
+        &admin,
+        "INSERT INTO onboarding_invites (tenant_id, invite_subject_hash, max_uses, consumed_uses)
+         VALUES ($1, $2, 3, 1)",
+        &[&tenant, &invite_y],
+    )
+    .await;
+    seed_device(&admin, &tenant, &invite_y, &other_invite_device).await;
+    let unredeemed = new_device();
+    seed_device(&admin, &tenant, &invite_z, &unredeemed).await;
+    let stranger = new_device();
+    linker
+        .link(&near_a, account_a, &tenant, &invite_x, &first)
+        .await
+        .expect("the first device links the tenant to A");
+
+    // The honest path, directly: the link function answers already_linked
+    // and spends the challenge in this transaction; the attestation function
+    // attests and records the spend against this device.
+    let honest = Call::new(rt, &near_a, account_a, &tenant, &invite_x, &devices[0]).await;
+    assert_eq!(
+        direct(rt, &honest, &honest, None).await,
+        outcomes("already_linked", "attested")
+    );
+    let claimed_by: Option<String> = admin
+        .query_one(
+            "SELECT attested_device_key_id FROM trace_legacy_invite_link_challenges
+              WHERE tenant_id=$1 AND nonce_hash=$2",
+            &[&near_a, &hash(&honest.nonce)],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(claimed_by.as_deref(), Some(devices[0].id.as_str()));
+
+    // --- challenge_invalid.
+    // Never spent.
+    let unspent = Call::new(rt, &near_a, account_a, &tenant, &invite_x, &devices[1]).await;
+    assert_eq!(
+        in_one_tx(rt, &near_a, &[(Step::Attest, &unspent)], None).await,
+        ["challenge_invalid"]
+    );
+    // Spent in an EARLIER transaction, then replayed straight into the
+    // attestation function: the review's long-spent nonce.
+    let replayed = Call::new(rt, &near_a, account_a, &tenant, &invite_x, &devices[1]).await;
+    assert_eq!(
+        in_one_tx(rt, &near_a, &[(Step::Link, &replayed)], None).await,
+        ["already_linked"]
+    );
+    assert_eq!(
+        in_one_tx(rt, &near_a, &[(Step::Attest, &replayed)], None).await,
+        ["challenge_invalid"],
+        "a challenge spent in another transaction backs no attestation"
+    );
+    // One spend backs one attestation: a second device cannot ride on it.
+    let shared = Call::new(rt, &near_a, account_a, &tenant, &invite_x, &devices[2]).await;
+    assert_eq!(
+        in_one_tx(
+            rt,
+            &near_a,
+            &[
+                (Step::Link, &shared),
+                (Step::Attest, &shared),
+                (Step::Attest, &shared.by(&devices[3])),
+            ],
+            None,
+        )
+        .await,
+        ["already_linked", "attested", "challenge_invalid"]
+    );
+    // Expired between the spend and the attestation.
+    let expiring = Call::new(rt, &near_a, account_a, &tenant, &invite_x, &devices[3]).await;
+    exec(
+        &admin,
+        "UPDATE trace_legacy_invite_link_challenges SET expires_at = issued_at + 2
+          WHERE tenant_id=$1 AND nonce_hash=$2",
+        &[&near_a, &hash(&expiring.nonce)],
+    )
+    .await;
+    assert_eq!(
+        direct(
+            rt,
+            &expiring,
+            &expiring,
+            Some(std::time::Duration::from_millis(3600))
+        )
+        .await,
+        outcomes("already_linked", "challenge_invalid"),
+        "a challenge that expired before the attestation backs none"
+    );
+
+    // --- device_not_eligible. The link function spends the challenge and
+    // refuses; the attestation function must refuse on its own.
+    let stranger_call = Call::new(rt, &near_a, account_a, &tenant, &invite_x, &stranger).await;
+    assert_eq!(
+        direct(rt, &stranger_call, &stranger_call, None).await,
+        outcomes("device_not_eligible", "device_not_eligible")
+    );
+    let unredeemed_call = Call::new(rt, &near_a, account_a, &tenant, &invite_z, &unredeemed).await;
+    assert_eq!(
+        direct(rt, &unredeemed_call, &unredeemed_call, None).await,
+        outcomes("device_not_eligible", "device_not_eligible"),
+        "a device under an invite its tenant never redeemed"
+    );
+
+    // --- tenant_claimed. B's challenge is spent by a refused link call (an
+    // unregistered device, so no conflict row is written); an attestation for
+    // a real device of A's tenant must still refuse B.
+    let as_b = Call::new(rt, &near_b, account_b, &tenant, &invite_x, &stranger).await;
+    assert_eq!(
+        direct(rt, &as_b, &as_b.by(&devices[0]), None).await,
+        outcomes("device_not_eligible", "tenant_claimed"),
+        "another account never gets an attestation, not even A's device's"
+    );
+
+    // --- invite_not_linked (the Medium): this account's link, another
+    // invite of the same tenant.
+    let other = Call::new(
+        rt,
+        &near_a,
+        account_a,
+        &tenant,
+        &invite_y,
+        &other_invite_device,
+    )
+    .await;
+    assert_eq!(
+        direct(rt, &other, &other, None).await,
+        outcomes("already_linked", "invite_not_linked")
+    );
+    // Through ingest's entry point: its own refusal, not tenant_claimed.
+    let request = linker
+        .request(&near_a, account_a, &tenant, &invite_y, &other_invite_device)
+        .await;
+    assert_eq!(
+        link_legacy_invite(rt, &linker.signer, &near_a, account_a, &request)
+            .await
+            .expect_err("another invite of the linked tenant is refused"),
+        LinkRefusal::InviteNotLinked
+    );
+    // The challenge stays spent, and the refusal is recorded for the
+    // operator, hash-only, naming both invites by hash.
+    assert_eq!(
+        count(
+            &admin,
+            "SELECT count(*) FROM trace_legacy_invite_link_challenges
+              WHERE tenant_id=$1 AND nonce_hash=$2 AND consumed_at IS NOT NULL",
+            &[&near_a, &hash(&request.nonce)],
+        )
+        .await,
+        1
+    );
+    let refused = admin
+        .query(
+            "SELECT outcome, safe_metadata FROM trace_account_audit
+              WHERE tenant_id=$1 AND action='legacy_invite_device_attest_refused'",
+            &[&near_a],
+        )
+        .await
+        .unwrap();
+    assert_eq!(refused.len(), 2, "one row per refusal");
+    for row in &refused {
+        assert_eq!(row.get::<_, String>(0), "invite_not_linked");
+        let metadata: serde_json::Value = row.get(1);
+        assert!(!metadata.to_string().contains(&tenant), "{metadata}");
+        assert_eq!(metadata["legacy_tenant_hash"], hash(&tenant));
+        assert_eq!(metadata["device_key_id"], other_invite_device.id);
+        assert_eq!(metadata["invite_subject_hash"], invite_y);
+        assert_eq!(metadata["linked_invite_subject_hash"], invite_x);
+    }
+    assert_eq!(
+        count(
+            &admin,
+            "SELECT count(*) FROM trace_legacy_invite_link_devices WHERE device_key_id=$1",
+            &[&other_invite_device.id],
+        )
+        .await,
+        0
+    );
+    assert_eq!(
+        count(
+            &admin,
+            "SELECT count(*) FROM trace_legacy_invite_link_conflicts WHERE legacy_tenant_id=$1",
+            &[&tenant],
+        )
+        .await,
+        0,
+        "one account under two invites is not a two-account conflict"
+    );
+
+    // --- A row V91 recorded under the link domain is superseded in place by
+    // the device's next attestation, which then verifies as an attestation.
+    let v91_device = &devices[4];
+    exec(
+        &admin,
+        "INSERT INTO trace_legacy_invite_link_devices
+            (attestation_id, link_id, tenant_id, account_id, device_key_id, invite_subject_hash,
+             nonce, issued_at, device_signature, attested_at, server_kid, server_signature,
+             countersign_domain)
+         SELECT $1, l.link_id, l.tenant_id, l.account_id, $2, l.invite_subject_hash,
+                repeat('f', 64), 1, 'c2ln', 1, 'ingest-test-1', 'c2ln',
+                'trace-commons.legacy-invite-link-record.v1'
+           FROM trace_legacy_invite_links l
+          WHERE l.legacy_tenant_id = $3 AND l.revoked_at IS NULL",
+        &[&Uuid::new_v4(), &v91_device.id, &tenant],
+    )
+    .await;
+    let superseding = linker
+        .link(&near_a, account_a, &tenant, &invite_x, v91_device)
+        .await
+        .expect("a device with a V91 row attests again");
+    UnparsedPublicKey::new(&ED25519, linker.signer.public_key_bytes())
+        .verify(
+            &legacy_invite_link_record_bytes(&superseding.record),
+            &B64.decode(&superseding.server_signature).unwrap(),
+        )
+        .expect("the superseding attestation verifies as one");
+    assert_eq!(
+        count(
+            &admin,
+            "SELECT count(*) FROM trace_legacy_invite_link_devices
+              WHERE device_key_id=$1
+                AND countersign_domain='trace-commons.legacy-invite-device-attestation-record.v1'",
+            &[&v91_device.id],
+        )
+        .await,
+        1,
+        "superseded in place: still one row for the device"
+    );
+
+    // --- tenant_pooled and invite_revoked, each on a tenant of its own that
+    // A linked before the operator acted.
+    // Each of the three revocations the link function honours is checked.
+    for (case, expected) in [
+        ("pooled", "tenant_pooled"),
+        ("invite_revoked", "invite_revoked"),
+        ("registry_revoked", "invite_revoked"),
+        ("grant_revoked", "invite_revoked"),
+    ] {
+        let t = format!("tenant-v92-{case}-{}", Uuid::new_v4().simple());
+        let invite = hash(&format!("invite:{t}"));
+        let d1 = new_device();
+        let d2 = new_device();
+        seed_legacy_tenant(&admin, &t, &invite, 3, &d1).await;
+        seed_device(&admin, &t, &invite, &d2).await;
+        linker
+            .link(&near_a, account_a, &t, &invite, &d1)
+            .await
+            .expect("links");
+        match case {
+            "pooled" => {
+                exec(
+                    &admin,
+                    "INSERT INTO trace_legacy_invite_pooled_tenants (tenant_id, reason_label)
+                     VALUES ($1, 'shared')",
+                    &[&t],
+                )
+                .await
+            }
+            "invite_revoked" => {
+                exec(
+                    &admin,
+                    "UPDATE onboarding_invites SET revoked_at = now() WHERE tenant_id=$1",
+                    &[&t],
+                )
+                .await
+            }
+            "registry_revoked" => {
+                exec(
+                    &admin,
+                    "INSERT INTO onboarding_invite_grants
+                        (invite_subject_hash, policy_label, tenant_mode, fixed_tenant_id,
+                         policy_version, max_uses, consumed_uses, issuance_source, revoked_at)
+                     VALUES ($1, 'pilot', 'fixed', $2, 'v1', 3, 1, 'test', now())",
+                    &[&invite, &t],
+                )
+                .await
+            }
+            _ => {
+                exec(
+                    &admin,
+                    "UPDATE trace_account_invite_grants SET revoked_at = now()
+                      WHERE tenant_id=$1 AND account_id=$2 AND invite_subject_hash=$3",
+                    &[&near_a, &account_a, &invite],
+                )
+                .await
+            }
+        }
+        let call = Call::new(rt, &near_a, account_a, &t, &invite, &d2).await;
+        assert_eq!(
+            direct(rt, &call, &call, None).await,
+            outcomes(expected, expected),
+            "{case}"
+        );
+    }
+
+    // --- tenant_claimed with no live link: an operator revoked it after the
+    // link function read it.
+    let t = format!("tenant-v92-unlinked-{}", Uuid::new_v4().simple());
+    let invite = hash(&format!("invite:{t}"));
+    let d1 = new_device();
+    let d2 = new_device();
+    seed_legacy_tenant(&admin, &t, &invite, 3, &d1).await;
+    seed_device(&admin, &t, &invite, &d2).await;
+    linker
+        .link(&near_a, account_a, &t, &invite, &d1)
+        .await
+        .expect("links");
+    exec(
+        &admin,
+        "UPDATE trace_legacy_invite_links SET revoked_at = now() WHERE legacy_tenant_id=$1",
+        &[&t],
+    )
+    .await;
+    let spend = Call::new(rt, &near_a, account_a, &t, &invite, &stranger).await;
+    assert_eq!(
+        direct(rt, &spend, &spend.by(&d2), None).await,
+        outcomes("device_not_eligible", "tenant_claimed")
+    );
+
+    // --- account_ineligible, by shape: a legacy tenant id in the account
+    // namespace.
+    let shaped = Call {
+        legacy_tenant: &near_b,
+        ..Call::new(rt, &near_a, account_a, &tenant, &invite_x, &devices[1]).await
+    };
+    assert_eq!(
+        in_one_tx(rt, &near_a, &[(Step::Attest, &shaped)], None).await,
+        ["account_ineligible"]
+    );
+    // A closed account attests nothing, even under its own live link. Last,
+    // because it closes A.
+    exec(
+        &admin,
+        "UPDATE trace_accounts SET closed_at = now() WHERE tenant_id=$1 AND account_id=$2",
+        &[&near_a, &account_a],
+    )
+    .await;
+    let closed = Call::new(rt, &near_a, account_a, &tenant, &invite_x, &devices[1]).await;
+    assert_eq!(
+        direct(rt, &closed, &closed, None).await,
+        outcomes("account_ineligible", "account_ineligible")
+    );
+
+    // Only the honest call, the one-spend case's first device and the
+    // superseded row attested anything under this tenant's link.
+    assert_eq!(
+        count(
+            &admin,
+            "SELECT count(*) FROM trace_legacy_invite_link_devices d
+               JOIN trace_legacy_invite_links l ON l.link_id = d.link_id
+              WHERE l.legacy_tenant_id = $1",
+            &[&tenant],
+        )
+        .await,
+        3
     );
 }
 

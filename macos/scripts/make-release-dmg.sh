@@ -68,6 +68,14 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 PACKAGE_DIR="$PWD"
+# Every native release requests webcredentials and must embed a matching
+# Apple-issued profile. An override is explicit local input, never a download.
+# Refuse invalid/expired grants before build or signing credential import.
+SIGNING_PROFILE="${TC_MACOS_PROVISION_PROFILE:-$PACKAGE_DIR/TraceCommons-DeveloperID.provisionprofile}"
+SIGNING_ENTITLEMENTS="$PACKAGE_DIR/entitlements.plist"
+python3 "$PACKAGE_DIR/../scripts/ci/native-passkey-entitlements.py" \
+  --entitlements "$SIGNING_ENTITLEMENTS" --profile-cms "$SIGNING_PROFILE" \
+  --bundle-id ai.tracecommons.shell --require-passkeys
 CONFIG=release
 APP="$PACKAGE_DIR/.build/TraceCommons.app"
 DMG="$PACKAGE_DIR/.build/TraceCommons.dmg"
@@ -194,14 +202,26 @@ find "$APP/Contents/Frameworks" -name '*.dylib' -print0 |
       --sign "$MACOS_SIGNING_IDENTITY" "$dylib"
   done
 
-# Hardened runtime is required for notarization. There is deliberately no
-# entitlements file: this app needs no exception to the hardened runtime, and
-# adding entitlements it does not use would widen what a compromised process
-# could do for no benefit. Sparkle's updater runs out of process precisely so
-# that the app does not need one.
+# Hardened runtime is required for notarization. The entitlements file requests
+# exactly one thing, and the app uses it: `keychain-access-groups`, which is
+# what lets a build read the Cloud credential an earlier build stored without
+# asking the contributor for their password. The legacy keychain binds an item
+# to the binary that created it, so every upgrade prompted, and "Always Allow"
+# only ever added the binary that was already running.
+#
+# The embedded profile is load-bearing, not decoration. A binary carrying this
+# entitlement WITHOUT a profile that grants it is killed by the kernel at exec
+# -- measured, not assumed. The failure is an application that does not start,
+# which is why CI launches the signed app rather than trusting that it signed.
+cp "$SIGNING_PROFILE" "$APP/Contents/embedded.provisionprofile"
 codesign --force --timestamp --options runtime \
+  --entitlements "$SIGNING_ENTITLEMENTS" \
   --sign "$MACOS_SIGNING_IDENTITY" "$APP"
 codesign --verify --deep --strict --verbose=2 "$APP"
+# Inspect the actual signed metadata and embedded grant before packaging.
+# The release workflow separately runs the real launch/Keychain probe.
+TC_REQUIRE_NATIVE_PASSKEYS=1 TC_VERIFY_STATIC_ONLY=1 \
+  "$PACKAGE_DIR/../scripts/ci/verify-macos-entitlements.sh" "$APP"
 
 echo "--- packaging the DMG"
 rm -f "$DMG"

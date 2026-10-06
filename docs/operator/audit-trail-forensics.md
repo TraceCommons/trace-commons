@@ -176,11 +176,41 @@ append will fail the same way.
 
 ## Rolling forward after a binary rollback
 
-Builds from before #1043 did not put the file log's chain fields on DB audit
-rows. Under required mirror writes they wrote the DB row before chaining the
-event into the file, so the row has no `previous_event_hash` / `event_hash`.
-Some of their events (a submission's `submitted` event, an idempotent
-re-POST) went to the file only, with the store writing its own unhashed row.
+> **Disabled by default since 2026-10-02.** The pilot's pre-#1043 rollback
+> target, `5f239be4`, was retired on 2026-10-02, so the legacy-segment resume
+> below is off unless ingest was started with
+> `TRACE_COMMONS_ALLOW_LEGACY_SEGMENT_RESUME=true` (read once at startup;
+> `1`, `true`, `yes` or `on`). While it is off:
+>
+> - the dry run (step 1) works as below and still reports
+>   `file_ahead_through_legacy_rows` with every segment count and time, and
+>   its response carries `legacy_segment_resume_enabled: false`;
+> - every non-dry run that carries `"accept_legacy_segment": true`, or that
+>   meets a legacy segment without it, is refused `409`
+>   `legacy_segment_resume_disabled` before anything is written. The refusal
+>   is logged by that label alone.
+>
+> Turn it on only for an emergency roll-forward after a rollback to a
+> pre-#1043 build: set the variable, restart ingest, run step 2 for each
+> affected tenant, then unset it and restart again. The dry run's
+> `legacy_segment_resume_enabled: true` confirms the restart took.
+
+Builds from before #1043 (the pilot's was `5f239be4`) did not put the file
+log's chain fields on DB audit rows. Under required mirror writes they wrote
+the DB row before chaining the event into the file, so the row has no
+`previous_event_hash` / `event_hash`. Some kinds of event they wrote to the
+file only, with no DB row of the event's id:
+
+| File event | What the old build wrote to the DB instead |
+|---|---|
+| `submitted`, `quarantine_remediated`, `quarantine_operator_rescrub` | the store's `submit-audit` row, under an id derived from the submission |
+| `review_decision` | the store's own status row (`actor_role` `system`, reason `review_decision`) |
+| `idempotent_submit` (a re-POST) | nothing |
+
+It also wrote store rows with no file event of their own: a status row and
+an artifact-invalidation row beside a `revoked` or `maintenance` event, and a
+status row for each PII-backstop pass. Every other event it mirrored under the
+event's own id, unhashed.
 
 So a rollback to such a build is safe to serve, but it leaves a mark. While
 it runs, the file chain moves ahead and the DB's latest hashed row does not.
@@ -189,14 +219,20 @@ head, the DB refuses it as stale, and every audited write for each tenant
 that was active during the rollback fails with a 500. The DB-ahead repair
 above has nothing to restore here.
 
+A submission attempted in that state is refused with a 500, but its
+submission row and file record were written before the audit append failed.
+Its `submitted` audit event was never written. When the client retries after
+the repair, the retry finds the submission and is recorded as an
+`idempotent_submit`. Repair each tenant before it takes traffic, or expect
+such submissions.
+
 The same route handles this shape. It resumes the DB chain across the
 segment the old build wrote:
 
-1. Roll forward, then run the dry run for each tenant that was active during
-   the rollback. Those are the tenants whose audited writes now fail. The
-   drills do not single them out: the old build's rows are unhashed, and the
-   chain skips unhashed rows. A dry run for an unaffected tenant reports
-   `clean`.
+1. Roll forward, then find the affected tenants: the audit-chain drill
+   reports `audit_chain_file_head_not_db_head=1` for each one, because the
+   file's head is not the DB's latest hashed row. The dry run tells you
+   why. A dry run for an unaffected tenant reports `clean`.
 
    ```bash
    curl -sS -X POST "$INGEST/v1/admin/audit-chain-repair" \
@@ -208,12 +244,25 @@ segment the old build wrote:
    `legacy_segment_file_events` (file events past the DB's latest hashed
    row), `legacy_segment_unhashed_db_rows` (the rows the old build wrote
    there) and `legacy_segment_file_only_events` (those file events with no DB
-   row of their id). Check they fit the traffic the rollback served.
+   row of their id). Check they fit the traffic the rollback served. For
+   example, two submissions, one re-POST and one status read on the old
+   build give 4 file events (two `submitted`, one `idempotent_submit`, one
+   `read`), 3 unhashed DB rows (two `submit-audit` rows and the read's
+   mirror) and 3 file-only events (the two `submitted` and the re-POST).
+
+   `legacy_segment_earliest_at` and `legacy_segment_latest_at` bound the
+   segment's file events and DB rows. Both must fall inside the rollback
+   window. A segment that reaches outside it was not written by the rollback:
+   stop and treat it as chain drift.
+
    `chain_resumed` is `false`, and nothing is written.
 2. Run it with `"dry_run": false` **and** `"accept_legacy_segment": true`.
    The second flag is the explicit acceptance of rows the repair cannot
    verify by hash, the unhashed rows the rolled-back build wrote. Without it
    a non-dry run refuses `legacy_segment_not_accepted` and writes nothing.
+   This step needs `TRACE_COMMONS_ALLOW_LEGACY_SEGMENT_RESUME` set (see the
+   note at the top of this section); otherwise it refuses
+   `legacy_segment_resume_disabled`, with or without the flag.
 
    ```bash
    curl -sS -X POST "$INGEST/v1/admin/audit-chain-repair" \
@@ -221,25 +270,46 @@ segment the old build wrote:
      -d '{"dry_run": false, "accept_legacy_segment": true, "purpose": "INC-1234 roll forward after rollback to <build>"}'
    ```
 
-   It appends one `audit_chain_repair` event,
-   chained from the file head like any other event, to the file and then to
-   the DB. Its `decision_inputs_hash` is the DB's latest hashed row's
-   `event_hash`: the row names the exact point the DB chain resumes from. The
-   response has `chain_resumed: true`, and `repair_audit_event_id` is that
-   event. It holds only counts and the purpose's hash.
+   It appends one `audit_chain_repair` event, chained from the file head
+   like any other event. Its `decision_inputs_hash` is the DB's latest
+   hashed row's `event_hash`: the row names the exact point the DB chain
+   resumes from. The response has `chain_resumed: true`, and
+   `repair_audit_event_id` is that event. It holds only counts and the
+   purpose's hash.
 3. Run it again. It reports `clean`. Then confirm one submission succeeds,
    and run the audit-chain and db-reconciliation drills: neither reports a
-   chain failure. The acceptance flag is not needed here, because a clean
-   run takes no legacy path.
+   chain failure, and the audit-chain drill reports the resume
+   (`db_legacy_segment_resume_count`, `db_legacy_segment_file_event_count`).
+   The acceptance flag is not needed here, because a clean run takes no
+   legacy path. A non-dry run on a clean chain without the flag (or with
+   it, while `TRACE_COMMONS_ALLOW_LEGACY_SEGMENT_RESUME` is set) still
+   records its own `audit_chain_repair` event, as every non-dry repair does.
+   That event is harmless. With the switch off, a run carrying the flag is
+   refused `legacy_segment_resume_disabled` even on a clean chain.
 
-What it verifies before writing anything, holding the tenant's append lock:
+Nothing in-band proves that a rolled-back build wrote the segment. A DB-side
+edit could strip the hashes from the chain's tail, or delete it and plant an
+unhashed row. So the repair accepts only what that build could have written,
+and requires every row and event to account for each other. Holding the
+tenant's append lock, it verifies all of this before writing anything:
 - The DB's latest hashed row is a file event, with the same chain fields.
 - Every file event after it chains from it and reproduces its own hash.
-- Every DB row whose id is one of those events is unhashed, and agrees with
-  the event: tenant, submission, reason, principal, export id and decision
-  inputs.
-- At least one DB row after the latest hashed row is unhashed. That is the
-  old build's mark; without it the file running ahead is unexplained.
+- A DB row of one of those events' ids sits after the DB head. It is exactly
+  the row the old build mirrored the event as: unhashed, with no request id,
+  with the event's principal, and with every column the event determines
+  agreeing with it. That covers action and metadata (through the kind
+  projection), status, role, reason, export and decision inputs. Only
+  `object_ref_id` and `occurred_at` are not compared: the file event has no
+  object ref, and `occurred_at` is the database's clock.
+- An event with no DB row is of a kind the old build left file-only (the
+  table above). It has the store row that build wrote beside it: a
+  `submit-audit` row with the event's status, or a status row by the event's
+  principal.
+- Every DB row after the DB head is one of those, or another store row that
+  build wrote: beside a `revoked` or `maintenance` event in the segment by
+  the same principal, or a PII-backstop pass's status row.
+- There is at least one DB row after the latest hashed row. That is the old
+  build's mark; without it the file running ahead is unexplained.
 
 It refuses anything else with a `409` and writes nothing:
 
@@ -247,27 +317,45 @@ It refuses anything else with a `409` and writes nothing:
 |---|---|---|
 | `db_head_not_in_file` | The DB's latest hashed row is not a file event, or its chain fields differ. A fork or a tampered row, not a rollback. | P0 chain drift: do not edit either log. |
 | `file_chain_break_after_db_head` | The file does not chain on from the DB's latest hashed row, or an event after it does not reproduce its hash. | P0: the file was edited or forked. |
-| `legacy_row_mismatch` | An unhashed DB row disagrees with the file event of its id. The old build copied those fields from the event, so this is not its doing. | P0: treat as tampering. |
-| `legacy_segment_not_accepted` | The state is a legacy segment the repair can resume across, but the non-dry run did not carry `"accept_legacy_segment": true`. Nothing was written. | Review the dry run's counts, then rerun with the flag. |
-| `file_head_not_in_db` | The file is ahead with no unhashed DB rows after the DB head. | See the table above. |
+| `legacy_row_mismatch` | An unhashed DB row disagrees with the file event of its id, or the event names no principal. The old build copied those fields from the event and always named one, so this is not its doing. | P0: treat as tampering. |
+| `legacy_row_before_db_head` | A row of a segment event's id sits at or before the DB head. The old build wrote it after. | P0: treat as tampering. |
+| `legacy_file_only_event_unexpected` | A segment event has no DB row, and the old build mirrored every event of its kind. Its hashed row was deleted, or it was never written. | P0: treat as a deletion. |
+| `legacy_event_unattributed` | A file-only segment event names no principal or role. | P0: treat as tampering. |
+| `legacy_submit_row_missing` | A file-only `submitted`, `quarantine_remediated` or `quarantine_operator_rescrub` has no `submit-audit` row with its status after the DB head. | P0: treat as a deletion. |
+| `legacy_status_row_missing` | A file-only `review_decision` has no store status row after the DB head. | P0: treat as a deletion. |
+| `legacy_row_unexplained` | A DB row after the DB head is neither a segment event's row nor a store row the old build wrote. | P0: treat as a planted row. |
+| `legacy_segment_not_accepted` | The state is a legacy segment the repair can resume across, but the non-dry run did not carry `"accept_legacy_segment": true`. Nothing was written. | Review the dry run's counts and times, then rerun with the flag. |
+| `legacy_segment_resume_disabled` | The legacy-segment resume is off: ingest was started without `TRACE_COMMONS_ALLOW_LEGACY_SEGMENT_RESUME`. Returned for any non-dry run that carries `"accept_legacy_segment": true`, before the repair reads either log, and for any non-dry run that meets a legacy segment. Takes precedence over `legacy_segment_not_accepted`. Nothing was written. | The dry run still diagnoses the state. Resume only in an emergency: set the variable, restart ingest, rerun, then unset it and restart. |
+| `file_head_not_in_db` | The file is ahead with no DB rows after the DB head. | See the table above. |
 
 How the drills read it afterwards. The DB chain is the hashed rows in order,
 and an unhashed row neither breaks nor restarts it. A hashed row that does
 not chain from the one before is a failure, except for a repair row like
 this. That row passes only if all of these hold:
-- it is an `audit_chain_repair` row with its canonical payload;
+- it is an `audit_chain_repair` row (`Retain`, not a dry run) with its
+  canonical payload;
 - its `decision_inputs_hash` is exactly the hashed row before it;
-- it carries the chain fields of the file event with its id.
+- it carries the chain fields of the file event with its id;
+- that hashed row is an ancestor of it in the file chain.
 
-A hashed row lost before it therefore still breaks the chain. The rows the
-old build wrote remain unhashed legacy rows (`db_legacy_event_count`), since
-the table is insert-only. The file chain was never broken, and the
-audit-chain drill verifies it end to end.
+A hashed row lost before it therefore still breaks the chain, and so does a
+resume across a fork. The rows the old build wrote remain unhashed legacy
+rows (`db_legacy_event_count`), since the table is insert-only. The file
+chain was never broken, and the audit-chain drill verifies it end to end.
+Inside a segment such a row resumes across, the db-reconciliation and
+rollback drills count the old build's file-only events and store rows apart
+(`db_audit_legacy_segment_file_only_event_count`), not as missing events or
+reader-parity drift.
 
-The repair writes the file line first and the DB row second. If the DB write
-fails, the tenant is left with one more file-only event past the DB head,
-and rerunning the repair resumes across it. The DB write refuses a DB head
-that moved since the plan.
+The resume row and its file line are written together. The store takes the
+tenant's advisory lock, re-checks that the DB head is still the one planned
+against, and inserts the row. Only then, before it commits, is the file line
+appended. So a repair whose plan went stale fails before it touches the file,
+and two overlapping repairs (an old and a new process on one file root)
+cannot both write a line. If the commit fails after the file append, the
+line is file-only. The next dry run reports
+`legacy_segment_resume_interrupted: true`, and the next repair writes that
+line's DB row rather than a second resume event.
 
 Rolling back again later is handled the same way. Each roll-forward needs one
 repair per affected tenant, and each repair is its own resume point.

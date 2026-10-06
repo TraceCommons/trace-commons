@@ -578,6 +578,10 @@ final class AppModel: ObservableObject {
         submitNearAiCredential { try $0.nearAiCredentialForget() }
     }
 
+    func migrateNearAiCredential() {
+        submitNearAiCredential { try $0.nearAiCredentialMigrate() }
+    }
+
     /// One write, then a re-read of everything the key is behind.
     ///
     /// The listener and the tool list are re-read as well as the card: the
@@ -823,6 +827,14 @@ final class AppModel: ObservableObject {
     private var client: DaemonClient?
     var skillLearningClient: DaemonClient? { client }
     private var subscription: TCSubscription?
+    /// The C1 data contract's live client (K1 of #1173), for screens that
+    /// read through `DaemonDataClient`. Created with the daemon and fed by
+    /// the same `tc_subscribe` callback as `handle(event:)`, so there is
+    /// one subscription and both sides see the same frames. `nil` while no
+    /// daemon is running. Published, so a screen holding `daemonData` sees
+    /// a daemon restart replace the client rather than keep a finished one.
+    @Published private(set) var liveData: LiveDaemonClient?
+    var daemonData: (any DaemonDataClient)? { liveData }
     private var undoTask: Task<Void, Never>?
 
     /// Client-side bookkeeping for the daemon's bounded preview scheduler --
@@ -880,10 +892,11 @@ final class AppModel: ObservableObject {
     /// `recomputeWaiting` and `applyPreviewOutcome`.
     @Published private(set) var nothingMatchedCount: Int = 0
 
-    /// The badge counts DECISIONS OWED -- entries actually waiting for a yes
-    /// or no -- not sessions found and not queue total.
-    var decisionsOwed: Int {
-        awaitingDecision.count
+    /// Only the daemon decides which sessions owe a decision (K6). The
+    /// review list can include sessions held by other gates. Missing on an
+    /// older daemon means unavailable, never an inferred count or zero.
+    var decisionsOwed: Int? {
+        status.decisionsOwed
     }
 
     /// The single place the two derived queue views are rebuilt. Called
@@ -983,6 +996,15 @@ final class AppModel: ObservableObject {
     /// contributor who is not told that meets it as a dead control.
     var isAttachedDaemon: Bool { daemon?.isAttached ?? false }
 
+    /// The quit prompt that is true for this process, from the core
+    /// (`tc_quit_prompt_json`): the ABI reads off the daemon handle whether
+    /// this app hosts the watcher, is attached to one, or has none, and
+    /// chooses the sentence. Nil only on a caught panic.
+    var quitPrompt: QuitPrompt? {
+        QuitPrompt.decode(fromJSON: daemon?.quitPromptJSON()
+            ?? TCCoreCopy.quitPromptWithoutWatcherJSON())
+    }
+
     var traceNavigationReady: Bool {
         guard case .running = startup else { return false }
         return status.loggedIn && isOnboardingComplete
@@ -1028,9 +1050,24 @@ final class AppModel: ObservableObject {
             case .success(let daemon):
                 self.daemon = daemon
                 self.client = DaemonClient(daemon: daemon)
+                self.liveData = DaemonDataWiring.live(daemon)
                 self.startup = .running
                 self.subscribe()
                 self.refreshAll()
+                #if DEBUG
+                // K2 (#1173): console-only, so a developer can confirm the
+                // dry run took before trusting the screens. Asked of the
+                // daemon, not read from the environment, so it matches the
+                // daemon's own mode. A label, not a sentence
+                // (`ShellWordingTests`).
+                if let client = self.client {
+                    Task.detached {
+                        if client.devDryRunActive() {
+                            NSLog("TraceCommons: status.dev_dry_run=true")
+                        }
+                    }
+                }
+                #endif
             case .failure(TCDaemon.TCError.rootsNotDeclared):
                 self.startup = .needsRoots
             case .failure(let error):
@@ -1043,7 +1080,11 @@ final class AppModel: ObservableObject {
 
     private func subscribe() {
         guard let daemon else { return }
+        // Captured, not read through `self`: the callback runs on a Rust
+        // thread, and `deliver` is lock-guarded and never calls back in.
+        let liveData = self.liveData
         subscription = daemon.subscribe { [weak self] json in
+            liveData?.deliver(eventJSON: json)
             // Rust background thread. Nothing observable may be touched
             // here; hop first, always.
             let event = DaemonEventParser.parse(json)
@@ -1068,9 +1109,9 @@ final class AppModel: ObservableObject {
             applyPreviewOutcome(result)
         case .queueChanged:
             refreshQueue()
-            // `queue_depth` lives on `status`, and the daemon does not
-            // publish `status_changed` for a queue change, so a status
-            // fetched at launch would stay at 0 forever.
+            // The daemon count lives on `status`, not this local review
+            // list. Fetch it too, including for older event publishers
+            // that don't accompany queue changes with `status_changed`.
             refreshStatus()
             // A queue change is when a project can first become visible:
             // `list_projects` reports discovered projects from the queue, and
@@ -1152,6 +1193,10 @@ final class AppModel: ObservableObject {
         self.subscription = nil
         self.daemon = nil
         self.client = nil
+        // Screens' `for await` loops end here rather than waiting on a
+        // subscription that is about to be cancelled.
+        self.liveData?.finishEvents()
+        self.liveData = nil
         guard let daemon else { return }
         if case .leaked(let reason) = daemon.shutdown(unsubscribing: subscription) {
             // A fixed label, no path or token, per this repo's logging rule.
@@ -1307,13 +1352,13 @@ final class AppModel: ObservableObject {
     /// the authority: the queue is live, and a poll or an approval between
     /// the render and the click moves it. When the two disagree the
     /// contributor is told rather than left to notice -- see
-    /// `ProjectIgnoreCopy.reconciliation`.
+    /// `tc_project_ignore_reconciled_text`.
     func ignoreProject(id projectID: String, label: String, promised: Int) {
         perform(
             "set_project_mode",
             work: { try $0.setProjectMode(projectID: projectID, mode: .ignore) }
         ) { purged in
-            self.lastActionNotice = ProjectIgnoreCopy.reconciliation(
+            self.lastActionNotice = TCCoreCopy.projectIgnoreReconciled(
                 project: label,
                 promised: promised,
                 purged: purged
@@ -1603,11 +1648,11 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Projects whose "Ask me first" the daemon refused, by project id, so
+    /// Projects whose "Ask me" the daemon refused, by project id, so
     /// the notice can show the Rust's refusal line. Cleared on a retry.
     @Published private(set) var askFirstRefused: Set<String> = []
 
-    /// "Ask me first" on a rewording or held-folder notice. The same call as
+    /// "Ask me" on a rewording or held-folder notice. The same call as
     /// Settings -- `set_project_mode` with the project's id and
     /// `notify_only` -- which also answers a rewording notice. A refusal
     /// changes nothing; the notice stays and says so.

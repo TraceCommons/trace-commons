@@ -473,13 +473,13 @@ checksum = "8b75356056920673b02621b35afd0f7dda9306d03c79a30f5c56c44cf256e3de"
 
 [[package]]
 name = "async-trait"
-version = "0.1.89"
+version = "0.1.92"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9035ad2d096bed7955a320ee7e2230574d28fd3c3a0f186cbea1ff3c7eed5dbb"
+checksum = "82f6aeea286b8eb4dd3431a1be1b59d290ace00f5bfd8e2a159bc2a05e2c1667"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.117",
+ "syn 3.0.5",
 ]
 
 [[package]]
@@ -4057,7 +4057,7 @@ dependencies = [
 [[package]]
 name = "ironwire_agents"
 version = "0.1.0"
-source = "git+https://github.com/nearai/ironwire?rev=d622d11417f1e70f3eada0877673e3866ba5f31f#d622d11417f1e70f3eada0877673e3866ba5f31f"
+source = "git+https://github.com/nearai/ironwire?rev=b1bd24176b402aab1a990a0f62d094d7a97ce636#b1bd24176b402aab1a990a0f62d094d7a97ce636"
 dependencies = [
  "dirs",
  "ironwire_catalog",
@@ -4069,7 +4069,7 @@ dependencies = [
 [[package]]
 name = "ironwire_catalog"
 version = "0.1.0"
-source = "git+https://github.com/nearai/ironwire?rev=d622d11417f1e70f3eada0877673e3866ba5f31f#d622d11417f1e70f3eada0877673e3866ba5f31f"
+source = "git+https://github.com/nearai/ironwire?rev=b1bd24176b402aab1a990a0f62d094d7a97ce636#b1bd24176b402aab1a990a0f62d094d7a97ce636"
 dependencies = [
  "chrono",
  "ed25519-dalek",
@@ -4084,7 +4084,7 @@ dependencies = [
 [[package]]
 name = "ironwire_core"
 version = "0.1.0"
-source = "git+https://github.com/nearai/ironwire?rev=d622d11417f1e70f3eada0877673e3866ba5f31f#d622d11417f1e70f3eada0877673e3866ba5f31f"
+source = "git+https://github.com/nearai/ironwire?rev=b1bd24176b402aab1a990a0f62d094d7a97ce636#b1bd24176b402aab1a990a0f62d094d7a97ce636"
 dependencies = [
  "chrono",
  "dirs",
@@ -4098,7 +4098,7 @@ dependencies = [
 [[package]]
 name = "ironwire_creds"
 version = "0.1.0"
-source = "git+https://github.com/nearai/ironwire?rev=d622d11417f1e70f3eada0877673e3866ba5f31f#d622d11417f1e70f3eada0877673e3866ba5f31f"
+source = "git+https://github.com/nearai/ironwire?rev=b1bd24176b402aab1a990a0f62d094d7a97ce636#b1bd24176b402aab1a990a0f62d094d7a97ce636"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -4116,7 +4116,7 @@ dependencies = [
 [[package]]
 name = "ironwire_ledger"
 version = "0.1.0"
-source = "git+https://github.com/nearai/ironwire?rev=d622d11417f1e70f3eada0877673e3866ba5f31f#d622d11417f1e70f3eada0877673e3866ba5f31f"
+source = "git+https://github.com/nearai/ironwire?rev=b1bd24176b402aab1a990a0f62d094d7a97ce636#b1bd24176b402aab1a990a0f62d094d7a97ce636"
 dependencies = [
  "chrono",
  "ironclaw_common",
@@ -4132,7 +4132,7 @@ dependencies = [
 [[package]]
 name = "ironwire_privacy"
 version = "0.1.0"
-source = "git+https://github.com/nearai/ironwire?rev=d622d11417f1e70f3eada0877673e3866ba5f31f#d622d11417f1e70f3eada0877673e3866ba5f31f"
+source = "git+https://github.com/nearai/ironwire?rev=b1bd24176b402aab1a990a0f62d094d7a97ce636#b1bd24176b402aab1a990a0f62d094d7a97ce636"
 dependencies = [
  "getrandom 0.4.2",
  "hmac 0.12.1",
@@ -4148,15 +4148,18 @@ dependencies = [
 [[package]]
 name = "ironwire_proxy"
 version = "0.1.0"
-source = "git+https://github.com/nearai/ironwire?rev=d622d11417f1e70f3eada0877673e3866ba5f31f#d622d11417f1e70f3eada0877673e3866ba5f31f"
+source = "git+https://github.com/nearai/ironwire?rev=b1bd24176b402aab1a990a0f62d094d7a97ce636#b1bd24176b402aab1a990a0f62d094d7a97ce636"
 dependencies = [
  "anyhow",
  "async-stream",
+ "async-trait",
  "axum",
  "bytes",
  "chrono",
+ "ed25519-dalek",
  "futures-util",
  "getrandom 0.2.17",
+ "hex",
  "http",
  "ironwire_agents",
  "ironwire_catalog",
@@ -4181,7 +4184,7 @@ dependencies = [
 [[package]]
 name = "ironwire_translate"
 version = "0.1.0"
-source = "git+https://github.com/nearai/ironwire?rev=d622d11417f1e70f3eada0877673e3866ba5f31f#d622d11417f1e70f3eada0877673e3866ba5f31f"
+source = "git+https://github.com/nearai/ironwire?rev=b1bd24176b402aab1a990a0f62d094d7a97ce636#b1bd24176b402aab1a990a0f62d094d7a97ce636"
 dependencies = [
  "ironwire_core",
  "serde",
@@ -4193,7 +4196,7 @@ dependencies = [
 [[package]]
 name = "ironwire_update"
 version = "0.1.0"
-source = "git+https://github.com/nearai/ironwire?rev=d622d11417f1e70f3eada0877673e3866ba5f31f#d622d11417f1e70f3eada0877673e3866ba5f31f"
+source = "git+https://github.com/nearai/ironwire?rev=b1bd24176b402aab1a990a0f62d094d7a97ce636#b1bd24176b402aab1a990a0f62d094d7a97ce636"
 dependencies = [
  "chrono",
  "semver",
@@ -4206,7 +4209,7 @@ dependencies = [
 [[package]]
 name = "ironwire_upstream"
 version = "0.1.0"
-source = "git+https://github.com/nearai/ironwire?rev=d622d11417f1e70f3eada0877673e3866ba5f31f#d622d11417f1e70f3eada0877673e3866ba5f31f"
+source = "git+https://github.com/nearai/ironwire?rev=b1bd24176b402aab1a990a0f62d094d7a97ce636#b1bd24176b402aab1a990a0f62d094d7a97ce636"
 dependencies = [
  "async-trait",
  "bytes",
@@ -4230,7 +4233,7 @@ dependencies = [
 [[package]]
 name = "ironwire_usage"
 version = "0.1.0"
-source = "git+https://github.com/nearai/ironwire?rev=d622d11417f1e70f3eada0877673e3866ba5f31f#d622d11417f1e70f3eada0877673e3866ba5f31f"
+source = "git+https://github.com/nearai/ironwire?rev=b1bd24176b402aab1a990a0f62d094d7a97ce636#b1bd24176b402aab1a990a0f62d094d7a97ce636"
 dependencies = [
  "chrono",
  "ironwire_ledger",
@@ -8688,6 +8691,7 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "chrono",
+ "chrono-tz",
  "clap",
  "dirs",
  "hex",
@@ -8699,6 +8703,7 @@ dependencies = [
  "notify",
  "reqwest 0.12.28",
  "ring",
+ "security-framework",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -8865,6 +8870,7 @@ dependencies = [
  "trace-commons-attestation",
  "trace-commons-build-info",
  "trace-commons-contributor",
+ "trace-commons-gate-api",
  "trace-commons-gate-enclave",
  "trace-commons-operator-client",
  "trace-commons-protocol",

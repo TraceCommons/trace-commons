@@ -81,6 +81,11 @@ swift build --configuration "$CONFIG" --arch arm64 --arch x86_64
 # .build/apple/Products/<Config, capitalized>.
 CONFIG_CAP="$(tr '[:lower:]' '[:upper:]' <<< "${CONFIG:0:1}")${CONFIG:1}"
 BIN_DIR="$PACKAGE_DIR/.build/apple/Products/$CONFIG_CAP"
+# Newer SwiftPM (the macOS 27 SDK's) writes the same products to
+# .build/out/Products/<Config> instead.
+if [ ! -x "$BIN_DIR/TraceCommonsApp" ] && [ -x "$PACKAGE_DIR/.build/out/Products/$CONFIG_CAP/TraceCommonsApp" ]; then
+  BIN_DIR="$PACKAGE_DIR/.build/out/Products/$CONFIG_CAP"
+fi
 
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Frameworks" "$APP/Contents/Resources"
@@ -180,6 +185,11 @@ if [ "${TC_SKIP_ADHOC_SIGN:-0}" != "1" ]; then
   codesign --force --sign - --timestamp=none \
     "$SPARKLE_FRAMEWORK" >/dev/null
   codesign --force --sign - --timestamp=none "$APP/Contents/Frameworks/$DYLIB_NAME" >/dev/null 2>&1 || true
+  # Deliberately no --entitlements here. This script ad-hoc signs, and an ad-hoc
+  # binary carrying `keychain-access-groups` is killed at exec. A locally built
+  # app therefore runs unentitled and cannot reach Cloud credentials; work on the
+  # sign-in ceremony needs a Developer ID-signed build. See the data-protection
+  # keychain spec.
   codesign --force --sign - --timestamp=none "$APP" >/dev/null 2>&1 || true
 fi
 

@@ -30,12 +30,87 @@ use crate::config::{ConfigStore, DAEMON_HISTORY_FILE, Receipt};
 pub const STATUS_QUARANTINED: &str = "quarantined";
 pub const STATUS_ACCEPTED: &str = "accepted";
 pub const STATUS_SUBMITTED: &str = "submitted";
+/// Server-side status for a submission the server will not take.
+pub const STATUS_REJECTED: &str = "rejected";
+/// Receipt status from the versioned pipeline (`route_pipeline_receipt` on
+/// the server): the upload is in. To a contributor that is
+/// [`STATUS_SUBMITTED`] -- uploaded, no verdict reported yet -- and every
+/// client surface reads it as such through [`status_bucket`].
+///
+/// "No verdict reported", not "no verdict": Admission runs inside the
+/// request that returns this receipt, and a trace it quarantined or
+/// rejected gets the same `processing` receipt. Receipts are append-only,
+/// so that receipt is never rewritten; the verdict arrives only through
+/// the status read-back. Code deciding whether a session is already
+/// submitted reads the read-back first, through [`reported_verdicts`].
+pub const STATUS_PROCESSING: &str = "processing";
 /// Local status this cache stamps onto a record once `daemon::withdraw` has
 /// had the server confirm a withdrawal. Not a status the server itself ever
 /// returns from submission-status read-back -- `join` only ever writes the
 /// four statuses above from the server's response, so a record can only
 /// carry this one by going through `mark_withdrawn`.
 pub const STATUS_WITHDRAWN: &str = "withdrawn";
+/// Server-side status for a submission withdrawn from the web (#1112): the
+/// server's own read-back of a withdrawal this daemon never saw. Counted as
+/// taken back exactly like a local [`STATUS_WITHDRAWN`] row.
+pub const STATUS_REVOKED: &str = "revoked";
+
+/// The status a row is counted, selected and short-circuited under:
+/// [`STATUS_PROCESSING`] is [`STATUS_SUBMITTED`], and every other status is
+/// itself. The one mapping the rollup, `withdraw_bulk` and the submit
+/// short-circuit all read, so they cannot disagree about a `processing` row.
+pub fn status_bucket(status: &str) -> &str {
+    if status == STATUS_PROCESSING {
+        STATUS_SUBMITTED
+    } else {
+        status
+    }
+}
+
+/// The verdicts the server has read back, by submission id: rows a status
+/// read-back refreshed (`last_refreshed_at` set; `merge_new_receipts` never
+/// sets it), not taken back, whose status is `accepted`, `quarantined` or
+/// `rejected`.
+///
+/// For a [`STATUS_PROCESSING`] receipt only; see [`receipt_status`]. A
+/// withdrawn or revoked row is deliberately absent: it is not a verdict,
+/// and reading it as one would make a `processing` receipt look not
+/// submitted, and a re-run would upload a trace the contributor took back.
+pub fn reported_verdicts(records: &[HistoryRecord]) -> BTreeMap<Uuid, String> {
+    records
+        .iter()
+        .filter(|r| r.last_refreshed_at.is_some() && !is_taken_back(r))
+        .filter(|r| {
+            [STATUS_ACCEPTED, STATUS_QUARANTINED, STATUS_REJECTED].contains(&r.status.as_str())
+        })
+        .map(|r| (r.submission_id, r.status.clone()))
+        .collect()
+}
+
+/// The status a receipt is judged by: the receipt's own, except that a
+/// [`STATUS_PROCESSING`] receipt takes the verdict the server has since
+/// read back for that submission, when [`reported_verdicts`] holds one.
+///
+/// Only `processing` is overridden. Every other receipt status already came
+/// from the server's answer to the upload, and a cache row must not
+/// overrule it.
+pub fn receipt_status<'a>(receipt: &'a Receipt, verdicts: &'a BTreeMap<Uuid, String>) -> &'a str {
+    if receipt.status == STATUS_PROCESSING {
+        if let Some(verdict) = verdicts.get(&receipt.submission_id) {
+            return verdict;
+        }
+    }
+    &receipt.status
+}
+
+/// Whether a row has been taken back: withdrawn here (`withdrawn_at`, or the
+/// local [`STATUS_WITHDRAWN`] stamp), or reported `revoked` by the server
+/// (a withdrawal made on the web). The one predicate every count uses, so
+/// the rollup's `taken_back`, its `withdrawn` bucket and the digest's
+/// contribution line cannot disagree about a row.
+pub fn is_taken_back(rec: &HistoryRecord) -> bool {
+    rec.withdrawn_at.is_some() || rec.status == STATUS_WITHDRAWN || rec.status == STATUS_REVOKED
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HistoryRecord {
@@ -75,6 +150,57 @@ pub struct HistoryRecord {
     /// written before this field existed still parses.
     #[serde(default)]
     pub withdrawn_at: Option<DateTime<Utc>>,
+    /// When this row was first seen carrying the server's own [`STATUS_REVOKED`]
+    /// (K12): a withdrawal made on the web, which this daemon never drove and
+    /// which the status read-back itself carries no timestamp for.
+    ///
+    /// Not the moment of the web withdrawal -- this daemon has no way to know
+    /// that -- but the moment it was first discovered, which is the same
+    /// honest compromise `observed_modified_at` and `review_started_at` make
+    /// elsewhere in this crate for a fact this device can only poll for.
+    /// Stamped once, by [`join`], from the `refreshed_at` of the poll that
+    /// first saw it, and carried forward on every rebuild after that so a
+    /// later poll cannot push the date forward; see `join`'s doc.
+    ///
+    /// `None` for a row that is not (or not yet) `revoked`, and for one
+    /// written before this field existed.
+    ///
+    /// `#[serde(default)]` so a cache file written before this field existed
+    /// still parses.
+    #[serde(default)]
+    pub revoked_at: Option<DateTime<Utc>>,
+    /// Whether this trace reached upload without the contributor deciding --
+    /// an armed (`auto_upload`) folder sent it rather than a person approving
+    /// it. Carried from `Receipt::approved_unattended`, itself set at upload
+    /// time from `QueueEntry::approved_unattended`.
+    ///
+    /// This is what draws the design's "you approved" versus "armed · went
+    /// without asking" distinction on a history row (K7). It is a fixed
+    /// label about how the send happened, never a message body.
+    ///
+    /// `Some(false)`: a person approved it. `Some(true)`: an armed folder
+    /// sent it without asking. `None`: UNRECORDED -- the receipt predates
+    /// this field -- and a client must say so rather than render "you
+    /// approved", since an old row may have come from an armed folder.
+    ///
+    /// `#[serde(default)]` so a cache line written before this field existed
+    /// still parses, as `None`.
+    #[serde(default)]
+    pub approved_unattended: Option<bool>,
+    /// The contributor's verdict at approval time (`worked` / `partly` /
+    /// `failed`), carried from `Receipt::approved_verdict`. `None` when no
+    /// verdict was given, or when this row predates the field.
+    #[serde(default)]
+    pub approved_verdict: Option<String>,
+    /// The serialized size, in bytes, of what this submission actually sent
+    /// (K10), carried from `Receipt::uploaded_bytes`, itself set once at
+    /// upload time. `None` when the figure could not be measured, or when
+    /// this row predates the field.
+    ///
+    /// `#[serde(default)]` so a cache line written before this field existed
+    /// still parses.
+    #[serde(default)]
+    pub uploaded_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -82,12 +208,22 @@ pub struct HistoryCounts {
     pub submitted: u32,
     pub accepted: u32,
     pub quarantined: u32,
+    /// Taken back (see [`is_taken_back`]): withdrawn here, or `revoked` by a
+    /// withdrawal on the web. Its own bucket so a withdrawn row is neither
+    /// folded into `other` nor counted twice. `#[serde(default)]` for a
+    /// rollup serialised before this existed.
+    #[serde(default)]
+    pub withdrawn: u32,
     pub other: u32,
 }
 
 impl HistoryCounts {
-    fn count(&mut self, status: &str) {
-        match status {
+    fn count(&mut self, rec: &HistoryRecord) {
+        if is_taken_back(rec) {
+            self.withdrawn += 1;
+            return;
+        }
+        match status_bucket(&rec.status) {
             STATUS_ACCEPTED => self.accepted += 1,
             STATUS_QUARANTINED => self.quarantined += 1,
             STATUS_SUBMITTED => self.submitted += 1,
@@ -96,7 +232,7 @@ impl HistoryCounts {
     }
 
     pub fn total(&self) -> u32 {
-        self.submitted + self.accepted + self.quarantined + self.other
+        self.submitted + self.accepted + self.quarantined + self.withdrawn + self.other
     }
 }
 
@@ -110,6 +246,12 @@ pub struct HistoryRollup {
     /// Surfaced on its own so a contributor sees held-for-review distinctly
     /// from failure.
     pub quarantined: u32,
+    /// How many records have been taken back (K7), by [`is_taken_back`]:
+    /// withdrawn here or `revoked` by a withdrawal on the web. Equal to
+    /// `all_time.withdrawn`, and surfaced on its own the way `quarantined` is,
+    /// for the design's "2 taken back" tile.
+    #[serde(default)]
+    pub taken_back: u32,
     pub last_refreshed_at: Option<DateTime<Utc>>,
 }
 
@@ -137,14 +279,41 @@ pub type ProjectAttribution = BTreeMap<Uuid, (String, String)>;
 ///
 /// A receipt with no server update keeps its locally recorded status, so
 /// history is complete offline rather than omitting rows it cannot refresh.
+///
+/// `previous` is the cache this join is about to replace. A local
+/// withdrawal (`mark_withdrawn`) lives only there -- the receipt and the
+/// server's read-back know nothing of it until the server reports
+/// `revoked` -- so its `withdrawn_at` is carried across, or one refresh
+/// would silently undo "taken back".
 pub fn join(
     receipts: &[Receipt],
     updates: &[TraceSubmissionStatusUpdate],
     labels: &ProjectAttribution,
+    previous: &[HistoryRecord],
     refreshed_at: DateTime<Utc>,
 ) -> Vec<HistoryRecord> {
     let by_id: BTreeMap<Uuid, &TraceSubmissionStatusUpdate> =
         updates.iter().map(|u| (u.submission_id, u)).collect();
+    let withdrawn: BTreeMap<Uuid, DateTime<Utc>> = previous
+        .iter()
+        .filter_map(|p| p.withdrawn_at.map(|at| (p.submission_id, at)))
+        .collect();
+    // K12: the same carry-forward as `withdrawn` above, for the same reason
+    // -- the server's `revoked` read-back carries no timestamp of its own,
+    // so the first poll that saw it is the only record of when, and a later
+    // poll must not overwrite that with its own, later `refreshed_at`.
+    let revoked: BTreeMap<Uuid, DateTime<Utc>> = previous
+        .iter()
+        .filter_map(|p| p.revoked_at.map(|at| (p.submission_id, at)))
+        .collect();
+    // Rows the cache already held as `revoked`, dated or not. One with no
+    // date was revoked before `revoked_at` existed, on a day this device
+    // cannot know, so it stays undated rather than taking this poll's.
+    let already_revoked: std::collections::BTreeSet<Uuid> = previous
+        .iter()
+        .filter(|p| p.status == STATUS_REVOKED)
+        .map(|p| p.submission_id)
+        .collect();
 
     let mut records: Vec<HistoryRecord> = receipts
         .iter()
@@ -177,17 +346,48 @@ pub fn join(
                     })
                     .unwrap_or_default(),
                 last_refreshed_at: update.map(|_| refreshed_at),
-                // `join` rebuilds every record from receipts + the server's
-                // own status read-back, which does not yet report a
-                // withdrawn status of its own (the server endpoint that
-                // would is being built separately -- see
-                // `docs/superpowers/specs/2026-08-08-trace-withdrawal-design.md`).
-                // A caller that refreshes history after `mark_withdrawn` set
-                // this must re-apply it; `join` cannot know about it here
-                // because it has no access to the cache it is about to
-                // replace.
-                withdrawn_at: None,
+                // Provenance is the receipt's own: it was set once, at
+                // upload time, from the queue entry that produced this
+                // submission, and the server's status read-back has no
+                // opinion about it.
+                approved_unattended: r.approved_unattended,
+                approved_verdict: r.approved_verdict.clone(),
+                // The receipt's own, set once at upload time -- see
+                // `HistoryRecord::uploaded_bytes`.
+                uploaded_bytes: r.uploaded_bytes,
+                // Carried from the cache being replaced: see this function's
+                // doc.
+                withdrawn_at: withdrawn.get(&r.submission_id).copied(),
+                // Set below, once `status` has its final value: a fresh
+                // `revoked` read-back is not yet reflected in `update` alone
+                // when it arrives via the fallback `r.status` path, and the
+                // carry-forward has to run after that regardless.
+                revoked_at: None,
             }
+        })
+        .map(|mut rec| {
+            // A local withdrawal is the more recent fact than a stale
+            // `accepted` read-back; a server `revoked` already says so.
+            if rec.withdrawn_at.is_some() && rec.status != STATUS_REVOKED {
+                rec.status = STATUS_WITHDRAWN.to_string();
+            }
+            // K12: stamp the moment a `revoked` row was first seen, carried
+            // forward from the cache being replaced so a later poll cannot
+            // push the date forward. `is_taken_back` is `true` for every
+            // revoked row regardless of this field, so a row that is revoked
+            // before this field existed is still counted correctly; it just
+            // has no date to show until the next poll re-observes it.
+            // Only a web withdrawal: one this device drove already carries
+            // `withdrawn_at`, and its `revoked` read-back is not a second
+            // event to date.
+            if rec.status == STATUS_REVOKED && rec.withdrawn_at.is_none() {
+                rec.revoked_at = match revoked.get(&rec.submission_id) {
+                    Some(at) => Some(*at),
+                    None if already_revoked.contains(&rec.submission_id) => None,
+                    None => Some(refreshed_at),
+                };
+            }
+            rec
         })
         .collect();
     records.sort_by_key(|r| std::cmp::Reverse(r.submitted_at));
@@ -195,7 +395,8 @@ pub fn join(
 }
 
 /// Add a record for every receipt the cache does not already know about,
-/// carrying the receipt's own locally recorded status (`submitted`).
+/// carrying the receipt's own locally recorded status (`submitted`, or the
+/// versioned pipeline's `processing`).
 ///
 /// This exists because "uploaded, no verdict yet" is a real state that was
 /// invisible for up to a full `history_poll_secs` -- half an hour on the
@@ -256,6 +457,13 @@ pub fn merge_new_receipts(
             explanations: Vec::new(),
             last_refreshed_at: None,
             withdrawn_at: None,
+            // A receipt's own status is never `revoked` -- only a server
+            // read-back says that, and this function runs no read-back --
+            // so there is nothing to date yet. See `HistoryRecord::revoked_at`.
+            revoked_at: None,
+            approved_unattended: r.approved_unattended,
+            approved_verdict: r.approved_verdict.clone(),
+            uploaded_bytes: r.uploaded_bytes,
         });
         added = true;
     }
@@ -298,15 +506,18 @@ pub fn rollup(records: &[HistoryRecord], now: DateTime<Utc>) -> HistoryRollup {
     let month_cutoff = now - Duration::days(30);
     let mut r = HistoryRollup::default();
     for rec in records {
-        r.all_time.count(&rec.status);
+        r.all_time.count(rec);
         if rec.submitted_at >= month_cutoff {
-            r.month.count(&rec.status);
+            r.month.count(rec);
         }
         if rec.submitted_at >= week_cutoff {
-            r.week.count(&rec.status);
+            r.week.count(rec);
         }
         if rec.status == STATUS_QUARANTINED {
             r.quarantined += 1;
+        }
+        if is_taken_back(rec) {
+            r.taken_back += 1;
         }
         r.credit_pending += rec.credit_points_pending;
         if let Some(f) = rec.credit_points_final {
@@ -341,7 +552,7 @@ pub fn contributed_since(
 ) -> ContributedSince {
     let mut out = ContributedSince::default();
     for rec in records {
-        if rec.withdrawn_at.is_some() {
+        if is_taken_back(rec) {
             continue;
         }
         // Strictly after: a record stamped at the exact instant of the last
@@ -406,12 +617,26 @@ mod tests {
     use crate::daemon::test_support::at;
 
     fn receipt(id: Uuid, hash: &str, status: &str, when: &str) -> Receipt {
+        receipt_with_provenance(id, hash, status, when, None, None)
+    }
+
+    fn receipt_with_provenance(
+        id: Uuid,
+        hash: &str,
+        status: &str,
+        when: &str,
+        approved_unattended: Option<bool>,
+        approved_verdict: Option<&str>,
+    ) -> Receipt {
         Receipt {
             submission_id: id,
             session_hash: hash.into(),
             source: "claude-code".into(),
             submitted_at: at(when),
             status: status.into(),
+            approved_unattended,
+            approved_verdict: approved_verdict.map(str::to_string),
+            uploaded_bytes: None,
         }
     }
 
@@ -432,7 +657,24 @@ mod tests {
             explanation: vec!["held for privacy review".into()],
             delayed_credit_explanations: vec![],
             consent_scopes: vec![ConsentScope::DebuggingEvaluation],
+            pipeline: None,
         }
+    }
+
+    /// K9: a queue entry's title is the one bulk exception to the preview
+    /// content boundary, and only while the entry is queued. It is never
+    /// carried onto a receipt or a history row, which outlive the entry
+    /// (see "The preview content boundary" in the IPC doc). A field named
+    /// `title` on either fails this.
+    #[test]
+    fn receipts_and_history_rows_never_carry_a_title() {
+        let id = Uuid::new_v4();
+        let receipt =
+            serde_json::to_value(receipt(id, "sha256:aa", "accepted", "2026-09-30T09:00:00Z"))
+                .unwrap();
+        assert!(receipt.get("title").is_none(), "{receipt}");
+        let row = serde_json::to_value(record("accepted", "2026-09-30T09:00:00Z")).unwrap();
+        assert!(row.get("title").is_none(), "{row}");
     }
 
     fn record(status: &str, when: &str) -> HistoryRecord {
@@ -450,6 +692,10 @@ mod tests {
             explanations: vec![],
             last_refreshed_at: Some(at("2026-08-08T12:00:00Z")),
             withdrawn_at: None,
+            revoked_at: None,
+            approved_unattended: None,
+            approved_verdict: None,
+            uploaded_bytes: None,
         }
     }
 
@@ -625,6 +871,7 @@ mod tests {
             &receipts,
             &[update(id, STATUS_ACCEPTED, 1.5, Some(2.0))],
             &labels(id),
+            &records,
             at("2026-08-08T12:00:00Z"),
         );
         let r = rollup(&refreshed, at("2026-08-08T12:00:00Z"));
@@ -659,7 +906,13 @@ mod tests {
             "2026-08-08T10:00:00Z",
         )];
         let updates = vec![update(id, "accepted", 1.5, Some(2.0))];
-        let recs = join(&receipts, &updates, &labels(id), at("2026-08-08T12:00:00Z"));
+        let recs = join(
+            &receipts,
+            &updates,
+            &labels(id),
+            &[],
+            at("2026-08-08T12:00:00Z"),
+        );
         assert_eq!(recs[0].status, "accepted");
         assert_eq!(recs[0].credit_points_final, Some(2.0));
         assert_eq!(recs[0].consent_scopes, vec!["debugging_evaluation"]);
@@ -681,7 +934,7 @@ mod tests {
             "submitted",
             "2026-08-08T10:00:00Z",
         )];
-        let recs = join(&receipts, &[], &labels(id), at("2026-08-08T12:00:00Z"));
+        let recs = join(&receipts, &[], &labels(id), &[], at("2026-08-08T12:00:00Z"));
         assert_eq!(recs[0].status, "submitted");
         assert_eq!(recs[0].credit_points_final, None);
         assert_eq!(
@@ -698,7 +951,13 @@ mod tests {
             receipt(a, "sha256:aa", "submitted", "2026-08-01T10:00:00Z"),
             receipt(b, "sha256:bb", "submitted", "2026-08-08T10:00:00Z"),
         ];
-        let recs = join(&receipts, &[], &BTreeMap::new(), at("2026-08-08T12:00:00Z"));
+        let recs = join(
+            &receipts,
+            &[],
+            &BTreeMap::new(),
+            &[],
+            at("2026-08-08T12:00:00Z"),
+        );
         assert_eq!(recs[0].submission_id, b);
     }
 
@@ -843,6 +1102,10 @@ mod tests {
             explanations: vec![],
             last_refreshed_at: None,
             withdrawn_at: None,
+            revoked_at: None,
+            approved_unattended: None,
+            approved_verdict: None,
+            uploaded_bytes: None,
         };
         let json = serde_json::to_string(&record).unwrap();
         assert!(json.contains("proj_"), "expected an opaque id: {json}");
@@ -864,5 +1127,441 @@ mod tests {
         });
         let loaded: HistoryRecord = serde_json::from_value(value).unwrap();
         assert_eq!(loaded.project_id, "");
+    }
+
+    /// K7: a row written before `approved_unattended` / `approved_verdict`
+    /// existed must still parse -- and must parse as "you approved", the
+    /// safe reading, rather than being silently skipped as a corrupt line.
+    #[test]
+    fn a_history_record_written_before_provenance_existed_still_loads() {
+        let value = serde_json::json!({
+            "submission_id": Uuid::new_v4(),
+            "submitted_at": Utc::now(),
+            "project_id": "proj_aa",
+            "project_label": "repo",
+            "source": "claude_code",
+            "session_hash": "sha256:abc",
+            "status": "accepted",
+            "consent_scopes": [],
+            "credit_points_pending": 0.0,
+            "explanations": [],
+        });
+        let loaded: HistoryRecord = serde_json::from_value(value).unwrap();
+        assert_eq!(
+            loaded.approved_unattended, None,
+            "unrecorded, never \"you approved\""
+        );
+        assert_eq!(loaded.approved_verdict, None);
+    }
+
+    /// K7: `join` carries the receipt's own provenance onto the history row
+    /// -- both directions, so "you approved · Worked" and "armed · went
+    /// without asking" can be told apart. Removing the assignment in `join`
+    /// makes this fail rather than passing vacuously: both receipts start
+    /// with distinct, non-default provenance.
+    #[test]
+    fn join_carries_provenance_for_a_persons_approval_and_an_unattended_one() {
+        let approved_by_person = Uuid::new_v4();
+        let sent_unattended = Uuid::new_v4();
+        let receipts = vec![
+            receipt_with_provenance(
+                approved_by_person,
+                "sha256:aa",
+                "submitted",
+                "2026-08-08T10:00:00Z",
+                Some(false),
+                Some("worked"),
+            ),
+            receipt_with_provenance(
+                sent_unattended,
+                "sha256:bb",
+                "submitted",
+                "2026-08-08T10:00:00Z",
+                Some(true),
+                None,
+            ),
+        ];
+        let recs = join(
+            &receipts,
+            &[],
+            &BTreeMap::new(),
+            &[],
+            at("2026-08-08T12:00:00Z"),
+        );
+        let person = recs
+            .iter()
+            .find(|r| r.submission_id == approved_by_person)
+            .unwrap();
+        assert_eq!(
+            person.approved_unattended,
+            Some(false),
+            "a person approved this one"
+        );
+        assert_eq!(person.approved_verdict.as_deref(), Some("worked"));
+
+        let unattended = recs
+            .iter()
+            .find(|r| r.submission_id == sent_unattended)
+            .unwrap();
+        assert_eq!(
+            unattended.approved_unattended,
+            Some(true),
+            "an armed folder sent this one without asking"
+        );
+        assert_eq!(unattended.approved_verdict, None);
+    }
+
+    /// The same, through the cheap local merge rather than a server
+    /// read-back -- the path an upload pass actually uses the moment a
+    /// receipt lands (see `merge_new_receipts`'s module doc).
+    #[test]
+    fn merge_new_receipts_carries_provenance_for_a_persons_approval_and_an_unattended_one() {
+        let approved_by_person = Uuid::new_v4();
+        let sent_unattended = Uuid::new_v4();
+        let receipts = vec![
+            receipt_with_provenance(
+                approved_by_person,
+                "sha256:aa",
+                "submitted",
+                "2026-08-08T10:00:00Z",
+                Some(false),
+                Some("partly"),
+            ),
+            receipt_with_provenance(
+                sent_unattended,
+                "sha256:bb",
+                "submitted",
+                "2026-08-08T10:00:00Z",
+                Some(true),
+                None,
+            ),
+        ];
+        let mut records = Vec::new();
+        merge_new_receipts(&mut records, &receipts, &BTreeMap::new());
+        let person = records
+            .iter()
+            .find(|r| r.submission_id == approved_by_person)
+            .unwrap();
+        assert_eq!(person.approved_unattended, Some(false));
+        assert_eq!(person.approved_verdict.as_deref(), Some("partly"));
+        let unattended = records
+            .iter()
+            .find(|r| r.submission_id == sent_unattended)
+            .unwrap();
+        assert_eq!(unattended.approved_unattended, Some(true));
+    }
+
+    /// The versioned pipeline answers an upload with a `processing` receipt:
+    /// uploaded, no verdict yet. That is the `submitted` bucket, never
+    /// `other`. Built from a receipt through `merge_new_receipts`, the path
+    /// an upload pass takes.
+    #[test]
+    fn rollup_counts_a_processing_receipt_as_submitted() {
+        let mut recs = vec![record(STATUS_SUBMITTED, "2026-08-08T10:00:00Z")];
+        let receipts = [receipt(
+            Uuid::new_v4(),
+            "sha256:bb",
+            "processing",
+            "2026-08-08T11:00:00Z",
+        )];
+        assert!(merge_new_receipts(&mut recs, &receipts, &BTreeMap::new()));
+
+        let r = rollup(&recs, at("2026-08-08T12:00:00Z"));
+        assert_eq!(r.all_time.submitted, 2);
+        assert_eq!(r.week.submitted, 2);
+        assert_eq!(r.all_time.other, 0, "processing is not an 'other' status");
+        assert_eq!(r.all_time.total(), 2);
+    }
+
+    /// K10: a row written before `uploaded_bytes` existed must still parse.
+    #[test]
+    fn a_history_record_written_before_uploaded_bytes_existed_still_loads() {
+        let value = serde_json::json!({
+            "submission_id": Uuid::new_v4(),
+            "submitted_at": Utc::now(),
+            "project_id": "proj_aa",
+            "project_label": "repo",
+            "source": "claude_code",
+            "session_hash": "sha256:abc",
+            "status": "accepted",
+            "consent_scopes": [],
+            "credit_points_pending": 0.0,
+            "explanations": [],
+        });
+        let loaded: HistoryRecord = serde_json::from_value(value).unwrap();
+        assert_eq!(loaded.uploaded_bytes, None);
+    }
+
+    /// K10: a receipt's `uploaded_bytes` -- set once at upload time, from the
+    /// envelope the submission actually sent -- lands on the history row
+    /// `join` builds.
+    #[test]
+    fn join_carries_the_uploaded_bytes_from_the_receipt() {
+        let id = Uuid::new_v4();
+        let sized = Receipt {
+            uploaded_bytes: Some(4096),
+            ..receipt(id, "sha256:aa", "submitted", "2026-08-08T10:00:00Z")
+        };
+        let recs = join(
+            &[sized],
+            &[],
+            &BTreeMap::new(),
+            &[],
+            at("2026-08-08T12:00:00Z"),
+        );
+        assert_eq!(recs[0].uploaded_bytes, Some(4096));
+    }
+
+    /// The same, through the cheap local merge `merge_new_receipts` runs
+    /// instead of a server read-back.
+    #[test]
+    fn merge_new_receipts_carries_the_uploaded_bytes_from_the_receipt() {
+        let id = Uuid::new_v4();
+        let sized = Receipt {
+            uploaded_bytes: Some(4096),
+            ..receipt(id, "sha256:aa", "submitted", "2026-08-08T10:00:00Z")
+        };
+        let mut records = Vec::new();
+        merge_new_receipts(&mut records, &[sized], &BTreeMap::new());
+        assert_eq!(records[0].uploaded_bytes, Some(4096));
+    }
+
+    /// K12: a row written before `revoked_at` existed must still parse.
+    #[test]
+    fn a_history_record_written_before_revoked_at_existed_still_loads() {
+        let value = serde_json::json!({
+            "submission_id": Uuid::new_v4(),
+            "submitted_at": Utc::now(),
+            "project_id": "proj_aa",
+            "project_label": "repo",
+            "source": "claude_code",
+            "session_hash": "sha256:abc",
+            "status": "revoked",
+            "consent_scopes": [],
+            "credit_points_pending": 0.0,
+            "explanations": [],
+        });
+        let loaded: HistoryRecord = serde_json::from_value(value).unwrap();
+        assert_eq!(loaded.revoked_at, None);
+    }
+
+    /// K12: a web withdrawal carries no timestamp of its own on the
+    /// server's status read-back, so `join` stamps the moment it is first
+    /// observed. Removing that stamp (or always leaving it `None`) makes
+    /// this fail: the receipt and prior cache both start with no date.
+    #[test]
+    fn join_stamps_revoked_at_the_first_time_it_sees_revoked() {
+        let id = Uuid::new_v4();
+        let receipts = vec![receipt(
+            id,
+            "sha256:aa",
+            "submitted",
+            "2026-08-08T10:00:00Z",
+        )];
+        let updates = vec![update(id, STATUS_REVOKED, 0.0, None)];
+        let seen_at = at("2026-08-08T12:00:00Z");
+        let recs = join(&receipts, &updates, &labels(id), &[], seen_at);
+        assert_eq!(recs[0].status, STATUS_REVOKED);
+        assert_eq!(
+            recs[0].revoked_at,
+            Some(seen_at),
+            "the first poll to see it revoked must date it"
+        );
+    }
+
+    /// A row that was already `revoked` in the cache before `revoked_at`
+    /// existed was withdrawn on some earlier day this device cannot know.
+    /// Stamping it with the upgrade's first poll would show a false date.
+    #[test]
+    fn join_leaves_a_row_revoked_before_the_field_existed_undated() {
+        let id = Uuid::new_v4();
+        let receipts = vec![receipt(
+            id,
+            "sha256:aa",
+            "submitted",
+            "2026-08-08T10:00:00Z",
+        )];
+        let updates = vec![update(id, STATUS_REVOKED, 0.0, None)];
+        let mut cached = join(
+            &receipts,
+            &updates,
+            &labels(id),
+            &[],
+            at("2026-08-08T12:00:00Z"),
+        );
+        cached[0].revoked_at = None; // as an older daemon wrote it
+        let after_upgrade = join(
+            &receipts,
+            &updates,
+            &labels(id),
+            &cached,
+            at("2026-09-30T12:00:00Z"),
+        );
+        assert_eq!(after_upgrade[0].status, STATUS_REVOKED);
+        assert_eq!(
+            after_upgrade[0].revoked_at, None,
+            "the upgrade day is not when it was revoked"
+        );
+    }
+
+    /// `revoked_at` dates a withdrawal made on the web. A withdrawal this
+    /// device drove already carries `withdrawn_at`, and the server reading
+    /// it back as `revoked` must not give it a second, later date.
+    #[test]
+    fn join_does_not_date_a_local_withdrawal_as_a_web_one() {
+        let id = Uuid::new_v4();
+        let receipts = vec![receipt(
+            id,
+            "sha256:aa",
+            "submitted",
+            "2026-08-08T10:00:00Z",
+        )];
+        let accepted = vec![update(id, "accepted", 0.0, None)];
+        let mut cached = join(
+            &receipts,
+            &accepted,
+            &labels(id),
+            &[],
+            at("2026-08-08T12:00:00Z"),
+        );
+        cached[0].withdrawn_at = Some(at("2026-08-08T13:00:00Z"));
+        let revoked = vec![update(id, STATUS_REVOKED, 0.0, None)];
+        let recs = join(
+            &receipts,
+            &revoked,
+            &labels(id),
+            &cached,
+            at("2026-08-08T14:00:00Z"),
+        );
+        assert_eq!(recs[0].withdrawn_at, Some(at("2026-08-08T13:00:00Z")));
+        assert_eq!(
+            recs[0].revoked_at, None,
+            "a local withdrawal is not a web one"
+        );
+    }
+
+    /// The date must not creep forward on every later poll that merely
+    /// re-confirms the same `revoked` status -- it is "when this was first
+    /// seen", not "when this was last checked".
+    #[test]
+    fn join_carries_revoked_at_forward_without_pushing_the_date() {
+        let id = Uuid::new_v4();
+        let receipts = vec![receipt(
+            id,
+            "sha256:aa",
+            "submitted",
+            "2026-08-08T10:00:00Z",
+        )];
+        let updates = vec![update(id, STATUS_REVOKED, 0.0, None)];
+        let first_seen = at("2026-08-08T12:00:00Z");
+        let first_pass = join(&receipts, &updates, &labels(id), &[], first_seen);
+        assert_eq!(first_pass[0].revoked_at, Some(first_seen));
+
+        let later_poll = at("2026-08-09T12:00:00Z");
+        let second_pass = join(&receipts, &updates, &labels(id), &first_pass, later_poll);
+        assert_eq!(
+            second_pass[0].revoked_at,
+            Some(first_seen),
+            "a later poll must not overwrite when this was first observed"
+        );
+    }
+
+    /// K7 review: a withdrawn row lands in the `withdrawn` bucket and in
+    /// `taken_back`, and NOT also in `other`. Built through `mark_withdrawn`,
+    /// the real path, which stamps `STATUS_WITHDRAWN`.
+    #[test]
+    fn rollup_counts_a_withdrawn_row_once_in_its_own_bucket() {
+        let mut recs = vec![
+            record(STATUS_ACCEPTED, "2026-08-08T10:00:00Z"),
+            record(STATUS_ACCEPTED, "2026-08-08T10:00:00Z"),
+            record(STATUS_ACCEPTED, "2026-08-08T10:00:00Z"),
+        ];
+        let first = recs[0].submission_id;
+        let second = recs[1].submission_id;
+        assert!(mark_withdrawn(&mut recs, first, at("2026-08-08T11:00:00Z")));
+        assert!(mark_withdrawn(
+            &mut recs,
+            second,
+            at("2026-08-08T11:30:00Z")
+        ));
+
+        let r = rollup(&recs, at("2026-08-08T12:00:00Z"));
+        assert_eq!(r.taken_back, 2);
+        assert_eq!(r.all_time.withdrawn, 2);
+        assert_eq!(r.all_time.accepted, 1);
+        assert_eq!(r.all_time.other, 0, "a withdrawn row is not also `other`");
+        assert_eq!(r.all_time.total(), 3, "every row counted exactly once");
+        assert_eq!(r.week.withdrawn, 2);
+    }
+
+    /// K7 review, the confirmed probe: `taken_back` went from 1 to 0 after
+    /// one history refresh because `join` dropped the local `withdrawn_at`.
+    /// It must survive a refresh -- even one where the server still says
+    /// `accepted` for the row.
+    #[test]
+    fn a_local_withdrawal_survives_a_history_refresh() {
+        let id = Uuid::new_v4();
+        let receipts = vec![receipt(
+            id,
+            "sha256:aa",
+            "submitted",
+            "2026-08-08T10:00:00Z",
+        )];
+        let updates = vec![update(id, STATUS_ACCEPTED, 1.0, None)];
+        let mut cache = join(
+            &receipts,
+            &updates,
+            &labels(id),
+            &[],
+            at("2026-08-08T11:00:00Z"),
+        );
+        assert!(mark_withdrawn(&mut cache, id, at("2026-08-08T11:30:00Z")));
+        assert_eq!(rollup(&cache, at("2026-08-08T12:00:00Z")).taken_back, 1);
+
+        let refreshed = join(
+            &receipts,
+            &updates,
+            &labels(id),
+            &cache,
+            at("2026-08-08T12:00:00Z"),
+        );
+        assert_eq!(refreshed[0].withdrawn_at, Some(at("2026-08-08T11:30:00Z")));
+        assert_eq!(refreshed[0].status, STATUS_WITHDRAWN);
+        let r = rollup(&refreshed, at("2026-08-08T12:00:00Z"));
+        assert_eq!(r.taken_back, 1);
+        assert_eq!(r.all_time.withdrawn, 1);
+        assert_eq!(r.all_time.accepted, 0);
+        assert!(
+            contributed_since(&refreshed, None).count == 0,
+            "a taken-back row is not reported as contributed"
+        );
+    }
+
+    /// K7 review: a withdrawal made on the web (#1112) comes back from the
+    /// server as `revoked`, with no local `withdrawn_at`. It is taken back,
+    /// not `other`.
+    #[test]
+    fn a_server_revoked_row_counts_as_taken_back() {
+        let id = Uuid::new_v4();
+        let receipts = vec![receipt(
+            id,
+            "sha256:aa",
+            "submitted",
+            "2026-08-08T10:00:00Z",
+        )];
+        let updates = vec![update(id, STATUS_REVOKED, 0.0, None)];
+        let recs = join(
+            &receipts,
+            &updates,
+            &labels(id),
+            &[],
+            at("2026-08-08T12:00:00Z"),
+        );
+        assert_eq!(recs[0].status, STATUS_REVOKED);
+        let r = rollup(&recs, at("2026-08-08T12:00:00Z"));
+        assert_eq!(r.taken_back, 1);
+        assert_eq!(r.all_time.withdrawn, 1);
+        assert_eq!(r.all_time.other, 0);
+        assert_eq!(contributed_since(&recs, None).count, 0);
     }
 }

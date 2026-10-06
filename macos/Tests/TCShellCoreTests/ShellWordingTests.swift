@@ -36,19 +36,14 @@ final class ShellWordingTests: XCTestCase {
 
         // TCShellCore's copy types -- transcribed from the same shared design
         // the Windows interop classes were, and the first thing Slice 1 moves.
-        "TCShellCore/ArmingOffer.swift": 4,
         "TCShellCore/ContributorVerdict.swift": 4,
         "TCShellCore/CorrectionCopy.swift": 4,
         "TCShellCore/DailyBudgetCopy.swift": 6,
-        "TCShellCore/DigestCopy.swift": 1,
         "TCShellCore/MenuBarStatus.swift": 4,
         "TCShellCore/OriginalSearchOutcome.swift": 4,
-        "TCShellCore/ProjectArmingCopy.swift": 4,
-        "TCShellCore/ProjectIgnoreCopy.swift": 9,
-        "TCShellCore/ProjectRow.swift": 3,
-        "TCShellCore/RedactionLabels.swift": 3,
+        "TCShellCore/ProjectRow.swift": 2,
+        "TCShellCore/RedactionLabels.swift": 1,
         "TCShellCore/RedactionMarks.swift": 2,
-        "TCShellCore/RedactionSummary.swift": 7,
         "TCShellCore/ScrubDetectors.swift": 2,
         "TCShellCore/SourceCandidate.swift": 5,
         "TCShellCore/StateDirectory.swift": 2,
@@ -56,9 +51,8 @@ final class ShellWordingTests: XCTestCase {
         "TCShellCore/SubmitToast.swift": 10,
 
         // The app model and its non-view surfaces.
-        "TraceCommonsApp/AppDelegate.swift": 1,
         "TraceCommonsApp/AppModel.swift": 8,
-        "TraceCommonsApp/HealthCopy.swift": 23,
+        "TraceCommonsApp/HealthCopy.swift": 20,
         "TraceCommonsApp/Notifier.swift": 2,
         "TraceCommonsApp/SelfTest.swift": 15,
 
@@ -67,13 +61,13 @@ final class ShellWordingTests: XCTestCase {
         "TraceCommonsApp/Views/BrandMark.swift": 1,
         "TraceCommonsApp/Views/ConsentScopesView.swift": 7,
         "TraceCommonsApp/Views/CreditRecordView.swift": 9,
-        "TraceCommonsApp/Views/HistoryView.swift": 26,
+        // Lowered from 26: an unrecognised status reads the core's label.
+        "TraceCommonsApp/Views/HistoryView.swift": 21,
         "TraceCommonsApp/Views/MainWindowView.swift": 14,
         "TraceCommonsApp/Views/MenuBarView.swift": 11,
         "TraceCommonsApp/Views/OnboardingConnectView.swift": 7,
         "TraceCommonsApp/Views/OnboardingCoordinatorView.swift": 5,
         "TraceCommonsApp/Views/OnboardingDoneView.swift": 8,
-        "TraceCommonsApp/Views/OnboardingPrivacyScanView.swift": 5,
         "TraceCommonsApp/Views/OnboardingProjectsView.swift": 4,
         "TraceCommonsApp/Views/OnboardingRootsView.swift": 5,
         "TraceCommonsApp/Views/OnboardingWelcomeView.swift": 8,
@@ -87,7 +81,7 @@ final class ShellWordingTests: XCTestCase {
         "TraceCommonsApp/Views/ScrubbingCaveat.swift": 4,
         "TraceCommonsApp/Views/SettingsView.swift": 40,
         "TraceCommonsApp/Views/WhatGetsRemovedSheet.swift": 4,
-        "TraceCommonsApp/Views/WithdrawalCopy.swift": 49,
+        "TraceCommonsApp/Views/WithdrawalCopy.swift": 48,
     ]
 
     /// The surfaces whose wording already comes from Rust. Nothing may ever
@@ -95,6 +89,14 @@ final class ShellWordingTests: XCTestCase {
     /// and an entry here would be a quiet way of undoing that.
     private static let rustOwnedSurfaces = [
         "TCBridge/TCConsentCopy.swift",
+        // K3 (#1173): the copy tables that used to be written here.
+        "TCBridge/TCCoreCopy.swift",
+        "TCShellCore/AutomaticGrantCopy.swift",
+        "TCShellCore/PrivacyScanCopy.swift",
+        "TCShellCore/ProjectArmingCopy.swift",
+        "TCShellCore/ProjectIgnoreCopy.swift",
+        "TCShellCore/QuitPrompt.swift",
+        "TCShellCore/RedactionSummary.swift",
         "TCBridge/TCContributionEligibility.swift",
         "TCBridge/TCRoutingCopy.swift",
         "TCBridge/TCSkillLearning.swift",

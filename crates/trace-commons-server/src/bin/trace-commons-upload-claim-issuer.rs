@@ -261,6 +261,8 @@ fn run_mint_invites(rest: &[String]) -> anyhow::Result<()> {
                 issued_by_label: None,
                 credential_binding_hash: None,
                 note_label: mint_note_label.clone(),
+                issuer_display_name: None,
+                credit_range: None,
             };
             match backend.insert_invite_grant(write).await? {
                 InviteGrantInsertOutcome::Inserted => println!("{code}"),

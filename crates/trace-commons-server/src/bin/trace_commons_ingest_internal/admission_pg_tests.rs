@@ -12,12 +12,16 @@ use trace_commons_server::{
     witness_service::{self, Enclave, SeamUnavailable, Signer},
 };
 
-struct FixtureSigner(SigningKey);
+/// A synthetic EIP-191 signer standing in for a real provider-TEE/gateway
+/// signer. `pub(super)`: shared with `pipeline_http_pg_tests`, which needs
+/// the same NEAR evidence/witness chain to reach a real, evidence-verified
+/// upload for a pipeline-routed, admission-gated tenant.
+pub(super) struct FixtureSigner(SigningKey);
 impl FixtureSigner {
-    fn new(seed: &str) -> Self {
+    pub(super) fn new(seed: &str) -> Self {
         Self(SigningKey::from_slice(&Keccak256::digest(seed.as_bytes())).unwrap())
     }
-    fn address(&self) -> String {
+    pub(super) fn address(&self) -> String {
         let point = self.0.verifying_key().to_encoded_point(false);
         format!(
             "0x{}",
@@ -39,7 +43,8 @@ impl Signer for FixtureSigner {
         ))
     }
 }
-struct FixtureEnclave(String);
+/// `pub(super)`: see `FixtureSigner`.
+pub(super) struct FixtureEnclave(pub(super) String);
 #[async_trait::async_trait]
 impl Enclave for FixtureEnclave {
     fn signing_address(&self) -> &str {
@@ -221,6 +226,8 @@ async fn actual_postgres_challenge_witness_ingest_and_terminal_retry() {
             issued_by_label: None,
             credential_binding_hash: None,
             note_label: None,
+            issuer_display_name: None,
+            credit_range: None,
         })
         .await
         .unwrap();
@@ -1243,7 +1250,11 @@ async fn admission_pg_admin() -> Arc<PgBackend> {
 ///
 /// Returns the tenant id, the stored anchor without its `sha256:` prefix, and
 /// the device key id, so a caller can revoke the device.
-async fn provision_synthetic_near_account(
+///
+/// `pub(super)`: shared with `pipeline_http_pg_tests`, which needs the same
+/// NEAR account fixture for its own admission-gated pipeline tests, rather
+/// than keeping a second copy of this SQL.
+pub(super) async fn provision_synthetic_near_account(
     db: &PgBackend,
     principal: &str,
 ) -> (String, String, String) {
@@ -1279,6 +1290,51 @@ async fn provision_synthetic_near_account(
     client.execute("INSERT INTO trace_account_principals(tenant_id,account_id,principal_ref) VALUES($1,$2,$3)",&[&tenant,&account,&principal]).await.unwrap();
     client.execute("INSERT INTO trace_near_provisioned_devices(tenant_id,principal_ref,account_id,device_key_id,anchor_hash) VALUES($1,$2,$3,$4,$5)",&[&tenant,&principal,&account,&device,&prefixed]).await.unwrap();
     (tenant, anchor, device)
+}
+
+/// Adds a second device -- and its own principal -- to the account
+/// `provision_synthetic_near_account` already provisioned under `tenant` and
+/// `anchor` (its bare, unprefixed return value). V58 keys
+/// `trace_near_provisioned_devices` on `(tenant_id, principal_ref)`, and
+/// nothing makes `anchor_hash` unique per principal, so an account can have
+/// more than one provisioned device/principal sharing the same anchor -- this
+/// is the fixture for that shape: `admission::anchor`'s lookup resolves each
+/// principal to the SAME `anchor_hash`, so `admission::reserve`'s
+/// completed-lookup (keyed on `(tenant, anchor, submission, body_hash)`, not
+/// on principal) cannot by itself distinguish a retry from this device from
+/// one from the device `provision_synthetic_near_account` provisioned.
+///
+/// `pub(super)`: shared with `pipeline_http_pg_tests`.
+pub(super) async fn provision_second_device_on_the_same_account(
+    db: &PgBackend,
+    tenant: &str,
+    anchor: &str,
+    principal: &str,
+) -> String {
+    let prefixed = format!("sha256:{anchor}");
+    let client = db.raw_pool_for_tests_and_diagnostics().get().await.unwrap();
+    let account: Uuid = client
+        .query_one(
+            "SELECT account_id FROM trace_near_account_anchors
+              WHERE tenant_id = $1 AND anchor_hash = $2",
+            &[&tenant, &prefixed],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    let device_bytes: [u8; 32] = sha2::Sha256::digest(Uuid::new_v4().as_bytes()).into();
+    let device =
+        trace_commons_protocol::onboarding::device_key_id_from_public_key_bytes(&device_bytes);
+    client.execute("INSERT INTO device_keys(device_key_id,tenant_id,public_key,invite_subject_hash,onboarding_origin) VALUES($1,$2,$3,NULL,'near')",&[&device,&tenant,&base64::engine::general_purpose::STANDARD.encode(device_bytes)]).await.unwrap();
+    client
+        .execute(
+            "INSERT INTO trace_account_principals(tenant_id,account_id,principal_ref) VALUES($1,$2,$3)",
+            &[&tenant, &account, &principal],
+        )
+        .await
+        .unwrap();
+    client.execute("INSERT INTO trace_near_provisioned_devices(tenant_id,principal_ref,account_id,device_key_id,anchor_hash) VALUES($1,$2,$3,$4,$5)",&[&tenant,&principal,&account,&device,&prefixed]).await.unwrap();
+    device
 }
 
 /// An `AppState` whose only relevant part is the mirror `admission::anchor`
@@ -1758,6 +1814,8 @@ async fn account_replacement_is_default_off_and_validates_offered_evidence() {
         issued_by_label: None,
         credential_binding_hash: None,
         note_label: None,
+        issuer_display_name: None,
+        credit_range: None,
     })
     .await
     .unwrap();
@@ -1929,5 +1987,154 @@ async fn rejected_foreign_session_claim_preserves_victim_bytes_after_sibling_wit
             .await
             .unwrap()
             .is_none()
+    );
+}
+
+/// Kristi's #1021 edge: both accounts held one source session and only the
+/// absorbed account had withdrawn it. The merge joins the survivor's accepted
+/// version to a withdrawn session, and the withdrawal must win exactly as a
+/// withdrawal does: the version is revoked and tombstoned, its bytes are
+/// deleted, and it gets its own hash-only revoke audit event.
+#[tokio::test]
+#[ignore = "requires isolated TRACE_COMMONS_ADMISSION_INGEST_PG_TEST_URL"]
+async fn merge_completes_a_withdrawal_the_absorbed_account_made() {
+    use trace_commons_server::trace_corpus_storage::{TraceCorpusStore, TraceSourceSessionStatus};
+
+    let db = admission_pg_admin().await;
+    let token = "admission-fixture-token";
+    let (tenant, _, _) = provision_synthetic_near_account(&db, &principal_for(token)).await;
+    let (_temp, mut state, _) = anchor_state(db.clone(), &[(tenant.as_str(), token)]);
+    Arc::make_mut(&mut state).require_db_mirror_writes = true;
+    let session_headers = account_session_headers(&state, token).await;
+    let client = db.raw_pool_for_tests_and_diagnostics().get().await.unwrap();
+    let survivor: Uuid = client
+        .query_one(
+            "SELECT account_id FROM trace_account_principals
+              WHERE tenant_id = $1 AND principal_ref = $2",
+            &[&tenant, &principal_for(token)],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    let absorbed = Uuid::new_v4();
+    client
+        .execute(
+            "INSERT INTO trace_accounts(tenant_id,account_id) VALUES($1,$2)",
+            &[&tenant, &absorbed],
+        )
+        .await
+        .unwrap();
+    client
+        .execute(
+            "INSERT INTO trace_account_principals(tenant_id,account_id,principal_ref)
+             VALUES($1,$2,'principal:merge-absorbed')",
+            &[&tenant, &absorbed],
+        )
+        .await
+        .unwrap();
+
+    let digest = [0x5du8; 32];
+    let absorbed_version = insert_account_test_submission_with_status(
+        db.as_ref(),
+        &tenant,
+        "principal:merge-absorbed",
+        StorageTraceCorpusStatus::Accepted,
+    )
+    .await;
+    assert_eq!(
+        db.claim_trace_source_session(&tenant, absorbed, &digest, absorbed_version)
+            .await
+            .unwrap(),
+        TraceSourceSessionStatus::Active
+    );
+    db.withdraw_trace_source_session(&tenant, absorbed, absorbed_version, Utc::now())
+        .await
+        .unwrap()
+        .unwrap();
+    let survivor_version = insert_account_test_submission_with_status(
+        db.as_ref(),
+        &tenant,
+        &principal_for(token),
+        StorageTraceCorpusStatus::Accepted,
+    )
+    .await;
+    let survivor_object = stage_trace_object_file(
+        &state,
+        &tenant,
+        TraceCorpusStatus::Accepted,
+        survivor_version,
+    );
+    assert_eq!(
+        db.claim_trace_source_session(&tenant, survivor, &digest, survivor_version)
+            .await
+            .unwrap(),
+        TraceSourceSessionStatus::Active
+    );
+
+    let code_hash = format!(
+        "sha256:{}{}",
+        Uuid::new_v4().simple(),
+        Uuid::new_v4().simple()
+    );
+    client
+        .execute(
+            "INSERT INTO trace_login_links (tenant_id, link_id, account_id, code_hash,
+                created_principal_ref, created_at, expires_at, consumed_at)
+             VALUES ($1, $2, $3, $4, 'principal:merge-link', now(), now() + interval '1 hour', NULL)",
+            &[&tenant, &Uuid::new_v4(), &absorbed, &code_hash],
+        )
+        .await
+        .unwrap();
+    let staged = db
+        .stage_merge_proposal(&tenant, survivor, &code_hash)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut confirm = axum::http::Request::builder()
+        .method("POST")
+        .uri("/v1/account/merge/confirm")
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            serde_json::to_vec(&serde_json::json!({ "proposal_id": staged.proposal_id })).unwrap(),
+        ))
+        .unwrap();
+    confirm.headers_mut().extend(session_headers);
+    require_ok(app(state.clone()).oneshot(confirm).await.unwrap()).await;
+
+    assert_eq!(
+        db.get_trace_submission(&tenant, survivor_version)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        StorageTraceCorpusStatus::Revoked,
+        "the survivor's version of the withdrawn session is withdrawn at merge"
+    );
+    assert!(
+        db.get_trace_withdrawal(&tenant, survivor_version)
+            .await
+            .unwrap()
+            .is_some(),
+        "it carries its own withdrawal tombstone"
+    );
+    assert!(!survivor_object.exists(), "its bytes are deleted");
+    let revoke_events: i64 = client
+        .query_one(
+            "SELECT count(*) FROM trace_audit_events
+              WHERE submission_id = $1 AND action = 'revoke'",
+            &[&survivor_version],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(
+        revoke_events, 1,
+        "it records one hash-only revoke event, as a withdrawal does"
+    );
+    assert!(
+        db.list_incomplete_source_session_withdrawals(&tenant, Some(survivor), &[], 100)
+            .await
+            .unwrap()
+            .is_empty()
     );
 }

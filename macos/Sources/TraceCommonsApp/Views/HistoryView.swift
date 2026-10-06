@@ -447,7 +447,9 @@ struct HistoryRow: View {
                     .font(TC.Font_.footnote)
                     .foregroundStyle(.tertiary)
                 Spacer(minLength: TC.Space.m)
-                TCTag(text: statusSentence, tone: statusTone, symbol: statusSymbol)
+                if let statusSentence {
+                    TCTag(text: statusSentence, tone: statusTone, symbol: statusSymbol)
+                }
             }
             ForEach(Array(record.explanations.enumerated()), id: \.offset) { _, text in
                 Text(text)
@@ -511,20 +513,24 @@ struct HistoryRow: View {
     /// not offered again -- the daemon would treat it as a no-op, and an
     /// enabled button on it would suggest the first one did not take.
     private var isWithdrawable: Bool {
-        !ContributionStatusPresentation.isTerminal(record.status)
+        ContributionStatusPresentation.offersWithdraw(record.status)
     }
 
-    private var statusSentence: String {
-        switch record.status {
-        case "accepted": return "In the commons"
-        case "quarantined": return "Held for privacy review"
-        case "submitted": return "Waiting to be scored"
-        // Withdrawn is its own state, not the "something else happened"
-        // bucket: a withdrawn trace stays on this list, reading as
-        // withdrawn, rather than vanishing as though it had never been sent.
-        case "withdrawn": return "Withdrawn by you"
-        default: return "Not in the commons"
-        }
+    /// The row's status tag, or nil when there is nothing true to say.
+    ///
+    /// The core's word for the status (`PublicRunCopy.historyStatusLabel`,
+    /// `history_copy::STATUS_LABELS`), the table every shell reads. A status
+    /// the core does not name reads as "Status unavailable"; it used to read
+    /// "Not in the commons", which asserts where the trace is. Withdrawn is
+    /// its own state, not the "something else happened" bucket: a withdrawn
+    /// trace stays on this list, reading as withdrawn. With no core copy
+    /// decoded the row draws no tag.
+    static func statusSentence(for status: String, copy: PublicRunCopy?) -> String? {
+        copy?.historyStatusLabel(for: status)
+    }
+
+    private var statusSentence: String? {
+        Self.statusSentence(for: record.status, copy: model.publicRunCopy)
     }
 
     private var statusTone: TC.Tone {

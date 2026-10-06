@@ -210,6 +210,17 @@ public class TrayModelTests
     }
 
     [Fact]
+    public void PausedSaysNothingIsQueuedOrSentAsMacOsDoes()
+    {
+        // macOS MainWindowView and SettingsView, and GTK ui/settings.rs, all
+        // say "or sent": pause holds uploads as well as the queue, and a
+        // sentence that drops it lets a contributor believe approved
+        // sessions are still going out.
+        TrayModel model = TrayModel.Compute(0, isPaused: true, isHealthy: true);
+        Assert.Equal("Trace Commons — Paused. Nothing is being queued or sent.", model.Tooltip);
+    }
+
+    [Fact]
     public void NothingOwedAndAllWellIsIdle()
     {
         TrayModel model = TrayModel.Compute(0, isPaused: false, isHealthy: true);
@@ -302,6 +313,36 @@ public class TrayModelTests
 
 public class TrayMenuModelTests
 {
+    [Theory]
+    [InlineData(0)]
+    [InlineData(2)]
+    public void DecisionsComeFromStatusRatherThanQueueDepthOrPendingRows(int decisions)
+    {
+        var status = System.Text.Json.JsonSerializer.Deserialize<DaemonStatus>(
+            $"{{\"queue_depth\":12,\"decisions_owed\":{decisions}}}")!;
+        var pending = new[] { new QueueEntry { ProjectLabel = "project" } };
+        var menu = TrayMenuModel.Compute(status, pending, new HistoryRollup(), Array.Empty<ProjectSetting>());
+
+        Assert.Equal(decisions, menu.DecisionsOwed);
+        Assert.Equal(decisions == 0 ? string.Empty : "2", TrayModel.DecisionCountText(menu.DecisionsOwed));
+        Assert.Single(menu.Waiting);
+        Assert.Equal(1, menu.Waiting[0].Count);
+        Assert.Equal(decisions == 0 ? TrayIconState.Idle : TrayIconState.Attention,
+            TrayModel.Compute(menu.DecisionsOwed, false, true).State);
+    }
+
+    [Fact]
+    public void AnOlderDaemonDoesNotInventAnExactDecisionCount()
+    {
+        var status = System.Text.Json.JsonSerializer.Deserialize<DaemonStatus>("{\"queue_depth\":12}")!;
+        var menu = TrayMenuModel.Compute(status, new[] { new QueueEntry() }, new HistoryRollup(), Array.Empty<ProjectSetting>());
+        var tray = TrayModel.Compute(menu.DecisionsOwed, false, true);
+        Assert.Contains("unavailable", tray.Tooltip, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("12", tray.Tooltip);
+        Assert.Null(menu.DecisionsOwed);
+        Assert.Equal("?", TrayModel.DecisionCountText(menu.DecisionsOwed));
+    }
+
     [Fact]
     public void WaitingRowsAreGroupedAndSortedWithoutPaths()
     {

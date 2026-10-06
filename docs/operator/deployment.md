@@ -230,9 +230,104 @@ export TRACE_COMMONS_WEBAUTHN_RP_NAME="TraceCommons"            # shown in authe
   exact origin the browser sees (scheme + host + port). A mismatch makes every
   ceremony fail verification at the authenticator. `RP_ID` must be a registrable
   suffix of that origin's host.
+- **Several origins.** `TRACE_COMMONS_WEBAUTHN_RP_ORIGIN` may be a
+  comma-separated list, e.g. `https://tracecommons.ai,https://ingest.tracecommons.ai`.
+  The first entry is the primary origin; every entry is accepted. A single value
+  means what it always did. Every entry must be the `RP_ID` host or a subdomain
+  of it, or startup fails. Subdomains are never implied: list each origin.
 - The `webauthn-authenticator-rs` crate is a **DEV-dependency only** (it backs the
   in-process soft-authenticator used by the passkey tests). It is **not** compiled
   into or shipped with the production binaries; no production env var enables it.
+
+### Native passkey creation (Z2 S2)
+
+The native app creates a passkey, and with it an `unbound` account, through the
+unauthenticated `POST /v1/account/native/passkey/create/{start,finish}`. Because
+anyone can call it, and attestation is `none`, creation is capped by:
+
+```sh
+export TRACE_COMMONS_UNBOUND_PASSKEY_ACCOUNT_CEILING=5000   # the pilot's value; there is no default
+```
+
+- **Unset disables creation.** Every `create` request gets the uniform deny.
+  A value that is not a non-negative integer fails startup.
+- The cap is on passkey accounts in state `unbound` or `closed`, counted
+  across every tenant. It is checked at `create/start` and again inside the
+  `create/finish` transaction. A `closed` account (a bind refused because the
+  NEAR AI account already had one, see S3 below) keeps its slot until the
+  reaper deletes it, 30 days after the close, so creating and closing accounts
+  in a loop cannot get past the cap (V102; before V102 only `unbound` counted).
+  `bound` accounts never count.
+- When the count reaches the cap, ingest logs the label
+  `unbound_account_ceiling_reached` once (target `trace_commons::passkey`), and
+  again only after the count has dropped below and reached it a second time.
+  Alert on it.
+- Each client IP (as the per-IP rate limiter reads it) may make at most
+  `TRACE_COMMONS_NATIVE_PASSKEY_CREATIONS_PER_IP_PER_DAY` successful
+  `create/finish` calls in a rolling 24 hours; the next gets the uniform deny.
+  Unset means **10**; `0` refuses every creation; a value that is not a
+  non-negative integer fails startup. The count is held in process, like the
+  per-minute limits, and holds only a salted hash of each IP: nothing about
+  the caller's address is written to the database. A restart clears it, and
+  with more than one ingest instance each keeps its own count.
+- Native passkey **sign-in** (`/v1/account/native/passkey/login/*`) is not
+  capped and needs no new setting; like the browser sign-in it needs the
+  login-resolver pool above.
+
+V98 grants `trace_ingest_runtime` `INSERT` on `trace_account_bindings`, and
+`EXECUTE` on `trace_unbound_passkey_account_count()`, a `SECURITY DEFINER`
+function owned by the new NOLOGIN role `trace_unbound_account_count_guard`.
+An ingest login that holds its grants some other way than through
+`trace_ingest_runtime` needs both, or every `create` is refused:
+
+```sql
+SELECT has_table_privilege('<ingest runtime login>', 'public.trace_account_bindings', 'INSERT'),
+       has_function_privilege('<ingest runtime login>', 'public.trace_unbound_passkey_account_count()', 'EXECUTE');
+```
+
+### Connect near.ai: binding a passkey account (Z2 S3)
+
+An unbound account attaches its NEAR AI identity through
+`POST /v1/account/near-ai/provision/bind/{start,finish}`, behind the account
+middleware with a native (`tcn1_`) session. It runs the NEAR AI login
+provisioning ceremony and needs exactly what that path needs (the provisioning
+switch, the admission gate, the NEAR account identity, the published issuer,
+and the login-resolver pool); there is no new setting. It uses the v2
+readiness, so no witness JSON is required.
+
+V100 grants `trace_ingest_runtime` `UPDATE (state, bound_at)` on
+`trace_account_bindings` and nothing else. An ingest login that holds its
+grants some other way needs it, or every bind fails and leaves the account
+`unbound`:
+
+```sql
+SELECT has_column_privilege('<ingest runtime login>', 'public.trace_account_bindings', 'state', 'UPDATE'),
+       has_column_privilege('<ingest runtime login>', 'public.trace_account_bindings', 'bound_at', 'UPDATE');
+```
+
+When the NEAR AI account already belongs to another commons account, the bind
+is refused: the passkey account is closed (its sessions and passkey revoked)
+and the response carries the existing account's session. Nothing moves between
+the two accounts; folding the passkey into the existing account is not built.
+
+When the daemon's device key is already registered to another account (the
+machine ran NEAR AI or wallet provisioning for a different account first),
+bind finish answers `409 {"error":"device_key_registered_elsewhere"}` rather
+than the uniform deny, and writes an `account_binding_failed` audit row with
+that stage. Nothing else is written: the passkey account stays `unbound`, and
+no fresh device key is minted. The label names no tenant or account.
+
+### Browser passkey step-up page (Z2 S7)
+
+`GET /account/step-up` is where the native app sends a person to add or remove
+a passkey or change the payout, which a weak native session cannot do. It runs
+the browser passkey sign-in on the ingest origin, so that origin must be on the
+origin list above, e.g.
+`TRACE_COMMONS_WEBAUTHN_RP_ORIGIN=https://tracecommons.ai,https://ingest.tracecommons.ai`.
+Without it the page loads but every sign-in is refused. There is no other
+setting; with the relying party or the account database unset, the page is a
+scriptless 503. The URL contract, headers and log labels are in
+[`native-step-up-page.md`](./native-step-up-page.md).
 
 ### Login-with-NEAR (contributor NEAR sign-in, Slice 3a)
 
@@ -557,6 +652,453 @@ GRANT trace_ingest_runtime TO <ingest runtime login>;
 ```
 
 A deployment that migrates and serves as one role needs nothing.
+
+### V92 to V95: the pipeline tables
+
+V92 to V95 create the versioned pipeline's tables. Each of them grants
+`trace_ingest_runtime`, the group V90 names, what the pipeline code reads and
+writes on the tables it creates, and nothing broader. Each refuses to apply if
+the group does not exist; V90 creates it. The grants are these:
+
+| Table | Grant | Why |
+|---|---|---|
+| `pipeline_runs` | `SELECT, INSERT`; `UPDATE` on `next_phase`, `state`, `last_error_label`, `updated_at`, `lease_token`, `lease_expires_at`, `attempt_count`, `next_attempt_at`, `phase_started_at`, `index_membership`, `index_command_ref`, `index_command_hash`, `index_write_state`, `score_neighbor_ref`, `score_neighbor_hash`, `settle_selection`, `settle_selection_hash`, `approved_revision_id`, `approved_object_ref_id`, `approved_content_hash` | the receipt inserts the run; claims, phase commits, retries, failures and the lease sweep lock and update it. Nothing updates its identity, `created_at`, `max_attempts`, or its admission decision |
+| `phase_outcomes` | `SELECT, INSERT` | each phase commit appends its outcome, and later phases read it |
+| `pipeline_bundle_packages` | `SELECT, INSERT` | registering a bundle appends its package, and every phase reads it |
+| `pipeline_active_bundles` | `SELECT, INSERT` here; V112 adds `UPDATE (bundle_id, selected_at)` | startup selects the default bundle for a tenant that has none; the receipt reads it. The activation gate switches a tenant to a qualified bundle with the V112 `UPDATE` ([V110 to V113](#v110-to-v113-activation-policy-interventions-the-activation-gate-and-the-rebuild-fence)); no other statement of the runtime updates the row, and the runtime holds no `DELETE` |
+| `pipeline_bundle_policy_status` | `SELECT, INSERT` here; V111 adds `UPDATE (runnable, operational_status, error_label, updated_at)` | registering a bundle adds one row per phase; the receipt and the worker read whether a phase is runnable, and an operator's policy intervention updates the row ([V110 to V113](#v110-to-v113-activation-policy-interventions-the-activation-gate-and-the-rebuild-fence)) |
+| `pipeline_receipt_artifacts` | `SELECT, INSERT, DELETE, UPDATE (state, committed_at, cleanup_after)` | receipt staging, its final commit, a refused attempt's clean-up, and the orphan sweep |
+| `pipeline_run_settlements` | `SELECT, INSERT`; `UPDATE` on `operation_state`, `result_ref_hash`, `external_receipt_hash`, `credit_event_id`, `settlement_batch_id`, `payout_state`, `lease_token`, `lease_expires_at`, `dispatched_at`, `attempt_count`, `last_error_label`, `updated_at` | Score adds one leg per award; Settle, reconciliation, and a failed run advance each leg. Nothing updates a leg's identity, its payout rail, or `created_at` |
+| `pipeline_admission_usage` | `SELECT, INSERT` | the receipt counts each key once and reads the counts for its quota |
+
+No grant allows `DELETE` on runs, outcomes, or legs. They go only with their
+submission or tenant, through foreign-key cascades, which run as the table
+owner. Outcomes and bundle packages also refuse `UPDATE` and a direct `DELETE`
+by trigger.
+
+The pipeline also uses tables older than V62:
+
+| Table | What the pipeline needs |
+|---|---|
+| `trace_tenants` | `INSERT` |
+| `trace_submissions` | `SELECT, INSERT`; `UPDATE` on `status`, `reviewed_at`, `updated_at`; row locks (`FOR UPDATE`, `FOR SHARE`) |
+| `trace_object_refs` | `SELECT, INSERT`; a row lock (`FOR SHARE`) |
+| `trace_derived_records` | `INSERT` |
+| `trace_tombstones` | `SELECT` |
+| `trace_withdrawals` | `SELECT` |
+| `trace_credit_holds` | `SELECT` |
+| `trace_credit_ledger` | `SELECT, INSERT`; `UPDATE` on `settlement_state` |
+| `trace_credit_settlement_batches` | `SELECT, INSERT`; `UPDATE` on `instrument_id` |
+
+V92 to V95 grant nothing on these tables: the pipeline needs them at V1 or
+V2, long before any pipeline migration runs. V90 does not grant them either
+-- its own table, above, covers only the tables V63 to V89 added. The pilot's
+group holds these as table-wide privileges taken by hand when its schema was
+at V62, not by any migration. A deployment whose ingest runtime group holds
+V90's grants but never took the pilot's V62-era table grants by hand is still
+missing them, and the pipeline -- like the legacy path -- fails closed with
+`permission denied` until it does. Only a deployment carrying both, the
+pilot's V62-era grants and V90's own, has nothing left to do by hand for the
+pipeline.
+
+### Account cookies take the `__Host-` prefix: a one-time browser sign-out
+
+The browser cookies ingest sets for contributor accounts are bound to the
+exact host that set them:
+
+| Cookie | Was | Now |
+|---|---|---|
+| account session | `tc_account_session` | `__Host-tc_account_session` |
+| passkey ceremony | `tc_passkey_ceremony` | `__Host-tc_passkey_ceremony` |
+| NEAR ceremony | `tc_near_ceremony` | `__Host-tc_near_ceremony` |
+| sign-in link ceremony | `tc_login_ceremony` (`Path=/account/login`) | `__Host-tc_login_ceremony` (`Path=/`) |
+
+A browser accepts a `__Host-` cookie only with `Secure`, `Path=/` and no
+`Domain`, which every one of these already carried except the sign-in link
+ceremony's path. Nothing changes for native clients: the desktop apps
+authenticate with a `tcn1_` bearer, not a cookie.
+
+**The first deploy of this build signs every browser out once.** The server
+does not read the old session cookie name, so a browser that presents only
+`tc_account_session` gets a `401` from `/v1/account/*` and has to sign in
+again. There is deliberately no period in which both names are accepted.
+Server-side, the old sessions stay valid rows until they expire (seven days)
+or are revoked; only the browser's handle to them is dropped.
+
+The old cookie is also cleaned out of browsers. Every response that sets the
+new session cookie (sign-in by link, passkey or NEAR, and session rotation),
+and a browser logout, carries a second `Set-Cookie` that expires
+`tc_account_session` (`Max-Age=0`, `Path=/`, same attributes). The in-flight
+ceremony cookies need no cleanup: they live three to ten minutes, and a
+ceremony started before the deploy simply has to be started again.
+
+Nothing needs configuring. If a contributor reports being signed out after the
+deploy, that is this change; signing in again is the fix.
+
+Signing in again does not end the old session, and the contributor cannot log
+it out: logout identifies the session by the new cookie, and the browser no
+longer presents the old one. That row stays valid until it expires, up to
+seven days. A contributor who wants it gone now should sign in again and call
+`POST /v1/account/sessions/revoke-all`, which revokes every session on the
+account, the old one and the current one alike, and then sign in once more.
+
+### V97: account bindings
+
+V97 (`trace_account_bindings`, native passkey identity) grants
+`trace_ingest_runtime` `SELECT` on the new table and nothing else. Session
+validation joins it on every authenticated `/v1/account/*` request, so an
+ingest login that holds its grants some other way than through
+`trace_ingest_runtime` fails those requests with a 500 until it can read the
+table. Check before deploying:
+
+```sql
+SELECT has_table_privilege('<ingest runtime login>', 'public.trace_account_bindings', 'SELECT');
+```
+
+### V105 and V106: review, invalidation, and export tables
+
+V105 adds the human review claims and assessments, the index invalidation
+queue, two columns on `pipeline_run_settlements`
+(`payout_eligible`, set when Score inserts a leg, which the runtime's
+table-wide `INSERT` from V94 covers; and `credit_audited_at`, set when
+ingest's worker has appended `main`'s `CreditMutate` audit event for the
+leg's credit event), and indexes for the payout pass and the audit work
+list. It
+also widens V94's `pipeline_run_settlements_dispatch_shape` check to allow a
+Trace Credit leg that `main`'s `NoveltyUtility` credit checks withheld before
+its adapter was called: complete, never dispatched, no credit event, with its
+withholding label. V106
+adds the export snapshots and their items. Like V92 to V95, each grants
+`trace_ingest_runtime` what the pipeline code reads and writes there, and
+nothing broader, and each refuses to apply if the group does not exist. V105
+also grants `main`'s gate driver role, `trace_gate_driver`, two columns of
+`pipeline_runs`, and refuses to apply if that role (V36) does not exist:
+
+| Object | Grant | Why |
+|---|---|---|
+| `pipeline_review_claims` | `SELECT, INSERT, DELETE`; `UPDATE` on `reviewer_principal_ref`, `lease_token`, `lease_expires_at`, `claimed_at` | a reviewer's claim inserts the row, or takes over an expired claim or renews its own; the assessment deletes the spent claim |
+| `pipeline_review_assessments` | `SELECT, INSERT` | an assessment inserts its row; the claim, the review queue, and each Review attempt read it |
+| `pipeline_index_invalidations` | `SELECT, INSERT`; `UPDATE` on `state`, `completed_at`, `attempt_count`, `next_attempt_at`, `last_error_label` | a withdrawal or a cancelled index write queues the revision's removal; the worker claims, completes, retries, or fails it; the summaries count it |
+| `pipeline_run_settlements` | `UPDATE (credit_audited_at)`, the column V105 adds | the worker marks a leg's credit event audited once it appended the `CreditMutate` audit event |
+| `pipeline_runs` (to `trace_gate_driver`) | `SELECT (tenant_id, submission_id)`, and a cross-tenant `SELECT` policy for that role only, as V36 gives it on `main`'s tables | `main`'s gate driver leaves every submission with a pipeline run out of its work list and backlog count; the pipeline's own Score scores it |
+| `pipeline_export_snapshots` | `SELECT, INSERT`; `UPDATE` on `state`, `export_manifest_id`, `completed_at`, `invalidated_at` | export creation and delivery, a withdrawal's invalidation, and the summaries |
+| `pipeline_export_snapshot_items` | `SELECT, INSERT`; `UPDATE` on `invalidated_at`, `invalidation_reason` | export creation, and a withdrawal's invalidation |
+
+No grant allows `DELETE` on assessments, snapshots, or items. A trigger
+refuses a direct `DELETE` and an `UPDATE` of their identity; they go only with
+their submission or tenant, through foreign-key cascades.
+
+These routes also write tables older than V62, which no pipeline migration
+grants anything on. The pilot's V62-era table-wide grants cover them:
+
+| Table | What the pipeline needs |
+|---|---|
+| `trace_export_manifests` | `INSERT` when a snapshot is delivered; `UPDATE` on `invalidated_at`, `updated_at` when a submission in it is withdrawn |
+| `trace_export_manifest_items` | `INSERT` when a snapshot is delivered; `UPDATE` on `source_invalidated_at`, `source_invalidation_reason`, `updated_at` on withdrawal |
+| `trace_tombstones` | `INSERT` on withdrawal |
+| `trace_object_refs` | `UPDATE` on `invalidated_at`, `updated_at` on withdrawal |
+| `trace_derived_records` | `UPDATE` on `status`, `updated_at` on withdrawal |
+| `trace_vector_entries` | `UPDATE` on `status`, `invalidated_at`, `updated_at` on withdrawal |
+| `trace_revocation_propagation_items` | `SELECT, INSERT` on withdrawal, one item per object to delete |
+| `trace_near_credit_outbox` | `SELECT, INSERT`; `UPDATE` on `status`, `near_transaction_hash`, `submitted_at`, `confirmed_at`, `last_error_hash`, `near_call_json` -- only when the runtime enables NEAR payout |
+
+The withdrawal routes -- the pipeline's and `main`'s -- read
+`trace_account_admission_submissions` (V77) when the submission belongs to a
+source session. V77 grants that table only to
+`trace_account_admission_runtime`, and no pipeline migration grants it
+again. The ingest login therefore needs membership in that role, which
+`main`'s withdrawal route already needs. Without it, withdrawing a
+submission of a source session fails with `permission denied` on either
+route:
+
+```sql
+GRANT trace_account_admission_runtime TO <ingest runtime login>;
+```
+
+### V107 and V108: qualification and attempt artifact tables
+
+V107 adds `pipeline_bundle_qualifications`, the immutable record that the
+activation gate reads to decide whether a signed package is production
+qualified. V108 adds `pipeline_attempt_artifacts`, which stages the object
+each phase attempt writes -- Review's approved revision, and Score's index
+command and neighbour set -- before its phase commit, so the attempt sweep
+can delete the ones that never commit. Like V92 to V95, each grants
+`trace_ingest_runtime` what the pipeline code reads and writes there, and
+nothing broader, and each refuses to apply if the group does not exist:
+
+| Table | Grant | Why |
+|---|---|---|
+| `pipeline_bundle_qualifications` | `SELECT, INSERT` | a qualification inserts one row for each bundle and code revision (V112 widens the key); the qualification route inserts it, and the activation gate and the worker and API paths read it |
+| `pipeline_attempt_artifacts` | `SELECT, INSERT, DELETE`; `UPDATE` on `state`, `committed_at`, `ciphertext_sha256` | the phase write stages a row (INSERT), the phase commit moves it to `committed` and sets a hash a compatibility Score staged the row without (UPDATE), and the Score commit (for an artifact it did not write) and the attempt sweep delete a `staged` row (DELETE) |
+
+`pipeline_bundle_qualifications` is append-only: a trigger refuses a direct
+`UPDATE` or any `DELETE` that is not a cascade, and a row leaves only when
+its package does, through the foreign key, which runs as the table owner.
+`pipeline_attempt_artifacts`'s guard trigger allows an `UPDATE` only from
+`staged` to `committed`, which may set a missing `ciphertext_sha256` to a
+64-character lowercase hex value but never change one already set; every
+other change to a `committed` row, or to a `staged` row but its commit, is
+refused regardless of grant. A `committed` row must have its hash.
+
+Check before deploying:
+
+```sql
+SELECT has_table_privilege('<ingest runtime login>', 'public.pipeline_bundle_qualifications', 'INSERT');
+SELECT has_table_privilege('<ingest runtime login>', 'public.pipeline_attempt_artifacts', 'INSERT');
+SELECT has_column_privilege('<ingest runtime login>', 'public.pipeline_attempt_artifacts', 'ciphertext_sha256', 'UPDATE');
+```
+
+### V110 to V113: activation, policy interventions, the activation gate, and the rebuild fence
+
+V110 adds `pipeline_tenant_routing` (one row for each tenant: its routing state),
+`pipeline_activation_events` (the history of routing changes), and
+`pipeline_receipt_ownership` (the permanent owner of each submission id). It
+binds each routing row to one event (a deferred foreign key, a
+`routing_generation` column on both tables, and two triggers; see below).
+V111 adds `operational_status` to `pipeline_bundle_policy_status` and the table
+`pipeline_policy_interventions`. V112 widens the primary key of
+`pipeline_bundle_qualifications` to `(tenant_id, bundle_id, code_revision_hash)`
+and grants the `UPDATE` on two columns of `pipeline_active_bundles` (`bundle_id`
+and `selected_at`) that the activation gate needs. V113 adds
+`pipeline_index_rebuild_fences`. Like V92 to V95, each grants
+`trace_ingest_runtime` what the pipeline code reads and writes there, and
+nothing broader, and each refuses to apply if the group does not exist. Each new
+table enables and forces row-level security with the tenant policy
+`trace_corpus_tenant_isolation`, and is in `TRACE_COMMONS_RLS_TABLES`. The
+grants are these:
+
+| Table | Grant | Why |
+|---|---|---|
+| `pipeline_tenant_routing` | `SELECT, INSERT`; `UPDATE` on `routing_state`, `activation_record_id`, `actor_principal_ref`, `reason_code`, `evidence_hash`, `recorded_at` | each new upload reads the row; an activation, a rollback, a containment, or a deactivation inserts it or updates every column but the key and `routing_generation`, which a trigger sets on each update |
+| `pipeline_activation_events` | `SELECT, INSERT` | each routing change appends its event; `GET /v1/admin/pipeline/routing` reads them |
+| `pipeline_receipt_ownership` | `SELECT, INSERT` | the legacy path claims a submission id, and the pipeline's receipt commits its own row |
+| `pipeline_bundle_policy_status` | `UPDATE (runnable, operational_status, error_label, updated_at)`, added to V93's `SELECT, INSERT` | a policy intervention updates the row, and each phase commit locks it `FOR SHARE`, which needs `UPDATE` on a column |
+| `pipeline_policy_interventions` | `SELECT, INSERT` | an intervention appends its record; the list route reads them |
+| `pipeline_active_bundles` | `UPDATE (bundle_id, selected_at)`, added to V93's `SELECT, INSERT` | the activation gate switches a tenant's bundle, in a statement that runs only after a qualification on the deployed revision and four runnable policies were found |
+| `pipeline_index_rebuild_fences` | `SELECT, INSERT, DELETE`; `UPDATE (fenced_until)` | a rebuild inserts its row and extends it (only `fenced_until` changes), deletes it when it ends, and the invalidation claim reads the rows |
+
+`pipeline_activation_events`, `pipeline_receipt_ownership`, and
+`pipeline_policy_interventions` are append-only: a trigger refuses an `UPDATE`
+and a direct `DELETE`. A row leaves only through a foreign-key cascade, which
+runs as the table owner: with its tenant, and also with its run (an ownership
+row) or with its bundle's policy rows (an intervention).
+`pipeline_tenant_routing` and
+`pipeline_index_rebuild_fences` are mutable, in the columns above. No grant
+allows `DELETE` on the routing, event, ownership, or intervention tables. The
+runtime login still has no `DELETE` on `pipeline_active_bundles`.
+
+The grants do not make the routes the only way to change routing. V110 lets the
+ingest login `INSERT` and `UPDATE` `pipeline_tenant_routing` and `INSERT` events,
+and V112 lets it `UPDATE (bundle_id, selected_at)` on `pipeline_active_bundles`.
+Any statement under that login can use them.
+
+The database enforces the record of a routing change, for a direct statement
+too. V110 binds the routing row to its event:
+
+- `activation_record_id` is a foreign key to the event's `event_id`, for the
+  same tenant. A row that names no event does not commit.
+- A row trigger (`pipeline_tenant_routing_assign_generation`) sets
+  `routing_generation`. Each update gets the old value plus 1: an update
+  cannot choose the value, and the ingest login has no `UPDATE` grant on the
+  column. An insert keeps the value that it supplies when that is from 1 to
+  2^62 (4611686018427387904), and gets 1 when the value is below 1. An insert
+  above 2^62 is refused (`pipeline routing generation is out of range`): a
+  first row near the end of the type would make each later change of the
+  tenant fail, a containment too. A tenant has one routing row and the ingest
+  login cannot delete it, so an insert happens one time for a tenant; the
+  commit check below applies to it too. The same trigger refuses an update
+  that keeps `activation_record_id` (`pipeline routing change needs a new
+  activation event`).
+- A constraint trigger (`pipeline_tenant_routing_event_match`) runs at the
+  commit. The event that the row names must have the row's `routing_state` as
+  its `resulting_state`, and the row's `routing_generation`. If it does not,
+  the commit fails (`pipeline routing row does not match its activation
+  event`).
+
+Events are immutable, and each version of the row has a higher generation than
+the versions before it. So an event matches one version of the row and cannot
+be named again: every change of the routing row appends one matching event.
+The three messages are not labels. The routes never cause them, because the
+code writes the row and its event with one id and one generation, and names no
+generation on an insert. Only a direct statement can get them.
+
+The database does not enforce the activation gate. The ingest login can append
+an event and write a matching row in one transaction, and it can update the
+active bundle, with no qualification and no evidence. It can also append an
+event that no row names: such an event is in the history, and the row's
+`activation_record_id` says which event is in force. Only the code runs the
+gate: it changes routing through the routes (`POST /v1/admin/pipeline/...`,
+see [pipeline-activation.md](pipeline-activation.md)), and the active bundle
+only through the gate. Change routing only through the routes. Do not run a
+direct statement of the ingest login against these tables.
+
+V110 changed on the branch `vp/pipeline-activation` before it merged: the key,
+the two triggers, and the `routing_generation` columns came later. The
+migration runner records only a migration's version and name, so it does not
+see the change. A database that applied a draft of V110 from that branch keeps
+the draft's tables, and each routing change fails there. Create that database
+again.
+
+A restore must bring `pipeline_tenant_routing` and `pipeline_activation_events`
+back from one snapshot, as a `pg_dump` and `pg_restore` of the whole database
+does (the triggers are created after the rows). A data-only restore into a
+migrated database (`pg_restore --data-only`, `INSERT`, or `COPY`) also works
+when the events are restored with the rows: an inserted row keeps the
+generation that it had, and the commit accepts it when its event is there.
+Load the events before the routing rows, or load both in one transaction. A
+routing row that is loaded without its event, or with another generation than
+its event has, does not commit.
+
+V111 adds a check that requires `runnable` to equal `operational_status =
+'runnable'`, and every existing row gets the status `runnable`. V93 gave the
+runtime no `UPDATE` on the table and nothing wrote `runnable`, so a row has
+`runnable` false only if someone set it by hand. A row like that makes V111 fail
+to apply. Check before you apply it.
+
+The table forces row-level security, also for its owner. A count by the
+migrator with no tenant set sees no row and answers 0, whatever the table
+holds. So do the count in one of these two ways. As a superuser, or as a role
+with `BYPASSRLS`:
+
+```sql
+SELECT COUNT(*) FROM pipeline_bundle_policy_status WHERE NOT runnable;
+```
+
+Or as the migrator, one time for each tenant that has a pipeline bundle (each
+tenant that is, or was, on a pipeline list):
+
+```sql
+BEGIN;
+SELECT set_config('trace_commons.trace_tenant_id', '<tenant id>', true);
+SELECT COUNT(*) FROM pipeline_bundle_policy_status WHERE NOT runnable;
+COMMIT;
+```
+
+Each count must be 0. V111 itself reads every row when it adds the check, so it
+fails on a row that the plain count did not show. Apply V110 to V113 as the
+migrator before you install the binary, as for every migration above ("First:
+does this build carry a migration the database does not have?").
+
+**A deploy to a new code revision, and what stops intake.** A process with a
+pipeline runtime refuses the new uploads of a tenant whose routing row says
+`pipeline` while the tenant's active bundle has no qualification on the
+revision that the process was built from (`503`
+`pipeline_bundle_not_qualified`; a build with no revision: `503`
+`bundle_runtime_revision_unknown`). So qualify each such tenant's active bundle
+on the new revision, through a process of the new build that takes no client
+traffic, before you roll the fleet: the procedure is in
+[pipeline-activation.md](pipeline-activation.md), "After a deploy: the
+qualification is read again for each new upload". A rollback to the binary of
+an earlier revision serves the bundles that were qualified on that revision,
+and refuses a tenant whose active bundle was first qualified on the later one.
+
+At start, a process that is not started with
+`TRACE_COMMONS_PIPELINE_ALLOW_TEST_DEPENDENCIES` logs these warnings. None of
+them stops the start:
+
+| Warning | When |
+|---|---|
+| `pipeline_active_bundle_not_qualified` (with the tenant's storage reference) | one for each tenant on the receipts list whose row says `pipeline` and whose active bundle has no qualification on the build's revision: this process refuses that tenant's new uploads |
+| `pipeline_code_revision_unset` | one in all, when the receipts list is not empty and the build has no revision: this process refuses the new uploads of every `pipeline` tenant |
+| `pipeline_qualification_start_check_incomplete` (with the tenant's storage reference) | the read for that tenant failed |
+| `pipeline_qualification_start_check_incomplete` (with `tenants_not_read`, a count) | one in all, when the reads together took more than 5 seconds: the check stopped, and it did not read that many of the listed tenants |
+
+**Binary rollback to an older build.** An older binary ignores these
+migrations. What it does with a tenant that has a routing row depends on the
+build:
+
+- A build with no pipeline runtime (the repository binary) that has these
+  migrations' code and the rule of review round 1 reads the routing row. It
+  refuses the uploads of a tenant whose row says `pipeline` (`503`
+  `pipeline_tenant_not_served`) or `contained` (`503`
+  `pipeline_receipt_intake_contained`), and serves every other tenant on the
+  legacy path. `POST /v1/admin/pipeline/contain` and `deactivate` work on it
+  (they need only the routing store), so `deactivate` each tenant whose row
+  says `pipeline` to serve it on that build. `activate`, `rollback`,
+  `qualifications`, and the policy routes answer `404` there.
+- A build with no pipeline runtime from before that rule reads no routing
+  row. It serves every tenant on the legacy path, a tenant whose row says
+  `pipeline` or `contained` included.
+- A build that has a pipeline runtime and is from before these migrations'
+  code also reads no routing row. It routes by its receipts list alone. Every
+  new upload of a tenant on its receipts list goes to the pipeline: a tenant
+  whose row says `contained` or `legacy`, and a listed tenant with no row, too.
+  Its receipt transaction checks no routing and writes no ownership row. It
+  also has no policy guard at a phase commit and none at the payout dispatch.
+  A suspended policy still stops a receipt and the start of a phase, because
+  that build reads `runnable` there. It does not stop a phase that already
+  runs, and it does not stop a payout dispatch under a suspended Settle
+  policy.
+
+Before you install a build that has a pipeline runtime and is from before
+these migrations' code, do these steps:
+
+1. Read each listed tenant's routing (`GET /v1/admin/pipeline/routing`) and
+   suspended policies (`suspended_policy_count` in `GET
+   /v1/admin/pipeline/operational-summary`) on the current build.
+2. In the older build's configuration, keep on the receipts list only the
+   tenants whose row says `pipeline`. Move every other tenant (contained,
+   `legacy`, or with no row) to the drain list, or off both lists. A `contain`
+   or a `deactivate` does not protect a tenant on that build: only the lists
+   do.
+
+   On that build, a tenant that is off the receipts list uploads on the legacy
+   path. This includes a contained tenant. That build does not read the row, so
+   nothing there holds the tenant's intake: its uploads are neither refused
+   nor sent to the pipeline, and the legacy path takes them. If a contained
+   tenant's uploads must stay stopped, do not install that build.
+3. Do not rely on a suspension: on that build it does not hold for a phase
+   that already runs or for a payout. For a tenant with a suspended Settle
+   policy, keep the tenant off both lists (its pipeline work then waits), or
+   set the NEAR settlement mode of the older build to `disabled`
+   (`TRACE_COMMONS_NEAR_SETTLEMENT_MODE`; this stops every NEAR payout of the
+   process, `main`'s too). Keep that until a build with the guards runs again.
+
+See also "Run one build and one configuration" in "Scope lists and the routing
+row" of [pipeline-activation.md](pipeline-activation.md).
+
+The drain report (`GET /v1/admin/pipeline/legacy-drain`) reads 16 tables through
+the ingest login. Two are pipeline tables that V92 and V110 grant
+(`pipeline_runs`, `pipeline_tenant_routing`). Three are covered by V90's grants
+(`trace_submission_sessions`, `trace_source_sessions`,
+`trace_token_attachments`). The other eleven are older tables of `main`, which
+no pipeline migration grants anything on: the pilot's V62-era table grants cover
+them, as they cover the older tables in "V92 to V95". A deployment without those
+grants answers the report with a `500` (`permission denied`), not with a zero.
+The tables are listed in [pipeline-activation.md](pipeline-activation.md),
+"Legacy drain report".
+
+The three routes that qualify and activate bundles need three settings that no
+earlier build read:
+
+| Variable | Set | What it does |
+|---|---|---|
+| `TRACE_COMMONS_PIPELINE_PACKAGE_TRUSTED_KEYS_PATH` | at run time | a JSON file, an array of trusted keys (`{"key_id", "public_key_base64url"}`), whose signatures make a bundle package trusted |
+| `TRACE_COMMONS_PIPELINE_CHECK_TRUSTED_KEYS_PATH` | at run time | the same format, for the keys whose signatures make a check result count; no key may also be a package key |
+| `TRACE_COMMONS_BUILD_CODE_REVISION_HASH` | when you build | the output of `python3 scripts/operator/pipeline.py revision` for the tree you build |
+
+A variable that is set to a file that cannot be read, or whose file is not valid,
+refuses the start (`pipeline_trust_store_invalid`), and so does a key that is in
+both files (`pipeline_trust_store_overlap`). A trust store variable that is set
+to the empty string counts as unset, and so does a build revision that is set
+to the empty string. Any other build revision that is not `sha256:` and 64
+lowercase hex digits refuses the start (`pipeline_code_revision_invalid`). With a trust store variable unset, or
+no revision in the build, the routes refuse (`503`
+`pipeline_trust_store_missing`, `409` `bundle_runtime_revision_unknown`). `GET
+/v1/admin/config-status` reports the three as booleans
+(`pipeline_package_trust_store_loaded`, `pipeline_check_trust_store_loaded`,
+`pipeline_code_revision_configured`). The details are in
+[pipeline-activation.md](pipeline-activation.md), "What the process needs".
+
+Check before deploying:
+
+```sql
+SELECT has_table_privilege('<ingest runtime login>', 'public.pipeline_tenant_routing', 'INSERT');
+SELECT has_table_privilege('<ingest runtime login>', 'public.pipeline_receipt_ownership', 'INSERT');
+SELECT has_column_privilege('<ingest runtime login>', 'public.pipeline_active_bundles', 'bundle_id', 'UPDATE');
+SELECT has_column_privilege('<ingest runtime login>', 'public.pipeline_bundle_policy_status', 'operational_status', 'UPDATE');
+SELECT has_table_privilege('<ingest runtime login>', 'public.pipeline_index_rebuild_fences', 'DELETE');
+```
 
 ### Build and install
 

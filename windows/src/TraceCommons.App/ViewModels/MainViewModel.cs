@@ -43,10 +43,11 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
     private readonly DaemonHost _host;
     private readonly AppUpdater? _updater;
-    private readonly SemaphoreSlim _refreshGate = new(1, 1);
+    private readonly CoalescingRefresh _refreshGate = new();
     private readonly SemaphoreSlim _watchingChangeGate = new(1, 1);
     private readonly DispatcherQueueTimer _undoTick;
     private string _statusText = "Starting…";
+    private int? _decisionsOwed;
     private string _updateStatusText = string.Empty;
     private bool _isBusy;
     private bool _isPaused;
@@ -382,17 +383,17 @@ public sealed class MainViewModel : INotifyPropertyChanged
     /// The rail's numeric badge: how many decisions are owed.
     /// </summary>
     /// <remarks>
-    /// Empty on an empty queue, so a rail with nothing waiting carries no
-    /// zero. This is the figure the shield is added to, and it is the one a
-    /// contributor at scale is reading.
+    /// Read only from status.decisions_owed. An older daemon leaves the
+    /// count unavailable; pending rows and queue occupancy cannot replace it.
     /// </remarks>
-    public string QueueCountText =>
-        Pending.Count == 0
-            ? string.Empty
-            : Pending.Count.ToString(CultureInfo.CurrentCulture);
+    public string QueueCountText => TrayModel.DecisionCountText(_decisionsOwed);
+
+    public string QueueCountToolTip => _decisionsOwed is null
+        ? TrayModel.DecisionCountUnavailable
+        : string.Empty;
 
     /// <summary>Whether there is a badge to draw at all.</summary>
-    public bool HasQueueCount => Pending.Count > 0;
+    public bool HasQueueCount => QueueCountText.Length > 0;
 
     /// <summary>
     /// Re-reads every rail signal. Called when the queue changes and when a
@@ -406,6 +407,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         Raise(nameof(ShieldIsWaiting));
         Raise(nameof(ShieldIsAttention));
         Raise(nameof(QueueCountText));
+        Raise(nameof(QueueCountToolTip));
         Raise(nameof(HasQueueCount));
     }
 
@@ -1428,19 +1430,14 @@ public sealed class MainViewModel : INotifyPropertyChanged
     /// <summary>
     /// Refetches the queue and the status line.
     ///
-    /// Serialized by a gate rather than allowed to overlap: events can arrive
-    /// in bursts, and two refreshes racing to rewrite one ObservableCollection
-    /// produces flicker at best. A refresh already in flight makes a second
-    /// request redundant, since the later one would read the same daemon state
-    /// anyway.
+    /// Events during a snapshot request one follow-up snapshot: status may
+    /// already have been read when a later event arrives. Collection writes
+    /// remain serialized and bursts are coalesced rather than discarded.
     /// </summary>
-    public async Task RefreshAsync()
-    {
-        if (!await _refreshGate.WaitAsync(0).ConfigureAwait(true))
-        {
-            return;
-        }
+    public Task RefreshAsync() => _refreshGate.RunAsync(RefreshSnapshotAsync);
 
+    private async Task RefreshSnapshotAsync()
+    {
         try
         {
             IsBusy = true;
@@ -1510,6 +1507,9 @@ public sealed class MainViewModel : INotifyPropertyChanged
                 .CallAsync(DaemonProtocol.Methods.Status)
                 .ConfigureAwait(true);
 
+            _decisionsOwed = status.IsError ? null : status.ResultAs<DaemonStatus>()?.DecisionsOwed;
+            RaiseShield();
+
             StatusText = status.IsError
                 ? "Daemon unavailable"
                 : DescribeQueue(Pending.Count);
@@ -1560,7 +1560,6 @@ public sealed class MainViewModel : INotifyPropertyChanged
         finally
         {
             IsBusy = false;
-            _refreshGate.Release();
         }
     }
 
@@ -1824,7 +1823,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     }
 
     /// <summary>
-    /// "Ask me first" on a rewording or held-folder notice: the Settings
+    /// "Ask me" on a rewording or held-folder notice: the Settings
     /// call, unchanged, which also answers a rewording notice. A refusal
     /// changes nothing, and <paramref name="failed"/>, the core's refusal
     /// line, is shown.

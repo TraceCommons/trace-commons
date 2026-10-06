@@ -201,10 +201,14 @@ struct MenuBarContent: View {
             Text("Not watching anything yet")
             Text("Open the window to choose which folders to watch")
         case .running:
-            if model.decisionsOwed == 0 {
+            if let count = model.decisionsOwed, count == 0 {
                 Text("Nothing waiting")
             } else {
-                Text("\(model.decisionsOwed) waiting for your decision")
+                if let count = model.decisionsOwed {
+                    Text("\(count) waiting for your decision")
+                } else {
+                    Text("Decision count unavailable")
+                }
                 // Not approve buttons. Deliberately inert lines: the only
                 // forward action in this menu is Review.
                 ForEach(model.waitingByProject, id: \.id) { row in
@@ -383,24 +387,41 @@ struct MenuBarContent: View {
 
     // MARK: - Pause
 
+    /// The pause words, held once so the glass panel (R13) offers the same
+    /// choices in the same words.
+    static let resumeLabel = "Resume watching"
+    static let pauseLabel = "Pause"
+    static let pauseHourLabel = "For 1 hour"
+    static let pauseMorningLabel = "Until tomorrow morning"
+    static let pauseIndefiniteLabel = "Until I turn it back on"
+
+    /// The three pause lengths, in the menu's order: nil is until resumed.
+    static func pauseUntil(_ choice: Int) -> Date? {
+        switch choice {
+        case 0: Date().addingTimeInterval(3600)
+        case 1: Format.tomorrowMorning()
+        default: nil
+        }
+    }
+
     @ViewBuilder
     private var pauseSection: some View {
         if model.status.paused {
             Button {
                 model.resume()
             } label: {
-                Label("Resume watching", systemImage: "play.circle")
+                Label(Self.resumeLabel, systemImage: "play.circle")
             }
         } else {
-            Menu("Pause") {
-                Button("For 1 hour") {
-                    model.pause(until: Date().addingTimeInterval(3600))
+            Menu(Self.pauseLabel) {
+                Button(Self.pauseHourLabel) {
+                    model.pause(until: Self.pauseUntil(0))
                 }
-                Button("Until tomorrow morning") {
-                    model.pause(until: Format.tomorrowMorning())
+                Button(Self.pauseMorningLabel) {
+                    model.pause(until: Self.pauseUntil(1))
                 }
-                Button("Until I turn it back on") {
-                    model.pause(until: nil)
+                Button(Self.pauseIndefiniteLabel) {
+                    model.pause(until: Self.pauseUntil(2))
                 }
             }
         }

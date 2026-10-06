@@ -923,18 +923,10 @@ fn format_size(bytes: u64) -> String {
     }
 }
 
-/// What to call this session's origin in a table: what it declares itself
-/// to be when discovery knows, and otherwise the adapter that found it.
-///
-/// See `SessionRef::declared_source` for why the two differ at all.
-fn displayed_source(r: &SessionRef) -> &str {
-    r.declared_source.as_deref().unwrap_or(r.source)
-}
-
 fn session_row(idx: usize, r: &SessionRef) -> Vec<String> {
     vec![
         (idx + 1).to_string(),
-        displayed_source(r).to_string(),
+        r.displayed_source().to_string(),
         r.project.clone().unwrap_or_else(|| "-".to_string()),
         format_age(r.started_at),
         format_size(r.size_bytes),
@@ -945,15 +937,23 @@ fn session_row(idx: usize, r: &SessionRef) -> Vec<String> {
 /// receipt with an already-submitted status matches this session's hash,
 /// `Some(false)` when not, `None` when the transcript failed to load (the
 /// session stays selectable; `submit_sessions` will classify it).
+///
+/// A receipt's status is read through
+/// [`crate::daemon::history::receipt_status`], so a `processing` receipt
+/// whose submission the server has since read back as `rejected` is not
+/// marked -- the same rule the submit short-circuit applies.
 fn submitted_marker(
     source: &dyn TraceSource,
     r: &SessionRef,
     receipts: &[crate::config::Receipt],
+    verdicts: &std::collections::BTreeMap<uuid::Uuid, String>,
 ) -> Option<bool> {
     let transcript = source.load(r).ok()?;
     Some(receipts.iter().any(|rec| {
         rec.session_hash == transcript.session_hash
-            && crate::submit::ALREADY_SUBMITTED_STATUSES.contains(&rec.status.as_str())
+            && crate::submit::is_already_submitted(crate::daemon::history::receipt_status(
+                rec, verdicts,
+            ))
     }))
 }
 
@@ -1398,12 +1398,17 @@ pub async fn submit(store: &ConfigStore, sel: &SubmitSelection<'_>) -> Result<()
         (0..refs.len()).collect()
     } else {
         let receipts = store.load_receipts().context("loading receipts")?;
+        // A cache that cannot be read leaves every receipt's own status in
+        // force, which is what the picker showed before the cache was read.
+        let verdicts = crate::daemon::history::reported_verdicts(
+            &crate::daemon::history::HistoryCache::load(store).unwrap_or_default(),
+        );
         let rows: Vec<Vec<String>> = refs
             .iter()
             .enumerate()
             .map(|(i, r)| {
                 let marker = source_for(r.source, sel.trajectory)
-                    .and_then(|src| submitted_marker(src.as_ref(), r, &receipts));
+                    .and_then(|src| submitted_marker(src.as_ref(), r, &receipts, &verdicts));
                 submit_picker_row(i, r, marker)
             })
             .collect();
@@ -1577,7 +1582,8 @@ pub async fn submit(store: &ConfigStore, sel: &SubmitSelection<'_>) -> Result<()
             }
             // Only the daemon asks for a hold; listed so a CLI run that ever
             // got one says so rather than failing to compile it away.
-            SubmitOutcome::HeldForReview { reason_label, .. } => {
+            SubmitOutcome::HeldForReview { reason_label, .. }
+            | SubmitOutcome::HeldForSecondLook { reason_label, .. } => {
                 println!("{preview_prefix}held ({reason_label})");
             }
         }
@@ -2045,8 +2051,10 @@ mod tests {
         let r = src.discover().unwrap().remove(0);
         let transcript = src.load(&r).unwrap();
 
+        let no_verdicts = std::collections::BTreeMap::new();
+
         // No receipts: not submitted, cell renders "-".
-        assert_eq!(submitted_marker(&src, &r, &[]), Some(false));
+        assert_eq!(submitted_marker(&src, &r, &[], &no_verdicts), Some(false));
         let row = submit_picker_row(0, &r, Some(false));
         assert_eq!(row.last().unwrap(), "-");
 
@@ -2057,18 +2065,59 @@ mod tests {
             source: r.source.to_string(),
             submitted_at: chrono::Utc::now(),
             status: "accepted".into(),
+            approved_unattended: None,
+            approved_verdict: None,
+            uploaded_bytes: None,
         };
         assert_eq!(
-            submitted_marker(&src, &r, std::slice::from_ref(&receipt)),
+            submitted_marker(&src, &r, std::slice::from_ref(&receipt), &no_verdicts),
             Some(true)
         );
         let row = submit_picker_row(0, &r, Some(true));
         assert_eq!(row.last().unwrap(), "yes");
 
+        // The versioned pipeline's receipt status: uploaded, no verdict
+        // reported yet.
+        let mut processing = receipt.clone();
+        processing.status = "processing".into();
+        assert_eq!(
+            submitted_marker(&src, &r, std::slice::from_ref(&processing), &no_verdicts),
+            Some(true)
+        );
+
+        // poldsam's review of #1169: Admission can reject a trace inside
+        // the request that returned `processing`. A refreshed read-back of
+        // `rejected` wins over that receipt, so the session is selectable
+        // again; `quarantined` still marks it.
+        let read_back = |status: &str| {
+            std::collections::BTreeMap::from([(processing.submission_id, status.to_string())])
+        };
+        assert_eq!(
+            submitted_marker(
+                &src,
+                &r,
+                std::slice::from_ref(&processing),
+                &read_back("rejected")
+            ),
+            Some(false)
+        );
+        assert_eq!(
+            submitted_marker(
+                &src,
+                &r,
+                std::slice::from_ref(&processing),
+                &read_back("quarantined")
+            ),
+            Some(true)
+        );
+
         // Receipt with a non-terminal status does not mark the session.
         let mut rejected = receipt;
         rejected.status = "rejected".into();
-        assert_eq!(submitted_marker(&src, &r, &[rejected]), Some(false));
+        assert_eq!(
+            submitted_marker(&src, &r, &[rejected], &no_verdicts),
+            Some(false)
+        );
 
         // Load failure renders "?" and stays selectable.
         let row = submit_picker_row(0, &r, None);
@@ -3695,8 +3744,17 @@ fn resolve_project_key(path: &Path) -> Result<String> {
     Ok(resolved.to_string_lossy().to_string())
 }
 
-pub fn daemon_set_project(store: &ConfigStore, path: &Path, mode: &str, json: bool) -> Result<()> {
+pub fn daemon_set_project(
+    store: &ConfigStore,
+    path: &Path,
+    mode: &str,
+    include_backlog: bool,
+    json: bool,
+) -> Result<()> {
     let mode = parse_project_mode(mode)?;
+    if include_backlog && mode != ProjectMode::AutoUpload {
+        anyhow::bail!("--include-backlog applies only to --mode auto");
+    }
     let key = resolve_project_key(path)?;
     // No `label` is sent. The daemon derives it from the key -- it ignores
     // any label a client supplies, because a caller-chosen string reaching
@@ -3709,7 +3767,13 @@ pub fn daemon_set_project(store: &ConfigStore, path: &Path, mode: &str, json: bo
     let resp = daemon_call(
         store,
         "set_project_mode",
-        serde_json::json!({ "project_key": key, "mode": mode }),
+        // Only when asked: arming applies to new sessions by default, and
+        // the backlog waits for the contributor (K5).
+        if include_backlog {
+            serde_json::json!({ "project_key": key, "mode": mode, "include_backlog": true })
+        } else {
+            serde_json::json!({ "project_key": key, "mode": mode })
+        },
     )?;
     // Ask the same daemon that just applied the edit what it now knows, so
     // the label shown is disambiguated against the authoritative known-key
@@ -3757,6 +3821,13 @@ pub fn daemon_set_project(store: &ConfigStore, path: &Path, mode: &str, json: bo
             "{display_label}: {}",
             serde_json::to_string(&mode).unwrap_or_default()
         );
+        if mode == ProjectMode::AutoUpload && !include_backlog {
+            println!(
+                "note: new sessions from this project are sent automatically; \
+                 sessions already on disk wait for you (`daemon pending`). Pass \
+                 --include-backlog to send them too."
+            );
+        }
         if matches_nothing {
             println!(
                 "note: no session the daemon currently knows about comes from this \
@@ -3882,7 +3953,9 @@ async fn refresh_history_cache(store: &ConfigStore) -> Result<()> {
         }
         m
     };
-    let records = crate::daemon::history::join(&receipts, &updates, &labels, Utc::now());
+    // Keep local withdrawals across the rebuild; see `history::join`.
+    let previous = crate::daemon::history::HistoryCache::load(store).unwrap_or_default();
+    let records = crate::daemon::history::join(&receipts, &updates, &labels, &previous, Utc::now());
     crate::daemon::history::HistoryCache::save(store, &records)
 }
 
@@ -4053,6 +4126,7 @@ mod daemon_command_tests {
             std::path::Path::new(crate::daemon::policy::UNKNOWN_PROJECT_KEY),
             "auto",
             false,
+            false,
         )
         .unwrap_err();
         assert!(err.to_string().contains("unknown-project"), "{err}");
@@ -4080,7 +4154,7 @@ mod daemon_command_tests {
         // Arming records the terms in force, so it needs a config.
         store.save_config(&unenrolled_preview_config()).unwrap();
         let project = tempfile::tempdir().unwrap();
-        daemon_set_project(&store, project.path(), "auto", false).unwrap();
+        daemon_set_project(&store, project.path(), "auto", false, false).unwrap();
         let key = std::fs::canonicalize(project.path())
             .unwrap()
             .to_string_lossy()
@@ -4619,6 +4693,9 @@ mod logout_tests {
                     source: "claude-code".to_string(),
                     submitted_at: Utc::now(),
                     status: "accepted".to_string(),
+                    approved_unattended: None,
+                    approved_verdict: None,
+                    uploaded_bytes: None,
                 })
                 .unwrap();
         }

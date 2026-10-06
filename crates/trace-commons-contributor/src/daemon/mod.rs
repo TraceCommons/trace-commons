@@ -22,6 +22,7 @@
 
 pub mod account_admission;
 pub mod account_onboarding;
+pub mod activity_missions;
 pub mod admission_setup;
 pub mod approved_envelope;
 pub mod arming_wording;
@@ -35,6 +36,7 @@ pub(crate) mod cloud_credential_lifecycle;
 mod cloud_credential_lifecycle_tests;
 #[cfg(test)]
 pub(crate) mod cloud_credential_test_support;
+pub mod commons_credit;
 pub mod community;
 pub mod contribution_eligibility;
 pub(crate) mod credential_store;
@@ -45,13 +47,18 @@ pub mod harness;
 pub mod health;
 pub mod history;
 pub mod inference_connection;
+pub mod inference_map;
 pub mod install;
 pub mod ipc;
 pub mod ironwire_pointer;
 pub(crate) mod legacy_migration;
+pub mod mission_catalogue;
+pub mod mission_matching;
 pub mod native_flow;
+mod native_identity;
 pub mod nearai_credential;
 pub mod nearai_onboarding;
+mod network_data;
 pub mod notify;
 #[cfg(feature = "test-credential-store")]
 pub(crate) mod test_credential_store;
@@ -67,6 +74,7 @@ pub mod profile;
 pub mod project_key;
 pub mod public_run;
 pub mod queue;
+pub mod second_look;
 pub mod settings;
 pub mod skill_loop;
 pub mod state;
@@ -77,6 +85,7 @@ pub(crate) mod test_paths;
 pub(crate) mod test_support;
 pub(crate) mod token_capture;
 mod token_cleanup;
+pub mod unsure_spans;
 pub mod uploader;
 pub mod watcher;
 #[cfg(windows)]
@@ -236,6 +245,88 @@ impl EmbeddedDaemon {
     }
 }
 
+/// The environment variable that turns on the K2 (#1173) developer dry run.
+/// Debug builds only: a release build has neither this name nor the code
+/// that reads it, so `macos/scripts/check-dev-dry-run-release.sh` can check
+/// the release dylib for the string.
+#[cfg(debug_assertions)]
+const DEV_DRY_RUN_ENV: &str = "TC_DEV_DRY_RUN";
+
+/// Whether this process runs the K2 (#1173) developer dry run: a daemon
+/// that watches and queues real sessions as usual, in its own state store
+/// (see [`dev_dry_run_store`]), and that refuses every IPC method that is
+/// not local (`ipc::DEV_DRY_RUN_LOCAL_METHODS`) and never drains the queue.
+///
+/// Read by `start_embedded` before `DaemonShared`'s `Arc` is ever cloned,
+/// and by the C ABI's start calls to pick the state store. A later change
+/// to the environment has no effect until the daemon restarts.
+///
+/// Always `false` in a release build, whatever the environment says.
+pub fn dev_dry_run_enabled() -> bool {
+    #[cfg(debug_assertions)]
+    {
+        dev_dry_run_value(std::env::var(DEV_DRY_RUN_ENV).ok().as_deref())
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        false
+    }
+}
+
+/// `1` or `true` in any case. Anything else, or no value, is off.
+#[cfg(debug_assertions)]
+fn dev_dry_run_value(value: Option<&str>) -> bool {
+    value.is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+}
+
+/// The folder a developer dry run keeps its state in, in place of the real
+/// state directory: `~/Library/Caches/TraceCommons/dev-dry-run/` on macOS.
+pub fn dev_dry_run_dir() -> Result<std::path::PathBuf> {
+    Ok(dirs::cache_dir()
+        .context("could not determine a cache directory for this platform")?
+        .join("TraceCommons")
+        .join("dev-dry-run"))
+}
+
+/// The state store to start a daemon against: `real` normally, and under a
+/// developer dry run a separate store in [`dev_dry_run_dir`].
+///
+/// A dry run may read the real store, but never writes it. Its queue,
+/// policy, history and audit log are its own, so nothing a dry run does can
+/// change what the real daemon later sends. Idempotent: given the dry-run
+/// store itself, it returns it unchanged.
+pub fn dev_dry_run_store(real: ConfigStore) -> Result<ConfigStore> {
+    if !dev_dry_run_enabled() {
+        return Ok(real);
+    }
+    isolate_dev_dry_run_store(&real, dev_dry_run_dir()?)
+}
+
+/// Open `dir` as the dry-run store. The first time, seed it with a copy of
+/// the real store's enrolment terms (`contributor.json`) and settings (the
+/// declared session roots among them), so the dry run reads the same
+/// sessions and builds the same envelopes. Nothing else is copied: no
+/// device key, account session, queue, policy or history.
+fn isolate_dev_dry_run_store(real: &ConfigStore, dir: std::path::PathBuf) -> Result<ConfigStore> {
+    if real.dir() == dir.as_path() {
+        return ConfigStore::open(dir);
+    }
+    let dry = ConfigStore::open(dir).context("opening the dev dry-run state directory")?;
+    for name in [
+        crate::config::CONFIG_FILE,
+        crate::config::DAEMON_SETTINGS_FILE,
+    ] {
+        if dry.daemon_path(name).exists() {
+            continue;
+        }
+        if let Ok(bytes) = std::fs::read(real.daemon_path(name)) {
+            dry.write_daemon_file(name, &bytes)
+                .context("seeding the dev dry-run state directory")?;
+        }
+    }
+    Ok(dry)
+}
+
 /// Take the daemon's exclusive lock, build the shared state, and bind and
 /// spawn the socket server -- everything `run` does before it starts the
 /// supervise loop, returned as pieces instead of run to completion.
@@ -257,6 +348,9 @@ impl EmbeddedDaemon {
 /// `try_lock`: that file belongs to the daemon holding it, and this function
 /// must not touch it.
 pub async fn start_embedded(store: ConfigStore) -> Result<EmbeddedDaemon> {
+    // K2 (#1173): a dev dry run never opens the real state directory for
+    // writing -- not even its lock file.
+    let store = dev_dry_run_store(store)?;
     let lock_path = store.daemon_path(DAEMON_LOCK_FILE);
     let lock = std::fs::OpenOptions::new()
         .create(true)
@@ -307,8 +401,17 @@ pub async fn start_embedded(store: ConfigStore) -> Result<EmbeddedDaemon> {
     // a zero-byte `daemon.lock` from a failed start was read as proof the
     // daemon had started, and produced a confident wrong diagnosis.
     let started = async {
-        let shared =
+        let mut shared =
             Arc::new(tokio::task::spawn_blocking(move || ipc::DaemonShared::load(store)).await??);
+        // K2 (#1173): the one place `dev_dry_run` is ever set to `true`.
+        // `Arc::get_mut` succeeds only while this is the sole reference,
+        // which stops being true when `preview_runner` below takes its
+        // first clone, so nothing downstream can change it.
+        if dev_dry_run_enabled() {
+            if let Some(shared_mut) = Arc::get_mut(&mut shared) {
+                shared_mut.dev_dry_run = true;
+            }
+        }
         // Claim this runtime for anything the daemon hosts that outlives one
         // request. This block is `async` and runs on the real daemon runtime
         // in both entry points, which is the whole reason the call belongs
@@ -429,6 +532,9 @@ async fn supervise(shared: Arc<ipc::DaemonShared>, dry_run: bool) -> Result<()> 
 /// The periodic work: watch, expire, and decide about digests, until asked to
 /// stop.
 async fn supervise_passes(shared: &Arc<ipc::DaemonShared>, dry_run: bool) -> Result<()> {
+    // K2 (#1173): a dev dry run is a dry run: no upload, history or
+    // community pass, and no account admission refresh.
+    let dry_run = dry_run || shared.dev_dry_run;
     let poll_interval = {
         let s = shared.settings.lock().expect("settings lock");
         std::time::Duration::from_secs(s.poll_interval_secs.max(1))
@@ -645,6 +751,12 @@ async fn drain_approved(
     if shared.quiesced.load(Ordering::Relaxed) {
         return Ok(());
     }
+    // K2 (#1173): a dev dry run sends nothing, and leaves every entry as it
+    // is. Refusing an entry here would record a final `Refused`, and an
+    // approved session would never upload once the dry run ended.
+    if shared.dev_dry_run {
+        return Ok(());
+    }
 
     // The post-approval hold. An entry approved a moment ago is skipped
     // until its hold elapses, so the undo a client offers after `approve`
@@ -690,18 +802,56 @@ async fn drain_approved(
     // entries are refused; an ask-first project's go back to waiting. A key
     // policy cannot resolve falls back to ask-first, so a lookup miss now
     // asks rather than sends -- the safe direction.
-    let (ignored_ids, returned_ids): (Vec<uuid::Uuid>, Vec<uuid::Uuid>) = {
+    //
+    // A "Never" contribution override holds every send (#1208), the
+    // contributor's own approvals included, so its "Nothing is queued or
+    // sent" is true. Those are left exactly as they are -- `Approved`, pin
+    // and hold intact -- and simply not sent, so clearing the override
+    // releases them as they were. Unattended ones take the `Ignore` arm
+    // below, back to waiting.
+    let (ignored_ids, returned_ids, held_ids): (Vec<uuid::Uuid>, Vec<uuid::Uuid>, Vec<uuid::Uuid>) = {
         let policy = shared.policy.lock().expect("policy lock");
         let mut ignored = Vec::new();
         let mut returned = Vec::new();
+        let held: Vec<uuid::Uuid> = if policy.holds_every_send() {
+            candidates
+                .iter()
+                .filter(|e| !e.approved_unattended)
+                .map(|e| e.entry_id)
+                .collect()
+        } else {
+            Vec::new()
+        };
         for e in candidates.iter().filter(|e| e.approved_unattended) {
             match policy.resolve(&e.project_key) {
+                // A session that must wait for a person although its
+                // project is armed -- on disk at the automatic grant in a
+                // project the grant armed, or on disk when the project was
+                // armed from now (K5) -- waits for the contributor, as it
+                // would in an ask-first folder. The watcher never approves
+                // one of these unattended; this covers an approval made
+                // before the hold applied that was in flight when it began,
+                // and came back `Approved`.
+                policy::ProjectMode::AutoUpload
+                    if policy
+                        .waits_for_a_person_at_send(&e.project_key, &e.path.to_string_lossy()) =>
+                {
+                    returned.push(e.entry_id)
+                }
                 policy::ProjectMode::AutoUpload => {}
+                // Ignored by a contribution override, not by the folder's
+                // own mode: back to waiting rather than refused, so clearing
+                // the override restores it (#1173).
+                policy::ProjectMode::Ignore
+                    if policy.folder_mode(&e.project_key) != policy::ProjectMode::Ignore =>
+                {
+                    returned.push(e.entry_id)
+                }
                 policy::ProjectMode::Ignore => ignored.push(e.entry_id),
                 policy::ProjectMode::NotifyOnly => returned.push(e.entry_id),
             }
         }
-        (ignored, returned)
+        (ignored, returned, held)
     };
     if !ignored_ids.is_empty() || !returned_ids.is_empty() {
         {
@@ -748,7 +898,11 @@ async fn drain_approved(
     }
     let approved: Vec<queue::QueueEntry> = candidates
         .into_iter()
-        .filter(|e| !ignored_ids.contains(&e.entry_id) && !returned_ids.contains(&e.entry_id))
+        .filter(|e| {
+            !ignored_ids.contains(&e.entry_id)
+                && !returned_ids.contains(&e.entry_id)
+                && !held_ids.contains(&e.entry_id)
+        })
         .collect();
     if approved.is_empty() {
         // Re-check enrollment when the queue is empty, so a stale not-logged-in
@@ -855,7 +1009,16 @@ async fn drain_approved(
         // because the upload really is in flight. See
         // `Queue::claim_for_upload`.
         {
+            // Policy before queue, as everywhere. Held across the claim so a
+            // "Never" override set since the snapshot above stops this entry
+            // before it is in flight (#1208); it stays `Approved`, as the
+            // snapshot's hold leaves it.
+            let policy = shared.policy.lock().expect("policy lock");
             let mut q = shared.queue.lock().expect("queue lock");
+            if policy.holds_every_send() {
+                continue;
+            }
+            drop(policy);
             let Some(current) = q.get(entry.entry_id).cloned() else {
                 continue;
             };
@@ -1060,11 +1223,43 @@ async fn drain_approved(
                 reason_label,
                 pin,
                 attested_inference,
+                would_send_bytes,
             } => {
                 // Held with the witness's certified bytes pinned. Nothing
                 // re-approves it: the reason is one of
                 // `REASONS_NEEDING_A_PERSON`.
-                q.hold_with_witness_pin(entry.entry_id, &reason_label, &pin, attested_inference);
+                q.hold_with_witness_pin(
+                    entry.entry_id,
+                    &reason_label,
+                    &pin,
+                    attested_inference,
+                    would_send_bytes,
+                );
+            }
+            uploader::UploadDecision::HeldForSecondLook {
+                reason_label,
+                reasons,
+                pin,
+                would_send_bytes,
+            } => {
+                // The Scrub check (K4 of #1118). Under Automatic the reason
+                // is one of `REASONS_NEEDING_A_PERSON`, so nothing
+                // re-approves it. The envelope the hold was decided on is
+                // pinned with its counts beside the digest
+                // (`QueueEntry::scrub`), like a preview's. Labels only.
+                tracing::info!(
+                    reason = reason_label.as_str(),
+                    second_look = ?reasons,
+                    "held a session approved on the contributor's behalf for a person"
+                );
+                q.hold_with_scrub_pin_at(
+                    entry.entry_id,
+                    &reason_label,
+                    pin.as_ref()
+                        .map(|(digest, counts)| (digest.as_str(), *counts)),
+                    would_send_bytes,
+                    now,
+                );
             }
             uploader::UploadDecision::Failed { reason_label } => {
                 // Same rule on the failure side: `submit_one` can report an
@@ -1078,7 +1273,19 @@ async fn drain_approved(
                 if let Some(mark) = attestation_mark::writeback_for(&reason_label) {
                     q.record_attestation(entry.entry_id, mark.state, mark.reason);
                 }
-                if reason_label == crate::submit::REASON_TRANSIENT_REDACTION {
+                if reason_label == crate::submit::REASON_TRANSIENT_REDACTION
+                    && q.record_transient_redaction_failure(entry.entry_id)
+                        >= MAX_TRANSIENT_REDACTION_FAILURES
+                {
+                    // The budget is spent. Stop re-sending the session to
+                    // the classifier and put it in front of a person, held
+                    // so a standing opt-in does not simply re-approve it.
+                    q.record_attempt(entry.entry_id, None);
+                    q.revoke_approval(
+                        entry.entry_id,
+                        crate::submit::REASON_TRANSIENT_REDACTION_EXHAUSTED,
+                    );
+                } else if reason_label == crate::submit::REASON_TRANSIENT_REDACTION {
                     let attempt = q
                         .get(entry.entry_id)
                         .map(|e| e.attempts.saturating_add(1))
@@ -1228,8 +1435,16 @@ fn witness_capacity_jitter(entry_id: uuid::Uuid, retry_after_secs: u32) -> chron
     chrono::Duration::seconds((entry_id.as_u128() % span) as i64)
 }
 
-/// One minute, doubling per failed attempt and capped at one hour. There is
-/// no per-session attempt limit: an upstream outage must not consume a trace.
+/// How many transient classifier failures in a row an approval survives.
+///
+/// With [`transient_redaction_retry_delay`] that is about nineteen hours of
+/// retrying. After it the approval is revoked and the session is held for a
+/// person ([`crate::submit::REASON_TRANSIENT_REDACTION_EXHAUSTED`]), not
+/// refused: an outage longer than that still does not consume the trace, but
+/// a failure that only looks transient stops being re-sent to the classifier.
+const MAX_TRANSIENT_REDACTION_FAILURES: u32 = 24;
+
+/// One minute, doubling per failed attempt and capped at one hour.
 fn transient_redaction_retry_delay(attempts: u32) -> chrono::Duration {
     let exponent = attempts.saturating_sub(1).min(6);
     chrono::Duration::seconds((60_i64 * (1_i64 << exponent)).min(3_600))
@@ -1302,6 +1517,39 @@ pub async fn drain_approved_for_test(
     now: chrono::DateTime<Utc>,
 ) -> Result<()> {
     drain_approved(shared, now, std::time::Instant::now()).await
+}
+
+/// Can this process reach the Cloud credential store?
+///
+/// The FFI crate cannot reach `cloud_credential_lifecycle` directly -- that
+/// module is `pub(crate)` here -- so this is the public wrapper it calls
+/// through. The probe is the same shape as
+/// [`cloud_credential_lifecycle::CloudCredentialLifecycle::probe`]: a read of
+/// a reference that was never stored, which answers without writing anything.
+///
+/// The two map their errors **differently, on purpose**. `probe` guards a
+/// sign-in, so it treats everything that is not `Unentitled` as go -- a
+/// transient store error must not stop a contributor signing in. This one
+/// gates a release, where the same leniency reports PASS against a store that
+/// is failing for any reason at all. So only `NoEntry` is reachable here: it
+/// means the store answered and nothing was stored, which is exactly the
+/// question. Every other error is 2.
+///
+/// Returns 0 reachable, 1 unentitled, 2 for a backend that could not be
+/// constructed or a read that failed for any other reason.
+pub fn credential_store_self_check() -> i32 {
+    use credential_store::{CredentialError, CredentialReference, CredentialStore};
+
+    let backend = match os_secret_store::OsSecretBackend::new() {
+        Ok(backend) => backend,
+        Err(CredentialError::Unentitled) => return 1,
+        Err(_) => return 2,
+    };
+    match CredentialStore::new(backend).load_bytes(&CredentialReference::allocate()) {
+        Err(CredentialError::Unentitled) => 1,
+        Err(CredentialError::NoEntry) | Ok(_) => 0,
+        Err(_) => 2,
+    }
 }
 
 /// Find the adapter and session reference matching a queue entry's path.
@@ -1455,7 +1703,10 @@ async fn refresh_history(
         }
         m
     };
-    let records = history::join(&receipts, &updates, &labels, now);
+    // The cache being replaced carries local withdrawals that neither the
+    // receipts nor the server's read-back know about yet; `join` keeps them.
+    let previous = run_blocking(|| history::HistoryCache::load(&shared.store).unwrap_or_default());
+    let records = history::join(&receipts, &updates, &labels, &previous, now);
     history::HistoryCache::save(&shared.store, &records)?;
     let mut state = shared.state.lock().expect("state lock");
     state.last_history_poll_at = Some(now);
@@ -1530,14 +1781,21 @@ async fn refresh_community(
 
 /// Age out undecided entries, then decide whether a digest is due.
 fn expire_and_digest(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<Utc>) {
-    let (ttl_days, digest_interval_secs, local_notifications) = {
+    let (ttl_days, digest_interval_secs, digest_schedule, local_notifications) = {
         let s = shared.settings.lock().expect("settings lock");
         (
             s.queue_ttl_days,
             s.digest_interval_secs,
+            s.digest_schedule,
             s.local_notifications,
         )
     };
+    // The contributor's own local timezone, read fresh on every call so a
+    // laptop that travels (or a DST transition) is reflected immediately --
+    // never cached alongside `digest_schedule`, which would go stale exactly
+    // when it matters most. Ignored entirely under `Interval`, which the
+    // generic `Tz` parameter never touches.
+    let local_tz = chrono::Local;
     let blocked = shared.health.lock().expect("health lock").blocks_expiry();
 
     let (queue_changed, pending_count, digest) = {
@@ -1572,20 +1830,29 @@ fn expire_and_digest(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<Utc>
     // file before the clock is even close is work whose result is discarded.
     // `interval_elapsed` is the same expression `digest_due` applies, not a
     // second opinion about it.
-    let contributed = if notify::interval_elapsed(last_digest_at, now, digest_interval_secs) {
+    let contributed = if notify::schedule_elapsed(
+        digest_schedule,
+        last_digest_at,
+        now,
+        digest_interval_secs,
+        &local_tz,
+    ) {
         history::contributed_since(
             &history::HistoryCache::load(&shared.store).unwrap_or_default(),
             last_digest_at,
         )
     } else {
-        // Only reachable when `digest_due` is about to be false anyway: the
-        // interval has not elapsed, so neither half of the digest can fire.
+        // Only reachable when `digest_due_for_schedule` is about to be false
+        // anyway: the schedule's window has not elapsed, so neither half of
+        // the digest can fire.
         history::ContributedSince::default()
     };
-    if notify::digest_due(
+    if notify::digest_due_for_schedule(
+        digest_schedule,
         last_digest_at,
         now,
         digest_interval_secs,
+        &local_tz,
         pending_count,
         contributed.count,
     ) {
@@ -1877,7 +2144,7 @@ mod tests {
                     "{}\n",
                     serde_json::json!({
                         "type": "user",
-                        "message": {"role": "user", "content": "fix the parser please"},
+                        "message": {"role": "user", "content": "fix the parser please, then mail alice.smith@example.org"},
                         "cwd": project_cwd,
                         "timestamp": "2026-08-08T10:00:00Z",
                         "version": "2.0.1",
@@ -2280,6 +2547,242 @@ mod tests {
         assert_eq!(published.event, ipc::EVENT_QUEUE_CHANGED);
     }
 
+    /// #1173: a "Never" override stops an unattended send in a folder whose
+    /// own mode is not Never by putting it back to waiting -- not refusing
+    /// it -- so clearing the override restores it.
+    #[tokio::test]
+    async fn a_never_override_returns_an_unattended_approval_to_waiting() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::config::ConfigStore::open(dir.path().join("state")).unwrap();
+        let shared = Arc::new(ipc::DaemonShared::load(store).unwrap());
+        {
+            let mut q = shared.queue.lock().expect("queue lock");
+            let e = queue::QueueEntry {
+                entry_id: uuid::Uuid::new_v4(),
+                session_hash: "sha256:never-override".to_string(),
+                project_key: "/w/armed".to_string(),
+                ..Default::default()
+            };
+            let id = e.entry_id;
+            q.upsert(e, 100).unwrap();
+            assert!(q.approve_unattended(id, &[], None));
+        }
+        {
+            let mut policy = shared.policy.lock().expect("policy lock");
+            policy
+                .set_mode(
+                    "/w/armed",
+                    policy::ProjectMode::AutoUpload,
+                    at("2026-08-08T12:00:00Z"),
+                )
+                .unwrap();
+            policy
+                .set_contribution_override(
+                    policy::ProjectMode::Ignore,
+                    at("2026-08-08T12:00:00Z"),
+                    None,
+                )
+                .unwrap();
+        }
+
+        drain_approved_for_test(&shared, at("2026-08-08T13:00:00Z"))
+            .await
+            .unwrap();
+
+        let e = shared.queue.lock().expect("queue lock").all()[0].clone();
+        assert_eq!(
+            e.state,
+            queue::QueueState::Pending,
+            "held by the override, not refused by the folder"
+        );
+    }
+
+    /// An entry the contributor approved that `drain_approved` would try to
+    /// send: approved under the config's scopes, past its hold, and for a
+    /// session no source lists -- so a pass that reaches the send marks it
+    /// `session-file-vanished`, which is how these tests see that it did.
+    fn seed_contributor_approval(shared: &ipc::DaemonShared) -> uuid::Uuid {
+        let cfg = crate::commands::unenrolled_preview_config();
+        shared.store.save_config(&cfg).unwrap();
+        let mut q = shared.queue.lock().expect("queue lock");
+        let e = queue::QueueEntry {
+            entry_id: uuid::Uuid::new_v4(),
+            session_hash: "sha256:held-by-never".to_string(),
+            project_key: "/w/approved".to_string(),
+            path: std::path::PathBuf::from("/nowhere/held-by-never.jsonl"),
+            state: queue::QueueState::Approved,
+            approved_scopes: Some(cfg.consent_scopes.clone()),
+            ..Default::default()
+        };
+        let id = e.entry_id;
+        q.upsert(e, 100).unwrap();
+        id
+    }
+
+    /// #1208: while a "Never" override is in force nothing is sent, not even
+    /// what the contributor approved: it is held exactly as it was, and
+    /// clearing the override releases it to the send path.
+    #[tokio::test]
+    async fn a_never_override_holds_contributor_approvals_until_it_clears() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::config::ConfigStore::open(dir.path().join("state")).unwrap();
+        let shared = Arc::new(ipc::DaemonShared::load(store).unwrap());
+        let id = seed_contributor_approval(&shared);
+        shared
+            .policy
+            .lock()
+            .expect("policy lock")
+            .set_contribution_override(
+                policy::ProjectMode::Ignore,
+                at("2026-08-08T12:00:00Z"),
+                None,
+            )
+            .unwrap();
+        let before = shared.queue.lock().expect("queue lock").get(id).cloned();
+
+        drain_approved_for_test(&shared, at("2026-08-08T13:00:00Z"))
+            .await
+            .unwrap();
+
+        let held = shared.queue.lock().expect("queue lock").get(id).cloned();
+        assert_eq!(held, before, "held exactly as it was, not sent");
+
+        shared
+            .policy
+            .lock()
+            .expect("policy lock")
+            .clear_contribution_override();
+        drain_approved_for_test(&shared, at("2026-08-08T13:00:00Z"))
+            .await
+            .unwrap();
+        let released = shared.queue.lock().expect("queue lock").get(id).cloned();
+        assert_eq!(
+            released.map(|e| (e.state, e.reason_label)),
+            Some((
+                queue::QueueState::Failed,
+                Some("session-file-vanished".to_string())
+            )),
+            "released: the pass reached the send"
+        );
+    }
+
+    /// K2 (#1173): a dev dry run leaves an approved entry exactly as it was
+    /// -- still `Approved`, not `Refused`, with no attempt recorded -- so it
+    /// uploads as approved once the daemon runs without the dry run. The
+    /// same entry is marked `session-file-vanished` by an ordinary pass
+    /// (see the test above), so a pass that reached it would show here.
+    #[tokio::test]
+    async fn a_dev_dry_run_leaves_an_approved_entry_approved() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::config::ConfigStore::open(dir.path().join("state")).unwrap();
+        let mut shared = ipc::DaemonShared::load(store).unwrap();
+        shared.dev_dry_run = true;
+        let shared = Arc::new(shared);
+        let id = seed_contributor_approval(&shared);
+        let before = shared.queue.lock().expect("queue lock").get(id).cloned();
+
+        for _ in 0..3 {
+            drain_approved_for_test(&shared, at("2026-08-08T13:00:00Z"))
+                .await
+                .unwrap();
+        }
+
+        let after = shared.queue.lock().expect("queue lock").get(id).cloned();
+        assert_eq!(after, before, "left exactly as it was");
+        assert_eq!(after.map(|e| e.state), Some(queue::QueueState::Approved));
+    }
+
+    /// Every file under `dir`, by relative path, with its bytes.
+    fn snapshot_dir(dir: &std::path::Path) -> std::collections::BTreeMap<String, Vec<u8>> {
+        fn walk(
+            root: &std::path::Path,
+            dir: &std::path::Path,
+            out: &mut std::collections::BTreeMap<String, Vec<u8>>,
+        ) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    walk(root, &path, out);
+                } else {
+                    let rel = path.strip_prefix(root).unwrap().display().to_string();
+                    out.insert(rel, std::fs::read(&path).unwrap());
+                }
+            }
+        }
+        let mut out = std::collections::BTreeMap::new();
+        walk(dir, dir, &mut out);
+        out
+    }
+
+    /// K2 (#1173): a dev dry run runs against its own store. It is seeded
+    /// with the real enrolment terms and settings, and nothing else, and a
+    /// session that approves, dismisses, pauses, changes settings and
+    /// drains leaves every byte of the real store as it was -- including an
+    /// entry the contributor had already approved there.
+    #[tokio::test]
+    async fn a_dev_dry_run_never_writes_the_real_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = crate::config::ConfigStore::open(dir.path().join("real")).unwrap();
+        let real_approved = {
+            let shared = ipc::DaemonShared::load(real.clone()).unwrap();
+            let id = seed_contributor_approval(&shared);
+            shared.queue.lock().unwrap().save(&shared.store).unwrap();
+            shared.state.lock().unwrap().save(&shared.store).unwrap();
+            id
+        };
+        let before = snapshot_dir(real.dir());
+
+        let dry = isolate_dev_dry_run_store(&real, dir.path().join("dry")).unwrap();
+        assert_ne!(dry.dir(), real.dir());
+        assert!(
+            dry.load_config().unwrap().is_some(),
+            "enrolment terms are copied"
+        );
+        for name in [
+            crate::config::DAEMON_QUEUE_FILE,
+            crate::config::DAEMON_STATE_FILE,
+        ] {
+            assert!(!dry.daemon_path(name).exists(), "{name} is not copied");
+        }
+
+        let mut shared = ipc::DaemonShared::load(dry).unwrap();
+        shared.dev_dry_run = true;
+        let shared = Arc::new(shared);
+        let id = seed_contributor_approval(&shared);
+        for (method, params) in [
+            ("approve", serde_json::json!({ "all": true })),
+            ("dismiss", serde_json::json!({ "entry_id": id })),
+            ("pause", serde_json::json!({})),
+            ("resume", serde_json::json!({})),
+            (
+                "set_settings",
+                serde_json::json!({ "approval_hold_secs": 60 }),
+            ),
+        ] {
+            let request = ipc::Request {
+                id: 1,
+                method: method.to_string(),
+                params,
+            };
+            let _ = ipc::handle_request_async(&shared, &request).await;
+        }
+        drain_approved_for_test(&shared, at("2026-08-08T13:00:00Z"))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            snapshot_dir(real.dir()),
+            before,
+            "the real store is untouched"
+        );
+        let real_queue = queue::Queue::load(&real).unwrap();
+        assert_eq!(
+            real_queue.get(real_approved).map(|e| e.state),
+            Some(queue::QueueState::Approved),
+            "the real approval is still an approval"
+        );
+    }
+
     #[tokio::test]
     async fn an_entry_released_from_upload_is_not_sent_after_its_project_is_excluded() {
         // The race reviewed on #997. `retract_unattended_for_project` runs
@@ -2592,6 +3095,60 @@ mod tests {
         assert_eq!(h.uploads.load(Ordering::SeqCst), 1);
     }
 
+    /// The Automatic Scrub check (K4 of #1118), which is the default, through
+    /// a real upload pass. This harness's own session carries an address the
+    /// scrubber removes, so it passes the check (the other tests here rely on
+    /// that). A second armed session the scrubber removes nothing from is,
+    /// with nothing chosen, held for a person with `nothing-matched` and
+    /// nothing is uploaded for it, while the marked one still goes.
+    #[tokio::test]
+    async fn by_default_an_armed_session_where_nothing_matched_is_held() {
+        let h = TransientRetryHarness::new().await;
+        let marked = h.entry().entry_id;
+        assert_eq!(
+            h.shared.settings.lock().unwrap().scrub_check,
+            settings::ScrubCheck::Automatic,
+            "the default is Automatic"
+        );
+        h.add_session("9e9e9e9e-9e9e-9e9e-9e9e-9e9e9e9e9e9e", "tidy the lexer")
+            .await;
+        let unmarked = h
+            .entries()
+            .into_iter()
+            .find(|e| e.entry_id != marked)
+            .expect("the session with nothing in it to remove");
+        assert_eq!(unmarked.state, queue::QueueState::Approved, "armed");
+        assert!(unmarked.approved_unattended);
+
+        h.pass(TransientRetryHarness::now()).await;
+
+        let held = h
+            .entries()
+            .into_iter()
+            .find(|e| e.entry_id == unmarked.entry_id)
+            .unwrap();
+        assert_eq!(held.state, queue::QueueState::Pending, "{held:?}");
+        assert_eq!(
+            held.reason_label.as_deref(),
+            Some(second_look::REASON_SECOND_LOOK_REVIEW_REQUIRED)
+        );
+        assert!(held.held_for_review());
+        assert!(
+            matches!(held.scrub(), second_look::Scrub::Scrubbed(_)),
+            "the held envelope is pinned with its counts: {held:?}"
+        );
+        assert_eq!(
+            held.second_look_reasons(),
+            vec![second_look::REASON_NOTHING_MATCHED]
+        );
+        assert_eq!(
+            h.shared.queue.lock().unwrap().get(marked).unwrap().state,
+            queue::QueueState::Uploaded,
+            "the session with a mark still goes"
+        );
+        assert_eq!(h.uploads.load(Ordering::SeqCst), 1, "only that one");
+    }
+
     /// Z5, end to end through a real witness exchange: a witness at capacity
     /// holds every session that needs it, is asked once rather than once per
     /// session, is not asked again before its `Retry-After`, and the sessions
@@ -2600,8 +3157,11 @@ mod tests {
     #[tokio::test]
     async fn a_saturated_witness_holds_sessions_and_is_asked_again_only_when_due() {
         let h = TransientRetryHarness::with_witness().await;
-        h.add_session("8d8d8d8d-8d8d-8d8d-8d8d-8d8d8d8d8d8d", "tidy the lexer too")
-            .await;
+        h.add_session(
+            "8d8d8d8d-8d8d-8d8d-8d8d-8d8d8d8d8d8d",
+            "tidy the lexer too, then mail alice.smith@example.org",
+        )
+        .await;
         assert_eq!(h.entries().len(), 2);
         assert!(
             h.entries()
@@ -2821,6 +3381,80 @@ mod tests {
                 "attempt {attempts}"
             );
         }
+    }
+
+    /// A failure the classifier reports as transient is not always passing:
+    /// an over-limit window can come back as a 502 every time. Without a cap
+    /// the session stayed approved forever and was re-sent in full to the
+    /// classifier every hour. After the cap it goes back to a person instead,
+    /// held so no standing opt-in re-approves it, and is left alone until
+    /// someone does; their approval starts a fresh budget.
+    #[tokio::test]
+    async fn transient_retries_return_the_session_to_a_person_after_the_cap() {
+        let h = TransientRetryHarness::new().await;
+        let original = h.entry();
+        h.classifier_status.store(500, Ordering::SeqCst);
+
+        // Two real failed passes, and the rest of the run counted directly:
+        // each pass spends the adapter's own in-client retries, and a whole
+        // day of them would cost this test most of a minute.
+        let mut now = TransientRetryHarness::now();
+        for _ in 0..2 {
+            h.pass(now).await;
+            let waiting = h.entry();
+            assert_eq!(waiting.state, queue::QueueState::Approved);
+            assert_eq!(
+                waiting.reason_label.as_deref(),
+                Some(crate::submit::REASON_TRANSIENT_REDACTION)
+            );
+            now = waiting.retry_after.expect("a scheduled retry");
+        }
+        {
+            let mut q = h.shared.queue.lock().unwrap();
+            for _ in 2..MAX_TRANSIENT_REDACTION_FAILURES - 1 {
+                q.record_transient_redaction_failure(original.entry_id);
+            }
+        }
+        h.pass(now).await;
+        let held = h.entry();
+        assert_eq!(held.state, queue::QueueState::Pending, "{held:?}");
+        assert_eq!(
+            held.reason_label.as_deref(),
+            Some(crate::submit::REASON_TRANSIENT_REDACTION_EXHAUSTED)
+        );
+        assert!(held.retry_after.is_none());
+        assert!(held.approved_scopes.is_none(), "the approval is revoked");
+        assert!(
+            held.held_for_review(),
+            "a standing opt-in must not re-approve it on the next poll"
+        );
+        assert_eq!(held.attempts, 3, "three real failed passes");
+        assert_eq!(h.uploads.load(Ordering::SeqCst), 0);
+
+        // Nothing tries it again on its own, however long it waits.
+        h.pass(now + chrono::Duration::days(2)).await;
+        assert_eq!(h.entry().attempts, 3);
+        assert_eq!(h.entry().state, queue::QueueState::Pending);
+
+        // A person approving it again gets a whole budget, not one attempt.
+        {
+            let mut q = h.shared.queue.lock().unwrap();
+            assert!(q.approve(
+                original.entry_id,
+                original.approved_scopes.as_deref().unwrap(),
+                original.approved_inputs.as_deref(),
+                None,
+                None,
+                None,
+            ));
+        }
+        h.pass(now + chrono::Duration::days(2)).await;
+        let retried = h.entry();
+        assert_eq!(retried.state, queue::QueueState::Approved, "{retried:?}");
+        assert_eq!(
+            retried.reason_label.as_deref(),
+            Some(crate::submit::REASON_TRANSIENT_REDACTION)
+        );
     }
 
     #[tokio::test]

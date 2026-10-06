@@ -1,3 +1,4 @@
+pub mod activity_missions;
 pub mod admission;
 pub mod canonical_json;
 pub mod community_handle;
@@ -6,11 +7,13 @@ pub mod inference_connection;
 pub mod insights;
 pub mod insights_cards;
 pub mod insights_pricing;
+pub mod invite_lookup;
 pub mod legacy_invite_link;
 pub mod llm;
 pub mod mission_catalog;
 pub mod mission_draft;
 pub mod mission_evaluation;
+pub mod near_ai_measurements;
 pub mod onboarding;
 pub mod privacy;
 pub mod public_run;

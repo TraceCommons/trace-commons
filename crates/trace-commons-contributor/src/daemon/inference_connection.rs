@@ -135,6 +135,28 @@ pub const ERR_WITNESS_REFUSED: &str = "inference-connection-witness-refused";
 pub const ERR_RECEIPT_REFUSED: &str = "inference-connection-receipt-endpoint-refused";
 pub const ERR_STATE_UNREADABLE: &str = "inference-connection-state-unreadable";
 pub const ERR_STATE_WRITE_FAILED: &str = "inference-connection-state-write-failed";
+/// `select`/`install` were called with no top-level `confirmed: true`.
+///
+/// Before this existed, only the Tauri shell's own command layer required
+/// `confirmed` before it would even build the call's params -- the daemon
+/// itself had no opinion, so a caller that reached either method directly
+/// (another shell, or a future one) got no floor at all. Tauri's own
+/// behaviour does not change: it already refuses locally before the call
+/// ever reaches here, and now also sends `confirmed: true` on the call it
+/// does make, so this is never reached by an already-confirmed request.
+pub const ERR_CONFIRMATION_REQUIRED: &str = "inference-connection-confirmation-required";
+
+/// Whether `req.params` carries a top-level `"confirmed": true`. Checked
+/// once, by [`handle_select`] and [`handle_install`], after each has
+/// confirmed there is a signed-in account to act on -- so a session-less
+/// caller still gets [`super::account_auth`]'s own refusal first, the same
+/// one every other method here gives it.
+fn confirmed(req: &Request) -> bool {
+    req.params
+        .get("confirmed")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+}
 
 /// What this device holds, beside the config it describes.
 #[derive(Default, Serialize, Deserialize)]
@@ -432,6 +454,9 @@ pub(super) async fn handle_select(shared: &DaemonShared, req: &Request) -> Respo
         Ok(pair) => pair,
         Err(response) => return *response,
     };
+    if !confirmed(req) {
+        return Response::err(req.id, ERR_BAD_PARAMS, ERR_CONFIRMATION_REQUIRED);
+    }
     if load_state(shared).is_err() {
         return Response::err(req.id, ERR_UNAVAILABLE, ERR_STATE_UNREADABLE);
     }
@@ -563,6 +588,9 @@ pub(super) async fn handle_install(shared: &DaemonShared, req: &Request) -> Resp
         Ok(pair) => pair,
         Err(response) => return *response,
     };
+    if !confirmed(req) {
+        return Response::err(req.id, ERR_BAD_PARAMS, ERR_CONFIRMATION_REQUIRED);
+    }
     let Ok(state) = load_state(shared) else {
         return Response::err(req.id, ERR_UNAVAILABLE, ERR_STATE_UNREADABLE);
     };
@@ -884,6 +912,7 @@ mod tests {
             "config_digest": test_support::config_digest_with(receipt),
             "disclosure_version": DISCLOSURE_VERSION,
             "idempotency_key": "6f7d3c1e-6b1a-4c5e-9d2f-2a4b8c9e0f11",
+            "confirmed": true,
         })
     }
 
@@ -907,6 +936,7 @@ mod tests {
                 serde_json::json!({
                     "connection_id": id.to_string(),
                     "config_digest": test_support::config_digest_with(receipt.as_deref()),
+                    "confirmed": true,
                 }),
             ),
         )
@@ -1041,8 +1071,11 @@ mod tests {
         assert_eq!(seen.auth, vec![format!("Bearer {SESSION}")]);
         let mut expected = select_params();
         expected["expected_current_version"] = serde_json::Value::Null;
-        // The provider is bound into the digest check, never sent.
+        // The provider is bound into the digest check, never sent. And
+        // `confirmed` is this call's own gate, checked locally and never
+        // part of the wire request to the server.
         expected.as_object_mut().unwrap().remove("provider_id");
+        expected.as_object_mut().unwrap().remove("confirmed");
         assert_eq!(seen.selects, vec![expected]);
         // Selecting installs nothing.
         assert_eq!(serde_json::to_value(config(&s)).unwrap(), before);
@@ -1058,6 +1091,49 @@ mod tests {
         let response = handle_select(&s, &req("inference_connection_select", params)).await;
         assert_eq!(response.error.unwrap().code, ERR_BAD_PARAMS);
         assert!(server.seen.lock().unwrap().selects.is_empty());
+    }
+
+    /// `confirmed` used to be checked only by the Tauri shell's own command
+    /// layer, never forwarded to the daemon -- a raw caller of
+    /// `inference_connection_select`/`_install` had no such floor. Both now
+    /// refuse without it, and never reach the server (nothing is sent,
+    /// nothing is installed) when they do.
+    #[tokio::test]
+    async fn select_and_install_refuse_without_confirmed() {
+        let server = test_support::spawn().await;
+        let s = enrolled(&server.base);
+
+        let mut params = select_params();
+        params.as_object_mut().unwrap().remove("confirmed");
+        let response = handle_select(&s, &req("inference_connection_select", params)).await;
+        assert_eq!(error_message(response), ERR_CONFIRMATION_REQUIRED);
+        assert!(server.seen.lock().unwrap().selects.is_empty());
+
+        // Also an explicit `false`, not only an absent key.
+        let mut params = select_params();
+        params["confirmed"] = serde_json::json!(false);
+        let response = handle_select(&s, &req("inference_connection_select", params)).await;
+        assert_eq!(error_message(response), ERR_CONFIRMATION_REQUIRED);
+        assert!(server.seen.lock().unwrap().selects.is_empty());
+
+        // A real selection exists to install, confirmed this time, so the
+        // unconfirmed install below is refused for its own missing
+        // `confirmed` and not for having nothing pending.
+        select(&s).await.result.expect("selected");
+        let id = server.stub.lock().unwrap().connection_id;
+        let response = handle_install(
+            &s,
+            &req(
+                "inference_connection_install",
+                serde_json::json!({
+                    "connection_id": id.to_string(),
+                    "config_digest": test_support::config_digest(),
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(error_message(response), ERR_CONFIRMATION_REQUIRED);
+        assert!(config(&s).witness.is_none(), "nothing was installed");
     }
 
     #[tokio::test]
@@ -1207,6 +1283,7 @@ mod tests {
                 serde_json::json!({
                     "connection_id": id.to_string(),
                     "config_digest": format!("sha256:{}", "c".repeat(64)),
+                    "confirmed": true,
                 }),
             ),
         )
@@ -1789,6 +1866,7 @@ mod tests {
             serde_json::json!({
                 "connection_id": first.to_string(),
                 "config_digest": test_support::config_digest(),
+                "confirmed": true,
             }),
         );
         let first_install = handle_install(&s, &install_request);

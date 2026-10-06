@@ -55,6 +55,27 @@ pub struct SessionTooLarge {
 /// cannot resolve a home. Joining a conventional suffix to that fallback
 /// produces a relative path; this helper does not claim that such a path is
 /// absent or replace the source-declaration and consent checks.
+/// `read_dir` for `TraceSource::discover`: `Ok(None)` when the directory does
+/// not exist, and an error for every other failure.
+///
+/// A listing that could not be read is not an empty one. Discovery used to
+/// answer `Ok(empty)` for an unreadable root, and a pass that records what is
+/// on disk -- for the automatic grant or an arming from now (K5) -- then
+/// recorded that source as holding nothing, so every session already there
+/// read as new and was approved unattended once the root came back. An error
+/// leaves the source unrecorded for that pass, which holds everything from it:
+/// fail closed. The message is a fixed label and the error kind, never a path.
+pub(crate) fn read_dir_for_discovery(path: &Path) -> anyhow::Result<Option<std::fs::ReadDir>> {
+    match std::fs::read_dir(path) {
+        Ok(entries) => Ok(Some(entries)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(anyhow::anyhow!(
+            "discovery-listing-unreadable ({:?})",
+            e.kind()
+        )),
+    }
+}
+
 pub(crate) fn home_dir() -> PathBuf {
     dirs::home_dir().unwrap_or_default()
 }
@@ -78,6 +99,85 @@ pub const SOURCE_TRAJECTORY: &str = "trajectory";
 pub const SOURCE_GEMINI_CLI: &str = "gemini-cli";
 pub const SOURCE_CLINE: &str = "cline";
 pub const SOURCE_OPENCODE: &str = "opencode";
+
+/// What an imported Antigravity conversation calls itself: `meta.source` on
+/// the staged trajectory file, and `SessionRef::declared_source` once
+/// discovery has read that file (K13).
+///
+/// Deliberately not a `SOURCE_*` constant beside the ones above: those name
+/// adapters registered in [`NATIVE_SOURCES`], and Antigravity has none --
+/// `crate::antigravity` is a one-shot import command, not a `TraceSource`,
+/// and its conversations are staged into and read back by the `trajectory`
+/// adapter (see [`SOURCE_TRAJECTORY`] and `SessionRef::declared_source`'s own
+/// doc). This constant exists only so [`source_default_family`] and this
+/// crate's tests spell the string once rather than repeating the literal.
+pub const DECLARED_SOURCE_ANTIGRAVITY: &str = "antigravity";
+
+/// The protocol family a native source's own tool answers with by default,
+/// before any Private AI redirection changes where a call actually goes.
+///
+/// `None` covers two different things a contributor should not be told
+/// apart from a label: a tool this build does not recognise, and a tool
+/// recognised but known to have no single default -- Cline and OpenCode both
+/// let a person point at more than one provider from the start, so naming
+/// one here would be a guess dressed as a fact.
+///
+/// This is a fixed fact about the released tool's OWN documented default,
+/// checked once against that tool's docs and pinned here -- never a claim
+/// this daemon probed, verified, or confirmed for the copy actually running
+/// on this machine. A contributor who changed their Claude Code
+/// configuration to answer somewhere else is not contradicted by this
+/// table, because the table never claimed to have looked.
+///
+/// `DECLARED_SOURCE_ANTIGRAVITY` is keyed here too (K13), alongside the
+/// adapter names: this function is reached by `declared_source` as well as
+/// by `source` wherever a session's tool is displayed (see
+/// `daemon::watcher::resolve_cwd` and `daemon::ipc::sessions_seen_per_project`),
+/// and Antigravity's own documented default is the same Google family
+/// Gemini CLI's is -- the two tools are still told apart by the distinct
+/// string each one answers to, never merged into one row.
+///
+/// See [`vendor_label`] for the word this turns into, and
+/// [`crate::harness_state::built_in_family`] for the same question asked
+/// about the two tools this daemon can also connect -- kept as a separate
+/// table because its two keys (`"claude"`, `"codex"`) are IronWire's ids,
+/// not these adapter names.
+#[must_use]
+pub fn source_default_family(source: &str) -> Option<&'static str> {
+    match source {
+        SOURCE_CLAUDE_CODE => Some("anthropic"),
+        SOURCE_CODEX => Some("openai"),
+        SOURCE_GEMINI_CLI => Some("google"),
+        DECLARED_SOURCE_ANTIGRAVITY => Some("google"),
+        _ => None,
+    }
+}
+
+/// The display word for a protocol family, e.g. `"Anthropic"` for
+/// `"anthropic"`.
+///
+/// Fixed English, and the ONLY place either surface below spells a vendor's
+/// name: `discovery::describe` reaches it through [`source_default_family`],
+/// and `daemon::harness::handle_list` reaches it through
+/// [`crate::harness_state::built_in_family`], so the two surfaces cannot
+/// drift into two different words for the same vendor.
+#[must_use]
+pub fn vendor_label(family: &str) -> Option<&'static str> {
+    match family {
+        "anthropic" => Some("Anthropic"),
+        "openai" => Some("OpenAI"),
+        "google" => Some("Google"),
+        _ => None,
+    }
+}
+
+/// The "answers at <vendor>" word for a discovered source, or `None` when
+/// the tool has no fixed default -- see [`source_default_family`], which
+/// decides that and is not a claim this daemon verified.
+#[must_use]
+pub fn source_answers_at(source: &str) -> Option<&'static str> {
+    vendor_label(source_default_family(source)?)
+}
 
 #[derive(Debug, Clone)]
 pub struct SessionRef {
@@ -125,6 +225,29 @@ pub struct SessionRef {
     /// entry so a card covering a hundred delegated transcripts can say so
     /// -- that is material to the consent decision, not decoration.
     pub group_member_count: u32,
+}
+
+impl SessionRef {
+    /// Which tool this session reads as: what it declares itself to be when
+    /// discovery knows, and otherwise the adapter that found it.
+    ///
+    /// The one rule every display and per-tool count uses -- the CLI's
+    /// session table, `list_projects.tools` (via the watcher's cwd cache)
+    /// and the queue's `QueueEntry` label -- so an imported Antigravity
+    /// conversation is `antigravity` everywhere, never `trajectory` on one
+    /// surface. Never a substitute for `source` when pairing a ref back to
+    /// an adapter.
+    ///
+    /// For a staged import this is self-declared: `meta.source` in a file
+    /// anyone can drop into the staging directory, bounded by
+    /// `validate_source_name` but not verified. A trajectory claiming
+    /// `claude-code` is counted, and shown as answering at Anthropic, as
+    /// Claude Code. The effect is local display only; nothing here decides
+    /// routing, consent or upload on it.
+    #[must_use]
+    pub fn displayed_source(&self) -> &str {
+        self.declared_source.as_deref().unwrap_or(self.source)
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -916,6 +1039,48 @@ mod tests {
         }
     }
 
+    /// K5: every directory-backed source reports an unreadable root as a
+    /// failed discovery, not as an empty one, and a missing root as empty.
+    /// See `read_dir_for_discovery`.
+    #[test]
+    #[cfg(unix)]
+    fn every_source_fails_discovery_on_an_unreadable_root() {
+        use std::os::unix::fs::PermissionsExt;
+        let makers: Vec<(&str, fn(PathBuf) -> Box<dyn TraceSource>)> = vec![
+            ("cline", |r| Box::new(cline::ClineSource::new(r))),
+            ("gemini-cli", |r| {
+                Box::new(gemini_cli::GeminiCliSource::new(r))
+            }),
+            ("opencode", |r| Box::new(opencode::OpenCodeSource::new(r))),
+            ("codex", |r| Box::new(codex::CodexSource::new(r))),
+        ];
+        for (name, make) in makers {
+            let dir = tempfile::tempdir().unwrap();
+            assert!(
+                make(dir.path().join("absent"))
+                    .discover()
+                    .unwrap()
+                    .is_empty(),
+                "{name}: a missing root is empty"
+            );
+            let root = dir.path().join("root");
+            std::fs::create_dir_all(&root).unwrap();
+            std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o000)).unwrap();
+            let bound = std::fs::read_dir(&root).is_err();
+            let result = make(root.clone()).discover();
+            std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
+            if !bound {
+                eprintln!("permission bits do not bind for this user; probe skipped");
+                return;
+            }
+            assert!(
+                result.is_err(),
+                "{name}: an unreadable root must fail discovery, got {:?}",
+                result.map(|r| r.len())
+            );
+        }
+    }
+
     fn watch(path: &str) -> Option<SourceDeclaration> {
         Some(SourceDeclaration::Watch {
             path: PathBuf::from(path),
@@ -1042,6 +1207,7 @@ mod tests {
                     output_tokens: Some(200),
                     cost_usd: Some(0.02),
                     status: 200,
+                    ..Default::default()
                 },
             ]));
         let wrapped_sources = all_sources(
@@ -1214,6 +1380,27 @@ mod tests {
                 staging_dir: None,
             }
         )));
+    }
+
+    /// K13: Antigravity's declared source answers at its own vendor word,
+    /// distinct from the adapter that happens to store an imported
+    /// conversation.
+    #[test]
+    fn antigravity_answers_at_google_under_its_own_declared_source() {
+        assert_eq!(
+            source_answers_at(DECLARED_SOURCE_ANTIGRAVITY),
+            Some("Google"),
+            "an imported Antigravity conversation must name its own vendor, \
+             not fall through to None"
+        );
+        // Sharing a vendor family with gemini-cli must not collapse the two
+        // into one tool: each is still looked up by its own distinct string.
+        assert_eq!(source_answers_at(SOURCE_GEMINI_CLI), Some("Google"));
+        assert_ne!(
+            DECLARED_SOURCE_ANTIGRAVITY, SOURCE_GEMINI_CLI,
+            "the two tools must remain distinct strings even though they \
+             answer at the same vendor"
+        );
     }
 
     #[test]

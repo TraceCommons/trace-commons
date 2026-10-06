@@ -1,0 +1,34 @@
+{
+  "kept": [
+    {
+      "entry_id": "13911b04-a209-51c5-b8cc-a3305ea0a079",
+      "session_hash": "k2-sample-90",
+      "source": "claude-code",
+      "declared_source": null,
+      "project_id": "proj_9c3104d8d0e56788",
+      "project_label": "web",
+      "project_path": "/Users/sample/src/web",
+      "session_path": null,
+      "size_bytes": 48213,
+      "discovered_at": "2026-09-30T09:12:00Z",
+      "state": "refused",
+      "reason_label": "kept-on-this-mac",
+      "attempts": 0,
+      "retry_after": null,
+      "submission_id": null,
+      "subagent_count": 0,
+      "subagents_dropped": 0,
+      "started_at": null,
+      "ended_at": null,
+      "duration_secs": null,
+      "user_turns": null,
+      "title": null,
+      "would_send_bytes": null,
+      "holds_certificate": false,
+      "attestation": "unknown",
+      "scrub": "not-yet-scrubbed",
+      "second_look": [],
+      "second_look_lines": []
+    }
+  ]
+}

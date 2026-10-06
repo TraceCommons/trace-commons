@@ -130,6 +130,29 @@ pub struct TraceArtifactObjectRef {
     pub ciphertext_sha256: String,
 }
 
+/// Where a service-owned remote object is stored, without its ciphertext
+/// hash: what a caller holds when it recorded the object's key before the
+/// object's content existed (`TraceArtifactStore::serialized_json_object_key`).
+/// `RemoteTraceArtifactProvider::delete_encrypted_artifact_at_key` deletes by
+/// it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TraceArtifactObjectLocation {
+    pub object_store: String,
+    pub tenant_storage_ref: String,
+    pub artifact_kind: TraceArtifactKind,
+    pub object_key: String,
+}
+
+impl TraceArtifactObjectLocation {
+    /// Whether `object_ref` names the object stored at this location.
+    pub fn locates(&self, object_ref: &TraceArtifactObjectRef) -> bool {
+        object_ref.object_store == self.object_store
+            && object_ref.tenant_storage_ref == self.tenant_storage_ref
+            && object_ref.artifact_kind == self.artifact_kind
+            && object_ref.object_key == self.object_key
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TraceArtifactPutReceipt {
     pub object_ref: TraceArtifactObjectRef,
@@ -225,7 +248,55 @@ pub struct PreparedBundleArtifact {
     pub artifact: EncryptedTraceArtifact,
 }
 
+/// A serialized-JSON artifact encrypted but not yet written
+/// (`TraceArtifactStore::prepare_serialized_json`). Its receipt names the
+/// exact object `publish_serialized_json` writes -- the object key and the
+/// ciphertext hash -- so a caller can record both durably before any
+/// content is stored, and delete the object by that record if the caller
+/// fails after the write. Only a store builds one, so the receipt always
+/// matches the artifact it carries. It has no public constructor on
+/// purpose: a store outside this module implements
+/// `prepare_serialized_json` and `publish_serialized_json` by delegating to
+/// a built-in store.
+#[derive(Clone)]
+pub struct PreparedSerializedJsonArtifact {
+    receipt: EncryptedTraceArtifactReceipt,
+    artifact: EncryptedTraceArtifact,
+}
+
+impl PreparedSerializedJsonArtifact {
+    /// The receipt `publish_serialized_json` returns for this artifact.
+    pub fn receipt(&self) -> &EncryptedTraceArtifactReceipt {
+        &self.receipt
+    }
+}
+
 pub trait TraceArtifactStore: Send + Sync {
+    /// Encrypts `serialized_json` for `object_id` without writing it: the
+    /// first half of `put_serialized_json`. A store that cannot split its
+    /// write refuses with `serialized_json_prepare_unavailable` (the
+    /// default), so a caller that must record an object before writing it
+    /// fails closed instead of writing an untracked one.
+    fn prepare_serialized_json(
+        &self,
+        _tenant_storage_ref: &str,
+        _artifact_kind: TraceArtifactKind,
+        _object_id: &str,
+        _serialized_json: &[u8],
+    ) -> anyhow::Result<PreparedSerializedJsonArtifact> {
+        anyhow::bail!("serialized_json_prepare_unavailable")
+    }
+
+    /// Writes a prepared artifact: the second half of `put_serialized_json`.
+    /// Returns the prepared receipt. The default refuses with
+    /// `serialized_json_publish_unavailable`.
+    fn publish_serialized_json(
+        &self,
+        _prepared: &PreparedSerializedJsonArtifact,
+    ) -> anyhow::Result<EncryptedTraceArtifactReceipt> {
+        anyhow::bail!("serialized_json_publish_unavailable")
+    }
+
     /// Binary bundle support is explicit; legacy stores cannot claim it.
     fn supports_bundle_bytes(&self) -> bool {
         false
@@ -327,6 +398,40 @@ pub trait TraceArtifactStore: Send + Sync {
     ) -> anyhow::Result<Option<bool>> {
         Ok(None)
     }
+
+    /// The object key `prepare_serialized_json` gives `object_id`, without
+    /// encrypting anything. A built-in store derives the key from the
+    /// tenant, the kind, the object id and its own configuration, never from
+    /// the content, so a caller can record the key before the content
+    /// exists: a compatibility Score stages its attempt rows before it takes
+    /// its tenant's Score lock (PR 4). The caller still compares the key a
+    /// later `prepare_serialized_json` returns with this one before it
+    /// publishes. The default refuses with
+    /// `serialized_json_object_key_unavailable`, so a store that cannot
+    /// answer fails closed.
+    fn serialized_json_object_key(
+        &self,
+        _tenant_storage_ref: &str,
+        _artifact_kind: TraceArtifactKind,
+        _object_id: &str,
+    ) -> anyhow::Result<String> {
+        anyhow::bail!("serialized_json_object_key_unavailable")
+    }
+
+    /// Deletes the object stored at `object_key`, whatever its ciphertext:
+    /// for a caller that recorded the key before the content and so holds no
+    /// ciphertext hash (PR 4's attempt rows staged before a compatibility
+    /// Score's tenant lock, when the attempt stopped before its commit).
+    /// `Ok(false)` when nothing is stored there. The default refuses with
+    /// `artifact_delete_at_object_key_unavailable`.
+    fn delete_artifact_at_object_key(
+        &self,
+        _expected_tenant_storage_ref: &str,
+        _artifact_kind: TraceArtifactKind,
+        _object_key: &str,
+    ) -> anyhow::Result<bool> {
+        anyhow::bail!("artifact_delete_at_object_key_unavailable")
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -376,6 +481,19 @@ pub trait RemoteTraceArtifactProvider: Send + Sync {
     ) -> anyhow::Result<Option<bool>> {
         Ok(None)
     }
+
+    /// Deletes whatever object is stored at `location`, without comparing
+    /// its ciphertext hash, which the caller does not hold
+    /// (`TraceArtifactStore::delete_artifact_at_object_key`). `Ok(false)`
+    /// when nothing is stored there. The default refuses with
+    /// `remote_trace_artifact_delete_at_key_unavailable`.
+    fn delete_encrypted_artifact_at_key(
+        &self,
+        _location: &TraceArtifactObjectLocation,
+        _deleted_at: DateTime<Utc>,
+    ) -> anyhow::Result<bool> {
+        anyhow::bail!("remote_trace_artifact_delete_at_key_unavailable")
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -415,8 +533,12 @@ impl FileRemoteTraceArtifactProvider {
 
     fn object_path(&self, object_ref: &TraceArtifactObjectRef) -> anyhow::Result<PathBuf> {
         validate_file_remote_object_ref(object_ref)?;
-        let store_dir = self.root.join(&object_ref.object_store);
-        let path = store_dir.join(&object_ref.object_key);
+        self.object_path_at(&object_ref.object_store, &object_ref.object_key)
+    }
+
+    fn object_path_at(&self, object_store: &str, object_key: &str) -> anyhow::Result<PathBuf> {
+        let store_dir = self.root.join(object_store);
+        let path = store_dir.join(object_key);
         anyhow::ensure!(
             path.starts_with(&store_dir),
             "remote trace artifact path escapes object-store directory"
@@ -577,6 +699,36 @@ impl RemoteTraceArtifactProvider for FileRemoteTraceArtifactProvider {
         }
         if self.versioned_deletes {
             let record = self.read_record(object_ref)?;
+            self.write_deleted_version(record, deleted_at)?;
+        }
+        std::fs::remove_file(&path).with_context(|| {
+            format!(
+                "failed to delete remote trace artifact object {}",
+                path.display()
+            )
+        })?;
+        Ok(true)
+    }
+
+    fn delete_encrypted_artifact_at_key(
+        &self,
+        location: &TraceArtifactObjectLocation,
+        deleted_at: DateTime<Utc>,
+    ) -> anyhow::Result<bool> {
+        validate_remote_object_location(location)?;
+        let path = self.object_path_at(&location.object_store, &location.object_key)?;
+        if !path.exists() {
+            return Ok(false);
+        }
+        if self.versioned_deletes {
+            // The record's own object ref carries the hash the caller does
+            // not hold, so it names the archived version as an ordinary
+            // delete would.
+            let record = Self::read_record_at_path(&path)?;
+            anyhow::ensure!(
+                location.locates(&record.object_ref),
+                "remote trace artifact object ref mismatch"
+            );
             self.write_deleted_version(record, deleted_at)?;
         }
         std::fs::remove_file(&path).with_context(|| {
@@ -934,6 +1086,49 @@ impl<P: RemoteTraceArtifactProvider, K: KmsKeyWrapper> TraceArtifactStore
         })
     }
 
+    fn prepare_serialized_json(
+        &self,
+        tenant_storage_ref: &str,
+        artifact_kind: TraceArtifactKind,
+        object_id: &str,
+        serialized_json: &[u8],
+    ) -> anyhow::Result<PreparedSerializedJsonArtifact> {
+        serde_json::from_slice::<serde_json::Value>(serialized_json)
+            .context("failed to parse serialized trace artifact")?;
+        let scope = legacy_trace_artifact_scope(tenant_storage_ref);
+        let prepared =
+            self.prepare_scoped_bytes(&scope, artifact_kind, object_id, serialized_json)?;
+        Ok(PreparedSerializedJsonArtifact {
+            receipt: EncryptedTraceArtifactReceipt {
+                tenant_storage_ref: prepared.object_ref.tenant_storage_ref,
+                artifact_kind: prepared.object_ref.artifact_kind,
+                object_key: prepared.object_ref.object_key,
+                ciphertext_sha256: prepared.object_ref.ciphertext_sha256,
+                encrypted_at: prepared.artifact.receipt.encrypted_at,
+            },
+            artifact: prepared.artifact,
+        })
+    }
+
+    fn publish_serialized_json(
+        &self,
+        prepared: &PreparedSerializedJsonArtifact,
+    ) -> anyhow::Result<EncryptedTraceArtifactReceipt> {
+        let receipt = &prepared.receipt;
+        let scope = legacy_trace_artifact_scope(&receipt.tenant_storage_ref);
+        let object_ref = legacy_remote_object_ref_from_receipt(&self.config, &scope, receipt)?;
+        verify_encrypted_artifact(
+            &prepared.artifact,
+            &scope.tenant_storage_ref,
+            &object_ref.artifact_kind,
+            &object_ref.object_key,
+            &object_ref.ciphertext_sha256,
+        )?;
+        self.provider
+            .put_encrypted_artifact(object_ref, prepared.artifact.clone())?;
+        Ok(receipt.clone())
+    }
+
     fn read_artifact(
         &self,
         expected_tenant_storage_ref: &str,
@@ -1000,6 +1195,45 @@ impl<P: RemoteTraceArtifactProvider, K: KmsKeyWrapper> TraceArtifactStore
         self.provider.encrypted_artifact_present(&object_ref)
     }
 
+    fn serialized_json_object_key(
+        &self,
+        tenant_storage_ref: &str,
+        artifact_kind: TraceArtifactKind,
+        object_id: &str,
+    ) -> anyhow::Result<String> {
+        self.validate_remote_config()?;
+        let scope = legacy_trace_artifact_scope(tenant_storage_ref);
+        scope.validate()?;
+        validate_non_empty_ref("trace artifact object id", object_id)?;
+        let object_key =
+            remote_artifact_object_key(&self.config, &scope, &artifact_kind, object_id);
+        validate_remote_object_key(&object_key)?;
+        validate_remote_object_key_scope(&scope, &object_key)?;
+        Ok(object_key)
+    }
+
+    fn delete_artifact_at_object_key(
+        &self,
+        expected_tenant_storage_ref: &str,
+        artifact_kind: TraceArtifactKind,
+        object_key: &str,
+    ) -> anyhow::Result<bool> {
+        self.validate_remote_config()?;
+        let scope = legacy_trace_artifact_scope(expected_tenant_storage_ref);
+        scope.validate()?;
+        validate_remote_object_key(object_key)?;
+        validate_remote_object_key_scope(&scope, object_key)?;
+        self.provider.delete_encrypted_artifact_at_key(
+            &TraceArtifactObjectLocation {
+                object_store: self.config.object_store.clone(),
+                tenant_storage_ref: scope.tenant_storage_ref.clone(),
+                artifact_kind,
+                object_key: object_key.to_string(),
+            },
+            Utc::now(),
+        )
+    }
+
     fn delete_artifact(
         &self,
         expected_tenant_storage_ref: &str,
@@ -1061,6 +1295,25 @@ impl LocalEncryptedTraceArtifactStore {
         object_id: &str,
         serialized_json: &[u8],
     ) -> anyhow::Result<EncryptedTraceArtifactReceipt> {
+        let prepared = self.prepare_serialized_json(
+            tenant_storage_ref,
+            artifact_kind,
+            object_id,
+            serialized_json,
+        )?;
+        self.publish_serialized_json(&prepared)
+    }
+
+    /// Encrypts `serialized_json` for `object_id` without writing it. The
+    /// artifact path is resolved here too, so a prepared artifact always
+    /// names a key this store can write.
+    pub fn prepare_serialized_json(
+        &self,
+        tenant_storage_ref: &str,
+        artifact_kind: TraceArtifactKind,
+        object_id: &str,
+        serialized_json: &[u8],
+    ) -> anyhow::Result<PreparedSerializedJsonArtifact> {
         serde_json::from_slice::<serde_json::Value>(serialized_json)
             .context("failed to parse serialized trace artifact")?;
         let (ciphertext, salt) = self
@@ -1076,6 +1329,7 @@ impl LocalEncryptedTraceArtifactStore {
             ciphertext_sha256,
             encrypted_at: Utc::now(),
         };
+        self.artifact_path(&receipt.tenant_storage_ref, &receipt.object_key)?;
         let artifact = EncryptedTraceArtifact {
             schema_version: TRACE_ARTIFACT_CIPHERTEXT_SCHEMA_VERSION.to_string(),
             receipt: receipt.clone(),
@@ -1083,11 +1337,22 @@ impl LocalEncryptedTraceArtifactStore {
             ciphertext_base64: base64::engine::general_purpose::STANDARD.encode(ciphertext),
             wrapped_dek: None,
         };
+        Ok(PreparedSerializedJsonArtifact { receipt, artifact })
+    }
+
+    /// Writes an artifact `prepare_serialized_json` prepared.
+    pub fn publish_serialized_json(
+        &self,
+        prepared: &PreparedSerializedJsonArtifact,
+    ) -> anyhow::Result<EncryptedTraceArtifactReceipt> {
         write_json_file(
-            &self.artifact_path(&receipt.tenant_storage_ref, &receipt.object_key)?,
-            &artifact,
+            &self.artifact_path(
+                &prepared.receipt.tenant_storage_ref,
+                &prepared.receipt.object_key,
+            )?,
+            &prepared.artifact,
         )?;
-        Ok(receipt)
+        Ok(prepared.receipt.clone())
     }
 
     pub fn get_json<T: DeserializeOwned>(
@@ -1267,6 +1532,29 @@ impl TraceArtifactStore for LocalEncryptedTraceArtifactStore {
         )
     }
 
+    fn prepare_serialized_json(
+        &self,
+        tenant_storage_ref: &str,
+        artifact_kind: TraceArtifactKind,
+        object_id: &str,
+        serialized_json: &[u8],
+    ) -> anyhow::Result<PreparedSerializedJsonArtifact> {
+        Self::prepare_serialized_json(
+            self,
+            tenant_storage_ref,
+            artifact_kind,
+            object_id,
+            serialized_json,
+        )
+    }
+
+    fn publish_serialized_json(
+        &self,
+        prepared: &PreparedSerializedJsonArtifact,
+    ) -> anyhow::Result<EncryptedTraceArtifactReceipt> {
+        Self::publish_serialized_json(self, prepared)
+    }
+
     fn read_artifact(
         &self,
         expected_tenant_storage_ref: &str,
@@ -1318,6 +1606,32 @@ impl TraceArtifactStore for LocalEncryptedTraceArtifactStore {
             self.artifact_path(expected_tenant_storage_ref, object_key)?
                 .exists(),
         ))
+    }
+
+    fn serialized_json_object_key(
+        &self,
+        tenant_storage_ref: &str,
+        artifact_kind: TraceArtifactKind,
+        object_id: &str,
+    ) -> anyhow::Result<String> {
+        let object_key = artifact_object_key(tenant_storage_ref, &artifact_kind, object_id);
+        self.artifact_path(tenant_storage_ref, &object_key)?;
+        Ok(object_key)
+    }
+
+    fn delete_artifact_at_object_key(
+        &self,
+        expected_tenant_storage_ref: &str,
+        _artifact_kind: TraceArtifactKind,
+        object_key: &str,
+    ) -> anyhow::Result<bool> {
+        let path = self.artifact_path(expected_tenant_storage_ref, object_key)?;
+        if !path.exists() {
+            return Ok(false);
+        }
+        std::fs::remove_file(&path)
+            .with_context(|| format!("failed to delete trace artifact {}", path.display()))?;
+        Ok(true)
     }
 }
 
@@ -1642,19 +1956,8 @@ fn validate_object_hash(value: &str) -> anyhow::Result<()> {
 pub(crate) fn validate_file_remote_object_ref(
     object_ref: &TraceArtifactObjectRef,
 ) -> anyhow::Result<()> {
-    validate_non_empty_ref(
-        "remote trace artifact object store",
+    validate_remote_object_store_and_tenant(
         &object_ref.object_store,
-    )?;
-    anyhow::ensure!(
-        object_ref
-            .object_store
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')),
-        "remote trace artifact object store contains unsupported characters"
-    );
-    validate_non_empty_ref(
-        "remote trace artifact tenant storage ref",
         &object_ref.tenant_storage_ref,
     )?;
     validate_non_empty_ref(
@@ -1667,6 +1970,33 @@ pub(crate) fn validate_file_remote_object_ref(
     );
     validate_remote_object_key(&object_ref.object_key)?;
     validate_object_hash(&object_ref.ciphertext_sha256)
+}
+
+/// `validate_file_remote_object_ref` for a `TraceArtifactObjectLocation`:
+/// the same checks, but no ciphertext hash (a location has none), and no
+/// provider kind or submission storage ref (a location names neither).
+pub(crate) fn validate_remote_object_location(
+    location: &TraceArtifactObjectLocation,
+) -> anyhow::Result<()> {
+    validate_remote_object_store_and_tenant(&location.object_store, &location.tenant_storage_ref)?;
+    validate_remote_object_key(&location.object_key)
+}
+
+fn validate_remote_object_store_and_tenant(
+    object_store: &str,
+    tenant_storage_ref: &str,
+) -> anyhow::Result<()> {
+    validate_non_empty_ref("remote trace artifact object store", object_store)?;
+    anyhow::ensure!(
+        object_store
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')),
+        "remote trace artifact object store contains unsupported characters"
+    );
+    validate_non_empty_ref(
+        "remote trace artifact tenant storage ref",
+        tenant_storage_ref,
+    )
 }
 
 fn validate_object_key(object_key: &str) -> anyhow::Result<()> {
@@ -1936,6 +2266,19 @@ impl RemoteTraceArtifactProvider for InMemoryRemoteTraceArtifactProvider {
             .map_err(|_| anyhow::anyhow!("remote trace artifact provider lock poisoned"))?;
         Ok(objects.remove(&object_ref.object_key).is_some())
     }
+
+    fn delete_encrypted_artifact_at_key(
+        &self,
+        location: &TraceArtifactObjectLocation,
+        _deleted_at: DateTime<Utc>,
+    ) -> anyhow::Result<bool> {
+        validate_remote_object_location(location)?;
+        let mut objects = self
+            .objects
+            .write()
+            .map_err(|_| anyhow::anyhow!("remote trace artifact provider lock poisoned"))?;
+        Ok(objects.remove(&location.object_key).is_some())
+    }
 }
 
 #[cfg(test)]
@@ -2064,6 +2407,46 @@ mod tests {
                 .delete_artifact("tenant:sha256:trait", &receipt)
                 .expect("artifact deletes through trait")
         );
+
+        // Prepare names the object and its ciphertext before anything is
+        // stored; publish writes exactly that object.
+        let prepared = store
+            .prepare_serialized_json(
+                "tenant:sha256:trait",
+                TraceArtifactKind::ContributionEnvelope,
+                "trait-contract-prepared",
+                &serialized_payload,
+            )
+            .expect("artifact prepares through trait");
+        assert!(
+            store
+                .read_artifact("tenant:sha256:trait", prepared.receipt())
+                .is_err(),
+            "a prepared artifact is not stored"
+        );
+        assert!(
+            !store
+                .delete_artifact("tenant:sha256:trait", prepared.receipt())
+                .expect("deleting an unwritten artifact succeeds")
+        );
+        let published = store
+            .publish_serialized_json(&prepared)
+            .expect("artifact publishes through trait");
+        assert!(published.matches_identity(prepared.receipt()));
+        let prepared_round_trip: serde_json::Value = store
+            .read_json_by_object_key(
+                "tenant:sha256:trait",
+                TraceArtifactKind::ContributionEnvelope,
+                &prepared.receipt().object_key,
+                &prepared.receipt().ciphertext_sha256,
+            )
+            .expect("published artifact reads by the prepared key and hash");
+        assert_eq!(prepared_round_trip, payload);
+        assert!(
+            store
+                .delete_artifact("tenant:sha256:trait", prepared.receipt())
+                .expect("published artifact deletes by the prepared receipt")
+        );
     }
 
     #[test]
@@ -2171,6 +2554,201 @@ mod tests {
             TraceArtifactStore::read_json(&store, "tenant:sha256:alpha", &drifted)
                 .expect("remote read tolerates encrypted_at drift");
         assert_eq!(round_trip, payload);
+    }
+
+    /// A store that implements only the required methods.
+    struct UnsplitStore;
+
+    impl TraceArtifactStore for UnsplitStore {
+        fn put_serialized_json(
+            &self,
+            _tenant_storage_ref: &str,
+            _artifact_kind: TraceArtifactKind,
+            _object_id: &str,
+            _serialized_json: &[u8],
+        ) -> anyhow::Result<EncryptedTraceArtifactReceipt> {
+            anyhow::bail!("unused")
+        }
+
+        fn read_artifact(
+            &self,
+            _expected_tenant_storage_ref: &str,
+            _receipt: &EncryptedTraceArtifactReceipt,
+        ) -> anyhow::Result<EncryptedTraceArtifact> {
+            anyhow::bail!("unused")
+        }
+
+        fn read_json(
+            &self,
+            _expected_tenant_storage_ref: &str,
+            _receipt: &EncryptedTraceArtifactReceipt,
+        ) -> anyhow::Result<serde_json::Value> {
+            anyhow::bail!("unused")
+        }
+
+        fn read_json_by_object_key(
+            &self,
+            _expected_tenant_storage_ref: &str,
+            _expected_artifact_kind: TraceArtifactKind,
+            _object_key: &str,
+            _expected_ciphertext_sha256: &str,
+        ) -> anyhow::Result<serde_json::Value> {
+            anyhow::bail!("unused")
+        }
+
+        fn delete_artifact(
+            &self,
+            _expected_tenant_storage_ref: &str,
+            _receipt: &EncryptedTraceArtifactReceipt,
+        ) -> anyhow::Result<bool> {
+            anyhow::bail!("unused")
+        }
+    }
+
+    /// A store that cannot split its write refuses both halves with a label.
+    #[test]
+    fn an_unsplit_store_refuses_prepare_and_publish_with_labels() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let prepared = test_store(&temp)
+            .prepare_serialized_json(
+                "tenant:sha256:trait",
+                TraceArtifactKind::ContributionEnvelope,
+                "unsplit",
+                b"{}",
+            )
+            .expect("the local store prepares");
+        let store = UnsplitStore;
+        let prepare = store
+            .prepare_serialized_json(
+                "tenant:sha256:trait",
+                TraceArtifactKind::ContributionEnvelope,
+                "unsplit",
+                b"{}",
+            )
+            .err()
+            .expect("prepare refuses");
+        assert_eq!(prepare.to_string(), "serialized_json_prepare_unavailable");
+        let publish = store
+            .publish_serialized_json(&prepared)
+            .expect_err("publish refuses");
+        assert_eq!(publish.to_string(), "serialized_json_publish_unavailable");
+    }
+
+    /// PR 4, rebase 10 option D: a store that cannot derive a key ahead of
+    /// the content, or delete at a key alone, refuses both with labels, so a
+    /// caller that needs them fails closed.
+    #[test]
+    fn an_unsplit_store_refuses_key_derivation_and_delete_at_key_with_labels() {
+        let store = UnsplitStore;
+        let key = store
+            .serialized_json_object_key(
+                "tenant:sha256:trait",
+                TraceArtifactKind::VectorPayload,
+                "unsplit",
+            )
+            .expect_err("key derivation refuses");
+        assert_eq!(key.to_string(), "serialized_json_object_key_unavailable");
+        let delete = store
+            .delete_artifact_at_object_key(
+                "tenant:sha256:trait",
+                TraceArtifactKind::VectorPayload,
+                "unsplit",
+            )
+            .expect_err("delete at key refuses");
+        assert_eq!(
+            delete.to_string(),
+            "artifact_delete_at_object_key_unavailable"
+        );
+    }
+
+    /// Option D: the key a store derives for an object id before any
+    /// content exists is the key `prepare_serialized_json` then gives that
+    /// object id, whatever the content; and `delete_artifact_at_object_key`
+    /// deletes the published object at that key with no ciphertext hash,
+    /// answering `false` once nothing is stored there. Run for the local
+    /// store, the service-owned store over the in-memory provider, and over
+    /// the filesystem provider with and without versioned deletes (where the
+    /// archived version still restores by its receipt).
+    #[test]
+    fn a_store_derives_the_prepared_key_ahead_of_the_content_and_deletes_at_it() {
+        fn check(store: &dyn TraceArtifactStore, restorable: bool) {
+            let tenant = "tenant:sha256:option-d";
+            let kind = TraceArtifactKind::VectorPayload;
+            let object_id = "pipeline-index-command-run-lease";
+            let key = store
+                .serialized_json_object_key(tenant, kind.clone(), object_id)
+                .expect("the key is derived ahead of the content");
+            for content in [&b"{}"[..], br#"{"different":"content"}"#] {
+                let prepared = store
+                    .prepare_serialized_json(tenant, kind.clone(), object_id, content)
+                    .expect("prepare");
+                assert_eq!(prepared.receipt().object_key, key, "the prepared key");
+            }
+            assert!(
+                !store
+                    .delete_artifact_at_object_key(tenant, kind.clone(), &key)
+                    .expect("delete at an empty key"),
+                "nothing is stored there yet"
+            );
+            let prepared = store
+                .prepare_serialized_json(tenant, kind.clone(), object_id, br#"{"a":1}"#)
+                .expect("prepare");
+            let receipt = store.publish_serialized_json(&prepared).expect("publish");
+            assert!(
+                store
+                    .delete_artifact_at_object_key("tenant:sha256:other", kind.clone(), &key)
+                    .map(|deleted| !deleted)
+                    .unwrap_or(true),
+                "another tenant's delete never reaches the object"
+            );
+            assert!(store.read_json(tenant, &receipt).is_ok(), "still stored");
+            assert!(
+                store
+                    .delete_artifact_at_object_key(tenant, kind.clone(), &key)
+                    .expect("delete at the key"),
+                "the published object is deleted at its key"
+            );
+            assert!(
+                store.read_json(tenant, &receipt).is_err(),
+                "the object is gone"
+            );
+            assert!(
+                !store
+                    .delete_artifact_at_object_key(tenant, kind.clone(), &key)
+                    .expect("a second delete"),
+                "nothing is left at the key"
+            );
+            if restorable {
+                assert!(
+                    store
+                        .restore_deleted_artifact(tenant, &receipt)
+                        .expect("restore"),
+                    "a versioned delete at a key archives the version"
+                );
+                assert_eq!(store.read_json(tenant, &receipt).expect("restored")["a"], 1);
+            }
+        }
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        check(&test_store(&temp), false);
+        check(&test_remote_store(), false);
+        for versioned in [false, true] {
+            let temp = tempfile::tempdir().expect("temp dir");
+            let key = crate::secrets::keychain::generate_master_key_hex();
+            let provider = if versioned {
+                FileRemoteTraceArtifactProvider::versioned(temp.path())
+            } else {
+                FileRemoteTraceArtifactProvider::new(temp.path())
+            };
+            let store = ServiceOwnedTraceArtifactStore::new(
+                TraceArtifactProviderConfig::service_owned_remote("trace-commons-prod")
+                    .expect("remote provider config"),
+                SecretsCrypto::new(SecretString::from(key.clone())).expect("test crypto"),
+                test_kek(&key),
+                provider,
+            );
+            check(&store, versioned);
+        }
     }
 
     #[test]

@@ -41,6 +41,50 @@ pub struct CwdCacheEntry {
     pub size_bytes: u64,
     pub modified_at: DateTime<Utc>,
     pub cwd: Option<String>,
+    /// The project key `cwd` resolves to, recorded when the entry is written
+    /// so that answering "sessions per project" never canonicalizes a path.
+    /// `None` on an entry written before this existed; it is filled in the
+    /// first time it is needed.
+    #[serde(default)]
+    pub project_key: Option<String>,
+    /// Which tool this session reads as having come from (K11), recorded
+    /// when the entry is written: `SessionRef::declared_source` when the
+    /// source that discovered it named one (an imported Antigravity
+    /// conversation, say), otherwise the adapter's own name -- that is,
+    /// `SessionRef::displayed_source`, the same preference the CLI's session
+    /// table and the GTK shell's `agent_label` use for a contributor-facing
+    /// name. For a staged import the declared name is self-declared and
+    /// unverified; see that method's doc.
+    ///
+    /// `#[serde(default)]` so a state file written before this field
+    /// existed still loads, and `None` is never backfilled retroactively:
+    /// unlike `project_key`, which is re-derivable from `cwd`, the tool that
+    /// discovered a session is not recoverable from where it ran. An entry
+    /// whose size and mtime have not changed since before this field existed
+    /// keeps reporting `None` until the file changes again and the cache
+    /// entry is rewritten.
+    #[serde(default)]
+    pub tool: Option<String>,
+    /// Which adapter actually discovered this session (K16, #1227 review):
+    /// `SessionRef::source`, never `declared_source` or `displayed_source`.
+    /// Recorded alongside `tool` when the entry is written, from the same
+    /// `SessionRef`.
+    ///
+    /// `tool` above is the self-declared, contributor-facing name --
+    /// unverified for a staged import, by that method's own doc -- and must
+    /// stay that way for display. This field is the thing a consent
+    /// decision is allowed to gate on: the adapter that actually read the
+    /// bytes, which a staged file cannot spoof into claiming a different
+    /// tool is switched on.
+    ///
+    /// `#[serde(default)]` so a state file written before this field
+    /// existed still loads, and `None` is never backfilled retroactively,
+    /// same as `tool`. `daemon::mission_matching::readable_sessions` reads
+    /// this field, not `tool`, to decide whether a session may be read, and
+    /// treats `None` as unreadable -- fails closed, rather than trusting
+    /// the self-declared name while the real adapter is unknown.
+    #[serde(default)]
+    pub adapter: Option<String>,
 }
 
 /// What `save` last actually wrote, and where: the store directory it was
@@ -459,5 +503,50 @@ mod tests {
     fn state_defaults_when_the_file_is_absent() {
         let (_d, store) = temp_store();
         assert_eq!(DaemonState::load(&store).unwrap(), DaemonState::new());
+    }
+
+    /// K11: a `cwd_cache` entry written before `tool` existed still loads,
+    /// and reads as `None` rather than refusing to parse.
+    ///
+    /// Hand-written JSON rather than round-tripped through `save`, because a
+    /// round trip through the current struct would always include the field
+    /// and could never prove the old shape still decodes.
+    #[test]
+    fn a_cwd_cache_entry_written_before_tool_existed_still_loads() {
+        let (_d, store) = temp_store();
+        let body = serde_json::json!({
+            "schema_version": DAEMON_STATE_SCHEMA,
+            "cwd_cache": {
+                "/tmp/old-session.jsonl": {
+                    "size_bytes": 10,
+                    "modified_at": "2026-08-08T10:00:00Z",
+                    "cwd": "/Users/testuser/code/proj",
+                    "project_key": "/Users/testuser/code/proj"
+                }
+            },
+            "prior_uploads": {},
+            "last_observation": {},
+            "last_digest_at": null,
+            "day_bucket": null,
+            "uploads_today": 0,
+            "bytes_today": 0
+        });
+        std::fs::write(
+            store.daemon_path(DAEMON_STATE_FILE),
+            serde_json::to_vec(&body).unwrap(),
+        )
+        .unwrap();
+
+        let loaded = DaemonState::load(&store).unwrap();
+        let entry = loaded.cwd_cache.get("/tmp/old-session.jsonl").unwrap();
+        assert_eq!(
+            entry.tool, None,
+            "an entry with no `tool` key must not refuse to parse"
+        );
+        assert_eq!(
+            entry.project_key.as_deref(),
+            Some("/Users/testuser/code/proj"),
+            "the field that did exist must still decode"
+        );
     }
 }

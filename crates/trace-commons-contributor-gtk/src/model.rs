@@ -25,6 +25,10 @@ pub struct Status {
     pub paused: bool,
     #[serde(default)]
     pub queue_depth: u64,
+    /// The daemon's unresolved decision count. Missing on older daemons;
+    /// queue occupancy and pending rows are not substitutes.
+    #[serde(default)]
+    pub decisions_owed: Option<u64>,
     #[serde(default)]
     pub next_digest_at: Option<String>,
     #[serde(default)]
@@ -83,7 +87,7 @@ pub struct ArmingRewordingCard {
     pub id: Option<u64>,
     /// The core's words.
     pub notice: trace_commons_contributor::consent_copy::ArmingRewordedNoticeCopy,
-    /// The project "Ask me first" switches, present only when the core
+    /// The project "Ask me" switches, present only when the core
     /// offered the button.
     pub ask_first_project_id: Option<String>,
 }

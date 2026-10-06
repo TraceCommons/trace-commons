@@ -720,6 +720,7 @@ impl App {
                 // than at window construction, where neither is known yet.
                 onboarding::present_if_needed(app, status.logged_in, status.tenant_id.as_deref());
                 *app.status.borrow_mut() = Some(status);
+                queue::render_badge(app);
             }
         });
         // Asked alongside the queue, not with `list_projects`, because this
@@ -1087,7 +1088,7 @@ impl App {
         label
     }
 
-    /// "Ask me first": Settings' call, unchanged -- `set_project_mode` with
+    /// "Ask me": Settings' call, unchanged -- `set_project_mode` with
     /// this project's id and `notify_only`. It also answers a rewording
     /// notice. A refusal changes nothing; the core's refusal line says so.
     fn ask_first_button(
@@ -1421,8 +1422,8 @@ impl App {
 
     /// Put the number of decisions owed on the switcher's Queue item.
     ///
-    /// Called by `queue::render` rather than computed here, so there is
-    /// exactly one place that decides which entries count as waiting.
+    /// The count comes from daemon status, independently of the pending
+    /// rows whose preview flags determine the shield.
     /// The sidebar's queue badge: the number, and a shield glyph beside it.
     ///
     /// The glyph is ADDED to the count, not substituted for it. At 149
@@ -1430,18 +1431,22 @@ impl App {
     /// icon meaning "there is a queue" says strictly less. What the glyph
     /// adds is the one thing the number cannot carry: whether anything in
     /// there wants looking at. See [`crate::shield`].
-    pub fn set_queue_count(self: &Rc<Self>, waiting: usize, shield: crate::shield::Shield) {
-        let label = match shield {
-            // Nothing waiting: the badge is hidden anyway, so the glyph
-            // would be a decoration on an invisible widget.
-            crate::shield::Shield::Clear => waiting.to_string(),
-            crate::shield::Shield::Waiting => format!("{waiting}"),
-            crate::shield::Shield::Attention => {
-                format!("{waiting} {}", style::Tone::Attention.glyph())
-            }
-        };
+    pub fn set_queue_count(
+        self: &Rc<Self>,
+        decisions_owed: Option<u64>,
+        shield: crate::shield::Shield,
+    ) {
+        let mut label = crate::shield::decision_count_label(decisions_owed);
+        if !label.is_empty() && shield == crate::shield::Shield::Attention {
+            label.push_str(&format!(" {}", style::Tone::Attention.glyph()));
+        }
         self.queue_badge.set_label(&label);
-        self.queue_badge.set_visible(waiting > 0);
+        self.queue_badge.set_visible(!label.is_empty());
+        self.queue_badge.set_tooltip_text(
+            decisions_owed
+                .is_none()
+                .then_some("Decision count unavailable."),
+        );
         // A colour is never the only carrier: the glyph above is what
         // survives greyscale, and this is what makes it findable.
         if shield == crate::shield::Shield::Attention {

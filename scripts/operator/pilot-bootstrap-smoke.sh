@@ -112,19 +112,21 @@ python3 "$SCRIPT_DIR/pilot-bootstrap-mock-server.py" \
   >"$MOCK_LOG" 2>&1 &
 MOCK_PID=$!
 
-# Wait up to 5s for the server to accept connections.
-for i in 1 2 3 4 5 6 7 8 9 10; do
-  if curl -sS --max-time 1 "http://$HOST:$PORT/__smoke/stats" >/dev/null 2>&1; then
-    break
-  fi
+# Wait until the server answers, or its process exits. The bound only turns a
+# hang into a failure: a fixed ten tries failed a loaded CI runner
+# (mock_server_never_ready) and left no log behind to say why.
+MOCK_READY_TIMEOUT_SECONDS="${SMOKE_MOCK_READY_TIMEOUT_SECONDS:-30}"
+mock_ready_deadline=$((SECONDS + MOCK_READY_TIMEOUT_SECONDS))
+until curl -sS --max-time 1 "http://$HOST:$PORT/__smoke/stats" >/dev/null 2>&1; do
   if ! kill -0 "$MOCK_PID" 2>/dev/null; then
     cat "$MOCK_LOG" >&2
     bail "mock_server_exited_early"
   fi
-  sleep 0.5
-  if [ "$i" = "10" ]; then
+  if [ "$SECONDS" -ge "$mock_ready_deadline" ]; then
+    cat "$MOCK_LOG" >&2
     bail "mock_server_never_ready"
   fi
+  sleep 0.5
 done
 
 run_binary() {

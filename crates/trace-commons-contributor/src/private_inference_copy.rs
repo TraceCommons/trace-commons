@@ -383,6 +383,57 @@ pub fn state_tone(label: &str) -> PrivateInferenceTone {
     }
 }
 
+/// Every runtime state label a daemon reports in
+/// `private_inference_state.state`, in the order a shell lists them.
+///
+/// Each one has its own sentence in [`state_line`]; the empty label
+/// (unreported) and a label this build does not know are not in the list,
+/// and are answered by [`STATE_UNREPORTED`] and [`STATE_UNKNOWN`].
+pub const STATE_LABELS: [&str; 10] = [
+    LABEL_OFF,
+    LABEL_STOPPING,
+    LABEL_RUNNING,
+    LABEL_RUNNING_NO_BACKENDS,
+    LABEL_RUNNING_ANSWERED_ELSEWHERE,
+    LABEL_RUNNING_DESTINATION_UNKNOWN,
+    LABEL_RUNNING_ELSEWHERE,
+    LABEL_PORT_IN_USE,
+    LABEL_START_FAILED,
+    LABEL_CRASHED,
+];
+
+/// One state label's sentence, and whether an indicator may paint that
+/// state as working: [`state_line`] and [`state_tone`]'s
+/// [`PrivateInferenceTone::reads_as_working`], carried together so a shell
+/// that renders a table looks the label up and never compares sentences.
+#[derive(Clone, Copy, Debug, serde::Serialize, PartialEq, Eq)]
+pub struct StateCopy {
+    pub line: &'static str,
+    pub working: bool,
+}
+
+/// [`StateCopy`] for every label in [`STATE_LABELS`], keyed by label.
+///
+/// A shell that holds this table answers a label it does not find with
+/// [`STATE_UNKNOWN`], not working, and an empty one with
+/// [`STATE_UNREPORTED`], not working -- what [`state_line`] and
+/// [`state_tone`] answer for both.
+#[must_use]
+pub fn state_copies() -> std::collections::BTreeMap<&'static str, StateCopy> {
+    STATE_LABELS
+        .into_iter()
+        .map(|label| {
+            (
+                label,
+                StateCopy {
+                    line: state_line(label),
+                    working: state_tone(label).reads_as_working(),
+                },
+            )
+        })
+        .collect()
+}
+
 /// Whether a shell should put the offer in front of the contributor.
 ///
 /// Two inputs and one rule, crossing the ABI for the reason the tone table
@@ -569,6 +620,8 @@ pub struct PrivateInferenceCopy {
     pub credential_cancel: &'static str,
     pub credential_forget: &'static str,
     pub credential_forget_explains: &'static str,
+    pub credential_migrate: &'static str,
+    pub credential_migrate_explains: &'static str,
     pub credential_absent: &'static str,
     pub credential_obtaining: &'static str,
     pub credential_failed: &'static str,
@@ -1152,6 +1205,47 @@ pub const CREDENTIAL_FORGET_EXPLAINS: &str = "Forgetting removes the inference k
      computer. It does not revoke them at Private AI. Remove the key in your \
      Private AI account to stop it working elsewhere.";
 
+/// The button behind `migration_available`: copy the sign-in an earlier
+/// build kept in the login keychain into the store this build uses.
+pub const CREDENTIAL_MIGRATE: &str = "Move my sign-in";
+
+/// What moving does, beside the button, and the one prompt it can cause.
+///
+/// **Names the password prompt before it happens.** The move is the one
+/// moment the app reads the login keychain, and macOS may ask for the login
+/// password to allow it. A dialog nobody warned about is the interruption
+/// this whole change exists to remove; one the contributor was told about
+/// and asked for is not.
+///
+/// Says the old copy stays, because it does: the move copies, and the
+/// login-keychain entry is only removed when a later sign-in or Forget
+/// supersedes it.
+pub const CREDENTIAL_MIGRATE_EXPLAINS: &str = "Moving copies your saved key and Private AI sign-in from the login \
+     keychain into the store this version of the app uses, so later updates \
+     stop asking for your password. macOS may ask for your login password \
+     once to allow it. The old copy stays in the login keychain until you \
+     next sign in or forget this key.";
+
+/// `migration_available`.
+///
+/// **Not "could not be read, unlock and restart".** That was the sentence an
+/// upgraded contributor saw before this state existed, and it was false:
+/// the store opened fine, the sign-in simply lives in the login keychain an
+/// earlier build used, and no number of restarts moves it.
+pub const CREDENTIAL_MIGRATION_AVAILABLE: &str = "Your Private AI sign-in from an earlier version of the app is still in \
+     your login keychain. Move it to keep using it without signing in again.";
+
+/// `storage_unentitled`.
+///
+/// **Permanent for this build, and says so.** The binary is not signed with
+/// the keychain access group, so no unlock, retry or restart reaches the
+/// store; telling a contributor to try again would be a lie they could act
+/// on. A locally built app lands here, and so does any build signed without
+/// the entitlement.
+pub const CREDENTIAL_STORAGE_UNENTITLED: &str = "This copy of the app is not signed to use the system credential store \
+     where your Private AI sign-in is kept, so it cannot read or save one. \
+     Restarting will not change that. Use a released build of the app.";
+
 /// `absent`.
 pub const CREDENTIAL_ABSENT: &str = "NEAR AI isn’t connected to this app.";
 
@@ -1231,6 +1325,11 @@ pub enum CredentialAction {
     /// Remove the stored key from this machine, with
     /// [`CREDENTIAL_FORGET_EXPLAINS`] beside it.
     Forget,
+    /// Copy the sign-in an earlier build kept in the login keychain into the
+    /// store this build uses (`near_ai_credential_migrate`), with
+    /// [`CREDENTIAL_MIGRATE_EXPLAINS`] beside it. macOS only in practice:
+    /// no other platform produces `migration_available`.
+    Migrate,
 }
 
 /// The sentence for one `near_ai_credential_status` state label.
@@ -1247,6 +1346,8 @@ pub fn credential_state_line(label: &str) -> &'static str {
         LABEL_CREDENTIAL_CLEANUP_REQUIRED => {
             "Private AI sign-in is disabled here, but its saved credentials could not be deleted. Unlock your system credential store, then choose Forget again."
         }
+        LABEL_CREDENTIAL_STORAGE_UNENTITLED => CREDENTIAL_STORAGE_UNENTITLED,
+        LABEL_CREDENTIAL_MIGRATION_AVAILABLE => CREDENTIAL_MIGRATION_AVAILABLE,
         "" => CREDENTIAL_UNREPORTED,
         LABEL_CREDENTIAL_ABSENT => CREDENTIAL_ABSENT,
         LABEL_CREDENTIAL_OBTAINING => CREDENTIAL_OBTAINING,
@@ -1297,6 +1398,10 @@ pub fn credential_action(label: &str) -> CredentialAction {
         LABEL_CREDENTIAL_PRESENT
         | LABEL_CREDENTIAL_STORAGE_UNAVAILABLE
         | LABEL_CREDENTIAL_CLEANUP_REQUIRED => CredentialAction::Forget,
+        LABEL_CREDENTIAL_MIGRATION_AVAILABLE => CredentialAction::Migrate,
+        // `storage_unentitled` offers nothing, deliberately. This build can
+        // neither read the key nor delete it, and Forget from here would drop
+        // the signed app's pointer to a sign-in this build cannot even see.
         _ => CredentialAction::None,
     }
 }
@@ -1489,6 +1594,52 @@ pub fn group_control(pending: u64, contributable: Option<u64>) -> ContributionCo
         ContributionControl::None
     } else {
         ContributionControl::Contribute
+    }
+}
+
+/// A `list_projects` group's whole eligibility picture, computed once from
+/// `pending` and `contributable`.
+///
+/// Before this existed, every caller re-derived `eligible_count` and
+/// `withheld_count` from the same two numbers by hand: Tauri's
+/// `eligibility_group_copy` computed `contributable.unwrap_or(pending).
+/// min(pending)` and `pending.saturating_sub(eligible)` inline, and the
+/// macOS shell computed `pending - contributableCount` itself in Swift, with
+/// no `min` clamp at all -- a second, slightly different arithmetic for the
+/// same fact, safe only because the FFI's `tc_contribution_withheld_line`
+/// clamps a negative input to zero on its side of the ABI. One function now
+/// does this arithmetic, so both numbers are derived exactly once.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GroupEligibility {
+    /// How many of `pending` may actually be sent. Clamped to `pending`:
+    /// `contributable` is documented never to exceed it, but a caller
+    /// reading data from an older or mismatched daemon should not be able to
+    /// turn a clamp failure into a claim of more eligible sessions than
+    /// exist.
+    pub eligible_count: u64,
+    /// `pending` minus `eligible_count`, never negative.
+    pub withheld_count: u64,
+    /// Whether the group's submit control may be offered at all -- exactly
+    /// [`group_control`]'s answer for this `pending`/`contributable` pair.
+    pub can_contribute: bool,
+}
+
+/// Compute [`GroupEligibility`] from a `list_projects` row's `pending_count`
+/// and `contributable_count`.
+///
+/// `contributable`, like [`group_control`]'s parameter of the same name,
+/// must be `None` for an ABSENT `contributable_count` (an invited
+/// contributor, for whom every pending session is sendable) and
+/// `Some(0)` for a present count of zero -- never conflate the two, or an
+/// invited contributor's folder reads as having nothing eligible.
+#[must_use]
+pub fn group_eligibility(pending: u64, contributable: Option<u64>) -> GroupEligibility {
+    let eligible_count = contributable.unwrap_or(pending).min(pending);
+    GroupEligibility {
+        eligible_count,
+        withheld_count: pending.saturating_sub(eligible_count),
+        can_contribute: group_control(pending, contributable.map(|_| eligible_count))
+            == ContributionControl::Contribute,
     }
 }
 
@@ -2003,6 +2154,8 @@ pub fn private_inference_copy() -> PrivateInferenceCopy {
         credential_cancel: CREDENTIAL_CANCEL,
         credential_forget: CREDENTIAL_FORGET,
         credential_forget_explains: CREDENTIAL_FORGET_EXPLAINS,
+        credential_migrate: CREDENTIAL_MIGRATE,
+        credential_migrate_explains: CREDENTIAL_MIGRATE_EXPLAINS,
         credential_absent: CREDENTIAL_ABSENT,
         credential_obtaining: CREDENTIAL_OBTAINING,
         credential_failed: CREDENTIAL_FAILED,
@@ -2523,6 +2676,8 @@ pub fn queue_outcome_line(label: &str) -> &'static str {
         return line;
     }
     match label {
+        crate::daemon::second_look::REASON_SECOND_LOOK_REVIEW_REQUIRED
+        | crate::daemon::second_look::REASON_SCRUB_CHECK_MANUAL => "Waiting for review; not sent",
         queue::REASON_DISMISSED => "Skipped; not sent",
         queue::REASON_EXPIRED => "Expired without a decision; not sent",
         queue::REASON_CHANGED => "Session changed; review it again before sending",
@@ -2539,6 +2694,12 @@ pub fn queue_outcome_line(label: &str) -> &'static str {
         health::LABEL_PII_FILTER_UNAVAILABLE => "Waiting for the privacy scan",
         health::LABEL_CANARY_FAILED => "Privacy scan failed its self-test",
         health::LABEL_WITNESS_SATURATED => "Waiting for the privacy witness; not sent yet",
+        crate::submit::REASON_TRANSIENT_REDACTION => {
+            "Waiting for the privacy scan; it will be tried again, not sent yet"
+        }
+        crate::submit::REASON_TRANSIENT_REDACTION_EXHAUSTED => {
+            "The privacy scan kept failing; not sent. Approve it again to retry"
+        }
         _ => "Status unavailable",
     }
 }
@@ -2650,8 +2811,9 @@ pub use crate::daemon::nearai_credential::balance::{
 /// the same reason.
 pub use crate::daemon::nearai_credential::{
     LABEL_CREDENTIAL_ABSENT, LABEL_CREDENTIAL_CANCELLED, LABEL_CREDENTIAL_CLEANUP_REQUIRED,
-    LABEL_CREDENTIAL_FAILED, LABEL_CREDENTIAL_OBTAINING, LABEL_CREDENTIAL_PRESENT,
-    LABEL_CREDENTIAL_STORAGE_UNAVAILABLE,
+    LABEL_CREDENTIAL_FAILED, LABEL_CREDENTIAL_MIGRATION_AVAILABLE, LABEL_CREDENTIAL_OBTAINING,
+    LABEL_CREDENTIAL_PRESENT, LABEL_CREDENTIAL_STORAGE_UNAVAILABLE,
+    LABEL_CREDENTIAL_STORAGE_UNENTITLED,
 };
 pub use crate::daemon::private_inference::{
     LABEL_CRASHED, LABEL_OFF, LABEL_PORT_IN_USE, LABEL_RUNNING, LABEL_RUNNING_ANSWERED_ELSEWHERE,
@@ -2663,6 +2825,27 @@ pub use crate::daemon::private_inference::{
 mod tests {
     use super::*;
 
+    /// Reviewed on #1162: the Scrub check's two hold labels used to fall
+    /// through to "Status unavailable", so every shell listed held sessions
+    /// that are still waiting as "N -- Status unavailable". Both share the
+    /// one line #1162 merged, which says the session is waiting and was not
+    /// sent.
+    #[test]
+    fn the_scrub_check_holds_have_waiting_lines_not_status_unavailable() {
+        use crate::daemon::second_look::{
+            REASON_SCRUB_CHECK_MANUAL, REASON_SECOND_LOOK_REVIEW_REQUIRED,
+        };
+        for label in [
+            REASON_SECOND_LOOK_REVIEW_REQUIRED,
+            REASON_SCRUB_CHECK_MANUAL,
+        ] {
+            let line = queue_outcome_line(label);
+            assert_eq!(line, "Waiting for review; not sent", "{label}");
+            assert!(line.contains("Waiting"), "{line}");
+            assert!(line.contains("not sent"), "{line}");
+        }
+    }
+
     /// The failure this surface exists to prevent, pinned.
     ///
     /// If the destination could not be read, or was read and is not ours, the
@@ -2672,6 +2855,8 @@ mod tests {
     fn queue_outcomes_cover_producer_labels_without_guessing_unknown_send_state() {
         use crate::daemon::{health, preview, queue};
         for label in [
+            crate::daemon::second_look::REASON_SECOND_LOOK_REVIEW_REQUIRED,
+            crate::daemon::second_look::REASON_SCRUB_CHECK_MANUAL,
             queue::REASON_DISMISSED,
             queue::REASON_CHANGED,
             preview::REASON_INPUTS_CHANGED,
@@ -2686,6 +2871,8 @@ mod tests {
             health::LABEL_PII_FILTER_UNAVAILABLE,
             health::LABEL_CANARY_FAILED,
             health::LABEL_WITNESS_SATURATED,
+            crate::submit::REASON_TRANSIENT_REDACTION,
+            crate::submit::REASON_TRANSIENT_REDACTION_EXHAUSTED,
         ] {
             let line = queue_outcome_line(label);
             assert_ne!(line, "Status unavailable", "{label}");
@@ -3607,6 +3794,53 @@ mod tests {
         assert_eq!(group_control(0, Some(0)), ContributionControl::None);
     }
 
+    /// `group_eligibility` is the arithmetic every caller used to do by
+    /// hand: `eligible_count` clamped to `pending`, `withheld_count` the
+    /// non-negative remainder, and `can_contribute` exactly `group_control`'s
+    /// own answer.
+    #[test]
+    fn group_eligibility_computes_the_eligible_and_withheld_counts() {
+        assert_eq!(
+            group_eligibility(7, Some(3)),
+            GroupEligibility {
+                eligible_count: 3,
+                withheld_count: 4,
+                can_contribute: true,
+            }
+        );
+        // The question does not apply: every pending session is eligible,
+        // and nothing is withheld.
+        assert_eq!(
+            group_eligibility(7, None),
+            GroupEligibility {
+                eligible_count: 7,
+                withheld_count: 0,
+                can_contribute: true,
+            }
+        );
+        // Nothing sendable: no control offered, and the whole group is
+        // withheld.
+        assert_eq!(
+            group_eligibility(7, Some(0)),
+            GroupEligibility {
+                eligible_count: 0,
+                withheld_count: 7,
+                can_contribute: false,
+            }
+        );
+        // A `contributable` above `pending` is data this function does not
+        // trust blindly: `eligible_count` is clamped rather than exceeding
+        // `pending`, so `withheld_count` cannot go negative.
+        assert_eq!(
+            group_eligibility(3, Some(9)),
+            GroupEligibility {
+                eligible_count: 3,
+                withheld_count: 0,
+                can_contribute: true,
+            }
+        );
+    }
+
     /// The withheld line counts and says nothing else.
     ///
     /// Zero renders nothing -- there is no gap to explain -- and the sentence
@@ -4251,7 +4485,7 @@ mod tests {
         let fields = payload.as_object().expect("a JSON object");
         assert_eq!(
             fields.len(),
-            139,
+            141,
             "the payload's field count changed -- update the shells' decoders \
              and the tests that pin the set"
         );
@@ -4749,5 +4983,64 @@ mod tests {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod state_table_tests {
+    use super::*;
+
+    /// Every label a daemon can report is in the table, once, with its own
+    /// sentence: none falls through to the unknown or unreported line.
+    #[test]
+    fn the_state_table_names_every_reported_label_with_its_own_line() {
+        let table = state_copies();
+        assert_eq!(table.len(), STATE_LABELS.len());
+        assert_eq!(table.len(), 10);
+        for label in STATE_LABELS {
+            let copy = table[label];
+            assert_eq!(copy.line, state_line(label), "{label}");
+            assert_ne!(copy.line, STATE_UNKNOWN, "{label}");
+            assert_ne!(copy.line, STATE_UNREPORTED, "{label}");
+        }
+        // The states the daemon's own state machine reports are all here.
+        use crate::daemon::private_inference::PrivateInferenceState as State;
+        let running = State::Running { port: 1 };
+        let mut reported: Vec<&str> = [
+            State::Off,
+            State::Stopping { port: None },
+            State::RunningWithoutBackends { port: 1 },
+            State::RunningElsewhere { port: 1 },
+        ]
+        .iter()
+        .map(State::label)
+        .collect();
+        for authenticated in [Some(true), Some(false), None] {
+            reported.push(running.label_for(authenticated));
+        }
+        reported.extend([LABEL_PORT_IN_USE, LABEL_START_FAILED, LABEL_CRASHED]);
+        reported.sort_unstable();
+        let mut listed = STATE_LABELS.to_vec();
+        listed.sort_unstable();
+        assert_eq!(reported, listed);
+    }
+
+    /// Only `running` may be painted as working; the table says so for each
+    /// label rather than leaving a shell to infer it.
+    #[test]
+    fn only_running_is_working_in_the_state_table() {
+        for (label, copy) in state_copies() {
+            assert_eq!(copy.working, label == LABEL_RUNNING, "{label}");
+            assert_eq!(
+                copy.working,
+                state_tone(label).reads_as_working(),
+                "{label}"
+            );
+        }
+        let wire = serde_json::to_value(state_copies()[LABEL_RUNNING]).unwrap();
+        assert_eq!(
+            wire,
+            serde_json::json!({"line": STATE_RUNNING, "working": true})
+        );
     }
 }

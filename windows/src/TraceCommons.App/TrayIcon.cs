@@ -114,7 +114,7 @@ public sealed class TrayIcon : IDisposable
     private IntPtr _hIcon;
     private ushort _classAtom;
     private bool _added;
-    private TrayModel _model = TrayModel.Compute(0, isPaused: false, isHealthy: true);
+    private TrayModel _model = TrayModel.Compute(null, isPaused: false, isHealthy: true);
     private TrayMenuModel _menu = TrayMenuModel.Compute(
         new DaemonStatus(),
         Array.Empty<QueueEntry>(),
@@ -434,7 +434,7 @@ public sealed class TrayIcon : IDisposable
                     "   " + waiting.Text);
             }
 
-            if (_menu.DecisionsOwed > 0)
+            if (_menu.DecisionsOwed > 0 || _menu.Waiting.Count > 0)
             {
                 AppendMenu(menu, MF_STRING, MenuIdReview, "Review waiting sessions…");
             }
@@ -627,18 +627,21 @@ public sealed class TrayIcon : IDisposable
 
         uint? dot = state switch
         {
-            // tc_green: something is waiting for you. The spec asks for a
-            // numeric badge here; a 16px tray icon cannot carry two legible
-            // digits, so the count lives in the tooltip and in the menu
-            // header, both of which a screen reader can also read, and the
-            // icon carries only "there is something".
-            TrayIconState.Attention => lightTaskbar ? 0xFF178F70U : 0xFF3FBE9AU,
+            // The brand accent (TcAccentBrush in BrandTokens.xaml, generated
+            // from design-tokens/glass.tokens.json; BrandTokensTests holds
+            // these literals to it): something is waiting for you. The spec
+            // asks for a numeric badge here; a 16px tray icon cannot carry
+            // two legible digits, so the count lives in the tooltip and in
+            // the menu header, both of which a screen reader can also read,
+            // and the icon carries only "there is something".
+            TrayIconState.Attention => lightTaskbar ? 0xFF6D14F3U : 0xFF8A3DFFU,
 
             // The spec says an amber dot. This design system has no amber;
-            // tc_coral is its "something went wrong" ink, and inventing a
+            // statusOutside (TcStatusOutsideBrush, which the coral keys now
+            // carry) is its "something went wrong" ink, and inventing a
             // token for one 3px dot would put a colour in the product that
             // no other surface uses.
-            TrayIconState.Unhealthy => lightTaskbar ? 0xFFD65D4FU : 0xFFF2887AU,
+            TrayIconState.Unhealthy => lightTaskbar ? 0xFFD0342CU : 0xFFFF6B6BU,
 
             // Paused and idle carry no dot. Paused is "struck through" in the
             // spec; a strike at 16px is a smear, and the tooltip says

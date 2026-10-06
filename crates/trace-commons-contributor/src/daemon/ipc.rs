@@ -145,6 +145,7 @@ use super::audit::{self, AuditEntry};
 use super::enroll;
 use super::health::HealthState;
 use super::history::{HistoryCache, rollup};
+use super::notify;
 use super::policy::{
     ERR_PROJECT_ID_UNRECOGNIZED, ERR_PROJECT_KEY_UNRECOGNIZED, ProjectMode, ProjectPolicy,
     UNKNOWN_PROJECT_KEY, disambiguated_label, known_keys, project_id_for, project_key_for_id,
@@ -230,6 +231,20 @@ pub const ERR_CORRECTION_TOO_LONG: &str = "correction-too-long";
 /// and every one of them would carry it into the corpus as the
 /// contributor's own words.
 pub const ERR_CORRECTION_NEEDS_ENTRY: &str = "correction-needs-entry-id";
+/// `approve` while a "Never" contribution override is in force (#1208). The
+/// override promises nothing is queued or sent; clearing it lets the
+/// contributor approve again.
+pub const ERR_CONTRIBUTION_OVERRIDE_NEVER: &str = "contribution-override-never";
+/// K2 (#1173): refused because `DaemonShared::dev_dry_run` is set.
+///
+/// Returned by the dispatcher for every method not on
+/// [`DEV_DRY_RUN_LOCAL_METHODS`] -- everything that reaches ingest, the
+/// issuer, the witness or near.ai, or that approves or grants a send -- and
+/// by `set_project_mode` and `set_contribution_override` for `auto_upload`.
+/// Nothing clears this mode over the socket: it is set once, from the
+/// process environment, before the daemon starts serving requests, and only
+/// in a debug build.
+pub const ERR_DEV_DRY_RUN: &str = "dev-dry-run";
 /// The label an entry is skipped under when credential detection fired on
 /// the correction the contributor wrote for it.
 ///
@@ -289,6 +304,19 @@ const QUIESCE_POLL_MS: u64 = 200;
 /// until #777. Four members (`arming_suggestion`, `decline_arming`,
 /// `probe_routed_tools`, `search_original`) appear nowhere in it.
 pub const METHODS: &[&str] = &[
+    "account_bind",
+    "account_binding",
+    "account_session_status",
+    "account_sign_in",
+    "account_sign_out",
+    "passkey_add_begin",
+    "passkey_add_complete",
+    "passkey_cancel",
+    "passkey_create_begin",
+    "passkey_create_complete",
+    "passkey_login_begin",
+    "passkey_login_complete",
+    "passkey_state",
     "acknowledge_arming_rewordings",
     "acknowledge_grant_voids",
     "acknowledge_legacy_invite_migration",
@@ -302,6 +330,10 @@ pub const METHODS: &[&str] = &[
     "route_disclosure",
     "cancel",
     "clear_public_profile",
+    "commons_credit_summary",
+    "mission_catalogue",
+    "activity_missions_catalogue",
+    "activity_missions_status",
     "consent_options",
     "discover_routing",
     "dismiss",
@@ -319,6 +351,7 @@ pub const METHODS: &[&str] = &[
     "near_ai_credential_status",
     "near_ai_credential_cancel",
     "near_ai_credential_forget",
+    "near_ai_credential_migrate",
     "near_ai_balance",
     "near_ai_funding",
     "get_public_profile",
@@ -337,10 +370,22 @@ pub const METHODS: &[&str] = &[
     "inference_connection_select",
     "inference_connection_install",
     "inference_connection_disconnect",
+    "inference_calls",
+    "inference_summary",
+    "inference_call_proof",
+    "model_spend",
+    "private_ai",
+    "set_private_ai",
+    "invite_lookup",
+    "tool_destinations",
     "list_audit",
     "list_history",
     "list_pending",
+    "list_kept",
+    "keep",
+    "undo_keep",
     "list_projects",
+    "mission_matches",
     "project_automatic_copy",
     "pause",
     "preview",
@@ -349,6 +394,7 @@ pub const METHODS: &[&str] = &[
     "preview_request",
     "witness_preview_request",
     "preview_turns",
+    "preview_unsure_spans",
     "preview_visible",
     "probe_routed_tools",
     "probe_routing",
@@ -360,6 +406,8 @@ pub const METHODS: &[&str] = &[
     "search_original",
     "set_consent_scopes",
     "set_project_mode",
+    "set_contribution_override",
+    "clear_contribution_override",
     "set_public_profile",
     "set_settings",
     "shutdown",
@@ -377,6 +425,102 @@ pub const METHODS: &[&str] = &[
     "unpublish_public_run",
 ];
 
+/// K2 (#1173): the methods a developer dry run still answers. An allowlist,
+/// not a denylist: each of these only reads or writes this daemon's own
+/// state store, so a method added later that reaches the network is refused
+/// until someone adds it here on purpose.
+///
+/// Not on it, and so refused, because they reach ingest, the issuer, the
+/// witness or near.ai: `enroll`, `near_ai_account_enroll`,
+/// `legacy_invite_migrate`, `near_account_start`, `native_wallet_flow`,
+/// `prepare_admission_session`, `near_account_capabilities`, the
+/// `account_*` and `passkey_*` methods, the `near_ai_credential_*` start,
+/// migrate, balance and funding calls, `invite_lookup`, `inference_summary`,
+/// `model_spend`, `set_private_ai`, `publish_public_run`,
+/// `unpublish_public_run`, `set_public_profile`, `clear_public_profile`,
+/// `history_detail`, `refresh_history`, `withdraw`, `withdraw_bulk`,
+/// `commons_credit_summary`, the mission catalogues, the
+/// `inference_connection_*` methods, `skill_candidate`, `skill_evaluate`,
+/// `witness_preview_request`, and the routing probes. Also refused, because
+/// they approve or grant a send, or write outside the state store (the
+/// keychain, a tool's own config, the skills folder): `approve`,
+/// `grant_automatic`, `harness_commit`, `near_ai_credential_forget`,
+/// `remove_token_local_copies`, `discard_token_reviews` and the
+/// `skill_install_*` writes.
+pub const DEV_DRY_RUN_LOCAL_METHODS: &[&str] = &[
+    "hello",
+    "status",
+    "subscribe",
+    "shutdown",
+    "quiesce",
+    "pause",
+    "resume",
+    "cancel",
+    "get_settings",
+    "set_settings",
+    "consent_options",
+    "set_consent_scopes",
+    "acknowledge_near_ai_notice",
+    "acknowledge_grant_voids",
+    "acknowledge_legacy_invite_migration",
+    "acknowledge_arming_rewordings",
+    "certificate_detail",
+    "route_disclosure",
+    "tool_destinations",
+    "inference_calls",
+    "inference_call_proof",
+    "private_ai",
+    "list_pending",
+    "list_kept",
+    "keep",
+    "undo_keep",
+    "dismiss",
+    "list_projects",
+    "project_automatic_copy",
+    "arming_suggestion",
+    "decline_arming",
+    // `auto_upload` is refused inside these two; the other modes only stop
+    // sends.
+    "set_project_mode",
+    "set_contribution_override",
+    "clear_contribution_override",
+    "automatic_grant",
+    "withdraw_automatic_grant",
+    "preview",
+    "preview_body",
+    "preview_cancel",
+    "preview_request",
+    "preview_turns",
+    "preview_unsure_spans",
+    "preview_visible",
+    "search_original",
+    "near_account_status",
+    "near_account_cancel",
+    "near_ai_credential_status",
+    "near_ai_credential_cancel",
+    "discover_routing",
+    "harness_list",
+    "harness_plan",
+    "skill_review",
+    "skill_install_plan",
+    "skill_install_status",
+    "list_audit",
+    "list_history",
+    "history_rollup",
+    "queue_outcome_counts",
+    "token_storage_status",
+    "get_public_profile",
+];
+
+/// K2 (#1173): the one dry-run check, made by both dispatchers before they
+/// look at the method. `None` lets the call through.
+fn dev_dry_run_refusal(shared: &DaemonShared, req: &Request) -> Option<Response> {
+    if shared.dev_dry_run && !DEV_DRY_RUN_LOCAL_METHODS.contains(&req.method.as_str()) {
+        return Some(Response::err(req.id, ERR_BAD_PARAMS, ERR_DEV_DRY_RUN));
+    }
+    None
+}
+
 pub const EVENT_SNAPSHOT: &str = "snapshot";
 pub const EVENT_QUEUE_CHANGED: &str = "queue_changed";
 pub const EVENT_STATUS_CHANGED: &str = "status_changed";
@@ -392,6 +536,12 @@ pub const EVENT_RESYNC_REQUIRED: &str = "resync_required";
 /// published for a job that was cancelled while it ran; see
 /// `preview_scheduler::PreviewScheduler::cancel`.
 pub const EVENT_PREVIEW_READY: &str = "preview_ready";
+/// The poll tick read a call from IronWire's log that no earlier tick had
+/// (K14). Label-only: the call's ledger id, the tool `inference_calls`
+/// names for it, its model label and IronWire's proof label -- see
+/// `inference_map::call_added`. At most `inference_map::MAX_ADDED_PER_TICK`
+/// per tick, newest kept.
+pub const EVENT_INFERENCE_CALL_ADDED: &str = "inference_call_added";
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Request {
@@ -490,12 +640,28 @@ pub struct GateHeld {
 
 /// Everything the daemon's loops and its IPC server share.
 pub struct DaemonShared {
+    pub(crate) native_identity: Mutex<super::native_identity::Ceremonies>,
     pub store: ConfigStore,
     pub queue: Mutex<Queue>,
     pub policy: Mutex<ProjectPolicy>,
     pub state: Mutex<DaemonState>,
     pub settings: Arc<Mutex<DaemonSettings>>,
     pub health: Mutex<HealthState>,
+    /// K2 (#1173): the developer-only dry-run switch. Set exactly once, from
+    /// `TC_DEV_DRY_RUN` in the process environment, by `start_embedded`
+    /// before this struct's `Arc` is ever cloned -- see
+    /// `daemon::dev_dry_run_enabled`. `DaemonShared::load` always
+    /// initializes it to `false`; nothing past construction ever assigns it
+    /// again.
+    ///
+    /// No method on this type sets it, no IPC handler reads it out of
+    /// `req.params`, and no wire schema in `docs/contributor-daemon-ipc-v1_1.md`
+    /// names it -- that absence is what makes it untoggleable over the
+    /// socket, the same way `quiesced` above is process-lifetime state no
+    /// request can reach. A plain `bool`, not an `AtomicBool`: it is written
+    /// once, before any other thread holds a reference to this struct, and
+    /// read-only for the rest of the process's life.
+    pub dev_dry_run: bool,
     pub paused: AtomicBool,
     /// Uploads are parked for an update swap.
     ///
@@ -614,6 +780,13 @@ pub struct DaemonShared {
     /// started a daemon has none, and falls back to the ambient runtime --
     /// which for those callers is the only one there is.
     proxy_runtime: std::sync::OnceLock<tokio::runtime::Handle>,
+    /// The NEAR AI measurement pins in force: the operator override when
+    /// `TRACE_COMMONS_NEAR_AI_EXPECTED_MEASUREMENTS` was set at daemon start,
+    /// else what ingest publishes, cached with a bounded TTL
+    /// (`crate::routing::proof_attestor`). One instance for the daemon's
+    /// life, shared with every attestor it builds, so the cache survives
+    /// reconcile passes and proxy restarts.
+    pub(crate) near_ai_pins: Arc<crate::routing::proof_attestor::PinProvider>,
     /// The last state the instance above reported.
     ///
     /// Kept beside it, under a `std` mutex, because `get_settings` and
@@ -720,15 +893,41 @@ impl DaemonShared {
         // finished or undone before the policy is read and before any pass,
         // so nothing ever sees a half-switched identity.
         super::legacy_migration::recover(&store)?;
-        let policy = ProjectPolicy::load(&store)?;
+        let mut policy = ProjectPolicy::load(&store)?;
         let state = DaemonState::load(&store)?;
-        let settings = DaemonSettings::load_with_cloud_credentials(&store).or_else(|_| {
+        let settings = DaemonSettings::load_with_cloud_credentials(&store).or_else(|error| {
             let mut settings = DaemonSettings::load(&store)?;
+            settings.cloud_storage_failure =
+                super::cloud_credential_lifecycle::classify_load_failure(&settings, &error);
+            // The label only: never the reference, never a platform string.
+            tracing::warn!(
+                reason =
+                    super::nearai_credential::storage_failure_label(settings.cloud_storage_failure),
+                "Private AI credential not loaded at startup"
+            );
             settings.near_ai_inference = None;
             settings.near_ai_session = None;
             settings.cloud_storage_unavailable = true;
             Ok::<_, anyhow::Error>(settings)
         })?;
+        if settings.scrub_check_defaulted_on_upgrade
+            && store
+                .read_daemon_file(crate::config::DAEMON_SETTINGS_FILE)?
+                .is_none()
+        {
+            // Save provenance before marking the policy migration done; a
+            // restart must not mistake a legacy settings-less install for fresh.
+            settings.save(&store)?;
+        }
+        if policy.record_scrub_check_upgrade(
+            settings.scrub_check_defaulted_on_upgrade
+                && settings.scrub_check == super::settings::ScrubCheck::Automatic,
+            Utc::now(),
+        ) {
+            // Fail startup if the notice cannot be persisted: changed
+            // unattended behavior must not silently precede its notice.
+            policy.save(&store)?;
+        }
         // Built here from the declaration this settings file carries at
         // startup. A later edit does not wait for a restart:
         // `set_settings` rebuilds the instance in place.
@@ -739,6 +938,7 @@ impl DaemonShared {
         });
         let (events, _) = broadcast::channel(256);
         let paused = state.paused;
+        let pin_store = store.clone();
         Ok(Self {
             store,
             queue: Mutex::new(queue),
@@ -746,6 +946,9 @@ impl DaemonShared {
             state: Mutex::new(state),
             settings: Arc::new(Mutex::new(settings)),
             health: Mutex::new(HealthState::default()),
+            // `start_embedded` is the only place this ever becomes `true`,
+            // and only before this `Arc` is shared -- see the field's doc.
+            dev_dry_run: false,
             paused: AtomicBool::new(paused),
             quiesced: AtomicBool::new(false),
             shutdown: AtomicBool::new(false),
@@ -775,10 +978,23 @@ impl DaemonShared {
             private_inference_changed: tokio::sync::Notify::new(),
             private_inference_stop_task: Mutex::new(None),
             proxy_runtime: std::sync::OnceLock::new(),
+            near_ai_pins: Arc::new(crate::routing::proof_attestor::PinProvider::new(
+                crate::routing::proof_attestor::pins_from_env(),
+                // Tests never reach ingest from here; a test that needs pins
+                // installs its own provider.
+                if cfg!(test) {
+                    None
+                } else {
+                    Some(Box::new(
+                        crate::routing::proof_attestor::IngestPinSource::new(pin_store),
+                    ))
+                },
+            )),
             private_inference_state: Arc::new(Mutex::new(
                 super::private_inference::PrivateInferenceState::Off,
             )),
             harness_plans: super::harness::PlanStore::default(),
+            native_identity: Mutex::new(Default::default()),
             skill_loop: Mutex::new(super::skill_loop::SkillLoopState::default()),
         })
     }
@@ -874,6 +1090,7 @@ impl DaemonShared {
         settings.near_ai_session = stored.near_ai_session;
         settings.cloud_credentials = stored.cloud_credentials;
         settings.cloud_storage_unavailable = false;
+        settings.cloud_storage_failure = super::settings::CloudStorageFailure::default();
         drop(settings);
         self.near_ai_credential_changes
             .store(observed, Ordering::Release);
@@ -894,11 +1111,19 @@ impl DaemonShared {
         let mut held = self.private_inference.lock().await;
         // Read after acquiring lifecycle ownership: a queued reconciliation
         // must not replay a setting superseded while it waited for that lock.
-        let (on, generation, credential, capture_enabled) = {
+        let (on, generation, credential, capture_enabled, attestor_key) = {
             let settings = self.settings.lock().expect("settings lock");
             (
+                // K2 (#1173): never host the proxy under a developer dry
+                // run, however `private_inference` reads. Hosting it is
+                // "IronWire changes" in the sense the dry-run guarantee
+                // names: it opens a loopback listener that forwards real
+                // inference traffic to the NEAR AI backend, which is network
+                // the dry run promises never to reach, regardless of what a
+                // contributor's real settings say.
                 !self.private_inference_terminating.load(Ordering::Acquire)
-                    && settings.private_inference,
+                    && settings.private_inference
+                    && !self.dev_dry_run,
                 self.private_inference_generation.load(Ordering::Acquire),
                 // Read here, under the same lock as the switch, so a key
                 // obtained while the daemon runs is picked up on the next
@@ -909,6 +1134,9 @@ impl DaemonShared {
                     .as_ref()
                     .map(|c| ironwire_proxy::embed::HostSecret::from(c.key.clone())),
                 settings.token_capture_enabled,
+                // The same key, for the attestor's gateway fetch. Never
+                // logged; it goes where IronWire already sends it.
+                settings.near_ai_inference.as_ref().map(|c| c.key.clone()),
             )
         };
         let Some(host) = held.as_mut() else {
@@ -929,6 +1157,11 @@ impl DaemonShared {
             return;
         };
         host.set_runtime(self.proxy_runtime.get().cloned());
+        host.set_signer_attestor(signer_attestor_for(
+            &self.store,
+            attestor_key,
+            Arc::clone(&self.near_ai_pins),
+        ));
         host.set_credential(credential);
         host.set_token_capture(capture_enabled);
         if host.accept_generation(generation) {
@@ -1161,7 +1394,7 @@ impl DaemonShared {
     /// contributor asked for; this is what actually happened, and a shell
     /// that renders the boolean alone would show a proxy as on while it was
     /// refusing to start.
-    fn private_inference_value(&self) -> serde_json::Value {
+    pub(crate) fn private_inference_value(&self) -> serde_json::Value {
         let state = self
             .private_inference_state
             .lock()
@@ -1181,6 +1414,31 @@ impl DaemonShared {
             "state": state.label_for(destination),
             "port": state.port(),
         })
+    }
+
+    /// The label `private_inference_state.state` carries right now.
+    ///
+    /// For `inference_map`, which must draw the same answer `status` gives.
+    pub(crate) fn private_inference_label(&self) -> &'static str {
+        let state = self
+            .private_inference_state
+            .lock()
+            .expect("private inference state lock")
+            .clone();
+        let destination = self
+            .routing_ledger()
+            .and_then(|ledger| ledger.nearai_authenticated());
+        state.label_for(destination)
+    }
+
+    /// Hold `ledger` as the routing ledger, for tests.
+    #[cfg(test)]
+    pub(crate) fn install_routing_ledger_for_test(
+        &self,
+        ledger: crate::routing::ironwire::IronWireLedger,
+    ) {
+        let mut held = self.routing.write().expect("routing lock");
+        held.ledger = Some(Arc::new(ledger));
     }
 
     /// The port a tool's config would be pointed at, or `None`.
@@ -1370,6 +1628,9 @@ impl DaemonShared {
             return;
         };
         ledger.refresh().await;
+        // Once per row this tick read that no earlier tick had. Reads only
+        // the snapshot the refresh above committed; never a second fetch.
+        super::inference_map::publish_added_calls(self, &ledger.take_added_rows());
         if let Some(has_rows) = self.routing_transition(ledger.has_rows()) {
             // Hash-only by construction: `has_rows` is a bool, and nothing
             // else about the ledger -- port, token, row contents -- appears
@@ -1389,6 +1650,20 @@ impl DaemonShared {
     fn routing_transition(&self, has_rows: bool) -> Option<bool> {
         let previous = self.routing_had_rows.swap(has_rows, Ordering::Relaxed);
         (previous != has_rows).then_some(has_rows)
+    }
+
+    /// Publish `status_changed` when a policy or Scrub check change moved
+    /// `status.decisions_owed` away from `before` (K6).
+    ///
+    /// A policy change -- `set_project_mode`, the watcher arming a new
+    /// project under the grant -- can change the badge without touching the
+    /// queue, so no `queue_changed` follows it, and a shell that refreshes
+    /// status only on `queue_changed` would keep drawing the old count.
+    /// Reads settings, then takes policy and queue: call with none held.
+    pub(crate) fn publish_if_decisions_owed_changed(&self, before: usize) {
+        if self.decisions_owed_value() != before {
+            self.publish(EVENT_STATUS_CHANGED, serde_json::json!({}));
+        }
     }
 
     pub fn publish(&self, event: &str, data: serde_json::Value) {
@@ -1445,13 +1720,17 @@ impl DaemonShared {
     /// A count and a byte total on `status` are the only place the
     /// condition can be told, which is why it lands here rather than on a
     /// queue entry.
+    ///
+    /// Only entries a pass would try now are simulated: an approved entry
+    /// paced behind a future `retry_after` (a transient classifier failure,
+    /// a witness at capacity) is not held by the cap until it is due.
     pub fn daily_budget(&self, now: chrono::DateTime<Utc>) -> super::uploader::DailyBudget {
         let approved: Vec<super::queue::QueueEntry> = {
             let queue = self.queue.lock().expect("queue lock");
             queue
                 .all()
                 .iter()
-                .filter(|e| e.state == super::queue::QueueState::Approved)
+                .filter(|e| e.ready_for_upload(now))
                 .cloned()
                 .collect()
         };
@@ -1502,17 +1781,40 @@ impl DaemonShared {
         let automatic_contribution_held = self.gate_held_value();
         // Before the queue lock: it takes the queue lock itself.
         let witness_capacity = self.witness_capacity();
+        // Snapshot settings without nesting its lock under policy or queue.
+        let scrub_check = self.settings.lock().expect("settings lock").scrub_check;
+        // Policy, then queue: the order every method above follows. Both
+        // counts below come from this one queue guard, so `decisions_owed`
+        // and `queue_depth` can never describe two different queues. The
+        // policy guard is dropped straight away; nothing below needs it.
+        let policy = self.policy.lock().expect("policy lock");
         let queue = self.queue.lock().expect("queue lock");
+        let decisions_owed = super::queue::decisions_owed(&queue, &policy, scrub_check);
+        let contribution_override = contribution_override_value(&policy);
+        let contribution_mode = contribution_mode_value(&policy, &queue);
+        let contribution_mode_partial =
+            policy.contribution_mode_partial(queue.all().iter().map(|e| e.project_key.as_str()));
+        drop(policy);
         let health = self.health.lock().expect("health lock");
         let cfg = self.store.load_config().ok().flatten();
-        serde_json::json!({
+        #[cfg_attr(not(debug_assertions), allow(unused_mut))]
+        let mut status = serde_json::json!({
             "schema_version": IPC_SCHEMA,
             "logged_in": self.logged_in(),
             "tenant_id": cfg.as_ref().map(|c| c.tenant_id.clone()),
             "consent_scopes": cfg.as_ref().map(|c| c.consent_scopes.clone()).unwrap_or_default(),
             "paused": self.is_paused(now),
             "queue_depth": queue.pending().len(),
-            "next_digest_at": self.next_digest_at(),
+            // Additive (K6). The badge's exact count: `Pending` entries that
+            // need a decision from this person. Unlike `queue_depth`, this
+            // excludes armed folders' `Pending` entries that will go out
+            // unattended once they settle or the gate clears -- "armed
+            // folders never move it" -- unless Manual Scrub check, a review
+            // hold, undo Keep, or a backlog hold still requires a person.
+            // See `queue::decisions_owed`. `queue_depth` is kept unchanged
+            // for compatibility; do not derive it from this field.
+            "decisions_owed": decisions_owed,
+            "next_digest_at": self.next_digest_at(now),
             "health": {
                 "last_error_label": health.last_error_label,
                 "since": health.since,
@@ -1572,7 +1874,28 @@ impl DaemonShared {
             // `witness_capacity` is. Always present, zero when none. It
             // releases on its own: nothing here is acknowledged.
             "automatic_contribution_held": automatic_contribution_held,
-        })
+            // Additive (#1173). The menu-bar pill's global override: `null`,
+            // or `{mode, since}` while one is in force.
+            "contribution_override": contribution_override,
+            // Additive (#1173). The pill's roll-up, so no shell computes it:
+            // `notify_only`, `auto_upload`, `ignore`, or `mixed`. The
+            // override's mode while one is in force; otherwise from every
+            // folder's own mode.
+            "contribution_mode": contribution_mode,
+            // Additive (#1208). True when `contribution_mode` is
+            // `auto_upload` but a folder set to Never, or sessions from an
+            // unidentified folder, do not upload: the pill adds
+            // `ContributionModeCopy.auto_partial` under its label.
+            "contribution_mode_partial": contribution_mode_partial,
+        });
+        // K2 (#1173): debug builds only, so the app shows the dry-run notice
+        // from what this daemon is doing rather than parsing the
+        // environment itself. A release build never names the field.
+        #[cfg(debug_assertions)]
+        {
+            status["dev_dry_run"] = serde_json::Value::Bool(self.dev_dry_run);
+        }
+        status
     }
 
     /// The `arming_rewordings` list of [`Self::status_value`]. Each folder
@@ -1592,6 +1915,21 @@ impl DaemonShared {
             .iter()
             .map(|notice| {
                 let key = notice.project_key.as_str();
+                // The "Automatic" override's rewording (#1208) names no
+                // folder: its key is not a path, so no id or label is derived
+                // from it, and the shared copy words it as unplaced.
+                if key == super::policy::OVERRIDE_ARMING_KEY {
+                    return serde_json::json!({
+                        "id": notice.id,
+                        "kind": "contribution_override",
+                        "reworded_at": notice.reworded_at,
+                        "project_id": serde_json::Value::Null,
+                        "project_label": serde_json::Value::Null,
+                        "was": notice.was,
+                        "now": notice.now,
+                        "scrub_check_defaulted": notice.scrub_check_defaulted,
+                    });
+                }
                 serde_json::json!({
                     "id": notice.id,
                     "reworded_at": notice.reworded_at,
@@ -1603,10 +1941,23 @@ impl DaemonShared {
                     ),
                     "was": notice.was,
                     "now": notice.now,
+                    "scrub_check_defaulted": notice.scrub_check_defaulted,
                 })
             })
             .collect();
         serde_json::Value::Array(notices)
+    }
+
+    /// The `decisions_owed` count of [`Self::status_value`] (K6), on its own.
+    /// See [`super::queue::decisions_owed`] for the exact rule; this only
+    /// takes the locks in the order every other status helper above does:
+    /// settings (released), then policy and queue. For a caller comparing the count across a policy
+    /// change (see [`Self::publish_if_decisions_owed_changed`]).
+    pub(crate) fn decisions_owed_value(&self) -> usize {
+        let scrub_check = self.settings.lock().expect("settings lock").scrub_check;
+        let policy = self.policy.lock().expect("policy lock");
+        let queue = self.queue.lock().expect("queue lock");
+        super::queue::decisions_owed(&queue, &policy, scrub_check)
     }
 
     /// The `automatic_contribution_held` object of [`Self::status_value`].
@@ -1658,6 +2009,16 @@ impl DaemonShared {
             .grant_voids
             .iter()
             .map(|notice| match notice.project_key.as_deref() {
+                // The "Automatic" override (#1208): no project, and not
+                // the Flow 1 grant either.
+                None if notice.contribution_override => serde_json::json!({
+                    "id": notice.id,
+                    "kind": "contribution_override",
+                    "voided_at": notice.voided_at,
+                    "project_id": serde_json::Value::Null,
+                    "project_label": serde_json::Value::Null,
+                    "reasons": notice.reasons,
+                }),
                 Some(key) => serde_json::json!({
                     "id": notice.id,
                     "kind": "project",
@@ -1738,12 +2099,25 @@ impl DaemonShared {
         })
     }
 
-    fn next_digest_at(&self) -> Option<chrono::DateTime<Utc>> {
+    /// The next time a digest is expected, or `None` when nothing has fired
+    /// yet under `Interval` -- there is no fixed clock to project forward
+    /// from in that case, only "some time after the interval next elapses".
+    /// `Evening` always answers `Some`, and honours `last_digest_at` the way
+    /// the firing predicate does (see `notify::next_evening_at`).
+    fn next_digest_at(&self, now: chrono::DateTime<Utc>) -> Option<chrono::DateTime<Utc>> {
         let state = self.state.lock().expect("state lock");
         let settings = self.settings.lock().expect("settings lock");
-        state
-            .last_digest_at
-            .map(|t| t + chrono::Duration::seconds(settings.digest_interval_secs as i64))
+        match settings.digest_schedule {
+            super::settings::DigestSchedule::Interval => state
+                .last_digest_at
+                .map(|t| t + chrono::Duration::seconds(settings.digest_interval_secs as i64)),
+            super::settings::DigestSchedule::Evening { hour } => Some(notify::next_evening_at(
+                state.last_digest_at,
+                now,
+                hour,
+                &chrono::Local,
+            )),
+        }
     }
 
     fn snapshot_value(&self) -> serde_json::Value {
@@ -1952,6 +2326,23 @@ pub fn entry_value(
         // to expose, because nothing in the format supplies one.
         "subagent_count": e.subagent_count,
         "subagents_dropped": e.subagents_dropped,
+        // When the session ran and how many prompts it had. Metadata only;
+        // null for an entry queued before this was recorded.
+        "started_at": e.shape.as_ref().and_then(|s| s.started_at),
+        "ended_at": e.shape.as_ref().and_then(|s| s.ended_at),
+        "duration_secs": e.shape.as_ref().and_then(super::queue::SessionShape::duration_secs),
+        "user_turns": e.shape.as_ref().map(|s| s.user_turns),
+        // K9: the redacted opening prompt, cut at a word to 60 chars. Null
+        // for an entry queued before this existed, or whose task named no
+        // description.
+        "title": e.title,
+        // K10: the serialized size, in bytes, of the redacted envelope a
+        // preview pinned for this entry -- what an upload of it would
+        // actually send, as opposed to `size_bytes` above, the raw session
+        // file on disk before redaction. Null when nothing is pinned: an
+        // entry never previewed (an armed auto-upload, an approve-all), or
+        // one written before this field existed.
+        "would_send_bytes": e.would_send_bytes,
     });
     // ABSENT, NOT `unknown`, WHENEVER THE SIGNUP FLAG IS OFF.
     //
@@ -2041,6 +2432,16 @@ pub fn entry_value(
     if let Some(reason) = e.attestation_reason.as_deref() {
         value["attestation_reason"] = serde_json::Value::from(reason);
     }
+    // THE FLOW 2 SCRUB STATE: `scrub`, `marks`, `second_look`.
+    //
+    // `scrub` is `not-yet-scrubbed` until a preview of this entry has run,
+    // and `marks` is ABSENT until then -- never `0`, which would read as
+    // "nothing matched" for a session the scrubber has not read.
+    // `second_look` holds the fixed reasons from
+    // `second_look::second_look_reasons`, the one predicate every surface
+    // shares; `trimmed-to-fit` is known from discovery and can appear before
+    // any preview.
+    super::second_look::insert_fields(&mut value, e.scrub(), e.subagents_dropped);
     value
 }
 
@@ -2175,6 +2576,23 @@ fn handle_certificate_detail(shared: &DaemonShared, req: &Request) -> Response {
 /// Labels are explicit because several methods share a label that cannot
 /// be derived from their names, including the onboarding and profile groups.
 const ASYNC_ONLY_METHODS: &[(&str, &str)] = &[
+    ("inference_summary", "inference-summary-requires-async"),
+    ("model_spend", "model-spend-requires-async"),
+    ("set_private_ai", "private-ai-requires-async"),
+    ("invite_lookup", "invite-lookup-requires-async"),
+    ("account_bind", "identity-requires-async"),
+    ("account_binding", "identity-requires-async"),
+    ("account_session_status", "identity-requires-async"),
+    ("account_sign_in", "identity-requires-async"),
+    ("account_sign_out", "identity-requires-async"),
+    ("passkey_add_begin", "identity-requires-async"),
+    ("passkey_add_complete", "identity-requires-async"),
+    ("passkey_cancel", "identity-requires-async"),
+    ("passkey_create_begin", "identity-requires-async"),
+    ("passkey_create_complete", "identity-requires-async"),
+    ("passkey_login_begin", "identity-requires-async"),
+    ("passkey_login_complete", "identity-requires-async"),
+    ("passkey_state", "identity-requires-async"),
     (
         "prepare_admission_session",
         "admission-setup-requires-async",
@@ -2187,17 +2605,38 @@ const ASYNC_ONLY_METHODS: &[(&str, &str)] = &[
         "near_ai_credential_start",
         "near-ai-credential-requires-async",
     ),
+    (
+        "near_ai_credential_migrate",
+        "near-ai-credential-requires-async",
+    ),
     ("native_wallet_flow", "near-signup-requires-async"),
     ("near_ai_funding", "near-ai-funding-requires-async"),
     ("witness_preview_request", "witness-review-requires-async"),
     ("preview_body", "preview-body-requires-async"),
     ("preview_turns", "preview-turns-requires-async"),
+    (
+        "preview_unsure_spans",
+        "preview-unsure-spans-requires-async",
+    ),
     ("quiesce", "quiesce-requires-async"),
     ("probe_routing", "probe-routing-requires-async"),
     ("probe_routed_tools", "probe-routed-tools-requires-async"),
     ("enroll", "enroll-requires-async"),
     ("withdraw", "withdraw-requires-async"),
     ("withdraw_bulk", "withdraw-requires-async"),
+    (
+        "commons_credit_summary",
+        "commons-credit-summary-requires-async",
+    ),
+    ("mission_catalogue", "mission-catalogue-requires-async"),
+    (
+        "activity_missions_catalogue",
+        "activity-missions-requires-async",
+    ),
+    (
+        "activity_missions_status",
+        "activity-missions-requires-async",
+    ),
     (
         "inference_connection_offers",
         "inference-connection-requires-async",
@@ -2241,6 +2680,9 @@ const ASYNC_ONLY_METHODS: &[(&str, &str)] = &[
 ];
 
 pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
+    if let Some(refused) = dev_dry_run_refusal(shared, req) {
+        return refused;
+    }
     if let Some(label) = ASYNC_ONLY_METHODS
         .iter()
         .find(|(name, _)| *name == req.method)
@@ -2257,7 +2699,7 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
                 "methods": METHODS,
                 "events": [
                     EVENT_SNAPSHOT, EVENT_QUEUE_CHANGED, EVENT_STATUS_CHANGED,
-                    EVENT_DIGEST_DUE, EVENT_RESYNC_REQUIRED,
+                    EVENT_DIGEST_DUE, EVENT_RESYNC_REQUIRED, EVENT_INFERENCE_CALL_ADDED,
                 ],
                 "max_line_bytes": MAX_LINE_BYTES,
             }),
@@ -2265,8 +2707,18 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
         "status" => Response::ok(req.id, shared.status_value()),
         "certificate_detail" => handle_certificate_detail(shared, req),
         "route_disclosure" => handle_route_disclosure(shared, req),
+        "tool_destinations" => super::inference_map::handle_destinations(shared, req),
+        "inference_calls" => super::inference_map::handle_calls(shared, req),
+        "inference_call_proof" => super::network_data::handle_proof(shared, req),
+        "private_ai" => super::network_data::handle_private_ai(shared, req),
         "list_pending" => handle_list_pending(shared, req),
+        "list_kept" => handle_list_kept(shared, req),
+        "keep" => handle_keep(shared, req),
+        "undo_keep" => handle_undo_keep(shared, req),
         "list_projects" => handle_list_projects(shared, req),
+        // K16: which contribution missions fit this Mac's work. Read-only,
+        // and answered here only (M1, M2); see `mission_matching`.
+        "mission_matches" => super::mission_matching::handle_mission_matches(shared, req),
         "project_automatic_copy" => handle_project_automatic_copy(shared, req),
         // The one project worth offering to arm right now, or nothing.
         //
@@ -2325,6 +2777,8 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
             }
         }
         "set_project_mode" => handle_set_project_mode(shared, req),
+        "set_contribution_override" => handle_set_contribution_override(shared, req),
+        "clear_contribution_override" => handle_clear_contribution_override(shared, req),
         "grant_automatic" => handle_grant_automatic(shared, req),
         "acknowledge_grant_voids" => handle_acknowledge_grant_voids(shared, req),
         "acknowledge_legacy_invite_migration" => {
@@ -2412,12 +2866,9 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
         }
         "cancel" => handle_cancel(shared, req),
         "list_audit" => handle_list_audit(shared, req),
-        // A count of `reason_label` across every entry currently on the
-        // queue, whatever its state -- no state filter is applied, it is
-        // simply whichever entries currently carry a label (in practice
-        // that's dismissed, refused, expired, and superseded entries, since
-        // nothing else sets one). These labels are already computed by the
-        // queue and uploader; this is the first surface that rolls them up.
+        // Resolved outcomes only. Pending review holds and approved/uploading
+        // entries are still waiting, and must not appear in the shells'
+        // "Sessions no longer waiting" group.
         //
         // Deliberately NOT named `eligibility_reasons`: every source of a
         // `reason_label` applies to an entry that already exists in the
@@ -2433,6 +2884,12 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
             let mut counts: std::collections::BTreeMap<&str, u64> =
                 std::collections::BTreeMap::new();
             for e in queue.all() {
+                if matches!(
+                    e.state,
+                    QueueState::Pending | QueueState::Approved | QueueState::Uploading
+                ) {
+                    continue;
+                }
                 if let Some(label) = e.reason_label.as_deref() {
                     *counts.entry(label).or_insert(0) += 1;
                 }
@@ -2655,13 +3112,106 @@ fn handle_list_pending(shared: &DaemonShared, req: &Request) -> Response {
     // config file, and holding the queue across that would put a file read
     // in front of every other queue caller.
     let admission_evidence = shared.admission_evidence();
+    // K5: an optional `project_id`, for Customize's past-session picker,
+    // which lists one folder's waiting sessions at a time. Matched by the id
+    // `entry_value` publishes, and refused rather than answered with an empty
+    // list when the daemon does not know the project, so a stale id cannot
+    // read as "nothing waiting". Absent is every project, as before.
+    let project_filter = match req.params.get("project_id") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(id)) => {
+            let policy = shared.policy.lock().expect("policy lock");
+            let queue = shared.queue.lock().expect("queue lock");
+            let known = known_keys(&policy, queue.all().iter().map(|e| e.project_key.clone()));
+            match project_key_for_id(id, &known) {
+                Some(key) => Some(key),
+                None => {
+                    return Response::err(req.id, ERR_BAD_PARAMS, ERR_PROJECT_ID_UNRECOGNIZED);
+                }
+            }
+        }
+        Some(_) => return Response::err(req.id, ERR_BAD_PARAMS, "project_id-invalid"),
+    };
     let queue = shared.queue.lock().expect("queue lock");
     let entries: Vec<serde_json::Value> = queue
         .pending()
         .iter()
+        .filter(|e| project_filter.as_deref().is_none_or(|k| e.project_key == k))
         .map(|e| entry_value(e, admission_evidence))
         .collect();
     Response::ok(req.id, serde_json::json!({ "pending": entries }))
+}
+
+/// K5: every session kept on this Mac, in the `list_pending` entry shape,
+/// so a shell can show them and offer the undo. See `queue::REASON_KEPT`.
+fn handle_list_kept(shared: &DaemonShared, req: &Request) -> Response {
+    let admission_evidence = shared.admission_evidence();
+    let queue = shared.queue.lock().expect("queue lock");
+    let entries: Vec<serde_json::Value> = queue
+        .kept()
+        .iter()
+        .map(|e| entry_value(e, admission_evidence))
+        .collect();
+    Response::ok(req.id, serde_json::json!({ "kept": entries }))
+}
+
+/// K5: "Keep on this Mac" (open decision #4 in #1118), the reversible
+/// sibling of `dismiss`. The entry must be `pending`; see `Queue::keep` and
+/// `queue::REASON_KEPT` for exactly what a kept session is.
+fn handle_keep(shared: &DaemonShared, req: &Request) -> Response {
+    let id = match entry_id_param(req) {
+        Ok(id) => id,
+        Err(response) => return *response,
+    };
+    // A kept entry is never previewed while kept, as for `dismiss`.
+    shared.previews.cancel(id);
+    let mut queue = shared.queue.lock().expect("queue lock");
+    if let Err(e) = queue.keep(id) {
+        return Response::err(req.id, ERR_BAD_PARAMS, &one_line_label(&e.to_string()));
+    }
+    if queue.save(&shared.store).is_err() {
+        return Response::err(req.id, ERR_UNAVAILABLE, "queue-write-failed");
+    }
+    // The pin went with the keep, so the stored envelope goes too.
+    let _ = super::approved_envelope::sweep(&shared.store, &queue.pinned_entry_ids());
+    drop(queue);
+    shared.publish(EVENT_QUEUE_CHANGED, serde_json::json!({}));
+    Response::ok(req.id, serde_json::json!({ "kept": true }))
+}
+
+/// K5: undo a keep. The entry returns to `pending`, waiting for a person.
+fn handle_undo_keep(shared: &DaemonShared, req: &Request) -> Response {
+    let id = match entry_id_param(req) {
+        Ok(id) => id,
+        Err(response) => return *response,
+    };
+    let max_entries = shared
+        .settings
+        .lock()
+        .expect("settings lock")
+        .max_queue_entries;
+    // Lock order is policy before queue, as everywhere else.
+    let policy = shared.policy.lock().expect("policy lock");
+    let mut queue = shared.queue.lock().expect("queue lock");
+    // A session in a folder now set to Never is not brought back as a
+    // waiting card: the folder rule says not to offer it. The keep stays,
+    // and the undo can be asked for again once the rule changes.
+    if queue
+        .get(id)
+        .is_some_and(|e| e.is_kept() && policy.resolve(&e.project_key) == ProjectMode::Ignore)
+    {
+        return Response::err(req.id, ERR_BAD_PARAMS, "project-ignored");
+    }
+    drop(policy);
+    if let Err(e) = queue.undo_keep(id, Utc::now(), max_entries) {
+        return Response::err(req.id, ERR_BAD_PARAMS, &one_line_label(&e.to_string()));
+    }
+    if queue.save(&shared.store).is_err() {
+        return Response::err(req.id, ERR_UNAVAILABLE, "queue-write-failed");
+    }
+    drop(queue);
+    shared.publish(EVENT_QUEUE_CHANGED, serde_json::json!({}));
+    Response::ok(req.id, serde_json::json!({ "kept": false }))
 }
 
 // Every project the daemon knows about -- configured *and* merely
@@ -2695,6 +3245,77 @@ fn handle_list_pending(shared: &DaemonShared, req: &Request) -> Response {
 // which every shell does to it, because the raw label is a slug no
 // contributor should read. Clients MUST NOT recognise this row by
 // label.
+/// Per-project session bookkeeping from the cwd cache: how many sessions,
+/// when the latest was last written, and which tools produced them.
+#[derive(Debug, Clone, Default, PartialEq)]
+struct ProjectSessionsSeen {
+    count: usize,
+    last_modified_at: Option<chrono::DateTime<Utc>>,
+    /// Session count per tool (K11), e.g. `claude-code` or an imported
+    /// conversation's declared source like `antigravity`. Absent for an
+    /// entry written before `CwdCacheEntry::tool` existed -- it is never
+    /// backfilled, since the tool that discovered a session cannot be
+    /// recovered from where it ran -- so this map can undercount `count`
+    /// and must never be asserted to sum to it.
+    tools: std::collections::BTreeMap<String, usize>,
+}
+
+/// Sessions the watcher has observed per project key, with the latest one's
+/// modification time and a per-tool breakdown (K11), from the cwd cache.
+///
+/// The project key is read from each entry, where the watcher recorded it at
+/// insert, so this canonicalizes nothing under the state lock. An entry
+/// written before that field existed is resolved once, outside the lock, and
+/// the key written back.
+///
+/// What it counts: sessions observed on this machine and still present at
+/// the last full pass (the watcher prunes entries whose file is gone), and
+/// the latest session's file modification time -- when it was last written,
+/// not when it started.
+fn sessions_seen_per_project(
+    shared: &DaemonShared,
+) -> std::collections::BTreeMap<String, ProjectSessionsSeen> {
+    let unresolved: Vec<(String, Option<String>)> = {
+        let state = shared.state.lock().expect("state lock");
+        state
+            .cwd_cache
+            .iter()
+            .filter(|(_, e)| e.project_key.is_none())
+            .map(|(path, e)| (path.clone(), e.cwd.clone()))
+            .collect()
+    };
+    if !unresolved.is_empty() {
+        let resolved: Vec<(String, String)> = unresolved
+            .into_iter()
+            .map(|(path, cwd)| (path, super::policy::project_for(cwd.as_deref()).0))
+            .collect();
+        let mut state = shared.state.lock().expect("state lock");
+        for (path, key) in resolved {
+            if let Some(entry) = state.cwd_cache.get_mut(&path) {
+                entry.project_key.get_or_insert(key);
+            }
+        }
+    }
+    let state = shared.state.lock().expect("state lock");
+    let mut seen: std::collections::BTreeMap<String, ProjectSessionsSeen> =
+        std::collections::BTreeMap::new();
+    for cached in state.cwd_cache.values() {
+        let Some(key) = cached.project_key.clone() else {
+            continue;
+        };
+        let slot = seen.entry(key).or_default();
+        slot.count += 1;
+        slot.last_modified_at = Some(match slot.last_modified_at {
+            Some(current) => current.max(cached.modified_at),
+            None => cached.modified_at,
+        });
+        if let Some(tool) = cached.tool.clone() {
+            *slot.tools.entry(tool).or_insert(0) += 1;
+        }
+    }
+    seen
+}
+
 fn handle_list_projects(shared: &DaemonShared, req: &Request) -> Response {
     // What a group-level send would actually do, answerable before the
     // press.
@@ -2713,8 +3334,14 @@ fn handle_list_projects(shared: &DaemonShared, req: &Request) -> Response {
     let group_filters = super::contribution_eligibility::evidence_flag(
         shared.store.load_config().ok().flatten().as_ref(),
     );
+    // How many sessions the watcher has seen in each project, and when the
+    // latest was last written: from the cwd cache every observed session
+    // passes through, so it counts sessions whatever their queue state.
+    // Taken before the policy lock, so it adds no lock ordering.
+    let seen = sessions_seen_per_project(shared);
     let policy = shared.policy.lock().expect("policy lock");
     let queue = shared.queue.lock().expect("queue lock");
+    let known = known_keys(&policy, queue.all().iter().map(|e| e.project_key.clone()));
     let counts = |key: &str| {
         let pending: Vec<&super::queue::QueueEntry> = queue
             .pending()
@@ -2735,13 +3362,41 @@ fn handle_list_projects(shared: &DaemonShared, req: &Request) -> Response {
     // exactly as it does for `eligibility`; a null would be one more thing
     // three shells each decide how to read.
     let with_counts = |mut row: serde_json::Value, counts: (usize, Option<usize>)| {
+        let key = row["project_id"]
+            .as_str()
+            .and_then(|id| project_key_for_id(id, &known));
+        let project_seen = key.and_then(|k| seen.get(&k));
+        let session_count = project_seen.map_or(0, |s| s.count);
+        let last_session_at = project_seen.and_then(|s| s.last_modified_at);
+        row["session_count"] = serde_json::Value::from(session_count);
+        row["last_session_at"] = serde_json::json!(last_session_at);
+        // K11: which tool each of this project's sessions came from, with a
+        // count per tool -- read off the same cwd cache `session_count`
+        // already comes from, so this costs no extra pass over the
+        // filesystem. Always an array, empty rather than absent when
+        // nothing is known yet, so a client never has to test for the key.
+        row["tools"] = serde_json::json!(
+            project_seen
+                .map(|s| s.tools.clone())
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(source, session_count)| serde_json::json!({
+                    "source": source,
+                    "session_count": session_count,
+                    // The same fixed vendor word `tc_discover_sources` and
+                    // `harness_list` draw `answers_at` from (K13 extends the
+                    // table with Antigravity's), so this cannot name a
+                    // vendor differently from either surface.
+                    "answers_at": crate::source::source_answers_at(&source),
+                }))
+                .collect::<Vec<_>>()
+        );
         row["pending_count"] = serde_json::Value::from(counts.0);
         if let Some(contributable) = counts.1 {
             row["contributable_count"] = serde_json::Value::from(contributable);
         }
         row
     };
-    let known = known_keys(&policy, queue.all().iter().map(|e| e.project_key.clone()));
     let discovered: std::collections::BTreeMap<String, Option<String>> = queue
         .all()
         .iter()
@@ -2759,6 +3414,7 @@ fn handle_list_projects(shared: &DaemonShared, req: &Request) -> Response {
                 "project_label": disambiguated_label(key, entry.display_path.as_deref(), &known),
                 "project_path": display_path(shown),
                 "mode": policy.resolve(key),
+                "folder_mode": policy.folder_mode(key),
                 "added_at": entry.added_at,
                 "configured": true,
                 "is_unresolved_bucket": key == UNKNOWN_PROJECT_KEY,
@@ -2780,6 +3436,12 @@ fn handle_list_projects(shared: &DaemonShared, req: &Request) -> Response {
                         super::automatic_gate::Disclosure::PatternsOnly => "patterns_only",
                     },
                 );
+                // K5: whether the arming left the backlog waiting
+                // (`set_project_mode` with `from_now: true`). Armed rows
+                // only, like the disclosure.
+                // Also true for a folder an "Automatic" override
+                // arms: its backlog waits the same way (#1173).
+                row["from_now"] = serde_json::Value::Bool(policy.armed_from_now_at(&key).is_some());
             }
             row
         })
@@ -2790,6 +3452,7 @@ fn handle_list_projects(shared: &DaemonShared, req: &Request) -> Response {
                 "project_label": disambiguated_label(key, shown.as_deref(), &known),
                 "project_path": display_path(shown.as_deref().unwrap_or(key)),
                 "mode": policy.resolve(key),
+                "folder_mode": policy.folder_mode(key),
                 "added_at": serde_json::Value::Null,
                 "configured": false,
                 "is_unresolved_bucket": key == UNKNOWN_PROJECT_KEY,
@@ -2798,7 +3461,40 @@ fn handle_list_projects(shared: &DaemonShared, req: &Request) -> Response {
             )
         }))
         .collect();
-    Response::ok(req.id, serde_json::json!({ "projects": projects }))
+    // K7's upsell: "27 scrubbed sessions are sitting on this Mac under
+    // folders set to Ask me. None has been decided." Three conditions,
+    // all required:
+    //
+    // - `Pending`, i.e. undecided -- `queue.pending()` already filters this.
+    //   An `Approved`, `Uploaded`, `Refused`, `Expired` or `Superseded`
+    //   entry has already been decided, one way or another.
+    // - The project's mode resolves to `NotifyOnly` ("Ask me"), never
+    //   `AutoUpload` ("armed") or `Ignore`. Armed is excluded on the
+    //   project's resolved mode rather than the entry's own
+    //   `approved_unattended` flag, because a gate-held armed session is
+    //   `Pending` with nothing decided about it yet either -- see
+    //   `policy::resolve` and the design's note that "gate-held armed
+    //   sessions stay Pending". Counting those into this upsell would tell a
+    //   contributor to go decide about a folder they already armed.
+    // - Previewed at least once (`previewed_envelope_digest.is_some()`) --
+    //   "scrubbed", in the design's word. An entry nobody has opened a
+    //   preview for has not been through the redaction pass this count is
+    //   about, and including it would inflate "27" with sessions no
+    //   preview-then-decide flow has touched.
+    //
+    // This is not K6's decisions-owed badge: its copy promises previewed
+    // Ask-me sessions only, while the badge also includes unpreviewed and
+    // armed-but-human-held sessions. Keep the two contracts distinct.
+    let unpurposed_traces = queue
+        .pending()
+        .iter()
+        .filter(|e| policy.resolve(&e.project_key) == ProjectMode::NotifyOnly)
+        .filter(|e| e.previewed_envelope_digest.is_some())
+        .count();
+    Response::ok(
+        req.id,
+        serde_json::json!({ "projects": projects, "unpurposed_traces": unpurposed_traces }),
+    )
 }
 
 /// The arming disclosure for one project (K6, R1), as the grant screens'
@@ -2861,9 +3557,16 @@ fn automatic_grant_value(shared: &DaemonShared) -> serde_json::Value {
     }
 }
 
+/// `grant_automatic` refused: the request did not carry `confirmed: true`,
+/// the grant screen's button. The same label `flow1::grant_precondition`
+/// refuses with in a shell, so the daemon holds the confirmation for every
+/// IPC caller rather than trusting each shell to have asked.
+pub const ERR_GRANT_CONFIRMATION_REQUIRED: &str = crate::flow1::GRANT_CONFIRMATION_REQUIRED;
 /// `grant_automatic` refused: the saved consent scopes were never chosen
-/// through `set_consent_scopes` (R7). An enrollment saves the floor scope
-/// with nobody having picked it, so a non-empty list is not a choice.
+/// through `set_consent_scopes` (R7), or the saved list is empty. An
+/// enrollment saves the floor scope with nobody having picked it, so a
+/// non-empty list is not a choice; and a choice recorded over an empty list
+/// names nothing to grant under.
 pub const ERR_GRANT_SCOPES_NOT_CHOSEN: &str = "automatic-grant-scopes-not-chosen";
 /// `grant_automatic` refused: the caller did not say which witness the
 /// contributor was shown (`witness_signing_address`, a string or `null`).
@@ -2872,15 +3575,22 @@ pub const ERR_GRANT_WITNESS_REQUIRED: &str = "automatic-grant-witness-required";
 /// contributor was shown.
 pub const ERR_GRANT_WITNESS_CHANGED: &str = "automatic-grant-witness-changed";
 
-/// Why the Flow 1 grant may not be given under `cfg`, given the witness
-/// signing address the caller says the contributor was shown. `None` when it
-/// may. The labels are fixed and carry no content.
+/// Why the Flow 1 grant may not be given under `cfg`, given the caller's
+/// confirmation and the witness signing address the caller says the
+/// contributor was shown. `None` when it may. The labels are fixed and carry
+/// no content.
 fn grant_automatic_refusal(
     cfg: &crate::config::ContributorConfig,
     params: &serde_json::Value,
 ) -> Option<&'static str> {
-    // R7: a scope nobody chose never carries a standing grant.
-    if !cfg.consent_scopes_chosen {
+    // The grant screen's button. Only a JSON `true` is a confirmation: an
+    // absent key, `false`, and a string or number are not.
+    if params.get("confirmed").and_then(serde_json::Value::as_bool) != Some(true) {
+        return Some(ERR_GRANT_CONFIRMATION_REQUIRED);
+    }
+    // R7: a scope nobody chose never carries a standing grant, and an empty
+    // list names nothing to grant under.
+    if !cfg.consent_scopes_chosen || cfg.consent_scopes.is_empty() {
         return Some(ERR_GRANT_SCOPES_NOT_CHOSEN);
     }
     // The witness shown on the disclosure screen, or `null` for none. It
@@ -2900,8 +3610,9 @@ fn grant_automatic_refusal(
 // Give the Flow 1 grant: arm projects discovered from now on (K3), never
 // anything already on disk (K4). Refused without terms to grant under, like
 // arming one project, and recorded before it takes effect. Refused, too,
-// unless the contributor chose the scopes (R7) and the witness configured
-// now is the one the disclosure screen showed.
+// unless the caller states the contributor confirmed (`confirmed: true`),
+// the contributor chose a non-empty scope list (R7), and the witness
+// configured now is the one the disclosure screen showed.
 fn handle_grant_automatic(shared: &DaemonShared, req: &Request) -> Response {
     let Ok(Some(cfg)) = shared.store.load_config() else {
         return Response::err(req.id, ERR_UNAVAILABLE, "arming-terms-unavailable");
@@ -3102,6 +3813,36 @@ fn handle_set_project_mode(shared: &DaemonShared, req: &Request) -> Response {
         Some(Ok(m)) => m,
         _ => return Response::err(req.id, ERR_BAD_PARAMS, "mode-invalid"),
     };
+    // K2 (#1173): arming a project for `auto_upload` is a send path -- it is
+    // what lets a future session leave unattended -- so it is refused before
+    // the project key is even resolved. `notify_only` and `ignore` only ever
+    // restrict, never enable a send, so neither is touched here.
+    if mode == ProjectMode::AutoUpload && shared.dev_dry_run {
+        return Response::err(req.id, ERR_BAD_PARAMS, ERR_DEV_DRY_RUN);
+    }
+    // K5: arming is **from now** by default. `auto_upload` arms the project
+    // for sessions that appear from here on, and what is already on disk
+    // waits for the contributor -- the spec's rule that automatic
+    // contribution arms nothing already on disk, applied to every shell at
+    // once. See `policy::ArmedFromNow`. Only an explicit
+    // `include_backlog: true` sends the backlog too, which is what
+    // `auto_upload` meant before. Only a boolean is accepted, and only with
+    // `auto_upload`: a backlog means nothing for ask-first or Never, and
+    // silently ignoring it there would let a shell believe it had set a rule
+    // it had not.
+    let include_backlog = match req.params.get("include_backlog") {
+        None | Some(serde_json::Value::Null) => false,
+        Some(serde_json::Value::Bool(b)) => *b,
+        Some(_) => return Response::err(req.id, ERR_BAD_PARAMS, "include-backlog-invalid"),
+    };
+    if include_backlog && mode != ProjectMode::AutoUpload {
+        return Response::err(
+            req.id,
+            ERR_BAD_PARAMS,
+            "include-backlog-requires-auto-upload",
+        );
+    }
+    let from_now = mode == ProjectMode::AutoUpload && !include_backlog;
     // A `label` param is accepted on the wire for compatibility with
     // older clients and then IGNORED. It used to be stored verbatim
     // and echoed back by `list_projects` and written into
@@ -3122,6 +3863,9 @@ fn handle_set_project_mode(shared: &DaemonShared, req: &Request) -> Response {
         let cfg = shared.store.load_config().ok().flatten();
         super::arming_wording::project_arming_claim(super::automatic_gate::disclosure(cfg.as_ref()))
     });
+    // The badge before the change, so a change that moves it -- arming a
+    // folder with entries waiting, say -- is announced (K6).
+    let decisions_owed_before = shared.decisions_owed_value();
     let mut policy = shared.policy.lock().expect("policy lock");
     let (key, audit_label) = {
         let queue = shared.queue.lock().expect("queue lock");
@@ -3198,7 +3942,10 @@ fn handle_set_project_mode(shared: &DaemonShared, req: &Request) -> Response {
                 at: Utc::now(),
                 action: "armed-auto-upload".to_string(),
                 project_label: Some(audit_label),
-                detail: None,
+                // The same action either way, so every shell's audit
+                // sentence still reads right; the detail label says the
+                // backlog was not included.
+                detail: from_now.then(|| "from-now".to_string()),
             },
         ) {
             return Response::err(req.id, ERR_UNAVAILABLE, "audit-write-failed");
@@ -3206,52 +3953,88 @@ fn handle_set_project_mode(shared: &DaemonShared, req: &Request) -> Response {
         policy = shared.policy.lock().expect("policy lock");
     }
 
-    if let Err(e) = policy.set_mode(&key, mode, Utc::now()) {
+    let now = Utc::now();
+    // A re-arm from now over an arming from now keeps the record it had:
+    // the hold covers what was on disk at the FIRST arming, and a shell
+    // re-sending the same setting must neither release that backlog nor
+    // start holding sessions that arrived since.
+    let prior_arming = policy.armed_from_now.get(&key).cloned();
+    let rearm_from_now = from_now && prior_arming.is_some();
+    // `set_mode` refuses only what `check_mode` refused above, and before
+    // touching anything, so this return leaves memory as it was.
+    if let Err(e) = policy.set_mode(&key, mode, now) {
         return Response::err(req.id, ERR_BAD_PARAMS, &one_line_label(&e.to_string()));
     }
-    if let Some(claim) = arming_claim {
-        policy.record_arming_claim(&key, claim);
-    }
-    if let Some(terms) = arming_terms {
-        policy.record_grant_terms(&key, terms);
-    }
-    if let Err(_e) = policy.save(&shared.store) {
-        return Response::err(req.id, ERR_UNAVAILABLE, "policy-write-failed");
-    }
-    // A newly-configured project can turn a previously-unique queue
-    // label into a collision (or vice versa) immediately -- e.g.
-    // configuring the client's "api" the moment after "api" was
-    // queued bare from the contributor's own repo. Relabel now
-    // rather than leaving the queue to lag until the next poll,
-    // which would leave two same-basename projects briefly
-    // indistinguishable in the one place uploads are approved from.
-    // Ignoring a project clears what it already has waiting. Doing
-    // it here rather than in the UI means Settings, onboarding and
-    // the CLI all get it: before this, ignoring from Settings left
-    // the contributor staring at the cards they had just declined.
-    //
-    // Pending entries, plus approvals the watcher made unattended.
-    // See `refuse_pending_for_project` and `retract_unattended_for_project`.
-    //
-    // Leaving `Ignore` undoes exactly that, and only that: see
-    // `clear_project_ignored`, which is what makes the
-    // confirmation's "You can undo this in Settings" true for a
-    // *finished* session -- the ordinary case, and the one the
-    // ignore was aimed at. It is the same arm because the two are
-    // one setting, and every route that can set it (Settings,
-    // onboarding, the CLI, the Waiting screen) must get both halves.
-    //
-    // The policy is already saved at this point, so a `queue.save`
-    // failure below leaves disk disagreeing with memory: the project
-    // is durably `Ignore` while its entries are still durably
-    // `Pending`, and a restart brings the cleared cards back. The
-    // error is reported and the daemon keeps the in-memory truth, so
-    // the contributor sees the right thing until then. Ordering the
-    // two writes the other way does not help -- the relabel below
-    // reads the *new* policy, so the queue cannot be written first --
-    // and a real fix wants both files under one atomic write, which
-    // the store does not offer.
-    let (queue_changed, purged, retracted) = {
+    // #1208: the folder's mode is saved either way -- it is what clearing a
+    // contribution override returns the folder to -- but while one is in
+    // force and still decides this folder, the reply names it, so a shell
+    // never shows a change that is not yet in effect as in effect. `null`
+    // when the folder now resolves to what was set (always so for Never,
+    // which every override leaves alone).
+    let overridden_by = policy
+        .contribution_override
+        .as_ref()
+        .filter(|_| policy.resolve(&key) != mode)
+        .map(|o| mode_label(o.mode));
+    // From here on, memory has changed, and every exit -- success or a
+    // failed write -- goes through the one publish point after this block.
+    // A failed write keeps the in-memory truth (see below), so the shells
+    // must hear about it exactly as they would on success, or the badge and
+    // the queue view go stale until something else happens to refresh them.
+    let mut queue_touched = false;
+    let outcome: Result<(usize, usize), &'static str> = 'apply: {
+        // Under the same policy lock as the mode, so no pass can see the
+        // project armed without the arming's hold.
+        if from_now {
+            match prior_arming {
+                Some(prior) => policy.restore_arming_from_now(&key, prior),
+                None => policy.arm_from_now(&key, now),
+            }
+        }
+        // Whatever this change left no arming able to hold.
+        policy.prune_arming_record();
+        if let Some(claim) = arming_claim {
+            policy.record_arming_claim(&key, claim);
+        }
+        if let Some(terms) = arming_terms {
+            policy.record_grant_terms(&key, terms);
+        }
+        if let Err(_e) = policy.save(&shared.store) {
+            break 'apply Err("policy-write-failed");
+        }
+        // A newly-configured project can turn a previously-unique queue
+        // label into a collision (or vice versa) immediately -- e.g.
+        // configuring the client's "api" the moment after "api" was
+        // queued bare from the contributor's own repo. Relabel now
+        // rather than leaving the queue to lag until the next poll,
+        // which would leave two same-basename projects briefly
+        // indistinguishable in the one place uploads are approved from.
+        // Ignoring a project clears what it already has waiting. Doing
+        // it here rather than in the UI means Settings, onboarding and
+        // the CLI all get it: before this, ignoring from Settings left
+        // the contributor staring at the cards they had just declined.
+        //
+        // Pending entries, plus approvals the watcher made unattended.
+        // See `refuse_pending_for_project` and `retract_unattended_for_project`.
+        //
+        // Leaving `Ignore` undoes exactly that, and only that: see
+        // `clear_project_ignored`, which is what makes the
+        // confirmation's "You can undo this in Settings" true for a
+        // *finished* session -- the ordinary case, and the one the
+        // ignore was aimed at. It is the same arm because the two are
+        // one setting, and every route that can set it (Settings,
+        // onboarding, the CLI, the Waiting screen) must get both halves.
+        //
+        // The policy is already saved at this point, so a `queue.save`
+        // failure below leaves disk disagreeing with memory: the project
+        // is durably `Ignore` while its entries are still durably
+        // `Pending`, and a restart brings the cleared cards back. The
+        // error is reported and the daemon keeps the in-memory truth, so
+        // the contributor sees the right thing until then. Ordering the
+        // two writes the other way does not help -- the relabel below
+        // reads the *new* policy, so the queue cannot be written first --
+        // and a real fix wants both files under one atomic write, which
+        // the store does not offer.
         let mut queue = shared.queue.lock().expect("queue lock");
         let purged = if mode == ProjectMode::Ignore {
             // Both halves. `refuse_pending_for_project` covers entries
@@ -3284,6 +4067,15 @@ fn handle_set_project_mode(shared: &DaemonShared, req: &Request) -> Response {
             ProjectMode::NotifyOnly => {
                 queue.return_unattended_to_waiting_for_project(&key, Utc::now())
             }
+            // Arming from now over an earlier plain arming: whatever that
+            // arming approved unattended and has not sent yet was on disk
+            // now, so it is backlog, and it goes back to waiting for the
+            // contributor exactly as turning automatic off would put it. Not
+            // over an arming from now: what that approved arrived after it,
+            // and is not backlog.
+            ProjectMode::AutoUpload if from_now && !rearm_from_now => {
+                queue.return_unattended_to_waiting_for_project(&key, Utc::now())
+            }
             ProjectMode::AutoUpload => 0,
         };
         let restored = if mode == ProjectMode::Ignore {
@@ -3292,21 +4084,287 @@ fn handle_set_project_mode(shared: &DaemonShared, req: &Request) -> Response {
             queue.clear_project_ignored(&key)
         };
         let relabelled = relabel_queue_entries(&policy, &mut queue);
-        if relabelled || purged > 0 || retracted > 0 || restored > 0 {
+        queue_touched = relabelled || purged > 0 || retracted > 0 || restored > 0;
+        if queue_touched {
             if let Err(_e) = queue.save(&shared.store) {
-                return Response::err(req.id, ERR_UNAVAILABLE, "queue-write-failed");
+                break 'apply Err("queue-write-failed");
             }
         }
-        (relabelled || restored > 0, purged, retracted)
+        Ok((purged, retracted))
     };
+    // The one publish point, with neither lock held: the queue lock went
+    // with the block, and the compare below takes both.
     drop(policy);
-    if queue_changed || purged > 0 || retracted > 0 {
+    if queue_touched {
         shared.publish(EVENT_QUEUE_CHANGED, serde_json::json!({}));
     }
-    Response::ok(
-        req.id,
-        serde_json::json!({ "ok": true, "purged": purged, "retracted": retracted }),
-    )
+    shared.publish_if_decisions_owed_changed(decisions_owed_before);
+    match outcome {
+        Ok((purged, retracted)) => Response::ok(
+            req.id,
+            serde_json::json!({
+                "ok": true,
+                "purged": purged,
+                "retracted": retracted,
+                "from_now": from_now,
+                "overridden_by": overridden_by,
+            }),
+        ),
+        Err(label) => Response::err(req.id, ERR_UNAVAILABLE, label),
+    }
+}
+
+/// The wire name of a mode, as `set_project_mode` takes it and the audit
+/// detail records it.
+fn mode_label(mode: ProjectMode) -> &'static str {
+    match mode {
+        ProjectMode::AutoUpload => "auto_upload",
+        ProjectMode::NotifyOnly => "notify_only",
+        ProjectMode::Ignore => "ignore",
+    }
+}
+
+/// `status.contribution_override`, and the `contribution_override` both
+/// override methods answer with: `null`, or `{mode, since}`.
+fn contribution_override_value(policy: &ProjectPolicy) -> serde_json::Value {
+    match &policy.contribution_override {
+        None => serde_json::Value::Null,
+        Some(o) => serde_json::json!({ "mode": mode_label(o.mode), "since": o.since }),
+    }
+}
+
+/// `status.contribution_mode`: the menu-bar pill's roll-up (#1173). The
+/// override's mode while one is in force; otherwise the one mode every
+/// folder shares, or `"mixed"`. See `ProjectPolicy::contribution_mode`.
+fn contribution_mode_value(policy: &ProjectPolicy, queue: &super::queue::Queue) -> &'static str {
+    match policy.contribution_mode(queue.all().iter().map(|e| e.project_key.as_str())) {
+        Some(mode) => mode_label(mode),
+        None => "mixed",
+    }
+}
+
+/// Put back to waiting every unattended approval that a stopping override
+/// ("Ask me", "Never") leaves with no standing yes: one in a folder that no
+/// longer resolves to `AutoUpload`. Never refused, so clearing the override
+/// restores them. Call with the policy lock held and the queue lock taken
+/// after it.
+pub(crate) fn return_unattended_the_override_stops(
+    policy: &ProjectPolicy,
+    queue: &mut super::queue::Queue,
+) -> usize {
+    let keys: std::collections::BTreeSet<String> = queue
+        .all()
+        .iter()
+        .filter(|e| e.approved_unattended)
+        .map(|e| e.project_key.clone())
+        .filter(|k| policy.resolve(k) != ProjectMode::AutoUpload)
+        .collect();
+    let now = Utc::now();
+    keys.iter()
+        .map(|k| queue.return_unattended_to_waiting_for_project(k, now))
+        .sum()
+}
+
+/// #1173: set the menu-bar pill's global contribution override. See
+/// `policy::ContributionOverride` for what each mode does; per-folder modes
+/// are never written, so `clear_contribution_override` restores them.
+///
+/// `auto_upload` arms every folder not already armed, and is a grant (owner
+/// decision on #1208), so it is held to the arming paths' rules: refused
+/// without `confirm: true` (the shell showed the confirmation,
+/// `consent_copy::contribution_override_copy`), refused with
+/// `arming-terms-unavailable` without `GrantTerms` in force, recorded with
+/// those terms and its words' claim so an R6 widening voids it and a K5
+/// rewording is told, recorded in the audit **before** it takes effect, and
+/// from now -- nothing already on disk is sent unattended. A stopping
+/// override (`notify_only`, `ignore`) is never refused for want of an audit
+/// row, and is recorded after.
+fn handle_set_contribution_override(shared: &DaemonShared, req: &Request) -> Response {
+    let mode: ProjectMode = match req
+        .params
+        .get("mode")
+        .cloned()
+        .map(serde_json::from_value::<ProjectMode>)
+    {
+        Some(Ok(m)) => m,
+        _ => return Response::err(req.id, ERR_BAD_PARAMS, "mode-invalid"),
+    };
+    // K2 (#1173): the contribution override's `auto_upload` is the whole-
+    // account version of arming, so it is refused on the same terms --
+    // before `confirm` is even checked. `notify_only` and `ignore` stay
+    // allowed: both only ever stop sends.
+    if mode == ProjectMode::AutoUpload && shared.dev_dry_run {
+        return Response::err(req.id, ERR_BAD_PARAMS, ERR_DEV_DRY_RUN);
+    }
+    let confirm = match req.params.get("confirm") {
+        None | Some(serde_json::Value::Null) => false,
+        Some(serde_json::Value::Bool(b)) => *b,
+        Some(_) => return Response::err(req.id, ERR_BAD_PARAMS, "confirm-invalid"),
+    };
+    if mode == ProjectMode::AutoUpload && !confirm {
+        return Response::err(req.id, ERR_BAD_PARAMS, "confirm-required");
+    }
+    // An `auto_upload` override is a grant (owner decision on #1208), held
+    // to what `set_project_mode` holds an arming to: the terms in force and
+    // the claim its words made are read before the policy lock is taken, so
+    // this adds no lock ordering, and without terms -- no config yet, or one
+    // that could not be read -- it is refused, fail closed, rather than
+    // leaving the next sweep to adopt whatever config then exists.
+    let grant = if mode == ProjectMode::AutoUpload {
+        let Some(terms) = super::grant_terms::GrantTerms::in_force(shared) else {
+            return Response::err(req.id, ERR_UNAVAILABLE, "arming-terms-unavailable");
+        };
+        let cfg = shared.store.load_config().ok().flatten();
+        let claim = super::arming_wording::project_arming_claim(super::automatic_gate::disclosure(
+            cfg.as_ref(),
+        ));
+        Some((terms, claim))
+    } else {
+        None
+    };
+    let audit_entry = AuditEntry {
+        at: Utc::now(),
+        action: "contribution-override-set".to_string(),
+        project_label: None,
+        detail: Some(mode_label(mode).to_string()),
+    };
+    let queue_touched;
+    let outcome: Result<usize, &'static str> = {
+        // One policy lock from the "same mode" check through the change, so
+        // two identical sets cannot both pass the check and both write an
+        // audit row. Held across the audit append: a rare contributor action,
+        // and `audit::append` takes no lock of its own.
+        let mut policy = shared.policy.lock().expect("policy lock");
+        // The same mode again is not a change: nothing is recorded, and an
+        // `auto_upload` override keeps the hold and the terms it had.
+        if policy
+            .contribution_override
+            .as_ref()
+            .is_some_and(|o| o.mode == mode)
+        {
+            return Response::ok(
+                req.id,
+                serde_json::json!({
+                    "changed": false,
+                    "contribution_override": contribution_override_value(&policy),
+                    "returned": 0,
+                }),
+            );
+        }
+        // Arming: recorded first, refused if it cannot be, as
+        // `set_project_mode` and `grant_automatic` do.
+        if mode == ProjectMode::AutoUpload && audit::append(&shared.store, &audit_entry).is_err() {
+            return Response::err(req.id, ERR_UNAVAILABLE, "audit-write-failed");
+        }
+        let previous = policy.clone();
+        if let Err(e) = policy.set_contribution_override(mode, Utc::now(), grant) {
+            // Unreachable while `grant` is filled above for `auto_upload`;
+            // kept so the policy's own refusal is never swallowed.
+            return Response::err(req.id, ERR_UNAVAILABLE, &one_line_label(&e.to_string()));
+        }
+        if policy.save(&shared.store).is_err() {
+            // Rolled back, so nothing changed and there is nothing to
+            // announce.
+            *policy = previous;
+            return Response::err(req.id, ERR_UNAVAILABLE, "policy-write-failed");
+        }
+        // A stopping override is never refused for want of an audit row, and
+        // is recorded after it takes effect, still under the lock.
+        if mode != ProjectMode::AutoUpload {
+            let _ = audit::append(&shared.store, &audit_entry);
+        }
+        let mut queue = shared.queue.lock().expect("queue lock");
+        let returned = return_unattended_the_override_stops(&policy, &mut queue);
+        queue_touched = returned > 0;
+        // A failed queue write keeps the in-memory truth, as in
+        // `set_project_mode`, and is announced exactly as success is.
+        if queue_touched && queue.save(&shared.store).is_err() {
+            Err("queue-write-failed")
+        } else {
+            Ok(returned)
+        }
+    };
+    // The override itself is on `status`, so `status_changed` always
+    // follows, carrying any `decisions_owed` change with it.
+    shared.publish(EVENT_STATUS_CHANGED, serde_json::json!({}));
+    if queue_touched {
+        shared.publish(EVENT_QUEUE_CHANGED, serde_json::json!({}));
+    }
+    match outcome {
+        Ok(returned) => {
+            let policy = shared.policy.lock().expect("policy lock");
+            Response::ok(
+                req.id,
+                serde_json::json!({
+                    "changed": true,
+                    "contribution_override": contribution_override_value(&policy),
+                    "returned": returned,
+                }),
+            )
+        }
+        Err(label) => Response::err(req.id, ERR_UNAVAILABLE, label),
+    }
+}
+
+/// #1173: clear the contribution override. Every folder is back on its own
+/// mode, which the override never wrote. Clearing a stopping override can
+/// resume unattended sending in folders armed by their own mode; that is the
+/// arming the contributor already gave and the audit already holds, so it is
+/// recorded after, like `withdraw_automatic_grant`.
+fn handle_clear_contribution_override(shared: &DaemonShared, req: &Request) -> Response {
+    let queue_touched;
+    let outcome: Result<(Option<ProjectMode>, usize), &'static str> = {
+        let mut policy = shared.policy.lock().expect("policy lock");
+        let previous = policy.contribution_override.clone();
+        let previous_record = policy.sessions_on_disk_at_arming.clone();
+        if !policy.clear_contribution_override() {
+            return Response::ok(
+                req.id,
+                serde_json::json!({ "cleared": false, "returned": 0 }),
+            );
+        }
+        if policy.save(&shared.store).is_err() {
+            policy.contribution_override = previous;
+            policy.sessions_on_disk_at_arming = previous_record;
+            return Response::err(req.id, ERR_UNAVAILABLE, "policy-write-failed");
+        }
+        // Clearing an "Automatic" override takes a folder that asks
+        // back to asking: what the override approved unattended there and
+        // has not sent goes back to waiting.
+        let mut queue = shared.queue.lock().expect("queue lock");
+        let returned = return_unattended_the_override_stops(&policy, &mut queue);
+        queue_touched = returned > 0;
+        let previous_mode = previous.map(|o| o.mode);
+        if queue_touched && queue.save(&shared.store).is_err() {
+            Err("queue-write-failed")
+        } else {
+            Ok((previous_mode, returned))
+        }
+    };
+    let _ = audit::append(
+        &shared.store,
+        &AuditEntry {
+            at: Utc::now(),
+            action: "contribution-override-cleared".to_string(),
+            project_label: None,
+            detail: outcome
+                .as_ref()
+                .ok()
+                .and_then(|(m, _)| *m)
+                .map(|m| mode_label(m).to_string()),
+        },
+    );
+    shared.publish(EVENT_STATUS_CHANGED, serde_json::json!({}));
+    if queue_touched {
+        shared.publish(EVENT_QUEUE_CHANGED, serde_json::json!({}));
+    }
+    match outcome {
+        Ok((_, returned)) => Response::ok(
+            req.id,
+            serde_json::json!({ "cleared": true, "returned": returned }),
+        ),
+        Err(label) => Response::err(req.id, ERR_UNAVAILABLE, label),
+    }
 }
 
 fn handle_pause(shared: &DaemonShared, req: &Request) -> Response {
@@ -3466,11 +4524,13 @@ fn handle_set_settings(shared: &DaemonShared, req: &Request) -> Response {
     let Ok(persisted) = crate::daemon::settings::DaemonSettings::load(&shared.store) else {
         return Response::err(req.id, ERR_UNAVAILABLE, "settings-write-failed");
     };
+    let decisions_owed_before = shared.decisions_owed_value();
     let mut settings = shared.settings.lock().expect("settings lock");
     // Advance lifecycle consent only after this candidate is persisted.
     // Routing separately retains its warm reader when its endpoint is unchanged.
     let private_inference_before = settings.private_inference;
     let capture_before = settings.token_capture_enabled;
+    let scrub_check_before = settings.scrub_check;
     // `apply_settings_object` is the same validation
     // `tc_daemon_start_with_settings` (the C ABI's pre-start
     // settings override) uses, so there is one definition of "a
@@ -3516,8 +4576,33 @@ fn handle_set_settings(shared: &DaemonShared, req: &Request) -> Response {
             // the save so a declaration that takes effect is always
             // one that survives a restart too.
             shared.rebuild_effective_routing(&settings);
+            let manual = super::settings::ScrubCheck::Manual;
+            let switched_to_manual = settings.scrub_check == manual && scrub_check_before != manual;
             let mut value = redacted_settings(&settings);
             drop(settings);
+            // The switch to the Manual Scrub check (K4 of #1118) returns
+            // every unsent approval made on the contributor's behalf to
+            // waiting at once, rather than leaving it reading approved until
+            // the uploader reaches and holds it. Mirrors turning a project's
+            // automatic contributing off. The count rides on the reply.
+            if switched_to_manual {
+                let returned = {
+                    let mut queue = shared.queue.lock().expect("queue lock");
+                    let returned = queue.return_unattended_to_waiting();
+                    if returned > 0 {
+                        let _ = queue.save(&shared.store);
+                    }
+                    returned
+                };
+                if returned > 0 {
+                    shared.publish(EVENT_QUEUE_CHANGED, serde_json::json!({}));
+                }
+                value["scrub_check_returned_to_waiting"] = serde_json::Value::from(returned);
+            }
+            // Manual can make already-pending armed sessions require a
+            // person without changing a queue row. Switching back can remove
+            // that obligation too. Neither transition may leave badges stale.
+            shared.publish_if_decisions_owed_changed(decisions_owed_before);
             add_admission_setting(shared, &mut value);
             Response::ok(req.id, value)
         }
@@ -3534,7 +4619,7 @@ fn handle_set_settings(shared: &DaemonShared, req: &Request) -> Response {
 /// the same friction `rebuild_effective_routing` exists to avoid for a typed port.
 /// The reported state is re-read after the reconcile so the answer describes
 /// what happened rather than what was true a moment before it.
-async fn handle_set_settings_async(shared: &DaemonShared, req: &Request) -> Response {
+pub(crate) async fn handle_set_settings_async(shared: &DaemonShared, req: &Request) -> Response {
     shared.absorb_near_ai_credential_change().await;
     let mut response = handle_set_settings(shared, req);
     if response.error.is_some() {
@@ -3552,7 +4637,8 @@ async fn handle_set_settings_async(shared: &DaemonShared, req: &Request) -> Resp
 /// `"probe_routed_tools"`,
 /// `"quiesce"`, `"enroll"`, `"near_ai_credential_status"`,
 /// `"near_ai_credential_forget"`,
-/// `"withdraw"`, `"withdraw_bulk"`, `"set_public_profile"`,
+/// `"withdraw"`, `"withdraw_bulk"`, `"commons_credit_summary"`,
+/// `"set_public_profile"`,
 /// `"clear_public_profile"`, `"skill_candidate"`, `"skill_evaluate"`, and the
 /// four `"skill_install_*"` methods) for
 /// real and delegates every other method, unchanged, to the synchronous
@@ -3561,7 +4647,28 @@ async fn handle_set_settings_async(shared: &DaemonShared, req: &Request) -> Resp
 /// why both real callers (the socket loop and `handle_local`) always go
 /// through this function rather than `handle_request` directly.
 pub async fn handle_request_async(shared: &DaemonShared, req: &Request) -> Response {
+    if let Some(refused) = dev_dry_run_refusal(shared, req) {
+        return refused;
+    }
     match req.method.as_str() {
+        "inference_summary" => super::network_data::handle_summary(shared, req).await,
+        "model_spend" => super::network_data::handle_model_spend(shared, req).await,
+        "set_private_ai" => super::network_data::handle_set_private_ai(shared, req).await,
+        "invite_lookup" => super::network_data::handle_invite_lookup(shared, req).await,
+        "account_bind" => super::native_identity::handle(shared, req).await,
+        "account_binding" => super::native_identity::handle(shared, req).await,
+        "account_session_status" => super::native_identity::handle(shared, req).await,
+        "account_sign_in" => super::native_identity::handle(shared, req).await,
+        "account_sign_out" => super::native_identity::handle(shared, req).await,
+        "passkey_add_begin" => super::native_identity::handle(shared, req).await,
+        "passkey_add_complete" => super::native_identity::handle(shared, req).await,
+        "passkey_cancel" => super::native_identity::handle(shared, req).await,
+        "passkey_create_begin" => super::native_identity::handle(shared, req).await,
+        "passkey_create_complete" => super::native_identity::handle(shared, req).await,
+        "passkey_login_begin" => super::native_identity::handle(shared, req).await,
+        "passkey_login_complete" => super::native_identity::handle(shared, req).await,
+        "passkey_state" => super::native_identity::handle(shared, req).await,
+
         "native_wallet_flow" => super::native_flow::handle_wallet(shared, req).await,
         "prepare_admission_session" => super::native_flow::admission_response(
             super::admission_setup::handle_prepare_admission_session(shared, req).await,
@@ -3571,6 +4678,7 @@ pub async fn handle_request_async(shared: &DaemonShared, req: &Request) -> Respo
         "near_ai_account_enroll" => super::nearai_onboarding::handle_enroll(shared, req).await,
         "legacy_invite_migrate" => super::legacy_migration::handle_migrate(shared, req).await,
         "near_ai_credential_start" => super::nearai_credential::handle_start(shared, req).await,
+        "near_ai_credential_migrate" => super::nearai_credential::handle_migrate(shared, req).await,
         // Both of these answer identically on the sync path -- they are in
         // `handle_request` too, and that is what defines the response. The
         // override exists so the reconcile that makes the answer true of the
@@ -3596,12 +4704,21 @@ pub async fn handle_request_async(shared: &DaemonShared, req: &Request) -> Respo
         "preview_body" => handle_preview_body(shared, req).await,
         "quiesce" => handle_quiesce(shared, req).await,
         "preview_turns" => handle_preview_turns(shared, req).await,
+        "preview_unsure_spans" => handle_preview_unsure_spans(shared, req).await,
         "search_original" => handle_search_original(shared, req).await,
         "probe_routing" => handle_probe_routing(req).await,
         "probe_routed_tools" => handle_probe_routed_tools(req).await,
         "enroll" => enroll::handle_enroll(shared, req).await,
         "withdraw" => super::withdraw::handle_withdraw(shared, req).await,
         "withdraw_bulk" => super::withdraw::handle_withdraw_bulk(shared, req).await,
+        "commons_credit_summary" => {
+            super::commons_credit::handle_commons_credit_summary(shared, req).await
+        }
+        "mission_catalogue" => super::mission_catalogue::handle_catalogue(shared, req).await,
+        "activity_missions_catalogue" => {
+            super::activity_missions::handle_catalogue(shared, req).await
+        }
+        "activity_missions_status" => super::activity_missions::handle_status(shared, req).await,
         "inference_connection_offers" => {
             super::inference_connection::handle_offers(shared, req).await
         }
@@ -3757,6 +4874,17 @@ async fn handle_approve(shared: &DaemonShared, req: &Request) -> Response {
         if all || req.params.get("project_id").is_some() {
             return Response::err(req.id, ERR_BAD_PARAMS, ERR_CORRECTION_NEEDS_ENTRY);
         }
+    }
+    // A "Never" contribution override promises that nothing is queued or
+    // sent (#1208), so nothing is approved while it is in force: refused,
+    // before anything is approved or recorded, with a fixed label.
+    if shared
+        .policy
+        .lock()
+        .expect("policy lock")
+        .holds_every_send()
+    {
+        return Response::err(req.id, ERR_BAD_PARAMS, ERR_CONTRIBUTION_OVERRIDE_NEVER);
     }
     // Read before the queue lock is taken, so the settings lock is
     // never held under it.
@@ -4566,12 +5694,23 @@ async fn handle_witness_preview_request_inner(
         return Response::err(req.id, ERR_UNAVAILABLE, "witness-review-save-failed");
     }
     let previous_queue = queue.clone();
+    // K10: the certified response's own bytes -- exactly what an upload of
+    // this pin would send over `call_bytes` -- not a re-serialization of the
+    // parsed envelope, which would not be measuring the same wire bytes.
+    let would_send_bytes = Some(review.artifact.response().envelope_bytes.len() as u64);
     if !queue.record_previewed_envelope(
         id,
         &review.summary.envelope_digest,
         review.artifact.attested_inference().cloned(),
-    ) || queue.save(&shared.store).is_err()
-    {
+        would_send_bytes,
+    ) || {
+        queue.record_scrub(
+            id,
+            &review.summary.envelope_digest,
+            review.summary.scrub_counts,
+        );
+        queue.save(&shared.store).is_err()
+    } {
         *queue = previous_queue;
         return Response::err(req.id, ERR_UNAVAILABLE, "witness-review-save-failed");
     }
@@ -4588,8 +5727,14 @@ async fn handle_preview(shared: &DaemonShared, req: &Request) -> Response {
     if entry.holds_witness_certificate() {
         return match open_preview(shared, id).await {
             Ok((summary, _)) => {
+                let scrub = super::second_look::Scrub::Scrubbed(summary.scrub_counts);
+                let dropped = summary.subagents_dropped;
                 let mut value =
                     serde_json::to_value(summary).expect("preview summary serialization");
+                super::second_look::insert_fields(&mut value, scrub, dropped);
+                // Re-read: the build above recorded its counts on the pinned
+                // entry, and the entry this response describes should say so.
+                let entry = entry_by_id(shared, req, id).unwrap_or(entry);
                 value["entry"] = entry_value(&entry, shared.admission_evidence());
                 Response::ok(req.id, value)
             }
@@ -4663,12 +5808,31 @@ async fn handle_preview(shared: &DaemonShared, req: &Request) -> Response {
 pub(crate) fn preview_card_value(
     summary: &super::preview::PreviewCardSummary,
 ) -> serde_json::Value {
+    let mut value = preview_card_fields(summary);
+    // The same scrub fields `entry_value` carries, describing THIS build: a
+    // card is a scrub, so it is always `scrubbed`. A card pins nothing, so
+    // nothing here is recorded on the queue entry -- see
+    // `QueueEntry::scrub`.
+    super::second_look::insert_fields(
+        &mut value,
+        super::second_look::Scrub::Scrubbed(summary.scrub_counts),
+        summary.subagents_dropped,
+    );
+    value
+}
+
+fn preview_card_fields(summary: &super::preview::PreviewCardSummary) -> serde_json::Value {
     serde_json::json!({
         "would_send_bytes": summary.would_send_bytes,
         "raw_session_bytes": summary.raw_session_bytes,
+        "title": summary.title,
         "event_count": summary.event_count,
         "opening_prompt": summary.opening_prompt,
         "redactions": summary.redactions,
+        // Distinct values removed per label (R7, #1173): a card needs this
+        // the same way the full summary does, to say "185 local path (12
+        // distinct)" rather than just a total. Counts only, never content.
+        "redactions_distinct": summary.redactions_distinct,
         "pii_labels_present": summary.pii_labels_present,
         "consent_scopes": summary.consent_scopes,
         "residual_risk": summary.residual_risk,
@@ -4839,7 +6003,7 @@ async fn build_and_pin_preview(
         if transcript.session_hash != entry.session_hash {
             return Err((ERR_UNAVAILABLE, "witness-review-stale"));
         }
-        return super::preview::summarize_witnessed_preview(
+        let built = super::preview::summarize_witnessed_preview(
             &artifact,
             cfg.ok_or(unavailable)?,
             near_ai,
@@ -4847,7 +6011,17 @@ async fn build_and_pin_preview(
             session_ref.size_bytes,
             attested_bodies,
         )
-        .map_err(|_| (ERR_UNAVAILABLE, "witness-review-stale"));
+        .map_err(|_| (ERR_UNAVAILABLE, "witness-review-stale"))?;
+        // The stored artifact this summary was rebuilt from is the one the
+        // entry is pinned to (checked above), so its counts describe the
+        // bytes an approval would send.
+        record_scrub(
+            shared,
+            entry_id,
+            &built.0.envelope_digest,
+            built.0.scrub_counts,
+        );
+        return Ok(built);
     }
     let (summary, body, envelope) = super::preview::build_preview_with_correction(
         &shared.store,
@@ -4876,6 +6050,28 @@ async fn build_and_pin_preview(
         pin_previewed_envelope(shared, entry_id, &summary, &envelope);
     }
     Ok((summary, body, envelope))
+}
+
+/// Record what the scrubber found in the envelope `entry_id` is pinned to,
+/// so `list_pending` can say "Scrubbed · 7 marks" -- or "worth a second
+/// look" -- without re-running the pipeline. See `QueueEntry::scrub` and
+/// `second_look`.
+///
+/// Only for the pinned bytes: `Queue::record_scrub` refuses a digest the
+/// entry is not pinned to, so a card, an unenrolled build, or a pin that
+/// failed to write records nothing. Counts only. Best effort, like
+/// `pin_previewed_envelope`: a queue that cannot be saved keeps the record in
+/// memory, and a lost record reads as not yet scrubbed, the safe direction.
+pub(crate) fn record_scrub(
+    shared: &DaemonShared,
+    entry_id: Uuid,
+    envelope_digest: &str,
+    counts: super::second_look::ScrubCounts,
+) {
+    let mut queue = shared.queue.lock().expect("queue lock");
+    if queue.record_scrub(entry_id, envelope_digest, counts) {
+        let _ = queue.save(&shared.store);
+    }
 }
 
 /// Full preview -- summary *and* redacted body -- for one queue entry, for a
@@ -5206,6 +6402,7 @@ async fn handle_preview_turns(shared: &DaemonShared, req: &Request) -> Response 
             "envelope_digest": envelope_digest,
             "turn_count": turns.len(),
             "turns": turns,
+            "leaves_this_mac": leaves_this_mac_value(shared, id, &envelope, turns.len()),
         }),
     )
 }
@@ -5239,8 +6436,151 @@ pub async fn open_preview_turns(
         "envelope_digest": envelope_digest,
         "turn_count": turns.len(),
         "turns": turns,
+        "leaves_this_mac": leaves_this_mac_value(shared, entry_id, &envelope, turns.len()),
     }))
     .map_err(|_| "turns-serialize-failed")
+}
+
+/// The review sheet's "Leaves this Mac" object: the envelope metadata that
+/// leaves with the conversation, as fixed labels read off the envelope
+/// itself (`consent_copy::leaves_this_mac_fields`), the size and turn count
+/// the line quotes, and the finished DRAFT line. Labels and counts only: no
+/// field VALUE rides along -- not the tool name, not the model, not the
+/// fingerprint.
+///
+/// `would_send_bytes` is `null` in the (unreachable) case that the
+/// envelope cannot be measured, and `line` is then absent: a line quoting a
+/// size nobody measured would be a claim the daemon cannot back.
+fn leaves_this_mac_value(
+    shared: &DaemonShared,
+    entry_id: Uuid,
+    envelope: &trace_commons_protocol::trace_contribution::TraceContributionEnvelope,
+    turn_count: usize,
+) -> serde_json::Value {
+    let fields = crate::consent_copy::leaves_this_mac_fields(envelope);
+    let size = crate::envelope::envelope_size(envelope).ok();
+    // The folder's own names, from the entry: the basename of the project
+    // root, of the unfolded path, and of the directory the session ran in.
+    // Only absolute paths are scrubbed, so a relative path in the
+    // conversation can still name the folder, and the line must say so
+    // rather than promise it never leaves.
+    let folders: Vec<String> = {
+        let queue = shared.queue.lock().expect("queue lock");
+        queue
+            .get(entry_id)
+            .map(|e| {
+                [
+                    Some(e.project_key.as_str()),
+                    e.project_path.as_deref(),
+                    e.session_cwd.as_deref(),
+                ]
+                .into_iter()
+                .flatten()
+                .filter_map(|p| p.rsplit(['/', '\\']).find(|seg| !seg.is_empty()))
+                .map(str::to_string)
+                .collect()
+            })
+            .unwrap_or_default()
+    };
+    let folder_refs: Vec<&str> = folders.iter().map(String::as_str).collect();
+    let (in_metadata, in_conversation) =
+        crate::consent_copy::folder_named_in(envelope, &folder_refs);
+    let mut value = serde_json::json!({
+        "fields": fields,
+        "would_send_bytes": size,
+        "turn_count": turn_count,
+        "folder_named_in_conversation": in_conversation,
+        "folder_named_in_metadata": in_metadata,
+    });
+    if let Some(bytes) = size {
+        value["line"] = serde_json::Value::from(crate::consent_copy::leaves_this_mac_line(
+            bytes,
+            turn_count,
+            &fields,
+            (in_metadata, in_conversation),
+        ));
+    }
+    value
+}
+
+/// Spans of the redacted preview body that look like personal data the
+/// scrubber did not mark -- an email the email pass did not redact, a phone
+/// number, a credential-shaped string -- so the review sheet can put "looks
+/// like an email. Not matched. Your call." under that line.
+///
+/// # What crosses
+///
+/// Byte offsets into the body and a fixed label from
+/// `unsure_spans::UNSURE_LABELS`. **Never the text**: the shell already
+/// holds the body from `preview_body` and renders the span from it. The body
+/// is trace content under the preview content boundary; this response is
+/// not, in the same way `preview_turns` is not, and it is served under the
+/// same rules -- only for an entry the caller already holds
+/// (`unknown-entry-id` otherwise), and never logged, audited or notified.
+///
+/// # Anchoring
+///
+/// `body_digest` is **required** on every call, exactly as for
+/// `preview_turns`: the offsets index one specific string, and against any
+/// other they are not stale but wrong. A mismatch is
+/// [`ERR_PREVIEW_BODY_CHANGED`]; the caller re-reads the body from
+/// `offset: 0` and asks again. The body and the spans are resolved through
+/// `resolve_preview_envelope`, the same path as `preview_body` and
+/// `preview_turns`, so the three can never come from two builds.
+///
+/// # Fail-closed
+///
+/// A body the detector cannot index exactly -- or any span that does not
+/// re-verify against the bytes it points at -- refuses the whole response
+/// with `unsure_spans::REASON_UNSURE_INDEX_FAILED`. A partial list is only
+/// ever returned flagged: `span_count` is the total, `spans` holds at most
+/// `unsure_spans::MAX_UNSURE_SPANS` of them, and `spans_truncated` says
+/// whether it was cut.
+async fn handle_preview_unsure_spans(shared: &DaemonShared, req: &Request) -> Response {
+    let id = try_response!(entry_id_param(req));
+    let expected_digest = match req.params.get("body_digest") {
+        None => return Response::err(req.id, ERR_BAD_PARAMS, ERR_BODY_DIGEST_REQUIRED),
+        Some(v) => match v.as_str() {
+            Some(s) => s.to_string(),
+            None => return Response::err(req.id, ERR_BAD_PARAMS, "body-digest-invalid"),
+        },
+    };
+    match open_preview_unsure_spans(shared, id, &expected_digest).await {
+        Ok(value) => Response::ok(req.id, value),
+        Err((code, label)) => Response::err(req.id, code, label),
+    }
+}
+
+/// The unsure-span index for one entry, for a caller holding `shared`
+/// directly (a future C ABI export) as well as for the socket method, so
+/// the two cannot describe the same entry differently. Anchored by the
+/// caller's `body_digest` exactly as `open_preview_turns` is. Errors are
+/// `(code, fixed label)`, never content.
+pub async fn open_preview_unsure_spans(
+    shared: &DaemonShared,
+    entry_id: Uuid,
+    expected_body_digest: &str,
+) -> Result<serde_json::Value, (&'static str, &'static str)> {
+    let (envelope, envelope_digest, _enrolled) = resolve_preview_envelope(shared, entry_id).await?;
+    let body =
+        super::preview::body_of(&envelope).map_err(|_| (ERR_UNAVAILABLE, "preview-failed"))?;
+    let body_digest = format!("sha256:{:x}", Sha256::digest(body.as_bytes()));
+    if expected_body_digest != body_digest {
+        return Err((ERR_UNAVAILABLE, ERR_PREVIEW_BODY_CHANGED));
+    }
+    let mut spans =
+        super::unsure_spans::unsure_spans_in(&body).map_err(|label| (ERR_UNAVAILABLE, label))?;
+    let span_count = spans.len();
+    let truncated = span_count > super::unsure_spans::MAX_UNSURE_SPANS;
+    spans.truncate(super::unsure_spans::MAX_UNSURE_SPANS);
+    Ok(serde_json::json!({
+        "entry_id": entry_id,
+        "body_digest": body_digest,
+        "envelope_digest": envelope_digest,
+        "span_count": span_count,
+        "spans": spans,
+        "spans_truncated": truncated,
+    }))
 }
 
 /// The redacted body for one entry, plus its envelope digest and whether the
@@ -5345,7 +6685,13 @@ fn pin_previewed_envelope(
     if super::approved_envelope::save(&shared.store, entry_id, envelope).is_err() {
         return;
     }
-    if queue.record_previewed_envelope(entry_id, &summary.envelope_digest, None) {
+    // K10: the summary already measured the bytes this envelope serializes
+    // to; mirror it onto the pin rather than re-measuring.
+    let would_send_bytes = Some(summary.would_send_bytes as u64);
+    if queue.record_previewed_envelope(entry_id, &summary.envelope_digest, None, would_send_bytes) {
+        // The counts go down with the pin they describe; see
+        // `QueueEntry::scrub`.
+        queue.record_scrub(entry_id, &summary.envelope_digest, summary.scrub_counts);
         // A failed queue write leaves the pin in memory and the bytes on
         // disk -- consistent with each other, and the next queue save
         // persists it. Nothing is removed here: the bytes are what the
@@ -5836,7 +7182,19 @@ fn probe_credential(req: &Request) -> Result<(u16, String, std::path::PathBuf), 
             // treated as absent, because falling through to the
             // environment would answer about a path the caller did not ask
             // about.
-            Some(dir) if !dir.is_empty() => Some(std::path::PathBuf::from(dir)),
+            Some(dir) if !dir.is_empty() => {
+                // Relative would resolve against the daemon's working
+                // directory, which no shell controls: the same floor
+                // `set_settings` holds a saved declaration to.
+                if !std::path::Path::new(dir).is_absolute() {
+                    return Err(Box::new(Response::err(
+                        req.id,
+                        ERR_BAD_PARAMS,
+                        super::settings::ERR_ROUTING_TOKEN_DIR_MUST_BE_ABSOLUTE,
+                    )));
+                }
+                Some(std::path::PathBuf::from(dir))
+            }
             _ => {
                 return Err(Box::new(Response::err(
                     req.id,
@@ -6056,8 +7414,43 @@ fn routed_tools(body: &[u8]) -> Vec<serde_json::Value> {
 #[path = "cloud_credential_recovery_tests.rs"]
 mod cloud_credential_recovery_tests;
 
+/// The receipt-proof attestor for the embedded IronWire, or none.
+///
+/// Built whenever both hold: a NEAR AI key (the gateway refuses the
+/// attestation registry without one, and it is the key IronWire already sends
+/// there), and an enrolled config (ingest serves the collateral, and its
+/// allowlist governs egress).
+///
+/// Whether any pins are in force does not matter here. The attestor reads
+/// `pins` on every question: with none it answers `Unavailable` without
+/// fetching anything, so no row becomes `verified`, and pins that ingest
+/// starts publishing after the proxy started take effect without a restart.
+/// A set that lapses stops earning keys at once. Reconcile therefore never
+/// asks ingest for pins itself. The cost is that IronWire's receipt checks
+/// run for every NEAR AI answer even while nothing is pinned.
+fn signer_attestor_for(
+    store: &ConfigStore,
+    key: Option<String>,
+    pins: Arc<crate::routing::proof_attestor::PinProvider>,
+) -> Option<std::sync::Arc<dyn ironwire_proxy::proof::SignerAttestor>> {
+    use crate::routing::proof_attestor::{HttpAttestationSource, NearAiQuoteAttestor};
+    let key = key?;
+    let cfg = store.load_config().ok().flatten()?;
+    let source =
+        HttpAttestationSource::new(&crate::config::config_allowlist(&cfg), &cfg.ingest_url, key)
+            .ok()?;
+    Some(std::sync::Arc::new(NearAiQuoteAttestor::new(
+        Box::new(source),
+        pins,
+    )))
+}
+
 #[cfg(test)]
 mod tests {
+    mod missions {
+        include!("mission_catalogue_tests.rs");
+        include!("activity_missions_tests.rs");
+    }
     mod witnessed_flow {
         include!("ipc_witness_flow_test.rs");
     }
@@ -6081,6 +7474,252 @@ mod tests {
             .save_config(&crate::commands::unenrolled_preview_config())
             .unwrap();
         s
+    }
+
+    /// K2 (#1173): every explicit send-enabling IPC method is refused,
+    /// before anything it would otherwise do, while `dev_dry_run` is set.
+    mod dev_dry_run {
+        use super::*;
+
+        /// Every method off `DEV_DRY_RUN_LOCAL_METHODS` is refused by both
+        /// dispatchers before its handler runs -- the network calls the
+        /// review named (`near_ai_account_enroll`, `legacy_invite_migrate`,
+        /// `near_account_start`, `native_wallet_flow`, `publish_public_run`,
+        /// `set_public_profile`, `withdraw`, `withdraw_bulk`) among them,
+        /// and any method added later until it is allowlisted.
+        #[tokio::test]
+        async fn refuses_every_method_off_the_local_allowlist() {
+            let mut s = enrolled_shared();
+            s.dev_dry_run = true;
+            let refused: Vec<&str> = METHODS
+                .iter()
+                .copied()
+                .filter(|m| !DEV_DRY_RUN_LOCAL_METHODS.contains(m))
+                .collect();
+            for named in [
+                "enroll",
+                "near_ai_account_enroll",
+                "legacy_invite_migrate",
+                "near_account_start",
+                "native_wallet_flow",
+                "publish_public_run",
+                "set_public_profile",
+                "withdraw",
+                "withdraw_bulk",
+                "approve",
+                "grant_automatic",
+                "witness_preview_request",
+            ] {
+                assert!(refused.contains(&named), "{named} must be refused");
+            }
+            for method in refused {
+                let async_r = handle_request_async(&s, &req(method, serde_json::json!({}))).await;
+                let sync_r = handle_request(&s, &req(method, serde_json::json!({})));
+                for r in [async_r, sync_r] {
+                    let err = r
+                        .error
+                        .unwrap_or_else(|| panic!("{method} answered under dev_dry_run"));
+                    assert_eq!(err.code, ERR_BAD_PARAMS, "{method}");
+                    assert_eq!(err.message, ERR_DEV_DRY_RUN, "{method}");
+                }
+            }
+            assert!(
+                s.store.load_config().unwrap().unwrap().device_key_id
+                    == crate::commands::unenrolled_preview_config().device_key_id,
+                "nothing was enrolled"
+            );
+        }
+
+        /// The allowlist names real methods, so a typo cannot quietly
+        /// refuse one the dry run is meant to keep.
+        #[test]
+        fn the_local_allowlist_names_only_real_methods() {
+            for m in DEV_DRY_RUN_LOCAL_METHODS {
+                assert!(METHODS.contains(m), "{m} is not a method");
+            }
+        }
+
+        /// Off, nothing is refused for being off the allowlist.
+        #[tokio::test]
+        async fn refuses_nothing_when_off() {
+            let s = enrolled_shared();
+            let r = handle_request(&s, &req("near_ai_credential_forget", serde_json::json!({})));
+            assert_ne!(
+                r.error.map(|e| e.message),
+                Some(ERR_DEV_DRY_RUN.to_string())
+            );
+        }
+
+        /// Debug builds report the mode in `status`, which is what the app
+        /// reads to show its notice.
+        #[test]
+        fn status_reports_the_mode() {
+            let mut s = enrolled_shared();
+            assert_eq!(s.status_value()["dev_dry_run"], false);
+            s.dev_dry_run = true;
+            assert_eq!(s.status_value()["dev_dry_run"], true);
+            let r = handle_request(&s, &req("status", serde_json::json!({})));
+            assert_eq!(r.result.expect("status still answers")["dev_dry_run"], true);
+        }
+
+        #[tokio::test]
+        async fn refuses_approve_a_single_entry_and_all() {
+            let mut s = enrolled_shared();
+            s.dev_dry_run = true;
+            let id = seed_entry(&s, "/tmp/dev-dry-run-approve");
+            for params in [
+                serde_json::json!({"entry_id": id}),
+                serde_json::json!({"all": true}),
+                serde_json::json!({"project_id": "whatever-a-folder-approve-would-send"}),
+            ] {
+                let r = handle_request_async(&s, &req("approve", params)).await;
+                let err = r.error.expect("approve is refused under dev_dry_run");
+                assert_eq!(err.code, ERR_BAD_PARAMS);
+                assert_eq!(err.message, ERR_DEV_DRY_RUN);
+            }
+            // Refused before anything is approved: the seeded entry is
+            // exactly where it started.
+            assert_eq!(
+                s.queue.lock().unwrap().get(id).unwrap().state,
+                super::super::super::queue::QueueState::Pending
+            );
+        }
+
+        #[test]
+        fn refuses_arming_a_project_for_auto_upload_but_not_notify_only_or_ignore() {
+            let mut s = enrolled_shared();
+            s.dev_dry_run = true;
+            seed_entry(&s, "/tmp/dev-dry-run-arm");
+            let r = handle_request(
+                &s,
+                &req(
+                    "set_project_mode",
+                    serde_json::json!({"project_key": "/tmp/dev-dry-run-arm", "mode": "auto_upload"}),
+                ),
+            );
+            let err = r.error.expect("arming is refused under dev_dry_run");
+            assert_eq!(err.code, ERR_BAD_PARAMS);
+            assert_eq!(err.message, ERR_DEV_DRY_RUN);
+            // A mode that only ever restricts a send is not a send path, and
+            // stays allowed -- the guarantee is "nothing can be made to
+            // send", not "nothing can be configured".
+            for mode in ["notify_only", "ignore"] {
+                let r = handle_request(
+                    &s,
+                    &req(
+                        "set_project_mode",
+                        serde_json::json!({"project_key": "/tmp/dev-dry-run-arm", "mode": mode}),
+                    ),
+                );
+                assert!(r.error.is_none(), "{mode}: {:?}", r.error);
+            }
+        }
+
+        #[test]
+        fn refuses_the_auto_contribution_override_but_not_notify_only_or_ignore() {
+            let mut s = enrolled_shared();
+            s.dev_dry_run = true;
+            let r = handle_request(
+                &s,
+                &req(
+                    "set_contribution_override",
+                    serde_json::json!({"mode": "auto_upload", "confirm": true}),
+                ),
+            );
+            let err = r
+                .error
+                .expect("the Auto override is refused under dev_dry_run");
+            assert_eq!(err.code, ERR_BAD_PARAMS);
+            assert_eq!(err.message, ERR_DEV_DRY_RUN);
+            for mode in ["notify_only", "ignore"] {
+                let r = handle_request(
+                    &s,
+                    &req(
+                        "set_contribution_override",
+                        serde_json::json!({"mode": mode}),
+                    ),
+                );
+                assert!(r.error.is_none(), "{mode}: {:?}", r.error);
+            }
+        }
+
+        #[test]
+        fn refuses_grant_automatic() {
+            let mut s = enrolled_shared();
+            s.dev_dry_run = true;
+            let r = handle_request(&s, &req("grant_automatic", serde_json::json!({})));
+            let err = r
+                .error
+                .expect("grant_automatic is refused under dev_dry_run");
+            assert_eq!(err.code, ERR_BAD_PARAMS);
+            assert_eq!(err.message, ERR_DEV_DRY_RUN);
+        }
+
+        #[tokio::test]
+        async fn refuses_the_witness_preview() {
+            let mut s = enrolled_shared();
+            s.dev_dry_run = true;
+            let id = seed_entry(&s, "/tmp/dev-dry-run-witness-preview");
+            let r = handle_request_async(
+                &s,
+                &req(
+                    "witness_preview_request",
+                    serde_json::json!({"entry_id": id, "raw_session_confirmed": true}),
+                ),
+            )
+            .await;
+            let err = r
+                .error
+                .expect("a witness preview is refused under dev_dry_run");
+            assert_eq!(err.code, ERR_BAD_PARAMS);
+            assert_eq!(err.message, ERR_DEV_DRY_RUN);
+        }
+
+        /// IronWire hosting is "nothing reaches the network" too: the exact
+        /// settings and home that `rejected_private_inference_settings_never_reach_reconcile`'s
+        /// sibling tests drive to `Running` elsewhere in this file stay `Off`
+        /// here, because `dev_dry_run` forces `on` to `false` regardless of
+        /// what `private_inference` says.
+        #[tokio::test]
+        async fn never_hosts_ironwire() {
+            let mut s = shared();
+            s.dev_dry_run = true;
+            let home = tempfile::tempdir().unwrap();
+            *s.private_inference.lock().await = Some(
+                super::super::super::private_inference::PrivateInference::with_port(
+                    home.path().to_path_buf(),
+                    0,
+                ),
+            );
+            s.settings.lock().unwrap().private_inference = true;
+            s.reconcile_private_inference().await;
+            assert_eq!(s.private_inference_value()["state"], "off");
+        }
+
+        /// The flag cannot be set, cleared, or discovered over the socket.
+        /// `set_settings` refuses any key `apply_settings_object` does not
+        /// recognize (`ERR_SETTINGS_UNKNOWN_FIELD`), and `dev_dry_run` is not
+        /// one of them -- the refusal itself is the proof that no code path
+        /// reads it out of `req.params`, and the field is unchanged either
+        /// way.
+        #[tokio::test]
+        async fn cannot_be_set_over_ipc() {
+            let mut s = enrolled_shared();
+            s.dev_dry_run = true;
+            let r = handle_request_async(
+                &s,
+                &req("set_settings", serde_json::json!({"dev_dry_run": false})),
+            )
+            .await;
+            let err = r
+                .error
+                .expect("an unrecognized settings key is refused outright");
+            assert_eq!(
+                err.message,
+                super::super::super::settings::ERR_SETTINGS_UNKNOWN_FIELD
+            );
+            assert!(s.dev_dry_run, "no IPC request may clear dev_dry_run");
+        }
     }
 
     #[test]
@@ -6546,7 +8185,7 @@ mod tests {
         s.queue
             .lock()
             .unwrap()
-            .record_previewed_envelope(id, "witness-sha256:missing", None);
+            .record_previewed_envelope(id, "witness-sha256:missing", None, None);
         assert!(open_preview(&s, id).await.is_err());
         assert!(resolve_preview_envelope(&s, id).await.is_err());
         let response = handle_request_async(
@@ -6840,6 +8479,42 @@ mod tests {
         }
     }
 
+    /// The card shape (R7, #1173) carries `redactions_distinct` the same way
+    /// the full summary does: `preview` for a non-certificate entry,
+    /// `preview_request`'s cache hit, and `preview_ready` all share
+    /// `preview_card_value`, so one assertion here covers all three.
+    #[test]
+    fn preview_card_value_carries_redactions_distinct() {
+        let mut redactions = std::collections::BTreeMap::new();
+        redactions.insert("local_path".to_string(), 185);
+        let mut redactions_distinct = std::collections::BTreeMap::new();
+        redactions_distinct.insert("local_path".to_string(), 12);
+        let summary = super::super::preview::PreviewCardSummary {
+            would_send_bytes: 100,
+            raw_session_bytes: 200,
+            event_count: 3,
+            opening_prompt: "hello".to_string(),
+            title: None,
+            redactions,
+            redactions_distinct: redactions_distinct.clone(),
+            pii_labels_present: Vec::new(),
+            consent_scopes: Vec::new(),
+            residual_risk: "none".to_string(),
+            input_fingerprint: "fp".to_string(),
+            enrolled: true,
+            subagent_count: 0,
+            subagents_dropped: 0,
+            scrub_counts: super::super::second_look::ScrubCounts::default(),
+        };
+        let value = preview_card_value(&summary);
+        assert_eq!(
+            value["redactions_distinct"],
+            serde_json::to_value(&redactions_distinct).unwrap(),
+            "the card summary must carry redactions_distinct, a count only, \
+             the same way the full summary does"
+        );
+    }
+
     use crate::daemon::test_support::at;
 
     /// A real directory on this machine whose canonical path is an
@@ -7037,26 +8712,14 @@ mod tests {
                 serde_json::json!({"project_key": work_api, "mode": "notify_only"}),
             ),
         );
-        let entry_id = uuid::Uuid::new_v4();
-        {
-            let mut queue = s.queue.lock().unwrap();
-            queue
-                .upsert(
-                    super::super::queue::QueueEntry {
-                        entry_id,
-                        session_hash: "sha256:seed".to_string(),
-                        source: "claude-code".to_string(),
-                        project_key: work_api.clone(),
-                        project_label: "api".to_string(),
-                        path: std::path::PathBuf::from("/tmp/seed.jsonl"),
-                        size_bytes: 1,
-                        discovered_at: Utc::now(),
-                        ..Default::default()
-                    },
-                    500,
-                )
-                .unwrap();
-        }
+        let entry_id = seed_queue_entry(
+            &s,
+            super::super::queue::QueueEntry {
+                project_key: work_api.clone(),
+                project_label: "api".to_string(),
+                ..queue_entry_fixture()
+            },
+        );
 
         // A colliding project shows up via a policy edit -- no tick runs.
         let r = handle_request(
@@ -7127,26 +8790,7 @@ mod tests {
         // audit; approving one entry at a time is the default, always-was
         // path and does not need a new log entry per click.
         let s = shared();
-        let entry_id = uuid::Uuid::new_v4();
-        {
-            let mut queue = s.queue.lock().unwrap();
-            queue
-                .upsert(
-                    super::super::queue::QueueEntry {
-                        entry_id,
-                        session_hash: "sha256:seed".to_string(),
-                        source: "claude-code".to_string(),
-                        project_key: "/tmp/p".to_string(),
-                        project_label: "p".to_string(),
-                        path: std::path::PathBuf::from("/tmp/seed.jsonl"),
-                        size_bytes: 1,
-                        discovered_at: Utc::now(),
-                        ..Default::default()
-                    },
-                    500,
-                )
-                .unwrap();
-        }
+        let entry_id = seed_queue_entry(&s, queue_entry_fixture());
         let r = handle_request_async(
             &s,
             &req(
@@ -7162,31 +8806,17 @@ mod tests {
     #[tokio::test]
     async fn an_approval_carries_its_verdict_to_the_entry() {
         let s = shared();
-        let entry_id = uuid::Uuid::new_v4();
-        {
-            let mut queue = s.queue.lock().unwrap();
-            queue
-                .upsert(
-                    super::super::queue::QueueEntry {
-                        entry_id,
-                        session_hash: "sha256:seed".to_string(),
-                        source: "claude-code".to_string(),
-                        project_key: "/tmp/p".to_string(),
-                        project_label: "p".to_string(),
-                        path: std::path::PathBuf::from("/tmp/seed.jsonl"),
-                        size_bytes: 1,
-                        discovered_at: Utc::now(),
-                        // Already pinned, so `handle_approve` does not try to
-                        // build a real preview for a path that does not
-                        // exist -- this test is about the verdict, not the
-                        // envelope pipeline.
-                        previewed_envelope_digest: Some("sha256:preview".to_string()),
-                        ..Default::default()
-                    },
-                    500,
-                )
-                .unwrap();
-        }
+        let entry_id = seed_queue_entry(
+            &s,
+            super::super::queue::QueueEntry {
+                // Already pinned, so `handle_approve` does not try to
+                // build a real preview for a path that does not
+                // exist -- this test is about the verdict, not the
+                // envelope pipeline.
+                previewed_envelope_digest: Some("sha256:preview".to_string()),
+                ..queue_entry_fixture()
+            },
+        );
 
         let r = handle_request_async(
             &s,
@@ -7256,26 +8886,7 @@ mod tests {
     #[tokio::test]
     async fn an_unrecognised_verdict_is_refused_and_approves_nothing() {
         let s = shared();
-        let entry_id = uuid::Uuid::new_v4();
-        {
-            let mut queue = s.queue.lock().unwrap();
-            queue
-                .upsert(
-                    super::super::queue::QueueEntry {
-                        entry_id,
-                        session_hash: "sha256:seed".to_string(),
-                        source: "claude-code".to_string(),
-                        project_key: "/tmp/p".to_string(),
-                        project_label: "p".to_string(),
-                        path: std::path::PathBuf::from("/tmp/seed.jsonl"),
-                        size_bytes: 1,
-                        discovered_at: Utc::now(),
-                        ..Default::default()
-                    },
-                    500,
-                )
-                .unwrap();
-        }
+        let entry_id = seed_queue_entry(&s, queue_entry_fixture());
 
         let r = handle_request_async(
             &s,
@@ -7652,6 +9263,47 @@ mod tests {
         assert!(one.get("excluded_held").is_none(), "{one}");
     }
 
+    /// The Scrub check's hold (K4 of #1118) is left out of a group approve
+    /// like the others: "Submit all" is not a second look at one session.
+    #[tokio::test]
+    async fn a_group_approve_leaves_a_session_held_for_a_second_look() {
+        let s = shared();
+        let key = "/tmp/secondlookproj";
+        let open = seed_entry_with_eligibility(&s, key, None);
+        let held = seed_entry_with_eligibility(&s, key, None);
+        s.queue.lock().unwrap().set_state(
+            held,
+            super::super::queue::QueueState::Pending,
+            Some(super::super::second_look::REASON_SECOND_LOOK_REVIEW_REQUIRED.to_string()),
+        );
+
+        let result = handle_request_async(
+            &s,
+            &req(
+                "approve",
+                serde_json::json!({ "project_id": project_id_for(key) }),
+            ),
+        )
+        .await
+        .result
+        .expect("approve answers");
+
+        assert_eq!(result["excluded_held"], 1, "{result}");
+        let selected = result["skipped"].as_array().expect("a skipped list");
+        assert!(
+            selected
+                .iter()
+                .all(|e| e["entry_id"] != serde_json::json!(held)),
+            "the held session was not selected: {result}"
+        );
+        assert!(
+            selected
+                .iter()
+                .any(|e| e["entry_id"] == serde_json::json!(open)),
+            "the other session was: {result}"
+        );
+    }
+
     /// Arming over the socket records the terms it was granted under, so a
     /// later widening can be compared against what was actually agreed
     /// rather than against a baseline taken afterwards.
@@ -7964,6 +9616,89 @@ mod tests {
         assert_eq!(
             status["automatic_contribution_held"],
             serde_json::json!({ "held_sessions": 0, "reasons": [], "projects": [] })
+        );
+    }
+
+    #[test]
+    fn automatic_default_upgrade_notice_survives_save_restart_and_acknowledgement() {
+        let s = enrolled_shared();
+        {
+            let mut policy = s.policy.lock().unwrap();
+            policy
+                .set_mode("/tmp/upgrade", ProjectMode::AutoUpload, Utc::now())
+                .unwrap();
+            policy.scrub_check_upgrade_recorded = false;
+            policy.save(&s.store).unwrap();
+        }
+        let mut old = serde_json::to_value(DaemonSettings::default()).unwrap();
+        old.as_object_mut().unwrap().remove("scrub_check");
+        s.store
+            .write_daemon_file(
+                crate::config::DAEMON_SETTINGS_FILE,
+                old.to_string().as_bytes(),
+            )
+            .unwrap();
+        // A preference write before the daemon starts must not erase provenance.
+        DaemonSettings::load(&s.store)
+            .unwrap()
+            .save(&s.store)
+            .unwrap();
+        let upgraded = DaemonShared::load(s.store.clone()).unwrap();
+        let notices = upgraded.status_value()["arming_rewordings"].clone();
+        assert_eq!(notices.as_array().unwrap().len(), 1);
+        assert_eq!(notices[0]["scrub_check_defaulted"], true);
+        assert!(!notices.to_string().contains("/tmp/upgrade"));
+        let restarted = DaemonShared::load(s.store.clone()).unwrap();
+        assert_eq!(restarted.status_value()["arming_rewordings"], notices);
+        let response = handle_request(
+            &restarted,
+            &req(
+                "acknowledge_arming_rewordings",
+                serde_json::json!({"ids": [notices[0]["id"]]}),
+            ),
+        );
+        assert!(response.error.is_none());
+        let acknowledged = DaemonShared::load(s.store.clone()).unwrap();
+        assert_eq!(
+            acknowledged.status_value()["arming_rewordings"],
+            serde_json::json!([])
+        );
+    }
+
+    #[test]
+    fn startup_announces_an_old_armed_install_without_a_settings_file() {
+        let s = shared();
+        assert!(
+            s.store
+                .read_daemon_file(crate::config::DAEMON_SETTINGS_FILE)
+                .unwrap()
+                .is_none()
+        );
+        {
+            let mut policy = s.policy.lock().unwrap();
+            policy
+                .set_mode("/tmp/legacy", ProjectMode::AutoUpload, Utc::now())
+                .unwrap();
+            policy.scrub_check_upgrade_recorded = false;
+            policy.save(&s.store).unwrap();
+        }
+        let upgraded = DaemonShared::load(s.store.clone()).unwrap();
+        assert_eq!(
+            upgraded.status_value()["arming_rewordings"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(
+            DaemonSettings::load(&s.store)
+                .unwrap()
+                .scrub_check_defaulted_on_upgrade
+        );
+        let restarted = DaemonShared::load(s.store.clone()).unwrap();
+        assert_eq!(
+            restarted.status_value()["arming_rewordings"],
+            upgraded.status_value()["arming_rewordings"]
         );
     }
 
@@ -8311,7 +10046,7 @@ mod tests {
         {
             let mut queue = s.queue.lock().unwrap();
             for id in ids {
-                assert!(queue.record_previewed_envelope(id, "sha256:pinned", None));
+                assert!(queue.record_previewed_envelope(id, "sha256:pinned", None, None));
             }
         }
 
@@ -8386,6 +10121,395 @@ mod tests {
                 .expect("an object")
                 .contains_key("contributable_count"),
             "the key must be absent, not null: {row}"
+        );
+    }
+
+    /// K6 review: the `status` wiring, on the wire. A mixed queue -- an
+    /// Ask-me pending, an armed pending that is settling, and a grant
+    /// backlog entry (on disk when the grant armed its folder) -- owes two
+    /// decisions while `queue_depth` stays three. Swapping `decisions_owed`
+    /// for `queue.pending().len()` in `status_value` fails here.
+    #[test]
+    fn status_reports_decisions_owed_apart_from_queue_depth_for_a_mixed_queue() {
+        let s = shared();
+        let now = Utc::now();
+        {
+            let mut policy = s.policy.lock().unwrap();
+            policy
+                .set_mode("/tmp/k6armed", ProjectMode::AutoUpload, now)
+                .unwrap();
+            policy
+                .set_mode("/tmp/k6grant", ProjectMode::AutoUpload, now)
+                .unwrap();
+            policy.armed_by_grant.insert("/tmp/k6grant".to_string());
+            // `seed_entry` puts every entry at this path; only the grant
+            // folder's entry is held back, because only that folder was
+            // armed by the grant.
+            policy
+                .sessions_on_disk_at_grant
+                .insert("/tmp/seed.jsonl".to_string());
+        }
+        seed_entry(&s, "/tmp/k6ask");
+        seed_entry(&s, "/tmp/k6armed");
+        seed_entry(&s, "/tmp/k6grant");
+
+        let status = handle_request(&s, &req("status", serde_json::json!({})))
+            .result
+            .unwrap();
+        assert_eq!(status["queue_depth"], 3, "{status}");
+        assert_eq!(
+            status["decisions_owed"], 2,
+            "the Ask-me pending and the grant backlog, not the settling armed one: {status}"
+        );
+    }
+
+    #[test]
+    fn manual_scrub_check_counts_armed_pending_decisions_without_changing_queue_depth() {
+        let s = shared();
+        s.policy
+            .lock()
+            .unwrap()
+            .set_mode("/tmp/k6manual", ProjectMode::AutoUpload, Utc::now())
+            .unwrap();
+        let pending = seed_entry(&s, "/tmp/k6manual");
+        let kept = seed_entry(&s, "/tmp/k6manual");
+        s.queue.lock().unwrap().keep(kept).unwrap();
+        s.settings.lock().unwrap().scrub_check = super::super::settings::ScrubCheck::Manual;
+
+        let status = s.status_value();
+        assert_eq!(status["queue_depth"], 1);
+        assert_eq!(
+            status["decisions_owed"], 1,
+            "Manual requires a person even in an armed folder"
+        );
+        assert_eq!(s.decisions_owed_value(), 1);
+        assert!(
+            s.queue
+                .lock()
+                .unwrap()
+                .get(pending)
+                .unwrap()
+                .reason_label
+                .is_none(),
+            "new Manual-mode pending sessions have no hold label"
+        );
+    }
+
+    #[test]
+    fn switching_scrub_check_publishes_badge_changes_even_without_a_queue_transition() {
+        let s = shared();
+        s.policy
+            .lock()
+            .unwrap()
+            .set_mode("/tmp/k6toggle", ProjectMode::AutoUpload, Utc::now())
+            .unwrap();
+        seed_entry(&s, "/tmp/k6toggle");
+        assert_eq!(s.decisions_owed_value(), 0);
+        let mut rx = s.events.subscribe();
+
+        for (mode, expected) in [("manual", 1), ("automatic", 0)] {
+            let response = handle_set_settings(
+                &s,
+                &req("set_settings", serde_json::json!({"scrub_check": mode})),
+            );
+            assert!(response.error.is_none(), "{:?}", response.error);
+            let mut saw_status = false;
+            while let Ok(event) = rx.try_recv() {
+                saw_status |= event.event == EVENT_STATUS_CHANGED;
+                assert_ne!(
+                    event.event, EVENT_QUEUE_CHANGED,
+                    "the row was already pending"
+                );
+            }
+            assert!(
+                saw_status,
+                "{mode} changes the badge without changing the queue"
+            );
+            assert_eq!(s.status_value()["decisions_owed"], expected);
+            assert_eq!(s.decisions_owed_value(), expected);
+        }
+    }
+
+    /// K6 review: explicitly arming a folder including backlog moves the badge
+    /// (1 -> 0) without any queue change, so `status_changed` must follow,
+    /// or a shell refreshing status only on `queue_changed` keeps the old
+    /// count.
+    #[test]
+    fn arming_a_folder_with_a_waiting_entry_publishes_status_changed() {
+        let key = "/tmp/k6arm-publishes";
+        let s = enrolled_shared();
+        seed_entry_with_eligibility(&s, key, None);
+        assert_eq!(s.decisions_owed_value(), 1);
+        let from_now = handle_set_project_mode(
+            &s,
+            &req(
+                "set_project_mode",
+                serde_json::json!({ "project_key": key, "mode": "auto_upload" }),
+            ),
+        );
+        assert!(from_now.error.is_none(), "{:?}", from_now.error);
+        assert_eq!(from_now.result.unwrap()["from_now"], true);
+        assert_eq!(
+            s.decisions_owed_value(),
+            1,
+            "default arming preserves the backlog decision"
+        );
+        let mut rx = s.events.subscribe();
+
+        let r = handle_set_project_mode(
+            &s,
+            &req(
+                "set_project_mode",
+                serde_json::json!({ "project_key": key, "mode": "auto_upload", "include_backlog": true }),
+            ),
+        );
+        assert!(r.error.is_none(), "{:?}", r.error);
+        assert_eq!(r.result.unwrap()["from_now"], false);
+        assert_eq!(s.decisions_owed_value(), 0);
+        let mut saw_status = false;
+        while let Ok(event) = rx.try_recv() {
+            saw_status |= event.event == EVENT_STATUS_CHANGED;
+        }
+        assert!(saw_status, "the badge moved; status_changed must say so");
+    }
+
+    /// And a policy change that leaves the badge where it was publishes no
+    /// extra `status_changed`.
+    #[test]
+    fn a_policy_change_that_leaves_the_badge_alone_publishes_no_status_changed() {
+        let key = "/tmp/k6arm-quiet";
+        let s = enrolled_shared();
+        seed_entry_with_eligibility(&s, key, None);
+        let mut rx = s.events.subscribe();
+
+        // Ask-me to Ask-me: nothing moves.
+        let r = handle_set_project_mode(
+            &s,
+            &req(
+                "set_project_mode",
+                serde_json::json!({ "project_key": key, "mode": "notify_only" }),
+            ),
+        );
+        assert!(r.error.is_none(), "{:?}", r.error);
+        while let Ok(event) = rx.try_recv() {
+            assert_ne!(event.event, EVENT_STATUS_CHANGED);
+        }
+    }
+
+    /// Make a daemon state file unwritable by putting a directory where it
+    /// goes, the way the `settings-write-failed` tests do.
+    fn block_daemon_file(s: &DaemonShared, name: &str) {
+        let path = s.store.daemon_path(name);
+        let _ = std::fs::remove_file(&path);
+        std::fs::create_dir_all(&path).unwrap();
+    }
+
+    fn drain_event_names(rx: &mut tokio::sync::broadcast::Receiver<Event>) -> Vec<String> {
+        let mut names = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            names.push(event.event);
+        }
+        names
+    }
+
+    /// #1132 / #1163 review: a `policy.save` failure returns after `set_mode`
+    /// has already changed the in-memory policy, and the daemon keeps that
+    /// in-memory truth. If the change moved the badge, `status_changed` must
+    /// still say so, or every shell keeps drawing the old count.
+    #[test]
+    fn a_policy_write_failure_still_publishes_the_badge_change_it_made() {
+        let key = "/tmp/k6-policy-write-failed";
+        let s = enrolled_shared();
+        seed_entry_with_eligibility(&s, key, None);
+        assert_eq!(s.decisions_owed_value(), 1);
+        block_daemon_file(&s, crate::config::DAEMON_PROJECTS_FILE);
+        let mut rx = s.events.subscribe();
+
+        let r = handle_set_project_mode(
+            &s,
+            &req(
+                "set_project_mode",
+                serde_json::json!({ "project_key": key, "mode": "auto_upload", "include_backlog": true }),
+            ),
+        );
+        let err = r
+            .error
+            .expect("an unwritable policy file must fail the call");
+        assert_eq!(err.code, ERR_UNAVAILABLE);
+        assert_eq!(err.message, "policy-write-failed");
+        assert_eq!(
+            s.decisions_owed_value(),
+            0,
+            "the in-memory policy is kept, so the badge has moved"
+        );
+        let events = drain_event_names(&mut rx);
+        assert!(
+            events.iter().any(|e| e == EVENT_STATUS_CHANGED),
+            "the badge moved in memory; status_changed must say so: {events:?}"
+        );
+    }
+
+    /// #1132 / #1163 review: a `queue.save` failure returns after the queue
+    /// was purged in memory, and the daemon keeps that in-memory truth. The
+    /// shells must hear `queue_changed` (the cards went away) and
+    /// `status_changed` (the badge moved), exactly as on success.
+    #[test]
+    fn a_queue_write_failure_still_publishes_the_queue_and_badge_changes_it_made() {
+        let key = "/tmp/k6-queue-write-failed";
+        let s = enrolled_shared();
+        let entry = seed_entry_with_eligibility(&s, key, None);
+        assert_eq!(s.decisions_owed_value(), 1);
+        block_daemon_file(&s, crate::config::DAEMON_QUEUE_FILE);
+        let mut rx = s.events.subscribe();
+
+        let r = handle_set_project_mode(
+            &s,
+            &req(
+                "set_project_mode",
+                serde_json::json!({ "project_key": key, "mode": "ignore" }),
+            ),
+        );
+        let err = r
+            .error
+            .expect("an unwritable queue file must fail the call");
+        assert_eq!(err.code, ERR_UNAVAILABLE);
+        assert_eq!(err.message, "queue-write-failed");
+        assert_ne!(
+            s.queue.lock().unwrap().get(entry).map(|e| e.state),
+            Some(QueueState::Pending),
+            "the in-memory purge is kept"
+        );
+        assert_eq!(s.decisions_owed_value(), 0);
+        let events = drain_event_names(&mut rx);
+        assert!(
+            events.iter().any(|e| e == EVENT_QUEUE_CHANGED),
+            "the queue changed in memory; queue_changed must say so: {events:?}"
+        );
+        assert!(
+            events.iter().any(|e| e == EVENT_STATUS_CHANGED),
+            "the badge moved in memory; status_changed must say so: {events:?}"
+        );
+    }
+
+    /// K7's upsell: "27 scrubbed sessions are sitting on this Mac under
+    /// folders set to Ask me. None has been decided." Three entries, each
+    /// failing exactly one of the three conditions the count requires, so a
+    /// broken filter shows up as a wrong number rather than a coincidence:
+    ///
+    /// - one in an Ask-me (unconfigured, `notify_only`) project, previewed
+    ///   -- the only one that must count;
+    /// - one in the same Ask-me project, never previewed -- undecided but
+    ///   unpreviewed, must be excluded;
+    /// - one in an armed (`auto_upload`) project, previewed -- must be
+    ///   excluded even though it is otherwise identical to the first.
+    #[test]
+    fn list_projects_unpurposed_traces_counts_only_previewed_ask_me_pending_entries() {
+        let s = shared();
+        let ask_project = "/tmp/askproj";
+        let armed_project = "/tmp/armedproj";
+        s.policy
+            .lock()
+            .unwrap()
+            .set_mode(armed_project, ProjectMode::AutoUpload, Utc::now())
+            .unwrap();
+
+        let scrubbed_and_undecided = seed_entry(&s, ask_project);
+        let _undecided_but_unpreviewed = seed_entry(&s, ask_project);
+        let armed_and_previewed = seed_entry(&s, armed_project);
+        {
+            let mut queue = s.queue.lock().unwrap();
+            assert!(queue.record_previewed_envelope(
+                scrubbed_and_undecided,
+                "sha256:a",
+                None,
+                None
+            ));
+            assert!(queue.record_previewed_envelope(armed_and_previewed, "sha256:b", None, None));
+        }
+
+        let result = handle_request(&s, &req("list_projects", serde_json::json!({})))
+            .result
+            .unwrap();
+        assert_eq!(result["unpurposed_traces"], 1, "{result}");
+    }
+
+    /// K11: a project's `list_projects` row names the tools that produced
+    /// its sessions, with a count per tool -- from the same cwd cache
+    /// `session_count` already reads, so no extra scan.
+    ///
+    /// Also K13: an imported Antigravity conversation and a Gemini CLI
+    /// session in the same project are reported as two distinct tool rows,
+    /// not folded into one, even though both answer at the same vendor.
+    #[test]
+    fn list_projects_breaks_sessions_down_by_tool() {
+        let s = shared();
+        let project_key = "/tmp/multi-tool-proj";
+        seed_entry(&s, project_key);
+
+        let insert = |path: &str, tool: &str| {
+            s.state.lock().unwrap().cwd_cache.insert(
+                path.to_string(),
+                super::super::state::CwdCacheEntry {
+                    size_bytes: 10,
+                    modified_at: Utc::now(),
+                    cwd: Some(project_key.to_string()),
+                    project_key: Some(project_key.to_string()),
+                    tool: Some(tool.to_string()),
+                    adapter: Some(tool.to_string()),
+                },
+            );
+        };
+        insert("/tmp/claude-a.jsonl", "claude-code");
+        insert("/tmp/claude-b.jsonl", "claude-code");
+        insert("/tmp/gemini-a.json", "gemini-cli");
+        insert("/staged/antigravity-a.json", "antigravity");
+        // An entry with no recorded tool (written before K11, or never
+        // re-touched since) must not crash the rollup and must not be
+        // counted under any tool.
+        s.state.lock().unwrap().cwd_cache.insert(
+            "/tmp/legacy.jsonl".to_string(),
+            super::super::state::CwdCacheEntry {
+                size_bytes: 10,
+                modified_at: Utc::now(),
+                cwd: Some(project_key.to_string()),
+                project_key: Some(project_key.to_string()),
+                tool: None,
+                adapter: None,
+            },
+        );
+
+        let rows = projects_of(&s);
+        let row = rows
+            .into_iter()
+            .find(|r| r["project_id"] == serde_json::json!(project_id_for(project_key)))
+            .expect("the project is listed");
+
+        assert_eq!(row["session_count"], 5, "{row}");
+        let tools = row["tools"].as_array().expect("tools is an array");
+        let tool_count = |name: &str| {
+            tools
+                .iter()
+                .find(|t| t["source"] == name)
+                .unwrap_or_else(|| panic!("no {name} row in {tools:?}"))["session_count"]
+                .clone()
+        };
+        assert_eq!(tool_count("claude-code"), serde_json::json!(2));
+        assert_eq!(tool_count("gemini-cli"), serde_json::json!(1));
+        assert_eq!(tool_count("antigravity"), serde_json::json!(1));
+        assert_eq!(
+            tools.len(),
+            3,
+            "the legacy entry with no tool must not mint a fourth row: {tools:?}"
+        );
+
+        let answers_at =
+            |name: &str| tools.iter().find(|t| t["source"] == name).unwrap()["answers_at"].clone();
+        assert_eq!(answers_at("claude-code"), serde_json::json!("Anthropic"));
+        assert_eq!(answers_at("gemini-cli"), serde_json::json!("Google"));
+        assert_eq!(
+            answers_at("antigravity"),
+            serde_json::json!("Google"),
+            "Antigravity must name its own vendor rather than falling through to null"
         );
     }
 
@@ -8957,26 +11081,7 @@ mod tests {
     #[tokio::test]
     async fn bulk_approval_is_rolled_back_when_its_audit_entry_cannot_be_written() {
         let s = shared();
-        let entry_id = uuid::Uuid::new_v4();
-        {
-            let mut queue = s.queue.lock().unwrap();
-            queue
-                .upsert(
-                    super::super::queue::QueueEntry {
-                        entry_id,
-                        session_hash: "sha256:seed".to_string(),
-                        source: "claude-code".to_string(),
-                        project_key: "/tmp/p".to_string(),
-                        project_label: "p".to_string(),
-                        path: std::path::PathBuf::from("/tmp/seed.jsonl"),
-                        size_bytes: 1,
-                        discovered_at: Utc::now(),
-                        ..Default::default()
-                    },
-                    500,
-                )
-                .unwrap();
-        }
+        let entry_id = seed_queue_entry(&s, queue_entry_fixture());
         break_the_audit_log(&s.store);
 
         let r = handle_request_async(&s, &req("approve", serde_json::json!({"all": true}))).await;
@@ -9199,6 +11304,46 @@ mod tests {
         assert_eq!(b["max_uploads_per_day"], 50);
         assert_eq!(b["uploads_remaining"], 38);
         assert!(!b["resets_at"].is_null());
+    }
+
+    #[test]
+    fn a_scheduled_retry_does_not_count_as_blocked_by_the_daily_cap() {
+        // An entry waiting out a transient classifier failure is approved,
+        // but no pass will try it before its `retry_after`. Counting it
+        // against today's cap reports pressure, or blocked entries, that no
+        // upload is actually facing yet. Once it is due it counts again.
+        let s = shared();
+        // Stay within one UTC day: near midnight, +31 minutes correctly
+        // resets the real daily cap and used to make this test fail.
+        let now = "2026-09-30T12:00:00Z"
+            .parse::<chrono::DateTime<Utc>>()
+            .unwrap();
+        {
+            let mut state = s.state.lock().unwrap();
+            state.day_bucket = Some(now.format("%Y-%m-%d").to_string());
+            state.uploads_today = 50;
+        }
+        let mut waiting = approved_entry(1_024);
+        waiting.discovered_at = now;
+        waiting.reason_label = Some(crate::submit::REASON_TRANSIENT_REDACTION.into());
+        waiting.retry_after = Some(now + chrono::Duration::minutes(30));
+        {
+            let mut q = s.queue.lock().unwrap();
+            let max = s.settings.lock().unwrap().max_queue_entries;
+            q.upsert(waiting, max).unwrap();
+        }
+        let budget = s.daily_budget(now);
+        assert_eq!(budget.uploads_remaining, 0);
+        assert_eq!(
+            budget.blocked_entries, 0,
+            "a retry scheduled for later is not held by the cap now"
+        );
+        assert_eq!(
+            s.daily_budget(now + chrono::Duration::minutes(31))
+                .blocked_entries,
+            1,
+            "once due, the same entry is held by the spent cap"
+        );
     }
 
     #[test]
@@ -9704,6 +11849,55 @@ mod tests {
         assert!(body.contains("secret-client-project"));
     }
 
+    /// K9: `list_pending` carries the queued title, and says `null` rather
+    /// than omitting the field for an entry that has none.
+    #[test]
+    fn entry_value_reports_the_queued_title() {
+        use crate::daemon::queue::{QueueEntry, entry_id_for};
+        let e = QueueEntry {
+            entry_id: entry_id_for("sha256:aa"),
+            session_hash: "sha256:aa".into(),
+            source: "claude-code".into(),
+            project_key: "/Users/z/code/proj".into(),
+            project_label: "proj".into(),
+            path: "/Users/z/.claude/projects/x/s.jsonl".into(),
+            size_bytes: 10,
+            discovered_at: Utc::now(),
+            title: Some("add a rate limiter".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(entry_value(&e, None)["title"], "add a rate limiter");
+        let untitled = QueueEntry { title: None, ..e };
+        assert!(entry_value(&untitled, None)["title"].is_null());
+    }
+
+    /// K10: `list_pending` carries the pinned preview's measured size, and
+    /// says `null` rather than omitting the field for an entry with none
+    /// pinned.
+    #[test]
+    fn entry_value_reports_the_would_send_bytes_of_a_pinned_preview() {
+        use crate::daemon::queue::{QueueEntry, entry_id_for};
+        let e = QueueEntry {
+            entry_id: entry_id_for("sha256:aa"),
+            session_hash: "sha256:aa".into(),
+            source: "claude-code".into(),
+            project_key: "/Users/z/code/proj".into(),
+            project_label: "proj".into(),
+            path: "/Users/z/.claude/projects/x/s.jsonl".into(),
+            size_bytes: 10,
+            discovered_at: Utc::now(),
+            previewed_envelope_digest: Some("sha256:redacted".to_string()),
+            would_send_bytes: Some(4096),
+            ..Default::default()
+        };
+        assert_eq!(entry_value(&e, None)["would_send_bytes"], 4096);
+        let unpinned = QueueEntry {
+            would_send_bytes: None,
+            ..e
+        };
+        assert!(entry_value(&unpinned, None)["would_send_bytes"].is_null());
+    }
+
     #[test]
     fn the_upgrade_retires_entries_that_stand_for_a_lone_subagent_transcript() {
         // Discovery no longer yields a `subagents/` path, so these entries
@@ -10172,6 +12366,10 @@ mod tests {
             explanations: vec![],
             last_refreshed_at: None,
             withdrawn_at: None,
+            revoked_at: None,
+            approved_unattended: None,
+            approved_verdict: None,
+            uploaded_bytes: None,
         };
         let json = serde_json::to_string(&record).unwrap();
         assert!(
@@ -10257,7 +12455,8 @@ mod tests {
             assert!(queue.record_previewed_envelope(
                 id,
                 &pin,
-                review.artifact.attested_inference().cloned()
+                review.artifact.attested_inference().cloned(),
+                None
             ));
             queue.save(&s.store).unwrap();
         }
@@ -10935,6 +13134,114 @@ mod tests {
         assert!(!absent_home.exists());
     }
 
+    /// The attestor needs a key and an enrollment, and nothing else: with no
+    /// pins in force it is still built, because it reads the pins on every
+    /// question and answers `Unavailable` until some arrive.
+    #[test]
+    fn an_attestor_is_built_with_a_key_and_an_enrollment_pinned_or_not() {
+        let unpinned = || Arc::new(crate::routing::proof_attestor::PinProvider::new(None, None));
+        let bare = shared();
+        let enrolled = enrolled_shared();
+        let key = || Some("sk-minted".to_string());
+        assert!(signer_attestor_for(&enrolled.store, None, unpinned()).is_none());
+        assert!(signer_attestor_for(&bare.store, key(), unpinned()).is_none());
+        assert!(signer_attestor_for(&enrolled.store, key(), unpinned()).is_some());
+    }
+
+    /// Reconcile never asks for the pins: the attestor reads them itself on
+    /// every question. So reconcile costs no ingest round trip, pinned or
+    /// not, and private inference being off costs none either.
+    #[tokio::test]
+    async fn reconcile_never_asks_ingest_for_pins() {
+        use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+        use trace_commons_protocol::near_ai_measurements::{NearAiMeasurementPins, PinState};
+        struct Counting(Arc<AtomicUsize>);
+        #[async_trait::async_trait]
+        impl crate::routing::proof_attestor::PinSource for Counting {
+            async fn fetch(
+                &self,
+            ) -> Result<NearAiMeasurementPins, crate::routing::proof_attestor::SourceUnavailable>
+            {
+                self.0.fetch_add(1, AtomicOrdering::SeqCst);
+                Ok(NearAiMeasurementPins::new(
+                    PinState::Configured,
+                    vec![format!("mrconfigid={}", "aa".repeat(48))],
+                ))
+            }
+        }
+        let asked = Arc::new(AtomicUsize::new(0));
+        let mut s = enrolled_shared();
+        s.near_ai_pins = Arc::new(crate::routing::proof_attestor::PinProvider::new(
+            None,
+            Some(Box::new(Counting(Arc::clone(&asked)))),
+        ));
+        s.settings.lock().unwrap().near_ai_inference =
+            Some(crate::daemon::settings::NearAiInferenceCredential {
+                key: "sk-minted".into(),
+                key_id: "key-1".into(),
+                key_prefix: "sk-min".into(),
+                organization_id: "org-1".into(),
+                workspace_id: "ws-1".into(),
+                minted_at: chrono::Utc::now(),
+            });
+        // Private inference off: no proxy host held.
+        s.reconcile_private_inference().await;
+        assert_eq!(asked.load(AtomicOrdering::SeqCst), 0, "asked with it off");
+
+        let home = tempfile::tempdir().unwrap();
+        *s.private_inference.lock().await = Some(
+            super::super::private_inference::PrivateInference::with_port(
+                home.path().join("never-created"),
+                0,
+            ),
+        );
+        s.reconcile_private_inference().await;
+        assert!(
+            s.private_inference
+                .lock()
+                .await
+                .as_ref()
+                .unwrap()
+                .holds_signer_attestor()
+        );
+        assert_eq!(asked.load(AtomicOrdering::SeqCst), 0, "asked on reconcile");
+    }
+
+    /// With no pins in force -- nothing published and no override --
+    /// reconcile still hands IronWire the attestor, so pins that arrive later
+    /// take effect without a proxy restart. Until then it answers
+    /// `Unavailable` and no row can become `verified`.
+    #[tokio::test]
+    async fn reconcile_hands_ironwire_the_attestor_without_pins() {
+        assert!(
+            std::env::var_os(crate::routing::proof_attestor::NEAR_AI_EXPECTED_MEASUREMENTS_ENV)
+                .is_none(),
+            "the premise: nothing is pinned in the test environment"
+        );
+        let s = enrolled_shared();
+        let home = tempfile::tempdir().unwrap();
+        *s.private_inference.lock().await = Some(
+            super::super::private_inference::PrivateInference::with_port(
+                home.path().join("never-created"),
+                0,
+            ),
+        );
+        s.settings.lock().unwrap().near_ai_inference =
+            Some(crate::daemon::settings::NearAiInferenceCredential {
+                key: "sk-minted".into(),
+                key_id: "key-1".into(),
+                key_prefix: "sk-min".into(),
+                organization_id: "org-1".into(),
+                workspace_id: "ws-1".into(),
+                minted_at: chrono::Utc::now(),
+            });
+        s.reconcile_private_inference().await;
+        let held = s.private_inference.lock().await;
+        let host = held.as_ref().unwrap();
+        assert!(host.holds_credential());
+        assert!(host.holds_signer_attestor());
+    }
+
     /// A key obtained after the daemon started still reaches the proxy, and
     /// a key removed stops reaching it. The reconcile pass reads it from the
     /// same lock as the switch, so neither needs a daemon restart.
@@ -11217,6 +13524,98 @@ mod tests {
         assert!(!reloaded.private_inference);
     }
 
+    /// Reviewed on #1139: switching to the Manual Scrub check returns every
+    /// unsent approval made on the contributor's behalf to waiting at once,
+    /// rather than leaving it reading approved until the uploader holds it.
+    /// A person's own approval stands. Mirrors
+    /// `turning_automatic_off_returns_its_unsent_approvals_to_waiting`.
+    #[test]
+    fn switching_to_manual_returns_unsent_unattended_approvals_to_waiting() {
+        let s = shared();
+        let key = "/tmp/manualproj";
+        let unattended = seed_entry_with_eligibility(&s, key, None);
+        let theirs = seed_entry_with_eligibility(&s, key, None);
+        {
+            let mut q = s.queue.lock().unwrap();
+            assert!(q.approve_unattended(unattended, &[], None));
+            assert!(q.approve(theirs, &[], None, None, None, None));
+        }
+
+        let r = handle_request(
+            &s,
+            &req("set_settings", serde_json::json!({"scrub_check": "manual"})),
+        );
+        let result = r.result.expect("set_settings answers");
+        assert_eq!(result["scrub_check_returned_to_waiting"], 1, "{result}");
+
+        let q = s.queue.lock().unwrap();
+        let back = q.get(unattended).unwrap();
+        assert_eq!(back.state, super::super::queue::QueueState::Pending);
+        assert!(!back.approved_unattended);
+        assert_eq!(
+            back.reason_label.as_deref(),
+            Some(super::super::second_look::REASON_SCRUB_CHECK_MANUAL)
+        );
+        assert_eq!(
+            q.get(theirs).unwrap().state,
+            super::super::queue::QueueState::Approved,
+            "the contributor's own approval stands"
+        );
+        drop(q);
+
+        // Setting Manual again moves nothing and reports nothing.
+        let again = handle_request(
+            &s,
+            &req("set_settings", serde_json::json!({"scrub_check": "manual"})),
+        )
+        .result
+        .expect("set_settings answers");
+        assert!(
+            again.get("scrub_check_returned_to_waiting").is_none(),
+            "{again}"
+        );
+    }
+
+    /// The Scrub check (K4 of #1118) is readable, settable, persisted, and
+    /// refuses anything but its two values over the socket too.
+    #[test]
+    fn the_scrub_check_round_trips_over_the_socket_and_persists() {
+        let s = shared();
+        let before = handle_request(&s, &req("get_settings", serde_json::json!({})))
+            .result
+            .expect("get_settings answers");
+        assert_eq!(
+            before["scrub_check"], "automatic",
+            "the default, reported as the string"
+        );
+
+        let r = handle_request(
+            &s,
+            &req("set_settings", serde_json::json!({"scrub_check": "manual"})),
+        );
+        assert!(r.error.is_none(), "{:?}", r.error);
+        assert_eq!(
+            r.result.expect("set_settings answers")["scrub_check"],
+            "manual"
+        );
+        let reloaded = super::super::settings::DaemonSettings::load(&s.store).unwrap();
+        assert_eq!(
+            reloaded.scrub_check,
+            super::super::settings::ScrubCheck::Manual,
+            "a restart keeps it"
+        );
+
+        let bad = handle_request(
+            &s,
+            &req("set_settings", serde_json::json!({"scrub_check": "off"})),
+        );
+        assert!(bad.error.is_some(), "an unknown mode is refused");
+        let after = handle_request(&s, &req("get_settings", serde_json::json!({})))
+            .result
+            .expect("get_settings answers");
+        assert_eq!(after["scrub_check"], "manual", "and changes nothing");
+    }
+
     /// Ask 127.0.0.1:`port` for IronWire's health endpoint using nothing
     /// but the standard library.
     ///
@@ -11432,6 +13831,26 @@ mod tests {
             s.settings.lock().unwrap().max_uploads_per_day,
             super::super::settings::DaemonSettings::default().max_uploads_per_day
         );
+    }
+
+    fn queue_entry_fixture() -> super::super::queue::QueueEntry {
+        super::super::queue::QueueEntry {
+            entry_id: Uuid::new_v4(),
+            session_hash: "sha256:seed".to_string(),
+            source: "claude-code".to_string(),
+            project_key: "/tmp/p".to_string(),
+            project_label: "p".to_string(),
+            path: std::path::PathBuf::from("/tmp/seed.jsonl"),
+            size_bytes: 1,
+            discovered_at: Utc::now(),
+            ..Default::default()
+        }
+    }
+
+    fn seed_queue_entry(s: &DaemonShared, entry: super::super::queue::QueueEntry) -> Uuid {
+        let id = entry.entry_id;
+        s.queue.lock().unwrap().upsert(entry, 500).unwrap();
+        id
     }
 
     fn seed_entry_in_state(s: &DaemonShared, state: QueueState) -> Uuid {
@@ -11729,6 +14148,27 @@ mod tests {
     }
 
     #[test]
+    fn queue_outcome_counts_excludes_sessions_still_waiting_for_review() {
+        for label in [
+            super::super::second_look::REASON_SECOND_LOOK_REVIEW_REQUIRED,
+            super::super::second_look::REASON_SCRUB_CHECK_MANUAL,
+        ] {
+            let s = shared();
+            let id = seed_entry_in_state(&s, QueueState::Pending);
+            s.queue
+                .lock()
+                .unwrap()
+                .set_state(id, QueueState::Pending, Some(label.into()));
+            let r = handle_request(&s, &req("queue_outcome_counts", serde_json::json!({})));
+            assert_eq!(
+                r.result.unwrap()["reasons"],
+                serde_json::json!({}),
+                "{label}"
+            );
+        }
+    }
+
+    #[test]
     fn consent_options_is_reachable_over_the_dispatcher() {
         let s = shared();
         let r = handle_request(&s, &req("consent_options", serde_json::json!({})));
@@ -11772,27 +14212,13 @@ mod tests {
     #[tokio::test]
     async fn quiesce_times_out_rather_than_forcing_its_way_past_an_upload() {
         let s = shared();
-        let entry_id = uuid::Uuid::new_v4();
-        {
-            let mut queue = s.queue.lock().unwrap();
-            queue
-                .upsert(
-                    super::super::queue::QueueEntry {
-                        entry_id,
-                        session_hash: "sha256:seed".to_string(),
-                        source: "claude-code".to_string(),
-                        project_key: "/tmp/p".to_string(),
-                        project_label: "p".to_string(),
-                        path: std::path::PathBuf::from("/tmp/seed.jsonl"),
-                        size_bytes: 1,
-                        discovered_at: Utc::now(),
-                        state: QueueState::Uploading,
-                        ..Default::default()
-                    },
-                    500,
-                )
-                .unwrap();
-        }
+        seed_queue_entry(
+            &s,
+            super::super::queue::QueueEntry {
+                state: QueueState::Uploading,
+                ..queue_entry_fixture()
+            },
+        );
         let r =
             handle_request_async(&s, &req("quiesce", serde_json::json!({"timeout_secs": 1}))).await;
         let err = r.error.expect("an in-flight upload must not be abandoned");
@@ -11806,27 +14232,13 @@ mod tests {
     #[tokio::test]
     async fn quiesce_completes_once_the_in_flight_upload_finishes() {
         let s = std::sync::Arc::new(shared());
-        let entry_id = uuid::Uuid::new_v4();
-        {
-            let mut queue = s.queue.lock().unwrap();
-            queue
-                .upsert(
-                    super::super::queue::QueueEntry {
-                        entry_id,
-                        session_hash: "sha256:seed".to_string(),
-                        source: "claude-code".to_string(),
-                        project_key: "/tmp/p".to_string(),
-                        project_label: "p".to_string(),
-                        path: std::path::PathBuf::from("/tmp/seed.jsonl"),
-                        size_bytes: 1,
-                        discovered_at: Utc::now(),
-                        state: QueueState::Uploading,
-                        ..Default::default()
-                    },
-                    500,
-                )
-                .unwrap();
-        }
+        let entry_id = seed_queue_entry(
+            &s,
+            super::super::queue::QueueEntry {
+                state: QueueState::Uploading,
+                ..queue_entry_fixture()
+            },
+        );
         let finisher = std::sync::Arc::clone(&s);
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(300)).await;
@@ -11926,9 +14338,48 @@ mod tests {
     }
 
     #[test]
+    fn network_methods_are_reachable_and_unknown_is_not_zero() {
+        let s = shared();
+        for method in [
+            "inference_summary",
+            "inference_call_proof",
+            "model_spend",
+            "private_ai",
+            "set_private_ai",
+            "invite_lookup",
+        ] {
+            assert!(METHODS.contains(&method), "{method} must be advertised");
+        }
+        let spend = handle_local(&s, "model_spend", serde_json::json!({}))
+            .result
+            .unwrap();
+        assert_eq!(spend["known"], false);
+        assert_eq!(spend["reason_label"], "billed-model-spend-unavailable");
+        let summary = handle_local(&s, "inference_summary", serde_json::json!({}))
+            .result
+            .unwrap();
+        assert_eq!(summary["readable"], false);
+        assert!(summary["summary"].is_null());
+        let proof = handle_local(&s, "inference_call_proof", serde_json::json!({"call_id":1}))
+            .result
+            .unwrap();
+        assert_eq!(proof["readable"], false);
+        assert_eq!(proof["found"], false);
+        let private = handle_local(&s, "private_ai", serde_json::json!({}))
+            .result
+            .unwrap();
+        assert_eq!(private["on"], false);
+        assert_eq!(private["state"], "off");
+        assert_eq!(
+            private["disclosure"],
+            crate::private_inference_copy::OFFER_EXPOSURE
+        );
+    }
+
+    #[test]
     fn every_async_only_method_is_advertised_and_refused_synchronously() {
         let s = shared();
-        assert_eq!(ASYNC_ONLY_METHODS.len(), 33);
+        assert_eq!(ASYNC_ONLY_METHODS.len(), 56);
         let mut seen = std::collections::BTreeSet::new();
         for &(method, label) in ASYNC_ONLY_METHODS {
             assert!(
@@ -12229,6 +14680,24 @@ mod tests {
             .expect("a non-string token_dir is refused");
         assert_eq!(error.code, ERR_BAD_PARAMS);
         assert_eq!(error.message, "token-dir-invalid");
+        // A relative token_dir would be read against the daemon's working
+        // directory: the probe refuses it with the label `set_settings`
+        // uses, so a shell cannot be told a token was found at a path no
+        // saved declaration could ever name.
+        let req = Request {
+            id: 7,
+            method: "probe_routing".to_string(),
+            params: serde_json::json!({"port": 8463, "token_dir": "relative/ironwire"}),
+        };
+        let error = handle_probe_routing(&req)
+            .await
+            .error
+            .expect("a relative token_dir is refused");
+        assert_eq!(error.code, ERR_BAD_PARAMS);
+        assert_eq!(
+            error.message,
+            super::super::settings::ERR_ROUTING_TOKEN_DIR_MUST_BE_ABSOLUTE
+        );
         drop(dir);
     }
 
@@ -12278,6 +14747,18 @@ mod tests {
         assert_eq!(PROBE_REACHABLE, "reachable");
         assert_eq!(PROBE_TOKEN_UNREADABLE, "token_unreadable");
         assert_eq!(PROBE_UNREACHABLE, "unreachable");
+    }
+
+    #[tokio::test]
+    async fn native_identity_no_config_status_and_logout_are_available() {
+        let s = shared();
+        let status =
+            handle_request_async(&s, &req("account_session_status", serde_json::json!({}))).await;
+        assert_eq!(status.result.unwrap()["signed_in"], false);
+        let logout =
+            handle_request_async(&s, &req("account_sign_out", serde_json::json!({}))).await;
+        assert_eq!(logout.result.unwrap()["signed_out"], true);
+        assert!(s.store.load_config().unwrap().is_none());
     }
 
     /// `hello`'s method list and the dispatchers are one contract, checked
@@ -12357,8 +14838,8 @@ mod tests {
             src,
             "pub async fn handle_request_async(shared",
         ));
-        assert_eq!(sync.len(), 50, "synchronous dispatcher arms: {sync:?}");
-        assert_eq!(asy.len(), 40, "asynchronous dispatcher arms: {asy:?}");
+        assert_eq!(sync.len(), 60, "synchronous dispatcher arms: {sync:?}");
+        assert_eq!(asy.len(), 63, "asynchronous dispatcher arms: {asy:?}");
 
         let dispatched: std::collections::BTreeSet<String> = sync.union(&asy).cloned().collect();
         let advertised: std::collections::BTreeSet<String> =
@@ -12442,6 +14923,31 @@ mod tests {
         // no readable ledger, so nothing is claimed at all.
         assert_eq!(result["activity"]["readable"], serde_json::json!(false));
         assert!(result["activity"]["last_call_at"].is_null());
+    }
+
+    /// `answers_at` names the same vendor `source::discovery` would for the
+    /// same tool, derived through the SAME table (`source::vendor_label`) so
+    /// the two surfaces cannot drift apart.
+    #[test]
+    fn harness_list_names_the_vendor_each_built_in_tool_answers_at() {
+        let shared = shared();
+        let req = Request {
+            id: 1,
+            method: "harness_list".to_string(),
+            params: serde_json::Value::Null,
+        };
+        let result = handle_request(&shared, &req).result.expect("an answer");
+        let harnesses = result["harnesses"].as_array().expect("a list");
+
+        let answers_at = |id: &str| {
+            harnesses
+                .iter()
+                .find(|h| h["id"] == id)
+                .unwrap_or_else(|| panic!("no {id} row"))["answers_at"]
+                .clone()
+        };
+        assert_eq!(answers_at("claude"), serde_json::json!("Anthropic"));
+        assert_eq!(answers_at("codex"), serde_json::json!("OpenAI"));
     }
 
     /// With no ledger, the amount is UNKNOWN and not zero, and the wire says
@@ -13182,5 +15688,400 @@ mod tests {
         ] {
             assert!(!a.contains(b) && !b.contains(a), "{a} and {b} overlap");
         }
+    }
+
+    // -- The contribution override (#1173) ---------------------------------
+
+    fn set_override(s: &DaemonShared, params: serde_json::Value) -> Response {
+        handle_request(s, &req("set_contribution_override", params))
+    }
+
+    /// An entry in `project_key` approved unattended, as the watcher would.
+    fn seed_unattended(s: &DaemonShared, project_key: &str) -> uuid::Uuid {
+        let id = seed_entry(s, project_key);
+        assert!(s.queue.lock().unwrap().approve_unattended(id, &[], None));
+        id
+    }
+
+    /// "Automatic" arms every folder at once, so it is refused unless
+    /// the shell says it showed the confirmation -- and a refusal records
+    /// and changes nothing.
+    #[test]
+    fn an_auto_override_is_refused_without_confirm() {
+        let s = enrolled_shared();
+        for (params, label) in [
+            (
+                serde_json::json!({"mode": "auto_upload"}),
+                "confirm-required",
+            ),
+            (
+                serde_json::json!({"mode": "auto_upload", "confirm": false}),
+                "confirm-required",
+            ),
+            (
+                serde_json::json!({"mode": "auto_upload", "confirm": "true"}),
+                "confirm-invalid",
+            ),
+            (serde_json::json!({"mode": "always"}), "mode-invalid"),
+        ] {
+            let r = set_override(&s, params);
+            let err = r.error.expect("refused");
+            assert_eq!(err.code, ERR_BAD_PARAMS);
+            assert_eq!(err.message, label);
+        }
+        assert!(s.policy.lock().unwrap().contribution_override.is_none());
+        assert!(audit::load(&s.store).unwrap().is_empty());
+
+        let r = set_override(
+            &s,
+            serde_json::json!({"mode": "auto_upload", "confirm": true}),
+        );
+        assert!(r.error.is_none(), "{:?}", r.error);
+        let body = r.result.unwrap();
+        assert_eq!(body["changed"], true);
+        assert_eq!(body["contribution_override"]["mode"], "auto_upload");
+        let entries = audit::load(&s.store).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].action, "contribution-override-set");
+        assert_eq!(entries[0].project_label, None, "label-only, and no folder");
+        assert_eq!(entries[0].detail.as_deref(), Some("auto_upload"));
+
+        // The same override again changes and records nothing.
+        let again = set_override(
+            &s,
+            serde_json::json!({"mode": "auto_upload", "confirm": true}),
+        );
+        assert_eq!(again.result.unwrap()["changed"], false);
+        assert_eq!(audit::load(&s.store).unwrap().len(), 1);
+    }
+
+    /// #1208, owner decision: "Automatic" is a grant, so it fails
+    /// closed without terms, exactly as `set_project_mode` arming does: the
+    /// same label, nothing recorded, nothing changed. With terms it records
+    /// them, and the claim its words made.
+    #[test]
+    fn an_auto_override_without_terms_is_refused_and_records_its_terms_when_given() {
+        let s = enrolled_shared();
+        let cfg = s.store.load_config().unwrap().unwrap();
+        std::fs::remove_file(s.store.dir().join("contributor.json")).unwrap();
+        let r = set_override(
+            &s,
+            serde_json::json!({"mode": "auto_upload", "confirm": true}),
+        );
+        let err = r.error.expect("refused without terms");
+        assert_eq!(err.code, ERR_UNAVAILABLE);
+        assert_eq!(err.message, "arming-terms-unavailable");
+        assert!(s.policy.lock().unwrap().contribution_override.is_none());
+        assert!(
+            audit::load(&s.store).unwrap().is_empty(),
+            "nothing recorded"
+        );
+
+        s.store.save_config(&cfg).unwrap();
+        let r = set_override(
+            &s,
+            serde_json::json!({"mode": "auto_upload", "confirm": true}),
+        );
+        assert!(r.error.is_none(), "{:?}", r.error);
+        let policy = s.policy.lock().unwrap();
+        let o = policy.contribution_override.as_ref().unwrap();
+        assert_eq!(
+            o.granted_under,
+            super::super::grant_terms::GrantTerms::in_force(&s)
+        );
+        assert!(o.claim.is_some());
+    }
+
+    /// "Ask me" puts what went unattended back to waiting, and says so on
+    /// both events; clearing restores the folder's own mode and the watcher
+    /// may approve again.
+    #[test]
+    fn an_ask_override_returns_unattended_approvals_and_clearing_restores_the_folder() {
+        let s = enrolled_shared();
+        let key = "/tmp/override-armed";
+        s.policy
+            .lock()
+            .unwrap()
+            .set_mode(key, ProjectMode::AutoUpload, Utc::now())
+            .unwrap();
+        let id = seed_unattended(&s, key);
+        let mut rx = s.events.subscribe();
+
+        let r = set_override(&s, serde_json::json!({"mode": "notify_only"}));
+        assert!(r.error.is_none(), "{:?}", r.error);
+        assert_eq!(r.result.unwrap()["returned"], 1);
+        assert_eq!(
+            s.queue.lock().unwrap().get(id).unwrap().state,
+            super::super::queue::QueueState::Pending
+        );
+        assert_eq!(s.decisions_owed_value(), 1, "it waits for a person now");
+        let events = drain_event_names(&mut rx);
+        assert!(
+            events.iter().any(|e| e == EVENT_STATUS_CHANGED),
+            "{events:?}"
+        );
+        assert!(
+            events.iter().any(|e| e == EVENT_QUEUE_CHANGED),
+            "{events:?}"
+        );
+
+        let r = handle_request(
+            &s,
+            &req("clear_contribution_override", serde_json::json!({})),
+        );
+        assert_eq!(r.result.unwrap()["cleared"], true);
+        assert_eq!(
+            s.policy.lock().unwrap().resolve(key),
+            ProjectMode::AutoUpload
+        );
+        assert_eq!(s.decisions_owed_value(), 0);
+        let events = drain_event_names(&mut rx);
+        assert!(
+            events.iter().any(|e| e == EVENT_STATUS_CHANGED),
+            "{events:?}"
+        );
+        let actions: Vec<String> = audit::load(&s.store)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.action)
+            .collect();
+        assert_eq!(
+            actions,
+            ["contribution-override-set", "contribution-override-cleared"]
+        );
+
+        let r = handle_request(
+            &s,
+            &req("clear_contribution_override", serde_json::json!({})),
+        );
+        assert_eq!(r.result.unwrap()["cleared"], false);
+    }
+
+    /// "Never" queues and sends nothing, but refuses nothing either: what
+    /// was waiting is still waiting when the override clears.
+    #[test]
+    fn a_never_override_refuses_nothing_so_clearing_restores_the_queue() {
+        let s = enrolled_shared();
+        let key = "/tmp/override-never";
+        let waiting = seed_entry(&s, key);
+        let r = set_override(&s, serde_json::json!({"mode": "ignore"}));
+        assert!(r.error.is_none(), "{:?}", r.error);
+        assert_eq!(s.policy.lock().unwrap().resolve(key), ProjectMode::Ignore);
+        assert_eq!(
+            s.queue.lock().unwrap().get(waiting).unwrap().state,
+            super::super::queue::QueueState::Pending
+        );
+        assert_eq!(s.decisions_owed_value(), 0);
+        handle_request(
+            &s,
+            &req("clear_contribution_override", serde_json::json!({})),
+        );
+        assert_eq!(
+            s.policy.lock().unwrap().resolve(key),
+            ProjectMode::NotifyOnly
+        );
+        assert_eq!(s.decisions_owed_value(), 1);
+    }
+
+    /// #1208: "Nothing is queued or sent" holds for the contributor's own
+    /// approvals too, so `approve` is refused while "Never" is in force --
+    /// with a fixed label, approving and recording nothing -- and works
+    /// again once the override clears.
+    #[tokio::test]
+    async fn approve_is_refused_while_a_never_override_is_in_force() {
+        let s = enrolled_shared();
+        let id = seed_entry(&s, "/tmp/override-never-approve");
+        let r = set_override(&s, serde_json::json!({"mode": "ignore"}));
+        assert!(r.error.is_none(), "{:?}", r.error);
+        let audit_before = audit::load(&s.store).unwrap().len();
+        for params in [
+            serde_json::json!({"entry_id": id}),
+            serde_json::json!({"all": true}),
+        ] {
+            let r = handle_request_async(&s, &req("approve", params)).await;
+            let err = r.error.expect("refused under Never");
+            assert_eq!(err.code, ERR_BAD_PARAMS);
+            assert_eq!(err.message, ERR_CONTRIBUTION_OVERRIDE_NEVER);
+        }
+        assert_eq!(
+            s.queue.lock().unwrap().get(id).unwrap().state,
+            super::super::queue::QueueState::Pending
+        );
+        assert_eq!(audit::load(&s.store).unwrap().len(), audit_before);
+
+        handle_request(
+            &s,
+            &req("clear_contribution_override", serde_json::json!({})),
+        );
+        let r =
+            handle_request_async(&s, &req("approve", serde_json::json!({"entry_id": id}))).await;
+        assert_ne!(
+            r.error.map(|e| e.message),
+            Some(ERR_CONTRIBUTION_OVERRIDE_NEVER.to_string()),
+            "approve works again once it clears"
+        );
+    }
+
+    /// #1208: a per-folder `set_project_mode` while an override is in force
+    /// is saved -- it is what clearing the override returns the folder to --
+    /// and the reply says when the override still governs that folder
+    /// (`overridden_by`). Never is never overridden, so setting a folder to
+    /// Never under "Automatic" takes effect and says so with `null`.
+    #[test]
+    fn set_project_mode_reports_when_the_override_still_governs_the_folder() {
+        let s = enrolled_shared();
+        let key = "/tmp/overridden-folder";
+        seed_entry(&s, key);
+        let set_mode = |mode: &str| {
+            handle_request(
+                &s,
+                &req(
+                    "set_project_mode",
+                    serde_json::json!({"project_key": key, "mode": mode}),
+                ),
+            )
+            .result
+            .expect("saved")
+        };
+        assert!(
+            set_mode("notify_only")["overridden_by"].is_null(),
+            "no override"
+        );
+
+        let r = set_override(
+            &s,
+            serde_json::json!({"mode": "auto_upload", "confirm": true}),
+        );
+        assert!(r.error.is_none(), "{:?}", r.error);
+        assert_eq!(set_mode("notify_only")["overridden_by"], "auto_upload");
+        assert!(set_mode("ignore")["overridden_by"].is_null(), "Never wins");
+        assert_eq!(s.policy.lock().unwrap().resolve(key), ProjectMode::Ignore);
+        assert_eq!(set_mode("notify_only")["overridden_by"], "auto_upload");
+
+        // Clearing returns the folder to exactly the latest mode it was set to.
+        handle_request(
+            &s,
+            &req("clear_contribution_override", serde_json::json!({})),
+        );
+        assert_eq!(
+            s.policy.lock().unwrap().resolve(key),
+            ProjectMode::NotifyOnly
+        );
+    }
+
+    /// An override that cannot be saved is rolled back, so nothing changed
+    /// and the call says so.
+    #[test]
+    fn an_override_that_cannot_be_saved_is_rolled_back() {
+        let s = enrolled_shared();
+        block_daemon_file(&s, crate::config::DAEMON_PROJECTS_FILE);
+        let r = set_override(
+            &s,
+            serde_json::json!({"mode": "auto_upload", "confirm": true}),
+        );
+        assert_eq!(r.error.unwrap().message, "policy-write-failed");
+        assert!(s.policy.lock().unwrap().contribution_override.is_none());
+    }
+
+    /// #1171: a queue write that fails after the queue changed in memory is
+    /// announced exactly as success is.
+    #[test]
+    fn an_override_queue_write_failure_still_publishes_what_it_changed() {
+        let s = enrolled_shared();
+        let key = "/tmp/override-queue-write";
+        s.policy
+            .lock()
+            .unwrap()
+            .set_mode(key, ProjectMode::AutoUpload, Utc::now())
+            .unwrap();
+        seed_unattended(&s, key);
+        block_daemon_file(&s, crate::config::DAEMON_QUEUE_FILE);
+        let mut rx = s.events.subscribe();
+        let r = set_override(&s, serde_json::json!({"mode": "ignore"}));
+        assert_eq!(r.error.unwrap().message, "queue-write-failed");
+        let events = drain_event_names(&mut rx);
+        assert!(
+            events.iter().any(|e| e == EVENT_STATUS_CHANGED),
+            "{events:?}"
+        );
+        assert!(
+            events.iter().any(|e| e == EVENT_QUEUE_CHANGED),
+            "{events:?}"
+        );
+    }
+
+    /// The backlog an "Automatic" override found waiting in an Ask me
+    /// folder still needs a person: the badge does not drop.
+    #[test]
+    fn an_auto_override_leaves_the_backlog_on_the_badge() {
+        let s = enrolled_shared();
+        seed_entry(&s, "/tmp/override-backlog");
+        assert_eq!(s.decisions_owed_value(), 1);
+        let r = set_override(
+            &s,
+            serde_json::json!({"mode": "auto_upload", "confirm": true}),
+        );
+        assert!(r.error.is_none(), "{:?}", r.error);
+        assert_eq!(
+            s.policy.lock().unwrap().resolve("/tmp/override-backlog"),
+            ProjectMode::AutoUpload
+        );
+        assert_eq!(s.decisions_owed_value(), 1);
+    }
+
+    /// `status` reports the override and the pill's roll-up, `mixed` when
+    /// folders differ, and `list_projects` both modes of a folder.
+    #[test]
+    fn status_reports_the_override_and_a_mixed_roll_up() {
+        let s = enrolled_shared();
+        let status = s.status_value();
+        assert!(status["contribution_override"].is_null());
+        assert_eq!(status["contribution_mode"], "notify_only");
+        s.policy
+            .lock()
+            .unwrap()
+            .set_mode("/tmp/rollup-armed", ProjectMode::AutoUpload, Utc::now())
+            .unwrap();
+        assert_eq!(s.status_value()["contribution_mode"], "auto_upload");
+        seed_entry(&s, "/tmp/rollup-asks");
+        assert_eq!(s.status_value()["contribution_mode"], "mixed");
+
+        let r = set_override(&s, serde_json::json!({"mode": "ignore"}));
+        assert!(r.error.is_none(), "{:?}", r.error);
+        let status = s.status_value();
+        assert_eq!(status["contribution_mode"], "ignore");
+        assert_eq!(status["contribution_override"]["mode"], "ignore");
+        assert!(status["contribution_override"]["since"].is_string());
+        let armed = projects_of(&s)
+            .into_iter()
+            .find(|p| p["project_label"] == "rollup-armed")
+            .unwrap();
+        assert_eq!(armed["mode"], "ignore");
+        assert_eq!(armed["folder_mode"], "auto_upload");
+
+        handle_request(
+            &s,
+            &req("clear_contribution_override", serde_json::json!({})),
+        );
+        let status = s.status_value();
+        assert!(status["contribution_override"].is_null());
+        assert_eq!(status["contribution_mode"], "mixed");
+        assert_eq!(status["contribution_mode_partial"], false);
+
+        // #1208: "Automatic" with a folder set to Never still rolls up
+        // to auto, and says some folders are left out.
+        s.policy
+            .lock()
+            .unwrap()
+            .set_mode("/tmp/rollup-never", ProjectMode::Ignore, Utc::now())
+            .unwrap();
+        let r = set_override(
+            &s,
+            serde_json::json!({"mode": "auto_upload", "confirm": true}),
+        );
+        assert!(r.error.is_none(), "{:?}", r.error);
+        let status = s.status_value();
+        assert_eq!(status["contribution_mode"], "auto_upload");
+        assert_eq!(status["contribution_mode_partial"], true);
     }
 }

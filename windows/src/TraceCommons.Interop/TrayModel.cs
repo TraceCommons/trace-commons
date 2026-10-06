@@ -19,7 +19,7 @@ public enum TrayIconState
     /// <summary>Watching, nothing owed.</summary>
     Idle = 0,
 
-    /// <summary>Paused by the contributor. Nothing is being queued.</summary>
+    /// <summary>Paused by the contributor. Nothing is being queued or sent.</summary>
     Paused = 1,
 
     /// <summary>A health state the contributor should know about.</summary>
@@ -57,8 +57,9 @@ public sealed class TrayModel
     /// truncates or fails on overflow rather than telling anyone.
     /// </summary>
     public const int MaxTooltipLength = 127;
+    public const string DecisionCountUnavailable = "Decision count unavailable.";
 
-    private TrayModel(TrayIconState state, int decisionsOwed, string tooltip, string menuHeader)
+    private TrayModel(TrayIconState state, int? decisionsOwed, string tooltip, string menuHeader)
     {
         State = state;
         DecisionsOwed = decisionsOwed;
@@ -76,7 +77,7 @@ public sealed class TrayModel
     /// queue total or anything to do with credit: "If it shows 3, there are
     /// exactly three things to say yes or no to."
     /// </remarks>
-    public int DecisionsOwed { get; }
+    public int? DecisionsOwed { get; }
 
     /// <summary>The hover tooltip. Fixed labels and one count.</summary>
     public string Tooltip { get; }
@@ -90,12 +91,17 @@ public sealed class TrayModel
     /// <summary>
     /// Applies the spec's precedence.
     /// </summary>
-    /// <param name="decisionsOwed">Pending entries awaiting a decision.</param>
+    /// <param name="decisionsOwed">The daemon's decision count, or null when unavailable.</param>
     /// <param name="isPaused">Whether the contributor has paused watching.</param>
     /// <param name="isHealthy">Whether daemon health is clear.</param>
-    public static TrayModel Compute(int decisionsOwed, bool isPaused, bool isHealthy)
+    public static TrayModel Compute(int? decisionsOwed, bool isPaused, bool isHealthy)
     {
-        int owed = Math.Max(0, decisionsOwed);
+        if (decisionsOwed is null)
+        {
+            return new TrayModel(TrayIconState.Unhealthy, null,
+                $"Trace Commons — {DecisionCountUnavailable}", DecisionCountUnavailable);
+        }
+        int owed = Math.Max(0, decisionsOwed.Value);
 
         TrayIconState state =
             owed > 0 ? TrayIconState.Attention
@@ -114,12 +120,23 @@ public sealed class TrayModel
             TrayIconState.Attention when !isHealthy => $"{Waiting(owed)} Needs attention.",
             TrayIconState.Attention => Waiting(owed),
             TrayIconState.Unhealthy => "Needs attention.",
-            TrayIconState.Paused => "Paused. Nothing is being queued.",
+            // macOS's sentence, word for word (MainWindowView.swift and
+            // SettingsView.swift; GTK ui/settings.rs says the same). The
+            // core does not export it yet.
+            TrayIconState.Paused => "Paused. Nothing is being queued or sent.",
             _ => "Watching. Nothing waiting.",
         };
 
         return new TrayModel(state, owed, Truncate($"Trace Commons — {detail}"), detail);
     }
+
+    /// <summary>The rail badge: unknown stays distinct from an exact zero.</summary>
+    public static string DecisionCountText(int? decisionsOwed) => decisionsOwed switch
+    {
+        null => "?",
+        <= 0 => string.Empty,
+        _ => decisionsOwed.Value.ToString(CultureInfo.CurrentCulture),
+    };
 
     /// <summary>
     /// "3 sessions waiting for review." -- the same sentence the main window's
@@ -154,7 +171,7 @@ public sealed class TrayMenuModel
 {
     private TrayMenuModel(
         bool isPaused,
-        int decisionsOwed,
+        int? decisionsOwed,
         IReadOnlyList<TrayProjectLine> waiting,
         IReadOnlyList<string> armedProjects,
         string weekText)
@@ -168,7 +185,7 @@ public sealed class TrayMenuModel
 
     public bool IsPaused { get; }
 
-    public int DecisionsOwed { get; }
+    public int? DecisionsOwed { get; }
 
     public IReadOnlyList<TrayProjectLine> Waiting { get; }
 
@@ -217,7 +234,7 @@ public sealed class TrayMenuModel
 
         return new TrayMenuModel(
             status.Paused,
-            Math.Max(0, status.QueueDepth),
+            status.DecisionsOwed is { } owed ? Math.Max(0, owed) : null,
             waiting,
             armed,
             week);
@@ -321,9 +338,11 @@ public static class DigestText
     /// The daemon composes the same sentence for its own local notifier
     /// (<c>daemon::notify::contribution_text</c>), the Linux shell in
     /// <c>notify::contribution_body</c>, and macOS in
-    /// <c>DigestCopy.contributionLine</c>. All four follow the same rules and
-    /// are tested against them separately, because each platform words the
-    /// surrounding text differently.
+    /// <c>DigestCopy.contributionLine</c>. All four follow the same rule -- a
+    /// project is named only when exactly one distinct, non-blank label is
+    /// present (the WYSIWYG design's evening-digest examples, K9 #1118) --
+    /// and each pins the design's two example sentences verbatim. Unlike
+    /// <see cref="Body"/>, this half never lists several projects.
     /// </remarks>
     public static string? ContributionLine(
         int contributedCount,
@@ -338,7 +357,18 @@ public static class DigestText
         }
 
         string noun = contributedCount == 1 ? "session" : "sessions";
-        string from = JoinProjects(projectLabels);
+        var named = new List<string>(projectLabels.Count);
+        foreach (string label in projectLabels)
+        {
+            if (!string.IsNullOrWhiteSpace(label) && !named.Contains(label, StringComparer.Ordinal))
+            {
+                named.Add(label);
+            }
+        }
+
+        // One project: the same from-clause the waiting half builds.
+        // More than one: no clause at all.
+        string from = named.Count == 1 ? JoinProjects(named) : string.Empty;
         string line = $"{contributedCount} {noun} contributed{from}.";
 
         // Only when there is some: "0 credit pending" reads as a failure
@@ -368,11 +398,9 @@ public static class DigestText
     /// digest, not a manifest.
     /// </summary>
     /// <remarks>
-    /// Three, matching the daemon's <c>digest_text</c> and
-    /// <c>contribution_text</c>, the Linux shell's <c>contribution_body</c>,
-    /// and macOS's <c>DigestCopy.joined</c>. This shell listed every name,
-    /// so the same eight-project contributor read a one-line summary on
-    /// Linux and macOS and a paragraph on Windows.
+    /// Three, matching the daemon's <c>digest_text</c> for the waiting half.
+    /// The contribution half no longer lists projects at all past one (see
+    /// <see cref="ContributionLine"/>).
     /// </remarks>
     private const int MaxNamedProjects = 3;
 

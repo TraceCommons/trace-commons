@@ -67,6 +67,24 @@
 //!
 //! **DRAFT, NEEDS APPROVAL**, every sentence in both: the spec's Open list
 //! says the wording is open.
+//!
+//! # The submit toast and the per-session notification (K9, #1118)
+//!
+//! Two more WYSIWYG design sentences, matched here so no shell writes its
+//! own: [`toast_sent_text`] (`tc_toast_sent_text`), "Sent. N left to decide
+//! (middle dot) upload limit X of Y"; and [`session_notification_copy`]
+//! (`tc_session_notification_copy`), the per-session notification whose body
+//! is [`GATE_STATEMENT`] and whose one action is "Look, then decide". Both
+//! **DRAFT, NEEDS APPROVAL**.
+
+/// **DRAFT, NEEDS APPROVAL.**
+/// Core-owned disclosure for configured activity missions with rewards disabled.
+pub const ACTIVITY_MISSIONS_DISCLOSURE: &str = "Matching stays on this Mac; no activity profile or match result is sent. Missions change no capture or contribution permissions and send no sessions. Progress uses contributions made through your existing consent. Mission rewards are disabled, and no mission credit is available. Any future mission credit would remain pending and conditional until settlement.";
+
+/// **DRAFT, NEEDS APPROVAL.**
+/// Core-owned disclosure for discovery, separate from daily activity mechanics.
+/// Skill awards do not become corpus credit or authorize a contribution.
+pub const MISSION_CATALOGUE_DISCLOSURE: &str = "These are published skill-evaluation tasks. Matching stays on this Mac; no activity profile or match result is sent. Viewing or selecting a mission changes no capture or contribution permissions and sends no sessions. Contributions still require your existing consent. Corpus credit remains pending and conditional until settlement. Skill-evaluation awards are separate from corpus credit.";
 
 /// The sentence that replaced the acknowledgement checkbox.
 ///
@@ -272,6 +290,31 @@ pub const VOID_REARM_FAILED: &str =
 /// [`VOID_GRANT_REGRANT`] and its button beside this sentence.
 pub const VOID_GRANT_PROJECTS: &str = "Projects still set to contribute automatically carry on. Any project that stopped has its own notice.";
 
+/// The title of the "Automatic" override's
+/// void notice (`grant_voids` element of kind `contribution_override`). It
+/// names the mode by its one name (`project_copy::CONTRIBUTION_MODE_AUTO_LABEL`).
+pub const VOID_OVERRIDE_TITLE: &str = concat!(
+    crate::project_copy::folder_mode_auto_label!(),
+    " turned off"
+);
+
+/// What happened. Held to `sweep_grants`: the
+/// override is cleared, so every folder is back on its own setting, and a
+/// folder that asks first waits for you again.
+pub const VOID_OVERRIDE_BODY: &str = concat!(
+    "Settings it was turned on under have since changed, so ",
+    crate::project_copy::folder_mode_auto_label!(),
+    " is off and each folder is back on its own setting. Sessions from folders that ask first \
+     wait for you again."
+);
+
+/// How it is turned back on.
+pub const VOID_OVERRIDE_REARM: &str = concat!(
+    "You can turn ",
+    crate::project_copy::folder_mode_auto_label!(),
+    " back on from Contribution mode. Doing so agrees to the new settings."
+);
+
 /// The title of a void this build cannot place: a `kind` it does not know,
 /// or a project void without a label. It says what is certain -- automatic
 /// contributing stopped -- and does not guess for what.
@@ -328,6 +371,11 @@ pub fn void_reason_line(label: &str) -> &'static str {
         }
         "attested-bodies-on" => {
             "The full text of your attested AI calls would now be sent with your sessions."
+        }
+        // `policy::OVERRIDE_TERMS_UNRECORDED`:
+        // only an "Automatic" override saved by a pre-release build.
+        "terms-unrecorded" => {
+            "It was turned on before this app recorded the settings it was turned on under."
         }
         _ => VOID_REASON_UNKNOWN,
     }
@@ -424,6 +472,20 @@ pub fn void_notice_for_wire(void: &serde_json::Value) -> Option<VoidNoticeCopy> 
         label,
     ) {
         (Some("automatic_grant"), _) => Some(void_notice(None, &reasons)),
+        // The "Automatic" override (#1208): the pill is back on each
+        // folder's own setting. No button: turning it back on is the pill's
+        // own confirmation, not a one-tap re-arm.
+        (Some("contribution_override"), _) => {
+            let placed = void_notice(None, &reasons);
+            Some(VoidNoticeCopy {
+                title: VOID_OVERRIDE_TITLE.to_string(),
+                body: VOID_OVERRIDE_BODY,
+                rearm: VOID_OVERRIDE_REARM,
+                rearm_action: None,
+                rearm_failed: None,
+                ..placed
+            })
+        }
         (Some("project"), Some(label)) => {
             let notice = void_notice(Some(label), &reasons);
             // The button acts on the element's `project_id`; without one
@@ -582,6 +644,43 @@ pub const AUTO_PATH_AUTOMATIC: &str = "Contribute automatically from projects th
 /// witness or the privacy scan sends a session somewhere before approval.
 pub const AUTO_PATH_ASK_FIRST: &str = "Review each session yourself. Nothing is contributed until you approve it, and you can set a project to contribute automatically later.";
 
+// ---------------------------------------------------------------------------
+// The Scrub check (K4 of #1118)
+// ---------------------------------------------------------------------------
+//
+// Every constant in this section is DRAFT, NEEDS APPROVAL. Written for the
+// Settings row and the held-session row so that no shell writes its own.
+//
+// "Trust relaxes what may be sent, never what may be said" (the spec's R1):
+// the Automatic check counts what the scrubber removed and notices a trimmed
+// session. It is not a quality check, and it never says a model looked at
+// anything, because on most routes nothing confirms one did.
+// `the_scrub_check_copy_claims_no_model_or_quality_check` holds that.
+
+/// **DRAFT, NEEDS APPROVAL.** The Settings row's heading.
+pub const SCRUB_CHECK_TITLE: &str = "Scrub check";
+
+/// **DRAFT, NEEDS APPROVAL.** The Automatic choice (`scrub_check:
+/// "automatic"`). The default: a daemon where nothing was chosen reports
+/// `"automatic"` and holds as this says, so a shell renders it selected.
+pub const SCRUB_CHECK_AUTOMATIC_LABEL: &str = "Automatic";
+
+/// **DRAFT, NEEDS APPROVAL.** What Automatic does. Names both second-look
+/// reasons and says what the check is not.
+pub const SCRUB_CHECK_AUTOMATIC_HELP: &str = "In folders set to share automatically, a session is sent on its own once it has been scrubbed, unless nothing personal was removed from it, something left in it still looks like personal data, or it was trimmed to fit. Those wait for you. This only counts and looks for patterns; it does not check that the scrubbing was right.";
+
+/// **DRAFT, NEEDS APPROVAL.** The Manual choice (`scrub_check: "manual"`).
+pub const SCRUB_CHECK_MANUAL_LABEL: &str = "Manual";
+
+/// **DRAFT, NEEDS APPROVAL.** What Manual does.
+pub const SCRUB_CHECK_MANUAL_HELP: &str = "Every session waits for you, including in folders set to share automatically. Nothing is sent until you approve it.";
+
+/// **DRAFT, NEEDS APPROVAL.** On a session held under
+/// `second-look-review-required`. The particular reason is the row's own
+/// `second_look` sentence; this says only that it did not move and will not.
+pub const SCRUB_CHECK_HELD: &str =
+    "This session was not sent on its own. It waits until you decide.";
+
 /// What the fixed patterns remove and where they stop, for one disclosure.
 #[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
 pub struct ScrubCopy {
@@ -641,6 +740,39 @@ pub fn automatic_grant_copy(
         path_automatic: AUTO_PATH_AUTOMATIC,
         path_ask_first: AUTO_PATH_ASK_FIRST,
         raw_send: AUTO_RAW_SEND_BOTH_ENCLAVES,
+    }
+}
+
+/// The sentences a contributor reads on the Flow 1 grant screens, with the
+/// choice between them made here: `automatic_gate::disclosure` picks the
+/// disclosure (R1) and [`automatic_grant_copy`] carries only the scrub
+/// wording that answer allows.
+///
+/// `disclosure(config)` reads configuration only, so it answers
+/// `PatternsOnly`, and that is the right answer for a screen shown before
+/// the grant. Configuration is not evidence that a model ran: the model-scrub
+/// wording is earned only by `automatic_gate::folder_disclosure`, over the
+/// certificates of sessions the witness has already redacted, and before the
+/// grant there are none. So a shell never reads the `auto_scrub_*` fields to
+/// choose, and the model-scrub sentences never reach this screen.
+#[must_use]
+pub fn automatic_contribution_copy(
+    config: Option<&crate::config::ContributorConfig>,
+) -> AutomaticGrantCopy {
+    automatic_grant_copy(crate::daemon::automatic_gate::disclosure(config))
+}
+
+/// The grant screens' words for a disclosure the daemon already chose and
+/// reported by name (`list_projects`' `automatic_disclosure`). `None` for a
+/// name this build does not know, so a shell shows nothing rather than
+/// guessing which wording is true.
+#[must_use]
+pub fn automatic_grant_copy_named(disclosure: &str) -> Option<AutomaticGrantCopy> {
+    use crate::daemon::automatic_gate::Disclosure;
+    match disclosure {
+        "patterns_only" => Some(automatic_grant_copy(Disclosure::PatternsOnly)),
+        "model_scrubbed" => Some(automatic_grant_copy(Disclosure::ModelScrubbed)),
+        _ => None,
     }
 }
 
@@ -816,6 +948,12 @@ pub fn legacy_migration_refusal_line(label: &str) -> &'static str {
         "legacy_migration_tenant_claimed" => {
             "This invite has already been moved to a different account. Nothing changed here."
         }
+        // Copy for Zaki's approval (V104): another of this person's devices
+        // moved the same invite tenant onto this account under a different
+        // invite code, which was never granted to the account.
+        "legacy_migration_invite_not_linked" => {
+            "This device joined with a different invite than the one already moved to your account, so it can't be moved. It keeps working as it does now."
+        }
         "legacy_migration_invite_revoked" => {
             "This invite was revoked, so it can't be moved. Nothing changed here."
         }
@@ -863,6 +1001,60 @@ pub fn legacy_migration_offer() -> LegacyMigrationOfferCopy {
 }
 
 // ---------------------------------------------------------------------------
+// Missions: the disclosure (M4)
+// ---------------------------------------------------------------------------
+//
+// The consent design's "Missions" section, M4: the first time Missions is
+// opened, and in Settings, the core's copy says that matching happens on
+// this Mac, that nothing is sent because of a mission, and that a mission's
+// credit is projected until the commons records it, then pending until it
+// settles. Every constant here is DRAFT, NEEDS APPROVAL, as M4 requires
+// until it is approved. Where the spec gives the words they are used as
+// given; the sentences it does not give are new and called out below.
+// Matching itself is `daemon::mission_matching` (K16).
+
+/// **DRAFT, NEEDS APPROVAL.** New: the spec gives no heading.
+pub const MISSIONS_DISCLOSURE_TITLE: &str = "How missions work";
+
+/// **DRAFT, NEEDS APPROVAL.** The first sentence is the spec's (M1, M4);
+/// the second is new.
+pub const MISSIONS_DISCLOSURE_MATCHING: &str =
+    "Matching happens on this Mac. What it looks at to find missions for you stays here.";
+
+/// **DRAFT, NEEDS APPROVAL.** The first sentence is the spec's (M2, M4);
+/// the second is new, and says the same as M2's "a session counts toward a
+/// mission only when it is contributed through one of the existing paths".
+pub const MISSIONS_DISCLOSURE_NOTHING_SENT: &str = "Nothing is sent because of a mission. A session counts toward one only when you contribute it, the same way as any other.";
+
+/// **DRAFT, NEEDS APPROVAL.** The spec's words (M3, M4).
+pub const MISSIONS_DISCLOSURE_CREDIT: &str =
+    "A mission's credit is projected until the commons records it, then pending until it settles.";
+
+/// The Missions disclosure, as a shell renders it (M4).
+#[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
+pub struct MissionsDisclosureCopy {
+    pub title: &'static str,
+    /// Matching happens on this Mac.
+    pub matching: &'static str,
+    /// Nothing is sent because of a mission.
+    pub nothing_sent: &'static str,
+    /// Credit is projected, then pending.
+    pub credit: &'static str,
+}
+
+/// The Missions disclosure (M4): shown the first time Missions is opened,
+/// and in Settings. Across the ABI, `tc_missions_disclosure_copy_json`.
+#[must_use]
+pub fn missions_disclosure_copy() -> MissionsDisclosureCopy {
+    MissionsDisclosureCopy {
+        title: MISSIONS_DISCLOSURE_TITLE,
+        matching: MISSIONS_DISCLOSURE_MATCHING,
+        nothing_sent: MISSIONS_DISCLOSURE_NOTHING_SENT,
+        credit: MISSIONS_DISCLOSURE_CREDIT,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Switch-on notices: the old-wording notice (K5) and the held-folder notice
 // ---------------------------------------------------------------------------
 //
@@ -884,10 +1076,11 @@ pub const REWORDED_NOW_HEADING: &str = "What happens to its sessions";
 
 /// The button that switches a reworded folder to ask-first. A shell sends it
 /// as `set_project_mode` with the element's `project_id` and `notify_only`,
-/// which also answers the notice.
+/// which also answers the notice. It names the mode it sets, by the mode's
+/// one name (`project_copy::CONTRIBUTION_MODE_ASK_LABEL`).
 ///
 /// **DRAFT, NEEDS APPROVAL.**
-pub const ASK_ME_FIRST_ACTION: &str = "Ask me first";
+pub const ASK_ME_FIRST_ACTION: &str = crate::project_copy::CONTRIBUTION_MODE_ASK_LABEL;
 
 /// Shown when the daemon refuses that switch. The notice stays.
 ///
@@ -933,10 +1126,9 @@ pub struct ArmingRewordedNoticeCopy {
 /// The notice for one element of `status.arming_rewordings`, as it came off
 /// the wire. `None` only for a value that is not an object.
 ///
-/// Every element is a narrowing to patterns-only today, the only rewording
-/// the daemon records (`arming_wording::ArmingClaim::narrowed_to`), so the
-/// words do not branch on `was` / `now`; a shell passes the object through
-/// and never reads them.
+/// The daemon also uses this persisted/acknowledged channel for the
+/// Automatic-default upgrade. Shells pass the whole object through, so
+/// both notices reach every shell without shell-authored consent copy.
 #[must_use]
 pub fn arming_reworded_notice_for_wire(
     value: &serde_json::Value,
@@ -950,6 +1142,30 @@ pub fn arming_reworded_notice_for_wire(
         .get("project_id")
         .and_then(serde_json::Value::as_str)
         .is_some_and(|id| !id.is_empty());
+    if object
+        .get("scrub_check_defaulted")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+    {
+        return Some(ArmingRewordedNoticeCopy {
+            title: label.map_or_else(
+                || "The Scrub check is now Automatic".to_string(),
+                |label| format!("The Scrub check is now Automatic for {label}"),
+            ),
+            body: "Your Scrub check was previously unset. This update makes it Automatic. This folder stays set to share automatically, but more sessions may now wait for your review.",
+            now_heading: "What happens now",
+            scope: SCRUB_CHECK_AUTOMATIC_HELP,
+            limit: concat!(
+                "Choose ",
+                crate::project_copy::folder_mode_ask_label!(),
+                " for this folder if you want to review every session from it."
+            ),
+            no_review: "Held sessions are not sent until you decide.",
+            acknowledge: VOID_ACKNOWLEDGE,
+            ask_first_action: has_id.then_some(ASK_ME_FIRST_ACTION),
+            ask_first_failed: has_id.then_some(ASK_ME_FIRST_FAILED),
+        });
+    }
     Some(ArmingRewordedNoticeCopy {
         title: arming_reworded_title(label),
         body: REWORDED_BODY,
@@ -980,8 +1196,11 @@ pub const GATE_HELD_RELEASE: &str = "Nothing from these projects is sent while t
 /// [`ASK_ME_FIRST_ACTION`].
 ///
 /// **DRAFT, NEEDS APPROVAL.**
-pub const GATE_HELD_ASK_FIRST: &str =
-    "To review a project's sessions yourself instead, switch it to Ask me first.";
+pub const GATE_HELD_ASK_FIRST: &str = concat!(
+    "To review a project's sessions yourself instead, switch it to ",
+    crate::project_copy::folder_mode_ask_label!(),
+    "."
+);
 
 /// One of the gate's reason labels (`automatic_gate::REASON_*`), as a
 /// sentence. A label this build does not know still gets one.
@@ -1443,11 +1662,14 @@ pub const DISCLOSURE_UNREADABLE: &str = "Where sessions go could not be read.";
 /// Approved by Zaki with #1102.
 pub const DISCLOSURE_SESSION_UNREADABLE: &str = "Where this session goes could not be read.";
 
-/// [`DISCLOSURE_UNREADABLE`] and [`DISCLOSURE_SESSION_UNREADABLE`], for a
-/// shell that cannot hold them as constants (the C ABI's
-/// `tc_route_disclosure_unreadable_copy`).
+/// [`DISCLOSURE_UNREADABLE`] and [`DISCLOSURE_SESSION_UNREADABLE`], with the
+/// section's [`DISCLOSURE_TITLE`] so an unreadable panel is still named, for
+/// a shell that cannot hold them as constants (the C ABI's
+/// `tc_route_disclosure_unreadable_copy`, Tauri's
+/// `route_disclosure_unreadable_copy`).
 #[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
 pub struct DisclosureUnreadableCopy {
+    pub title: &'static str,
     pub panel: &'static str,
     pub session: &'static str,
 }
@@ -1455,6 +1677,7 @@ pub struct DisclosureUnreadableCopy {
 #[must_use]
 pub fn disclosure_unreadable_copy() -> DisclosureUnreadableCopy {
     DisclosureUnreadableCopy {
+        title: DISCLOSURE_TITLE,
         panel: DISCLOSURE_UNREADABLE,
         session: DISCLOSURE_SESSION_UNREADABLE,
     }
@@ -1668,9 +1891,487 @@ pub fn inference_connection_copy() -> InferenceConnectionCopy {
     }
 }
 
+// ---------------------------------------------------------------------------
+// "Leaves this Mac" (Flow 2 review sheet, #1118 K3)
+//
+// The sheet in the design says, under "Leaves this Mac", "19 KB · 12 turns ·
+// tool, project label, timing, outcome. Never the path." That is a claim
+// about what the envelope carries, made at the instant of consent, so it is
+// derived here from the envelope's own serialized keys rather than written
+// by each shell -- and derived, it does NOT say "project label": the
+// envelope has carried no project name, in the clear or hashed, since #207.
+//
+// The list is COMPLETE by construction: [`leaves_this_mac_fields`] walks every
+// key of the serialized envelope and classifies it, and a key it has no
+// label for is reported as [`LEAVES_OTHER`] rather than dropped, so a field
+// added to the protocol later is shown as "other metadata" until somebody
+// names it. `every_envelope_key_has_a_named_label` fails the build of that
+// field instead.
+//
+// Every sentence in this section is DRAFT, NEEDS APPROVAL.
+
+/// Wire labels for [`leaves_this_mac_fields`]. Closed: each has exactly one
+/// phrase in [`leaves_this_mac_phrase`], and [`LEAVES_FIELDS`] is the order
+/// they are listed in.
+pub const LEAVES_CONVERSATION: &str = "conversation";
+pub const LEAVES_TOOL: &str = "tool";
+pub const LEAVES_TOOL_VERSION: &str = "tool-version";
+pub const LEAVES_MODEL: &str = "model";
+pub const LEAVES_TIMING: &str = "timing";
+pub const LEAVES_USAGE_AND_COST: &str = "usage-and-cost";
+pub const LEAVES_ROUTING: &str = "routing";
+pub const LEAVES_OUTCOME: &str = "outcome";
+pub const LEAVES_CORRECTION: &str = "correction";
+pub const LEAVES_USES: &str = "uses";
+pub const LEAVES_REDACTION_SUMMARY: &str = "redaction-summary";
+pub const LEAVES_SESSION_ID: &str = "session-id";
+pub const LEAVES_TRACE_IDS: &str = "trace-ids";
+pub const LEAVES_CONTRIBUTOR_ID: &str = "contributor-id";
+pub const LEAVES_TENANT: &str = "tenant";
+pub const LEAVES_CREDIT_ACCOUNT: &str = "credit-account";
+pub const LEAVES_REVOCATION_HANDLE: &str = "revocation-handle";
+pub const LEAVES_FOLDER_FINGERPRINT: &str = "folder-fingerprint";
+pub const LEAVES_REPLAY: &str = "replay";
+pub const LEAVES_SCORES: &str = "scores";
+pub const LEAVES_FORMAT_VERSION: &str = "format-version";
+/// A key this build has no name for. Reported, never dropped.
+pub const LEAVES_OTHER: &str = "other";
+
+/// Every label [`leaves_this_mac_fields`] can return, in list order.
+pub const LEAVES_FIELDS: &[&str] = &[
+    LEAVES_CONVERSATION,
+    LEAVES_TOOL,
+    LEAVES_TOOL_VERSION,
+    LEAVES_MODEL,
+    LEAVES_TIMING,
+    LEAVES_USAGE_AND_COST,
+    LEAVES_ROUTING,
+    LEAVES_OUTCOME,
+    LEAVES_CORRECTION,
+    LEAVES_USES,
+    LEAVES_REDACTION_SUMMARY,
+    LEAVES_SESSION_ID,
+    LEAVES_TRACE_IDS,
+    LEAVES_CONTRIBUTOR_ID,
+    LEAVES_TENANT,
+    LEAVES_CREDIT_ACCOUNT,
+    LEAVES_REVOCATION_HANDLE,
+    LEAVES_FOLDER_FINGERPRINT,
+    LEAVES_REPLAY,
+    LEAVES_SCORES,
+    LEAVES_FORMAT_VERSION,
+    LEAVES_OTHER,
+];
+
+/// **DRAFT, NEEDS APPROVAL.** What the metadata never carries. Scoped to
+/// the metadata on purpose: only absolute paths are scrubbed out of the
+/// conversation, so a relative path or a sentence can still name the folder
+/// there -- see [`LEAVES_FOLDER_IN_CONVERSATION`].
+pub const LEAVES_METADATA_NEVER: &str = "The metadata never carries the path or the folder name.";
+
+/// **DRAFT, NEEDS APPROVAL.** Added when the conversation itself names the
+/// folder, for instance through `../myproj/src/main.rs`.
+pub const LEAVES_FOLDER_IN_CONVERSATION: &str = "The conversation itself names the folder.";
+
+/// **DRAFT, NEEDS APPROVAL.** Replaces [`LEAVES_METADATA_NEVER`] in the
+/// (not expected) case that the folder's name is found outside the
+/// conversation too: the sentence is only ever said when it is true.
+pub const LEAVES_FOLDER_IN_METADATA: &str = "The folder's name appears in what would be sent.";
+
+/// Where a key sits in the envelope: a label that covers everything under
+/// it, a node to look inside, or a key with no name.
+enum Class {
+    Label(&'static str),
+    Descend,
+    Unknown,
+}
+
+/// The label for one serialized key path (array indices are not part of a
+/// path). One table, read by both the live list and the completeness test.
+fn classify(path: &[&str]) -> Class {
+    use Class::*;
+    match path {
+        [] => Descend,
+        ["schema_version"] => Label(LEAVES_FORMAT_VERSION),
+        ["trace_id"] | ["submission_id"] => Label(LEAVES_TRACE_IDS),
+        ["created_at"] => Label(LEAVES_TIMING),
+        ["ironclaw"] | ["ironclaw", "feature_flags"] => Descend,
+        ["ironclaw", "version"] | ["ironclaw", "engine_version"] => Label(LEAVES_TOOL_VERSION),
+        ["ironclaw", "channel"] => Label(LEAVES_TOOL),
+        ["ironclaw", "model_name"] => Label(LEAVES_MODEL),
+        ["ironclaw", "feature_flags", "agent"] => Label(LEAVES_TOOL),
+        ["ironclaw", "feature_flags", "agent_version"] => Label(LEAVES_TOOL_VERSION),
+        ["ironclaw", "feature_flags", "cwd_hash"] => Label(LEAVES_FOLDER_FINGERPRINT),
+        ["consent", ..] | ["trace_card", ..] => Label(LEAVES_USES),
+        ["contributor"] => Descend,
+        ["contributor", "pseudonymous_contributor_id"] => Label(LEAVES_CONTRIBUTOR_ID),
+        ["contributor", "tenant_scope_ref"] => Label(LEAVES_TENANT),
+        ["contributor", "credit_account_ref"] => Label(LEAVES_CREDIT_ACCOUNT),
+        ["contributor", "revocation_handle"] => Label(LEAVES_REVOCATION_HANDLE),
+        ["privacy", ..] => Label(LEAVES_REDACTION_SUMMARY),
+        ["events"] => Descend,
+        ["events", "timestamp"] | ["events", "latency_ms"] => Label(LEAVES_TIMING),
+        ["events", "token_counts"] | ["events", "cost_usd"] => Label(LEAVES_USAGE_AND_COST),
+        ["events", "tool_name"] | ["events", "tool_category"] => Label(LEAVES_TOOL),
+        [
+            "events",
+            "event_id" | "parent_event_id" | "event_type" | "redacted_content"
+            | "structured_payload" | "tool_call_id" | "success" | "failure_modes" | "side_effect",
+        ] => Label(LEAVES_CONVERSATION),
+        ["outcome"] => Descend,
+        ["outcome", "human_correction"] => Label(LEAVES_CORRECTION),
+        [
+            "outcome",
+            "user_feedback" | "task_success" | "error_taxonomy" | "failure_modes",
+        ] => Label(LEAVES_OUTCOME),
+        ["replay", ..] => Label(LEAVES_REPLAY),
+        ["conversation_id"] | ["source_session", ..] => Label(LEAVES_SESSION_ID),
+        ["value", ..]
+        | ["value_card", ..]
+        | ["embedding_analysis", ..]
+        | ["hindsight", ..]
+        | ["training_dynamics", ..]
+        | ["process_evaluation", ..] => Label(LEAVES_SCORES),
+        _ => Unknown,
+    }
+}
+
+fn walk(
+    value: &serde_json::Value,
+    path: &mut Vec<String>,
+    found: &mut std::collections::BTreeSet<&'static str>,
+    unknown: &mut Vec<String>,
+) {
+    match value {
+        serde_json::Value::Array(items) => {
+            for item in items {
+                walk(item, path, found, unknown);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            // A routing row is an event like any other, and it is also the
+            // one place routing leaves: name it.
+            if path.len() == 1
+                && path[0] == "events"
+                && map.get("event_type").and_then(|t| t.as_str()) == Some("routing_decision")
+            {
+                found.insert(LEAVES_ROUTING);
+            }
+            for (key, child) in map {
+                if child.is_null() {
+                    continue;
+                }
+                path.push(key.clone());
+                let refs: Vec<&str> = path.iter().map(String::as_str).collect();
+                match classify(&refs) {
+                    Class::Label(label) => {
+                        found.insert(label);
+                    }
+                    Class::Descend => walk(child, path, found, unknown),
+                    Class::Unknown => {
+                        found.insert(LEAVES_OTHER);
+                        unknown.push(refs.join("."));
+                    }
+                }
+                path.pop();
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Every labelled key path of `envelope`'s serialized form, plus the paths
+/// no label covers. The second list is empty for every envelope this build
+/// produces; `every_envelope_key_has_a_named_label` holds it to that.
+fn classify_envelope(
+    envelope: &trace_commons_protocol::trace_contribution::TraceContributionEnvelope,
+) -> (Vec<&'static str>, Vec<String>) {
+    let value = serde_json::to_value(envelope).unwrap_or(serde_json::Value::Null);
+    let mut found = std::collections::BTreeSet::new();
+    let mut unknown = Vec::new();
+    walk(&value, &mut Vec::new(), &mut found, &mut unknown);
+    // A serialization failure must not read as "nothing leaves".
+    if value.is_null() {
+        found.insert(LEAVES_OTHER);
+    }
+    let ordered = LEAVES_FIELDS
+        .iter()
+        .copied()
+        .filter(|label| found.contains(label))
+        .collect();
+    (ordered, unknown)
+}
+
+/// What leaves this machine in `envelope`, as labels from [`LEAVES_FIELDS`],
+/// in that order: every serialized key, classified. A key with no name is
+/// [`LEAVES_OTHER`], so the list can over-describe but never omit.
+pub fn leaves_this_mac_fields(
+    envelope: &trace_commons_protocol::trace_contribution::TraceContributionEnvelope,
+) -> Vec<&'static str> {
+    classify_envelope(envelope).0
+}
+
+/// Whether `text` names `folder`: a case-insensitive match that stands alone
+/// (not glued to a letter or digit on either side), so `api` is found in
+/// `../api/src` but not in `rapid`. An empty folder name names nothing.
+pub fn names_folder(text: &str, folder: &str) -> bool {
+    let folder = folder.trim().to_lowercase();
+    if folder.is_empty() {
+        return false;
+    }
+    let text = text.to_lowercase();
+    let bytes = text.as_bytes();
+    let glued = |c: Option<&u8>| c.is_some_and(|c| c.is_ascii_alphanumeric());
+    text.match_indices(&folder).any(|(at, m)| {
+        !glued(at.checked_sub(1).and_then(|i| bytes.get(i))) && !glued(bytes.get(at + m.len()))
+    })
+}
+
+/// Where the folder's name appears in `envelope`, for any of `folders`
+/// (the project's basenames): `(in_metadata, in_conversation)`, where the
+/// conversation is `events` and the metadata is everything else.
+pub fn folder_named_in(
+    envelope: &trace_commons_protocol::trace_contribution::TraceContributionEnvelope,
+    folders: &[&str],
+) -> (bool, bool) {
+    let conversation = serde_json::to_string(&envelope.events).unwrap_or_default();
+    let mut metadata_only = envelope.clone();
+    metadata_only.events.clear();
+    let metadata = serde_json::to_string(&metadata_only).unwrap_or_default();
+    let any = |text: &str| folders.iter().any(|f| names_folder(text, f));
+    (any(&metadata), any(&conversation))
+}
+
+/// **DRAFT, NEEDS APPROVAL.** The phrase for one [`LEAVES_FIELDS`] label,
+/// or `None` for a label this build does not know.
+pub fn leaves_this_mac_phrase(label: &str) -> Option<&'static str> {
+    Some(match label {
+        LEAVES_CONVERSATION => "the scrubbed conversation",
+        LEAVES_TOOL => "tool",
+        LEAVES_TOOL_VERSION => "tool version",
+        LEAVES_MODEL => "model",
+        LEAVES_TIMING => "timing",
+        LEAVES_USAGE_AND_COST => "token counts and cost",
+        LEAVES_ROUTING => "which route each call took",
+        LEAVES_OUTCOME => "outcome",
+        LEAVES_CORRECTION => "your correction",
+        LEAVES_USES => "the uses you allowed",
+        LEAVES_REDACTION_SUMMARY => "what scrubbing removed, as counts",
+        LEAVES_SESSION_ID => "the tool's own session id",
+        LEAVES_TRACE_IDS => "random ids for this trace",
+        LEAVES_CONTRIBUTOR_ID => "a pseudonymous contributor id",
+        LEAVES_TENANT => "the commons you joined",
+        LEAVES_CREDIT_ACCOUNT => "your credit account reference",
+        LEAVES_REVOCATION_HANDLE => "a handle for taking it back",
+        LEAVES_FOLDER_FINGERPRINT => "a one-way fingerprint of the folder",
+        LEAVES_REPLAY => "the tools a replay would need",
+        LEAVES_SCORES => "a value estimate",
+        LEAVES_FORMAT_VERSION => "the format version",
+        LEAVES_OTHER => "other metadata this version has no name for",
+        _ => return None,
+    })
+}
+
+/// A byte count as the sheet prints it: `812 bytes`, `19 KB`, `1.5 MB`.
+pub fn leaves_this_mac_size(bytes: usize) -> String {
+    const KB: usize = 1024;
+    const MB: usize = KB * 1024;
+    if bytes >= MB {
+        format!("{:.1} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{} KB", (bytes + KB / 2) / KB)
+    } else if bytes == 1 {
+        "1 byte".to_string()
+    } else {
+        format!("{bytes} bytes")
+    }
+}
+
+/// **DRAFT, NEEDS APPROVAL.** The whole "Leaves this Mac" line, for
+/// example `19 KB · 12 turns · tool, model, timing, …. The metadata never
+/// carries the path or the folder name.`
+///
+/// `would_send_bytes` is the envelope's size (`preview`'s figure, the one
+/// that governs consent), `turn_count` is `preview_turns`' count, `fields`
+/// is [`leaves_this_mac_fields`], and `folder_named` is [`folder_named_in`].
+/// The conversation label is carried by the turn count rather than repeated,
+/// and an unknown label is skipped rather than printed raw.
+pub fn leaves_this_mac_line(
+    would_send_bytes: usize,
+    turn_count: usize,
+    fields: &[&str],
+    folder_named: (bool, bool),
+) -> String {
+    let turns = if turn_count == 1 {
+        "1 turn".to_string()
+    } else {
+        format!("{turn_count} turns")
+    };
+    let phrases: Vec<&str> = fields
+        .iter()
+        .filter(|f| **f != LEAVES_CONVERSATION)
+        .filter_map(|f| leaves_this_mac_phrase(f))
+        .collect();
+    let (in_metadata, in_conversation) = folder_named;
+    let mut close = vec![if in_metadata {
+        LEAVES_FOLDER_IN_METADATA
+    } else {
+        LEAVES_METADATA_NEVER
+    }];
+    if in_conversation && !in_metadata {
+        close.push(LEAVES_FOLDER_IN_CONVERSATION);
+    }
+    format!(
+        "{} \u{00b7} {turns} \u{00b7} {}. {}",
+        leaves_this_mac_size(would_send_bytes),
+        phrases.join(", "),
+        close.join(" ")
+    )
+}
+
+/// Test access to the unknown-key list, for the completeness test that lives
+/// beside a real envelope build.
+#[cfg(test)]
+pub(crate) fn unlabelled_envelope_keys(
+    envelope: &trace_commons_protocol::trace_contribution::TraceContributionEnvelope,
+) -> Vec<String> {
+    classify_envelope(envelope).1
+}
+
+// ---------------------------------------------------------------------------
+// The submit toast (K9, #1118): "Sent. N left to decide - upload limit X of Y"
+// ---------------------------------------------------------------------------
+//
+// Not the same sentence as the GTK/macOS/Windows "one-click submit" toast
+// (`crate::daemon::queue`'s redaction-count toast, e.g. "Approved. 4
+// redactions applied. 1 flagged."). This is a second, later line from the
+// WYSIWYG design's Flow 2 and Flow 3: after a submit, how many decisions are
+// still owed and where today's upload cap stands. It lives here, not in a
+// shell, for the reason the module doc gives -- one Rust sentence rather
+// than three native copies of the same arithmetic.
+
+/// **DRAFT, NEEDS APPROVAL.** The toast after a submit, matching the design's
+/// worked example exactly: "Sent. 1 left to decide - upload limit 7 of 20".
+///
+/// `uploads_today` and `max_uploads_per_day` are `status.daily_budget`'s
+/// fields of the same names. `decisions_owed` is `status.decisions_owed`
+/// (K6, a separate branch): this function only formats the count it is
+/// given and never reads the queue itself, so it has nothing to say about
+/// what counts as "owed" -- that is K6's decision, not this one's.
+#[must_use]
+pub fn toast_sent_text(
+    uploads_today: u64,
+    max_uploads_per_day: u64,
+    decisions_owed: u64,
+) -> String {
+    // `\u{b7}` is the design's middle dot (·), written as an escape so the
+    // source stays plain ASCII like the rest of this file's comments.
+    format!(
+        "Sent. {decisions_owed} left to decide \u{b7} upload limit {uploads_today} of {max_uploads_per_day}"
+    )
+}
+
+// ---------------------------------------------------------------------------
+// The per-session notification (K9, #1118)
+// ---------------------------------------------------------------------------
+
+/// **DRAFT, NEEDS APPROVAL.** The one action on a per-session notification
+/// (the design's Flow 2, "Notification. Body is the consent sentence; one
+/// action, 'Look, then decide'"). Named for what it is, not what it does:
+/// the notification offers no way to decide without looking, because the
+/// review sheet is where [`GATE_STATEMENT`] and the verdict live, and a
+/// second action here would be a second, undisclosed way to approve.
+pub const NOTIFICATION_LOOK_THEN_DECIDE_ACTION: &str = "Look, then decide";
+
+/// A per-session notification's words: the body and its one action.
+///
+/// The body is [`GATE_STATEMENT`] itself, not a paraphrase of it -- the
+/// design calls for "the consent sentence", and that is the one this crate
+/// already ships above an irreversible Submit. A notification that said
+/// something adjacent would be a second, drifting copy of the one sentence
+/// this module exists to keep singular.
+#[derive(Clone, Copy, Debug, serde::Serialize, PartialEq, Eq)]
+pub struct SessionNotificationCopy {
+    pub body: &'static str,
+    pub action: &'static str,
+}
+
+/// The per-session notification's copy. Takes no argument: like
+/// [`consent_copy`], it describes the build rather than a running daemon, so
+/// there is nothing to look up.
+#[must_use]
+pub fn session_notification_copy() -> SessionNotificationCopy {
+    SessionNotificationCopy {
+        body: GATE_STATEMENT,
+        action: NOTIFICATION_LOOK_THEN_DECIDE_ACTION,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// M4: the Missions disclosure says the three things, in the spec's
+    /// words where it gives them, and never calls credit earned.
+    #[test]
+    fn the_missions_disclosure_says_the_three_things() {
+        let copy = missions_disclosure_copy();
+        assert!(copy.matching.starts_with("Matching happens on this Mac."));
+        assert!(
+            copy.nothing_sent
+                .starts_with("Nothing is sent because of a mission.")
+        );
+        assert_eq!(
+            copy.credit,
+            "A mission's credit is projected until the commons records it, then pending until it settles."
+        );
+        let all = [copy.title, copy.matching, copy.nothing_sent, copy.credit].join(" ");
+        assert!(!all.to_lowercase().contains("earn"), "{all}");
+    }
+
+    #[test]
+    fn the_leaves_this_mac_line_is_assembled_from_labels() {
+        let line = leaves_this_mac_line(
+            19 * 1024,
+            12,
+            &[
+                LEAVES_CONVERSATION,
+                LEAVES_TOOL,
+                LEAVES_TIMING,
+                LEAVES_OUTCOME,
+                "not-a-field",
+            ],
+            (false, false),
+        );
+        assert_eq!(
+            line,
+            "19 KB \u{00b7} 12 turns \u{00b7} tool, timing, outcome. The metadata never carries the path or the folder name."
+        );
+        assert_eq!(leaves_this_mac_size(812), "812 bytes");
+        assert_eq!(leaves_this_mac_size(3 * 1024 * 1024 / 2), "1.5 MB");
+        assert!(leaves_this_mac_line(10, 1, &[], (false, false)).contains("1 turn \u{00b7}"));
+        for label in LEAVES_FIELDS {
+            assert!(leaves_this_mac_phrase(label).is_some(), "{label}");
+        }
+    }
+
+    #[test]
+    fn a_folder_named_in_the_conversation_is_said_and_never_denied() {
+        let named = leaves_this_mac_line(10, 1, &[LEAVES_TOOL], (false, true));
+        assert!(named.ends_with(LEAVES_FOLDER_IN_CONVERSATION), "{named}");
+        let leaked = leaves_this_mac_line(10, 1, &[LEAVES_TOOL], (true, true));
+        assert!(!leaked.contains(LEAVES_METADATA_NEVER), "{leaked}");
+        assert!(leaked.ends_with(LEAVES_FOLDER_IN_METADATA), "{leaked}");
+    }
+
+    #[test]
+    fn a_folder_name_is_matched_standing_alone_and_case_insensitively() {
+        assert!(names_folder("cat ../myproj/src/main.rs", "myproj"));
+        assert!(names_folder("cd MyProj && ls", "myproj"));
+        assert!(names_folder("in api/", "api"));
+        assert!(!names_folder("rapid progress", "api"));
+        assert!(!names_folder("anything", ""));
+    }
 
     /// K5: the rewording notice says the folder is still armed and then
     /// says exactly what a patterns-only folder is told, with no model-scrub
@@ -1702,6 +2403,41 @@ mod tests {
         assert_eq!(n.title, REWORDED_UNPLACED_TITLE);
         assert!(n.ask_first_action.is_none() && n.ask_first_failed.is_none());
         assert!(arming_reworded_notice_for_wire(&serde_json::json!("x")).is_none());
+    }
+
+    /// #1208: the "Automatic" override's void gets its own words --
+    /// not the Flow 1 grant's, not the unplaced fallback -- and no button,
+    /// since turning it back on is the pill's own confirmation.
+    #[test]
+    fn an_override_void_gets_its_own_notice() {
+        let n = void_notice_for_wire(&serde_json::json!({
+            "id": 3, "kind": "contribution_override", "project_id": null,
+            "project_label": null, "reasons": ["scopes-widened"]
+        }))
+        .unwrap();
+        assert_eq!(n.title, VOID_OVERRIDE_TITLE);
+        assert_eq!(n.body, VOID_OVERRIDE_BODY);
+        assert_eq!(n.rearm, VOID_OVERRIDE_REARM);
+        assert_eq!(n.reasons, vec![void_reason_line("scopes-widened")]);
+        assert!(n.rearm_action.is_none() && n.rearm_failed.is_none());
+        assert_ne!(void_reason_line("terms-unrecorded"), VOID_REASON_UNKNOWN);
+    }
+
+    #[test]
+    fn an_automatic_default_upgrade_explains_the_new_hold() {
+        let copy = arming_reworded_notice_for_wire(&serde_json::json!({
+            "id": 1, "project_id": "p-1", "project_label": "api",
+            "scrub_check_defaulted": true
+        }))
+        .unwrap();
+        assert_eq!(copy.title, "The Scrub check is now Automatic for api");
+        assert!(copy.body.contains("previously unset"));
+        assert_eq!(copy.scope, SCRUB_CHECK_AUTOMATIC_HELP);
+        assert_eq!(
+            copy.no_review,
+            "Held sessions are not sent until you decide."
+        );
+        assert!(copy.ask_first_action.is_some());
     }
 
     /// The held notice: counted, a sentence per reason, the release line,
@@ -1974,6 +2710,17 @@ mod tests {
         assert!(route_disclosure_for_wire(&serde_json::json!("witness")).is_none());
     }
 
+    /// An unreadable disclosure keeps its title: a shell that could not read
+    /// the route still names the section, from the core rather than a
+    /// literal of its own.
+    #[test]
+    fn the_unreadable_copy_carries_the_disclosure_title() {
+        let copy = disclosure_unreadable_copy();
+        assert_eq!(copy.title, DISCLOSURE_TITLE);
+        assert_eq!(copy.panel, DISCLOSURE_UNREADABLE);
+        assert_eq!(copy.session, DISCLOSURE_SESSION_UNREADABLE);
+    }
+
     #[test]
     fn the_certificate_detail_copy_says_what_was_checked_and_when() {
         let copy = certificate_detail_copy();
@@ -1981,6 +2728,23 @@ mod tests {
         assert!(!copy.heading.is_empty());
         assert!(!copy.measurement_label.is_empty());
         assert!(!copy.signer_label.is_empty());
+    }
+
+    /// A name the daemon reported reads as exactly that disclosure's words;
+    /// an unknown name reads as nothing.
+    #[test]
+    fn a_named_disclosure_reads_as_the_one_the_daemon_chose() {
+        use crate::daemon::automatic_gate::Disclosure;
+        assert_eq!(
+            automatic_grant_copy_named("patterns_only"),
+            Some(automatic_grant_copy(Disclosure::PatternsOnly))
+        );
+        assert_eq!(
+            automatic_grant_copy_named("model_scrubbed"),
+            Some(automatic_grant_copy(Disclosure::ModelScrubbed))
+        );
+        assert_eq!(automatic_grant_copy_named("scrubbed"), None);
+        assert_eq!(automatic_grant_copy_named(""), None);
     }
 
     /// "Trust relaxes what may be sent, never what may be said": the
@@ -2665,5 +3429,61 @@ mod tests {
             WitnessOrigin::ConnectedInference,
         ));
         assert!(line.contains("connected inference"));
+    }
+
+    /// R1: the Scrub check's words never claim a model looked at a session
+    /// or that anything was quality checked. The Automatic check is a count
+    /// of what the scrubber removed, and must read as one.
+    #[test]
+    fn the_scrub_check_copy_claims_no_model_or_quality_check() {
+        for sentence in [
+            SCRUB_CHECK_TITLE,
+            SCRUB_CHECK_AUTOMATIC_LABEL,
+            SCRUB_CHECK_AUTOMATIC_HELP,
+            SCRUB_CHECK_MANUAL_LABEL,
+            SCRUB_CHECK_MANUAL_HELP,
+            SCRUB_CHECK_HELD,
+        ] {
+            let lower = sentence.to_lowercase();
+            for claim in ["model", "quality", "verified", "certified", "safe"] {
+                assert!(
+                    !lower.contains(claim),
+                    "{claim:?} in Scrub check copy: {sentence}"
+                );
+            }
+        }
+        assert!(
+            SCRUB_CHECK_AUTOMATIC_HELP.contains("does not check that the scrubbing was right"),
+            "Automatic says what it is not"
+        );
+    }
+
+    /// The design's own worked example (Flow 2), verbatim.
+    #[test]
+    fn toast_sent_text_matches_the_design_example() {
+        assert_eq!(
+            toast_sent_text(7, 20, 1),
+            "Sent. 1 left to decide \u{b7} upload limit 7 of 20"
+        );
+    }
+
+    #[test]
+    fn toast_sent_text_states_both_counts_whatever_they_are() {
+        let text = toast_sent_text(0, 50, 0);
+        assert!(text.starts_with("Sent."), "{text}");
+        assert!(text.contains("0 left to decide"), "{text}");
+        assert!(text.contains("upload limit 0 of 50"), "{text}");
+    }
+
+    /// The per-session notification's body is the consent sentence itself,
+    /// not a paraphrase -- the same string a shell shows above Submit.
+    #[test]
+    fn session_notification_copy_uses_the_consent_sentence_and_look_then_decide() {
+        let copy = session_notification_copy();
+        assert_eq!(copy.body, GATE_STATEMENT);
+        assert_eq!(copy.action, "Look, then decide");
+        let value = serde_json::to_value(copy).expect("serialises");
+        assert_eq!(value["body"], GATE_STATEMENT);
+        assert_eq!(value["action"], "Look, then decide");
     }
 }

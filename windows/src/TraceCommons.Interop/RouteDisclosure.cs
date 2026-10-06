@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
@@ -63,6 +64,16 @@ public sealed record WitnessDisclosureCopy
     /// <summary>The second enclave. Only on the witness route.</summary>
     [JsonPropertyName("classifier")] public string? Classifier { get; init; }
     [JsonPropertyName("origin")] public string Origin { get; init; } = string.Empty;
+
+    /// <summary>
+    /// The nested <c>copy.witness</c> fields this shell decodes, compared
+    /// against the export: the both-enclaves and origin sentences live here.
+    /// </summary>
+    public static IReadOnlyList<string> ConsumedFields { get; } = new[]
+    {
+        "heading", "address_label", "signing_label", "measurements_label", "check",
+        "classifier", "origin",
+    };
 }
 
 public sealed record SessionSendCopy
@@ -72,15 +83,22 @@ public sealed record SessionSendCopy
     [JsonPropertyName("before_line")] public string BeforeLine { get; init; } = string.Empty;
     [JsonPropertyName("after_label")] public string AfterLabel { get; init; } = string.Empty;
     [JsonPropertyName("after_line")] public string AfterLine { get; init; } = string.Empty;
+
+    /// <summary>The nested <c>copy.session</c> fields this shell decodes, compared against the export.</summary>
+    public static IReadOnlyList<string> ConsumedFields { get; } = new[]
+    {
+        "heading", "before_label", "before_line", "after_label", "after_line",
+    };
 }
 
-/// <summary>What a surface says when the disclosure cannot be read.</summary>
+/// <summary>What a surface says when the disclosure cannot be read, under its title.</summary>
 public sealed record RouteDisclosureUnreadable
 {
+    [JsonPropertyName("title")] public string Title { get; init; } = string.Empty;
     [JsonPropertyName("panel")] public string Panel { get; init; } = string.Empty;
     [JsonPropertyName("session")] public string Session { get; init; } = string.Empty;
 
-    public static IReadOnlyList<string> ConsumedFields { get; } = new[] { "panel", "session" };
+    public static IReadOnlyList<string> ConsumedFields { get; } = new[] { "title", "panel", "session" };
 }
 
 /// <summary>The labels for <c>certificate_detail</c>.</summary>
@@ -132,19 +150,41 @@ public static class RouteDisclosureSurface
     }
 
     /// <summary>The lines shown when the disclosure cannot be read.</summary>
-    public static RouteDisclosureUnreadable? Unreadable()
+    public static RouteDisclosureUnreadable? Unreadable() =>
+        ParseUnreadable(NativeMethods.TakeOwnedString(NativeMethods.tc_route_disclosure_unreadable_copy()));
+
+    /// <summary>The labels for <c>certificate_detail</c>.</summary>
+    public static CertificateDetailCopy? CertificateLabels() =>
+        ParseCertificateLabels(NativeMethods.TakeOwnedString(NativeMethods.tc_certificate_detail_copy()));
+
+    /// <summary>The payload half of <see cref="Unreadable"/>, testable without the cdylib.</summary>
+    internal static RouteDisclosureUnreadable? ParseUnreadable(string? json)
     {
-        RouteDisclosureUnreadable? value = Deserialize<RouteDisclosureUnreadable>(
-            NativeMethods.TakeOwnedString(NativeMethods.tc_route_disclosure_unreadable_copy()));
-        return value is null || string.IsNullOrEmpty(value.Panel) || string.IsNullOrEmpty(value.Session)
+        RouteDisclosureUnreadable? value = Deserialize<RouteDisclosureUnreadable>(json);
+        return value is null || AnyEmpty(value.Title, value.Panel, value.Session) ? null : value;
+    }
+
+    /// <summary>
+    /// The payload half of <see cref="CertificateLabels"/>, testable without
+    /// the cdylib. Every label is required: an empty one would draw a value
+    /// with nothing saying what it is.
+    /// </summary>
+    internal static CertificateDetailCopy? ParseCertificateLabels(string? json)
+    {
+        CertificateDetailCopy? value = Deserialize<CertificateDetailCopy>(json);
+        return value is null
+            || AnyEmpty(value.Heading, value.MeasurementLabel, value.SignerLabel, value.VerifiedAtReview)
             ? null
             : value;
     }
 
-    /// <summary>The labels for <c>certificate_detail</c>.</summary>
-    public static CertificateDetailCopy? CertificateLabels() =>
-        Deserialize<CertificateDetailCopy>(
-            NativeMethods.TakeOwnedString(NativeMethods.tc_certificate_detail_copy()));
+    /// <summary>
+    /// The Settings section's title: the disclosure's, or the core's title
+    /// for an unreadable one, so the unreadable line is never under a blank
+    /// heading.
+    /// </summary>
+    public static string PanelTitle(RouteDisclosure? disclosure, RouteDisclosureUnreadable? unreadable) =>
+        disclosure?.Copy.Title ?? unreadable?.Title ?? string.Empty;
 
     /// <summary>The payload half of <see cref="ForFacts"/>, testable without the cdylib.</summary>
     internal static RouteDisclosure? Parse(string? json)
@@ -253,7 +293,23 @@ public static class RouteDisclosureSurface
             required.AddRange(new[] { w.Heading, w.AddressLabel, w.SigningLabel, w.MeasurementsLabel, w.Check, w.Origin });
         }
 
+        // The witness's address and signing key are drawn as values; missing,
+        // they would render as empty rows under their labels.
+        if (value.Facts.Witness is { } facts)
+        {
+            required.AddRange(new[] { facts.Url, facts.SigningAddress });
+        }
+
         if (required.Exists(string.IsNullOrEmpty))
+        {
+            return false;
+        }
+
+        // A block that is present must have words. Absent is "not true of
+        // this route"; present and empty is a defect, refused rather than
+        // dropped by AddLine, as the macOS and Tauri parsers do.
+        if (new[] { c.LocalFilter, c.Receipts, c.AttestedBodies, c.Witness?.Classifier }
+            .Any(line => line is { Length: 0 }))
         {
             return false;
         }
@@ -264,6 +320,8 @@ public static class RouteDisclosureSurface
             && (c.Receipts is not null) == witnessRoute
             && (c.AttestedBodies is not null) == (witnessRoute && value.Facts.AttestedBodies);
     }
+
+    private static bool AnyEmpty(params string?[] lines) => lines.Any(string.IsNullOrEmpty);
 
     private static void AddLine(List<DisclosureRow> rows, string? line)
     {

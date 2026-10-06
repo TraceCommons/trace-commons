@@ -25,6 +25,8 @@ use uuid::Uuid;
 
 use crate::config::{ConfigStore, DAEMON_QUEUE_FILE};
 use crate::daemon::approved_envelope::WITNESS_PIN_PREFIX;
+use crate::daemon::policy::{ProjectMode, ProjectPolicy};
+use crate::daemon::settings::ScrubCheck;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -54,6 +56,122 @@ pub enum QueueState {
     /// The session changed after this entry was offered; a fresh entry
     /// replaced it.
     Superseded,
+}
+
+/// The shape of a session, for the queue rows, the review sheet's header and
+/// the past-session picker: when it started and ended, and how many prompts
+/// the person gave.
+///
+/// `user_turns` counts what someone reading the session would call a turn --
+/// a prompt they typed -- and is deliberately not `preview_turns`'
+/// `turn_count`, which indexes every event of the redacted envelope, tool
+/// calls and results included.
+/// Where a group transcript's delegated members begin: the adapter's
+/// `subagent_group` / `subagent_transcript` markers.
+fn is_delegated_boundary(event: &crate::source::SessionEvent) -> bool {
+    matches!(
+        event.structured.get("record_type").and_then(|v| v.as_str()),
+        Some("subagent_group" | "subagent_transcript")
+    )
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionShape {
+    #[serde(default)]
+    pub started_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub ended_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub user_turns: u32,
+}
+
+impl SessionShape {
+    /// The shape of the conversation a person had.
+    ///
+    /// Only the parent transcript counts: a Claude Code group appends each
+    /// delegated transcript behind a `subagent_transcript` marker, and a
+    /// subagent's opening prompt is the agent's, not the person's. A user
+    /// event counts as a turn only when `preview::task_prompt` finds a
+    /// request in it, so injected wrappers -- system reminders, command
+    /// metadata, AGENTS.md and environment preambles -- are not turns, and
+    /// the count agrees with what the card calls the task.
+    ///
+    /// `started_at` is the earlier of the source's declared start and the
+    /// first event timestamp, so it is never after `ended_at`.
+    pub fn of(transcript: &crate::source::SessionTranscript) -> Self {
+        let first = transcript.events.iter().filter_map(|e| e.timestamp).min();
+        let last = transcript.events.iter().filter_map(|e| e.timestamp).max();
+        let started_at = match (transcript.started_at, first) {
+            (Some(declared), Some(first)) => Some(declared.min(first)),
+            (declared, first) => declared.or(first),
+        };
+        let user_turns = transcript
+            .events
+            .iter()
+            .take_while(|e| !is_delegated_boundary(e))
+            .filter(|e| e.kind == crate::source::SessionEventKind::User)
+            .filter(|e| {
+                e.content
+                    .as_deref()
+                    .and_then(crate::daemon::preview::task_prompt)
+                    .is_some()
+            })
+            .count()
+            .try_into()
+            .unwrap_or(u32::MAX);
+        Self {
+            started_at,
+            ended_at: last,
+            user_turns,
+        }
+    }
+
+    /// Wall-clock length, when both ends are known and in order.
+    pub fn duration_secs(&self) -> Option<i64> {
+        match (self.started_at, self.ended_at) {
+            (Some(start), Some(end)) if end >= start => Some((end - start).num_seconds()),
+            _ => None,
+        }
+    }
+}
+
+/// The session's title, built at the same moment [`SessionShape::of`] is:
+/// when the watcher queues the session, from the raw transcript rather than
+/// a built envelope.
+///
+/// K1's `preview::title_of` is the first non-empty line of the *redacted*
+/// opening prompt, cut and truncated the same way; this calls that same
+/// function so the two can never drift. The only difference is where the
+/// redaction comes from. A preview builds a whole envelope -- optionally
+/// through a configured prose privacy filter, which calls out over the
+/// network -- and the watcher's poll loop is synchronous and runs on every
+/// discovered session, so it cannot pay for that here. It runs the
+/// deterministic pass alone (`envelope::build_deterministic_preview_redactor`
+/// together with `redact_text`: secret-leak patterns, known and generic
+/// local paths, private emails, PEM blocks), which is the same floor every
+/// preview's redaction starts from and an unenrolled preview's title never
+/// goes past.
+/// So a queued title is never LESS redacted than an equivalent preview's;
+/// an enrolled contributor's preview may additionally scrub prose PII that
+/// only a configured filter catches, which this cannot.
+///
+/// `None` when the opening prompt is empty, is only harness-injected setup,
+/// or the task names no description -- the same cases `preview::title_of`
+/// already returns `None` for.
+pub fn title_of(transcript: &crate::source::SessionTranscript) -> Option<String> {
+    let opening = transcript
+        .events
+        .iter()
+        .take_while(|e| !is_delegated_boundary(e))
+        .filter(|e| e.kind == crate::source::SessionEventKind::User)
+        .find_map(|e| {
+            e.content
+                .as_deref()
+                .and_then(crate::daemon::preview::task_prompt)
+        })?;
+    let redactor = crate::envelope::build_deterministic_preview_redactor(transcript.cwd.as_deref());
+    let (redacted, _report) = redactor.redact_text(opening);
+    crate::daemon::preview::title_of(&redacted)
 }
 
 /// One session offered to the contributor.
@@ -133,11 +251,23 @@ pub struct QueueEntry {
     pub path: PathBuf,
     pub size_bytes: u64,
     pub discovered_at: DateTime<Utc>,
+    /// The first time these bytes were held for a person's review. A newly
+    /// held approved backlog gets a full review TTL without changing its
+    /// discovery provenance. Kept across repeats and restarts, so a hold
+    /// cannot renew its own deadline forever; absent on older queue lines.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_started_at: Option<DateTime<Utc>>,
     pub state: QueueState,
     /// A fixed label, never a message body or response text.
     pub reason_label: Option<String>,
     pub attempts: u32,
     pub retry_after: Option<DateTime<Utc>>,
+    /// Transient classifier failures since this entry was last approved.
+    /// `attempts` counts every try for the entry's whole life; this counts
+    /// only the run the daemon caps (`MAX_TRANSIENT_REDACTION_FAILURES`), and
+    /// an approval (a person's, or a standing opt-in's) starts it again.
+    #[serde(default)]
+    pub transient_redaction_failures: u32,
     pub submission_id: Option<Uuid>,
     /// The consent scopes in force at the moment this entry was approved.
     ///
@@ -239,6 +369,26 @@ pub struct QueueEntry {
     /// fingerprint is what covers them.
     #[serde(default)]
     pub previewed_envelope_digest: Option<String>,
+    /// The serialized size, in bytes, of the redacted envelope
+    /// `previewed_envelope_digest` pins (K10), mirrored here for the same
+    /// reason as `attested_inference`: so a queue listing can say what an
+    /// upload of this entry would actually send without opening the stored
+    /// file for every row. Set only by `record_previewed_envelope`, from the
+    /// bytes being pinned, cleared wherever the pin is.
+    ///
+    /// Raw session bytes (`size_bytes`) are what is on disk before
+    /// redaction; this is what redaction leaves, which can be smaller or
+    /// larger and is the number that matters for consent.
+    ///
+    /// `None` whenever there is no pinned preview to describe -- an armed
+    /// auto-upload, an approve-all, or an entry written before this field
+    /// existed -- and also on a handful of paths that re-pin an already
+    /// -certified review without re-measuring it (see
+    /// `Uploader::upload_entry`'s witness re-affirmation), which carry the
+    /// previously recorded figure forward instead of reporting `None` for a
+    /// bound that has not actually changed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub would_send_bytes: Option<u64>,
     /// The stored review's attested-inference record, mirrored here so a
     /// queue listing can say it without opening the file. Set only by
     /// `record_previewed_envelope` from the artifact being pinned, cleared
@@ -315,6 +465,25 @@ pub struct QueueEntry {
     pub subagent_count: u32,
     #[serde(default)]
     pub subagents_dropped: u32,
+    /// When the session ran and how many prompts it had, from the loaded
+    /// transcript. Metadata, not content: timestamps and a count, never a
+    /// word of what was said. `None` on an entry written before this existed.
+    #[serde(default)]
+    pub shape: Option<SessionShape>,
+    /// The session's title (K9): the first non-empty line of the redacted
+    /// opening prompt, cut and truncated exactly as the K1 preview title is.
+    /// See [`title_of`] for what "redacted" means on this path.
+    ///
+    /// `None` when the task named no description, and on every entry
+    /// written before this field existed -- it is not backfilled, exactly
+    /// like `shape`: an older entry gets a title the next time its session
+    /// is loaded (it grows, or is re-offered).
+    ///
+    /// `#[serde(default)]` because `daemon-queue.jsonl` written before this
+    /// field existed must still load; a required field here would make the
+    /// daemon refuse its own queue after an upgrade.
+    #[serde(default)]
+    pub title: Option<String>,
     /// The `modified_at` of the observation this entry was built from --
     /// the group mtime for a claude-code session, the file's own mtime for
     /// every single-file source. Pairs with `size_bytes`, which is the
@@ -403,9 +572,69 @@ pub struct QueueEntry {
     pub attestation: Option<String>,
     #[serde(default)]
     pub attestation_reason: Option<String>,
+    /// The reason label a kept entry carried when it was kept, so
+    /// `undo_keep` can put back a hold that needs a person
+    /// ([`REASONS_NEEDING_A_PERSON`]) rather than replace it with a weaker
+    /// one. `None` on every entry that is not kept, and on one kept with no
+    /// label. A fixed label only, like `reason_label`.
+    #[serde(default)]
+    pub kept_from_reason: Option<String>,
+    /// What the scrubber found in the bytes this entry is pinned to, bound
+    /// to their digest, or `None` when nothing has counted them.
+    ///
+    /// **`None` is "not yet scrubbed", never zero.** A session nobody has
+    /// counted and a session the scrubber read and found nothing personal in
+    /// are different facts, and only the second is "nothing matched" -- see
+    /// `second_look::Scrub`.
+    ///
+    /// Written only by the pinning build (`Queue::record_scrub`, from
+    /// `ipc::pin_previewed_envelope` and the witnessed review), never by a
+    /// card, an unenrolled build, or any build that pins nothing. Read back
+    /// only while `previewed_envelope_digest` names the same digest
+    /// ([`QueueEntry::scrub`]), so a released, replaced or revoked pin --
+    /// after an enrolment, a filter change, a revoked approval -- reads as
+    /// not yet scrubbed with nothing to clear by hand.
+    ///
+    /// Counts and a digest, never content.
+    ///
+    /// `#[serde(default)]` because `daemon-queue.jsonl` written before this
+    /// field existed must still load; such an entry reads as not yet
+    /// scrubbed until it is previewed again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scrub: Option<super::second_look::ScrubRecord>,
 }
 
 impl QueueEntry {
+    /// Which tool this session reads as: what the transcript declared
+    /// itself to be when discovery knew it, else the adapter that read it.
+    ///
+    /// The same preference `SessionRef::displayed_source` applies to a
+    /// `SessionRef`, so every surface names an imported Antigravity
+    /// conversation `antigravity` rather than `trajectory`. Display and
+    /// counting only -- never a substitute for `source` when pairing the
+    /// entry back to an adapter that can load it.
+    #[must_use]
+    pub fn displayed_source(&self) -> &str {
+        self.declared_source.as_deref().unwrap_or(&self.source)
+    }
+
+    /// Whether the scrubber has run on this entry, and how many marks it
+    /// made. See `second_look::Scrub`.
+    pub fn scrub(&self) -> super::second_look::Scrub {
+        match (&self.scrub, self.previewed_envelope_digest.as_deref()) {
+            (Some(record), Some(pinned)) if record.envelope_digest == pinned => {
+                super::second_look::Scrub::Scrubbed(record.counts)
+            }
+            _ => super::second_look::Scrub::NotYetScrubbed,
+        }
+    }
+
+    /// [`super::second_look::second_look_reasons`] for this entry: the
+    /// recorded scrub and the discovery-time trim.
+    pub fn second_look_reasons(&self) -> Vec<&'static str> {
+        super::second_look::second_look_reasons(self.scrub(), self.subagents_dropped)
+    }
+
     /// Whether this entry is waiting on a person and must not be approved on
     /// anyone's behalf. See [`REASONS_NEEDING_A_PERSON`].
     pub fn held_for_review(&self) -> bool {
@@ -414,6 +643,20 @@ impl QueueEntry {
                 .reason_label
                 .as_deref()
                 .is_some_and(|reason| REASONS_NEEDING_A_PERSON.contains(&reason))
+    }
+
+    /// Whether the contributor kept this session on this Mac. See
+    /// [`REASON_KEPT`].
+    pub fn is_kept(&self) -> bool {
+        self.state == QueueState::Refused && self.reason_label.as_deref() == Some(REASON_KEPT)
+    }
+
+    /// Whether this entry is waiting because the contributor undid a "Keep on
+    /// this Mac", and so must not be approved on anyone's behalf. See
+    /// [`REASON_RETURNED_FROM_KEEP`].
+    pub fn returned_from_keep(&self) -> bool {
+        self.state == QueueState::Pending
+            && self.reason_label.as_deref() == Some(REASON_RETURNED_FROM_KEEP)
     }
 
     /// A paced retry -- a transient classifier outage, or a witness at
@@ -520,6 +763,37 @@ pub const REASON_CHANGED: &str = "session-changed-after-offer";
 /// silently start re-offering declined sessions again.
 pub const REASON_DISMISSED: &str = "dismissed-by-contributor";
 
+/// The reason label `keep` records: the contributor chose "Keep on this Mac"
+/// for this session (K5, open decision #4 in #1118).
+///
+/// **Reversible, unlike `REASON_DISMISSED`.** A kept entry is `Refused` with
+/// this label, which is what keeps it out of every path that sends: it is
+/// not `Pending`, so it is out of `list_pending`, `status.queue_depth` (the
+/// badge), every group `approve`, `approve_unattended` and `expire`; it is not
+/// `Approved`, so nothing uploads it; and only `Superseded` is ever
+/// compacted, so the record does not decay. `Queue::kept_at_path` makes it a
+/// decision about the *conversation*, the way `dismissed_at_path` does: while
+/// kept, the watcher skips that session at its path -- no new card, no
+/// unattended approval in an armed project, and no re-read -- however much it
+/// grows. `undo_keep` is the only way out, and it returns the entry to
+/// waiting marked `REASON_RETURNED_FROM_KEEP`.
+///
+/// It is a distinct string so that none of the path-level rules keyed on
+/// `REASON_DISMISSED` apply to it, and so no reader can mistake a keep for a
+/// permanent decline.
+pub const REASON_KEPT: &str = "kept-on-this-mac";
+
+/// The reason label `undo_keep` leaves on the entry it returns to waiting.
+///
+/// A person ruled on this conversation, so undoing the keep asks them again
+/// rather than handing it to a folder's standing yes: `approve_unattended`
+/// refuses it and the watcher does not approve it on anyone's behalf, in an
+/// armed folder included. A person's own `approve` clears it like any other
+/// label. Not in `REASONS_NEEDING_A_PERSON`, deliberately: those are also
+/// left out of a group `approve`, and a contributor who undid a keep and then
+/// pressed "Submit all" for the folder did decide about it.
+pub const REASON_RETURNED_FROM_KEEP: &str = "returned-from-keep";
+
 /// The reason label an approve records when the envelope it built is past
 /// `envelope::MAX_ENVELOPE_BYTES`.
 ///
@@ -574,6 +848,12 @@ pub const REASON_TOKEN_DISTRIBUTION_REVIEW_REQUIRED: &str = "token-distribution-
 pub const REASONS_NEEDING_A_PERSON: &[&str] = &[
     REASON_TOKEN_DISTRIBUTION_REVIEW_REQUIRED,
     crate::submit::REASON_WITNESS_RISK_REVIEW_REQUIRED,
+    // Re-approving it unattended would restart the retry budget the cap
+    // just spent, and the classifier would get the session every hour again.
+    crate::submit::REASON_TRANSIENT_REDACTION_EXHAUSTED,
+    // The Automatic Scrub check's hold (K4 of #1118): the scrubber was
+    // unsure about the session, and an unsure session never moves on its own.
+    super::second_look::REASON_SECOND_LOOK_REVIEW_REQUIRED,
 ];
 
 /// Strip an entry back to a fresh offer, keeping only provenance.
@@ -589,7 +869,9 @@ fn reoffered_from(old: QueueEntry) -> QueueEntry {
         reason_label: None,
         attempts: 0,
         retry_after: None,
+        transient_redaction_failures: 0,
         submission_id: None,
+        review_started_at: None,
         // Provenance carries over; the approval and every term it was given
         // under -- scopes, envelope-determining inputs, and the artifact
         // that was shown -- do not.
@@ -833,6 +1115,121 @@ impl Queue {
         self.at_path(path).any(|e| {
             e.state == QueueState::Refused && e.reason_label.as_deref() == Some(REASON_DISMISSED)
         })
+    }
+
+    /// Has the contributor kept the session living at `path` on this Mac?
+    /// The reversible sibling of [`Self::dismissed_at_path`]: answered the
+    /// same way, from the path, for the same reason. See [`REASON_KEPT`].
+    pub fn kept_at_path(&self, path: &Path) -> bool {
+        self.at_path(path).any(QueueEntry::is_kept)
+    }
+
+    /// Whether a live entry at `path` is one a contributor returned from a
+    /// keep. The watcher asks before it supersedes that entry with newer
+    /// content, so the mark follows the conversation rather than the bytes:
+    /// a session that grew while kept is still asked about after the undo.
+    pub fn returned_from_keep_at_path(&self, path: &Path) -> bool {
+        self.at_path(path).any(QueueEntry::returned_from_keep)
+    }
+
+    /// Every entry kept on this Mac, in queue order.
+    pub fn kept(&self) -> Vec<&QueueEntry> {
+        self.entries.iter().filter(|e| e.is_kept()).collect()
+    }
+
+    /// Keep a session on this Mac: to `Refused` with [`REASON_KEPT`].
+    ///
+    /// A `Pending` entry can be kept, and so can one `Approved` **unattended**
+    /// -- the keep revokes that approval in the same step, so a keep pressed
+    /// while the watcher re-approves the card on the folder's behalf cannot
+    /// lose the race and answer `not-pending`. An approval a person made is
+    /// a decision already taken, which `cancel` undoes first; anything past
+    /// `Approved` is in flight or finished.
+    ///
+    /// The label the entry carried is remembered in `kept_from_reason`, so an
+    /// undo restores a hold that needs a person. Any preview pin goes, so the
+    /// stored envelope is swept like a dismissed one's -- an undo rebuilds.
+    pub fn keep(&mut self, entry_id: Uuid) -> Result<()> {
+        let Some(e) = self.entries.iter_mut().find(|e| e.entry_id == entry_id) else {
+            bail!("unknown-entry-id");
+        };
+        let unattended = e.state == QueueState::Approved && e.approved_unattended;
+        if e.state != QueueState::Pending && !unattended {
+            bail!("not-pending");
+        }
+        e.kept_from_reason = if unattended {
+            None
+        } else {
+            e.reason_label.clone()
+        };
+        e.state = QueueState::Refused;
+        e.reason_label = Some(REASON_KEPT.to_string());
+        e.retry_after = None;
+        e.approved_scopes = None;
+        e.approved_verdict = None;
+        e.approved_correction = None;
+        e.approved_inputs = None;
+        e.approved_at = None;
+        e.approved_unattended = false;
+        e.previewed_envelope_digest = None;
+        e.attested_inference = None;
+        e.would_send_bytes = None;
+        Ok(())
+    }
+
+    /// Undo a keep: the kept entry returns to `Pending`, marked
+    /// [`REASON_RETURNED_FROM_KEEP`] so it waits for a person, and dated
+    /// `now` -- expiry counts from `discovered_at`, and a session kept for a
+    /// month must not expire on the pass after the contributor asked for it
+    /// back. Refuses anything that is not kept, a dismissal included: a
+    /// dismissal stays permanent.
+    ///
+    /// A hold that needs a person ([`REASONS_NEEDING_A_PERSON`]: a witness
+    /// risk review, a token-distribution review, and any added later) is put
+    /// back as it was, not replaced: `returned-from-keep` is weaker, since a
+    /// group `approve` includes it, and a keep and an undo must never be a
+    /// way to clear a hold. Any other label becomes `returned-from-keep`.
+    ///
+    /// The queue cap applies, as it does to every new offer: an undo into a
+    /// full queue is refused `queue-full` and the entry stays kept.
+    pub fn undo_keep(
+        &mut self,
+        entry_id: Uuid,
+        now: DateTime<Utc>,
+        max_entries: usize,
+    ) -> Result<()> {
+        let live = self
+            .entries
+            .iter()
+            .filter(|e| matches!(e.state, QueueState::Pending | QueueState::Approved))
+            .count();
+        let Some(e) = self.entries.iter_mut().find(|e| e.entry_id == entry_id) else {
+            bail!("unknown-entry-id");
+        };
+        if !e.is_kept() {
+            bail!("not-kept");
+        }
+        if live >= max_entries {
+            bail!("queue-full");
+        }
+        let restored = e
+            .kept_from_reason
+            .take()
+            .filter(|r| REASONS_NEEDING_A_PERSON.contains(&r.as_str()));
+        e.state = QueueState::Pending;
+        e.reason_label = Some(restored.unwrap_or_else(|| REASON_RETURNED_FROM_KEEP.to_string()));
+        e.discovered_at = now;
+        e.retry_after = None;
+        e.approved_scopes = None;
+        e.approved_verdict = None;
+        e.approved_correction = None;
+        e.approved_inputs = None;
+        e.approved_at = None;
+        e.approved_unattended = false;
+        e.previewed_envelope_digest = None;
+        e.attested_inference = None;
+        e.would_send_bytes = None;
+        Ok(())
     }
 
     pub fn pending(&self) -> Vec<&QueueEntry> {
@@ -1185,6 +1582,9 @@ impl Queue {
         e.state = QueueState::Approved;
         e.reason_label = None;
         e.retry_after = None;
+        // A fresh approval gets a whole retry budget, or a session a person
+        // re-approved after the cap would be held again after one try.
+        e.transient_redaction_failures = 0;
         // The latest approver wins. An entry can be auto-approved, revoked
         // back to `Pending` by a scope change or an Undo, and then approved
         // by hand; without this reset it would still be marked unattended
@@ -1219,7 +1619,7 @@ impl Queue {
         if self
             .entries
             .iter()
-            .any(|e| e.entry_id == entry_id && e.held_for_review())
+            .any(|e| e.entry_id == entry_id && (e.held_for_review() || e.returned_from_keep()))
         {
             return false;
         }
@@ -1270,6 +1670,7 @@ impl Queue {
         entry_id: Uuid,
         digest: &str,
         attested_inference: Option<crate::witness::inference_record::InferenceAttestationRecord>,
+        would_send_bytes: Option<u64>,
     ) -> bool {
         let Some(e) = self.entries.iter_mut().find(|e| e.entry_id == entry_id) else {
             return false;
@@ -1282,6 +1683,43 @@ impl Queue {
         // being pinned, and a local preview (no record) pinned over an
         // earlier witnessed one must not keep the earlier answer.
         e.attested_inference = attested_inference;
+        // Same rule as `attested_inference` above, and for the same reason
+        // (K10): this describes exactly the bytes being pinned, so a caller
+        // with no fresh measurement passes `None` rather than leaving a
+        // stale figure in place that no longer describes what is pinned now.
+        e.would_send_bytes = would_send_bytes;
+        true
+    }
+
+    /// Record what the scrubber found in the envelope `entry_id` is pinned
+    /// to. Returns whether anything changed, so a caller saves the queue
+    /// only when it has to.
+    ///
+    /// Refused unless the entry is `Pending` and its pin names exactly
+    /// `envelope_digest`: a count is only ever stored beside the bytes it
+    /// describes, which are the bytes an approval would send.
+    pub fn record_scrub(
+        &mut self,
+        entry_id: Uuid,
+        envelope_digest: &str,
+        counts: super::second_look::ScrubCounts,
+    ) -> bool {
+        let Some(e) = self.entries.iter_mut().find(|e| e.entry_id == entry_id) else {
+            return false;
+        };
+        if e.state != QueueState::Pending
+            || e.previewed_envelope_digest.as_deref() != Some(envelope_digest)
+        {
+            return false;
+        }
+        let record = super::second_look::ScrubRecord {
+            envelope_digest: envelope_digest.to_string(),
+            counts,
+        };
+        if e.scrub.as_ref() == Some(&record) {
+            return false;
+        }
+        e.scrub = Some(record);
         true
     }
 
@@ -1312,6 +1750,7 @@ impl Queue {
         }
         e.previewed_envelope_digest = None;
         e.attested_inference = None;
+        e.would_send_bytes = None;
         true
     }
 
@@ -1369,20 +1808,99 @@ impl Queue {
         reason_label: &str,
         pin: &str,
         attested_inference: Option<crate::witness::inference_record::InferenceAttestationRecord>,
+        would_send_bytes: Option<u64>,
     ) -> bool {
         if !self.revoke_approval(entry_id, reason_label) {
             return false;
         }
-        self.record_previewed_envelope(entry_id, pin, attested_inference)
+        self.record_previewed_envelope(entry_id, pin, attested_inference, would_send_bytes)
+    }
+
+    /// Return every unsent approval made on the contributor's behalf to
+    /// waiting, under `second_look::REASON_SCRUB_CHECK_MANUAL`, and say how
+    /// many moved. For the switch to the Manual Scrub check (K4 of #1118):
+    /// such an entry would be held by the uploader anyway, and until then a
+    /// row still reading approved would be telling the contributor something
+    /// Manual no longer allows. A person's own approval is never touched, and
+    /// an entry already `Uploading` is left to its pass.
+    pub fn return_unattended_to_waiting(&mut self) -> usize {
+        self.return_unattended_to_waiting_at(Utc::now())
+    }
+
+    /// The settings change's clock starts the Manual review window.
+    pub fn return_unattended_to_waiting_at(&mut self, now: DateTime<Utc>) -> usize {
+        let ids: Vec<Uuid> = self
+            .entries
+            .iter()
+            .filter(|e| e.state == QueueState::Approved && e.approved_unattended)
+            .map(|e| e.entry_id)
+            .collect();
+        for id in &ids {
+            self.revoke_approval_at(*id, super::second_look::REASON_SCRUB_CHECK_MANUAL, now);
+        }
+        ids.len()
+    }
+
+    /// Revoke an unattended approval the Scrub check holds for a person (K4
+    /// of #1118), and pin the envelope the hold was decided on, with its
+    /// counts beside the digest, so the entry reads `scrubbed` with the
+    /// `second_look` that held it and a person's review shows those bytes.
+    ///
+    /// `pin` is the digest the uploader saved the envelope under
+    /// (`approved_envelope::save`) and its counts, or `None` when nothing was
+    /// saved: the entry is held all the same and reads not yet scrubbed.
+    pub fn hold_with_scrub_pin(
+        &mut self,
+        entry_id: Uuid,
+        reason_label: &str,
+        pin: Option<(&str, super::second_look::ScrubCounts)>,
+        would_send_bytes: Option<u64>,
+    ) -> bool {
+        self.hold_with_scrub_pin_at(entry_id, reason_label, pin, would_send_bytes, Utc::now())
+    }
+
+    /// The upload pass supplies its own clock, so the review deadline and
+    /// that pass's expiry decision agree even for an old approved backlog.
+    pub fn hold_with_scrub_pin_at(
+        &mut self,
+        entry_id: Uuid,
+        reason_label: &str,
+        pin: Option<(&str, super::second_look::ScrubCounts)>,
+        would_send_bytes: Option<u64>,
+        now: DateTime<Utc>,
+    ) -> bool {
+        if !self.revoke_approval_at(entry_id, reason_label, now) {
+            return false;
+        }
+        if let Some((digest, counts)) = pin {
+            if self.record_previewed_envelope(entry_id, digest, None, would_send_bytes) {
+                self.record_scrub(entry_id, digest, counts);
+            }
+        }
+        true
     }
 
     /// Revoke an approval and put the entry back in front of the
     /// contributor, because the terms it was approved under no longer hold.
     /// Returns whether anything changed.
     pub fn revoke_approval(&mut self, entry_id: Uuid, reason_label: &str) -> bool {
+        self.revoke_approval_at(entry_id, reason_label, Utc::now())
+    }
+
+    fn revoke_approval_at(
+        &mut self,
+        entry_id: Uuid,
+        reason_label: &str,
+        now: DateTime<Utc>,
+    ) -> bool {
         let Some(e) = self.entries.iter_mut().find(|e| e.entry_id == entry_id) else {
             return false;
         };
+        if REASONS_NEEDING_A_PERSON.contains(&reason_label)
+            || reason_label == super::second_look::REASON_SCRUB_CHECK_MANUAL
+        {
+            e.review_started_at.get_or_insert(now);
+        }
         e.state = QueueState::Pending;
         e.reason_label = Some(reason_label.to_string());
         e.retry_after = None;
@@ -1399,6 +1917,7 @@ impl Queue {
         // would be sent, so the re-offer must be previewed afresh.
         e.previewed_envelope_digest = None;
         e.attested_inference = None;
+        e.would_send_bytes = None;
         true
     }
 
@@ -1483,6 +2002,18 @@ impl Queue {
                 true
             }
             _ => false,
+        }
+    }
+
+    /// Count one more transient classifier failure against the entry's
+    /// current approval, returning the new count (0 for an unknown id).
+    pub fn record_transient_redaction_failure(&mut self, entry_id: Uuid) -> u32 {
+        match self.entries.iter_mut().find(|e| e.entry_id == entry_id) {
+            Some(e) => {
+                e.transient_redaction_failures = e.transient_redaction_failures.saturating_add(1);
+                e.transient_redaction_failures
+            }
+            None => 0,
         }
     }
 
@@ -1754,6 +2285,7 @@ impl Queue {
         // envelope.
         e.previewed_envelope_digest = None;
         e.attested_inference = None;
+        e.would_send_bytes = None;
         Ok(())
     }
 
@@ -1761,6 +2293,9 @@ impl Queue {
     ///
     /// `blocked_on_health` suspends the clock entirely: an entry the daemon
     /// could not have uploaded even with permission has not been declined.
+    /// A review hold starts its own TTL, without rewriting discovery. A
+    /// later explicit re-offer already dated by its caller still gets that
+    /// later date, as it did before the review clock existed.
     pub fn expire(&mut self, now: DateTime<Utc>, ttl_days: i64, blocked_on_health: bool) -> usize {
         if blocked_on_health {
             return 0;
@@ -1768,7 +2303,10 @@ impl Queue {
         let cutoff = now - Duration::days(ttl_days);
         let mut expired = 0;
         for e in self.entries.iter_mut() {
-            if e.state == QueueState::Pending && e.discovered_at < cutoff {
+            let waiting_since = e
+                .review_started_at
+                .map_or(e.discovered_at, |review| review.max(e.discovered_at));
+            if e.state == QueueState::Pending && waiting_since < cutoff {
                 e.state = QueueState::Expired;
                 e.reason_label = Some(REASON_EXPIRED.to_string());
                 expired += 1;
@@ -1817,9 +2355,187 @@ impl Queue {
     }
 }
 
+/// The menu-bar badge (K6): `Pending` entries that need a decision from a
+/// person. Never `queue_depth` -- see `status.decisions_owed`.
+///
+/// With Automatic Scrub check, an armed folder's `Pending` entries are
+/// excluded by default: they will go
+/// out unattended once they settle or the automatic-contribution gate clears,
+/// so the design never asks about them (`arming_rewordings`, `gate_held`,
+/// `automatic_contribution_held` are the notices for that path, not this
+/// count). This holds whether the entry is merely unsettled
+/// (`armed_not_settled`) or held by the gate (`TickReport::gate_blocked`,
+/// `automatic_gate`): both are "armed means no decision", so neither counts,
+/// exactly like the design rule "armed folders never move it".
+///
+/// Exceptions inside an armed folder DO need a person, so they count:
+///
+/// - Manual Scrub check requires a person for every pending entry, including
+///   a newly discovered session without a hold reason.
+/// - [`QueueEntry::held_for_review`] -- revoked for a reason in
+///   [`REASONS_NEEDING_A_PERSON`] that no unattended re-approval can satisfy
+///   (`watcher::visit_session` already refuses to auto-approve these).
+/// - [`QueueEntry::returned_from_keep`] -- undoing Keep restores a personal
+///   decision, not unattended approval. Kept entries themselves are excluded.
+/// - [`ProjectPolicy::waits_for_a_person_at_send`] -- backlog held back by
+///   the automatic grant or an arming from now.
+///
+/// A folder in `NotifyOnly` ("Ask me") always counts every `Pending` entry:
+/// that is the ordinary Ask-me case the badge exists for.
+///
+/// An `Ignore`d folder counts nothing but a `held_for_review` or
+/// `returned_from_keep` entry. Setting
+/// `Ignore` refuses what was waiting (`refuse_pending_for_project`), so a
+/// `Pending` entry there is only a transient (a failed queue save, say), and
+/// the contributor has already said "never offer these": the badge must not
+/// ask them to decide about it. The check is therefore `== NotifyOnly`, not
+/// `!= AutoUpload`.
+///
+/// Deliberately one small function, with one predicate
+/// ([`needs_a_person`]), so a state that must also count or must not --
+/// K5's returned-from-keep entries and from-now backlog (#1134), and a
+/// `scrub_check` manual hold (#1139) -- has exactly one
+/// place to add its rule, rather than a second badge-counting path drifting
+/// from this one. Extend `needs_a_person`, not `status_value`.
+pub fn decisions_owed(queue: &Queue, policy: &ProjectPolicy, scrub_check: ScrubCheck) -> usize {
+    queue
+        .pending()
+        .into_iter()
+        .filter(|entry| needs_a_person(entry, policy, scrub_check))
+        .count()
+}
+
+/// Whether one `Pending` entry is a decision owed to a person. See
+/// [`decisions_owed`] for each rule and why.
+fn needs_a_person(entry: &QueueEntry, policy: &ProjectPolicy, scrub_check: ScrubCheck) -> bool {
+    if entry.held_for_review() || entry.returned_from_keep() {
+        return true;
+    }
+    match policy.resolve(&entry.project_key) {
+        ProjectMode::NotifyOnly => true,
+        ProjectMode::AutoUpload => {
+            scrub_check == ScrubCheck::Manual
+                || policy
+                    .waits_for_a_person_at_send(&entry.project_key, &entry.path.to_string_lossy())
+        }
+        ProjectMode::Ignore => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn event(
+        kind: crate::source::SessionEventKind,
+        at: Option<&str>,
+        content: Option<&str>,
+    ) -> crate::source::SessionEvent {
+        crate::source::SessionEvent {
+            kind,
+            timestamp: at.map(|t| t.parse().unwrap()),
+            content: content.map(str::to_string),
+            ..Default::default()
+        }
+    }
+
+    fn marker(record_type: &str) -> crate::source::SessionEvent {
+        crate::source::SessionEvent {
+            structured: serde_json::json!({ "record_type": record_type, "index": 0 }),
+            ..Default::default()
+        }
+    }
+
+    /// K1: a session's turns are the prompts the person typed in the parent
+    /// transcript. Injected wrappers (a system reminder, a Codex AGENTS.md
+    /// preamble) are not turns, and neither is anything behind a Claude Code
+    /// group's delegated-transcript boundary.
+    #[test]
+    fn a_session_shape_counts_only_the_persons_prompts() {
+        use crate::source::SessionEventKind::{Assistant, ToolCall, ToolResult, User};
+        let transcript = crate::source::SessionTranscript {
+            events: vec![
+                event(
+                    User,
+                    Some("2026-09-12T10:00:00Z"),
+                    Some("# AGENTS.md instructions for x\n<INSTRUCTIONS>\nRules\n</INSTRUCTIONS>"),
+                ),
+                event(
+                    User,
+                    Some("2026-09-12T10:00:05Z"),
+                    Some("add a rate limiter"),
+                ),
+                event(Assistant, Some("2026-09-12T10:01:00Z"), Some("ok")),
+                event(ToolCall, None, None),
+                event(ToolResult, Some("2026-09-12T10:05:00Z"), None),
+                event(
+                    User,
+                    Some("2026-09-12T10:06:00Z"),
+                    Some("<system-reminder>be careful</system-reminder>"),
+                ),
+                event(User, Some("2026-09-12T11:00:00Z"), Some("now add a test")),
+                marker("subagent_group"),
+                marker("subagent_transcript"),
+                event(
+                    User,
+                    Some("2026-09-12T11:10:00Z"),
+                    Some("search the repo for callers"),
+                ),
+                event(Assistant, Some("2026-09-12T11:18:00Z"), Some("found 3")),
+            ],
+            ..Default::default()
+        };
+        let shape = SessionShape::of(&transcript);
+        assert_eq!(
+            shape.user_turns, 2,
+            "two typed prompts, no wrappers, no subagent"
+        );
+        assert_eq!(
+            shape.started_at,
+            Some("2026-09-12T10:00:00Z".parse().unwrap())
+        );
+        assert_eq!(
+            shape.ended_at,
+            Some("2026-09-12T11:18:00Z".parse().unwrap()),
+            "the delegated work is part of the session's span"
+        );
+        assert_eq!(shape.duration_secs(), Some(78 * 60));
+    }
+
+    /// The start is the earlier of the declared start and the first event, so
+    /// a declared start later than the events cannot give a null duration.
+    #[test]
+    fn a_session_shape_starts_at_the_earlier_of_declared_and_first_event() {
+        use crate::source::SessionEventKind::User;
+        let events = vec![
+            event(User, Some("2026-09-12T10:00:00Z"), Some("go")),
+            event(User, Some("2026-09-12T10:30:00Z"), Some("again")),
+        ];
+        let later = crate::source::SessionTranscript {
+            started_at: Some("2026-09-12T10:10:00Z".parse().unwrap()),
+            events: events.clone(),
+            ..Default::default()
+        };
+        let shape = SessionShape::of(&later);
+        assert_eq!(
+            shape.started_at,
+            Some("2026-09-12T10:00:00Z".parse().unwrap())
+        );
+        assert_eq!(shape.duration_secs(), Some(30 * 60));
+        let earlier = crate::source::SessionTranscript {
+            started_at: Some("2026-09-12T09:59:00Z".parse().unwrap()),
+            events,
+            ..Default::default()
+        };
+        assert_eq!(SessionShape::of(&earlier).started_at, earlier.started_at);
+        assert_eq!(SessionShape::default().duration_secs(), None);
+        let backwards = SessionShape {
+            started_at: Some("2026-09-12T11:00:00Z".parse().unwrap()),
+            ended_at: Some("2026-09-12T10:00:00Z".parse().unwrap()),
+            user_turns: 0,
+        };
+        assert_eq!(backwards.duration_secs(), None, "no negative lengths");
+    }
 
     /// R5, the queue half: an unattended approval held after the witness
     /// goes back to waiting with its certified review pinned, and nothing
@@ -1839,6 +2555,7 @@ mod tests {
             id,
             crate::submit::REASON_WITNESS_RISK_REVIEW_REQUIRED,
             &pin,
+            None,
             None
         ));
         let e = q.get(id).unwrap().clone();
@@ -2320,6 +3037,115 @@ mod tests {
     }
 
     #[test]
+    fn a_new_scrub_hold_does_not_expire_with_the_old_backlog() {
+        let now = at("2026-09-30T12:00:00Z");
+        let mut q = Queue::new();
+        let e = QueueEntry {
+            discovered_at: now - Duration::days(20),
+            approved_unattended: true,
+            ..entry_in("/w/alpha", QueueState::Approved)
+        };
+        let id = e.entry_id;
+        let discovered = e.discovered_at;
+        q.push_for_test(e);
+        assert!(q.hold_with_scrub_pin_at(
+            id,
+            super::super::second_look::REASON_SECOND_LOOK_REVIEW_REQUIRED,
+            None,
+            None,
+            now,
+        ));
+        assert_eq!(q.get(id).unwrap().discovered_at, discovered);
+        assert_eq!(q.get(id).unwrap().review_started_at, Some(now));
+        assert_eq!(
+            q.expire(now, 14, false),
+            0,
+            "new review is not old discovery"
+        );
+        assert!(q.get(id).unwrap().held_for_review());
+        assert_eq!(q.expire(now + Duration::days(14), 14, false), 0);
+        assert_eq!(
+            q.expire(now + Duration::days(14) + Duration::seconds(1), 14, false),
+            1
+        );
+    }
+
+    #[test]
+    fn a_review_deadline_survives_reload_and_repeated_holds() {
+        let now = at("2026-09-30T12:00:00Z");
+        for reason in [
+            super::super::second_look::REASON_SECOND_LOOK_REVIEW_REQUIRED,
+            super::super::second_look::REASON_SCRUB_CHECK_MANUAL,
+        ] {
+            let (_d, store) = temp_store();
+            let mut q = Queue::new();
+            let e = QueueEntry {
+                discovered_at: now - Duration::days(20),
+                approved_unattended: true,
+                ..entry_in("/w/alpha", QueueState::Approved)
+            };
+            let id = e.entry_id;
+            q.push_for_test(e);
+            assert!(q.hold_with_scrub_pin_at(id, reason, None, None, now));
+            q.save(&store).unwrap();
+            let mut loaded = Queue::load(&store).unwrap();
+            assert_eq!(loaded.get(id).unwrap().review_started_at, Some(now));
+            let repeated = now + Duration::days(13);
+            assert!(loaded.hold_with_scrub_pin_at(id, reason, None, None, repeated));
+            assert_eq!(loaded.get(id).unwrap().review_started_at, Some(now));
+            assert_eq!(loaded.expire(repeated, 14, false), 0);
+            assert_eq!(
+                loaded.expire(now + Duration::days(14) + Duration::seconds(1), 14, false),
+                1,
+                "{reason} must not extend its deadline on a repeat"
+            );
+        }
+    }
+
+    #[test]
+    fn switching_to_manual_starts_review_without_rewriting_discovery() {
+        let now = at("2026-09-30T12:00:00Z");
+        let mut q = Queue::new();
+        let e = QueueEntry {
+            discovered_at: at("2026-08-08T12:00:00Z"),
+            approved_unattended: true,
+            ..entry_in("/w/alpha", QueueState::Approved)
+        };
+        let id = e.entry_id;
+        let discovered = e.discovered_at;
+        q.push_for_test(e);
+        assert_eq!(q.return_unattended_to_waiting_at(now), 1);
+        let review = q
+            .get(id)
+            .unwrap()
+            .review_started_at
+            .expect("Manual starts review");
+        assert_eq!(q.get(id).unwrap().discovered_at, discovered);
+        assert_eq!(review, now);
+        assert_eq!(q.expire(review + Duration::days(13), 14, false), 0);
+        assert_eq!(
+            q.return_unattended_to_waiting_at(now + Duration::days(13)),
+            0
+        );
+        assert_eq!(q.get(id).unwrap().review_started_at, Some(review));
+        assert_eq!(q.expire(review + Duration::days(15), 14, false), 1);
+    }
+
+    #[test]
+    fn an_older_queue_line_without_a_review_clock_keeps_its_original_expiry() {
+        let (_d, store) = temp_store();
+        let e = entry("sha256:aa", "2026-08-08T12:00:00Z");
+        let mut line = serde_json::to_value(&e).unwrap();
+        line.as_object_mut().unwrap().remove("review_started_at");
+        store
+            .write_daemon_file(DAEMON_QUEUE_FILE, line.to_string().as_bytes())
+            .unwrap();
+        let mut loaded = Queue::load(&store).unwrap();
+        assert_eq!(loaded.get(e.entry_id).unwrap().review_started_at, None);
+        assert_eq!(loaded.expire(at("2026-08-23T12:00:00Z"), 14, false), 1);
+    }
+
+    #[test]
     fn resolved_entries_are_never_expired() {
         let mut q = Queue::new();
         q.upsert(entry("sha256:aa", "2026-07-01T12:00:00Z"), 500)
@@ -2469,6 +3295,80 @@ mod tests {
         assert_eq!(loaded.all().len(), 1, "the entry must survive the upgrade");
         assert_eq!(loaded.all()[0].subagent_count, 0);
         assert_eq!(loaded.all()[0].subagents_dropped, 0);
+    }
+
+    /// K1: a line queued before `shape` existed still loads, with no shape.
+    /// It is not backfilled: the entry gets a shape when its session is next
+    /// loaded (it grows, or is re-offered), and `list_pending` reports the
+    /// shape fields as null until then.
+    #[test]
+    fn a_queue_line_written_before_the_session_shape_still_loads() {
+        let (_d, store) = temp_store();
+        let mut value = serde_json::to_value(entry("sha256:aa", "2026-08-08T12:00:00Z")).unwrap();
+        value.as_object_mut().unwrap().remove("shape");
+        store
+            .write_daemon_file(DAEMON_QUEUE_FILE, format!("{value}\n").as_bytes())
+            .unwrap();
+
+        let loaded = Queue::load(&store).unwrap();
+        assert_eq!(loaded.all().len(), 1, "the entry must survive the upgrade");
+        assert_eq!(loaded.all()[0].shape, None);
+    }
+
+    /// K9: a line queued before `title` existed still loads, with no title.
+    /// Not backfilled, for the same reason `shape` is not: the entry gets a
+    /// title the next time its session is loaded.
+    #[test]
+    fn a_queue_line_written_before_the_title_existed_still_loads() {
+        let (_d, store) = temp_store();
+        let mut value = serde_json::to_value(entry("sha256:aa", "2026-08-08T12:00:00Z")).unwrap();
+        value.as_object_mut().unwrap().remove("title");
+        store
+            .write_daemon_file(DAEMON_QUEUE_FILE, format!("{value}\n").as_bytes())
+            .unwrap();
+
+        let loaded = Queue::load(&store).unwrap();
+        assert_eq!(loaded.all().len(), 1, "the entry must survive the upgrade");
+        assert_eq!(loaded.all()[0].title, None);
+    }
+
+    /// K9: the queued title is built from the same source as the K1 preview
+    /// title, and must survive the same redaction requirement -- a
+    /// redactable first line (an email address, a local path) must never
+    /// reach it.
+    #[test]
+    fn a_redactable_first_line_does_not_survive_into_the_queued_title() {
+        use crate::source::SessionEventKind::User;
+        let transcript = crate::source::SessionTranscript {
+            cwd: Some("/Users/testuser/code/myproj".to_string()),
+            events: vec![event(
+                User,
+                Some("2026-09-12T10:00:00Z"),
+                Some("mail alice.smith@example.org about /Users/testuser/code/myproj/secret.txt"),
+            )],
+            ..Default::default()
+        };
+        let title = title_of(&transcript).expect("the prompt names a task");
+        assert!(!title.contains("alice.smith@example.org"), "{title}");
+        assert!(!title.contains("/Users/testuser"), "{title}");
+        assert!(title.starts_with("mail "), "{title}");
+    }
+
+    /// K9: the title stops at the delegated-transcript boundary, exactly
+    /// like `SessionShape::of`'s turn count -- a subagent's own opening
+    /// prompt is not the person's task.
+    #[test]
+    fn the_queued_title_never_crosses_into_delegated_work() {
+        use crate::source::SessionEventKind::User;
+        let transcript = crate::source::SessionTranscript {
+            events: vec![
+                marker("subagent_group"),
+                marker("subagent_transcript"),
+                event(User, Some("2026-09-12T11:10:00Z"), Some("do the subtask")),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(title_of(&transcript), None);
     }
 
     #[test]
@@ -2830,6 +3730,41 @@ mod tests {
     }
 
     #[test]
+    fn a_scrub_count_is_bound_to_the_pinned_bytes() {
+        use crate::daemon::second_look::{Scrub, ScrubCounts};
+        let counts = ScrubCounts {
+            marks: 7,
+            content_marks: 2,
+            unsure_spans: 0,
+            unsure_unreadable: false,
+        };
+        let mut q = Queue::new();
+        q.upsert(entry("sha256:aa", "2026-08-08T12:00:00Z"), 500)
+            .unwrap();
+        let id = entry_id_for("sha256:aa");
+
+        // Nothing pinned: a count has nothing to describe.
+        assert!(!q.record_scrub(id, "sha256:envelope", counts));
+        assert_eq!(q.get(id).unwrap().scrub(), Scrub::NotYetScrubbed);
+
+        assert!(q.record_previewed_envelope(id, "sha256:envelope", None, None));
+        // A count for other bytes than the pin is refused.
+        assert!(!q.record_scrub(id, "sha256:other", counts));
+        assert!(q.record_scrub(id, "sha256:envelope", counts));
+        assert_eq!(q.get(id).unwrap().scrub(), Scrub::Scrubbed(counts));
+
+        // Re-pinned to a new build (a filter change, a re-enrolment): the
+        // old count no longer describes what would be sent.
+        assert!(q.record_previewed_envelope(id, "sha256:rebuilt", None, None));
+        assert_eq!(q.get(id).unwrap().scrub(), Scrub::NotYetScrubbed);
+
+        // Released: likewise.
+        assert!(q.record_scrub(id, "sha256:rebuilt", counts));
+        assert!(q.release_preview_pin(id));
+        assert_eq!(q.get(id).unwrap().scrub(), Scrub::NotYetScrubbed);
+    }
+
+    #[test]
     fn cancel_clears_the_pin_so_the_next_approval_rebuilds() {
         // Undo withdraws the approval, and the pin is the approval's
         // binding to the exact bytes it covered. Left behind, it makes a
@@ -2841,7 +3776,7 @@ mod tests {
         q.upsert(entry("sha256:aa", "2026-08-08T12:00:00Z"), 500)
             .unwrap();
         let id = entry_id_for("sha256:aa");
-        assert!(q.record_previewed_envelope(id, "sha256:envelope", None));
+        assert!(q.record_previewed_envelope(id, "sha256:envelope", None, None));
         assert!(q.approve(id, &[], None, None, None, Some(at("2026-08-08T12:00:00Z"))));
         assert!(
             q.get(id).unwrap().previewed_envelope_digest.is_some(),
@@ -2873,7 +3808,8 @@ mod tests {
         assert!(q.record_previewed_envelope(
             id,
             "witness-sha256:envelope",
-            Some(InferenceAttestationRecord::certified())
+            Some(InferenceAttestationRecord::certified()),
+            None
         ));
         assert_eq!(
             q.get(id).unwrap().attested_inference,
@@ -2885,7 +3821,8 @@ mod tests {
         assert!(q.record_previewed_envelope(
             id,
             "witness-sha256:envelope",
-            Some(InferenceAttestationRecord::certified())
+            Some(InferenceAttestationRecord::certified()),
+            None
         ));
         assert!(q.approve(id, &[], None, None, None, Some(at("2026-08-08T12:00:00Z"))));
         q.cancel(id).unwrap();
@@ -2896,10 +3833,48 @@ mod tests {
         assert!(q.record_previewed_envelope(
             id,
             "witness-sha256:envelope",
-            Some(InferenceAttestationRecord::certified())
+            Some(InferenceAttestationRecord::certified()),
+            None
         ));
-        assert!(q.record_previewed_envelope(id, "sha256:local", None));
+        assert!(q.record_previewed_envelope(id, "sha256:local", None, None));
         assert_eq!(q.get(id).unwrap().attested_inference, None);
+    }
+
+    /// K10: `would_send_bytes` measures the pinned envelope, so it goes
+    /// wherever the pin goes. A size left behind would tell a queue list
+    /// "this is what would be sent" with nothing pinned behind it.
+    #[test]
+    fn the_would_send_size_lives_and_dies_with_the_pin() {
+        let mut q = Queue::new();
+        q.upsert(entry("sha256:aa", "2026-08-08T12:00:00Z"), 500)
+            .unwrap();
+        let id = entry_id_for("sha256:aa");
+        let pin = |q: &mut Queue| {
+            assert!(q.record_previewed_envelope(id, "sha256:local", None, Some(1234)));
+            assert_eq!(q.get(id).unwrap().would_send_bytes, Some(1234));
+        };
+
+        pin(&mut q);
+        assert!(q.release_preview_pin(id));
+        assert_eq!(
+            q.get(id).unwrap().would_send_bytes,
+            None,
+            "release_preview_pin"
+        );
+
+        pin(&mut q);
+        assert!(q.approve(id, &[], None, None, None, Some(at("2026-08-08T12:00:00Z"))));
+        q.cancel(id).unwrap();
+        assert_eq!(q.get(id).unwrap().would_send_bytes, None, "cancel");
+
+        pin(&mut q);
+        assert!(q.approve(id, &[], None, None, None, Some(at("2026-08-08T12:00:00Z"))));
+        assert!(q.revoke_approval(id, "approval-inputs-changed"));
+        assert_eq!(q.get(id).unwrap().would_send_bytes, None, "revoke_approval");
+
+        pin(&mut q);
+        q.keep(id).unwrap();
+        assert_eq!(q.get(id).unwrap().would_send_bytes, None, "keep");
     }
 
     #[test]
@@ -2911,7 +3886,7 @@ mod tests {
         q.upsert(entry("sha256:aa", "2026-08-08T12:00:00Z"), 500)
             .unwrap();
         let id = entry_id_for("sha256:aa");
-        assert!(q.record_previewed_envelope(id, "sha256:envelope", None));
+        assert!(q.record_previewed_envelope(id, "sha256:envelope", None, None));
         assert!(q.release_preview_pin(id));
         assert_eq!(q.get(id).unwrap().previewed_envelope_digest, None);
         assert!(!q.pinned_entry_ids().contains(&id));
@@ -2926,7 +3901,7 @@ mod tests {
         q.upsert(entry("sha256:aa", "2026-08-08T12:00:00Z"), 500)
             .unwrap();
         let id = entry_id_for("sha256:aa");
-        assert!(q.record_previewed_envelope(id, "sha256:envelope", None));
+        assert!(q.record_previewed_envelope(id, "sha256:envelope", None, None));
         assert!(q.approve(id, &[], None, None, None, None));
         assert!(!q.release_preview_pin(id));
         assert!(q.get(id).unwrap().previewed_envelope_digest.is_some());
@@ -3452,5 +4427,373 @@ mod tests {
         value.as_object_mut().unwrap().remove("session_cwd");
         let loaded: QueueEntry = serde_json::from_value(value).unwrap();
         assert_eq!(loaded.session_cwd, None);
+    }
+
+    /// K5: "Keep on this Mac" takes a waiting session out of everything that
+    /// sends or counts it as owed, without expiring it, and the undo puts it
+    /// back as waiting for a person.
+    #[test]
+    fn a_kept_session_is_out_of_pending_never_expires_and_can_be_undone() {
+        let mut q = queue_of(vec![entry("sha256:k", "2026-08-01T00:00:00Z")]);
+        let id = entry_id_for("sha256:k");
+        q.keep(id).unwrap();
+
+        assert!(
+            q.pending().is_empty(),
+            "out of the Ask-me list and the badge"
+        );
+        assert!(q.kept_at_path(&the_path()));
+        assert!(!q.dismissed_at_path(&the_path()), "not a dismissal");
+        assert_eq!(q.kept().len(), 1);
+        assert!(!q.approve_unattended(id, &[], None), "nothing sends it");
+        assert!(
+            !q.approve(id, &[], None, None, None, None),
+            "not even by hand"
+        );
+        assert_eq!(
+            q.expire(at("2027-01-01T00:00:00Z"), 14, false),
+            0,
+            "a kept session does not age out"
+        );
+        assert!(q.get(id).unwrap().is_kept());
+
+        q.undo_keep(id, at("2027-01-01T00:00:00Z"), 5000).unwrap();
+        let e = q.get(id).unwrap();
+        assert_eq!(e.state, QueueState::Pending);
+        assert!(e.returned_from_keep());
+        assert!(!q.kept_at_path(&the_path()));
+        assert_eq!(
+            q.expire(at("2027-01-02T00:00:00Z"), 14, false),
+            0,
+            "the undo restarts the clock"
+        );
+        assert!(
+            !q.approve_unattended(id, &[], None),
+            "an undone keep waits for a person"
+        );
+        assert!(q.approve(id, &[], None, None, None, None), "a person may");
+        assert_eq!(q.get(id).unwrap().reason_label, None);
+    }
+
+    /// A keep and an undo are never a way to clear a hold that needs a
+    /// person: every such hold comes back exactly as it was, still out of
+    /// unattended and group approval.
+    #[test]
+    fn a_hold_that_needs_a_person_survives_a_keep_and_its_undo() {
+        for hold in REASONS_NEEDING_A_PERSON {
+            let mut q = queue_of(vec![entry("sha256:h", "2026-08-01T00:00:00Z")]);
+            let id = entry_id_for("sha256:h");
+            q.set_state(id, QueueState::Pending, Some(hold.to_string()));
+            assert!(q.get(id).unwrap().held_for_review());
+            q.keep(id).unwrap();
+            q.undo_keep(id, at("2026-08-02T00:00:00Z"), 5000).unwrap();
+            let e = q.get(id).unwrap();
+            assert_eq!(e.reason_label.as_deref(), Some(*hold));
+            assert!(e.held_for_review(), "{hold}: the hold is back");
+            assert_eq!(e.kept_from_reason, None);
+            assert!(!q.approve_unattended(id, &[], None), "{hold}");
+        }
+    }
+
+    /// Only a waiting session can be kept, and only a kept one un-kept -- so a
+    /// dismissal can never be undone through the keep route.
+    #[test]
+    fn keep_and_its_undo_refuse_every_other_state() {
+        let mut q = queue_of(vec![entry("sha256:k", "2026-08-01T00:00:00Z")]);
+        let id = entry_id_for("sha256:k");
+        assert_eq!(
+            q.undo_keep(id, at("2026-08-02T00:00:00Z"), 5000)
+                .unwrap_err()
+                .to_string(),
+            "not-kept"
+        );
+        q.set_state(id, QueueState::Refused, Some(REASON_DISMISSED.to_string()));
+        assert_eq!(q.keep(id).unwrap_err().to_string(), "not-pending");
+        assert_eq!(
+            q.undo_keep(id, at("2026-08-02T00:00:00Z"), 5000)
+                .unwrap_err()
+                .to_string(),
+            "not-kept",
+            "a dismissal stays permanent"
+        );
+        assert!(q.dismissed_at_path(&the_path()));
+        assert_eq!(
+            q.keep(entry_id_for("sha256:none")).unwrap_err().to_string(),
+            "unknown-entry-id"
+        );
+    }
+
+    // -- `decisions_owed` (K6): the badge's exact count -----------------
+
+    /// An Ask-me folder is the ordinary case the badge exists for: every
+    /// `Pending` entry in it needs a person, so it counts.
+    #[test]
+    fn decisions_owed_counts_an_ask_me_pending() {
+        let policy = ProjectPolicy::new(); // unset project keys resolve NotifyOnly ("Ask me")
+        let q = queue_of(vec![entry_in("/w/ask-me", QueueState::Pending)]);
+        assert_eq!(decisions_owed(&q, &policy, ScrubCheck::Automatic), 1);
+    }
+
+    #[test]
+    fn decisions_owed_counts_undo_keep_in_an_armed_folder() {
+        let mut policy = ProjectPolicy::new();
+        let now = at("2026-08-08T12:00:00Z");
+        policy
+            .set_mode("/w/armed", ProjectMode::AutoUpload, now)
+            .unwrap();
+        let entry = entry_in("/w/armed", QueueState::Pending);
+        let id = entry.entry_id;
+        let mut q = queue_of(vec![entry]);
+        q.keep(id).unwrap();
+        assert_eq!(decisions_owed(&q, &policy, ScrubCheck::Automatic), 0);
+        q.undo_keep(id, now, 5000).unwrap();
+        assert_eq!(
+            decisions_owed(&q, &policy, ScrubCheck::Automatic),
+            1,
+            "undo Keep requires a person, not unattended approval"
+        );
+    }
+
+    #[test]
+    fn decisions_owed_counts_backlog_held_by_arming_from_now() {
+        let mut policy = ProjectPolicy::new();
+        let now = at("2026-08-08T12:00:00Z");
+        policy
+            .set_mode("/w/armed", ProjectMode::AutoUpload, now)
+            .unwrap();
+        policy.arm_from_now("/w/armed", now);
+        let q = queue_of(vec![entry_in("/w/armed", QueueState::Pending)]);
+        assert_eq!(
+            decisions_owed(&q, &policy, ScrubCheck::Automatic),
+            1,
+            "unrecorded backlog must wait for a person"
+        );
+        let backlog = q.pending()[0].path.to_string_lossy().to_string();
+        policy.record_source_for_armings(
+            &policy.armings_from_now(),
+            "claude-code",
+            [backlog].into(),
+        );
+        assert_eq!(
+            decisions_owed(&q, &policy, ScrubCheck::Automatic),
+            1,
+            "recorded backlog still waits for a person"
+        );
+        let mut fresh = entry_in("/w/armed", QueueState::Pending);
+        fresh.path = PathBuf::from("/w/armed/fresh.jsonl");
+        let fresh = queue_of(vec![fresh]);
+        assert_eq!(
+            decisions_owed(&fresh, &policy, ScrubCheck::Automatic),
+            0,
+            "sessions arriving after the arming record remain automatic"
+        );
+        assert_eq!(decisions_owed(&fresh, &policy, ScrubCheck::Manual), 1);
+    }
+
+    /// Automatic re-approves entries left by a Manual spell. Counting that
+    /// label as a review hold would incorrectly inflate the badge.
+    #[test]
+    fn decisions_owed_leaves_out_armed_entries_that_go_unattended_under_automatic() {
+        let mut policy = ProjectPolicy::new();
+        policy
+            .set_mode(
+                "/w/armed",
+                ProjectMode::AutoUpload,
+                at("2026-08-08T12:00:00Z"),
+            )
+            .unwrap();
+        let settling = entry_in("/w/armed", QueueState::Pending);
+        let mut left_by_manual = entry_in("/w/armed", QueueState::Pending);
+        left_by_manual.session_hash = "sha256:left-by-manual".into();
+        left_by_manual.path = PathBuf::from("/w/armed/left-by-manual.jsonl");
+        left_by_manual.reason_label =
+            Some(super::super::second_look::REASON_SCRUB_CHECK_MANUAL.to_string());
+        assert!(!left_by_manual.held_for_review());
+        let q = queue_of(vec![settling, left_by_manual]);
+        assert_eq!(q.pending().len(), 2);
+        assert_eq!(decisions_owed(&q, &policy, ScrubCheck::Automatic), 0);
+    }
+
+    /// An Automatic Scrub check hold needs a person even in an armed folder.
+    #[test]
+    fn decisions_owed_counts_a_second_look_hold_in_an_armed_folder() {
+        let mut policy = ProjectPolicy::new();
+        policy
+            .set_mode(
+                "/w/armed",
+                ProjectMode::AutoUpload,
+                at("2026-08-08T12:00:00Z"),
+            )
+            .unwrap();
+        let held = entry_in("/w/armed", QueueState::Pending);
+        let id = held.entry_id;
+        let mut q = queue_of(vec![held]);
+        assert!(q.approve_unattended(id, &[], None));
+        assert!(q.hold_with_scrub_pin(
+            id,
+            super::super::second_look::REASON_SECOND_LOOK_REVIEW_REQUIRED,
+            None,
+            None
+        ));
+        assert_eq!(q.get(id).unwrap().state, QueueState::Pending);
+        assert_eq!(decisions_owed(&q, &policy, ScrubCheck::Automatic), 1);
+    }
+
+    /// A mixed queue, each entry a different reason to count or not: an
+    /// Ask-me `Pending` (counts), an Ask-me entry already `Approved` (no
+    /// decision left), an armed `Pending` that is settling (goes out
+    /// unattended), and an armed `Pending` held for review (needs a person).
+    /// Replaces a single-entry case that could not fail: an `Approved` entry
+    /// is never in `pending()` whatever the filter says.
+    #[test]
+    fn decisions_owed_counts_only_the_owed_entries_of_a_mixed_queue() {
+        let mut policy = ProjectPolicy::new();
+        policy
+            .set_mode(
+                "/w/armed",
+                ProjectMode::AutoUpload,
+                at("2026-08-08T12:00:00Z"),
+            )
+            .unwrap();
+        let mut ask_me = entry_in("/w/ask-me", QueueState::Pending);
+        ask_me.session_hash = "sha256:ask-me".into();
+        let mut decided = entry_in("/w/ask-me", QueueState::Approved);
+        decided.session_hash = "sha256:decided".into();
+        decided.path = PathBuf::from("/w/ask-me/decided.jsonl");
+        let mut settling = entry_in("/w/armed", QueueState::Pending);
+        settling.session_hash = "sha256:settling".into();
+        let mut held = entry_in("/w/armed", QueueState::Pending);
+        held.session_hash = "sha256:held".into();
+        held.path = PathBuf::from("/w/armed/held.jsonl");
+        held.reason_label = Some(REASON_TOKEN_DISTRIBUTION_REVIEW_REQUIRED.to_string());
+        let q = queue_of(vec![ask_me, decided, settling, held]);
+        assert_eq!(q.pending().len(), 3);
+        assert_eq!(
+            decisions_owed(&q, &policy, ScrubCheck::Automatic),
+            2,
+            "the Ask-me pending and the held-for-review one"
+        );
+    }
+
+    /// `Ignore` asks nobody: a `Pending` entry left in an ignored folder
+    /// (setting `Ignore` normally refuses them, so this is a transient) is
+    /// not a decision the contributor owes. Pins the `== NotifyOnly` rule.
+    #[test]
+    fn decisions_owed_does_not_count_a_pending_entry_in_an_ignored_folder() {
+        let mut policy = ProjectPolicy::new();
+        policy
+            .set_mode(
+                "/w/ignored",
+                ProjectMode::Ignore,
+                at("2026-08-08T12:00:00Z"),
+            )
+            .unwrap();
+        let q = queue_of(vec![entry_in("/w/ignored", QueueState::Pending)]);
+        assert_eq!(q.pending().len(), 1);
+        assert_eq!(decisions_owed(&q, &policy, ScrubCheck::Automatic), 0);
+        assert_eq!(
+            decisions_owed(&q, &policy, ScrubCheck::Manual),
+            0,
+            "Manual does not override Ignore"
+        );
+    }
+
+    /// A fresh session in an armed folder stays `Pending` while it is
+    /// unsettled, or while the automatic-contribution gate blocks it
+    /// (`TickReport::gate_blocked`) -- queue and policy alone cannot tell
+    /// those two apart, and they must not be told apart here: both are
+    /// "armed means no decision" ("armed folders never move it"), and the
+    /// design would not ask about either. It goes out unattended once
+    /// settled or ungated, so it must not inflate the badge meanwhile.
+    #[test]
+    fn decisions_owed_excludes_a_gate_held_armed_pending() {
+        let mut policy = ProjectPolicy::new();
+        policy
+            .set_mode(
+                "/w/gated",
+                ProjectMode::AutoUpload,
+                at("2026-08-08T12:00:00Z"),
+            )
+            .unwrap();
+        let q = queue_of(vec![entry_in("/w/gated", QueueState::Pending)]);
+        assert_eq!(
+            decisions_owed(&q, &policy, ScrubCheck::Automatic),
+            0,
+            "an armed pending session, gate-held or merely unsettled, asks nobody yet"
+        );
+    }
+
+    /// `held_for_review` entries -- revoked for a reason in
+    /// `REASONS_NEEDING_A_PERSON` -- need a person even inside an armed
+    /// folder: the watcher already refuses to re-approve these unattended,
+    /// so the badge must not disagree with it.
+    #[test]
+    fn decisions_owed_counts_a_held_for_review_entry() {
+        let mut policy = ProjectPolicy::new();
+        policy
+            .set_mode(
+                "/w/armed",
+                ProjectMode::AutoUpload,
+                at("2026-08-08T12:00:00Z"),
+            )
+            .unwrap();
+        let mut held = entry_in("/w/armed", QueueState::Pending);
+        held.reason_label = Some(REASON_TOKEN_DISTRIBUTION_REVIEW_REQUIRED.to_string());
+        assert!(held.held_for_review());
+        let q = queue_of(vec![held]);
+        assert_eq!(decisions_owed(&q, &policy, ScrubCheck::Automatic), 1);
+    }
+
+    /// A session already on disk when the automatic grant armed a folder is
+    /// deliberately held back from unattended approval
+    /// (`holds_back_unattended`) -- the grant arms nothing already on disk.
+    /// It still needs a person, so it counts even though its folder is
+    /// armed.
+    #[test]
+    fn decisions_owed_counts_a_grant_held_back_pre_grant_session() {
+        let mut policy = ProjectPolicy::new();
+        policy
+            .set_mode(
+                "/w/grant-armed",
+                ProjectMode::AutoUpload,
+                at("2026-08-08T12:00:00Z"),
+            )
+            .unwrap();
+        policy.armed_by_grant.insert("/w/grant-armed".to_string());
+        let pre_grant = entry_in("/w/grant-armed", QueueState::Pending);
+        policy
+            .sessions_on_disk_at_grant
+            .insert(pre_grant.path.to_string_lossy().to_string());
+        assert!(policy.holds_back_unattended("/w/grant-armed", &pre_grant.path.to_string_lossy()));
+        let q = queue_of(vec![pre_grant]);
+        assert_eq!(decisions_owed(&q, &policy, ScrubCheck::Automatic), 1);
+    }
+
+    /// The whole point: `decisions_owed` is not `queue_depth`. A queue
+    /// mixing an Ask-me pending, an armed-and-settled-away entry, and a
+    /// gate-held armed pending reports only the one decision actually
+    /// owed, while `queue_depth` (still `pending().len()`, unchanged for
+    /// compatibility) would have counted the gate-held one too.
+    #[test]
+    fn decisions_owed_differs_from_queue_depth_when_a_gate_holds_an_armed_entry() {
+        let mut policy = ProjectPolicy::new();
+        policy
+            .set_mode(
+                "/w/gated",
+                ProjectMode::AutoUpload,
+                at("2026-08-08T12:00:00Z"),
+            )
+            .unwrap();
+        let mut ask_me = entry_in("/w/ask-me", QueueState::Pending);
+        ask_me.session_hash = "sha256:ask-me".into();
+        let mut gated = entry_in("/w/gated", QueueState::Pending);
+        gated.session_hash = "sha256:gated".into();
+        let q = queue_of(vec![ask_me, gated]);
+        assert_eq!(q.pending().len(), 2, "queue_depth counts both");
+        assert_eq!(
+            decisions_owed(&q, &policy, ScrubCheck::Automatic),
+            1,
+            "decisions_owed excludes the gate-held armed one"
+        );
     }
 }

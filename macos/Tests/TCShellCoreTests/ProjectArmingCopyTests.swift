@@ -64,93 +64,27 @@ final class ProjectArmingCopyTests: XCTestCase {
 
     // MARK: - The confirmation
 
-    func testTheHeadingNamesTheProject() {
-        XCTAssertEqual(
-            ProjectArmingCopy.confirmationTitle(project: "api"),
-            "Contribute from api automatically?"
-        )
-    }
+    // The confirmation's words are the core's (`project_copy`, through
+    // `tc_arming_offer_copy_json`); the heading, the whole body, and that it
+    // states the scrubbing, that review stops and the way back, are asserted
+    // against the real export in `TCBridgeTests/CoreCopyExportTests`.
 
-    /// The whole body, pinned exactly, byte for byte against the Linux
-    /// shell's `ARMING_BODY` in `crates/trace-commons-contributor-gtk/src/
-    /// copy.rs`.
-    ///
-    /// The three tests below check the body says particular things, and each
-    /// is a `contains`. That is the right shape for "this idea is present"
-    /// but it cannot see the shape of the text around it: a paragraph break
-    /// collapsing to a single newline, a double space, a trailing space, a
-    /// sentence reordered so the cost lands before the reassurance -- every
-    /// one of those keeps all three substrings and changes what the sheet
-    /// reads like. "Verbatim with GTK" is a claim about the whole string, so
-    /// it takes an assertion about the whole string.
-    ///
-    /// If this fails, the fix is almost never to edit the literal here.
-    /// Either GTK moved and this shell should follow, or this shell moved
-    /// and should not have -- two shells wording the same
-    /// irreversible-feeling switch differently is worse than either wording
-    /// alone.
-    func testTheBodyIsVerbatimTheLinuxWording() {
-        XCTAssertEqual(
-            ProjectArmingCopy.confirmationBody,
-            """
-            Sessions from this project will be scrubbed and contributed without asking \
-            you, including any already waiting. You won't review them first.
+    // MARK: - Mode names
 
-            No session is sent until it has been quiet for a day.
-
-            You can turn this off at any time. Anything it hasn't sent yet goes back to \
-            waiting for you, and anything already sent stays sent.
-            """
-        )
-    }
-
-    /// The body has to say the part a contributor would otherwise discover by
-    /// noticing traces they never saw: that review stops. The Linux shell's
-    /// `ARMING_BODY` says it in these words and this shell says the same
-    /// thing -- two shells describing the same irreversible-feeling switch
-    /// differently is worse than either wording alone.
-    func testTheBodySaysReviewStops() {
-        let body = ProjectArmingCopy.confirmationBody
-        XCTAssertTrue(body.contains("without asking you"), body)
-        XCTAssertTrue(body.contains("You won't review them first."), body)
-    }
-
-    /// Every confirmation in this app names the way back. Arming is
-    /// reversible and the body must say so, or it reads as a door that only
-    /// opens one way.
-    func testTheBodyNamesTheWayBack() {
-        XCTAssertTrue(
-            ProjectArmingCopy.confirmationBody.contains("turn this off at any time"),
-            ProjectArmingCopy.confirmationBody
-        )
-    }
-
-    /// The scrubbing promise is load-bearing here in a way it is not under
-    /// ask-first: nobody reads a preview once this is on. It is stated in the
-    /// body for that reason.
-    func testTheBodyStatesTheScrubbing() {
-        XCTAssertTrue(
-            ProjectArmingCopy.confirmationBody.contains("scrubbed"),
-            ProjectArmingCopy.confirmationBody
-        )
-    }
-
-    /// A confirm button that says "OK" makes the reader reconstruct what they
-    /// are agreeing to from the heading. This one carries the action.
-    func testTheButtonsCarryTheirActions() {
-        XCTAssertEqual(ProjectArmingCopy.confirm, "Turn on automatic contributing")
-        XCTAssertEqual(ProjectArmingCopy.cancel, "Not now")
-    }
-
-    // MARK: - Picker labels
-
-    /// The picker offers choices, so its labels are actions ("Contribute
-    /// automatically"), not the state sentences Settings shows beside a row
-    /// ("Contributed without asking"). Both exist; they are not
-    /// interchangeable, and these are the Linux shell's `mode_choices` words.
-    func testChoiceLabelsAreActionsNotStates() {
-        XCTAssertEqual(ProjectCopy.modeChoiceLabel(.ask), "Ask me first")
-        XCTAssertEqual(ProjectCopy.modeChoiceLabel(.autoUpload), "Contribute automatically")
-        XCTAssertEqual(ProjectCopy.modeChoiceLabel(.ignore), "Never offer this one")
+    /// A project mode reads by the core's one name for it, looked up in the
+    /// pill's table by wire mode (owner decision, 2026-10-02). The words here
+    /// are a fixture; `TraceCommonsAppTests/ProjectModeWordsTests` checks the
+    /// real export.
+    func testAModeReadsByItsNameInThePillTable() throws {
+        let json = #"""
+            {"title":"t","mixed":"m","override_active":"o","clear":"c","auto_partial":"p",
+             "choices":[{"mode":"notify_only","label":"A","line":"a"},
+                        {"mode":"auto_upload","label":"B","line":"b"},
+                        {"mode":"ignore","label":"C","line":"c"}]}
+            """#
+        let copy = try XCTUnwrap(ContributionModeCopy.decode(fromJSON: json))
+        XCTAssertEqual(copy.label(for: .ask), "A")
+        XCTAssertEqual(copy.label(for: .autoUpload), "B")
+        XCTAssertEqual(copy.label(for: .ignore), "C")
     }
 }

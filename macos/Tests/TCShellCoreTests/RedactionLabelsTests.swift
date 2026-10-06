@@ -64,25 +64,17 @@ final class RedactionLabelsTests: XCTestCase {
         XCTAssertEqual(RedactionLabels.survivors(counts).map(\.count), [1, 2])
     }
 
+    /// No survivors is a total of zero, which is what keeps the queue card
+    /// from asking the core for a surviving-secret line at all.
     func testASessionWithNoSurvivorsHasNoLine() {
-        XCTAssertNil(RedactionLabels.survivorLine(["local_path": 3]))
-        XCTAssertNil(RedactionLabels.survivorLine([:]))
         XCTAssertEqual(RedactionLabels.survivorTotal(["local_path": 3]), 0)
+        XCTAssertEqual(RedactionLabels.survivorTotal([:]), 0)
+        XCTAssertTrue(RedactionLabels.survivors(["local_path": 3]).isEmpty)
     }
 
-    func testTheSurvivorLineInflects() {
-        XCTAssertEqual(
-            RedactionLabels.survivorLine(["residual_secret_at:events.x": 1]),
-            "A secret found here is still in what would be sent"
-        )
-        XCTAssertEqual(
-            RedactionLabels.survivorLine([
-                "residual_secret_at:events.x": 1,
-                "residual_secret_at:events.y": 1,
-            ]),
-            "Secrets found in 2 places are still in what would be sent"
-        )
-    }
+    // The survivor line's inflection is the core's
+    // (`preview_copy::residual_secret_line`), asserted against the real
+    // export in `TCBridgeTests/CoreCopyExportTests`.
 
     /// A bare `residual_secret_at` with no site still counts. It should never
     /// be minted, but dropping it would be the one failure direction that

@@ -29,6 +29,13 @@ test("each rewording keeps the wire element, to hand back to the core", () => {
   assert.deepEqual(parsed.wire, rewording);
 });
 
+test("the Automatic upgrade marker reaches shared notice copy unchanged", () => {
+  const upgrade = { ...rewording, scrub_check_defaulted: true };
+  const [parsed] = parseArmingRewordings([upgrade]);
+  assert.equal(parsed.id, upgrade.id);
+  assert.deepEqual(parsed.wire, upgrade);
+});
+
 // A malformed list read as empty would reword a folder in silence.
 test("a malformed rewording list is refused, not read as empty", () => {
   assert.throws(() => parseArmingRewordings("none"));
@@ -44,7 +51,7 @@ const notice = {
   limit: "l",
   no_review: "n",
   acknowledge: "Got it",
-  ask_first_action: "Ask me first",
+  ask_first_action: "Ask me",
   ask_first_failed: "It could not be switched.",
 };
 
@@ -64,7 +71,7 @@ test("a rewording notice missing a sentence is refused", () => {
   assert.throws(() => parseArmingRewordedNotice(null));
 });
 
-test("Ask me first acts on the element's project, only when offered", () => {
+test("Ask me acts on the element's project, only when offered", () => {
   const [parsed] = parseArmingRewordings([rewording]);
   assert.equal(askFirstTarget(parsed.wire, notice), "3f1c");
   assert.equal(
@@ -116,7 +123,7 @@ const heldNotice = {
     {
       project_id: "3f1c",
       line: "api: 3 sessions waiting",
-      ask_first_action: "Ask me first",
+      ask_first_action: "Ask me",
       ask_first_failed: "f",
     },
   ],

@@ -22,6 +22,39 @@ pub const LEGACY_INVITE_LINK_STATEMENT_DOMAIN: &str = "trace-commons.legacy-invi
 /// Domain tag of the record ingest countersigns.
 pub const LEGACY_INVITE_LINK_RECORD_DOMAIN: &str = "trace-commons.legacy-invite-link-record.v1";
 
+/// Domain tag of a second device's attestation under an existing link. It
+/// differs from the link record's so a countersigned attestation can never be
+/// presented as the link itself, or the reverse.
+pub const LEGACY_INVITE_DEVICE_ATTESTATION_RECORD_DOMAIN: &str =
+    "trace-commons.legacy-invite-device-attestation-record.v1";
+
+/// Which of the two countersigned records a [`LegacyInviteLinkRecord`] is.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LegacyInviteLinkRecordKind {
+    /// The link itself: the first device of the legacy tenant moved it onto
+    /// the account. `link_id` names the link.
+    #[default]
+    Link,
+    /// Another device of an already-linked legacy tenant attested to that
+    /// link from the same account. `link_id` is the attestation's own id,
+    /// not the link's.
+    DeviceAttestation,
+}
+
+impl LegacyInviteLinkRecordKind {
+    pub fn is_link(&self) -> bool {
+        matches!(self, Self::Link)
+    }
+
+    fn domain(self) -> &'static str {
+        match self {
+            Self::Link => LEGACY_INVITE_LINK_RECORD_DOMAIN,
+            Self::DeviceAttestation => LEGACY_INVITE_DEVICE_ATTESTATION_RECORD_DOMAIN,
+        }
+    }
+}
+
 /// What the legacy device key signs. `account_tenant_id` and `account_id` are
 /// the NEAR account the session is signed into; the server fills them from
 /// the authenticated session and never from the request body.
@@ -77,12 +110,19 @@ pub struct LegacyInviteLinkRecord {
     pub linked_at: i64,
     /// Key id of the ingest attestation key that countersigned.
     pub server_kid: String,
+    /// A link, or a second device's attestation. Absent on the wire for a
+    /// link, so a link record and any record kept before this field existed
+    /// keep their exact form. Bound by the countersignature through the
+    /// domain tag it selects.
+    #[serde(default, skip_serializing_if = "LegacyInviteLinkRecordKind::is_link")]
+    pub kind: LegacyInviteLinkRecordKind,
 }
 
-/// The exact bytes ingest signs with raw Ed25519 to countersign a record.
+/// The exact bytes ingest signs with raw Ed25519 to countersign a record,
+/// under the domain of the record's kind.
 pub fn legacy_invite_link_record_bytes(r: &LegacyInviteLinkRecord) -> Vec<u8> {
     let mut out = Vec::new();
-    push_domain(&mut out, LEGACY_INVITE_LINK_RECORD_DOMAIN);
+    push_domain(&mut out, r.kind.domain());
     push_field(&mut out, r.link_id.hyphenated().to_string().as_bytes());
     push_statement_fields(&mut out, &r.statement);
     push_field(&mut out, r.device_signature.as_bytes());
@@ -209,6 +249,7 @@ mod tests {
             device_signature: "sig".into(),
             linked_at: 1_790_000_001,
             server_kid: "ingest-1".into(),
+            kind: LegacyInviteLinkRecordKind::Link,
         };
         let record_bytes = legacy_invite_link_record_bytes(&record);
         assert!(record_bytes.starts_with(b"trace-commons.legacy-invite-link-record.v1\n"));
@@ -222,5 +263,49 @@ mod tests {
         let mut other = record;
         other.device_signature = "sih".into();
         assert_ne!(legacy_invite_link_record_bytes(&other), record_bytes);
+    }
+
+    fn record(kind: LegacyInviteLinkRecordKind) -> LegacyInviteLinkRecord {
+        LegacyInviteLinkRecord {
+            link_id: Uuid::nil(),
+            statement: statement(),
+            device_signature: "sig".into(),
+            linked_at: 1_790_000_001,
+            server_kid: "ingest-1".into(),
+            kind,
+        }
+    }
+
+    /// A second device's attestation is countersigned under its own domain,
+    /// so no countersignature over one can be presented as the other.
+    #[test]
+    fn an_attestation_never_encodes_as_a_link_record() {
+        let link_domain = b"trace-commons.legacy-invite-link-record.v1\n";
+        let attestation_domain = b"trace-commons.legacy-invite-device-attestation-record.v1\n";
+        let link = legacy_invite_link_record_bytes(&record(LegacyInviteLinkRecordKind::Link));
+        let attestation =
+            legacy_invite_link_record_bytes(&record(LegacyInviteLinkRecordKind::DeviceAttestation));
+        assert!(link.starts_with(link_domain));
+        assert!(attestation.starts_with(attestation_domain));
+        // Only the domain separates them; every field is bound the same way.
+        assert_eq!(
+            &link[link_domain.len()..],
+            &attestation[attestation_domain.len()..]
+        );
+    }
+
+    /// A link record's wire form is unchanged: no `kind` is written for it,
+    /// and a record kept before `kind` existed reads back as a link.
+    #[test]
+    fn a_link_record_keeps_its_wire_form_and_old_records_read_as_links() {
+        let link = serde_json::to_value(record(LegacyInviteLinkRecordKind::Link)).unwrap();
+        assert!(link.get("kind").is_none(), "{link}");
+        let parsed: LegacyInviteLinkRecord = serde_json::from_value(link).unwrap();
+        assert_eq!(parsed.kind, LegacyInviteLinkRecordKind::Link);
+        let attestation =
+            serde_json::to_value(record(LegacyInviteLinkRecordKind::DeviceAttestation)).unwrap();
+        assert_eq!(attestation["kind"], "device_attestation");
+        let parsed: LegacyInviteLinkRecord = serde_json::from_value(attestation).unwrap();
+        assert_eq!(parsed.kind, LegacyInviteLinkRecordKind::DeviceAttestation);
     }
 }

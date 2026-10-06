@@ -1,10 +1,13 @@
 import SwiftUI
+import TCBridge
+import TCShellCore
 
 /// Onboarding screen 4, "Extra privacy scan" -- shown only when the operator
 /// has configured the second scanner (`DaemonSettingsView.nearAIConfigured`,
-/// from `get_settings`). Copy is verbatim from the shared design spec
-/// (`docs/superpowers/specs/2026-08-08-contributor-shell-shared-design.md`,
-/// "## Onboarding", "### 4. Extra privacy scan"), not paraphrased.
+/// from `get_settings`). Every word on it is the core's
+/// (`privacy_scan_copy`, through `tc_privacy_scan_copy_json`), which holds
+/// the shared design spec's "### 4. Extra privacy scan" copy for every
+/// shell; this screen used to hold its own transcription of it.
 ///
 /// Two rules from the spec are load-bearing and must not be softened:
 ///
@@ -68,51 +71,47 @@ struct OnboardingPrivacyScanContent: View {
         _choice = State(initialValue: previewChoice)
     }
 
+    /// The core's words for this screen. Nil draws the screen without its
+    /// choices or its Continue: the scan is never chosen, and nothing is
+    /// acknowledged, against a disclosure this screen could not show.
+    private let copy = PrivacyScanCopy.decode(fromJSON: TCCoreCopy.privacyScanCopyJSON())
+
     var body: some View {
         VStack(alignment: .leading, spacing: TC.Space.xl) {
-            header
-            explanation
-            choices
-            continueButton
+            if let copy {
+                header(copy)
+                explanation(copy)
+                choices(copy)
+                continueButton
+            }
         }
         .padding(TC.Space.xxl)
         .tcColumn(TC.Measure.prose)
         .tcScreen()
     }
 
-    private var header: some View {
-        Text("Extra scrub before sending? (optional)").font(TC.Font_.sectionTitle)
+    private func header(_ copy: PrivacyScanCopy) -> some View {
+        Text(copy.title).font(TC.Font_.sectionTitle)
     }
 
-    private var explanation: some View {
+    // `Text(verbatim:)`: the core's sentences are plain text, and the
+    // `LocalizedStringKey` initialiser would read any `*` in them as
+    // Markdown.
+    private func explanation(_ copy: PrivacyScanCopy) -> some View {
         VStack(alignment: .leading, spacing: TC.Space.m) {
-            Text("""
-            Local scrubbing removes secrets, keys, tokens and credentials by pattern \
-            before anything leaves this machine. It runs either way.
-            """)
-            .font(.body)
-
-            Text("""
-            You can additionally send the *message text* of each trace — not tool \
-            output, not file contents — through a second scanner run by **NEAR AI**, \
-            a third party, to catch personal information the patterns miss: names, \
-            addresses, that kind of thing.
-            """)
-            .font(.body)
-
-            Text("""
-            This means your message text is transmitted to NEAR AI before it reaches \
-            Trace Commons. If that scanner is unreachable, **nothing is sent at \
-            all** — traces wait rather than going out unscanned.
-            """)
-            .font(.body)
+            Text(verbatim: copy.localAlways)
+                .font(.body)
+            Text(verbatim: copy.offer)
+                .font(.body)
+            Text(verbatim: copy.disclosure)
+                .font(.body)
         }
     }
 
-    private var choices: some View {
+    private func choices(_ copy: PrivacyScanCopy) -> some View {
         VStack(alignment: .leading, spacing: TC.Space.s) {
-            choiceRow(.localOnly, title: "Local scrubbing only")
-            choiceRow(.localPlusScan, title: "Local scrubbing + NEAR AI scan")
+            choiceRow(.localOnly, title: copy.localOnly)
+            choiceRow(.localPlusScan, title: copy.withNear)
         }
     }
 
@@ -123,7 +122,7 @@ struct OnboardingPrivacyScanContent: View {
             HStack(spacing: TC.Space.m) {
                 Image(systemName: choice == value ? "largecircle.fill.circle" : "circle")
                     .font(.system(size: 15))
-                    .foregroundStyle(choice == value ? AnyShapeStyle(TC.green) : AnyShapeStyle(.tertiary))
+                    .foregroundStyle(choice == value ? AnyShapeStyle(TC.accentText) : AnyShapeStyle(.tertiary))
                 Text(title).font(TC.Font_.body.weight(choice == value ? .semibold : .regular))
                 Spacer(minLength: 0)
             }

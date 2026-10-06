@@ -108,8 +108,30 @@ pub(crate) fn witness_input_for_profile(
 
 /// Statuses that mean a session has already been accepted by the server;
 /// re-encountering a receipt with one of these statuses short-circuits the
-/// per-session flow instead of re-uploading.
-pub(crate) const ALREADY_SUBMITTED_STATUSES: [&str; 3] = ["submitted", "accepted", "quarantined"];
+/// per-session flow instead of re-uploading. Read through
+/// [`is_already_submitted`], never directly.
+const ALREADY_SUBMITTED_STATUSES: [&str; 3] = [
+    crate::daemon::history::STATUS_SUBMITTED,
+    crate::daemon::history::STATUS_ACCEPTED,
+    crate::daemon::history::STATUS_QUARANTINED,
+];
+
+/// Whether a receipt's status means its session is already submitted.
+///
+/// Through [`crate::daemon::history::status_bucket`], so the versioned
+/// pipeline's `processing` receipt -- uploaded, no verdict reported yet --
+/// counts as `submitted` here exactly as it does in the history rollup.
+/// Receipts are append-only and that receipt is never rewritten, so without
+/// this a re-run would upload again, under the same submission id with a
+/// new `trace_id`, and get a 409.
+///
+/// Callers pass the status from [`crate::daemon::history::receipt_status`],
+/// not the receipt's raw one: Admission can quarantine or reject a trace
+/// inside the request that returned `processing`, and once the server has
+/// read that verdict back it wins over the receipt.
+pub(crate) fn is_already_submitted(status: &str) -> bool {
+    ALREADY_SUBMITTED_STATUSES.contains(&crate::daemon::history::status_bucket(status))
+}
 
 /// A fail-closed precondition that aborts the whole submit pass rather than
 /// producing an outcome for one session.
@@ -138,6 +160,12 @@ pub const PRECONDITION_NOT_LOGGED_IN: &str = "not-logged-in";
 /// Upstream classifier outage after its own retries. The daemon may retry
 /// this exact outcome with its approval and current-source checks intact.
 pub(crate) const REASON_TRANSIENT_REDACTION: &str = "privacy-filter-transient";
+/// [`REASON_TRANSIENT_REDACTION`] kept recurring until the daemon's retry
+/// budget ran out. The approval is revoked and the session is held for a
+/// person: a "transient" failure that never clears (an over-limit window the
+/// classifier reports as a 5xx, say) must not re-send the session to the
+/// classifier every hour for ever.
+pub(crate) const REASON_TRANSIENT_REDACTION_EXHAUSTED: &str = "privacy-filter-transient-exhausted";
 /// The witness answered `503 witness_saturated`: it is at capacity and
 /// judged nothing. Like [`REASON_TRANSIENT_REDACTION`], the daemon keeps the
 /// approval and retries after the witness's own delay; unlike every other
@@ -193,10 +221,34 @@ pub enum SubmitOutcome {
         witnessed: Box<WitnessedEnvelope>,
         attested_inference: Box<InferenceAttestationRecord>,
     },
+    /// The Automatic Scrub check held this session for a person (K4 of
+    /// #1118): the envelope was built and scrubbed, and the scrub is worth a
+    /// second look. Nothing was uploaded. Only returned when the caller asked
+    /// for it with [`SubmitContext::hold_unless_scrub_is_clear`].
+    ///
+    /// `counts` and `reasons` describe the built envelope. `envelope` is that
+    /// envelope, so the caller can pin it and keep the counts beside its
+    /// digest (`QueueEntry::scrub`), exactly as a preview does. `None` on
+    /// the witness path, whose certified bytes are pinned only through the
+    /// witnessed-review artifact; there the entry keeps no counts.
+    HeldForSecondLook {
+        reason_label: String,
+        reasons: Vec<&'static str>,
+        counts: crate::daemon::second_look::ScrubCounts,
+        envelope: Option<Box<TraceContributionEnvelope>>,
+    },
 }
 
 /// The label an unattended witnessed session is held under when its
 /// certificate's residual-risk verdict is not `low`.
+/// The label `--remediate-quarantined` is refused under for a session whose
+/// receipt came from the versioned pipeline (`processing`). The server's
+/// quarantine remediation works on a legacy submission record, not a
+/// pipeline run, so a re-upload would only meet the stored submission.
+/// Refusing says so, where falling through to "already submitted
+/// (processing)" said nothing.
+pub const REASON_REMEDIATION_UNSUPPORTED_FOR_TENANT: &str = "remediation-unsupported-for-tenant";
+
 pub const REASON_WITNESS_RISK_REVIEW_REQUIRED: &str = "witness-risk-review-required";
 
 /// The R5 hold, decided: `Some` when the caller asked for it, this call ran
@@ -216,6 +268,61 @@ fn held_for_review(
         witnessed: Box::new(response.clone()),
         attested_inference: Box::new(record),
     })
+}
+
+/// The Automatic Scrub check's hold, decided (K4 of #1118): `Some` when the
+/// caller asked for it (`hold` carries the entry's `subagents_dropped`) and
+/// the envelope about to be sent is worth a second look.
+///
+/// Counted exactly as a preview counts (`second_look::ScrubCounts::of`, over
+/// the redaction map and `preview::body_of`), but on the envelope that would
+/// be sent, so the scrub is always a real count, never "not yet scrubbed".
+/// A body that cannot be serialized for the unsure-span detector is held as
+/// `looks-unsure`: an unreadable body counts as unsure.
+///
+/// `pinnable` is whether the caller may pin these bytes as a local preview:
+/// true on the local-redaction path, false for a witnessed envelope.
+fn held_for_second_look(
+    hold: Option<u32>,
+    envelope: &TraceContributionEnvelope,
+    pinnable: bool,
+) -> Option<SubmitOutcome> {
+    use crate::daemon::second_look::{self, Scrub};
+    let subagents_dropped = hold?;
+    let counts = built_scrub_counts(
+        &envelope.privacy.redaction_counts,
+        crate::daemon::preview::body_of(envelope),
+    );
+    let scrub = Scrub::Scrubbed(counts);
+    let reason_label = second_look::unattended_hold(
+        crate::daemon::settings::ScrubCheck::Automatic,
+        scrub,
+        subagents_dropped,
+    )?;
+    Some(SubmitOutcome::HeldForSecondLook {
+        reason_label: reason_label.to_string(),
+        reasons: second_look::second_look_reasons(scrub, subagents_dropped),
+        counts,
+        envelope: pinnable.then(|| Box::new(envelope.clone())),
+    })
+}
+
+/// The Flow 2 counts of a built envelope, given its redaction map and the
+/// result of serializing its body. A body that could not be serialized is
+/// unreadable to the unsure-span detector, and unreadable counts as unsure:
+/// it holds, it is never skipped.
+fn built_scrub_counts(
+    redactions: &BTreeMap<String, u32>,
+    body: Result<String>,
+) -> crate::daemon::second_look::ScrubCounts {
+    use crate::daemon::second_look::ScrubCounts;
+    match body {
+        Ok(body) => ScrubCounts::of(redactions, &body),
+        Err(_) => ScrubCounts {
+            unsure_unreadable: true,
+            ..ScrubCounts::of(redactions, "")
+        },
+    }
 }
 
 /// Whether a certificate's verdict lets an unattended session go without a
@@ -304,6 +411,30 @@ fn refused_for_size(session_ref: &str, size_bytes: usize) -> SubmitOutcome {
         session_ref: session_ref.to_string(),
         size_bytes: Some(size_bytes),
         limit_bytes: Some(MAX_ENVELOPE_BYTES),
+    }
+}
+
+/// The serialized size, in bytes, of what an upload actually sends (K10).
+///
+/// A witnessed submission sends `witnessed.envelope_bytes` verbatim over
+/// `call_bytes` -- see `upload_with_retry` -- so that length IS the wire
+/// size; re-serializing the parsed envelope would not be measuring the same
+/// bytes. An ordinary submission has no such fixed byte string: `call_json`
+/// serializes `envelope` itself, after scope-stamping, so
+/// `envelope::envelope_size` on that same value is the number `call_json`
+/// is about to produce.
+///
+/// `None` only when the local measurement fails, which is the same
+/// serializer `envelope_size_ok` already required to succeed earlier in
+/// this function -- so in practice this is `None` only for a witnessed
+/// response whose certified bytes this device never parses back out.
+fn sent_envelope_bytes(
+    envelope: &TraceContributionEnvelope,
+    witnessed: Option<&WitnessedEnvelope>,
+) -> Option<u64> {
+    match witnessed {
+        Some(w) => Some(w.envelope_bytes.len() as u64),
+        None => envelope_size(envelope).ok().map(|n| n as u64),
     }
 }
 
@@ -432,7 +563,8 @@ pub fn build_manifest(outcomes: &[SubmitOutcome]) -> Vec<ManifestEntry> {
             SubmitOutcome::SkippedParseFailure { .. }
             | SubmitOutcome::Refused { .. }
             | SubmitOutcome::Failed { .. }
-            | SubmitOutcome::HeldForReview { .. } => None,
+            | SubmitOutcome::HeldForReview { .. }
+            | SubmitOutcome::HeldForSecondLook { .. } => None,
         })
         .collect()
 }
@@ -455,6 +587,10 @@ pub async fn submit_sessions(
     })?;
     let mut outcomes = Vec::with_capacity(sessions.len());
     for (source, session_ref) in sessions {
+        // The CLI's `submit`: a person ran the command, so the receipt says a
+        // person approved it, with the `--verdict` they passed (K7). Set per
+        // session because `submit_loaded` takes it one-shot.
+        ctx.set_upload_provenance(false, opts.verdict.map(|v| v.name().to_string()));
         outcomes.push(ctx.submit_one(source.as_ref(), &session_ref).await?);
     }
     Ok(outcomes)
@@ -485,6 +621,12 @@ pub struct SubmitContext<'a> {
     near_ai_notice_recorded: bool,
     near_ai: Option<NearAiSettings>,
     receipts: Vec<Receipt>,
+    /// The server verdicts the history cache holds, read once here like
+    /// `receipts` (see [`crate::daemon::history::reported_verdicts`]). Only a
+    /// `processing` receipt consults it. A verdict read back after this
+    /// context was built is not seen, and the receipt's own `processing`
+    /// then applies, which is what a re-run did before the cache was read.
+    verdicts: std::collections::BTreeMap<Uuid, String>,
     canary_runs: u32,
     approved_envelope: Option<TraceContributionEnvelope>,
     approved_witness: Option<WitnessedEnvelope>,
@@ -494,6 +636,13 @@ pub struct SubmitContext<'a> {
     /// `HeldForReview` instead of uploaded. One-shot, like the approvals
     /// above. See the spec's R5.
     hold_unless_low_risk: bool,
+    /// Set by the daemon for a session approved on the contributor's behalf
+    /// under the Automatic Scrub check (K4 of #1118): the envelope, once
+    /// built and past every refusal, is held instead of uploaded when its
+    /// scrub is worth a second look. Carries the entry's
+    /// `subagents_dropped`, the one second-look input the envelope does not.
+    /// One-shot, like the hold above.
+    hold_unless_scrub_clear: Option<u32>,
     /// What the last `submit_one`'s receipt fetch produced, for the daemon to
     /// correct the attestation mark after an upload. Reset at the start of
     /// each `submit_one`, set by `witness_envelope` when it runs.
@@ -508,6 +657,20 @@ pub struct SubmitContext<'a> {
     /// work. Set by the daemon's upload pass, never by a review a person
     /// asked for. See `HttpWitnessTransport::with_background_workload`.
     background_witness: bool,
+    /// The queue entry's own provenance for the submission about to run:
+    /// whether it reached upload without the contributor deciding
+    /// (`QueueEntry::approved_unattended`), and the verdict they gave, if
+    /// any (`QueueEntry::approved_verdict`). Set by `daemon::uploader`
+    /// before every `submit_loaded`, via [`Self::set_upload_provenance`],
+    /// and taken once at the top of `submit_loaded` like `approved_envelope`
+    /// -- a value left behind would apply to whatever session came next.
+    ///
+    /// `None` for a caller that never sets it, and the receipt then records
+    /// provenance as UNRECORDED (`approved_unattended: None`) rather than
+    /// guessing "you approved". Both production drivers set it:
+    /// `daemon::uploader` from the queue entry, and [`submit_sessions`] (the
+    /// CLI's `submit`, run by a person) with `false` and its `--verdict`.
+    upload_provenance: Option<(bool, Option<String>)>,
     /// The delay a saturated witness asked for on the last submission, in
     /// seconds; zero for none. Reset at the start of each submission, like
     /// `last_receipt_shipped`. Atomic only because `witness_envelope`
@@ -561,6 +724,15 @@ impl<'a> SubmitContext<'a> {
         } else {
             store.load_receipts().context("loading receipts")?
         };
+        // The same guard as `receipts`. A cache that cannot be read leaves
+        // every receipt's own status in force.
+        let verdicts = if opts.unenrolled_preview {
+            std::collections::BTreeMap::new()
+        } else {
+            crate::daemon::history::reported_verdicts(
+                &crate::daemon::history::HistoryCache::load(store).unwrap_or_default(),
+            )
+        };
         Ok(Self {
             store,
             cfg,
@@ -573,14 +745,17 @@ impl<'a> SubmitContext<'a> {
             near_ai_notice_recorded: false,
             near_ai,
             receipts,
+            verdicts,
             canary_runs: 0,
             approved_envelope: None,
             approved_witness: None,
             approved_token_bundle: None,
             hold_unless_low_risk: false,
+            hold_unless_scrub_clear: None,
             last_receipt_shipped: ReceiptShipped::NoCall,
             last_sent_witness: None,
             background_witness: false,
+            upload_provenance: None,
             last_witness_retry_after: std::sync::atomic::AtomicU32::new(0),
             #[cfg(test)]
             receipt_override: None,
@@ -656,6 +831,21 @@ impl<'a> SubmitContext<'a> {
     /// hold stops the upload to the commons but not the send to the witness.
     pub(crate) fn hold_witnessed_unless_low_risk(&mut self) {
         self.hold_unless_low_risk = true;
+    }
+
+    /// Hold, rather than upload, the next session if the envelope built for
+    /// it is worth a second look (`second_look::unattended_hold` under
+    /// Automatic). For sessions nobody reviewed, under the Automatic Scrub
+    /// check. `subagents_dropped` is the queue entry's discovery-time trim.
+    ///
+    /// Decided on the envelope itself, after redaction and before the send,
+    /// so the mark count is exact and a session is never judged on a scrub
+    /// that did not run. On the local-redaction path nothing has left the
+    /// machine at that point. On the witness path the witness has already
+    /// seen the session -- like R5's hold, it stops the upload to the
+    /// commons, not the send to the enclave.
+    pub(crate) fn hold_unless_scrub_is_clear(&mut self, subagents_dropped: u32) {
+        self.hold_unless_scrub_clear = Some(subagents_dropped);
     }
 
     pub(crate) fn use_approved_token_bundle(
@@ -1204,6 +1394,24 @@ impl<'a> SubmitContext<'a> {
         self.background_witness = true;
     }
 
+    /// Record the queue entry's provenance for the very next submission this
+    /// context runs (K7). One-shot, like `use_approved_envelope`: taken at
+    /// the top of `submit_loaded` so it cannot leak onto whatever session
+    /// comes after this one.
+    ///
+    /// `daemon::uploader::upload_entry` calls this immediately before
+    /// `submit_loaded`, with the entry's own `approved_unattended` and
+    /// `approved_verdict`, so the receipt this call produces -- and, from it,
+    /// the history row -- can say whether a person approved this session or
+    /// an armed folder sent it without asking.
+    pub fn set_upload_provenance(
+        &mut self,
+        approved_unattended: bool,
+        approved_verdict: Option<String>,
+    ) {
+        self.upload_provenance = Some((approved_unattended, approved_verdict));
+    }
+
     /// The delay, in seconds, a saturated witness asked for on the most
     /// recent submission, or `None` if the witness was not saturated.
     /// Meaningful immediately after a submission returns `Failed` with
@@ -1263,7 +1471,16 @@ impl<'a> SubmitContext<'a> {
         // behind would apply to whatever session came next.
         let approved_envelope = self.approved_envelope.take();
         let approved_witness = self.approved_witness.take();
+        // Same one-shot rule as `approved_envelope` above: taken here so it
+        // cannot apply to a later submission this context happens to run.
+        // Absent for a caller that never set it, which is recorded as
+        // unrecorded (`None`), never as "you approved" (K7).
+        let (provenance_unattended, provenance_verdict) = match self.upload_provenance.take() {
+            Some((unattended, verdict)) => (Some(unattended), verdict),
+            None => (None, None),
+        };
         let hold_unless_low_risk = std::mem::take(&mut self.hold_unless_low_risk);
+        let hold_unless_scrub_clear = self.hold_unless_scrub_clear.take();
 
         if opts.no_reasoning {
             crate::commands::strip_reasoning(&mut transcript);
@@ -1271,24 +1488,38 @@ impl<'a> SubmitContext<'a> {
 
         // Take the most recent matching receipt, so a session that was
         // delivered and later accepted reports "accepted" rather than the
-        // first status it ever had.
+        // first status it ever had. A `processing` receipt is judged by the
+        // verdict the server has read back since, when there is one.
         let prior = self
             .receipts
             .iter()
-            .filter(|r| {
-                r.session_hash == transcript.session_hash
-                    && ALREADY_SUBMITTED_STATUSES.contains(&r.status.as_str())
+            .map(|r| (r, crate::daemon::history::receipt_status(r, &self.verdicts)))
+            .filter(|(r, status)| {
+                r.session_hash == transcript.session_hash && is_already_submitted(status)
             })
-            .max_by_key(|r| r.submitted_at);
-        if let Some(prior) = prior
+            .max_by_key(|(r, _)| r.submitted_at);
+        if let Some((prior, prior_status)) = prior
             && self.approved_token_bundle.is_none()
         {
-            let remediating_quarantined =
-                opts.remediate_quarantined && prior.status == "quarantined";
+            if opts.remediate_quarantined
+                && prior.status == crate::daemon::history::STATUS_PROCESSING
+                && [
+                    crate::daemon::history::STATUS_PROCESSING,
+                    crate::daemon::history::STATUS_QUARANTINED,
+                ]
+                .contains(&prior_status)
+            {
+                return Ok(refused(
+                    REASON_REMEDIATION_UNSUPPORTED_FOR_TENANT,
+                    &transcript.session_hash,
+                ));
+            }
+            let remediating_quarantined = opts.remediate_quarantined
+                && prior_status == crate::daemon::history::STATUS_QUARANTINED;
             if !remediating_quarantined {
                 return Ok(SubmitOutcome::AlreadySubmitted {
                     submission_id: prior.submission_id,
-                    prior_status: prior.status.clone(),
+                    prior_status: prior_status.to_string(),
                 });
             }
         }
@@ -1526,6 +1757,12 @@ impl<'a> SubmitContext<'a> {
             {
                 return Ok(outcome);
             }
+            // A dry run reports what the real send would do, hold included.
+            if let Some(held) =
+                held_for_second_look(hold_unless_scrub_clear, &envelope, witnessed.is_none())
+            {
+                return Ok(held);
+            }
             if !opts.machine_readable {
                 if opts.unenrolled_preview {
                     println!(
@@ -1598,6 +1835,15 @@ impl<'a> SubmitContext<'a> {
         ) {
             return Ok(held);
         }
+        // The Automatic Scrub check (K4 of #1118), at the same point and for
+        // the same reason: after every refusal, before anything reaches the
+        // commons. The scrub is read off the envelope that would be sent, so
+        // it is always a real count, never "not yet scrubbed".
+        if let Some(held) =
+            held_for_second_look(hold_unless_scrub_clear, &envelope, witnessed.is_none())
+        {
+            return Ok(held);
+        }
         // Every check above has passed, so this is the certificate the send
         // below carries, if it goes.
         self.last_sent_witness = witnessed.clone();
@@ -1609,6 +1855,7 @@ impl<'a> SubmitContext<'a> {
                 .as_ref()
                 .ok_or_else(|| anyhow::anyhow!("bundle-review-stale"))?;
             journal.validate_review(&bundle, &response.envelope_bytes)?;
+            let uploaded_bytes = sent_envelope_bytes(&envelope, Some(response));
             let client = build_ingest_client(self.cfg, &token)?;
             match journal.upload_approved(bundle.journal_id, &client).await {
                 Ok(_) => {
@@ -1618,6 +1865,9 @@ impl<'a> SubmitContext<'a> {
                         source: transcript.source.into(),
                         submitted_at: Utc::now(),
                         status: "submitted".into(),
+                        approved_unattended: provenance_unattended,
+                        approved_verdict: provenance_verdict.clone(),
+                        uploaded_bytes,
                     };
                     self.store.append_receipt(&receipt)?;
                     self.receipts.push(receipt);
@@ -1655,6 +1905,9 @@ impl<'a> SubmitContext<'a> {
                     source: transcript.source.to_string(),
                     submitted_at: Utc::now(),
                     status: receipt.status.clone(),
+                    approved_unattended: provenance_unattended,
+                    approved_verdict: provenance_verdict.clone(),
+                    uploaded_bytes: sent_envelope_bytes(&envelope, witnessed.as_ref()),
                 };
                 match self.store.append_receipt(&r) {
                     Ok(()) => {
@@ -1720,6 +1973,38 @@ pub async fn status(
         updates.append(&mut chunk_updates);
     }
     Ok(updates)
+}
+
+/// The NEAR AI measurement pins ingest enforces, read with this device's own
+/// credential (`GET /v1/contributors/me/near-ai-measurements`).
+///
+/// The same empty-scope mint as [`status`]: a device-authenticated read that
+/// does not depend on the scopes chosen for submission. The document carries
+/// pins only; what a client may pin from it is
+/// [`NearAiMeasurementPins::usable_sets`], never the raw `sets`.
+///
+/// [`NearAiMeasurementPins::usable_sets`]: trace_commons_protocol::near_ai_measurements::NearAiMeasurementPins::usable_sets
+pub async fn near_ai_measurement_pins(
+    store: &ConfigStore,
+    cfg: &ContributorConfig,
+) -> Result<trace_commons_protocol::near_ai_measurements::NearAiMeasurementPins> {
+    let device = DeviceIdentity::load_or_generate_async(store)
+        .await
+        .context("loading device identity")?;
+    let issuer = IssuerClient::new(config_allowlist(cfg)).context("building issuer client")?;
+    let token = mint_status_claim(&issuer, cfg, &device, Utc::now())
+        .await
+        .context("minting upload claim for the measurement read")?;
+    let client = build_ingest_client(cfg, &token).context("building ingest client")?;
+    client
+        .call_json::<(), _>(
+            Method::GET,
+            trace_commons_protocol::near_ai_measurements::NEAR_AI_MEASUREMENTS_PATH,
+            &[],
+            None,
+        )
+        .await
+        .context("fetching NEAR AI measurement pins")
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2228,7 +2513,7 @@ async fn mint_claim(
 /// Mint a claim for a status read-back: an empty consent_scopes/allowed_uses
 /// request, which the issuer resolves to the caller's full grant ceiling
 /// regardless of what was requested for submission.
-async fn mint_status_claim(
+pub(crate) async fn mint_status_claim(
     issuer: &IssuerClient,
     cfg: &ContributorConfig,
     device: &DeviceIdentity,
@@ -2333,7 +2618,7 @@ fn ensure_certified_grant(
     Ok(())
 }
 
-fn build_ingest_client(
+pub(crate) fn build_ingest_client(
     cfg: &ContributorConfig,
     token: &ClaimToken,
 ) -> std::result::Result<Client, OcError> {
@@ -3038,6 +3323,25 @@ mod tests {
 
     /// The hosted admission gate's refusal shape: a status, an
     /// `{"error": ...}` label, and no receipt.
+    /// An ingest that records the exact byte length of each request body it
+    /// receives, before any parsing.
+    fn stub_ingest_body_lengths(lengths: Arc<Mutex<Vec<usize>>>) -> Router {
+        Router::new().route(
+            "/v1/traces",
+            post(move |body: axum::body::Bytes| {
+                let lengths = lengths.clone();
+                async move {
+                    lengths.lock().unwrap().push(body.len());
+                    Json(serde_json::json!({
+                        "status": "accepted",
+                        "credit_points_pending": 0.0,
+                        "explanation": []
+                    }))
+                }
+            }),
+        )
+    }
+
     fn stub_ingest_refuses(status: u16, label: &'static str) -> Router {
         Router::new().route(
             "/v1/traces",
@@ -3699,6 +4003,188 @@ mod tests {
         assert_eq!(receipts[0].session_hash, verified_hash);
     }
 
+    /// K7: `set_upload_provenance` is what lets a history row say "you
+    /// approved · Worked" rather than "armed · went without asking". A
+    /// person's own approval -- `daemon::uploader` would call this with
+    /// `approved_unattended: false` for an entry nobody's armed folder
+    /// decided -- must land on the written receipt unattended-false, with
+    /// whatever verdict was given.
+    #[tokio::test]
+    async fn upload_provenance_for_a_persons_approval_lands_on_the_written_receipt() {
+        let issuer = spawn(stub_issuer()).await;
+        let ingest = spawn(stub_ingest(Arc::new(Mutex::new(Vec::new())))).await;
+        let (_dir, store) = crate::config::tests_support::temp_store();
+        let device = DeviceIdentity::load_or_generate(&store).unwrap();
+        let cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
+        let opts = SubmitOptions {
+            machine_readable: true,
+            ..Default::default()
+        };
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        ctx.set_upload_provenance(false, Some("worked".to_string()));
+        let (source, session_ref) = fixture_selection().remove(0);
+
+        let outcome = ctx.submit_one(source.as_ref(), &session_ref).await.unwrap();
+        assert!(
+            matches!(outcome, SubmitOutcome::Submitted { .. }),
+            "got {outcome:?}"
+        );
+
+        let receipts = store.load_receipts().unwrap();
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(
+            receipts[0].approved_unattended,
+            Some(false),
+            "a person approved this one"
+        );
+        assert_eq!(receipts[0].approved_verdict.as_deref(), Some("worked"));
+    }
+
+    /// The other half: an armed folder's send must be recorded as
+    /// unattended, with whatever verdict it carries (ordinarily none, since
+    /// nobody was asked).
+    #[tokio::test]
+    async fn upload_provenance_for_an_unattended_send_lands_on_the_written_receipt() {
+        let issuer = spawn(stub_issuer()).await;
+        let ingest = spawn(stub_ingest(Arc::new(Mutex::new(Vec::new())))).await;
+        let (_dir, store) = crate::config::tests_support::temp_store();
+        let device = DeviceIdentity::load_or_generate(&store).unwrap();
+        let cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
+        let opts = SubmitOptions {
+            machine_readable: true,
+            ..Default::default()
+        };
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        ctx.set_upload_provenance(true, None);
+        let (source, session_ref) = fixture_selection().remove(0);
+
+        let outcome = ctx.submit_one(source.as_ref(), &session_ref).await.unwrap();
+        assert!(
+            matches!(outcome, SubmitOutcome::Submitted { .. }),
+            "got {outcome:?}"
+        );
+
+        let receipts = store.load_receipts().unwrap();
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(
+            receipts[0].approved_unattended,
+            Some(true),
+            "an armed folder sent this one without asking"
+        );
+        assert_eq!(receipts[0].approved_verdict, None);
+    }
+
+    /// One-shot, like `use_approved_envelope`: a second submission in the
+    /// same context must not inherit the first one's provenance when
+    /// nothing set it for that call. Removing the `.take()` in favour of a
+    /// plain read would make this fail by leaking `true` / `Some("failed")`
+    /// onto the second receipt.
+    #[tokio::test]
+    async fn upload_provenance_does_not_leak_onto_a_later_submission() {
+        let issuer = spawn(stub_issuer()).await;
+        let ingest = spawn(stub_ingest(Arc::new(Mutex::new(Vec::new())))).await;
+        let (_dir, store) = crate::config::tests_support::temp_store();
+        let device = DeviceIdentity::load_or_generate(&store).unwrap();
+        let cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
+        let opts = SubmitOptions {
+            machine_readable: true,
+            ..Default::default()
+        };
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+
+        let trajectory_dir = tempfile::tempdir().unwrap();
+        write_test_trajectory(&trajectory_dir.path().join("a.json"), "first session");
+        write_test_trajectory(&trajectory_dir.path().join("b.json"), "second session");
+        let mut selection = trajectory_selection(trajectory_dir.path());
+        let (source_a, ref_a) = selection.remove(0);
+        let (source_b, ref_b) = selection.remove(0);
+
+        ctx.set_upload_provenance(true, Some("failed".to_string()));
+        ctx.submit_one(source_a.as_ref(), &ref_a).await.unwrap();
+        // Nothing set for this call: must not inherit the previous one's.
+        ctx.submit_one(source_b.as_ref(), &ref_b).await.unwrap();
+
+        let receipts = store.load_receipts().unwrap();
+        assert_eq!(receipts.len(), 2);
+        assert_eq!(receipts[0].approved_unattended, Some(true));
+        assert_eq!(receipts[0].approved_verdict.as_deref(), Some("failed"));
+        assert_eq!(
+            receipts[1].approved_unattended, None,
+            "provenance must not leak onto a later submission; unset is unrecorded"
+        );
+        assert_eq!(receipts[1].approved_verdict, None);
+    }
+
+    /// K10: the receipt's `uploaded_bytes` describes the exact bytes the
+    /// server received, not an estimate made some other way. The stub
+    /// measures the raw request body before parsing it, so the comparison
+    /// does not depend on how a re-serialization would escape the JSON.
+    #[tokio::test]
+    async fn uploaded_bytes_lands_on_the_written_receipt_and_matches_what_was_sent() {
+        let issuer = spawn(stub_issuer()).await;
+        let lengths = Arc::new(Mutex::new(Vec::new()));
+        let ingest = spawn(stub_ingest_body_lengths(lengths.clone())).await;
+        let (_dir, store) = crate::config::tests_support::temp_store();
+        let device = DeviceIdentity::load_or_generate(&store).unwrap();
+        let cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
+        let opts = SubmitOptions {
+            machine_readable: true,
+            ..Default::default()
+        };
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let (source, session_ref) = fixture_selection().remove(0);
+
+        let outcome = ctx.submit_one(source.as_ref(), &session_ref).await.unwrap();
+        assert!(
+            matches!(outcome, SubmitOutcome::Submitted { .. }),
+            "got {outcome:?}"
+        );
+
+        let receipts = store.load_receipts().unwrap();
+        assert_eq!(receipts.len(), 1);
+        let uploaded_bytes = receipts[0].uploaded_bytes.expect("a size must be recorded");
+
+        let lengths = lengths.lock().unwrap();
+        assert_eq!(lengths.len(), 1);
+        let sent_bytes = lengths[0] as u64;
+        assert_eq!(
+            uploaded_bytes, sent_bytes,
+            "the recorded size must match the bytes the server actually received"
+        );
+    }
+
+    /// K7 review: the CLI's `submit --verdict` is a person approving, and
+    /// the verdict they passed is recorded on the receipt rather than
+    /// dropped.
+    #[tokio::test]
+    async fn cli_submit_records_a_persons_approval_and_its_verdict() {
+        let issuer = spawn(stub_issuer()).await;
+        let ingest = spawn(stub_ingest(Arc::new(Mutex::new(Vec::new())))).await;
+        let (_dir, store) = crate::config::tests_support::temp_store();
+        let device = DeviceIdentity::load_or_generate(&store).unwrap();
+        let cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
+        let opts = SubmitOptions {
+            machine_readable: true,
+            verdict: Some(crate::envelope::ContributorVerdict::Partly),
+            ..Default::default()
+        };
+        let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
+            .await
+            .unwrap();
+        assert!(
+            outcomes
+                .iter()
+                .any(|o| matches!(o, SubmitOutcome::Submitted { .. })),
+            "got {outcomes:?}"
+        );
+        let receipts = store.load_receipts().unwrap();
+        assert!(!receipts.is_empty());
+        for receipt in &receipts {
+            assert_eq!(receipt.approved_unattended, Some(false));
+            assert_eq!(receipt.approved_verdict.as_deref(), Some("partly"));
+        }
+    }
+
     #[tokio::test]
     async fn submit_context_reruns_the_canary_after_invalidation() {
         // A long-lived daemon re-checks the privacy filter periodically.
@@ -3771,6 +4257,219 @@ mod tests {
             SubmitOutcome::AlreadySubmitted { .. }
         ));
         assert_eq!(received.lock().unwrap().len(), 1);
+    }
+
+    /// The versioned pipeline answers with a `processing` receipt, and
+    /// receipts are append-only, so that receipt is never rewritten. A re-run
+    /// must read it as already submitted rather than upload again: the second
+    /// upload builds a new `trace_id` under the same submission id and the
+    /// server answers 409.
+    #[tokio::test]
+    async fn processing_receipt_short_circuits_a_rerun() {
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let issuer = spawn(stub_issuer()).await;
+        let ingest = spawn(stub_ingest_status(received.clone(), "processing")).await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
+        let cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
+        let opts = SubmitOptions {
+            ..Default::default()
+        };
+
+        let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
+            .await
+            .unwrap();
+        assert!(matches!(
+            &outcomes[0],
+            SubmitOutcome::Submitted { status, .. } if status == "processing"
+        ));
+        assert_eq!(received.lock().unwrap().len(), 1);
+
+        let rerun = submit_sessions(&store, &cfg, fixture_selection(), &opts)
+            .await
+            .unwrap();
+        assert!(
+            matches!(
+                &rerun[0],
+                SubmitOutcome::AlreadySubmitted { prior_status, .. }
+                    if prior_status == "processing"
+            ),
+            "{:?}",
+            rerun[0]
+        );
+        assert_eq!(received.lock().unwrap().len(), 1, "no second upload");
+    }
+
+    /// What a history refresh leaves in the cache once the server has read
+    /// a submission back: every receipt's row, now carrying `status` and
+    /// stamped as refreshed.
+    fn record_read_back(store: &crate::config::ConfigStore, status: &str) {
+        use crate::daemon::history::{HistoryCache, merge_new_receipts};
+        let receipts = store.load_receipts().unwrap();
+        let mut records = HistoryCache::load(store).unwrap();
+        merge_new_receipts(&mut records, &receipts, &std::collections::BTreeMap::new());
+        for rec in &mut records {
+            rec.status = status.to_string();
+            rec.last_refreshed_at = Some(Utc::now());
+        }
+        HistoryCache::save(store, &records).unwrap();
+    }
+
+    /// poldsam's review of #1169: Admission runs inside `submit`, so a trace
+    /// it rejected still got a `processing` receipt, and receipts are never
+    /// rewritten. Once the history read-back says `rejected`, a re-run must
+    /// not report the stale `already-submitted (processing)`: `rejected` is
+    /// not an already-submitted status, so the session goes the way any
+    /// rejected session goes and is built and uploaded again.
+    #[tokio::test]
+    async fn rejected_read_back_overrides_a_processing_receipt_on_rerun() {
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let issuer = spawn(stub_issuer()).await;
+        let ingest = spawn(stub_ingest_status(received.clone(), "processing")).await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
+        let cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
+        let opts = SubmitOptions::default();
+
+        submit_sessions(&store, &cfg, fixture_selection(), &opts)
+            .await
+            .unwrap();
+        assert_eq!(received.lock().unwrap().len(), 1);
+        record_read_back(&store, "rejected");
+
+        let rerun = submit_sessions(&store, &cfg, fixture_selection(), &opts)
+            .await
+            .unwrap();
+        assert!(
+            !matches!(&rerun[0], SubmitOutcome::AlreadySubmitted { .. }),
+            "a rejected read-back is not already submitted: {:?}",
+            rerun[0]
+        );
+        assert_eq!(received.lock().unwrap().len(), 2, "the re-run uploads");
+    }
+
+    /// The quarantined variant: still already submitted, but reported under
+    /// the status the server read back, not the receipt's `processing`.
+    #[tokio::test]
+    async fn quarantined_read_back_overrides_a_processing_receipt_on_rerun() {
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let issuer = spawn(stub_issuer()).await;
+        let ingest = spawn(stub_ingest_status(received.clone(), "processing")).await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
+        let cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
+        let opts = SubmitOptions::default();
+
+        submit_sessions(&store, &cfg, fixture_selection(), &opts)
+            .await
+            .unwrap();
+        record_read_back(&store, "quarantined");
+
+        let rerun = submit_sessions(&store, &cfg, fixture_selection(), &opts)
+            .await
+            .unwrap();
+        assert!(
+            matches!(
+                &rerun[0],
+                SubmitOutcome::AlreadySubmitted { prior_status, .. }
+                    if prior_status == "quarantined"
+            ),
+            "{:?}",
+            rerun[0]
+        );
+        assert_eq!(received.lock().unwrap().len(), 1, "no second upload");
+    }
+
+    /// A row this device withdrew is not a server verdict, and must never
+    /// turn a `processing` receipt into "not submitted": that would upload
+    /// a trace the contributor took back.
+    #[tokio::test]
+    async fn withdrawn_row_does_not_override_a_processing_receipt() {
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let issuer = spawn(stub_issuer()).await;
+        let ingest = spawn(stub_ingest_status(received.clone(), "processing")).await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
+        let cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
+        let opts = SubmitOptions::default();
+
+        submit_sessions(&store, &cfg, fixture_selection(), &opts)
+            .await
+            .unwrap();
+        record_read_back(&store, crate::daemon::history::STATUS_WITHDRAWN);
+
+        let rerun = submit_sessions(&store, &cfg, fixture_selection(), &opts)
+            .await
+            .unwrap();
+        assert!(
+            matches!(
+                &rerun[0],
+                SubmitOutcome::AlreadySubmitted { prior_status, .. }
+                    if prior_status == "processing"
+            ),
+            "{:?}",
+            rerun[0]
+        );
+        assert_eq!(received.lock().unwrap().len(), 1, "no second upload");
+    }
+
+    /// poldsam's review of #1169, finding 2: the versioned pipeline has no
+    /// remediation, and its receipt is always `processing`, so
+    /// `--remediate-quarantined` used to fall through to a silent
+    /// `AlreadySubmitted { prior_status: "processing" }`. It is now refused
+    /// under a fixed label, and nothing is uploaded.
+    #[tokio::test]
+    async fn remediate_quarantined_is_refused_for_a_pipeline_receipt() {
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let issuer = spawn(stub_issuer()).await;
+        let ingest = spawn(stub_ingest_status(received.clone(), "processing")).await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
+        let cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
+
+        submit_sessions(&store, &cfg, fixture_selection(), &SubmitOptions::default())
+            .await
+            .unwrap();
+        let remediate = SubmitOptions {
+            remediate_quarantined: true,
+            ..Default::default()
+        };
+
+        // No verdict read back yet: the receipt alone says this is a
+        // pipeline tenant, and remediation does not exist there.
+        let unknown = submit_sessions(&store, &cfg, fixture_selection(), &remediate)
+            .await
+            .unwrap();
+        assert!(
+            matches!(
+                &unknown[0],
+                SubmitOutcome::Refused { reason_label, .. }
+                    if reason_label == REASON_REMEDIATION_UNSUPPORTED_FOR_TENANT
+            ),
+            "{:?}",
+            unknown[0]
+        );
+
+        // Read back as quarantined: the case the flag is for.
+        record_read_back(&store, "quarantined");
+        let quarantined = submit_sessions(&store, &cfg, fixture_selection(), &remediate)
+            .await
+            .unwrap();
+        assert!(
+            matches!(
+                &quarantined[0],
+                SubmitOutcome::Refused { reason_label, .. }
+                    if reason_label == REASON_REMEDIATION_UNSUPPORTED_FOR_TENANT
+            ),
+            "{:?}",
+            quarantined[0]
+        );
+        assert_eq!(received.lock().unwrap().len(), 1, "nothing re-uploaded");
     }
 
     #[tokio::test]
@@ -4528,6 +5227,9 @@ mod tests {
                 source: "claude-code".to_string(),
                 submitted_at: Utc::now(),
                 status: "submitted".to_string(),
+                approved_unattended: None,
+                approved_verdict: None,
+                uploaded_bytes: None,
             })
             .unwrap();
 
@@ -5035,6 +5737,7 @@ mod tests {
             output_tokens: Some(1),
             cost_usd: Some(0.0),
             status: 200,
+            ..Default::default()
         };
         let call = crate::routing::attested::attested_final_call(&[row], dir.path())
             .expect("the fixture must be attestable, or these tests prove nothing");
@@ -5792,6 +6495,93 @@ mod tests {
     /// witness rates `medium` must come back held with its certified review
     /// saved and nothing sent; and a person's approve of that entry must send
     /// exactly those certified bytes, without running the witness again.
+    /// Reviewed on #1139: the Scrub check's hold on the real send path, not
+    /// a dry run. A claim is minted from the stub issuer and the envelope
+    /// stamped, and the hold still stops it before anything reaches ingest.
+    /// The entry is trimmed to fit, so the hold does not depend on what the
+    /// fixture happens to contain.
+    #[tokio::test]
+    async fn the_scrub_check_holds_on_the_real_send_path_and_nothing_reaches_ingest() {
+        use crate::daemon::uploader::{UploadDecision, Uploader};
+        let capture = Arc::new(Mutex::new(CapturedUpload::default()));
+        let issuer = spawn(stub_issuer()).await;
+        let ingest = spawn(stub_ingest_raw(capture.clone(), 200)).await;
+        let (_dir, store) = crate::config::tests_support::temp_store();
+        let device = DeviceIdentity::load_or_generate(&store).unwrap();
+        let cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
+        store.save_config(&cfg).unwrap();
+        let (source, reference) = fixture_selection().remove(0);
+        let entry = crate::daemon::queue::QueueEntry {
+            subagents_dropped: 1,
+            ..r5_unattended_entry(&cfg, &reference)
+        };
+        let settings = crate::daemon::settings::DaemonSettings {
+            scrub_check: crate::daemon::settings::ScrubCheck::Automatic,
+            ..Default::default()
+        };
+        let opts = review_options();
+        assert!(!opts.dry_run);
+        let mut state = crate::daemon::state::DaemonState::new();
+        let mut health = crate::daemon::health::HealthState::default();
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let decision = tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            Uploader {
+                ctx: &mut ctx,
+                store: &store,
+                settings: &settings,
+                state: &mut state,
+                health: &mut health,
+            }
+            .upload_entry(source.as_ref(), &reference, &entry, Utc::now()),
+        )
+        .await
+        .expect("the upload decides within a minute")
+        .unwrap();
+        let UploadDecision::HeldForSecondLook {
+            reason_label,
+            reasons,
+            pin,
+            ..
+        } = &decision
+        else {
+            panic!("expected a hold, got {decision:?}");
+        };
+        assert_eq!(
+            reason_label,
+            crate::daemon::second_look::REASON_SECOND_LOOK_REVIEW_REQUIRED
+        );
+        assert!(
+            reasons.contains(&crate::daemon::second_look::REASON_TRIMMED_TO_FIT),
+            "{reasons:?}"
+        );
+        assert!(pin.is_some(), "the held envelope is pinned");
+        assert!(
+            capture.lock().unwrap().bodies.is_empty(),
+            "nothing reached the commons"
+        );
+        assert_eq!(state.uploads_today, 0);
+    }
+
+    /// A body that cannot be serialized for the unsure-span detector counts
+    /// as unreadable, and unreadable holds: the check is never skipped.
+    #[test]
+    fn a_body_that_cannot_be_read_holds_rather_than_skipping_the_check() {
+        let mut redactions = BTreeMap::new();
+        redactions.insert("private_email".to_string(), 3);
+        let counts = built_scrub_counts(&redactions, Err(anyhow::anyhow!("body-serialize-failed")));
+        assert!(counts.unsure_unreadable);
+        assert_eq!(counts.content_marks, 3, "the marks are still counted");
+        assert_eq!(
+            crate::daemon::second_look::unattended_hold(
+                crate::daemon::settings::ScrubCheck::Automatic,
+                crate::daemon::second_look::Scrub::Scrubbed(counts),
+                0
+            ),
+            Some(crate::daemon::second_look::REASON_SECOND_LOOK_REVIEW_REQUIRED)
+        );
+    }
+
     #[tokio::test]
     async fn an_unattended_medium_verdict_is_held_and_a_persons_approve_sends_the_pinned_bytes() {
         use crate::daemon::uploader::{UploadDecision, Uploader};
@@ -5822,6 +6612,7 @@ mod tests {
             reason_label,
             pin,
             attested_inference,
+            ..
         } = decision
         else {
             panic!("expected a hold, got {decision:?}");
@@ -5835,7 +6626,13 @@ mod tests {
         // What `drain_approved` does with that decision, then a person.
         let mut q = crate::daemon::queue::Queue::default();
         q.upsert(entry.clone(), 10).unwrap();
-        assert!(q.hold_with_witness_pin(entry.entry_id, &reason_label, &pin, attested_inference));
+        assert!(q.hold_with_witness_pin(
+            entry.entry_id,
+            &reason_label,
+            &pin,
+            attested_inference,
+            None
+        ));
         assert!(q.get(entry.entry_id).unwrap().held_for_review());
         assert!(q.approve(
             entry.entry_id,
@@ -6406,7 +7203,8 @@ pub fn outcomes_to_json(
                     "size_bytes": size_bytes,
                     "limit_bytes": limit_bytes,
                 }),
-                SubmitOutcome::HeldForReview { reason_label, .. } => serde_json::json!({
+                SubmitOutcome::HeldForReview { reason_label, .. }
+                | SubmitOutcome::HeldForSecondLook { reason_label, .. } => serde_json::json!({
                     "outcome": "held",
                     "reason": reason_label,
                 }),
