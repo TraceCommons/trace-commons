@@ -70,6 +70,8 @@ final class GlassSurfaceRulesTests: XCTestCase {
         "Views/Monitor/HomeViews.swift",
         // Ron's session review card (#1146, Task 6 of #1241).
         "Views/Monitor/SessionReviewCard.swift",
+        // Settings as Ron's modal over the Monitor (#1146, Task 10 of #1241).
+        "Views/Monitor/SettingsModal.swift",
     ]
 
     static func text(_ rel: String) throws -> String {

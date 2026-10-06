@@ -241,7 +241,12 @@
     "inspectorBreakpoint": 900,
     "windowMinWidth": 760,
     "windowMinHeight": 560,
-    "nodeCardWidth": 260
+    "nodeCardWidth": 260,
+    "modalWidth": 780,
+    "modalNavWidth": 180,
+    "modalInsetTop": 52,
+    "modalInset": 28,
+    "modalScrimBlur": 8
   },
   "opacity": {
     "disabled": 0.45,

@@ -102,16 +102,17 @@ struct TraceCommonsShell: App {
             MainWindowCommands(model: model, compute: compute, navigation: navigation,
                                missionDrafts: missionDrafts)
             #if DEBUG
-            MonitorWindowCommands()
+            MonitorWindowCommands(navigation: navigation)
             #endif
         }
 
         #if DEBUG
-        // The glass monitor window and the Settings window (R5 of #1173),
-        // in debug builds until the screens they frame match the design.
+        // The glass monitor window (R5 of #1173), in debug builds until the
+        // screens it frames match the design. Settings is a modal inside it
+        // (Ron's #1146; #1241 Task 10), not a window of its own.
         // TRACE_COMMONS_MONITOR=1 opens the monitor at launch.
         Window("Monitor", id: WindowID.monitor) {
-            MonitorWindowView()
+            MonitorWindowView(navigation: navigation)
                 .environmentObject(model)
                 // The monitor reads the daemon whatever the main window
                 // shows (Insights defers services).
@@ -143,28 +144,38 @@ struct TraceCommonsShell: App {
         }
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 860, height: 760)
-
-        Settings {
-            MonitorSettingsWindow(navigation: navigation)
-                .environmentObject(model)
-                // Settings loads and saves through the daemon; opened with
-                // ⌘, while the main window rests on Insights it would
-                // otherwise show nothing and drop edits.
-                .onAppear { navigation.activateServicesForWindow() }
-                .environment(compute)
-                .tint(TC.accent)
-        }
         #endif
     }
 }
 
 #if DEBUG
-/// Window ▸ Monitor, to open the glass monitor window in a debug build.
+/// Window ▸ Monitor, to open the glass monitor window in a debug build, and
+/// the app menu's Settings (Cmd-comma), which opens the Monitor and asks it
+/// for its Settings modal (#1241 Task 10). The Monitor reads the daemon
+/// whatever the main window shows, so services start as it opens.
 private struct MonitorWindowCommands: Commands {
+    let navigation: MainWindowNavigation
+
     var body: some Commands {
         CommandGroup(after: .windowList) {
             OpenMonitorButton()
         }
+        CommandGroup(replacing: .appSettings) {
+            OpenSettingsModalButton(navigation: navigation)
+        }
+    }
+}
+
+private struct OpenSettingsModalButton: View {
+    let navigation: MainWindowNavigation
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        Button(MonitorWords.table?.settings ?? "") {
+            openWindow(id: WindowID.monitor)
+            navigation.requestSettings()
+        }
+        .keyboardShortcut(",", modifiers: .command)
     }
 }
 

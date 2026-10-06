@@ -11,6 +11,10 @@ import TCShellCore
 struct PrivateAISection: View {
     @EnvironmentObject private var model: AppModel
     var navigation: MainWindowNavigation?
+    /// Where the pointer goes when Settings is the Monitor's modal: it closes
+    /// the modal and opens the Inference tab (Ron's #1146). Nil in the main
+    /// window, whose own Private AI destination the pointer opens.
+    var onPointer: (() -> Void)? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
@@ -24,7 +28,11 @@ struct PrivateAISection: View {
                         // The label is the destination's own, so the sidebar
                         // and this pointer can never name it differently.
                         Button(copy.destination) {
-                            navigation?.section = .privateInference
+                            if let onPointer {
+                                onPointer()
+                            } else {
+                                navigation?.section = .privateInference
+                            }
                         }
                         .buttonStyle(GlassButtonStyle(.link))
                     }

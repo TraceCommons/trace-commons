@@ -737,6 +737,15 @@ pub struct MonitorScreensCopy {
     pub manage_rules: &'static str,
     /// Opens Settings.
     pub settings: &'static str,
+    /// The Settings modal's title (Ron's #1146 `SettingsModal`), over the
+    /// Monitor.
+    pub settings_title: &'static str,
+    /// The Settings modal's subtitle.
+    pub settings_subtitle: &'static str,
+    /// The name of the Settings modal's section list.
+    pub settings_sections: &'static str,
+    /// Closes a modal.
+    pub close: &'static str,
     /// Quits the app.
     pub quit: &'static str,
     /// The core did not answer; see [`MONITOR_CORE_UNREACHABLE`].
@@ -838,6 +847,10 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
         flagged: "Flagged",
         manage_rules: "Manage rules…",
         settings: "Trace Commons Settings…",
+        settings_title: "Settings",
+        settings_subtitle: "What this machine watches, and what your traces are allowed to do.",
+        settings_sections: "Settings sections",
+        close: "Close",
         quit: "Quit…",
         core_unreachable: MONITOR_CORE_UNREACHABLE,
         request_failed: MONITOR_REQUEST_FAILED,
@@ -935,6 +948,12 @@ mod tests {
         assert!(copy.projected_note.contains("not earned"));
         // Held is said in full, and never as rejected.
         assert!(copy.held_explanation.contains("not been rejected"));
+        // Ron's #1146 settings modal (#1241 Task 10): its title is not the
+        // menu item that opens it, and its subtitle is a sentence.
+        assert_eq!(copy.settings_title, "Settings");
+        assert_ne!(copy.settings_title, copy.settings);
+        assert!(copy.settings_subtitle.ends_with('.'));
+        assert!(!copy.settings_sections.is_empty() && !copy.close.is_empty());
     }
 
     #[test]

@@ -18,6 +18,17 @@ final class MonitorScreensCopyExportTests: XCTestCase {
         }
     }
 
+    /// Ron's #1146 Settings modal over the Monitor (#1241 Task 10): its
+    /// title, subtitle, section list name and close button, from the core.
+    func testTheSettingsModalWordsDecode() throws {
+        let copy = try XCTUnwrap(MonitorScreensCopy.decode(fromJSON: TCCoreCopy.monitorScreensCopyJSON()))
+        XCTAssertEqual(copy.settingsTitle, "Settings")
+        XCTAssertNotEqual(copy.settingsTitle, copy.settings)
+        XCTAssertTrue(copy.settingsSubtitle.hasPrefix("What this machine watches"))
+        XCTAssertFalse(copy.settingsSections.isEmpty)
+        XCTAssertFalse(copy.close.isEmpty)
+    }
+
     /// History's refresh and sign-in words (native words for Ron's #1146
     /// controls).
     func testTheHistoryActionsDecode() throws {

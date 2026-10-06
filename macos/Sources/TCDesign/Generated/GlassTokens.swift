@@ -369,6 +369,11 @@ public enum GlassTokens {
         public static let windowMinWidth: CGFloat = 760
         public static let windowMinHeight: CGFloat = 560
         public static let nodeCardWidth: CGFloat = 260
+        public static let modalWidth: CGFloat = 780
+        public static let modalNavWidth: CGFloat = 180
+        public static let modalInsetTop: CGFloat = 52
+        public static let modalInset: CGFloat = 28
+        public static let modalScrimBlur: CGFloat = 8
 
         /// Every size token by its JSON name.
         public static let all: [String: CGFloat] = [
@@ -403,6 +408,11 @@ public enum GlassTokens {
             "windowMinWidth": windowMinWidth,
             "windowMinHeight": windowMinHeight,
             "nodeCardWidth": nodeCardWidth,
+            "modalWidth": modalWidth,
+            "modalNavWidth": modalNavWidth,
+            "modalInsetTop": modalInsetTop,
+            "modalInset": modalInset,
+            "modalScrimBlur": modalScrimBlur,
         ]
     }
 
