@@ -212,8 +212,10 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
         public let otherOptions: String
         /// A refused ceremony; its label is never shown.
         public let refused: String
-        /// An existing passkey's account is bound on another Mac; signed out.
+        /// An existing passkey's account is a legacy one; signed out.
         public let boundElsewhere: String
+        /// This Mac's near.ai sign-in is not the passkey account's; signed out.
+        public let nearAiMismatch: String
     }
 
     public struct PrivateAi: Decodable, Equatable, Sendable {

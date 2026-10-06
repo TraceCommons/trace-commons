@@ -433,15 +433,15 @@ final class PasskeySheetsTests: XCTestCase {
         XCTAssertEqual(cancelling.outcome, .signedOut)
     }
 
-    /// Kristi's #1235 B1, decision (b), deferred: an account already bound
-    /// (on another Mac, or a legacy one) cannot be enrolled from this Mac yet,
-    /// so the sign-in fails closed. The daemon's session is signed out, so
-    /// nothing half-held survives, and the sheet says why with the core's
-    /// line. No outcome is reported, so Join records no account.
-    func test_anAccountBoundElsewhereIsSignedOutAndSaysSo() async throws {
+    /// A legacy account (not created with a passkey) cannot be joined from
+    /// this Mac with a passkey, so the sign-in fails closed. The daemon's
+    /// session is signed out, so nothing half-held survives, and the sheet
+    /// says why with the core's line. No outcome is reported, so Join records
+    /// no account. (An account bound on another Mac joins through Verify.)
+    func test_aLegacyAccountIsSignedOutAndSaysSo() async throws {
         let copy = try coreCopy()
         let account = RecordingAccount()
-        account.signInAnswer = .alreadyBound
+        account.signInAnswer = .legacy
         let model = PasskeySheetModel(start: .welcomeBack, copy: copy.passkey, account: account)
         await model.useExisting()
         XCTAssertEqual(account.calls, ["signIn", "signOut"])
@@ -468,14 +468,119 @@ final class PasskeySheetsTests: XCTestCase {
         XCTAssertTrue(source.contains("PasskeySheets.noticeLine(model"))
     }
 
-    /// The daemon's `binding_state` after a passkey sign-in. Only `unbound`
-    /// can be bound here; `bound` and `legacy` are bound already; anything
-    /// else is not a state this build knows and fails closed.
+    /// The daemon's `binding_state` after a passkey sign-in. `unbound` is
+    /// bound here; `bound` (another Mac bound it) is joined through Verify;
+    /// `legacy` cannot be joined with a passkey; anything else is not a state
+    /// this build knows and fails closed.
     func test_aSignInsBindingStateDecidesTheNextStep() {
         XCTAssertEqual(PasskeySignInResult(bindingState: "unbound"), .unbound)
-        XCTAssertEqual(PasskeySignInResult(bindingState: "bound"), .alreadyBound)
-        XCTAssertEqual(PasskeySignInResult(bindingState: "legacy"), .alreadyBound)
+        XCTAssertEqual(PasskeySignInResult(bindingState: "bound"), .bound)
+        XCTAssertEqual(PasskeySignInResult(bindingState: "legacy"), .legacy)
         XCTAssertEqual(PasskeySignInResult(bindingState: "closed"), .unrecognised)
         XCTAssertEqual(PasskeySignInResult(bindingState: ""), .unrecognised)
+    }
+
+    /// Option 1 (2026-10-06): a second Mac signs in with the passkey of an
+    /// account another Mac bound. Verify runs the daemon's bind, which the
+    /// commons answers `enrolled` only when this Mac's near.ai sign-in is the
+    /// account's own; only then is the outcome `.signedIn`, which Join records
+    /// as a held passkey and an enrolment.
+    func test_aSecondMacJoinsItsPasskeysBoundAccountThroughVerify() async throws {
+        let copy = try coreCopy()
+        let account = RecordingAccount()
+        account.signInAnswer = .bound
+        let model = PasskeySheetModel(start: .welcomeBack, copy: copy.passkey, account: account)
+        await model.useExisting()
+        XCTAssertEqual(model.step, .verify)
+        XCTAssertNil(model.outcome, "no outcome before the enrolment")
+        XCTAssertEqual(account.calls, ["signIn"])
+
+        account.bindAnswer = .enrolled
+        await model.verify()
+        XCTAssertEqual(model.outcome, .signedIn)
+        XCTAssertEqual(account.calls, ["signIn", "bind"])
+
+        // A bound account's Verify accepts nothing but an enrolment: a bind or
+        // a switch would not be this account, so it fails closed.
+        for answer in [PasskeyBindResult.bound, .existingAccount] {
+            let odd = PasskeySheetModel(copy: copy.passkey, account: account)
+            await odd.useExisting()
+            account.bindAnswer = answer
+            await odd.verify()
+            XCTAssertNil(odd.outcome, "\(answer)")
+            XCTAssertEqual(odd.refusal, "account-bind-invalid")
+        }
+
+        // And an unbound account's, or a created passkey's, never accepts one.
+        account.signInAnswer = .unbound
+        let unbound = PasskeySheetModel(copy: copy.passkey, account: account)
+        await unbound.useExisting()
+        account.bindAnswer = .enrolled
+        await unbound.verify()
+        XCTAssertNil(unbound.outcome)
+        XCTAssertEqual(unbound.refusal, "account-bind-invalid")
+        let created = PasskeySheetModel(copy: copy.passkey, account: account)
+        created.createNew()
+        created.name = "Work laptop"
+        await created.submitName()
+        await created.verify()
+        XCTAssertNil(created.outcome)
+        XCTAssertEqual(created.refusal, "account-bind-invalid")
+    }
+
+    /// A second Mac whose near.ai sign-in is not the one its passkey's
+    /// account uses is refused by the commons before anything is added. The
+    /// sheet signs the passkey session out, fails closed, and says why with
+    /// the core's line; no outcome, so Join records no account. A sign-out the
+    /// daemon refuses is said as a refusal instead, since the session may
+    /// still be held.
+    func test_aSecondMacOnAnotherNearAiAccountIsSignedOutAndSaysSo() async throws {
+        let copy = try coreCopy()
+        let account = RecordingAccount()
+        account.signInAnswer = .bound
+        account.bindAnswer = .nearAiMismatch
+        let model = PasskeySheetModel(copy: copy.passkey, account: account)
+        await model.useExisting()
+        await model.verify()
+        XCTAssertEqual(account.calls, ["signIn", "bind", "signOut"])
+        XCTAssertNil(model.outcome)
+        XCTAssertEqual(model.step, .choose)
+        XCTAssertNil(model.refusal)
+        XCTAssertEqual(PasskeySheets.noticeLine(model, copy: copy.passkey), copy.passkey.nearAiMismatch)
+        XCTAssertNotEqual(copy.passkey.nearAiMismatch, copy.passkey.refused)
+        XCTAssertNotEqual(copy.passkey.nearAiMismatch, copy.passkey.boundElsewhere)
+
+        // Verify after that is not reachable: the sheet is back on Choose.
+        await model.verify()
+        XCTAssertEqual(account.calls, ["signIn", "bind", "signOut"])
+
+        let stuck = PasskeySheetModel(copy: copy.passkey, account: account)
+        account.signOutAnswer = .refused(label: "account-session-changed")
+        await stuck.useExisting()
+        await stuck.verify()
+        XCTAssertNil(stuck.outcome)
+        XCTAssertEqual(stuck.refusal, "account-session-changed")
+        XCTAssertEqual(PasskeySheets.noticeLine(stuck, copy: copy.passkey), copy.passkey.refused)
+    }
+
+    /// The daemon's answers for a join: `enrolled` with `bound` is the only
+    /// success, and its `account-enrol-mismatch` refusal is told apart from
+    /// every other failure by its label, never by a sentence.
+    func test_aJoinsAnswersMapFromTheDaemon() throws {
+        XCTAssertEqual(
+            PasskeyBindResult(try bindResult(#"{"outcome":"enrolled","binding_state":"bound"}"#)), .enrolled)
+        XCTAssertEqual(
+            PasskeyBindResult(try bindResult(#"{"outcome":"enrolled","binding_state":"legacy"}"#)),
+            .failed(.refused(label: "account-bind-invalid")))
+        XCTAssertEqual(
+            PasskeyBindResult(error: DaemonClient.Failure(code: "unavailable", message: "account-enrol-mismatch")),
+            .nearAiMismatch)
+        var viewed = DaemonClient.Failure(code: "unavailable", message: "account-enrol-mismatch")
+        viewed.viewMessage = "daemon view text"
+        XCTAssertEqual(PasskeyBindResult(error: viewed), .nearAiMismatch)
+        XCTAssertEqual(
+            PasskeyBindResult(error: DaemonClient.Failure(code: "unavailable", message: "account-request-refused")),
+            .failed(.refused(label: "account-request-refused")))
+        XCTAssertEqual(PasskeyBindResult(error: NativePasskeyFailure.cancelled), .failed(.cancelled))
     }
 }

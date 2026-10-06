@@ -29,9 +29,10 @@ public enum AccountAnswer: Codable, Equatable, Sendable {
     /// with the daemon, so they open once Folders or Tools started it
     /// (`FirstRunCall.openPasskeySheets`); until then the choice is undoable.
     case passkeyChosen
-    /// A passkey whose account Verify bound, which enrolled this Mac
-    /// (`account_bind`), with the name the person gave it (empty when an
-    /// existing passkey signed in, or the bind answered `existing_account`).
+    /// A passkey whose account Verify bound, or joined this Mac to (another
+    /// Mac had bound it), which enrolled this Mac (`account_bind`), with the
+    /// name the person gave it (empty when an existing passkey signed in, or
+    /// the bind answered `existing_account`).
     /// A sign-in alone never records it: it holds no enrolment.
     case passkey(name: String)
     /// The daemon was already enrolled when this first run began: an earlier
