@@ -135,6 +135,15 @@ public struct FirstRunState: Codable, Equatable, Sendable {
     /// (`recordDiscovery`). Such a tool is not asked (spec rule 1); see
     /// `sessionRoots` for how it is declared.
     public var notFound: Set<SourceKind>
+    /// The person signed out on Join (#1030 rule 6) while the daemon held an
+    /// enrolment: this run's invite, a passkey Verify bound, or an earlier
+    /// first run's. The daemon has no call that drops an enrolment, so it
+    /// may still hold one; this first run no longer treats it as an account
+    /// (`holdsEnrolment` is false) and sends nothing that belongs to one --
+    /// no scopes, no grant, no enrolment marker -- and an enrolment the
+    /// daemon reports is not recorded again. A later enrolment (a new
+    /// invite enrolled, a passkey bound) clears it.
+    public var signedOutOfEnrolment: Bool
 
     public init(
         tier: FirstRunTier = .quick,
@@ -156,7 +165,8 @@ public struct FirstRunState: Codable, Equatable, Sendable {
         enrolledInvite: String? = nil,
         signedIn: Bool = false,
         nearAIEnrolled: Bool = false,
-        notFound: Set<SourceKind> = []
+        notFound: Set<SourceKind> = [],
+        signedOutOfEnrolment: Bool = false
     ) {
         self.tier = tier
         self.step = step
@@ -178,6 +188,7 @@ public struct FirstRunState: Codable, Equatable, Sendable {
         self.signedIn = signedIn
         self.nearAIEnrolled = nearAIEnrolled
         self.notFound = notFound
+        self.signedOutOfEnrolment = signedOutOfEnrolment
     }
 
     /// Record what discovery found. A tool not on this Mac is not asked,
@@ -192,8 +203,10 @@ public struct FirstRunState: Codable, Equatable, Sendable {
     /// need. An earlier first run's enrolment; a passkey Verify bound; or
     /// near.ai once its invite enrolled, or once it enrolled this Mac with no
     /// invite. An account answer alone -- near.ai chosen, a passkey chosen --
-    /// is not one.
+    /// is not one, and nor is an enrolment the person signed out of
+    /// (`signedOutOfEnrolment`).
     public var holdsEnrolment: Bool {
+        if signedOutOfEnrolment { return false }
         switch account {
         case .enrolled, .passkey: return true
         case .nearAI: return enrolledInvite != nil || nearAIEnrolled

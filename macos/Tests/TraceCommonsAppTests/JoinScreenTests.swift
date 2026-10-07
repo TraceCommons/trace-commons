@@ -71,24 +71,35 @@ final class JoinScreenTests: XCTestCase {
         if case .joined(let text) = line { XCTAssertFalse(text.contains("_"), text) }
 
         // One figure reads as one figure; a unit this build cannot word reads
-        // as a dash, never as the wire label.
+        // as the core's Unknown, never as the wire label or a dash.
         let one = try Self.lookup(
             #"{"valid":true,"credit_range":{"min":5,"max":5,"unit":"points_per_accepted_trace"}}"#)
         XCTAssertEqual(
             JoinScreenLayout.payRange(one, copy: copy.join),
             copy.join.payRangePointsOne.replacingOccurrences(of: "{min}", with: "5"))
         let foreign = try Self.lookup(#"{"valid":true,"credit_range":{"min":1,"max":2,"unit":"dollars"}}"#)
-        XCTAssertEqual(JoinScreenLayout.payRange(foreign, copy: copy.join), "—")
+        XCTAssertEqual(JoinScreenLayout.payRange(foreign, copy: copy.join), copy.join.unknown)
+        XCTAssertEqual(copy.join.unknown, "Unknown")
         XCTAssertFalse(JoinScreenLayout.inviteIsEditable(state))
 
-        // An unknown range reads as a dash, never as zero.
+        // An unknown range reads as Unknown, never as zero or a dash.
         let noRange = try Self.lookup(#"{"valid":true}"#)
         XCTAssertEqual(
             JoinScreenLayout.inviteLine(state, lookup: noRange, failure: nil, copy: copy.join),
             .joined(
                 copy.join.inviteJoined
                     .replacingOccurrences(of: "{host}", with: "issuer.example")
-                    .replacingOccurrences(of: "{pay_range}", with: "—")))
+                    .replacingOccurrences(of: "{pay_range}", with: copy.join.unknown)))
+        // An unknown host reads as Unknown too.
+        var hostless = state
+        hostless.issuerHost = nil
+        XCTAssertEqual(
+            JoinScreenLayout.inviteLine(hostless, lookup: noRange, failure: nil, copy: copy.join),
+            .joined(
+                copy.join.inviteJoined
+                    .replacingOccurrences(of: "{host}", with: copy.join.unknown)
+                    .replacingOccurrences(of: "{pay_range}", with: copy.join.unknown)))
+        XCTAssertFalse(try Self.source().contains("\"—\""))
 
         // The screen's own host function is the core's (`TCInvite.issuerHost`),
         // so a real invite shows its issuer's host before the daemon runs.
@@ -591,19 +602,112 @@ final class JoinScreenTests: XCTestCase {
         XCTAssertEqual(signedOut.state.account, .none)
         XCTAssertEqual(signedOut.notice, copy.join.signedOut)
 
-        // The sign-out ends the daemon's account session, a near.ai one
-        // included: the chosen near.ai stays chosen and is signed in again.
+        // #1030 rule 6: signing out clears every sign-in, near.ai included,
+        // so nothing is signed in again behind the person's back.
         let nearAI = FirstRunState(
             account: .nearAI, toolAnswers: [.claudeCode: .off, .codex: .off], daemonStarted: true, signedIn: true)
         let afterNearAI = JoinScreenLayout.apply(.signedOut, to: nearAI, copy: copy)
-        XCTAssertEqual(afterNearAI.state.account, .nearAI)
+        XCTAssertEqual(afterNearAI.state.account, AccountAnswer.none)
         XCTAssertFalse(afterNearAI.state.signedIn)
-        XCTAssertEqual(FirstRunPlan.calls(for: afterNearAI.state, at: .leaveRoots).last, .enrollNearAI)
-        var invited = nearAI
-        invited.invite = "invite:issuer.example"
-        invited.enrolledInvite = "invite:issuer.example"
-        let afterInvited = JoinScreenLayout.apply(.signedOut, to: invited, copy: copy)
-        XCTAssertEqual(FirstRunPlan.calls(for: afterInvited.state, at: .leaveRoots).last, .signInNearAI)
+        XCTAssertFalse(FirstRunPlan.calls(for: afterNearAI.state, at: .leaveRoots).contains(.signInNearAI))
+        XCTAssertFalse(FirstRunPlan.calls(for: afterNearAI.state, at: .leaveRoots).contains(.enrollNearAI))
+    }
+
+    /// #1030 rule 6 (owner ruling, 2026-10-06): signing out clears the
+    /// invite and the enrolment it wrote, not only the cards. The daemon has
+    /// no call that drops an enrolment, so the state stops treating it as an
+    /// account: no joined line, no scopes, no grant, no enrolment marker, and
+    /// the daemon's report of it is not recorded again.
+    func test_signingOutClearsTheInviteAndItsEnrolment() throws {
+        let copy = try coreCopy()
+        var state = FirstRunState(
+            step: .uses, invite: "invite:issuer.example", issuerHost: "issuer.example", account: .nearAI,
+            toolAnswers: [.claudeCode: .off, .codex: .off], scopes: ["research"], sharing: .automatic,
+            grantReady: true, daemonStarted: true, enrolledInvite: "invite:issuer.example", signedIn: true)
+        state.startedSettingsJSON = state.sessionRoots.settingsJSON()
+        XCTAssertTrue(state.holdsEnrolment)
+
+        let out = JoinScreenLayout.apply(.signedOut, to: state, copy: copy).state
+        XCTAssertEqual(out.account, AccountAnswer.none)
+        XCTAssertEqual(out.invite, "")
+        XCTAssertNil(out.issuerHost)
+        XCTAssertNil(out.enrolledInvite)
+        XCTAssertFalse(out.signedIn)
+        XCTAssertTrue(out.signedOutOfEnrolment)
+        XCTAssertFalse(out.holdsEnrolment)
+        XCTAssertFalse(JoinScreenLayout.hasAccount(out))
+        XCTAssertEqual(JoinScreenLayout.inviteLine(out, lookup: nil, failure: nil, copy: copy.join), .hidden)
+        XCTAssertTrue(JoinScreenLayout.inviteIsEditable(out))
+        XCTAssertFalse(FirstRunNavigation.canChooseAutomatic(out))
+        // The answers that are not sign-ins are kept.
+        XCTAssertEqual(out.scopes, state.scopes)
+        XCTAssertEqual(out.toolAnswers, state.toolAnswers)
+
+        // Fail closed: nothing that belongs to an enrolment is sent for it.
+        var watching = out
+        watching.account = .watchOnly
+        let calls = FirstRunPlan.calls(for: watching, at: .start)
+        XCTAssertFalse(calls.contains(.setConsentScopes(["research"])))
+        XCTAssertFalse(calls.contains(.markComplete))
+        XCTAssertFalse(calls.contains { if case .grantAutomatic = $0 { return true } else { return false } })
+        XCTAssertEqual(calls.last, .markWatchOnlyComplete)
+
+        // The daemon still reports the enrolment; it is not the account again.
+        XCTAssertEqual(OnboardingNavigation.recordEnrolment(out), out)
+
+        // An earlier first run's enrolment is signed out of the same way.
+        let earlier = JoinScreenLayout.apply(
+            .signedOut, to: OnboardingNavigation.recordEnrolment(FirstRunState()), copy: copy
+        ).state
+        XCTAssertTrue(earlier.signedOutOfEnrolment)
+        XCTAssertFalse(earlier.holdsEnrolment)
+        XCTAssertNil(earlier.enrolledInvite)
+
+        // near.ai's invite-free enrolment is signed out of the same way.
+        var viaNearAI = FirstRunState(account: .nearAI, daemonStarted: true, signedIn: true)
+        viaNearAI.nearAIEnrolled = true
+        XCTAssertTrue(viaNearAI.holdsEnrolment)
+        let nearAIOut = JoinScreenLayout.apply(.signedOut, to: viaNearAI, copy: copy).state
+        XCTAssertFalse(nearAIOut.nearAIEnrolled)
+        XCTAssertTrue(nearAIOut.signedOutOfEnrolment)
+        XCTAssertFalse(nearAIOut.holdsEnrolment)
+
+        // A sign-out with nothing enrolled marks nothing.
+        let chosen = JoinScreenLayout.apply(.signedOut, to: FirstRunState(account: .passkeyChosen), copy: copy).state
+        XCTAssertFalse(chosen.signedOutOfEnrolment)
+
+        // A later bound passkey is an enrolment again.
+        let bound = JoinScreenLayout.apply(.created(name: "Mac"), to: out, copy: copy).state
+        XCTAssertFalse(bound.signedOutOfEnrolment)
+        XCTAssertTrue(bound.holdsEnrolment)
+    }
+
+    /// The runner's side of the sign-out: the invite's lookup goes with the
+    /// invite, and a new invite the daemon enrolls clears the mark.
+    func test_theRunnerDropsTheLookupOnSignOut() async throws {
+        let copy = try coreCopy()
+        let daemon = RecordingFirstRunDaemon()
+        var state = FirstRunState(
+            tier: .quick, step: .folders, invite: "invite:issuer.example", issuerHost: "issuer.example",
+            account: .nearAI, toolAnswers: [.claudeCode: .off, .codex: .off])
+        state.account = .nearAI
+        let runner = FirstRunRunner(state: state, daemon: daemon)
+        await runner.commit(.leaveRoots)
+        XCTAssertNotNil(runner.lookup)
+        XCTAssertNotNil(runner.state.enrolledInvite)
+
+        runner.finishPasskey(.signedOut, copy: copy)
+        XCTAssertNil(runner.lookup)
+        XCTAssertEqual(runner.state.step, .join)
+        XCTAssertTrue(runner.state.signedOutOfEnrolment)
+
+        runner.state.invite = "invite:other.example"
+        runner.state.issuerHost = "other.example"
+        runner.state.account = .nearAI
+        runner.state.step = .folders
+        await runner.commit(.leaveRoots)
+        XCTAssertEqual(runner.state.enrolledInvite, "invite:other.example")
+        XCTAssertFalse(runner.state.signedOutOfEnrolment)
     }
 
     /// Every word on Join is the core's: the file holds no literal of two or

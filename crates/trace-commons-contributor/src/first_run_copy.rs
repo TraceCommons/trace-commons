@@ -14,6 +14,13 @@
 //!   tools it used to name are not read (owner decision, 2026-10-04), and a
 //!   folder that matches nothing is refused with `tools.add_tool_refused`.
 //! - The invite placeholder carries no code: Ron's preview showed a mock one.
+//! - Frame adds `undo`, which takes back a passkey or near.ai chosen on Join
+//!   and not yet acted on.
+//! - Join adds `invite_dead` for a real invite the daemon refused,
+//!   `pay_range_points` and `pay_range_points_one` to word the invite's
+//!   credit range in the one unit the daemon accepts, `passkey_chosen` and
+//!   `near_ai_chosen` for an account chosen before the daemon runs, and
+//!   `unknown` for an invite host or pay range the shell does not know.
 //! - Tools adds three lines for a folder that matches more than one kind:
 //!   `which_kind` asks which, `trajectory_label` names the exported-traces
 //!   option and its row, and `neither` dismisses the question; and
@@ -25,8 +32,10 @@
 //!   `sign_in_failed` (the core's existing sign-in line), so leaving Folders
 //!   or Tools never stops in silence, and `settings_failed` for a changed
 //!   folder declaration the running daemon refused.
-//! - Rules adds `past_sessions_watch_only`: watching only queues the picked
-//!   past sessions on this Mac, and the card says they wait there.
+//! - Rules adds `unavailable` and `retry` for folders the daemon could not
+//!   read, `sessions_unavailable` for one folder's past sessions, and
+//!   `past_sessions_watch_only`: watching only queues the picked past
+//!   sessions on this Mac, and the card says they wait there.
 //! - Join adds `invite_or_passkey`: a new passkey creates an account of its
 //!   own, so it is not combined with an invite. near.ai needs no invite
 //!   (owner, Ron's review of #1235), so there is no line asking for one.
@@ -83,7 +92,7 @@ pub struct FrameCopy {
     /// `{count}`: sessions found for a tool (Tools) or a repo (Rules).
     pub session_count: &'static str,
     /// Takes back a choice not yet acted on (a passkey or near.ai on Join).
-    /// Not Ron's words.
+    /// Approved 2026-10-06.
     pub undo: &'static str,
     /// What an unanswered picker reads: Ron's design-system `Picker`
     /// placeholder. The picker's question stays its accessible label.
@@ -110,7 +119,7 @@ pub struct JoinCopy {
     /// found). Not Ron's words; owner-approved 2026-10-05.
     pub invite_dead: &'static str,
     /// `{min}`, `{max}`: the invite's range in the one unit the daemon
-    /// accepts, `points_per_accepted_trace`. A shell shows a dash for any
+    /// accepts, `points_per_accepted_trace`. A shell shows `unknown` for any
     /// other unit, never the wire label. Not Ron's words; owner-approved.
     pub pay_range_points: &'static str,
     /// `{min}`: the same, when the range is a single figure.
@@ -122,17 +131,20 @@ pub struct JoinCopy {
     pub passkey_create: &'static str,
     pub passkey_done: &'static str,
     /// Create passkey chosen but not yet created: the passkey sheets open
-    /// once the daemon starts, after Folders or Tools. Not Ron's words.
+    /// once the daemon starts, after Folders or Tools. Approved 2026-10-06.
     pub passkey_chosen: &'static str,
     pub near_ai_eyebrow: &'static str,
     pub near_ai_text: &'static str,
     pub near_ai_sign_in: &'static str,
     /// near.ai chosen but not yet signed in: the sign-in runs once the
-    /// daemon starts, after Folders or Tools. Not Ron's words.
+    /// daemon starts, after Folders or Tools. Approved 2026-10-06.
     pub near_ai_chosen: &'static str,
     /// A new passkey creates an account of its own, so it is not combined
-    /// with an invite. Not Ron's words.
+    /// with an invite. Approved 2026-10-06.
     pub invite_or_passkey: &'static str,
+    /// An invite host or pay range the shell does not know, in place of a
+    /// dash (owner ruling, 2026-10-06).
+    pub unknown: &'static str,
     pub signed_in: &'static str,
     pub no_sharing: &'static str,
     pub skip_note: &'static str,
@@ -184,8 +196,8 @@ pub struct FoldersCopy {
     pub sign_in_failed: &'static str,
     /// The daemon is running and refused a changed folder declaration on a
     /// later Continue (`set_settings`). Watching goes on with the folders it
-    /// already had, so this is not `watcher_start_failed`.
-    /// **DRAFT, NEEDS APPROVAL**
+    /// already had, so this is not `watcher_start_failed`. Approved
+    /// 2026-10-06.
     pub settings_failed: &'static str,
 }
 
@@ -205,14 +217,13 @@ pub struct ToolsCopy {
     /// A folder of exported traces, as an option and as its row's name.
     pub trajectory_label: &'static str,
     /// The last option of `which_kind`'s picker: the folder is neither kind.
-    /// It closes the question and adds the folder as nothing.
-    /// **DRAFT, NEEDS APPROVAL**
+    /// It closes the question and adds the folder as nothing. Approved
+    /// 2026-10-06.
     pub neither: &'static str,
     /// `{tool}`: a tool's own row and a folder added for it both read
     /// Watch. The daemon watches one folder per tool, so Continue waits for
     /// one of them to say "I don't use it"; this says so beside the added
-    /// folder.
-    /// **DRAFT, NEEDS APPROVAL**
+    /// folder. Approved 2026-10-06.
     pub one_folder_per_tool: &'static str,
 }
 
@@ -235,16 +246,17 @@ pub struct RulesCopy {
     pub never_count: &'static str,
     pub never_label: &'static str,
     /// The folders could not be read; Continue stays disabled, and the
-    /// card offers `folders.retry`. No screen has a Back (Ron's review of
-    /// #1235, item 9), so it does not say to go back.
-    /// **DRAFT, NEEDS APPROVAL**
+    /// card offers `retry`. No screen has a Back (Ron's review of #1235,
+    /// item 9), so it does not say to go back. Approved 2026-10-06.
     pub unavailable: &'static str,
+    /// Reads the folders again after `unavailable`: Rules' own word, not
+    /// Folders' `retry`. Approved 2026-10-06.
+    pub retry: &'static str,
     /// One folder's past sessions could not be read.
     pub sessions_unavailable: &'static str,
     /// Watching only: the past-session card's note. Start queues the picked
     /// sessions on this Mac as pending offers and sends none of them, since
-    /// there is no enrolment to send them under.
-    /// **DRAFT, NEEDS APPROVAL**
+    /// there is no enrolment to send them under. Approved 2026-10-06.
     pub past_sessions_watch_only: &'static str,
     /// A session's weekday names, Sunday first, as Ron's `WEEKDAYS`.
     pub weekdays: [&'static str; 7],
@@ -327,13 +339,11 @@ pub struct PasskeyCopy {
     /// could check).
     /// Adding a Mac to one with a passkey is not built, so the sheet signed
     /// out and stays on Choose. (An account bound on another Mac goes through
-    /// Verify and joins.)
-    /// **DRAFT, NEEDS APPROVAL**
+    /// Verify and joins.) Approved 2026-10-06.
     pub bound_elsewhere: &'static str,
     /// Verify, joining an account bound on another Mac, was refused: this
     /// Mac's near.ai sign-in is not the one that account uses. Nothing was
-    /// added; the sheet signed out and stays on Choose.
-    /// **DRAFT, NEEDS APPROVAL**
+    /// added; the sheet signed out and stays on Choose. Approved 2026-10-06.
     pub near_ai_mismatch: &'static str,
 }
 
@@ -401,6 +411,7 @@ pub fn first_run_copy() -> FirstRunCopy {
             near_ai_sign_in: "Sign in",
             near_ai_chosen: "You'll sign in once watching starts.",
             invite_or_passkey: "An invite and a new passkey can't be combined. Use one or the other.",
+            unknown: "Unknown",
             signed_in: "Signed in",
             no_sharing: "Connecting or creating an account doesn't authorize any data sharing.",
             skip_note: "Skipping sets up watching only. Contributing needs a near.ai account; sign in any time.",
@@ -461,6 +472,7 @@ pub fn first_run_copy() -> FirstRunCopy {
             never_count: "{count} · rule is Never",
             never_label: "{folder}: rule is Never",
             unavailable: "Couldn't read repos from your sessions.",
+            retry: "Try again",
             sessions_unavailable: "Past sessions unavailable",
             past_sessions_watch_only: "You're watching only, so the sessions you pick wait on this Mac, unsent, until you join.",
             weekdays: ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"],
@@ -664,6 +676,29 @@ mod tests {
         assert!(rules.past_sessions_watch_only.contains("this Mac"));
         assert!(rules.past_sessions_watch_only.contains("join"));
         assert_ne!(rules.past_sessions_watch_only, rules.past_sessions);
+    }
+
+    /// An unknown invite host or pay range reads as a word, never a dash
+    /// (owner ruling, 2026-10-06), and it is not a figure.
+    #[test]
+    fn an_unknown_host_or_range_is_a_word() {
+        let join = first_run_copy().join;
+        assert_eq!(join.unknown, "Unknown");
+        assert!(!join.unknown.contains('—'));
+        assert!(!join.unknown.chars().any(|c| c.is_ascii_digit()));
+    }
+
+    /// The Rules screen has no Back link, so its unavailable line points at
+    /// no way back: the screen offers a retry beside it instead.
+    #[test]
+    fn unreadable_rules_point_at_no_back_link() {
+        let copy = first_run_copy();
+        assert!(!copy.rules.unavailable.contains("Go back"));
+        assert!(!copy.rules.unavailable.contains("Back"));
+        assert_ne!(copy.rules.unavailable, copy.folders.discovery_failed);
+        // Rules has its own retry word, not Folders' "Look again".
+        assert_eq!(copy.rules.retry, "Try again");
+        assert_ne!(copy.rules.retry, copy.folders.retry);
     }
 
     /// Enroll runs only after the invite was looked up and accepted, so its

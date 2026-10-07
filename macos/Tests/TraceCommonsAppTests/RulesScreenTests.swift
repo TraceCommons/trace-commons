@@ -325,4 +325,32 @@ final class RulesScreenTests: XCTestCase {
             .appendingPathComponent("Sources/TraceCommonsApp/Views/FirstRun/RulesScreen.swift")
         XCTAssertTrue(try String(contentsOf: url, encoding: .utf8).contains("RulesScreenLayout.pastSessionsNote("))
     }
+
+    /// Ron's ruling of 2026-10-06: folders that cannot be read show the
+    /// core's unavailable line with a retry, as Compute and History do, and
+    /// Continue stays disabled until they load. The line names no Back link,
+    /// which the first run no longer has.
+    func test_unreadableFoldersOfferARetryAndHoldContinue() throws {
+        let copy = try XCTUnwrap(FirstRunCopy.decode(try XCTUnwrap(TCCoreCopy.firstRunCopyJSON())))
+        XCTAssertFalse(RulesScreenLayout.canContinue(projects: nil))
+        XCTAssertTrue(RulesScreenLayout.canContinue(projects: []))
+        XCTAssertEqual(RulesScreenLayout.retryTitle(copy), copy.rules.retry)
+        XCTAssertEqual(copy.rules.retry, "Try again")
+        XCTAssertNotEqual(copy.rules.retry, copy.folders.retry)
+        XCTAssertFalse(copy.rules.unavailable.contains("Go back"))
+
+        let url = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Sources/TraceCommonsApp/Views/FirstRun/RulesScreen.swift")
+        let source = try String(contentsOf: url, encoding: .utf8)
+        // The retry sits in the unavailable branch and reads again.
+        let branch = try XCTUnwrap(source.range(of: "} else if loadFailed {"))
+        let rest = source[branch.upperBound...]
+        let end = try XCTUnwrap(rest.range(of: "} else {"))
+        let failed = rest[..<end.lowerBound]
+        XCTAssertTrue(failed.contains("copy.rules.unavailable"))
+        XCTAssertTrue(failed.contains("RulesScreenLayout.retryTitle(copy)"))
+        XCTAssertTrue(failed.contains("await load()"))
+        XCTAssertTrue(source.contains("isEnabled: RulesScreenLayout.canContinue(projects: projects)"))
+    }
 }

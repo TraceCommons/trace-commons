@@ -59,6 +59,8 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
         public let nearAiChosen: String
         /// An invite and a new passkey are not combined.
         public let inviteOrPasskey: String
+        /// An invite host or pay range not known, in place of a dash.
+        public let unknown: String
         public let signedIn: String
         public let noSharing: String
         public let skipNote: String
@@ -157,6 +159,8 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
         public let neverLabel: String
         /// The folders could not be read.
         public let unavailable: String
+        /// Reads the folders again after `unavailable`.
+        public let retry: String
         /// One folder's past sessions could not be read.
         public let sessionsUnavailable: String
         /// Watching only: picked past sessions wait on this Mac.
