@@ -1375,6 +1375,23 @@ pub trait Database: TraceCorpusStore + Send + Sync {
         ))
     }
 
+    /// The label `account_id` gave its ACTIVE credential `credential_id`, for
+    /// the native sign-in answer (`passkey_label`). `None` for no label, and
+    /// for an unknown, revoked, other-account or other-tenant credential: the
+    /// row must match the tenant, the account AND the credential, so a caller
+    /// can only ever read the label of a credential its own account holds.
+    /// Tenant-scoped under forced RLS.
+    async fn credential_label_for_account(
+        &self,
+        _tenant_id: &str,
+        _account_id: uuid::Uuid,
+        _credential_id: &str,
+    ) -> Result<Option<String>, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "credential_label_for_account not implemented".to_string(),
+        ))
+    }
+
     /// Persist the post-finish `Passkey` after a successful assertion so the
     /// updated sign counter (clone-detection state) is durable, and stamp
     /// `last_used_at`. Tenant-scoped under forced RLS; only an active

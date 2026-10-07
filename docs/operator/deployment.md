@@ -273,6 +273,10 @@ export TRACE_COMMONS_UNBOUND_PASSKEY_ACCOUNT_CEILING=5000   # the pilot's value;
 - Native passkey **sign-in** (`/v1/account/native/passkey/login/*`) is not
   capped and needs no new setting; like the browser sign-in it needs the
   login-resolver pool above.
+  Its `login/finish` answer adds an optional `passkey_label`, the
+  authenticating passkey's own label, read under the session's tenant by
+  account and credential id; it needs no grant beyond the `SELECT` on
+  `trace_webauthn_credentials` the login already uses, and is never logged.
 
 V98 grants `trace_ingest_runtime` `INSERT` on `trace_account_bindings`, and
 `EXECUTE` on `trace_unbound_passkey_account_count()`, a `SECURITY DEFINER`

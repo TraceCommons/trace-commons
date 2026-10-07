@@ -296,10 +296,11 @@ enum JoinScreenLayout {
     /// Record how the passkey sheets ended. A sign-in ends them only once
     /// Verify bound its account, or joined this Mac to the account another
     /// Mac bound (`PasskeySheetOutcome.signedIn`), so every held passkey is
-    /// an enrolment. The login itself carries no name
+    /// an enrolment. The shell's login result carries no name
     /// (`NativePasskeyCoordinator.perform(.login)` returns none); the
     /// outcome carries the one the daemon remembers for the signed-in
-    /// account's own record, when it has one. Without it (and after a switch
+    /// account's own record, when it has one: a name given here, or the
+    /// label the server returned for that passkey at sign-in. Without it (and after a switch
     /// to an existing account) the passkey is held with an empty name, which
     /// `passkeyLine` never shows.
     static func apply(

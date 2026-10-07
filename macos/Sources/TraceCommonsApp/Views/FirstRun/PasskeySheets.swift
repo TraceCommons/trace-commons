@@ -70,7 +70,8 @@ enum PasskeyCallResult: Equatable {
 enum PasskeyBindResult: Equatable {
     case bound
     case existingAccount
-    /// A bound account's Verify joined this Mac to it (`enrolled`).
+    /// A bound account's Verify joined this Mac to it (`enrolled`), or found
+    /// this Mac already enrolled in it (`already_enrolled`).
     case enrolled
     /// The commons refused to join this Mac to the bound account: this Mac's
     /// near.ai sign-in is not the one the account uses
@@ -85,7 +86,11 @@ enum PasskeyBindResult: Equatable {
         switch (result.outcome, result.bindingState) {
         case ("bound", "bound"): self = .bound
         case ("existing_account", "bound"), ("existing_account", "legacy"): self = .existingAccount
-        case ("enrolled", "bound"): self = .enrolled
+        // `already_enrolled`: this Mac already holds the enrolment of the
+        // account the session signed in to (the daemon checked it locally,
+        // and sent nothing), so it is the join Verify would have made. Only
+        // a bound account's Verify accepts it (`verify()`).
+        case ("enrolled", "bound"), ("already_enrolled", "bound"): self = .enrolled
         default: self = .failed(.refused(label: "account-bind-invalid"))
         }
     }

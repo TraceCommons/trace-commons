@@ -10,9 +10,12 @@
 //! What a record holds, and nothing more:
 //!
 //! - `name`: the passkey's display name as the person gave it when it was
-//!   created or added here. A sign-in carries no name (the server's login
-//!   answer has none, and the platform assertion gives the shell none), so a
-//!   passkey first used here by signing in is remembered without one.
+//!   created or added here, or, for a sign-in, the label the server's login
+//!   answer returned for the passkey that authenticated (`passkey_label`; the
+//!   platform assertion gives the shell none). A sign-in whose answer has no
+//!   usable label (an older server, or a passkey without one) keeps the name
+//!   this Mac already held, so a passkey first used here that way is
+//!   remembered without one.
 //! - `account`: the SHA-256 (hex) of the account id the passkey signed in to,
 //!   used only to match a later sign-in to the same record. The raw id is
 //!   never stored, and the hash never leaves this file.
@@ -121,8 +124,9 @@ pub fn name_for(store: &ConfigStore, account_id: &str) -> Result<Option<String>>
 }
 
 /// Remember that the passkey for `account_id` was created, added or used
-/// here, at `now`. A `name` replaces the remembered one; `None` (a sign-in)
-/// keeps whatever name this Mac already knew for that account. The record
+/// here, at `now`. A valid `name` replaces the remembered one; `None` (a
+/// sign-in whose answer carried no label) or a name that fails
+/// [`valid_name`] keeps whatever name this Mac already knew for that account. The record
 /// moves to the front, and the oldest beyond [`MAX_REMEMBERED`] is dropped.
 ///
 /// A file that cannot be read is replaced: it is this Mac's convenience
