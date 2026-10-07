@@ -59,7 +59,8 @@ final class ComponentParityTests: XCTestCase {
     func test_aRowReservesTheWatchColumn() throws {
         XCTAssertEqual(GlassListRow.watchColumn, 38)
         let rows = try XCTUnwrap(Dictionary(uniqueKeysWithValues: try DesignSources.components())["ListRow.swift"])
-        XCTAssertTrue(rows.contains("Color.clear.frame(width: Self.watchColumn, height: 0)"))
+        XCTAssertTrue(rows.contains("Color.clear.accessibilityHidden(true)"))
+        XCTAssertTrue(rows.contains(".frame(width: Self.watchColumn)"))
     }
 
     /// The floating segmented control's chosen segment: 18% white, no edge.

@@ -246,35 +246,30 @@ struct MonitorWindowView: View {
             // (`monitor-shell.tsx:166`, `px-4 py-4.5`), wider than the
             // other panes' 12.
             GlassPane(insets: GlassPaneInsets.inspector) {
-                Group {
-                    // An empty branch would leave the pane nothing to draw,
-                    // and it would vanish while the layout still reserved its
-                    // width. While onboarding is required only Inference is
-                    // shown, so the Private AI inspector is the only one
-                    // admitted (R-38).
-                    if !model.onboardingKnown {
-                        Color.clear
-                    } else {
-                        switch Self.shownTab(tab, requiresOnboarding: model.requiresOnboarding) {
-                        // The prompts and the health banners are drawn above
-                        // the Traces tree, not here (owner, 2026-10-07: offers,
-                        // undo and health above the tree). Inference keeps its
-                        // own inspector; Home, Traces and History host the
-                        // selection's inspector.
-                        case .inference:
-                            PrivateAIInspectorView(store: inference, destinationLabel: model.privateInferenceCopy?.destination)
-                        case .home, .traces:
-                            // An opened History row is the inspector's
-                            // selection while History is shown; otherwise the
-                            // Traces selection's card, as Ron mounts
-                            // `WaitingPage`.
-                            if tab == .home,
-                               let row = HistorySelection.opened(
-                                   selectedHistory, onHistory: homePage == .history, in: home.history) {
-                                HistoryInspectorPane(row: row)
-                            } else {
-                                TracesInspectorHost(traces: traces, home: home, selection: selection)
-                            }
+                // An empty branch would leave the pane nothing to draw, and
+                // it would vanish while the layout still reserved its width.
+                // While onboarding is required only Inference is shown, so
+                // the Private AI inspector is the only one admitted (R-38).
+                if !model.onboardingKnown {
+                    Color.clear
+                } else {
+                    switch Self.shownTab(tab, requiresOnboarding: model.requiresOnboarding) {
+                    // The prompts and the health banners are drawn above the
+                    // Traces tree, not here (owner, 2026-10-07: offers, undo
+                    // and health above the tree). Inference keeps its own
+                    // inspector; Home, Traces and History host the
+                    // selection's inspector.
+                    case .inference:
+                        PrivateAIInspectorView(store: inference, destinationLabel: model.privateInferenceCopy?.destination)
+                    case .home, .traces:
+                        // An opened History row is the inspector's selection
+                        // while History is shown; otherwise the Traces
+                        // selection's card, as Ron mounts `WaitingPage`.
+                        if tab == .home,
+                           let row = HistorySelection.opened(selectedHistory, onHistory: homePage == .history, in: home.history) {
+                            HistoryInspectorPane(row: row)
+                        } else {
+                            TracesInspectorHost(traces: traces, home: home, selection: selection)
                         }
                     }
                 }

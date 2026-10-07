@@ -135,7 +135,7 @@ final class TracesInspectorHostTests: XCTestCase {
         let pane = String(window[inspector.upperBound..<end.lowerBound])
         // The switch is on the shown tab inside the onboarding gate (R15).
         let switchStart = try XCTUnwrap(pane.range(of: "switch Self.shownTab(tab, requiresOnboarding: model.requiresOnboarding) {"))
-        let arms = pane[switchStart.upperBound...].components(separatedBy: "\n                        case ").dropFirst()
+        let arms = pane[switchStart.upperBound...].components(separatedBy: "\n                    case ").dropFirst()
         return (pane, Array(arms))
     }
 
@@ -153,8 +153,8 @@ final class TracesInspectorHostTests: XCTestCase {
         XCTAssertEqual(pane.components(separatedBy: "PrivateAIInspectorView(").count - 1, 1)
     }
 
-    /// Every arm but Inference draws the host, and no arm draws a detail
-    /// that skips it: a History row is the left pane's to show.
+    /// Every arm but Inference draws the host; an opened History row shows
+    /// in `HistoryInspectorPane` only on History, else the host.
     func test_everyInspectorArmButInferenceDrawsTheHost() throws {
         let (pane, arms) = try Self.inspectorArms()
         XCTAssertEqual(arms.count, 2, "one arm for Inference, one host for the rest")
