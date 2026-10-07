@@ -516,13 +516,16 @@ struct JoinScreen: View {
                     }
                 }
                 // #1030's `ftux-row--between`: the text takes the row and
-                // the action keeps its own width.
+                // the action keeps its own width. The action is fixed at its
+                // ideal size so the text column can never squeeze it to zero
+                // width and wrap its label out of sight.
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .layoutPriority(1)
                 if let done {
                     GlassStatusLabel(done, status: .on)
+                        .fixedSize()
                 } else if showsAction {
                     action()
+                        .fixedSize()
                 }
             }
         }

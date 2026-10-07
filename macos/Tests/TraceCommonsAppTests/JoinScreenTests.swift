@@ -416,6 +416,20 @@ final class JoinScreenTests: XCTestCase {
 
     /// One held account leaves the other card with neither its inviting line
     /// nor its action, which could never be taken over that account.
+    /// #1030's `ftux-row--between`: the account card's text takes the row
+    /// and its action keeps its own width. A text column with layout
+    /// priority over an action that is not fixed squeezed Create passkey
+    /// and Sign in to empty capsules and stretched the cards.
+    func test_anAccountCardsActionKeepsItsWidth() throws {
+        let source = try Self.source()
+        let card = try XCTUnwrap(source.range(of: "private func accountCard<Action: View>("))
+        let body = String(source[card.lowerBound...].prefix(1800))
+        XCTAssertFalse(body.contains(".layoutPriority("), "the text column outranks the action again")
+        XCTAssertTrue(body.contains("action()\n                        .fixedSize()"), "the action can be squeezed")
+        XCTAssertTrue(body.contains("GlassStatusLabel(done, status: .on)\n                        .fixedSize()"),
+                      "the done label can be squeezed")
+    }
+
     func test_aHeldAccountQuietsTheOtherCard() throws {
         let copy = try coreCopy()
         let start = FirstRunState(daemonStarted: true)
