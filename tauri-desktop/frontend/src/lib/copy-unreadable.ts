@@ -5,7 +5,7 @@
  * cannot come from the core, because the core's words are what failed, so
  * it is the only status sentence this shell types. It says what is true in
  * every case -- the wording could not be read -- and claims nothing about
- * what is running, waiting or sent. DRAFT, NEEDS APPROVAL (new, 2026-10-06).
+ * what is running, waiting or sent. Approved 2026-10-06.
  */
 export const WORDING_UNREADABLE =
   "This can't be shown, because this build could not read its wording.";

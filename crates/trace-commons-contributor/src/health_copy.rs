@@ -223,7 +223,7 @@ pub fn health_copy_for_label(label: &str, max_queue_entries: Option<u64>) -> Hea
 /// background service is running (one screen's read failed, not the
 /// service), so it claims neither that the service is down nor that what is
 /// on screen is a last-known answer. A failed read changes nothing, which is
-/// the data consequence it states. DRAFT, NEEDS APPROVAL (new, 2026-10-06).
+/// the data consequence it states. Approved 2026-10-06.
 pub const READ_UNAVAILABLE: &str =
     "This couldn't be read just now. Nothing has changed. Try again in a moment.";
 
@@ -231,9 +231,9 @@ pub const READ_UNAVAILABLE: &str =
 /// background service to start again, and the same button while it is
 /// asking. Not part of [`core_down_copy`] itself: nothing in the core
 /// restarts a stopped service, so only a shell that hosts one offers this.
-/// DRAFT, NEEDS APPROVAL (new, 2026-10-06).
+/// Approved 2026-10-06.
 pub const RETRY_STARTUP: &str = "Try again";
-/// See [`RETRY_STARTUP`]. DRAFT, NEEDS APPROVAL (new, 2026-10-06).
+/// See [`RETRY_STARTUP`]. Approved 2026-10-06.
 pub const RETRYING_STARTUP: &str = "Trying again…";
 
 /// Every status line a shell shows around a failed read or request, in one

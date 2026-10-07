@@ -650,12 +650,12 @@ pub const SCOPE_TAG_REQUIRED: &str = "required";
 
 /// The tag beside a scope that permits a use of the traces
 /// (`grants_data_use`). Tauri's wording, moved into the core so every shell
-/// can draw it. DRAFT, NEEDS APPROVAL (new, 2026-10-06).
+/// can draw it. Approved 2026-10-06.
 pub const SCOPE_TAG_DATA_USE: &str = "data use";
 
 /// The tag beside a scope that permits no use of the traces
 /// (`public_attribution`, an empty allowed-use set). Tauri's wording, moved
-/// into the core. DRAFT, NEEDS APPROVAL (new, 2026-10-06).
+/// into the core. Approved 2026-10-06.
 pub const SCOPE_TAG_ATTRIBUTION_ONLY: &str = "attribution only";
 
 /// The tag for a scope, from the two facts `consent_options` carries for
