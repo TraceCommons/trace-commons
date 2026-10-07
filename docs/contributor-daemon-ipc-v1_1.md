@@ -1937,8 +1937,10 @@ status is unread or the daemon is down. `tc_contribution_override_confirm_json(m
 confirmation; for `auto_upload` it carries `arming`, the Flow 1 grant
 screens' disclosure table for the configuration in `config_dir`. For
 `mode` `"clear"` it returns the confirmation a shell shows before
-`clear_contribution_override` when any folder's own setting is Automatic, or
-when the folder list or a folder's own setting is unknown: its `mode` is
+`clear_contribution_override` when the override in force is Ask me or Never
+and any folder's own setting is Automatic, or the folder list or a folder's
+own setting is unknown (under an Automatic override clearing resumes nothing,
+so it is not confirmed): its `mode` is
 `"clear"` (never a `ProjectMode`, never sent to `set_contribution_override`)
 and it carries no `arming`. Every sentence was approved 2026-10-06
 (`project_copy.rs`).

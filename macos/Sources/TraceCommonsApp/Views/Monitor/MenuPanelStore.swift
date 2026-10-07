@@ -87,15 +87,17 @@ final class MenuPanelStore {
     }
 
     /// Mixed was pressed while an override is in force. Clearing hands
-    /// every folder back to its own setting, so when any folder's own
-    /// setting is Automatic (or is not known) the core's clear confirmation
-    /// is shown first, as for an override: unattended sending never resumes
-    /// from a single menu press. Otherwise the override is cleared at once.
+    /// every folder back to its own setting, so when the override is Ask me
+    /// or Never and any folder's own setting is Automatic (or is not known),
+    /// the core's clear confirmation is shown first, as for an override:
+    /// unattended sending never resumes from a single menu press. Under an
+    /// Automatic override clearing resumes nothing, so it, like a clear with
+    /// no Automatic folder, happens at once.
     /// Without the core's confirmation nothing is cleared.
     func chooseMixed() async {
         guard canChooseOverride, status?.contributionOverride != nil else { return }
         overrideRefusal = nil
-        guard MenuPanelData.clearNeedsConfirmation(projects) else {
+        guard MenuPanelData.clearNeedsConfirmation(projects, override: status?.contributionOverride?.mode) else {
             await writeOverride { _ = try await $0.clearContributionOverride() }
             return
         }
@@ -251,7 +253,11 @@ enum MenuPanelData {
     /// folder's own setting is Automatic, so clearing resumes unattended
     /// sending there. An unread folder list, or a folder whose own setting
     /// the daemon did not report, needs it too (fail closed).
-    static func clearNeedsConfirmation(_ projects: [ProjectRow]?) -> Bool {
+    static func clearNeedsConfirmation(_ projects: [ProjectRow]?, override: String?) -> Bool {
+        // Under an Automatic override every folder already sends unattended;
+        // clearing starts nothing new (an Automatic folder keeps its own
+        // arming, Ask me folders go back to asking).
+        if override == "auto_upload" { return false }
         guard let projects else { return true }
         return projects.contains { $0.folderMode == nil || $0.folderMode == .autoUpload }
     }
