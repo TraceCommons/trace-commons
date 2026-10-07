@@ -769,3 +769,206 @@ fn the_enrol_mismatch_reaches_the_shell_by_name() {
         "account-unavailable"
     );
 }
+
+fn login_params() -> Value {
+    let data = json!({"type":"webauthn.get","challenge":"AQID","origin":"https://tracecommons.ai","crossOrigin":false});
+    json!({"ceremony":"local","credential_id":"AQID","raw_client_data_json":URL_SAFE_NO_PAD.encode(data.to_string()),"raw_authenticator_data":"BwgJ","signature":"CgsM","user_handle":"DQ4P"})
+}
+
+fn session_reply(account_id: &str) -> Value {
+    json!({"access_token":"tcn1_secret","token_type":"Bearer","expires_in_secs":43200,"account_id":account_id,"binding_state":"unbound"})
+}
+
+async fn passkey_state(shared: &DaemonShared) -> Value {
+    handle(shared, &request("passkey_state", json!({})))
+        .await
+        .result
+        .unwrap()
+}
+
+/// P-7 needs to know, before anyone signs in, that a passkey was used here
+/// and what it is called. Nothing has been: the count is an honest zero.
+#[tokio::test]
+async fn signed_out_passkey_state_reports_nothing_remembered_as_zero() {
+    let (_dir, shared) = shared();
+    assert_eq!(
+        passkey_state(&shared).await,
+        json!({"state":"none","passkey_count":0,"remembered_name":null,"near_ai_connected":null})
+    );
+}
+
+/// Creating a passkey remembers its name; signing out keeps it, so the
+/// signed-out `passkey_state` P-7 reads names it. The account id is not on
+/// the wire.
+#[tokio::test]
+async fn a_created_passkey_is_remembered_across_sign_out() {
+    let (_dir, shared) = shared();
+    let account_id = uuid::Uuid::new_v4().to_string();
+    let (origin, worker) = server_once("200 OK", session_reply(&account_id), None).await;
+    put_pending(
+        &shared,
+        &origin,
+        Action::Create,
+        Instant::now() + Duration::from_secs(30),
+    );
+    shared
+        .native_identity
+        .lock()
+        .unwrap()
+        .get_mut("local")
+        .unwrap()
+        .label = Some("Work laptop".into());
+    let response = handle(
+        &shared,
+        &request("passkey_create_complete", registration_params()),
+    )
+    .await;
+    assert!(response.error.is_none());
+    worker.await.unwrap();
+    commons_credentials::clear(&shared.store, &[Kind::Account]).unwrap();
+    let logout = handle(&shared, &request("account_sign_out", json!({}))).await;
+    assert_eq!(logout.result.unwrap()["signed_out"], true);
+    let state = passkey_state(&shared).await;
+    assert_eq!(
+        state,
+        json!({"state":"none","passkey_count":1,"remembered_name":"Work laptop","near_ai_connected":null})
+    );
+    assert!(!state.to_string().contains(&account_id));
+}
+
+/// A sign-in carries no name: it refreshes the record this Mac already has
+/// for the account, keeping its name, or adds one without a name.
+#[tokio::test]
+async fn a_sign_in_refreshes_the_remembered_passkey_and_keeps_its_name() {
+    let (_dir, shared) = shared();
+    let account_id = uuid::Uuid::new_v4().to_string();
+    super::super::remembered_passkeys::remember_at(
+        &shared.store,
+        &account_id,
+        Some("Home"),
+        Utc::now() - chrono::Duration::days(3),
+    )
+    .unwrap();
+    super::super::remembered_passkeys::remember_at(
+        &shared.store,
+        &uuid::Uuid::new_v4().to_string(),
+        Some("Someone else"),
+        Utc::now() - chrono::Duration::days(1),
+    )
+    .unwrap();
+    let (origin, worker) = server_once("200 OK", session_reply(&account_id), None).await;
+    put_pending(
+        &shared,
+        &origin,
+        Action::Login,
+        Instant::now() + Duration::from_secs(30),
+    );
+    let response = handle(&shared, &request("passkey_login_complete", login_params())).await;
+    assert_eq!(response.result.unwrap(), json!({"binding_state":"unbound"}));
+    assert!(
+        worker
+            .await
+            .unwrap()
+            .starts_with("POST /v1/account/native/passkey/login/finish ")
+    );
+    commons_credentials::clear(&shared.store, &[Kind::Account]).unwrap();
+    let state = passkey_state(&shared).await;
+    assert_eq!(state["passkey_count"], 2);
+    assert_eq!(state["remembered_name"], "Home");
+}
+
+/// A refused finish signed nobody in, so nothing is remembered.
+#[tokio::test]
+async fn a_refused_finish_remembers_nothing() {
+    let (_dir, shared) = shared();
+    let (origin, worker) = server_once("403 Forbidden", json!({"error":"no"}), None).await;
+    put_pending(
+        &shared,
+        &origin,
+        Action::Login,
+        Instant::now() + Duration::from_secs(30),
+    );
+    let response = handle(&shared, &request("passkey_login_complete", login_params())).await;
+    assert_eq!(response.error.unwrap().message, "passkey-finish-refused");
+    worker.await.unwrap();
+    assert_eq!(passkey_state(&shared).await["passkey_count"], 0);
+}
+
+/// One canned JSON answer per connection, in order.
+async fn server_sequence(bodies: Vec<Value>) -> (String, tokio::task::JoinHandle<Vec<String>>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let worker = tokio::spawn(async move {
+        let mut seen = Vec::new();
+        for body in bodies {
+            let body = body.to_string();
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut raw = Vec::new();
+            loop {
+                let mut buf = [0; 4096];
+                let n = socket.read(&mut buf).await.unwrap();
+                if n == 0 {
+                    break;
+                }
+                raw.extend_from_slice(&buf[..n]);
+                if let Some(end) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let headers = String::from_utf8_lossy(&raw[..end]).to_lowercase();
+                    let length = headers
+                        .lines()
+                        .find_map(|l| l.strip_prefix("content-length: "))
+                        .and_then(|n| n.parse::<usize>().ok())
+                        .unwrap_or(0);
+                    if raw.len() >= end + 4 + length {
+                        break;
+                    }
+                }
+            }
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+            seen.push(String::from_utf8(raw).unwrap());
+        }
+        seen
+    });
+    (origin, worker)
+}
+
+/// A passkey added to the signed-in account here is remembered by the name
+/// it was given.
+#[tokio::test]
+async fn an_added_passkey_is_remembered_by_its_name() {
+    let (_dir, shared) = shared();
+    let (origin, worker) = server_sequence(vec![json!({}), json!({"binding_state":"bound"})]).await;
+    configure_test_origin(&shared, &origin);
+    let snapshot = commons_credentials::snapshot(&shared.store, Kind::Account).unwrap();
+    persist_session(&shared.store, &snapshot, &origin, &json!({"access_token":format!("tcn1_{}.original", URL_SAFE_NO_PAD.encode("tenant-a")),"token_type":"Bearer","expires_in_secs":43200,"account_id":uuid::Uuid::new_v4().to_string(),"binding_state":"bound"})).unwrap();
+    let session = account_auth::try_load_session_with_snapshot(&shared.store)
+        .unwrap()
+        .unwrap();
+    put_pending(
+        &shared,
+        &origin,
+        Action::Add,
+        Instant::now() + Duration::from_secs(600),
+    );
+    {
+        let mut pending = shared.native_identity.lock().unwrap();
+        let pending = pending.get_mut("local").unwrap();
+        pending.session = Some(session);
+        pending.label = Some("Studio".into());
+    }
+    let response = handle(
+        &shared,
+        &request("passkey_add_complete", registration_params()),
+    )
+    .await;
+    assert_eq!(response.result.unwrap(), json!({"binding_state":"bound"}));
+    let seen = worker.await.unwrap();
+    assert!(seen[0].starts_with("POST /v1/account/passkeys/native/register/finish "));
+    let remembered = super::super::remembered_passkeys::summary(&shared.store).unwrap();
+    assert_eq!(remembered.count, 1);
+    assert_eq!(remembered.latest_name.as_deref(), Some("Studio"));
+}
