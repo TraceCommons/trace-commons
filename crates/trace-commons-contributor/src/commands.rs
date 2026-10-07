@@ -3123,11 +3123,30 @@ pub(crate) fn parse_invite(raw: &str) -> Result<ParsedInvite> {
 /// sentence, so the distinction between "not a URL" and "no code in it" is
 /// one the interface must not draw anyway.
 pub fn invite_issuer_host(raw: &str) -> Option<String> {
+    let (_, url) = acceptable_invite(raw)?;
+    url.host_str().map(str::to_string)
+}
+
+/// `raw` parsed as an invite the daemon's `invite_lookup` would ask its
+/// issuer about, with the issuer URL; `None` for anything it refuses. One
+/// check for both, so a shell never shows a host for an invite the lookup
+/// then refuses: https, or http to a literal loopback address only; no
+/// userinfo; a code of at most 256 characters with no control character.
+/// A port is accepted.
+pub(crate) fn acceptable_invite(raw: &str) -> Option<(ParsedInvite, reqwest::Url)> {
     let parsed = parse_invite(raw).ok()?;
-    reqwest::Url::parse(&parsed.issuer_url)
-        .ok()?
-        .host_str()
-        .map(str::to_string)
+    let url = reqwest::Url::parse(&parsed.issuer_url).ok()?;
+    let literal_loopback = match url.host() {
+        Some(url::Host::Ipv4(address)) => address.is_loopback(),
+        Some(url::Host::Ipv6(address)) => address.is_loopback(),
+        _ => false,
+    };
+    let acceptable = (url.scheme() == "https" || (url.scheme() == "http" && literal_loopback))
+        && url.username().is_empty()
+        && url.password().is_none()
+        && parsed.code.len() <= 256
+        && !parsed.code.chars().any(char::is_control);
+    acceptable.then_some((parsed, url))
 }
 
 /// The invite inside a `tracecommons://enroll?invite=…` deep link, or
@@ -3223,6 +3242,34 @@ mod invite_tests {
         assert_eq!(
             invite_issuer_host("https://issuer.tracecommons.ai/onboard"),
             None
+        );
+    }
+
+    /// Kristi b#16: the host a shell shows is only ever one the daemon's
+    /// `invite_lookup` would go on to ask. http (but to a literal loopback
+    /// address), userinfo, and a code too long or holding a control
+    /// character are refused here as they are there; a port is accepted by
+    /// both.
+    #[test]
+    fn issuer_host_refuses_what_invite_lookup_refuses() {
+        for bad in [
+            "http://issuer.tracecommons.ai/onboard#VQWWPGYSG8Y4LTP6",
+            "https://someone@issuer.tracecommons.ai/onboard#VQWWPGYSG8Y4LTP6",
+            "https://someone:secret@issuer.tracecommons.ai/onboard#VQWWPGYSG8Y4LTP6",
+        ] {
+            assert_eq!(invite_issuer_host(bad), None, "{bad}");
+            assert!(super::acceptable_invite(bad).is_none(), "{bad}");
+        }
+        let long = format!("https://issuer.tracecommons.ai/onboard#{}", "A".repeat(257));
+        assert_eq!(invite_issuer_host(&long), None);
+        assert_eq!(
+            invite_issuer_host("https://issuer.tracecommons.ai:8443/onboard#VQWWPGYSG8Y4LTP6")
+                .as_deref(),
+            Some("issuer.tracecommons.ai")
+        );
+        assert_eq!(
+            invite_issuer_host("http://127.0.0.1:8080/onboard#VQWWPGYSG8Y4LTP6").as_deref(),
+            Some("127.0.0.1")
         );
     }
 

@@ -20,8 +20,19 @@ final class InviteHostBridgeTests: XCTestCase {
             "https://issuer.tracecommons.ai/onboard",
             "not a url",
             "",
+            // The daemon's `invite_lookup` refuses these, so Join never
+            // shows a host for them.
+            "http://issuer.tracecommons.ai/onboard#VQWWPGYSG8Y4LTP6",
+            "https://someone@issuer.tracecommons.ai/onboard#VQWWPGYSG8Y4LTP6",
         ] {
             XCTAssertNil(TCInvite.issuerHost(bad), bad)
         }
+    }
+
+    /// A port is accepted by the daemon too, and the host is shown without it.
+    func test_aPortIsAccepted() {
+        XCTAssertEqual(
+            TCInvite.issuerHost("https://issuer.tracecommons.ai:8443/onboard#VQWWPGYSG8Y4LTP6"),
+            "issuer.tracecommons.ai")
     }
 }
