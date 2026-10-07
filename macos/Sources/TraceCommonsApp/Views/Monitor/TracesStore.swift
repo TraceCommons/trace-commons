@@ -20,8 +20,10 @@ final class TracesStore {
     private(set) var phase: Phase = .loading
     private(set) var tree = TracesTree(tools: [], unplaced: [])
     /// Whether the tree draws folders set to ignore (the View menu's "Show
-    /// ignored folders"; hidden by default, as #1146). Changing it redraws
-    /// the tree from the last read, without asking the core again.
+    /// ignored folders"). The window sets it from its own preference, which
+    /// is on by default as #1146's `useState(true)`; a store no window has
+    /// told draws them hidden. Changing it redraws the tree from the last
+    /// read, without asking the core again.
     var showsIgnored = false {
         didSet {
             guard showsIgnored != oldValue, let read = lastRead else { return }

@@ -40,7 +40,7 @@ public struct GlassSelect<Value: Hashable>: View {
             .pickerStyle(.inline)
             .labelsHidden()
         } label: {
-            GlassPickerPill(title: current?.title ?? "", dot: current?.dot, invalid: invalid)
+            GlassPickerPill(title: current?.title ?? "", dot: current?.dot, invalid: invalid, trailing: 10)
         }
         .menuStyle(.button)
         .buttonStyle(GlassPressStyle())
@@ -146,7 +146,7 @@ public struct GlassRadioGroup<Value: Hashable>: View {
                     }
                     .contentShape(Rectangle())
                 }
-                .buttonStyle(GlassPressStyle())
+                .buttonStyle(GlassPressStyle(disabledOpacity: GlassTokens.Opacity.disabledCheck))
                 .focusable(false)
                 .disabled(!option.isEnabled)
             }

@@ -136,7 +136,7 @@ struct TracesGraphFooter: View {
                                                                         known: history != nil), status: .shared)
                 GlassLegendCell(MenuWords.kept, value: String(shown?.kept ?? buckets.map(\.kept).reduce(0, +)), status: .kept)
             }
-            GlassBarGraph(buckets.map(Self.bar), scaleFloor: 5, hovered: $hovered)
+            GlassBarGraph(buckets.map(Self.bar), scaleFloor: 5, period: offset, hovered: $hovered)
             HStack(spacing: GlassTokens.Space.s3) {
                 Button { offset -= 1 } label: { Image(systemName: "chevron.left") }
                     .buttonStyle(GlassButtonStyle(.glass, small: true))
@@ -161,8 +161,7 @@ struct TracesGraphFooter: View {
                     .help(MonitorShellWords.next)
             }
         }
-        .padding(.top, GlassTokens.Space.s4)
-        .overlay(alignment: .top) { Rectangle().fill(GlassColor.hairline).frame(height: 0.5) }
+        // Its insets and its rule are the shell's (`MonitorWindowView`).
     }
 
     /// A count, or a dash while History has not been read: an unread record

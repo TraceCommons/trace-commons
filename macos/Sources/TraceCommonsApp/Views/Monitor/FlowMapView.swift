@@ -57,7 +57,7 @@ struct FlowMapView: View {
             // A click on the field, not a node, lets go of the pinned card.
             .onTapGesture { pinned = nil }
             .overlay(alignment: .bottomTrailing) {
-                if zoomable { zoomControls.padding(GlassTokens.Space.panePadding) }
+                if zoomable { zoomControls.padding(GlassTokens.Space.mapOverlayInset) }
             }
         }
         .accessibilityElement(children: .contain)

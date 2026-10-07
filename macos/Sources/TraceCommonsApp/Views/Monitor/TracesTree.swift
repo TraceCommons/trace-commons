@@ -10,7 +10,7 @@ import TCShellCore
 /// session row shows its own tool. Folders are ordered by their most recent
 /// waiting session, then by name. Ignored folders are drawn, with a switch
 /// back to Ask me, only while the View menu's "Show ignored folders" asks
-/// for them (Ron's shell, #1146 `showIgnored`, default hidden).
+/// for them (Ron's shell, #1146 `showIgnored`, default shown).
 ///
 /// `tools` and `unplaced` are the per-tool aggregate the flow map draws (and
 /// the Summary's top tools reads); the tree pane never draws them. Their

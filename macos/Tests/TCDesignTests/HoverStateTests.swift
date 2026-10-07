@@ -23,11 +23,41 @@ final class HoverStateTests: XCTestCase {
         }
     }
 
-    /// Every button kind dims by the one shared disabled opacity.
+    /// Every button kind dims by the one shared disabled opacity but the
+    /// submit pill, which #1146 dims to 0.55; checkboxes and radios dim to
+    /// 0.7 (#1146 `.tc-btn--submit:disabled`, `.tc-checkbox:disabled`).
     func test_everyKindDimsByTheSharedDisabledOpacity() {
-        for kind: GlassButtonKind in [.primary, .secondary, .glass, .submit(done: false), .link, .destructive] {
+        for kind: GlassButtonKind in [.primary, .secondary, .glass, .link, .destructive] {
             XCTAssertEqual(GlassButtonStyle.disabledOpacity(kind), GlassTokens.Opacity.disabled, "\(kind)")
         }
+        XCTAssertEqual(GlassTokens.Opacity.disabled, 0.45)
+        XCTAssertEqual(GlassButtonStyle.disabledOpacity(.submit(done: false)), 0.55)
+        XCTAssertEqual(GlassTokens.Opacity.disabledSubmit, 0.55)
+        XCTAssertEqual(GlassTokens.Opacity.disabledCheck, 0.7)
+    }
+
+    /// A hover fill replaces the tier's own fill, as #1146's `:hover`
+    /// background does, and never shows on a disabled control.
+    func test_aHoverFillReplacesTheTierFill() {
+        let hover = GlassTokens.Color.controlHover
+        XCTAssertEqual(GlassTierFill.choose(hover: hover, hovering: true, enabled: true), .hover(hover))
+        XCTAssertEqual(GlassTierFill.choose(hover: hover, hovering: false, enabled: true), .tier)
+        XCTAssertEqual(GlassTierFill.choose(hover: hover, hovering: true, enabled: false), .tier)
+        XCTAssertEqual(GlassTierFill.choose(hover: nil, hovering: true, enabled: true), .tier)
+        // #1146's values: 16% white on a control, 10% on an interactive card.
+        XCTAssertEqual(hover.alpha, 0.16, accuracy: 0.0001)
+        XCTAssertEqual(GlassTokens.Color.cardHover.alpha, 0.1, accuracy: 0.0001)
+    }
+
+    /// The disabled dimming of checkboxes and radios is wired.
+    func test_checkboxesAndRadiosDimByTheirOwnOpacity() throws {
+        let sources = Dictionary(uniqueKeysWithValues: try DesignSources.components())
+        let controls = try XCTUnwrap(sources["Controls.swift"])
+        let checkbox = try XCTUnwrap(controls.range(of: "struct GlassCheckboxStyle").map { String(controls[$0.lowerBound...].prefix(1500)) })
+        XCTAssertTrue(checkbox.contains("GlassPressStyle(disabledOpacity: GlassTokens.Opacity.disabledCheck)"))
+        let forms = try XCTUnwrap(sources["Forms.swift"])
+        let radio = try XCTUnwrap(forms.range(of: "struct GlassRadioGroup").map { String(forms[$0.lowerBound...].prefix(3000)) })
+        XCTAssertTrue(radio.contains("GlassPressStyle(disabledOpacity: GlassTokens.Opacity.disabledCheck)"))
     }
 
     /// The submit pill keeps its statusOff ink when it cannot be used.
@@ -87,10 +117,18 @@ final class HoverStateTests: XCTestCase {
             XCTAssertTrue(body.contains(".onHover"), "\(name) has no hover")
         }
         let controls = try XCTUnwrap(sources["Controls.swift"])
-        for name in ["struct GlassRoundButton", "struct GlassPillIconButton", "struct GlassToolbarButton", "struct GlassPickerPill"] {
-            let body = try XCTUnwrap(controls.range(of: name).map { String(controls[$0.lowerBound...].prefix(1500)) })
-            XCTAssertTrue(body.contains(".glassHover("), "\(name) has no hover")
+        // A control with a fill takes the hover in its place; the toolbar
+        // glyph has no fill, so its hover is a fill of its own.
+        for name in ["struct GlassRoundButton", "struct GlassPillIconButton", "struct GlassPickerPill", "struct GlassFolderButton"] {
+            let body = try XCTUnwrap(controls.range(of: name).map { String(controls[$0.lowerBound...].prefix(2000)) })
+            XCTAssertTrue(body.contains("hover: GlassTokens.Color.controlHover"), "\(name) has no hover")
         }
+        let toolbar = try XCTUnwrap(controls.range(of: "struct GlassToolbarButton").map { String(controls[$0.lowerBound...].prefix(2500)) })
+        XCTAssertTrue(toolbar.contains(".glassHover(GlassTokens.Color.controlHover"), "the toolbar button has no hover")
+        let buttons = try XCTUnwrap(controls.range(of: "private struct GlassButtonBody").map { String(controls[$0.lowerBound...].prefix(5000)) })
+        XCTAssertFalse(buttons.contains("Capsule().fill(hoverFill)"), "a glass button's hover stacks on its fill")
+        let containers = try XCTUnwrap(sources["Containers.swift"])
+        XCTAssertTrue(containers.contains("hover: Self.hoverFill(interactive: interactive)"))
         let panel = try XCTUnwrap(sources["MenuBarPanel.swift"])
         XCTAssertFalse(panel.contains("0.55"), "the option row dims twice")
     }

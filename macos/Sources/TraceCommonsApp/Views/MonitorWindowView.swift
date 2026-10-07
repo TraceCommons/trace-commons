@@ -68,8 +68,9 @@ struct MonitorWindowView: View {
     @SceneStorage("monitor.showsInspector") private var showsInspector = true
     /// The Traces graph footer (the toolbar's Graph), on by default as #1146.
     @SceneStorage("monitor.showsGraph") private var showsGraph = true
-    /// The View menu's "Show ignored folders"; hidden by default, as #1146.
-    @SceneStorage("monitor.showsIgnored") private var showsIgnored = false
+    /// The View menu's "Show ignored folders"; shown by default, as #1146
+    /// (`traces-workspace.tsx`, `useState(true)`).
+    @SceneStorage("monitor.showsIgnored") private var showsIgnored = true
     /// The binoculars: the map shows only the selected session's tool.
     @State private var mapFocus = false
     /// What asked for the inspector last time (`InspectorDemand`).
@@ -206,10 +207,18 @@ struct MonitorWindowView: View {
                 }
             } footer: {
                 // Shared over kept under the tree (#1146 `GraphFooter`).
+                // Full bleed under its 0.5pt rule, at #1146's `px-3 py-2.5`,
+                // sliding up from the pane's bottom edge as it opens.
                 if Self.shownTab(tab, requiresOnboarding: model.requiresOnboarding) == .traces && showsGraph {
                     TracesGraphFooter(
                         history: home.history, sessions: traces.tree.allSessions, tool: selectedTool,
                         focus: $mapFocus, onFocus: focusMap)
+                        .padding(.horizontal, GlassTokens.Space.panePadding)
+                        .padding(.vertical, GlassTokens.Space.s5)
+                        .overlay(alignment: .top) {
+                            Rectangle().fill(GlassTokens.Color.rule.color).frame(height: 0.5)
+                        }
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
             }
         } map: {
@@ -218,7 +227,8 @@ struct MonitorWindowView: View {
                 traces: traces, inference: inference, focusTool: mapFocus ? selectedTool?.rawValue : nil,
                 sentence: { Self.rowSentence($0, copy: model.privateInferenceCopy, calls: model.harnessCalls) })
         } inspector: {
-            GlassPane {
+            // #1146's inspector insets: 16 on the sides, 18 above and below.
+            GlassPane(insets: GlassPaneInsets.inspector) {
                 // An empty branch would leave the pane nothing to draw, and
                 // it would vanish while the layout still reserved its width.
                 // While onboarding is required only Inference is shown, so
@@ -491,108 +501,145 @@ private struct MonitorMainPane<Content: View, Footer: View>: View {
     /// Half the unified title bar's 52pt height.
     static var lightsCentre: CGFloat { 26 }
 
+    /// The View menu's width (#1146 `monitor-toolbar.tsx`, `w-[250px]`).
+    static var viewMenuWidth: CGFloat { 250 }
+    /// The Settings button's gap from the toolbar capsule: #1146's `gap-2`
+    /// plus `ml-1.5`.
+    static var settingsGap: CGFloat { GlassTokens.Space.s4 + GlassTokens.Space.s3 }
+
+    /// The tab's own insets in the pane (#1146 `monitor-shell.tsx`): the
+    /// Traces tree runs 8pt from the pane's sides and to its bottom (the
+    /// graph sits under it); the other tabs keep 12 on the sides and below.
+    static func contentInsets(_ tab: MonitorWindowView.Tab) -> EdgeInsets {
+        tab == .traces
+            ? EdgeInsets(top: 0, leading: GlassTokens.Space.treeInset, bottom: 0, trailing: GlassTokens.Space.treeInset)
+            : EdgeInsets(
+                top: 0, leading: GlassTokens.Space.panePadding, bottom: GlassTokens.Space.panePadding,
+                trailing: GlassTokens.Space.panePadding)
+    }
+
     var body: some View {
-        GlassPane {
-            VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
-                HStack(spacing: GlassTokens.Space.s4) {
-                    Spacer(minLength: 0)
-                    GlassToolbarGroup {
-                        GlassToolbarButton(MonitorShellWords.view, systemImage: "line.3.horizontal", expanded: viewMenu) {
-                            viewMenu.toggle()
-                        }
-                        GlassToolbarButton(MonitorShellWords.graphToggle(shown: showsGraph), systemImage: "chart.bar.xaxis", pressed: showsGraph) {
-                            showsGraph.toggle()
-                        }
-                        GlassToolbarButton(MonitorShellWords.mapToggle(shown: showsMap), systemImage: "map", pressed: showsMap) {
-                            showsMap.toggle()
-                        }
-                        GlassToolbarButton(MonitorShellWords.inspectorToggle(shown: showsInspector), systemImage: "sidebar.right", pressed: showsInspector) {
-                            showsInspector.toggle()
-                        }
-                    }
-                    // Open before onboarding too: Settings gates each section
-                    // itself (R-43), so Connection, Startup, Notifications,
-                    // Updates, Private AI and Compute are reachable, and a
-                    // section that writes what first run asks draws the
-                    // onboarding notice.
-                    GlassRoundButton(MonitorWords.table?.settingsTitle ?? "", systemImage: "gearshape", small: true, action: onSettings)
-                }
-                // Clearance for the real traffic lights, not an origin.
-                .padding(.leading, GlassTokens.Space.windowControlsWidth - GlassTokens.Space.panePadding)
-                .frame(height: GlassTokens.Size.controlLarge)
-                // Centre the row on the traffic lights, which the unified
-                // title bar centres 26pt below the window's top edge.
-                .padding(.top, Self.lightsCentre - GlassTokens.Space.windowPadding - GlassTokens.Space.panePadding
-                    - GlassTokens.Size.controlLarge / 2)
-                // The View menu drops from the toolbar over the tabs.
-                .overlay(alignment: .topTrailing) {
-                    if viewMenu {
-                        GlassMenu(onDismiss: { viewMenu = false }) {
-                            GlassMenuItem(MonitorShellWords.showIgnoredFolders, checked: showsIgnored) {
-                                showsIgnored.toggle()
-                                viewMenu = false
+        let shown = MonitorWindowView.shownTab(tab, requiresOnboarding: model.requiresOnboarding)
+        // The pane draws edge to edge; each row takes #1146's own insets.
+        GlassPane(padding: 0) {
+            VStack(alignment: .leading, spacing: 0) {
+                VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
+                    HStack(spacing: Self.settingsGap) {
+                        Spacer(minLength: 0)
+                        GlassToolbarGroup {
+                            GlassToolbarButton(MonitorShellWords.view, icon: .glyph(.viewMenu), expanded: viewMenu) {
+                                viewMenu.toggle()
+                            }
+                            GlassToolbarButton(MonitorShellWords.graphToggle(shown: showsGraph), icon: .glyph(.graph), pressed: showsGraph) {
+                                showsGraph.toggle()
+                            }
+                            GlassToolbarButton(MonitorShellWords.mapToggle(shown: showsMap), icon: .glyph(.map), pressed: showsMap) {
+                                showsMap.toggle()
+                            }
+                            GlassToolbarButton(MonitorShellWords.inspectorToggle(shown: showsInspector), icon: .glyph(.inspector), pressed: showsInspector) {
+                                showsInspector.toggle()
                             }
                         }
-                        .fixedSize()
-                        .padding(.top, GlassTokens.Size.controlLarge + GlassTokens.Space.s2)
-                        .padding(.trailing, GlassTokens.Size.controlLarge + GlassTokens.Space.s4)
+                        // Open before onboarding too: Settings gates each section
+                        // itself (R-43), so Connection, Startup, Notifications,
+                        // Updates, Private AI and Compute are reachable, and a
+                        // section that writes what first run asks draws the
+                        // onboarding notice. #1146's 28pt round button and gear.
+                        GlassRoundButton(MonitorWords.table?.settingsTitle ?? "", icon: .glyph(.gear), action: onSettings)
+                    }
+                    // Clearance for the real traffic lights, not an origin.
+                    .padding(.leading, GlassTokens.Space.windowControlsWidth - GlassTokens.Space.panePadding)
+                    .frame(height: GlassTokens.Size.controlLarge)
+                    // Centre the row on the traffic lights, which the unified
+                    // title bar centres 26pt below the window's top edge.
+                    .padding(.top, Self.lightsCentre - GlassTokens.Space.windowPadding - GlassTokens.Space.panePadding
+                        - GlassTokens.Size.controlLarge / 2)
+                    // The View menu drops from the toolbar over the tabs, 250pt
+                    // wide, its trailing edge on the Settings button's.
+                    .overlay(alignment: .topTrailing) {
+                        if viewMenu {
+                            GlassMenu(onDismiss: { viewMenu = false }) {
+                                GlassMenuItem(MonitorShellWords.showIgnoredFolders, checked: showsIgnored) {
+                                    showsIgnored.toggle()
+                                    viewMenu = false
+                                }
+                            }
+                            .frame(width: Self.viewMenuWidth)
+                            .padding(.top, GlassTokens.Size.controlLarge + GlassTokens.Space.s2)
+                        }
+                    }
+                    .zIndex(1)
+                    // The same notices the main window puts above everything,
+                    // here in the pane that is always shown, so a void or a gate
+                    // hold during monitor use is told whatever the map and the
+                    // inspector are doing.
+                    ShellNotices()
+                    if gate != .awaiting {
+                        switch gate {
+                        case .down(let sentence):
+                            StartupRefusedBanner(sentence: sentence)
+                        case .signedOut:
+                            GlassNotice(tone: .ask, title: MonitorWords.signedOut) {
+                                Button(MonitorWindowView.openFirstRun) { OpenMonitor.request() }
+                            }
+                        case .awaiting, .open:
+                            EmptyView()
+                        }
+                        GlassSegmentedTabs(
+                            MonitorWords.table?.shell.tabsLabel ?? "",
+                            selection: Binding(
+                                get: { MonitorWindowView.shownTab(tab, requiresOnboarding: model.requiresOnboarding) },
+                                set: { tab = $0 }),
+                            segments: MonitorWindowView.Tab.shown(requiresOnboarding: model.requiresOnboarding).map { item in
+                                GlassSegment(
+                                    item.title, value: item,
+                                    badgeValue: item == .traces ? tracesBadge : nil,
+                                    dot: item == .inference ? inferenceDot : item == .traces ? tracesDot : nil,
+                                    accessibilityValue: item == .inference
+                                        ? inferenceDescription : item == .traces ? tracesDescription : nil)
+                            })
                     }
                 }
+                .padding([.horizontal, .top], GlassTokens.Space.panePadding)
                 .zIndex(1)
-                // The same notices the main window puts above everything,
-                // here in the pane that is always shown, so a void or a gate
-                // hold during monitor use is told whatever the map and the
-                // inspector are doing.
-                ShellNotices()
-                // No Home or Traces before onboarding is done: their screens
-                // act on consent that has not been given. Inference stays, so
-                // Private AI sign-in is reachable before Commons enrollment
-                // (R-38); its own startup handling (roots, starting, refused)
-                // is its gate. The button opens first run, which is where
-                // every other request goes until then. Before the core says,
-                // the placeholder status is not "signed out", and a daemon
-                // that refused to start is said as a refusal, not as
-                // "signed out", whoever is at the keyboard (`MonitorGate`).
-                let gate = MonitorGate.of(
-                    startup: model.startup, onboardingKnown: model.onboardingKnown,
-                    requiresOnboarding: model.requiresOnboarding)
                 if gate == .awaiting {
                     SettingsAwaiting()
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .padding(GlassTokens.Space.panePadding)
                 } else {
-                    switch gate {
-                    case .down(let sentence):
-                        StartupRefusedBanner(sentence: sentence)
-                    case .signedOut:
-                        GlassNotice(tone: .ask, title: MonitorWords.signedOut) {
-                            Button(MonitorWindowView.openFirstRun) { OpenMonitor.request() }
-                        }
-                    case .awaiting, .open:
-                        EmptyView()
-                    }
-                    GlassSegmentedTabs(
-                        MonitorWords.table?.shell.tabsLabel ?? "",
-                        selection: Binding(
-                            get: { MonitorWindowView.shownTab(tab, requiresOnboarding: model.requiresOnboarding) },
-                            set: { tab = $0 }),
-                        segments: MonitorWindowView.Tab.shown(requiresOnboarding: model.requiresOnboarding).map { item in
-                            GlassSegment(
-                                item.title, value: item,
-                                badgeValue: item == .traces ? tracesBadge : nil,
-                                dot: item == .inference ? inferenceDot : item == .traces ? tracesDot : nil,
-                                accessibilityValue: item == .inference
-                                    ? inferenceDescription : item == .traces ? tracesDescription : nil)
-                        })
+                    // 8pt under the tabs and under the breadcrumb (#1146
+                    // `mb-2`, `pb-2`).
                     if let breadcrumb {
                         GlassBreadcrumb(breadcrumb, backLabel: MonitorWindowView.Tab.home.title,
                                         onBack: breadcrumb.first?.action)
+                            .padding(.horizontal, GlassTokens.Space.panePadding)
+                            .padding(.top, GlassTokens.Space.s4)
                     }
                     content()
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                        .padding(.top, GlassTokens.Space.s4)
+                        .padding(Self.contentInsets(shown))
+                    // Full bleed under the tree (#1146 `GraphFooter`).
                     footer()
                 }
             }
+            // The graph opens and closes over #1146's .25s.
+            .animation(GlassMotion.systemReducesMotion ? nil : GlassMotion.curve(GlassTokens.Motion.slide), value: showsGraph)
         }
+    }
+
+    /// No Home or Traces before onboarding is done: their screens act on
+    /// consent that has not been given. Inference stays, so Private AI
+    /// sign-in is reachable before Commons enrollment (R-38); its own
+    /// startup handling (roots, starting, refused) is its gate. The button
+    /// opens first run, which is where every other request goes until then.
+    /// Before the core says, the placeholder status is not "signed out", and
+    /// a daemon that refused to start is said as a refusal, not as "signed
+    /// out", whoever is at the keyboard (`MonitorGate`).
+    private var gate: MonitorGate {
+        MonitorGate.of(
+            startup: model.startup, onboardingKnown: model.onboardingKnown,
+            requiresOnboarding: model.requiresOnboarding)
     }
 }
 
@@ -615,15 +662,14 @@ private struct MonitorMapPane: View {
         // The map is content, not chrome: an opaque pane, so the selector,
         // zoom and node cards floating on it are its only glass (Apple: no
         // glass on glass; R14).
-        GlassPane(padding: 0, isContent: true) {
+        // #1146's map field and map edge, its view tabs 14pt in.
+        GlassPane(padding: 0, isContent: true, edge: GlassTokens.Shadow.mapEdge) {
             ZStack(alignment: .topTrailing) {
-                RadialGradient(
-                    colors: [GlassTokens.Color.mapFieldInner.color, GlassTokens.Color.mapFieldOuter.color],
-                    center: .center, startRadius: 20, endRadius: 520)
+                GlassMapField()
                 map
                 GlassFloatingGroup {
                     GlassSegmentedTabs(MonitorWords.table?.shell.mapViewsLabel ?? "", selection: $mapTab, segments: segments, floating: true)
-                        .padding(GlassTokens.Space.panePadding)
+                        .padding(GlassTokens.Space.mapOverlayInset)
                 }
                 stateLine
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)

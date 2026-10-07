@@ -18,7 +18,7 @@ struct TracesRefusal: View {
 
     var body: some View {
         if let refused = store.actionError, refused.entryId == entryId, let line = store.message(for: refused.error) {
-            GlassNotice(tone: .outside, title: line) { EmptyView() }
+            GlassAlert(line)
         }
     }
 }

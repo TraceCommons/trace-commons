@@ -112,6 +112,9 @@ public struct GlassListRow: View {
         GlassTokens.Color.textTertiary
     }
 
+    /// The switch's column, reserved on a row with no switch.
+    static let watchColumn = GlassTokens.Size.watchSwitchWidth
+
     public var body: some View {
         HStack(spacing: GlassTokens.Space.s4) {
             Group {
@@ -154,6 +157,9 @@ public struct GlassListRow: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
+            // Every column is laid out on every row, empty or not (#1146's
+            // grid `16 24 1fr auto 38 22`, with placeholders): a session's
+            // Review pill lines up with its folder's Submit pill.
             if let submitTitle {
                 Button(submitTitle) { onSubmit?() }
                     .buttonStyle(GlassButtonStyle(.submit(done: submitDone)))
@@ -163,6 +169,8 @@ public struct GlassListRow: View {
                     .fixedSize()
                     .disabled(onSubmit == nil)
                     .focusable(submitFocusable)
+            } else {
+                Color.clear.frame(width: 0, height: 0)
             }
 
             if let accessory {
@@ -175,6 +183,8 @@ public struct GlassListRow: View {
                     // A switch the person cannot change here is disabled, so
                     // assistive tech does not offer a control that does nothing.
                     .disabled(watchDisabled)
+            } else {
+                Color.clear.frame(width: Self.watchColumn, height: 0)
             }
 
             Group {

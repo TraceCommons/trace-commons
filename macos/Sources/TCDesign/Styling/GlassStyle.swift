@@ -219,26 +219,62 @@ public enum GlassTier: Sendable, Equatable {
 
 public extension View {
     /// Put this view on a material tier: its fill, its edge, its radius.
-    func glassTier(_ tier: GlassTier, radius: CGFloat? = nil) -> some View {
-        modifier(GlassTierModifier(tier: tier, radius: radius))
+    ///
+    /// `hover` is the fill the tier takes under the pointer while enabled:
+    /// it replaces the tier's own fill, as #1146's `:hover` background does
+    /// (owner ruling, 2026-10-07: hover states from #1146), and never stacks
+    /// on it. `edge` replaces the tier's edge (the map's `mapEdge`).
+    func glassTier(
+        _ tier: GlassTier, radius: CGFloat? = nil, hover: GlassRGBA? = nil, edge: [GlassShadow]? = nil
+    ) -> some View {
+        modifier(GlassTierModifier(tier: tier, radius: radius, hover: hover, edge: edge))
+    }
+}
+
+/// Which fill a tier draws: its own, or its hover fill in its place.
+enum GlassTierFill: Equatable {
+    case tier
+    case hover(GlassRGBA)
+
+    static func choose(hover: GlassRGBA?, hovering: Bool, enabled: Bool) -> GlassTierFill {
+        guard let hover, GlassHover.shows(hovering: hovering, enabled: enabled) else { return .tier }
+        return .hover(hover)
     }
 }
 
 private struct GlassTierModifier: ViewModifier {
     let tier: GlassTier
     let radius: CGFloat?
+    let hover: GlassRGBA?
+    let edge: [GlassShadow]?
+    @State private var hovering = false
+    @Environment(\.isEnabled) private var isEnabled
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     func body(content: Content) -> some View {
         let shape = RoundedRectangle(cornerRadius: radius ?? tier.radius, style: .continuous)
+        let fill = GlassTierFill.choose(hover: hover, hovering: hovering, enabled: isEnabled)
         // Clip the content and fill first; the edge's drop shadows fall
         // outside the shape and must not be clipped with them. Every tier
         // draws its edge, a pane on Liquid Glass too, as #1146's `.tc-pane`
         // keeps `--tc-pane-edge` over native glass (owner ruling, 2026-10-07).
         return content
-            .background { tier.fill(in: shape).glassPressedFill() }
+            .background {
+                ZStack {
+                    tier.fill(in: shape).opacity(fill == .tier ? 1 : 0)
+                    if let hover {
+                        shape.fill(hover.color).opacity(fill == .tier ? 0 : 1)
+                    }
+                }
+                .glassPressedFill()
+                .animation(GlassMotion.fast(reduceMotion), value: fill)
+            }
             .clipShape(shape)
-            .glassEdge(tier.edge, in: shape)
+            .glassEdge(edge ?? tier.edge, in: shape)
             .contentShape(shape)
+            .onHover { inside in
+                if hover != nil { hovering = inside }
+            }
     }
 }
 
@@ -260,6 +296,7 @@ private struct GlassSurfaceModifier: ViewModifier {
     let tier: GlassTier
     let radius: CGFloat?
     let floating: Bool?
+    let hover: GlassRGBA?
     @Environment(\.glassLayer) private var layer
 
     func body(content: Content) -> some View {
@@ -272,10 +309,10 @@ private struct GlassSurfaceModifier: ViewModifier {
             // translucent fill: #1146's fill, edge and backdrop blur, on
             // macOS 26 too (owner ruling, 2026-10-07).
             content
-                .glassTier(tier, radius: radius)
+                .glassTier(tier, radius: radius, hover: hover)
                 .background { GlassFloatingBlur(cornerRadius: radius ?? tier.radius) }
         case .painted:
-            content.glassTier(tier, radius: radius)
+            content.glassTier(tier, radius: radius, hover: hover)
         }
     }
 }
@@ -301,9 +338,12 @@ enum GlassSurfaceBacking: Equatable {
 public extension View {
     /// Put this view on a tier that may float. `floating: nil` follows the
     /// surrounding `glassLayer`; `true` or `false` fixes it (a menu always
-    /// floats; a well never does).
-    func glassSurface(_ tier: GlassTier, radius: CGFloat? = nil, floating: Bool? = nil) -> some View {
-        modifier(GlassSurfaceModifier(tier: tier, radius: radius, floating: floating))
+    /// floats; a well never does). `hover` replaces the tier's fill under
+    /// the pointer (`glassTier`).
+    func glassSurface(
+        _ tier: GlassTier, radius: CGFloat? = nil, floating: Bool? = nil, hover: GlassRGBA? = nil
+    ) -> some View {
+        modifier(GlassSurfaceModifier(tier: tier, radius: radius, floating: floating, hover: hover))
     }
 }
 
