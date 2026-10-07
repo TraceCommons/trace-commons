@@ -165,9 +165,7 @@ pub const OFFER_ASKED_ONCE: &str = "Either way, this is the only time you will b
 pub const SETTINGS_TITLE: &str = "Private AI on this computer";
 
 /// The settings switch, in #1146's words (`private-ai-connection-panel.tsx`;
-/// owner ruling, 2026-10-06).
-///
-/// DRAFT, NEEDS APPROVAL (re-approval after #1146 parity, 2026-10-06).
+/// owner ruling, 2026-10-06). Approved 2026-10-06.
 pub const SETTINGS_TOGGLE: &str = "Answer model calls on this computer";
 
 /// Changes are not deferred to a restart, and the line beneath the switch is
@@ -953,8 +951,8 @@ pub const HARNESS_PLAN_NO_CONFIG_PATH: &str = "This app could not work out where
 /// see [`CREDENTIAL_OBTAIN`] -- so a contributor reading this sentence is
 /// looking for words that exist somewhere on the screen.
 ///
-/// DRAFT, NEEDS APPROVAL (re-approval after #1146 parity, 2026-10-06): the
-/// button's words changed to #1146's, so this sentence did too.
+/// Approved 2026-10-06: the button's words changed to #1146's, so this
+/// sentence did too.
 pub const HARNESS_NEEDS_CREDENTIAL: &str = "This computer would be the one answering this tool's calls, and no key \
      is kept here to answer them with yet. Use Connect credential first, and \
      this tool can be connected after that.";

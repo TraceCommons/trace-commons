@@ -442,8 +442,7 @@ pub struct AdmissionCopy {
     pub backend: &'static str,
     pub confirm: &'static str,
     /// The tick that must be ticked before [`Self::confirm`] can be pressed
-    /// (#1146 `admission-preparation-overlay.tsx`). DRAFT, NEEDS APPROVAL
-    /// (re-approval after #1146 parity, 2026-10-06).
+    /// (#1146 `admission-preparation-overlay.tsx`). Approved 2026-10-06.
     pub confirm_line: &'static str,
     pub cancel: &'static str,
     pub permission: &'static str,
