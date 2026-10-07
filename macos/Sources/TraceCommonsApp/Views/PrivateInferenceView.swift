@@ -53,6 +53,9 @@ struct PrivateAISwitchCard: View {
     let refusal: String?
     let onSet: (Bool) -> Void
     let onDismiss: () -> Void
+    /// Re-reads the connection. With it the card wears #1146's panel header
+    /// (the connection eyebrow and a re-read link) above its expander.
+    var onRefresh: (() -> Void)?
 
     @State private var isOpen = false
 
@@ -70,6 +73,11 @@ struct PrivateAISwitchCard: View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
             GlassCard {
                 VStack(alignment: .leading, spacing: GlassTokens.Space.s6) {
+                    if let onRefresh {
+                        PrivateAIPanelHeader(
+                            eyebrow: copy.panelConnectionEyebrow, refresh: copy.panelRefresh,
+                            disabled: busy, onRefresh: onRefresh)
+                    }
                     GlassExpander(copy.settingsTitle, isOpen: $isOpen)
                     GlassStatusLabel(label.line, status: label.status)
                         .fixedSize(horizontal: false, vertical: true)

@@ -297,15 +297,9 @@ final class MonitorShellTests: XCTestCase {
     // MARK: Inference
 
     func test_theInferenceInspectorSummarises() {
-        XCTAssertEqual(PrivateAIInspectorView.connectedCount(nil), "—")
-        XCTAssertEqual(PrivateAIInspectorView.names([]), "—")
-    }
-
-    /// #1146's "{n} of {m} tools connected", from the core; nothing when
-    /// the list was not read.
-    func test_theInferenceInspectorSaysHowManyToolsAreConnected() {
-        XCTAssertNil(PrivateAIInspectorView.connectedLine(nil))
-        XCTAssertEqual(PrivateAIInspectorView.connectedLine([]), "0 of 0 tools connected")
+        // A list nobody could read is a dash in both legend cells, never zero.
+        XCTAssertEqual(PrivateAIInspectorView.counts(nil).connected, "—")
+        XCTAssertEqual(PrivateAIInspectorView.counts(nil).notConnected, "—")
     }
 
     private static func text(_ path: String) throws -> String {

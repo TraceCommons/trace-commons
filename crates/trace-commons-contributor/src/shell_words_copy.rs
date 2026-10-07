@@ -524,25 +524,6 @@ pub fn settings_words() -> SettingsWords {
 }
 
 // ---------------------------------------------------------------------------
-// Inference
-
-/// The Inference tab's words with a count in them, which the Private AI
-/// payload (finished sentences only) does not carry.
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
-pub struct InferenceWords {
-    /// The inspector's line under its title (#1146 `inference-inspector.tsx`):
-    /// `{count}` connected of `{total}` listed.
-    pub tools_connected_of: &'static str,
-}
-
-#[must_use]
-pub fn inference_words() -> InferenceWords {
-    InferenceWords {
-        tools_connected_of: "{count} of {total} tools connected",
-    }
-}
-
-// ---------------------------------------------------------------------------
 // The table
 
 /// Every table above, as the one object `tc_shell_words_copy_json` returns.
@@ -554,7 +535,6 @@ pub struct ShellWordsCopy {
     pub history: HistoryWords,
     pub scrubbing: ScrubbingWords,
     pub settings: SettingsWords,
-    pub inference: InferenceWords,
 }
 
 #[must_use]
@@ -566,7 +546,6 @@ pub fn shell_words_copy() -> ShellWordsCopy {
         history: history_words(),
         scrubbing: scrubbing_words(),
         settings: settings_words(),
-        inference: inference_words(),
     }
 }
 

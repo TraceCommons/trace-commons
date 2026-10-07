@@ -1,4 +1,5 @@
-// INTEGRATION: add FundingRow(copy:) inside CredentialSection. AppModel supplies
+// INTEGRATION: FundingRow(copy:) is its own card on the Inference tab, after the
+// balance panel (#1146's funding panel). AppModel supplies
 // nearAiFunding(expected: FundingDestination?) async -> FundingStatus? and must
 // return nil after awaiting if its captured client is no longer current or the
 // task was cancelled. PrivateInferenceCopy supplies fundingTitle, fundingWhat,
@@ -115,7 +116,11 @@ struct FundingRow: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
-            GlassSectionRule(copy.fundingTitle)
+            // #1146's funding panel: the billing eyebrow at the top of its
+            // own card, after the balance panel.
+            Text(copy.fundingTitle)
+                .glassType(GlassTokens.TypeScale.eyebrow)
+                .foregroundStyle(GlassColor.textTertiary)
             Text(status?.view.message ?? copy.fundingUnavailable)
                 .glassType(GlassTokens.TypeScale.body)
                 .foregroundStyle(GlassColor.textPrimary)

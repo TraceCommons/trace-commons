@@ -122,21 +122,12 @@ struct CredentialSection: View {
                 }
             }
             actionButton(action)
-            // What the key is worth, on the same card as the key. A balance
-            // is the one fact on this screen about an ACCOUNT rather than
-            // this computer, and it is here because it is the thing the
-            // sign-in above is for -- a contributor who has just signed in
-            // should not have to go looking for what they signed in to see.
-            //
-            // `credentialAction` is passed so the two rows cannot draw the
-            // same sign-in button twice; the decision is
-            // `BalanceSurface.actionToDraw`'s, not this view's.
-            if !requiresSession && action != .obtain {
-                Divider().overlay(GlassColor.hairline).padding(.vertical, GlassTokens.Space.s2)
-                BalanceRow(copy: copy, credentialAction: action, run: run)
-                Divider().overlay(GlassColor.hairline).padding(.vertical, GlassTokens.Space.s2)
-                FundingRow(copy: copy)
-            }
+            // The balance and funding are their own panels after this card,
+            // as #1146 draws them (`PrivateAIBalanceCard`, `FundingRow`). The
+            // sign-in the balance needs stays here, beside the provider
+            // chooser it uses, and never doubles this card's own button: the
+            // decision is `BalanceSurface.actionToDraw`'s, not this view's.
+            actionButton(balanceAction)
         }
         .task(id: action) {
             // A state nobody could read polls nothing. There is no outcome
