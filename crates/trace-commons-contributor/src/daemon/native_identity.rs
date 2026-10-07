@@ -198,9 +198,16 @@ pub(super) async fn authenticated(
     } else if commons_credentials::snapshot(&shared.store, Kind::Account)? != session.snapshot {
         bail!("account-session-changed");
     }
-    response
-        .result
-        .map_err(|_| anyhow!("account-request-refused"))
+    response.result.map_err(|error| {
+        // The one server refusal on these routes a shell words on its own:
+        // an enrolment whose near.ai login is not the one this account is
+        // bound to. It names no account, and nothing was written.
+        if error.server_label() == Some("near_ai_account_mismatch") {
+            anyhow!("account-enrol-mismatch")
+        } else {
+            anyhow!("account-request-refused")
+        }
+    })
 }
 
 fn normalize_options(action: Action, start: &Value) -> Result<Value> {
@@ -561,7 +568,14 @@ async fn complete(shared: &DaemonShared, action: Action, params: &Value) -> Resu
             None,
         )
         .await?;
-        Ok(json!({"binding_state":binding(&result)?}))
+        let state = binding(&result)?;
+        // The passkey just added to this account is one this Mac has used.
+        super::remembered_passkeys::remember(
+            &shared.store,
+            &session.session.account_id,
+            pending.label.as_deref(),
+        );
+        Ok(json!({"binding_state":state}))
     } else {
         let result: Value = scoped_client(
             &shared.store,
@@ -573,8 +587,32 @@ async fn complete(shared: &DaemonShared, action: Action, params: &Value) -> Resu
         .await
         .map_err(|_| anyhow!("passkey-finish-refused"))?;
         persist_session(&shared.store, &pending.snapshot, &pending.origin, &result)?;
+        // Created here (with the name it was given) or signed in with here
+        // (no name: the login answer carries none). `persist_session`
+        // validated the account id.
+        super::remembered_passkeys::remember(
+            &shared.store,
+            string(&result, "account_id")?,
+            if action == Action::Create {
+                pending.label.as_deref()
+            } else {
+                None
+            },
+        );
         Ok(json!({"binding_state":binding(&result)?}))
     }
+}
+
+/// `passkey_state` with the passkeys this Mac remembers
+/// (`remembered_passkeys`): how many, and the most recent one's name. Local
+/// facts, so they are answered whatever the session's state; an unreadable
+/// list is null, never zero.
+fn passkey_state(store: &ConfigStore, state: &str, near_ai_connected: Option<bool>) -> Value {
+    let (count, name) = match super::remembered_passkeys::summary(store) {
+        Ok(remembered) => (json!(remembered.count), json!(remembered.latest_name)),
+        Err(_) => (Value::Null, Value::Null),
+    };
+    json!({"state":state,"passkey_count":count,"remembered_name":name,"near_ai_connected":near_ai_connected})
 }
 
 fn status(store: &ConfigStore) -> Value {
@@ -680,9 +718,7 @@ async fn handle_inner(shared: &DaemonShared, req: &Request) -> Result<Value> {
             let Some(mut session) = account_auth::try_load_session_with_snapshot(&shared.store)?
             else {
                 if req.method == "passkey_state" {
-                    return Ok(
-                        json!({"state":"none","passkey_count":null,"near_ai_connected":null}),
-                    );
+                    return Ok(passkey_state(&shared.store, "none", None));
                 }
                 bail!("account-session-required");
             };
@@ -698,9 +734,15 @@ async fn handle_inner(shared: &DaemonShared, req: &Request) -> Result<Value> {
             .await?;
             let state = binding(&value)?;
             if req.method == "passkey_state" {
-                Ok(
-                    json!({"state":state,"passkey_count":null,"near_ai_connected":match state {"bound"=>Some(true),"unbound"|"closed"=>Some(false),_=>None}}),
-                )
+                Ok(passkey_state(
+                    &shared.store,
+                    state,
+                    match state {
+                        "bound" => Some(true),
+                        "unbound" | "closed" => Some(false),
+                        _ => None,
+                    },
+                ))
             } else {
                 Ok(json!({"binding_state":state}))
             }
@@ -713,31 +755,9 @@ pub(super) async fn handle(shared: &DaemonShared, req: &Request) -> Response {
         Ok(value) => Response::ok(req.id, value),
         Err(error) => {
             if req.method == "passkey_state" {
-                return Response::ok(
-                    req.id,
-                    json!({"state":"unknown","passkey_count":null,"near_ai_connected":null}),
-                );
+                return Response::ok(req.id, passkey_state(&shared.store, "unknown", None));
             }
-            let label = match error.to_string().as_str() {
-                "passkey-invalid" => "passkey-invalid",
-                "passkey-busy" => "passkey-busy",
-                "passkey-start-refused" => "passkey-start-refused",
-                "passkey-finish-refused" => "passkey-finish-refused",
-                "passkey-ceremony-expired" => "passkey-ceremony-expired",
-                "account-session-required" => "account-session-required",
-                "account-session-changed" => "account-session-changed",
-                "account-origin-required" => "account-origin-required",
-                "account-origin-refused" => "account-origin-refused",
-                "account-enrollment-required" => "account-enrollment-required",
-                "account-sign-in-refused" => "account-sign-in-refused",
-                "account-request-refused" => "account-request-refused",
-                "account-already-enrolled" => "account-already-enrolled",
-                "account-enrollment-mismatch" => "account-enrollment-mismatch",
-                "account-bind-invalid" => "account-bind-invalid",
-                "account-bind-refused" => "account-bind-refused",
-                "near_ai_enroll_no_session" => "near_ai_enroll_no_session",
-                _ => "account-unavailable",
-            };
+            let label = ipc_label(&error.to_string());
             Response::err(
                 req.id,
                 if label == "passkey-invalid" {
@@ -748,6 +768,33 @@ pub(super) async fn handle(shared: &DaemonShared, req: &Request) -> Response {
                 label,
             )
         }
+    }
+}
+
+/// The label an identity call answers with: one of this module's own, or
+/// `account-unavailable`. An error string from a transport or a remote body is
+/// never forwarded.
+fn ipc_label(error: &str) -> &'static str {
+    match error {
+        "passkey-invalid" => "passkey-invalid",
+        "passkey-busy" => "passkey-busy",
+        "passkey-start-refused" => "passkey-start-refused",
+        "passkey-finish-refused" => "passkey-finish-refused",
+        "passkey-ceremony-expired" => "passkey-ceremony-expired",
+        "account-session-required" => "account-session-required",
+        "account-session-changed" => "account-session-changed",
+        "account-origin-required" => "account-origin-required",
+        "account-origin-refused" => "account-origin-refused",
+        "account-enrollment-required" => "account-enrollment-required",
+        "account-sign-in-refused" => "account-sign-in-refused",
+        "account-request-refused" => "account-request-refused",
+        "account-already-enrolled" => "account-already-enrolled",
+        "account-enrollment-mismatch" => "account-enrollment-mismatch",
+        "account-bind-invalid" => "account-bind-invalid",
+        "account-bind-refused" => "account-bind-refused",
+        "account-enrol-mismatch" => "account-enrol-mismatch",
+        "near_ai_enroll_no_session" => "near_ai_enroll_no_session",
+        _ => "account-unavailable",
     }
 }
 

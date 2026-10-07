@@ -88,7 +88,7 @@ impl TraceSource for CodexSource {
 }
 
 /// The rollout naming rule, in one place: `rollout-<...>.jsonl`.
-fn is_rollout_file_name(file_name: &str) -> bool {
+pub(crate) fn is_rollout_file_name(file_name: &str) -> bool {
     file_name.starts_with("rollout-") && file_name.ends_with(".jsonl")
 }
 
@@ -393,6 +393,7 @@ fn parse_session_reader(
     let mut events = Vec::new();
     let mut model: Option<String> = None;
     let mut agent_version: Option<String> = None;
+    let mut native_id: Option<String> = None;
     let mut cwd: Option<String> = None;
     let mut started_at: Option<chrono::DateTime<chrono::Utc>> = None;
     let mut unparseable = 0usize;
@@ -435,6 +436,12 @@ fn parse_session_reader(
             // `is_event_record_kind` admits every other type as an event, so
             // these two are the whole metadata set it excludes.
             if record_type == "session_meta" {
+                if native_id.is_none() {
+                    native_id = payload
+                        .and_then(|p| p.get("id"))
+                        .and_then(|v| v.as_str())
+                        .map(str::to_owned);
+                }
                 if cwd.is_none() {
                     if let Some(c) = payload.and_then(|p| p.get("cwd")).and_then(|v| v.as_str()) {
                         cwd = Some(c.to_string());
@@ -489,6 +496,7 @@ fn parse_session_reader(
         .map(|s| s.to_string());
 
     Ok(SessionTranscript {
+        source_session: super::native_session_identity(SOURCE_CODEX, native_id.as_deref()),
         source: Cow::Borrowed(SOURCE_CODEX),
         agent_version,
         model,
@@ -654,6 +662,37 @@ fn map_response_item(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn native_identity_uses_session_meta_and_survives_growth() {
+        let id = "11111111-1111-4111-8111-111111111111";
+        let prefix = format!("{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{id}\"}}}}\n");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir
+            .path()
+            .join(format!("rollout-2026-10-02T10-00-00-{id}.jsonl"));
+        std::fs::write(&path, "{\"type\":\"session_meta\",\"payload\":{}}\n").unwrap();
+        assert!(
+            load_session(&path).unwrap().source_session.is_none(),
+            "the filename cannot substitute for session_meta.id"
+        );
+        let first = parse_session_bytes(prefix.as_bytes()).unwrap();
+        let grown = parse_session_bytes(format!("{prefix}{{\"type\":\"response_item\",\"payload\":{{\"type\":\"message\",\"role\":\"user\",\"content\":[{{\"type\":\"input_text\",\"text\":\"hello\"}}]}}}}\n").as_bytes()).unwrap();
+        assert_eq!(first.source_session.as_ref().unwrap().native_id, id);
+        assert_eq!(first.source_session, grown.source_session);
+        assert_ne!(first.session_hash, grown.session_hash);
+        assert!(first.conversation_id.as_deref().is_none_or(|v| v != id));
+        for payload in ["{}", "{\"id\":\"broken\"}"] {
+            assert!(
+                parse_session_bytes(
+                    format!("{{\"type\":\"session_meta\",\"payload\":{payload}}}\n").as_bytes()
+                )
+                .unwrap()
+                .source_session
+                .is_none()
+            );
+        }
+    }
+
     use crate::source::{SessionEventKind, TraceSource};
     use std::path::PathBuf;
 

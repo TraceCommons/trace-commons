@@ -1,4 +1,5 @@
 import SwiftUI
+import TCDesign
 import TCShellCore
 
 /// What is left in the account this destination spends from.
@@ -32,13 +33,12 @@ struct BalanceRow: View {
 
     var body: some View {
         let status = model.balanceStatus
-        let tone = PrivateInferenceIndicator.palette(
-            BalanceSurface.tone(status, calls: model.balanceCalls))
+        let tone = BalanceSurface.tone(status, calls: model.balanceCalls)
         let action = BalanceSurface.actionToDraw(
             balance: BalanceSurface.action(status, calls: model.balanceCalls),
             credential: credentialAction)
-        VStack(alignment: .leading, spacing: TC.Space.sm) {
-            TCSectionHeader(title: copy.balanceTitle)
+        VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
+            GlassSectionRule(copy.balanceTitle)
             // A sentence OR the figures, never both: every state but the one
             // that was read has null figures behind it, and the sentence for
             // a null remaining amount is about an uncapped account, which is
@@ -46,9 +46,7 @@ struct BalanceRow: View {
             if let sentence = BalanceSurface.stateLine(
                 status, copy: copy, calls: model.balanceCalls)
             {
-                Label(sentence, systemImage: tone.symbol)
-                    .font(TC.Font_.body)
-                    .foregroundStyle(tone.textColor)
+                GlassStatusLabel(sentence, status: PrivateInferenceIndicator.status(tone))
                     .fixedSize(horizontal: false, vertical: true)
             } else if BalanceSurface.showsFigures(status, calls: model.balanceCalls) {
                 figures(status)
@@ -57,8 +55,8 @@ struct BalanceRow: View {
             // in every state: it qualifies the heading, which names an
             // account, as much as it qualifies any number under it.
             Text(copy.balanceWhat)
-                .font(TC.Font_.meta)
-                .foregroundStyle(.secondary)
+                .glassType(GlassTokens.TypeScale.caption)
+                .foregroundStyle(GlassColor.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
             actionButton(action)
         }
@@ -74,35 +72,36 @@ struct BalanceRow: View {
     /// answer to the heading's question and not a footnote to it.
     @ViewBuilder
     private func figures(_ status: BalanceStatus) -> some View {
-        VStack(alignment: .leading, spacing: TC.Space.xs) {
+        VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
             switch BalanceSurface.remaining(status, copy: copy, calls: model.balanceCalls) {
             case .figure(let amount):
-                // Monospaced digits so a figure that changes under a poll
+                // Tabular digits so a figure that changes under a poll
                 // does not reflow the line it sits on.
                 Text(amount)
-                    .font(TC.Font_.metricValueMono)
-                    .monospacedDigit()
+                    .glassType(GlassTokens.TypeScale.number)
+                    .foregroundStyle(GlassColor.textPrimary)
                     .textSelection(.enabled)
             case .sentence(let sentence):
                 Text(sentence)
-                    .font(TC.Font_.body)
+                    .glassType(GlassTokens.TypeScale.body)
+                    .foregroundStyle(GlassColor.textPrimary)
                     .fixedSize(horizontal: false, vertical: true)
             }
             // The ceiling and the running total, each drawn only when the
             // account has one. Absent is no line; a zero is a real $0.00 and
             // keeps its line, and the difference is the Rust's.
             if let limit = BalanceSurface.limitLine(status, calls: model.balanceCalls) {
-                Text(limit).font(TC.Font_.meta).foregroundStyle(.secondary)
+                Text(limit).glassType(GlassTokens.TypeScale.caption).foregroundStyle(GlassColor.textSecondary)
             }
             if let spent = BalanceSurface.spentLine(status, calls: model.balanceCalls) {
-                Text(spent).font(TC.Font_.meta).foregroundStyle(.secondary)
+                Text(spent).glassType(GlassTokens.TypeScale.caption).foregroundStyle(GlassColor.textSecondary)
             }
             // When the question was put -- not when the service updated
             // anything, which is a claim nothing here supports.
             if let observed = BalanceSurface.observedLine(
                 status, now: Date(), calls: model.balanceCalls)
             {
-                Text(observed).font(TC.Font_.meta).foregroundStyle(.secondary)
+                Text(observed).glassType(GlassTokens.TypeScale.caption).foregroundStyle(GlassColor.textSecondary)
             }
         }
     }
@@ -116,7 +115,7 @@ struct BalanceRow: View {
     private func actionButton(_ action: CredentialAction) -> some View {
         if let label = CredentialSurface.actionLabel(action, copy: copy) {
             Button(label) { run(action) }
-                .buttonStyle(.bordered)
+                .buttonStyle(GlassButtonStyle(.glass))
                 .disabled(model.credentialBusy)
         }
     }

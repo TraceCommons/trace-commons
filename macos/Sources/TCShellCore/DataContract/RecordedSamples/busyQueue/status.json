@@ -1,6 +1,7 @@
 {
   "schema_version": "trace_commons.daemon.v1_1",
   "logged_in": true,
+  "account_scope": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
   "tenant_id": "tenant-sample",
   "consent_scopes": [
     "debugging_evaluation"
@@ -53,5 +54,6 @@
   "contribution_override": null,
   "contribution_mode": "notify_only",
   "contribution_mode_partial": false,
+  "dev_dry_run": false,
   "_sample": "private AI, routing and budget need a live IronWire"
 }

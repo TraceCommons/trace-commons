@@ -88,7 +88,7 @@ export function OnboardingConsentStep({
               />
               <span>
                 <strong>
-                  {option.name.replaceAll("_", " ")}
+                  {option.title}
                   {option.always_on
                     ? " · required"
                     : option.grants_data_use

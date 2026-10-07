@@ -345,6 +345,22 @@ macro_rules! json {
     };
 }
 
+/// A first-run sentence with each `{name}` placeholder replaced by [`HOLE`],
+/// so it compares equal to the Swift literal that interpolates the argument.
+fn holed(text: String) -> String {
+    placeholders().fold(text, |text, name| {
+        text.replace(&format!("{{{name}}}"), HOLE)
+    })
+}
+
+/// Every `{name}` a pinned table may carry: the first run's and the
+/// monitor's (#1241).
+fn placeholders() -> impl Iterator<Item = &'static &'static str> {
+    trace_commons_contributor::first_run_copy::PLACEHOLDERS
+        .iter()
+        .chain(trace_commons_contributor::preview_copy::MONITOR_PLACEHOLDERS)
+}
+
 /// The core sentences no Swift literal may hold, by where they come from.
 fn pinned_sentences() -> Vec<(&'static str, String)> {
     use trace_commons_contributor::{
@@ -415,6 +431,50 @@ fn pinned_sentences() -> Vec<(&'static str, String)> {
             .map(counted)
             .collect(),
     );
+    // The first-run wording of #1030.
+    add(
+        "first_run_copy::first_run_copy",
+        table(json!(
+            trace_commons_contributor::first_run_copy::first_run_copy()
+        ))
+        .into_iter()
+        .map(holed)
+        .collect(),
+    );
+    // Ron's #1146 inspector words (#1241), the parts of the monitor tables
+    // that carry them. The tables' older single words are not pinned here.
+    {
+        let traces = json!(preview_copy::monitor_traces_copy());
+        let screens = json!(preview_copy::monitor_screens_copy());
+        let mut ron = Vec::new();
+        for key in [
+            "tree",
+            "counts",
+            "inspector",
+            "summary_panel",
+            "session_review",
+            "look_inside",
+            "undo",
+            "optional_automation",
+            "dismiss_action",
+        ] {
+            ron.extend(table(traces[key].clone()));
+        }
+        ron.extend(table(screens["safeguards"].clone()));
+        assert!(ron.len() > 100, "Ron's inspector words are not being read");
+        add(
+            "preview_copy::monitor_*_copy (#1146 inspector)",
+            ron.into_iter().map(holed).collect(),
+        );
+        // History's refresh and sign-in controls, in native words (#1241).
+        add(
+            "preview_copy::monitor_screens_copy history_actions",
+            table(screens["history_actions"].clone())
+                .into_iter()
+                .map(holed)
+                .collect(),
+        );
+    }
     // The menu-bar Contribution mode pill, its override confirmations and
     // their refusal lines (#1173).
     add(
@@ -468,6 +528,23 @@ fn pinned_sentences() -> Vec<(&'static str, String)> {
         "privacy_scan_copy",
         table(json!(privacy_scan_copy::privacy_scan_copy())),
     );
+    // The health banner (R6/R7, #1173): every label's words and the
+    // core-down banner. `daily-cap-reached` is left out: its title is
+    // `DAILY_BUDGET_TITLE`, which `DailyBudgetCopy.swift` holds as Swift
+    // until the budget banner has an export of its own.
+    {
+        use trace_commons_contributor::{daemon::health::ALL_LABELS, health_copy};
+        let mut lines = table(json!(health_copy::core_down_copy()));
+        for label in ALL_LABELS
+            .iter()
+            .filter(|label| **label != "daily-cap-reached")
+        {
+            lines.extend(table(json!(health_copy::health_copy_for_label(
+                label, None
+            ))));
+        }
+        add("health_copy", lines);
+    }
     add(
         "preview_copy::REDACTION_CATEGORY_*",
         [
@@ -541,6 +618,12 @@ fn pinned_sentences() -> Vec<(&'static str, String)> {
         legacy.push(consent::legacy_migration_refusal_line(label).to_owned());
     }
     add("consent_copy::legacy_migration_*", legacy);
+    // The Missions disclosure (M4, #1173): not built in macOS yet, pinned
+    // so the Missions tab arrives with the core's words.
+    add(
+        "consent_copy::missions_disclosure_copy",
+        table(json!(consent::missions_disclosure_copy())),
+    );
     add(
         "consent_copy::inference_connection_copy",
         table(json!(consent::inference_connection_copy())),
@@ -577,6 +660,25 @@ fn pinned_sentences() -> Vec<(&'static str, String)> {
 /// names a file and the fragment, so a NEW file repeating the same words
 /// still fails. Remove an entry when its reason stops being true.
 const ALLOWED: &[(&str, &str, &str)] = &[
+    // The export-failure fallback (`HealthCopy.onHoldFallback`): the core's
+    // `on_hold_copy()`, verbatim, drawn only when `tc_health_copy_json`
+    // returns NULL for a reported label -- a caught panic -- so a reported
+    // condition is never drawn as healthy.
+    (
+        "TraceCommonsApp/HealthCopy.swift",
+        "Contributions are on hold.",
+        "health export-failure fallback",
+    ),
+    (
+        "TraceCommonsApp/HealthCopy.swift",
+        "Something is stopping traces from being sent.",
+        "health export-failure fallback",
+    ),
+    (
+        "TraceCommonsApp/HealthCopy.swift",
+        "Nothing has been lost, and nothing has gone out.",
+        "health export-failure fallback",
+    ),
     // The per-tier withdrawal confirmations (`WithdrawalCopy.canonical*`)
     // reproduce `docs/contributor-daemon-ipc-v1_1.md`'s "Canonical
     // confirmation copy" table, and their credit note is the same two
@@ -594,25 +696,40 @@ const ALLOWED: &[(&str, &str, &str)] = &[
         "Credit still pending is forfeited.",
         "per-tier withdrawal credit note; no core export yet",
     ),
-    // The rollup tallies over History and the queue's week figures name a
-    // count of rows in a state, in the same words as the row's status tag.
-    // The core exports the row label (`history_status_labels`) but no tally
-    // heading yet, so these headings stay Swift's until it does. The row
-    // tag itself reads the core (see `history_rows_read_the_cores_status_words`).
+    // The legacy History rollup tallies and the queue's week figures, which
+    // held the core's status words as headings, left the shell with the
+    // legacy screens (R15); their allowances went with them.
+    //
+    // Ron's #1146 inspector words (#1241) that native screens already say
+    // in Swift. Each goes when its screen reads the core's table instead.
+    //
+    // The legacy queue's no-longer-waiting group, held verbatim in
+    // QueueView.swift since R15 until the core exports it.
     (
-        "TraceCommonsApp/Views/HistoryView.swift",
-        "Held for privacy review",
-        "rollup tally heading; no core tally export yet",
-    ),
-    (
-        "TraceCommonsApp/Views/HistoryView.swift",
-        "Waiting to be scored",
-        "rollup tally heading; no core tally export yet",
+        "TraceCommonsApp/Views/QueueView.swift",
+        "Sessions no longer waiting (",
+        "legacy queue window; #1241 moves only the monitor to the core's words",
     ),
     (
         "TraceCommonsApp/Views/QueueView.swift",
-        "Held for privacy review",
-        "week tally heading; no core tally export yet",
+        "This covers sessions that reached the queue.",
+        "legacy queue window; #1241 moves only the monitor to the core's words",
+    ),
+    // Not a sentence of its own: Look inside reads the core's
+    // `session_review.cannot_show_title`, and this verbatim copy of it is
+    // the fallback for a table that did not decode, so the cannot-show
+    // notice is never drawn without a title (`HealthCopy.onHoldFallback`).
+    (
+        "TraceCommonsApp/Views/PreviewSheet.swift",
+        "This one can't be shown.",
+        "fallback copy of the core's cannot_show_title (#1241 Task 7)",
+    ),
+    // Not a copy: the scanner matches substrings, and "N waiting for your
+    // decision" contains Ron's "N waiting for you".
+    (
+        "TCShellCore/MenuBarStatus.swift",
+        "waiting for you",
+        "substring of a different sentence (\"waiting for your decision\")",
     ),
 ];
 
@@ -667,6 +784,31 @@ fn no_pinned_core_sentence_is_a_swift_literal() {
     }
 }
 
+/// A core sentence that carries a `{name}` placeholder is pinned with a
+/// [`HOLE`] in its place, the way the scanner reads a Swift interpolation.
+/// Pinned with the braces, `"Include every past session in \(folder)"`
+/// would never match it.
+#[test]
+fn a_placeholder_sentence_is_pinned_the_way_swift_interpolates_it() {
+    let pinned = pinned_sentences();
+    let braced: Vec<&String> = pinned
+        .iter()
+        .map(|(_, sentence)| sentence)
+        .filter(|sentence| placeholders().any(|name| sentence.contains(&format!("{{{name}}}"))))
+        .collect();
+    assert!(
+        braced.is_empty(),
+        "pinned sentences still carry a brace placeholder: {braced:?}"
+    );
+    let probe = swift_literals(r#"let t = "Include every past session in \(folder)""#);
+    assert!(
+        pinned.iter().any(|(_, sentence)| fragments(sentence)
+            .iter()
+            .any(|fragment| probe.iter().any(|lit| lit.contains(fragment)))),
+        "a Swift re-authoring of a placeholder sentence is not caught: {probe:?}"
+    );
+}
+
 /// Each safety surface a macOS screen shows, the screen's file, the bridge
 /// call that screen must make, the bridge file, and the export that call
 /// must reach.
@@ -687,7 +829,7 @@ const SURFACES: &[(&str, &str, &str, &str, &str)] = &[
     ),
     (
         "monitor screens words",
-        "TraceCommonsApp/Views/Monitor/InferenceViews.swift",
+        "TraceCommonsApp/Views/Monitor/MonitorWords.swift",
         "TCCoreCopy.monitorScreensCopyJSON",
         "TCBridge/TCCoreCopy.swift",
         "tc_monitor_screens_copy_json",
@@ -706,23 +848,26 @@ const SURFACES: &[(&str, &str, &str, &str, &str)] = &[
         "TCBridge/TCConsentCopy.swift",
         "tc_consent_copy",
     ),
+    // Look inside is read-only since #1241 Task 7: Contribute, and its
+    // tooltip, are the inspector's session card (`SessionReviewCard`,
+    // #1241 Task 6).
     (
         "consent gate help",
-        "TraceCommonsApp/Views/PreviewSheet.swift",
+        "TraceCommonsApp/Views/Monitor/SessionReviewCard.swift",
         "TCConsentCopy.gateHelp",
         "TCBridge/TCConsentCopy.swift",
         "tc_consent_gate_help",
     ),
     (
         "grant void notice",
-        "TraceCommonsApp/Views/MainWindowView.swift",
+        "TraceCommonsApp/Views/ShellNotices.swift",
         "TCConsentCopy.voidNoticeJSON",
         "TCBridge/TCConsentCopy.swift",
         "tc_grant_void_notice",
     ),
     (
         "arming rewording notice",
-        "TraceCommonsApp/Views/MainWindowView.swift",
+        "TraceCommonsApp/Views/ShellNotices.swift",
         "TCConsentCopy.armingRewordedNoticeJSON",
         "TCBridge/TCConsentCopy.swift",
         "tc_arming_reworded_notice",
@@ -764,7 +909,7 @@ const SURFACES: &[(&str, &str, &str, &str, &str)] = &[
     ),
     (
         "ignore project",
-        "TraceCommonsApp/Views/QueueFolderRow.swift",
+        "TraceCommonsApp/Views/Monitor/TracesViews.swift",
         "TCCoreCopy.projectIgnoreCopyJSON",
         "TCBridge/TCCoreCopy.swift",
         "tc_project_ignore_copy_json",
@@ -799,45 +944,54 @@ const SURFACES: &[(&str, &str, &str, &str, &str)] = &[
     ),
     (
         "arming offer",
-        "TraceCommonsApp/Views/QueueView.swift",
+        "TraceCommonsApp/Views/Monitor/TracesOffers.swift",
         "TCCoreCopy.armingOfferCopyJSON",
         "TCBridge/TCCoreCopy.swift",
         "tc_arming_offer_copy_json",
     ),
     (
         "arming confirmation",
-        "TraceCommonsApp/Views/SettingsView.swift",
+        "TraceCommonsApp/Views/Settings/ProjectsSection.swift",
         "TCCoreCopy.armingOfferCopyJSON",
         "TCBridge/TCCoreCopy.swift",
         "tc_arming_offer_copy_json",
     ),
     (
-        "surviving secret",
-        "TraceCommonsApp/Views/QueueView.swift",
+        "first-run arming confirmation",
+        "TraceCommonsApp/Views/FirstRun/RulesScreen.swift",
+        "TCCoreCopy.armingOfferCopyJSON",
+        "TCBridge/TCCoreCopy.swift",
+        "tc_arming_offer_copy_json",
+    ),
+    (
+        "surviving secret in Traces",
+        "TraceCommonsApp/Views/Monitor/TracesStore.swift",
         "TCCoreCopy.residualSecretLine",
         "TCBridge/TCCoreCopy.swift",
         "tc_residual_secret_line_text",
     ),
+    // Look inside's What's in it tab left with #1241 Task 7; the scrubbing
+    // panel is the session card's (see the gate help above).
     (
         "scrubbing panel",
-        "TraceCommonsApp/Views/PreviewSheet.swift",
+        "TraceCommonsApp/Views/Monitor/SessionReviewCard.swift",
         "TCCoreCopy.redactionSummaryJSON",
         "TCBridge/TCCoreCopy.swift",
         "tc_redaction_summary_json",
     ),
     (
-        "extra privacy scan",
-        "TraceCommonsApp/Views/OnboardingPrivacyScanView.swift",
-        "TCCoreCopy.privacyScanCopyJSON",
-        "TCBridge/TCCoreCopy.swift",
-        "tc_privacy_scan_copy_json",
-    ),
-    (
         "extra privacy scan recovery",
         "TraceCommonsApp/HealthCopy.swift",
-        "TCCoreCopy.privacyScanCopyJSON",
+        "TCCoreCopy.healthCopyJSON",
         "TCBridge/TCCoreCopy.swift",
-        "tc_privacy_scan_copy_json",
+        "tc_health_copy_json",
+    ),
+    (
+        "health banner in Traces",
+        "TraceCommonsApp/Views/Monitor/TracesStore.swift",
+        "HealthCopy.core(",
+        "TCBridge/TCCoreCopy.swift",
+        "tc_health_copy_json",
     ),
     (
         "withdrawal of an unknown reach",
@@ -860,6 +1014,20 @@ const SURFACES: &[(&str, &str, &str, &str, &str)] = &[
         "TCBridge/TCCoreCopy.swift",
         "tc_quit_prompt_json",
     ),
+    (
+        "first run",
+        "TraceCommonsApp/Views/OnboardingCoordinatorView.swift",
+        "TCCoreCopy.firstRunCopyJSON",
+        "TCBridge/TCCoreCopy.swift",
+        "tc_first_run_copy_json",
+    ),
+    (
+        "first-run sharing card",
+        "TraceCommonsApp/Views/FirstRun/UsesScreen.swift",
+        "TCCoreCopy.automaticContributionCopyJSON",
+        "TCBridge/TCCoreCopy.swift",
+        "tc_automatic_contribution_copy_json",
+    ),
 ];
 
 /// Bridge functions for surfaces macOS has not built yet. Each must still
@@ -876,10 +1044,6 @@ const BRIDGE_ONLY: &[(&str, &str)] = &[
     (
         "TCBridge/TCCoreCopy.swift",
         "tc_inference_connection_copy_json",
-    ),
-    (
-        "TCBridge/TCCoreCopy.swift",
-        "tc_automatic_contribution_copy_json",
     ),
 ];
 
@@ -940,24 +1104,24 @@ fn history_rows_read_the_cores_status_words() {
         "PublicRunCopy.historyStatusLabel(for:) no longer reads historyStatusLabels"
     );
 
-    let history = read("TraceCommonsApp/Views/HistoryView.swift");
+    let history = read("TraceCommonsApp/Views/Monitor/HomeViews.swift");
     let start = history
-        .find("static func statusSentence(")
-        .expect("HistoryRow.statusSentence exists");
+        .find("static func historyStatusLabel(")
+        .expect("HomeFormat.historyStatusLabel exists");
     let end = history[start..]
         .find("\n    }\n")
         .map(|at| start + at)
-        .expect("statusSentence has a body");
+        .expect("historyStatusLabel has a body");
     let body = &history[start..end];
     assert!(
         swift_code(body).contains("historyStatusLabel(for:"),
-        "HistoryRow.statusSentence must read the core's table"
+        "HomeFormat.historyStatusLabel must read the core's table"
     );
     let literals = swift_literals(body);
     for row in trace_commons_contributor::history_copy::STATUS_LABELS {
         assert!(
             !literals.iter().any(|lit| lit.contains(row.label)),
-            "HistoryRow.statusSentence types the core's word {:?} for {}",
+            "HomeFormat.historyStatusLabel types the core's word {:?} for {}",
             row.label,
             row.status
         );

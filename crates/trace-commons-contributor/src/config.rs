@@ -19,7 +19,7 @@ use crate::witness::WitnessTrust;
 
 pub const CONTRIBUTOR_CONFIG_SCHEMA_VERSION: &str = "trace_commons.contributor_config.v1";
 
-const CONFIG_FILE: &str = "contributor.json";
+pub(crate) const CONFIG_FILE: &str = "contributor.json";
 const DEVICE_KEY_FILE: &str = "device.pk8";
 const RECEIPTS_FILE: &str = "receipts.jsonl";
 const NEAR_AI_NOTICE_MARKER_FILE: &str = "near-ai-notice-shown";
@@ -65,6 +65,10 @@ pub const LEGACY_INVITE_LINK_FILE: &str = "legacy-invite-link.json";
 /// without asking the issuer or the contributor. A hash, never the code.
 /// Swept by `wipe()`.
 pub const INVITE_SUBJECT_FILE: &str = "invite-subject.json";
+/// The passkeys used on this Mac, remembered for the first run's "Welcome
+/// back" (`daemon::remembered_passkeys`). Names and account hashes only.
+/// Survives sign-out; swept by `wipe()`.
+pub const REMEMBERED_PASSKEYS_FILE: &str = "remembered-passkeys.json";
 /// Name prefix of the per-entry redacted envelope files
 /// (`daemon::approved_envelope`). One file per previewed-and-approved queue
 /// entry, so they cannot be listed by name; `wipe()` sweeps them by prefix.
@@ -1163,6 +1167,7 @@ impl ConfigStore {
             IDENTITY_SWITCH_JOURNAL_FILE,
             LEGACY_INVITE_LINK_FILE,
             INVITE_SUBJECT_FILE,
+            REMEMBERED_PASSKEYS_FILE,
         ] {
             let path = self.dir.join(name);
             if path.exists() {
@@ -1187,6 +1192,7 @@ impl ConfigStore {
             IDENTITY_SWITCH_JOURNAL_FILE,
             LEGACY_INVITE_LINK_FILE,
             INVITE_SUBJECT_FILE,
+            REMEMBERED_PASSKEYS_FILE,
         ]
         .into_iter()
         .map(|name| format!(".{name}.tmp-"))

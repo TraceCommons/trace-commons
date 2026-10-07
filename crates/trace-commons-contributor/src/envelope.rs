@@ -783,7 +783,7 @@ fn build_raw_contribution_with_id(
         embedding_analysis: None,
         value: ValueMetadata::default(),
         conversation_id: t.conversation_id.clone(),
-        source_session: None,
+        source_session: t.source_session.clone(),
     }
 }
 
@@ -1144,6 +1144,22 @@ fn raw_event_for(e: &SessionEvent, now: DateTime<Utc>) -> RawTraceContributionEv
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn native_identity_survives_envelope_and_redaction() {
+        let mut transcript = fixture_transcript();
+        transcript.source_session = crate::source::native_session_identity(
+            "codex",
+            Some("11111111-1111-4111-8111-111111111111"),
+        );
+        let raw = build_raw_contribution(&transcript, &test_config(), chrono::Utc::now());
+        assert_eq!(raw.source_session, transcript.source_session);
+        let redactor =
+            trace_commons_protocol::trace_contribution::DeterministicTraceRedactor::try_default()
+                .unwrap();
+        let redacted = redact_to_envelope(&redactor, raw).await.unwrap();
+        assert_eq!(redacted.source_session, transcript.source_session);
+    }
+
     use super::*;
     use crate::source::{TraceSource, claude_code::ClaudeCodeSource};
 

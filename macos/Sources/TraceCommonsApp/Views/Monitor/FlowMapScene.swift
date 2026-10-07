@@ -1,4 +1,3 @@
-#if DEBUG
 import CoreGraphics
 import TCDesign
 import TCShellCore
@@ -282,16 +281,10 @@ struct FlowMapScene: Equatable {
         }
     }
 
-    /// IronWire's harness ids to the tools that have artwork.
+    /// IronWire's harness ids to the tools that have artwork. The table is
+    /// `HarnessToolArt`, beside the tools list the release window draws.
     static func glassTool(harness id: String) -> GlassTool? {
-        switch id {
-        case "claude", "claude-code": .claudeCode
-        case "codex": .codex
-        case "gemini", "gemini-cli": .geminiCLI
-        case "cline": .cline
-        case "opencode": .openCode
-        default: nil
-        }
+        HarnessToolArt.tool(harness: id)
     }
 
     // MARK: Helpers
@@ -306,9 +299,14 @@ struct FlowMapScene: Equatable {
         "\(word) \(count.map(String.init) ?? "—")"
     }
 
+    /// A heading and a count the core may not have reported, set apart by
+    /// a spaced dot: "Worth a second look · 3", a dash in place of the count.
+    static func dotPair(_ word: String, _ count: Int?) -> String {
+        "\(word) · \(count.map(String.init) ?? "—")"
+    }
+
     private static func curve(from: CGPoint, to: CGPoint, style: Arc.Style, dim: Double) -> Arc {
         let midX = (from.x + to.x) / 2
         return Arc(from: from, control1: CGPoint(x: midX, y: from.y), control2: CGPoint(x: midX, y: to.y), to: to, style: style, dim: dim)
     }
 }
-#endif

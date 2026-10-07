@@ -55,7 +55,7 @@ pub mod dark {
     /// `statusOutside`.
     pub const STATUS_OUTSIDE: &str = "#FF6B6B";
     /// `statusOutsideText`.
-    pub const STATUS_OUTSIDE_TEXT: &str = "#FF6B6B";
+    pub const STATUS_OUTSIDE_TEXT: &str = "#FF9494";
     /// `textOnStatus`.
     pub const ON_STATUS: &str = "#0C0C0E";
 }
@@ -88,6 +88,6 @@ pub const DARK_CSS: &str = r#"
 @define-color tc_status_ask #F5C142; /* statusAsk */
 @define-color tc_status_ask_text #F5C142; /* statusAskText */
 @define-color tc_status_outside #FF6B6B; /* statusOutside */
-@define-color tc_status_outside_text #FF6B6B; /* statusOutsideText */
+@define-color tc_status_outside_text #FF9494; /* statusOutsideText */
 @define-color tc_on_status #0C0C0E; /* textOnStatus */
 "#;

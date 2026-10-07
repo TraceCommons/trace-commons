@@ -244,7 +244,7 @@ const LIGHT_TOKENS: &str = r#"
 ///   4.61:1  tertiary    #878D81 on surface    #21241E
 ///   7.49:1  accent text #C9B3FF on surface-2  #2A2E27
 ///   8.29:1  gold text   #F5C142 on surface-2  #2A2E27
-///   4.98:1  coral text  #FF6B6B on surface-2  #2A2E27
+///   6.53:1  coral text  #FF9494 on surface-2  #2A2E27
 ///   7.78:1  blue text   #9DB6F1 on surface    #21241E
 ///   7.68:1  blue icon   #9DB6F1 on bg         #23251D
 ///   5.01:1  PRIMARY     #FFFFFF on accent     #8A3DFF   <- the consent action

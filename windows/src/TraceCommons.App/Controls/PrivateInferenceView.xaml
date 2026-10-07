@@ -43,6 +43,7 @@
 
         <ScrollViewer Grid.Row="1" Padding="22,16,22,16">
             <StackPanel Spacing="12" MaxWidth="640" HorizontalAlignment="Left">
+                <ContentControl x:Name="ManagedContent" />
 
                 <!--
                     The credential this computer answers calls with, and it

@@ -360,6 +360,23 @@ pub trait Database: TraceCorpusStore + Send + Sync {
     ) -> Result<Option<uuid::Uuid>, DatabaseError> {
         Err(DatabaseError::Pool("near_provisioning_unconfigured".into()))
     }
+    async fn external_account_trust_runtime_ready(&self) -> Result<bool, DatabaseError> {
+        Ok(false)
+    }
+    async fn enable_external_account_trust_growth(&self) -> Result<(), DatabaseError> {
+        Err(DatabaseError::Pool(
+            "external_account_trust_unavailable".into(),
+        ))
+    }
+    async fn prune_account_trust_dependency_locks(
+        &self,
+        _limit: i32,
+        _dry_run: bool,
+    ) -> Result<u64, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "account_trust_retention_unavailable".into(),
+        ))
+    }
     async fn account_admission_runtime_ready(&self) -> Result<bool, DatabaseError> {
         Ok(false)
     }
@@ -1181,6 +1198,26 @@ pub trait Database: TraceCorpusStore + Send + Sync {
         _session: NewSession<'_>,
         _identity: &crate::near_account_identity::NearAccountIdentity,
     ) -> Result<crate::account_onboarding::NearAiBindOutcome, DatabaseError> {
+        Err(DatabaseError::Pool("near_ai_bind_unconfigured".into()))
+    }
+
+    /// Enrol a further device into the `bound` account `(tenant_id,
+    /// account_id)` from a verified NEAR AI login: a second Mac signed in with
+    /// the account's passkey. Attaches the device only if the login's anchor
+    /// is that account's own, decided in the same transaction that would
+    /// write the device; otherwise refuses with
+    /// [`crate::account_onboarding::NEAR_AI_ENROL_ACCOUNT_MISMATCH`] having
+    /// written nothing. Never claims an anchor or mints a tenant or account.
+    /// The default refuses.
+    async fn enrol_near_ai_login(
+        &self,
+        _tenant_id: &str,
+        _account_id: uuid::Uuid,
+        _login: &crate::near_ai_login::VerifiedNearAiLogin,
+        _device_public_key: &[u8; 32],
+        _session: NewSession<'_>,
+        _identity: &crate::near_account_identity::NearAccountIdentity,
+    ) -> Result<crate::account_onboarding::ProvisionedNearAccount, DatabaseError> {
         Err(DatabaseError::Pool("near_ai_bind_unconfigured".into()))
     }
 

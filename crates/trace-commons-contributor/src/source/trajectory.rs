@@ -347,6 +347,14 @@ impl TrajectorySource {
                 .collect(),
         }
     }
+
+    /// Also read `path` as a declared location: a folder of exports the
+    /// contributor chose, read on the same strict terms as `--trajectory`.
+    #[must_use]
+    pub fn also_declared(mut self, path: PathBuf) -> Self {
+        self.scopes.push(Scope::Declared(path));
+        self
+    }
 }
 
 fn is_trajectory_file(path: &Path) -> bool {
@@ -582,6 +590,7 @@ impl TraceSource for TrajectorySource {
             .map(|s| s.to_string());
 
         Ok(SessionTranscript {
+            source_session: None,
             source: Cow::Owned(parsed.source),
             // Trajectory carries no harness version field.
             agent_version: None,
@@ -640,6 +649,19 @@ impl TrajectorySource {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn imported_native_attribution_cannot_supply_source_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("run.jsonl");
+        let text = SAMPLE.replace("\"source\":\"openhands\"", "\"source\":\"codex\",\"source_session\":{\"adapter\":\"codex\",\"native_id\":\"11111111-1111-4111-8111-111111111111\"}");
+        std::fs::write(&path, text).unwrap();
+        let source = TrajectorySource::new(dir.path().to_path_buf());
+        let r = source.discover().unwrap().into_iter().next().unwrap();
+        let imported = source.load(&r).unwrap();
+        assert_eq!(imported.source.as_ref(), "codex");
+        assert!(imported.source_session.is_none());
+    }
+
     use super::*;
     use crate::source::SessionEventKind;
 

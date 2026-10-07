@@ -20,9 +20,11 @@ public struct ProjectIgnoreCopy: Decodable, Equatable, Sendable {
     public let button: String
     /// The button's help text.
     public let tooltip: String
+    /// The confirmation's cancel, which keeps the project (#1146).
+    public let keep: String
 
     /// The payload fields this shell decodes, by wire name.
-    public static let consumedFields = ["title", "body", "button", "tooltip"]
+    public static let consumedFields = ["title", "body", "button", "tooltip", "keep"]
 
     /// Decode the payload, or nil if it will not parse or a field is empty.
     /// Nil, never a partly-filled value: the confirmation is not offered
@@ -33,7 +35,7 @@ public struct ProjectIgnoreCopy: Decodable, Equatable, Sendable {
         else {
             return nil
         }
-        return [copy.title, copy.body, copy.button, copy.tooltip].contains(where: \.isEmpty)
+        return [copy.title, copy.body, copy.button, copy.tooltip, copy.keep].contains(where: \.isEmpty)
             ? nil : copy
     }
 }

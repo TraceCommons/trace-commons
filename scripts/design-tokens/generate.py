@@ -180,7 +180,7 @@ def render(tokens: dict) -> str:
             for stop in entry["stops"]
         )
         gradients.append(
-            (identifier(key, where), f"GlassGradient(angle: {number(entry['angle'], where)}, stops: [{stops}])", None)
+            (identifier(key, where), f"GlassGradient(angle: {number(entry['angle'], where)}, stops: [{stops}])", entry.get("note"))
         )
     section("Gradient", "GlassGradient", gradients)
 

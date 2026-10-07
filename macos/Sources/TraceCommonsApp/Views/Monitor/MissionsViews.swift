@@ -1,4 +1,3 @@
-#if DEBUG
 import SwiftUI
 import TCDesign
 import TCShellCore
@@ -29,9 +28,6 @@ struct MissionsPage: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
-            GlassBreadcrumb(
-                [GlassCrumb(MonitorWindowView.Tab.home.title, action: back), GlassCrumb(MonitorWords.missions)],
-                backLabel: MonitorWindowView.Tab.home.title, onBack: back)
             ScrollView {
                 VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
                     if let failure = store.failures["mission_catalogue"] {
@@ -72,6 +68,8 @@ struct MissionsPage: View {
             }
             .scrollIndicators(.never)
         }
+        // Escape goes back to Home, as the shell's breadcrumb does.
+        .onExitCommand(perform: back)
     }
 }
 
@@ -154,4 +152,3 @@ extension MonitorWords {
     static var projected: String { table?.projected ?? "" }
     static var projectedNote: String { table?.projectedNote ?? "" }
 }
-#endif

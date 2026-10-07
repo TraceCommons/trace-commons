@@ -1,4 +1,3 @@
-#if DEBUG
 import SwiftUI
 import TCDesign
 import TCShellCore
@@ -305,4 +304,3 @@ struct FlowMapGeometry {
         CGPoint(x: origin.x + p.x * scale, y: origin.y + p.y * scale)
     }
 }
-#endif

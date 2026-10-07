@@ -14,28 +14,65 @@ public enum GlassButtonKind: Sendable, Equatable {
     case submit(done: Bool)
     /// Accent text, no container.
     case link
+    /// A glass pill whose label reads in the outside red: the action that
+    /// cannot be undone (delete, sign out). Never the default action.
+    case destructive
 }
 
 /// `Button("Start watching") {}.buttonStyle(GlassButtonStyle(.primary))`.
 public struct GlassButtonStyle: ButtonStyle {
     private let kind: GlassButtonKind
     private let small: Bool
+    private let selected: Bool
 
-    public init(_ kind: GlassButtonKind, small: Bool = false) {
+    /// `selected` is a glass button that is the chosen one of a set (#1146's
+    /// `aria-pressed`): it reads purple, the CTA fill and white label, and
+    /// says selected to assistive tech. Other kinds ignore it.
+    public init(_ kind: GlassButtonKind, small: Bool = false, selected: Bool = false) {
         self.kind = kind
         self.small = small
+        self.selected = selected
     }
 
     public func makeBody(configuration: Configuration) -> some View {
-        GlassButtonBody(kind: kind, small: small, configuration: configuration)
+        GlassButtonBody(kind: kind, small: small, selected: selected, configuration: configuration)
+    }
+
+    /// The fill a kind gets under the pointer, drawn over its own fill: the
+    /// glass pill's control hover. The CTAs, the submit pill and the link
+    /// have none (the link underlines instead); a selected glass button
+    /// keeps its purple.
+    static func hoverFill(_ kind: GlassButtonKind, selected: Bool = false) -> GlassRGBA? {
+        switch kind {
+        case .glass where !selected, .destructive: GlassTokens.Color.controlHover
+        default: nil
+        }
+    }
+
+    /// The destructive pill's label ink: the outside red, lifted for the
+    /// control fill.
+    static let destructiveInk = GlassTokens.Color.destructiveText
+
+    /// The submit pill's label ink: green once sent, `statusOff` while it
+    /// cannot be used (on top of the shared disabled dimming), text otherwise.
+    static func submitInk(done: Bool, enabled: Bool) -> GlassRGBA {
+        if done { return GlassTokens.Color.statusOnText }
+        return enabled ? GlassTokens.Color.textPrimary : GlassTokens.Color.statusOff
+    }
+
+    /// Every kind dims by the one shared disabled opacity.
+    static func disabledOpacity(_ kind: GlassButtonKind) -> Double {
+        GlassTokens.Opacity.disabled
     }
 }
 
 private struct GlassButtonBody: View {
     let kind: GlassButtonKind
     let small: Bool
+    let selected: Bool
     let configuration: ButtonStyleConfiguration
     @Environment(\.isEnabled) private var isEnabled
+    @State private var hovering = false
 
     var body: some View {
         label
@@ -43,8 +80,15 @@ private struct GlassButtonBody: View {
             // faded consent button reads as disabled. The label keeps its
             // contrast; the fill reads `glassPressed`.
             .environment(\.glassPressed, configuration.isPressed && isEnabled)
-            .opacity(isEnabled ? 1 : GlassTokens.Opacity.disabled)
+            .opacity(isEnabled ? 1 : GlassButtonStyle.disabledOpacity(kind))
             .contentShape(Capsule())
+            .onHover { hovering = $0 }
+            .accessibilityAddTraits(kind == .glass && selected ? .isSelected : [])
+    }
+
+    private var hoverFill: Color {
+        guard hovering, isEnabled, let fill = GlassButtonStyle.hoverFill(kind, selected: selected) else { return .clear }
+        return fill.color
     }
 
     @ViewBuilder
@@ -66,25 +110,46 @@ private struct GlassButtonBody: View {
                 .frame(minHeight: small ? 30 : GlassTokens.Size.cta)
                 .background(Capsule().fill(GlassTokens.Gradient.ctaSecondaryFill.linear).glassPressedFill())
                 .glassEdge(GlassTokens.Shadow.ctaSecondaryEdge, in: Capsule())
+        case .glass where selected:
+            // One of a set, chosen: the CTA's purple (#1146 glass.css,
+            // `.tc-btn--glass[aria-pressed="true"]`).
+            configuration.label
+                .glassType(GlassTokens.TypeScale.label.weight(.semibold))
+                .foregroundStyle(GlassTokens.Color.textOnAccent.color)
+                .padding(.horizontal, 12)
+                .frame(minHeight: GlassTokens.Size.controlLarge)
+                .background(Capsule().fill(GlassTokens.Gradient.ctaFill.linear).glassPressedFill())
+                .glassEdge(GlassTokens.Shadow.ctaEdge, in: Capsule())
         case .glass:
             configuration.label
                 .glassType(GlassTokens.TypeScale.label.weight(.semibold))
                 .foregroundStyle(GlassColor.textPrimary)
                 .padding(.horizontal, 12)
                 .frame(minHeight: GlassTokens.Size.controlLarge)
+                .background(Capsule().fill(hoverFill))
                 .glassSurface(.control)
         case let .submit(done):
             configuration.label
                 .glassType(GlassTokens.TypeScale.caption.weight(.bold))
-                .foregroundStyle(done ? GlassTokens.Color.statusOnText.color : GlassColor.textPrimary)
+                .foregroundStyle(GlassButtonStyle.submitInk(done: done, enabled: isEnabled).color)
                 .padding(.horizontal, 10)
                 .frame(minHeight: GlassTokens.Size.submitPill)
                 .glassSurface(.control)
+        case .destructive:
+            configuration.label
+                .glassType(GlassTokens.TypeScale.label.weight(.semibold))
+                .foregroundStyle(GlassButtonStyle.destructiveInk.color)
+                .padding(.horizontal, 12)
+                .frame(minHeight: GlassTokens.Size.controlLarge)
+                .background(Capsule().fill(hoverFill))
+                .glassSurface(.control)
         case .link:
-            // No fill to darken: the text takes the press instead.
+            // No fill to darken: the text takes the press instead, and the
+            // pointer underlines it.
             configuration.label
                 .glassType(GlassTokens.TypeScale.label.weight(.semibold))
                 .foregroundStyle(GlassColor.accentText)
+                .underline(hovering && isEnabled)
                 .glassPressedFill()
         }
     }
@@ -111,6 +176,7 @@ public struct GlassRoundButton: View {
                 .glassGlyph(small ? 11 : 13, weight: .medium)
                 .foregroundStyle(GlassColor.textPrimary)
                 .frame(width: side, height: side)
+                .glassHover(GlassTokens.Color.controlHover, in: Circle())
                 .glassSurface(.control, radius: side / 2)
         }
         .buttonStyle(GlassPressStyle())
@@ -137,6 +203,7 @@ public struct GlassPillIconButton: View {
                 .glassGlyph(11, weight: .semibold)
                 .foregroundStyle(GlassColor.textPrimary)
                 .frame(width: 30, height: GlassTokens.Size.control)
+                .glassHover(GlassTokens.Color.controlHover, in: Capsule())
                 .glassSurface(.control)
         }
         .buttonStyle(GlassPressStyle())
@@ -146,17 +213,23 @@ public struct GlassPillIconButton: View {
 }
 
 /// A toolbar icon inside a grouped glass capsule (view, graph, map,
-/// inspector). `pressed` dims it when its panel is hidden.
+/// inspector). `pressed` dims it when its panel is hidden; `expanded` is a
+/// button whose menu is open (the View menu), drawn on a solid fill.
 public struct GlassToolbarButton: View {
     private let label: String
     private let systemImage: String
     private let pressed: Bool?
+    private let expanded: Bool?
     private let action: () -> Void
 
-    public init(_ label: String, systemImage: String, pressed: Bool? = nil, action: @escaping () -> Void) {
+    public init(
+        _ label: String, systemImage: String, pressed: Bool? = nil, expanded: Bool? = nil,
+        action: @escaping () -> Void
+    ) {
         self.label = label
         self.systemImage = systemImage
         self.pressed = pressed
+        self.expanded = expanded
         self.action = action
     }
 
@@ -169,6 +242,8 @@ public struct GlassToolbarButton: View {
                 // A glyph has no fill: the press darkens a wash behind it,
                 // never the glyph, which keeps its contrast.
                 .glassPressedWash(Capsule())
+                .background(Capsule().fill(Self.fill(expanded: expanded)?.color ?? .clear))
+                .glassHover(GlassTokens.Color.controlHover, in: Capsule())
                 .contentShape(Capsule())
         }
         .buttonStyle(GlassPressStyle())
@@ -182,6 +257,12 @@ public struct GlassToolbarButton: View {
     /// replaced was about 2.8:1.
     static func glyph(pressed: Bool?) -> GlassRGBA {
         pressed == false ? GlassTokens.Color.statusOff : GlassTokens.Color.textPrimary
+    }
+
+    /// The fill behind the glyph: `toolbarExpanded` while its menu is open
+    /// (#1146 `.tc-btn--icon[aria-expanded="true"]`), none otherwise.
+    static func fill(expanded: Bool?) -> GlassRGBA? {
+        expanded == true ? GlassTokens.Color.toolbarExpanded : nil
     }
 }
 
@@ -229,6 +310,8 @@ public struct GlassKebab: View {
     private let label: String
     private let open: Bool
     private let action: () -> Void
+    @State private var hovering = false
+    @Environment(\.isEnabled) private var isEnabled
 
     /// `label` names the button for VoiceOver and the help tag, from the
     /// core's copy.
@@ -238,21 +321,30 @@ public struct GlassKebab: View {
         self.action = action
     }
 
+    /// Open or under the pointer, the kebab lights: the glyph in the text
+    /// colour on a faint fill (#1146 `.tc-btn--kebab:hover`); otherwise a
+    /// `statusOff` glyph with no fill.
+    static func lit(open: Bool, hovering: Bool) -> Bool {
+        open || hovering
+    }
+
     public var body: some View {
+        let lit = Self.lit(open: open, hovering: hovering && isEnabled)
         Button(action: action) {
             Image(systemName: "ellipsis")
                 .rotationEffect(.degrees(90))
                 .glassGlyph(12, weight: .bold)
-                .foregroundStyle(open ? GlassColor.textPrimary : GlassTokens.Color.statusOff.color)
+                .foregroundStyle(lit ? GlassColor.textPrimary : GlassTokens.Color.statusOff.color)
                 .frame(width: 22, height: 24)
                 .background(
                     RoundedRectangle(cornerRadius: 6, style: .continuous)
-                        .fill(open ? GlassColor.ink(0.14) : .clear)
+                        .fill(lit ? GlassColor.ink(0.14) : .clear)
                 )
                 .glassPressedFill()
                 .contentShape(Rectangle())
         }
         .buttonStyle(GlassPressStyle())
+        .onHover { hovering = $0 }
         .accessibilityLabel(label)
         .help(label)
     }
@@ -337,21 +429,7 @@ public struct GlassPicker<Value: Hashable>: View {
                 Button(option.title) { selection = option.value }
             }
         } label: {
-            HStack(spacing: GlassTokens.Space.inlineGap) {
-                if let dot = current?.dot {
-                    GlassStatusDot(dot, size: GlassTokens.Size.dot)
-                }
-                Text(current?.title ?? placeholder)
-                Image(systemName: "chevron.down")
-                    .glassGlyph(8, weight: .bold)
-                    .foregroundStyle(GlassColor.textTertiary)
-            }
-            .glassType(GlassTokens.TypeScale.label.weight(.semibold))
-            .foregroundStyle(GlassColor.textPrimary)
-            .padding(.leading, 10)
-            .padding(.trailing, 8)
-            .frame(minHeight: GlassTokens.Size.controlLarge)
-            .glassSurface(.control)
+            GlassPickerPill(title: current?.title ?? placeholder, dot: current?.dot)
         }
         // A button-style menu draws the label as given (the borderless
         // style keeps only its text, tinted, and drops the pill), and
@@ -362,6 +440,38 @@ public struct GlassPicker<Value: Hashable>: View {
         .fixedSize()
         .accessibilityLabel(label)
         .accessibilityValue(current?.title ?? placeholder)
+    }
+}
+
+/// The picker's pill: dot, label, chevron, on the control tier, with the
+/// control hover. `invalid` adds the outside-red ring (`GlassSelect`).
+struct GlassPickerPill: View {
+    let title: String
+    let dot: GlassStatus?
+    var invalid = false
+
+    var body: some View {
+        HStack(spacing: GlassTokens.Space.inlineGap) {
+            if let dot {
+                GlassStatusDot(dot, size: GlassTokens.Size.dot)
+            }
+            Text(title)
+            Image(systemName: "chevron.down")
+                .glassGlyph(8, weight: .bold)
+                .foregroundStyle(GlassColor.textTertiary)
+        }
+        .glassType(GlassTokens.TypeScale.label.weight(.semibold))
+        .foregroundStyle(GlassColor.textPrimary)
+        .padding(.leading, 10)
+        .padding(.trailing, 8)
+        .frame(minHeight: GlassTokens.Size.controlLarge)
+        .glassHover(GlassTokens.Color.controlHover, in: Capsule())
+        .overlay {
+            if let ring = GlassTextField.ring(invalid: invalid) {
+                Capsule().strokeBorder(ring.color, lineWidth: 1)
+            }
+        }
+        .glassSurface(.control)
     }
 }
 
@@ -395,11 +505,17 @@ public struct GlassToggleStyle: ToggleStyle {
         }
     }
 
-    /// The knob: white, except on the bright watch green, where white is
-    /// about 1.8:1 and the knob takes the dark ink instead (over 9:1). Every
-    /// knob clears the 3:1 glyph floor against its track (SwitchContrastTests).
+    /// The knob: white on every track, as #1146 draws it.
     static func knob(_ kind: GlassSwitchKind, isOn: Bool) -> GlassRGBA {
-        kind == .watch && isOn ? GlassTokens.Color.textOnStatus : GlassTokens.Color.textOnAccent
+        GlassTokens.Color.textOnAccent
+    }
+
+    /// A hairline ring around the knob. On the bright watch green white is
+    /// about 1.8:1, so the knob is told apart from its track by this ring
+    /// instead, which clears the 3:1 glyph floor against the track
+    /// (SwitchContrastTests). Every other knob clears it by itself.
+    static func knobEdge(_ kind: GlassSwitchKind, isOn: Bool) -> GlassRGBA? {
+        kind == .watch && isOn ? GlassTokens.Color.switchKnobEdge : nil
     }
 
     public func makeBody(configuration: Configuration) -> some View {
@@ -423,6 +539,11 @@ public struct GlassToggleStyle: ToggleStyle {
                         .glassPressedFill()
                     Circle()
                         .fill(Self.knob(kind, isOn: configuration.isOn).color)
+                        .overlay {
+                            if let edge = Self.knobEdge(kind, isOn: configuration.isOn) {
+                                Circle().strokeBorder(edge.color, lineWidth: 1)
+                            }
+                        }
                         .frame(width: 18, height: 18)
                         .padding(inset)
                 }
@@ -513,32 +634,97 @@ public struct GlassCheckMark: View {
     }
 }
 
-/// A labelled field: eyebrow label over a dark inset field.
+/// A labelled field: eyebrow label over a dark inset field (#1146
+/// `.tc-input`): the field fill with the well's inner edge, the prompt in
+/// tertiary text, and the shared disabled dimming. Focus is the system's
+/// ring.
+///
+/// `secure` hides what is typed (a passphrase). `invalid` draws a 1pt ring
+/// in the outside red inside the field; say why in words beside it, from
+/// the core's copy. `showsLabel: false` drops the eyebrow for a field whose
+/// label is drawn elsewhere; `label` still names it for VoiceOver.
 public struct GlassTextField: View {
     private let label: String
     private let prompt: String?
+    private let secure: Bool
+    private let invalid: Bool
+    private let showsLabel: Bool
+    private let focus: FocusState<Bool>.Binding?
     @Binding private var text: String
+    @Environment(\.isEnabled) private var isEnabled
 
-    public init(_ label: String, text: Binding<String>, prompt: String? = nil) {
+    /// `focus` binds the field's keyboard focus, for a caller that moves
+    /// focus into it (a search field taking Command-F).
+    public init(
+        _ label: String, text: Binding<String>, prompt: String? = nil, secure: Bool = false,
+        invalid: Bool = false, showsLabel: Bool = true, focus: FocusState<Bool>.Binding? = nil
+    ) {
         self.label = label
         self._text = text
         self.prompt = prompt
+        self.secure = secure
+        self.invalid = invalid
+        self.showsLabel = showsLabel
+        self.focus = focus
     }
+
+    /// The ring an invalid entry draws inside the field, or none.
+    static func ring(invalid: Bool) -> GlassRGBA? {
+        invalid ? GlassTokens.Color.statusOutside : nil
+    }
+
+    /// The prompt's ink: tertiary text, which clears 4.5:1 where #1146's
+    /// 30% white did not.
+    static let promptInk = GlassTokens.Color.textTertiary
 
     public var body: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
-            Text(label).glassType(GlassTokens.TypeScale.eyebrow).foregroundStyle(GlassColor.textTertiary)
-            TextField(label, text: $text, prompt: prompt.map { Text($0) })
+            if showsLabel {
+                Text(label).glassType(GlassTokens.TypeScale.eyebrow).foregroundStyle(GlassColor.textTertiary)
+            }
+            focused(field)
                 .textFieldStyle(.plain)
                 .glassType(GlassTokens.TypeScale.label.weight(.regular))
                 .foregroundStyle(GlassColor.textPrimary)
                 .padding(.horizontal, 10)
                 .frame(minHeight: GlassTokens.Size.controlLarge)
-                .background(
-                    RoundedRectangle(cornerRadius: GlassTokens.Radius.control, style: .continuous)
-                        .fill(GlassTokens.Color.fieldFill.color)
-                )
+                .glassFieldWell(invalid: invalid)
                 .labelsHidden()
+                .opacity(isEnabled ? 1 : GlassTokens.Opacity.disabled)
         }
+    }
+
+    @ViewBuilder
+    private func focused(_ field: some View) -> some View {
+        if let focus {
+            field.focused(focus)
+        } else {
+            field
+        }
+    }
+
+    @ViewBuilder
+    private var field: some View {
+        let shownPrompt = prompt.map { Text($0).foregroundStyle(GlassColor.textTertiary) }
+        if secure {
+            SecureField(label, text: $text, prompt: shownPrompt)
+        } else {
+            TextField(label, text: $text, prompt: shownPrompt)
+        }
+    }
+}
+
+public extension View {
+    /// The field well under a text field or text area: the field fill, the
+    /// well's inner edge, and the invalid ring when there is one.
+    func glassFieldWell(invalid: Bool) -> some View {
+        let shape = RoundedRectangle(cornerRadius: GlassTokens.Radius.control, style: .continuous)
+        return background(shape.fill(GlassTokens.Color.fieldFill.color))
+            .glassEdge(GlassTokens.Shadow.wellEdge, in: shape)
+            .overlay {
+                if let ring = GlassTextField.ring(invalid: invalid) {
+                    shape.strokeBorder(ring.color, lineWidth: 1)
+                }
+            }
     }
 }

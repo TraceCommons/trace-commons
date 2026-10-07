@@ -132,6 +132,7 @@ modules:
       # location fixed even if the workspace layout changes again.
       - cargo --offline build --locked --release --target-dir target --manifest-path crates/trace-commons-contributor-gtk/Cargo.toml
       - install -Dm755 target/release/trace-commons-shell /app/bin/trace-commons-shell
+      - install -Dm755 target/release/near-ai /app/bin/near-ai
       - install -Dm644 crates/trace-commons-contributor-gtk/flatpak/ai.tracecommons.Contributor.desktop /app/share/applications/ai.tracecommons.Contributor.desktop
       # The icon the desktop entry has always named and nothing has ever
       # installed. Scalable SVG rather than a raster ladder: the file is
