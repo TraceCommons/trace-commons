@@ -8720,7 +8720,9 @@ mod tests {
             &mut settings,
             &serde_json::json!({"trajectory_source": {
                 "mode": "watch",
-                "path": "/private/trajectory-folder-sentinel"
+                "path": std::env::temp_dir()
+                    .join("trajectory-folder-sentinel")
+                    .to_string_lossy(),
             }}),
         )
         .unwrap();
