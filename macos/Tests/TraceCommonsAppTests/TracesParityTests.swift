@@ -476,6 +476,16 @@ final class TracesParityTests: XCTestCase {
         XCTAssertFalse(offers[arming.lowerBound...].prefix(1500).contains("GlassButtonStyle(.primary"))
         let privateAI = try XCTUnwrap(offers.range(of: "struct PrivateAIOfferGlassCard"))
         XCTAssertFalse(offers[privateAI.lowerBound..<arming.lowerBound].contains("GlassButtonStyle(.primary"))
+        // #1146's head: the destination as a mono accent eyebrow over the
+        // h2 title, and the four paragraphs drawn alike.
+        let card = String(offers[privateAI.lowerBound..<arming.lowerBound])
+        let eyebrow = try XCTUnwrap(card.range(of: "Text(copy.destination)\n                    .glassType(Self.destinationType)"))
+        let title = try XCTUnwrap(card.range(of: "Text(copy.offerTitle)\n                    .glassType(GlassTokens.TypeScale.title)"))
+        XCTAssertLessThan(eyebrow.lowerBound, title.lowerBound)
+        XCTAssertEqual(PrivateAIOfferGlassCard.destinationType.design, .monospaced)
+        XCTAssertTrue(PrivateAIOfferGlassCard.destinationType.uppercase)
+        XCTAssertTrue(card.contains("Text(copy.offerAskedOnce)\n                }\n                .glassType(GlassTokens.TypeScale.body)"),
+                      "the asked-once paragraph is drawn apart from the other three")
     }
 
     /// The folder row offers Submit all only when the shared table offers
