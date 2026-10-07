@@ -260,6 +260,21 @@ final class SessionReviewCardTests: XCTestCase {
         XCTAssertFalse(sheet.contains("tokenDistributionSummary"), "Look inside still draws the token distribution")
     }
 
+    /// #1146's answers and chip: Worked / Partly / Failed are standard glass
+    /// buttons and the chosen one is the selected (purple) glass button;
+    /// the question is 12/600; Enrolled is the glass chip with no dot, and
+    /// Not enrolled the muted one.
+    func test_theVerdictAndChipAreRons() throws {
+        let card = try Self.text(Self.card)
+        XCTAssertTrue(card.contains(".buttonStyle(GlassButtonStyle(.glass, selected: selected))"))
+        XCTAssertFalse(card.contains(".glassTier(selected ? .controlSelected : .control)"), "the custom verdict pill is back")
+        XCTAssertFalse(card.contains("Image(systemName: \"checkmark\")"), "the chosen answer is the purple button, not a mark")
+        XCTAssertTrue(card.contains(".glassType(GlassTokens.TypeScale.label.weight(.semibold))"))
+        XCTAssertTrue(card.contains("GlassChip(glass: summary.enrolled == true ? review.enrolled : review.notEnrolled,"))
+        XCTAssertTrue(card.contains("muted: summary.enrolled != true)"), "unknown enrolment reads as not enrolled")
+        XCTAssertFalse(card.contains("status: summary.enrolled == true ? .on : .ask"), "the green-dot status chip is back")
+    }
+
     /// Contribute on the card is the one approve control in the Monitor:
     /// no other Monitor file contributes a single session, and the store's
     /// single `approve` is the only one that reaches the daemon.

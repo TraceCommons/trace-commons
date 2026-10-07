@@ -150,9 +150,10 @@ struct SessionReviewCard: View {
                         .foregroundStyle(GlassColor.textPrimary)
                 }
                 Spacer(minLength: 0)
-                // Unknown is not enrolled: Contribute stays disarmed.
-                GlassChip(summary.enrolled == true ? review.enrolled : review.notEnrolled,
-                          status: summary.enrolled == true ? .on : .ask)
+                // Unknown is not enrolled: Contribute stays disarmed. #1146's
+                // glass chip, no dot; Not enrolled is tinted and secondary.
+                GlassChip(glass: summary.enrolled == true ? review.enrolled : review.notEnrolled,
+                          muted: summary.enrolled != true)
             }
             GlassCard(quiet: true) {
                 Text(summary.openingPrompt.flatMap { $0.isEmpty ? nil : $0 } ?? review.noOpeningPrompt)
@@ -289,8 +290,9 @@ struct SessionReviewCard: View {
         let draft = self.draft.current(for: entry?.entryId ?? "")
         let busy = entry.map { store.acting.contains($0.entryId) } ?? true
         VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
+            // #1146's legend: 12/600, primary.
             Text(outcome.verdictQuestion)
-                .glassType(GlassTokens.TypeScale.label)
+                .glassType(GlassTokens.TypeScale.label.weight(.semibold))
                 .foregroundStyle(GlassColor.textPrimary)
             HStack(spacing: GlassTokens.Space.s2) {
                 verdictOption(.worked, outcome.worked, draft)
@@ -327,34 +329,20 @@ struct SessionReviewCard: View {
         .disabled(busy)
     }
 
-    /// One answer, a glass pill, as the review sheet draws it. The chosen
-    /// one leads with a checkmark, is drawn strong and carries the selected
-    /// trait, so which is chosen is never the fill alone.
+    /// One answer, #1146's `GlassButton` with `aria-pressed`: the standard
+    /// glass button, and the chosen one purple (the CTA fill, on-accent
+    /// ink) with the selected trait, so which is chosen is never the
+    /// colour alone to assistive tech.
     private func verdictOption(
         _ option: ContributorVerdict, _ label: String, _ draft: SessionReviewDraft
     ) -> some View {
         let selected = draft.verdict == option
-        return Button {
+        return Button(label) {
             var next = draft
             next.choose(option)
             self.draft = next
-        } label: {
-            HStack(spacing: GlassTokens.Space.s2) {
-                if selected {
-                    Image(systemName: "checkmark")
-                        .imageScale(.small)
-                        .accessibilityHidden(true)
-                }
-                Text(label)
-            }
-            .glassType(GlassTokens.TypeScale.label.weight(selected ? .semibold : .regular))
-            .foregroundStyle(selected ? GlassColor.textPrimary : GlassColor.textSecondary)
-            .padding(.horizontal, GlassTokens.Space.s6)
-            .frame(minHeight: GlassTokens.Size.control)
-            .glassTier(selected ? .controlSelected : .control)
         }
-        .buttonStyle(GlassPressStyle())
-        .accessibilityAddTraits(selected ? [.isSelected, .isButton] : .isButton)
+        .buttonStyle(GlassButtonStyle(.glass, selected: selected))
     }
 
     // MARK: Native's kept lines

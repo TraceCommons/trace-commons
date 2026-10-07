@@ -51,28 +51,55 @@ public struct GlassStatusLabel: View {
     }
 }
 
-/// A mono chip with a hairline ring at 60% of its colour.
+/// A mono chip with a hairline ring at 60% of its colour; or #1146's
+/// `tc-chip--glass`: purple ink on the quiet card edge, no dot, and, when
+/// `muted`, the neutral tint with secondary ink.
 public struct GlassChip: View {
     private let title: String
     private let status: GlassStatus?
+    private let glass: Bool
+    private let muted: Bool
 
     public init(_ title: String, status: GlassStatus? = nil) {
         self.title = title
         self.status = status
+        self.glass = false
+        self.muted = false
+    }
+
+    /// #1146's glass chip (`tc-chip--glass`), muted for the negative state
+    /// (`bg-tc-tint text-tc-secondary`).
+    public init(glass title: String, muted: Bool = false) {
+        self.title = title
+        self.status = nil
+        self.glass = true
+        self.muted = muted
     }
 
     public var body: some View {
-        let ink = status?.textColor ?? GlassColor.textSecondary
-        HStack(spacing: 5) {
-            if let status { GlassStatusDot(status, size: 6) }
+        if glass {
             Text(title)
+                .glassType(GlassTokens.TypeScale.mono)
+                .foregroundStyle(muted ? GlassColor.textSecondary : GlassColor.accentText)
+                .lineLimit(1)
+                .padding(.vertical, 3)
+                .padding(.horizontal, 9)
+                .background(Capsule().fill(muted ? GlassTokens.Color.tintNeutral.color : Color.clear))
+                .glassEdge(GlassTokens.Shadow.cardEdgeQuiet, in: Capsule())
+                .accessibilityElement(children: .combine)
+        } else {
+            let ink = status?.textColor ?? GlassColor.textSecondary
+            HStack(spacing: 5) {
+                if let status { GlassStatusDot(status, size: 6) }
+                Text(title)
+            }
+            .glassType(GlassTokens.TypeScale.mono)
+            .foregroundStyle(ink)
+            .padding(.vertical, 3)
+            .padding(.horizontal, 9)
+            .overlay(Capsule().strokeBorder(ink.opacity(0.6), lineWidth: 0.5))
+            .accessibilityElement(children: .combine)
         }
-        .glassType(GlassTokens.TypeScale.mono)
-        .foregroundStyle(ink)
-        .padding(.vertical, 3)
-        .padding(.horizontal, 9)
-        .overlay(Capsule().strokeBorder(ink.opacity(0.6), lineWidth: 0.5))
-        .accessibilityElement(children: .combine)
     }
 }
 
