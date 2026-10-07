@@ -589,7 +589,14 @@ final class JoinScreenTests: XCTestCase {
             JoinScreenLayout.passkeyLine(created.state, copy: copy.join),
             copy.join.passkeyReady.replacingOccurrences(of: "{name}", with: "Mac"))
 
-        for nameless in [PasskeySheetOutcome.signedIn, .existingAccount] {
+        // A sign-in is named by the signed-in account's remembered record.
+        let signedIn = JoinScreenLayout.apply(.signedIn(name: "Home"), to: start, copy: copy)
+        XCTAssertEqual(signedIn.state.account, .passkey(name: "Home"))
+        XCTAssertEqual(
+            JoinScreenLayout.passkeyLine(signedIn.state, copy: copy.join),
+            copy.join.passkeyReady.replacingOccurrences(of: "{name}", with: "Home"))
+
+        for nameless in [PasskeySheetOutcome.signedIn(name: nil), .existingAccount] {
             let applied = JoinScreenLayout.apply(nameless, to: start, copy: copy)
             XCTAssertTrue(JoinScreenLayout.hasAccount(applied.state))
             XCTAssertTrue(JoinScreenLayout.passkeyDone(applied.state))
