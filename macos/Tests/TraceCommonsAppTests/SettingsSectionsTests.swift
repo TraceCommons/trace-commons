@@ -6,9 +6,8 @@ import XCTest
 /// navigation") chooses which part of the existing settings is drawn.
 @MainActor
 final class SettingsSectionsTests: XCTestCase {
-    /// The spec's sections, in its order, plus Compute. Notifications and
-    /// Updates have rows of their own, after Startup, so they can be found
-    /// from the list.
+    /// The spec's sections, in its order, plus Compute. Every one is
+    /// drawn in the body; Notifications and Updates follow Startup.
     func test_theSectionsAreTheSpecsInItsOrder() {
         XCTAssertEqual(SettingsSection.allCases, [
             .connection, .startup, .notifications, .updates, .watching, .consent, .publicProfile,
@@ -17,40 +16,33 @@ final class SettingsSectionsTests: XCTestCase {
         XCTAssertEqual(Set(SettingsSection.allCases.map(\.symbol)).count, SettingsSection.allCases.count)
     }
 
+    /// The list is #1146's twelve (`sections.ts`), in his order and his
+    /// words, from the core: Notifications and Updates sit under "Startup &
+    /// notifications", and nothing truncates to "Private AI on this com…".
+    func test_theListIsRonsTwelveInTheCoresWords() throws {
+        XCTAssertEqual(SettingsSection.listed, [
+            .connection, .startup, .watching, .consent, .publicProfile, .watchedFolders, .tools,
+            .privateAI, .witness, .projects, .changes, .compute,
+        ])
+        let nav = try XCTUnwrap(MonitorWords.table?.settingsNav)
+        XCTAssertEqual(SettingsSection.listed.map { $0.listRow(nav).text }, [
+            "Connection", "Startup & notifications", "Watching", "How traces may be used", "Public profile",
+            "Watched folders", "Tools", "Private AI", "Redaction witness", "Projects",
+            "Changes on this machine", "Compute",
+        ])
+        XCTAssertNil(SettingsSection.notifications.navName(nav))
+        XCTAssertNil(SettingsSection.updates.navName(nav))
+    }
+
     /// A section whose copy has not loaded is a disabled placeholder row,
-    /// never a vanished one; a loaded title is the row's text.
+    /// never a vanished one; a loaded name is the row's text.
     func test_aSectionWithNoCopyIsAPlaceholderNotAMissingRow() {
         XCTAssertEqual(SettingsSection.ListRow.row(title: nil), .init(text: "—", enabled: false))
         XCTAssertEqual(SettingsSection.ListRow.row(title: ""), .init(text: "—", enabled: false))
         XCTAssertEqual(SettingsSection.ListRow.row(title: "Private AI"), .init(text: "Private AI", enabled: true))
-    }
-
-    /// With no copy loaded, every section whose title comes from copy has
-    /// `title()` nil and draws as the disabled placeholder; the others keep
-    /// their words. With the copy loaded, each row is that copy's heading.
-    func test_aNilTitleDrawsTheDisabledPlaceholderRow() {
-        let none = SettingsSection.TitleSources()
-        let fromCopy: [SettingsSection] = [.notifications, .watchedFolders, .tools, .privateAI, .witness]
-        for section in SettingsSection.allCases {
-            let row = section.listRow(none)
-            if fromCopy.contains(section) {
-                XCTAssertNil(section.title(none), "\(section)")
-                XCTAssertEqual(row, .init(text: "—", enabled: false), "\(section)")
-            } else {
-                XCTAssertNotNil(section.title(none), "\(section)")
-                XCTAssertTrue(row.enabled, "\(section)")
-            }
+        for section in SettingsSection.listed {
+            XCTAssertEqual(section.listRow(nil), .init(text: "—", enabled: false), "\(section)")
         }
-
-        let loaded = SettingsSection.TitleSources(
-            notifications: "N", watchedFolders: "F", tools: "T", privateAI: "P", witness: "W", compute: "C")
-        let expected: [SettingsSection: String] = [
-            .notifications: "N", .watchedFolders: "F", .tools: "T", .privateAI: "P", .witness: "W", .compute: "C",
-        ]
-        for (section, text) in expected {
-            XCTAssertEqual(section.listRow(loaded), .init(text: text, enabled: true), "\(section)")
-        }
-        XCTAssertEqual(SettingsSection.updates.listRow(none).text, SettingsWords.updates)
     }
 
     /// Every section but Compute (its own view) draws its own glass view

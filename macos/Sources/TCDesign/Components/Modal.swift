@@ -103,7 +103,9 @@ public enum GlassModalWidth: Sendable, Equatable {
 /// one). A click on the scrim calls `onCancel` too, as #1146's does.
 ///
 /// Every word is the caller's: `title`, `subtitle`, `closeLabel` (which
-/// names the close button; empty draws none) and the action titles.
+/// names the close button) and the action titles. An empty `closeLabel`
+/// takes the host's (`glassModalCloseLabel`), so every modal under a host
+/// that names one has #1146's close button; with neither, none is drawn.
 public struct GlassModal<Content: View>: View {
     private let title: String
     private let subtitle: String?
@@ -113,6 +115,7 @@ public struct GlassModal<Content: View>: View {
     private let onCancel: () -> Void
     private let content: Content
     @Environment(\.glassModalIsTopmost) private var isTopmost
+    @Environment(\.glassModalCloseLabel) private var hostCloseLabel
 
     public init(
         title: String, subtitle: String? = nil, width: GlassModalWidth = .regular, closeLabel: String = "",
@@ -131,6 +134,7 @@ public struct GlassModal<Content: View>: View {
     public var body: some View {
         let shape = RoundedRectangle(cornerRadius: GlassTokens.Radius.pane, style: .continuous)
         let defaultAction = GlassModalAction.defaultAction(in: actions)
+        let closeLabel = Self.closeLabel(own: closeLabel, host: hostCloseLabel)
         VStack(alignment: .leading, spacing: 0) {
             // The title block and the close button centre on each other
             // (#1146 `.tc-modal__header`, `align-items: center`).
@@ -198,6 +202,12 @@ public struct GlassModal<Content: View>: View {
         .preference(key: GlassModalScrimAction.self, value: GlassModalScrimAction.Action(run: onCancel))
     }
 
+    /// The close button's name: the modal's own, else its host's; empty
+    /// draws none.
+    static func closeLabel(own: String, host: String) -> String {
+        own.isEmpty ? host : own
+    }
+
     /// The key an action answers: Return for the default action and Escape
     /// for the cancel action, on the topmost modal only; none otherwise.
     static func shortcut(for action: GlassModalAction, isDefault: Bool, isTopmost: Bool) -> KeyboardShortcut? {
@@ -208,9 +218,10 @@ public struct GlassModal<Content: View>: View {
     }
 }
 
-/// A confirmation (#1146's viewport modal): a narrow modal with the
-/// caller's message and actions, raised over the whole window. The
-/// replacement for a stock `.alert` or `.confirmationDialog`.
+/// A confirmation (#1146's viewport modal, `responsive-overlay.tsx`): the
+/// regular modal raised over the whole window, its message the header's
+/// subtitle and its actions the footer. The replacement for a stock
+/// `.alert` or `.confirmationDialog`.
 public struct GlassConfirmation: View {
     private let title: String
     private let message: String?
@@ -224,16 +235,17 @@ public struct GlassConfirmation: View {
         self.onCancel = onCancel
     }
 
+    /// #1146's width: the regular modal, never the narrow one.
+    public static let width: GlassModalWidth = .regular
+
     public var body: some View {
-        GlassModal(title: title, width: .narrow, actions: actions, onCancel: onCancel) {
-            if let message {
-                Text(message)
-                    .glassType(GlassTokens.TypeScale.body)
-                    .foregroundStyle(GlassColor.textSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .padding(.vertical, GlassTokens.Space.s7)
-                    .padding(.horizontal, 18)
-            }
+        GlassModal(title: title, subtitle: message, width: Self.width, actions: actions, onCancel: onCancel) {
+            // #1146's body (`px-[18px] py-3`), empty: the message is the
+            // subtitle.
+            Color.clear
+                .frame(height: 0)
+                .padding(.vertical, GlassTokens.Space.s6)
+                .accessibilityHidden(true)
         }
     }
 }
@@ -282,6 +294,10 @@ public extension EnvironmentValues {
     @Entry var glassModalIsTopmost: Bool = true
     /// True under a `glassModalHost()`: a presented modal goes to the host.
     @Entry var glassModalHostIsPresent: Bool = false
+    /// The close button's name for every modal raised under this view that
+    /// names none of its own (#1146 draws one on every modal). Set once at
+    /// the window's root, from the core's copy; empty draws none.
+    @Entry var glassModalCloseLabel: String = ""
 }
 
 /// A presented modal, on its way to the host.

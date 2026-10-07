@@ -134,6 +134,14 @@ struct PreviewSheet: View {
     /// in place of the header's own when the sheet is raised in one.
     static var modalTitle: String? { traces?.lookInside.title }
 
+    /// Ron's description: the modal's subtitle (#1146 `ResponsiveOverlay`
+    /// `description`).
+    static var modalSubtitle: String? { traces?.lookInside.description }
+
+    /// The modal's Close (its close button and its footer's one action), in
+    /// the core's words, as `closeWord` is the sheet's.
+    static var modalClose: String? { traces?.lookInside.close ?? fallbackClose }
+
     /// The core's other Close, for a sheet whose Look-inside table did not
     /// decode: the footer's one control is never drawn without a name.
     private static let fallbackClose = TCCoreCopy.firstRunCopyJSON().flatMap(FirstRunCopy.decode)?.passkey.close
@@ -168,13 +176,22 @@ struct PreviewSheet: View {
             envelopeDigest: summary?.envelopeDigest)
     }
 
+    /// Raised in a `GlassModal` (`PreviewModal`): the modal draws the one
+    /// header (title, description, close button) and the footer's Close,
+    /// so the sheet draws neither, nor the rules between them.
+    private var inModal: Bool { onClose != nil }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
-            Divider().overlay(GlassColor.hairline)
+            if !inModal {
+                Divider().overlay(GlassColor.hairline)
+            }
             content
-            Divider().overlay(GlassColor.hairline)
-            footer
+            if !inModal {
+                Divider().overlay(GlassColor.hairline)
+                footer
+            }
         }
         // The spec's canvas is the floor, not the fixed size: the transcript
         // and search tabs can use the additional reading space. Ideal
@@ -240,15 +257,17 @@ struct PreviewSheet: View {
     // MARK: - Chrome
 
     /// Ron's head of the inspector: what this is, the gate statement, the
-    /// sizes, the send disclosure, and the native review actions.
+    /// sizes, the send disclosure, and the native review actions. In a
+    /// modal it opens the body (#1146 `preview-inspector.tsx`): the LOOK
+    /// INSIDE eyebrow, then Ron's description again under the modal's.
     private var header: some View {
-        VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
+        VStack(alignment: .leading, spacing: inModal ? GlassTokens.Space.s8 : GlassTokens.Space.s4) {
             if let words {
+                Text(words.eyebrow)
+                    .glassType(GlassTokens.TypeScale.eyebrow)
+                    .foregroundStyle(GlassColor.textTertiary)
                 // In a modal the modal draws the title (`PreviewModal`).
-                if onClose == nil {
-                    Text(words.eyebrow)
-                        .glassType(GlassTokens.TypeScale.eyebrow)
-                        .foregroundStyle(GlassColor.textTertiary)
+                if !inModal {
                     Text(words.title)
                         .glassType(GlassTokens.TypeScale.title)
                         .foregroundStyle(GlassColor.textPrimary)
@@ -271,10 +290,14 @@ struct PreviewSheet: View {
             }
             nativeReview
         }
-        .padding(.horizontal, GlassTokens.Space.s9)
-        .padding(.vertical, GlassTokens.Space.s8)
+        .padding(.horizontal, inModal ? Self.modalInset : GlassTokens.Space.s9)
+        .padding(.top, inModal ? GlassTokens.Space.s6 : GlassTokens.Space.s8)
+        .padding(.bottom, inModal ? 0 : GlassTokens.Space.s8)
         .frame(maxWidth: .infinity, alignment: .leading)
     }
+
+    /// The modal body's side inset (#1146 `px-[18px]`).
+    static let modalInset: CGFloat = 18
 
     /// Ron's quiet card: the session's tool and folder, and what would be
     /// sent against the file on disk.
@@ -425,8 +448,8 @@ struct PreviewSheet: View {
                 }
                 Spacer(minLength: 0)
             }
-            .padding(.horizontal, GlassTokens.Space.s9)
-            .padding(.vertical, GlassTokens.Space.s8)
+            .padding(.horizontal, inModal ? Self.modalInset : GlassTokens.Space.s9)
+            .padding(.vertical, inModal ? GlassTokens.Space.s6 : GlassTokens.Space.s8)
         } else if summary != nil {
             // A summary with no body to show, or the core's Look-inside
             // table would not decode: said, never a blank pane or a row of
@@ -1401,10 +1424,11 @@ private struct PreviewChrome: ViewModifier {
     }
 }
 
-/// The preview raised in a `GlassModal` over the whole window: the same
-/// tabs, gates and footer as the sheet, the modal titled with the sheet's
-/// own Look-inside heading. Escape and Close both close it; nothing in it
-/// answers Return.
+/// The preview raised in a `GlassModal` over the whole window (#1146
+/// `PreviewInspector`): one header -- the sheet's Look-inside title, its
+/// description as the subtitle, and the close button -- the sheet's tabs
+/// and gates as the body, and Close as the footer. Escape, the close
+/// button, Close and the scrim all close it; nothing in it answers Return.
 struct PreviewModal: View {
     let entry: QueueEntry
     let onClose: () -> Void
@@ -1413,6 +1437,9 @@ struct PreviewModal: View {
     var body: some View {
         GlassModal(
             title: PreviewSheet.modalTitle ?? model.publicRunCopy?.sessionDetail ?? PreviewSheet.reviewWord ?? "",
+            subtitle: PreviewSheet.modalSubtitle,
+            closeLabel: PreviewSheet.modalClose ?? "",
+            actions: PreviewSheet.modalClose.map { [.cancel($0, action: onClose)] } ?? [],
             onCancel: onClose
         ) {
             PreviewSheet(entry: entry, onClose: onClose)
