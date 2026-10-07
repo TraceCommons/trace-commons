@@ -819,6 +819,30 @@ pub struct MonitorScreensCopy {
     /// 2026-10-06): the toolbar toggles, the graph's focus tips, Home's
     /// status lines and History's filters and empty states.
     pub shell: MonitorShellCopy,
+    /// The Settings modal's section list and section rules (#1146
+    /// `features/settings/sections.ts`).
+    pub settings_nav: MonitorSettingsNavCopy,
+}
+
+/// Ron's #1146 Settings section names (`features/settings/sections.ts`), in
+/// his order: the modal's section list, and the rule that opens each
+/// section in its body. Plain labels. A shell that draws a section #1146
+/// folds into another (notifications and updates, under startup) draws it
+/// under that section's name.
+#[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
+pub struct MonitorSettingsNavCopy {
+    pub connection: &'static str,
+    pub startup: &'static str,
+    pub watching: &'static str,
+    pub uses: &'static str,
+    pub profile: &'static str,
+    pub folders: &'static str,
+    pub tools: &'static str,
+    pub private_ai: &'static str,
+    pub witness: &'static str,
+    pub projects: &'static str,
+    pub log: &'static str,
+    pub compute: &'static str,
 }
 
 /// Ron's #1146 words for the monitor's toolbar, the Traces graph's focus
@@ -1038,6 +1062,20 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             tabs_label: "Monitor",
             map_views_label: "Map",
         },
+        settings_nav: MonitorSettingsNavCopy {
+            connection: "Connection",
+            startup: "Startup & notifications",
+            watching: "Watching",
+            uses: "How traces may be used",
+            profile: "Public profile",
+            folders: "Watched folders",
+            tools: "Tools",
+            private_ai: "Private AI",
+            witness: "Redaction witness",
+            projects: "Projects",
+            log: "Changes on this machine",
+            compute: "Compute",
+        },
     }
 }
 
@@ -1256,6 +1294,26 @@ mod tests {
         // Withdrawn is a filter word, never "by you": it also gathers
         // withdrawals this machine did not make.
         assert!(!shell.filter_withdrawn.contains("by you"));
+    }
+
+    /// The Settings modal's section names are #1146's twelve, verbatim and
+    /// in his order, each short enough for the list's 180pt column, and the
+    /// change log's matches the heading the shell already reads.
+    #[test]
+    fn the_settings_section_names_are_rons() {
+        let screens = monitor_screens_copy();
+        let nav = &screens.settings_nav;
+        let names: Vec<String> = words_of(nav).into_iter().map(|(_, word)| word).collect();
+        assert_eq!(names.len(), 12, "#1146 lists twelve sections: {names:?}");
+        assert_eq!(nav.startup, "Startup & notifications");
+        assert_eq!(nav.uses, "How traces may be used");
+        assert_eq!(nav.profile, "Public profile");
+        assert_eq!(nav.private_ai, "Private AI");
+        assert_eq!(nav.compute, "Compute");
+        assert_eq!(nav.log, screens.shell.changes_heading);
+        for name in &names {
+            assert!(!name.ends_with('.') && name.chars().count() <= 24, "{name}");
+        }
     }
 
     /// Every `{...}` in the monitor tables is one [`MONITOR_PLACEHOLDERS`]

@@ -28,8 +28,11 @@ struct SettingsModal: View {
     @EnvironmentObject private var model: AppModel
     @Environment(ComputeModel.self) private var compute
 
-    /// Every section, in the list's order, in one body.
+    /// Every section, in order, in one body.
     static let sections: [SettingsSection] = SettingsSection.allCases
+
+    /// The sections the list names: #1146's twelve.
+    static let listed: [SettingsSection] = SettingsSection.listed
 
     var body: some View {
         ZStack {
@@ -52,7 +55,7 @@ struct SettingsModal: View {
         GlassPane(padding: 0, isContent: true) {
             VStack(spacing: 0) {
                 header
-                hairline
+                    .overlay(alignment: .bottom) { rule(.horizontal) }
                 columns
             }
         }
@@ -68,7 +71,7 @@ struct SettingsModal: View {
         HStack(alignment: .center, spacing: GlassTokens.Space.s6) {
             VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
                 Text(words?.settingsTitle ?? "")
-                    .glassType(GlassTokens.TypeScale.title)
+                    .glassType(GlassTokens.TypeScale.title.weight(.bold))
                     .foregroundStyle(GlassColor.textPrimary)
                     .accessibilityAddTraits(.isHeader)
                 Text(words?.settingsSubtitle ?? "")
@@ -86,42 +89,62 @@ struct SettingsModal: View {
                 // as to the dialog's exit command.
                 .keyboardShortcut(.cancelAction)
         }
-        .padding(.horizontal, GlassTokens.Space.panePadding)
-        .padding(.vertical, GlassTokens.Space.s5)
+        // `.tc-modal__header`: 14 16 10 18, as every `GlassModal`.
+        .padding(.top, GlassTokens.Space.s7)
+        .padding(.trailing, GlassTokens.Space.s8)
+        .padding(.bottom, GlassTokens.Space.s5)
+        .padding(.leading, Self.headerLeading)
     }
 
-    /// The section list beside the one body it scrolls.
+    /// The modal header's and body's leading inset (#1146 `.tc-modal__header`).
+    static let headerLeading: CGFloat = 18
+
+    /// The section list beside the one body it scrolls (#1146
+    /// `settings-modal.tsx`): 180pt, 12pt secondary rows with a faint
+    /// hover, and a 0.5pt rule between the two.
     private var columns: some View {
         ScrollViewReader { proxy in
             HStack(alignment: .top, spacing: 0) {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 1) {
-                        ForEach(Self.sections) { item in
+                        ForEach(Self.listed) { item in
                             // A section whose copy has not loaded is a
                             // disabled placeholder, never a missing row.
-                            let row = item.listRow(.init(model: model, compute: compute.snapshot?.title))
+                            let row = item.listRow(words?.settingsNav)
                             Button {
                                 proxy.scrollTo(item, anchor: .top)
                             } label: {
-                                Text(row.text).lineLimit(1)
+                                Text(row.text)
                             }
-                            .buttonStyle(GlassMenuRowStyle())
+                            .buttonStyle(GlassSectionNavRowStyle())
                             .disabled(!row.enabled)
+                            .help(row.enabled ? row.text : "")
                             .accessibilityLabel(row.enabled ? row.text : MonitorWords.unknown)
                         }
                     }
-                    .padding(GlassTokens.Space.s4)
+                    // #1146 `px-2 py-2.5`.
+                    .padding(.horizontal, GlassTokens.Space.s4)
+                    .padding(.vertical, GlassTokens.Space.s5)
                 }
                 .frame(width: GlassTokens.Size.modalNavWidth)
                 .accessibilityElement(children: .contain)
                 .accessibilityLabel(words?.settingsSections ?? "")
-                Rectangle().fill(GlassColor.hairline).frame(width: 1).accessibilityHidden(true)
+                rule(.vertical)
                 ScrollView {
                     VStack(alignment: .leading, spacing: 0) {
                         ForEach(Self.sections) { item in
-                            section(item).id(item)
+                            VStack(alignment: .leading, spacing: 0) {
+                                if let name = item.navName(words?.settingsNav) {
+                                    GlassSectionRule(name)
+                                        .padding(.horizontal, Self.bodyInset)
+                                        .padding(.top, Self.sectionGap)
+                                }
+                                section(item)
+                            }
+                            .id(item)
                         }
                     }
+                    .padding(.bottom, GlassTokens.Space.s10)
                     .frame(maxWidth: .infinity, alignment: .topLeading)
                 }
             }
@@ -129,6 +152,11 @@ struct SettingsModal: View {
             .onChange(of: request) { _, new in Self.scroll(to: new.section, proxy) }
         }
     }
+
+    /// The body's side inset (#1146 `px-5`).
+    static let bodyInset: CGFloat = GlassTokens.Space.s9
+    /// Above each section's rule (#1146 `pt-3.5` and the rule's own top).
+    static let sectionGap: CGFloat = GlassTokens.Space.s5
 
     /// One section of the body. Before onboarding, no write surface outside
     /// first run (R-43): a section that writes what first run asks draws
@@ -143,23 +171,27 @@ struct SettingsModal: View {
         ).forSettings(availableBeforeOnboarding: item.availableBeforeOnboarding) {
         case .awaiting:
             SettingsAwaiting()
-                .padding(GlassTokens.Space.panePadding)
+                .padding(.horizontal, Self.bodyInset)
+                .padding(.vertical, GlassTokens.Space.s6)
                 .frame(maxWidth: .infinity, alignment: .topLeading)
         case .down(let sentence):
             StartupRefusedBanner(sentence: sentence)
-                .padding(GlassTokens.Space.panePadding)
+                .padding(.horizontal, Self.bodyInset)
+                .padding(.vertical, GlassTokens.Space.s6)
                 .frame(maxWidth: .infinity, alignment: .topLeading)
         case .signedOut:
             GlassNotice(tone: .ask, title: MonitorWords.signedOut) {
                 Button(MonitorWindowView.openFirstRun) { OpenMonitor.request() }
             }
-            .padding(GlassTokens.Space.panePadding)
+            .padding(.horizontal, Self.bodyInset)
+            .padding(.vertical, GlassTokens.Space.s6)
             .frame(maxWidth: .infinity, alignment: .topLeading)
         case .open:
             switch item {
             case .compute:
                 ComputeView(model: compute)
-                    .padding(GlassTokens.Space.panePadding)
+                    .padding(.horizontal, Self.bodyInset)
+                    .padding(.vertical, GlassTokens.Space.s6)
                     .frame(maxWidth: 560, alignment: .leading)
                     .frame(maxWidth: .infinity, alignment: .topLeading)
             default:
@@ -168,9 +200,21 @@ struct SettingsModal: View {
         }
     }
 
-    private var hairline: some View {
-        Rectangle().fill(GlassColor.hairline).frame(height: 1).accessibilityHidden(true)
+    /// The modal's 0.5pt rules: under the header (`.tc-modal__header`,
+    /// the modal rule), and between the list and the body (#1146's
+    /// `rgba(255,255,255,0.1)`).
+    @ViewBuilder
+    private func rule(_ axis: Axis) -> some View {
+        switch axis {
+        case .horizontal:
+            Rectangle().fill(GlassTokens.Color.rule.color).frame(height: 0.5).accessibilityHidden(true)
+        case .vertical:
+            Rectangle().fill(GlassColor.ink(Self.navRuleInk)).frame(width: 0.5).accessibilityHidden(true)
+        }
     }
+
+    /// The list's rule (#1146 `borderRight: 0.5px solid rgba(255,255,255,0.1)`).
+    static let navRuleInk: Double = 0.1
 
     /// Straight to the asked-for section; the top for none (the gear).
     static func scroll(to section: SettingsSection?, _ proxy: ScrollViewProxy) {

@@ -788,7 +788,7 @@ final class MonitorNavigationTests: XCTestCase {
         XCTAssertTrue(modal.contains("""
                 case .down(let sentence):
                     StartupRefusedBanner(sentence: sentence)
-                        .padding(GlassTokens.Space.panePadding)
+                        .padding(.horizontal, Self.bodyInset)
         """), "a writing section says a refused daemon as a refusal (B1)")
     }
 
