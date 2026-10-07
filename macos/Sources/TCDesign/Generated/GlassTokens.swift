@@ -128,6 +128,12 @@ public enum GlassTokens {
         public static let mapRuleIgnoreFill: GlassRGBA = GlassRGBA(0x3A3A3E, alpha: 1, light: GlassRGBA(0xE4E4E7, alpha: 1))
         public static let mapRuleUnsetFill: GlassRGBA = GlassRGBA(0x2A2A2C, alpha: 1, light: GlassRGBA(0xEDEDF0, alpha: 1))
         public static let mapCredentialOn: GlassRGBA = GlassRGBA(0x2C7A5B, alpha: 1, light: GlassRGBA(0x27A06B, alpha: 1))
+        /// The graph footer's focus glyph while the map is focused on a tool (#1146 traces-graph.tsx).
+        public static let graphFocusOn: GlassRGBA = GlassRGBA(0x4DA3FF, alpha: 1, light: GlassRGBA(0x1F6FD1, alpha: 1))
+        /// The focus glyph when a tool can be focused.
+        public static let graphFocusIdle: GlassRGBA = GlassRGBA(0xD6D6DC, alpha: 1, light: GlassRGBA(0x3C3C42, alpha: 1))
+        /// The focus glyph with nothing selected to focus on.
+        public static let graphFocusOff: GlassRGBA = GlassRGBA(0x6B6B70, alpha: 1, light: GlassRGBA(0xA1A1A6, alpha: 1))
         public static let consentFill: GlassRGBA = GlassRGBA(0x000000, alpha: 0.25, light: GlassRGBA(0x000000, alpha: 0.04))
         public static let fieldFill: GlassRGBA = GlassRGBA(0x000000, alpha: 0.25, light: GlassRGBA(0x000000, alpha: 0.05))
         public static let tintOn: GlassRGBA = GlassRGBA(0x3DDC84, alpha: 0.18, light: GlassRGBA(0x1A8F4C, alpha: 0.14))
@@ -221,6 +227,9 @@ public enum GlassTokens {
             "mapRuleIgnoreFill": mapRuleIgnoreFill,
             "mapRuleUnsetFill": mapRuleUnsetFill,
             "mapCredentialOn": mapCredentialOn,
+            "graphFocusOn": graphFocusOn,
+            "graphFocusIdle": graphFocusIdle,
+            "graphFocusOff": graphFocusOff,
             "consentFill": consentFill,
             "fieldFill": fieldFill,
             "tintOn": tintOn,

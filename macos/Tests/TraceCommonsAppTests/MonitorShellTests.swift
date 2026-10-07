@@ -12,22 +12,23 @@ import XCTest
 final class MonitorShellTests: XCTestCase {
     // MARK: Show ignored folders
 
-    /// Hidden by default; the View menu's choice draws them, and their
-    /// sessions with them.
-    func test_ignoredFoldersShowOnlyWhenAskedFor() throws {
+    /// Shown by default, as #1146's `useState(true)`; the View menu's
+    /// choice hides them, and their sessions with them.
+    func test_ignoredFoldersShowUnlessHidden() throws {
         let project = ProjectRow(projectId: "p1", projectLabel: "quiet", projectPath: "/x", mode: .ignore)
         let hidden = TracesTree.build(entries: [], projects: [project], settings: nil, scansWhenUnset: [])
         XCTAssertTrue(hidden.unplaced.isEmpty)
         let shown = TracesTree.build(entries: [], projects: [project], settings: nil, scansWhenUnset: [], showsIgnored: true)
         XCTAssertEqual(shown.unplaced.map(\.label), ["quiet"])
         XCTAssertEqual(shown.unplaced.first?.mode, .ignore)
-        XCTAssertFalse(TracesStore(client: nil).showsIgnored, "ignored folders are hidden by default")
+        XCTAssertTrue(TracesStore(client: nil).showsIgnored, "ignored folders are shown by default (#1146)")
     }
 
     /// The store redraws from its last read when the choice changes,
     /// without asking the core again.
     func test_theStoreRedrawsWhenTheChoiceChanges() async throws {
         let store = TracesStore(client: SampleDaemonClient(.normalDay))
+        store.showsIgnored = false
         await store.load()
         let before = store.tree
         store.showsIgnored = true
@@ -45,7 +46,7 @@ final class MonitorShellTests: XCTestCase {
                        "GlassToolbarButton(MonitorShellWords.graphToggle(shown: showsGraph),",
                        "GlassToolbarButton(MonitorShellWords.mapToggle(shown: showsMap),",
                        "GlassToolbarButton(MonitorShellWords.inspectorToggle(shown: showsInspector),",
-                       "@SceneStorage(\"monitor.showsIgnored\") private var showsIgnored = false",
+                       "@SceneStorage(\"monitor.showsIgnored\") private var showsIgnored = true",
                        ".onChange(of: showsIgnored) { _, shows in traces.showsIgnored = shows }"] {
             XCTAssertTrue(window.contains(needle), "MonitorWindowView.swift lacks \(needle)")
         }
@@ -86,6 +87,79 @@ final class MonitorShellTests: XCTestCase {
         let earlier = TracesGraphModel.buckets(shared: shared, kept: kept, offset: -1, now: now, calendar: calendar)
         XCTAssertEqual(earlier.last?.start, calendar.date(byAdding: .day, value: -11, to: today))
         XCTAssertEqual(earlier.map(\.shared).reduce(0, +), 1)
+    }
+
+    /// #1146's three ranges: 24 hours in 2-hour buckets, 11 days, 42 days,
+    /// each labelled as #1146 labels it, and zooming steps between them.
+    func test_theGraphZoomsBetweenThreeRanges() throws {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = try XCTUnwrap(TimeZone(identifier: "UTC"))
+        let now = Date(timeIntervalSince1970: 1_760_000_000) // 2025-10-09 08:53 UTC
+        let hour = try XCTUnwrap(calendar.dateInterval(of: .hour, for: now)?.start)
+
+        let hours = TracesGraphModel.buckets(shared: [now], kept: [], offset: 0, now: now, range: .hours, calendar: calendar)
+        XCTAssertEqual(hours.count, 12)
+        XCTAssertEqual(hours.last?.start, hour)
+        XCTAssertEqual(hours.last?.shared, 1)
+        XCTAssertEqual(hours.first?.label, "\(calendar.component(.hour, from: try XCTUnwrap(hours.first?.start))):00")
+        XCTAssertEqual(hours[1].label, "", "every third hour bucket is labelled")
+        XCTAssertEqual(hours.first.map { calendar.dateComponents([.hour], from: $0.start, to: hour).hour }, 22)
+
+        let days = TracesGraphModel.buckets(shared: [], kept: [], offset: 0, now: now, calendar: calendar)
+        XCTAssertEqual(days.count, 11)
+        XCTAssertTrue(days.allSatisfy { !$0.label.isEmpty }, "every day has its weekday")
+        XCTAssertEqual(days.last?.label, TracesGraphModel.weekday(now, calendar: calendar))
+
+        let weeks = TracesGraphModel.buckets(shared: [], kept: [], offset: -1, now: now, range: .weeks, calendar: calendar)
+        XCTAssertEqual(weeks.count, 42)
+        XCTAssertEqual(weeks.filter { !$0.label.isEmpty }.count, 7, "every sixth day is labelled")
+        XCTAssertEqual(weeks.last?.start, calendar.date(byAdding: .day, value: -42, to: calendar.startOfDay(for: now)))
+
+        XCTAssertEqual(TracesGraphModel.Range.days.zoomedOut, .weeks)
+        XCTAssertNil(TracesGraphModel.Range.weeks.zoomedOut)
+        XCTAssertEqual(TracesGraphModel.Range.days.zoomedIn, .hours)
+        XCTAssertNil(TracesGraphModel.Range.hours.zoomedIn)
+        XCTAssertEqual(TracesGraphModel.Range.allCases.map(\.span), [24, 11, 42])
+    }
+
+    /// The range pill says the window in the core's words, or the hovered
+    /// day in full; a bar says its day, then shared and kept.
+    func test_theRangePillAndBarsUseTheCoresWords() throws {
+        let words = try XCTUnwrap(MonitorWords.table?.tracesGraph)
+        XCTAssertEqual(TracesGraphFooter.rangeLabel(range: .days, offset: 0, hovered: nil, words: words), "Last 11 days")
+        XCTAssertEqual(TracesGraphFooter.rangeLabel(range: .hours, offset: 0, hovered: nil, words: words), "Last 24 hours")
+        XCTAssertEqual(TracesGraphFooter.rangeLabel(range: .weeks, offset: -1, hovered: nil, words: words),
+                       "42 days, 1 window back")
+        XCTAssertEqual(TracesGraphFooter.rangeLabel(range: .days, offset: -3, hovered: nil, words: words),
+                       "11 days, 3 windows back")
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = try XCTUnwrap(TimeZone(identifier: "UTC"))
+        let date = Date(timeIntervalSince1970: 1_759_665_600)
+        let day = TracesGraphModel.day(date, calendar: calendar)
+        var style = Date.FormatStyle.dateTime.weekday(.wide).month(.wide).day()
+        style.timeZone = calendar.timeZone
+        XCTAssertEqual(day, date.formatted(style))
+        XCTAssertEqual(words.bar(day: day, shared: 3, kept: 2), "\(day): 3 shared, 2 kept")
+        XCTAssertEqual(TracesGraphFooter.figure(0, known: false), "—")
+    }
+
+    /// The binoculars' glyph: blue when focused, light when a tool can be
+    /// focused, dim with nothing to focus on (#1146), never the purple CTA.
+    func test_theFocusGlyphTakesItsInkFromItsState() throws {
+        XCTAssertEqual(TracesGraphFooter.focusInk(focused: true, canFocus: true), GlassTokens.Color.graphFocusOn)
+        XCTAssertEqual(TracesGraphFooter.focusInk(focused: false, canFocus: true), GlassTokens.Color.graphFocusIdle)
+        XCTAssertEqual(TracesGraphFooter.focusInk(focused: true, canFocus: false), GlassTokens.Color.graphFocusOff)
+        let shell = try Self.text("Views/Monitor/MonitorShell.swift")
+        XCTAssertFalse(shell.contains("GlassButtonStyle(.glass, small: true, selected:"), "the focus pill is not a CTA")
+        // Six pills around the range, in #1146's order.
+        let order = ["MonitorShellWords.previous, glyph:", "systemImage: \"binoculars\"", "words?.zoomOut",
+                     ".glassEdge(Self.rangeEdge", "words?.zoomIn", "MonitorShellWords.next, glyph:", "words?.jumpToNow"]
+        var at = shell.startIndex
+        for needle in order {
+            let found = try XCTUnwrap(shell.range(of: needle, range: at..<shell.endIndex), needle)
+            at = found.upperBound
+        }
+        XCTAssertEqual(TracesGraphFooter.height, 206)
     }
 
     /// Shared is what left and still stands: withdrawn is not counted.

@@ -301,6 +301,12 @@ public struct GlassBarGraph: View {
                     ZStack {
                         RoundedRectangle(cornerRadius: thin ? 3 : GlassTokens.Radius.control, style: .continuous)
                             .fill(GlassColor.ink(hovered == bucket.id ? 0.18 : 0.08))
+                            // #1146 `.tc-bar-graph__track`: a lit top edge.
+                            .overlay(alignment: .top) {
+                                RoundedRectangle(cornerRadius: thin ? 3 : GlassTokens.Radius.control, style: .continuous)
+                                    .strokeBorder(GlassColor.ink(0.14), lineWidth: 1)
+                                    .mask(alignment: .top) { Rectangle().frame(height: 1) }
+                            }
                         VStack(spacing: 0) {
                             Spacer(minLength: 0)
                             bar(bucket.up, of: maximum, color: GlassTokens.Color.dataShared.color, top: true)
@@ -313,7 +319,13 @@ public struct GlassBarGraph: View {
                     .frame(height: 96)
                     Text(bucket.label)
                         .glassType(thin ? GlassTokens.TypeScale.micro.weight(.regular) : GlassTokens.TypeScale.caption)
-                        .foregroundStyle(hovered == bucket.id ? GlassColor.textPrimary : GlassColor.textTertiary)
+                        .foregroundStyle(hovered == bucket.id ? GlassColor.textPrimary : GlassTokens.Color.statusOff.color)
+                        // Never wrapped or cut ("Sat", "14:00"): centred on
+                        // its bar and free to run past it, as #1146's
+                        // `white-space: nowrap`, without widening the bar.
+                        .lineLimit(1)
+                        .fixedSize()
+                        .frame(width: 0)
                         .frame(minHeight: 12)
                 }
                 .onHover { hovered = $0 ? bucket.id : nil }
