@@ -5137,3 +5137,455 @@ pub async fn account_redeem(
         json,
     )
 }
+
+// ---------------------------------------------------------------------------
+// `unenroll` and `consent scopes`
+// ---------------------------------------------------------------------------
+
+/// One daemon request, as `daemon_call` answers it. A parameter so the two
+/// commands below can be tested against a recording daemon.
+pub(crate) type DaemonCaller<'a> = &'a mut dyn FnMut(&str, serde_json::Value) -> Result<Response>;
+
+/// Remove this Mac's enrollment through the daemon (`unenroll`). Asks first
+/// unless `yes`; a non-interactive session must pass `--yes`.
+pub fn unenroll(store: &ConfigStore, yes: bool, json: bool) -> Result<()> {
+    if !yes && !std::io::stdin().is_terminal() {
+        anyhow::bail!("unenroll requires confirmation; use --yes in non-interactive mode");
+    }
+    unenroll_with(
+        yes,
+        json,
+        &mut std::io::stdin(),
+        &mut std::io::stdout(),
+        &mut |method, params| daemon_call(store, method, params),
+    )
+}
+
+/// What `unenroll` is about to do, for the confirmation. The core has no
+/// words for this, so these follow `logout`'s summary.
+pub(crate) fn unenroll_summary_lines() -> [&'static str; 3] {
+    [
+        "about to unenroll this Mac: its contributor config, device key and account session are deleted here.",
+        "nothing is sent to the server: the account stays, and submitted traces stay where they are.",
+        "approved sessions not yet sent go back to waiting; history, receipts, settings and folder rules stay.",
+    ]
+}
+
+/// `unenroll` over explicit streams and an explicit daemon, so the
+/// confirmation and the call are testable.
+pub(crate) fn unenroll_with(
+    yes: bool,
+    json: bool,
+    reader: &mut impl std::io::Read,
+    writer: &mut impl std::io::Write,
+    call: DaemonCaller<'_>,
+) -> Result<()> {
+    if !yes {
+        for line in unenroll_summary_lines() {
+            writeln!(writer, "{line}").context("writing unenroll summary")?;
+        }
+        if !read_yes_no("unenroll this Mac? [y/N] ", reader, writer)? {
+            writeln!(writer, "unenroll cancelled; nothing removed")
+                .context("writing unenroll outcome")?;
+            anyhow::bail!("unenroll cancelled; nothing removed");
+        }
+    }
+    let resp = call("unenroll", serde_json::json!({}))?;
+    render_into(resp, json, writer, |v, w| {
+        if v["removed"] == true {
+            writeln!(w, "unenrolled; this Mac is no longer enrolled")?;
+            let returned = v["approvals_returned"].as_u64().unwrap_or(0);
+            if returned > 0 {
+                writeln!(w, "{returned} approved session(s) went back to waiting")?;
+            }
+        } else {
+            writeln!(w, "not enrolled; nothing to remove")?;
+        }
+        Ok(())
+    })
+}
+
+/// `render`, onto `writer`.
+fn render_into<W: std::io::Write>(
+    resp: Response,
+    json: bool,
+    writer: &mut W,
+    table: impl FnOnce(&serde_json::Value, &mut W) -> std::io::Result<()>,
+) -> Result<()> {
+    if let Some(err) = resp.error {
+        if json {
+            writeln!(
+                writer,
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "schema_version": "trace_commons.cli_error.v1",
+                    "error": err.code,
+                    "detail": err.message,
+                }))?
+            )?;
+        }
+        anyhow::bail!("{}: {}", err.code, err.message);
+    }
+    let result = resp.result.unwrap_or(serde_json::Value::Null);
+    if json {
+        writeln!(writer, "{}", serde_json::to_string_pretty(&result)?)?;
+    } else {
+        table(&result, writer)?;
+    }
+    Ok(())
+}
+
+/// Choose the consent scopes (`set_consent_scopes`), from `--scopes` or the
+/// core's consent menu. Recorded as the person's choice, which lifts the
+/// consent hold a `login --default` or headless enrollment leaves.
+pub fn consent_scopes(store: &ConfigStore, scopes: Option<&str>, json: bool) -> Result<()> {
+    let interactive = std::io::stdin().is_terminal();
+    consent_scopes_with(
+        scopes,
+        interactive,
+        json,
+        &mut std::io::stdin().lock(),
+        &mut std::io::stdout(),
+        &mut |method, params| daemon_call(store, method, params),
+    )
+}
+
+/// `consent scopes` over explicit streams and an explicit daemon.
+///
+/// The request always names the floor scope, even when nothing else was
+/// ticked: `set_consent_scopes` records a choice only for a non-empty list,
+/// and answering no to every optional use is a choice.
+pub(crate) fn consent_scopes_with(
+    scopes: Option<&str>,
+    interactive: bool,
+    json: bool,
+    reader: &mut impl std::io::BufRead,
+    writer: &mut impl std::io::Write,
+    call: DaemonCaller<'_>,
+) -> Result<()> {
+    let options = crate::daemon::enroll::consent_options();
+    let chosen = match scopes {
+        Some(csv) => {
+            let names: Vec<String> = csv.split(',').map(|s| s.trim().to_string()).collect();
+            validate_scopes(&names).context("invalid --scopes value")?
+        }
+        None if interactive => prompt_consent_scopes(&options, reader, writer)?,
+        // Nobody to ask, and choosing for the person is what the consent
+        // hold exists to prevent.
+        None => anyhow::bail!("consent scopes needs --scopes when not run in a terminal"),
+    };
+    let resp = call(
+        "set_consent_scopes",
+        serde_json::json!({ "scopes": chosen }),
+    )?;
+    render_into(resp, json, writer, |v, w| {
+        writeln!(
+            w,
+            "{}:",
+            crate::first_run_copy::first_run_copy().uses.eyebrow
+        )?;
+        let saved = v["consent_scopes"].as_array().cloned().unwrap_or_default();
+        for scope in options["scopes"].as_array().into_iter().flatten() {
+            if saved.contains(&scope["name"]) {
+                writeln!(w, "  {}", scope["title"].as_str().unwrap_or_default())?;
+            }
+        }
+        Ok(())
+    })
+}
+
+/// The consent menu in the core's words (`consent_options`): each scope's
+/// title, tag and description, and one y/N per optional scope. The floor
+/// scope is shown and not asked. Only an explicit yes is a yes.
+fn prompt_consent_scopes(
+    options: &serde_json::Value,
+    reader: &mut impl std::io::BufRead,
+    writer: &mut impl std::io::Write,
+) -> Result<Vec<String>> {
+    writeln!(
+        writer,
+        "{}",
+        crate::first_run_copy::first_run_copy().uses.eyebrow
+    )?;
+    let mut names = Vec::new();
+    for scope in options["scopes"].as_array().into_iter().flatten() {
+        let title = scope["title"].as_str().unwrap_or_default();
+        let tag = scope["tag"].as_str().unwrap_or_default();
+        let description = scope["description"].as_str().unwrap_or_default();
+        writeln!(writer, "  {title}  [{tag}]")?;
+        writeln!(writer, "      {description}")?;
+        if scope["always_on"] == true {
+            continue;
+        }
+        write!(writer, "  [y/N] ")?;
+        writer.flush()?;
+        let mut line = String::new();
+        reader.read_line(&mut line)?;
+        let answer = line.trim();
+        if answer.eq_ignore_ascii_case("y") || answer.eq_ignore_ascii_case("yes") {
+            if let Some(name) = scope["name"].as_str() {
+                names.push(name.to_string());
+            }
+        }
+    }
+    // Adds the floor scope and orders the list as the protocol does.
+    validate_scopes(&names)
+}
+
+#[cfg(test)]
+mod enrollment_command_tests {
+    use super::*;
+    use crate::daemon::ipc::ERR_BUSY;
+
+    /// A daemon that records every call and answers each with `answer`.
+    fn recorder<'a>(
+        calls: &'a mut Vec<(String, serde_json::Value)>,
+        answer: impl Fn(&str, &serde_json::Value) -> Response + 'a,
+    ) -> impl FnMut(&str, serde_json::Value) -> Result<Response> + 'a {
+        move |method, params| {
+            let response = answer(method, &params);
+            calls.push((method.to_string(), params));
+            Ok(response)
+        }
+    }
+
+    fn ok(v: serde_json::Value) -> Response {
+        Response::ok(1, v)
+    }
+
+    #[test]
+    fn unenroll_with_yes_calls_the_daemon_without_asking() {
+        let mut calls = Vec::new();
+        let mut out = Vec::new();
+        unenroll_with(
+            true,
+            false,
+            &mut std::io::empty(),
+            &mut out,
+            &mut recorder(&mut calls, |_, _| {
+                ok(serde_json::json!({"unenrolled": true, "removed": true, "approvals_returned": 0}))
+            }),
+        )
+        .unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "unenroll");
+        let printed = String::from_utf8(out).unwrap();
+        assert!(!printed.contains("[y/N]"), "{printed}");
+    }
+
+    #[test]
+    fn unenroll_asks_and_a_yes_calls_the_daemon() {
+        let mut calls = Vec::new();
+        let mut out = Vec::new();
+        unenroll_with(
+            false,
+            false,
+            &mut std::io::Cursor::new(b"y\n".to_vec()),
+            &mut out,
+            &mut recorder(&mut calls, |_, _| {
+                ok(serde_json::json!({"unenrolled": true, "removed": true, "approvals_returned": 2}))
+            }),
+        )
+        .unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "unenroll");
+        let printed = String::from_utf8(out).unwrap();
+        assert!(printed.contains("[y/N]"), "{printed}");
+    }
+
+    #[test]
+    fn unenroll_declined_or_closed_stdin_calls_nothing() {
+        for input in [&b"n\n"[..], &b""[..]] {
+            let mut calls = Vec::new();
+            let r = unenroll_with(
+                false,
+                false,
+                &mut std::io::Cursor::new(input.to_vec()),
+                &mut Vec::new(),
+                &mut recorder(&mut calls, |_, _| ok(serde_json::json!({}))),
+            );
+            assert!(r.is_err());
+            assert!(calls.is_empty(), "a no is a no: {input:?}");
+        }
+    }
+
+    #[test]
+    fn unenroll_reports_a_refusal_as_an_error() {
+        let mut calls = Vec::new();
+        let r = unenroll_with(
+            true,
+            false,
+            &mut std::io::empty(),
+            &mut Vec::new(),
+            &mut recorder(&mut calls, |_, _| {
+                Response::err(1, ERR_BUSY, crate::daemon::unenroll::ERR_UPLOAD_IN_FLIGHT)
+            }),
+        );
+        assert!(
+            r.unwrap_err()
+                .to_string()
+                .contains(crate::daemon::unenroll::ERR_UPLOAD_IN_FLIGHT)
+        );
+    }
+
+    #[test]
+    fn explicit_scopes_are_sent_with_the_floor_scope() {
+        let mut calls = Vec::new();
+        consent_scopes_with(
+            Some("model_training"),
+            false,
+            false,
+            &mut std::io::empty(),
+            &mut Vec::new(),
+            &mut recorder(&mut calls, |_, p| {
+                ok(serde_json::json!({"consent_scopes": p["scopes"].clone()}))
+            }),
+        )
+        .unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "set_consent_scopes");
+        assert_eq!(
+            calls[0].1["scopes"],
+            serde_json::json!(["debugging_evaluation", "model_training"])
+        );
+    }
+
+    #[test]
+    fn an_unknown_scope_is_refused_before_the_daemon_is_asked() {
+        let mut calls = Vec::new();
+        let r = consent_scopes_with(
+            Some("training"),
+            false,
+            false,
+            &mut std::io::empty(),
+            &mut Vec::new(),
+            &mut recorder(&mut calls, |_, _| ok(serde_json::json!({}))),
+        );
+        assert!(r.is_err());
+        assert!(calls.is_empty());
+    }
+
+    /// Answering no to everything is still a choice: the floor scope is
+    /// named in the request, so the daemon records it as one.
+    #[test]
+    fn the_menu_shows_the_cores_words_and_a_floor_only_answer_names_the_floor() {
+        let mut calls = Vec::new();
+        let mut out = Vec::new();
+        consent_scopes_with(
+            None,
+            true,
+            false,
+            &mut std::io::Cursor::new(b"n\nn\nn\nn\n".to_vec()),
+            &mut out,
+            &mut recorder(&mut calls, |_, p| {
+                ok(serde_json::json!({"consent_scopes": p["scopes"].clone()}))
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            calls[0].1["scopes"],
+            serde_json::json!(["debugging_evaluation"])
+        );
+        let printed = String::from_utf8(out).unwrap();
+        assert!(printed.contains(crate::first_run_copy::first_run_copy().uses.eyebrow));
+        for scope in crate::daemon::enroll::consent_options()["scopes"]
+            .as_array()
+            .unwrap()
+        {
+            assert!(
+                printed.contains(scope["title"].as_str().unwrap()),
+                "{printed}"
+            );
+            assert!(printed.contains(scope["description"].as_str().unwrap()));
+            assert!(printed.contains(scope["tag"].as_str().unwrap()));
+            // The wire name is never shown.
+            assert!(!printed.contains(scope["name"].as_str().unwrap()));
+        }
+    }
+
+    #[test]
+    fn the_menu_sends_what_was_ticked() {
+        let mut calls = Vec::new();
+        consent_scopes_with(
+            None,
+            true,
+            false,
+            // benchmark, ranking, training, attribution
+            &mut std::io::Cursor::new(b"y\nn\nyes\nn\n".to_vec()),
+            &mut Vec::new(),
+            &mut recorder(&mut calls, |_, p| {
+                ok(serde_json::json!({"consent_scopes": p["scopes"].clone()}))
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            calls[0].1["scopes"],
+            serde_json::json!(["debugging_evaluation", "benchmark_only", "model_training"])
+        );
+    }
+
+    #[test]
+    fn without_a_terminal_scopes_must_be_named() {
+        let mut calls = Vec::new();
+        let r = consent_scopes_with(
+            None,
+            false,
+            false,
+            &mut std::io::empty(),
+            &mut Vec::new(),
+            &mut recorder(&mut calls, |_, _| ok(serde_json::json!({}))),
+        );
+        assert!(r.is_err());
+        assert!(calls.is_empty(), "no choice is made for the person");
+    }
+
+    /// End to end against a stopped daemon's state: an enrollment that
+    /// holds on unchosen scopes is released by `consent scopes`.
+    #[test]
+    fn consent_scopes_lifts_the_consent_hold() {
+        let (_dir, store) = crate::config::tests_support::temp_store();
+        let mut cfg = unenrolled_preview_config();
+        cfg.consent_scopes_chosen = Some(false);
+        store.save_config(&cfg).unwrap();
+        assert!(crate::config::consent_hold(store.load_config().unwrap().as_ref()).is_some());
+
+        consent_scopes_with(
+            None,
+            true,
+            false,
+            &mut std::io::Cursor::new(b"\n\n\n\n".to_vec()),
+            &mut Vec::new(),
+            &mut |method, params| {
+                let shared = daemon_shared(&store)?;
+                Ok(handle_local(&shared, method, params))
+            },
+        )
+        .unwrap();
+        let after = store.load_config().unwrap().unwrap();
+        assert_eq!(after.consent_scopes_chosen, Some(true));
+        assert_eq!(crate::config::consent_hold(Some(&after)), None);
+    }
+
+    /// End to end: `unenroll --yes` against a stopped daemon's state.
+    #[test]
+    fn unenroll_against_saved_state_reads_not_logged_in_after() {
+        let (_dir, store) = crate::config::tests_support::temp_store();
+        crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
+        store.save_config(&unenrolled_preview_config()).unwrap();
+        assert!(crate::daemon::uploader::enrollment_is_live(&store));
+
+        unenroll_with(
+            true,
+            false,
+            &mut std::io::empty(),
+            &mut Vec::new(),
+            &mut |method, params| {
+                let shared = daemon_shared(&store)?;
+                Ok(handle_local(&shared, method, params))
+            },
+        )
+        .unwrap();
+        assert!(!crate::daemon::uploader::enrollment_is_live(&store));
+        assert!(store.load_config().unwrap().is_none());
+    }
+}
