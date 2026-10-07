@@ -59,6 +59,8 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
         public let nearAiChosen: String
         /// An invite and a new passkey are not combined.
         public let inviteOrPasskey: String
+        /// An invite host or pay range not known, in place of a dash.
+        public let unknown: String
         public let signedIn: String
         public let noSharing: String
         public let skipNote: String
