@@ -1477,6 +1477,7 @@ fn tauri_status_lines_consent_tags_and_mode_names_are_the_cores() {
             "Retry core startup",
             "Core is still unavailable",
             "Source roots remain saved",
+            "Private AI status unavailable",
         ] {
             assert!(
                 !source.contains(retired),
@@ -1514,6 +1515,7 @@ fn tauri_status_lines_consent_tags_and_mode_names_are_the_cores() {
         "tauri-desktop/frontend/src/features/private-ai/components/harness-list.tsx",
         "tauri-desktop/frontend/src/features/history/history-page.tsx",
         "tauri-desktop/frontend/src/features/onboarding/components/onboarding-roots-step.tsx",
+        "tauri-desktop/frontend/src/features/private-ai/private-ai-page.tsx",
     ] {
         let source = read(&root, path);
         assert!(
