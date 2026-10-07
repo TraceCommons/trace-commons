@@ -66,6 +66,9 @@ protocol FirstRunDaemon: AnyObject {
 enum FirstRunFailure: Equatable {
     /// The daemon did not start.
     case startFailed
+    /// Create passkey on Join could not start the daemon its sheets need,
+    /// so none opened and no account was made. Join says so.
+    case passkeyUnavailable
     /// The running daemon refused a changed declaration (`set_settings`) on
     /// a later Continue. It keeps watching what it held before.
     case settingsFailed
@@ -103,10 +106,11 @@ final class FirstRunRunner: ObservableObject {
     /// The last invite the daemon looked up and found valid.
     @Published private(set) var lookup: DaemonData.InviteLookup?
     @Published private(set) var isCommitting = false
-    /// The passkey sheets are asked for: by the commit that started the
-    /// daemon for a passkey chosen on Join, or by Create passkey once the
-    /// daemon runs. `firstRunPasskeySheets`, mounted on the first-run host,
-    /// presents them on whichever step is on screen.
+    /// The passkey sheets are asked for: by Create passkey on Join, after
+    /// starting the daemon when it was not running (`openPasskeyOnJoin`),
+    /// or by the commit that started the daemon for a passkey an earlier
+    /// build recorded as chosen. `firstRunPasskeySheets`, mounted on the
+    /// first-run host, presents them on whichever step is on screen.
     @Published private(set) var passkeyDue = false
     /// How the passkey sheets last ended, for Join's notice
     /// (`PasskeySheetOutcome.joinNotice`). Cleared when they are asked for
@@ -158,7 +162,9 @@ final class FirstRunRunner: ObservableObject {
         guard !isCommitting else { return }
         isCommitting = true
         defer { isCommitting = false }
-        failure = nil
+        // Create passkey on Join takes back only its own failure: a refused
+        // invite's line stays on Join beside it.
+        if point != .passkeyOnJoin || failure == .passkeyUnavailable { failure = nil }
         refusedGrant = nil
         carriedRefusal = refusal
         defer { carriedRefusal = nil }
@@ -170,7 +176,12 @@ final class FirstRunRunner: ObservableObject {
             return
         }
         for call in FirstRunPlan.calls(for: state, at: point) {
-            guard await run(call) else { return }
+            guard await run(call) else {
+                // On Join a failed start is the passkey's, not the
+                // watcher's: no folder has been answered yet.
+                if point == .passkeyOnJoin, failure == .startFailed { failure = .passkeyUnavailable }
+                return
+            }
         }
         if point == .leaveRoots {
             state = FirstRunNavigation.next(state)
@@ -248,6 +259,14 @@ final class FirstRunRunner: ObservableObject {
             finish()
         }
         return true
+    }
+
+    /// Create passkey on Join: the sheets open over Join, as in #1030, with
+    /// the daemon started first (watching nothing) when it is not running
+    /// (`CommitPoint.passkeyOnJoin`). A start that fails opens nothing and
+    /// reads `passkeyUnavailable`; Join stays.
+    func openPasskeyOnJoin() async {
+        await commit(.passkeyOnJoin)
     }
 
     /// Ask for the passkey sheets, at P-1.

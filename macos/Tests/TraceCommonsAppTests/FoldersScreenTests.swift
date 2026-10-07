@@ -190,8 +190,9 @@ final class FoldersScreenTests: XCTestCase {
             case .startFailed, .settingsFailed, .inviteDead, .lookupUnavailable, .enrollFailed, .signInFailed,
                 .nearAIEnrollFailed, .scopesFailed, .rulesFailed, .privateAIFailed, .grantRefused:
                 XCTAssertNotNil(notice, "\(failure)")
-            // Leaving the roots never marks completion.
-            case .completeFailed:
+            // Leaving the roots never marks completion, and Join's own
+            // passkey start is never a Folders failure.
+            case .completeFailed, .passkeyUnavailable:
                 XCTFail("\(failure)")
             }
         }
