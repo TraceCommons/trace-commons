@@ -46,24 +46,41 @@ final class MenuBarGlassPanelTests: XCTestCase {
         XCTAssertTrue(source.contains("store.status?.contributionMode"))
     }
 
-    /// The pill's list checks Mixed while no override is in force, and the
-    /// override's own mode, alone, while one is. Clearing it goes back to
-    /// Mixed. Nothing is checked before the status is read.
-    func test_theListChecksMixedUnlessAnOverrideIsInForce() async throws {
+    /// The list agrees with the pill: with no override it checks the
+    /// core's roll-up (Mixed only when the folders differ, otherwise that
+    /// mode's row), and while one is in force it checks the override's own
+    /// mode alone. Nothing is checked before the status is read or while
+    /// the core is down, even with a status still in hand.
+    func test_theListChecksTheRollupUnlessAnOverrideIsInForce() async throws {
         let client = SampleDaemonClient(.normalDay)
         let modes: [String?] = [nil, "notify_only", "auto_upload", "ignore"]
-        func checked(_ status: DaemonData.Status?) -> [String?] {
-            modes.filter { MenuPanelData.listChecks($0, status: status) }
+        func checked(_ status: DaemonData.Status?, stale: Bool = false) -> [String?] {
+            modes.filter { MenuPanelData.listChecks($0, status: status, stale: stale) }
         }
         XCTAssertEqual(checked(nil), [])
         let before = try await client.status()
-        XCTAssertEqual(checked(before), [nil])
+        XCTAssertEqual(before.contributionMode, "notify_only")
+        XCTAssertEqual(checked(before), ["notify_only"], "every folder on Ask me checks Ask me, not Mixed")
+        XCTAssertEqual(checked(try Self.status(before, contributionMode: "mixed")), [nil])
+        XCTAssertEqual(checked(try Self.status(before, contributionMode: "auto_upload")), ["auto_upload"])
+        XCTAssertEqual(checked(before, stale: true), [])
         _ = try await client.setContributionOverride(mode: .ignore, confirm: false)
         let overridden = try await client.status()
         XCTAssertEqual(checked(overridden), ["ignore"])
+        XCTAssertEqual(checked(overridden, stale: true), [], "a core-down panel shows no override as known")
         _ = try await client.clearContributionOverride()
         let cleared = try await client.status()
-        XCTAssertEqual(checked(cleared), [nil])
+        XCTAssertEqual(checked(cleared), ["notify_only"])
+    }
+
+    /// `status` with the core's roll-up replaced, through its own coding.
+    private static func status(_ status: DaemonData.Status, contributionMode: String) throws -> DaemonData.Status {
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(status)) as? [String: Any])
+        let key = try XCTUnwrap(object.first { $0.value as? String == status.contributionMode && $0.key.lowercased().hasPrefix("contribution") }?.key)
+        object[key] = contributionMode
+        let patched = try JSONDecoder().decode(DaemonData.Status.self, from: JSONSerialization.data(withJSONObject: object))
+        XCTAssertEqual(patched.contributionMode, contributionMode)
+        return patched
     }
 
     // MARK: Day graph
@@ -118,6 +135,32 @@ final class MenuBarGlassPanelTests: XCTestCase {
             pending: store.pending, history: store.history, calls: store.calls, statusLabel: { _ in nil })
         XCTAssertLessThanOrEqual(rows.count, 3)
         XCTAssertEqual(rows.map(\.at), rows.map(\.at).sorted(by: >))
+    }
+
+    /// With no word for a status the row names the project only, never the
+    /// raw wire token.
+    func test_recentActivityNeverShowsTheRawStatusToken() async throws {
+        let store = MenuPanelStore(client: SampleDaemonClient(.normalDay))
+        await store.load()
+        let statuses = Set(store.history.compactMap(\.status))
+        let rows = MenuPanelData.recent(
+            pending: [], history: store.history, calls: [], statusLabel: { _ in nil }, limit: 50)
+        XCTAssertFalse(rows.isEmpty)
+        for row in rows {
+            for status in statuses { XCTAssertFalse(row.text.contains(status), row.text) }
+        }
+    }
+
+    /// A row with no status is still recent activity, read with the shared
+    /// status table's unknown word, as the History list reads it.
+    func test_aRowWithNoStatusReadsStatusUnavailable() throws {
+        let copy = try XCTUnwrap(PublicRunCopy.decode(fromJSON: TCPublicRun.copyJSON() ?? ""))
+        let row = try DaemonDataDecoding.decoder().decode(DaemonData.HistoryRow.self, from: Data(
+            #"{"submission_id":"a","submitted_at":"2026-09-30T09:00:00Z","project_label":"repo","status":null}"#.utf8))
+        let rows = MenuPanelData.recent(
+            pending: [], history: [row], calls: [],
+            statusLabel: { HomeFormat.historyStatusLabel(copy: copy, $0) })
+        XCTAssertEqual(rows.map(\.text), ["repo · \(copy.contributionStatusUnavailable)"])
     }
 
     /// An outside call carries its proof label unless it was verified; a
@@ -178,6 +221,33 @@ final class MenuBarGlassPanelTests: XCTestCase {
         XCTAssertTrue(panel.contains("store.attach(model.daemonData, configDirectory: model.configDirectory)"))
     }
 
+    // MARK: Private AI pill
+
+    /// The pill reads what the listener reports, never the switch alone: a
+    /// switch left on over a listener that refused to start, crashed or is
+    /// stopping is never drawn On. Unknown is unknown, never Off.
+    func test_thePrivateAIPillFollowsTheListenerNotTheSwitch() throws {
+        let running = PrivateInferenceSurface.tone(
+            PrivateInferenceState(label: "running", port: 8080), calls: .testing)
+        XCTAssertEqual(MenuPanelStatus.privateAI(on: true, tone: running), .on)
+        for label in ["port_in_use", "start_failed", "crashed", "stopping", "unknown_state", ""] {
+            let tone = PrivateInferenceSurface.tone(PrivateInferenceState(label: label, port: nil), calls: .testing)
+            XCTAssertEqual(MenuPanelStatus.privateAI(on: true, tone: tone), .notWorking,
+                           "a switch on over \(label) must not read On")
+        }
+        XCTAssertEqual(MenuPanelStatus.privateAI(on: false, tone: running), .off)
+        XCTAssertEqual(MenuPanelStatus.privateAI(on: nil, tone: running), .unknown)
+        // The pill's fill and value come from that, not from the switch.
+        let url = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Sources/TraceCommonsApp/Views/Monitor/MenuBarGlassPanel.swift")
+        let source = try String(contentsOf: url, encoding: .utf8)
+        XCTAssertTrue(source.contains("MenuPanelStatus.privateAI(\n            on: privateAIOn,"))
+        XCTAssertTrue(source.contains("fill: .solid(privateAIPill == .on ? GlassTokens.Color.dataShared"))
+        XCTAssertFalse(source.contains("privateAIOn == true ? GlassTokens.Color.dataShared"))
+        XCTAssertFalse(source.contains("private var privateAIValue: String {\n        switch privateAIOn {"))
+    }
+
     // MARK: Badge
 
     func test_theBadgeCountsDecisionsOwedOnly() {
@@ -204,7 +274,7 @@ final class MenuBarGlassPanelTests: XCTestCase {
             XCTAssertFalse(source.contains(forbidden), "the popover contains \(forbidden)")
         }
         XCTAssertTrue(source.contains("modeOptions"))
-        XCTAssertTrue(source.contains(".disabled(!store.canChooseOverride)"),
+        XCTAssertTrue(source.contains(".disabled(!store.canChooseOverride || model.requiresOnboarding)"),
                       "the choices are disabled unless the store has positive evidence the core is up")
         XCTAssertTrue(source.contains("store.resolveConfirmation(confirmed:"))
     }
@@ -246,6 +316,110 @@ final class MenuBarGlassPanelTests: XCTestCase {
         await store.clearOverride()
         XCTAssertEqual(client.overrideCalls.last, "clear_contribution_override")
         XCTAssertNil(store.status?.contributionOverride)
+    }
+
+    /// Mixed clears an override at once when no folder's own setting is
+    /// Automatic, and does nothing while no override is in force.
+    func test_mixedClearsAtOnceWhenNoFolderIsAutomatic() async throws {
+        let (store, client) = await loadedStore(.normalDay)
+        await store.chooseMixed()
+        XCTAssertEqual(client.overrideCalls, [], "nothing to clear")
+        store.choose("ignore")
+        await store.resolveConfirmation(confirmed: true)
+        await store.chooseMixed()
+        XCTAssertNil(store.confirming)
+        XCTAssertEqual(client.overrideCalls.last, "clear_contribution_override")
+        XCTAssertNil(store.status?.contributionOverride)
+    }
+
+    /// When a folder's own setting is Automatic, Mixed shows the core's
+    /// clear confirmation and sends nothing; cancel keeps the override;
+    /// confirm clears it.
+    func test_mixedConfirmsBeforeAnAutomaticFolderSendsAgain() async throws {
+        let (store, client) = await loadedStore(.armedFolder)
+        store.choose("ignore")
+        await store.resolveConfirmation(confirmed: true)
+        XCTAssertEqual(store.status?.contributionOverride?.mode, "ignore")
+        let sent = client.overrideCalls
+
+        await store.chooseMixed()
+        let confirming = try XCTUnwrap(store.confirming)
+        XCTAssertEqual(confirming.mode, ContributionOverrideConfirmCopy.clearMode)
+        XCTAssertEqual(confirming, ContributionOverrideConfirmCopy.decode(
+            fromJSON: TCCoreCopy.contributionOverrideConfirmJSON(mode: "clear", configDir: nil)))
+        XCTAssertNil(confirming.arming)
+        XCTAssertEqual(client.overrideCalls, sent, "choosing Mixed sent nothing")
+
+        await store.resolveConfirmation(confirmed: false)
+        XCTAssertEqual(client.overrideCalls, sent, "a cancelled clear sent a write")
+        XCTAssertEqual(store.status?.contributionOverride?.mode, "ignore")
+
+        await store.chooseMixed()
+        await store.resolveConfirmation(confirmed: true)
+        XCTAssertEqual(client.overrideCalls.last, "clear_contribution_override")
+        XCTAssertNil(store.status?.contributionOverride)
+    }
+
+    /// Clearing is confirmed when a folder is Automatic, and when the
+    /// folders or a folder's own setting are not known (fail closed).
+    func test_clearNeedsConfirmationFailsClosed() {
+        let ask = ProjectRow(projectId: "a", projectLabel: "a", mode: .ignore, folderMode: .ask)
+        let never = ProjectRow(projectId: "n", projectLabel: "n", mode: .ignore, folderMode: .ignore)
+        let auto = ProjectRow(projectId: "u", projectLabel: "u", mode: .ignore, folderMode: .autoUpload)
+        let unknown = ProjectRow(projectId: "x", projectLabel: "x", mode: .ignore)
+        XCTAssertFalse(MenuPanelData.clearNeedsConfirmation([], override: "ignore"))
+        XCTAssertFalse(MenuPanelData.clearNeedsConfirmation([ask, never], override: "ignore"))
+        XCTAssertTrue(MenuPanelData.clearNeedsConfirmation([ask, auto], override: "ignore"))
+        XCTAssertTrue(MenuPanelData.clearNeedsConfirmation([ask, unknown], override: "ignore"))
+        XCTAssertTrue(MenuPanelData.clearNeedsConfirmation(nil, override: "ignore"))
+    }
+
+    /// Under an Automatic override, clearing starts no new unattended
+    /// sending (a folder set to Automatic already sends under its own
+    /// arming, and Ask me folders go back to asking), so Mixed clears at
+    /// once; under Ask me or Never it is still confirmed (#1256 review).
+    func test_mixedClearsAnAutomaticOverrideAtOnce() async throws {
+        let ask = ProjectRow(projectId: "a", projectLabel: "a", mode: .ignore, folderMode: .ask)
+        let auto = ProjectRow(projectId: "u", projectLabel: "u", mode: .ignore, folderMode: .autoUpload)
+        XCTAssertFalse(MenuPanelData.clearNeedsConfirmation([ask, auto], override: "auto_upload"))
+        XCTAssertFalse(MenuPanelData.clearNeedsConfirmation(nil, override: "auto_upload"))
+        XCTAssertTrue(MenuPanelData.clearNeedsConfirmation([ask, auto], override: "ignore"))
+        XCTAssertTrue(MenuPanelData.clearNeedsConfirmation([ask, auto], override: "notify_only"))
+        XCTAssertTrue(MenuPanelData.clearNeedsConfirmation([ask, auto], override: nil))
+
+        let (store, client) = await loadedStore(.armedFolder)
+        store.choose("auto_upload")
+        await store.resolveConfirmation(confirmed: true)
+        XCTAssertEqual(store.status?.contributionOverride?.mode, "auto_upload")
+        await store.chooseMixed()
+        XCTAssertNil(store.confirming)
+        XCTAssertEqual(client.overrideCalls.last, "clear_contribution_override")
+        XCTAssertNil(store.status?.contributionOverride)
+    }
+
+    /// A stale store sends nothing from Mixed, even with an override in
+    /// force and an Automatic folder.
+    func test_mixedDoesNothingWhileStale() async throws {
+        let (store, client) = await loadedStore(.armedFolder)
+        store.choose("ignore")
+        await store.resolveConfirmation(confirmed: true)
+        let sent = client.overrideCalls
+        store.attach(client)
+        XCTAssertFalse(store.canChooseOverride)
+        await store.chooseMixed()
+        XCTAssertNil(store.confirming)
+        XCTAssertEqual(client.overrideCalls, sent)
+    }
+
+    /// The Mixed row goes through `chooseMixed`, which confirms; the panel
+    /// never calls the unconfirmed `clearOverride` (#1256 review).
+    func test_theMixedRowGoesThroughChooseMixed() throws {
+        let url = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Sources/TraceCommonsApp/Views/Monitor/MenuBarGlassPanel.swift")
+        let source = try String(contentsOf: url, encoding: .utf8)
+        XCTAssertTrue(source.contains("Task { await store.chooseMixed() }"))
+        XCTAssertFalse(source.contains("clearOverride()"))
     }
 
     /// Automatic's confirmation carries the arming disclosure, and its

@@ -1,7 +1,7 @@
 // Copyright (C) 2026 K&Z Partners LLC
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//! Account identity and inactive, explicitly configured contribution policy.
+//! Account identity and explicitly configured contribution policy.
 
 use crate::db::Database;
 use serde::Deserialize;
@@ -16,8 +16,8 @@ pub struct TrustAccount {
 
 /// A stable server-side source. The definer function verifies each against
 /// the server row it names before recording it; a caller-supplied claim alone
-/// never creates a fact. Recording a fact never raises an allowance: no
-/// admission policy reads these rows (the growth rule is shadow-only).
+/// never creates a fact. Recording a fact alone never raises an allowance;
+/// externally configured growth consumes a separately recorded evaluation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrustFactSource {
     /// A submission ID with an `accepted` credit-ledger event.
@@ -187,6 +187,7 @@ pub struct BoundedPolicy {
     processing_cost_bound: i64,
     bounded_allowance: i64,
     period: PolicyPeriod,
+    external_growth: Option<ExternalGrowth>,
 }
 
 impl BoundedPolicy {
@@ -202,9 +203,21 @@ impl BoundedPolicy {
         self.bounded_allowance
     }
 
+    pub fn external_growth(&self) -> Option<&ExternalGrowth> {
+        self.external_growth.as_ref()
+    }
+
     pub fn period(&self) -> &PolicyPeriod {
         &self.period
     }
+}
+
+/// Explicit bounds for consuming externally recorded evaluations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalGrowth {
+    pub policy_version: String,
+    pub allowance_ceiling: i64,
+    pub evaluation_max_age_seconds: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -225,6 +238,9 @@ struct RawPolicy {
     bounded_allowance: i64,
     period: RawPeriod,
     growth_rule: String,
+    growth_policy_version: Option<String>,
+    allowance_ceiling: Option<i64>,
+    evaluation_max_age_seconds: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -248,7 +264,6 @@ pub fn parse_bounded_policy(
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
         || !supported_versions.contains(&raw.version.as_str())
-        || raw.growth_rule != "none"
         || raw.processing_cost_bound <= 0
         || raw.bounded_allowance <= 0
         || raw.processing_cost_bound > raw.bounded_allowance
@@ -259,6 +274,40 @@ pub fn parse_bounded_policy(
     {
         return Err(PolicyError);
     }
+    let external_growth = match raw.growth_rule.as_str() {
+        "none"
+            if raw.growth_policy_version.is_none()
+                && raw.allowance_ceiling.is_none()
+                && raw.evaluation_max_age_seconds.is_none() =>
+        {
+            None
+        }
+        "external" => {
+            let policy_version = raw.growth_policy_version.ok_or(PolicyError)?;
+            let allowance_ceiling = raw.allowance_ceiling.ok_or(PolicyError)?;
+            let evaluation_max_age_seconds = raw.evaluation_max_age_seconds.ok_or(PolicyError)?;
+            if policy_version.is_empty()
+                || policy_version.len() > 64
+                || !policy_version
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+                || allowance_ceiling < raw.bounded_allowance
+                || allowance_ceiling
+                    .checked_add(raw.processing_cost_bound)
+                    .is_none()
+                || evaluation_max_age_seconds <= 0
+                || evaluation_max_age_seconds.checked_mul(1000).is_none()
+            {
+                return Err(PolicyError);
+            }
+            Some(ExternalGrowth {
+                policy_version,
+                allowance_ceiling,
+                evaluation_max_age_seconds,
+            })
+        }
+        _ => return Err(PolicyError),
+    };
     let period = match raw.period {
         RawPeriod::Lifetime {} => PolicyPeriod::Lifetime,
         RawPeriod::Fixed { seconds } if seconds > 0 && seconds.checked_mul(1000).is_some() => {
@@ -271,5 +320,6 @@ pub fn parse_bounded_policy(
         processing_cost_bound: raw.processing_cost_bound,
         bounded_allowance: raw.bounded_allowance,
         period,
+        external_growth,
     })
 }

@@ -67,6 +67,12 @@ pub struct SkillLearningCopy {
     pub rolling_back: &'static str,
     pub rollback_disclosure: &'static str,
     pub rollback_incomplete: &'static str,
+    /// The confirmation before a rollback (owner ruling, 2026-10-06):
+    /// [`Self::rollback`] confirms it, `rollback_keep` leaves the skill
+    /// installed. DRAFT, NEEDS APPROVAL (new, 2026-10-06).
+    pub rollback_confirm_title: &'static str,
+    pub rollback_confirm_body: &'static str,
+    pub rollback_keep: &'static str,
     pub unavailable: &'static str,
 }
 
@@ -135,6 +141,9 @@ pub fn skill_learning_copy() -> SkillLearningCopy {
         rolling_back: "Rolling back…",
         rollback_disclosure: "Rollback is available while Trace Commons can verify the installed package has not changed.",
         rollback_incomplete: "The skill could not be removed. Inspect the installed directory before retrying.",
+        rollback_confirm_title: "Roll back this skill?",
+        rollback_confirm_body: "Trace Commons removes the skill's directory and the two files it installed, so Codex no longer has this skill. If those files have changed since the install, nothing is removed.",
+        rollback_keep: "Keep skill",
         unavailable: "The skill workflow could not complete. Retry the current step.",
     }
 }
@@ -253,6 +262,25 @@ mod tests {
             skill_learning_error_line("skill-evaluation-did-not-pass").contains("repository plans")
         );
         assert_eq!(skill_learning_error_line("unknown"), copy.unavailable);
+    }
+
+    /// A rollback asks first (owner ruling, 2026-10-06), and the question
+    /// says what is removed and that changed files are left alone, as
+    /// `rollback_codex_install` does.
+    #[test]
+    fn a_rollback_is_confirmed_in_the_cores_words() {
+        let copy = skill_learning_copy();
+        assert!(copy.rollback_confirm_title.ends_with('?'));
+        assert!(copy.rollback_confirm_body.contains("removes"));
+        assert!(copy.rollback_confirm_body.contains("nothing is removed"));
+        assert_ne!(copy.rollback_keep, copy.rollback);
+        for word in [
+            copy.rollback_confirm_title,
+            copy.rollback_confirm_body,
+            copy.rollback_keep,
+        ] {
+            assert!(!word.is_empty());
+        }
     }
 
     #[test]

@@ -48,6 +48,7 @@ public struct GlassSegmentedTabs<Value: Hashable>: View {
     private let segments: [GlassSegment<Value>]
     @Binding private var selection: Value
     private let floating: Bool
+    @State private var hovered: Value?
 
     public init(_ label: String, selection: Binding<Value>, segments: [GlassSegment<Value>], floating: Bool = false) {
         self.label = label
@@ -80,7 +81,7 @@ public struct GlassSegmentedTabs<Value: Hashable>: View {
                         .accessibilityHidden(segment.accessibilityValue != nil)
                     }
                     .glassType(GlassTokens.TypeScale.label.weight(selected ? .semibold : .medium))
-                    .foregroundStyle(selected ? GlassColor.textPrimary : (floating ? GlassColor.textSecondary : GlassColor.textTertiary))
+                    .foregroundStyle(Self.ink(selected: selected, hovering: hovered == segment.value, floating: floating))
                     .padding(.horizontal, floating ? 12 : 8)
                     .frame(maxWidth: floating ? nil : .infinity)
                     .frame(minHeight: floating ? 24 : GlassTokens.Size.tab)
@@ -101,6 +102,13 @@ public struct GlassSegmentedTabs<Value: Hashable>: View {
                     .contentShape(Capsule())
                 }
                 .buttonStyle(GlassPressStyle())
+                .onHover { inside in
+                    if inside {
+                        hovered = segment.value
+                    } else if hovered == segment.value {
+                        hovered = nil
+                    }
+                }
                 .accessibilityValue(segment.accessibilityValue ?? "")
                 .accessibilityAddTraits(selected ? [.isSelected, .isButton] : .isButton)
             }
@@ -110,6 +118,14 @@ public struct GlassSegmentedTabs<Value: Hashable>: View {
         .glassSurface(floating ? .control : .well, floating: floating)
         .accessibilityElement(children: .contain)
         .accessibilityLabel(label)
+    }
+
+    /// A segment's label ink: primary when selected or under the pointer
+    /// (#1146 `.tc-segmented__item:hover`), otherwise secondary on the
+    /// floating variant and tertiary in the well.
+    static func ink(selected: Bool, hovering: Bool, floating: Bool) -> Color {
+        if selected || hovering { return GlassColor.textPrimary }
+        return floating ? GlassColor.textSecondary : GlassColor.textTertiary
     }
 }
 
@@ -130,6 +146,7 @@ public struct GlassBreadcrumb: View {
     private let trail: [GlassCrumb]
     private let backLabel: String
     private let onBack: (() -> Void)?
+    @State private var hovered: Int?
 
     /// `backLabel` names the back button (it is icon-only), from the core's
     /// copy.
@@ -153,9 +170,18 @@ public struct GlassBreadcrumb: View {
                         .accessibilityAddTraits(.isHeader)
                 } else {
                     // A text link: no fill, so the text takes the press.
+                    // Under the pointer it reads primary (#1146
+                    // `.tc-breadcrumb__crumb:hover`).
                     Button { crumb.action?() } label: { Text(crumb.title).glassPressedFill() }
                         .buttonStyle(GlassPressStyle())
-                        .foregroundStyle(GlassColor.textSecondary)
+                        .foregroundStyle(hovered == index ? GlassColor.textPrimary : GlassColor.textSecondary)
+                        .onHover { inside in
+                            if inside {
+                                hovered = index
+                            } else if hovered == index {
+                                hovered = nil
+                            }
+                        }
                 }
             }
         }

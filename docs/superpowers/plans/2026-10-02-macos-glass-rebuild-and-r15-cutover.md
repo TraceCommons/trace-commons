@@ -51,12 +51,12 @@ the owner says nothing, and is always the choice that claims less.
 | D-4 | **The always-on data use.** Today the always-on scope is locked and included (`ConsentScopesContent` RULE 2, "always on" tag). The concept makes it "required but unticked" (rule 3). That is a consent-semantics change. | Owner | Phase 2 Task 5 (Uses step) | Keep locked-and-included, as the daemon's `always_on` flag says. |
 | D-5 | **Sharing as a step of onboarding.** The concept adds a Sharing moment (Ask me each time / Share automatically, then the scrub and witness disclosures, then the grant). Today onboarding deliberately withholds arming (`OnboardingProjectsView` doc comment) and the arming offer lives in the Queue. The core already exports the sharing card's words (`tc_automatic_contribution_copy_json`, `BRIDGE_ONLY` in the copy ratchet) but no macOS screen renders them, and the grant call path on macOS (`acceptArmingOffer`) is the Queue's. Also: the Quick/Custom tiers, the Tools step ("add your tool", needs daemon source detection, not built) and the Rules step (per-repo rule plus past-session selection, no backend). | Owner, Kristi (K-lane wiring), Ron | Phase 2 Task 10 | No Sharing step, no tiers, no Tools or Rules steps in Phase 2; Task 10 records the DRAFT sentences and the wiring needed. |
 | D-6 | **Private AI in onboarding.** The concept shows the Private AI switch on Custom setup's Uses step as a consent event. Today the first-run Private AI offer is a card on the Queue (`PrivateInferenceOfferCard`), not an onboarding step. | Owner | Phase 2 Task 10; Phase 4 Task 7 (where the offer card lives in glass) | Offer card stays where the Queue put it, hosted in the Traces tab. |
-| D-7 | **Where Skills lives.** No glass design exists. `SkillLearningView` is per-history-record and lives inside `SessionDetailView`. | Ron, owner | Phase 3 Task 2 | The History page's inspector, for the selected row. |
-| D-8 | **Compute controls' look.** No glass design exists; the spec only says "a Settings section, including pause, resume and withdraw". | Ron | Phase 3 Task 1 (component choices only; bindings are fixed) | `GlassCard` with the core's sentences, `GlassTextField` for the allowance, `GlassButtonStyle(.glass)` for the four controls. |
+| D-7 | **Where Skills lives.** No glass design exists. `SkillLearningView` is per-history-record and lives inside `SessionDetailView`. | Ron, owner | Phase 3 Task 2 | The History page's inspector, for the selected row. **Settled 2026-10-06 (Ron): as built in #1258.** |
+| D-8 | **Compute controls' look.** No glass design exists; the spec only says "a Settings section, including pause, resume and withdraw". | Ron | Phase 3 Task 1 (component choices only; bindings are fixed) | `GlassCard` with the core's sentences, `GlassTextField` for the allowance, `GlassButtonStyle(.glass)` for the four controls. **Settled 2026-10-06 (Ron): four glass buttons, as built in #1258.** |
 | D-9 | **Missions catalogue in release.** `LiveDaemonClient.missionCatalogue` throws `notAvailableYet`; `MissionsPage` says it "stays in the debug window until" the core's disclosure exists (M4). | Owner | Phase 4 Task 8 | Ship the page; it draws the core's `requestFailed` line for `notAvailableYet`, which is the fail-closed state. |
 | D-10 | **Menu-panel override rows.** `MenuBarGlassPanel.modeOptions` draws the three overrides disabled ("setting an override needs its confirmation ... and a client write the data contract does not carry yet"). Ship disabled, or hide until the write exists? | Owner, Kristi | Phase 4 Task 9 | Ship disabled, as built. |
 | D-11 | **Insights without the daemon.** `MainWindowNavigation.activateServicesIfNeeded` never starts services while the main window rests on Insights or Mission drafts (local, account-free); the Monitor starts services on appear ("reads the daemon whatever the main window shows"). With the Monitor as the main window, an Insights-only launch starts the watcher. | Owner | Phase 4 Task 3 | Services start when the Monitor opens; the Insights-only mode is lost and said so in the PR. |
-| D-12 | **Pause-duration words.** The glass panel reads `MenuBarContent.pauseHourLabel`, `pauseMorningLabel`, `pauseIndefiniteLabel`, `resumeLabel`, `pauseLabel` from `MenuBarView.swift` (Swift-authored; three count as sentences in `ShellWordingTests`). `MonitorScreensCopy` has `watching` and `paused` but no durations. A core export (`tc_monitor_screens_copy_json` gaining `pauseHour`, `pauseMorning`, `pauseIndefinite`, `resume`, `pause`) is Kristi's lane. | Kristi | Phase 4 Task 9 (deleting the last of `MenuBarView.swift`) | `MenuBarView.swift` shrinks to a `MenuBarWords` table holding exactly those words (baseline lowered from 11 to 3) until the export lands. |
+| D-12 | **Pause-duration words.** The glass panel reads `MenuBarContent.pauseHourLabel`, `pauseMorningLabel`, `pauseIndefiniteLabel`, `resumeLabel`, `pauseLabel` from `MenuBarView.swift` (Swift-authored; three count as sentences in `ShellWordingTests`). `MonitorScreensCopy` has `watching` and `paused` but no durations. A core export (`tc_monitor_screens_copy_json` gaining `pauseHour`, `pauseMorning`, `pauseIndefinite`, `resume`, `pause`) is Kristi's lane. | Kristi | Phase 4 Task 9 (deleting the last of `MenuBarView.swift`) | `MenuBarView.swift` shrinks to a `MenuBarWords` table holding exactly those words (baseline lowered from 11 to 3) until the export lands. **Done 2026-10-06:** the words are the core's shell table (`MonitorShellCopy`, #1146's `tray.rs` words) and the baseline entry is deleted. |
 | D-13 | **Who lands the live-client switch.** `MonitorWindowView` builds its three stores on `DaemonDataWiring.sample(...)`; only `MenuBarStripLabel` attaches `model.daemonData`. Switching the call site is the one-line change `DaemonDataWiring`'s doc describes, in Kristi's K1 lane. | Owner, Kristi | Phase 4 Task 1 | This plan's Task 1 does it; tell Kristi before merging. |
 | D-14 | **An invite link while already onboarded.** Today `AppDelegate.application(_:open:)` parks the invite in `PendingInvite` and opens the main window; only `OnboardingConnectContent` consumes it, so an onboarded person's link is never consumed. | Owner | Phase 4 Task 3 | Same behaviour: open the Monitor; the invite stays parked. Said in the PR. |
 | D-15 | **The public-profile panel in glass.** `SettingsView.profilePanel` and `GoPublicDialog` are drawn in `CommunityBrand` on purpose: "the black frame is the exact boundary of what becomes public" (DESIGN-SPEC §7.3). TCDesign has no brand-seam surface. | Ron | Phase 1 Task 4 | A `GlassCard` with a `GlassTag(_, tone: .accent)` eyebrow reading the core's `PublicProfileCopy.heading`; the go-public dialog as a `GlassSheet`. |
@@ -1855,14 +1855,22 @@ inspector for a row. D-7's default puts Skills in the History page's
 inspector for the selected row, resolved to the `HistoryRecord` by
 `submissionID`.
 
-**Design questions for Ron (recorded in the Phase 3 PR, not decided here):**
+**Design questions for Ron (recorded in the Phase 3 PR; settled
+2026-10-06):**
 1. Whether Compute's four controls are one segmented control or four glass
    buttons; and whether the allowance field is inline or in a well.
+   **Settled: four glass buttons and the field as built in #1258.**
 2. Whether Skills is a History-inspector section (default) or a Home card
-   that opens a page, as Missions does.
+   that opens a page, as Missions does. **Settled: the History inspector,
+   as built in #1258.**
 3. The look of the skill editor's three fields and the evaluation report's
    per-trial rows (`SkillTrialRow`), which have no counterpart in #1146.
+   **Settled: as built in #1258.**
 4. Whether `InstalledSkillPanel`'s rollback warrants a confirmation.
+   **Settled: yes.** Roll back opens a confirmation in the core's words
+   (`SkillLearningCopy.rollback_confirm_*`, `rollback_keep`; DRAFT, NEEDS
+   APPROVAL as new wording), and only its confirm rolls back
+   (`ComputeSkillsParityTests.test_aSkillRollbackIsConfirmedFirst`).
 
 ### Task 1: Compute on glass in the Settings window
 

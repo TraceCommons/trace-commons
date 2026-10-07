@@ -1,6 +1,7 @@
 {
   "schema_version": "trace_commons.daemon.v1_1",
   "logged_in": false,
+  "account_scope": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
   "tenant_id": null,
   "consent_scopes": [],
   "paused": false,

@@ -204,6 +204,8 @@ public enum GlassTool: Sendable, Equatable {
 public struct GlassToolTile: View {
     public enum Kind: Sendable, Equatable {
         case tool(GlassTool), folder, session
+        /// The "+" of an add box (the first run's "add your tool").
+        case add
     }
 
     private let kind: Kind
@@ -239,6 +241,12 @@ public struct GlassToolTile: View {
                     .foregroundStyle(GlassTokens.Color.tileFolderInk.color)
                     .frame(width: side, height: side)
                     .background(RoundedRectangle(cornerRadius: GlassTokens.Radius.tile, style: .continuous).fill(GlassTokens.Color.tileFolder.color))
+            case .add:
+                Image(systemName: "plus")
+                    .glassGlyph(large ? 13 : 10, weight: .semibold)
+                    .foregroundStyle(GlassColor.textSecondary)
+                    .frame(width: side, height: side)
+                    .background(RoundedRectangle(cornerRadius: GlassTokens.Radius.tile, style: .continuous).fill(GlassColor.ink(0.1)))
             case .session:
                 Image(systemName: "doc.plaintext")
                     .glassGlyph(large ? 13 : 10)

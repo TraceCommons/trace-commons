@@ -2245,6 +2245,45 @@ pub unsafe extern "C" fn tc_discover_opencode_export(path: *const c_char) -> *mu
     })
 }
 
+/// Recognise a folder the contributor picked, by its layout alone, so "add
+/// your tool" can say which tool's sessions it holds.
+///
+/// Needs no handle, like [`tc_discover_sources`]. Returns an owned JSON
+/// array whose elements have the shape of one row of
+/// [`tc_discover_sources`] -- `source` (`claude-code`, `codex`,
+/// `gemini-cli`, `cline`, `opencode` or `trajectory`), `path` (the picked
+/// folder itself), `exists`, `session_count`, `most_recent`,
+/// `relocated_by_env` (always `false`) and `answers_at`. One element per kind
+/// whose layout matches; a folder that fits two kinds (a flat folder of
+/// `.json` files is both an OpenCode and a trajectory export) reports both,
+/// and one that fits none, or is not there, is `[]`. Free it with
+/// [`tc_string_free`].
+///
+/// Reads directory entries and metadata only, follows no symlink below the
+/// picked folder, and never opens a file, per the same rule
+/// [`tc_discover_sources`] follows.
+///
+/// Returns NULL for a NULL or non-UTF-8 `path`, recording `null-pointer` or
+/// `invalid-utf8`, and NULL on a caught panic.
+///
+/// # Safety
+/// `path` must point to a valid, NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_describe_folder(path: *const c_char) -> *mut c_char {
+    guard_forwarding(|| {
+        let path = unsafe { borrow_str(path) }?;
+        let found = trace_commons_contributor::source::discovery::describe_folder(
+            std::path::Path::new(path),
+        );
+        let json = serde_json::to_string(&found).unwrap_or_else(|_| "[]".to_string());
+        Ok(to_owned_cstring(&json))
+    })
+    .unwrap_or_else(|err| {
+        set_last_error(&err);
+        std::ptr::null_mut()
+    })
+}
+
 /// Every fixed word on the routing surface, in one call.
 ///
 /// Needs no handle: it describes the build, not a running daemon.
@@ -5256,6 +5295,22 @@ pub extern "C" fn tc_onboarding_copy() -> *mut c_char {
     })
 }
 
+/// The first-run wording of #1030 (`first_run_copy::first_run_copy`): a JSON
+/// object of per-screen groups, `{frame, join, folders, tools, rules, uses,
+/// passkey, private_ai}`, each a map of strings. `{tool}`, `{host}`,
+/// `{pay_range}`, `{count}`, `{folder}`, `{name}`, `{max}`, `{selected}`,
+/// `{total}` and `{tools}` are placeholders the shell fills.
+///
+/// Returns an owned JSON string; free it with [`tc_string_free`]. NULL only
+/// on a caught panic.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_first_run_copy_json() -> *mut c_char {
+    guarded_string_no_err(|| {
+        let copy = trace_commons_contributor::first_run_copy::first_run_copy();
+        Ok(to_owned_cstring(&serde_json::to_string(&copy)?))
+    })
+}
+
 // ---------------------------------------------------------------------------
 // K3 (#1173): the copy commands that reached only Tauri. Each export below
 // is the C ABI route to a sentence, or a table of them, the contributor core
@@ -5352,7 +5407,7 @@ pub unsafe extern "C" fn tc_redaction_summary_json(
 
 /// The ignore-project control and its confirmation for one project
 /// (`project_copy::ignore_project_copy`): a JSON object
-/// `{title, body, button, tooltip}`.
+/// `{title, body, button, tooltip, keep}`.
 ///
 /// `project_label` is the label the queue shows for the project; `pending`
 /// is how many of its sessions the confirmation will say it removes, as this
@@ -5468,7 +5523,9 @@ pub extern "C" fn tc_contribution_mode_copy_json() -> *mut c_char {
 /// `project_copy::contribution_override_confirm_copy`): a JSON object
 /// `{mode, title, body, confirm, cancel, arming}`. `mode` is
 /// `"notify_only"`, `"auto_upload"` or `"ignore"`, as
-/// `set_contribution_override` takes it.
+/// `set_contribution_override` takes it, or `"clear"` for the confirmation
+/// before `clear_contribution_override`
+/// (`project_copy::contribution_override_clear_confirm_copy`).
 ///
 /// `arming` is the arming disclosure -- the Flow 1 grant screens' table,
 /// with the disclosure the core chose for the configuration in
@@ -5493,6 +5550,11 @@ pub unsafe extern "C" fn tc_contribution_override_confirm_json(
         let Some(mode) = (unsafe { borrow_optional_str(mode) }) else {
             return Ok(std::ptr::null_mut());
         };
+        if mode == trace_commons_contributor::project_copy::CONTRIBUTION_OVERRIDE_CLEAR_MODE {
+            let copy =
+                trace_commons_contributor::project_copy::contribution_override_clear_confirm_copy();
+            return Ok(to_owned_cstring(&serde_json::to_string(&copy)?));
+        }
         let Ok(mode) = serde_json::from_value::<ProjectMode>(serde_json::json!(mode)) else {
             return Ok(std::ptr::null_mut());
         };
@@ -5545,8 +5607,8 @@ pub unsafe extern "C" fn tc_contribution_override_refusal_text(
 /// a JSON object `{title, matching, nothing_sent, credit}` -- matching
 /// happens on this Mac, nothing is sent because of a mission, and a
 /// mission's credit is projected until the commons records it, then
-/// pending. Shown the first time Missions is opened and in Settings. DRAFT,
-/// NEEDS APPROVAL, every sentence.
+/// pending. Shown the first time Missions is opened and in Settings.
+/// Approved 2026-10-06, every sentence.
 ///
 /// Returns an owned JSON string; free it with [`tc_string_free`]. NULL only
 /// on a caught panic.

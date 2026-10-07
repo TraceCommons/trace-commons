@@ -44,8 +44,10 @@ public enum GlassTokens {
         public static let statusOnText: GlassRGBA = GlassRGBA(0x3DDC84, alpha: 1, light: GlassRGBA(0x11613A, alpha: 1))
         /// statusAsk as text: 4.5:1 or more on every light ground and on its own tint. Dark is statusAsk.
         public static let statusAskText: GlassRGBA = GlassRGBA(0xF5C142, alpha: 1, light: GlassRGBA(0x7A4A06, alpha: 1))
-        /// statusOutside as text: 4.5:1 or more on every light ground and on its own tint. Dark is statusOutside.
-        public static let statusOutsideText: GlassRGBA = GlassRGBA(0xFF6B6B, alpha: 1, light: GlassRGBA(0xA3221C, alpha: 1))
+        /// statusOutside as text: 4.5:1 or more on every light ground and on its own tint. Dark is lighter than statusOutside: on tintOutside over every card stop on paneOpaque it clears 4.73:1, where #ff6b6b was 3.61.
+        public static let statusOutsideText: GlassRGBA = GlassRGBA(0xFF9494, alpha: 1, light: GlassRGBA(0xA3221C, alpha: 1))
+        /// The destructive button's label (GlassButtonKind.destructive): the outside red lifted so it clears 4.5:1 on the glass control fill over the pane (5.0; statusOutsideText there is 4.1). The same values as menuNoProof. #1146 has no destructive button.
+        public static let destructiveText: GlassRGBA = GlassRGBA(0xFF8A8A, alpha: 1, light: GlassRGBA(0xC62828, alpha: 1))
         /// The decisions-owed badge behind textOnStatus. Dark is statusOutside; light is lighter so the dark count clears 4.5:1 (4.86), and the fill 3:1 on the pane.
         public static let badgeFill: GlassRGBA = GlassRGBA(0xFF6B6B, alpha: 1, light: GlassRGBA(0xE04A42, alpha: 1))
         public static let dataShared: GlassRGBA = GlassRGBA(0x8A3DFF, alpha: 1, light: GlassRGBA(0x7A2CF5, alpha: 1))
@@ -60,12 +62,22 @@ public enum GlassTokens {
         /// Over native glass, the thin dark veil kept for text contrast.
         public static let glassVeil: GlassRGBA = GlassRGBA(0x0C0E14, alpha: 0.28, light: GlassRGBA(0xFFFFFF, alpha: 0.3))
         public static let wellFill: GlassRGBA = GlassRGBA(0x000000, alpha: 0.22, light: GlassRGBA(0x000000, alpha: 0.06))
+        /// Hover on a glass, round, pill-icon or toolbar button (#1146 --tc-control-hover), drawn over the control fill.
         public static let controlHover: GlassRGBA = GlassRGBA(0xFFFFFF, alpha: 0.16, light: GlassRGBA(0x000000, alpha: 0.08))
+        /// Hover on an interactive card: #1146's .tc-card--interactive:hover fill, which replaces the card gradient. Light is the card fill's brighter end, so the card lifts rather than greys.
+        public static let cardHover: GlassRGBA = GlassRGBA(0xFFFFFF, alpha: 0.1, light: GlassRGBA(0xFFFFFF, alpha: 0.86))
+        /// Hover on an unselected list row (#1146 .tc-list-row:hover). Never over a selected row.
+        public static let rowHover: GlassRGBA = GlassRGBA(0xFFFFFF, alpha: 0.05, light: GlassRGBA(0x000000, alpha: 0.04))
+        /// A toolbar button whose menu is open (#1146 .tc-btn--icon[aria-expanded=true]). textPrimary on it clears 4.5:1 in both appearances.
+        public static let toolbarExpanded: GlassRGBA = GlassRGBA(0x55555A, alpha: 1, light: GlassRGBA(0xD1D1D6, alpha: 1))
         public static let controlSelected: GlassRGBA = GlassRGBA(0xFFFFFF, alpha: 0.16, light: GlassRGBA(0xFFFFFF, alpha: 1))
         public static let toggleOn: GlassRGBA = GlassRGBA(0x3A7BD5, alpha: 1, light: GlassRGBA(0x2F6BC4, alpha: 1))
         public static let toggleOff: GlassRGBA = GlassRGBA(0xFFFFFF, alpha: 0.18, light: GlassRGBA(0x000000, alpha: 0.16))
         public static let toggleOnSettings: GlassRGBA = GlassRGBA(0x8A3DFF, alpha: 1, light: GlassRGBA(0x7A2CF5, alpha: 1))
-        public static let watchOn: GlassRGBA = GlassRGBA(0x3DDC84, alpha: 1, light: GlassRGBA(0x28B463, alpha: 1))
+        /// The watch switch's track when on: statusOn in both appearances, as #1146's --tc-watch-on is var(--tc-status-on). Light was #28b463, a third green; it now equals statusOn's light value, under which the white knob clears 3:1 (4.0).
+        public static let watchOn: GlassRGBA = GlassRGBA(0x3DDC84, alpha: 1, light: GlassRGBA(0x1A8F4C, alpha: 1))
+        /// A 1pt ring inside the white switch knob, drawn on the watch switch when on (owner decision). #1146 draws the knob white on every track; on the bright dark-appearance watch green white is about 1.8:1, so the knob is told apart from its track by this ring, which over the white knob clears 3:1 against the track (3.9; SwitchContrastTests). Light needs no help (the knob alone clears 3:1) and keeps a faint ring.
+        public static let switchKnobEdge: GlassRGBA = GlassRGBA(0x000000, alpha: 0.65, light: GlassRGBA(0x000000, alpha: 0.18))
         /// Rows inside a list only; never around a container.
         public static let hairline: GlassRGBA = GlassRGBA(0xFFFFFF, alpha: 0.07, light: GlassRGBA(0x000000, alpha: 0.08))
         public static let popoverFill: GlassRGBA = GlassRGBA(0x22242A, alpha: 0.78, light: GlassRGBA(0xF7F7F9, alpha: 0.84))
@@ -93,7 +105,10 @@ public enum GlassTokens {
         public static let menuNoProof: GlassRGBA = GlassRGBA(0xFF8A8A, alpha: 1, light: GlassRGBA(0xC62828, alpha: 1))
         public static let menuSeparator: GlassRGBA = GlassRGBA(0xFFFFFF, alpha: 0.14, light: GlassRGBA(0x000000, alpha: 0.1))
         public static let nodeCardFill: GlassRGBA = GlassRGBA(0x14161C, alpha: 0.72, light: GlassRGBA(0xFFFFFF, alpha: 0.84))
+        /// The general scrim. #1146 has two: --tc-scrim at .35 and --tc-modal-scrim at .40; they are merged here at .40, the modal's, since nothing native draws the .35 one. modalScrim names the modal's use and keeps the same values.
         public static let scrim: GlassRGBA = GlassRGBA(0x000000, alpha: 0.4, light: GlassRGBA(0x000000, alpha: 0.25))
+        /// Behind a GlassModal, over a within-window blur of size.modalScrimBlur (#1146 --tc-modal-scrim and --tc-modal-scrim-blur). Light is lighter so the light panes are dimmed, not blacked out.
+        public static let modalScrim: GlassRGBA = GlassRGBA(0x000000, alpha: 0.4, light: GlassRGBA(0x000000, alpha: 0.25))
         /// Darker than blue so white row text clears 4.5:1 (5.3:1); white on #3a7bd5 was 4.22:1.
         public static let selection: GlassRGBA = GlassRGBA(0x2F6AC0, alpha: 1, light: GlassRGBA(0x2F6BC4, alpha: 1))
         public static let mapIdle: GlassRGBA = GlassRGBA(0xFFFFFF, alpha: 0.35, light: GlassRGBA(0x000000, alpha: 0.3))
@@ -146,6 +161,7 @@ public enum GlassTokens {
             "statusOnText": statusOnText,
             "statusAskText": statusAskText,
             "statusOutsideText": statusOutsideText,
+            "destructiveText": destructiveText,
             "badgeFill": badgeFill,
             "dataShared": dataShared,
             "dataKept": dataKept,
@@ -157,11 +173,15 @@ public enum GlassTokens {
             "glassVeil": glassVeil,
             "wellFill": wellFill,
             "controlHover": controlHover,
+            "cardHover": cardHover,
+            "rowHover": rowHover,
+            "toolbarExpanded": toolbarExpanded,
             "controlSelected": controlSelected,
             "toggleOn": toggleOn,
             "toggleOff": toggleOff,
             "toggleOnSettings": toggleOnSettings,
             "watchOn": watchOn,
+            "switchKnobEdge": switchKnobEdge,
             "hairline": hairline,
             "popoverFill": popoverFill,
             "menuFill": menuFill,
@@ -180,6 +200,7 @@ public enum GlassTokens {
             "menuSeparator": menuSeparator,
             "nodeCardFill": nodeCardFill,
             "scrim": scrim,
+            "modalScrim": modalScrim,
             "selection": selection,
             "mapIdle": mapIdle,
             "mapNodeOff": mapNodeOff,
@@ -214,8 +235,11 @@ public enum GlassTokens {
         public static let cardFill: GlassGradient = GlassGradient(angle: 180, stops: [GlassStop(0xFFFFFF, alpha: 0.085, at: 0, light: GlassRGBA(0xFFFFFF, alpha: 0.72)), GlassStop(0xFFFFFF, alpha: 0.045, at: 1, light: GlassRGBA(0xFFFFFF, alpha: 0.52))])
         public static let cardFillQuiet: GlassGradient = GlassGradient(angle: 180, stops: [GlassStop(0xFFFFFF, alpha: 0.075, at: 0, light: GlassRGBA(0xFFFFFF, alpha: 0.6)), GlassStop(0xFFFFFF, alpha: 0.04, at: 1, light: GlassRGBA(0xFFFFFF, alpha: 0.42))])
         public static let controlFill: GlassGradient = GlassGradient(angle: 180, stops: [GlassStop(0xFFFFFF, alpha: 0.14, at: 0, light: GlassRGBA(0xFFFFFF, alpha: 0.92)), GlassStop(0xFFFFFF, alpha: 0.07, at: 1, light: GlassRGBA(0xFFFFFF, alpha: 0.72))])
+        /// Translucent in dark, as #1146. Opaque in light: a translucent purple over a light pane washes out under its white label (under 4.5:1), so the light stops are the solid brand purples.
         public static let ctaFill: GlassGradient = GlassGradient(angle: 180, stops: [GlassStop(0x8A3DFF, alpha: 0.72, at: 0, light: GlassRGBA(0x7A2CF5, alpha: 1)), GlassStop(0x6D14F3, alpha: 0.62, at: 1, light: GlassRGBA(0x6D14F3, alpha: 1))])
+        /// Opaque in light, for the same reason as ctaFill.
         public static let ctaSecondaryFill: GlassGradient = GlassGradient(angle: 180, stops: [GlassStop(0x4A0EA6, alpha: 0.6, at: 0, light: GlassRGBA(0x5A12C9, alpha: 1)), GlassStop(0x320878, alpha: 0.55, at: 1, light: GlassRGBA(0x4A0EA6, alpha: 1))])
+        /// Opaque in light, so the white check clears 4.5:1 on it.
         public static let checkboxOnFill: GlassGradient = GlassGradient(angle: 180, stops: [GlassStop(0x8A3DFF, alpha: 0.8, at: 0, light: GlassRGBA(0x7A2CF5, alpha: 1)), GlassStop(0x6D14F3, alpha: 0.7, at: 1, light: GlassRGBA(0x6D14F3, alpha: 1))])
 
         /// Every gradient token by its JSON name.
@@ -312,6 +336,8 @@ public enum GlassTokens {
         public static let cardPaddingHorizontal: CGFloat = 14
         public static let cardGap: CGFloat = 10
         public static let inlineGap: CGFloat = 6
+        public static let modalInsetTop: CGFloat = 52
+        public static let modalInset: CGFloat = 28
 
         /// Every space token by its JSON name.
         public static let all: [String: CGFloat] = [
@@ -334,6 +360,8 @@ public enum GlassTokens {
             "cardPaddingHorizontal": cardPaddingHorizontal,
             "cardGap": cardGap,
             "inlineGap": inlineGap,
+            "modalInsetTop": modalInsetTop,
+            "modalInset": modalInset,
         ]
     }
 
@@ -358,7 +386,9 @@ public enum GlassTokens {
         public static let toolLogoLarge: CGFloat = 20
         public static let listRow: CGFloat = 40
         public static let paneLeftWidth: CGFloat = 400
+        public static let paneLeftCompactWidth: CGFloat = 360
         public static let mapWidth: CGFloat = 600
+        public static let mapMinWidth: CGFloat = 360
         public static let inspectorWidth: CGFloat = 300
         public static let windowWidth: CGFloat = 1320
         public static let windowHeight: CGFloat = 760
@@ -369,6 +399,16 @@ public enum GlassTokens {
         public static let windowMinWidth: CGFloat = 760
         public static let windowMinHeight: CGFloat = 560
         public static let nodeCardWidth: CGFloat = 260
+        public static let modalWidth: CGFloat = 780
+        public static let modalNarrowWidth: CGFloat = 450
+        public static let modalNavWidth: CGFloat = 180
+        public static let modalScrimBlur: CGFloat = 8
+        public static let spinner: CGFloat = 12
+        public static let spinnerStroke: CGFloat = 1.5
+        public static let skeletonHeight: CGFloat = 12
+        public static let textAreaMinHeight: CGFloat = 56
+        public static let radio: CGFloat = 15
+        public static let radioDot: CGFloat = 5
 
         /// Every size token by its JSON name.
         public static let all: [String: CGFloat] = [
@@ -392,7 +432,9 @@ public enum GlassTokens {
             "toolLogoLarge": toolLogoLarge,
             "listRow": listRow,
             "paneLeftWidth": paneLeftWidth,
+            "paneLeftCompactWidth": paneLeftCompactWidth,
             "mapWidth": mapWidth,
+            "mapMinWidth": mapMinWidth,
             "inspectorWidth": inspectorWidth,
             "windowWidth": windowWidth,
             "windowHeight": windowHeight,
@@ -403,17 +445,29 @@ public enum GlassTokens {
             "windowMinWidth": windowMinWidth,
             "windowMinHeight": windowMinHeight,
             "nodeCardWidth": nodeCardWidth,
+            "modalWidth": modalWidth,
+            "modalNarrowWidth": modalNarrowWidth,
+            "modalNavWidth": modalNavWidth,
+            "modalScrimBlur": modalScrimBlur,
+            "spinner": spinner,
+            "spinnerStroke": spinnerStroke,
+            "skeletonHeight": skeletonHeight,
+            "textAreaMinHeight": textAreaMinHeight,
+            "radio": radio,
+            "radioDot": radioDot,
         ]
     }
 
     public enum Opacity {
         public static let disabled: Double = 0.45
-        public static let rowOff: Double = 0.7
+        public static let rowOff: Double = 0.6
+        public static let skeletonDim: Double = 0.5
 
         /// Every opacity token by its JSON name.
         public static let all: [String: Double] = [
             "disabled": disabled,
             "rowOff": rowOff,
+            "skeletonDim": skeletonDim,
         ]
     }
 
@@ -427,6 +481,8 @@ public enum GlassTokens {
         public static let easeY1: Double = 0.8
         public static let easeX2: Double = 0.2
         public static let easeY2: Double = 1
+        public static let spin: Double = 0.8
+        public static let pulse: Double = 1.6
 
         /// Every motion token by its JSON name.
         public static let all: [String: Double] = [
@@ -439,6 +495,8 @@ public enum GlassTokens {
             "easeY1": easeY1,
             "easeX2": easeX2,
             "easeY2": easeY2,
+            "spin": spin,
+            "pulse": pulse,
         ]
     }
 

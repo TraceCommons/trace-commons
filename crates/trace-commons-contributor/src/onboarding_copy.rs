@@ -9,9 +9,11 @@ pub const NOTIFICATION_ALLOWED: &str = "Notifications allowed";
 pub const NOTIFICATION_DENIED: &str = "Notifications turned off in System Settings";
 pub const NOTIFICATION_UNKNOWN: &str = "Notification permission could not be determined";
 pub const NOTIFICATION_NOT_ASKED: &str = "Not asked yet";
-pub const NOTIFICATION_ALLOW: &str = "Allow notifications";
+/// #1146 `platform-panel.tsx` (owner ruling, 2026-10-06).
+pub const NOTIFICATION_ALLOW: &str = "Allow";
 pub const NOT_NOW: &str = "Not now";
-pub const SYSTEM_SETTINGS: &str = "Open System Settings";
+/// #1146 `platform-panel.tsx` (owner ruling, 2026-10-06).
+pub const SYSTEM_SETTINGS: &str = "System settings";
 /// Names the two rows that gate the watcher (`daemon::settings::roots_declared`).
 /// Not "each": a blank Gemini, Cline, or OpenCode row never blocks it.
 pub const ROOTS_REQUIRED: &str = "Answer for Claude Code and Codex before continuing.";

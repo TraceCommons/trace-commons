@@ -3,7 +3,7 @@ import TCShellCore
 
 /// The Settings window's sections (spec, "Settings navigation"; R11 of
 /// #1173), in the order #1146's settings modal lists them, plus Compute.
-/// Each names the part of `SettingsContent` it shows.
+/// Each names the section `GlassSettingsContent` draws for it.
 enum SettingsSection: String, CaseIterable, Identifiable {
     case connection
     case startup
@@ -21,6 +21,18 @@ enum SettingsSection: String, CaseIterable, Identifiable {
     case compute
 
     var id: String { rawValue }
+
+    /// Whether the Settings window draws this section while onboarding is
+    /// required (R-43): only the sections that ask nothing first run asks.
+    /// Consent, the public profile, the watched folders, the tools, the
+    /// witness, the projects -- and the pause and change log beside them --
+    /// wait for first run, so no write surface exists outside it.
+    var availableBeforeOnboarding: Bool {
+        switch self {
+        case .connection, .startup, .notifications, .updates, .privateAI, .compute: true
+        case .watching, .consent, .publicProfile, .watchedFolders, .tools, .witness, .projects, .changes: false
+        }
+    }
 
     /// The section's name in the list: the heading the section itself
     /// shows, from the core's copy where the section takes it from there.
@@ -121,7 +133,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
 }
 
 /// The single words the section list shows for sections whose heading is
-/// a single word in `SettingsContent` too.
+/// a single word on the section itself too.
 enum SettingsWords {
     static let connection = "Connection"
     static let startup = "Startup"

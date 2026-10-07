@@ -991,6 +991,10 @@ fn load_group(parent: &Path, budget: u64) -> anyhow::Result<SessionTranscript> {
         .map(|s| s.to_string());
 
     Ok(SessionTranscript {
+        source_session: super::native_session_identity(
+            SOURCE_CLAUDE_CODE,
+            conversation_id.as_deref(),
+        ),
         source: Cow::Borrowed(SOURCE_CLAUDE_CODE),
         agent_version: parsed.agent_version,
         model: parsed.model,
@@ -1406,6 +1410,22 @@ fn served_by_of(record: &Value, usage: &Value) -> Option<crate::source::ServedBy
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn native_identity_uses_validated_parent_uuid() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = "11111111-1111-4111-8111-111111111111";
+        let path = dir.path().join(format!("{id}.jsonl"));
+        std::fs::write(&path, format!("{{\"type\":\"user\",\"sessionId\":\"{id}\",\"message\":{{\"role\":\"user\",\"content\":\"hello\"}}}}\n")).unwrap();
+        assert_eq!(
+            load_group(&path, GROUP_RAW_BYTE_BUDGET)
+                .unwrap()
+                .source_session
+                .unwrap()
+                .native_id,
+            id
+        );
+    }
+
     use super::*;
     use crate::source::{SessionEventKind, TraceSource};
     use std::path::PathBuf;

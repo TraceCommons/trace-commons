@@ -52,6 +52,7 @@ pub mod install;
 pub mod ipc;
 pub mod ironwire_pointer;
 pub(crate) mod legacy_migration;
+pub mod managed;
 pub mod mission_catalogue;
 pub mod mission_matching;
 pub mod native_flow;
@@ -66,6 +67,7 @@ pub(crate) mod test_credential_store;
 // round-trip tests constructs the OS store, by design.
 #[cfg_attr(all(feature = "test-credential-store", not(test)), allow(dead_code))]
 pub(crate) mod os_secret_store;
+pub mod past_sessions;
 pub mod policy;
 pub mod preview;
 pub mod preview_scheduler;
@@ -74,6 +76,7 @@ pub mod profile;
 pub mod project_key;
 pub mod public_run;
 pub mod queue;
+pub mod remembered_passkeys;
 pub mod second_look;
 pub mod settings;
 pub mod skill_loop;

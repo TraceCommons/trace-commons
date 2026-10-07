@@ -80,6 +80,7 @@ export function WitnessReviewOverlay({
             Disclosure unavailable. Witness review is disabled.
           </p>
         )}
+        {copy.data && <p className="m-0">{copy.data.immutable}</p>}
         {copy.data && (
           <label className="flex items-start gap-2.5 rounded-[9px] border border-border p-3.5 text-foreground">
             <Checkbox

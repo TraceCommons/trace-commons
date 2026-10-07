@@ -1,4 +1,3 @@
-#if DEBUG
 import Foundation
 import Observation
 import TCBridge
@@ -87,7 +86,32 @@ final class MenuPanelStore {
         confirming = copy
     }
 
+    /// Mixed was pressed while an override is in force. Clearing hands
+    /// every folder back to its own setting, so when the override is Ask me
+    /// or Never and any folder's own setting is Automatic (or is not known),
+    /// the core's clear confirmation is shown first, as for an override:
+    /// unattended sending never resumes from a single menu press. Under an
+    /// Automatic override clearing resumes nothing, so it, like a clear with
+    /// no Automatic folder, happens at once.
+    /// Without the core's confirmation nothing is cleared.
+    func chooseMixed() async {
+        guard canChooseOverride, status?.contributionOverride != nil else { return }
+        overrideRefusal = nil
+        guard MenuPanelData.clearNeedsConfirmation(projects, override: status?.contributionOverride?.mode) else {
+            await writeOverride { _ = try await $0.clearContributionOverride() }
+            return
+        }
+        let copy = ContributionOverrideConfirmCopy.decode(
+            fromJSON: TCCoreCopy.contributionOverrideConfirmJSON(mode: ContributionOverrideConfirmCopy.clearMode, configDir: nil))
+        guard let copy, copy.mode == ContributionOverrideConfirmCopy.clearMode else {
+            overrideRefusal = TCCoreCopy.contributionOverrideRefusalLine(label: "")
+            return
+        }
+        confirming = copy
+    }
+
     /// The confirmation was answered. Cancel sends nothing; confirm sends
+    /// `clear_contribution_override` for the clear confirmation, or else
     /// `set_contribution_override`, with `confirm: true` for Auto
     /// contribute (the core's arming disclosure was just shown), then
     /// re-reads `status`: the pill shows what the daemon says, never a guess.
@@ -95,11 +119,17 @@ final class MenuPanelStore {
         guard let copy = confirming else { return }
         confirming = nil
         guard confirmed else { return }
+        if copy.mode == ContributionOverrideConfirmCopy.clearMode {
+            await writeOverride { _ = try await $0.clearContributionOverride() }
+            return
+        }
         guard let mode = ProjectMode(rawValue: copy.mode) else { return }
         await writeOverride { try await $0.setContributionOverride(mode: mode, confirm: mode == .autoUpload) }
     }
 
-    /// The core's clear action: every folder back on its own setting.
+    /// The core's clear action, unconfirmed: every folder back on its own
+    /// setting. The panel goes through `chooseMixed`, which confirms first
+    /// when a folder is Automatic.
     func clearOverride() async {
         guard canChooseOverride else { return }
         overrideRefusal = nil
@@ -180,6 +210,12 @@ final class MenuPanelStore {
 
 /// The popover's rules, as pure functions so they are tested.
 enum MenuPanelData {
+    /// Where "Manage rules" goes: the watched folders in Settings, or first
+    /// run while onboarding is required, with no Settings section (R-43).
+    static func manageRules(requiresOnboarding: Bool) -> MonitorDestination? {
+        requiresOnboarding ? nil : .settings(.watchedFolders)
+    }
+
     /// The roll-up of every listed folder's mode, for the mode pill.
     enum ModeRollup: Equatable {
         case ask, armed, never
@@ -213,14 +249,34 @@ enum MenuPanelData {
         }
     }
 
-    /// Whether the pill's list checks a row: an override's own mode while
-    /// one is in force, and the Mixed row (`mode` nil, each folder on its
-    /// own setting) while none is. Nothing is checked before the status
-    /// has been read.
-    static func listChecks(_ mode: String?, status: DaemonData.Status?) -> Bool {
-        guard let status else { return false }
-        guard let active = status.contributionOverride else { return mode == nil }
-        return mode != nil && active.mode == mode
+    /// Whether clearing the override needs the core's confirmation: some
+    /// folder's own setting is Automatic, so clearing resumes unattended
+    /// sending there. An unread folder list, or a folder whose own setting
+    /// the daemon did not report, needs it too (fail closed).
+    static func clearNeedsConfirmation(_ projects: [ProjectRow]?, override: String?) -> Bool {
+        // Under an Automatic override every folder already sends unattended;
+        // clearing starts nothing new (an Automatic folder keeps its own
+        // arming, Ask me folders go back to asking).
+        if override == "auto_upload" { return false }
+        guard let projects else { return true }
+        return projects.contains { $0.folderMode == nil || $0.folderMode == .autoUpload }
+    }
+
+    /// Whether the pill's list checks a row, agreeing with the pill: an
+    /// override's own mode while one is in force; with none, the core's
+    /// roll-up, which is the Mixed row (`mode` nil) only when the folders
+    /// differ. Nothing is checked before the status has been read, or while
+    /// the core is down: a status kept from before is not a known mode.
+    static func listChecks(_ mode: String?, status: DaemonData.Status?, stale: Bool) -> Bool {
+        guard !stale, let status else { return false }
+        if let active = status.contributionOverride {
+            return mode != nil && active.mode == mode
+        }
+        switch rollup(status.contributionMode) {
+        case .mixed: return mode == nil
+        case .none: return false
+        case .ask, .armed, .never: return mode != nil && status.contributionMode == mode
+        }
     }
 
     /// The core's partial line, under Auto contribute exactly when the
@@ -279,7 +335,7 @@ enum MenuPanelData {
     /// outside model with their proof label.
     static func recent(
         pending: [DaemonData.QueueEntry], history: [DaemonData.HistoryRow], calls: [DaemonData.InferenceCall],
-        statusLabel: (String) -> String?, limit: Int = 3
+        statusLabel: (String?) -> String?, limit: Int = 3
     ) -> [Recent] {
         var rows: [Recent] = []
         for entry in pending {
@@ -289,10 +345,13 @@ enum MenuPanelData {
                 text: "\(entry.projectLabel) · \(MonitorWords.waiting)", trailing: nil))
         }
         for row in history {
-            guard let at = row.submittedAt, let status = row.status else { continue }
+            // A row with no status is still activity: the shared table
+            // reads it as unavailable, as the History list does.
+            guard let at = row.submittedAt else { continue }
             rows.append(Recent(
                 id: "history:\(row.submissionId)", kind: .contributed, at: at, tool: row.source.flatMap(tool),
-                text: "\(row.projectLabel ?? "—") · \(statusLabel(status) ?? status)", trailing: nil))
+                text: [row.projectLabel ?? "—", statusLabel(row.status)].compactMap { $0 }.joined(separator: " · "),
+                trailing: nil))
         }
         for call in calls where call.route == "outside" {
             rows.append(Recent(
@@ -307,4 +366,3 @@ enum MenuPanelData {
         SourceKind(rawValue: source).map(TracesTreeView.glassTool)
     }
 }
-#endif

@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { coreKeys } from "../../../lib/tauri/query-keys";
+import { useShellStatusLines } from "../../../lib/tauri/use-contributor-copy";
 import { useCoreStatus } from "../../../lib/tauri/use-core-status";
 import { settingsKeys } from "../api/query-keys";
 import {
@@ -12,6 +13,7 @@ import {
 
 // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: Routing hook coordinates discovery and sequential probe/configure mutations.
 export function useRouting() {
+  const lines = useShellStatusLines();
   const core = useCoreStatus();
   const queryClient = useQueryClient();
   const discoveryQuery = useQuery<RoutingDiscovery>({
@@ -67,7 +69,7 @@ export function useRouting() {
           ? "error"
           : "ready") as "busy" | "loading" | "ready" | "error",
     error: discoveryQuery.isError
-      ? "Routing discovery unavailable. Refresh after Rust core starts."
+      ? lines.readUnavailable
       : checkMutation.isError
         ? "Routing check unavailable. Verify port and token directory."
         : configureMutation.isError

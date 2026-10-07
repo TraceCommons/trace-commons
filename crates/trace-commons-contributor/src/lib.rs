@@ -4,9 +4,11 @@
 //! identities.
 
 pub mod account_auth;
+pub mod account_contribution;
 pub(crate) mod antigravity;
 pub mod attach_copy;
 pub mod brand;
+pub mod cli;
 pub mod commands;
 pub mod commons_credit;
 pub mod compute;
@@ -20,6 +22,7 @@ pub mod disclosure;
 pub mod disclosure_copy;
 pub mod envelope;
 pub mod external_url;
+pub mod first_run_copy;
 pub mod flow1;
 pub mod harness_state;
 pub mod health_copy;
@@ -28,6 +31,7 @@ pub mod identity;
 pub mod inference_connection;
 pub mod insights;
 pub mod issuer_client;
+pub mod managed;
 pub mod mission_attempt;
 pub mod mission_catalog;
 pub mod mission_draft;
