@@ -585,7 +585,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `quiesce` | `timeout_secs` (optional, default 60, max 300) | `quiesced: true`, `waited_ms` | parks uploads for an update swap; `busy` / `quiesce-timeout` if in-flight work does not finish in time |
 | `get_settings` | — | settings; credential presence as booleans, source declarations as `*_source_mode` (`unset`/`off`/`watch`), never local paths | |
 | `set_settings` | any of `quiescence_secs`, `digest_interval_secs`, `digest_schedule`, `approval_hold_secs`, `local_notifications`, `claude_root`, `codex_root`, `claude_source`, `codex_source`, `gemini_source`, `cline_source`, `opencode_source`, `trajectory_source`, `ironwire`, `ironwire_attested_bodies`, `token_distributions_contribution`, `token_capture_enabled`, `private_inference`, `private_inference_offer_seen`, `scrub_check`, `max_uploads_per_day`, `max_bytes_per_day` | updated settings | see "`set_settings`" below |
-| `consent_options` | — | `scopes[]` of `{name, description, always_on, grants_data_use}` | |
+| `consent_options` | — | `scopes[]` of `{name, title, description, always_on, grants_data_use}` | |
 | `set_consent_scopes` | `scopes[]` (wire-name strings; omitted means floor scope only) | `consent_scopes[]` | requires an existing enrollment |
 | `enroll` | `grant` xor `invite`, `scopes[]` (optional) | `enrolled: bool`, and on success `tenant_id`, `device_key_id`, `consent_scopes[]` | performs real network I/O |
 | `acknowledge_grant_voids` | `ids[]` (**required**) | `acknowledged: <count>` | records that the void notices with these ids were shown; see "Void notices" below |
@@ -4996,8 +4996,8 @@ guessed one.
 ```json
 {
   "scopes": [
-    { "name": "debugging_evaluation", "description": "…", "always_on": true, "grants_data_use": true },
-    { "name": "public_attribution", "description": "…", "always_on": false, "grants_data_use": false }
+    { "name": "debugging_evaluation", "title": "…", "description": "…", "always_on": true, "grants_data_use": true },
+    { "name": "public_attribution", "title": "…", "description": "…", "always_on": false, "grants_data_use": false }
   ]
 }
 ```
@@ -5006,6 +5006,12 @@ guessed one.
 contributor implicitly grants. `grants_data_use` is `false` for scopes (such
 as `public_attribution`) that carry no data-use grant of their own -- do not
 present those beside real data-use scopes with equal visual weight.
+
+`title` is the scope's short bold label (owner ruling, 2026-10-06). Every
+shell draws it as given and keeps no table of its own; it is never the wire
+name with its underscores replaced. A shell that receives a scope without a
+`title` fails closed: macOS, GTK and Windows refuse the list (or the row),
+so nothing is offered under words the core did not supply.
 
 ### `set_consent_scopes`
 

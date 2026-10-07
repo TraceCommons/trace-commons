@@ -63,7 +63,7 @@ final class SettingsParityTests: XCTestCase {
                            "model.toggleConsentScope(", "model.consentWriteRefused",
                            "ConsentScopeRows.isOn(scope: scope, granted: granted, unavailable: unavailable)",
                            "ConsentScopeRows.isEnabled(scope: scope, busy: model.consentWriteBusy, unavailable: unavailable)"],
-                copySources: ["ScopeCopy.title(for:", "scope.description", "settingsCopy()?.consentSaveFailed",
+                copySources: ["scope.title", "scope.description", "settingsCopy()?.consentSaveFailed",
                               "ConsentScopeRows.refusalLine(", "MonitorScreensCopy.decode(",
                               "SettingsLegacyWords.consentHeading", "SettingsLegacyWords.appliesFromNow",
                               "SettingsLegacyWords.alwaysIncluded", "SettingsLegacyWords.optionalEachOne",

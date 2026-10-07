@@ -101,11 +101,11 @@ private final class PublicProfileDaemon: DaemonCalling {
 /// section view shares and none owns.
 final class SettingsSectionStateTests: XCTestCase {
     private static let always = ConsentScope(
-        name: "debugging_evaluation", description: "", alwaysOn: true, grantsDataUse: true)
+        name: "debugging_evaluation", title: "debugging_evaluation", description: "", alwaysOn: true, grantsDataUse: true)
     private static let benchmark = ConsentScope(
-        name: "benchmark_only", description: "", alwaysOn: false, grantsDataUse: true)
+        name: "benchmark_only", title: "benchmark_only", description: "", alwaysOn: false, grantsDataUse: true)
     private static let research = ConsentScope(
-        name: "research", description: "", alwaysOn: false, grantsDataUse: true)
+        name: "research", title: "research", description: "", alwaysOn: false, grantsDataUse: true)
 
     private func loggedIn(_ scopes: [String]) throws -> DaemonStatus {
         let list = scopes.map { "\"\($0)\"" }.joined(separator: ",")

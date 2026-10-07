@@ -301,7 +301,7 @@ final class TracesParityTests: XCTestCase {
         XCTAssertTrue(sheet.contains("width - 2 * TranscriptTab.inset"))
         // No sentence is drawn in the uppercased eyebrow inside the tabs.
         let tabsStart = try XCTUnwrap(sheet.range(of: "// MARK: - Tabs")).lowerBound
-        let tabsEnd = try XCTUnwrap(sheet.range(of: "enum ScopeCopy {")).lowerBound
+        let tabsEnd = try XCTUnwrap(sheet.range(of: "struct WitnessReviewConsent: View {")).lowerBound
         XCTAssertFalse(sheet[tabsStart..<tabsEnd].contains("TypeScale.eyebrow"))
         XCTAssertTrue(GlassSurfaceRulesTests.files.contains("Views/PreviewSheet.swift"))
     }
