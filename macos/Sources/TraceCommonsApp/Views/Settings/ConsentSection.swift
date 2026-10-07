@@ -55,7 +55,12 @@ struct ConsentSection: View {
         // `grants_data_use`, never a name. Kept apart from the real ones.
         let credit = model.consentScopes.filter { !$0.alwaysOn && !$0.grantsDataUse }
 
-        GlassEyebrowCard(SettingsLegacyWords.consentHeading) {
+        // #1146: CONSENT over the question as the h2, and Refresh.
+        GlassEyebrowCard(SettingsLegacyWords.consentEyebrow, title: SettingsLegacyWords.consentHeading) {
+            Button(SettingsLegacyWords.refresh, action: model.refreshStatus)
+                .buttonStyle(GlassButtonStyle(.link))
+                .fixedSize()
+        } content: {
             VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
                 caption(SettingsLegacyWords.appliesFromNow)
                 // Until the daemon answers, the rows below are disabled and

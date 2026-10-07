@@ -566,6 +566,18 @@ public struct MonitorShellCopy: MonitorWordTable {
     public let tabTraces: String
     public let tabsLabel: String
     public let mapViewsLabel: String
+    public let settingsRefresh: String
+    public let consentEyebrow: String
+    public let desktopEyebrow: String
+    public let desktopTitle: String
+    public let discoveryEyebrow: String
+    public let discoveryTitle: String
+    public let watcherEyebrow: String
+    public let watcherTitle: String
+    public let watcherWatching: String
+    public let watcherPaused: String
+    /// DRAFT, NEEDS APPROVAL (#1146 parity, 2026-10-07).
+    public let watcherCaption: String
 
     enum CodingKeys: String, CodingKey, CaseIterable {
         case showGraph = "show_graph"
@@ -607,6 +619,17 @@ public struct MonitorShellCopy: MonitorWordTable {
         case tabTraces = "tab_traces"
         case tabsLabel = "tabs_label"
         case mapViewsLabel = "map_views_label"
+        case settingsRefresh = "settings_refresh"
+        case consentEyebrow = "consent_eyebrow"
+        case desktopEyebrow = "desktop_eyebrow"
+        case desktopTitle = "desktop_title"
+        case discoveryEyebrow = "discovery_eyebrow"
+        case discoveryTitle = "discovery_title"
+        case watcherEyebrow = "watcher_eyebrow"
+        case watcherTitle = "watcher_title"
+        case watcherWatching = "watcher_watching"
+        case watcherPaused = "watcher_paused"
+        case watcherCaption = "watcher_caption"
     }
 
     public static var consumedFields: [String] { CodingKeys.allCases.map(\.rawValue) }

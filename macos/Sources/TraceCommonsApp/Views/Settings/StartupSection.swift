@@ -15,7 +15,13 @@ struct StartupSection: View {
     @State private var loginItemState: LoginItemManager.State = LoginItemManager.currentState
 
     var body: some View {
-        GlassEyebrowCard(SettingsWords.startup) {
+        // #1146's `DESKTOP / System integrations`, with Refresh re-reading
+        // the login item from the system.
+        GlassEyebrowCard(SettingsLegacyWords.desktopEyebrow, title: SettingsLegacyWords.desktopTitle) {
+            Button(SettingsLegacyWords.refresh) { loginItemState = LoginItemManager.currentState }
+                .buttonStyle(GlassButtonStyle(.link))
+                .fixedSize()
+        } content: {
             VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
                 switch loginItemState {
                 case .enabled:

@@ -1032,6 +1032,26 @@ pub struct MonitorShellCopy {
     pub tab_traces: &'static str,
     pub tabs_label: &'static str,
     pub map_views_label: &'static str,
+    /// Settings cards' two-level heads (#1146 `settings-page.tsx`,
+    /// `consent-settings-panel.tsx`, `platform-panel.tsx`): an eyebrow over
+    /// an h2, and the re-read link at the right. A shell uppercases the
+    /// eyebrows.
+    pub settings_refresh: &'static str,
+    pub consent_eyebrow: &'static str,
+    pub desktop_eyebrow: &'static str,
+    pub desktop_title: &'static str,
+    pub discovery_eyebrow: &'static str,
+    pub discovery_title: &'static str,
+    /// The Watching section's watcher card (#1146 `settings-page.tsx`):
+    /// its eyebrow and title, the chip for each state, and what pausing
+    /// does. The buttons are `pause_watcher` and `resume_watcher`.
+    pub watcher_eyebrow: &'static str,
+    pub watcher_title: &'static str,
+    pub watcher_watching: &'static str,
+    pub watcher_paused: &'static str,
+    /// DRAFT, NEEDS APPROVAL (#1146 parity, 2026-10-07): says what a pause
+    /// does and does not do to queued sessions and consent.
+    pub watcher_caption: &'static str,
 }
 
 /// Ron's #1146 Home and History words that carry their structure
@@ -1248,6 +1268,17 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             tab_traces: "Traces",
             tabs_label: "Monitor",
             map_views_label: "Map view",
+            settings_refresh: "Refresh",
+            consent_eyebrow: "Consent",
+            desktop_eyebrow: "Desktop",
+            desktop_title: "System integrations",
+            discovery_eyebrow: "Watcher",
+            discovery_title: "Session discovery",
+            watcher_eyebrow: "Daemon",
+            watcher_title: "Contribution watcher",
+            watcher_watching: "Watching",
+            watcher_paused: "Paused",
+            watcher_caption: "Pausing stops contribution processing. It does not delete queued sessions or change consent.",
         },
         traces_graph: MonitorTracesGraphCopy {
             zoom_out: "Zoom out",

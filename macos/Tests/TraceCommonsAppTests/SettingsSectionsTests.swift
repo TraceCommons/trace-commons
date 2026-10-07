@@ -96,15 +96,20 @@ final class SettingsSectionsTests: XCTestCase {
     }
 
     /// Each section's heading is the one the list names it by: the same
-    /// source, read in the section's own file.
+    /// source, read in the section's own file. Startup, Watching and Uses
+    /// take #1146's two-level card heads instead (an eyebrow over an h2);
+    /// the modal's section rule still names each by the list's word.
     func test_eachSectionIsHeadedByTheListsTitleSource() throws {
         let headings: [SettingsSection: (file: String, source: String)] = [
             .connection: ("ConnectionSection", "GlassEyebrowCard(SettingsWords.connection)"),
-            .startup: ("StartupSection", "GlassEyebrowCard(SettingsWords.startup)"),
+            .startup: ("StartupSection",
+                       "GlassEyebrowCard(SettingsLegacyWords.desktopEyebrow, title: SettingsLegacyWords.desktopTitle)"),
             .notifications: ("StartupSection", "if let heading = Notifier.copy?.notificationHeading"),
             .updates: ("StartupSection", "GlassEyebrowCard(SettingsWords.updates)"),
-            .watching: ("WatchingSection", "GlassEyebrowCard(SettingsWords.watching)"),
-            .consent: ("ConsentSection", "GlassEyebrowCard(SettingsLegacyWords.consentHeading)"),
+            .watching: ("WatchingSection",
+                        "GlassEyebrowCard(SettingsLegacyWords.discoveryEyebrow, title: SettingsLegacyWords.discoveryTitle)"),
+            .consent: ("ConsentSection",
+                       "GlassEyebrowCard(SettingsLegacyWords.consentEyebrow, title: SettingsLegacyWords.consentHeading)"),
             .publicProfile: ("PublicProfileSection", "GlassEyebrowCard(PublicProfileCopy.heading)"),
             .watchedFolders: ("WatchedFoldersSection", "GlassEyebrowCard(copy.heading)"),
             .tools: ("ToolsSection", "GlassEyebrowCard(copy.toolsHeading)"),
@@ -121,6 +126,34 @@ final class SettingsSectionsTests: XCTestCase {
         // The two the words table holds are the list's own two.
         XCTAssertEqual(SettingsLegacyWords.consentHeading, SettingsContent.consentHeading)
         XCTAssertEqual(SettingsLegacyWords.auditHeading, SettingsContent.auditHeading)
+    }
+
+    /// #1146's watcher card: drawn only once the core's status is read, a
+    /// glass chip for Watching or Paused, the caption, and Pause watcher and
+    /// Resume watcher, each enabled only where it changes something. Every
+    /// word is the core's.
+    func test_watchingHasRonsWatcherCard() throws {
+        let source = try SettingsParityTests.text("Views/Settings/WatchingSection.swift")
+        for needle in ["if model.statusRead == .answered {\n            watcher(paused: model.status.paused)",
+                       "GlassEyebrowCard(SettingsLegacyWords.watcherEyebrow, title: SettingsLegacyWords.watcherTitle)",
+                       "GlassChip(glass: paused ? SettingsLegacyWords.watcherPaused : SettingsLegacyWords.watcherWatching,",
+                       "Button(SettingsLegacyWords.pauseWatcher) { model.pause(until: nil) }",
+                       ".disabled(paused)", "Button(SettingsLegacyWords.resumeWatcher) { model.resume() }",
+                       ".disabled(!paused)", "Text(SettingsLegacyWords.watcherCaption)"] {
+            XCTAssertTrue(source.contains(needle), "WatchingSection.swift lacks \(needle)")
+        }
+        let shell = try XCTUnwrap(MonitorWords.table?.shell)
+        for word in [shell.watcherEyebrow, shell.watcherTitle, shell.watcherWatching, shell.watcherPaused,
+                     shell.watcherCaption, shell.settingsRefresh, shell.consentEyebrow, shell.desktopEyebrow,
+                     shell.desktopTitle, shell.discoveryEyebrow, shell.discoveryTitle] {
+            XCTAssertFalse(word.isEmpty)
+        }
+        XCTAssertNotEqual(shell.watcherWatching, shell.watcherPaused)
+        // Every card with a re-read link uses the core's word for it.
+        for file in ["WatchingSection", "ConsentSection", "StartupSection"] {
+            let text = try SettingsParityTests.text("Views/Settings/\(file).swift")
+            XCTAssertTrue(text.contains("Button(SettingsLegacyWords.refresh"), "\(file) has no Refresh")
+        }
     }
 
     /// The view a section's `case` arm draws in `GlassSettingsContent`.

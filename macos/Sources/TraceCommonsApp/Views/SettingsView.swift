@@ -54,6 +54,21 @@ enum SettingsLegacyWords {
         fill(value ? words?.stateYes : words?.stateNo, ["title": title])
     }
     static var startAtLogin: String { MonitorWords.table?.shell.startAtLogin ?? "" }
+    /// #1146's two-level card heads and the watcher card, from the core's
+    /// monitor shell table.
+    static var refresh: String { MonitorWords.table?.shell.settingsRefresh ?? "" }
+    static var consentEyebrow: String { MonitorWords.table?.shell.consentEyebrow ?? "" }
+    static var desktopEyebrow: String { MonitorWords.table?.shell.desktopEyebrow ?? "" }
+    static var desktopTitle: String { MonitorWords.table?.shell.desktopTitle ?? "" }
+    static var discoveryEyebrow: String { MonitorWords.table?.shell.discoveryEyebrow ?? "" }
+    static var discoveryTitle: String { MonitorWords.table?.shell.discoveryTitle ?? "" }
+    static var watcherEyebrow: String { MonitorWords.table?.shell.watcherEyebrow ?? "" }
+    static var watcherTitle: String { MonitorWords.table?.shell.watcherTitle ?? "" }
+    static var watcherWatching: String { MonitorWords.table?.shell.watcherWatching ?? "" }
+    static var watcherPaused: String { MonitorWords.table?.shell.watcherPaused ?? "" }
+    static var watcherCaption: String { MonitorWords.table?.shell.watcherCaption ?? "" }
+    static var pauseWatcher: String { MonitorWords.table?.shell.pauseWatcher ?? "" }
+    static var resumeWatcher: String { MonitorWords.table?.shell.resumeWatcher ?? "" }
     static var waitingOnApproval: String { words?.waitingOnApproval ?? "" }
     static var turnOnInSystemSettings: String { words?.turnOnInSystemSettings ?? "" }
     static func couldNotTurnOn(_ message: String) -> String { fill(words?.couldNotTurnOn, ["message": message]) }

@@ -62,20 +62,25 @@ public struct GlassCard<Content: View>: View {
 }
 
 /// A card with an eyebrow heading and an optional accessory on the right.
-/// With `action` the whole card is a button (Home's Missions and History).
+/// With `title`, #1146's two-level head: the eyebrow over an h2, the
+/// accessory (a chip, a re-read link) top-right. With `action` the whole
+/// card is a button (Home's Missions and History).
 public struct GlassEyebrowCard<Accessory: View, Content: View>: View {
     private let eyebrow: String
+    private let title: String?
     private let accessory: Accessory
     private let content: Content
     private let action: (() -> Void)?
 
     public init(
         _ eyebrow: String,
+        title: String? = nil,
         action: (() -> Void)? = nil,
         @ViewBuilder accessory: () -> Accessory = { EmptyView() },
         @ViewBuilder content: () -> Content
     ) {
         self.eyebrow = eyebrow
+        self.title = title
         self.action = action
         self.accessory = accessory()
         self.content = content()
@@ -84,8 +89,17 @@ public struct GlassEyebrowCard<Accessory: View, Content: View>: View {
     private var card: some View {
         GlassCard(interactive: action != nil) {
             VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
-                HStack {
-                    Text(eyebrow).glassType(GlassTokens.TypeScale.eyebrow).foregroundStyle(GlassColor.textTertiary)
+                HStack(alignment: title == nil ? .center : .top, spacing: GlassTokens.Space.s6) {
+                    VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
+                        Text(eyebrow).glassType(GlassTokens.TypeScale.eyebrow).foregroundStyle(GlassColor.textTertiary)
+                        if let title {
+                            Text(title)
+                                .glassType(GlassTokens.TypeScale.title)
+                                .foregroundStyle(GlassColor.textPrimary)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .accessibilityAddTraits(.isHeader)
+                        }
+                    }
                     Spacer(minLength: GlassTokens.Space.s4)
                     accessory
                 }
