@@ -32,6 +32,9 @@ public enum TCSourceChecks {
     /// The wire key for Cline's session source.
     public static let cline = "cline"
 
+    /// The wire key for OpenCode's session source.
+    public static let opencode = "opencode"
+
     /// One tool's row, from `get_settings`'s `*_source_mode` -- `watch`,
     /// `off` or `unset`.
     ///

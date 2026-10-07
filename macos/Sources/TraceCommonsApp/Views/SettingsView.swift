@@ -67,6 +67,8 @@ enum SettingsLegacyWords {
     static var watcherWatching: String { MonitorWords.table?.shell.watcherWatching ?? "" }
     static var watcherPaused: String { MonitorWords.table?.shell.watcherPaused ?? "" }
     static var watcherCaption: String { MonitorWords.table?.shell.watcherCaption ?? "" }
+    static var connectionReady: String { MonitorWords.table?.shell.connectionReady ?? "" }
+    static var connectionLocalOnly: String { MonitorWords.table?.shell.connectionLocalOnly ?? "" }
     static var pauseWatcher: String { MonitorWords.table?.shell.pauseWatcher ?? "" }
     static var resumeWatcher: String { MonitorWords.table?.shell.resumeWatcher ?? "" }
     static var waitingOnApproval: String { words?.waitingOnApproval ?? "" }

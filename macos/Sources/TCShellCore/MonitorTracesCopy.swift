@@ -578,6 +578,8 @@ public struct MonitorShellCopy: MonitorWordTable {
     public let watcherPaused: String
     /// DRAFT, NEEDS APPROVAL (#1146 parity, 2026-10-07).
     public let watcherCaption: String
+    public let connectionReady: String
+    public let connectionLocalOnly: String
 
     enum CodingKeys: String, CodingKey, CaseIterable {
         case showGraph = "show_graph"
@@ -630,6 +632,8 @@ public struct MonitorShellCopy: MonitorWordTable {
         case watcherWatching = "watcher_watching"
         case watcherPaused = "watcher_paused"
         case watcherCaption = "watcher_caption"
+        case connectionReady = "connection_ready"
+        case connectionLocalOnly = "connection_local_only"
     }
 
     public static var consumedFields: [String] { CodingKeys.allCases.map(\.rawValue) }

@@ -1052,6 +1052,10 @@ pub struct MonitorShellCopy {
     /// DRAFT, NEEDS APPROVAL (#1146 parity, 2026-10-07): says what a pause
     /// does and does not do to queued sessions and consent.
     pub watcher_caption: &'static str,
+    /// The Connection card's chip (#1146 `connection-panel.tsx`): enrolled,
+    /// or queued here only.
+    pub connection_ready: &'static str,
+    pub connection_local_only: &'static str,
 }
 
 /// Ron's #1146 Home and History words that carry their structure
@@ -1279,6 +1283,8 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             watcher_watching: "Watching",
             watcher_paused: "Paused",
             watcher_caption: "Pausing stops contribution processing. It does not delete queued sessions or change consent.",
+            connection_ready: "Ready",
+            connection_local_only: "Local only",
         },
         traces_graph: MonitorTracesGraphCopy {
             zoom_out: "Zoom out",

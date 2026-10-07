@@ -75,6 +75,16 @@ final class SettingsSectionsTests: XCTestCase {
         ] {
             XCTAssertTrue(connection.contains("copy.\(field)"), "the card does not read \(field)")
         }
+        // #1146's head: Connected or Not connected as the h2 and Ready or
+        // Local only as the chip, neither before the core has answered.
+        for needle in ["guard model.statusRead == .answered else { return nil }",
+                       "model.status.loggedIn ? SettingsLegacyWords.connected : SettingsLegacyWords.notConnected",
+                       "GlassChip(glass: model.status.loggedIn ? SettingsLegacyWords.connectionReady",
+                       ": SettingsLegacyWords.connectionLocalOnly,"] {
+            XCTAssertTrue(connection.contains(needle), "ConnectionSection.swift lacks \(needle)")
+        }
+        XCTAssertNotEqual(SettingsLegacyWords.connectionReady, SettingsLegacyWords.connectionLocalOnly)
+        XCTAssertFalse(SettingsLegacyWords.connectionReady.isEmpty)
     }
 
     /// Startup no longer hides Notifications and Updates behind its row, and
@@ -101,7 +111,7 @@ final class SettingsSectionsTests: XCTestCase {
     /// the modal's section rule still names each by the list's word.
     func test_eachSectionIsHeadedByTheListsTitleSource() throws {
         let headings: [SettingsSection: (file: String, source: String)] = [
-            .connection: ("ConnectionSection", "GlassEyebrowCard(SettingsWords.connection)"),
+            .connection: ("ConnectionSection", "GlassEyebrowCard(SettingsWords.connection, title: connectionTitle)"),
             .startup: ("StartupSection",
                        "GlassEyebrowCard(SettingsLegacyWords.desktopEyebrow, title: SettingsLegacyWords.desktopTitle)"),
             .notifications: ("StartupSection", "if let heading = Notifier.copy?.notificationHeading"),
