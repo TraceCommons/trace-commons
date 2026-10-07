@@ -337,8 +337,9 @@ public struct GlassBarGraph: View {
 
     private func bar(_ value: Double, of maximum: Double, color: Color, top: Bool) -> some View {
         let height = value <= 0 ? 0 : max(3, value / maximum * 46)
+        // Shared stands on the axis and kept hangs from it (#1146
+        // `.tc-bar-graph__down { top: 50% }`), never from the track's foot.
         return VStack(spacing: 0) {
-            if !top { Spacer(minLength: 0) }
             UnevenRoundedRectangle(
                 topLeadingRadius: top ? 99 : 0,
                 bottomLeadingRadius: top ? 0 : 99,
