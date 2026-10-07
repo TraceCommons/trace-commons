@@ -8686,14 +8686,17 @@ mod tests {
     /// without a matching removal here would put that path on the wire.
     #[test]
     fn the_settings_blob_reports_source_modes_and_never_a_source_path() {
+        // An absolute path on every platform: a declared folder must be one
+        // (`/private/...` is relative on Windows and is refused there).
+        let sentinel = std::env::temp_dir()
+            .join("source-path-sentinel")
+            .to_string_lossy()
+            .into_owned();
         for source in crate::source::declarable_source_names() {
             let key = crate::daemon::settings::source_settings_key(source)
                 .expect("every registered source has a settings key");
             for (declaration, expected) in [
-                (
-                    serde_json::json!({"mode":"watch","path":"/private/source-path-sentinel"}),
-                    "watch",
-                ),
+                (serde_json::json!({"mode":"watch","path":sentinel}), "watch"),
                 (serde_json::json!({"mode":"off"}), "off"),
                 (serde_json::Value::Null, "unset"),
             ] {
