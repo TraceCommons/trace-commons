@@ -175,8 +175,9 @@ final class MonitorShellTests: XCTestCase {
     // MARK: Inference
 
     func test_theInferenceInspectorSummarises() {
-        XCTAssertEqual(PrivateAIInspectorView.connectedCount(nil), "—")
-        XCTAssertEqual(PrivateAIInspectorView.names([]), "—")
+        // A list nobody could read is a dash in both legend cells, never zero.
+        XCTAssertEqual(PrivateAIInspectorView.counts(nil).connected, "—")
+        XCTAssertEqual(PrivateAIInspectorView.counts(nil).notConnected, "—")
     }
 
     private static func text(_ path: String) throws -> String {

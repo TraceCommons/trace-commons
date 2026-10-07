@@ -13,10 +13,15 @@ import TCShellCore
 struct HarnessListSection: View {
     @EnvironmentObject private var model: AppModel
     let copy: PrivateInferenceCopy
+    /// Whether the list draws its own heading. The Inference tab's panel
+    /// draws #1146's eyebrow header above it instead, with the same title.
+    var titled = true
 
     var body: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.s6) {
-            GlassSectionRule(copy.harnessesTitle)
+            if titled {
+                GlassSectionRule(copy.harnessesTitle)
+            }
             // Says the choice is per tool AND that the list is what this app
             // knows how to look for. Without the second half a contributor
             // whose tool is missing concludes it cannot be connected.
@@ -112,13 +117,18 @@ private struct HarnessRowView: View {
         GlassCard(quiet: true) {
             VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
                 ViewThatFits(in: .horizontal) {
-                    HStack(spacing: GlassTokens.Space.s6) {
+                    HStack(alignment: .top, spacing: GlassTokens.Space.s6) {
                         toolHeading.fixedSize()
                         Spacer(minLength: GlassTokens.Space.s6)
-                        actionButton.fixedSize()
+                        VStack(alignment: .trailing, spacing: GlassTokens.Space.s3) {
+                            connectionCaption
+                            actionButton
+                        }
+                        .fixedSize()
                     }
                     VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
                         toolHeading
+                        connectionCaption
                         actionButton
                     }
                 }
@@ -181,6 +191,16 @@ private struct HarnessRowView: View {
                 .foregroundStyle(GlassColor.textPrimary)
                 .fixedSize(horizontal: false, vertical: true)
         }
+    }
+
+    /// Whether the tool's settings name this computer, as #1146's row
+    /// caption says it. A settings fact, never a claim that a call arrived:
+    /// that is the state line's.
+    private var connectionCaption: some View {
+        Text(row.connected ? copy.harnessCaptionConnected : copy.harnessCaptionNotConnected)
+            .glassType(GlassTokens.TypeScale.caption)
+            .foregroundStyle(GlassColor.textTertiary)
+            .lineLimit(1)
     }
 
     /// One button, or none. Which action it offers is the shared table's

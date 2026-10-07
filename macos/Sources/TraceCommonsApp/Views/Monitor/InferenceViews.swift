@@ -47,19 +47,16 @@ struct InferenceTabView: View {
     private var ledger: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
-                // Saved model accounts and managed sessions lead the tab
-                // (#1146's private-AI page): accounts, then sessions, then
-                // their error notice.
-                ManagedSessionsSection()
-                // The standard tool settings below are global; managed
-                // launches never edit them.
-                ManagedGlobalSettingsHeader()
-                // Sign-in with balance and funding, the tools with their
-                // connect action, and the Private AI switch, in the main pane
-                // above the ledger as #1146's Private AI page has them (owner
-                // ruling on #1241). Drawn only while the daemon runs, which
-                // every one of them needs: the ledger is.
+                // #1146's Private AI page leads the tab: the subtitle, the
+                // Inference access / Runtime pair, the tools, the switch,
+                // sign-in, balance and funding, in the main pane above the
+                // ledger (owner ruling on #1241). Drawn only while the daemon
+                // runs, which every one of them needs: the ledger is.
                 InferenceAccountSection(store: store)
+                // Saved model accounts and managed sessions, which #1146 has
+                // no panel for, follow its page (owner ruling O3): accounts,
+                // then sessions, then their error notice.
+                ManagedSessionsSection()
                 // The stack-wide rule (ScreenState): a core that is down or a
                 // failed read is said in the core's words over the last page,
                 // never as the error's fixed label and never as current.
@@ -298,22 +295,33 @@ struct InferenceTabView: View {
 }
 
 /// The inspector on the Inference tab: the Private AI summary, as #1146's
-/// `inference-inspector.tsx` draws it. How many tools point at it, the
-/// listener's state in the core's sentence (never the switch: what was asked
-/// for is not what happened), the credential's state, and which tools are
-/// connected. Its controls are in the main pane (`InferenceAccountSection`).
+/// `inference-inspector.tsx` draws it. A 17pt bold title with "N of M tools
+/// connected" under it, the connected / not connected legend pair, three
+/// rows -- the listener's state in the core's sentence (never the switch:
+/// what was asked for is not what happened), the credential's state, and
+/// which tools are connected -- and the balance panel. Its other controls
+/// are in the main pane (`InferenceAccountSection`).
 struct PrivateAIInspectorView: View {
     let store: InferenceStore
     let destinationLabel: String?
     @EnvironmentObject private var model: AppModel
 
     var body: some View {
+        let copy = runningCopy
         ScrollView {
             VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
-                Text(destinationLabel ?? MonitorWindowView.Tab.inference.title)
-                    .glassType(GlassTokens.TypeScale.title)
-                    .foregroundStyle(GlassColor.textPrimary)
-                if case .running = model.startup, let copy = model.privateInferenceCopy {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(destinationLabel ?? MonitorWindowView.Tab.inference.title)
+                        .glassType(GlassTokens.TypeScale.heading.weight(.bold))
+                        .foregroundStyle(GlassColor.textPrimary)
+                        .accessibilityAddTraits(.isHeader)
+                    if let copy, let sub = Self.subLine(store.harnesses?.harnesses, copy: copy) {
+                        Text(sub)
+                            .glassType(GlassTokens.TypeScale.label.weight(.regular))
+                            .foregroundStyle(GlassColor.textSecondary)
+                    }
+                }
+                if let copy {
                     summary(copy)
                 }
             }
@@ -321,34 +329,91 @@ struct PrivateAIInspectorView: View {
         .scrollIndicators(.never)
     }
 
+    /// The core's words, only while the daemon runs: every row reads it.
+    private var runningCopy: PrivateInferenceCopy? {
+        guard case .running = model.startup else { return nil }
+        return model.privateInferenceCopy
+    }
+
     private func summary(_ copy: PrivateInferenceCopy) -> some View {
         let rows = store.harnesses?.harnesses
-        let connected = rows?.filter(\.connected) ?? []
+        let counts = Self.counts(rows)
         let state = PrivateAISwitchCard.stateLabel(
             state: InferenceAccountSection.surfaceState(store.privateAI?.state), copy: copy,
             calls: model.privateInferenceCalls)
         return VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
-            // A list nobody could read is a dash, never zero connected.
-            GlassLegendCell(MonitorWords.connected, value: Self.connectedCount(rows), status: .on)
-            GlassStatusLabel(state.line, status: state.status)
-                .fixedSize(horizontal: false, vertical: true)
-            GlassKeyValueList([
-                .init(copy.credentialTitle,
-                      CredentialSurface.stateLine(model.credentialStatus, copy: copy, calls: model.credentialCalls)),
-                .init(copy.harnessesTitle, rows == nil ? "—" : Self.names(connected)),
-            ])
+            // A list nobody could read is a dash in both cells, never zero.
+            // Side by side when both labels fit on one line, stacked
+            // otherwise: a legend label never wraps.
+            let connectedCell = GlassLegendCell(copy.inspectorConnected, value: counts.connected, status: .on)
+            let notConnectedCell = GlassLegendCell(copy.inspectorNotConnected, value: counts.notConnected, status: .off)
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: GlassTokens.Space.s3) { connectedCell; notConnectedCell }
+                VStack(spacing: GlassTokens.Space.s3) { connectedCell; notConnectedCell }
+            }
+            VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
+                InspectorFactRow(label: copy.inspectorStatus, value: state.line, status: state.status)
+                InspectorFactRow(
+                    label: copy.inspectorCredential,
+                    value: CredentialSurface.stateLine(model.credentialStatus, copy: copy, calls: model.credentialCalls))
+                InspectorFactRow(label: copy.inspectorConnectedTools, value: Self.names(rows, copy: copy))
+            }
+            .padding(.horizontal, GlassTokens.Space.s2)
+            PrivateAIBalanceCard(copy: copy)
         }
     }
 
-    /// Connected over listed, or a dash when the list was not read.
-    static func connectedCount(_ rows: [HarnessRow]?) -> String {
-        guard let rows else { return "—" }
-        return "\(rows.filter(\.connected).count)/\(rows.count)"
+    /// "N of M tools connected", or nil when the list was not read.
+    static func subLine(_ rows: [HarnessRow]?, copy: PrivateInferenceCopy) -> String? {
+        guard let rows else { return nil }
+        return copy.inspectorToolsConnected
+            .replacingOccurrences(of: "{connected}", with: String(rows.filter(\.connected).count))
+            .replacingOccurrences(of: "{total}", with: String(rows.count))
     }
 
-    /// The connected tools' names as the core reports them; a dash for none.
-    static func names(_ rows: [HarnessRow]) -> String {
-        rows.isEmpty ? "—" : rows.map(\.name).joined(separator: ", ")
+    /// Connected and not connected, or a dash for each when the list was
+    /// not read.
+    static func counts(_ rows: [HarnessRow]?) -> (connected: String, notConnected: String) {
+        guard let rows else { return ("—", "—") }
+        let connected = rows.filter(\.connected).count
+        return (String(connected), String(rows.count - connected))
+    }
+
+    /// The connected tools' names as the core reports them; the core's
+    /// "None" for a list read with none connected, and a dash for a list
+    /// nobody could read.
+    static func names(_ rows: [HarnessRow]?, copy: PrivateInferenceCopy) -> String {
+        guard let rows else { return "—" }
+        let connected = rows.filter(\.connected)
+        return connected.isEmpty ? copy.inspectorNone : connected.map(\.name).joined(separator: ", ")
+    }
+}
+
+/// One inspector fact as #1146 draws it: the label on the left, the value
+/// right-aligned and semibold, with the state's dot before it when it has one.
+private struct InspectorFactRow: View {
+    let label: String
+    let value: String
+    var status: GlassStatus?
+
+    var body: some View {
+        HStack(alignment: .top, spacing: GlassTokens.Space.s6) {
+            Text(label)
+                .foregroundStyle(GlassColor.textPrimary)
+                .fixedSize()
+            Spacer(minLength: GlassTokens.Space.s4)
+            HStack(alignment: .top, spacing: GlassTokens.Space.s3) {
+                // The dot sits beside the sentence it stands for.
+                if let status { GlassStatusDot(status).padding(.top, 5) }
+                Text(value)
+                    .fontWeight(.semibold)
+                    .foregroundStyle(GlassColor.textPrimary)
+                    .multilineTextAlignment(.trailing)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .glassType(GlassTokens.TypeScale.body)
+        .accessibilityElement(children: .combine)
     }
 }
 
