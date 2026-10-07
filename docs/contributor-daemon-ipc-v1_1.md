@@ -2736,7 +2736,10 @@ them.
 
 **One reply, one deadline.** A group `approve` does not fan out. It takes one
 approval instant for the whole call, so every entry it approves shares one
-hold and the single `hold_until` it reports is true of all of them. A client
+hold and the single `hold_until` it reports is true of all of them. The
+instant is taken under the lock that approves, after every preview the call
+builds, never when the call began: a slow build must not use up the undo
+window before the approval is even saved. A client
 must not fan a group submit out into per-entry calls and keep the first
 reply's hold: an undo bar has to outlast every entry it offers to undo, and
 the first reply's deadline retires Undo while something it covers is still
@@ -2794,6 +2797,8 @@ This is the whole signal a one-click submit needs: a client that never calls
   | `not-pinned` | The pin did not stick even though the build succeeded, and the entry is still `pending` (a concurrent write, or the entry vanished from the queue mid-call) | Transient -- retry is expected to work |
   | `correction-credential-detected` | The `correction` sent with this call contains something credential-shaped. Nothing was built, pinned or sent; the entry stays `pending` | Retry succeeds once the credential is out of the text. Surface this distinctly and tell the contributor to rotate it -- never echo the correction or the match |
   | `not-pending` | The entry was not `pending` when this call reached it -- already `approved` by an earlier `approve`, or dismissed, expired or superseded meanwhile | Refresh queue state rather than retry blindly; a retry alone can never succeed |
+  | `project-mode-never` | The entry's folder was set to Never while this call built its previews; checked again under the lock that approves | Will not succeed while the folder is Never |
+  | `contribution-override-never` | The Never contribution override was turned on while this call built its previews; checked again under the lock that approves | Will not succeed while the override is on |
 
   Only `envelope-too-large` changes the entry's state; every other label
   above leaves the entry exactly where it stood. A refusal that no retry
