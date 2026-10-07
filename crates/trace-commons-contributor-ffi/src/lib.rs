@@ -5682,6 +5682,22 @@ pub extern "C" fn tc_monitor_screens_copy_json() -> *mut c_char {
     })
 }
 
+/// The words the macOS shell used to write in Swift
+/// (`shell_words_copy::shell_words_copy`): withdrawal, the public profile,
+/// the queue's and History's legacy words, the scrubbing caveat and the
+/// Settings sections' sentences, as one JSON object of `ShellWordsCopy`'s
+/// fields.
+///
+/// Returns an owned JSON string; free it with [`tc_string_free`]. NULL only
+/// on a caught panic.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_shell_words_copy_json() -> *mut c_char {
+    guarded_string_no_err(|| {
+        let copy = trace_commons_contributor::shell_words_copy::shell_words_copy();
+        Ok(to_owned_cstring(&serde_json::to_string(&copy)?))
+    })
+}
+
 /// The grant screens' words for one disclosure the daemon chose and named
 /// (`consent_copy::automatic_grant_copy_named`): a JSON object of
 /// `AutomaticGrantCopy`'s fields. An armed folder's `list_projects` row says

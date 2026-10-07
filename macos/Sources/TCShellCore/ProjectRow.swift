@@ -280,8 +280,6 @@ public enum ProjectCopy {
     /// daemon cannot name never has its path written into the audit log,
     /// notification text or history, and not being armable is the protective
     /// half of that.
-    public static let unresolvedBucketNote = """
-        Trace Commons can't tell which folder these ran in, so they can never \
-        be contributed automatically. You'll always be asked.
-        """
+    /// #1146's line under the bucket (`projects-panel.tsx`).
+    public static let unresolvedBucketNote = "These sessions cannot be contributed automatically."
 }

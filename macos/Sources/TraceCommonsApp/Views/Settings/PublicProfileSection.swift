@@ -136,7 +136,7 @@ struct PublicProfileSection: View {
     private var profileCopyDefects: some View {
         let problems = PublicProfileCopyCheck.failures()
         if !problems.isEmpty {
-            GlassNotice(tone: .outside, title: SettingsLegacyWords.doNotTrustProfileWording) {
+            GlassNotice(tone: .outside, title: PublicProfileCopy.wordingDefect) {
                 VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
                     ForEach(problems, id: \.self) { problem in
                         Text(problem)
@@ -189,11 +189,12 @@ struct GoPublicSheet: View {
     /// is never the default: consent is a click, never a stray Return.
     var body: some View {
         GlassModal(
-            title: PublicProfileCopy.goPublicHeadline, width: .regular,
+            title: PublicProfileCopy.goPublicHeadline, subtitle: PublicProfileCopy.goPublicDescription,
+            width: .regular,
             actions: [
                 .cancel(PublicProfileCopy.notNow, action: onDismiss),
                 GlassModalAction(
-                    PublicProfileCopy.goPublicConfirm,
+                    model.profileBusy ? PublicProfileCopy.goingPublic : PublicProfileCopy.goPublicConfirm,
                     isEnabled: GoPublicGate.canGoPublic(acknowledged: acknowledged, handle: handle, busy: model.profileBusy),
                     isProminent: true
                 ) { model.claimHandle(handle, bio: bio) },
@@ -216,8 +217,8 @@ struct GoPublicSheet: View {
     @ViewBuilder
     private var consent: some View {
         HStack(alignment: .top, spacing: GlassTokens.Space.cardGap) {
-            column(PublicProfileCopy.publishedHeading, SettingsLegacyWords.publishedLines)
-            column(PublicProfileCopy.neverHeading, SettingsLegacyWords.neverLines)
+            column(PublicProfileCopy.publishedHeading, PublicProfileCopy.publishedLines)
+            column(PublicProfileCopy.neverHeading, PublicProfileCopy.neverLines)
         }
         // The handle is inside the consent dialog rather than behind it:
         // the thing consented to is this exact string becoming public.

@@ -66,11 +66,8 @@ final class ShellWordingTests: XCTestCase {
         // (1), CreditRecordView.swift (9: the Home credit card carries the
         // credit record in the core's words) and MainWindowView.swift (14:
         // the Monitor's words are the core's `MonitorScreensCopy`).
-        // Lowered from 26: an unrecognised status reads the core's label.
-        // Lowered from 21 at R15: the screen left, and the held sentence left
-        // for the core (`MonitorScreensCopy.heldExplanation`, #1218; R-37).
-        // What glass still reads is `HistoryLegacyWords` (2).
-        "TraceCommonsApp/Views/HistoryView.swift": 2,
+        // HistoryView.swift: deleted at zero, 2026-10-07 -- `HistoryLegacyWords`
+        // reads the core's `shell_words_copy` (#1146 parity).
         // MenuBarView.swift: deleted at zero, 2026-10-06 -- the pause words
         // left for the core's shell table (#1146 parity).
         // Lowered from 38: Look inside is read-only (#1241 Task 7) -- its
@@ -80,22 +77,30 @@ final class ShellWordingTests: XCTestCase {
         // more, were deleted (their facts are the session card's). Then
         // 14 -> 13: Ron's glass search field states its prompt once.
         "TraceCommonsApp/Views/PreviewSheet.swift": 9,
-        "TraceCommonsApp/Views/PublicProfileCopy.swift": 46,
+        // Lowered from 46 at #1146 parity (2026-10-07): the profile's words are
+        // the core's (`shell_words_copy`). What is left is
+        // `PublicProfileCopyCheck`'s defect lines, which name a broken
+        // property of the decoded table rather than say anything to a
+        // contributor about their profile.
+        "TraceCommonsApp/Views/PublicProfileCopy.swift": 14,
         // Back to 3: the withheld line briefly lived here and is now
         // `tc_contribution_withheld_line`, assembled in the Rust and shared
         // with the other two shells. Do not raise this again for it.
         // Lowered from 3 at R15: the row's Open help left with the row (the
         // glass folder row expands in place).
         "TraceCommonsApp/Views/QueueFolderRow.swift": 2,
-        // Lowered from 25 at R15: the queue screen left; `QueueLegacyWords`
-        // is what the glass Traces tab still reads.
-        "TraceCommonsApp/Views/QueueView.swift": 7,
-        "TraceCommonsApp/Views/ScrubbingCaveat.swift": 4,
-        // 39 + 1 at R15: `ActionNoticeWords.dismissWord` moved here, verbatim,
-        // from the deleted ActionMessageBanner.swift. A move, not a new
-        // sentence: that file's entry went down by it.
-        "TraceCommonsApp/Views/SettingsView.swift": 37,
-        "TraceCommonsApp/Views/WithdrawalCopy.swift": 48,
+        // QueueView.swift and ScrubbingCaveat.swift: deleted at zero,
+        // 2026-10-07 -- `QueueLegacyWords` and `ScrubbingCaveat` read the
+        // core's `shell_words_copy` (#1146 parity).
+        // Lowered from 37 at #1146 parity (2026-10-07): the Settings sections'
+        // sentences are the core's (`shell_words_copy`). What is left is
+        // `ActionNoticeWords.dismissWord`, the fallback for a notice whose
+        // core word did not decode.
+        "TraceCommonsApp/Views/SettingsView.swift": 1,
+        // Lowered from 48 at #1146 parity (2026-10-07): the withdrawal words
+        // are the core's (`shell_words_copy`). What is left is
+        // `WithdrawalCopyCheck`'s defect lines.
+        "TraceCommonsApp/Views/WithdrawalCopy.swift": 23,
     ]
 
     /// The surfaces whose wording already comes from Rust. Nothing may ever

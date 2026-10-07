@@ -26,7 +26,7 @@ final class ProjectArmingRuleTests: XCTestCase {
         let hits = lines.indices.filter { lines[$0].contains("mode: .autoUpload") }
         XCTAssertEqual(hits.count, 1)
         let at = try XCTUnwrap(hits.first)
-        XCTAssertTrue(lines[at - 1].contains("GlassModalAction(copy.confirm, isDefault: true) {"),
+        XCTAssertTrue(lines[at - 1].contains("GlassModalAction(copy.settingsConfirm, isDefault: true) {"),
                       "arming outside the confirm closure")
     }
 

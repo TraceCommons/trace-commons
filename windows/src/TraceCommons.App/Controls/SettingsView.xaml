@@ -186,7 +186,7 @@
 
                 <TextBlock Text="PROJECTS"
                            Style="{StaticResource TcEyebrowTextStyle}" />
-                <TextBlock Text="No projects seen yet."
+                <TextBlock Text="No projects seen yet. Sessions appear here after discovery."
                            Visibility="{x:Bind Settings.HasNoProjects, Mode=OneWay}"
                            Style="{StaticResource TcCaptionTextStyle}" />
                 <ItemsControl ItemsSource="{x:Bind Settings.Projects}">

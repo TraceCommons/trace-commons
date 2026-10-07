@@ -328,6 +328,12 @@ struct PrivateAIInspectorView: View {
             state: InferenceAccountSection.surfaceState(store.privateAI?.state), copy: copy,
             calls: model.privateInferenceCalls)
         return VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
+            // #1146's line under the title; none when the list was not read.
+            if let line = Self.connectedLine(rows) {
+                Text(line)
+                    .glassType(GlassTokens.TypeScale.caption)
+                    .foregroundStyle(GlassColor.textSecondary)
+            }
             // A list nobody could read is a dash, never zero connected.
             GlassLegendCell(MonitorWords.connected, value: Self.connectedCount(rows), status: .on)
             GlassStatusLabel(state.line, status: state.status)
@@ -338,6 +344,15 @@ struct PrivateAIInspectorView: View {
                 .init(copy.harnessesTitle, rows == nil ? "—" : Self.names(connected)),
             ])
         }
+    }
+
+    /// The core's "{count} of {total} tools connected", or nil when the
+    /// list was not read: an unread list is not "0 of 0".
+    static func connectedLine(_ rows: [HarnessRow]?) -> String? {
+        guard let rows, let template = ShellWords.table?.inference.toolsConnectedOf else { return nil }
+        return template
+            .replacingOccurrences(of: "{count}", with: String(rows.filter(\.connected).count))
+            .replacingOccurrences(of: "{total}", with: String(rows.count))
     }
 
     /// Connected over listed, or a dash when the list was not read.

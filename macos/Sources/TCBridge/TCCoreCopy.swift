@@ -179,6 +179,14 @@ public enum TCCoreCopy {
         take(tc_monitor_screens_copy_json())
     }
 
+    /// `tc_shell_words_copy_json`: the words this shell used to write in
+    /// Swift (withdrawal, the public profile, the legacy queue and History
+    /// words, the scrubbing caveat, Settings). Decoded by
+    /// `TCShellCore.ShellWordsCopy`.
+    public static func shellWordsCopyJSON() -> String? {
+        take(tc_shell_words_copy_json())
+    }
+
     /// `tc_automatic_grant_copy_json`: the words for the disclosure an armed
     /// folder's `list_projects` row names (`automatic_disclosure`). Decoded
     /// by `TCShellCore.AutomaticGrantCopy`. Nil for a name the core does

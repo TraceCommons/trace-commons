@@ -170,8 +170,11 @@ pub const SETTINGS_TOGGLE: &str = "Answer model calls on this computer";
 
 /// Changes are not deferred to a restart, and the line beneath the switch is
 /// what actually happened rather than what was asked for.
-pub const SETTINGS_APPLIES_AT_ONCE: &str =
-    "Changes here apply straight away, and the line below says what happened.";
+/// The switch's caption, in Ron's #1146 words (`private-ai-connection-panel.tsx`).
+/// DRAFT, NEEDS APPROVAL (#1146 parity, 2026-10-07): it was "Changes here
+/// apply straight away, and the line below says what happened."
+pub const SETTINGS_APPLIES_AT_ONCE: &str = "Turning this on starts a local listener for configured \
+     tools. It does not publish traces. Credential enrollment remains separate.";
 
 /// `off`.
 pub const STATE_OFF: &str = "Off. This app is not answering model calls.";
@@ -1763,13 +1766,24 @@ pub fn eligibility_reason_line(label: &str) -> &'static str {
 /// this surface where that is the honest noun: everything else here is about
 /// what this machine holds, and a balance is not. It is a fact about an
 /// account that other computers, and a browser, spend from too.
-pub const BALANCE_TITLE: &str = "What is left in your Private AI account";
+///
+/// Ron's #1146 heading (`private-ai-balance-panel.tsx`); it was "What is
+/// left in your Private AI account".
+pub const BALANCE_TITLE: &str = "NEAR AI usage";
 pub const FUNDING_TITLE: &str = "Cloud billing";
-pub const FUNDING_WHAT: &str = "Choose a payment method or staking option in Cloud. Your browser may ask you to sign in again.";
+/// Ron's #1146 caption (`private-ai-funding-panel.tsx`), without his
+/// machinery word. DRAFT, NEEDS APPROVAL (#1146 parity, 2026-10-07): it
+/// was "Choose a payment method or staking option in Cloud. Your browser
+/// may ask you to sign in again."
+pub const FUNDING_WHAT: &str = "Billing URL is released only after the current organization and \
+     connection revision are verified. This app never chooses a payer.";
+/// Kept over #1146's "Manage credits" (owner ruling): the offer surface
+/// keeps contribution credit apart from NEAR AI billing.
 pub const FUNDING_MANAGE: &str = "Manage billing";
-pub const FUNDING_REFRESH: &str = "Refresh account";
-pub const FUNDING_UNAVAILABLE: &str =
-    "The billing destination could not be verified. Refresh account to try again.";
+/// #1146's "Verify current account".
+pub const FUNDING_REFRESH: &str = "Verify current account";
+/// #1146's "Account destination not read."
+pub const FUNDING_UNAVAILABLE: &str = "Account destination not read.";
 
 /// Canonical wording for the organization handoff; no shell chooses a payer.
 pub fn funding_message(
@@ -1790,7 +1804,7 @@ pub fn funding_message(
             "The connected Cloud organization is unavailable. Sign in to Private AI again.".into()
         }
         FundingReport::Changed => {
-            "The Private AI connection changed. Refresh account to check its destination.".into()
+            "Funding destination changed. Verify current account and try again.".into()
         }
         FundingReport::InvalidRequest | FundingReport::Unavailable => FUNDING_UNAVAILABLE.into(),
     }
@@ -1803,6 +1817,10 @@ pub fn funding_message(
 /// total; this one exists because a total invites being read as a
 /// per-machine figure. Both failures are somebody planning around a number
 /// that means something else.
+///
+/// Not #1146's caption ("Account balance requires retained session
+/// authority. ..."): it drops the figure's scope, which
+/// `the_balance_row_carries_its_own_words` holds this sentence to.
 pub const BALANCE_WHAT: &str = "This is the whole account, not just this computer. Calls answered \
      anywhere you are signed in are already in these figures.";
 

@@ -93,9 +93,10 @@ struct WitnessSection: View {
                 GlassStatusLabel(line, status: stateTone)
                     .accessibilityElement(children: .combine)
             }
-            // The ABI's fixed operator label, verbatim.
+            // The ABI's fixed operator label, verbatim, under the core's
+            // lead-in (#1146's "Operator label: ...").
             if let label = model.witnessStatus?.refusal ?? model.witnessLabel {
-                GlassTag(label, tone: Self.tagTone(stateTone))
+                GlassTag(Self.operatorLabel(label, copy: model.witnessCopy), tone: Self.tagTone(stateTone))
             }
         }
     }
@@ -110,7 +111,7 @@ struct WitnessSection: View {
                     next.url = value
                     model.witnessDraft = next
                 }
-            ))
+            ), prompt: copy.urlPlaceholder)
             .accessibilityLabel(copy.urlTitle)
 
             GlassTextField(copy.signingAddressTitle, text: Binding(
@@ -120,7 +121,7 @@ struct WitnessSection: View {
                     next.signingAddress = value
                     model.witnessDraft = next
                 }
-            ))
+            ), prompt: copy.signingAddressPlaceholder)
             .accessibilityLabel(copy.signingAddressTitle)
 
             VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
@@ -141,7 +142,7 @@ struct WitnessSection: View {
                         next.measurements = value
                         model.witnessDraft = next
                     }
-                ), showsLabel: false)
+                ), prompt: copy.measurementsPlaceholder, showsLabel: false)
                 note(copy.measurementsNote)
             }
 
@@ -187,8 +188,9 @@ struct WitnessSection: View {
         }
         .glassModal(isPresented: $showingInferenceDisclosure) {
             GlassConfirmation(
-                title: copy.inferenceHeading,
-                message: [copy.inferenceDisclosure, copy.inferenceCaptureNote, copy.inferenceScopeNote].joined(separator: "\n\n"),
+                title: copy.privacyConfirmTitle ?? copy.inferenceHeading,
+                message: [copy.privacyConfirmDescription, copy.inferenceDisclosure, copy.inferenceCaptureNote,
+                          copy.inferenceScopeNote].compactMap { $0 }.joined(separator: "\n\n"),
                 actions: [
                     .cancel(copy.inferenceCancel) { showingInferenceDisclosure = false },
                     GlassModalAction(copy.inferenceConfirm, isDefault: true) {
@@ -237,8 +239,9 @@ struct WitnessSection: View {
         .accessibilityHidden(copy.tokenHeading == nil)
         .glassModal(isPresented: $showingTokenDisclosure) {
             GlassConfirmation(
-                title: copy.tokenHeading ?? "",
-                message: [(copy.tokenDisclosure ?? ""), (copy.tokenCaptureNote ?? ""), (copy.tokenScopeNote ?? "")].joined(separator: "\n\n"),
+                title: copy.privacyConfirmTitle ?? copy.tokenHeading ?? "",
+                message: [copy.privacyConfirmDescription, copy.tokenDisclosure, copy.tokenCaptureNote,
+                          copy.tokenScopeNote].compactMap { $0 }.joined(separator: "\n\n"),
                 actions: [
                     .cancel(copy.tokenCancel ?? "") { showingTokenDisclosure = false },
                     GlassModalAction(copy.tokenConfirm ?? "", isDefault: true) {
@@ -253,6 +256,10 @@ struct WitnessSection: View {
     @ViewBuilder
     private func storageBlock(_ storage: TokenStorageView) -> some View {
         if let label = storage.captureLabel {
+            // #1146 names the row "Local token capture".
+            if let name = model.witnessCopy?.localCapture {
+                heading(name)
+            }
             note(storage.captureNotice ?? "")
             Button(label) {
                 if storage.captureEnabled == true { Task { await model.setLocalTokenCapture(false) } }
@@ -272,6 +279,10 @@ struct WitnessSection: View {
                     ],
                     onCancel: { showingTokenCapture = false })
             }
+        }
+        // #1146 heads the block "Local token-review storage".
+        if let name = model.witnessCopy?.localStorage {
+            heading(name)
         }
         prose(storage.stateLine)
         prose(storage.scopeNote)
@@ -310,6 +321,19 @@ struct WitnessSection: View {
             .glassType(GlassTokens.TypeScale.caption)
             .foregroundStyle(GlassColor.textSecondary)
             .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private func heading(_ text: String) -> some View {
+        Text(text)
+            .glassType(GlassTokens.TypeScale.bodyStrong)
+            .foregroundStyle(GlassColor.textPrimary)
+    }
+
+    /// The operator label under the core's lead-in, or bare when the core
+    /// sent none: the label is a fixed wire value, never reworded here.
+    static func operatorLabel(_ label: String, copy: WitnessCopy?) -> String {
+        guard let template = copy?.operatorLabel else { return label }
+        return template.replacingOccurrences(of: "{label}", with: label)
     }
 
     /// `WitnessTone` -> the glass status. A refusal is `.outside` and never

@@ -942,7 +942,9 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
         recent_activity: "Recent activity",
         flagged: SECOND_LOOK_HEADING,
         manage_rules: "Manage rules…",
-        settings: "Trace Commons Settings…",
+        // #1146 tray word (`tray.rs`), with the ellipsis of a command that
+        // opens a window; the modal it opens is titled bare "Settings".
+        settings: "Settings\u{2026}",
         settings_title: "Settings",
         settings_subtitle: "What this machine watches, and what your traces are allowed to do.",
         settings_sections: "Settings sections",
@@ -992,11 +994,13 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             sign_in_to_withdraw: "Sign in to withdraw",
             waiting_for_sign_in: "Waiting for sign-in\u{2026}",
             complete_sign_in: "Complete sign-in in your browser. This may take up to five minutes.",
-            sign_in_inactive: "Sign-in finished, but this device is still signed out of your \
-                Trace Commons account. Sign in again to withdraw.",
-            sign_in_unverified: "Sign-in finished, but your account could not be checked. \
-                Sign in again before withdrawing.",
-            sign_in_failed: "Sign-in did not finish. Nothing was withdrawn; sign in again to withdraw.",
+            // #1146's sentences (`use-history-withdrawal.ts`); none names
+            // machinery, so the ban below holds them as it held native's.
+            sign_in_inactive: "Sign-in finished, but the account session is not active. \
+                Withdrawal remains unavailable.",
+            sign_in_unverified: "Sign-in finished, but account status could not be verified. \
+                Retry sign-in before withdrawing.",
+            sign_in_failed: "Sign-in did not finish. Withdrawal was not completed; try signing in again.",
         },
         shell: MonitorShellCopy {
             show_graph: "Show the graph",
@@ -1036,7 +1040,7 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             tab_inference: "Inference",
             tab_traces: "Traces",
             tabs_label: "Monitor",
-            map_views_label: "Map",
+            map_views_label: "Map view",
         },
     }
 }

@@ -223,6 +223,13 @@ final class MonitorShellTests: XCTestCase {
         XCTAssertEqual(PrivateAIInspectorView.names([]), "—")
     }
 
+    /// #1146's "{n} of {m} tools connected", from the core; nothing when
+    /// the list was not read.
+    func test_theInferenceInspectorSaysHowManyToolsAreConnected() {
+        XCTAssertNil(PrivateAIInspectorView.connectedLine(nil))
+        XCTAssertEqual(PrivateAIInspectorView.connectedLine([]), "0 of 0 tools connected")
+    }
+
     private static func text(_ path: String) throws -> String {
         let url = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
