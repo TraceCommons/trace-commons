@@ -137,12 +137,17 @@ public struct ShellWordsCopy: Decodable, Equatable, Sendable {
         public let auditChanged: String
     }
 
+    public struct Inference: Decodable, Equatable, Sendable {
+        public let toolsConnectedOf: String
+    }
+
     public let withdrawal: Withdrawal
     public let publicProfile: PublicProfile
     public let queue: Queue
     public let history: History
     public let scrubbing: Scrubbing
     public let settings: Settings
+    public let inference: Inference
 
     /// Fill a string's `{name}` holes, each with its value; adds nothing.
     public static func fill(_ template: String, _ values: [String: String]) -> String {

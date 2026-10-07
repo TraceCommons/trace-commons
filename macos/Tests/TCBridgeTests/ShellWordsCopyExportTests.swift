@@ -25,6 +25,7 @@ final class ShellWordsCopyExportTests: XCTestCase {
         let tables: [(String, Any)] = [
             ("withdrawal", copy.withdrawal), ("public_profile", copy.publicProfile), ("queue", copy.queue),
             ("history", copy.history), ("scrubbing", copy.scrubbing), ("settings", copy.settings),
+            ("inference", copy.inference),
         ]
         for (name, decoded) in tables {
             let nested = try XCTUnwrap(object[name] as? [String: Any], name)
