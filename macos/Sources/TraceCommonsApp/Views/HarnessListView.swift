@@ -72,8 +72,10 @@ struct HarnessListSection: View {
                     .foregroundStyle(GlassColor.textPrimary)
                     .fixedSize(horizontal: false, vertical: true)
             } else {
-                ForEach(model.harnesses.harnesses) { row in
-                    HarnessRowView(row: row, copy: copy)
+                VStack(alignment: .leading, spacing: 1) {
+                    ForEach(model.harnesses.harnesses) { row in
+                        HarnessRowView(row: row, copy: copy)
+                    }
                 }
             }
         }
@@ -105,91 +107,86 @@ struct HarnessListSection: View {
     }
 }
 
-/// One tool.
+/// One tool, as #1146's `HarnessListPanel` row: flat, 15 above and below,
+/// a hairline under it; on the left the name, the state in words and the
+/// settings file inline; on the right the connection caption and the one
+/// neutral action.
 private struct HarnessRowView: View {
     @EnvironmentObject private var model: AppModel
     let row: HarnessRow
     let copy: PrivateInferenceCopy
-    @State private var settingsExpanded = false
 
     var body: some View {
         let state = HarnessSurface.state(row, calls: model.harnessCalls)
-        GlassCard(quiet: true) {
+        ViewThatFits(in: .horizontal) {
+            HStack(alignment: .top, spacing: 18) {
+                details(state)
+                Spacer(minLength: 0)
+                VStack(alignment: .trailing, spacing: GlassTokens.Space.s3) {
+                    connectionCaption
+                    actionButton
+                }
+                .fixedSize()
+            }
             VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
-                ViewThatFits(in: .horizontal) {
-                    HStack(alignment: .top, spacing: GlassTokens.Space.s6) {
-                        toolHeading.fixedSize()
-                        Spacer(minLength: GlassTokens.Space.s6)
-                        VStack(alignment: .trailing, spacing: GlassTokens.Space.s3) {
-                            connectionCaption
-                            actionButton
-                        }
-                        .fixedSize()
-                    }
-                    VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
-                        toolHeading
-                        connectionCaption
-                        actionButton
-                    }
-                }
-                // The one state that means a call arrived is the only one
-                // drawn as working, and the two that cannot be attributed say
-                // nothing rather than borrow a claim. A tool that is not on
-                // this machine is listed and says so, rather than borrowing a
-                // sentence about settings it does not have.
-                if let sentence = HarnessSurface.rowSentence(
-                    row, copy: copy, calls: model.harnessCalls)
-                {
-                    GlassStatusLabel(sentence, status: PrivateInferenceIndicator.status(HarnessSurface.tone(state)))
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                if let restart = HarnessSurface.restartSentence(row, state: state, copy: copy) {
-                    Text(restart)
-                        .glassType(GlassTokens.TypeScale.caption)
-                        .foregroundStyle(GlassColor.textSecondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                // When a call last arrived, assembled on the far side and
-                // empty when there is nothing to report -- which draws no
-                // line at all.
-                if let lastCall = HarnessSurface.lastCallSentence(row, calls: model.harnessCalls) {
-                    Text(lastCall)
-                        .glassType(GlassTokens.TypeScale.caption)
-                        .foregroundStyle(GlassColor.textSecondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                GlassExpander(copy.harnessPreviewTitle, isOpen: $settingsExpanded)
-                if settingsExpanded {
-                    VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
-                        if let path = row.configPath {
-                            Label(path, systemImage: "doc.text")
-                                .textSelection(.enabled)
-                        }
-                        Label(row.connectCommand, systemImage: "terminal")
-                            .textSelection(.enabled)
-                    }
-                    .glassType(GlassTokens.TypeScale.mono)
-                    .foregroundStyle(GlassColor.textSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                }
+                details(state)
+                connectionCaption
+                actionButton
             }
         }
+        .padding(.vertical, 15)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .overlay(alignment: .bottom) { GlassHairline(GlassColor.hairline) }
     }
 
-    private var toolHeading: some View {
-        HStack(spacing: GlassTokens.Space.s4) {
-            if let tool = HarnessToolArt.tool(harness: row.id) {
-                GlassToolTile(.tool(tool))
-            } else {
-                Image(systemName: "terminal")
-                    .glassGlyph(14)
-                    .foregroundStyle(GlassColor.accentText)
-                    .accessibilityHidden(true)
-            }
+    /// The name, then the state in the core's words, then the settings
+    /// file and the command, both selectable.
+    private func details(_ state: HarnessState) -> some View {
+        VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
             Text(row.name)
                 .glassType(GlassTokens.TypeScale.bodyStrong)
                 .foregroundStyle(GlassColor.textPrimary)
                 .fixedSize(horizontal: false, vertical: true)
+            // The one state that means a call arrived is the only one the
+            // core words as working, and the two that cannot be attributed
+            // say nothing rather than borrow a claim. A tool that is not on
+            // this machine is listed and says so. #1146 draws it as plain
+            // text: the sentence is the signal, with no dot to misread.
+            if let sentence = HarnessSurface.rowSentence(
+                row, copy: copy, calls: model.harnessCalls)
+            {
+                Text(sentence)
+                    .glassType(GlassTokens.TypeScale.label.weight(.regular))
+                    .foregroundStyle(GlassColor.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if let restart = HarnessSurface.restartSentence(row, state: state, copy: copy) {
+                Text(restart)
+                    .glassType(GlassTokens.TypeScale.caption)
+                    .foregroundStyle(GlassColor.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            // When a call last arrived, assembled on the far side and
+            // empty when there is nothing to report -- which draws no line
+            // at all.
+            if let lastCall = HarnessSurface.lastCallSentence(row, calls: model.harnessCalls) {
+                Text(lastCall)
+                    .glassType(GlassTokens.TypeScale.caption)
+                    .foregroundStyle(GlassColor.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            // #1146 shows the settings file inline as code.
+            VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
+                if let path = row.configPath {
+                    Text(verbatim: path)
+                        .textSelection(.enabled)
+                }
+                Text(verbatim: row.connectCommand)
+                    .textSelection(.enabled)
+            }
+            .glassType(GlassTokens.TypeScale.mono)
+            .foregroundStyle(GlassColor.textSecondary)
+            .fixedSize(horizontal: false, vertical: true)
         }
     }
 
@@ -205,14 +202,15 @@ private struct HarnessRowView: View {
 
     /// One button, or none. Which action it offers is the shared table's
     /// answer, so an uninstalled tool that still holds our line keeps the
-    /// control that removes it. Connect is the only primary.
+    /// control that removes it. #1146: Connect is a neutral glass button,
+    /// Disconnect a glass button in the outside ink.
     @ViewBuilder
     private var actionButton: some View {
         if let action = HarnessSurface.action(row, calls: model.harnessCalls) {
             Button(HarnessSurface.actionLabel(action, copy: copy)) {
                 model.beginHarnessAction(id: row.id, action: action)
             }
-            .buttonStyle(GlassButtonStyle(action == .connect ? .primary : .glass))
+            .buttonStyle(GlassButtonStyle(action == .connect ? .glass : .destructive))
             .accessibilityLabel(Text(row.name) + Text(verbatim: ": ") + Text(HarnessSurface.actionLabel(action, copy: copy)))
             .disabled(model.harnessBusy)
         }

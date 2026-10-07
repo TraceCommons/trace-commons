@@ -19,6 +19,9 @@ struct CredentialSection: View {
     let copy: PrivateInferenceCopy
     var requiresSession = false
     var prominent = false
+    /// Whether the section draws its own title. Inside #1146's connection
+    /// panel it does not: the panel's title is the heading.
+    var titled = true
     @State private var ownProvider = "github"
     /// Where the provider choice lives when the caller holds it. `nil` -- every
     /// production caller -- keeps it in this view's own state.
@@ -66,7 +69,10 @@ struct CredentialSection: View {
             balance: BalanceSurface.action(model.balanceStatus, calls: model.balanceCalls),
             credential: action)
         VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
-            if prominent {
+            if !titled {
+                // Drawn inside the connection card, which is its heading.
+                EmptyView()
+            } else if prominent {
                 Text(copy.credentialTitle)
                     .glassType(GlassTokens.TypeScale.heading)
                     .foregroundStyle(GlassColor.textPrimary)

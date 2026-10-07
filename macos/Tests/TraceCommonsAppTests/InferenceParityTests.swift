@@ -86,12 +86,16 @@ final class InferenceParityTests: XCTestCase {
                        "isOn ?? false", "busy || isOn == nil", "GlassToggleStyle(.settings)",
                        "let label = Self.stateLabel(state: state, copy: copy, calls: calls)",
                        "GlassStatusLabel(label.line, status: label.status)",
-                       "GlassExpander(copy.settingsTitle, isOpen:",
+                       "eyebrow: copy.panelConnectionEyebrow, title: copy.settingsTitle,",
                        "GlassNotice(tone: .outside, title: refusal)",
                        "Button(ActionNoticeWords.coreDismissWord ?? ActionNoticeWords.dismissWord, action: onDismiss)"] {
             XCTAssertTrue(source.contains(needle), "PrivateInferenceView.swift lacks \(needle)")
         }
         XCTAssertFalse(source.contains("privateInferenceOn ? .on"), "the state must come from the tone, not the switch")
+        // P24: #1146's connection panel is never collapsed, so the
+        // exposure paragraph and the switch are always on screen.
+        XCTAssertFalse(source.contains("GlassExpander("), "the connection panel collapses again")
+        XCTAssertFalse(source.contains("if isOpen {"), "the exposure words hide behind a disclosure again")
         XCTAssertEqual(source.components(separatedBy: "GlassStatusLabel(").count - 1, 1,
                        "the card's one state label is the only status drawn")
         XCTAssertFalse(source.contains("static func palette("), "the TC palette left with the legacy queue")
@@ -354,35 +358,38 @@ final class InferenceParityTests: XCTestCase {
         XCTAssertEqual(source.components(separatedBy: "GlassModalAction(").count - 1, 2, "the two answers that act")
     }
 
-    /// A row's state is the shared tone on a worded label, the only primary
-    /// is connect, the action carries the tool's name and waits on busy, and
-    /// the details open in place.
+    /// P24: #1146's tool row. Flat, ruled off by a hairline, no icon tile
+    /// and no inner card; the state in the core's words as plain text in
+    /// the left column; the settings file inline; Connect a neutral glass
+    /// button and Disconnect the outside one; the action carries the tool's
+    /// name and waits on busy.
     func test_aToolRowDrawsItsStateInWordsAndOneAction() throws {
         let source = try Self.text("Views/HarnessListView.swift")
         for needle in ["if titled {\n                GlassSectionRule(copy.harnessesTitle)",
                        "Text(row.connected ? copy.harnessCaptionConnected : copy.harnessCaptionNotConnected)",
-                       "GlassStatusLabel(sentence, status: PrivateInferenceIndicator.status(HarnessSurface.tone(state)))",
                        "Button(HarnessSurface.actionLabel(action, copy: copy)) {\n"
                            + "                model.beginHarnessAction(id: row.id, action: action)\n"
                            + "            }\n"
-                           + "            .buttonStyle(GlassButtonStyle(action == .connect ? .primary : .glass))\n"
+                           + "            .buttonStyle(GlassButtonStyle(action == .connect ? .glass : .destructive))\n"
                            + "            .accessibilityLabel(Text(row.name) + Text(verbatim: \": \") + Text(HarnessSurface.actionLabel(action, copy: copy)))\n"
                            + "            .disabled(model.harnessBusy)\n",
-                       "if let tool = HarnessToolArt.tool(harness: row.id) {\n"
-                           + "                GlassToolTile(.tool(tool))\n"
-                           + "            } else {\n"
-                           + "                Image(systemName: \"terminal\")\n"
-                           + "                    .glassGlyph(14)",
-                       "GlassExpander(copy.harnessPreviewTitle, isOpen: $settingsExpanded)\n"
-                           + "                if settingsExpanded {\n",
+                       ".padding(.vertical, 15)",
+                       ".overlay(alignment: .bottom) { GlassHairline(GlassColor.hairline) }",
                        "HarnessSurface.restartSentence(row, state: state, copy: copy)",
                        "HarnessSurface.lastCallSentence(row, calls: model.harnessCalls)",
-                       "HarnessSurface.rowSentence(\n                    row, copy: copy, calls: model.harnessCalls)",
+                       "HarnessSurface.rowSentence(\n                row, copy: copy, calls: model.harnessCalls)",
                        ".glassType(GlassTokens.TypeScale.mono)"] {
             XCTAssertTrue(source.contains(needle), "HarnessListView.swift lacks \(needle)")
         }
+        let row = try XCTUnwrap(source.range(of: "private struct HarnessRowView"))
+        let rowEnd = try XCTUnwrap(source.range(of: "/// The change, before it is made."))
+        let rowBody = String(source[row.lowerBound..<rowEnd.lowerBound])
+        XCTAssertFalse(rowBody.contains("GlassCard("), "each tool is a nested card again")
+        XCTAssertFalse(rowBody.contains("GlassToolTile("), "the row carries an icon tile again")
+        XCTAssertFalse(rowBody.contains("GlassExpander("), "the settings file is behind an expander again")
+        XCTAssertFalse(rowBody.contains(".primary"), "Connect is a filled primary again")
         XCTAssertFalse(source.contains("palette("), "the row reads the glass status, not the TC palette")
-        XCTAssertEqual(source.components(separatedBy: "GlassStatusLabel(").count - 1, 1, "one worded state per row")
+        XCTAssertEqual(source.components(separatedBy: "GlassStatusLabel(").count - 1, 0, "the state is plain words, no dot")
         // One mapping: the artwork lives here and the map forwards to it.
         XCTAssertFalse(source.contains("FlowMapScene"), "the list must not read the flow map's copy of the art")
         let map = try Self.text("Views/Monitor/FlowMapScene.swift")
@@ -418,7 +425,8 @@ final class InferenceParityTests: XCTestCase {
             XCTAssertTrue(views.contains(needle), "InferenceViews.swift lacks \(needle)")
         }
         let account = try Self.text("Views/Monitor/InferenceAccount.swift")
-        for needle in ["CredentialSection(copy: copy, prominent: true)", "HarnessListSection(copy: copy, titled: false)",
+        for needle in ["credential: AnyView(CredentialSection(copy: copy, prominent: true, titled: false)))",
+                       "HarnessListSection(copy: copy, titled: false)",
                        "PrivateAISwitchCard(", "store.setPrivateAI(on:", "copy.writeUnconfirmed", "model.refreshSettings()",
                        "store.privateAI?.on", "model.privateInferenceCopy"] {
             XCTAssertTrue(account.contains(needle), "InferenceAccount.swift lacks \(needle)")
@@ -437,7 +445,8 @@ final class InferenceParityTests: XCTestCase {
         let order = ["Text(copy.subtitle)", "label: copy.statInferenceAccess,", "label: copy.statRuntime,",
                      "ManagedSessionsSection()", "ManagedGlobalSettingsHeader()", "eyebrow: copy.panelToolsEyebrow, title: copy.harnessesTitle,",
                      "HarnessListSection(copy: copy, titled: false)", "PrivateAISwitchCard(",
-                     "GlassCard { CredentialSection(copy: copy, prominent: true) }", "PrivateAIBalanceCard(copy: copy)",
+                     "credential: AnyView(CredentialSection(copy: copy, prominent: true, titled: false)))",
+                     "PrivateAIBalanceCard(copy: copy)",
                      "GlassCard { FundingRow(copy: copy) }"]
         var cursor = account.startIndex
         for needle in order {
@@ -542,7 +551,7 @@ final class InferenceParityTests: XCTestCase {
         for needle in ["        if let copy = model.privateInferenceCopy {\n"
                            + "            VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {\n",
                        "                PrivateAISwitchCard(\n",
-                       "onRefresh: { refreshConnection() })",
+                       "onRefresh: { refreshConnection() },",
                        "isOn: store.privateAI?.on,\n",
                        "state: Self.surfaceState(store.privateAI?.state),\n",
                        "calls: model.privateInferenceCalls,\n",
@@ -638,11 +647,11 @@ final class InferenceParityTests: XCTestCase {
                            + "                .fixedSize(horizontal: false, vertical: true)\n"
                            + "            Text(copy.offerNoRepoint)\n",
                        "if let path = row.configPath {\n"
-                           + "                            Label(path, systemImage: \"doc.text\")\n"
-                           + "                                .textSelection(.enabled)\n"
-                           + "                        }\n"
-                           + "                        Label(row.connectCommand, systemImage: \"terminal\")\n"
-                           + "                            .textSelection(.enabled)\n"] {
+                           + "                    Text(verbatim: path)\n"
+                           + "                        .textSelection(.enabled)\n"
+                           + "                }\n"
+                           + "                Text(verbatim: row.connectCommand)\n"
+                           + "                    .textSelection(.enabled)\n"] {
             XCTAssertTrue(source.contains(needle), "HarnessListView.swift lacks \(needle)")
         }
     }

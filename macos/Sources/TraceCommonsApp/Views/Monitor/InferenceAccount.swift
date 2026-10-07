@@ -62,8 +62,9 @@ struct InferenceAccountSection: View {
                         }
                     },
                     onDismiss: { store.dismissPrivateAIRefusal() },
-                    onRefresh: { refreshConnection() })
-                GlassCard { CredentialSection(copy: copy, prominent: true) }
+                    onRefresh: { refreshConnection() },
+                    // #1146: the sign-in is part of the connection panel.
+                    credential: AnyView(CredentialSection(copy: copy, prominent: true, titled: false)))
                 PrivateAIBalanceCard(copy: copy)
                 GlassCard { FundingRow(copy: copy) }
             }
