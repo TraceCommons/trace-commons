@@ -144,7 +144,7 @@ pub fn skill_learning_copy() -> SkillLearningCopy {
         rollback_confirm_title: "Roll back this skill?",
         rollback_confirm_body: "Trace Commons removes the skill's directory and the two files it installed, so Codex no longer has this skill. If those files have changed since the install, nothing is removed.",
         rollback_keep: "Keep skill",
-        unavailable: "The skill workflow could not complete. Retry the current step.",
+        unavailable: "Skill workflow could not complete. Retry this step.",
     }
 }
 
@@ -207,7 +207,8 @@ pub fn skill_learning_error_line(label: &str) -> &'static str {
             "The skill must pass every applicability check and its repository plans must beat both controls without regressions before installation."
         }
         "skill-install-occupied" => {
-            "A skill already occupies this path. Choose another name or remove it, then retry."
+            // #1146's `skill-install-preview.tsx`.
+            "Target path is occupied. Installation refused."
         }
         "skill-install-plan-changed" | "skill-review-changed" => {
             "The reviewed skill changed. Review the exact package again."

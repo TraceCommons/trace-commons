@@ -15,7 +15,7 @@ struct MissionDraftsView: View {
                 Text(model.text("intro"))
                 controls
                 if let selectedFile {
-                    Text("\(model.text("file_selected")): \(selectedFile.lastPathComponent)")
+                    Text("\(model.text("file_selected")) \(selectedFile.lastPathComponent)")
                         .glassType(GlassTokens.TypeScale.label.weight(.regular))
                         .textSelection(.enabled)
                 }
