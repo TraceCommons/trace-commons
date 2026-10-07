@@ -87,48 +87,37 @@ struct TracesTreeView: View {
                 // the set asked for was not one.
                 GlassChip("\(words.sample) · \(sample)", status: store.sampleUnknown ? .ask : .off)
             }
-            if let notice = store.folderNotice {
-                GlassNotice(tone: .ask) { Text(notice) }
-            }
-            // Offers, undo and health above the tree (owner, 2026-10-07: an
-            // accepted difference from #1146, which puts them in the
-            // inspector). Why approved sessions are not moving, or that the
-            // core is not answering, first: the pane never reads as current
-            // over a last good tree, and an unread status is never drawn as
-            // healthy. Then the undos, the offers and the first-contribution
-            // note (`InspectorPrompts`).
-            ForEach(TracesHealth.banners(
-                phase: store.phase, status: store.status, words: store.words, coreDown: TracesHealth.coreDownLine,
-                maxQueueEntries: model.daemonSettings?.maxQueueEntries)
-            ) { GlassHealthBanner(banner: $0) }
-            InspectorPrompts(store: store)
             if store.phase == .loading && isEmpty {
-                // #1146: "Reading local queue…", not a spinner.
-                Text(store.words?.tree.readingQueue ?? "")
-                    .glassType(GlassTokens.TypeScale.body)
-                    .foregroundStyle(GlassColor.textTertiary)
-                    .padding(GlassTokens.Space.s6)
-            } else if isEmpty && store.phase == .loaded {
-                VStack(spacing: GlassTokens.Space.s2) {
-                    Image(systemName: "tray")
-                        .glassGlyph(22)
-                        .foregroundStyle(GlassColor.textTertiary)
-                        .accessibilityLabel(MonitorWindowView.Tab.traces.title)
-                    Text(QueueLegacyWords.nothingWaiting)
-                        .glassType(GlassTokens.TypeScale.bodyStrong)
-                        .foregroundStyle(GlassColor.textPrimary)
-                    Text(QueueLegacyWords.nothingWaitingDetail)
-                        .glassType(GlassTokens.TypeScale.caption)
-                        .foregroundStyle(GlassColor.textSecondary)
-                        .fixedSize(horizontal: false, vertical: true)
+                ScrollView {
+                    VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
+                        prompts
+                        // #1146: "Reading local queue…", not a spinner.
+                        Text(store.words?.tree.readingQueue ?? "")
+                            .glassType(GlassTokens.TypeScale.body)
+                            .foregroundStyle(GlassColor.textTertiary)
+                            .padding(GlassTokens.Space.s6)
+                    }
                 }
-                .multilineTextAlignment(.center)
-                .frame(maxWidth: .infinity)
-                .padding(.top, GlassTokens.Space.s10)
+                .scrollIndicators(.never)
+            } else if isEmpty {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
+                        prompts
+                        if store.phase == .loaded { emptyTree }
+                    }
+                }
+                .scrollIndicators(.never)
             } else {
                 ScrollViewReader { proxy in
                     ScrollView {
                         VStack(spacing: 2) {
+                            // The prompts scroll with the tree, so however
+                            // many show they never push the tree, the graph
+                            // footer or the other panes out of the window.
+                            prompts
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(.bottom, GlassTokens.Space.cardGap - 2)
+                                .id(Self.promptsID)
                             ForEach(store.tree.folders) { folderRows($0) }
                         }
                     }
@@ -333,6 +322,55 @@ struct TracesTreeView: View {
     /// The folder holding a session.
     static func folder(of entryId: String, in tree: TracesTree) -> String? {
         tree.folders.first { $0.sessions.contains { $0.entryId == entryId } }?.id
+    }
+
+    /// The scroll anchor of the prompts above the first folder.
+    static let promptsID = "traces.prompts"
+
+    /// The folder notice, health banners and `InspectorPrompts`, drawn as
+    /// the first rows of the tree's scroll, never above it: a tall offer or
+    /// the first-contribution note scrolls away with the tree instead of
+    /// pushing it, the graph footer and the panes beside it out of the
+    /// window (R-LAYOUT-1).
+    @ViewBuilder
+    private var prompts: some View {
+        VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
+            if let notice = store.folderNotice {
+                GlassNotice(tone: .ask) { Text(notice) }
+            }
+            // Offers, undo and health above the tree (owner, 2026-10-07: an
+            // accepted difference from #1146, which puts them in the
+            // inspector), in the tree's scroll. Why approved sessions are not moving, or that the
+            // core is not answering, first: the pane never reads as current
+            // over a last good tree, and an unread status is never drawn as
+            // healthy. Then the undos, the offers and the first-contribution
+            // note (`InspectorPrompts`).
+            ForEach(TracesHealth.banners(
+                phase: store.phase, status: store.status, words: store.words, coreDown: TracesHealth.coreDownLine,
+                maxQueueEntries: model.daemonSettings?.maxQueueEntries)
+            ) { GlassHealthBanner(banner: $0) }
+            InspectorPrompts(store: store)
+        }
+    }
+
+    /// No folder, nothing waiting.
+    private var emptyTree: some View {
+        VStack(spacing: GlassTokens.Space.s2) {
+            Image(systemName: "tray")
+                .glassGlyph(22)
+                .foregroundStyle(GlassColor.textTertiary)
+                .accessibilityLabel(MonitorWindowView.Tab.traces.title)
+            Text(QueueLegacyWords.nothingWaiting)
+                .glassType(GlassTokens.TypeScale.bodyStrong)
+                .foregroundStyle(GlassColor.textPrimary)
+            Text(QueueLegacyWords.nothingWaitingDetail)
+                .glassType(GlassTokens.TypeScale.caption)
+                .foregroundStyle(GlassColor.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .multilineTextAlignment(.center)
+        .frame(maxWidth: .infinity)
+        .padding(.top, GlassTokens.Space.s10)
     }
 
     private var isEmpty: Bool { store.tree.folders.isEmpty }
@@ -574,7 +612,7 @@ struct TracesTreeView: View {
     /// The Dismiss confirmation's body: the core's sentence with the
     /// session's time and size filled in.
     static func dismissBody(_ entry: DaemonData.QueueEntry, words: MonitorTracesCopy) -> String {
-        let size = entry.sizeBytes.map { ByteCountFormatter.string(fromByteCount: Int64($0), countStyle: .file) } ?? "—"
+        let size = entry.sizeBytes.map { ByteCountFormatter.string(fromByteCount: Int64($0), countStyle: .memory) } ?? "—"
         return FirstRunCopy.fill(words.tree.dismissSessionBody, ["when": when(entry), "size": size])
     }
 
@@ -602,7 +640,7 @@ struct TracesTreeView: View {
             parts.append(Duration.seconds(seconds).formatted(.units(allowed: [.hours, .minutes], width: .abbreviated)))
         }
         if let bytes = entry.sizeBytes {
-            parts.append(ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file))
+            parts.append(ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .memory))
         }
         return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
@@ -644,7 +682,7 @@ struct TracesTreeView: View {
 
     /// The session's size, when the daemon reported it.
     static func size(_ entry: DaemonData.QueueEntry) -> String? {
-        entry.sizeBytes.map { ByteCountFormatter.string(fromByteCount: Int64($0), countStyle: .file) }
+        entry.sizeBytes.map { ByteCountFormatter.string(fromByteCount: Int64($0), countStyle: .memory) }
     }
 }
 

@@ -94,7 +94,7 @@ struct SummaryInspector: View {
         let fill = { (template: String, count: String) in FirstRunCopy.fill(template, ["count": count]) }
         // Ron's list: 8 between lines (`gap-2`).
         VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
-            SummaryDecisionLine(glyph: "tray", tone: .ask, text: fill(
+            SummaryDecisionLine(glyph: "rectangle.split.2x1", tone: .ask, text: fill(
                 words.summaryPanel.waitingForYou, SummaryFacts.waiting(traces.status)))
             SummaryDecisionLine(glyph: "exclamationmark.triangle", tone: .ask, text: fill(
                 words.summaryPanel.worthASecondLook, SummaryFacts.secondLook(loaded: loaded, sessions: sessions)))
@@ -113,7 +113,9 @@ struct SummaryInspector: View {
     private var pending: some View {
         let pending = SummaryFacts.pending(rollup: rollup, credit: credit)
         return VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
-            GlassKeyValueList([.init(MonitorWords.pending, pending.value)])
+            // On the decision lines' text column, not a right-aligned
+            // label column of its own.
+            SummaryDecisionLine(glyph: nil, tone: nil, text: MonitorWords.pending + " " + pending.value)
             if let condition = pending.condition {
                 Group {
                     Text(condition)
@@ -159,7 +161,7 @@ struct SummaryInspector: View {
                     Text(copy.heading)
                         .glassType(GlassTokens.TypeScale.bodyStrong)
                         .foregroundStyle(GlassColor.textPrimary)
-                    GlassKeyValueList(SummaryFacts.safeguardRows(status, copy: copy))
+                    SafeguardGrid(rows: SummaryFacts.safeguardRows(status, copy: copy))
                     if let held = SummaryFacts.heldByLimit(status.dailyBudget, copy: copy) {
                         Text(held)
                             .glassType(GlassTokens.TypeScale.caption)
@@ -177,23 +179,59 @@ struct SummaryInspector: View {
 }
 
 /// One decision line: a glyph in its status colour, and the core's line.
+/// No glyph keeps the 20 column empty, so the line stays on the text edge.
 private struct SummaryDecisionLine: View {
-    let glyph: String
+    let glyph: String?
     let tone: GlassStatus?
     let text: String
 
     var body: some View {
         // Ron's `DecisionLine`: the glyph in a 20 column, 10 before the line.
         HStack(spacing: GlassTokens.Space.s5) {
-            Image(systemName: glyph)
-                .glassGlyph(12, weight: .semibold)
-                .foregroundStyle(tone?.textColor ?? GlassColor.textTertiary)
-                .frame(width: 20)
-                .accessibilityHidden(true)
+            Group {
+                if let glyph {
+                    Image(systemName: glyph)
+                        .glassGlyph(12, weight: .semibold)
+                        .foregroundStyle(tone?.textColor ?? GlassColor.textTertiary)
+                } else {
+                    Color.clear.frame(height: 1)
+                }
+            }
+            .frame(width: 20)
+            .accessibilityHidden(true)
             Text(text)
                 .glassType(GlassTokens.TypeScale.body)
                 .foregroundStyle(GlassColor.textPrimary)
                 .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+}
+
+/// Ron's `QueueStatusPanel` grid: a cell per row, its label bold over its
+/// value, side by side between a top and a bottom hairline.
+struct SafeguardGrid: View {
+    let rows: [GlassKeyValueList.Item]
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Rectangle().fill(GlassColor.hairline).frame(height: 1)
+            HStack(alignment: .top, spacing: GlassTokens.Space.s4) {
+                ForEach(rows, id: \.label) { row in
+                    VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
+                        Text(row.label)
+                            .glassType(GlassTokens.TypeScale.bodyStrong)
+                            .foregroundStyle(GlassColor.textPrimary)
+                        Text(row.value)
+                            .glassType(GlassTokens.TypeScale.caption)
+                            .foregroundStyle(GlassColor.textSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
+                    .accessibilityElement(children: .combine)
+                }
+            }
+            .padding(.vertical, GlassTokens.Space.s4)
+            Rectangle().fill(GlassColor.hairline).frame(height: 1)
         }
     }
 }
@@ -395,7 +433,7 @@ enum SummaryFacts {
             ])))
         }
         if let routing = status.routing {
-            let state = TCRoutingCopy.stateLine(state: routing.state) ?? "—"
+            let state = copy.routingLabel(routing.state)
             rows.append(.init(copy.inferenceRouting, routing.derived == true ? "\(state) · \(copy.daemonOwned)" : state))
         }
         return rows

@@ -108,10 +108,13 @@ final class TracesParityTests: XCTestCase {
         XCTAssertTrue(banner.contains("TCCoreCopy.healthCopyJSON(reachable: false"))
         let banners = try XCTUnwrap(body.range(of: "TracesHealth.banners("))
         let prompts = try XCTUnwrap(body.range(of: "InspectorPrompts(store: store)"))
-        // #1146: "Reading local queue…" while loading, not a spinner.
-        let reading = try XCTUnwrap(body.range(of: "store.words?.tree.readingQueue"))
         XCTAssertLessThan(banners.lowerBound, prompts.lowerBound, "the banners precede the prompts")
-        XCTAssertLessThan(prompts.lowerBound, reading.lowerBound, "the prompts precede the loading line and the tree")
+        // #1146: "Reading local queue…" while loading, not a spinner, and
+        // drawn after the prompts in the same scroll.
+        let loading = try XCTUnwrap(body.range(of: "if store.phase == .loading && isEmpty {"))
+        let reading = try XCTUnwrap(body.range(of: "store.words?.tree.readingQueue"))
+        let drawn = try XCTUnwrap(body.range(of: "prompts", range: loading.upperBound..<reading.lowerBound))
+        XCTAssertLessThan(drawn.lowerBound, reading.lowerBound, "the prompts precede the loading line and the tree")
         let host = try TracesInspectorHostTests.hostBody()
         XCTAssertFalse(host.contains("TracesHealth.banners("), "the inspector repeats the banners")
         XCTAssertFalse(host.contains("InspectorPrompts("), "the inspector repeats the prompts")

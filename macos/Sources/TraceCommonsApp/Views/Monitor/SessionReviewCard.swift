@@ -174,16 +174,16 @@ struct SessionReviewCard: View {
             } else if RedactionLabels.survivorTotal(summary.redactions ?? [:]) > 0 {
                 caption(review.residualUnavailable, outside: true)
             }
+            // #1146: one tertiary caption line each, the label in bold and
+            // the core's values as it sends them.
             if let words, let risk = summary.residualRisk, !risk.isEmpty {
-                GlassKeyValueList([.init(words.residualRisk, risk.replacingOccurrences(of: "_", with: " "))])
+                labelled(words.residualRisk, risk)
             }
             if let consent {
-                caption(consent.gateStatement)
+                caption(consent.gateStatement, tertiary: true)
             }
             if let scopes = summary.consentScopes, !scopes.isEmpty {
-                GlassKeyValueList([.init(
-                    review.consentScopes,
-                    scopes.map { $0.replacingOccurrences(of: "_", with: " ") }.joined(separator: " · "))])
+                labelled(review.consentScopes, scopes.joined(separator: " · "), bold: false)
             }
             eligibility(entry, review)
             if let outcome {
@@ -207,7 +207,7 @@ struct SessionReviewCard: View {
         let parts = [
             summary.wouldSendBytes.map {
                 FirstRunCopy.fill(review.redactedPayload, [
-                    "size": ByteCountFormatter.string(fromByteCount: Int64($0), countStyle: .file),
+                    "size": ByteCountFormatter.string(fromByteCount: Int64($0), countStyle: .memory),
                 ])
             },
             summary.eventCount.map { FirstRunCopy.fill(review.events, ["count": String($0)]) },
@@ -240,7 +240,11 @@ struct SessionReviewCard: View {
                     caption(review.nothingRemoved)
                 } else {
                     ForEach(rows.removed, id: \.family) { row in
-                        caption(row.countLine)
+                        Self.redactionLine(row)
+                            .glassType(GlassTokens.TypeScale.caption)
+                            .foregroundStyle(GlassColor.textSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .frame(maxWidth: .infinity, alignment: .leading)
                     }
                 }
             }
@@ -248,7 +252,7 @@ struct SessionReviewCard: View {
                 GlassNotice(tone: .outside, title: review.stillPresent) {
                     VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
                         ForEach(rows.stillPresent, id: \.family) { row in
-                            Text(row.countLine)
+                            Self.redactionLine(row)
                         }
                     }
                 }
@@ -556,6 +560,24 @@ struct SessionReviewCard: View {
         slot.accept(entryId, result)
     }
 
+    /// #1146's redaction line: the count in bold, then what the category
+    /// is and the sub-labels it covered, all the core's words.
+    static func redactionLine(_ row: RedactionSummaryRow) -> Text {
+        var tail = row.description.isEmpty ? "" : ": " + row.description
+        if !row.detail.isEmpty { tail += " (" + row.detail.joined(separator: ", ") + ")" }
+        return Text(row.countLine).bold().foregroundColor(GlassColor.textPrimary) + Text(tail)
+    }
+
+    /// "Label: value" as one tertiary caption line (#1146), the label bold
+    /// where #1146 bolds it.
+    private func labelled(_ label: String, _ value: String, bold: Bool = true) -> some View {
+        (Text(label + ":").bold(bold) + Text(" " + value))
+            .glassType(GlassTokens.TypeScale.caption)
+            .foregroundStyle(GlassColor.textTertiary)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
     private func caption(_ text: String, outside: Bool = false, tertiary: Bool = false) -> some View {
         Text(text)
             .glassType(GlassTokens.TypeScale.caption)
@@ -573,7 +595,7 @@ struct SessionReviewCard: View {
     ) -> [GlassKeyValueList.Item] {
         let dash = "—"
         func bytes(_ value: Int?) -> String {
-            value.map { ByteCountFormatter.string(fromByteCount: Int64($0), countStyle: .file) } ?? dash
+            value.map { ByteCountFormatter.string(fromByteCount: Int64($0), countStyle: .memory) } ?? dash
         }
         func number(_ value: Int?) -> String { value.map(String.init) ?? dash }
         let tool = SourceKind(rawValue: entry.declaredSource ?? entry.source)?.displayName ?? entry.source

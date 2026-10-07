@@ -40,14 +40,21 @@ final class FlowMapSceneTests: XCTestCase {
 
     // MARK: Traces
 
-    /// One node per tool and per drawn folder, plus this computer and the
-    /// commons; every node inside the design space.
+    /// One node per tool this build knows and per drawn folder, plus this
+    /// computer and the commons; every node inside the design space. The
+    /// tools the tree leaves out are drawn too, dashed as not watched
+    /// (#1146 draws every tool).
     func test_theTracesSceneDrawsEveryToolAndFolder() async throws {
         for set in SampleDaemonClient.SampleSet.allCases where set != .coreDown {
             let tree = try await tree(set)
             let scene = FlowMapScene.traces(tree, gate: try await gate(set))
             let folders = tree.tools.reduce(0) { $0 + min($1.folders.count, FlowMapScene.foldersShown) }
-            XCTAssertEqual(scene.nodes.count, tree.tools.count + folders + 2, "\(set)")
+            XCTAssertEqual(scene.nodes.count, SourceKind.allCases.count + folders + 2, "\(set)")
+            let tools = scene.nodes.filter { $0.id.hasPrefix("tool:") }
+            XCTAssertEqual(tools.filter(\.dashed).count, SourceKind.allCases.count - tree.tools.count, "\(set)")
+            for tool in tree.tools {
+                XCTAssertEqual(tools.first { $0.id == "tool:\(tool.id)" }?.dashed, false, "\(set): \(tool.id)")
+            }
             let space = CGRect(origin: .zero, size: FlowMapScene.size)
             for node in scene.nodes {
                 XCTAssertTrue(space.contains(node.at), "\(set): \(node.id) at \(node.at)")
@@ -210,6 +217,68 @@ final class FlowMapSceneTests: XCTestCase {
         XCTAssertEqual(scene.overflows.map(\.count), [2])
     }
 
+    /// P13: a tool that has contributed is joined to the commons by a
+    /// quiet arc, and the library is lit once anything was contributed,
+    /// armed or not (#1146 `TracesMap`).
+    func test_contributedToolsReachTheLibrary() {
+        let folder = TracesTree.FolderNode(id: "f", label: "f", mode: .ask, sessions: [])
+        let tree = TracesTree(tools: [.init(kind: .claudeCode, mode: .watch, folders: [folder])], unplaced: [])
+        let none = FlowMapScene.traces(tree, gate: .init(state: .ready), contributed: .init(total: 0))
+        XCTAssertEqual(none.nodes.first { $0.id == "library" }?.kind, .library(active: false))
+        XCTAssertTrue(none.arcs.allSatisfy { $0.to != FlowMapScene.libraryPoint }, "nothing reaches the library")
+        let sent = FlowMapScene.traces(
+            tree, gate: .init(state: .ready), contributed: .init(total: 4, byTool: [.claudeCode: 4]))
+        XCTAssertEqual(sent.nodes.first { $0.id == "library" }?.kind, .library(active: true))
+        let toLibrary = sent.arcs.filter { $0.to == FlowMapScene.libraryPoint }
+        XCTAssertEqual(toLibrary.map(\.style), [.quiet])
+        XCTAssertFalse(sent.flows, "a past contribution never moves")
+        // Unread history is never read as contributed.
+        let unread = FlowMapScene.traces(tree, gate: .init(state: .ready), contributed: .unread)
+        XCTAssertEqual(unread.nodes.first { $0.id == "library" }?.kind, .library(active: false))
+    }
+
+    /// A selection's tool is ringed, the others faded to 0.3 and their
+    /// library arcs to 0.12 (#1146 `TracesMap`); nothing selected fades
+    /// nothing.
+    func test_theSelectionsToolIsRingedAndTheOthersFade() {
+        let folder = TracesTree.FolderNode(id: "f", label: "f", mode: .ask, sessions: [])
+        let tree = TracesTree(tools: [
+            .init(kind: .claudeCode, mode: .watch, folders: [folder]),
+            .init(kind: .codex, mode: .watch, folders: []),
+        ], unplaced: [])
+        let contributed = FlowMapScene.Contributions(total: 2, byTool: [.claudeCode: 1, .codex: 1])
+        let plain = FlowMapScene.traces(tree, gate: .init(state: .ready), contributed: contributed)
+        XCTAssertTrue(plain.nodes.allSatisfy { !$0.ringed })
+        XCTAssertTrue(plain.nodes.filter { $0.id.hasPrefix("tool:") && !$0.dashed }.allSatisfy { $0.dim == 1 })
+        let scene = FlowMapScene.traces(
+            tree, gate: .init(state: .ready), contributed: contributed, selectedTool: SourceKind.codex.rawValue)
+        let codex = try? XCTUnwrap(scene.nodes.first { $0.id == "tool:codex" })
+        let claude = try? XCTUnwrap(scene.nodes.first { $0.id == "tool:claude-code" })
+        XCTAssertEqual(codex?.ringed, true)
+        XCTAssertEqual(codex?.dim, 1)
+        XCTAssertEqual(claude?.ringed, false)
+        XCTAssertEqual(claude?.dim, 0.3)
+        let arcs = scene.arcs.filter { $0.to == FlowMapScene.libraryPoint }.map(\.dim).sorted()
+        XCTAssertEqual(arcs, [0.12, 1])
+        // Every tool stays drawn: the binoculars move the camera, they do
+        // not filter the map.
+        XCTAssertEqual(scene.focusPoint(tool: SourceKind.codex.rawValue), codex?.at)
+        XCTAssertNil(scene.focusPoint(tool: nil))
+    }
+
+    /// The binoculars' camera (#1146 `cameraFor`): the tool's point lands
+    /// at 1.6x on the same place #1146's transform puts it.
+    func test_theFocusCameraScalesAboutTheTool() {
+        let size = CGSize(width: 580, height: 760)
+        let focus = CGPoint(x: 150, y: 170)
+        let fit = FlowMapGeometry(size: size, zoom: 1, focus: focus)
+        XCTAssertEqual(fit.scale, 1.6, accuracy: 0.0001)
+        let drawn = fit.point(focus)
+        XCTAssertEqual(drawn.x, 290 + 1.6 * 50, accuracy: 0.001)
+        XCTAssertEqual(drawn.y, 380, accuracy: 0.001)
+        XCTAssertEqual(FlowMapGeometry(size: size, zoom: 1).scale, 1, accuracy: 0.0001)
+    }
+
     // MARK: Private AI
 
     /// Each tool's arc follows the core's state for it, never `connected`:
@@ -226,7 +295,11 @@ final class FlowMapSceneTests: XCTestCase {
             let scene = FlowMapScene.privateAI(
                 harnesses, destinationLabel: "D", privateAI: "running", sentence: { _ in nil }, state: { _ in state })
             XCTAssertEqual(scene.nodes.count, harnesses.harnesses.count + 1)
-            XCTAssertEqual(scene.nodes.first?.label, "D")
+            // #1146: the node is the credential, with its tools under it.
+            XCTAssertEqual(scene.nodes.first?.label, FlowMapScene.words?.credential ?? "D")
+            XCTAssertEqual(scene.nodes.first?.sublabel,
+                           FlowMapScene.words?.connected(tools: state == .notConnected || state == .unknown
+                               ? 0 : harnesses.harnesses.count, sentence: false))
             XCTAssertTrue(scene.arcs.allSatisfy { $0.style == expected[state] }, "\(state)")
             XCTAssertEqual(scene.flows, state == .answering, "\(state)")
             XCTAssertEqual(scene.nodes.first?.kind, .destination(state == .answering ? .answering : .running), "\(state)")

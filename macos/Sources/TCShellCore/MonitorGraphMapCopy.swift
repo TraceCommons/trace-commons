@@ -80,6 +80,9 @@ public struct MonitorFlowMapCopy: MonitorWordTable {
     public let folderCounts: String
     public let connected: String
     public let connectedLine: String
+    public let legendNotWatched: String
+    public let credential: String
+    public let noneFound: String
 
     enum CodingKeys: String, CodingKey, CaseIterable {
         case mapLabel = "map_label"
@@ -106,6 +109,9 @@ public struct MonitorFlowMapCopy: MonitorWordTable {
         case folderCounts = "folder_counts"
         case connected
         case connectedLine = "connected_line"
+        case legendNotWatched = "legend_not_watched"
+        case credential
+        case noneFound = "none_found"
     }
 
     public static var consumedFields: [String] { CodingKeys.allCases.map(\.rawValue) }

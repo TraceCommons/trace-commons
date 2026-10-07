@@ -50,6 +50,13 @@ struct FlowMapScene: Equatable {
         /// The card's title when it is not the label (#1146: a tool's card
         /// adds its folder count).
         var title: String? = nil
+        /// A tool that is not watched: drawn with a dashed rim (#1146's
+        /// "Tool not watched").
+        var dashed = false
+        /// Ringed as the selection's tool (#1146 `ToolGroup` ring).
+        var ringed = false
+        /// A second line under the label (#1146: the credential's tools).
+        var sublabel: String? = nil
 
         var cardTitle: String { title ?? label }
     }
@@ -169,27 +176,50 @@ struct FlowMapScene: Equatable {
         }
     }
 
+    /// Every tool this build knows, the tree's first, then the ones the
+    /// tree leaves out as not watched (#1146 draws every tool, the
+    /// unwatched ones dashed).
+    static func mapTools(_ tree: TracesTree) -> [(tool: TracesTree.ToolNode, watched: Bool)] {
+        let drawn = tree.tools.map { (tool: $0, watched: true) }
+        let rest = SourceKind.allCases
+            .filter { kind in !tree.tools.contains { $0.kind == kind } }
+            .map { (tool: TracesTree.ToolNode(kind: $0, mode: .unset, folders: []), watched: false) }
+        return drawn + rest
+    }
+
     /// Tools and their folders, ringed by rule, joined to this computer.
     /// A tool with a folder set to contribute automatically is joined to
     /// the commons: moving only when the gate is open and the core says
     /// that tool's sessions go there, dashed otherwise, and never for a
-    /// tool that is off.
-    static func traces(_ tree: TracesTree, gate: CommonsGate, contributed: Contributions = .unread) -> FlowMapScene {
+    /// tool that is off. A tool that has contributed is joined to it by a
+    /// quiet arc (#1146), and the library is lit once anything has been.
+    ///
+    /// `selectedTool` is the selection's tool: the others are faded, their
+    /// library arcs most of all, and it is ringed (#1146 `TracesMap`).
+    static func traces(
+        _ tree: TracesTree, gate: CommonsGate, contributed: Contributions = .unread, selectedTool: String? = nil
+    ) -> FlowMapScene {
         var scene = FlowMapScene()
-        let tools = tree.tools
+        let tools = mapTools(tree)
         let step = tools.count > 1 ? 460 / CGFloat(tools.count - 1) : 0
         var flowing = false
 
-        for (index, tool) in tools.enumerated() {
+        for (index, (tool, watched)) in tools.enumerated() {
             let at = CGPoint(x: 150, y: tools.count > 1 ? 170 + CGFloat(index) * step : hubPoint.y)
             let off = tool.mode == .off
-            let toolDim = off ? 0.4 : 1
+            let faded = selectedTool != nil && selectedTool != tool.id
+            let toolDim = (off ? 0.4 : 1) * (faded ? 0.3 : 1)
             let armed = tool.folders.contains { $0.mode == .autoUpload }
+            let sent = (contributed.tool(tool.kind) ?? 0) > 0
+            let arcDim = (off ? 0.3 : 1) * (faded ? 0.12 : 1)
 
             if armed && !off {
                 let moves = gate.open && gate.sendsToCommons(tool.kind)
                 flowing = flowing || moves
-                scene.arcs.append(curve(from: CGPoint(x: at.x + 12, y: at.y - 6), to: libraryPoint, style: moves ? .flowing : .dashed, dim: 1))
+                scene.arcs.append(curve(
+                    from: CGPoint(x: at.x + 12, y: at.y - 6), to: libraryPoint, style: moves ? .flowing : .dashed, dim: arcDim))
+            } else if sent {
+                scene.arcs.append(curve(from: CGPoint(x: at.x + 12, y: at.y - 6), to: libraryPoint, style: .quiet, dim: arcDim))
             }
             let midX = (hubPoint.x + at.x) / 2
             scene.arcs.append(Arc(
@@ -213,20 +243,30 @@ struct FlowMapScene: Equatable {
             }
             scene.nodes.append(Node(
                 id: "tool:\(tool.id)", kind: .tool(TracesTreeView.glassTool(tool.kind), off: off), at: at, radius: 13,
-                label: tool.kind.displayName, detail: toolDetail(tool), dim: toolDim, title: toolTitle(tool)))
+                label: tool.kind.displayName, detail: toolDetail(tool), dim: toolDim, title: toolTitle(tool),
+                dashed: !watched, ringed: selectedTool == tool.id))
         }
 
-        let waiting = tools.reduce(0) { $0 + $1.waiting } + tree.unplaced.reduce(0) { $0 + $1.sessions.count }
+        let toolsWaiting: Int = tree.tools.reduce(0) { $0 + $1.waiting }
+        let unplacedWaiting: Int = tree.unplaced.reduce(0) { $0 + $1.sessions.count }
+        let waiting = toolsWaiting + unplacedWaiting
         scene.nodes.insert(Node(
             id: "hub", kind: .hub, at: hubPoint, radius: 16,
             label: MonitorWords.computer,
             detail: words?.hub(waiting: waiting, contributed: contributed.total) ?? pair(MonitorWords.waiting, waiting)),
             at: 0)
         scene.nodes.append(Node(
-            id: "library", kind: .library(active: flowing), at: libraryPoint, radius: 11,
+            id: "library", kind: .library(active: flowing || (contributed.total ?? 0) > 0), at: libraryPoint, radius: 11,
             label: MonitorWords.commons,
             detail: words?.library(contributed: contributed.total) ?? pair(MonitorWords.table?.contributed ?? "", contributed.total)))
         return scene
+    }
+
+    /// The camera's centre for the binoculars (#1146 `cameraFor`): the
+    /// tool's node, nil when it is not drawn.
+    func focusPoint(tool id: String?) -> CGPoint? {
+        guard let id else { return nil }
+        return nodes.first { $0.id == "tool:\(id)" }?.at
     }
 
     /// The flow map's words (#1146 `FlowMap`), from the core.
@@ -318,9 +358,12 @@ struct FlowMapScene: Equatable {
         // sentence; unknown is said, never left to read as off.
         var detail = words?.connected(tools: connected, sentence: true) ?? pair(MonitorWords.connected, connected)
         if lamp == .unknown { detail += " " + MonitorWords.unknown }
+        // #1146: the credential, with how many tools it answers for, and
+        // the destination's own state after it.
         scene.nodes.insert(Node(
             id: "destination", kind: .destination(lamp), at: destinationPoint, radius: 26,
-            label: destinationLabel, detail: detail), at: 0)
+            label: words?.credential ?? destinationLabel, detail: detail,
+            sublabel: rows.isEmpty ? words?.noneFound : words?.connected(tools: connected, sentence: false)), at: 0)
         return scene
     }
 

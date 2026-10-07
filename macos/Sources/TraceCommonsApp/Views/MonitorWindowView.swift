@@ -240,6 +240,7 @@ struct MonitorWindowView: View {
                     model.daemonSettings?.privateInferenceState?.surfaceState, calls: model.privateInferenceCalls),
                 traces: traces, history: home.history, inference: inference,
                 focusTool: mapFocus ? selectedTool?.rawValue : nil,
+                selectedTool: selectedTool?.rawValue,
                 sentence: { Self.rowSentence($0, copy: model.privateInferenceCopy, calls: model.harnessCalls) })
         } inspector: {
             // Ron's inspector pane insets its content 16 across and 18 down
@@ -393,12 +394,23 @@ struct MonitorWindowView: View {
         InspectorDemand.keys(model: model, traces: traces, selection: selection)
     }
 
-    /// The selected session's tool: what the graph counts and the
-    /// binoculars focus the map on. The tree has no tool level, so it is
-    /// the session's own tool.
+    /// The selection's tool: what the graph counts and the binoculars
+    /// focus the map on. The tree has no tool level, so it is a session's
+    /// own tool, or the tool a folder is drawn under on the map (#1146
+    /// focuses a tool, a project or a session).
     private var selectedTool: SourceKind? {
-        guard let entry = traces.selectedSession(selection) else { return nil }
-        return SourceKind(rawValue: entry.declaredSource ?? entry.source) ?? SourceKind(rawValue: entry.source)
+        Self.selectedTool(traces.tree, session: traces.selectedSession(selection), folder: traces.selectedFolder(selection))
+    }
+
+    static func selectedTool(
+        _ tree: TracesTree, session: DaemonData.QueueEntry?, folder: TracesTree.FolderNode?
+    ) -> SourceKind? {
+        if let entry = session {
+            return SourceKind(rawValue: entry.declaredSource ?? entry.source) ?? SourceKind(rawValue: entry.source)
+        }
+        guard let folder else { return nil }
+        return tree.tools.first { $0.folders.contains { $0.id == folder.id } }?.kind
+            ?? TracesTree.majorityTool(folder.sessions)
     }
 
     /// The binoculars: focus the map on the selected tool, or back to the
@@ -699,6 +711,8 @@ private struct MonitorMapPane: View {
     let inference: InferenceStore
     /// The tool the binoculars focus the Traces view on; nil for all.
     let focusTool: String?
+    /// The selection's tool: the map fades the others and rings it.
+    let selectedTool: String?
     /// The core's sentence for a tool's Private AI state.
     let sentence: (HarnessRow) -> String?
     @EnvironmentObject private var model: AppModel
@@ -726,13 +740,15 @@ private struct MonitorMapPane: View {
     private var map: some View {
         switch shownTab {
         case .traces:
+            let scene = FlowMapScene.traces(
+                traces.tree,
+                gate: .init(state: tracesState, status: traces.status, destinations: traces.destinations),
+                contributed: .init(history: history), selectedTool: selectedTool)
             FlowMapView(
-                scene: .traces(
-                    traces.tree.focused(on: focusTool),
-                    gate: .init(state: tracesState, status: traces.status, destinations: traces.destinations),
-                    contributed: .init(history: history)),
+                scene: scene,
                 legend: [.autoUpload, .ask, .ignore], zoomable: true,
-                accessibilityName: FlowMapScene.words?.mapLabel ?? MonitorWindowView.Tab.traces.title, state: tracesState)
+                accessibilityName: FlowMapScene.words?.mapLabel ?? MonitorWindowView.Tab.traces.title, state: tracesState,
+                focus: scene.focusPoint(tool: focusTool))
         case .privateAI:
             if let harnesses = inference.harnesses, let privateAILabel {
                 FlowMapView(

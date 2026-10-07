@@ -19,6 +19,9 @@ struct FlowMapView: View {
     /// moving: paused, unknown and core-down arcs are drawn still, so a
     /// missing or stale signal never reads as live.
     var state: ScreenState = .ready
+    /// The binoculars' point in the design space (#1146 `cameraFor`): the
+    /// map is scaled up about it, and every node stays drawn.
+    var focus: CGPoint? = nil
 
     @State private var zoom: CGFloat = 1
     @State private var hovered: String?
@@ -41,7 +44,7 @@ struct FlowMapView: View {
 
     var body: some View {
         GeometryReader { proxy in
-            let fit = FlowMapGeometry(size: proxy.size, zoom: zoom)
+            let fit = FlowMapGeometry(size: proxy.size, zoom: zoom, focus: focus)
             ZStack(alignment: .topLeading) {
                 TimelineView(.animation(minimumInterval: 1 / 30, paused: reduceMotion || !scene.flows || !state.isHealthy)) { timeline in
                     Canvas { context, _ in
@@ -142,6 +145,14 @@ struct FlowMapView: View {
         case .tool(let tool, let off):
             layer.fill(disc, with: .color(GlassColor.ink(0.12)))
             mark(tool, centre: centre, side: 16 * fit.scale, in: &layer)
+            if node.dashed {
+                // #1146's "Tool not watched": a dashed rim.
+                layer.stroke(disc, with: .color(GlassTokens.Color.statusOff.color),
+                             style: StrokeStyle(lineWidth: 1.5 * fit.scale, dash: [2 * fit.scale, 2 * fit.scale]))
+            }
+            if node.ringed {
+                ring(disc, radius: radius, centre: centre, in: &layer, colour: GlassColor.ink(0.35), scale: fit.scale)
+            }
             if off {
                 var slash = Path()
                 slash.move(to: CGPoint(x: centre.x - 9 * fit.scale, y: centre.y - 9 * fit.scale))
@@ -177,6 +188,11 @@ struct FlowMapView: View {
         layer.draw(
             Text(label).font(GlassTokens.TypeScale.micro.font.weight(.semibold)).foregroundStyle(GlassColor.textSecondary),
             at: CGPoint(x: centre.x, y: centre.y + radius + 9 * fit.scale))
+        if let sublabel = node.sublabel {
+            layer.draw(
+                Text(sublabel).font(GlassTokens.TypeScale.micro.font).foregroundStyle(GlassColor.textTertiary),
+                at: CGPoint(x: centre.x, y: centre.y + radius + 21 * fit.scale))
+        }
     }
 
     private func ring(_ disc: Path, radius: CGFloat, centre: CGPoint, in context: inout GraphicsContext, colour: Color, scale: CGFloat) {
@@ -224,6 +240,17 @@ struct FlowMapView: View {
             let size = text.measure(in: CGSize(width: 400, height: 40))
             context.draw(text, at: CGPoint(x: centre.x + r + 4, y: centre.y), anchor: .leading)
             x += (r * 2 + 4 + size.width + 14) / fit.scale
+        }
+        // #1146's last item: a tool that is not watched, a dashed ring.
+        if let word = FlowMapScene.words?.legendNotWatched {
+            let centre = fit.point(CGPoint(x: x, y: 730))
+            let r = 5 * fit.scale
+            let disc = Path(ellipseIn: CGRect(x: centre.x - r, y: centre.y - r, width: r * 2, height: r * 2))
+            context.stroke(disc, with: .color(GlassTokens.Color.statusOff.color),
+                           style: StrokeStyle(lineWidth: 1.5 * fit.scale, dash: [2 * fit.scale, 2 * fit.scale]))
+            context.draw(
+                Text(word).font(GlassTokens.TypeScale.micro.font.weight(.regular)).foregroundStyle(GlassColor.textTertiary),
+                at: CGPoint(x: centre.x + r + 4, y: centre.y), anchor: .leading)
         }
     }
 
@@ -297,16 +324,30 @@ struct FlowMapView: View {
 }
 
 /// The design space (580×760) fitted into the field, centred, and zoomed
-/// about the centre.
+/// about the centre; or, with a focus, scaled 1.6× about that point as
+/// #1146's camera is (`cameraFor`).
 struct FlowMapGeometry {
     let scale: CGFloat
     let origin: CGPoint
 
-    init(size: CGSize, zoom: CGFloat) {
+    static let focusScale: CGFloat = 1.6
+
+    init(size: CGSize, zoom: CGFloat, focus: CGPoint? = nil) {
         let design = FlowMapScene.size
         let fit = min(size.width / design.width, size.height / design.height)
-        scale = max(0.01, fit * zoom)
-        origin = CGPoint(x: (size.width - design.width * scale) / 2, y: (size.height - design.height * scale) / 2)
+        let centred = CGPoint(x: (size.width - design.width * fit) / 2, y: (size.height - design.height * fit) / 2)
+        if let focus {
+            // #1146: translate(290 - 1.6(x - 50), 380 - 1.6y) scale(1.6), in
+            // design units, then fitted.
+            let k = Self.focusScale
+            scale = max(0.01, fit * k)
+            origin = CGPoint(
+                x: centred.x + fit * (290 - k * (focus.x - 50)),
+                y: centred.y + fit * (380 - k * focus.y))
+        } else {
+            scale = max(0.01, fit * zoom)
+            origin = CGPoint(x: (size.width - design.width * scale) / 2, y: (size.height - design.height * scale) / 2)
+        }
     }
 
     func point(_ p: CGPoint) -> CGPoint {

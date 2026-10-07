@@ -449,6 +449,11 @@ public struct MonitorSafeguardsCopy: MonitorWordTable {
     public let heldByLimitOne: String
     public let heldByLimit: String
     public let capacityUnreadable: String
+    public let routingNotDeclared: String
+    public let routingAwaitingRows: String
+    public let routingRowsSeen: String
+    public let routingTokenUnreadable: String
+    public let routingUnknown: String
 
     enum CodingKeys: String, CodingKey, CaseIterable {
         case eyebrow
@@ -462,6 +467,23 @@ public struct MonitorSafeguardsCopy: MonitorWordTable {
         case heldByLimitOne = "held_by_limit_one"
         case heldByLimit = "held_by_limit"
         case capacityUnreadable = "capacity_unreadable"
+        case routingNotDeclared = "routing_not_declared"
+        case routingAwaitingRows = "routing_awaiting_rows"
+        case routingRowsSeen = "routing_rows_seen"
+        case routingTokenUnreadable = "routing_token_unreadable"
+        case routingUnknown = "routing_unknown"
+    }
+
+    /// The routing cell's short label for `routing.state` (#1146
+    /// `routingLabel`): a state this build does not know is Unknown.
+    public func routingLabel(_ state: String?) -> String {
+        switch state {
+        case "not_declared": routingNotDeclared
+        case "awaiting_rows": routingAwaitingRows
+        case "rows_seen": routingRowsSeen
+        case "token_unreadable": routingTokenUnreadable
+        default: routingUnknown
+        }
     }
 
     public static var consumedFields: [String] { CodingKeys.allCases.map(\.rawValue) }

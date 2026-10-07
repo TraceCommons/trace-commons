@@ -33,27 +33,33 @@ struct FolderInspector: View {
 
     var body: some View {
         if let words = store.words {
-            VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
-                InspectorHeader(tile: .folder, title: folder.label, sub: Self.headerSub(folder, words: words))
-                // The legend says its words or is not drawn, as the Summary's.
-                if let table = MonitorWords.table {
-                    HStack(spacing: GlassTokens.Space.s3) {
-                        GlassLegendCell(table.shared, value: Self.shared(folder, history: history), status: .shared)
-                        GlassLegendCell(table.kept, value: String(folder.sessions.count), status: .kept)
+            // Scrolls as the Summary and a session do: disclosure lines, a
+            // refusal or a short window never push the pane past the window.
+            ScrollView {
+                VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
+                    InspectorHeader(tile: .folder, title: folder.label, sub: Self.headerSub(folder, words: words))
+                    // The legend says its words or is not drawn, as the Summary's.
+                    if let table = MonitorWords.table {
+                        HStack(spacing: GlassTokens.Space.s3) {
+                            GlassLegendCell(table.shared, value: Self.shared(folder, history: history), status: .shared)
+                            GlassLegendCell(table.kept, value: String(folder.sessions.count), status: .kept)
+                        }
+                    }
+                    InspectorSection(words.inspector.project) {
+                        GlassKeyValueList(Self.rows(folder, words: words))
+                    }
+                    InspectorSection(words.inspector.contributionRule) {
+                        VStack(alignment: .leading, spacing: GlassTokens.Space.s3) { rule(words) }
+                    }
+                    if !folder.sessions.isEmpty && folder.mode != .ignore {
+                        InspectorSection(words.inspector.decisions) {
+                            decisions(words)
+                        }
                     }
                 }
-                InspectorSection(words.inspector.project) {
-                    GlassKeyValueList(Self.rows(folder, words: words))
-                }
-                InspectorSection(words.inspector.contributionRule) {
-                    VStack(alignment: .leading, spacing: GlassTokens.Space.s3) { rule(words) }
-                }
-                if !folder.sessions.isEmpty && folder.mode != .ignore {
-                    InspectorSection(words.inspector.decisions) {
-                        decisions(words)
-                    }
-                }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
+            .scrollIndicators(.never)
             .frame(maxWidth: .infinity, alignment: .leading)
             // Whole-window confirmations, as the tree's: the destructive
             // action right-most and never on Return; Escape cancels.
@@ -285,13 +291,18 @@ struct FolderInspector: View {
             : FirstRunCopy.fill(words.inspector.waitingSessions, ["count": String(count)])
     }
 
-    /// "n eligible", then the core's withheld line after a middle dot; nil
-    /// when the folder has no eligibility question (the daemon gave no
-    /// contributable count), so no count is drawn that nobody asked.
+    /// "n eligible", then the core's withheld line after a middle dot, as
+    /// #1146 draws it under every folder that offers Submit all; nil when
+    /// nothing in the folder can be submitted.
     static func eligibleLine(
         _ folder: TracesTree.FolderNode, offer: GroupSubmitOffer, words: MonitorTracesCopy
     ) -> String? {
-        guard folder.contributableCount != nil else { return nil }
+        guard folder.contributableCount != nil else {
+            // The daemon asked no eligibility question: the folder submits
+            // whole, and the line counts what Submit all eligible counts
+            // (#1146 draws "{n} eligible" beside it).
+            return offer.offersContribute ? FirstRunCopy.fill(words.tree.eligibleCount, ["count": String(offer.count)]) : nil
+        }
         let eligible = FirstRunCopy.fill(words.tree.eligibleCount, ["count": String(offer.count)])
         guard let withheld = offer.withheldLine, !withheld.isEmpty else { return eligible }
         return "\(eligible) · \(withheld)"
@@ -321,7 +332,7 @@ struct FolderInspector: View {
         let sizes = folder.sessions.map(\.sizeBytes)
         let size = sizes.contains(where: { $0 == nil })
             ? "—"
-            : ByteCountFormatter.string(fromByteCount: Int64(sizes.compactMap { $0 }.reduce(0, +)), countStyle: .file)
+            : ByteCountFormatter.string(fromByteCount: Int64(sizes.compactMap { $0 }.reduce(0, +)), countStyle: .memory)
         return [
             .init(words.inspector.path, folder.path.flatMap { $0.isEmpty ? nil : $0 } ?? "—", mono: true),
             .init(MonitorWords.waiting, String(folder.sessions.count)),

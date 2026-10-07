@@ -179,7 +179,7 @@ final class HomeTests: XCTestCase {
         XCTAssertFalse(HomeFormat.meta(row, compact: true).contains(MonitorWords.withdrawn))
         let full = HomeFormat.meta(row, compact: false)
         XCTAssertTrue(full.hasPrefix(day))
-        XCTAssertTrue(full.contains(ByteCountFormatter.string(fromByteCount: 48213, countStyle: .file)), full)
+        XCTAssertTrue(full.contains(ByteCountFormatter.string(fromByteCount: 48213, countStyle: .memory)), full)
         XCTAssertTrue(full.contains(MonitorWords.withdrawn), full)
     }
 

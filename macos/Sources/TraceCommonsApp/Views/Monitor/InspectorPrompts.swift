@@ -104,8 +104,8 @@ struct InspectorPrompts: View {
     private var storeUndo: some View {
         if let contributed = store.lastContributed, let words = store.words {
             let busy = store.acting.contains(contributed.entryId)
-            UndoBarCard(eyebrow: words.undo.approvalSaved, title: contributed.toast.line) {
-                EmptyView()
+            UndoBarCard(eyebrow: words.undo.approvalSaved, title: Self.title(contributed.label, toast: contributed.toast, words: words)) {
+                UndoDetail(toast: contributed.toast, label: contributed.label, at: contributed.at, words: words)
             } actions: {
                 if contributed.toast.offerUndo {
                     Button(busy ? words.undo.undoing : words.undoContribute) {
@@ -122,8 +122,8 @@ struct InspectorPrompts: View {
         }
         if let folder = store.lastContributedFolder, let words = store.words {
             let busy = store.writing.contains(folder.projectId)
-            UndoBarCard(eyebrow: words.undo.approvalSaved, title: folder.toast.line) {
-                EmptyView()
+            UndoBarCard(eyebrow: words.undo.approvalSaved, title: Self.title(folder.label, toast: folder.toast, words: words)) {
+                UndoDetail(toast: folder.toast, label: folder.label, at: folder.at, words: words)
             } actions: {
                 if folder.toast.offerUndo {
                     Button(busy ? words.undo.undoing : words.undoContribute) {
@@ -144,6 +144,38 @@ struct InspectorPrompts: View {
                 .buttonStyle(GlassButtonStyle(.glass))
                 .disabled(busy)
             TracesRefusal(store: store, entryId: kept)
+        }
+    }
+
+    /// #1146's undo title, "{label} approved", for the folder the
+    /// contribution came from; the core's toast when no folder is named.
+    static func title(_ label: String?, toast: SubmitToast, words: MonitorTracesCopy) -> String {
+        guard let label, !label.isEmpty, toast.offerUndo else { return toast.line }
+        return words.undo.approved.replacingOccurrences(of: "{label}", with: label)
+    }
+}
+
+/// The line under a store undo's title: while Undo is offered, how long
+/// ago it was approved (the accepted count-up), else #1146's "Upload may
+/// already have started."; then the core's toast, when the title did not
+/// already say it, so its redaction and flag counts are never lost.
+private struct UndoDetail: View {
+    let toast: SubmitToast
+    let label: String?
+    let at: Date
+    let words: MonitorTracesCopy
+
+    var body: some View {
+        if toast.offerUndo {
+            TimelineView(.periodic(from: at, by: 1)) { context in
+                Text(QueueLegacyWords.approvedAgo(max(0, Int(context.date.timeIntervalSince(at)))))
+                    .monospacedDigit()
+            }
+        } else {
+            Text(words.undo.mayHaveStarted)
+        }
+        if InspectorPrompts.title(label, toast: toast, words: words) != toast.line {
+            Text(toast.line).fixedSize(horizontal: false, vertical: true)
         }
     }
 }

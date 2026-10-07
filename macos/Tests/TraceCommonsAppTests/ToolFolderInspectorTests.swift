@@ -84,9 +84,16 @@ final class ToolFolderInspectorTests: XCTestCase {
             FolderInspector.eligibleLine(asked, offer: GroupSubmitOffer(count: 2, offersContribute: true, withheldLine: nil),
                                          words: words),
             FirstRunCopy.fill(words.tree.eligibleCount, ["count": "2"]))
+        // With no eligibility question the folder submits whole, and the
+        // line counts what Submit all eligible counts (#1146); nothing to
+        // submit draws no line.
         let unasked = TracesTree.FolderNode(id: "p", label: "api", mode: .ask, sessions: folder.sessions)
+        XCTAssertEqual(
+            FolderInspector.eligibleLine(
+                unasked, offer: GroupSubmitOffer(count: 1, offersContribute: true, withheldLine: nil), words: words),
+            FirstRunCopy.fill(words.tree.eligibleCount, ["count": "1"]))
         XCTAssertNil(FolderInspector.eligibleLine(
-            unasked, offer: GroupSubmitOffer(count: 1, offersContribute: true, withheldLine: nil), words: words))
+            unasked, offer: GroupSubmitOffer(count: 0, offersContribute: false, withheldLine: nil), words: words))
 
         // Shared counts this project's standing contributions, and is a
         // dash while history is unread: never zero for unknown.

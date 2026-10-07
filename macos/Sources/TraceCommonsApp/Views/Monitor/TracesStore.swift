@@ -108,6 +108,12 @@ final class TracesStore {
     struct Contributed: Equatable {
         let entryId: String
         let toast: SubmitToast
+        /// The session's folder name, for #1146's "{label} approved"; nil
+        /// when the tree no longer lists the session.
+        var label: String? = nil
+        /// When the core took it, on this machine's clock: the card counts
+        /// up from here (the accepted count-up, never a countdown).
+        var at = Date()
     }
 
     /// The last contribution, until it is undone or another is made.
@@ -118,6 +124,8 @@ final class TracesStore {
     struct ContributedFolder: Equatable {
         let projectId: String
         let toast: SubmitToast
+        var label: String? = nil
+        var at = Date()
     }
 
     private(set) var lastContributedFolder: ContributedFolder?
@@ -440,7 +448,9 @@ final class TracesStore {
                 // `notApproved` and is said as a refusal, never as success.
                 let response = try await client.approve(entryId: entryId, verdict: verdict, correction: correction)
                 guard mine == attachment else { return }
-                lastContributed = Contributed(entryId: entryId, toast: response.toast)
+                lastContributed = Contributed(
+                    entryId: entryId, toast: response.toast,
+                    label: tree.allSessions.first { $0.entryId == entryId }?.projectLabel)
                 // One undo slot: a single-session contribute ends the folder's undo.
                 lastContributedFolder = nil
                 // A newer decision ends the older Keep's undo.
@@ -668,7 +678,7 @@ final class TracesStore {
         do {
             let response = try await client.approveFolder(projectId: folder.id, verdict: verdict)
             guard mine == attachment else { return }
-            lastContributedFolder = ContributedFolder(projectId: folder.id, toast: response.toast)
+            lastContributedFolder = ContributedFolder(projectId: folder.id, toast: response.toast, label: folder.label)
             lastContributed = nil
             folderNotice = Self.eligibilityCalls
                 .withheldLine(Int64(clamping: response.excludedIneligible ?? 0))

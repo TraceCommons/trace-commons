@@ -14,9 +14,10 @@ import TCShellCore
 /// session that has gone (uploaded, expired, dismissed elsewhere) is the
 /// Summary, never a stale card. A folder is read only through
 /// `TracesStore.selectedFolder` and shows Ron's Folder inspector
-/// (`FolderInspector`); one that has gone is the Summary too. On History it
-/// keeps the Traces selection's card: History's opened row is drawn in
-/// History's left pane, never here.
+/// (`FolderInspector`); one that has gone is the Summary too. On History,
+/// with no row open, it keeps the Traces selection's card; an opened
+/// History row is the window's own inspector arm (`HistoryInspectorPane`,
+/// V8), never this host.
 struct TracesInspectorHost: View {
     @EnvironmentObject private var model: AppModel
     let traces: TracesStore

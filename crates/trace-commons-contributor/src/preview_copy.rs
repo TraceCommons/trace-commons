@@ -442,6 +442,13 @@ pub struct MonitorSafeguardsCopy {
     /// `witness_capacity` was reported but could not be read: never "none
     /// waiting".
     pub capacity_unreadable: &'static str,
+    /// The inference routing cell's short state label (#1146
+    /// `routingLabel`), by `routing.state`; anything else is `routing_unknown`.
+    pub routing_not_declared: &'static str,
+    pub routing_awaiting_rows: &'static str,
+    pub routing_rows_seen: &'static str,
+    pub routing_token_unreadable: &'static str,
+    pub routing_unknown: &'static str,
 }
 
 /// History's refresh and account sign-in controls: the controls Ron's
@@ -925,6 +932,14 @@ pub struct MonitorFlowMapCopy {
     /// `{label}` is the tools connected.
     pub connected: &'static str,
     pub connected_line: &'static str,
+    /// The Traces legend's last item: a tool that is not watched, drawn
+    /// dashed.
+    pub legend_not_watched: &'static str,
+    /// The Private AI destination's label: the credential the tools'
+    /// calls are answered with.
+    pub credential: &'static str,
+    /// Under the destination when the core lists no tool.
+    pub none_found: &'static str,
 }
 
 /// Ron's #1146 Settings section names (`features/settings/sections.ts`), in
@@ -1168,6 +1183,11 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             held_by_limit: "{count} queued sessions held by limit",
             capacity_unreadable: "Some approved sessions may be waiting and have not been sent, \
                 but this build could not read how many or why.",
+            routing_not_declared: "Not declared",
+            routing_awaiting_rows: "Waiting for proxy rows",
+            routing_rows_seen: "Receiving proxy rows",
+            routing_token_unreadable: "Proxy token unreadable",
+            routing_unknown: "Unknown",
         },
         history_actions: MonitorHistoryActionsCopy {
             request_refresh: "Request server refresh",
@@ -1265,6 +1285,9 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             folder_counts: "{label} waiting, {count} contributed.",
             connected: "{label} connected.",
             connected_line: "{label} connected",
+            legend_not_watched: "Tool not watched",
+            credential: "NEAR AI credential",
+            none_found: "No configured tools found.",
         },
         home_history: MonitorHomeHistoryCopy {
             drafts_tag: "Drafts",

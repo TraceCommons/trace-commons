@@ -35,8 +35,8 @@ final class TracesInspectorHostTests: XCTestCase {
             XCTAssertFalse(body.contains(gone), "the inspector host still draws \(gone)")
         }
         XCTAssertTrue(body.contains("switch shown {"))
-        // History's detail is drawn in History's left pane (Task 8 of the
-        // #1146 port): the host has no History arm and never draws it.
+        // An opened History row is drawn by the window's own inspector arm
+        // (`HistoryInspectorPane`, V8): the host has no History arm.
         let hostSource = try Self.text("Views/Monitor/TracesInspectorHost.swift")
         XCTAssertFalse(hostSource.contains("HistoryDetailInspector("), "the host draws History's detail")
         XCTAssertFalse(hostSource.contains("historyRow"), "the host is handed a History row")
@@ -49,7 +49,10 @@ final class TracesInspectorHostTests: XCTestCase {
 
     /// V5 and V6 of the #1146 delta: the undos, the offers and the
     /// first-contribution note are drawn above the Traces tree, under the
-    /// health banners, and in no inspector.
+    /// health banners, and in no inspector. R-LAYOUT-1: they are the first
+    /// rows of the tree's own scroll, so however tall they are they never
+    /// push the tree, the graph footer or the panes beside it out of the
+    /// window; no branch draws them outside a ScrollView.
     func test_offersUndoAndHealthSitAboveTheTree() throws {
         let tree = try Self.text("Views/Monitor/TracesViews.swift")
         let treeView = try XCTUnwrap(tree.range(of: "struct TracesTreeView"))
@@ -57,10 +60,24 @@ final class TracesInspectorHostTests: XCTestCase {
         let body = String(tree[treeView.lowerBound..<slot.lowerBound])
         let banners = try XCTUnwrap(body.range(of: "TracesHealth.banners("))
         let prompts = try XCTUnwrap(body.range(of: "InspectorPrompts(store: store)"))
-        let scroll = try XCTUnwrap(body.range(of: "ScrollViewReader { proxy in"))
         XCTAssertLessThan(banners.lowerBound, prompts.lowerBound, "the banners come first")
-        XCTAssertLessThan(prompts.lowerBound, scroll.lowerBound, "the prompts precede the tree")
         XCTAssertEqual(body.components(separatedBy: "InspectorPrompts(").count - 1, 1)
+        // The tree's scroll draws the prompts before its first folder.
+        let scroll = try XCTUnwrap(body.range(of: "ScrollViewReader { proxy in"))
+        let folders = try XCTUnwrap(body.range(of: "ForEach(store.tree.folders)", range: scroll.upperBound..<body.endIndex))
+        let inTree = try XCTUnwrap(body.range(of: "prompts\n", options: .regularExpression,
+                                              range: scroll.upperBound..<folders.lowerBound))
+        XCTAssertLessThan(inTree.lowerBound, folders.lowerBound, "the prompts precede the tree")
+        // Every use of the prompts in the view body is inside a ScrollView.
+        let viewBody = try XCTUnwrap(body.range(of: "var body: some View {"))
+        let bodyEnd = try XCTUnwrap(body.range(of: "/// A mode change's confirmation"))
+        let drawn = String(body[viewBody.upperBound..<bodyEnd.lowerBound])
+        let uses = drawn.components(separatedBy: "\n").filter { $0.trimmingCharacters(in: .whitespaces) == "prompts" }
+        XCTAssertEqual(uses.count, 3, "the loading, empty and tree branches each draw the prompts")
+        XCTAssertEqual(drawn.components(separatedBy: "ScrollView {").count - 1, 3,
+                       "each branch drawing the prompts scrolls them")
+        XCTAssertFalse(body.contains("            InspectorPrompts(store: store)\n            if store.phase"),
+                       "the prompts are drawn above the tree's scroll again")
         XCTAssertTrue(body.contains("maxQueueEntries: model.daemonSettings?.maxQueueEntries"),
                       "the queue-full banner names the configured limit")
         let (pane, _) = try Self.inspectorArms()

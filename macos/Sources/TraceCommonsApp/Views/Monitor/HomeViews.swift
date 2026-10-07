@@ -1338,7 +1338,7 @@ enum HomeFormat {
         if let source = row.source { parts.append(InferenceTabView.toolName(source)) }
         if !compact {
             if let bytes = row.uploadedBytes {
-                parts.append(ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file))
+                parts.append(ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .memory))
             }
             if let withdrawn = row.revokedAt ?? row.withdrawnAt {
                 parts.append("\(MonitorWords.withdrawn) \(day(withdrawn))")
