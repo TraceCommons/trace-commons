@@ -3,16 +3,18 @@ import TCBridge
 import TCDesign
 import TCShellCore
 
-/// What the contributor must be able to see whenever it is live, at the top
-/// of the inspector on Home, Traces and History (Ron's #1146
-/// `WaitingPrompts`): the action messages, the undos (the approval's, a
-/// session's Contribute and a folder's Submit all, in Ron's `UndoBar` shape,
-/// and Undo keep), the arming offer, the Private AI offer and the
-/// first-contribution note.
+/// What the contributor must be able to see whenever it is live, above the
+/// Traces tree under its health banners: the action messages, the undos
+/// (the approval's, a session's Contribute and a folder's Submit all, in
+/// Ron's `UndoBar` shape, and Undo keep), the arming offer, the Private AI
+/// offer and the first-contribution note. Ron's #1146 mounts these as
+/// `WaitingPrompts` at the top of the inspector; offers, undo and health
+/// above the tree is an accepted difference (owner, 2026-10-07), so none of
+/// them depends on the inspector being shown.
 ///
-/// The inspector opens itself when one of these appears (`InspectorDemand`),
-/// so none runs out of sight in a window that started with it closed. Every
-/// sentence is the core's or `QueueLegacyWords`'.
+/// The inspector still opens when one of these appears (`InspectorDemand`),
+/// in addition to them showing here. Every sentence is the core's or
+/// `QueueLegacyWords`'.
 struct InspectorPrompts: View {
     @EnvironmentObject private var model: AppModel
     let store: TracesStore
@@ -83,11 +85,12 @@ struct InspectorPrompts: View {
                 // The app's one Return binding, on the safe action: a
                 // keystroke pulls a transcript back.
                 Button(store.words?.undoContribute ?? QueueLegacyWords.undo) { model.undoApproval() }
-                    .buttonStyle(GlassButtonStyle(.primary))
+                    .buttonStyle(GlassButtonStyle(.glass))
                     .keyboardShortcut(.defaultAction)
             }
+            // Ron's `TertiaryLink`: closing the card is the lesser action.
             Button(dismissWord) { model.dismissUndo() }
-                .buttonStyle(GlassButtonStyle(.glass))
+                .buttonStyle(GlassButtonStyle(.link))
                 .help(undo.offerUndo ? QueueLegacyWords.closeNoticeStillSends : QueueLegacyWords.closeNotice)
         }
     }
@@ -112,7 +115,7 @@ struct InspectorPrompts: View {
                     .disabled(busy)
                 }
                 Button(dismissWord) { store.dismissContributed() }
-                    .buttonStyle(GlassButtonStyle(.glass))
+                    .buttonStyle(GlassButtonStyle(.link))
                     .disabled(busy)
             }
             TracesRefusal(store: store, entryId: contributed.entryId)
@@ -130,7 +133,7 @@ struct InspectorPrompts: View {
                     .disabled(busy)
                 }
                 Button(dismissWord) { store.dismissContributedFolder() }
-                    .buttonStyle(GlassButtonStyle(.glass))
+                    .buttonStyle(GlassButtonStyle(.link))
                     .disabled(busy)
             }
             // A refused undo is said beside the folder (`folderNotes`).
@@ -145,9 +148,10 @@ struct InspectorPrompts: View {
     }
 }
 
-/// Ron's `UndoBar` card: an eyebrow, the line that says what was approved,
-/// the lines under it, and its buttons. Every word is the caller's, from
-/// the core.
+/// Ron's `UndoBar` card (`undo-bar.tsx`): the eyebrow, the line that says
+/// what was approved and the lines under it on the left, its buttons on the
+/// right, Undo then the Dismiss link. Every word is the caller's, from the
+/// core.
 private struct UndoBarCard<Detail: View, Actions: View>: View {
     let eyebrow: String?
     let title: String
@@ -156,21 +160,26 @@ private struct UndoBarCard<Detail: View, Actions: View>: View {
 
     var body: some View {
         GlassCard {
-            VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
-                if let eyebrow {
-                    Text(eyebrow)
-                        .glassType(GlassTokens.TypeScale.eyebrow)
-                        .foregroundStyle(GlassColor.textTertiary)
+            HStack(alignment: .center, spacing: GlassTokens.Space.s8) {
+                VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
+                    if let eyebrow {
+                        Text(eyebrow)
+                            .glassType(GlassTokens.TypeScale.eyebrow)
+                            .foregroundStyle(GlassColor.textTertiary)
+                    }
+                    Text(title)
+                        .glassType(GlassTokens.TypeScale.bodyStrong)
+                        .foregroundStyle(GlassColor.textPrimary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    VStack(alignment: .leading, spacing: GlassTokens.Space.s1) { detail() }
+                        .glassType(GlassTokens.TypeScale.caption)
+                        .foregroundStyle(GlassColor.textSecondary)
                 }
-                Text(title)
-                    .glassType(GlassTokens.TypeScale.bodyStrong)
-                    .foregroundStyle(GlassColor.textPrimary)
-                    .fixedSize(horizontal: false, vertical: true)
-                VStack(alignment: .leading, spacing: GlassTokens.Space.s1) { detail() }
-                    .glassType(GlassTokens.TypeScale.caption)
-                    .foregroundStyle(GlassColor.textSecondary)
-                HStack(spacing: GlassTokens.Space.s3) { actions() }
-                    .padding(.top, GlassTokens.Space.s2)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .layoutPriority(1)
+                HStack(spacing: GlassTokens.Space.s4) { actions() }
+                    .lineLimit(1)
+                    .fixedSize()
             }
         }
         .accessibilityElement(children: .contain)

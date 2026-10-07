@@ -5,10 +5,11 @@ import TCShellCore
 
 // The pieces the inspector's prompts draw (`InspectorPrompts`): the two
 // consent offers, the first-contribution note, why sessions stopped
-// waiting, and a refused action in the core's words. They were the offers
-// bar above the Traces tree; Ron's #1146 puts them at the top of the
-// inspector, which opens itself when one appears (`InspectorDemand`).
-// Every sentence is the core's or `QueueLegacyWords`'.
+// waiting, and a refused action in the core's words. Ron's #1146 puts them
+// at the top of the inspector; on macOS they stay above the Traces tree
+// (owner, 2026-10-07, an accepted difference), and the inspector still
+// opens beside them when one appears (`InspectorDemand`). Every sentence is
+// the core's or `QueueLegacyWords`'.
 
 /// The core's words for a refused action on `entryId`, if there is one.
 /// The prompts and the session card both say a refusal through this.

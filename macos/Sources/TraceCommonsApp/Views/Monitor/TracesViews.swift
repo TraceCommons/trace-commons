@@ -14,6 +14,9 @@ import TCShellCore
 /// disclosure bundle's folder mode names) (`ShellWordingTests`).
 struct TracesTreeView: View {
     let store: TracesStore
+    /// The queue's configured limit, which the queue-full banner names,
+    /// and the prompts drawn above the tree.
+    @EnvironmentObject private var model: AppModel
     /// The folder or session selected; nil for none.
     @Binding var selection: MonitorSelection?
     /// A session's Review pill: select it and show the inspector its review
@@ -81,13 +84,18 @@ struct TracesTreeView: View {
             if let notice = store.folderNotice {
                 GlassNotice(tone: .ask) { Text(notice) }
             }
-            // A core that does not answer, or a read it refused, is said
-            // beside the tree too, so the pane never reads as current over a
-            // last good tree with the inspector hidden. The safeguards and
-            // the prompts are the inspector's (`TracesInspectorHost`).
-            if case .failed(let error) = store.phase, let line = store.words?.line(for: error) {
-                GlassNotice(tone: .outside, title: line) { EmptyView() }
-            }
+            // Offers, undo and health above the tree (owner, 2026-10-07: an
+            // accepted difference from #1146, which puts them in the
+            // inspector). Why approved sessions are not moving, or that the
+            // core is not answering, first: the pane never reads as current
+            // over a last good tree, and an unread status is never drawn as
+            // healthy. Then the undos, the offers and the first-contribution
+            // note (`InspectorPrompts`).
+            ForEach(TracesHealth.banners(
+                phase: store.phase, status: store.status, words: store.words, coreDown: TracesHealth.coreDownLine,
+                maxQueueEntries: model.daemonSettings?.maxQueueEntries)
+            ) { GlassHealthBanner(banner: $0) }
+            InspectorPrompts(store: store)
             if store.phase == .loading && isEmpty {
                 GlassSpinner(standalone: true).frame(maxWidth: .infinity)
             } else if isEmpty && store.phase == .loaded {

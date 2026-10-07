@@ -5,10 +5,11 @@ import TCDesign
 @testable import TCShellCore
 @testable import TraceCommonsApp
 
-/// Ron's inspector host (#1146, Task 3 of the #1241 port): the health
-/// banners, then the prompts, then the selection's inspector, on Home,
-/// Traces and History; Inference keeps its own. The inspector opens itself
-/// when something it must show appears, and never closes itself.
+/// Ron's inspector host (#1146, Task 3 of the #1241 port): the selection's
+/// inspector on Home, Traces and History; Inference keeps its own. The
+/// health banners and the prompts are drawn above the Traces tree (owner,
+/// 2026-10-07). The inspector opens itself when something it must show
+/// appears, and never closes itself.
 @MainActor
 final class TracesInspectorHostTests: XCTestCase {
     static func text(_ rel: String) throws -> String {
@@ -24,21 +25,16 @@ final class TracesInspectorHostTests: XCTestCase {
         return String(host[body.lowerBound..<end.lowerBound])
     }
 
-    /// Review Focus 4: the health banners are drawn above whatever the
-    /// selection shows, outside the switch on it, so selecting a session
-    /// never hides a held queue or a core that is down.
-    func test_healthBannersStayVisibleWithASessionSelected() throws {
+    /// Review Focus 4, with offers, undo and health above the tree (owner,
+    /// 2026-10-07): the host draws only the selection's inspector, so
+    /// selecting a session can never hide a held queue, a core that is down,
+    /// an undo or an offer, which all sit above the tree.
+    func test_theHostDrawsOnlyTheSelection() throws {
         let body = try Self.hostBody()
-        let banners = try XCTUnwrap(body.range(of: "TracesHealth.banners("))
-        let prompts = try XCTUnwrap(body.range(of: "InspectorPrompts(store: traces)"))
-        let selection = try XCTUnwrap(body.range(of: "switch shown {"))
-        XCTAssertLessThan(banners.lowerBound, prompts.lowerBound, "the banners come first")
-        XCTAssertLessThan(prompts.lowerBound, selection.lowerBound, "the prompts precede the selection's inspector")
-        XCTAssertEqual(body.components(separatedBy: "TracesHealth.banners(").count - 1, 1)
-        XCTAssertTrue(body.contains("GlassHealthBanner(banner: $0)"))
-        XCTAssertTrue(body.contains("maxQueueEntries: model.daemonSettings?.maxQueueEntries"),
-                      "the queue-full banner names the configured limit")
-        XCTAssertTrue(body.contains("coreDown: TracesHealth.coreDownLine"))
+        for gone in ["TracesHealth.banners(", "GlassHealthBanner(", "InspectorPrompts("] {
+            XCTAssertFalse(body.contains(gone), "the inspector host still draws \(gone)")
+        }
+        XCTAssertTrue(body.contains("switch shown {"))
         // History's detail is drawn in History's left pane (Task 8 of the
         // #1146 port): the host has no History arm and never draws it.
         let hostSource = try Self.text("Views/Monitor/TracesInspectorHost.swift")
@@ -47,9 +43,31 @@ final class TracesInspectorHostTests: XCTestCase {
         XCTAssertFalse(hostSource.contains("case history"))
         // The session arm is reached only through the resolved selection,
         // so a session that has gone is the Summary, not a stale card.
-        let host = try Self.text("Views/Monitor/TracesInspectorHost.swift")
-        XCTAssertTrue(host.contains("traces.selectedSession(selection)"))
-        XCTAssertFalse(host.contains("case .session(let entryID)"), "never an entry picked by the raw selection")
+        XCTAssertTrue(hostSource.contains("traces.selectedSession(selection)"))
+        XCTAssertFalse(hostSource.contains("case .session(let entryID)"), "never an entry picked by the raw selection")
+    }
+
+    /// V5 and V6 of the #1146 delta: the undos, the offers and the
+    /// first-contribution note are drawn above the Traces tree, under the
+    /// health banners, and in no inspector.
+    func test_offersUndoAndHealthSitAboveTheTree() throws {
+        let tree = try Self.text("Views/Monitor/TracesViews.swift")
+        let treeView = try XCTUnwrap(tree.range(of: "struct TracesTreeView"))
+        let slot = try XCTUnwrap(tree.range(of: "struct PreviewSlot"))
+        let body = String(tree[treeView.lowerBound..<slot.lowerBound])
+        let banners = try XCTUnwrap(body.range(of: "TracesHealth.banners("))
+        let prompts = try XCTUnwrap(body.range(of: "InspectorPrompts(store: store)"))
+        let scroll = try XCTUnwrap(body.range(of: "ScrollViewReader { proxy in"))
+        XCTAssertLessThan(banners.lowerBound, prompts.lowerBound, "the banners come first")
+        XCTAssertLessThan(prompts.lowerBound, scroll.lowerBound, "the prompts precede the tree")
+        XCTAssertEqual(body.components(separatedBy: "InspectorPrompts(").count - 1, 1)
+        XCTAssertTrue(body.contains("maxQueueEntries: model.daemonSettings?.maxQueueEntries"),
+                      "the queue-full banner names the configured limit")
+        let (pane, _) = try Self.inspectorArms()
+        XCTAssertFalse(pane.contains("InspectorPrompts("), "an inspector arm still draws the prompts")
+        XCTAssertFalse(pane.contains("TracesHealth.banners("), "an inspector arm still draws the banners")
+        let window = try Self.text("Views/MonitorWindowView.swift")
+        XCTAssertEqual(window.components(separatedBy: "InspectorPrompts(").count - 1, 0)
     }
 
     /// An undo appearing is a new demand, and a new demand opens the
@@ -117,45 +135,41 @@ final class TracesInspectorHostTests: XCTestCase {
         let pane = String(window[inspector.upperBound..<end.lowerBound])
         // The switch is on the shown tab inside the onboarding gate (R15).
         let switchStart = try XCTUnwrap(pane.range(of: "switch Self.shownTab(tab, requiresOnboarding: model.requiresOnboarding) {"))
-        let arms = pane[switchStart.upperBound...].components(separatedBy: "\n                    case ").dropFirst()
+        let arms = pane[switchStart.upperBound...].components(separatedBy: "\n                        case ").dropFirst()
         return (pane, Array(arms))
     }
 
-    /// Inference keeps `PrivateAIInspectorView`, under the prompts, as
-    /// Ron's shell mounts `WaitingPrompts` above `InferenceInspector`; Home,
-    /// Traces and History get the host.
+    /// Inference keeps `PrivateAIInspectorView`; Home, Traces and History
+    /// get the host. Neither arm draws the prompts: they are above the tree.
     func test_inferenceKeepsItsOwnInspector() throws {
         let (pane, arms) = try Self.inspectorArms()
         let inference = try XCTUnwrap(arms.first { $0.hasPrefix(".inference:") })
-        let prompts = try XCTUnwrap(inference.range(of: "InspectorPrompts(store: traces)"))
-        let own = try XCTUnwrap(inference.range(of: "PrivateAIInspectorView(store: inference"))
-        XCTAssertLessThan(prompts.lowerBound, own.lowerBound, "the prompts sit above Inference's own inspector")
-        XCTAssertFalse(inference.contains("TracesHealth.banners("), "the health banners are the Traces inspector's")
+        XCTAssertTrue(inference.contains("PrivateAIInspectorView(store: inference"))
+        XCTAssertFalse(inference.contains("InspectorPrompts("), "the prompts are above the tree")
+        XCTAssertFalse(inference.contains("TracesHealth.banners("), "the health banners are above the tree")
         XCTAssertFalse(inference.contains("TracesInspectorHost("))
         XCTAssertFalse(pane.contains("SessionReviewCard("), "the session card is the host's to draw")
         XCTAssertFalse(pane.contains("HomeSummaryInspector("), "Home's summary is the host's to draw")
         XCTAssertEqual(pane.components(separatedBy: "PrivateAIInspectorView(").count - 1, 1)
     }
 
-    /// Every arm of the window's inspector switch draws the prompts, and
-    /// every arm but Inference draws them through the host, under the
-    /// health banners. No arm draws a detail that skips them: a History row
-    /// is the host's to show.
-    func test_everyInspectorArmDrawsThePrompts() throws {
+    /// Every arm but Inference draws the host, and no arm draws a detail
+    /// that skips it: a History row is the left pane's to show.
+    func test_everyInspectorArmButInferenceDrawsTheHost() throws {
         let (pane, arms) = try Self.inspectorArms()
         XCTAssertEqual(arms.count, 2, "one arm for Inference, one host for the rest")
-        for arm in arms {
-            if arm.hasPrefix(".inference:") {
-                XCTAssertTrue(arm.contains("InspectorPrompts(store: traces)"))
-            } else {
-                XCTAssertTrue(arm.contains("TracesInspectorHost("), "an arm skips the host: \(arm)")
-            }
+        for arm in arms where !arm.hasPrefix(".inference:") {
+            XCTAssertTrue(arm.contains("TracesInspectorHost("), "an arm skips the host: \(arm)")
         }
         XCTAssertFalse(pane.contains("HistoryDetailInspector("), "History's detail is drawn in History's left pane")
         let flat = pane.split(whereSeparator: \.isWhitespace).joined(separator: " ")
         // History included: the inspector keeps the Traces selection's card
         // (Task 8 of the #1146 port).
         XCTAssertTrue(flat.contains("TracesInspectorHost(traces: traces, home: home, selection: selection)"))
+        // Ron's inspector inset: 16 across and 18 down (L5).
+        XCTAssertTrue(flat.contains("GlassPane(padding: 0) {"))
+        XCTAssertTrue(flat.contains(".padding(.horizontal, GlassTokens.Space.s8)"))
+        XCTAssertTrue(flat.contains(".padding(.vertical, GlassTokens.Space.s8 + GlassTokens.Space.s1)"))
     }
 
     /// A demand already there when the window opens opens the inspector,
@@ -268,10 +282,10 @@ final class TracesInspectorHostTests: XCTestCase {
         XCTAssertTrue(prompts.contains("eyebrow: store.words?.undo.approvalSaved"))
     }
 
-    /// The offers bar above the tree is gone: the tree pane holds the tree
-    /// and its loading and error lines, and the prompts live in the
-    /// inspector, which a new one opens.
-    func test_theOffersBarIsGone() throws {
+    /// The old offers bar's name is gone: the prompts above the tree are
+    /// `InspectorPrompts`, one view, wherever they are drawn. Its pieces
+    /// are all there.
+    func test_thePromptsHoldEveryUndoAndOffer() throws {
         for rel in ["Views/Monitor/TracesViews.swift", "Views/Monitor/TracesOffers.swift",
                     "Views/MonitorWindowView.swift", "Views/Monitor/TracesInspectorHost.swift",
                     "Views/Monitor/InspectorPrompts.swift"] {
@@ -279,14 +293,12 @@ final class TracesInspectorHostTests: XCTestCase {
         }
         let tree = try Self.text("Views/Monitor/TracesViews.swift")
         let treeView = try XCTUnwrap(tree.range(of: "struct TracesTreeView"))
-        let inspector = try XCTUnwrap(tree.range(of: "struct PreviewSlot"))
-        let body = tree[treeView.lowerBound..<inspector.lowerBound]
-        for gone in ["TracesHealth.banners(", "GlassHealthBanner(", "model.undo", "store.lastContributed",
-                     "model.armingOffer", "CertificateSection("] {
-            XCTAssertFalse(body.contains(gone), "the tree pane still draws \(gone)")
+        let slot = try XCTUnwrap(tree.range(of: "struct PreviewSlot"))
+        let body = tree[treeView.lowerBound..<slot.lowerBound]
+        // The tree draws the prompts through the one view, not its pieces.
+        for piece in ["model.undo", "store.lastContributed", "model.armingOffer", "CertificateSection("] {
+            XCTAssertFalse(body.contains(piece), "the tree pane draws \(piece) itself")
         }
-        // A core that does not answer is still said beside the tree.
-        XCTAssertTrue(body.contains("if case .failed(let error) = store.phase, let line = store.words?.line(for: error)"))
 
         let prompts = try Self.text("Views/Monitor/InspectorPrompts.swift")
         for needle in ["model.undo", "store.lastContributed", "store.lastContributedFolder", "store.lastKept",
@@ -294,6 +306,11 @@ final class TracesInspectorHostTests: XCTestCase {
                        "model.lastActionNotice", "FirstContributionGlassNote("] {
             XCTAssertTrue(prompts.contains(needle), "InspectorPrompts.swift lacks \(needle)")
         }
+        // Ron's `UndoBar`: Undo a glass button, Dismiss a link, beside the
+        // words rather than under them.
+        XCTAssertEqual(prompts.components(separatedBy: ".buttonStyle(GlassButtonStyle(.link))").count - 1, 3)
+        XCTAssertFalse(prompts.contains("GlassButtonStyle(.primary)"), "Undo is a glass button, as Ron's")
+        XCTAssertTrue(prompts.contains("HStack(alignment: .center, spacing: GlassTokens.Space.s8) {"))
         for rel in ["Views/Monitor/TracesInspectorHost.swift", "Views/Monitor/InspectorPrompts.swift"] {
             try LegacySymbols.assertClean(rel)
             XCTAssertTrue(GlassSurfaceRulesTests.files.contains(rel), "\(rel) is not under the glass rules")

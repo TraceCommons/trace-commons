@@ -47,13 +47,62 @@ final class ToolFolderInspectorTests: XCTestCase {
         XCTAssertEqual(FolderInspector.rows(bucket, words: words).first?.value, "—")
 
         let source = try TracesParityTests.text("Views/Monitor/ToolFolderInspectors.swift")
-        XCTAssertTrue(source.contains("if Self.offersSubmitAll(folder, store: store) {"))
+        XCTAssertTrue(source.contains("let submits = Self.offersSubmitAll(folder, store: store)"))
+        XCTAssertTrue(source.contains("if submits {"))
+        XCTAssertTrue(source.contains("if submits, let outcome = store.disclosure?.outcome {"))
         XCTAssertTrue(source.contains("words.inspector.contributionRule"))
         XCTAssertTrue(source.contains("words.inspector.noRule"))
         XCTAssertFalse(source.contains("struct ToolInspector"), "no tool inspector: the tree has no tool level")
         let host = try TracesParityTests.text("Views/Monitor/TracesInspectorHost.swift")
         XCTAssertTrue(host.contains("traces.selectedFolder(selection)"))
-        XCTAssertTrue(host.contains("FolderInspector(store: traces, folder: folder)"))
+        XCTAssertTrue(host.contains("FolderInspector(store: traces, folder: folder, history: history)"))
+    }
+
+    /// P15 and V3 of the #1146 delta: Ron's header, the shared/kept legend,
+    /// three sections with bare content, and his Decisions card, whose
+    /// Submit reads "Submit all eligible (n)" on one line.
+    func test_theFolderInspectorIsRonsShape() async throws {
+        let (store, folder) = try await loaded()
+        let words = try XCTUnwrap(store.words)
+        let offer = store.groupOffer(folder)
+        let submit = FolderInspector.submitAllTitle(offer.count, words: words)
+        XCTAssertEqual(submit, FirstRunCopy.fill(words.inspector.submitAllEligible, ["count": String(offer.count)]))
+        XCTAssertTrue(submit.contains(String(offer.count)), submit)
+        XCTAssertFalse(submit.contains("{"), submit)
+        XCTAssertEqual(FolderInspector.waitingLine(1, words: words), words.inspector.waitingSessionsOne)
+        XCTAssertEqual(FolderInspector.waitingLine(3, words: words),
+                       FirstRunCopy.fill(words.inspector.waitingSessions, ["count": "3"]))
+
+        // The eligible line is drawn only for a folder with an eligibility
+        // question, and carries the core's withheld line after it.
+        let asked = TracesTree.FolderNode(
+            id: "p", label: "api", mode: .ask, sessions: folder.sessions, pendingCount: 3, contributableCount: 2)
+        let line = try XCTUnwrap(FolderInspector.eligibleLine(
+            asked, offer: GroupSubmitOffer(count: 2, offersContribute: true, withheldLine: "W"), words: words))
+        XCTAssertEqual(line, FirstRunCopy.fill(words.tree.eligibleCount, ["count": "2"]) + " · W")
+        XCTAssertEqual(
+            FolderInspector.eligibleLine(asked, offer: GroupSubmitOffer(count: 2, offersContribute: true, withheldLine: nil),
+                                         words: words),
+            FirstRunCopy.fill(words.tree.eligibleCount, ["count": "2"]))
+        let unasked = TracesTree.FolderNode(id: "p", label: "api", mode: .ask, sessions: folder.sessions)
+        XCTAssertNil(FolderInspector.eligibleLine(
+            unasked, offer: GroupSubmitOffer(count: 1, offersContribute: true, withheldLine: nil), words: words))
+
+        // Shared counts this project's standing contributions, and is a
+        // dash while history is unread: never zero for unknown.
+        XCTAssertEqual(FolderInspector.shared(folder, history: nil), "—")
+        XCTAssertEqual(FolderInspector.shared(folder, history: []), "0")
+
+        let source = try TracesParityTests.text("Views/Monitor/ToolFolderInspectors.swift")
+        for needle in ["InspectorHeader(tile: .folder, title: folder.label, sub: Self.headerSub(folder, words: words))",
+                       "GlassLegendCell(table.shared, value: Self.shared(folder, history: history), status: .shared)",
+                       "GlassLegendCell(table.kept, value: String(folder.sessions.count), status: .kept)",
+                       "InspectorSection(words.inspector.project)", "InspectorSection(words.inspector.contributionRule)",
+                       "InspectorSection(words.inspector.decisions)", "GlassCard(quiet: true)"] {
+            XCTAssertTrue(source.contains(needle), "ToolFolderInspectors.swift lacks \(needle)")
+        }
+        XCTAssertFalse(source.contains("GlassEyebrowCard("), "the folder inspector still draws eyebrow cards")
+        XCTAssertFalse(source.contains("TracesTreeView.submitTitle("), "the inspector's Submit is the tree pill's")
     }
 
     /// Automatic always goes through the arming confirmation, in the core's
