@@ -376,8 +376,9 @@ fn has_trajectory_suffix(path: &Path) -> bool {
 /// The largest file auto-discovery will read to decide whether it is a
 /// trajectory at all.
 ///
-/// Only auto-discovery is bounded by it: a path the contributor named is
-/// still read whole, because they said what it was. Here the read is a
+/// Only auto-discovery parses at discovery under it: a path the contributor
+/// named is not parsed until it is loaded, because they said what it was,
+/// and that load is bounded by [`LOAD_BYTE_BUDGET`]. Here the read is a
 /// guess about an unrelated file that happened to be sitting in a
 /// directory, and a guess must not be able to pull an arbitrarily large
 /// file into memory.
@@ -506,10 +507,13 @@ impl TraceSource for TrajectorySource {
                     skipped += 1;
                     continue;
                 };
-                let path = entry.path();
-                if !path.is_file() {
+                // `file_type` does not follow a symlink, as a scoped event
+                // does not (`real_file_within_root`): a sweep and an event
+                // must agree on what this folder holds.
+                if !entry.file_type().is_ok_and(|ft| ft.is_file()) {
                     continue;
                 }
+                let path = entry.path();
                 let declared_source = match scope.accepts(&path) {
                     Accepted::No => continue,
                     Accepted::WithoutParse => None,
@@ -565,49 +569,90 @@ impl TraceSource for TrajectorySource {
     }
 
     fn load(&self, r: &SessionRef) -> anyhow::Result<SessionTranscript> {
-        let bytes = std::fs::read(&r.path).map_err(|_| anyhow!("unreadable_trajectory_file"))?;
-        let hash = session_hash(&bytes);
-        let parsed = parse_trajectory(&bytes)?;
-
-        let project = parsed
-            .cwd
-            .as_deref()
-            .map(Path::new)
-            .and_then(|p| p.file_name())
-            .and_then(|n| n.to_str())
-            .map(|s| s.to_string());
-
-        let started_at = parsed.events.iter().find_map(|e| e.timestamp);
-
-        // The trajectory file's own stem -- the identifier this session is
-        // already addressed by. Trajectory carries no separate in-file
-        // session id, so this is not an invented one; it is the file's
-        // existing name.
-        let conversation_id = r
-            .path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .map(|s| s.to_string());
-
-        Ok(SessionTranscript {
-            source_session: None,
-            source: Cow::Owned(parsed.source),
-            // Trajectory carries no harness version field.
-            agent_version: None,
-            model: parsed.model,
-            project,
-            cwd: parsed.cwd,
-            started_at,
-            session_hash: hash,
-            conversation_id,
-            events: parsed.events,
-            subagent_count: 0,
-            subagents_dropped: 0,
-            routing: Vec::new(),
-            attested_call: None,
-            attested_refusal: None,
-        })
+        load_within(r, LOAD_BYTE_BUDGET)
     }
+}
+
+/// The largest trajectory file `load` reads, from any scope: the native
+/// adapters' budget. A declared folder is read on every poll, so a file it
+/// holds must not be able to pull an arbitrarily large file into memory
+/// each pass; over the budget it is refused from its size alone with
+/// [`crate::source::SessionTooLarge`], which the watcher reports as the
+/// too-large health label. The CLI's `--trajectory FILE` is bounded by the
+/// same figure.
+pub(crate) const LOAD_BYTE_BUDGET: u64 = super::claude_code::GROUP_RAW_BYTE_BUDGET;
+
+/// [`TrajectorySource::load`] under `budget` bytes.
+fn load_within(r: &SessionRef, budget: u64) -> anyhow::Result<SessionTranscript> {
+    use std::io::Read;
+    let file = std::fs::File::open(&r.path).map_err(|_| anyhow!("unreadable_trajectory_file"))?;
+    let declared = file
+        .metadata()
+        .map_err(|_| anyhow!("unreadable_trajectory_file"))?
+        .len();
+    let too_large = |declared_bytes| crate::source::SessionTooLarge {
+        label: "trajectory-too-large",
+        declared_bytes,
+        budget_bytes: budget,
+    };
+    if declared > budget {
+        return Err(too_large(declared).into());
+    }
+    // Read no further than the budget allows, whatever the file grew to
+    // since the stat.
+    let mut bytes = Vec::new();
+    file.take(budget + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| anyhow!("unreadable_trajectory_file"))?;
+    if bytes.len() as u64 > budget {
+        return Err(too_large(bytes.len() as u64).into());
+    }
+    load_bytes(r, &bytes)
+}
+
+/// A trajectory transcript from bytes already read for `r`.
+fn load_bytes(r: &SessionRef, bytes: &[u8]) -> anyhow::Result<SessionTranscript> {
+    let hash = session_hash(bytes);
+    let parsed = parse_trajectory(bytes)?;
+
+    let project = parsed
+        .cwd
+        .as_deref()
+        .map(Path::new)
+        .and_then(|p| p.file_name())
+        .and_then(|n| n.to_str())
+        .map(|s| s.to_string());
+
+    let started_at = parsed.events.iter().find_map(|e| e.timestamp);
+
+    // The trajectory file's own stem -- the identifier this session is
+    // already addressed by. Trajectory carries no separate in-file
+    // session id, so this is not an invented one; it is the file's
+    // existing name.
+    let conversation_id = r
+        .path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_string());
+
+    Ok(SessionTranscript {
+        source_session: None,
+        source: Cow::Owned(parsed.source),
+        // Trajectory carries no harness version field.
+        agent_version: None,
+        model: parsed.model,
+        project,
+        cwd: parsed.cwd,
+        started_at,
+        session_hash: hash,
+        conversation_id,
+        events: parsed.events,
+        subagent_count: 0,
+        subagents_dropped: 0,
+        routing: Vec::new(),
+        attested_call: None,
+        attested_refusal: None,
+    })
 }
 
 impl TrajectorySource {
@@ -1234,5 +1279,63 @@ mod tests {
             .expect("a tool result");
         assert_eq!(call.tool_call_id.as_deref(), Some("t1"));
         assert_eq!(result.tool_call_id.as_deref(), Some("t1"));
+    }
+
+    /// A declared folder is read on every poll, so a file over the byte
+    /// budget is refused from its size alone, with the typed refusal the
+    /// watcher maps to the too-large health label, before any byte is read.
+    #[test]
+    fn a_declared_file_over_the_budget_is_refused_as_too_large() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("big.jsonl"), vec![b' '; 4096]).unwrap();
+        let source = TrajectorySource::new(dir.path().to_path_buf());
+        let r = source.discover().unwrap().into_iter().next().unwrap();
+        let err = load_within(&r, 1024).unwrap_err();
+        let too_large = err
+            .downcast_ref::<crate::source::SessionTooLarge>()
+            .expect("typed too-large refusal");
+        assert_eq!(too_large.declared_bytes, 4096);
+        assert_eq!(too_large.budget_bytes, 1024);
+        assert_eq!(
+            LOAD_BYTE_BUDGET,
+            crate::source::claude_code::GROUP_RAW_BYTE_BUDGET
+        );
+    }
+
+    /// A `.json` in a declared folder that is not a trajectory is offered on
+    /// its name and fails closed at load: an error, never a transcript, and
+    /// not the too-large refusal.
+    #[test]
+    fn a_non_trajectory_json_in_a_declared_folder_fails_closed_at_load() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("settings.json"), br#"{"theme":"dark"}"#).unwrap();
+        let source = TrajectorySource::new(dir.path().to_path_buf());
+        let r = source.discover().unwrap().into_iter().next().unwrap();
+        let err = source.load(&r).unwrap_err();
+        assert!(
+            err.downcast_ref::<crate::source::SessionTooLarge>()
+                .is_none()
+        );
+    }
+
+    /// Discovery follows no symlink in a declared folder, as a scoped event
+    /// does not (`real_file_within_root`), so a sweep and an event agree.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_entry_in_a_declared_folder_is_not_discovered() {
+        let outside = tempfile::tempdir().unwrap();
+        let target = outside.path().join("elsewhere.jsonl");
+        std::fs::write(&target, SAMPLE).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(&target, dir.path().join("linked.jsonl")).unwrap();
+        std::fs::write(dir.path().join("real.jsonl"), SAMPLE).unwrap();
+        let source = TrajectorySource::new(dir.path().to_path_buf());
+        let found: Vec<_> = source
+            .discover()
+            .unwrap()
+            .into_iter()
+            .map(|r| r.path.file_name().unwrap().to_owned())
+            .collect();
+        assert_eq!(found, vec![std::ffi::OsString::from("real.jsonl")]);
     }
 }
