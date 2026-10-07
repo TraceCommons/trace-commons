@@ -32,6 +32,14 @@ struct FlowMapView: View {
 
     static let zoomRange: ClosedRange<CGFloat> = 0.6 ... 2
     static let zoomStep: CGFloat = 0.25
+    /// #1146 `right-3.5 bottom-3.5`: the zoom sits 14 in.
+    static let overlayInset: CGFloat = 14
+
+    /// The card's hint (#1146 `NodeCard`): shown while a card is peeked by
+    /// hovering or focus, not once it is pinned.
+    static func hint(pinned: Bool) -> String? {
+        pinned ? nil : FlowMapScene.words?.hint
+    }
 
     var body: some View {
         GeometryReader { proxy in
@@ -57,7 +65,7 @@ struct FlowMapView: View {
             // A click on the field, not a node, lets go of the pinned card.
             .onTapGesture { pinned = nil }
             .overlay(alignment: .bottomTrailing) {
-                if zoomable { zoomControls.padding(GlassTokens.Space.panePadding) }
+                if zoomable { zoomControls.padding(Self.overlayInset) }
             }
         }
         .accessibilityElement(children: .contain)
@@ -261,8 +269,9 @@ struct FlowMapView: View {
         // Beside the node, kept inside the field.
         let x = min(max(width / 2 + 8, centre.x + node.radius * fit.scale + 12 + width / 2), size.width - width / 2 - 8)
         let y = min(max(48, centre.y - 24), size.height - 48)
+        let peeked = (hovered ?? focused) == node.id
         return GlassFloatingGroup {
-            GlassNodeCard(node.label, detail: node.detail)
+            GlassNodeCard(node.cardTitle, detail: node.detail, hint: Self.hint(pinned: !peeked))
         }
         .position(x: x, y: y)
         .allowsHitTesting(false)
@@ -284,6 +293,8 @@ struct FlowMapView: View {
                 .disabled(zoom >= Self.zoomRange.upperBound)
             }
         }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(FlowMapScene.words?.zoomLabel ?? "")
     }
 }
 

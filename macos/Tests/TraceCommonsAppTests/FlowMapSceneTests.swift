@@ -83,9 +83,45 @@ final class FlowMapSceneTests: XCTestCase {
         XCTAssertEqual(flowing(scene), automatic.filter { open.sendsToCommons($0.kind) }.count)
         XCTAssertTrue(scene.flows)
         XCTAssertEqual(scene.nodes.first { $0.id == "library" }?.kind, .library(active: true))
-        // The armed count is the core's.
-        XCTAssertEqual(scene.nodes.first { $0.id == "library" }?.detail,
-                       FlowMapScene.pair(ProjectCopy.modeChoiceLabel(.autoUpload), open.destinations?.folders?.armed))
+        // #1146's library card: what was contributed, in the core's words;
+        // a dash while History is unread, never none.
+        let words = try XCTUnwrap(FlowMapScene.words)
+        XCTAssertEqual(scene.nodes.first { $0.id == "library" }?.detail, words.library(contributed: nil))
+        XCTAssertTrue(words.library(contributed: nil).hasPrefix("\u{2014} "))
+    }
+
+    /// The node cards say #1146's sentences: this computer and the library
+    /// count what was contributed from History, a tool's title counts its
+    /// folders, and a folder says its path, rule and counts.
+    func test_theNodeCardsSayRonsSentences() async throws {
+        let words = try XCTUnwrap(FlowMapScene.words)
+        let tree = try await tree(.normalDay)
+        let history = try await SampleDaemonClient(.normalDay).listHistory(limit: 100)
+        let contributed = FlowMapScene.Contributions(history: history)
+        let scene = FlowMapScene.traces(tree, gate: try await gate(.normalDay), contributed: contributed)
+        let total = try XCTUnwrap(contributed.total)
+        let waiting = tree.tools.reduce(0) { $0 + $1.waiting } + tree.unplaced.reduce(0) { $0 + $1.sessions.count }
+        XCTAssertEqual(scene.nodes.first { $0.id == "hub" }?.detail, words.hub(waiting: waiting, contributed: total))
+        XCTAssertEqual(scene.nodes.first { $0.id == "library" }?.detail, words.library(contributed: total))
+        for tool in tree.tools {
+            let node = try XCTUnwrap(scene.nodes.first { $0.id == "tool:\(tool.id)" })
+            XCTAssertEqual(node.label, tool.kind.displayName)
+            XCTAssertEqual(node.cardTitle, words.toolTitle(tool: tool.kind.displayName, folders: tool.folders.count))
+            XCTAssertFalse(node.detail.contains("{"), node.detail)
+        }
+        for node in scene.nodes where node.id.hasPrefix("folder:") {
+            XCTAssertTrue(node.detail.contains(" waiting, "), node.detail)
+            XCTAssertFalse(node.detail.contains("{"), node.detail)
+        }
+        // Unset is never said as off; unknown is said as neither.
+        XCTAssertEqual(words.tool(.unknown, waiting: 0), words.toolNothingWaiting)
+        XCTAssertNotEqual(words.tool(.unset, waiting: 0), words.toolOff)
+        XCTAssertEqual(words.folder(path: "/a", rule: "Ask me", waiting: 1, contributed: 2),
+                       "/a. Rule: Ask me. 1 session waiting, 2 contributed.")
+        XCTAssertEqual(words.folder(path: nil, rule: nil, waiting: 3, contributed: nil),
+                       "Rule: not set. 3 sessions waiting, \u{2014} contributed.")
+        XCTAssertNil(FlowMapView.hint(pinned: true))
+        XCTAssertEqual(FlowMapView.hint(pinned: false), words.hint)
     }
 
     /// Nothing moves to the commons while the core says something stops it:
@@ -132,7 +168,7 @@ final class FlowMapSceneTests: XCTestCase {
         XCTAssertFalse(FlowMapScene.traces(armed, gate: unread).flows, "no tool_destinations")
         let nothing = FlowMapScene.traces(armed, gate: .init(state: .coreDown, status: nil, destinations: nil))
         XCTAssertEqual(nothing.nodes.first { $0.id == "library" }?.detail,
-                       FlowMapScene.pair(ProjectCopy.modeChoiceLabel(.autoUpload), nil as Int?))
+                       FlowMapScene.words?.library(contributed: nil))
     }
 
     /// The menu's second-look row sets its count apart with a spaced dot,

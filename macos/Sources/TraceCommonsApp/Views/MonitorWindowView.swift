@@ -51,6 +51,9 @@ struct MonitorWindowView: View {
         case privateAI
     }
 
+    /// The Traces tree's inset from the pane's edge (#1146 `px-2`).
+    static let treeInset: CGFloat = 8
+
     /// Settings is drawn over the panes while `navigation.settingsRequest`
     /// is set (Ron's #1146 modal; #1241 Task 10), and an outside opener's
     /// destination waits there (`OpenMonitor`).
@@ -68,8 +71,9 @@ struct MonitorWindowView: View {
     @SceneStorage("monitor.showsInspector") private var showsInspector = true
     /// The Traces graph footer (the toolbar's Graph), on by default as #1146.
     @SceneStorage("monitor.showsGraph") private var showsGraph = true
-    /// The View menu's "Show ignored folders"; hidden by default, as #1146.
-    @SceneStorage("monitor.showsIgnored") private var showsIgnored = false
+    /// The View menu's "Show ignored folders"; shown by default, as #1146's
+    /// `traces-workspace.tsx` (`useState(true)`).
+    @SceneStorage("monitor.showsIgnored") private var showsIgnored = true
     /// The binoculars: the map shows only the selected session's tool.
     @State private var mapFocus = false
     /// What asked for the inspector last time (`InspectorDemand`).
@@ -189,6 +193,9 @@ struct MonitorWindowView: View {
                     ) { entryId in
                         Self.select(.session(entryID: entryId), selection: &selection, showsInspector: &showsInspector)
                     }
+                    // #1146 insets the tree 8 from the pane's edge (`px-2`),
+                    // closer than the other tabs' 12.
+                    .padding(.horizontal, Self.treeInset - GlassTokens.Space.panePadding)
                 case .inference: InferenceTabView(store: inference)
                 case .home:
                     HomeTabView(
@@ -206,16 +213,27 @@ struct MonitorWindowView: View {
                 }
             } footer: {
                 // Shared over kept under the tree (#1146 `GraphFooter`).
+                // Full bleed and fixed height, rising from the pane's foot
+                // when shown (#1146: height 0 to 206 over .25s).
                 if Self.shownTab(tab, requiresOnboarding: model.requiresOnboarding) == .traces && showsGraph {
                     TracesGraphFooter(
                         history: home.history, sessions: traces.tree.allSessions, tool: selectedTool,
                         focus: $mapFocus, onFocus: focusMap)
+                    .padding(.horizontal, -GlassTokens.Space.panePadding)
+                    .padding(.bottom, -GlassTokens.Space.panePadding)
+                    .padding(.top, -GlassTokens.Space.cardGap)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
             }
         } map: {
             MonitorMapPane(
                 mapTab: $mapTab, privateAILabel: model.privateInferenceCopy?.destination,
-                traces: traces, inference: inference, focusTool: mapFocus ? selectedTool?.rawValue : nil,
+                privateAIDot: Self.inferenceDot(model.daemonSettings?.privateInferenceState?.surfaceState,
+                                                calls: model.privateInferenceCalls),
+                privateAIDescription: Self.inferenceDotDescription(
+                    model.daemonSettings?.privateInferenceState?.surfaceState, calls: model.privateInferenceCalls),
+                traces: traces, history: home.history, inference: inference,
+                focusTool: mapFocus ? selectedTool?.rawValue : nil,
                 sentence: { Self.rowSentence($0, copy: model.privateInferenceCopy, calls: model.harnessCalls) })
         } inspector: {
             GlassPane {
@@ -490,6 +508,8 @@ private struct MonitorMainPane<Content: View, Footer: View>: View {
     @EnvironmentObject private var model: AppModel
     /// Half the unified title bar's 52pt height.
     static var lightsCentre: CGFloat { 26 }
+    /// #1146 `monitor-toolbar.tsx`: the View menu is `w-[250px]`.
+    static var viewMenuWidth: CGFloat { 250 }
 
     var body: some View {
         GlassPane {
@@ -501,7 +521,10 @@ private struct MonitorMainPane<Content: View, Footer: View>: View {
                             viewMenu.toggle()
                         }
                         GlassToolbarButton(MonitorShellWords.graphToggle(shown: showsGraph), systemImage: "chart.bar.xaxis", pressed: showsGraph) {
-                            showsGraph.toggle()
+                            // #1146's footer opens and closes over .25s.
+                            withAnimation(GlassMotion.systemReducesMotion ? nil : .easeInOut(duration: 0.25)) {
+                                showsGraph.toggle()
+                            }
                         }
                         GlassToolbarButton(MonitorShellWords.mapToggle(shown: showsMap), systemImage: "map", pressed: showsMap) {
                             showsMap.toggle()
@@ -533,9 +556,11 @@ private struct MonitorMainPane<Content: View, Footer: View>: View {
                                 viewMenu = false
                             }
                         }
-                        .fixedSize()
+                        // #1146's View menu: 250 wide, its right edge at
+                        // the pane's padding, under the toolbar row.
+                        .frame(width: Self.viewMenuWidth)
+                        .fixedSize(horizontal: false, vertical: true)
                         .padding(.top, GlassTokens.Size.controlLarge + GlassTokens.Space.s2)
-                        .padding(.trailing, GlassTokens.Size.controlLarge + GlassTokens.Space.s4)
                     }
                 }
                 .zIndex(1)
@@ -603,7 +628,15 @@ private struct MonitorMainPane<Content: View, Footer: View>: View {
 private struct MonitorMapPane: View {
     @Binding var mapTab: MonitorWindowView.MapTab
     let privateAILabel: String?
+    /// The Private AI segment's status dot (#1146 `FlowMap`): the same dot
+    /// the Inference tab carries; none while the core has not said.
+    let privateAIDot: GlassStatus?
+    /// The dot's text equivalent, the core's sentence for the same state.
+    let privateAIDescription: String?
     let traces: TracesStore
+    /// History's rows, for what each node says was contributed; nil while
+    /// unread, and then the cards say a dash, never none.
+    let history: [DaemonData.HistoryRow]?
     let inference: InferenceStore
     /// The tool the binoculars focus the Traces view on; nil for all.
     let focusTool: String?
@@ -612,32 +645,59 @@ private struct MonitorMapPane: View {
     @EnvironmentObject private var model: AppModel
 
     var body: some View {
-        // The map is content, not chrome: an opaque pane, so the selector,
+        // The map is content, not chrome: its own field, so the selector,
         // zoom and node cards floating on it are its only glass (Apple: no
-        // glass on glass; R14).
-        GlassPane(padding: 0, isContent: true) {
-            ZStack(alignment: .topTrailing) {
-                RadialGradient(
-                    colors: [GlassTokens.Color.mapFieldInner.color, GlassTokens.Color.mapFieldOuter.color],
-                    center: .center, startRadius: 20, endRadius: 520)
-                map
-                GlassFloatingGroup {
-                    GlassSegmentedTabs(MonitorWords.table?.shell.mapViewsLabel ?? "", selection: $mapTab, segments: segments, floating: true)
-                        .padding(GlassTokens.Space.panePadding)
-                }
-                stateLine
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
+        // glass on glass; R14). #1146 `.tc-map`: the field gradient and the
+        // map's own edge, not a pane's.
+        let shape = RoundedRectangle(cornerRadius: GlassTokens.Radius.pane, style: .continuous)
+        ZStack(alignment: .topTrailing) {
+            Self.field
+            map
+            GlassFloatingGroup {
+                GlassSegmentedTabs(MonitorWords.table?.shell.mapViewsLabel ?? "", selection: $mapTab, segments: segments, floating: true)
+                    .padding(Self.overlayInset)
             }
+            stateLine
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .clipShape(shape)
+        .glassEdge(GlassTokens.Shadow.mapEdge, in: shape)
+        .environment(\.glassPaneIsContent, true)
     }
+
+    /// #1146 `--tc-map-fill`: `radial-gradient(80% 60% at 50% 55%)`, an
+    /// ellipse 80% of the field wide and 60% tall, its centre a little
+    /// below the middle.
+    static var field: some View {
+        GeometryReader { proxy in
+            let size = proxy.size
+            EllipticalGradient(
+                colors: [GlassTokens.Color.mapFieldInner.color, GlassTokens.Color.mapFieldOuter.color],
+                center: .center, startRadiusFraction: 0, endRadiusFraction: 0.5)
+                .frame(width: size.width * fieldRadii.width * 2, height: size.height * fieldRadii.height * 2)
+                .position(x: size.width * fieldCentre.x, y: size.height * fieldCentre.y)
+        }
+        .background(GlassTokens.Color.mapFieldOuter.color)
+    }
+
+    /// The gradient's radii and centre, as fractions of the field.
+    static let fieldRadii = CGSize(width: 0.8, height: 0.6)
+    static let fieldCentre = UnitPoint(x: 0.5, y: 0.55)
+    /// #1146 `top-3.5 right-3.5`: the view selector, and the zoom, 14 in.
+    static let overlayInset: CGFloat = 14
 
     @ViewBuilder
     private var map: some View {
         switch shownTab {
         case .traces:
             FlowMapView(
-                scene: .traces(traces.tree.focused(on: focusTool), gate: .init(state: tracesState, status: traces.status, destinations: traces.destinations)), legend: [.autoUpload, .ask, .ignore], zoomable: true,
-                accessibilityName: MonitorWindowView.Tab.traces.title, state: tracesState)
+                scene: .traces(
+                    traces.tree.focused(on: focusTool),
+                    gate: .init(state: tracesState, status: traces.status, destinations: traces.destinations),
+                    contributed: .init(history: history)),
+                legend: [.autoUpload, .ask, .ignore], zoomable: true,
+                accessibilityName: FlowMapScene.words?.mapLabel ?? MonitorWindowView.Tab.traces.title, state: tracesState)
         case .privateAI:
             if let harnesses = inference.harnesses, let privateAILabel {
                 FlowMapView(
@@ -691,7 +751,8 @@ private struct MonitorMapPane: View {
     private var segments: [GlassSegment<MonitorWindowView.MapTab>] {
         var segments = [GlassSegment(MonitorWindowView.Tab.traces.title, value: MonitorWindowView.MapTab.traces)]
         if let privateAILabel {
-            segments.append(GlassSegment(privateAILabel, value: .privateAI))
+            segments.append(GlassSegment(
+                privateAILabel, value: .privateAI, dot: privateAIDot, accessibilityValue: privateAIDescription))
         }
         return segments
     }
