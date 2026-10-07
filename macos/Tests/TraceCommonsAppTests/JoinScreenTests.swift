@@ -540,6 +540,10 @@ final class JoinScreenTests: XCTestCase {
         XCTAssertEqual(runner.state.account, .passkey(name: "Mac"))
         XCTAssertFalse(FirstRunPlan.calls(for: runner.state, at: .leaveRoots).contains(.openPasskeySheets))
 
+        // A sign-in carries the signed-in account's remembered name to Join.
+        runner.finishPasskey(.signedIn(name: "Home"), copy: copy)
+        XCTAssertEqual(runner.state.account, .passkey(name: "Home"))
+
         let source = try Self.source()
         XCTAssertTrue(source.contains("runner.passkeyOutcome?.joinNotice(copy)"))
     }
