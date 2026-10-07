@@ -299,8 +299,9 @@ function FormDemo() {
           <Notice tone="ask" title="Automatic contributing stopped">
             orchard-api changed its settings. Nothing is sent until you look.
           </Notice>
-          <Notice tone="outside" title="Rust core could not start">
-            Source roots remain saved.
+          <Notice tone="outside" title="Today's upload limit is used up.">
+            Approved traces are waiting. Nothing has been lost -- they go out
+            when the limit resets.
           </Notice>
           <Skeleton className="h-4 w-2/3" />
         </div>
