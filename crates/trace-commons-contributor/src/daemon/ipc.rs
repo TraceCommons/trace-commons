@@ -2649,6 +2649,7 @@ const ASYNC_ONLY_METHODS: &[(&str, &str)] = &[
         "preview-unsure-spans-requires-async",
     ),
     ("quiesce", "quiesce-requires-async"),
+    ("include_past_sessions", "past-sessions-requires-async"),
     ("probe_routing", "probe-routing-requires-async"),
     ("probe_routed_tools", "probe-routed-tools-requires-async"),
     ("enroll", "enroll-requires-async"),
@@ -3196,6 +3197,10 @@ fn handle_list_pending(shared: &DaemonShared, req: &Request) -> Response {
 /// every project a declared source lists now, so a folder is answerable
 /// before the first discovery pass. An id that resolves to nothing is
 /// refused, never answered with an empty list.
+///
+/// `sessions` holds the newest `MAX_SESSIONS_PER_INCLUDE` rows and `total`
+/// counts them; `not_listed` is how many older sessions the folder has
+/// beyond those (`past_sessions::listed_page`).
 fn handle_list_past_sessions(shared: &DaemonShared, req: &Request) -> Response {
     let Some(project_id) = req.params.get("project_id").and_then(|v| v.as_str()) else {
         return Response::err(
@@ -3212,6 +3217,7 @@ fn handle_list_past_sessions(shared: &DaemonShared, req: &Request) -> Response {
         return Response::err(req.id, ERR_BAD_PARAMS, ERR_PROJECT_ID_UNRECOGNIZED);
     };
     let rows = super::past_sessions::rows_for(shared, &discovered, &project_key, Utc::now());
+    let (rows, not_listed) = super::past_sessions::listed_page(rows);
     let mode = shared
         .policy
         .lock()
@@ -3222,6 +3228,7 @@ fn handle_list_past_sessions(shared: &DaemonShared, req: &Request) -> Response {
         serde_json::json!({
             "total": rows.len(),
             "sessions": rows,
+            "not_listed": not_listed,
             "project_mode": mode,
         }),
     )
@@ -3231,9 +3238,11 @@ fn handle_list_past_sessions(shared: &DaemonShared, req: &Request) -> Response {
 /// folder's past sessions, each named by the opaque id `list_past_sessions`
 /// gave it. See `past_sessions::include_past_sessions` for the rules.
 ///
-/// `project_id` resolves as it does for the listing. `session_ids` is a
-/// non-empty array of strings, at most `MAX_SESSIONS_PER_INCLUDE` distinct
-/// ones; anything else is refused before the walk.
+/// `project_id` resolves as it does for the listing. `session_ids` is an
+/// array of strings with at least one id: more than
+/// `MAX_SESSIONS_PER_INCLUDE` entries, duplicates counted, is refused before
+/// any string is copied or the walk is taken; so is anything else that is
+/// not such an array.
 async fn handle_include_past_sessions(shared: &DaemonShared, req: &Request) -> Response {
     use super::past_sessions::{LABEL_SESSION_IDS_INVALID, LABEL_TOO_MANY_SESSIONS};
     let Some(project_id) = req.params.get("project_id").and_then(|v| v.as_str()) else {
@@ -5042,12 +5051,8 @@ async fn handle_approve(shared: &DaemonShared, req: &Request) -> Response {
         .as_ref()
         .map(|c| c.consent_scopes.clone())
         .unwrap_or_default();
-    // One instant for the whole call, so `approve: {"all": true}`
-    // holds every entry it approved for the same window and reports
-    // one deadline that is true of all of them -- rather than a
-    // deadline that happens to describe the first entry and expires
-    // early for the rest.
-    let approved_at = Utc::now();
+    // The approval instant is taken by `approve_as_a_person`, under the
+    // lock that approves; see there.
     let approval_hold_secs = shared
         .settings
         .lock()
@@ -5228,8 +5233,8 @@ async fn handle_approve(shared: &DaemonShared, req: &Request) -> Response {
         inputs: inputs.as_deref(),
         verdict: verdict.as_deref(),
         correction: correction.as_deref(),
-        approved_at,
         approval_hold_secs,
+        person_included: false,
     };
     let ApprovedBatch {
         approved_ids,
@@ -5285,9 +5290,10 @@ pub(super) struct ApprovalTerms<'a> {
     pub inputs: Option<&'a str>,
     pub verdict: Option<&'a str>,
     pub correction: Option<&'a str>,
-    /// One instant for the whole call; see `handle_approve`.
-    pub approved_at: chrono::DateTime<Utc>,
     pub approval_hold_secs: u64,
+    /// The first-run picker's include: every entry approved is marked
+    /// [`super::queue::QueueEntry::person_included`].
+    pub person_included: bool,
 }
 
 /// What one batch of a person's approvals came to. Every id the batch was
@@ -5320,8 +5326,8 @@ pub(super) async fn approve_as_a_person(
         inputs,
         verdict,
         correction,
-        approved_at,
         approval_hold_secs,
+        person_included,
     } = *terms;
     // Entries nobody previewed have no artifact behind them. Build one now.
     //
@@ -5421,7 +5427,16 @@ pub(super) async fn approve_as_a_person(
         }
     }
     let skipped_ids: std::collections::HashSet<Uuid> = skipped.iter().map(|(id, _)| *id).collect();
+    // Policy before queue, as everywhere else: the folder rules are read
+    // again under the lock that approves (see the Never check below).
+    let policy = shared.policy.lock().expect("policy lock");
     let mut queue = shared.queue.lock().expect("queue lock");
+    // One instant for the whole batch, so every entry it approves is held
+    // for the same window and the one deadline reported is true of all of
+    // them. Taken here, under the lock that approves and after every
+    // preview build, not when the call began: a slow build must not eat the
+    // undo window, which then ends before the approval is even saved.
+    let approved_at = Utc::now();
     // Written under the same lock that approves, and saved by the same
     // `queue.save` below, so the refusal and the approvals in this batch
     // land together or not at all.
@@ -5531,7 +5546,25 @@ pub(super) async fn approve_as_a_person(
                 continue;
             }
         }
+        // Never, set while this call built its previews, is honoured here:
+        // setting it refuses only `Pending` entries, so an approval landing
+        // after it would otherwise go out. A later Never leaves an approval
+        // made before it alone (`Queue::refuse_pending_for_project`).
+        if policy.holds_every_send() {
+            skipped.push((id, ERR_CONTRIBUTION_OVERRIDE_NEVER));
+            continue;
+        }
+        if queue
+            .get(id)
+            .is_some_and(|e| policy.resolve(&e.project_key) == ProjectMode::Ignore)
+        {
+            skipped.push((id, super::past_sessions::LABEL_PROJECT_MODE_NEVER));
+            continue;
+        }
         if queue.approve(id, scopes, inputs, verdict, correction, Some(approved_at)) {
+            if person_included {
+                queue.mark_person_included(id);
+            }
             approved_ids.push(id);
         } else {
             // `Queue::approve` refuses anything not `Pending`, and this
@@ -5573,6 +5606,7 @@ pub(super) async fn approve_as_a_person(
         return Err("queue-write-failed");
     }
     drop(queue);
+    drop(policy);
     shared.publish(EVENT_QUEUE_CHANGED, serde_json::json!({}));
     Ok(ApprovedBatch {
         approved_ids,
@@ -14601,7 +14635,7 @@ mod tests {
     #[test]
     fn every_async_only_method_is_advertised_and_refused_synchronously() {
         let s = shared();
-        assert_eq!(ASYNC_ONLY_METHODS.len(), 58);
+        assert_eq!(ASYNC_ONLY_METHODS.len(), 59);
         let mut seen = std::collections::BTreeSet::new();
         for &(method, label) in ASYNC_ONLY_METHODS {
             assert!(

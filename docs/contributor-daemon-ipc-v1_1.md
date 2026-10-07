@@ -551,8 +551,8 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `keep` | `entry_id` | `kept: true` | "Keep on this Mac": the **reversible** decline. The entry must be `pending`, or `approved` unattended, which the keep revokes (`not-pending` otherwise, `unknown-entry-id` if there is none). See "`keep`: Keep on this Mac" below |
 | `undo_keep` | `entry_id` | `kept: false` | returns a kept entry to `pending`, waiting for a person; `not-kept` for anything that is not kept, a dismissed entry included; `queue-full` at the queue cap; `project-ignored` if its folder is now Never. See "`keep`: Keep on this Mac" below |
 | `list_kept` | — | `kept[]` of queue entries | every kept entry, in the `list_pending` shape, so a shell can show them and offer the undo |
-| `list_past_sessions` | `project_id` (required) | `sessions[]` of past-session rows, `total`, `project_mode` | the first-run past-session picker: one folder's past sessions, queued or never offered, each named by an opaque `session_id`, never a path; nothing is read before the person chooses; `project_id-invalid` / `project-id-unrecognized`, never an empty list for an unknown folder. See "`list_past_sessions`" below |
-| `include_past_sessions` | `project_id`, `session_ids[]` (1 to 500 distinct) | `approved`, `skipped[]` of `{session_id, label}` | the picker's Continue: a person's `approve` of exactly the sessions named, never `include_backlog`; the whole call is refused on one foreign id (`session-id-unrecognized`), a Never folder (`project-mode-never`) or the Never override; writes `past-sessions-included` first. Async entry point only, as `approve`. See "`include_past_sessions`" below |
+| `list_past_sessions` | `project_id` (required) | `sessions[]` of past-session rows (the newest 500), `total`, `not_listed`, `project_mode` | the first-run past-session picker: one folder's past sessions, queued or never offered, each named by an opaque `session_id`, never a path; no session is loaded before the person chooses (only what each adapter's discovery already reads); `project_id-invalid` / `project-id-unrecognized`, never an empty list for an unknown folder. See "`list_past_sessions`" below |
+| `include_past_sessions` | `project_id`, `session_ids[]` (at most 500 ids, duplicates counted; at least one) | `approved`, `skipped[]` of `{session_id, label}`, `approved_entry_ids[]`, `hold_until` | the picker's Continue: a person's `approve` of exactly the sessions named, never `include_backlog`; the whole call is refused on one foreign id (`session-id-unrecognized`), a Never folder (`project-mode-never`), the Never override or the live-included limit (`included-sessions-limit`); writes `past-sessions-included` first. Async entry point only: the synchronous one answers `past-sessions-requires-async`. See "`include_past_sessions`" below |
 | `cancel` | `entry_id` **or** `project_id` | `ok: true` (`entry_id`) or `canceled: <count>` (`project_id`) | returns matching `approved` entries to `pending` and clears their pin, so the next `approve` rebuilds; guaranteed to succeed for the whole hold; `project_id` undoes that project's `approved` entries and no others -- `pending` entries are left alone, matched by the id `entry_value` publishes (never `project_label`) -- and is refused with `project-id-unrecognized` if the daemon does not know that project; the two selectors are mutually exclusive and `project_id` wins if both are sent; a known project with nothing `approved` succeeds with `canceled: 0`; the single-`entry_id` form errors if that entry is not currently `approved`; see "The approval hold" below |
 | `pause` | `until` (optional RFC 3339 timestamp) | `paused: true`, `paused_until` | see "Pause semantics" below |
 | `resume` | — | `paused: false` | |
@@ -1660,6 +1660,7 @@ visited is not in the queue at all. It uses `list_past_sessions` and
     }
   ],
   "total": 2,
+  "not_listed": 0,
   "project_mode": "notify_only"
 }
 ```
@@ -1669,7 +1670,10 @@ The listing walks every declared source's discovery itself rather than the
 watcher's cwd cache, so it is complete before the first discovery pass has
 run (a Rules step shown seconds after Folders started the daemon) and it
 includes sessions no pass has ever visited. It never loads a session: a row
-the queue has not offered is described by its date and size alone.
+the queue has not offered is described by its date and size alone. No
+session is loaded before the person chooses; the walk reads only what each
+adapter's discovery already reads (a file's head for its cwd, a staged
+trajectory's declaration).
 
 `project_id` is required. A missing or non-string one is `bad_params` /
 `project_id-invalid`; an id that resolves to no project the daemon knows --
@@ -1688,6 +1692,8 @@ Each row's `state`:
 | `not_queued` | true | on disk, never offered |
 | `never` | false | the folder's rule is Never; every row it would list is `never` |
 | `still_active` | false | still being written: modified within `quiescence_secs` |
+| `held_for_review` | false | queued, but held for a person's review of that one session, or held when it aged out; an include always skips it `held-for-review` |
+| `ineligible` | false | queued and recorded as one a group `approve` leaves out, for an evidence-admitted contributor (`contributable_in_a_group`); an include skips it `session-ineligible` |
 
 A queued row (`pending`, `approved`, `expired`) carries its queue entry's
 `entry_id`, `started_at`, `duration_secs`, `title`, `size_bytes` and `source`
@@ -1700,8 +1706,12 @@ on a queued entry that has none, as on `list_pending`.
 Kept and dismissed sessions are not listed. Outside a Never folder, neither
 is a session whose latest offer was decided some other way (uploading,
 uploaded, refused, failed): the picker is for sessions still open to a
-choice. A Never folder lists those too, as `never`. `total` is the number of rows
-returned.
+choice. A Never folder lists those too, as `never`. `sessions` holds the
+folder's newest 500 rows, so "Include every past session" of what is listed
+is one include that fits the per-call limit; `total` is the number of rows
+returned and `not_listed` how many older sessions the folder has beyond
+them (0 when none). A shell says how many with the core's
+`rules.not_listed` line.
 
 **No path crosses the socket.** `session_id` is `sess_` and the first 32 hex
 characters of sha256 over the session path's bytes: one-way, and
@@ -1726,7 +1736,9 @@ path; the folder is named only by `project_id`.
   "approved": 1,
   "skipped": [
     { "session_id": "sess_fedcba9876543210fedcba9876543210", "label": "session-still-active" }
-  ]
+  ],
+  "approved_entry_ids": ["5f0c...-uuid"],
+  "hold_until": "2026-10-06T12:00:10Z"
 }
 ```
 
@@ -1734,12 +1746,23 @@ The picker's Continue: approve exactly the sessions named, as a person's
 approval. Each one is pinned to a preview and held for the undo window
 exactly as a click on a card is (`approve` and this method share one
 implementation), and it is recorded as the person's own, so a later change
-of the folder's rule -- back to Ask me, say -- does not take it back.
+of the folder's rule -- back to Ask me, or to Never -- does not take it back.
 "Include every past session in {folder}" is a selection of every id the
-listing returned, never `include_backlog`.
+listing returned (at most 500, see `not_listed`), never `include_backlog`.
+
+`approved_entry_ids` and `hold_until` are `approve`'s: the queue entries
+approved, and when their undo window ends, `null` when nothing was approved
+or the hold is off. The window runs from when the approval lands, under the
+lock that approves, not from when the call began, so a slow include does
+not use it up; Undo is `cancel` on those ids.
+
+Sessions a person included do not count against the watcher's queue cap
+(`max_queue_entries`), so an include never stops the watcher offering new
+sessions. Their own total is bounded instead: at most 500 included sessions
+may be live (pending, approved or uploading) at once.
 
 Dispatched on the async entry point only, as `approve` is; the synchronous
-entry point answers `unknown_method`.
+entry point refuses it `unavailable` / `past-sessions-requires-async`.
 
 **The whole call is validated before anything changes.** Each of these
 refuses every session and records nothing:
@@ -1748,11 +1771,12 @@ refuses every session and records nothing:
 |---|---|
 | `bad_params` / `project_id-invalid` | `project_id` missing or not a string |
 | `bad_params` / `session_ids-invalid` | `session_ids` missing, not an array, holding a non-string, or empty once duplicates are dropped |
-| `bad_params` / `too-many-sessions` | more than 500 ids, checked before any id is read |
+| `bad_params` / `too-many-sessions` | more than 500 ids, duplicates counted, checked before any id is read |
 | `bad_params` / `project-id-unrecognized` | the project resolves as for `list_past_sessions` and does not |
 | `bad_params` / `contribution-override-never` | the global Never contribution override is on, as `approve` refuses it |
 | `bad_params` / `project-mode-never` | the folder's rule is Never |
 | `bad_params` / `session-id-unrecognized` | any one id is not one of this folder's sessions in the daemon's own walk -- another folder's id, a path, an empty string, a made-up id |
+| `bad_params` / `included-sessions-limit` | the live included sessions plus every id asked for would pass 500 |
 | `unavailable` / `audit-write-failed` | the `past-sessions-included` audit row could not be written |
 
 Duplicate ids are counted once, in the order first named. A session the
@@ -1764,8 +1788,9 @@ names what the person saw, and a vanished session refuses the selection.
 before anything is revived, queued or approved: `project_label` is the
 folder's derived label (from the key the daemon holds, never the caller's
 string) and `detail` the number of sessions chosen. No session id, path or
-title is in it. A log that refuses the write refuses the call, under the
-same rollback-cannot-record guarantee as `bulk-approved`.
+title is in it. It records the person's request, so it is written even when
+every session is then skipped. A log that refuses the write refuses the
+call, under the same rollback-cannot-record guarantee as `bulk-approved`.
 
 **One refusal comes after the audit row.** If the queue cannot be saved once
 the approvals are made, the call is `unavailable` / `queue-write-failed`:
@@ -1783,11 +1808,13 @@ approves them.
 |---|---|
 | `session-dismissed` | the session was dismissed; it is never revived |
 | `session-kept` | the session is kept on this Mac; `undo_keep` first |
-| `session-still-active` | still being written (judged at the walk, and again at the read); never queued half-written |
+| `session-still-active` | still being written (judged at the walk, and again at the read from a fresh walk); never queued half-written |
 | `held-for-review` | its offer is held for a person's review, or was when it aged out, as a group `approve` leaves it |
+| `session-ineligible` | for an evidence-admitted contributor, one a group `approve` leaves out (`contributable_in_a_group`), whether queued already or found so when read |
+| `session-duplicate` | its bytes are the same as a session already chosen in this call, so it is the same queue entry, answered once |
 | `not-pending` | already decided (approved, uploading, uploaded) by the time the include reached it |
 | `session-project-changed` | read now, the session resolves to another folder than the one named |
-| `project-mode-never` | the folder turned Never between the validation and the read |
+| `project-mode-never` | the folder (or the global override) turned Never after the validation: checked again at the revive, at the insert and under the lock that approves |
 | `session-unreadable` | the session file could not be read or parsed |
 | `session-file-vanished` | the session file was gone by the read |
 | `envelope-too-large` | over the size limit, at the read or at the pin |
@@ -1795,7 +1822,12 @@ approves them.
 | `not-enrolled`, and `approve`'s other per-entry labels | the approval itself was refused, as `approve` reports it |
 
 An `expired` session is revived to `pending` (its `discovered_at` set to
-now, as `undo_keep` dates a return) and approved. A `not_queued` session is
+now, as `undo_keep` dates a return) and approved; one whose session changed
+since it aged out (another size or modification time) is read again and
+offered fresh instead, so what is approved is what is on disk. A revive is
+the person's choice and stands even when the approval then does not land --
+watching only answers `not-enrolled` -- so the session waits again as an
+ordinary offer, and counts as a decision owed. A `not_queued` session is
 read and queued now, then approved; an explicit selection lands past the
 queue's entry cap, because it is a person's choice rather than the watcher's
 offer, but never past the quiescence check. A session queued by a discovery

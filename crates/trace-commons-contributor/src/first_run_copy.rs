@@ -37,7 +37,9 @@
 //! - Rules adds `unavailable` and `retry` for folders the daemon could not
 //!   read, `sessions_unavailable` for one folder's past sessions, and
 //!   `past_sessions_watch_only`: watching only queues the picked past
-//!   sessions on this Mac, and the card says they wait there.
+//!   sessions on this Mac, and the card says they wait there; and
+//!   `not_listed`, how many older sessions a folder has beyond the newest
+//!   500 the picker lists.
 //! - Join adds `invite_or_passkey`: a new passkey creates an account of its
 //!   own, so it is not combined with an invite. near.ai needs no invite
 //!   (owner, Ron's review of #1235), so there is no line asking for one.
@@ -260,6 +262,11 @@ pub struct RulesCopy {
     /// sessions on this Mac as pending offers and sends none of them, since
     /// there is no enrolment to send them under. Approved 2026-10-06.
     pub past_sessions_watch_only: &'static str,
+    /// `{count}`: a folder's older sessions beyond the newest 500 the
+    /// picker lists (`list_past_sessions`' `not_listed`; owner decision
+    /// 2026-10-05). Shown only when `{count}` is above zero.
+    /// DRAFT, NEEDS APPROVAL (new, 2026-10-06).
+    pub not_listed: &'static str,
     /// A session's weekday names, Sunday first, as Ron's `WEEKDAYS`.
     pub weekdays: [&'static str; 7],
     /// A session's month names, January first, as Ron's `MONTHS`.
@@ -477,6 +484,7 @@ pub fn first_run_copy() -> FirstRunCopy {
             retry: "Try again",
             sessions_unavailable: "Past sessions unavailable",
             past_sessions_watch_only: "You're watching only, so the sessions you pick wait on this Mac, unsent, until you join.",
+            not_listed: "Older sessions not listed here: {count}",
             weekdays: ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"],
             months: [
                 "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
@@ -678,6 +686,16 @@ mod tests {
         assert!(rules.past_sessions_watch_only.contains("this Mac"));
         assert!(rules.past_sessions_watch_only.contains("join"));
         assert_ne!(rules.past_sessions_watch_only, rules.past_sessions);
+    }
+
+    /// A folder with more past sessions than the picker lists says how many
+    /// more, by count alone: it never claims they were included.
+    #[test]
+    fn a_folder_with_more_sessions_than_listed_says_how_many() {
+        let rules = first_run_copy().rules;
+        assert!(rules.not_listed.contains("{count}"));
+        assert!(!rules.not_listed.contains("include"));
+        assert_ne!(rules.not_listed, rules.show_all);
     }
 
     /// An unknown invite host or pay range reads as a word, never a dash

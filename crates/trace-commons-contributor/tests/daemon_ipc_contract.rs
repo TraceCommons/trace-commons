@@ -73,7 +73,11 @@ fn first_run_picker_methods_are_documented_with_every_label() {
         past::LABEL_NOT_PENDING,
         past::LABEL_SESSION_PROJECT_CHANGED,
         past::LABEL_SESSION_UNREADABLE,
+        past::LABEL_SESSION_INELIGIBLE,
+        past::LABEL_SESSION_DUPLICATE,
+        past::LABEL_INCLUDED_SESSIONS_LIMIT,
         past::AUDIT_PAST_SESSIONS_INCLUDED,
+        "past-sessions-requires-async",
         "project-id-unrecognized",
         "project_id-invalid",
         "contribution-override-never",
@@ -94,9 +98,14 @@ fn first_run_picker_methods_are_documented_with_every_label() {
         "not_queued",
         "never",
         "still_active",
+        "held_for_review",
+        "ineligible",
     ] {
         let quoted = format!("`{state}`");
         assert!(contract.contains(&quoted), "undocumented state: {state}");
+    }
+    for field in ["`not_listed`", "`approved_entry_ids`", "`hold_until`"] {
+        assert!(contract.contains(field), "undocumented field: {field}");
     }
     assert!(
         contract.contains("### The `trajectory_source` declaration"),
