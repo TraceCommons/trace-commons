@@ -256,9 +256,7 @@ pub fn public_profile_words() -> PublicProfileWords {
             "I understand my handle and aggregate counts become public. Leaving the roster ",
             "removes me from future snapshots."
         ),
-        go_public_footnote: concat!(
-            "Nothing is pre-checked. Go public stays off until acknowledgement is enabled."
-        ),
+        go_public_footnote: "Nothing is pre-checked. Go public stays off until acknowledgement is enabled.",
         go_public_handle: "The handle to publish",
         go_public_bio: "Bio, if you want one \u{2014} 280 bytes, plaintext, no HTML",
         published: "You're on the roster. Your handle and aggregate counts are public now.",
@@ -347,9 +345,7 @@ pub fn queue_words() -> QueueWords {
             "When a session finishes and goes quiet, it shows up here. Nothing is sent unless ",
             "you say so."
         ),
-        undo_will_send: concat!(
-            "Approved sessions will send automatically. You can undo until uploading starts."
-        ),
+        undo_will_send: "Approved sessions will send automatically. You can undo until uploading starts.",
         close_notice_still_sends: "Close this notice. Approved sessions will still send automatically.",
         close_notice: "Close this notice.",
         not_offered_scope: concat!(
@@ -468,9 +464,7 @@ pub fn settings_words() -> SettingsWords {
         ),
         extra_scan_configured: "Extra privacy scan configured",
         session_finished_after: "A session counts as finished after {seconds} seconds of quiet.",
-        at_most_one_notification: concat!(
-            "At most one notification every {hours} hours, and none when nothing is waiting."
-        ),
+        at_most_one_notification: "At most one notification every {hours} hours, and none when nothing is waiting.",
         undecided_dropped: "Undecided sessions are dropped after {days} days. Dropped means never sent.",
         state_yes: "{title}: yes",
         state_no: "{title}: no",
@@ -487,9 +481,7 @@ pub fn settings_words() -> SettingsWords {
         checks_daily: "Checks daily",
         checks_automatically: "Trace Commons checks for updates automatically and asks before installing.",
         managed_by_homebrew: "Updates managed by Homebrew",
-        homebrew_replaces: concat!(
-            "Homebrew installed this copy, so Homebrew replaces it. Run this in a terminal:"
-        ),
+        homebrew_replaces: "Homebrew installed this copy, so Homebrew replaces it. Run this in a terminal:",
         updates_unavailable: "Updates unavailable",
         not_checked_yet: "Not checked yet on this machine.",
         last_checked: "Last checked {relative}.",
