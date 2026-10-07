@@ -100,10 +100,13 @@ public enum GlassModalWidth: Sendable, Equatable {
 /// read by VoiceOver while it is up; the modal itself is a modal container
 /// to assistive tech. Only the topmost modal answers the keyboard: Escape
 /// calls `onCancel`, Return takes the default action (never a destructive
-/// one). A click on the scrim does nothing, as with a macOS sheet.
+/// one). A click on the scrim calls `onCancel` too, as #1146's scrim does
+/// (`surfaces.tsx` `onClick={onClose}`).
 ///
 /// Every word is the caller's: `title`, `subtitle`, `closeLabel` (which
-/// names the close button; empty draws none) and the action titles.
+/// names the close button) and the action titles. An empty `closeLabel`
+/// takes the host's (`glassModalCloseLabel`), so every modal under a host
+/// that names one has #1146's close button; with neither, none is drawn.
 public struct GlassModal<Content: View>: View {
     private let title: String
     private let subtitle: String?
@@ -113,6 +116,7 @@ public struct GlassModal<Content: View>: View {
     private let onCancel: () -> Void
     private let content: Content
     @Environment(\.glassModalIsTopmost) private var isTopmost
+    @Environment(\.glassModalCloseLabel) private var hostCloseLabel
 
     public init(
         title: String, subtitle: String? = nil, width: GlassModalWidth = .regular, closeLabel: String = "",
@@ -131,8 +135,11 @@ public struct GlassModal<Content: View>: View {
     public var body: some View {
         let shape = RoundedRectangle(cornerRadius: GlassTokens.Radius.pane, style: .continuous)
         let defaultAction = GlassModalAction.defaultAction(in: actions)
+        let closeLabel = Self.closeLabel(own: closeLabel, host: hostCloseLabel)
         VStack(alignment: .leading, spacing: 0) {
-            HStack(alignment: .top, spacing: GlassTokens.Space.s6) {
+            // `.tc-modal__header`: the title block and the close button
+            // centred on one line (`align-items: center`).
+            HStack(alignment: .center, spacing: GlassTokens.Space.s6) {
                 VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
                     Text(title)
                         .glassType(GlassTokens.TypeScale.title.weight(.bold))
@@ -191,6 +198,15 @@ public struct GlassModal<Content: View>: View {
         .accessibilityElement(children: .contain)
         .accessibilityLabel(title)
         .accessibilityAddTraits(.isModal)
+        // What a click on the scrim does: this modal's cancel, whatever the
+        // modals inside it said.
+        .transformPreference(GlassModalCancel.self) { $0 = GlassModalCancel.Action(perform: onCancel) }
+    }
+
+    /// The close button's name: the modal's own, else its host's; empty
+    /// draws none.
+    static func closeLabel(own: String, host: String) -> String {
+        own.isEmpty ? host : own
     }
 
     /// The key an action answers: Return for the default action and Escape
@@ -203,9 +219,10 @@ public struct GlassModal<Content: View>: View {
     }
 }
 
-/// A confirmation (#1146's viewport modal): a narrow modal with the
-/// caller's message and actions, raised over the whole window. The
-/// replacement for a stock `.alert` or `.confirmationDialog`.
+/// A confirmation (#1146's viewport modal, `responsive-overlay.tsx`): the
+/// regular modal raised over the whole window, its message the header's
+/// subtitle and its actions the footer. The replacement for a stock
+/// `.alert` or `.confirmationDialog`.
 public struct GlassConfirmation: View {
     private let title: String
     private let message: String?
@@ -219,16 +236,17 @@ public struct GlassConfirmation: View {
         self.onCancel = onCancel
     }
 
+    /// #1146's width: the regular modal, never the narrow one.
+    public static let width: GlassModalWidth = .regular
+
     public var body: some View {
-        GlassModal(title: title, width: .narrow, actions: actions, onCancel: onCancel) {
-            if let message {
-                Text(message)
-                    .glassType(GlassTokens.TypeScale.body)
-                    .foregroundStyle(GlassColor.textSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .padding(.vertical, GlassTokens.Space.s7)
-                    .padding(.horizontal, 18)
-            }
+        GlassModal(title: title, subtitle: message, width: Self.width, actions: actions, onCancel: onCancel) {
+            // #1146's body (`px-[18px] py-3`), empty: the message is the
+            // subtitle.
+            Color.clear
+                .frame(height: 0)
+                .padding(.vertical, GlassTokens.Space.s6)
+                .accessibilityHidden(true)
         }
     }
 }
@@ -277,6 +295,23 @@ public extension EnvironmentValues {
     @Entry var glassModalIsTopmost: Bool = true
     /// True under a `glassModalHost()`: a presented modal goes to the host.
     @Entry var glassModalHostIsPresent: Bool = false
+    /// The close button's name for every modal raised under this view that
+    /// names none of its own (#1146 draws one on every modal). Set once at
+    /// the window's root, from the core's copy; empty draws none.
+    @Entry var glassModalCloseLabel: String = ""
+}
+
+/// The cancel of the modal a layer raises: what a click on its scrim does.
+struct GlassModalCancel: PreferenceKey {
+    struct Action {
+        let perform: () -> Void
+    }
+
+    static var defaultValue: Action? { nil }
+
+    static func reduce(value: inout Action?, nextValue: () -> Action?) {
+        if value == nil { value = nextValue() }
+    }
 }
 
 /// A presented modal, on its way to the host.
@@ -395,7 +430,8 @@ private struct GlassModalHost: ViewModifier {
                         .transition(.opacity)
                     }
                 }
-                .animation(GlassMotion.fast(reduceMotion), value: requests.map(\.id))
+                // #1146's `tc-fade var(--tc-dur)`: 220ms.
+                .animation(GlassMotion.standard(reduceMotion), value: requests.map(\.id))
             }
             // This host presents what was raised inside it; nothing goes on
             // to a host further out, which would raise it a second time.
@@ -413,11 +449,16 @@ private struct GlassModalLayer<M: View>: View {
 
     var body: some View {
         ZStack {
-            GlassModalScrim()
+            Color.clear
             modal()
                 .padding(.top, GlassTokens.Space.modalInsetTop)
                 .padding([.horizontal, .bottom], GlassTokens.Space.modalInset)
         }
+        // The scrim cancels the modal it raises, as #1146's does.
+        .backgroundPreferenceValue(GlassModalCancel.self) { cancel in
+            GlassModalScrim(onTap: cancel?.perform)
+        }
+        .transformPreference(GlassModalCancel.self) { $0 = nil }
         // The host reads the layer's standing and hands the modal less
         // than it when one is raised over it.
         .glassModalHost()
@@ -426,8 +467,11 @@ private struct GlassModalLayer<M: View>: View {
 }
 
 /// The scrim: the window behind, blurred within the window and dimmed by
-/// `modalScrim`. It takes every click, so nothing behind can be used.
+/// `modalScrim`. It takes every click, so nothing behind can be used, and a
+/// click on it cancels the modal over it.
 private struct GlassModalScrim: View {
+    let onTap: (() -> Void)?
+
     var body: some View {
         ZStack {
             GlassFloatingBlur(cornerRadius: 0)
@@ -435,7 +479,7 @@ private struct GlassModalScrim: View {
         }
         .ignoresSafeArea()
         .contentShape(Rectangle())
-        .onTapGesture {}
+        .onTapGesture { onTap?() }
         .accessibilityHidden(true)
     }
 }

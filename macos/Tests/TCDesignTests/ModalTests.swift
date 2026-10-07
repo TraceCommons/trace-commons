@@ -78,9 +78,55 @@ final class ModalTests: XCTestCase {
 
     /// A modal is no wider than its width, however wide the window.
     func test_aModalIsNoWiderThanItsWidth() {
-        let modal = GlassConfirmation(title: "t", message: "m", actions: [.cancel("c") {}], onCancel: {})
+        let modal = GlassModal(title: "t", width: .narrow, onCancel: {}) { Text("m") }
         let wide = NSHostingView(rootView: modal).fittingSize
         XCTAssertLessThanOrEqual(wide.width, GlassTokens.Size.modalNarrowWidth + 0.5)
+    }
+
+    /// A confirmation is #1146's regular modal (`responsive-overlay.tsx`),
+    /// 780 wide, never the narrow one; its message is the header's
+    /// subtitle, not a body of its own.
+    func test_aConfirmationIsTheRegularModalWithItsMessageAsSubtitle() throws {
+        XCTAssertEqual(GlassConfirmation.width, .regular)
+        XCTAssertEqual(GlassConfirmation.width.points, 780)
+        let long = String(repeating: "a long confirmation message ", count: 40)
+        let modal = GlassConfirmation(title: "t", message: long, actions: [.cancel("c") {}], onCancel: {})
+        let size = NSHostingView(rootView: modal.frame(maxWidth: 1400)).fittingSize
+        XCTAssertGreaterThan(size.width, GlassTokens.Size.modalNarrowWidth + 0.5)
+        XCTAssertLessThanOrEqual(size.width, GlassTokens.Size.modalWidth + 0.5)
+        let sources = Dictionary(uniqueKeysWithValues: try DesignSources.components())
+        let source = try XCTUnwrap(sources["Modal.swift"])
+        XCTAssertTrue(source.contains("GlassModal(title: title, subtitle: message, width: Self.width"))
+    }
+
+    /// #1146 draws a close button on every modal: a modal that names none
+    /// of its own takes its host's name, and with neither none is drawn.
+    func test_theCloseButtonTakesTheHostsName() {
+        XCTAssertEqual(GlassModal<EmptyView>.closeLabel(own: "", host: "Close"), "Close")
+        XCTAssertEqual(GlassModal<EmptyView>.closeLabel(own: "Done", host: "Close"), "Done")
+        XCTAssertEqual(GlassModal<EmptyView>.closeLabel(own: "", host: ""), "")
+    }
+
+    /// A click on the scrim cancels the modal over it (#1146 `surfaces.tsx`
+    /// `onClick={onClose}`): the layer reads the modal's cancel. The header
+    /// centres its title block and close button, and the fade is 220ms.
+    func test_aClickOnTheScrimCancels() throws {
+        let sources = Dictionary(uniqueKeysWithValues: try DesignSources.components())
+        let modal = try XCTUnwrap(sources["Modal.swift"])
+        XCTAssertFalse(modal.contains(".onTapGesture {}"), "the scrim swallows the click")
+        XCTAssertTrue(modal.contains(".onTapGesture { onTap?() }"))
+        XCTAssertTrue(modal.contains("GlassModalScrim(onTap: cancel?.perform)"))
+        XCTAssertTrue(modal.contains("$0 = GlassModalCancel.Action(perform: onCancel)"))
+        XCTAssertTrue(modal.contains("HStack(alignment: .center, spacing: GlassTokens.Space.s6)"))
+        XCTAssertTrue(modal.contains("GlassMotion.standard(reduceMotion)"), "the fade is not #1146's 220ms")
+
+        // The first cancel reduced in is the one the scrim calls.
+        var value: GlassModalCancel.Action?
+        var calls = 0
+        GlassModalCancel.reduce(value: &value) { GlassModalCancel.Action { calls += 1 } }
+        GlassModalCancel.reduce(value: &value) { GlassModalCancel.Action { calls += 10 } }
+        value?.perform()
+        XCTAssertEqual(calls, 1)
     }
 
     /// Hosted and unhosted presentations lay out, raised and not.

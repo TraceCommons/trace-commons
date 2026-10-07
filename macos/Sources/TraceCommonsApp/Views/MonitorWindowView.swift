@@ -279,6 +279,9 @@ struct MonitorWindowView: View {
         // of it, Settings' sections' own included: the Settings modal sits
         // inside this host.
         .glassModalHost()
+        // Every modal raised here has #1146's close button, named in the
+        // core's words.
+        .environment(\.glassModalCloseLabel, MonitorWords.table?.close ?? "")
         // Ron's `useInspectorDemand`: a key that was not there before (an
         // undo, a selected session, a folder's Submit all in flight, the
         // arming or Private AI offer) opens the inspector, so none runs out
