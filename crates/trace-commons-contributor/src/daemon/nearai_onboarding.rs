@@ -488,7 +488,7 @@ struct Commons<'a> {
 }
 
 /// The account a ceremony must have answered with, when the caller is signed
-/// in to one and the outcome keeps it (bind's `bound`, enrol's `enrolled`).
+/// in to one and the outcome keeps it (bind's `bound`, enroll's `enrolled`).
 struct ExpectedAccount {
     tenant_id: String,
     account_id: String,
@@ -506,7 +506,7 @@ fn persist(
 
 /// [`persist`], refusing (before anything is written) a result whose tenant
 /// or account is not `expected_account`. Defence in depth for bind and
-/// enrol: the commons already refuses an enrolment into any other account,
+/// enroll: the commons already refuses an enrollment into any other account,
 /// and this makes a commons that answered otherwise publish nothing.
 fn persist_for(
     store: &ConfigStore,
@@ -948,11 +948,11 @@ mod tests {
 }
 
 /// Connect a retained NEAR AI login to the signed-in passkey account: bind an
-/// unbound one, or enrol this Mac into a bound one. The authenticated bind
+/// unbound one, or enroll this Mac into a bound one. The authenticated bind
 /// protocol has its own account-bound proof; the unauthenticated provisioning
 /// preimage is never substituted for it.
 ///
-/// An enrolment's expected account is the passkey session's, which the
+/// An enrollment's expected account is the passkey session's, which the
 /// commons reads from the session itself: nothing here names it. If this
 /// Mac's near.ai login is someone else's, the commons refuses before it
 /// writes the device key, and this answers `account-enrol-mismatch` with the
@@ -990,13 +990,13 @@ pub(super) async fn bind(shared: &DaemonShared) -> Result<serde_json::Value> {
     bind_prepared(shared, &api, &origin, account, account_id, prepared).await
 }
 
-/// `account_bind` on a Mac that is already enrolled: the enrolment it holds
+/// `account_bind` on a Mac that is already enrolled: the enrollment it holds
 /// may be the signed-in account's own (Welcome back's sign-in, after the
-/// first status reported an enrolment). Answered from local state alone,
+/// first status reported an enrollment). Answered from local state alone,
 /// with no request and nothing written:
 ///
 /// - the session's tenant (decoded from its `tcn1_` token, as
-///   `persist_session` reads it) is the enrolment's `tenant_id`, and
+///   `persist_session` reads it) is the enrollment's `tenant_id`, and
 /// - the session was signed in to a `bound` account (the `binding_state`
 ///   stored with it).
 ///
@@ -1009,7 +1009,7 @@ pub(super) async fn bind(shared: &DaemonShared) -> Result<serde_json::Value> {
 /// only ever written for a passkey-origin account, and each of those is
 /// created alone in a freshly minted tenant. It grants nothing
 /// `persist_session` had not already accepted when it kept this session
-/// under this enrolment.
+/// under this enrollment.
 fn already_enrolled(
     shared: &DaemonShared,
     config: &crate::config::ContributorConfig,
@@ -1031,7 +1031,7 @@ fn already_enrolled(
 /// Whether `account_bind` runs a ceremony for the signed-in account's
 /// `binding_state`: `unbound` binds it to this Mac's near.ai login; `bound`
 /// (another Mac bound it, and this one signed in with the same passkey)
-/// enrols this Mac into it, which the commons allows only when this Mac's
+/// enrolls this Mac into it, which the commons allows only when this Mac's
 /// near.ai login is the one that account is bound to. Anything else is
 /// refused before the refresh token is spent.
 fn bind_admits(binding_state: &str) -> bool {
@@ -1207,7 +1207,7 @@ mod native_bind_tests {
     use serde_json::{Value, json};
     use std::sync::{Arc, Mutex};
 
-    /// An unbound account binds and a bound one enrols this Mac (a second
+    /// An unbound account binds and a bound one enrolls this Mac (a second
     /// Mac signed in with the same passkey); a legacy, closed or unknown
     /// state runs no ceremony and spends nothing.
     #[test]

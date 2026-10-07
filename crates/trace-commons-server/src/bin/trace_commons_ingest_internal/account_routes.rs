@@ -54,7 +54,7 @@ pub(crate) const ACCOUNT_UNBOUND: &str = "account_unbound";
 /// way forward. Everything else is `Refused`:
 /// invites and the legacy link (an invite must never attach to an account that
 /// may close), inference connections, reward reservations (finite offers),
-/// NEAR wallet enrolment and payout, merge, adding or removing a passkey, and
+/// NEAR wallet enrollment and payout, merge, adding or removing a passkey, and
 /// traces and credit.
 ///
 /// Adding a route to the account surface without a row here fails the
@@ -66,7 +66,7 @@ pub(crate) const UNBOUND_ACCOUNT_ROUTE_POLICY: &[(&str, &str, UnboundAccess)] = 
         ("GET", "/v1/account/binding", Allowed),
         ("GET", "/v1/account/activity-missions/status", Refused),
         // Z2 S3: connect near.ai. For an unbound account the handlers bind;
-        // a bound account (never gated) enrols a further device through the
+        // a bound account (never gated) enrolls a further device through the
         // same routes; a legacy or closed account is refused
         // (`account_already_bound`) and gets nothing.
         ("POST", "/v1/account/near-ai/provision/bind/start", Allowed),
@@ -145,7 +145,7 @@ pub(crate) const UNBOUND_ACCOUNT_ROUTE_POLICY: &[(&str, &str, UnboundAccess)] = 
             "/v1/account/traces/{submission_id}/publication",
             Refused,
         ),
-        // Refused: NEAR wallet enrolment, identities and payout.
+        // Refused: NEAR wallet enrollment, identities and payout.
         ("POST", "/v1/account/near/enroll/start", Refused),
         ("POST", "/v1/account/near/enroll/finish", Refused),
         ("GET", "/v1/account/near-identities", Refused),

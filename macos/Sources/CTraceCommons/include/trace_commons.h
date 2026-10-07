@@ -910,7 +910,7 @@ char*       tc_outcome_refusal_line(const char* label);
 /* Shared queue outcome sentence. Unknown labels are neutral. Free with tc_string_free. */
 char*       tc_queue_outcome_line(const char* label);
 
-/* The sentence for one NEAR AI login-enrolment control name.
+/* The sentence for one NEAR AI login-enrollment control name.
  *
  * Ten labels, each with its own sentence, and anything else -- including a
  * label from a newer daemon, an empty string or NULL -- reaching the generic

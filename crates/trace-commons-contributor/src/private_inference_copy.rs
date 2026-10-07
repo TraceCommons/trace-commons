@@ -2547,7 +2547,7 @@ pub const NEAR_AI_ENROLL_WHAT: &str =
 /// The control.
 pub const NEAR_AI_ENROLL_ACTION: &str = "Join with NEAR AI";
 
-/// Before there is a session to enrol with.
+/// Before there is a session to enroll with.
 ///
 /// NOT a refusal. Nothing has gone wrong and nothing was attempted; there is
 /// a step to take first, and this says which.
@@ -2615,7 +2615,7 @@ pub const NEAR_AI_ENROLL_VERIFICATION_FAILED_LINE: &str = "The commons could not
 pub const NEAR_AI_ENROLL_UNAVAILABLE_LINE: &str =
     "Joining with a NEAR AI login is not available right now. Nothing was joined.";
 
-/// The sentence for one login-enrolment control name.
+/// The sentence for one login-enrollment control name.
 ///
 /// Every label the daemon can return reaches its own sentence, and anything
 /// else reaches the generic one. Never the empty string: a refusal a shell
@@ -2756,12 +2756,12 @@ pub const OUTCOME_ADMISSION_EVIDENCE_REFUSED: &str =
 
 // PRIVATE-INFERENCE-SURFACE-END
 
-// The daemon's control names for login enrolment. Below the marker on
+// The daemon's control names for login enrollment. Below the marker on
 // purpose: the sweep above bans mechanism words from sentences a contributor
 // reads, and these are wire labels nobody is shown. Mirrored here rather than
 // imported because `daemon::nearai_onboarding` lands separately; when it does,
 // these should be sourced from it so a rename moves one string.
-/// The daemon's control names for login enrolment, so a shell never spells
+/// The daemon's control names for login enrollment, so a shell never spells
 /// one and a rename moves one string.
 pub const NEAR_AI_ENROLL_ALREADY_ENROLLED: &str = "near_ai_enroll_already_enrolled";
 pub const NEAR_AI_ENROLL_NO_SESSION: &str = "near_ai_enroll_no_session";
@@ -4338,7 +4338,7 @@ mod tests {
     ///
     /// The three that happen BEFORE anything is spent are the ones that
     /// matter most: no NEAR AI session, the commons unreachable, and the
-    /// commons not offering login enrolment. A contributor told "the commons
+    /// commons not offering login enrollment. A contributor told "the commons
     /// is unreachable" when they have simply never logged in will go and
     /// debug their network. The daemon already fixed that confusion once on
     /// its side by checking the session before reaching out; collapsing the

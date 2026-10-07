@@ -13,7 +13,7 @@ public enum FirstRunCall: Equatable, Sendable {
     /// (`account_sign_in`).
     case signInNearAI
     /// Without an invite: the near.ai login (the browser sign-in, skipped
-    /// when the daemon already keeps one), then the enrolment through it
+    /// when the daemon already keeps one), then the enrollment through it
     /// (`near_ai_account_enroll`). Signing in with near.ai needs no invite
     /// (owner, Ron's review of #1235).
     case nearAILogin
@@ -27,7 +27,7 @@ public enum FirstRunCall: Equatable, Sendable {
     case includePastSessions(projectID: String, [String])
     case setPrivateAI(Bool)
     case grantAutomatic(witness: String?)
-    /// The completion marker for an enrolment, keyed by its tenant.
+    /// The completion marker for an enrollment, keyed by its tenant.
     case markComplete
     /// The completion marker for watching only, which has no tenant to key
     /// a marker by.
@@ -106,7 +106,7 @@ public enum FirstRunPlan {
             }
         }
         // A new passkey creates an account of its own, and the daemon
-        // refuses to create one over an enrolment
+        // refuses to create one over an enrollment
         // (`account-already-enrolled`), so no sheet opens beside an invite.
         // Join keeps the two apart; this refuses the pair anyway.
         if state.account == .passkeyChosen, !joinsInvite, state.enrolledInvite == nil {
@@ -144,8 +144,8 @@ public enum FirstRunPlan {
         return object as? [String: [String: String]]
     }
 
-    /// Watch only holds no enrolment, so Start sends nothing that belongs
-    /// to one: no consent scopes (the daemon keeps them in the enrolment's
+    /// Watch only holds no enrollment, so Start sends nothing that belongs
+    /// to one: no consent scopes (the daemon keeps them in the enrollment's
     /// config and refuses them without it), no grant, and the watch-only
     /// marker instead of the tenant's. Custom's folder rules, past sessions
     /// and Private AI are local to the daemon and are sent either way: for
@@ -156,14 +156,14 @@ public enum FirstRunPlan {
     /// A passkey chosen on Join and not yet created holds no account, so
     /// Start reopens its sheets and sends nothing else: the sheets are not
     /// awaited, and nothing may run behind them. Any other account answer
-    /// without an enrolment the daemon holds sends nothing at all, since
+    /// without an enrollment the daemon holds sends nothing at all, since
     /// scopes, the grant and the marker all belong to one (`canContinue`
     /// keeps Start off for it).
     ///
-    /// Watching only while the daemon still holds an enrolment
+    /// Watching only while the daemon still holds an enrollment
     /// (`FirstRunState.daemonHoldsEnrolment`: one signed out of on Join, or
     /// an invite enrolled before a near.ai sign-in failed) sends nothing at
-    /// all. Its rules and past sessions would act under that enrolment,
+    /// all. Its rules and past sessions would act under that enrollment,
     /// whose scopes nobody chose here, and its marker is refused while the
     /// daemon is logged in. Join does not offer watch only then, and
     /// `canContinue` keeps Start off for it.

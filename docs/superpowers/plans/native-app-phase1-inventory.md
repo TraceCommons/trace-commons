@@ -396,7 +396,7 @@ The 11 with no route are residual_secret_line, redaction_summary_copy, project_i
 2. **Flow map, Private AI and model view.** Harness nodes, the NEAR AI credential link, model and outside-model nodes, and call counts, from `harness_list` plus `tool_destinations` and `inference_calls`. #1146 left out the model nodes, call counts and pulses.
 3. **Credit and settlement.** `commons_credit_summary` is IPC (K7: settlement posture plus account points) but unused. Use it for Home's credit/"Kept" tile and the History credit record. The design's "Top 8%" standing and credit multipliers have no route and are off-limits for projected credit.
 4. **Missions.** Vendor missions and credit multipliers have **no route** in the contributor core. Only local drafts exist (`tc_mission_drafts_call`).
-5. **Invite and enrolment.**
+5. **Invite and enrollment.**
    - The K12 inference-connection onboarding step: IPC `inference_connection_*` exists. Export `inference_connection_copy` and the disclosure per version, and move `select_params` and `with_disclosures` into the core.
    - The legacy invite migration panel: IPC `legacy_invite_migrate` exists. Export `legacy_migration_offer` and the refusal line, and add the macOS panel.
    - Invite deep links (shared with 4a item 9).

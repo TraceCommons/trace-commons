@@ -75,7 +75,7 @@ final class OnboardingNavigationTests: XCTestCase {
         XCTAssertEqual(FirstRunPlan.calls(for: state, at: .start).last, .markComplete,
             "an enrolment finishes on its tenant's marker")
 
-        // An invite link cannot replace the enrolment either.
+        // An invite link cannot replace the enrollment either.
         XCTAssertEqual(OnboardingNavigation.receive(
             invite: "https://issuer.example/i#CODE", in: state, failure: nil, isCommitting: false,
             host: { _ in "issuer.example" }), .discard)
@@ -83,9 +83,9 @@ final class OnboardingNavigationTests: XCTestCase {
 
     /// The daemon's first status can arrive after the first run is up (the
     /// main window hosts it as soon as the daemon runs, before `status`
-    /// says it is enrolled). The enrolment is applied then, over no account
+    /// says it is enrolled). The enrollment is applied then, over no account
     /// answer or watch only; an account Join chose is kept, and an
-    /// enrolment this first run made is left as it is.
+    /// enrollment this first run made is left as it is.
     func test_aLateEnrolmentIsRecordedWithoutReplacingAChosenAccount() {
         let fresh = OnboardingNavigation.initialState(startAt: .join, daemonRunning: true, enrolled: false)
         let late = OnboardingNavigation.recordEnrolment(fresh)
@@ -104,8 +104,8 @@ final class OnboardingNavigationTests: XCTestCase {
         XCTAssertEqual(OnboardingNavigation.recordEnrolment(joined), joined)
     }
 
-    /// The realistic late enrolment: a parked link filled Join before the
-    /// daemon's first status said it was enrolled. Recording that enrolment
+    /// The realistic late enrollment: a parked link filled Join before the
+    /// daemon's first status said it was enrolled. Recording that enrollment
     /// drops the held invite, so it is neither looked up nor joined again
     /// (Review Focus 4), and Join's line names no host the daemon was not
     /// shown to have joined (Review Focus 1), refusal or not.

@@ -895,7 +895,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var certificateDetails: [String: CertificateDetail] = [:]
 
     /// Re-read what leaves this machine. Called wherever a fact it states
-    /// can change: the witness, enrolment, and any settings write (through
+    /// can change: the witness, enrollment, and any settings write (through
     /// `daemonSettings`), as well as when a disclosure surface appears.
     func refreshRouteDisclosure() {
         routeDisclosureGeneration &+= 1
@@ -1743,7 +1743,7 @@ final class AppModel: ObservableObject {
             do {
                 return .joined(try client.nearAiAccountEnroll(commons: commons))
             } catch let failure as DaemonClient.Failure {
-                // `message` is the daemon's control name -- the enrolment
+                // `message` is the daemon's control name -- the enrollment
                 // handler answers a label and nothing else, because the
                 // errors underneath can quote a remote body or a URL. Empty
                 // falls back to the generic label rather than to a blank.
@@ -2104,9 +2104,9 @@ final class AppModel: ObservableObject {
     /// coordinator's atomicity note.
     ///
     /// Watching only finishes too (Review Focus 5 of #1030's port): with no
-    /// enrolment there is no tenant, so its marker is
+    /// enrollment there is no tenant, so its marker is
     /// `isWatchOnlyComplete`. It counts only while the daemon holds no
-    /// enrolment; an enrolled person confirms on Start whatever an earlier
+    /// enrollment; an enrolled person confirms on Start whatever an earlier
     /// watch-only run wrote. Before the first status arrives `loggedIn`
     /// reads false, so that marker alone decides until then: the main
     /// window may show its content, then switch back into the first run.
@@ -2150,7 +2150,7 @@ final class AppModel: ObservableObject {
     /// Test seam: `status` is `private(set)` and otherwise only ever set
     /// from a live daemon reply, so there is no other way to exercise the
     /// tenant-keyed onboarding marker without a running daemon and a real
-    /// enrolment. Debug-only, and deliberately routed through
+    /// enrollment. Debug-only, and deliberately routed through
     /// `publishIfChanged` so a test observes exactly what the app does.
     func setClientForTesting(_ client: DaemonClient) {
         self.client = client
@@ -3478,7 +3478,7 @@ extension AppModel: FirstRunDaemon {
     }
 
     /// An invite link (`PendingInvite`) takes back a finished watch-only
-    /// run while the daemon holds no enrolment: the marker is cleared, so
+    /// run while the daemon holds no enrollment: the marker is cleared, so
     /// `requiresOnboarding` turns true, a window hosts the first run again,
     /// and the coordinator applies the parked link to Join. Without this a
     /// finished watcher could never join, since the first run is the only

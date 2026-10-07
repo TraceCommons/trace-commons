@@ -83,7 +83,7 @@ enum FirstRunFailure: Equatable {
     case lookupUnavailable
     case enrollFailed
     case signInFailed
-    /// The near.ai enrolment without an invite was refused; the daemon's
+    /// The near.ai enrollment without an invite was refused; the daemon's
     /// label, for the core's line (`TCNearAiEnroll`).
     case nearAIEnrollFailed(label: String)
     case scopesFailed
@@ -169,7 +169,7 @@ final class FirstRunRunner: ObservableObject {
 
     /// Run the calls for `point`. Leaving the roots moves on to the next step
     /// only when every call succeeded; a dead invite, a near.ai sign-in that
-    /// did not succeed (with an invite or without), or a near.ai enrolment
+    /// did not succeed (with an invite or without), or a near.ai enrollment
     /// without one that was refused, goes back to Join; any other failure
     /// leaves the step where it is, and so does a cancelled browser wait. Start always ends in
     /// `markComplete` unless a call before the grant failed, and reports
@@ -230,7 +230,7 @@ final class FirstRunRunner: ObservableObject {
             state.signedOutOfEnrolment = false
         case .signInNearAI:
             // With an invite too (owner, 2026-10-07): back to Join with the
-            // choice cleared and the invite and its enrolment kept.
+            // choice cleared and the invite and its enrollment kept.
             guard await daemon.signInNearAI() else {
                 state = FirstRunNavigation.returnToJoin(afterNearAIFailure: state)
                 return fail(.signInFailed)
@@ -327,7 +327,7 @@ final class FirstRunRunner: ObservableObject {
     /// asks the daemon which passkeys this Mac remembers and, if the rule
     /// holds, opens the sheets at Welcome back with the remembered name. The
     /// rule is checked again once the daemon answers, since Join (or an
-    /// enrolment the first status reported) can change meanwhile. Offered at
+    /// enrollment the first status reported) can change meanwhile. Offered at
     /// most once; its Sign in is the ordinary sign-in, and "Other sign-in
     /// options" closes it and leaves Join as it was.
     func offerWelcomeBack(from account: any PasskeyAccount) async {

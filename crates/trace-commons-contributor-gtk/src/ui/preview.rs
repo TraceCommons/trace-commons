@@ -2332,7 +2332,7 @@ fn context_around(body: &str, byte_start: usize, byte_end: usize) -> Excerpt {
     }
 }
 
-/// Whether this contributor's enrolment admits evidence-bearing
+/// Whether this contributor's enrollment admits evidence-bearing
 /// contribution, read out of a `get_settings` reply.
 ///
 /// `admission_evidence_required` is the daemon's own answer, and it is not a
@@ -2350,11 +2350,11 @@ fn admission_required_by_settings(settings: &serde_json::Value) -> bool {
 /// Whether the preparation control belongs on the sheet at all.
 ///
 /// Withheld rather than shown refused, which is what macOS does: it omits
-/// `AdmissionPreparationView` outright for a contributor whose enrolment
+/// `AdmissionPreparationView` outright for a contributor whose enrollment
 /// cannot use it. A disabled button with nothing beside it to say why is
 /// worse than no button.
 fn admission_control_visible(required: bool, supported: bool, pinned: bool) -> bool {
-    // `required` is the enrolment, `supported` the daemon advertising the
+    // `required` is the enrollment, `supported` the daemon advertising the
     // method, `pinned` this sheet having already committed the bytes -- after
     // which there is nothing left to prepare.
     required && supported && !pinned

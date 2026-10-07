@@ -115,7 +115,7 @@ final class RulesScreenTests: XCTestCase {
         XCTAssertTrue(state.rules.isEmpty)
     }
 
-    /// Automatic needs an enrolment. A watch-only person is not offered it per
+    /// Automatic needs an enrollment. A watch-only person is not offered it per
     /// folder, and the layout refuses it however it is asked, so the plan
     /// never sends an arming the daemon would refuse for want of terms.
     func test_watchOnlyIsNotOfferedAutomaticPerFolder() {
@@ -330,7 +330,7 @@ final class RulesScreenTests: XCTestCase {
         state.pastSelections = ["p1": ["s1"]]
         XCTAssertTrue(FirstRunPlan.calls(for: state, at: .start).contains(.includePastSessions(projectID: "p1", ["s1"])))
 
-        // Only while it is true: with an enrolment the daemon still holds
+        // Only while it is true: with an enrollment the daemon still holds
         // (one signed out of, or an invite enrolled before a sign-in
         // failed), watching only sends nothing, so nothing waits to say so.
         for held in [

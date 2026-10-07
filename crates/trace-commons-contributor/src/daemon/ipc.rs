@@ -1827,7 +1827,7 @@ impl DaemonShared {
             "tenant_id": cfg.as_ref().map(|c| c.tenant_id.clone()),
             "consent_scopes": cfg.as_ref().map(|c| c.consent_scopes.clone()).unwrap_or_default(),
             // Additive. `consent-scopes-not-chosen` while nothing may be sent
-            // under the enrolment because its scopes were saved by enrolment
+            // under the enrollment because its scopes were saved by enrollment
             // and never chosen; `null` otherwise. Label only. See
             // `config::consent_hold`.
             "consent_hold": crate::config::consent_hold(cfg.as_ref()),
@@ -5070,8 +5070,8 @@ async fn handle_approve(shared: &DaemonShared, req: &Request) -> Response {
     // config records neither, which the uploader treats as
     // "unknown, re-ask" -- fail-closed.
     let cfg = shared.store.load_config().ok().flatten();
-    // An approval is a decision to send under the enrolment, and an
-    // enrolment whose scopes nobody chose sends nothing: refused, before
+    // An approval is a decision to send under the enrollment, and an
+    // enrollment whose scopes nobody chose sends nothing: refused, before
     // anything is approved or recorded, in every form (one entry, a
     // project, all).
     if let Some(label) = crate::config::consent_hold(cfg.as_ref()) {
@@ -5375,7 +5375,7 @@ pub(super) async fn approve_as_a_person(
     // A correction forces a rebuild even for an entry that was previewed:
     // the pinned artifact was built before the contributor had written
     // anything, so it carries neither the correction nor the
-    // `correction_included` declaration that enrols it for the PII backstop,
+    // `correction_included` declaration that enrolls it for the PII backstop,
     // and credential detection has never run over the text. Re-pinning here
     // is what makes the approval cover the bytes the correction is part of.
     // `correction` is only ever `Some` for a single `entry_id`, refused
@@ -6015,7 +6015,7 @@ async fn handle_preview(shared: &DaemonShared, req: &Request) -> Response {
     // No enrollment is not a refusal. Preview does no network I/O and needs
     // neither the daemon's lock nor its running loop, so requiring a config
     // here was incidental -- and it forced anyone who wanted to *see* what
-    // would be sent to enrol first, which is the wrong way round. Without a
+    // would be sent to enroll first, which is the wrong way round. Without a
     // config the pipeline builds the same placeholder-identity,
     // deterministic-only envelope the CLI's unenrolled `--dry-run` builds,
     // and the response says so. See `preview::build_preview`.
@@ -7774,13 +7774,13 @@ mod tests {
         let s = shared();
         let mut cfg = crate::commands::unenrolled_preview_config();
         // A contributor who chose their scopes: the one every send path
-        // serves. `unchosen_shared` is the enrolment nobody chose for.
+        // serves. `unchosen_shared` is the enrollment nobody chose for.
         cfg.consent_scopes_chosen = Some(true);
         s.store.save_config(&cfg).unwrap();
         s
     }
 
-    /// An enrolment whose consent scopes were saved by enrolment and never
+    /// An enrollment whose consent scopes were saved by enrollment and never
     /// chosen (`consent_scopes_chosen: Some(false)`).
     fn unchosen_shared() -> DaemonShared {
         let s = shared();
@@ -16452,7 +16452,7 @@ mod tests {
 
     // -- Sending needs chosen consent scopes -------------------------------
 
-    /// Under an enrolment whose scopes nobody chose, every way of sending is
+    /// Under an enrollment whose scopes nobody chose, every way of sending is
     /// refused with one fixed label, before anything is approved, armed or
     /// recorded: `approve` in all three forms, arming a folder, and an
     /// `auto_upload` contribution override. What only stops sends -- Ask me,
@@ -16553,7 +16553,7 @@ mod tests {
     }
 
     /// `status.consent_hold` names the hold, label only, so a shell can say
-    /// why nothing is sent; `null` with no enrolment, a choice, or a config
+    /// why nothing is sent; `null` with no enrollment, a choice, or a config
     /// that predates the record.
     #[test]
     fn status_names_the_consent_hold() {

@@ -105,7 +105,7 @@ final class AdmissionPlacementTests: XCTestCase {
             """)
     }
 
-    /// Moving it must not have widened who is offered it. The enrolment gate
+    /// Moving it must not have widened who is offered it. The enrollment gate
     /// this shell reads is `admissionEvidenceOffered`; `DaemonFieldDecodingTests`
     /// holds what that answers, and this holds that the native review still asks.
     func testTheMovedControlIsStillGatedOnTheEnrolment() throws {

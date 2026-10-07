@@ -1108,8 +1108,8 @@ struct PassContext {
     /// person, as the contributor asked.
     scrub_check_manual: bool,
     /// Whether anything may be approved on the contributor's behalf under
-    /// the enrolment this pass reads: false while its scopes were saved by
-    /// enrolment and never chosen (`config::consent_hold`). Such a session
+    /// the enrollment this pass reads: false while its scopes were saved by
+    /// enrollment and never chosen (`config::consent_hold`). Such a session
     /// waits for a person, whose `approve` is refused for the same reason
     /// until the scopes are chosen. Not a gate hold, and not counted as one.
     consent_chosen: bool,
@@ -4893,7 +4893,7 @@ mod tests {
         assert_eq!(row.project_label.as_deref(), Some("proj"));
     }
 
-    /// Set the saved config's scope-choice record, as an enrolment, a choice,
+    /// Set the saved config's scope-choice record, as an enrollment, a choice,
     /// or a config that predates the record would leave it.
     fn set_chosen(f: &WatcherFixture, chosen: Option<bool>) {
         let mut cfg = f.shared.store.load_config().unwrap().unwrap();
@@ -4902,8 +4902,8 @@ mod tests {
     }
 
     /// An armed folder approves nothing on anyone's behalf while the
-    /// enrolment's scopes were never chosen -- an arming left from before a
-    /// new enrolment, say. The session waits for a person (whose `approve`
+    /// enrollment's scopes were never chosen -- an arming left from before a
+    /// new enrollment, say. The session waits for a person (whose `approve`
     /// is refused too), and once the scopes are chosen the next pass
     /// approves it as in any armed folder.
     #[tokio::test]
@@ -5854,7 +5854,7 @@ mod tests {
     }
 
     /// Including past sessions approves them, so it is refused whole under
-    /// an enrolment whose scopes nobody chose: nothing is revived, queued,
+    /// an enrollment whose scopes nobody chose: nothing is revived, queued,
     /// approved or recorded.
     #[tokio::test]
     async fn include_is_refused_while_consent_scopes_are_not_chosen() {
@@ -5874,7 +5874,7 @@ mod tests {
         assert!(included_rows(&f).is_empty(), "nothing recorded");
     }
 
-    /// The first-run bug, at the daemon: an enrolment is held and its scopes
+    /// The first-run bug, at the daemon: an enrollment is held and its scopes
     /// were never chosen, and a watch-only Start sends what Custom collected
     /// -- an Automatic rule left on a folder and past-session picks -- then
     /// approves everything. Every call is refused, and no pass approves or
@@ -6040,7 +6040,7 @@ mod tests {
     }
 
     /// Kristi a#5: a revive is the person's choice and stands even when the
-    /// approval cannot land -- here, watching only, with no enrolment to
+    /// approval cannot land -- here, watching only, with no enrollment to
     /// approve under. The session waits again, and the badge counts it.
     #[tokio::test]
     async fn include_revives_an_expired_session_even_when_the_approval_cannot_land() {
@@ -6458,7 +6458,7 @@ mod tests {
         assert_eq!(count(&c), 0, "a declined session must not be re-read");
     }
 
-    /// Enrol the fixture, so `approve` has a config to build an envelope
+    /// Enroll the fixture, so `approve` has a config to build an envelope
     /// against. Without one it skips every entry `not-enrolled` and never
     /// reaches the size check at all.
     fn enrol(f: &WatcherFixture) {

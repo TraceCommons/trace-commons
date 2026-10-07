@@ -85,7 +85,7 @@ enum RulesScreenLayout {
         case refused
     }
 
-    /// The modes a folder's picker offers. Automatic needs an enrolment the
+    /// The modes a folder's picker offers. Automatic needs an enrollment the
     /// daemon holds (`FirstRunState.holdsEnrolment`), so a person without
     /// one -- watching only, a passkey not yet bound -- is not offered it; a folder the daemon already
     /// arms keeps it, so the picker can show what is in force, and picking
@@ -99,7 +99,7 @@ enum RulesScreenLayout {
     /// A pick on a folder's picker. The daemon's own mode clears the
     /// folder's answer, so it is not sent again. Automatic is a grant, so
     /// it is never silent: it waits for the arming confirmation, and a
-    /// person without an enrolment is refused it.
+    /// person without an enrollment is refused it.
     static func pick(_ state: inout FirstRunState, project: ProjectRow, wanted: ProjectMode) -> PickOutcome {
         let id = project.projectId
         if wanted == project.mode {
@@ -116,7 +116,7 @@ enum RulesScreenLayout {
     }
 
     /// The arming confirmation was accepted: the only writer of Automatic.
-    /// Refused for a person without an enrolment and for a folder the daemon will
+    /// Refused for a person without an enrollment and for a folder the daemon will
     /// not arm, whatever the view asked.
     static func confirmArming(_ state: inout FirstRunState, project: ProjectRow) -> Bool {
         guard FirstRunNavigation.canChooseAutomatic(state),
@@ -143,10 +143,10 @@ enum RulesScreenLayout {
         count > 0 ? FirstRunCopy.fill(copy.notListed, ["count": String(count)]) : nil
     }
 
-    /// The past-session card's note. Watching only has no enrolment, so the
+    /// The past-session card's note. Watching only has no enrollment, so the
     /// sessions picked here are queued on this Mac and none is sent; the
     /// core's line says they wait there. Nil for every other account, and
-    /// for watching only while the daemon still holds an enrolment, when
+    /// for watching only while the daemon still holds an enrollment, when
     /// Start sends nothing (`FirstRunPlan`) and nothing waits.
     static func pastSessionsNote(_ state: FirstRunState, copy: FirstRunCopy.Rules) -> String? {
         state.account == .watchOnly && !state.daemonHoldsEnrolment ? copy.pastSessionsWatchOnly : nil

@@ -14,7 +14,7 @@ final class FirstRunPlanTests: XCTestCase {
     }
 
     /// `answered` on Uses, after leaving the roots enrolled its invite: the
-    /// enrolment Start's scopes, grant and marker belong to.
+    /// enrollment Start's scopes, grant and marker belong to.
     private func onUses(tier: FirstRunTier = .quick) -> FirstRunState {
         var state = answered(tier: tier)
         state.step = .uses
@@ -102,7 +102,7 @@ final class FirstRunPlanTests: XCTestCase {
     }
 
     /// A new passkey creates an account of its own, and the daemon refuses
-    /// to create one over an enrolment (`account-already-enrolled`), so an
+    /// to create one over an enrollment (`account-already-enrolled`), so an
     /// invite and a chosen passkey never both reach the daemon. Join keeps
     /// them apart (`JoinScreenLayout.lookUp`); the plan refuses the pair anyway:
     /// the invite is joined and no sheet opens.
@@ -282,7 +282,7 @@ final class FirstRunPlanTests: XCTestCase {
     }
 
     /// Review Focus 5: Start finishes watching. Watch only holds no
-    /// enrolment, so nothing goes to the enrolment's config (the daemon
+    /// enrollment, so nothing goes to the enrollment's config (the daemon
     /// refuses consent scopes without one) and nothing is granted; Start
     /// ends in the watch-only marker, which needs no tenant. Custom's local
     /// choices (folder rules, past sessions, Private AI) are still sent.
@@ -310,13 +310,13 @@ final class FirstRunPlanTests: XCTestCase {
         ])
     }
 
-    /// The first-run consent bug, exactly: the daemon holds an enrolment
+    /// The first-run consent bug, exactly: the daemon holds an enrollment
     /// (an invite enrolled before a near.ai sign-in failed, or one signed
     /// out of on Join), the person is on watch only, and Start carries an
     /// Automatic rule left on a folder and past-session picks. Nothing that
-    /// would use the enrolment is sent -- no rule, no past session, no
+    /// would use the enrollment is sent -- no rule, no past session, no
     /// Private AI, no marker -- since every one of them would act under an
-    /// enrolment whose scopes nobody chose, and the watch-only marker cannot
+    /// enrollment whose scopes nobody chose, and the watch-only marker cannot
     /// finish while the daemon is logged in. Start is not offered for it
     /// either (`canContinue`).
     func test_watchOnlyUnderAHeldEnrolmentSendsNothing() {
@@ -344,7 +344,7 @@ final class FirstRunPlanTests: XCTestCase {
         XCTAssertFalse(
             FirstRunNavigation.canContinue(signedOut, candidates: [], requiredScope: "debugging_evaluation"))
 
-        // With no enrolment held, watch only still finishes as before.
+        // With no enrollment held, watch only still finishes as before.
         var watching = afterFailedSignIn
         watching.enrolledInvite = nil
         XCTAssertFalse(watching.daemonHoldsEnrolment)
@@ -352,7 +352,7 @@ final class FirstRunPlanTests: XCTestCase {
         XCTAssertTrue(FirstRunNavigation.canContinue(watching, candidates: [], requiredScope: "debugging_evaluation"))
     }
 
-    /// Whether the daemon may hold an enrolment, whatever this first run
+    /// Whether the daemon may hold an enrollment, whatever this first run
     /// treats as the account: one it enrolled, one an earlier run left, a
     /// bound passkey, near.ai's, and one signed out of on Join.
     func test_theDaemonHoldsAnEnrolmentWhateverTheAccountAnswer() {
@@ -409,8 +409,8 @@ final class FirstRunPlanTests: XCTestCase {
         XCTAssertEqual(FirstRunPlan.calls(for: state, at: .start), [.openPasskeySheets])
     }
 
-    /// Kristi's #1235 B1 floor: scopes, the grant and the enrolment's
-    /// marker belong to an enrolment the daemon holds. An account answer
+    /// Kristi's #1235 B1 floor: scopes, the grant and the enrollment's
+    /// marker belong to an enrollment the daemon holds. An account answer
     /// without one sends none of them.
     func test_noEnrolmentNoScopesGrantOrMarker() {
         var state = answered()

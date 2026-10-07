@@ -546,7 +546,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `preview_request` | `entry_id` | `entry_id`, `state`, and the fields that state carries | enqueues and returns immediately; the result arrives as a `preview_ready` event. See "Scheduled previews" below |
 | `preview_visible` | `entry_ids[]` | `visible: <count>` | replaces the on-screen set wholesale; decides preview **order**, never membership |
 | `preview_cancel` | `entry_id` | `entry_id`, `dropped` | drops a queued preview, or discards a running one's result; `dropped: false` is a no-op, not an error |
-| `approve` | `entry_id`, `all: true`, or `project_id`; `outcome` (optional); `correction` (optional, `entry_id` + `partly`/`failed` only) | `approved: <count>`, `hold_secs`, `hold_until`, `flagged`, `redactions`, `skipped[]` | `all: true` no longer requires a terminal; `project_id` approves that project's `Pending` entries and no others, matched by the id `entry_value` publishes (never `project_label`, which is display text and unstable), and is refused with `project-id-unrecognized` if the daemon does not know that project; the three are mutually exclusive and `all` wins over `project_id` wins over `entry_id` when more than one is sent; refused with `contribution-override-never` while a Never contribution override is in force (#1208), and with `consent-scopes-not-chosen` in every form while the enrolment's scopes were never chosen (see "Sending needs chosen consent scopes"); see "The approval hold", "What `approve` reports" and "The `outcome` verdict" below |
+| `approve` | `entry_id`, `all: true`, or `project_id`; `outcome` (optional); `correction` (optional, `entry_id` + `partly`/`failed` only) | `approved: <count>`, `hold_secs`, `hold_until`, `flagged`, `redactions`, `skipped[]` | `all: true` no longer requires a terminal; `project_id` approves that project's `Pending` entries and no others, matched by the id `entry_value` publishes (never `project_label`, which is display text and unstable), and is refused with `project-id-unrecognized` if the daemon does not know that project; the three are mutually exclusive and `all` wins over `project_id` wins over `entry_id` when more than one is sent; refused with `contribution-override-never` while a Never contribution override is in force (#1208), and with `consent-scopes-not-chosen` in every form while the enrollment's scopes were never chosen (see "Sending needs chosen consent scopes"); see "The approval hold", "What `approve` reports" and "The `outcome` verdict" below |
 | `dismiss` | `entry_id` | `ok: true` | declines the **session**, not just this entry: the daemon never offers that session file again, however much it grows afterwards. See "`dismiss` is permanent" below |
 | `keep` | `entry_id` | `kept: true` | "Keep on this Mac": the **reversible** decline. The entry must be `pending`, or `approved` unattended, which the keep revokes (`not-pending` otherwise, `unknown-entry-id` if there is none). See "`keep`: Keep on this Mac" below |
 | `undo_keep` | `entry_id` | `kept: false` | returns a kept entry to `pending`, waiting for a person; `not-kept` for anything that is not kept, a dismissed entry included; `queue-full` at the queue cap; `project-ignored` if its folder is now Never. See "`keep`: Keep on this Mac" below |
@@ -558,7 +558,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `resume` | — | `paused: false` | |
 | `list_projects` | — | `projects[]` of `{project_id, project_label, mode, folder_mode, added_at, configured, is_unresolved_bucket}`, plus a top-level `unpurposed_traces` | configured **and** discovered projects; see "`list_projects`" below |
 | `set_project_mode` | `project_id` **or** `project_key`, `mode` (`label` accepted and ignored), `include_backlog` (optional boolean, `auto_upload` only) | `ok: true`, `purged: <count>`, `retracted: <count>`, `from_now`, `overridden_by` (`null` or the override's mode) | socket clients send `project_id`; `auto_upload` no longer requires a terminal; see "Naming a project" above, "`set_project_mode` and the ignore purge" and "Arming from now" below |
-| `set_contribution_override` | `mode` (`notify_only`, `auto_upload` or `ignore`), `confirm` (boolean; `true` required for `auto_upload`) | `changed`, `contribution_override: {mode, since}`, `returned: <count>` | the menu-bar pill's global override (#1173); per-folder modes are never written; `auto_upload` is a grant, refused with `arming-terms-unavailable` without terms (#1208) and with `consent-scopes-not-chosen` while the enrolment's scopes were never chosen; see "The contribution override" below |
+| `set_contribution_override` | `mode` (`notify_only`, `auto_upload` or `ignore`), `confirm` (boolean; `true` required for `auto_upload`) | `changed`, `contribution_override: {mode, since}`, `returned: <count>` | the menu-bar pill's global override (#1173); per-folder modes are never written; `auto_upload` is a grant, refused with `arming-terms-unavailable` without terms (#1208) and with `consent-scopes-not-chosen` while the enrollment's scopes were never chosen; see "The contribution override" below |
 | `clear_contribution_override` | — | `cleared`, `returned: <count>` | every folder back on its own mode; see "The contribution override" below |
 | `mission_matches` | `catalogue` (a contribution mission catalogue; PROVISIONAL, shape owned by Z7/Z8) | `matches[]` of mission ids, `read: {tools, folders}` (counts) | K16 (#1173): which contribution missions this Mac's work fits, worked out on this Mac only; read-only; refused with `catalogue-required`, `catalogue-invalid` or `catalogue-schema-unsupported`; see "`mission_matches`" below |
 | `list_history` | `limit` (optional, default 50, max 1000) | `history[]`, each row now also carrying `approved_unattended`, `approved_verdict`, `uploaded_bytes`, and `revoked_at` | see "History provenance (K7)", "Sizes in history, and the would-send size (K10)" and "Withdrawal dates on revoked rows (K12)" below |
@@ -1153,7 +1153,7 @@ named.
 
 **`preview` does not require an enrollment.** It performs no network I/O and
 needs neither the daemon's file lock nor its running loop, so an app can
-show a contributor what would be sent *before* they decide to enrol -- which
+show a contributor what would be sent *before* they decide to enroll -- which
 is when the question matters most. Through `v1_1`'s first releases this
 refused with `unavailable` / `not-logged-in` unless a `contributor.json`
 existed, which forced app harnesses to fabricate an enrollment purely to
@@ -1229,7 +1229,7 @@ only the pinning build (`preview_body`, `preview_turns`,
 `preview_unsure_spans`, `approve`, a witnessed review) writes them. A card
 (`preview`, `preview_request`) pins nothing and so records nothing, and an
 unenrolled build is never pinned. When the pin is released, replaced or
-revoked -- a re-enrolment, a privacy-filter change, an approval revoked and
+revoked -- a re-enrollment, a privacy-filter change, an approval revoked and
 re-offered, a stale pin released after three days -- the entry reads as
 `not-yet-scrubbed` again, with nothing to clear by hand. Before then `marks`,
 `content_marks` and `unsure_spans` are **absent** -- never `0`, never `null`
@@ -1776,7 +1776,7 @@ refuses every session and records nothing:
 | `bad_params` / `too-many-sessions` | more than 500 ids, duplicates counted, checked before any id is read |
 | `bad_params` / `project-id-unrecognized` | the project resolves as for `list_past_sessions` and does not |
 | `bad_params` / `contribution-override-never` | the global Never contribution override is on, as `approve` refuses it |
-| `bad_params` / `consent-scopes-not-chosen` | the enrolment's scopes were never chosen, as `approve` refuses it; nothing is revived, queued or recorded |
+| `bad_params` / `consent-scopes-not-chosen` | the enrollment's scopes were never chosen, as `approve` refuses it; nothing is revived, queued or recorded |
 | `bad_params` / `project-mode-never` | the folder's rule is Never |
 | `bad_params` / `session-id-unrecognized` | any one id is not one of this folder's sessions in the daemon's own walk -- another folder's id, a path, an empty string, a made-up id |
 | `bad_params` / `included-sessions-limit` | the live included sessions plus every id asked for would pass 500 |
@@ -5081,7 +5081,7 @@ It also records that the contributor chose the scopes: the config field
 least one scope, and `false` when it is omitted or empty, since that saves the
 floor scope without naming anything. `grant_automatic` requires it, and
 every send path requires it (see "Sending needs chosen consent scopes"). The
-daemon's `enroll` and every app enrolment write it `false`; the CLI's `login`
+daemon's `enroll` and every app enrollment write it `false`; the CLI's `login`
 writes `true` when its own consent question was answered (an explicit
 `--scopes`, or the interactive menu) and `false` for default answers. A
 config with no such key predates the record and is not held; an omitted or
@@ -5089,7 +5089,7 @@ empty `scopes` leaves such a config without the key.
 
 ### Sending needs chosen consent scopes
 
-An enrolment saves the floor scope with nobody having picked it, so while
+An enrollment saves the floor scope with nobody having picked it, so while
 the config's `consent_scopes_chosen` is `false` nothing is sent under it.
 One fixed label, `consent-scopes-not-chosen`, everywhere:
 
@@ -5103,7 +5103,7 @@ One fixed label, `consent-scopes-not-chosen`, everywhere:
 | the upload pass | every `approved` entry is held exactly as it is (no state change, no attempt, no label), as a Never override holds them; choosing the scopes releases them to the send path, whose scope and input pins still re-ask an entry whose terms moved |
 
 `status.consent_hold` is `consent-scopes-not-chosen` while this holds and
-`null` otherwise (no enrolment, a choice recorded, or a config that predates
+`null` otherwise (no enrollment, a choice recorded, or a config that predates
 the record). No health label is raised.
 
 Migration: no released client wrote `consent_scopes_chosen`, so a config
@@ -5653,7 +5653,7 @@ scope list**, and the daemon deliberately does not pre-check
 which the issuer resolves to the caller's full grant ceiling, so the local
 set can be *narrower* than what the credential actually carries -- refusing
 locally would refuse contributors the server would have allowed. If the
-server refuses, the contributor's remedy is to enrol again with
+server refuses, the contributor's remedy is to enroll again with
 `public_attribution` in `scopes`, not to change anything locally.
 
 **`bio` is required, and `null` is how you publish none.** The server
@@ -6401,7 +6401,7 @@ result: `{"outcome":"bound","binding_state":"bound"}`. An
 unbound account; its passkey is not transferred (S6 fold is deferred).
 
 For a signed-in account whose `binding_state` is `bound` (another Mac bound
-it, and this Mac signed in with the same passkey), `account_bind` **enrols
+it, and this Mac signed in with the same passkey), `account_bind` **enrolls
 this Mac into that account** through the same routes: SAMPLE result
 `{"outcome":"enrolled","binding_state":"bound"}`. The commons compares the
 near.ai login this Mac proves with the account the passkey session is signed
@@ -6418,11 +6418,11 @@ spent.
 
 On a Mac that is **already enrolled**, `account_bind` sends no request and
 writes nothing. It answers `{"outcome":"already_enrolled","binding_state":"bound"}`
-when the enrolment it holds is the signed-in account's own: the session's
+when the enrollment it holds is the signed-in account's own: the session's
 tenant (decoded from its `tcn1_` token, as the sign-in's tenant check reads
-it) equals the enrolment config's `tenant_id`, **and** the session was signed
+it) equals the enrollment config's `tenant_id`, **and** the session was signed
 in to a `bound` account (the `binding_state` stored with it at sign-in). This
-is the first run's Welcome back case: the enrolment is reported after P-7
+is the first run's Welcome back case: the enrollment is reported after P-7
 opened, and the person signs in with that account's passkey. Anything else
 -- no session, another tenant, an `unbound` or `legacy` account, or a stored
 session without a `binding_state` -- is refused as before with
@@ -6431,7 +6431,7 @@ the check is a tenant match; it identifies one account because a binding row
 (and so a `bound` state) is only ever written for a passkey-origin account,
 each created alone in a freshly minted tenant, and it accepts nothing the
 sign-in's own tenant check had not already accepted when it kept the
-session. Recording the enrolled account at enrolment would make it
+session. Recording the enrolled account at enrollment would make it
 account-precise; that is not done yet. Added in v1.1 additively: the macOS
 shell treats it exactly as `enrolled` (Verify for a `bound` account accepts
 either); a shell that does not know it reads an unknown outcome and fails

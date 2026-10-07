@@ -305,7 +305,7 @@ struct PreviewSheet: View {
     /// witness review is no longer reached by a preview failing first --
     /// and never for a session that already holds a certificate.
     ///
-    /// Prepare admission is still gated on the enrolment, and gated nowhere
+    /// Prepare admission is still gated on the enrollment, and gated nowhere
     /// else: an invited contributor has no evidence-bearing path, so the
     /// control could only refuse them and is absent instead.
     @ViewBuilder

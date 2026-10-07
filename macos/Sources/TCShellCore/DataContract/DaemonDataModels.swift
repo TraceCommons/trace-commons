@@ -324,7 +324,7 @@ extension DaemonData {
         public let accountScope: String?
         public let consentScopes: [String]?
         /// `consent-scopes-not-chosen` while the daemon sends nothing under
-        /// its enrolment because the scopes were saved by enrolment and never
+        /// its enrollment because the scopes were saved by enrollment and never
         /// chosen; `nil` otherwise, and from a daemon predating it. A label,
         /// never shown as text.
         public let consentHold: String?
