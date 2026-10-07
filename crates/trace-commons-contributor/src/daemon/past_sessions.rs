@@ -464,6 +464,13 @@ pub async fn include_past_sessions(
             return Err((ERR_BAD_PARAMS, LABEL_PROJECT_MODE_NEVER));
         }
     }
+    // Including approves, so it is refused whole, as `approve` is, under an
+    // enrolment whose scopes nobody chose: nothing is revived or queued.
+    if let Some(label) =
+        crate::config::consent_hold(shared.store.load_config().ok().flatten().as_ref())
+    {
+        return Err((ERR_BAD_PARAMS, label));
+    }
     let by_id: HashMap<&str, &DiscoveredSession> = discovered
         .iter()
         .filter(|d| d.project_key == project_key)

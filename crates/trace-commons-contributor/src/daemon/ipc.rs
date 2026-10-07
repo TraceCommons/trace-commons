@@ -1825,6 +1825,11 @@ impl DaemonShared {
             "account_scope": account_scope,
             "tenant_id": cfg.as_ref().map(|c| c.tenant_id.clone()),
             "consent_scopes": cfg.as_ref().map(|c| c.consent_scopes.clone()).unwrap_or_default(),
+            // Additive. `consent-scopes-not-chosen` while nothing may be sent
+            // under the enrolment because its scopes were saved by enrolment
+            // and never chosen; `null` otherwise. Label only. See
+            // `config::consent_hold`.
+            "consent_hold": crate::config::consent_hold(cfg.as_ref()),
             "paused": self.is_paused(now),
             "queue_depth": queue.pending().len(),
             // Additive (K6). The badge's exact count: `Pending` entries that
@@ -3737,7 +3742,7 @@ fn grant_automatic_refusal(
     }
     // R7: a scope nobody chose never carries a standing grant, and an empty
     // list names nothing to grant under.
-    if !cfg.consent_scopes_chosen || cfg.consent_scopes.is_empty() {
+    if cfg.consent_scopes_chosen != Some(true) || cfg.consent_scopes.is_empty() {
         return Some(ERR_GRANT_SCOPES_NOT_CHOSEN);
     }
     // The witness shown on the disclosure screen, or `null` for none. It
@@ -4047,6 +4052,14 @@ fn handle_set_project_mode(shared: &DaemonShared, req: &Request) -> Response {
     // never be armed, terms or not.
     if let Err(e) = ProjectPolicy::check_mode(&key, mode) {
         return Response::err(req.id, ERR_BAD_PARAMS, &one_line_label(&e.to_string()));
+    }
+    // Arming sends on the contributor's behalf, so it needs scopes they
+    // chose. Ask me and Never only ever stop sends, and stay allowed.
+    if mode == ProjectMode::AutoUpload {
+        let cfg = shared.store.load_config().ok().flatten();
+        if let Some(label) = crate::config::consent_hold(cfg.as_ref()) {
+            return Response::err(req.id, ERR_BAD_PARAMS, label);
+        }
     }
     // Fail closed: a grant needs terms to be a grant of. Arming with none --
     // no config yet, or one that could not be read -- would leave the next
@@ -4358,6 +4371,13 @@ fn handle_set_contribution_override(shared: &DaemonShared, req: &Request) -> Res
     // that could not be read -- it is refused, fail closed, rather than
     // leaving the next sweep to adopt whatever config then exists.
     let grant = if mode == ProjectMode::AutoUpload {
+        // Arming everything, so held to arming one folder's rule: never
+        // under scopes nobody chose.
+        if let Some(label) =
+            crate::config::consent_hold(shared.store.load_config().ok().flatten().as_ref())
+        {
+            return Response::err(req.id, ERR_BAD_PARAMS, label);
+        }
         let Some(terms) = super::grant_terms::GrantTerms::in_force(shared) else {
             return Response::err(req.id, ERR_UNAVAILABLE, "arming-terms-unavailable");
         };
@@ -5047,6 +5067,13 @@ async fn handle_approve(shared: &DaemonShared, req: &Request) -> Response {
     // config records neither, which the uploader treats as
     // "unknown, re-ask" -- fail-closed.
     let cfg = shared.store.load_config().ok().flatten();
+    // An approval is a decision to send under the enrolment, and an
+    // enrolment whose scopes nobody chose sends nothing: refused, before
+    // anything is approved or recorded, in every form (one entry, a
+    // project, all).
+    if let Some(label) = crate::config::consent_hold(cfg.as_ref()) {
+        return Response::err(req.id, ERR_BAD_PARAMS, label);
+    }
     let scopes = cfg
         .as_ref()
         .map(|c| c.consent_scopes.clone())
@@ -7710,9 +7737,21 @@ mod tests {
     /// records the terms in force and is refused without a config.
     fn enrolled_shared() -> DaemonShared {
         let s = shared();
-        s.store
-            .save_config(&crate::commands::unenrolled_preview_config())
-            .unwrap();
+        let mut cfg = crate::commands::unenrolled_preview_config();
+        // A contributor who chose their scopes: the one every send path
+        // serves. `unchosen_shared` is the enrolment nobody chose for.
+        cfg.consent_scopes_chosen = Some(true);
+        s.store.save_config(&cfg).unwrap();
+        s
+    }
+
+    /// An enrolment whose consent scopes were saved by enrolment and never
+    /// chosen (`consent_scopes_chosen: Some(false)`).
+    fn unchosen_shared() -> DaemonShared {
+        let s = shared();
+        let mut cfg = crate::commands::unenrolled_preview_config();
+        cfg.consent_scopes_chosen = Some(false);
+        s.store.save_config(&cfg).unwrap();
         s
     }
 
@@ -8051,6 +8090,7 @@ mod tests {
         cfg.tenant_id = "synthetic-tenant".into();
         cfg.user_subject = "synthetic-user".into();
         cfg.consent_scopes = vec!["debugging_evaluation".into()];
+        cfg.consent_scopes_chosen = Some(true);
         let roots = s.source_roots_with_routing();
         let sources = crate::source::all_sources(&roots);
         let entry = s.queue.lock().unwrap().get(id).unwrap().clone();
@@ -9574,7 +9614,7 @@ mod tests {
         s.store
             .save_config(&crate::config::ContributorConfig {
                 inference_receipt_endpoint: None,
-                consent_scopes_chosen: false,
+                consent_scopes_chosen: Some(true),
                 witness_origin: None,
                 inference_receipt_check_attestation: false,
                 schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.to_string(),
@@ -14346,7 +14386,7 @@ mod tests {
         s.store
             .save_config(&crate::config::ContributorConfig {
                 inference_receipt_endpoint: None,
-                consent_scopes_chosen: false,
+                consent_scopes_chosen: Some(true),
                 witness_origin: None,
                 inference_receipt_check_attestation: false,
                 schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.to_string(),
@@ -16344,5 +16384,125 @@ mod tests {
         let status = s.status_value();
         assert_eq!(status["contribution_mode"], "auto_upload");
         assert_eq!(status["contribution_mode_partial"], true);
+    }
+
+    // -- Sending needs chosen consent scopes -------------------------------
+
+    /// Under an enrolment whose scopes nobody chose, every way of sending is
+    /// refused with one fixed label, before anything is approved, armed or
+    /// recorded: `approve` in all three forms, arming a folder, and an
+    /// `auto_upload` contribution override. What only stops sends -- Ask me,
+    /// Never -- is still allowed.
+    #[tokio::test]
+    async fn every_send_path_is_refused_while_consent_scopes_are_not_chosen() {
+        let s = unchosen_shared();
+        let key = "/tmp/unchosen-folder";
+        let id = seed_entry(&s, key);
+        let project_id = crate::daemon::policy::project_id_for(key);
+        let audit_before = audit::load(&s.store).unwrap_or_default().len();
+        for params in [
+            serde_json::json!({"entry_id": id}),
+            serde_json::json!({"all": true}),
+            serde_json::json!({"project_id": project_id}),
+        ] {
+            let r = handle_request_async(&s, &req("approve", params.clone())).await;
+            let err = r
+                .error
+                .unwrap_or_else(|| panic!("approve {params} refused"));
+            assert_eq!(err.code, ERR_BAD_PARAMS);
+            assert_eq!(err.message, crate::config::CONSENT_SCOPES_NOT_CHOSEN);
+        }
+        let r = handle_request(
+            &s,
+            &req(
+                "set_project_mode",
+                serde_json::json!({"project_id": project_id, "mode": "auto_upload"}),
+            ),
+        );
+        assert_eq!(
+            r.error.map(|e| e.message),
+            Some(crate::config::CONSENT_SCOPES_NOT_CHOSEN.to_string())
+        );
+        let r = set_override(
+            &s,
+            serde_json::json!({"mode": "auto_upload", "confirm": true}),
+        );
+        assert_eq!(
+            r.error.map(|e| e.message),
+            Some(crate::config::CONSENT_SCOPES_NOT_CHOSEN.to_string())
+        );
+        assert_eq!(
+            s.queue.lock().unwrap().get(id).unwrap().state,
+            super::super::queue::QueueState::Pending
+        );
+        assert_eq!(
+            s.policy.lock().unwrap().resolve(key),
+            ProjectMode::NotifyOnly
+        );
+        assert!(s.policy.lock().unwrap().contribution_override.is_none());
+        assert_eq!(
+            audit::load(&s.store).unwrap_or_default().len(),
+            audit_before,
+            "a refusal records nothing"
+        );
+
+        // Stopping sends needs no choice.
+        let r = handle_request(
+            &s,
+            &req(
+                "set_project_mode",
+                serde_json::json!({"project_id": project_id, "mode": "ignore"}),
+            ),
+        );
+        assert!(r.error.is_none(), "{:?}", r.error);
+        let r = set_override(&s, serde_json::json!({"mode": "ignore"}));
+        assert!(r.error.is_none(), "{:?}", r.error);
+    }
+
+    /// Once the scopes are chosen the same calls go through, and a config
+    /// that predates the record (no key at all) was never held.
+    #[tokio::test]
+    async fn a_choice_or_a_legacy_config_lets_the_send_paths_through() {
+        for chosen in [Some(true), None] {
+            let s = unchosen_shared();
+            let mut cfg = s.store.load_config().unwrap().unwrap();
+            cfg.consent_scopes_chosen = chosen;
+            s.store.save_config(&cfg).unwrap();
+            let key = "/tmp/chosen-folder";
+            let id = seed_entry(&s, key);
+            let r = handle_request_async(&s, &req("approve", serde_json::json!({"entry_id": id})))
+                .await;
+            assert_ne!(
+                r.error.map(|e| e.message),
+                Some(crate::config::CONSENT_SCOPES_NOT_CHOSEN.to_string()),
+                "{chosen:?}"
+            );
+            let r = handle_request(
+                &s,
+                &req(
+                    "set_project_mode",
+                    serde_json::json!({"project_id": crate::daemon::policy::project_id_for(key), "mode": "auto_upload"}),
+                ),
+            );
+            assert!(r.error.is_none(), "{chosen:?}: {:?}", r.error);
+        }
+    }
+
+    /// `status.consent_hold` names the hold, label only, so a shell can say
+    /// why nothing is sent; `null` with no enrolment, a choice, or a config
+    /// that predates the record.
+    #[test]
+    fn status_names_the_consent_hold() {
+        assert_eq!(
+            unchosen_shared().status_value()["consent_hold"],
+            crate::config::CONSENT_SCOPES_NOT_CHOSEN
+        );
+        assert!(enrolled_shared().status_value()["consent_hold"].is_null());
+        assert!(shared().status_value()["consent_hold"].is_null());
+        let s = unchosen_shared();
+        let mut cfg = s.store.load_config().unwrap().unwrap();
+        cfg.consent_scopes_chosen = None;
+        s.store.save_config(&cfg).unwrap();
+        assert!(s.status_value()["consent_hold"].is_null());
     }
 }

@@ -552,7 +552,7 @@ fn persist_for(
         )),
         witness: Some(commons.witness),
         inference_receipt_endpoint: commons.receipt_endpoint,
-        consent_scopes_chosen: false,
+        consent_scopes_chosen: Some(false),
         inference_receipt_check_attestation: true,
     };
 
@@ -1368,7 +1368,7 @@ mod native_bind_tests {
                 assert!(!result.to_string().contains("secret"));
                 let cfg = shared.store.load_config().unwrap().unwrap();
                 assert!(cfg.consent_scopes.is_empty());
-                assert!(!cfg.consent_scopes_chosen);
+                assert_eq!(cfg.consent_scopes_chosen, Some(false));
                 assert_eq!(
                     crate::account_auth::try_load_session_with_snapshot(&shared.store)
                         .unwrap()

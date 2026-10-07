@@ -137,17 +137,19 @@ enum RulesScreenLayout {
         }
     }
 
-    /// The past-session card's note. Watching only has no enrolment, so the
-    /// sessions picked here are queued on this Mac and none is sent; the
-    /// core's line says they wait there. Nil for every other account.
     /// A folder's older sessions beyond the newest the picker lists, in the
     /// core's words; nil when there are none.
     static func notListedNote(_ count: Int, copy: FirstRunCopy.Rules) -> String? {
         count > 0 ? FirstRunCopy.fill(copy.notListed, ["count": String(count)]) : nil
     }
 
+    /// The past-session card's note. Watching only has no enrolment, so the
+    /// sessions picked here are queued on this Mac and none is sent; the
+    /// core's line says they wait there. Nil for every other account, and
+    /// for watching only while the daemon still holds an enrolment, when
+    /// Start sends nothing (`FirstRunPlan`) and nothing waits.
     static func pastSessionsNote(_ state: FirstRunState, copy: FirstRunCopy.Rules) -> String? {
-        state.account == .watchOnly ? copy.pastSessionsWatchOnly : nil
+        state.account == .watchOnly && !state.daemonHoldsEnrolment ? copy.pastSessionsWatchOnly : nil
     }
 
     static func groupState(_ state: FirstRunState, projectID: String, sessions: [PastSession]) -> GroupState {
@@ -281,6 +283,15 @@ enum RulesScreenLayout {
         copy.rules.retry
     }
 
+    /// What the screen draws: the folders once read; while a read runs,
+    /// the loading line, even when the last read failed, so a retry never
+    /// leaves the old failure and a live retry up beside it (Kristi's review
+    /// of #1261); the failure only once no read is running.
+    static func phase(projects: [ProjectRow]?, loadFailed: Bool, loading: Bool) -> RulesLoadPhase {
+        if let projects { return .loaded(projects) }
+        return loadFailed && !loading ? .failed : .loading
+    }
+
     /// Continue waits for the folders: never while they are loading or
     /// could not be read.
     static func canContinue(projects: [ProjectRow]?) -> Bool {
@@ -291,6 +302,13 @@ enum RulesScreenLayout {
     static func folder(_ project: ProjectRow) -> String {
         project.projectPath.isEmpty ? project.displayLabel : project.projectPath
     }
+}
+
+/// What Rules draws in place of its cards (`RulesScreenLayout.phase`).
+enum RulesLoadPhase: Equatable {
+    case loading
+    case failed
+    case loaded([ProjectRow])
 }
 
 /// Ron's Rules screen (#1030 `rules-screen.tsx`, Custom setup's W-5) in
@@ -369,7 +387,8 @@ struct RulesScreen: View {
     }
 
     @ViewBuilder private var content: some View {
-        if let projects {
+        switch RulesScreenLayout.phase(projects: projects, loadFailed: loadFailed, loading: loading) {
+        case .loaded(let projects):
             if projects.isEmpty {
                 GlassCard(quiet: true) {
                     Text(copy.rules.empty)
@@ -381,7 +400,7 @@ struct RulesScreen: View {
                 rulesCard(projects)
                 pastSessionsCard(projects)
             }
-        } else if loadFailed {
+        case .failed:
             // No Back to retry through (Ron's review of #1235, item 9): the
             // core's retry reads the folders again.
             HStack(spacing: GlassTokens.Space.s4) {
@@ -394,7 +413,7 @@ struct RulesScreen: View {
                     .buttonStyle(GlassButtonStyle(.secondary))
                     .disabled(loading)
             }
-        } else {
+        case .loading:
             HStack(spacing: GlassTokens.Space.s4) {
                 GlassSpinner()
                 Text(copy.rules.loading)

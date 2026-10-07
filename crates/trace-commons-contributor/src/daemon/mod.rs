@@ -929,6 +929,16 @@ async fn drain_approved(
         health.fail(health::LABEL_NOT_LOGGED_IN, now);
         return Ok(());
     };
+    // An enrolment whose scopes nobody chose sends nothing. Every approved
+    // entry is held exactly as it is -- approved before this hold existed,
+    // by an older build, or by any path that reached it -- the way a Never
+    // override holds them: no state change, no attempt, no label. Choosing
+    // the scopes releases them to the checks below, which still re-ask an
+    // entry whose approved scopes or inputs have moved since.
+    // `status.consent_hold` says why.
+    if crate::config::consent_hold(Some(&cfg)).is_some() {
+        return Ok(());
+    }
     let near_ai = {
         let s = shared.settings.lock().expect("settings lock");
         s.near_ai.clone()
@@ -2109,7 +2119,7 @@ mod tests {
             store
                 .save_config(&crate::config::ContributorConfig {
                     inference_receipt_endpoint: None,
-                    consent_scopes_chosen: false,
+                    consent_scopes_chosen: Some(true),
                     witness_origin: None,
                     inference_receipt_check_attestation: false,
                     schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
@@ -2605,7 +2615,8 @@ mod tests {
     /// session no source lists -- so a pass that reaches the send marks it
     /// `session-file-vanished`, which is how these tests see that it did.
     fn seed_contributor_approval(shared: &ipc::DaemonShared) -> uuid::Uuid {
-        let cfg = crate::commands::unenrolled_preview_config();
+        let mut cfg = crate::commands::unenrolled_preview_config();
+        cfg.consent_scopes_chosen = Some(true);
         shared.store.save_config(&cfg).unwrap();
         let mut q = shared.queue.lock().expect("queue lock");
         let e = queue::QueueEntry {
@@ -2666,6 +2677,75 @@ mod tests {
                 Some("session-file-vanished".to_string())
             )),
             "released: the pass reached the send"
+        );
+    }
+
+    /// An entry approved before its enrolment's scopes were chosen -- by an
+    /// older build, or before this hold existed -- is held exactly as it was,
+    /// `Approved` with nothing sent, and the hold names itself only in
+    /// `status.consent_hold`. Choosing the scopes releases it to the send
+    /// path, where the scope and input pins it was approved under are
+    /// checked as for any other approval.
+    #[tokio::test]
+    async fn an_unchosen_enrolment_holds_approved_entries_until_scopes_are_chosen() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::config::ConfigStore::open(dir.path().join("state")).unwrap();
+        let shared = Arc::new(ipc::DaemonShared::load(store).unwrap());
+        let id = seed_contributor_approval(&shared);
+        let mut cfg = shared.store.load_config().unwrap().unwrap();
+        cfg.consent_scopes_chosen = Some(false);
+        shared.store.save_config(&cfg).unwrap();
+        let before = shared.queue.lock().expect("queue lock").get(id).cloned();
+
+        for _ in 0..2 {
+            drain_approved_for_test(&shared, at("2026-08-08T13:00:00Z"))
+                .await
+                .unwrap();
+        }
+        let held = shared.queue.lock().expect("queue lock").get(id).cloned();
+        assert_eq!(held, before, "held exactly as it was, not sent");
+        assert_eq!(
+            shared.status_value()["consent_hold"],
+            crate::config::CONSENT_SCOPES_NOT_CHOSEN
+        );
+
+        cfg.consent_scopes_chosen = Some(true);
+        shared.store.save_config(&cfg).unwrap();
+        drain_approved_for_test(&shared, at("2026-08-08T13:00:00Z"))
+            .await
+            .unwrap();
+        let released = shared.queue.lock().expect("queue lock").get(id).cloned();
+        assert_eq!(
+            released.map(|e| (e.state, e.reason_label)),
+            Some((
+                queue::QueueState::Failed,
+                Some("session-file-vanished".to_string())
+            )),
+            "released: the pass reached the send"
+        );
+    }
+
+    /// The migration rule at the send path: a config that predates the
+    /// scope-choice record (no key) is a contributor who joined before it
+    /// existed, and their approvals go out as they always did.
+    #[tokio::test]
+    async fn a_config_that_predates_the_choice_record_still_sends() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::config::ConfigStore::open(dir.path().join("state")).unwrap();
+        let shared = Arc::new(ipc::DaemonShared::load(store).unwrap());
+        let id = seed_contributor_approval(&shared);
+        let mut cfg = shared.store.load_config().unwrap().unwrap();
+        cfg.consent_scopes_chosen = None;
+        shared.store.save_config(&cfg).unwrap();
+
+        drain_approved_for_test(&shared, at("2026-08-08T13:00:00Z"))
+            .await
+            .unwrap();
+        let sent = shared.queue.lock().expect("queue lock").get(id).cloned();
+        assert_eq!(
+            sent.map(|e| e.reason_label),
+            Some(Some("session-file-vanished".to_string())),
+            "the pass reached the send"
         );
     }
 
@@ -3550,7 +3630,7 @@ mod tests {
         store
             .save_config(&crate::config::ContributorConfig {
                 inference_receipt_endpoint: None,
-                consent_scopes_chosen: false,
+                consent_scopes_chosen: Some(true),
                 witness_origin: None,
                 inference_receipt_check_attestation: false,
                 schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.to_string(),
