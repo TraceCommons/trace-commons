@@ -54,6 +54,9 @@ fn enroll_fixture(s: &DaemonShared) -> crate::config::ContributorConfig {
     cfg
 }
 
+// Redundant in a test-only file, and what `queue_fixture_default_guard`
+// reads, since it scans this file on its own.
+#[cfg(test)]
 fn seed(s: &DaemonShared, state: QueueState) -> Uuid {
     let entry_id = Uuid::new_v4();
     let mut queue = s.queue.lock().unwrap();
