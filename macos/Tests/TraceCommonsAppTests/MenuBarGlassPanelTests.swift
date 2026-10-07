@@ -411,6 +411,33 @@ final class MenuBarGlassPanelTests: XCTestCase {
         XCTAssertEqual(client.overrideCalls, sent)
     }
 
+    /// With no override in force, the checked row is the roll-up itself:
+    /// pressing it only closes the list and sets no override. While an
+    /// override is in force, or before the status is read, every row is a
+    /// real choice (#1255 review).
+    func test_pressingTheRollupsOwnRowOnlyClosesTheList() async throws {
+        let (store, _) = await loadedStore(.normalDay)
+        let rollup = try XCTUnwrap(store.status?.contributionMode)
+        XCTAssertEqual(rollup, "notify_only")
+        XCTAssertTrue(MenuPanelData.pressOnlyCloses(rollup, status: store.status, stale: false))
+        XCTAssertFalse(MenuPanelData.pressOnlyCloses("ignore", status: store.status, stale: false))
+        XCTAssertFalse(MenuPanelData.pressOnlyCloses(rollup, status: store.status, stale: true))
+        XCTAssertFalse(MenuPanelData.pressOnlyCloses(rollup, status: nil, stale: false))
+        store.choose("ignore")
+        await store.resolveConfirmation(confirmed: true)
+        XCTAssertEqual(store.status?.contributionOverride?.mode, "ignore")
+        XCTAssertFalse(MenuPanelData.pressOnlyCloses("ignore", status: store.status, stale: false),
+                       "under an override the checked row is the override, not a no-op")
+
+        let url = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Sources/TraceCommonsApp/Views/Monitor/MenuBarGlassPanel.swift")
+        let source = try String(contentsOf: url, encoding: .utf8)
+        XCTAssertTrue(source.contains("MenuPanelData.pressOnlyCloses(choice.mode, status: store.status, stale: store.stale)"))
+        // The override line is drawn only from a current status.
+        XCTAssertTrue(source.contains("if !store.stale, store.status?.contributionOverride != nil {"))
+    }
+
     /// The Mixed row goes through `chooseMixed`, which confirms; the panel
     /// never calls the unconfirmed `clearOverride` (#1256 review).
     func test_theMixedRowGoesThroughChooseMixed() throws {

@@ -262,6 +262,15 @@ enum MenuPanelData {
         return projects.contains { $0.folderMode == nil || $0.folderMode == .autoUpload }
     }
 
+    /// Whether pressing a mode row only closes the list: with no override
+    /// in force the checked row is the core's roll-up itself, so pressing it
+    /// changes nothing and must not set a global override (#1255 review).
+    /// Under an override, or before a current status, every row is a choice.
+    static func pressOnlyCloses(_ mode: String, status: DaemonData.Status?, stale: Bool) -> Bool {
+        guard !stale, let status, status.contributionOverride == nil else { return false }
+        return listChecks(mode, status: status, stale: stale)
+    }
+
     /// Whether the pill's list checks a row, agreeing with the pill: an
     /// override's own mode while one is in force; with none, the core's
     /// roll-up, which is the Mixed row (`mode` nil) only when the folders

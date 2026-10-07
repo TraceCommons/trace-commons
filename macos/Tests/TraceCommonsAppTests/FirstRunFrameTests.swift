@@ -78,6 +78,42 @@ final class FirstRunFrameTests: XCTestCase {
         }
     }
 
+    /// Cancel during the near.ai browser wait (owner, 2026-10-07): only
+    /// while the sign-in runs, in the core's first-run "Cancel", as a small
+    /// secondary button beside the spinning Continue, on Folders and Tools
+    /// only, and nowhere else in Ron's footer.
+    func test_cancelAppearsOnlyWhileTheSignInRuns() throws {
+        let words: FirstRunCopy = try copy()
+        XCTAssertNil(FoldersScreenLayout.signInCancel(waiting: false, copy: words, action: {}))
+        let cancel = try XCTUnwrap(FoldersScreenLayout.signInCancel(waiting: true, copy: words, action: {}))
+        XCTAssertEqual(cancel.title, words.passkey.cancel)
+        XCTAssertNil(FirstRunFooter(title: "", isEnabled: false, action: {}).cancel, "no Cancel unless a screen gives one")
+
+        for file in ["FoldersScreen.swift", "ToolsScreen.swift"] {
+            let source = try Self.appSource("Views/FirstRun/\(file)")
+            XCTAssertTrue(
+                source.contains("cancel: FoldersScreenLayout.signInCancel(waiting: runner.signInWaiting, copy: copy)"),
+                file)
+            XCTAssertTrue(source.contains("await runner.cancelSignIn()"), file)
+        }
+        for file in ["JoinScreen.swift", "RulesScreen.swift", "UsesScreen.swift"] {
+            XCTAssertFalse(try Self.appSource("Views/FirstRun/\(file)").contains("signInCancel"), file)
+        }
+
+        // In the footer row: after the spacer, before Continue, secondary.
+        let frame = try Self.source()
+        let row = try XCTUnwrap(frame.range(of: "private var footerRow: some View {"))
+        let rowBody = String(frame[row.upperBound...])
+        let spacer = try XCTUnwrap(rowBody.range(of: "Spacer(minLength: 0)"))
+        let cancelButton = try XCTUnwrap(rowBody.range(of: "if let cancel = footer.cancel {"))
+        let primary = try XCTUnwrap(rowBody.range(of: "Button(action: footer.action)"))
+        XCTAssertLessThan(spacer.lowerBound, cancelButton.lowerBound)
+        XCTAssertLessThan(cancelButton.lowerBound, primary.lowerBound)
+        let cancelBody = String(rowBody[cancelButton.upperBound..<primary.lowerBound])
+        XCTAssertTrue(cancelBody.contains("Button(cancel.title, action: cancel.action)"))
+        XCTAssertTrue(cancelBody.contains("GlassButtonStyle(.secondary)"))
+    }
+
     private static func appSource(_ path: String) throws -> String {
         let url = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()

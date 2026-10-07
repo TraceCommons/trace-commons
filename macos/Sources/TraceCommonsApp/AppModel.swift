@@ -612,6 +612,10 @@ final class AppModel: ObservableObject {
     /// state that has something to cancel.
     @Published private(set) var credentialAttempt: CredentialAttempt?
 
+    /// The attempt the first run's near.ai login is waiting on, kept apart
+    /// from Settings' `credentialAttempt` so its Cancel names its own.
+    private var firstRunLoginAttemptID: String?
+
     @Published private(set) var credentialBusy = false
 
     /// Re-read on every settings refresh, and again while a ceremony is in
@@ -3339,12 +3343,24 @@ extension AppModel: FirstRunDaemon {
         guard let client else { return false }
         let first = await Task.detached { try? client.nearAiCredentialStatus(attemptID: nil) }.value
         if NearAILoginPoll.verdict(first) == .signedIn { return true }
+        // A Cancel before the browser opens: no attempt is begun, and none
+        // that began meanwhile opens the browser.
+        if Task.isCancelled { return false }
         let started = await Task.detached { try? client.nearAiCredentialStart() }.value
         guard let attempt = started, let url = URL(string: attempt.browserURL) else { return false }
+        if Task.isCancelled {
+            _ = await Task.detached { try? client.nearAiCredentialCancel(attemptID: attempt.attemptID) }.value
+            return false
+        }
+        firstRunLoginAttemptID = attempt.attemptID
+        defer { if firstRunLoginAttemptID == attempt.attemptID { firstRunLoginAttemptID = nil } }
         NSWorkspace.shared.open(url)
         let deadline = Date().addingTimeInterval(NearAILoginPoll.limit)
         while Date() < deadline, !Task.isCancelled {
             try? await Task.sleep(for: .seconds(1))
+            // Cancelled (the first run's Cancel): stop at once, without
+            // another poll that could report a sign-in.
+            if Task.isCancelled { return false }
             guard self.client === client else { return false }
             let status = await Task.detached { try? client.nearAiCredentialStatus(attemptID: attempt.attemptID) }.value
             switch NearAILoginPoll.verdict(status) {
@@ -3359,6 +3375,19 @@ extension AppModel: FirstRunDaemon {
             }
         }
         return false
+    }
+
+    /// Cancel on Folders or Tools: end the browser sign-in `nearAILogin`
+    /// started, named by its attempt when one began, else whatever sign-in
+    /// the daemon runs. Called directly rather than through
+    /// `cancelNearAiCredential`, which writes the Settings notice and shares
+    /// its busy flag; the first run says its own line.
+    func cancelNearAILogin() async -> Bool {
+        let attemptID = firstRunLoginAttemptID
+        guard case .success = await firstRunCall({ try $0.nearAiCredentialCancel(attemptID: attemptID) })
+        else { return false }
+        refreshNearAiCredential()
+        return true
     }
 
     /// Enroll through the near.ai login with no invite. The daemon's label

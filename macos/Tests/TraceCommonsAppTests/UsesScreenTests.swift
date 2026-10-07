@@ -501,6 +501,7 @@ private final class StartDaemon: FirstRunDaemon {
     func enrollInvite(_ invite: String) async -> Bool { log.append(.enroll(invite)); return true }
     func signInNearAI() async -> Bool { log.append(.signInNearAI); return true }
     func nearAILogin() async -> Bool { log.append(.nearAILogin); return true }
+    func cancelNearAILogin() async -> Bool { true }
     func enrollNearAI() async -> FirstRunNearAIEnrolment { log.append(.enrollNearAI); return .enrolled }
     func saveConsentScopes(_ scopes: [String]) async -> Bool { log.append(.setConsentScopes(scopes)); return true }
     func setProjectMode(projectID: String, mode: ProjectMode) async -> Bool {
