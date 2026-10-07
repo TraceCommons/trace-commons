@@ -1,6 +1,9 @@
 //! Shared project controls shown beside the contribution queue.
 
 pub const IGNORE_PROJECT: &str = "Ignore project";
+/// The confirmation's way out, which keeps the project as it is (#1146's
+/// `ignore-project-control.tsx`; owner ruling, 2026-10-06).
+pub const KEEP_PROJECT: &str = "Keep project";
 pub const IGNORE_PROJECT_TOOLTIP: &str = "Stops this project being offered and clears what it has waiting. \
      Anything already submitted is unaffected, and you can undo this in Settings.";
 
@@ -150,6 +153,8 @@ pub struct IgnoreProjectCopy {
     pub body: String,
     pub button: &'static str,
     pub tooltip: &'static str,
+    /// The confirmation's cancel: [`KEEP_PROJECT`].
+    pub keep: &'static str,
 }
 
 /// The ignore-project words for `project` with `pending` sessions waiting.
@@ -160,6 +165,7 @@ pub fn ignore_project_copy(project: &str, pending: usize) -> IgnoreProjectCopy {
         body: ignore_project_body(pending),
         button: IGNORE_PROJECT,
         tooltip: IGNORE_PROJECT_TOOLTIP,
+        keep: KEEP_PROJECT,
     }
 }
 
@@ -737,10 +743,19 @@ mod copy_table_tests {
             .keys()
             .map(String::as_str)
             .collect();
-        assert_eq!(keys.len(), 4);
-        for key in ["title", "body", "button", "tooltip"] {
+        assert_eq!(keys.len(), 5);
+        for key in ["title", "body", "button", "tooltip", "keep"] {
             assert!(value[key].is_string(), "{key}");
         }
+    }
+
+    /// #1146's way out of the ignore confirmation (owner ruling,
+    /// 2026-10-06): it keeps the project, and it is not the ignore button.
+    #[test]
+    fn the_ignore_confirmation_keeps_the_project() {
+        let copy = ignore_project_copy("api", 2);
+        assert_eq!(copy.keep, "Keep project");
+        assert_ne!(copy.keep, copy.button);
     }
 
     #[test]

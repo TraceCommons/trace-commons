@@ -2387,9 +2387,9 @@ char*       tc_residual_secret_line_text(uint32_t count, const char* sites_json)
 char*       tc_redaction_summary_json(const char* redactions_json, const char* distinct_json);
 
 /* The ignore-project control and confirmation (project_copy::
- * ignore_project_copy): {title, body, button, tooltip}. pending is the count
- * the confirmation names; negative clamps to 0. NULL for an unreadable
- * project_label and on a caught panic.
+ * ignore_project_copy): {title, body, button, tooltip, keep}. pending is
+ * the count the confirmation names; negative clamps to 0. NULL for an
+ * unreadable project_label and on a caught panic.
  */
 char*       tc_project_ignore_copy_json(const char* project_label, int64_t pending);
 

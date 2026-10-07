@@ -5407,7 +5407,7 @@ pub unsafe extern "C" fn tc_redaction_summary_json(
 
 /// The ignore-project control and its confirmation for one project
 /// (`project_copy::ignore_project_copy`): a JSON object
-/// `{title, body, button, tooltip}`.
+/// `{title, body, button, tooltip, keep}`.
 ///
 /// `project_label` is the label the queue shows for the project; `pending`
 /// is how many of its sessions the confirmation will say it removes, as this
