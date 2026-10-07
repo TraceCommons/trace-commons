@@ -144,8 +144,10 @@ final class MonitorShellTests: XCTestCase {
         history.first?.action?()
         XCTAssertEqual(backs, 1)
         XCTAssertNil(history.last?.action, "the current page is not a link")
+        // The commons catalogue says so; #1146's Missions is the drafts.
         let missions = try XCTUnwrap(MonitorWindowView.breadcrumb(tab: .home, homePage: .missions, back: {}))
-        XCTAssertEqual(missions.map(\.title), [MonitorWindowView.Tab.home.title, MonitorWords.missions])
+        XCTAssertEqual(missions.map(\.title),
+                       [MonitorWindowView.Tab.home.title, try XCTUnwrap(MonitorWords.table).homeHistory.missionCatalogue])
         for page in ["Views/Monitor/HomeViews.swift", "Views/Monitor/MissionsViews.swift"] {
             XCTAssertFalse(try Self.text(page).contains("GlassBreadcrumb("), "\(page) draws its own breadcrumb")
         }
@@ -165,7 +167,10 @@ final class MonitorShellTests: XCTestCase {
         let home = try Self.text("Views/Monitor/HomeViews.swift")
         for needle in ["Button(action: openTraces)", "HomeStatTile(label: MonitorWords.waiting,",
                        "HomeStatTile(label: MonitorWords.contributed,", "HomeStatTile(label: HomeFormat.creditPendingWord,",
-                       "Text(MissionFormat.count(store.missions))"] {
+                       // Ron's Missions card: his Drafts tag over the drafts.
+                       "GlassEyebrowCard(MonitorWords.missions, action: openMissionDrafts)",
+                       "GlassTag(words.draftsTag, tone: .ask)", "Text(words.noMissionDrafts)",
+                       "Text(words.sources(draft.source_count))"] {
             XCTAssertTrue(home.contains(needle), "HomeViews.swift lacks \(needle)")
         }
         let window = try Self.text("Views/MonitorWindowView.swift")

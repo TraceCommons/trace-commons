@@ -29,16 +29,18 @@ final class MonitorHomeInsightsTests: XCTestCase {
             "MonitorWindowView(navigation: navigation, insightsStoreSelection: insightsStoreSelection, missionDrafts: missionDrafts)"))
     }
 
-    /// The headings are the core's: the Insights copy's `title` and the
-    /// mission drafts copy's `title`. A card whose word has not arrived is
-    /// not drawn, never drawn with a Swift-authored word.
+    /// The headings are the core's: the Insights copy's `title`, and the
+    /// screens' own word for Missions (Ron's Missions card opens the
+    /// drafts). A card whose word has not arrived is not drawn, never drawn
+    /// with a Swift-authored word.
     func test_theHomeCardsTakeTheirHeadingsFromTheCore() throws {
         let home = try MonitorNavigationTests.text("Views/Monitor/HomeViews.swift")
         XCTAssertTrue(home.contains("private static let insightsCopy = TCInsights.copy()"))
         // One reading: the card and the shell's breadcrumb both take it from
         // `HomeTabView.hostedHeading` (Ron's breadcrumb, #1241).
         XCTAssertEqual(home.components(separatedBy: #"Self.insightsCopy?["title"]"#).count - 1, 1)
-        XCTAssertTrue(home.contains(#"missionDrafts.copy["title"]"#))
+        XCTAssertTrue(home.contains("case .missionDrafts: HomeFormat.cardHeading(MonitorWords.missions)"))
+        XCTAssertTrue(home.contains("hostedCard(catalogue, action: openMissions)"))
         XCTAssertNil(HomeFormat.cardHeading(nil))
         XCTAssertNil(HomeFormat.cardHeading(""))
         XCTAssertEqual(HomeFormat.cardHeading("Insights"), "Insights")
@@ -97,14 +99,15 @@ final class MonitorHomeInsightsTests: XCTestCase {
     }
 
     /// M-3: Insights and Mission drafts are reachable only through their
-    /// cards, which draw only on the core's heading. A core that stops
-    /// sending either title goes red here rather than hiding a screen.
+    /// cards, which draw only on the core's words. A core that stops
+    /// sending either goes red here rather than hiding a screen.
     func test_theInsightsAndMissionDraftsHeadingsAreTheCores() throws {
         XCTAssertNotNil(HomeFormat.cardHeading(TCInsights.copy()?["title"]), "Insights would be unreachable")
         guard case .copy(let copy) = try TCMissionDrafts.call(.init(operation: .init("copy"))) else {
             return XCTFail("the mission drafts copy call answered something else")
         }
-        XCTAssertNotNil(HomeFormat.cardHeading(copy["title"]), "Mission drafts would be unreachable")
+        XCTAssertNotNil(HomeFormat.cardHeading(copy["title"]), "the drafts screen would have no title")
+        XCTAssertNotNil(HomeFormat.cardHeading(MonitorWords.missions), "Mission drafts would be unreachable")
     }
 
     /// M-1: the app's own reads refresh when someone looks, as the legacy

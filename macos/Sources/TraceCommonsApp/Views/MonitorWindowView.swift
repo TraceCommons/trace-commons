@@ -81,7 +81,7 @@ struct MonitorWindowView: View {
     /// Home's page: the overview or History, restored per window.
     @SceneStorage("monitor.homePage") private var homePage: HomeTabView.Page = .overview
     /// The opened History row's submission id; empty for none. Its details
-    /// are drawn in History's left pane, below the list.
+    /// are the inspector's while History is shown.
     @SceneStorage("monitor.selectedHistory") private var selectedHistory = ""
 
     /// The screens' data, read through the app's live client
@@ -195,12 +195,11 @@ struct MonitorWindowView: View {
                         store: home, traces: traces,
                         statusLabel: { HomeFormat.historyStatusLabel(copy: model.publicRunCopy, $0) },
                         page: $homePage,
-                        // Opening a row draws its details in History's own
-                        // pane, below the list (Ron's #1146). The inspector
-                        // keeps the Traces selection's card.
+                        // Opening a row shows its details in the inspector,
+                        // and opens it (Ron's inspector auto-open).
                         selection: Binding(
                             get: { selectedHistory },
-                            set: { selectedHistory = $0 }),
+                            set: { Self.openHistory($0, selected: &selectedHistory, showsInspector: &showsInspector) }),
                         openTraces: { tab = .traces },
                         insightsStoreSelection: insightsStoreSelection, missionDrafts: missionDrafts)
                 }
@@ -238,10 +237,15 @@ struct MonitorWindowView: View {
                             PrivateAIInspectorView(store: inference, destinationLabel: model.privateInferenceCopy?.destination)
                         }
                     case .home, .traces:
-                        // History included: Ron mounts `WaitingPage` there too,
-                        // so the inspector keeps the Traces selection's card
-                        // while History's detail opens in the left pane.
-                        TracesInspectorHost(traces: traces, home: home, selection: selection)
+                        // An opened History row is the inspector's selection
+                        // while History is shown; otherwise the Traces
+                        // selection's card, as Ron mounts `WaitingPage`.
+                        if tab == .home,
+                           let row = HistorySelection.opened(selectedHistory, onHistory: homePage == .history, in: home.history) {
+                            HistoryInspectorPane(row: row)
+                        } else {
+                            TracesInspectorHost(traces: traces, home: home, selection: selection)
+                        }
                     }
                 }
             }
@@ -390,7 +394,10 @@ struct MonitorWindowView: View {
         switch homePage {
         case .overview: return nil
         case .history: return [GlassCrumb(Tab.home.title, action: back), GlassCrumb(MonitorWords.history)]
-        case .missions: return [GlassCrumb(Tab.home.title, action: back), GlassCrumb(MonitorWords.missions)]
+        // The commons catalogue: #1146's Missions is the drafts (hosted).
+        case .missions:
+            return [GlassCrumb(Tab.home.title, action: back)]
+                + (MonitorWords.table.map { [GlassCrumb($0.homeHistory.missionCatalogue)] } ?? [])
         case .insights, .missionDrafts:
             return [GlassCrumb(Tab.home.title, action: back)] + (hosted(homePage).map { [GlassCrumb($0)] } ?? [])
         }
@@ -416,6 +423,14 @@ struct MonitorWindowView: View {
         case .settings:
             break
         }
+    }
+
+    /// Opening a History row: its details are the inspector's, so the
+    /// inspector opens (Ron's inspector auto-open). Clearing it closes
+    /// nothing.
+    static func openHistory(_ submissionId: String, selected: inout String, showsInspector: inout Bool) {
+        selected = submissionId
+        if !submissionId.isEmpty { showsInspector = true }
     }
 
     /// A tree selection. A session is a demand on the inspector, as in
