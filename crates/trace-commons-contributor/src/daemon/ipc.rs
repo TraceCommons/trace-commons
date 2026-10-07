@@ -437,6 +437,7 @@ pub const METHODS: &[&str] = &[
     "skill_review",
     "status",
     "subscribe",
+    "unenroll",
     "withdraw",
     "withdraw_bulk",
     "unpublish_public_run",
@@ -2658,6 +2659,7 @@ const ASYNC_ONLY_METHODS: &[(&str, &str)] = &[
     ("probe_routing", "probe-routing-requires-async"),
     ("probe_routed_tools", "probe-routed-tools-requires-async"),
     ("enroll", "enroll-requires-async"),
+    ("unenroll", "unenroll-requires-async"),
     ("withdraw", "withdraw-requires-async"),
     ("withdraw_bulk", "withdraw-requires-async"),
     (
@@ -4879,6 +4881,7 @@ pub async fn handle_request_async(shared: &DaemonShared, req: &Request) -> Respo
         "probe_routing" => handle_probe_routing(req).await,
         "probe_routed_tools" => handle_probe_routed_tools(req).await,
         "enroll" => enroll::handle_enroll(shared, req).await,
+        "unenroll" => super::unenroll::handle_unenroll(shared, req).await,
         "withdraw" => super::withdraw::handle_withdraw(shared, req).await,
         "withdraw_bulk" => super::withdraw::handle_withdraw_bulk(shared, req).await,
         "commons_credit_summary" => {
@@ -6949,6 +6952,20 @@ fn pin_previewed_envelope(
     if queue.get(entry_id).map(|e| e.state) != Some(QueueState::Pending) {
         return;
     }
+    // Only an envelope stamped with the enrollment in force now. A preview
+    // built before an `unenroll` (or any identity change) and finishing
+    // after it would otherwise pin bytes naming the old tenant and account,
+    // and an approval under the next enrollment would send them verbatim.
+    // Read under the queue lock, which `unenroll` holds while it removes the
+    // config, so the two cannot interleave.
+    let cfg = shared.store.load_config().ok().flatten();
+    if !envelope_is_for_enrollment(
+        cfg.as_ref(),
+        envelope.contributor.tenant_scope_ref.as_deref(),
+        envelope.contributor.pseudonymous_contributor_id.as_deref(),
+    ) {
+        return;
+    }
     if super::approved_envelope::save(&shared.store, entry_id, envelope).is_err() {
         return;
     }
@@ -6965,6 +6982,24 @@ fn pin_previewed_envelope(
         // in-memory pin refers to.
         let _ = queue.save(&shared.store);
     }
+}
+
+/// Whether an envelope's identity stamp is the enrollment `cfg` describes:
+/// its tenant and its pseudonymous contributor id, as `envelope` stamps them.
+/// No enrollment matches nothing.
+fn envelope_is_for_enrollment(
+    cfg: Option<&crate::config::ContributorConfig>,
+    tenant_scope_ref: Option<&str>,
+    pseudonymous_contributor_id: Option<&str>,
+) -> bool {
+    let Some(cfg) = cfg else {
+        return false;
+    };
+    tenant_scope_ref == Some(cfg.tenant_id.as_str())
+        && pseudonymous_contributor_id
+            == Some(
+                trace_commons_protocol::onboarding::user_subject_hash(&cfg.user_subject).as_str(),
+            )
 }
 
 /// Settings as returned over IPC: the privacy-filter credential is reported
@@ -14677,10 +14712,39 @@ mod tests {
         );
     }
 
+    /// A preview pins only bytes stamped with the enrollment in force, so one
+    /// that finishes after an `unenroll` pins nothing.
+    #[test]
+    fn a_pin_needs_the_envelope_to_name_the_enrollment_in_force() {
+        let cfg = crate::commands::unenrolled_preview_config();
+        let subject = trace_commons_protocol::onboarding::user_subject_hash(&cfg.user_subject);
+        assert!(envelope_is_for_enrollment(
+            Some(&cfg),
+            Some(cfg.tenant_id.as_str()),
+            Some(subject.as_str())
+        ));
+        assert!(!envelope_is_for_enrollment(
+            None,
+            Some(cfg.tenant_id.as_str()),
+            Some(subject.as_str())
+        ));
+        assert!(!envelope_is_for_enrollment(
+            Some(&cfg),
+            Some("tenant-before"),
+            Some(subject.as_str())
+        ));
+        assert!(!envelope_is_for_enrollment(
+            Some(&cfg),
+            Some(cfg.tenant_id.as_str()),
+            Some("sha256:someone-else")
+        ));
+        assert!(!envelope_is_for_enrollment(Some(&cfg), None, None));
+    }
+
     #[test]
     fn every_async_only_method_is_advertised_and_refused_synchronously() {
         let s = shared();
-        assert_eq!(ASYNC_ONLY_METHODS.len(), 59);
+        assert_eq!(ASYNC_ONLY_METHODS.len(), 60);
         let mut seen = std::collections::BTreeSet::new();
         for &(method, label) in ASYNC_ONLY_METHODS {
             assert!(
@@ -15140,7 +15204,7 @@ mod tests {
             "pub async fn handle_request_async(shared",
         ));
         assert_eq!(sync.len(), 74, "synchronous dispatcher arms: {sync:?}");
-        assert_eq!(asy.len(), 66, "asynchronous dispatcher arms: {asy:?}");
+        assert_eq!(asy.len(), 67, "asynchronous dispatcher arms: {asy:?}");
 
         let dispatched: std::collections::BTreeSet<String> = sync.union(&asy).cloned().collect();
         let advertised: std::collections::BTreeSet<String> =

@@ -70,7 +70,9 @@ public enum FirstRunNavigation {
     }
 
     /// The near.ai login did not finish, or the enrollment through it was
-    /// refused (Kristi's review of #1261). With no Back on Folders or Tools,
+    /// refused (Kristi's review of #1261), or, with an invite, the sign-in to
+    /// the account it enrolled did not go through (owner, 2026-10-07); the
+    /// invite and its enrollment are kept. With no Back on Folders or Tools,
     /// staying there would retry the same sign-in at every Continue, so the
     /// person goes back to Join with the near.ai choice cleared, to choose
     /// again: near.ai, a passkey, or watch only. Every other answer is kept,

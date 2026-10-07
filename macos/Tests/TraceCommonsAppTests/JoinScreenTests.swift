@@ -763,6 +763,63 @@ final class JoinScreenTests: XCTestCase {
         XCTAssertFalse(runner.state.signedOutOfEnrolment)
     }
 
+    /// Signing out on Join while the daemon holds an enrollment asks the
+    /// daemon to unenroll; once it has, nothing holds the person, and Skip:
+    /// watch only is offered again.
+    func test_aSignOutOnJoinUnenrollsAndOffersWatchOnlyAgain() async throws {
+        let copy = try coreCopy()
+        let daemon = RecordingFirstRunDaemon()
+        let state = FirstRunState(
+            tier: .quick, step: .folders, invite: "invite:issuer.example", issuerHost: "issuer.example",
+            account: .nearAI, toolAnswers: [.claudeCode: .off, .codex: .off])
+        let runner = FirstRunRunner(state: state, daemon: daemon)
+        await runner.commit(.leaveRoots)
+        XCTAssertNotNil(runner.state.enrolledInvite)
+
+        runner.finishPasskey(.signedOut, copy: copy)
+        XCTAssertTrue(runner.state.signedOutOfEnrolment, "held until the daemon confirms")
+        await runner.pendingUnenroll?.value
+
+        XCTAssertEqual(daemon.unenrollCalls, 1)
+        XCTAssertFalse(runner.state.signedOutOfEnrolment)
+        XCTAssertFalse(runner.state.daemonHoldsEnrolment)
+        XCTAssertTrue(JoinScreenLayout.offersWatchOnly(runner.state))
+        XCTAssertEqual(JoinScreenLayout.footerTitle(runner.state, copy: copy), copy.join.skip)
+    }
+
+    /// The daemon refused or could not be asked: the sign-out stays held,
+    /// as it was before the daemon could unenroll, and watch only stays off.
+    func test_aSignOutWhoseUnenrollFailsStaysHeld() async throws {
+        let copy = try coreCopy()
+        let daemon = RecordingFirstRunDaemon()
+        daemon.unenrollSucceeds = false
+        let state = FirstRunState(
+            tier: .quick, step: .folders, invite: "invite:issuer.example", issuerHost: "issuer.example",
+            account: .nearAI, toolAnswers: [.claudeCode: .off, .codex: .off])
+        let runner = FirstRunRunner(state: state, daemon: daemon)
+        await runner.commit(.leaveRoots)
+
+        runner.finishPasskey(.signedOut, copy: copy)
+        await runner.pendingUnenroll?.value
+
+        XCTAssertEqual(daemon.unenrollCalls, 1)
+        XCTAssertTrue(runner.state.signedOutOfEnrolment)
+        XCTAssertFalse(JoinScreenLayout.offersWatchOnly(runner.state))
+    }
+
+    /// A sign-out that held no enrollment asks nothing of the daemon.
+    func test_aSignOutWithNoEnrollmentDoesNotUnenroll() async throws {
+        let copy = try coreCopy()
+        let daemon = RecordingFirstRunDaemon()
+        let runner = FirstRunRunner(state: FirstRunState(step: .join, account: .passkeyChosen), daemon: daemon)
+
+        runner.finishPasskey(.signedOut, copy: copy)
+        await runner.pendingUnenroll?.value
+
+        XCTAssertEqual(daemon.unenrollCalls, 0)
+        XCTAssertFalse(runner.state.signedOutOfEnrolment)
+    }
+
     /// Every word on Join is the core's: the file holds no literal of two or
     /// more words, and reads each card's words from `copy.join`.
     func test_joinAuthorsNoSentence() throws {
@@ -839,6 +896,7 @@ private final class NoDaemon: FirstRunDaemon {
     func enrollInvite(_ invite: String) async -> Bool { false }
     func signInNearAI() async -> Bool { false }
     func nearAILogin() async -> Bool { false }
+    func cancelNearAILogin() async -> Bool { false }
     func enrollNearAI() async -> FirstRunNearAIEnrolment { .refused(label: "near_ai_enroll_unavailable") }
     func saveConsentScopes(_ scopes: [String]) async -> Bool { false }
     func setProjectMode(projectID: String, mode: ProjectMode) async -> Bool { false }
@@ -847,5 +905,6 @@ private final class NoDaemon: FirstRunDaemon {
     func grantAutomatic(witness: String?) async -> FirstRunGrantAnswer { .refused(label: "none") }
     func markComplete() async -> Bool { false }
     func markWatchOnlyComplete() async -> Bool { false }
+    func unenroll() async -> Bool { false }
     func firstRunFinished(notice: String?) {}
 }

@@ -137,8 +137,9 @@ public struct FirstRunState: Codable, Equatable, Sendable {
     public var notFound: Set<SourceKind>
     /// The person signed out on Join (#1030 rule 6) while the daemon held an
     /// enrollment: this run's invite, a passkey Verify bound, or an earlier
-    /// first run's. The daemon has no call that drops an enrollment, so it
-    /// may still hold one; this first run no longer treats it as an account
+    /// first run's. Until the daemon confirms it unenrolled
+    /// (`FirstRunRunner.unenrollAfterSignOut`) it may still hold one; this
+    /// first run no longer treats it as an account
     /// (`holdsEnrolment` is false) and sends nothing that belongs to one --
     /// no scopes, no grant, no enrollment marker -- and an enrollment the
     /// daemon reports is not recorded again. A later enrollment (a new
@@ -217,7 +218,7 @@ public struct FirstRunState: Codable, Equatable, Sendable {
     /// Whether the daemon may hold an enrollment, whatever this first run now
     /// treats as the account: one this run enrolled (an invite, near.ai's),
     /// one an earlier run left or a passkey Verify bound, and one the person
-    /// signed out of on Join, which the daemon has no call to drop. Watching
+    /// signed out of on Join that the daemon has not yet unenrolled. Watching
     /// only is not offered while it does: its Start would act under that
     /// enrollment, whose scopes nobody chose here, and its marker cannot
     /// finish while the daemon is logged in.

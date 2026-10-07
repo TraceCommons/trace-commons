@@ -227,6 +227,23 @@ final class FirstRunDaemonAdaptorTests: XCTestCase {
         }
     }
 
+    /// Cancel during the first run's near.ai browser wait: true only once
+    /// the daemon took `near_ai_credential_cancel`; no client, an error, or
+    /// an unreadable reply answers false, which the runner words as the
+    /// sign-in that did not finish.
+    func test_aCancelledLoginIsConfirmedOnlyByTheDaemon() async {
+        let noClient = await AppModel().cancelNearAILogin()
+        XCTAssertFalse(noClient)
+
+        let taken = await model([CredentialSurface.cancelMethod: #"{"result":{}}"#]).cancelNearAILogin()
+        XCTAssertTrue(taken)
+
+        for reply in [#"{"error":{"code":"unavailable","message":"nope"}}"#, #"not json"#] {
+            let answer = await model([CredentialSurface.cancelMethod: reply]).cancelNearAILogin()
+            XCTAssertFalse(answer, reply)
+        }
+    }
+
     func test_aRefusedInviteIsDeadWithTheDaemonsLabel() async {
         let cases: [(String, String)] = [
             (#"{"result":{"valid":false,"reason_label":"invite-exhausted"}}"#, "invite-exhausted"),

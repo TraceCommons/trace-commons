@@ -70,6 +70,15 @@ enum FoldersScreenLayout {
         default: return nil
         }
     }
+
+    /// Cancel beside the spinning Continue, only while the near.ai browser
+    /// sign-in runs (`FirstRunRunner.signInWaiting`), in the core's
+    /// first-run Cancel. Tools offers the same.
+    static func signInCancel(
+        waiting: Bool, copy: FirstRunCopy, action: @escaping () -> Void
+    ) -> FirstRunFooter.Cancel? {
+        waiting ? FirstRunFooter.Cancel(title: copy.passkey.cancel, action: action) : nil
+    }
 }
 
 /// Ron's Folders screen (#1030 `tool-screens.tsx` W-2), Quick setup's tool
@@ -96,6 +105,9 @@ struct FoldersScreen: View {
                 title: copy.frame.continueButton,
                 isEnabled: canContinue,
                 busy: runner.isCommitting,
+                cancel: FoldersScreenLayout.signInCancel(waiting: runner.signInWaiting, copy: copy) {
+                    Task { await runner.cancelSignIn() }
+                },
                 action: { Task { await runner.commit(.leaveRoots) } }
             )
         ) {

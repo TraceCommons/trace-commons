@@ -73,6 +73,24 @@ pub const REMEMBERED_PASSKEYS_FILE: &str = "remembered-passkeys.json";
 /// (`daemon::approved_envelope`). One file per previewed-and-approved queue
 /// entry, so they cannot be listed by name; `wipe()` sweeps them by prefix.
 pub const DAEMON_APPROVED_ENVELOPE_PREFIX: &str = "daemon-approved-envelope-";
+
+/// The plain files that belong to one enrollment, apart from the credential
+/// references `commons_credentials` owns (device key, account session,
+/// staged device key). `unenroll` removes exactly these, with the stored
+/// approved envelopes; `wipe()` removes them with everything else.
+///
+/// Not here, deliberately: receipts, history and the audit log (the local
+/// record of what this device did, and the audit log records the unenroll
+/// itself), settings, folder rules and the queue (the person's choices about
+/// this Mac, not about an account), the NEAR AI notice marker, and the
+/// remembered passkeys (a passkey is not an enrollment).
+pub(crate) const ENROLLMENT_FILES: [&str; 5] = [
+    CONFIG_FILE,
+    DAEMON_INFERENCE_CONNECTION_FILE,
+    IDENTITY_SWITCH_JOURNAL_FILE,
+    LEGACY_INVITE_LINK_FILE,
+    INVITE_SUBJECT_FILE,
+];
 /// Runtime files, not persistent state: removed on shutdown, not by `wipe()`.
 pub const DAEMON_SOCK_FILE: &str = "daemon.sock";
 pub const DAEMON_LOCK_FILE: &str = "daemon.lock";
@@ -1169,7 +1187,59 @@ impl ConfigStore {
         Ok(())
     }
 
+    /// Remove the plain files of one enrollment ([`ENROLLMENT_FILES`]), their
+    /// orphaned atomic-write temp files, and every stored approved envelope
+    /// with its temp files. Missing is not an error.
+    ///
+    /// The credential references are not touched here: `unenroll` runs this
+    /// inside `commons_credentials::clear_with`, which removes those first,
+    /// under the same commit lock -- see `daemon::unenroll` for why that
+    /// order is the fail-closed one.
+    pub(crate) fn remove_enrollment_files(&self) -> Result<()> {
+        for name in ENROLLMENT_FILES {
+            let path = self.dir.join(name);
+            match std::fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e).with_context(|| format!("removing {}", path.display())),
+            }
+        }
+        let tmp_prefixes: Vec<String> = ENROLLMENT_FILES
+            .iter()
+            .map(|name| format!(".{name}.tmp-"))
+            .collect();
+        let entries = match std::fs::read_dir(&self.dir) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => {
+                return Err(e).with_context(|| format!("reading dir {}", self.dir.display()));
+            }
+        };
+        for entry in entries {
+            let entry = entry.with_context(|| format!("reading dir {}", self.dir.display()))?;
+            let file_name = entry.file_name();
+            let file_name = file_name.to_string_lossy();
+            // Stored envelopes are stamped with this enrollment's identity, so
+            // they go with it -- see `wipe_files` below.
+            let is_approved_envelope = file_name.starts_with(DAEMON_APPROVED_ENVELOPE_PREFIX)
+                || file_name.starts_with(&format!(".{DAEMON_APPROVED_ENVELOPE_PREFIX}"));
+            if is_approved_envelope
+                || tmp_prefixes
+                    .iter()
+                    .any(|prefix| file_name.starts_with(prefix))
+            {
+                let path = entry.path();
+                std::fs::remove_file(&path)
+                    .with_context(|| format!("removing {}", path.display()))?;
+            }
+        }
+        Ok(())
+    }
+
     fn wipe_files(&self) -> Result<()> {
+        // Everything an enrollment owns goes first, through the one list
+        // `unenroll` uses, so a file added there can never survive a logout.
+        self.remove_enrollment_files()?;
         // Token review payloads belong to this enrollment. Never traverse a
         // substituted link into an agent's session directory. Remaining raw
         // capture leases expire independently in Ironwire's bounded spool.

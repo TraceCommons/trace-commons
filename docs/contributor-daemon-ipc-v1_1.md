@@ -588,6 +588,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `consent_options` | — | `scopes[]` of `{name, title, description, always_on, grants_data_use}` | |
 | `set_consent_scopes` | `scopes[]` (wire-name strings; omitted means floor scope only) | `consent_scopes[]` | requires an existing enrollment |
 | `enroll` | `grant` xor `invite`, `scopes[]` (optional) | `enrolled: bool`, and on success `tenant_id`, `device_key_id`, `consent_scopes[]` | performs real network I/O |
+| `unenroll` | none | `unenrolled: true`, `removed: bool`, `approvals_returned` | removes this Mac's enrollment locally; no server call; see "`unenroll`" below |
 | `acknowledge_grant_voids` | `ids[]` (**required**) | `acknowledged: <count>` | records that the void notices with these ids were shown; see "Void notices" below |
 | `legacy_invite_migrate` | `invite` (optional: the invite link or code, sent only after `legacy_migration_invite_needed`) | `migrated: true`, `folders_kept`, `automatic_grant_kept`, `legacy_session_revoked` | async only; performs real network I/O; moves a legacy invite identity to the contributor's NEAR AI account at their request; refusals are `legacy_migration_*` labels; see "Moving a legacy invite identity" below |
 | `acknowledge_legacy_invite_migration` | — | `acknowledged: bool` | records that the move notice was shown |
@@ -5121,6 +5122,67 @@ flag); a caller-supplied allowlist can degrade to permissive, and a socket
 caller is not trusted with that. On success, the underlying error is never
 echoed back over the socket -- it can carry an issuer response body or a URL
 -- so failures are reported only as `unavailable` / `enroll-failed`.
+
+### `unenroll`
+
+Removes this Mac's enrollment, locally only: no server call is made, so the
+device registration, the account and every submitted trace stay as they are
+on the server. Params: none. Async only: the synchronous entry point refuses
+it with `unavailable` / `unenroll-requires-async`. Not answered during a
+developer dry run (it deletes OS credential-store entries).
+
+What is removed:
+
+- the contributor config (`contributor.json`: tenant, endpoints, device
+  identity, consent scopes),
+- the device key, the account session, and a staged legacy-migration key,
+  from the OS credential store,
+- the files that belong to the enrollment: the inference-connection state,
+  a legacy identity-switch journal, the legacy invite link record, the
+  remembered invite subject hash, and every stored approved envelope.
+
+What stays: receipts, history and the audit log, settings, folder rules,
+the queue, the NEAR AI notice marker, and the remembered passkeys (a passkey
+is not an enrollment).
+
+Order: the credential references go first, with the credential generation
+advanced so an enrollment, sign-in or identity switch in flight cannot
+publish against an earlier snapshot; the config and the other files go next,
+under the same commit lock. `status.logged_in` needs both the config and the
+device key, so from the first removal the daemon reads as not enrolled and
+nothing can sign an upload claim. A crash between the two leaves a config
+with no device key: not enrolled, and refused by `enroll` until `unenroll`
+is called again, which finishes it (the method acts whenever any part of an
+enrollment is on disk).
+
+Queued entries: every `approved`, unsent entry returns to `pending` with
+`reason_label` `approval-inputs-changed`, and every preview pin is released.
+The sessions stay queued; no approval given under the old enrollment can be
+sent under a later one. A preview that finishes after `unenroll` pins
+nothing, because a pin now requires the envelope to name the enrollment in
+force. In-memory account-admission answers and passkey ceremonies are
+dropped.
+
+Audit: appended first, label only: action `unenrolled`, `detail`
+`approvals_returned=<n>`. No tenant, account, key id or path. When nothing
+was enrolled, nothing is written.
+
+Result: `{"unenrolled": true, "removed": <bool>, "approvals_returned": <n>}`.
+`removed` is `false` when there was nothing to remove; the call still
+succeeds. Pushes `queue_changed` and `status_changed` when something was
+removed.
+
+Refusals:
+
+| Code / label | When |
+|---|---|
+| `busy` / `upload-in-flight` | an upload is in flight; nothing is removed |
+| `unavailable` / `audit-write-failed` | the audit entry could not be written; nothing is removed |
+| `unavailable` / `unenroll-failed` | removing a credential or file failed; whatever was removed stays removed, and calling again finishes it |
+
+The CLI's `unenroll` (with `--yes` to skip its confirmation) calls this;
+`consent scopes` calls `set_consent_scopes` with the floor scope named, so an
+enrollment made with `login --default` leaves the consent hold.
 
 ### `acknowledge_near_ai_notice`
 
