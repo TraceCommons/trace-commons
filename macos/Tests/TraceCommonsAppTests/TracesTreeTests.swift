@@ -211,7 +211,7 @@ final class TracesTreeTests: XCTestCase {
     /// own first session rather than to the top of the tree.
     func test_theKeyboardWalksFoldersAndSessionsAsDrawn() async throws {
         let built = try await tree(.normalDay)
-        let rows = TracesTreeView.visibleRows(in: built, collapsed: [])
+        let rows = TracesTreeView.visibleRows(in: built, expanded: Set(built.folders.map(\.id)))
         let folders = built.folders
         var expected: [MonitorSelection] = []
         for folder in folders {
@@ -241,7 +241,7 @@ final class TracesTreeTests: XCTestCase {
 
         // A collapsed folder keeps its row and hides its sessions; down from
         // it goes to the next folder.
-        let closed = TracesTreeView.visibleRows(in: built, collapsed: [first.id])
+        let closed = TracesTreeView.visibleRows(in: built, expanded: Set(built.folders.map(\.id)).subtracting([first.id]))
         XCTAssertTrue(closed.contains(.folder(projectID: first.id)))
         XCTAssertFalse(closed.contains(firstSession))
         let after = closed.firstIndex(of: .folder(projectID: first.id)).map { $0 + 1 }
@@ -497,10 +497,14 @@ final class TracesRowWordsTests: XCTestCase {
         let words = try XCTUnwrap(MonitorTracesCopy.decode(fromJSON: TCCoreCopy.monitorTracesCopyJSON()))
         let held = try entry(held: true)
         XCTAssertEqual(TracesTreeView.flag(held), .ask)
-        XCTAssertEqual(TracesTreeView.sub(held, held: words.held, ineligible: nil)?.hasPrefix(words.held), true)
+        XCTAssertEqual(
+            TracesTreeView.sub(held, held: words.held, ineligible: nil, words: words)?.hasSuffix(words.held), true)
         let plain = try entry()
         XCTAssertNil(TracesTreeView.flag(plain))
-        XCTAssertEqual(TracesTreeView.sub(plain, held: words.held, ineligible: nil), TracesTreeView.measures(plain))
+        // #1146's sub line: the size, then the session's state in a word.
+        let sub = try XCTUnwrap(TracesTreeView.sub(plain, held: words.held, ineligible: nil, words: words))
+        XCTAssertEqual(sub, [TracesTreeView.size(plain), words.tree.sessionWaiting].compactMap { $0 }.joined(separator: " · "))
+        XCTAssertFalse(sub.contains(words.held))
     }
 
     /// A session that cannot be contributed as it stands says the core's
@@ -801,11 +805,11 @@ final class TracesFolderFirstTreeTests: XCTestCase {
             expected.append(.folder(projectID: folder.id))
             expected += folder.sessions.map { .session(entryID: $0.entryId) }
         }
-        XCTAssertEqual(TracesTreeView.visibleRows(in: tree, collapsed: []), expected)
-        // A tool's id collapses nothing: there is no tool row to collapse.
+        XCTAssertEqual(TracesTreeView.visibleRows(in: tree, expanded: Set(tree.folders.map(\.id))), expected)
+        // A tool's id opens nothing: there is no tool row to open.
         XCTAssertEqual(
-            TracesTreeView.visibleRows(in: tree, collapsed: [SourceKind.claudeCode.rawValue, SourceKind.codex.rawValue]),
-            expected)
+            TracesTreeView.visibleRows(in: tree, expanded: [SourceKind.claudeCode.rawValue, SourceKind.codex.rawValue]),
+            tree.folders.map { .folder(projectID: $0.id) })
 
         let source = try TracesParityTests.text("Views/Monitor/TracesViews.swift")
         let treeView = try XCTUnwrap(source.range(of: "struct TracesTreeView"))
@@ -818,9 +822,10 @@ final class TracesFolderFirstTreeTests: XCTestCase {
         XCTAssertTrue(body.contains("ForEach(store.tree.folders)"))
     }
 
-    /// Every session row shows its own tool's tile and names the tool first
-    /// in its sub-line, since one folder can hold several tools' sessions.
-    /// A source this build does not know keeps the plain session tile.
+    /// Every session row shows its own tool's tile, and names the tool to
+    /// VoiceOver, since one folder can hold several tools' sessions; its
+    /// sub-line is #1146's size and state. A source this build does not
+    /// know keeps the plain session tile.
     func test_sessionRowsShowTheirTool() throws {
         let claude = try recordedEntry(["source": "claude-code"])
         let codex = try recordedEntry(["source": "codex"])
@@ -832,14 +837,59 @@ final class TracesFolderFirstTreeTests: XCTestCase {
         XCTAssertEqual(TracesTreeView.toolName(codex), SourceKind.codex.displayName)
         XCTAssertNil(TracesTreeView.toolName(unknown))
 
-        let sub = try XCTUnwrap(TracesTreeView.sub(codex, held: nil, ineligible: nil, tool: TracesTreeView.toolName(codex)))
-        XCTAssertTrue(sub.hasPrefix(SourceKind.codex.displayName), sub)
-        if let measures = TracesTreeView.measures(codex) { XCTAssertTrue(sub.hasSuffix(measures), sub) }
-        XCTAssertEqual(TracesTreeView.sub(unknown, held: nil, ineligible: nil, tool: nil), TracesTreeView.measures(unknown))
+        let words = try XCTUnwrap(Self.words)
+        let sub = try XCTUnwrap(TracesTreeView.sub(codex, held: nil, ineligible: nil, words: words))
+        XCTAssertFalse(sub.contains(SourceKind.codex.displayName), sub)
+        if let size = TracesTreeView.size(codex) { XCTAssertTrue(sub.hasPrefix(size), sub) }
+        XCTAssertTrue(sub.hasSuffix(words.tree.sessionWaiting), sub)
+        // Dropped subagent transcripts read as trimmed to fit.
+        let trimmed = try recordedEntry(["source": "codex", "subagents_dropped": 2])
+        XCTAssertEqual(
+            TracesTreeView.sub(trimmed, held: nil, ineligible: nil, words: words)?.hasSuffix(words.tree.sessionTrimmed),
+            true)
 
         let source = try TracesParityTests.text("Views/Monitor/TracesViews.swift")
         XCTAssertTrue(source.contains("tile: Self.sessionTile(entry),"))
-        XCTAssertTrue(source.contains("tool: Self.toolName(entry)"))
+        XCTAssertTrue(source.contains(".accessibilityHint(Self.toolName(entry) ?? \"\")"))
+    }
+
+    /// #1146's session title: the short weekday and time it was found.
+    func test_aSessionIsTitledByWeekdayAndTime() throws {
+        let entry = try recordedEntry([
+            "discovered_at": "2026-10-05T15:04:00Z", "started_at": "2026-10-01T09:00:00Z",
+        ])
+        let utc = try XCTUnwrap(TimeZone(identifier: "UTC"))
+        let title = TracesTreeView.when(entry, timeZone: utc)
+        var style = Date.FormatStyle.dateTime.weekday(.abbreviated).hour().minute()
+        style.timeZone = utc
+        XCTAssertEqual(title, try XCTUnwrap(entry.discoveredAt).formatted(style))
+        XCTAssertFalse(title.contains("Oct"), "no month: \(title)")
+    }
+
+    /// The line under a folder whose Submit leaves sessions behind says how
+    /// many it sends first (#1146).
+    func test_theWithheldLineSaysWhatSubmitSends() throws {
+        let words = try XCTUnwrap(Self.words)
+        let note = TracesTreeView.withheldNote("1 is not eligible.", eligible: 2, words: words)
+        XCTAssertTrue(note.hasPrefix(FirstRunCopy.fill(words.tree.eligibleCount, ["count": "2"])), note)
+        XCTAssertTrue(note.hasSuffix("1 is not eligible."), note)
+        XCTAssertEqual(TracesTreeView.withheldNote("x", eligible: 2, words: nil), "x")
+    }
+
+    /// Folders start collapsed (#1146 `expanded = []`); selecting a session
+    /// from elsewhere opens its folder, and a folder selection opens none.
+    func test_foldersStartCollapsedAndASelectedSessionIsRevealed() async throws {
+        let store = TracesStore(client: SampleDaemonClient(.normalDay))
+        await store.load()
+        let tree = store.tree
+        XCTAssertEqual(TracesTreeView.visibleRows(in: tree, expanded: []), tree.folders.map { .folder(projectID: $0.id) })
+        let folder = try XCTUnwrap(tree.folders.first { !$0.sessions.isEmpty })
+        let session = MonitorSelection.session(entryID: try XCTUnwrap(folder.sessions.first).entryId)
+        XCTAssertEqual(TracesTreeView.revealing(session, in: tree, expanded: []), [folder.id])
+        XCTAssertEqual(TracesTreeView.revealing(.folder(projectID: folder.id), in: tree, expanded: []), [])
+        XCTAssertEqual(TracesTreeView.revealing(nil, in: tree, expanded: ["x"]), ["x"])
+        let source = try TracesParityTests.text("Views/Monitor/TracesViews.swift")
+        XCTAssertTrue(source.contains("@State private var expanded: Set<String> = []"))
     }
 
     /// Folders are ordered by their most recent waiting session (when it
@@ -892,7 +942,7 @@ final class TracesFolderFirstTreeTests: XCTestCase {
         XCTAssertEqual(folder.mode, .ignore)
         XCTAssertEqual(folder.path, "/x")
         XCTAssertEqual(tree.resolve(.folder(projectID: "p1")), .folder(projectID: "p1"))
-        XCTAssertEqual(TracesTreeView.visibleRows(in: tree, collapsed: []), [.folder(projectID: "p1")])
+        XCTAssertEqual(TracesTreeView.visibleRows(in: tree, expanded: Set(tree.folders.map(\.id))), [.folder(projectID: "p1")])
         // Shown, it is on the map too (Ron's `MonitorShellTests`).
         XCTAssertEqual(tree.unplaced.map(\.id), ["p1"])
 

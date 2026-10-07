@@ -9,8 +9,8 @@ import TCShellCore
 /// hierarchy). A folder can hold sessions from several tools, so each
 /// session row shows its own tool. Folders are ordered by their most recent
 /// waiting session, then by name. Ignored folders are drawn, with a switch
-/// back to Ask me, only while the View menu's "Show ignored folders" asks
-/// for them (Ron's shell, #1146 `showIgnored`, default hidden).
+/// back to Ask me, while the View menu's "Show ignored folders" asks
+/// for them (Ron's shell, #1146 `showIgnored`, shown by default).
 ///
 /// `tools` and `unplaced` are the per-tool aggregate the flow map draws (and
 /// the Summary's top tools reads); the tree pane never draws them. Their
@@ -29,7 +29,7 @@ import TCShellCore
 ///   does, a folder with no waiting session cannot be placed and is listed
 ///   on its own after the tools.
 /// - Ignored folders are left out, unless the View menu's "Show ignored
-///   folders" asks for them (#1146 `showIgnored`, default hidden).
+///   folders" asks for them (#1146 `showIgnored`, shown by default).
 /// - The unresolvable bucket (sessions whose folder the core cannot name) is
 ///   drawn under its shared name, never its `unknown-project` slug, and is
 ///   never offered automatic.
