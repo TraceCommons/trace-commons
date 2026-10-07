@@ -159,9 +159,18 @@ public enum FirstRunPlan {
     /// without an enrolment the daemon holds sends nothing at all, since
     /// scopes, the grant and the marker all belong to one (`canContinue`
     /// keeps Start off for it).
+    ///
+    /// Watching only while the daemon still holds an enrolment
+    /// (`FirstRunState.daemonHoldsEnrolment`: one signed out of on Join, or
+    /// an invite enrolled before a near.ai sign-in failed) sends nothing at
+    /// all. Its rules and past sessions would act under that enrolment,
+    /// whose scopes nobody chose here, and its marker is refused while the
+    /// daemon is logged in. Join does not offer watch only then, and
+    /// `canContinue` keeps Start off for it.
     private static func start(_ state: FirstRunState) -> [FirstRunCall] {
         if state.account == .passkeyChosen { return [.openPasskeySheets] }
         let watchOnly = state.account == .watchOnly
+        if watchOnly, state.daemonHoldsEnrolment { return [] }
         guard watchOnly || state.holdsEnrolment else { return [] }
         var calls: [FirstRunCall] = watchOnly ? [] : [.setConsentScopes(state.scopes.sorted())]
         if state.tier == .custom {

@@ -178,10 +178,22 @@ pub struct ContributorConfig {
     /// having picked it. Every enrollment path writes `false`; only
     /// `set_consent_scopes` writes `true`, and a new enrollment starts over.
     ///
-    /// `#[serde(default)]` is required: a config written before this field
-    /// existed has no such key, and reads as not chosen.
-    #[serde(default)]
-    pub consent_scopes_chosen: bool,
+    /// Three states, because the key's absence carries meaning:
+    ///
+    /// - `Some(true)`: chosen. Sends, and may carry the Flow 1 grant.
+    /// - `Some(false)`: an enrolment whose scopes nobody chose. Nothing is
+    ///   sent under it (`consent_hold`, `consent-scopes-not-chosen`) and the
+    ///   grant is refused.
+    /// - `None`: the config predates this record. No released client ever
+    ///   wrote it, so every such config belongs to a contributor who joined
+    ///   before it existed; they keep sending as they always have. The grant
+    ///   still asks for an explicit choice (R7).
+    ///
+    /// Absent stays absent across a save (`skip_serializing_if`), so a legacy
+    /// config rewritten for another reason is not turned into an unchosen
+    /// enrolment. Every enrolment writes `Some(..)`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consent_scopes_chosen: Option<bool>,
     /// How [`Self::witness`] got here, for the disclosure screens (K11).
     ///
     /// Written only beside the witness it describes, by
@@ -298,6 +310,26 @@ pub fn environment_witness_origin(
     witness: Option<&WitnessSettings>,
 ) -> Option<WitnessOriginRecord> {
     witness.map(|w| WitnessOriginRecord::for_witness(w, WitnessOrigin::Environment))
+}
+
+/// Why nothing may be sent under an enrolment: its consent scopes were saved
+/// by enrolment and never chosen (`ContributorConfig::consent_scopes_chosen`
+/// is `Some(false)`). A fixed label, and the one every send path refuses or
+/// holds with: `approve`, `include_past_sessions`, arming a folder, an
+/// `auto_upload` contribution override, the watcher's unattended approvals,
+/// and the uploader.
+pub const CONSENT_SCOPES_NOT_CHOSEN: &str = "consent-scopes-not-chosen";
+
+/// Whether sending under `cfg` is held because its consent scopes were never
+/// chosen, as the fixed label to refuse or hold with. `None` with no
+/// enrolment (nothing can be sent under one, and that is answered
+/// elsewhere), with a choice recorded, and for a config that predates the
+/// record (see `consent_scopes_chosen`).
+pub fn consent_hold(cfg: Option<&ContributorConfig>) -> Option<&'static str> {
+    match cfg {
+        Some(cfg) if cfg.consent_scopes_chosen == Some(false) => Some(CONSENT_SCOPES_NOT_CHOSEN),
+        _ => None,
+    }
 }
 
 impl ContributorConfig {
@@ -1657,7 +1689,7 @@ mod tests {
     fn sample_config() -> ContributorConfig {
         ContributorConfig {
             inference_receipt_endpoint: None,
-            consent_scopes_chosen: false,
+            consent_scopes_chosen: Some(false),
             witness_origin: None,
             inference_receipt_check_attestation: false,
             schema_version: CONTRIBUTOR_CONFIG_SCHEMA_VERSION.to_string(),
@@ -1712,7 +1744,55 @@ mod tests {
     fn a_config_that_predates_the_scope_choice_record_holds_no_choice() {
         let json = r#"{"schema_version":"1","issuer_url":"https://i","ingest_url":"https://g","audience":"a","tenant_id":"t","instance_id":"i","user_subject":"s","device_key_id":"d","consent_scopes":["debugging_evaluation"]}"#;
         let cfg: ContributorConfig = serde_json::from_str(json).unwrap();
-        assert!(!cfg.consent_scopes_chosen);
+        assert_ne!(cfg.consent_scopes_chosen, Some(true));
+        assert!(crate::flow1::grant_precondition(true, Some(&cfg)).is_err());
+    }
+
+    /// The migration rule. No released client ever wrote the scope-choice
+    /// record, so a config without the key belongs to someone who joined
+    /// before it existed, and sends as it always did. Only an enrolment that
+    /// records `false` -- every enrolment made since -- is held.
+    #[test]
+    fn a_config_that_predates_the_scope_choice_record_is_not_held() {
+        let json = r#"{"schema_version":"1","issuer_url":"https://i","ingest_url":"https://g","audience":"a","tenant_id":"t","instance_id":"i","user_subject":"s","device_key_id":"d","consent_scopes":["debugging_evaluation"]}"#;
+        let cfg: ContributorConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.consent_scopes_chosen, None);
+        assert_eq!(consent_hold(Some(&cfg)), None);
+    }
+
+    #[test]
+    fn an_enrolment_whose_scopes_nobody_chose_is_held() {
+        let mut cfg = sample_config();
+        cfg.consent_scopes_chosen = Some(false);
+        assert_eq!(consent_hold(Some(&cfg)), Some(CONSENT_SCOPES_NOT_CHOSEN));
+        assert_eq!(CONSENT_SCOPES_NOT_CHOSEN, "consent-scopes-not-chosen");
+        cfg.consent_scopes_chosen = Some(true);
+        assert_eq!(consent_hold(Some(&cfg)), None);
+        // No enrolment, nothing to send under: not this hold's to answer.
+        assert_eq!(consent_hold(None), None);
+    }
+
+    /// Absence survives a save, so rewriting a legacy config for any other
+    /// reason does not turn it into an unchosen enrolment.
+    #[test]
+    fn a_legacy_config_keeps_no_record_across_a_save() {
+        let (_d, store) = store();
+        let mut cfg = sample_config();
+        cfg.consent_scopes_chosen = None;
+        store.save_config(&cfg).unwrap();
+        let raw = std::fs::read_to_string(store_path(&store, "contributor.json")).unwrap();
+        assert!(!raw.contains("consent_scopes_chosen"));
+        assert_eq!(
+            store.load_config().unwrap().unwrap().consent_scopes_chosen,
+            None
+        );
+
+        cfg.consent_scopes_chosen = Some(false);
+        store.save_config(&cfg).unwrap();
+        assert_eq!(
+            store.load_config().unwrap().unwrap().consent_scopes_chosen,
+            Some(false)
+        );
     }
 
     #[test]

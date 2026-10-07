@@ -94,8 +94,9 @@ public enum FirstRunNavigation {
     ///   screen itself holds Continue until its folders have loaded
     ///   (`RulesScreenLayout.canContinue`), which this state cannot see.
     /// - Uses: the required use ticked, and something Start can do: finish
-    ///   watching only, reopen a chosen passkey's sheets, or finish an
-    ///   enrolment the daemon holds. With no required use known, Start stays
+    ///   watching only (not while the daemon holds an enrolment, which
+    ///   watching only cannot finish under), reopen a chosen passkey's
+    ///   sheets, or finish an enrolment the daemon holds. With no required use known, Start stays
     ///   disabled.
     public static func canContinue(
         _ state: FirstRunState,
@@ -114,7 +115,8 @@ public enum FirstRunNavigation {
             return true
         case .uses:
             guard let requiredScope else { return false }
-            let startable = state.account == .watchOnly || state.account == .passkeyChosen || state.holdsEnrolment
+            let watchesOnly = state.account == .watchOnly && !state.daemonHoldsEnrolment
+            let startable = watchesOnly || state.account == .passkeyChosen || state.holdsEnrolment
             return startable && state.scopes.contains(requiredScope)
         }
     }
