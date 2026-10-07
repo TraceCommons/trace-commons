@@ -276,13 +276,32 @@ final class TracesStore {
     /// the copy would not decode.
     func attestationValue(_ entry: DaemonData.QueueEntry) -> String? {
         guard let copy = inferenceCopy else { return nil }
-        let mark = AttestationMark(
-            mark: entry.attestation ?? "",
-            reason: (entry.attestationReason?.isEmpty ?? true) ? nil : entry.attestationReason)
+        let mark = Self.attestationMark(entry)
         return [
             AttestationSurface.markLine(mark, copy: copy, calls: Self.attestationCalls),
             AttestationSurface.reasonLine(mark, calls: Self.attestationCalls),
         ].compactMap { $0 }.joined(separator: " ")
+    }
+
+    /// A queue entry's attestation mark, as the shared table reads it.
+    static func attestationMark(_ entry: DaemonData.QueueEntry) -> AttestationMark {
+        AttestationMark(
+            mark: entry.attestation ?? "",
+            reason: (entry.attestationReason?.isEmpty ?? true) ? nil : entry.attestationReason)
+    }
+
+    /// The session row's attestation sentence (#1146's
+    /// `attestation_copy.state_line`): the core's sentence for the mark,
+    /// without its reason. Nil only when the copy would not decode.
+    func attestationLine(_ entry: DaemonData.QueueEntry) -> String? {
+        guard let copy = inferenceCopy else { return nil }
+        return AttestationSurface.markLine(Self.attestationMark(entry), copy: copy, calls: Self.attestationCalls)
+    }
+
+    /// The tone the core gives a session's attestation mark. A mark this
+    /// build cannot read is `.neutral`, never `.clear`.
+    static func attestationTone(_ entry: DaemonData.QueueEntry) -> PrivateInferenceTone {
+        AttestationSurface.tone(attestationMark(entry), calls: attestationCalls)
     }
 
     /// The tools the core reads from their usual folder while unset, from

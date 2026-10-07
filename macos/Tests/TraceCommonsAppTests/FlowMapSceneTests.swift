@@ -1,3 +1,4 @@
+import SwiftUI
 import TCDesign
 import TCShellCore
 import XCTest
@@ -526,5 +527,23 @@ final class FlowMapSceneTests: XCTestCase {
         XCTAssertNil(InferenceTabView.windowHours(try page("null"), destinations: try destinations("null")))
         XCTAssertEqual(InferenceTabView.windowLine(try page("null"), destinations: nil), "\u{2014}")
         XCTAssertEqual(words.windowLine(hours: nil), "\u{2014}")
+    }
+
+    /// A node's label and sublabel never meet: #1146's 11 and 10 point type
+    /// 14 apart, scaled with the map, at every zoom, never below the floor.
+    func test_nodeLabelsNeverTouch() {
+        for scale: CGFloat in [0.3, 0.6, 0.85, 1, 1.4, 2] {
+            let type = FlowMapView.labelType(scale: scale)
+            XCTAssertLessThan(type.sublabelSize, type.labelSize, "the sublabel is the smaller caption")
+            // Half of each line's height, at a generous 1.2 line height.
+            let clearance = type.sublabelOffset - type.labelOffset
+            XCTAssertGreaterThan(clearance, 0.6 * type.labelSize + 0.6 * type.sublabelSize, "at \(scale)")
+            XCTAssertGreaterThanOrEqual(type.labelSize, 11 * FlowMapView.labelFloor)
+        }
+        XCTAssertEqual(FlowMapView.labelType(scale: 1).labelSize, 11)
+        XCTAssertEqual(FlowMapView.labelType(scale: 1).sublabelSize, 10)
+        // The credential's key is #1146's level outline, wider than tall.
+        let key = FlowMapView.keyGlyph(centre: .zero, scale: 1).boundingRect
+        XCTAssertGreaterThan(key.width, key.height)
     }
 }

@@ -66,7 +66,7 @@ final class MonitorShellTests: XCTestCase {
             ".padding([.horizontal, .top], GlassTokens.Space.panePadding)",
             ".padding(Self.contentInsets(shown))",
             "EdgeInsets(top: 0, leading: GlassTokens.Space.treeInset, bottom: 0, trailing: GlassTokens.Space.treeInset)",
-            "Rectangle().fill(GlassTokens.Color.rule.color).frame(height: 0.5)",
+            "GlassHairline(GlassTokens.Color.rule.color)",
             ".transition(.move(edge: .bottom).combined(with: .opacity))",
             "GlassPane(insets: GlassPaneInsets.inspector) {",
             "GlassPane(padding: 0, isContent: true, edge: GlassTokens.Shadow.mapEdge) {",
@@ -216,17 +216,17 @@ final class MonitorShellTests: XCTestCase {
 
     func test_somethingNewOpensTheInspector() {
         let none = InspectorDemand.keys(approvalUndo: nil, contributed: nil, kept: nil, contributedFolder: nil,
-                                        submittingFolder: nil, privateAIOffer: false, armingOffer: nil)
+                                        submittingFolder: nil)
         XCTAssertTrue(none.isEmpty)
         let submitting = InspectorDemand.keys(approvalUndo: nil, contributed: nil, kept: nil, contributedFolder: nil,
-                                              submittingFolder: "p1", privateAIOffer: false, armingOffer: nil)
+                                              submittingFolder: "p1")
         XCTAssertTrue(InspectorDemand.opens(previous: none, current: submitting))
         let undo = InspectorDemand.keys(approvalUndo: nil, contributed: nil, kept: nil, contributedFolder: "p1",
-                                        submittingFolder: nil, privateAIOffer: false, armingOffer: nil)
+                                        submittingFolder: nil)
         XCTAssertTrue(InspectorDemand.opens(previous: submitting, current: undo))
         let offers = InspectorDemand.keys(approvalUndo: ["e1"], contributed: "e1", kept: "e2", contributedFolder: nil,
-                                          submittingFolder: nil, privateAIOffer: true, armingOffer: "p2")
-        XCTAssertEqual(offers.count, 5)
+                                          submittingFolder: nil)
+        XCTAssertEqual(offers.count, 3)
         XCTAssertTrue(InspectorDemand.opens(previous: none, current: offers))
         // Going away, or still asking, leaves the person's choice alone.
         XCTAssertFalse(InspectorDemand.opens(previous: offers, current: none))
@@ -243,9 +243,12 @@ final class MonitorShellTests: XCTestCase {
         XCTAssertTrue(window.contains("InspectorDemand.keys(model: model, traces: traces, selection: selection)"))
         let demand = try Self.text("Views/Monitor/TracesInspectorHost.swift")
         for input in ["model.undo?.entryIDs", "traces.lastContributed?.entryId", "traces.lastKept",
-                      "traces.lastContributedFolder?.projectId", "traces.submittingFolder",
-                      "model.showsPrivateInferenceOffer", "model.armingOffer?.projectId"] {
+                      "traces.lastContributedFolder?.projectId", "traces.submittingFolder"] {
             XCTAssertTrue(demand.contains(input), "the demand does not read \(input)")
+        }
+        // The offers are drawn above the tree only, so they open no inspector.
+        for input in ["model.showsPrivateInferenceOffer", "model.armingOffer"] {
+            XCTAssertFalse(demand.contains(input), "the demand reads \(input)")
         }
     }
 

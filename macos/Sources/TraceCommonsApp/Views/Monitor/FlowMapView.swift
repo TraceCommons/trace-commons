@@ -176,23 +176,57 @@ struct FlowMapView: View {
                              style: StrokeStyle(lineWidth: 1.5 * fit.scale, lineCap: .round, dash: [0.5 * fit.scale, 4 * fit.scale]))
             }
             // A key, not a shield: the node is the credential, and no
-            // protection is claimed for it (#1146).
-            layer.draw(Text(Image(systemName: "key.fill")).font(.system(size: 14 * fit.scale)).foregroundStyle(GlassColor.textPrimary), at: centre)
+            // protection is claimed for it. #1146's outlined, level key.
+            layer.stroke(Self.keyGlyph(centre: centre, scale: fit.scale), with: .color(GlassColor.textPrimary),
+                         style: StrokeStyle(lineWidth: 2 * fit.scale, lineCap: .round, lineJoin: .round))
         }
 
         if selected {
             layer.stroke(disc, with: .color(GlassColor.accentText), lineWidth: 2 * fit.scale)
         }
 
+        // #1146's `.tc-map__label` and `.tc-map__sublabel`: 11 semibold in
+        // the primary ink, then 10 regular in the off tone, 14 below. Type
+        // and gaps scale together, so the two lines never meet.
+        let type = Self.labelType(scale: fit.scale)
         let label = node.label.count > 18 ? node.label.prefix(17) + "…" : Substring(node.label)
         layer.draw(
-            Text(label).font(GlassTokens.TypeScale.micro.font.weight(.semibold)).foregroundStyle(GlassColor.textSecondary),
-            at: CGPoint(x: centre.x, y: centre.y + radius + 9 * fit.scale))
+            Text(label).font(.system(size: type.labelSize, weight: .semibold)).foregroundStyle(GlassColor.textPrimary),
+            at: CGPoint(x: centre.x, y: centre.y + radius + type.labelOffset))
         if let sublabel = node.sublabel {
             layer.draw(
-                Text(sublabel).font(GlassTokens.TypeScale.micro.font).foregroundStyle(GlassColor.textTertiary),
-                at: CGPoint(x: centre.x, y: centre.y + radius + 21 * fit.scale))
+                Text(sublabel).font(.system(size: type.sublabelSize))
+                    .foregroundStyle(GlassTokens.Color.statusOff.color),
+                at: CGPoint(x: centre.x, y: centre.y + radius + type.sublabelOffset))
         }
+    }
+
+    /// A node's label and sublabel: their sizes, and how far below the disc
+    /// each line's centre sits. In #1146's SVG, type scales with the map;
+    /// here it does too, down to a floor that keeps it legible, and the
+    /// gaps use the same factor as the type.
+    static func labelType(scale: CGFloat) -> (labelSize: CGFloat, sublabelSize: CGFloat,
+                                              labelOffset: CGFloat, sublabelOffset: CGFloat) {
+        let unit = max(scale, labelFloor)
+        return (11 * unit, 10 * unit, 12 * unit, 26.5 * unit)
+    }
+
+    /// The smallest factor the map's labels are drawn at.
+    static let labelFloor: CGFloat = 0.85
+
+    /// #1146's credential key: an open bow on the left, a level shaft and
+    /// two bits, in the map's units around the node's centre.
+    static func keyGlyph(centre: CGPoint, scale: CGFloat) -> Path {
+        var path = Path()
+        let bow = CGPoint(x: centre.x - 9 * scale, y: centre.y)
+        path.addEllipse(in: CGRect(x: bow.x - 6 * scale, y: bow.y - 6 * scale, width: 12 * scale, height: 12 * scale))
+        path.move(to: CGPoint(x: centre.x - 3 * scale, y: centre.y))
+        path.addLine(to: CGPoint(x: centre.x + 11 * scale, y: centre.y))
+        path.move(to: CGPoint(x: centre.x + 7 * scale, y: centre.y))
+        path.addLine(to: CGPoint(x: centre.x + 7 * scale, y: centre.y + 5 * scale))
+        path.move(to: CGPoint(x: centre.x + 11 * scale, y: centre.y))
+        path.addLine(to: CGPoint(x: centre.x + 11 * scale, y: centre.y + 4 * scale))
+        return path
     }
 
     private func ring(_ disc: Path, radius: CGFloat, centre: CGPoint, in context: inout GraphicsContext, colour: Color, scale: CGFloat) {

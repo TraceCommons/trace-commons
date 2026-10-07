@@ -1,6 +1,7 @@
 #if DEBUG
 import XCTest
 import TCBridge
+import SwiftUI
 import TCDesign
 @testable import TCShellCore
 @testable import TraceCommonsApp
@@ -49,10 +50,11 @@ final class TracesInspectorHostTests: XCTestCase {
 
     /// V5 and V6 of the #1146 delta: the undos, the offers and the
     /// first-contribution note are drawn above the Traces tree, under the
-    /// health banners, and in no inspector. R-LAYOUT-1: they are the first
-    /// rows of the tree's own scroll, so however tall they are they never
-    /// push the tree, the graph footer or the panes beside it out of the
-    /// window; no branch draws them outside a ScrollView.
+    /// health banners, and in no inspector. R-LAYOUT-1: with a tree, they
+    /// sit on a shelf above it that is capped at a share of the pane and
+    /// scrolls inside itself, so however tall they are the tree keeps rows
+    /// on screen and nothing is pushed out of the window; no branch draws
+    /// them outside a scroll.
     func test_offersUndoAndHealthSitAboveTheTree() throws {
         let tree = try Self.text("Views/Monitor/TracesViews.swift")
         let treeView = try XCTUnwrap(tree.range(of: "struct TracesTreeView"))
@@ -62,12 +64,15 @@ final class TracesInspectorHostTests: XCTestCase {
         let prompts = try XCTUnwrap(body.range(of: "InspectorPrompts(store: store)"))
         XCTAssertLessThan(banners.lowerBound, prompts.lowerBound, "the banners come first")
         XCTAssertEqual(body.components(separatedBy: "InspectorPrompts(").count - 1, 1)
-        // The tree's scroll draws the prompts before its first folder.
+        // With a tree, the prompts sit on the capped shelf, before the tree.
+        let shelf = try XCTUnwrap(body.range(of: "PromptsShelf(cap: Self.promptsCap(paneHeight: pane.size.height)) {\n"))
+        let afterShelf = try XCTUnwrap(body.range(of: "prompts\n", range: shelf.upperBound..<body.endIndex))
+        let treeUse = try XCTUnwrap(body.range(of: "tree\n", range: afterShelf.upperBound..<body.endIndex))
+        XCTAssertLessThan(afterShelf.lowerBound, treeUse.lowerBound, "the prompts precede the tree")
         let scroll = try XCTUnwrap(body.range(of: "ScrollViewReader { proxy in"))
         let folders = try XCTUnwrap(body.range(of: "ForEach(store.tree.folders)", range: scroll.upperBound..<body.endIndex))
-        let inTree = try XCTUnwrap(body.range(of: "prompts\n", options: .regularExpression,
-                                              range: scroll.upperBound..<folders.lowerBound))
-        XCTAssertLessThan(inTree.lowerBound, folders.lowerBound, "the prompts precede the tree")
+        XCTAssertNil(body.range(of: "prompts\n", range: scroll.upperBound..<folders.lowerBound),
+                     "the prompts are inside the tree's scroll again, where they can fill it")
         // Every use of the prompts in the view body is inside a ScrollView.
         let viewBody = try XCTUnwrap(body.range(of: "var body: some View {"))
         let bodyEnd = try XCTUnwrap(body.range(of: "/// A mode change's confirmation"))
@@ -75,7 +80,9 @@ final class TracesInspectorHostTests: XCTestCase {
         let uses = drawn.components(separatedBy: "\n").filter { $0.trimmingCharacters(in: .whitespaces) == "prompts" }
         XCTAssertEqual(uses.count, 3, "the loading, empty and tree branches each draw the prompts")
         XCTAssertEqual(drawn.components(separatedBy: "ScrollView {").count - 1, 3,
-                       "each branch drawing the prompts scrolls them")
+                       "the loading and empty branches scroll the prompts, and the tree scrolls")
+        let shelfType = try XCTUnwrap(tree.range(of: "struct PromptsShelf"))
+        XCTAssertTrue(tree[shelfType.lowerBound...].contains("ScrollView {"), "the shelf scrolls its prompts")
         XCTAssertFalse(body.contains("            InspectorPrompts(store: store)\n            if store.phase"),
                        "the prompts are drawn above the tree's scroll again")
         XCTAssertTrue(body.contains("maxQueueEntries: model.daemonSettings?.maxQueueEntries"),
@@ -85,6 +92,23 @@ final class TracesInspectorHostTests: XCTestCase {
         XCTAssertFalse(pane.contains("TracesHealth.banners("), "an inspector arm still draws the banners")
         let window = try Self.text("Views/MonitorWindowView.swift")
         XCTAssertEqual(window.components(separatedBy: "InspectorPrompts(").count - 1, 0)
+    }
+
+    /// R-LAYOUT-1, round 2: the prompts shelf never takes more than its
+    /// share of the pane, so the tree always keeps rows on screen, and an
+    /// empty shelf takes no room.
+    func test_promptsShelfLeavesTheTreeRows() {
+        let pane: CGFloat = 600
+        let cap = TracesTreeView.promptsCap(paneHeight: pane)
+        XCTAssertEqual(cap, pane * TracesTreeView.promptsShare, accuracy: 0.001)
+        XCTAssertLessThanOrEqual(TracesTreeView.promptsShare, 0.5, "the tree keeps at least half the pane")
+        // A tall offer plus the first-contribution note is clamped to the cap.
+        XCTAssertEqual(PromptsShelf<EmptyView>.shelfHeight(content: 900, cap: cap), cap)
+        XCTAssertGreaterThanOrEqual(pane - PromptsShelf<EmptyView>.shelfHeight(content: 900, cap: cap), 300)
+        // A short notice is drawn at its own height, and nothing takes none.
+        XCTAssertEqual(PromptsShelf<EmptyView>.shelfHeight(content: 40, cap: cap), 40)
+        XCTAssertEqual(PromptsShelf<EmptyView>.shelfHeight(content: 0, cap: cap), 0)
+        XCTAssertEqual(TracesTreeView.promptsCap(paneHeight: -10), 0)
     }
 
     /// An undo appearing is a new demand, and a new demand opens the
@@ -209,9 +233,10 @@ final class TracesInspectorHostTests: XCTestCase {
             "showsInspector = seed.showsInspector || InspectorDemand.opensOnAppear(keys: demandKeys)"))
     }
 
-    /// Every one of Ron's demand keys is a demand: a selected session, a
-    /// folder's Submit all in flight, the arming offer and the Private AI
-    /// offer each open the inspector when they appear.
+    /// A selected session and a folder's Submit all in flight each open the
+    /// inspector when they appear. The arming and Private AI offers do not:
+    /// they are drawn above the Traces tree and in no inspector, so on Home,
+    /// History or Inference opening it would only grow the window.
     func test_everyDemandKeyOpensTheInspector() async throws {
         let model = AppModel()
         // A resolved session selection.
@@ -229,8 +254,8 @@ final class TracesInspectorHostTests: XCTestCase {
         // The arming offer.
         model.setArmingOfferForTesting(ArmingOffer(projectId: "p1", projectLabel: "api", contributedCount: 3))
         let arming = InspectorDemand.keys(model: model, traces: traces, selection: nil)
-        XCTAssertTrue(arming.contains("offer:arming:p1"))
-        XCTAssertTrue(InspectorDemand.opens(previous: none, current: arming))
+        XCTAssertFalse(arming.contains { $0.hasPrefix("offer:") })
+        XCTAssertFalse(InspectorDemand.opens(previous: none, current: arming))
 
         // The Private AI offer, while it is unanswered and off.
         let offerModel = AppModel()
@@ -242,8 +267,8 @@ final class TracesInspectorHostTests: XCTestCase {
         offerModel.setDaemonSettingsForTesting(try DaemonClient(daemon: FrameDaemon(frame)).settings())
         XCTAssertTrue(offerModel.showsPrivateInferenceOffer)
         let offered = InspectorDemand.keys(model: offerModel, traces: traces, selection: nil)
-        XCTAssertTrue(offered.contains("offer:private-ai"))
-        XCTAssertTrue(InspectorDemand.opens(previous: before, current: offered))
+        XCTAssertFalse(offered.contains { $0.hasPrefix("offer:") })
+        XCTAssertFalse(InspectorDemand.opens(previous: before, current: offered))
     }
 
     /// A folder's Submit all is a demand while it is in flight, and not

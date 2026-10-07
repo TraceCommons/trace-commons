@@ -507,6 +507,45 @@ final class TracesRowWordsTests: XCTestCase {
         XCTAssertFalse(sub.contains(words.held))
     }
 
+    /// #1146 `SessionRow`: the sub-line carries the core's attestation
+    /// sentence after trimmed to fit and before waiting, and the flag is
+    /// amber for an attestation asking attention or refused and green for a
+    /// clear one. Held and ineligible still come first.
+    func test_aSessionRowSaysItsAttestation() throws {
+        let words = try XCTUnwrap(MonitorTracesCopy.decode(fromJSON: TCCoreCopy.monitorTracesCopyJSON()))
+        let store = TracesStore(client: SampleDaemonClient(.empty))
+        let plain = try entry()
+        let line = try XCTUnwrap(store.attestationLine(plain))
+        XCTAssertFalse(line.isEmpty)
+        let sub = try XCTUnwrap(TracesTreeView.sub(plain, held: words.held, ineligible: nil, attestation: line, words: words))
+        XCTAssertEqual(sub, [TracesTreeView.size(plain), line].compactMap { $0 }.joined(separator: " · "))
+        // Without the sentence, waiting.
+        XCTAssertEqual(TracesTreeView.sub(plain, held: words.held, ineligible: nil, attestation: nil, words: words)?
+            .hasSuffix(words.tree.sessionWaiting), true)
+        // Trimmed to fit wins over the attestation, as in #1146.
+        let trimmed = try recordedEntry(["source": "codex", "subagents_dropped": 1])
+        XCTAssertEqual(TracesTreeView.sub(trimmed, held: nil, ineligible: nil, attestation: line, words: words)?
+            .hasSuffix(words.tree.sessionTrimmed), true)
+        // Held still says its word first.
+        let held = try entry(held: true)
+        XCTAssertEqual(TracesTreeView.sub(held, held: words.held, ineligible: nil, attestation: line, words: words)?
+            .hasSuffix(words.held), true)
+
+        XCTAssertEqual(TracesTreeView.flag(plain, attestation: .clear), .on)
+        XCTAssertEqual(TracesTreeView.flag(plain, attestation: .attention), .ask)
+        XCTAssertEqual(TracesTreeView.flag(plain, attestation: .refused), .ask)
+        XCTAssertNil(TracesTreeView.flag(plain, attestation: .neutral), "an unread mark is never green")
+        XCTAssertNil(TracesTreeView.flag(plain, attestation: .held))
+        XCTAssertEqual(TracesTreeView.flag(held, attestation: .clear), .ask, "held outranks a clear mark")
+        XCTAssertEqual(TracesTreeView.flag(plain, ineligible: true, attestation: .clear), .ask)
+        // The row is wired to the store's sentence and tone, and a session
+        // under an ignored folder is drawn off.
+        let source = try TracesParityTests.text("Views/Monitor/TracesViews.swift")
+        XCTAssertTrue(source.contains("attestation: store.attestationLine(entry), words: words)"))
+        XCTAssertTrue(source.contains("attestation: TracesStore.attestationTone(entry))"))
+        XCTAssertTrue(source.contains("ForEach(folder.sessions) { sessionRow($0, off: ignored) }"))
+    }
+
     /// A session that cannot be contributed as it stands says the core's
     /// sentence on its row and is flagged; an eligible one, or one with no
     /// eligibility question, says nothing extra.

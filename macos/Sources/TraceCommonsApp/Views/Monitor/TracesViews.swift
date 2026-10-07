@@ -108,46 +108,19 @@ struct TracesTreeView: View {
                 }
                 .scrollIndicators(.never)
             } else {
-                ScrollViewReader { proxy in
-                    ScrollView {
-                        VStack(spacing: 2) {
-                            // The prompts scroll with the tree, so however
-                            // many show they never push the tree, the graph
-                            // footer or the other panes out of the window.
+                // The prompts sit above the tree on a shelf of their own,
+                // never taller than `promptsShare` of the pane and scrolling
+                // inside it past that: however many show, they never push
+                // the graph footer or the panes beside it out of the window,
+                // and the tree below them always keeps rows on screen
+                // (R-LAYOUT-1, round 2).
+                GeometryReader { pane in
+                    VStack(spacing: 0) {
+                        PromptsShelf(cap: Self.promptsCap(paneHeight: pane.size.height)) {
                             prompts
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .padding(.bottom, GlassTokens.Space.cardGap - 2)
-                                .id(Self.promptsID)
-                            ForEach(store.tree.folders) { folderRows($0) }
                         }
+                        tree
                     }
-                    // The keyboard moves the selection; keep it on screen,
-                    // opening a session's folder if it was closed.
-                    .onChange(of: selection, initial: true) { _, selected in
-                        reveal(selected)
-                        guard let id = selected.map(Self.rowID) else { return }
-                        withAnimation(GlassMotion.fast(GlassMotion.systemReducesMotion)) {
-                            proxy.scrollTo(id)
-                        }
-                        spoken = id
-                    }
-                }
-                .scrollIndicators(.never)
-                // A restored selection whose session arrives with a later
-                // read is revealed then.
-                .onChange(of: store.tree) { _, _ in reveal(selection) }
-                // #1146's tree name.
-                .accessibilityLabel(store.words?.tree.treeLabel ?? "")
-                // Full Keyboard Access: focus the tree, then the arrow keys
-                // move the selection through the folders and sessions as drawn.
-                .focusable()
-                .onMoveCommand(perform: move)
-                // Return opens the selected session's review, so the pill
-                // need not be its own tab stop on every row.
-                .onKeyPress(.return) {
-                    guard case .session(let entryID) = selection else { return .ignored }
-                    onReview(entryID)
-                    return .handled
                 }
             }
         }
@@ -157,6 +130,53 @@ struct TracesTreeView: View {
             if let pending = confirming { confirmation(pending) }
         }
         .glassModal(item: $dismissing) { dismissModal($0) }
+    }
+
+    /// The most of the Traces pane the prompts shelf may take; the rest is
+    /// always the tree.
+    static let promptsShare: CGFloat = 0.45
+
+    /// The shelf's ceiling for a pane of this height.
+    static func promptsCap(paneHeight: CGFloat) -> CGFloat {
+        max(0, paneHeight * promptsShare)
+    }
+
+    /// The folders and sessions, in their own scroll.
+    private var tree: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                VStack(spacing: 2) {
+                    ForEach(store.tree.folders) { folderRows($0) }
+                }
+            }
+            // The keyboard moves the selection; keep it on screen,
+            // opening a session's folder if it was closed.
+            .onChange(of: selection, initial: true) { _, selected in
+                reveal(selected)
+                guard let id = selected.map(Self.rowID) else { return }
+                withAnimation(GlassMotion.fast(GlassMotion.systemReducesMotion)) {
+                    proxy.scrollTo(id)
+                }
+                spoken = id
+            }
+        }
+        .scrollIndicators(.never)
+        // A restored selection whose session arrives with a later
+        // read is revealed then.
+        .onChange(of: store.tree) { _, _ in reveal(selection) }
+        // #1146's tree name.
+        .accessibilityLabel(store.words?.tree.treeLabel ?? "")
+        // Full Keyboard Access: focus the tree, then the arrow keys
+        // move the selection through the folders and sessions as drawn.
+        .focusable()
+        .onMoveCommand(perform: move)
+        // Return opens the selected session's review, so the pill
+        // need not be its own tab stop on every row.
+        .onKeyPress(.return) {
+            guard case .session(let entryID) = selection else { return .ignored }
+            onReview(entryID)
+            return .handled
+        }
     }
 
     /// A mode change's confirmation, in the core's words for that folder.
@@ -324,9 +344,6 @@ struct TracesTreeView: View {
         tree.folders.first { $0.sessions.contains { $0.entryId == entryId } }?.id
     }
 
-    /// The scroll anchor of the prompts above the first folder.
-    static let promptsID = "traces.prompts"
-
     /// The folder notice, health banners and `InspectorPrompts`, drawn as
     /// the first rows of the tree's scroll, never above it: a tall offer or
     /// the first-contribution note scrolls away with the tree instead of
@@ -483,21 +500,25 @@ struct TracesTreeView: View {
             } ?? []
         notes(folderNotes(folder) + withheld, depth: .folder)
         if isOpen(folder.id) {
-            ForEach(folder.sessions) { sessionRow($0) }
+            // #1146: a session under an ignored folder is drawn off too.
+            ForEach(folder.sessions) { sessionRow($0, off: ignored) }
         }
     }
 
     @ViewBuilder
-    private func sessionRow(_ entry: DaemonData.QueueEntry) -> some View {
+    private func sessionRow(_ entry: DaemonData.QueueEntry, off: Bool) -> some View {
         let words = store.words
         let selected = selection == .session(entryID: entry.entryId)
         GlassListRow(
             depth: .session,
             tile: Self.sessionTile(entry),
             title: Self.when(entry),
-            sub: Self.sub(entry, held: words?.held, ineligible: store.ineligibleLine(entry), words: words),
-            flag: Self.flag(entry, ineligible: store.ineligibleLine(entry) != nil),
+            sub: Self.sub(entry, held: words?.held, ineligible: store.ineligibleLine(entry),
+                          attestation: store.attestationLine(entry), words: words),
+            flag: Self.flag(entry, ineligible: store.ineligibleLine(entry) != nil,
+                            attestation: TracesStore.attestationTone(entry)),
             selected: selected,
+            off: off,
             // D10 default: a session's pill opens its review. Focus roves:
             // only the selected row's pill is a tab stop; Return opens it.
             submitTitle: selected ? words?.tree.reviewing : words?.review,
@@ -652,20 +673,31 @@ struct TracesTreeView: View {
         entry.heldForSecondLook || entry.heldByManualScrubCheck || entry.returnedFromKeep
     }
 
-    /// Amber when held, or when the core says the session cannot go as it
-    /// stands.
-    static func flag(_ entry: DaemonData.QueueEntry, ineligible: Bool = false) -> GlassListRow.Flag? {
-        isHeld(entry) || ineligible ? .ask : nil
+    /// Amber when held, when the core says the session cannot go as it
+    /// stands, or when its attestation asks for attention or was refused;
+    /// green for a clear attestation (#1146 `SessionRow`), and nothing for
+    /// any other tone, so a mark this build cannot read is never green.
+    static func flag(
+        _ entry: DaemonData.QueueEntry, ineligible: Bool = false, attestation: PrivateInferenceTone? = nil
+    ) -> GlassListRow.Flag? {
+        if isHeld(entry) || ineligible { return .ask }
+        switch attestation {
+        case .attention, .refused: return .ask
+        case .clear: return .on
+        default: return nil
+        }
     }
 
-    /// A session's sub-line, as #1146's `SessionRow`: its size, then one
-    /// word on its state. The amber is never the only signal: a held
-    /// session says the core's word for it, and one that cannot be
-    /// contributed says the core's sentence; otherwise trimmed to fit when
-    /// subagent transcripts were dropped, or waiting. The tool is the
-    /// row's tile (and its accessibility hint).
+    /// A session's sub-line, as #1146's `SessionRow`: its size, then its
+    /// state. The amber is never the only signal: a held session says the
+    /// core's word for it, and one that cannot be contributed says the
+    /// core's sentence. Otherwise #1146's order: trimmed to fit when
+    /// subagent transcripts were dropped, then the core's attestation
+    /// sentence, then waiting when that sentence is unavailable. The tool
+    /// is the row's tile (and its accessibility hint).
     static func sub(
-        _ entry: DaemonData.QueueEntry, held: String?, ineligible: String?, words: MonitorTracesCopy?
+        _ entry: DaemonData.QueueEntry, held: String?, ineligible: String?, attestation: String? = nil,
+        words: MonitorTracesCopy?
     ) -> String? {
         let state: String?
         if isHeld(entry), let held {
@@ -674,6 +706,8 @@ struct TracesTreeView: View {
             state = ineligible
         } else if (entry.subagentsDropped ?? 0) > 0 {
             state = words?.tree.sessionTrimmed
+        } else if let attestation, !attestation.isEmpty {
+            state = attestation
         } else {
             state = words?.tree.sessionWaiting
         }
@@ -684,6 +718,32 @@ struct TracesTreeView: View {
     /// The session's size, when the daemon reported it.
     static func size(_ entry: DaemonData.QueueEntry) -> String? {
         entry.sizeBytes.map { ByteCountFormatter.string(fromByteCount: Int64($0), countStyle: .memory) }
+    }
+}
+
+/// A content-sized shelf over the Traces tree: as tall as what it holds up
+/// to `cap`, then scrolling inside itself. With nothing in it, it takes no
+/// room and adds no gap.
+struct PromptsShelf<Content: View>: View {
+    let cap: CGFloat
+    @ViewBuilder let content: () -> Content
+    @State private var height: CGFloat = 0
+
+    var body: some View {
+        ScrollView {
+            content()
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .onGeometryChange(for: CGFloat.self, of: \.size.height) { height = $0 }
+        }
+        .scrollIndicators(.automatic)
+        .scrollBounceBehavior(.basedOnSize)
+        .frame(height: Self.shelfHeight(content: height, cap: cap))
+        .padding(.bottom, height > 0.5 ? GlassTokens.Space.cardGap : 0)
+    }
+
+    /// The shelf's height for content this tall under this ceiling.
+    static func shelfHeight(content: CGFloat, cap: CGFloat) -> CGFloat {
+        min(max(0, content), max(0, cap))
     }
 }
 

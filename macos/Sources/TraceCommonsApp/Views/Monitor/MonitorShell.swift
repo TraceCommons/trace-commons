@@ -38,14 +38,15 @@ enum MonitorShellWords {
 
 /// The inspector starts closed in a narrow window, but the things a person
 /// must not miss open it when they appear (#1146 `useInspectorDemand`): an
-/// undo window, a folder's Submit all, a review just opened, and the core's
-/// offers. Offers and undo still render above the tree (#1152); the
-/// inspector opening beside them is in addition, never instead.
+/// undo window, a folder's Submit all and a review just opened. The core's
+/// offers are not demands here: they are drawn above the Traces tree and in
+/// no inspector (owner, 2026-10-07), so opening the inspector for one would
+/// only grow the window beside a pane that does not show it.
 enum InspectorDemand {
     /// One key per thing asking for the inspector right now.
     static func keys(
         approvalUndo: [String]?, contributed: String?, kept: String?, contributedFolder: String?,
-        submittingFolder: String?, privateAIOffer: Bool, armingOffer: String?
+        submittingFolder: String?
     ) -> Set<String> {
         var keys: Set<String> = []
         if let approvalUndo { keys.insert("undo:" + approvalUndo.joined(separator: ",")) }
@@ -53,8 +54,6 @@ enum InspectorDemand {
         if let kept { keys.insert("kept:" + kept) }
         if let contributedFolder { keys.insert("folder-undo:" + contributedFolder) }
         if let submittingFolder { keys.insert("folder-submit:" + submittingFolder) }
-        if privateAIOffer { keys.insert("offer:private-ai") }
-        if let armingOffer { keys.insert("offer:arming:" + armingOffer) }
         return keys
     }
 

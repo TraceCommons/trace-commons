@@ -134,18 +134,17 @@ struct InspectorSection<Content: View>: View {
 /// What the inspector must show has appeared (Ron's `useInspectorDemand`,
 /// `monitor-shell.tsx:98-107`), read from the app and the Traces store:
 /// the shell's keys (`InspectorDemand.keys(approvalUndo:...)`: an undo, a
-/// folder's Submit all in flight, the arming offer, the Private AI offer)
-/// and two of the port's. A key that was not there before opens the
-/// inspector, and a key going away closes nothing. The undos and offers
-/// themselves are drawn above the tree; the inspector opening beside them
-/// is in addition, never instead.
+/// folder's Submit all in flight) and two of the port's. A key that was not
+/// there before opens the inspector, and a key going away closes nothing.
+/// The offers are no demand: they are drawn above the tree and in no
+/// inspector, so on Home, History or Inference opening it for one would
+/// only grow the window.
 extension InspectorDemand {
     @MainActor
     static func keys(model: AppModel, traces: TracesStore, selection: MonitorSelection?) -> Set<String> {
         var keys = keys(
             approvalUndo: model.undo?.entryIDs, contributed: traces.lastContributed?.entryId, kept: traces.lastKept,
-            contributedFolder: traces.lastContributedFolder?.projectId, submittingFolder: traces.submittingFolder,
-            privateAIOffer: model.showsPrivateInferenceOffer, armingOffer: model.armingOffer?.projectId)
+            contributedFolder: traces.lastContributedFolder?.projectId, submittingFolder: traces.submittingFolder)
         if let undo = model.undo {
             // The approval's time, not its ticking count: a second approval
             // of the same session is a new undo, a tick is not.
