@@ -32,13 +32,13 @@ use crate::witness::status::{InferenceReceiptCount, WitnessLastResult, WitnessTr
 pub const WITNESS_HEADING: &str = "Redaction witness";
 
 /// What the card is for, in Ron's #1146 words (`witness-panel.tsx`).
-/// DRAFT, NEEDS APPROVAL (#1146 parity, 2026-10-07): it was "A witness is a
+/// Rewritten plainly at the owner's request. DRAFT, NEEDS APPROVAL (owner rewrite request, 2026-10-07): it was "A witness is a
 /// sealed machine that removes private material from a session for you,
 /// instead of this app doing it here. ..."
 pub const WITNESS_INTRO: &str = concat!(
-    "A witness receives raw sessions only after local consent and measurement ",
-    "verification. A configured witness without a valid pin refuses submissions; no ",
-    "witness keeps local redaction."
+    "A witness gets your raw sessions only after you agree and its measurement ",
+    "checks out. If its pin isn't valid, nothing is sent. With no witness, redaction ",
+    "happens on this computer."
 );
 
 /// What the certificate proves, stated where a contributor reads it, so no
@@ -95,7 +95,7 @@ pub fn token_review_summary(
     )
 }
 
-/// DRAFT, NEEDS APPROVAL (#1146 parity, 2026-10-07): it was "Token
+/// Approved 2026-10-07: it was "Token
 /// probabilities".
 pub const WITNESS_TOKEN_HEADING: &str = "Token distribution contribution";
 pub const WITNESS_TOKEN_DISCLOSURE: &str = "Include token probabilities and alternative tokens in sessions you review with your witness. Alternatives can contain personal information even when the chosen text does not. The witness filters them before contribution; they remain restricted research data.";
@@ -103,16 +103,15 @@ pub const WITNESS_TOKEN_CAPTURE_NOTE: &str = "Capture is configured separately i
 pub const WITNESS_TOKEN_SCOPE_NOTE: &str = "After the server confirms durable storage, this app removes its local bundle and releases its capture lease. Your agent session files stay on this device. Withdrawing a contribution is a separate action.";
 pub const WITNESS_TOKEN_ENABLE: &str = "Enable";
 pub const WITNESS_TOKEN_DISABLE: &str = "Disable";
-/// DRAFT, NEEDS APPROVAL (#1146 parity, 2026-10-07): it was "Allow token
-/// review".
-pub const WITNESS_TOKEN_CONFIRM: &str = "I understand \u{2014} enable";
+/// "Enable" (owner ruling, 2026-10-07): it was "Allow token review".
+pub const WITNESS_TOKEN_CONFIRM: &str = "Enable";
 pub const WITNESS_TOKEN_CANCEL: &str = "Cancel";
 pub const WITNESS_TOKEN_ENABLED: &str = "Token probabilities will be included in explicit witness reviews when a matching capture is available.";
 pub const WITNESS_TOKEN_DISABLED: &str = "Token probabilities are not included.";
 pub const WITNESS_TOKEN_SAVE_FAILED: &str =
     "The change could not be confirmed. Check the saved setting before trying again.";
 
-/// DRAFT, NEEDS APPROVAL (#1146 parity, 2026-10-07): it was "Include
+/// Approved 2026-10-07: it was "Include
 /// captured inference evidence".
 pub const WITNESS_INFERENCE_HEADING: &str = "Model-call evidence";
 pub const WITNESS_INFERENCE_DISCLOSURE: &str = concat!(
@@ -135,16 +134,16 @@ pub const WITNESS_INFERENCE_SCOPE_NOTE: &str = concat!(
 );
 pub const WITNESS_INFERENCE_ENABLE: &str = "Enable";
 pub const WITNESS_INFERENCE_DISABLE: &str = "Disable";
-/// DRAFT, NEEDS APPROVAL (#1146 parity, 2026-10-07): it was "Allow sending
-/// captured bodies".
-pub const WITNESS_INFERENCE_CONFIRM: &str = "I understand \u{2014} enable";
+/// "Enable" (owner ruling, 2026-10-07): it was "Allow sending captured
+/// bodies".
+pub const WITNESS_INFERENCE_CONFIRM: &str = "Enable";
 pub const WITNESS_INFERENCE_CANCEL: &str = "Cancel";
 
 /// The confirmation over either privacy option's disclosure (#1146
 /// `privacy-controls-panel.tsx`); the disclosure itself is unchanged.
-/// DRAFT, NEEDS APPROVAL (#1146 parity, 2026-10-07).
+/// Approved 2026-10-07.
 pub const WITNESS_PRIVACY_CONFIRM_TITLE: &str = "Review privacy change";
-/// DRAFT, NEEDS APPROVAL (#1146 parity, 2026-10-07).
+/// Approved 2026-10-07.
 pub const WITNESS_PRIVACY_CONFIRM_DESCRIPTION: &str =
     "Changing local privacy behavior requires explicit confirmation.";
 /// The local capture row's and the token-review storage block's names

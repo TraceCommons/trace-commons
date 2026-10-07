@@ -576,7 +576,7 @@ public struct MonitorShellCopy: MonitorWordTable {
     public let watcherTitle: String
     public let watcherWatching: String
     public let watcherPaused: String
-    /// DRAFT, NEEDS APPROVAL (#1146 parity, 2026-10-07).
+    /// Approved 2026-10-07.
     public let watcherCaption: String
     public let connectionReady: String
     public let connectionLocalOnly: String

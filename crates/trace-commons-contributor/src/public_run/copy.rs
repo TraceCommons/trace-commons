@@ -175,7 +175,7 @@ pub fn public_run_copy() -> PublicRunCopy {
         edit_page: "Edit page",
         unpublishing: "Unpublishing…",
         unpublish: "Unpublish",
-        // DRAFT, NEEDS APPROVAL (#1146 parity, 2026-10-07): it was "Choose
+        // Approved 2026-10-07: it was "Choose
         // the exact fields that will be public. Session publication is
         // separate from Commons contribution and profile attribution."
         publication_disclosure: "Choose exact fields that become public. Publication is separate from Commons contribution and profile attribution.",

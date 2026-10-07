@@ -78,8 +78,8 @@ pub struct WithdrawalWords {
     pub confirm_description: &'static str,
     /// The confirmation's way back.
     pub keep: &'static str,
-    /// The confirmation's action, for every tier. DRAFT, NEEDS APPROVAL
-    /// (#1146 parity, 2026-10-07): it was "Withdraw" / "Withdraw anyway".
+    /// The confirmation's action, for every tier: "Withdraw" (owner ruling,
+    /// 2026-10-07; #1146 said "Confirm withdrawal").
     pub confirm: &'static str,
     pub withdrawing: &'static str,
     /// No confirmation could be worded, so withdrawal is not offered.
@@ -93,23 +93,22 @@ pub struct WithdrawalWords {
     pub credit_note: &'static str,
     /// Over a completed withdrawal's result.
     pub result_heading: &'static str,
-    /// What the tier the server applied did. DRAFT, NEEDS APPROVAL (#1146
-    /// parity, 2026-10-07): they were "Withdrawn. " + the canonical body.
+    /// What the tier the server applied did. Approved 2026-10-07: they
+    /// were "Withdrawn. " + the canonical body.
     pub result_not_distributed: &'static str,
     pub result_commons_not_distributed: &'static str,
     pub result_commons_distributed: &'static str,
     /// The server did not say which tier applied, so the furthest is not
-    /// ruled out. DRAFT, NEEDS APPROVAL (#1146 parity, 2026-10-07).
+    /// ruled out. Approved 2026-10-07.
     pub result_unknown: &'static str,
-    /// The account session was refused. DRAFT, NEEDS APPROVAL (#1146
-    /// parity, 2026-10-07).
+    /// The account session was refused, in the owner's words (2026-10-07).
     pub account_session_required: &'static str,
     /// No such submission under this account; never says which of "not
     /// yours" and "does not exist".
     pub not_found: &'static str,
     /// The daemon's labels for [`Self::not_found`].
     pub not_found_labels: &'static [&'static str],
-    /// Any other failure. DRAFT, NEEDS APPROVAL (#1146 parity, 2026-10-07).
+    /// Any other failure. Approved 2026-10-07.
     pub failed: &'static str,
     pub try_again: &'static str,
     /// Why there is no bulk withdrawal.
@@ -125,7 +124,7 @@ pub fn withdrawal_words() -> WithdrawalWords {
         confirm_title: "Confirm withdrawal",
         confirm_description: "Review what withdrawal changes before continuing.",
         keep: "Keep it",
-        confirm: "Confirm withdrawal",
+        confirm: "Withdraw",
         withdrawing: "Withdrawing\u{2026}",
         disclosure_unavailable: "Withdrawal disclosure unavailable. Withdrawal is disabled.",
         ambiguity: concat!(
@@ -149,7 +148,7 @@ pub fn withdrawal_words() -> WithdrawalWords {
             "distributed, they cannot be recalled."
         ),
         account_session_required: concat!(
-            "Commons rejected the stored account session. Nothing was withdrawn. Sign in ",
+            "The stored account session was rejected. Nothing was withdrawn. Sign in ",
             "again to retry."
         ),
         not_found: concat!(
@@ -183,28 +182,26 @@ pub struct PublicProfileWords {
     /// `{date}`: when the handle went public.
     pub on_roster_since: &'static str,
     pub go_public_headline: &'static str,
-    /// DRAFT, NEEDS APPROVAL (#1146 parity, 2026-10-07).
+    /// Approved 2026-10-07.
     pub go_public_description: &'static str,
     pub go_public: &'static str,
     pub going_public: &'static str,
     pub not_now: &'static str,
     pub published_heading: &'static str,
-    /// DRAFT, NEEDS APPROVAL (#1146 parity, 2026-10-07): one sentence
-    /// where there were four lines.
+    /// Approved 2026-10-07: one sentence where there were four lines.
     pub published_lines: &'static [&'static str],
     pub never_heading: &'static str,
-    /// DRAFT, NEEDS APPROVAL (#1146 parity, 2026-10-07): one sentence
-    /// where there were three lines.
+    /// Approved 2026-10-07: one sentence where there were three lines.
     pub never_lines: &'static [&'static str],
     pub acknowledgement: &'static str,
-    /// DRAFT, NEEDS APPROVAL (#1146 parity, 2026-10-07).
+    /// Approved 2026-10-07.
     pub go_public_footnote: &'static str,
     pub go_public_handle: &'static str,
     pub go_public_bio: &'static str,
     /// A claim the server accepted.
     pub published: &'static str,
     /// A claim the server accepted that this device could not write down:
-    /// public all the same. DRAFT, NEEDS APPROVAL (#1146 parity, 2026-10-07).
+    /// public all the same. Approved 2026-10-07.
     pub published_not_cached: &'static str,
     pub left_roster: &'static str,
     pub left_roster_not_cached: &'static str,
@@ -436,7 +433,7 @@ pub struct SettingsWords {
     pub updates_off: &'static str,
     pub notifications_rendered_here: &'static str,
     pub paused_nothing_sent: &'static str,
-    /// DRAFT, NEEDS APPROVAL (#1146 parity, 2026-10-07).
+    /// Rewritten plainly at the owner's request. DRAFT, NEEDS APPROVAL (owner rewrite request, 2026-10-07).
     pub applies_from_now: &'static str,
     pub always_included: &'static str,
     pub optional_data_use: &'static str,
@@ -497,8 +494,8 @@ pub fn settings_words() -> SettingsWords {
         notifications_rendered_here: "Notifications rendered by this app",
         paused_nothing_sent: "Paused. Nothing is being queued or sent.",
         applies_from_now: concat!(
-            "Applies to traces sent from now on. Always-included scope cannot be removed; ",
-            "every optional scope is changed from its current answer."
+            "Applies to traces sent from now on. The always-included use stays on; ",
+            "optional uses change only when you change them."
         ),
         always_included: "Always included",
         optional_data_use: "Optional data use",

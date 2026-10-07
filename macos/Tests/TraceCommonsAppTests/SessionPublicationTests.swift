@@ -264,7 +264,7 @@ final class SessionPublicationTests: XCTestCase {
             let confirmation = try XCTUnwrap(WithdrawalCopy.confirmation(for: stage))
             XCTAssertEqual(confirmation.question, "Confirm withdrawal")
             XCTAssertEqual(confirmation.description, "Review what withdrawal changes before continuing.")
-            XCTAssertEqual(confirmation.confirmLabel, "Confirm withdrawal")
+            XCTAssertEqual(confirmation.confirmLabel, "Withdraw")
             XCTAssertEqual(confirmation.busyLabel, "Withdrawing\u{2026}")
         }
         XCTAssertEqual(WithdrawalCopy.resultHeading, "Withdrawn by you")

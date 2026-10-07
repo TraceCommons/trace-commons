@@ -907,20 +907,19 @@ pub struct MonitorFlowMapCopy {
     pub tools_one: &'static str,
     pub tools: &'static str,
     /// This computer's card: `{label}` is the sessions waiting, `{count}`
-    /// those contributed. DRAFT, NEEDS APPROVAL (#1146 parity, 2026-10-07).
+    /// those contributed. Approved 2026-10-07.
     pub hub: &'static str,
-    /// The library's card: `{label}` is the traces contributed. DRAFT,
-    /// NEEDS APPROVAL (#1146 parity, 2026-10-07).
+    /// The library's card: `{label}` is the traces contributed. Approved
+    /// 2026-10-07.
     pub library: &'static str,
     /// A tool's card title: `{label}` is its folders.
     pub tool_title: &'static str,
-    /// A watched tool, then what waits for it. DRAFT, NEEDS APPROVAL
-    /// (#1146 parity, 2026-10-07).
+    /// A watched tool, then what waits for it. Approved 2026-10-07.
     pub tool_watched: &'static str,
     pub tool_waiting: &'static str,
     pub tool_nothing_waiting: &'static str,
-    /// A tool that is off, and one the core has no declaration for. DRAFT,
-    /// NEEDS APPROVAL (#1146 parity, 2026-10-07).
+    /// A tool that is off, and one the core has no declaration for. Approved
+    /// 2026-10-07.
     pub tool_off: &'static str,
     pub tool_unset: &'static str,
     /// A folder's card: its rule, `{label}` the rule's name, and its
@@ -1049,7 +1048,7 @@ pub struct MonitorShellCopy {
     pub watcher_title: &'static str,
     pub watcher_watching: &'static str,
     pub watcher_paused: &'static str,
-    /// DRAFT, NEEDS APPROVAL (#1146 parity, 2026-10-07): says what a pause
+    /// Approved 2026-10-07: says what a pause
     /// does and does not do to queued sessions and consent.
     pub watcher_caption: &'static str,
     /// The Connection card's chip (#1146 `connection-panel.tsx`): enrolled,
@@ -1106,8 +1105,8 @@ pub struct MonitorHomeHistoryCopy {
     /// label, and the chip before the first sync.
     pub credit_record: &'static str,
     pub about_credit: &'static str,
-    /// DRAFT, NEEDS APPROVAL (#1146 parity, 2026-10-07). What credit is,
-    /// as #1146's credit record says it.
+    /// Approved 2026-10-07, without #1146's "Today credit is a record"
+    /// sentence (owner ruling). What credit is.
     pub about_credit_body: &'static str,
     pub still_being_scored: &'static str,
     pub not_synced: &'static str,
@@ -1355,8 +1354,7 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             credit_record: "Credit record",
             about_credit: "About credit.",
             about_credit_body: "Contributions earn credit points, scored on novelty and information \
-                richness. Today credit is a record, not currency: no payout, token, exchange rate, \
-                or date.",
+                richness.",
             still_being_scored: "Still being scored",
             not_synced: "Not synced yet",
         },
@@ -1638,7 +1636,11 @@ mod tests {
         assert!(copy.records.contains("{count}") && !copy.records_one.contains('{'));
         assert!(copy.held_count.contains("{count}") && !copy.held_count_one.contains('{'));
         assert!(copy.accepted_in_window.contains("{label}"));
-        assert!(copy.about_credit_body.contains("not currency"));
+        // The card dropped #1146's "Today credit is a record" sentence (owner
+        // ruling, 2026-10-07); `credit_not_currency` still sits beside every
+        // credit figure.
+        assert!(!copy.about_credit_body.contains("currency"));
+        assert!(copy.about_credit_body.contains("credit points"));
     }
 
     /// The Settings modal's section names are #1146's twelve, verbatim and

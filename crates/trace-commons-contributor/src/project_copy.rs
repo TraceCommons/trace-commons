@@ -47,24 +47,25 @@ pub fn arming_offer_question(project_label: &str) -> String {
     format!("Contribute from {project_label} automatically?")
 }
 
-pub const ARMING_OFFER_CONFIRM: &str = "Turn on automatic contributing";
+/// "Enable" (owner ruling, 2026-10-07; was "Turn on automatic contributing").
+pub const ARMING_OFFER_CONFIRM: &str = "Enable";
 pub const ARMING_OFFER_DECLINE: &str = "Not now";
 
 /// Settings' confirmation before a project's mode is set to Automatic, in
 /// Ron's #1146 words (`project-mode-field.tsx`); its body is
 /// [`ARMING_BODY`], and the mode names stay [`FOLDER_MODE_LABELS`]'.
-/// DRAFT, NEEDS APPROVAL (#1146 parity, 2026-10-07): the heading and both
-/// buttons were the offer's ("Contribute from {project} automatically?",
+/// Approved 2026-10-07, with the buttons "Ask" / "Enable" (owner ruling).
+/// The heading and both buttons were the offer's ("Contribute from {project} automatically?",
 /// "Not now", "Turn on automatic contributing").
 pub fn settings_arming_question(project_label: &str) -> String {
     format!("Enable automatic contribution for {project_label}?")
 }
-/// DRAFT, NEEDS APPROVAL (#1146 parity, 2026-10-07).
+/// Approved 2026-10-07.
 pub const SETTINGS_ARMING_DESCRIPTION: &str = "Confirm project-wide automatic contribution.";
-/// DRAFT, NEEDS APPROVAL (#1146 parity, 2026-10-07).
-pub const SETTINGS_ARMING_DECLINE: &str = "Keep asking first";
-/// DRAFT, NEEDS APPROVAL (#1146 parity, 2026-10-07).
-pub const SETTINGS_ARMING_CONFIRM: &str = "Enable for this project";
+/// Approved 2026-10-07.
+pub const SETTINGS_ARMING_DECLINE: &str = "Ask";
+/// Approved 2026-10-07.
+pub const SETTINGS_ARMING_CONFIRM: &str = "Enable";
 /// The confirmation shown before a project is armed **from now**, which is
 /// what `set_project_mode` `auto_upload` does by default (K5): new sessions
 /// go without asking, and sessions already on this Mac keep waiting for the

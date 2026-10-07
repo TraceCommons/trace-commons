@@ -139,7 +139,7 @@ pub struct JoinCopy {
     pub passkey_chosen: &'static str,
     /// Create passkey on Join starts the daemon so the sheets open there,
     /// over Join (#1030), and it did not start: no account was made and
-    /// nothing is watched. DRAFT, NEEDS APPROVAL (#1146 parity, 2026-10-07).
+    /// nothing is watched. DRAFT, NEEDS APPROVAL (owner rewrite request, 2026-10-07).
     pub passkey_unavailable: &'static str,
     pub near_ai_eyebrow: &'static str,
     pub near_ai_text: &'static str,
@@ -414,7 +414,7 @@ pub fn first_run_copy() -> FirstRunCopy {
             passkey_create: "Create passkey",
             passkey_done: "Done",
             passkey_chosen: "You'll create your passkey once watching starts.",
-            passkey_unavailable: "The passkey step couldn't start just now, so no account was made. Try again, or skip and watch only.",
+            passkey_unavailable: "Couldn't start passkey setup, so no account was made. Try again, or skip and just watch.",
             near_ai_eyebrow: "Sign in with near.ai",
             near_ai_text: "Use the login you already have. Credits land in that account.",
             near_ai_sign_in: "Sign in",
@@ -818,7 +818,7 @@ mod tests {
             crate::onboarding_copy::WATCHER_START_FAILED
         );
         assert!(!join.passkey_unavailable.contains("folder"));
-        assert!(join.passkey_unavailable.contains("watch only"));
+        assert!(join.passkey_unavailable.contains("skip and just watch"));
     }
 
     /// A new passkey creates an account of its own, so Join says why it is

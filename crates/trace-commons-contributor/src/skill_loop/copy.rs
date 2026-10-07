@@ -69,7 +69,7 @@ pub struct SkillLearningCopy {
     pub rollback_incomplete: &'static str,
     /// The confirmation before a rollback (owner ruling, 2026-10-06):
     /// [`Self::rollback`] confirms it, `rollback_keep` leaves the skill
-    /// installed. DRAFT, NEEDS APPROVAL (new, 2026-10-06).
+    /// installed. Approved 2026-10-07.
     pub rollback_confirm_title: &'static str,
     pub rollback_confirm_body: &'static str,
     pub rollback_keep: &'static str,
@@ -143,7 +143,7 @@ pub fn skill_learning_copy() -> SkillLearningCopy {
         rollback_incomplete: "The skill could not be removed. Inspect the installed directory before retrying.",
         rollback_confirm_title: "Roll back this skill?",
         rollback_confirm_body: "Trace Commons removes the skill's directory and the two files it installed, so Codex no longer has this skill. If those files have changed since the install, nothing is removed.",
-        rollback_keep: "Keep skill",
+        rollback_keep: "Keep",
         unavailable: "Skill workflow could not complete. Retry this step.",
     }
 }

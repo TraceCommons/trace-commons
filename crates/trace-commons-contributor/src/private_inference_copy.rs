@@ -171,7 +171,7 @@ pub const SETTINGS_TOGGLE: &str = "Answer model calls on this computer";
 /// Changes are not deferred to a restart, and the line beneath the switch is
 /// what actually happened rather than what was asked for.
 /// The switch's caption, in Ron's #1146 words (`private-ai-connection-panel.tsx`).
-/// DRAFT, NEEDS APPROVAL (#1146 parity, 2026-10-07): it was "Changes here
+/// Approved 2026-10-07: it was "Changes here
 /// apply straight away, and the line below says what happened."
 pub const SETTINGS_APPLIES_AT_ONCE: &str = "Turning this on starts a local listener for configured \
      tools. It does not publish traces. Credential enrollment remains separate.";
@@ -1801,11 +1801,11 @@ pub fn eligibility_reason_line(label: &str) -> &'static str {
 pub const BALANCE_TITLE: &str = "NEAR AI usage";
 pub const FUNDING_TITLE: &str = "Cloud billing";
 /// Ron's #1146 caption (`private-ai-funding-panel.tsx`), without his
-/// machinery word. DRAFT, NEEDS APPROVAL (#1146 parity, 2026-10-07): it
+/// machinery word, rewritten plainly at the owner's request. DRAFT, NEEDS APPROVAL (owner rewrite request, 2026-10-07): it
 /// was "Choose a payment method or staking option in Cloud. Your browser
 /// may ask you to sign in again."
-pub const FUNDING_WHAT: &str = "Billing URL is released only after the current organization and \
-     connection revision are verified. This app never chooses a payer.";
+pub const FUNDING_WHAT: &str = "The billing link opens only after your account and connection \
+     are verified. This app never chooses who pays.";
 /// Kept over #1146's "Manage credits" (owner ruling): the offer surface
 /// keeps contribution credit apart from NEAR AI billing.
 pub const FUNDING_MANAGE: &str = "Manage billing";

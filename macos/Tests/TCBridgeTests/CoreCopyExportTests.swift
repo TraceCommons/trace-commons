@@ -89,15 +89,15 @@ final class CoreCopyExportTests: XCTestCase {
         let copy = try armingCopy(0)
         XCTAssertEqual(copy.settingsQuestion, "Enable automatic contribution for api?")
         XCTAssertEqual(copy.settingsDescription, "Confirm project-wide automatic contribution.")
-        XCTAssertEqual(copy.settingsDecline, "Keep asking first")
-        XCTAssertEqual(copy.settingsConfirm, "Enable for this project")
+        XCTAssertEqual(copy.settingsDecline, "Ask")
+        XCTAssertEqual(copy.settingsConfirm, "Enable")
     }
 
     /// The buttons carry their actions, and declining is not permanent: the
     /// daemon silences the offer for thirty days, not forever.
     func testTheArmingButtonsCarryTheirActions() throws {
         let copy = try armingCopy(5)
-        XCTAssertEqual(copy.confirm, "Turn on automatic contributing")
+        XCTAssertEqual(copy.confirm, "Enable")
         XCTAssertEqual(copy.decline, "Not now")
         XCTAssertFalse(copy.decline.lowercased().contains("never"))
         XCTAssertFalse(copy.decline.lowercased().contains("don't ask"))
