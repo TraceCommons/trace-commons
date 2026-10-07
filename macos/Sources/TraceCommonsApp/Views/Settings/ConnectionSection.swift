@@ -6,6 +6,13 @@ struct ConnectionSection: View {
     @EnvironmentObject private var model: AppModel
 
     var body: some View {
+        VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
+            connection
+            ContributionAccountCard()
+        }
+    }
+
+    private var connection: some View {
         GlassEyebrowCard(SettingsWords.connection) {
             VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
                 // Before the first answer the status is a placeholder, and
@@ -62,6 +69,49 @@ struct ConnectionSection: View {
             let scans = copy?.tools.values.first { $0.key == tool }?.unsetScansConventional
             return scans == true ? .on : .ask
         default: return .ask
+        }
+    }
+}
+
+/// Account contribution readiness and invite redemption. Every word is the
+/// core's (`account_contribution` in the contributor crate, carried in the
+/// Private AI copy); the card draws nothing until that copy has arrived.
+struct ContributionAccountCard: View {
+    @EnvironmentObject private var model: AppModel
+    @State private var inviteCode = ""
+
+    var body: some View {
+        if let copy = model.privateInferenceCopy,
+           let heading = copy.accountContributionHeading,
+           let refresh = copy.accountContributionRefreshAction,
+           let inviteLabel = copy.accountContributionInviteCode,
+           let redeem = copy.accountContributionRedeemAction {
+            GlassEyebrowCard(heading) {
+                VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
+                    Text(model.contributionLine)
+                        .glassType(GlassTokens.TypeScale.caption)
+                        .accessibilityAddTraits(.updatesFrequently)
+                    Button(refresh) { Task { await model.updateContributionAccount() } }
+                        .buttonStyle(GlassButtonStyle(.glass))
+                    GlassTextField(inviteLabel, text: $inviteCode, secure: true)
+                        .accessibilityLabel(inviteLabel)
+                    Button(redeem) {
+                        Task {
+                            if await model.updateContributionAccount(inviteCode: inviteCode) {
+                                inviteCode = ""
+                            }
+                        }
+                    }
+                    .buttonStyle(GlassButtonStyle(.glass))
+                    .disabled(inviteCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    if let pending = copy.accountContributionPendingCredit {
+                        Text(pending)
+                            .glassType(GlassTokens.TypeScale.caption)
+                            .foregroundStyle(GlassColor.textSecondary)
+                    }
+                }
+            }
+            .disabled(model.contributionBusy)
         }
     }
 }

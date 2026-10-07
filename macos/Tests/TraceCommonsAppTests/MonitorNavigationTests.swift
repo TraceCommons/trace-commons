@@ -676,7 +676,7 @@ final class MonitorNavigationTests: XCTestCase {
                                 EmptyView()
                             }
                             GlassSegmentedTabs(
-                                String(localized: "Monitor", comment: "Monitor tabs name"),
+                                MonitorWords.table?.shell.tabsLabel ?? "",
                                 selection: Binding(
                                     get: { MonitorWindowView.shownTab(tab, requiresOnboarding: model.requiresOnboarding) },
                                     set: { tab = $0 }),
@@ -774,7 +774,7 @@ final class MonitorNavigationTests: XCTestCase {
     func test_theSettingsButtonOpensSettingsBeforeOnboarding() throws {
         let window = try Self.text("Views/MonitorWindowView.swift")
         let button = """
-                            GlassRoundButton(String(localized: "Settings", comment: "Settings button"), systemImage: "gearshape", small: true, action: onSettings)
+                            GlassRoundButton(MonitorWords.table?.settingsTitle ?? "", systemImage: "gearshape", small: true, action: onSettings)
         """
         XCTAssertTrue(window.contains(button))
         XCTAssertFalse(window.contains(button + "\n                        .disabled("), "the gear is dead before onboarding")

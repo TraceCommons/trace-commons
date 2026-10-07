@@ -53,7 +53,7 @@ public extension MenuBarStatus {
     static func accessibilityLabel(decisionsOwed: Int?, unhealthy: Bool, paused: Bool, available: Bool = true) -> String {
         guard available else { return "Trace Commons. Watcher unavailable. Needs attention." }
         guard let decisionsOwed else {
-            return "Trace Commons. Decision count unavailable." + (paused ? " Paused." : "")
+            return "Trace Commons. Decisions owed unavailable." + (paused ? " Paused." : "")
         }
         let detail: String
         if decisionsOwed > 0 {

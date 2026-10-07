@@ -578,6 +578,8 @@ public struct AdmissionCopy: Decodable, Equatable, Sendable {
     public let prerequisite: String
     public let backend: String
     public let confirm: String
+    /// #1146's confirmation tick: Prepare waits on it.
+    public let confirmLine: String
     public let cancel: String
     public let permission: String
     public let working: String
@@ -602,6 +604,7 @@ public struct AdmissionCopy: Decodable, Equatable, Sendable {
         case prerequisite = "prerequisite"
         case backend = "backend"
         case confirm = "confirm"
+        case confirmLine = "confirm_line"
         case cancel = "cancel"
         case permission = "permission"
         case working = "working"

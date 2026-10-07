@@ -486,3 +486,113 @@ public struct MonitorHistoryActionsCopy: MonitorWordTable {
 
     public static var consumedFields: [String] { CodingKeys.allCases.map(\.rawValue) }
 }
+
+/// Ron's #1146 words for the monitor's toolbar, the Traces graph's focus
+/// button, Home and History (`preview_copy::MonitorShellCopy`; owner
+/// ruling, 2026-10-06). Numbers are `{name}` holes; a singular is its own
+/// line.
+public struct MonitorShellCopy: MonitorWordTable {
+    public let showGraph: String
+    public let hideGraph: String
+    public let showMap: String
+    public let hideMap: String
+    public let showInspector: String
+    public let hideInspector: String
+    public let focusNeedsSelection: String
+    public let focusWholeMap: String
+    public let focusTool: String
+    public let watchingToolsOne: String
+    public let watchingTools: String
+    public let waitingForYouOne: String
+    public let waitingForYou: String
+    public let worthASecondLook: String
+    public let nothingWaiting: String
+    public let nothingContributed: String
+    public let creditPendingAmount: String
+    public let filterAll: String
+    public let filterAccepted: String
+    public let filterSubmitted: String
+    public let filterQuarantined: String
+    public let filterWithdrawn: String
+    public let historyEmpty: String
+    public let historyFilterEmpty: String
+    public let open: String
+    public let pauseWatcher: String
+    public let resumeWatcher: String
+    public let pauseHour: String
+    public let pauseMorning: String
+    public let pauseUntilResumed: String
+    public let startAtLogin: String
+    public let projectsEmpty: String
+    public let changesHeading: String
+    public let tabHome: String
+    public let tabInference: String
+    public let tabTraces: String
+    public let tabsLabel: String
+    public let mapViewsLabel: String
+
+    enum CodingKeys: String, CodingKey, CaseIterable {
+        case showGraph = "show_graph"
+        case hideGraph = "hide_graph"
+        case showMap = "show_map"
+        case hideMap = "hide_map"
+        case showInspector = "show_inspector"
+        case hideInspector = "hide_inspector"
+        case focusNeedsSelection = "focus_needs_selection"
+        case focusWholeMap = "focus_whole_map"
+        case focusTool = "focus_tool"
+        case watchingToolsOne = "watching_tools_one"
+        case watchingTools = "watching_tools"
+        case waitingForYouOne = "waiting_for_you_one"
+        case waitingForYou = "waiting_for_you"
+        case worthASecondLook = "worth_a_second_look"
+        case nothingWaiting = "nothing_waiting"
+        case nothingContributed = "nothing_contributed"
+        case creditPendingAmount = "credit_pending_amount"
+        case filterAll = "filter_all"
+        case filterAccepted = "filter_accepted"
+        case filterSubmitted = "filter_submitted"
+        case filterQuarantined = "filter_quarantined"
+        case filterWithdrawn = "filter_withdrawn"
+        case historyEmpty = "history_empty"
+        case historyFilterEmpty = "history_filter_empty"
+        case open
+        case pauseWatcher = "pause_watcher"
+        case resumeWatcher = "resume_watcher"
+        case pauseHour = "pause_hour"
+        case pauseMorning = "pause_morning"
+        case pauseUntilResumed = "pause_until_resumed"
+        case startAtLogin = "start_at_login"
+        case projectsEmpty = "projects_empty"
+        case changesHeading = "changes_heading"
+        case tabHome = "tab_home"
+        case tabInference = "tab_inference"
+        case tabTraces = "tab_traces"
+        case tabsLabel = "tabs_label"
+        case mapViewsLabel = "map_views_label"
+    }
+
+    public static var consumedFields: [String] { CodingKeys.allCases.map(\.rawValue) }
+
+    /// Watching N tools: the singular is its own line.
+    public func watching(tools: Int) -> String {
+        tools == 1 ? watchingToolsOne : watchingTools.replacingOccurrences(of: "{count}", with: String(tools))
+    }
+
+    /// Home's second status line: sessions waiting, then how many of them
+    /// are worth a second look, or nothing waiting.
+    public func waiting(_ waiting: Int, secondLook: Int) -> String {
+        guard waiting > 0 else { return nothingWaiting }
+        let head = waiting == 1
+            ? waitingForYouOne : waitingForYou.replacingOccurrences(of: "{count}", with: String(waiting))
+        guard secondLook > 0 else { return head }
+        return head + " \u{00B7} " + worthASecondLook.replacingOccurrences(of: "{count}", with: String(secondLook))
+    }
+
+    /// The focus button's tip: select first, back to the whole map, or
+    /// show the selected tool.
+    public func focusTip(tool: String?, focused: Bool) -> String {
+        guard let tool else { return focusNeedsSelection }
+        return focused ? focusWholeMap : focusTool.replacingOccurrences(of: "{tool}", with: tool)
+    }
+}

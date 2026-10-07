@@ -26,6 +26,26 @@ public enum FirstRunNavigation {
         return moved
     }
 
+    /// Ron's P-7, "Welcome back" (#1030 spec: "A returning user starts at
+    /// P-7"; review of #1235 item 4): the first run opens at Welcome back
+    /// when it is on Join with no account answered, nobody is signed in
+    /// (`passkey_state` says `none`), and the daemon remembers a passkey used
+    /// on this Mac. Anything the daemon cannot say (`unknown`, a null count,
+    /// no answer) opens Join as before; so does a finished first run, a held
+    /// enrolment, and any answer already given on Join.
+    public static func opensWelcomeBack(
+        _ state: FirstRunState, passkeys: NativePasskeyState?, completed: Bool
+    ) -> Bool {
+        guard mayOfferWelcomeBack(state, completed: completed), let passkeys else { return false }
+        return passkeys.state == "none" && (passkeys.passkeyCount ?? 0) > 0
+    }
+
+    /// The part of `opensWelcomeBack` the first run decides alone, before
+    /// the daemon is asked: on Join, unfinished, no account answered.
+    public static func mayOfferWelcomeBack(_ state: FirstRunState, completed: Bool) -> Bool {
+        !completed && state.step == .join && state.account == .none
+    }
+
     /// Switch tiers, keeping the person on the equivalent screen: Folders and
     /// Tools ask the same thing, and Quick has no Rules.
     public static func switchTier(_ state: FirstRunState, to tier: FirstRunTier) -> FirstRunState {
@@ -52,11 +72,15 @@ public enum FirstRunNavigation {
     /// Whether the current step's Continue (or Start, on Uses) is enabled.
     ///
     /// - Join: an account answer, which may be "watch only".
-    /// - Folders / Tools: every offered tool answered, missing ones included,
-    ///   and a declaration the daemon would start with.
+    /// - Folders / Tools: every tool found on this Mac answered (a missing
+    ///   one is not asked, spec rule 1), every added folder answered, no
+    ///   tool watched in two rows, and a declaration the daemon would start
+    ///   with.
     /// - Rules: always; every choice there is optional.
-    /// - Uses: the required use ticked. With no required use known, Start
-    ///   stays disabled.
+    /// - Uses: the required use ticked, and something Start can do: finish
+    ///   watching only, reopen a chosen passkey's sheets, or finish an
+    ///   enrolment the daemon holds. With no required use known, Start stays
+    ///   disabled.
     public static func canContinue(
         _ state: FirstRunState,
         candidates: [SourceCandidate],
@@ -67,31 +91,30 @@ public enum FirstRunNavigation {
             return state.account != .none
         case .folders, .tools:
             let roots = state.sessionRoots
-            let everyOfferedAnswered = candidates.allSatisfy { roots[$0.source].isAnswered }
-            return everyOfferedAnswered && roots.settingsJSON() != nil
+            let everyOfferedAnswered = candidates.filter(\.exists).allSatisfy { roots[$0.source].isAnswered }
+            return everyOfferedAnswered && state.everyAddedFolderAnswered && state.watchedTwice.isEmpty
+                && roots.settingsJSON() != nil
         case .rules:
             return true
         case .uses:
             guard let requiredScope else { return false }
-            return state.scopes.contains(requiredScope)
+            let startable = state.account == .watchOnly || state.account == .passkeyChosen || state.holdsEnrolment
+            return startable && state.scopes.contains(requiredScope)
         }
     }
 
-    /// Whether this account can share automatically. Automatic needs an
-    /// account: a passkey the daemon holds, an enrolment it held before this
-    /// first run, or near.ai, which the Folders or Tools commit signs in
-    /// before Uses is reached. Watching only, no
-    /// answer, and a passkey chosen but not yet created cannot.
-    public static func canChooseAutomatic(_ account: AccountAnswer) -> Bool {
-        switch account {
-        case .passkey, .nearAI, .enrolled: return true
-        case .none, .watchOnly, .passkeyChosen: return false
-        }
+    /// Whether this first run can share automatically: only with an
+    /// enrolment the daemon holds (`FirstRunState.holdsEnrolment`). Watching
+    /// only, no answer, a passkey chosen but not created, and near.ai whose
+    /// invite has not enrolled cannot.
+    public static func canChooseAutomatic(_ state: FirstRunState) -> Bool {
+        state.holdsEnrolment
     }
 
-    /// The sharing paths the Uses picker offers.
-    public static func sharingPaths(for account: AccountAnswer) -> [SharingPath] {
-        canChooseAutomatic(account) ? [.askMe, .automatic] : [.askMe]
+    /// The sharing paths the Uses picker offers, in Ron's #1030 order:
+    /// Automatic first, then Ask me. The default answer stays Ask me.
+    public static func sharingPaths(for state: FirstRunState) -> [SharingPath] {
+        canChooseAutomatic(state) ? [.automatic, .askMe] : [.askMe]
     }
 
     private static func move(_ state: FirstRunState, by offset: Int) -> FirstRunState {

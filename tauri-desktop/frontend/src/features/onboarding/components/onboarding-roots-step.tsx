@@ -1,4 +1,7 @@
-import { useContributorDisclosureCopy } from "../../../lib/tauri/use-contributor-copy";
+import {
+  useContributorDisclosureCopy,
+  useShellStatusLines,
+} from "../../../lib/tauri/use-contributor-copy";
 import { SourceRootsPanel } from "../../settings/public";
 import { missingRequiredRoots } from "../roots-readiness";
 import type { OnboardingStepProps } from "./onboarding-step-types";
@@ -11,6 +14,7 @@ export function OnboardingRootsStep({
   busy,
 }: Pick<OnboardingStepProps, "onboarding" | "settings" | "roots" | "busy">) {
   const disclosure = useContributorDisclosureCopy();
+  const lines = useShellStatusLines();
   const shell = disclosure.data?.onboarding_shell;
   const copyReady = Boolean(disclosure.data?.source_settings && shell);
   const snapshot = settings.data ?? {};
@@ -31,7 +35,7 @@ export function OnboardingRootsStep({
         error={
           roots.error ||
           (settings.state === "error"
-            ? "Source declarations unavailable. Refresh after Rust core starts."
+            ? lines.readUnavailable
             : null)
         }
         onSave={(source, mode, path) => roots.save(source, mode, path)}

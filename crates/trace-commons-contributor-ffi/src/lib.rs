@@ -5407,7 +5407,7 @@ pub unsafe extern "C" fn tc_redaction_summary_json(
 
 /// The ignore-project control and its confirmation for one project
 /// (`project_copy::ignore_project_copy`): a JSON object
-/// `{title, body, button, tooltip}`.
+/// `{title, body, button, tooltip, keep}`.
 ///
 /// `project_label` is the label the queue shows for the project; `pending`
 /// is how many of its sessions the confirmation will say it removes, as this
@@ -5523,7 +5523,9 @@ pub extern "C" fn tc_contribution_mode_copy_json() -> *mut c_char {
 /// `project_copy::contribution_override_confirm_copy`): a JSON object
 /// `{mode, title, body, confirm, cancel, arming}`. `mode` is
 /// `"notify_only"`, `"auto_upload"` or `"ignore"`, as
-/// `set_contribution_override` takes it.
+/// `set_contribution_override` takes it, or `"clear"` for the confirmation
+/// before `clear_contribution_override`
+/// (`project_copy::contribution_override_clear_confirm_copy`).
 ///
 /// `arming` is the arming disclosure -- the Flow 1 grant screens' table,
 /// with the disclosure the core chose for the configuration in
@@ -5548,6 +5550,11 @@ pub unsafe extern "C" fn tc_contribution_override_confirm_json(
         let Some(mode) = (unsafe { borrow_optional_str(mode) }) else {
             return Ok(std::ptr::null_mut());
         };
+        if mode == trace_commons_contributor::project_copy::CONTRIBUTION_OVERRIDE_CLEAR_MODE {
+            let copy =
+                trace_commons_contributor::project_copy::contribution_override_clear_confirm_copy();
+            return Ok(to_owned_cstring(&serde_json::to_string(&copy)?));
+        }
         let Ok(mode) = serde_json::from_value::<ProjectMode>(serde_json::json!(mode)) else {
             return Ok(std::ptr::null_mut());
         };
@@ -5600,8 +5607,8 @@ pub unsafe extern "C" fn tc_contribution_override_refusal_text(
 /// a JSON object `{title, matching, nothing_sent, credit}` -- matching
 /// happens on this Mac, nothing is sent because of a mission, and a
 /// mission's credit is projected until the commons records it, then
-/// pending. Shown the first time Missions is opened and in Settings. DRAFT,
-/// NEEDS APPROVAL, every sentence.
+/// pending. Shown the first time Missions is opened and in Settings.
+/// Approved 2026-10-06, every sentence.
 ///
 /// Returns an owned JSON string; free it with [`tc_string_free`]. NULL only
 /// on a caught panic.

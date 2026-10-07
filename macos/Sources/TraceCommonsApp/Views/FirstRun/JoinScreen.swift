@@ -66,13 +66,13 @@ enum JoinScreenLayout {
         return toggled
     }
 
-    /// near.ai signs in to the account an invite enrolls: the daemon's
-    /// `account_sign_in` refuses without an enrolment
-    /// (`account-enrollment-required`), so it is chosen only with an invite
-    /// held, and `nearAILine` says so until then.
+    /// Signing in with near.ai needs no invite (owner, Ron's review of
+    /// #1235): with one it signs in to the account the invite enrolls;
+    /// without one it enrolls this Mac through the near.ai login
+    /// (`FirstRunPlan`, `near_ai_account_enroll`).
     static func canToggleNearAI(_ state: FirstRunState) -> Bool {
         switch state.account {
-        case .none, .watchOnly, .passkeyChosen: return holdsInvite(state)
+        case .none, .watchOnly, .passkeyChosen: return true
         case .nearAI: return !state.signedIn
         case .passkey, .enrolled: return false
         }
@@ -84,26 +84,15 @@ enum JoinScreenLayout {
     }
 
     /// Nothing while a passkey is held: near.ai cannot be chosen over it.
-    /// Without an invite, why near.ai waits for one.
     static func nearAILine(_ state: FirstRunState, copy: FirstRunCopy.Join) -> String? {
         if passkeyDone(state) || state.account == .enrolled { return nil }
         if nearAIChosen(state) { return copy.nearAiChosen }
-        if !state.signedIn, !holdsInvite(state) { return copy.nearAiNeedsInvite }
         return copy.nearAiText
     }
 
     /// An invite is held: pasted and found, or already enrolled.
     static func holdsInvite(_ state: FirstRunState) -> Bool {
         !state.invite.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || state.enrolledInvite != nil
-    }
-
-    /// near.ai waits for an invite, so one chosen and not yet signed in goes
-    /// when the invite does.
-    private static func releasingNearAI(_ state: FirstRunState) -> FirstRunState {
-        guard nearAIChosen(state), !holdsInvite(state) else { return state }
-        var released = state
-        released.account = .none
-        return released
     }
 
     static func nearAIAction(_ state: FirstRunState, copy: FirstRunCopy) -> String {
@@ -131,8 +120,8 @@ enum JoinScreenLayout {
     ///
     /// Looking an invite up asks to join, so it takes back watch only, and a
     /// passkey only chosen: a new passkey is an account of its own, never
-    /// combined with an invite. Withdrawing the invite takes back a near.ai
-    /// not yet signed in, which needs one (`canToggleNearAI`).
+    /// combined with an invite. Withdrawing the invite keeps near.ai, which
+    /// needs none.
     static func lookUp(
         _ draft: String, in state: FirstRunState, failure: FirstRunFailure?, host: (String) -> String?
     ) -> (state: FirstRunState, outcome: JoinLookUpOutcome, failure: FirstRunFailure?) {
@@ -145,13 +134,13 @@ enum JoinScreenLayout {
         if invite.isEmpty {
             looked.invite = ""
             looked.issuerHost = nil
-            return (releasingNearAI(looked), .withdrawn, deadCleared)
+            return (looked, .withdrawn, deadCleared)
         }
         guard let issuerHost = host(invite) else {
             if case .inviteDead = failure { return (looked, .refused, failure) }
             looked.invite = ""
             looked.issuerHost = nil
-            return (releasingNearAI(looked), .refused, failure)
+            return (looked, .refused, failure)
         }
         looked.invite = invite
         looked.issuerHost = issuerHost
@@ -183,7 +172,8 @@ enum JoinScreenLayout {
         if state.enrolledInvite != nil {
             return .joined(
                 FirstRunCopy.fill(
-                    copy.inviteJoined, ["host": state.issuerHost ?? dash, "pay_range": payRange(lookup, copy: copy)]))
+                    copy.inviteJoined,
+                    ["host": state.issuerHost ?? copy.unknown, "pay_range": payRange(lookup, copy: copy)]))
         }
         if passkeyDone(state) { return .note(copy.inviteOrPasskey) }
         if refused { return .error(copy.inviteError) }
@@ -195,12 +185,12 @@ enum JoinScreenLayout {
         return .hidden
     }
 
-    /// The invite's credit range in the core's words, or a dash when the
-    /// daemon gave none or gave a unit this build cannot word: an unknown
-    /// range never reads as a figure, and the wire label never reaches the
-    /// screen.
+    /// The invite's credit range in the core's words, or the core's
+    /// `unknown` when the daemon gave none or gave a unit this build cannot
+    /// word: an unknown range never reads as a figure, and the wire label
+    /// never reaches the screen.
     static func payRange(_ lookup: DaemonData.InviteLookup?, copy: FirstRunCopy.Join) -> String {
-        guard let range = lookup?.creditRange, range.unit == pointsPerAcceptedTrace else { return dash }
+        guard let range = lookup?.creditRange, range.unit == pointsPerAcceptedTrace else { return copy.unknown }
         if range.min == range.max {
             return FirstRunCopy.fill(copy.payRangePointsOne, ["min": "\(range.min)"])
         }
@@ -277,29 +267,61 @@ enum JoinScreenLayout {
         return trimmed.isEmpty ? nil : FirstRunCopy.fill(copy.passkeyReady, ["name": trimmed])
     }
 
-    /// Record how the passkey sheets ended. A sign-in carries no name
-    /// (`NativePasskeyCoordinator.perform(.login)` returns none), so its
-    /// passkey is held with an empty one, which `passkeyLine` never shows.
+    /// Signing out clears every sign-in on Join (#1030 rule 6): the
+    /// invite, near.ai and the passkey, held or only chosen, so no card
+    /// claims an account that is not linked. `account_sign_out` has already
+    /// ended the daemon's account session, the one near.ai holds too.
+    ///
+    /// The daemon has no call that drops an enrolment, so one it holds --
+    /// this run's invite, near.ai's invite-free enrolment, a passkey Verify
+    /// bound, an earlier first run's --
+    /// may outlive the sign-out. It is cleared here and marked
+    /// (`signedOutOfEnrolment`), which fails closed: nothing that belongs to
+    /// an enrolment is sent for it, and it is not recorded as the account
+    /// again. Every other answer (tools, rules, uses) is kept.
+    static func signOut(_ state: FirstRunState) -> FirstRunState {
+        var cleared = state
+        if state.holdsEnrolment || state.enrolledInvite != nil || state.nearAIEnrolled || state.account == .enrolled {
+            cleared.signedOutOfEnrolment = true
+        }
+        cleared.account = .none
+        cleared.signedIn = false
+        cleared.nearAIEnrolled = false
+        cleared.invite = ""
+        cleared.issuerHost = nil
+        cleared.enrolledInvite = nil
+        return cleared
+    }
+
+    /// Record how the passkey sheets ended. A sign-in ends them only once
+    /// Verify bound its account, or joined this Mac to the account another
+    /// Mac bound (`PasskeySheetOutcome.signedIn`), so every held passkey is
+    /// an enrolment. The login itself carries no name
+    /// (`NativePasskeyCoordinator.perform(.login)` returns none); the
+    /// outcome carries the one the daemon remembers for the signed-in
+    /// account's own record, when it has one. Without it (and after a switch
+    /// to an existing account) the passkey is held with an empty name, which
+    /// `passkeyLine` never shows.
     static func apply(
         _ outcome: PasskeySheetOutcome, to state: FirstRunState, copy: FirstRunCopy
     ) -> (state: FirstRunState, notice: String?) {
         var applied = state
         switch outcome {
-        case .created(let name): applied.account = .passkey(name: name)
-        case .signedIn, .existingAccount: applied.account = .passkey(name: "")
+        case .created(let name):
+            applied.account = .passkey(name: name)
+            applied.signedOutOfEnrolment = false
+        case .signedIn(let name):
+            applied.account = .passkey(name: name ?? "")
+            applied.signedOutOfEnrolment = false
+        case .existingAccount:
+            applied.account = .passkey(name: "")
+            applied.signedOutOfEnrolment = false
         case .closed: break
         case .signedOut:
-            // `account_sign_out` clears the daemon's account session, the
-            // one a near.ai sign-in holds too, so that fact goes with it and
-            // a chosen near.ai is signed in again at the next commit. The
-            // passkey, held or only chosen, is not asked for again.
-            if passkeyDone(applied) || passkeyChosen(applied) { applied.account = .none }
-            applied.signedIn = false
+            applied = signOut(applied)
         }
         return (applied, outcome.joinNotice(copy))
     }
-
-    private static let dash = "—"
 }
 
 /// Ron's Join (#1030 `join-screen.tsx`) in glass: the title, the invite card,
@@ -331,28 +353,24 @@ struct JoinScreen: View {
         FirstRunFrame(
             copy: copy,
             state: $runner.state,
-            onBack: nil,
             footer: FirstRunFooter(
                 title: JoinScreenLayout.footerTitle(runner.state, copy: copy),
                 isEnabled: true,
                 note: JoinScreenLayout.footerNote(runner.state, copy: copy),
                 action: { runner.state = JoinScreenLayout.forward(runner.state) })
         ) {
-            ScrollView {
-                VStack(alignment: .leading, spacing: GlassTokens.Space.s6) {
-                    title
-                    inviteCard
-                    passkeyCard
-                    nearAICard
-                    if let notice = runner.passkeyOutcome?.joinNotice(copy) {
-                        GlassNotice(tone: .ask) { Text(notice) }
-                    }
-                    GlassCard(quiet: true) {
-                        Text(copy.join.noSharing)
-                            .glassType(GlassTokens.TypeScale.label)
-                            .foregroundStyle(GlassColor.textSecondary)
-                    }
-                }
+            title
+        } content: {
+            inviteCard
+            passkeyCard
+            nearAICard
+            if let notice = runner.passkeyOutcome?.joinNotice(copy) {
+                GlassNotice(tone: .ask) { Text(notice) }
+            }
+            GlassCard(quiet: true) {
+                Text(copy.join.noSharing)
+                    .glassType(GlassTokens.TypeScale.label)
+                    .foregroundStyle(GlassColor.textSecondary)
             }
         }
     }
@@ -360,7 +378,8 @@ struct JoinScreen: View {
     private var title: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
             FirstRunTitle(light: copy.join.titleLight, bold: copy.join.titleBold)
-            (Text(copy.join.body) + Text(" ") + Text(copy.join.bodyEmphasis).bold())
+            (Text(copy.join.body) + Text(" ")
+                + Text(copy.join.bodyEmphasis).bold().foregroundColor(GlassColor.textPrimary))
                 .glassType(GlassTokens.TypeScale.body)
                 .foregroundStyle(GlassColor.textSecondary)
         }

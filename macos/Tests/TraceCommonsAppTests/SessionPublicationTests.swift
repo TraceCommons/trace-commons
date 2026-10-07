@@ -445,6 +445,20 @@ final class SessionPublicationTests: XCTestCase {
         )
     }
 
+    /// With no daemon client (the core is down) a read is not left as
+    /// nothing at all: the detail draws the core's unavailable line, with
+    /// Retry, as a refused read does, never an empty pane.
+    @MainActor
+    func testAReadWithNoDaemonSaysSoRatherThanDrawingNothing() {
+        let model = AppModel()
+        model.loadSessionDetail(record)
+        XCTAssertFalse(model.loadingSessionDetails.contains(record.submissionID))
+        XCTAssertNil(model.sessionDetails[record.submissionID])
+        let line = model.sessionDetailErrors[record.submissionID]
+        XCTAssertNotNil(line)
+        XCTAssertEqual(line, TCPublicRun.sessionDetailErrorLine(label: "daemon-unavailable"))
+    }
+
     @MainActor
     func testRefreshFailureClearsCachedSessionDetail() async throws {
         let model = AppModel()

@@ -2387,9 +2387,9 @@ char*       tc_residual_secret_line_text(uint32_t count, const char* sites_json)
 char*       tc_redaction_summary_json(const char* redactions_json, const char* distinct_json);
 
 /* The ignore-project control and confirmation (project_copy::
- * ignore_project_copy): {title, body, button, tooltip}. pending is the count
- * the confirmation names; negative clamps to 0. NULL for an unreadable
- * project_label and on a caught panic.
+ * ignore_project_copy): {title, body, button, tooltip, keep}. pending is
+ * the count the confirmation names; negative clamps to 0. NULL for an
+ * unreadable project_label and on a caught panic.
  */
 char*       tc_project_ignore_copy_json(const char* project_label, int64_t pending);
 
@@ -2417,9 +2417,10 @@ char*       tc_contribution_mode_copy_json(void);
 
 /* The confirmation for one contribution override (#1173, project_copy::
  * contribution_override_confirm_copy): {mode, title, body, confirm, cancel,
- * arming}. mode is "notify_only", "auto_upload" or "ignore". arming is the
+ * arming}. mode is "notify_only", "auto_upload" or "ignore", or "clear" for
+ * the confirmation before clear_contribution_override. arming is the
  * arming disclosure for auto_upload, read for the configuration in
- * config_dir, and null otherwise; config_dir may be NULL for the other two.
+ * config_dir, and null otherwise; config_dir may be NULL for the others.
  * NULL for an unknown or unreadable mode, for auto_upload with an unreadable
  * config_dir or configuration, and on a caught panic.
  */
@@ -2437,7 +2438,7 @@ char*       tc_contribution_override_refusal_text(const char* label);
  * missions_disclosure_copy): {title, matching, nothing_sent, credit}.
  * Matching happens on this Mac; nothing is sent because of a mission; a
  * mission's credit is projected until the commons records it, then pending.
- * DRAFT, NEEDS APPROVAL. NULL only on a caught panic.
+ * Approved 2026-10-06. NULL only on a caught panic.
  */
 char*       tc_missions_disclosure_copy_json(void);
 

@@ -20,34 +20,42 @@ use super::ipc::{DaemonShared, ERR_BAD_PARAMS, ERR_UNAVAILABLE, Request, Respons
 use crate::commands::{EnrollOutcome, enroll_core};
 use crate::consent::{VALID_SCOPES, validate_scopes};
 
-/// `(scope name, human description, grants_data_use)`, in the order
-/// `consent_options` walks `VALID_SCOPES`. `public_attribution` maps to an
+/// `(scope name, title, human description, grants_data_use)`, in the order
+/// `consent_options` walks `VALID_SCOPES`. The title is the short bold label
+/// every shell draws for the scope; no shell keeps its own table of them
+/// (owner ruling, 2026-10-06), and a shell that gets a scope without one
+/// does not offer it. `public_attribution` maps to an
 /// empty allowed-use set in `consent::scopes_to_allowed_uses`, hence
 /// `grants_data_use: false` -- presenting it beside four real data-use scopes
 /// with equal weight would mislead in both directions.
-const DESCRIPTIONS: [(&str, &str, bool); 5] = [
+const DESCRIPTIONS: [(&str, &str, &str, bool); 5] = [
     (
         "debugging_evaluation",
+        "Finding bugs and measuring agents",
         "Researchers read traces to find where coding agents fail, and score agents against each other.",
         true,
     ),
     (
         "benchmark_only",
+        "Turn my traces into test cases",
         "Parts of your sessions may become benchmark problems that agents are scored against.",
         true,
     ),
     (
         "ranking_training",
+        "Train models that judge agent output",
         "Used to train models that rank or grade what an agent produced. Not models that write code.",
         true,
     ),
     (
         "model_training",
+        "Train coding models directly",
         "Your traces become training data for models that write code, potentially including commercial ones.",
         true,
     ),
     (
         "public_attribution",
+        "List my handle publicly as a contributor",
         "Lists your handle publicly as a contributor. Does not change how any trace is used.",
         false,
     ),
@@ -60,16 +68,21 @@ pub fn consent_options() -> serde_json::Value {
     let scopes: Vec<serde_json::Value> = VALID_SCOPES
         .iter()
         .map(|name| {
-            let (_, description, grants_data_use) = DESCRIPTIONS
+            let (_, title, description, grants_data_use) = DESCRIPTIONS
                 .iter()
-                .find(|(n, _, _)| n == name)
+                .find(|(n, _, _, _)| n == name)
                 .expect("every VALID_SCOPES entry has a DESCRIPTIONS row");
+            // VALID_SCOPES[0] is documented as the always-on floor scope.
+            let always_on = *name == VALID_SCOPES[0];
             json!({
                 "name": name,
+                "title": title,
                 "description": description,
-                // VALID_SCOPES[0] is documented as the always-on floor scope.
-                "always_on": *name == VALID_SCOPES[0],
+                "always_on": always_on,
                 "grants_data_use": grants_data_use,
+                // The short tag every shell draws beside the title, so none
+                // keeps its own.
+                "tag": crate::consent_copy::scope_tag(always_on, *grants_data_use),
             })
         })
         .collect();
@@ -267,6 +280,35 @@ mod tests {
     }
 
     #[test]
+    fn consent_options_carries_every_scope_title() {
+        let v = consent_options();
+        let titles: Vec<(&str, &str)> = v["scopes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| (s["name"].as_str().unwrap(), s["title"].as_str().unwrap()))
+            .collect();
+        assert_eq!(
+            titles,
+            [
+                ("debugging_evaluation", "Finding bugs and measuring agents"),
+                ("benchmark_only", "Turn my traces into test cases"),
+                ("ranking_training", "Train models that judge agent output"),
+                ("model_training", "Train coding models directly"),
+                (
+                    "public_attribution",
+                    "List my handle publicly as a contributor"
+                ),
+            ]
+        );
+        // Never the wire name, with or without its underscores.
+        for (name, title) in titles {
+            assert_ne!(title, name);
+            assert_ne!(title, name.replace('_', " "));
+        }
+    }
+
+    #[test]
     fn consent_options_marks_the_floor_scope_as_always_on() {
         let v = consent_options();
         let floor = v["scopes"]
@@ -290,6 +332,27 @@ mod tests {
             .find(|s| s["name"] == "public_attribution")
             .unwrap();
         assert_eq!(pa["grants_data_use"], false);
+    }
+
+    #[test]
+    fn consent_options_carries_each_scopes_tag() {
+        let v = consent_options();
+        let tags: Vec<(&str, &str)> = v["scopes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| (s["name"].as_str().unwrap(), s["tag"].as_str().unwrap()))
+            .collect();
+        assert_eq!(
+            tags,
+            [
+                ("debugging_evaluation", "required"),
+                ("benchmark_only", "data use"),
+                ("ranking_training", "data use"),
+                ("model_training", "data use"),
+                ("public_attribution", "attribution only"),
+            ]
+        );
     }
 
     #[test]

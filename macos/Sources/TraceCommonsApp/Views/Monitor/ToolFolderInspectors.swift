@@ -173,7 +173,7 @@ struct FolderInspector: View {
             return GlassConfirmation(
                 title: pending.title, message: pending.body,
                 actions: [
-                    .cancel(words.inspector.cancel, action: cancel),
+                    .cancel(copy.keep, action: cancel),
                     .destructive(copy.button) { apply(pending.mode) },
                 ],
                 onCancel: cancel)

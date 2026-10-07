@@ -29,6 +29,20 @@ enum UsesScreenLayout {
         options.filter { !$0.alwaysOn && !$0.grantsDataUse }
     }
 
+    /// What the optional group's expander opens onto: the optional data
+    /// uses only. The handle is a row of its own after the group (Ron's
+    /// review of #1235, item 2).
+    static func expandedScopes(_ options: [ConsentScope]) -> [ConsentScope] {
+        optionalScopes(options)
+    }
+
+    /// The scope rows on screen, in order: the required use, the optional
+    /// uses while the group is open, then the handle, always.
+    static func visibleScopes(_ options: [ConsentScope], optionalOpen: Bool) -> [ConsentScope] {
+        (requiredScope(options).map { [$0] } ?? []) + (optionalOpen ? expandedScopes(options) : [])
+            + handleScopes(options)
+    }
+
     static func isTicked(_ scope: String, in state: FirstRunState) -> Bool {
         state.scopes.contains(scope)
     }
@@ -68,14 +82,20 @@ enum UsesScreenLayout {
     enum StartRoute: Equatable {
         /// The two disclosures, then the core's answer, then the commit.
         case disclose
+        /// Private AI on without Automatic: the witness disclosure, then
+        /// the commit, which asks for no grant.
+        case discloseWitness
         /// Straight to the commit.
         case commit
     }
 
-    /// Automatic, on an account that can choose it, goes through the
-    /// disclosures; everything else commits directly.
+    /// Automatic, on an account that can choose it, goes through both
+    /// disclosures; Private AI turned on otherwise goes through the witness
+    /// disclosure (spec rule 10); everything else commits directly.
     static func startRoute(_ state: FirstRunState) -> StartRoute {
-        SharingDisclosureFlow.isNeeded(for: state) ? .disclose : .commit
+        if SharingDisclosureFlow.isNeeded(for: state) { return .disclose }
+        if SharingDisclosureFlow.isWitnessOnlyNeeded(for: state) { return .discloseWitness }
+        return .commit
     }
 
     /// Ron's footer note, while the required use is unticked.
@@ -87,7 +107,7 @@ enum UsesScreenLayout {
     /// The path the screen shows: Automatic only for an account that can
     /// choose it, so a watch-only state never reads Automatic's words.
     static func effectiveSharing(_ state: FirstRunState) -> SharingPath {
-        FirstRunNavigation.canChooseAutomatic(state.account) ? state.sharing : .askMe
+        FirstRunNavigation.canChooseAutomatic(state) ? state.sharing : .askMe
     }
 
     /// The Sharing card's line: the core's words for the path chosen, the
@@ -113,9 +133,9 @@ enum UsesScreenLayout {
     /// The picker's options, named by the contribution mode table (Ask me,
     /// Automatic), and Automatic only for an account that can choose it.
     static func sharingOptions(
-        for account: AccountAnswer, modes: ContributionModeCopy?
+        for state: FirstRunState, modes: ContributionModeCopy?
     ) -> [GlassPickerOption<SharingPath>] {
-        FirstRunNavigation.sharingPaths(for: account).compactMap { path in
+        FirstRunNavigation.sharingPaths(for: state).compactMap { path in
             let mode: ProjectMode = path == .automatic ? .autoUpload : .ask
             guard let title = modes?.label(for: mode) else { return nil }
             return GlassPickerOption(title, value: path, dot: path == .automatic ? .on : .ask)
@@ -144,7 +164,9 @@ enum UsesScreenLayout {
         // line, never the refused grant's "Setup finished".
         case .completeFailed: return uses.completeFailed
         // Leaving the roots' failures, which never stop Start.
-        case .startFailed, .inviteDead, .lookupUnavailable, .enrollFailed, .signInFailed: return nil
+        case .startFailed, .settingsFailed, .inviteDead, .lookupUnavailable, .enrollFailed, .signInFailed,
+            .nearAIEnrollFailed:
+            return nil
         }
     }
 
@@ -242,7 +264,6 @@ struct UsesScreen: View {
         FirstRunFrame(
             copy: copy,
             state: $runner.state,
-            onBack: runner.isCommitting ? nil : { runner.state = FirstRunNavigation.back(runner.state) },
             notice: UsesScreenLayout.notice(for: runner.failure, uses: copy.uses, privateAI: privateAI),
             footer: FirstRunFooter(
                 title: copy.uses.start,
@@ -250,16 +271,16 @@ struct UsesScreen: View {
                     runner.state, uses: copy.uses, requiredScope: required, grant: grant,
                     isCommitting: runner.isCommitting),
                 note: UsesScreenLayout.footerNote(copy.uses, state: runner.state, requiredScope: required),
+                busy: runner.isCommitting,
                 action: start)
         ) {
-            ScrollView {
-                VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
-                    FirstRunTitle(light: copy.uses.titleLight, bold: copy.uses.titleBold)
-                    usesCard(options: options, required: required)
-                    sharingCard(grant: grant)
-                    if UsesScreenLayout.showsPrivateAI(runner.state) {
-                        privateAICard
-                    }
+            FirstRunTitle(light: copy.uses.titleLight, bold: copy.uses.titleBold)
+        } content: {
+            VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
+                usesCard(options: options, required: required)
+                sharingCard(grant: grant)
+                if UsesScreenLayout.showsPrivateAI(runner.state) {
+                    privateAICard
                 }
             }
         }
@@ -292,9 +313,12 @@ struct UsesScreen: View {
                 if let required {
                     VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
                         HStack(spacing: GlassTokens.Space.s4) {
-                            Toggle(ScopeCopy.title(for: required.name, options: options), isOn: scope(required.name))
+                            Toggle(required.title, isOn: scope(required.name))
                                 .toggleStyle(GlassCheckboxStyle())
-                            GlassTag(copy.uses.required, tone: .on)
+                            // Ron's inline "required" in the on colour.
+                            Text(copy.uses.required)
+                                .glassType(GlassTokens.TypeScale.mono)
+                                .foregroundStyle(GlassTokens.Color.statusOnText.color)
                         }
                         caption(required.description)
                     }
@@ -312,11 +336,15 @@ struct UsesScreen: View {
                 }
                 if optionalOpen {
                     VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
-                        ForEach(optional + UsesScreenLayout.handleScopes(options)) { option in
+                        ForEach(UsesScreenLayout.expandedScopes(options)) { option in
                             scopeRow(option, options: options)
                         }
                     }
                     .padding(.leading, GlassTokens.Space.s8)
+                }
+                // The handle: its own row after the group, always shown.
+                ForEach(UsesScreenLayout.handleScopes(options)) { option in
+                    scopeRow(option, options: options)
                 }
             }
         }
@@ -324,7 +352,7 @@ struct UsesScreen: View {
 
     private func scopeRow(_ option: ConsentScope, options: [ConsentScope]) -> some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
-            Toggle(ScopeCopy.title(for: option.name, options: options), isOn: scope(option.name))
+            Toggle(option.title, isOn: scope(option.name))
                 .toggleStyle(GlassCheckboxStyle())
             caption(option.description)
         }
@@ -364,8 +392,8 @@ struct UsesScreen: View {
                     selection: Binding(
                         get: { UsesScreenLayout.effectiveSharing(runner.state) },
                         set: { if let path = $0 { runner.state.sharing = path } }),
-                    options: UsesScreenLayout.sharingOptions(for: runner.state.account, modes: ProjectModeWords.table),
-                    placeholder: copy.uses.sharing)
+                    options: UsesScreenLayout.sharingOptions(for: runner.state, modes: ProjectModeWords.table),
+                    placeholder: copy.frame.choose)
                 .disabled(grant == nil)
             }
         }
@@ -397,7 +425,7 @@ struct UsesScreen: View {
                         get: { runner.state.privateAI && privateAI != nil },
                         set: { runner.state.privateAI = $0 })
                 )
-                .toggleStyle(GlassToggleStyle(.standard, showsLabel: false))
+                .toggleStyle(GlassToggleStyle(.settings, showsLabel: false))
                 .disabled(privateAI == nil)
             }
         }
@@ -409,6 +437,8 @@ struct UsesScreen: View {
         switch UsesScreenLayout.startRoute(runner.state) {
         case .disclose:
             disclosure = SharingDisclosureFlow()
+        case .discloseWitness:
+            disclosure = SharingDisclosureFlow(witnessOnly: true)
         case .commit:
             Task { pendingRefusal = await UsesStart.plainStart(runner: runner, pending: pendingRefusal) }
         }
@@ -418,6 +448,12 @@ struct UsesScreen: View {
     /// A not-ready answer finishes on Ask me; its failure is shown after
     /// the commit, which clears failures when it begins.
     private func finish(_ flow: SharingDisclosureFlow) {
+        // The Private AI path saw the witness disclosure and asks for no
+        // grant: Start as on Ask me.
+        if flow.witnessOnly {
+            Task { pendingRefusal = await UsesStart.plainStart(runner: runner, pending: pendingRefusal) }
+            return
+        }
         let request = SharingDisclosureFlow.grantRequest(
             flow.progress(connected: model.status.loggedIn, scopes: runner.state.scopes))
         Task { pendingRefusal = await UsesStart.finish(runner: runner, request: request, pending: pendingRefusal) }

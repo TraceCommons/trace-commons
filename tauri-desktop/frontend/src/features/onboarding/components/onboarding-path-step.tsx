@@ -1,5 +1,8 @@
 import { useState } from "react";
-import { useAutomaticGrantCopy } from "../../../lib/tauri/use-contributor-copy";
+import {
+  useAutomaticGrantCopy,
+  useContributorDisclosureCopy,
+} from "../../../lib/tauri/use-contributor-copy";
 import { useCoreStatus } from "../../../lib/tauri/use-core-status";
 import type { ContributionPath } from "../flow1";
 import type { OnboardingStepProps } from "./onboarding-step-types";
@@ -14,7 +17,12 @@ export function OnboardingPathStep({
 }: Pick<OnboardingStepProps, "onboarding" | "busy" | "showPrivacy">) {
   const core = useCoreStatus();
   const grantCopy = useAutomaticGrantCopy(core.scope, core.isSuccess);
-  const copy = grantCopy.data;
+  // Each path is named by its folder mode's one name (`folder_mode_labels`):
+  // asking first is "notify_only", contributing automatically "auto_upload".
+  const disclosure = useContributorDisclosureCopy();
+  const modes = disclosure.data?.folder_mode_labels;
+  const copy = modes ? grantCopy.data : undefined;
+  const copyFailed = grantCopy.isError || disclosure.isError;
   const [path, setPath] = useState<ContributionPath | null>(null);
   return (
     <section className="tc-card mb-2.5">
@@ -24,10 +32,10 @@ export function OnboardingPathStep({
       <h2 id="onboarding-path-heading">How should contributing work?</h2>
       {!copy && (
         <p
-          className={`m-0 text-[12px] ${grantCopy.isError ? "text-tc-outside" : "text-tc-secondary"}`}
-          role={grantCopy.isError ? "alert" : "status"}
+          className={`m-0 text-[12px] ${copyFailed ? "text-tc-outside" : "text-tc-secondary"}`}
+          role={copyFailed ? "alert" : "status"}
         >
-          {grantCopy.isError
+          {copyFailed
             ? "Path copy unavailable. Continue is disabled."
             : "Loading path copy…"}
         </p>
@@ -41,14 +49,14 @@ export function OnboardingPathStep({
         <label className="flex items-start gap-2.5 tc-hairline-bottom py-2 tc-label font-normal">
           <Radio value="ask_first" disabled={busy || !copy} />
           <span>
-            <strong>Ask me each time</strong>
+            <strong>{modes?.notify_only}</strong>
             <small>{copy?.path_ask_first}</small>
           </span>
         </label>
         <label className="flex items-start gap-2.5 tc-hairline-bottom py-2 tc-label font-normal">
           <Radio value="automatic" disabled={busy || !copy} />
           <span>
-            <strong>Contribute automatically</strong>
+            <strong>{modes?.auto_upload}</strong>
             <small>{copy?.path_automatic}</small>
           </span>
         </label>

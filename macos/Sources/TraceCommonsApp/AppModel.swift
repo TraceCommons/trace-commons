@@ -127,6 +127,39 @@ final class AppModel: ObservableObject {
         static let tickCeiling = 120
     }
 
+    @Published private(set) var contributionLine = PrivateInferenceCopy.decode(fromJSON: TCPrivateInference.copyJSON() ?? "")?.accountContributionRefresh ?? ""
+    @Published private(set) var contributionBusy = false
+    private var inviteAttempt: (code: String, key: String)?
+    func updateContributionAccount(inviteCode: String? = nil) async -> Bool {
+        guard let client, let scope = status.accountScope, !contributionBusy else { return false }
+        contributionBusy = true
+        contributionLine = privateInferenceCopy?.accountContributionChecking ?? ""
+        if let inviteCode, inviteAttempt?.code != inviteCode {
+            inviteAttempt = (inviteCode, UUID().uuidString)
+        }
+        let attempt = inviteAttempt
+        let outcome = await Task.detached(priority: .userInitiated) {
+            Result {
+                if let inviteCode, let attempt {
+                    return try client.redeemInvite(code: inviteCode, idempotencyKey: attempt.key, scope: scope)
+                }
+                return try client.contributionStatus(scope: scope)
+            }
+        }.value
+        contributionBusy = false
+        guard self.client === client, self.status.accountScope == scope, !Task.isCancelled else { return false }
+        switch outcome {
+        case .success(let account):
+            guard account.accountScope == scope else { return false }
+            contributionLine = account.line
+            if inviteCode != nil { inviteAttempt = nil }
+            return true
+        case .failure:
+            contributionLine = privateInferenceCopy?.accountContributionUnavailable ?? ""
+            return false
+        }
+    }
+
     @Published private(set) var startup: Startup = .starting
     @Published private(set) var isStartingDaemon = false
     private let daemonStartup: DaemonStartup
@@ -137,16 +170,20 @@ final class AppModel: ObservableObject {
         // not `PendingInvite.shared.value`. Delivered on the main actor:
         // `PendingInvite` is main-actor isolated.
         inviteLinks = PendingInvite.shared.$value.sink { [weak self] invite in
-            guard invite != nil else { return }
-            MainActor.assumeIsolated { self?.inviteLinkArrived() }
+            guard let invite else { return }
+            MainActor.assumeIsolated { self?.inviteLinkArrived(invite) }
         }
     }
     private var inviteLinks: AnyCancellable?
-    /// An invite link arrived before the config directory was known, so the
-    /// watch-only marker it takes back is cleared once it is.
-    private var inviteAwaitsConfigDirectory = false
+    /// An invite link that arrived before the config directory was known,
+    /// so the watch-only marker it takes back is cleared once it is.
+    private var inviteAwaitingConfigDirectory: String?
     @Published private(set) var status: DaemonStatus = .unknown {
         didSet {
+            if status.accountScope != oldValue.accountScope {
+                contributionLine = privateInferenceCopy?.accountContributionRefresh ?? ""
+                inviteAttempt = nil
+            }
             // Worded across the ABI once per notice the daemon sends, not on
             // every re-render of the card.
             if status.legacyInviteMigration != oldValue.legacyInviteMigration {
@@ -1079,9 +1116,9 @@ final class AppModel: ObservableObject {
     /// it.
     private(set) var configDirectory: String = "" {
         didSet {
-            guard inviteAwaitsConfigDirectory, !configDirectory.isEmpty else { return }
-            inviteAwaitsConfigDirectory = false
-            inviteLinkArrived()
+            guard let invite = inviteAwaitingConfigDirectory, !configDirectory.isEmpty else { return }
+            inviteAwaitingConfigDirectory = nil
+            inviteLinkArrived(invite)
         }
     }
 
@@ -2637,7 +2674,15 @@ final class AppModel: ObservableObject {
     @Published private(set) var publicRunWorking: Set<String> = []
     @Published var skillLearningStore = SkillLearningStore()
     private var accountOwnedContentScope: String?
+    /// Stamps each detail read in the order it started. Any number of rows
+    /// may be read at once, and each read lands for its own row; one row is
+    /// never read twice at once (`loadingSessionDetails`).
     private var sessionDetailRequestSequence: UInt64 = 0
+    /// The stamp of the newest read that decided the account content belongs
+    /// to: the one that set `accountOwnedContentScope`, or cleared it. A read
+    /// that started before it and answers for another account is stale
+    /// (#869): it neither replaces nor clears what that newer read decided.
+    private var sessionDetailScopeSequence: UInt64 = 0
     @Published private(set) var skillLearningCopy: SkillLearningCopy? = SkillLearningCopy.decode(
         fromJSON: TCSkillLearning.copyJSON() ?? ""
     )
@@ -2790,8 +2835,13 @@ final class AppModel: ObservableObject {
     /// public-run editor drawn from it, or the draft typed there. An account
     /// change still clears it (`clearAccountOwnedContent`).
     func loadSessionDetail(_ record: HistoryRecord) {
-        guard let client else { return }
         let id = record.submissionID
+        guard let client else {
+            // The core is down: say the read could not be made, with the
+            // core's line and Retry, rather than leave the detail empty.
+            sessionDetailErrors[id] = TCPublicRun.sessionDetailErrorLine(label: "daemon-unavailable")
+            return
+        }
         guard !loadingSessionDetails.contains(id) else { return }
         guard !publicRunWorking.contains(id) else { return }
         sessionDetailRequestSequence &+= 1
@@ -2802,17 +2852,29 @@ final class AppModel: ObservableObject {
             let result = Result { try client.sessionDetail(submissionID: id) }
             await MainActor.run {
                 self.loadingSessionDetails.remove(id)
-                guard requestSequence == self.sessionDetailRequestSequence else { return }
+                let superseded = requestSequence < self.sessionDetailScopeSequence
                 switch result {
                 case .success(let detail):
+                    if superseded, let scope = detail.ownerScopeSHA256, scope != self.accountOwnedContentScope {
+                        // Read under an account a newer read has replaced:
+                        // not shown, and the row says so, with Retry,
+                        // rather than drawing nothing.
+                        self.sessionDetailErrors[id] = TCPublicRun.sessionDetailErrorLine(label: "session-owner-changed")
+                        return
+                    }
+                    if detail.ownerScopeSHA256 != nil {
+                        self.sessionDetailScopeSequence = max(self.sessionDetailScopeSequence, requestSequence)
+                    }
                     self.reconcileAccountOwnedContent(scope: detail.ownerScopeSHA256)
                     self.sessionDetails[id] = detail
                 case .failure(let error):
                     let label = (error as? DaemonClient.Failure)?.message ?? ""
-                    if label == "account-session-required"
-                        || label == "session-detail-not-found"
-                        || label == "session-owner-changed"
+                    if !superseded,
+                        label == "account-session-required"
+                            || label == "session-detail-not-found"
+                            || label == "session-owner-changed"
                     {
+                        self.sessionDetailScopeSequence = requestSequence
                         self.clearAccountOwnedContent()
                     }
                     self.sessionDetailErrors[id] = TCPublicRun.sessionDetailErrorLine(label: label)
@@ -3248,6 +3310,55 @@ extension AppModel: FirstRunDaemon {
         return session.signedIn == true
     }
 
+    /// The near.ai login for a first run without an invite: done at once if
+    /// the daemon keeps a session, else the browser sign-in, waited on
+    /// until it ends (`NearAILoginPoll`). Called directly rather than
+    /// through `startNearAiCredential`, whose failure writes the Settings
+    /// notice; the first run says its own (`folders.sign_in_failed`).
+    func nearAILogin() async -> Bool {
+        guard let client else { return false }
+        let first = await Task.detached { try? client.nearAiCredentialStatus(attemptID: nil) }.value
+        if NearAILoginPoll.verdict(first) == .signedIn { return true }
+        let started = await Task.detached { try? client.nearAiCredentialStart() }.value
+        guard let attempt = started, let url = URL(string: attempt.browserURL) else { return false }
+        NSWorkspace.shared.open(url)
+        let deadline = Date().addingTimeInterval(NearAILoginPoll.limit)
+        while Date() < deadline, !Task.isCancelled {
+            try? await Task.sleep(for: .seconds(1))
+            guard self.client === client else { return false }
+            let status = await Task.detached { try? client.nearAiCredentialStatus(attemptID: attempt.attemptID) }.value
+            switch NearAILoginPoll.verdict(status) {
+            case .signedIn:
+                refreshNearAiCredential()
+                return true
+            case .ended:
+                refreshNearAiCredential()
+                return false
+            case .waiting:
+                continue
+            }
+        }
+        return false
+    }
+
+    /// Enroll through the near.ai login with no invite. The daemon's label
+    /// is passed back for the core's line, never shown.
+    func enrollNearAI() async -> FirstRunNearAIEnrolment {
+        guard let client else { return .refused(label: "near_ai_enroll_unavailable") }
+        let outcome = await Task.detached(priority: .userInitiated) { () -> FirstRunNearAIEnrolment in
+            do {
+                return try client.nearAiAccountEnroll().enrolled
+                    ? .enrolled : .refused(label: "near_ai_enroll_unavailable")
+            } catch let failure as DaemonClient.Failure {
+                return .refused(label: failure.message.isEmpty ? "near_ai_enroll_unavailable" : failure.message)
+            } catch {
+                return .refused(label: "near_ai_enroll_unavailable")
+            }
+        }.value
+        if outcome == .enrolled { refreshStatus() }
+        return outcome
+    }
+
     func saveConsentScopes(_ scopes: [String]) async -> Bool {
         let outcome = await setConsentScopes(scopes)
         if case .succeeded = outcome { return true }
@@ -3324,10 +3435,17 @@ extension AppModel: FirstRunDaemon {
     /// finished watcher could never join, since the first run is the only
     /// place a link is applied. An enrolled daemon's marker is the tenant's
     /// and is left alone. Announced, as `markWatchOnlyComplete` is.
-    func inviteLinkArrived() {
+    ///
+    /// Only an invite does this: a link carries any string, and the
+    /// coordinator discards one the core does not accept as an invite
+    /// (`OnboardingNavigation.receive`), so the same `TCInvite.issuerHost`
+    /// check runs here, and a finished watcher is not sent back to Join
+    /// with nothing to apply.
+    func inviteLinkArrived(_ invite: String) {
         guard !status.loggedIn else { return }
+        guard TCInvite.issuerHost(invite) != nil else { return }
         guard let key = Self.watchOnlyCompleteKey(configDirectory) else {
-            inviteAwaitsConfigDirectory = true
+            inviteAwaitingConfigDirectory = invite
             return
         }
         guard UserDefaults.standard.bool(forKey: key) else { return }

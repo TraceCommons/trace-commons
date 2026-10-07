@@ -1,6 +1,9 @@
 import { PageHeader } from "../../components/page-header";
 import { StatCard } from "../../components/stat-card";
-import { useContributorDisclosureCopy } from "../../lib/tauri/use-contributor-copy";
+import {
+  useContributorDisclosureCopy,
+  useShellStatusLines,
+} from "../../lib/tauri/use-contributor-copy";
 import { useSettings } from "../settings/public";
 import { HarnessListPanel } from "./components/harness-list";
 import { PrivateAiBalancePanel } from "./components/private-ai-balance-panel";
@@ -19,6 +22,7 @@ function text(
 }
 
 export function PrivateAiPage() {
+  const lines = useShellStatusLines();
   const settings = useSettings();
   const privateAi = usePrivateAi();
   const harnesses = useHarnesses();
@@ -49,7 +53,7 @@ export function PrivateAiPage() {
       </div>
       {settings.state === "error" && (
         <p className="tc-alert">
-          Private AI status unavailable. Start Tauri and refresh.
+          {lines.readUnavailable}
         </p>
       )}
       <HarnessListPanel
@@ -62,6 +66,7 @@ export function PrivateAiPage() {
         onPlan={harnesses.prepare}
         onCommit={harnesses.commit}
         onCancel={harnesses.cancel}
+        readUnavailable={lines.readUnavailable}
       />
       <PrivateAiConnectionPanel privateAi={privateAi} settings={settings} />
       <PrivateAiBalancePanel privateAi={privateAi} />

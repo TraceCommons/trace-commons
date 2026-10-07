@@ -428,6 +428,10 @@ fn load_session(path: &Path, cwd: Option<String>) -> anyhow::Result<SessionTrans
     let project = project_dir.and_then(|dir| project_label(dir, cwd.as_deref()));
 
     Ok(SessionTranscript {
+        source_session: super::native_session_identity(
+            SOURCE_GEMINI_CLI,
+            document.get("sessionId").and_then(|v| v.as_str()),
+        ),
         source: Cow::Borrowed(SOURCE_GEMINI_CLI),
         // Gemini's session document carries no CLI version field.
         agent_version: None,
@@ -721,6 +725,10 @@ mod tests {
         let t = source.load(&r).unwrap();
 
         assert_eq!(t.source, SOURCE_GEMINI_CLI);
+        assert_eq!(
+            t.source_session.as_ref().unwrap().native_id,
+            "11111111-1111-4111-8111-111111111111"
+        );
         assert_eq!(
             t.conversation_id.as_deref(),
             Some("11111111-1111-4111-8111-111111111111"),

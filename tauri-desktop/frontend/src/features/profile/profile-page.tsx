@@ -1,6 +1,7 @@
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useEffect, useState } from "react";
 import { FormProvider, useForm } from "react-hook-form";
+import { ContributionAccount } from "./components/contribution-account";
 import { ProfileEditor } from "./components/profile-editor";
 import { ProfileSummary } from "./components/profile-summary";
 import { PublicProfileConsent } from "./components/public-profile-consent";
@@ -61,6 +62,7 @@ export function ProfilePage({
           profile={publicProfile}
           profileState={publicProfileState}
         />
+        <ContributionAccount key={coreStatus?.daemon.account_scope ?? "scope-unavailable"} scope={coreStatus?.daemon.account_scope ?? null} />
         <ProfileEditor
           saved={saved}
           actionState={actions.state}

@@ -1,4 +1,7 @@
-import { useAutomaticGrantCopy } from "../../../lib/tauri/use-contributor-copy";
+import {
+  useAutomaticGrantCopy,
+  useContributorDisclosureCopy,
+} from "../../../lib/tauri/use-contributor-copy";
 import { useCoreStatus } from "../../../lib/tauri/use-core-status";
 import type { OnboardingStepProps } from "./onboarding-step-types";
 import { GlassButton } from "@/design-system";
@@ -14,7 +17,12 @@ export function OnboardingGrantStep({
 }: Pick<OnboardingStepProps, "onboarding" | "busy">) {
   const core = useCoreStatus();
   const grantCopy = useAutomaticGrantCopy(core.scope, core.isSuccess);
-  const copy = grantCopy.data;
+  // The two buttons name the folder modes they lead to, by their one name
+  // (`folder_mode_labels`); the grant is not offered before those arrive.
+  const disclosure = useContributorDisclosureCopy();
+  const modes = disclosure.data?.folder_mode_labels;
+  const copy = modes ? grantCopy.data : undefined;
+  const copyFailed = grantCopy.isError || disclosure.isError;
   const blocked = onboarding.grantBlockers.length > 0;
   return (
     <section className="tc-card mb-2.5">
@@ -29,10 +37,10 @@ export function OnboardingGrantStep({
         </div>
       ) : (
         <p
-          className={`m-0 text-[12px] ${grantCopy.isError ? "text-tc-outside" : "text-tc-secondary"}`}
-          role={grantCopy.isError ? "alert" : "status"}
+          className={`m-0 text-[12px] ${copyFailed ? "text-tc-outside" : "text-tc-secondary"}`}
+          role={copyFailed ? "alert" : "status"}
         >
-          {grantCopy.isError
+          {copyFailed
             ? "The disclosure could not be loaded. The grant is disabled."
             : "Loading disclosure…"}
         </p>
@@ -48,9 +56,9 @@ export function OnboardingGrantStep({
         <GlassButton
           type="button"
           onClick={onboarding.skipGrant}
-          disabled={busy}
+          disabled={busy || !modes}
         >
-          Ask me each time instead
+          {modes?.notify_only}
         </GlassButton>
         <GlassButton
           type="button"
@@ -59,7 +67,7 @@ export function OnboardingGrantStep({
         >
           {onboarding.grantMutation.isPending
             ? "Turning on…"
-            : "Contribute automatically"}
+            : modes?.auto_upload}
         </GlassButton>
       </div>
     </section>

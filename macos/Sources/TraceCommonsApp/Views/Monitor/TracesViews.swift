@@ -153,8 +153,8 @@ struct TracesTreeView: View {
             return GlassConfirmation(
                 title: pending.title, message: pending.body,
                 actions: [
-                    // The system's word, as the Waiting screen's ignore uses.
-                    .cancel("Cancel", action: cancel),
+                    // #1146's "Keep project", from the core.
+                    .cancel(copy.keep, action: cancel),
                     .destructive(copy.button) { apply(pending.folder, pending.mode) },
                 ],
                 onCancel: cancel)

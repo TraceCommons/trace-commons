@@ -93,8 +93,44 @@ final class DaemonClient {
         try call("near_ai_account_enroll", params: ["ingest_url": commons], as: NearAiEnrollment.self)
     }
 
+    /// The same, naming no commons: the daemon enrolls against the native
+    /// account's commons (the first run's near.ai sign-in without an
+    /// invite).
+    func nearAiAccountEnroll() throws -> NearAiEnrollment {
+        try call("near_ai_account_enroll", as: NearAiEnrollment.self)
+    }
+
     func prepareAdmissionSession(entryID: String, backend: String) throws -> AdmissionPreparation {
         try call("prepare_admission_session", params: ["entry_id": entryID, "backend": backend, "confirmed": true], as: AdmissionPreparation.self)
+    }
+
+    struct ContributionAccount: Decodable {
+        struct Status: Decodable {
+            let authority: String
+            let ready: Bool
+            let policyVersion: String?
+            let refusalLabel: String?
+            let retryAfterSeconds: Int?
+            private enum CodingKeys: String, CodingKey {
+                case authority, ready
+                case policyVersion = "policy_version"
+                case refusalLabel = "refusal_label"
+                case retryAfterSeconds = "retry_after_seconds"
+            }
+        }
+        let status: Status
+        let line: String
+        let accountScope: String
+        private enum CodingKeys: String, CodingKey {
+            case status, line
+            case accountScope = "account_scope"
+        }
+    }
+    func contributionStatus(scope: String) throws -> ContributionAccount {
+        try call("account_contribution_status", params: ["account_scope":scope], as: ContributionAccount.self)
+    }
+    func redeemInvite(code: String, idempotencyKey: String, scope: String) throws -> ContributionAccount {
+        try call("account_invite_redeem", params: ["invite_code": code, "idempotency_key": idempotencyKey, "account_scope":scope], as: ContributionAccount.self)
     }
 
     func status() throws -> DaemonStatus {

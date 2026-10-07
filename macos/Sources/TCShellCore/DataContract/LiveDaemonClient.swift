@@ -18,9 +18,11 @@ public protocol DaemonTransport: AnyObject {
 /// included: `tc_call` answers through `ipc::handle_local`, which runs the
 /// async dispatcher (`handle_request_async`), and that serves it. The
 /// `*-requires-async` refusals belong to the synchronous `handle_request`
-/// path only, which `tc_call` does not use. The PROVISIONAL network methods
-/// (Zaki's C3) throw `notAvailableYet` until their IPC lands, and send
-/// nothing.
+/// path only, which `tc_call` does not use. The network methods (C3, #1187)
+/// are routed too. Only the two PROVISIONAL methods the screens still read,
+/// `inferenceSummary()` and `missionCatalogue()`, throw `notAvailableYet`
+/// and send nothing: the daemon's real reply has a different shape, served
+/// by `networkInferenceSummary()` and `networkMissionCatalogue(limit:before:)`.
 ///
 /// Every call runs on `workQueue`, never on the caller's thread. The C ABI
 /// blocks for as long as the daemon takes (a preview is a redaction pass),
@@ -237,34 +239,74 @@ public final class LiveDaemonClient: DaemonDataClient, @unchecked Sendable {
         return try await call("inference_calls", params: params, as: DaemonData.InferenceCallPage.self)
     }
 
-    // MARK: PROVISIONAL network methods (Zaki's C3): not on main yet
+    // MARK: Network methods (C3, #1187)
+
+    public func networkInferenceSummary() async throws -> DaemonData.NetworkInferenceSummary {
+        try await call("inference_summary", as: DaemonData.NetworkInferenceSummary.self)
+    }
+
+    public func inferenceCallProof(callId: Int64) async throws -> DaemonData.InferenceProofDetail {
+        try await call("inference_call_proof", params: ["call_id": callId], as: DaemonData.InferenceProofDetail.self)
+    }
+
+    public func modelSpend() async throws -> DaemonData.ModelSpend {
+        try await call("model_spend", as: DaemonData.ModelSpend.self)
+    }
+
+    public func networkPrivateAI() async throws -> DaemonData.NetworkPrivateAISwitch {
+        try await call("private_ai", as: DaemonData.NetworkPrivateAISwitch.self)
+    }
+
+    public func setNetworkPrivateAI(on: Bool, consent: DaemonData.PrivateAIConsent?) async throws
+        -> DaemonData.NetworkPrivateAISwitch
+    {
+        // Refused here, before `tc_call`: an enable with no consent never
+        // reaches the daemon. The label is the daemon's own refusal.
+        guard !on || consent != nil else {
+            throw DaemonDataError.daemon(code: "bad_params", message: "confirmation-required")
+        }
+        return try await call(
+            "set_private_ai", params: ["on": on, "confirmed": consent != nil],
+            as: DaemonData.NetworkPrivateAISwitch.self)
+    }
+
+    public func networkMissionCatalogue(limit: Int?, before: String?) async throws
+        -> DaemonData.NetworkMissionCatalogue
+    {
+        var params: [String: Any] = [:]
+        if let limit { params["limit"] = limit }
+        if let before { params["before"] = before }
+        return try await call("mission_catalogue", params: params, as: DaemonData.NetworkMissionCatalogue.self)
+    }
+
+    public func lookupInvite(code: String) async throws -> DaemonData.InviteLookup {
+        try await call("invite_lookup", params: ["code": code], as: DaemonData.InviteLookup.self)
+    }
+
+    public func passkeyState() async throws -> DaemonData.PasskeyState {
+        try await call("passkey_state", as: DaemonData.PasskeyState.self)
+    }
+
+    public func accountState() async throws -> DaemonData.AccountState {
+        try await call("account_session_status", as: DaemonData.AccountState.self)
+    }
+
+    public func activityMissionsCatalogue() async throws -> DaemonData.ActivityMissionsCatalogue {
+        try await call("activity_missions_catalogue", as: DaemonData.ActivityMissionsCatalogue.self)
+    }
+
+    public func activityMissionsStatus() async throws -> DaemonData.ActivityMissionsStatus {
+        try await call("activity_missions_status", as: DaemonData.ActivityMissionsStatus.self)
+    }
+
+    // MARK: PROVISIONAL shapes the screens still read
 
     public func inferenceSummary() async throws -> DaemonData.InferenceSummary {
         throw DaemonDataError.notAvailableYet(method: "inference_summary")
     }
 
-    public func inferenceCallProof(callId: Int64) async throws -> DaemonData.InferenceProofDetail {
-        throw DaemonDataError.notAvailableYet(method: "inference_call_proof")
-    }
-
-    public func modelSpend() async throws -> DaemonData.ModelSpend {
-        throw DaemonDataError.notAvailableYet(method: "model_spend")
-    }
-
     public func missionCatalogue() async throws -> DaemonData.MissionCatalogue {
         throw DaemonDataError.notAvailableYet(method: "mission_catalogue")
-    }
-
-    public func lookupInvite(code: String) async throws -> DaemonData.InviteLookup {
-        throw DaemonDataError.notAvailableYet(method: "invite_lookup")
-    }
-
-    public func passkeyState() async throws -> DaemonData.PasskeyState {
-        throw DaemonDataError.notAvailableYet(method: "passkey_state")
-    }
-
-    public func accountState() async throws -> DaemonData.AccountState {
-        throw DaemonDataError.notAvailableYet(method: "account_session_status")
     }
 
     // MARK: Live updates

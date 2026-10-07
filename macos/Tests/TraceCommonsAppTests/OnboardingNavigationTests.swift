@@ -58,7 +58,7 @@ final class OnboardingNavigationTests: XCTestCase {
         XCTAssertEqual(JoinScreenLayout.footerTitle(state, copy: copy), copy.frame.continueButton)
         XCTAssertNotEqual(JoinScreenLayout.footerTitle(state, copy: copy), copy.join.skip)
         XCTAssertNil(JoinScreenLayout.footerNote(state, copy: copy))
-        XCTAssertTrue(FirstRunNavigation.canChooseAutomatic(state.account))
+        XCTAssertTrue(FirstRunNavigation.canChooseAutomatic(state))
 
         state = JoinScreenLayout.forward(state)
         XCTAssertEqual(state.account, .enrolled, "Continue keeps the account")

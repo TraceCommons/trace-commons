@@ -23,6 +23,8 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
         public let sessionCount: String
         /// Takes back a choice not yet acted on.
         public let undo: String
+        /// What an unanswered picker reads (Ron's `Picker` placeholder).
+        public let choose: String
     }
 
     public struct Join: Decodable, Equatable, Sendable {
@@ -55,10 +57,10 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
         public let nearAiSignIn: String
         /// near.ai chosen, signed in once the daemon starts.
         public let nearAiChosen: String
-        /// near.ai waits for an invite to sign in to.
-        public let nearAiNeedsInvite: String
         /// An invite and a new passkey are not combined.
         public let inviteOrPasskey: String
+        /// An invite host or pay range not known, in place of a dash.
+        public let unknown: String
         public let signedIn: String
         public let noSharing: String
         public let skipNote: String
@@ -112,6 +114,8 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
         public let lookupUnavailable: String
         /// The near.ai sign-in did not finish.
         public let signInFailed: String
+        /// A changed folder declaration the running daemon refused.
+        public let settingsFailed: String
     }
 
     public struct Tools: Decodable, Equatable, Sendable {
@@ -125,6 +129,10 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
         public let whichKind: String
         /// A folder of exported traces, as an option and as its row's name.
         public let trajectoryLabel: String
+        /// The ambiguous folder's last option: neither kind.
+        public let neither: String
+        /// `{tool}`: a tool watched in two rows.
+        public let oneFolderPerTool: String
     }
 
     public struct Rules: Decodable, Equatable, Sendable {
@@ -151,8 +159,21 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
         public let neverLabel: String
         /// The folders could not be read.
         public let unavailable: String
+        /// Reads the folders again after `unavailable`.
+        public let retry: String
         /// One folder's past sessions could not be read.
         public let sessionsUnavailable: String
+        /// Watching only: picked past sessions wait on this Mac.
+        public let pastSessionsWatchOnly: String
+        /// A session's weekday names, Sunday first, and month names,
+        /// January first.
+        public let weekdays: [String]
+        public let months: [String]
+        /// `{weekday}`, `{day}`, `{month}`.
+        public let sessionDate: String
+        /// `{minutes}`; then `{hours}` and `{minutes}`.
+        public let durationMinutes: String
+        public let durationHours: String
     }
 
     public struct Uses: Decodable, Equatable, Sendable {
@@ -206,6 +227,10 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
         public let otherOptions: String
         /// A refused ceremony; its label is never shown.
         public let refused: String
+        /// An existing passkey's account is a legacy one; signed out.
+        public let boundElsewhere: String
+        /// This Mac's near.ai sign-in is not the passkey account's; signed out.
+        public let nearAiMismatch: String
     }
 
     public struct PrivateAi: Decodable, Equatable, Sendable {

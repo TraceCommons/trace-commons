@@ -15,7 +15,8 @@ import TCShellCore
 /// legacy screen.
 enum SettingsContent {
     static let consentHeading = "How may your traces be used?"
-    static let auditHeading = "What has been changed on this machine"
+    /// #1146's `sections.ts` word, from the core (owner ruling, 2026-10-06).
+    static var auditHeading: String { MonitorWords.table?.shell.changesHeading ?? "" }
 
     /// Fixed action labels to sentences. The wording is the Linux shell's
     /// `audit_sentence`, verbatim, including its catch-all: an action this
@@ -59,7 +60,7 @@ enum SettingsLegacyWords {
     static func stateLabel(_ title: String, _ value: Bool) -> String {
         "\(title): \(value ? "yes" : "no")"
     }
-    static let startAtLogin = "Start Trace Commons when you log in"
+    static var startAtLogin: String { MonitorWords.table?.shell.startAtLogin ?? "" }
     static let waitingOnApproval = "Waiting on approval in System Settings."
     static let turnOnInSystemSettings = """
         Turn it on in System Settings -> General -> Login Items to let \
@@ -114,7 +115,7 @@ enum SettingsLegacyWords {
     ]
     static let doNotTrustProfileWording = "Do not trust the public-profile wording on this screen."
     static let auditHeading = SettingsContent.auditHeading
-    static let noProjectsYet = "No projects seen yet."
+    static var noProjectsYet: String { MonitorWords.table?.shell.projectsEmpty ?? "" }
     static let nothingChanged = "Nothing has been changed."
     static func auditSentence(_ action: String, project: String?) -> String {
         SettingsContent.auditSentence(action, project: project)

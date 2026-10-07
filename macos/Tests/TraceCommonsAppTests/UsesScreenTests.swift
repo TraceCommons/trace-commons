@@ -29,11 +29,11 @@ final class UsesScreenTests: XCTestCase {
     /// `consent_options` as the daemon answers it: the floor first, three
     /// data uses, then the handle, which grants no data use.
     private let options = [
-        ConsentScope(name: "debugging_evaluation", description: "d", alwaysOn: true, grantsDataUse: true),
-        ConsentScope(name: "benchmark_only", description: "b", alwaysOn: false, grantsDataUse: true),
-        ConsentScope(name: "ranking_training", description: "r", alwaysOn: false, grantsDataUse: true),
-        ConsentScope(name: "model_training", description: "m", alwaysOn: false, grantsDataUse: true),
-        ConsentScope(name: "public_attribution", description: "p", alwaysOn: false, grantsDataUse: false),
+        ConsentScope(name: "debugging_evaluation", title: "debugging_evaluation", description: "d", alwaysOn: true, grantsDataUse: true),
+        ConsentScope(name: "benchmark_only", title: "benchmark_only", description: "b", alwaysOn: false, grantsDataUse: true),
+        ConsentScope(name: "ranking_training", title: "ranking_training", description: "r", alwaysOn: false, grantsDataUse: true),
+        ConsentScope(name: "model_training", title: "model_training", description: "m", alwaysOn: false, grantsDataUse: true),
+        ConsentScope(name: "public_attribution", title: "public_attribution", description: "p", alwaysOn: false, grantsDataUse: false),
     ]
 
     private static func source() throws -> String {
@@ -57,10 +57,10 @@ final class UsesScreenTests: XCTestCase {
         XCTAssertTrue(fresh.scopes.isEmpty)
         XCTAssertFalse(UsesScreenLayout.isTicked("debugging_evaluation", in: fresh))
 
-        // The row carries Ron's "required" tag, and nothing in the screen
+        // The row carries Ron's inline "required", and nothing in the screen
         // ticks a scope except the person's own toggle.
         let source = try Self.source()
-        XCTAssertTrue(source.contains("GlassTag(copy.uses.required"))
+        XCTAssertTrue(source.contains("Text(copy.uses.required)"))
         XCTAssertEqual(source.components(separatedBy: "scopes.insert(").count - 1, 1)
         XCTAssertFalse(source.contains("scopes = "))
 
@@ -76,10 +76,28 @@ final class UsesScreenTests: XCTestCase {
         XCTAssertEqual(UsesScreenLayout.group([], optional: UsesScreenLayout.optionalScopes(options)), .none)
     }
 
+    /// Ron's review of #1235, item 2: "List my handle publicly as a
+    /// contributor" is its own row after the optional group, shown whether
+    /// or not the group is open.
+    func test_theHandleRowIsAlwaysShownAfterTheOptionalGroup() throws {
+        XCTAssertEqual(
+            UsesScreenLayout.expandedScopes(options).map(\.name),
+            ["benchmark_only", "ranking_training", "model_training"])
+        XCTAssertEqual(
+            UsesScreenLayout.visibleScopes(options, optionalOpen: false).map(\.name),
+            ["debugging_evaluation", "public_attribution"])
+        XCTAssertEqual(
+            UsesScreenLayout.visibleScopes(options, optionalOpen: true).map(\.name),
+            ["debugging_evaluation", "benchmark_only", "ranking_training", "model_training", "public_attribution"])
+        let source = try Self.source()
+        XCTAssertTrue(source.contains("UsesScreenLayout.expandedScopes(options)"))
+        XCTAssertFalse(source.contains("optional + UsesScreenLayout.handleScopes(options)"))
+    }
+
     func test_startIsDisabledUntilTheRequiredUseIsTicked() throws {
         let grant = try grant()
         let uses = try copy().uses
-        var state = FirstRunState(tier: .quick, step: .uses, account: .nearAI)
+        var state = FirstRunState(tier: .quick, step: .uses, account: .nearAI, enrolledInvite: "INVITE-1")
         let required = UsesScreenLayout.requiredScope(options)
         XCTAssertFalse(UsesScreenLayout.canStart(state, uses: uses, requiredScope: required, grant: grant, isCommitting: false))
 
@@ -121,7 +139,8 @@ final class UsesScreenTests: XCTestCase {
     func test_startIsDisabledWheneverTheSharingLineIsTheFallback() throws {
         let uses = try copy().uses
         let required = UsesScreenLayout.requiredScope(options)
-        var state = FirstRunState(tier: .quick, step: .uses, account: .nearAI, scopes: ["debugging_evaluation"])
+        var state = FirstRunState(
+            tier: .quick, step: .uses, account: .nearAI, scopes: ["debugging_evaluation"], enrolledInvite: "INVITE-1")
 
         let noAskFirst = try grant(without: "path_ask_first")
         XCTAssertEqual(
@@ -158,10 +177,12 @@ final class UsesScreenTests: XCTestCase {
         XCTAssertEqual(UsesScreenLayout.sharingLine(uses, path: .automatic, grant: nil), uses.sharingUnavailable)
 
         let modes = try modes()
-        let full = UsesScreenLayout.sharingOptions(for: .nearAI, modes: modes)
-        XCTAssertEqual(full.map(\.value), [.askMe, .automatic])
-        XCTAssertEqual(full.map(\.title), [modes.label(for: .ask), modes.label(for: .autoUpload)])
-        XCTAssertEqual(UsesScreenLayout.sharingOptions(for: .watchOnly, modes: modes).map(\.value), [.askMe])
+        let joined = FirstRunState(tier: .quick, step: .uses, account: .nearAI, enrolledInvite: "INVITE-1")
+        let full = UsesScreenLayout.sharingOptions(for: joined, modes: modes)
+        // Ron's #1030 order: Automatic first, then Ask me.
+        XCTAssertEqual(full.map(\.value), [.automatic, .askMe])
+        XCTAssertEqual(full.map(\.title), [modes.label(for: .autoUpload), modes.label(for: .ask)])
+        XCTAssertEqual(UsesScreenLayout.sharingOptions(for: FirstRunState(account: .watchOnly), modes: modes).map(\.value), [.askMe])
     }
 
     func test_privateAIAppearsOnlyInCustom() throws {
@@ -287,7 +308,8 @@ final class UsesScreenTests: XCTestCase {
         XCTAssertEqual(
             UsesScreenLayout.sharingLine(uses, path: UsesScreenLayout.effectiveSharing(watching), grant: grant),
             grant.pathAskFirst)
-        let joined = FirstRunState(tier: .quick, step: .uses, account: .nearAI, sharing: .automatic)
+        let joined = FirstRunState(
+            tier: .quick, step: .uses, account: .nearAI, sharing: .automatic, enrolledInvite: "INVITE-1")
         XCTAssertEqual(UsesScreenLayout.effectiveSharing(joined), .automatic)
 
         let source = try Self.source()
@@ -476,6 +498,8 @@ private final class StartDaemon: FirstRunDaemon {
     }
     func enrollInvite(_ invite: String) async -> Bool { log.append(.enroll(invite)); return true }
     func signInNearAI() async -> Bool { log.append(.signInNearAI); return true }
+    func nearAILogin() async -> Bool { log.append(.nearAILogin); return true }
+    func enrollNearAI() async -> FirstRunNearAIEnrolment { log.append(.enrollNearAI); return .enrolled }
     func saveConsentScopes(_ scopes: [String]) async -> Bool { log.append(.setConsentScopes(scopes)); return true }
     func setProjectMode(projectID: String, mode: ProjectMode) async -> Bool {
         log.append(.setProjectMode(projectID: projectID, mode))

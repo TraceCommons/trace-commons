@@ -395,7 +395,7 @@ final class InferenceParityTests: XCTestCase {
     func test_theMainPaneCarriesTheAccountTheSwitchAndTheTools() throws {
         let views = try Self.text("Views/Monitor/InferenceViews.swift")
         XCTAssertTrue(views.contains("InferenceAccountSection(store: store)"))
-        for needle in ["case .needsRoots", "OnboardingCoordinatorView(startAt: .folders, takesInvites: false, offersJoin: false", "case .refused(let",
+        for needle in ["case .needsRoots", "OnboardingCoordinatorView(startAt: .folders, takesInvites: false, onComplete: {})", "case .refused(let",
                        "GlassHealthBanner(banner:", "model.refreshAll()"] {
             XCTAssertTrue(views.contains(needle), "InferenceViews.swift lacks \(needle)")
         }
@@ -461,7 +461,10 @@ final class InferenceParityTests: XCTestCase {
         for needle in ["        VStack(alignment: .leading, spacing: 0) {\n"
                            + "            switch model.startup {\n"
                            + "            case .needsRoots:\n"
-                           + "                OnboardingCoordinatorView(startAt: .folders, takesInvites: false, offersJoin: false, onComplete: {})\n"
+                           + "                // Ron's 450pt first-run pane, centred, not the window's width.\n"
+                           + "                OnboardingCoordinatorView(startAt: .folders, takesInvites: false, onComplete: {})\n"
+                           + "                    .frame(width: FirstRunProgress.paneWidth)\n"
+                           + "                    .frame(maxWidth: .infinity)\n"
                            + "            case .starting:\n"
                            + "                SettingsAwaiting().frame(maxWidth: .infinity)\n"
                            + "            case .refused(let sentence):\n"

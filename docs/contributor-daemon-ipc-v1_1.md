@@ -585,7 +585,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `quiesce` | `timeout_secs` (optional, default 60, max 300) | `quiesced: true`, `waited_ms` | parks uploads for an update swap; `busy` / `quiesce-timeout` if in-flight work does not finish in time |
 | `get_settings` | — | settings; credential presence as booleans, source declarations as `*_source_mode` (`unset`/`off`/`watch`), never local paths | |
 | `set_settings` | any of `quiescence_secs`, `digest_interval_secs`, `digest_schedule`, `approval_hold_secs`, `local_notifications`, `claude_root`, `codex_root`, `claude_source`, `codex_source`, `gemini_source`, `cline_source`, `opencode_source`, `trajectory_source`, `ironwire`, `ironwire_attested_bodies`, `token_distributions_contribution`, `token_capture_enabled`, `private_inference`, `private_inference_offer_seen`, `scrub_check`, `max_uploads_per_day`, `max_bytes_per_day` | updated settings | see "`set_settings`" below |
-| `consent_options` | — | `scopes[]` of `{name, description, always_on, grants_data_use}` | |
+| `consent_options` | — | `scopes[]` of `{name, title, description, always_on, grants_data_use}` | |
 | `set_consent_scopes` | `scopes[]` (wire-name strings; omitted means floor scope only) | `consent_scopes[]` | requires an existing enrollment |
 | `enroll` | `grant` xor `invite`, `scopes[]` (optional) | `enrolled: bool`, and on success `tenant_id`, `device_key_id`, `consent_scopes[]` | performs real network I/O |
 | `acknowledge_grant_voids` | `ids[]` (**required**) | `acknowledged: <count>` | records that the void notices with these ids were shown; see "Void notices" below |
@@ -664,7 +664,7 @@ consequence, and an action label where there is a real recovery step -- are
 `health_copy::health_copy_for_label`, across the C ABI as `tc_health_copy_json`
 (R6/R7, #1173). Pass `reachable: 0` instead of a label when the daemon
 cannot be reached at all; that returns the separate core-down sentence
-(`health_copy::core_down_copy`, **DRAFT, NEEDS APPROVAL** -- no shell has
+(`health_copy::core_down_copy`, approved 2026-10-06 -- no shell had
 shown a contributor-facing sentence for a fully unreachable daemon before).
 `reachable` is never derived from this call: it is the caller's own
 liveness fact, from whatever probe or IPC failure told it the daemon is
@@ -1194,17 +1194,17 @@ in additive fields on every queue entry (`list_pending`, `snapshot`, the
 | `content_marks` | **only when `scrubbed`** | `marks` without the path family (`local_path`). |
 | `unsure_spans` | **only when `scrubbed`** | how many spans `preview_unsure_spans` would report for that build's body. |
 | `second_look` | always, possibly empty | fixed reasons, in this order: `nothing-matched`, `looks-unsure`, `trimmed-to-fit` |
-| `second_look_lines` | always, possibly empty (R6/R7, #1173; **DRAFT, NEEDS APPROVAL**) | `second_look`'s reasons, in the same order, each already turned into the sentence a person reads for it (`preview_copy::second_look_line`) |
+| `second_look_lines` | always, possibly empty (R6/R7, #1173; approved 2026-10-06) | `second_look`'s reasons, in the same order, each already turned into the sentence a person reads for it (`preview_copy::second_look_line`) |
 
 `second_look_lines` exists so a card or the review sheet can render the
 explanation without separately asking `tc_second_look_line_text` for each
 reason; it is the same table, inlined. It is exactly as long as
 `second_look` and lines up with it index for index -- never reordered,
 never deduplicated, and never shorter: a reason this build has no sentence
-for gets a generic fallback line rather than being dropped. **DRAFT, NEEDS APPROVAL** because the sentences it
-quotes (`preview_copy::second_look_line`) are themselves unapproved spec
-wording; a client that renders it should expect the words, not the
-presence or absence of the field, to still change.
+for gets a generic fallback line rather than being dropped. The sentences it
+quotes (`preview_copy::second_look_line`) were approved 2026-10-06; a
+client that renders it should expect the words, not the presence or
+absence of the field, to still change.
 
 The reasons:
 
@@ -1935,8 +1935,13 @@ checks what the pill shows: the override's own mode while one is in force,
 otherwise the roll-up (the Mixed row only for `mixed`), and nothing while the
 status is unread or the daemon is down. `tc_contribution_override_confirm_json(mode, config_dir)` is each
 confirmation; for `auto_upload` it carries `arming`, the Flow 1 grant
-screens' disclosure table for the configuration in `config_dir`. Every new
-sentence is DRAFT, NEEDS APPROVAL (`project_copy.rs`).
+screens' disclosure table for the configuration in `config_dir`. For
+`mode` `"clear"` it returns the confirmation a shell shows before
+`clear_contribution_override` when any folder's own setting is Automatic, or
+when the folder list or a folder's own setting is unknown: its `mode` is
+`"clear"` (never a `ProjectMode`, never sent to `set_contribution_override`)
+and it carries no `arming`. Every sentence was approved 2026-10-06
+(`project_copy.rs`).
 
 ### `preview_body`
 
@@ -2144,8 +2149,8 @@ never dropped -- and a test fails the build on any such key. Labels, never
 values.
 
 `would_send_bytes` is the envelope's size, `preview`'s figure; `turn_count`
-equals the method's own. `line` is the finished sentence (**DRAFT, NEEDS
-APPROVAL**), absent only if the envelope could not be measured.
+equals the method's own. `line` is the finished sentence (approved
+2026-10-06), absent only if the envelope could not be measured.
 
 **What the line promises about the folder is only what is true.** Only
 absolute paths are scrubbed out of the conversation, so a relative path
@@ -2522,7 +2527,7 @@ is contributed through one of the existing paths.
 **The disclosure (M4).** `tc_missions_disclosure_copy_json` returns the
 words shown the first time Missions is opened and in Settings
 (`consent_copy::missions_disclosure_copy`): `{title, matching, nothing_sent,
-credit}`. DRAFT, NEEDS APPROVAL.
+credit}`. Approved 2026-10-06.
 
 ### View menu: Group by and Sort by (K15)
 
@@ -4690,7 +4695,7 @@ the sessions where nothing matched, something looks unsure, or it was trimmed
 to fit. An explicit `"manual"` is kept across restarts and upgrades; only an
 unset value becomes `automatic`. `null` cannot be set: it is not a mode, and
 a caller that means the default sends `"automatic"`. A shell renders the choice with
-`consent_copy::SCRUB_CHECK_*` (DRAFT, NEEDS APPROVAL), whose Automatic
+`consent_copy::SCRUB_CHECK_*` (approved 2026-10-06), whose Automatic
 sentence says the check only counts what was removed and does not check that
 the scrubbing was right: it is not a model or quality check (the
 connect-and-forget design's R1).
@@ -4991,8 +4996,8 @@ guessed one.
 ```json
 {
   "scopes": [
-    { "name": "debugging_evaluation", "description": "…", "always_on": true, "grants_data_use": true },
-    { "name": "public_attribution", "description": "…", "always_on": false, "grants_data_use": false }
+    { "name": "debugging_evaluation", "title": "…", "description": "…", "always_on": true, "grants_data_use": true },
+    { "name": "public_attribution", "title": "…", "description": "…", "always_on": false, "grants_data_use": false }
   ]
 }
 ```
@@ -5001,6 +5006,12 @@ guessed one.
 contributor implicitly grants. `grants_data_use` is `false` for scopes (such
 as `public_attribution`) that carry no data-use grant of their own -- do not
 present those beside real data-use scopes with equal visual weight.
+
+`title` is the scope's short bold label (owner ruling, 2026-10-06). Every
+shell draws it as given and keeps no table of its own; it is never the wire
+name with its underscores replaced. A shell that receives a scope without a
+`title` fails closed: macOS, GTK and Windows refuse the list (or the row),
+so nothing is offered under words the core did not supply.
 
 ### `set_consent_scopes`
 
@@ -6096,7 +6107,7 @@ key, tenant identity or secret-store reference.
 | `passkey_cancel` | `ceremony` | `{cancelled:true}` |
 | `account_bind` | none | `{outcome,binding_state}` |
 | `account_binding` | none | `{binding_state}` |
-| `passkey_state` | none | `{state,passkey_count,near_ai_connected}` |
+| `passkey_state` | none | `{state,passkey_count,remembered_name,signed_in_name,near_ai_connected}` |
 | `account_sign_in` | `ingest_url?` | `{signed_in:true,expires_at}` |
 | `account_session_status` | none | `{state,signed_in,expires_at}` |
 | `account_sign_out` | none | `{signed_out:true}` |
@@ -6162,10 +6173,42 @@ complete result: `{"binding_state":"unbound"}`. Binding read values are
 `unbound|bound|closed|legacy`; `legacy` means no passkey-origin binding row,
 not proof of a NEAR AI connection. A signed-out binding read is unavailable,
 not `unbound`. `passkey_state.state` projects those labels, or `none` when
-signed out and `unknown` when unreadable. `passkey_count` is nullable until
-an authenticated source answers; `near_ai_connected` is nullable unless an
-authenticated identity fact establishes it. Never infer a count of zero or
-connected status from a missing binding row.
+signed out and `unknown` when unreadable. `near_ai_connected` is nullable
+unless an authenticated identity fact establishes it. Never infer connected
+status from a missing binding row.
+
+`passkey_count` and `remembered_name` are local facts, answered in every
+`state` including `none` and `unknown`: the passkeys **this Mac remembers**,
+not the account's passkeys on the server. The server cannot list an account's
+passkeys before authentication without telling anyone who asks whether the
+account exists, so the daemon keeps its own list (`remembered-passkeys.json`
+in the state directory, 0600): a record is written when a passkey is created,
+added, or used to sign in here, and holds the passkey's display name when this
+Mac learned one, the SHA-256 of the account id (for matching a later sign-in;
+never sent over IPC), and when it was last used. No credential material, no
+token, no credential id. At most four records are kept, most recent first.
+`passkey_count` is how many; `0` means none remembered here, not that the
+account has none. `remembered_name` is the most recent record's name, or null
+when it has none (a passkey first used here by signing in: the login answer
+carries no name). Both are null when the list cannot be read. Signing out
+keeps the list, since a returning person after sign-out is who the first
+run's "Welcome back" greets; removing this Mac's contributor state (`wipe`,
+the CLI's `logout`) clears it. Added in v1.1 additively; older shells ignore
+`remembered_name`.
+
+`signed_in_name` is the name this Mac remembers for the **signed-in
+account's own record**, matched by the session's account id (hashed, as the
+record is), never the most recent record's: after a sign-in, the most recent
+record may belong to another account, and its name is not this one's. It is
+null when no account session is held or the session cannot be read, when
+this Mac has no record for that account, when that record has no name (a
+passkey first used here by signing in), or when the list cannot be read. A
+local fact like the other two, it is answered in every `state`, including
+`unknown`. The first run reads it once a passkey sign-in has finished, to
+name the passkey on Join's card; it never reads `remembered_name` for that,
+since the person may have picked another account's passkey in the system
+sheet. Added in v1.1 additively; older shells ignore it, and a shell
+reading an older daemon finds it absent and shows no name.
 
 Native login is discoverable authentication: `user_handle` must contain the
 nonempty raw Apple user ID encoded as canonical base64url. A missing or empty
@@ -6191,7 +6234,23 @@ uses the existing URL validation/opening controls.
 bind start/finish routes and the **bind-specific** proof preimage. SAMPLE
 result: `{"outcome":"bound","binding_state":"bound"}`. An
 `existing_account` outcome switches to the existing account and closes the
-unbound account; its passkey is not transferred (S6 fold is deferred). Tokens,
+unbound account; its passkey is not transferred (S6 fold is deferred).
+
+For a signed-in account whose `binding_state` is `bound` (another Mac bound
+it, and this Mac signed in with the same passkey), `account_bind` **enrols
+this Mac into that account** through the same routes: SAMPLE result
+`{"outcome":"enrolled","binding_state":"bound"}`. The commons compares the
+near.ai login this Mac proves with the account the passkey session is signed
+in to -- the session's own account, never a request field -- inside the one
+transaction that would write the device key, and refuses before writing
+anything when they differ. That refusal is `unavailable` /
+`account-enrol-mismatch` (server: `409 {"error":"near_ai_account_mismatch"}`),
+one fixed label whether the login owns another account or none; the passkey
+session is left as it was, and the shell signs it out. A `bound` or
+`enrolled` result is persisted only if its tenant and account are the passkey
+session's (`account-enrollment-mismatch` otherwise). `legacy` (or any other
+state) is refused with `account-bind-refused` before the refresh token is
+spent. Tokens,
 rotations and atomic device/config persistence stay in Rust/Keychain. Binding
 creates no folder/trace/body consent. Native login remains weak and native add
 keeps the existing first-strong-authenticator gate; adding another requires
@@ -6576,3 +6635,32 @@ empty catalogue or a zero progress response.
 See `docs/superpowers/specs/2026-10-02-configured-activity-missions-design.md`
 for the operator policy and qualification rules. The policy is optional; this
 adapter does not choose thresholds or activate economics.
+
+## Explicit account contribution controls
+
+`status` includes nullable `account_scope`, an opaque local account lifecycle and
+configuration identifier. It changes on sign-in/replacement (including a new
+sign-in to the same account), logout, or configuration changes, and stays stable
+through token rotation. It contains no account name, token, or raw credential.
+Existing opaque credential records remain usable. The daemon publishes
+`status_changed` when this scope changes, including without armed folders; this
+local notification does not request contribution status from the server.
+
+`account_contribution_status` accepts optional `account_scope` and fetches fresh
+authenticated contribution readiness even when no automatic folder is armed.
+When supplied, the scope must still match the local session/configuration before
+the request. Its result contains `status` (`authority`, `policy_version`, `ready`,
+`refusal_label`, and `retry_after_seconds`), the shared user-facing `line`, and
+`account_scope`. It does not report a numeric remaining allowance. Shells clear
+cached readiness and invite attempts when the observed scope changes and discard
+responses whose scope does not match the current status.
+
+`account_invite_redeem` takes `invite_code`, a UUID `idempotency_key`, and optional
+`account_scope`. Keep the same key when retrying the same code in the same scope
+after an uncertain transport outcome. On success the daemon refreshes contribution
+status and returns the same status shape. Redemption and its refresh share one
+operation scope: token rotation is accepted, while account lifecycle or
+configuration changes between POST and GET refuse the combined result. Both
+methods require an account session and discard responses when the local account
+or ingest configuration changes. Neither returns an invite code or session token.
+Acceptance can earn pending credit; this is not credit redemption.

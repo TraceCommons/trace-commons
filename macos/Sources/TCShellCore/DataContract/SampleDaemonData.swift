@@ -20,14 +20,20 @@ import Foundation
 /// `RecordedSamples/` files and whatever Rust change prompted the
 /// re-recording.
 ///
-/// Values with no source on main are marked `"_sample": "no source yet"`
-/// in the JSON. That is every PROVISIONAL network method (Zaki's C3):
-/// `inference_summary`, `inference_call_proof`, `model_spend`,
-/// `mission_catalogue`, `invite_lookup`, `passkey_state` and
-/// `account_session_status` stay hand-written below, and so does `preview`
-/// / `preview_unsure_spans` (per-entry templates, not a fixed shape -- see
-/// `previewSummary(for:)`) and the write acknowledgements that carry a
-/// caller's own parameters (`approvedGroup`, `approveSkipped`). The marker
+/// The network methods (C3, #1187) -- `inference_summary`,
+/// `inference_call_proof`, `model_spend`, `private_ai`, `mission_catalogue`,
+/// `invite_lookup`, `passkey_state`, `account_session_status` and
+/// `activity_missions_catalogue` -- are hand-written below in the shapes the
+/// daemon serves, each reply marked `"_sample":"hand-written"`. They are
+/// synthetic, never pilot observations: K2's recorder runs a temp store with
+/// no network behind it, so it cannot capture them (see
+/// `k2_sample_recorder.rs`), and Rust-emitted fixtures for them are a
+/// follow-up. The PROVISIONAL shapes the Inference and Missions screens
+/// still read (`provisional(_:in:)`) are hand-written too, marked
+/// `"no source yet"`. So are `preview` / `preview_unsure_spans` (per-entry
+/// templates, not a fixed shape -- see `previewCard(for:withEntry:)`) and
+/// the write acknowledgements that carry a caller's own parameters
+/// (`approvedGroup`, `approveSkipped`), which carry no marker. The marker
 /// key is ignored by every decoder.
 ///
 /// Three more files under `RecordedSamples/` carry a `"_sample"` marker of
@@ -65,14 +71,29 @@ enum SampleDaemonData {
         case "keep": return recordedShared("keep")
         case "undo_keep": return recordedShared("undo_keep")
         case "set_project_mode": return recordedShared("set_project_mode")
-        // PROVISIONAL (Zaki's C3): no source on main.
+        // Network methods (C3, #1187): hand-written, see above.
         case "inference_summary": return inferenceSummary(set)
-        case "inference_call_proof": return proofDetail
+        case "inference_call_proof": return proofDetail(set)
         case "model_spend": return modelSpend(set)
+        case "private_ai": return privateAI(set)
         case "mission_catalogue": return missionCatalogue
         case "invite_lookup": return inviteLookup
         case "passkey_state": return passkeyState(set)
         case "account_session_status": return accountState(set)
+        case "activity_missions_catalogue":
+            guard set != .unknownCounts else { return nil }
+            return activityMissionsCatalogue
+        default: return nil
+        }
+    }
+
+    /// The PROVISIONAL shapes the Inference and Missions screens still read
+    /// through `inferenceSummary()` and `missionCatalogue()`. The wire's own
+    /// replies for those methods are in `reply(_:in:)`.
+    static func provisional(_ method: String, in set: Sample) -> String? {
+        switch method {
+        case "inference_summary": return provisionalInferenceSummary(set)
+        case "mission_catalogue": return provisionalMissionCatalogue
         default: return nil
         }
     }
@@ -202,41 +223,77 @@ enum SampleDaemonData {
         #"{"entry_id":"\#(entryId)","body_digest":"\#(bodyDigest)","envelope_digest":"sha256:sample-envelope","span_count":2,"spans":[{"label":"looks-like-email","byte_offset":1408,"byte_len":11},{"label":"looks-like-phone","byte_offset":2210,"byte_len":12}],"spans_truncated":false}"#
     }
 
-    // MARK: - PROVISIONAL network methods (Zaki's C3): no source on main
+    // MARK: - Network methods (C3, #1187): hand-written, marked per reply
 
     static func inferenceSummary(_ set: Sample) -> String {
+        guard set == .normalDay || set == .busyQueue else {
+            return #"{"_sample":"hand-written","readable":false,"window_hours":24,"observed_at":null,"summary":null}"#
+        }
+        // SAMPLE: registry-priced cost is incomplete and never billed spend.
+        return #"{"_sample":"hand-written","readable":true,"window_hours":24,"observed_at":"2026-10-01T00:00:00Z","summary":{"enabled":true,"receipts":true,"since":"2026-09-30T00:00:00Z","groups":[{"group_id":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","model":"example-model","backend":"nearai","route":"routed","work_kind":null,"calls":3,"priced_calls":2,"cost_usd":0.02,"proof":{"verified":1,"gateway_only":0,"unattested":0,"pending":1,"unavailable":0,"failed":1,"outside":0,"unrecorded":0}},{"group_id":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","model":"example-model","backend":"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","route":"outside","work_kind":null,"calls":1,"priced_calls":1,"cost_usd":0.01,"proof":{"verified":0,"gateway_only":0,"unattested":0,"pending":0,"unavailable":0,"failed":0,"outside":1,"unrecorded":0}}],"routed":{"calls":3,"priced_calls":2,"cost_usd":0.02,"proof":{"verified":1,"gateway_only":0,"unattested":0,"pending":1,"unavailable":0,"failed":1,"outside":0,"unrecorded":0}},"outside":{"calls":1,"priced_calls":1,"cost_usd":0.01,"proof":{"verified":0,"gateway_only":0,"unattested":0,"pending":0,"unavailable":0,"failed":0,"outside":1,"unrecorded":0}},"unknown":{"calls":0,"priced_calls":0,"cost_usd":0.0,"proof":{"verified":0,"gateway_only":0,"unattested":0,"pending":0,"unavailable":0,"failed":0,"outside":0,"unrecorded":0}}}}"#
+    }
+
+    static func proofDetail(_ set: Sample) -> String {
+        set == .normalDay || set == .busyQueue
+            ? #"{"_sample":"hand-written","call_id":414,"proof":"verified","checked_at":null,"checks":null,"readable":true,"found":true}"#
+            : #"{"_sample":"hand-written","call_id":414,"proof":"unrecorded","checked_at":null,"checks":null,"readable":false,"found":false}"#
+    }
+
+    static func modelSpend(_ set: Sample) -> String {
+        // SAMPLE: default previews have no authoritative organization billing recording.
+        #"{"_sample":"hand-written","known":false,"since":null,"models":[],"reason_label":"billed-model-spend-unavailable"}"#
+    }
+
+    static func privateAI(_ set: Sample) -> String {
+        if set == .unknownCounts {
+            return #"{"_sample":"hand-written","on":null,"state":null,"port":null,"disclosure":"SAMPLE: exposure disclosure from the Rust core"}"#
+        }
+        let on = set == .normalDay || set == .busyQueue
+        return #"{"_sample":"hand-written","on":\#(on),"state":"\#(on ? "running" : "off")","port":\#(on ? "3128" : "null"),"disclosure":"SAMPLE: exposure disclosure from the Rust core"}"#
+    }
+
+    // SAMPLE: public skill-evaluation catalogue, no daily assignments or credits.
+    static let missionCatalogue =
+        #"{"_sample":"hand-written","kind":"skill_evaluation","disclosure":"SAMPLE: catalogue consent disclosure from the Rust core","catalogue":{"schema_version":1,"entries":[{"mission_id":"00000000-0000-4000-8000-000000000001","program_id":"00000000-0000-4000-8000-000000000002","package_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","offer_version_hash":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","task_preview":"SAMPLE: evaluate a reviewed skill package against its controls.","published_at":"2026-10-01T00:00:00Z"}],"next_cursor":null}}"#
+
+    static let inviteLookup =
+        #"{"_sample":"hand-written","valid":true,"issuer_display_name":"SAMPLE Pilot","credit_range":{"min":1,"max":5,"unit":"points_per_accepted_trace"}}"#
+
+    static func passkeyState(_ set: Sample) -> String {
+        switch set {
+        case .empty:
+            return #"{"_sample":"hand-written","state":"none","passkey_count":0,"remembered_name":null,"signed_in_name":null,"near_ai_connected":null}"#
+        case .unknownCounts:
+            return #"{"_sample":"hand-written","state":"unknown","passkey_count":null,"remembered_name":null,"signed_in_name":null,"near_ai_connected":null}"#
+        default:
+            return #"{"_sample":"hand-written","state":"bound","passkey_count":1,"remembered_name":"SAMPLE passkey","signed_in_name":"SAMPLE passkey","near_ai_connected":true}"#
+        }
+    }
+
+    static func accountState(_ set: Sample) -> String {
+        switch set {
+        case .empty:
+            return #"{"_sample":"hand-written","state":"known","signed_in":false,"account_id":null,"expires_at":null}"#
+        case .unknownCounts:
+            return #"{"_sample":"hand-written","state":"unknown","signed_in":null,"account_id":null,"expires_at":null}"#
+        default:
+            return #"{"_sample":"hand-written","state":"known","signed_in":true,"account_id":"00000000-0000-4000-8000-000000000003","expires_at":"2026-10-02T00:00:00Z"}"#
+        }
+    }
+
+    static let activityMissionsCatalogue =
+        #"{"_sample":"hand-written","catalogue":{"schema_version":1,"kind":"trace_activity","state":"unconfigured","policy_sha256":null,"policy":null,"rewards_enabled":false,"credit_points_pending":null,"credit_condition":"mission_credit_ledger_unavailable"},"disclosure":"SAMPLE: activity mission consent disclosure from the Rust core"}"#
+
+    // MARK: - PROVISIONAL shapes the screens still read (no source)
+
+    static func provisionalInferenceSummary(_ set: Sample) -> String {
         guard set == .normalDay || set == .busyQueue else {
             return #"{"_sample":"no source yet","readable":false,"window_hours":24,"models":[]}"#
         }
         return #"{"_sample":"no source yet","readable":true,"window_hours":24,"models":[{"model":"zai-org/GLM-4.6","family":"anthropic","calls":9,"priced_micros":61200,"proof_counts":{"verified":7,"pending":1,"failed":1}},{"model":"Qwen/Qwen3.6-27B-FP8","family":"openai","calls":3,"priced_micros":36900,"proof_counts":{"gateway_only":3}}]}"#
     }
 
-    static let proofDetail =
-        #"{"_sample":"no source yet","call_id":414,"proof":"verified","checked_at":"2026-09-30T09:04:13Z","checks":["receipt-signature-valid","quote-measurement-pinned","digests-match"]}"#
-
-    static func modelSpend(_ set: Sample) -> String {
-        guard set == .normalDay || set == .busyQueue else {
-            return #"{"_sample":"no source yet","known":false,"since":null,"models":[]}"#
-        }
-        return #"{"_sample":"no source yet","known":true,"since":"2026-09-30T00:00:00Z","models":[{"model":"zai-org/GLM-4.6","billed_micros":820000},{"model":"Qwen/Qwen3.6-27B-FP8","billed_micros":410000}]}"#
-    }
-
-    static let missionCatalogue =
+    static let provisionalMissionCatalogue =
         #"{"_sample":"no source yet","fetched_at":"2026-09-30T06:00:00Z","posture":{"settlement":"disabled","graded":false,"explanation":"Sample settlement explanation, supplied by the commons"},"missions":[{"id":"mission-sample-1","title":"Debug a failing test","summary":"Failing test found, then fixed","credit_range":{"min":5,"max":20,"unit":"points"}},{"id":"mission-sample-2","title":"Review a pull request","summary":null,"credit_range":null}]}"#
-
-    static let inviteLookup =
-        #"{"_sample":"no source yet","valid":true,"issuer_display_name":"Sample Labs","credit_range":{"min":10,"max":40,"unit":"points_per_accepted_trace"}}"#
-
-    static func passkeyState(_ set: Sample) -> String {
-        set == .empty
-            ? #"{"_sample":"no source yet","state":"none","passkey_count":0,"near_ai_connected":false}"#
-            : #"{"_sample":"no source yet","state":"bound","passkey_count":1,"near_ai_connected":true}"#
-    }
-
-    static func accountState(_ set: Sample) -> String {
-        set == .empty
-            ? #"{"_sample":"no source yet","signed_in":false,"account_id":null}"#
-            : #"{"_sample":"no source yet","signed_in":true,"account_id":"sample.near"}"#
-    }
 }
 #endif
