@@ -797,6 +797,7 @@ private final class NoDaemon: FirstRunDaemon {
     func enrollInvite(_ invite: String) async -> Bool { false }
     func signInNearAI() async -> Bool { false }
     func nearAILogin() async -> Bool { false }
+    func cancelNearAILogin() async -> Bool { false }
     func enrollNearAI() async -> FirstRunNearAIEnrolment { .refused(label: "near_ai_enroll_unavailable") }
     func saveConsentScopes(_ scopes: [String]) async -> Bool { false }
     func setProjectMode(projectID: String, mode: ProjectMode) async -> Bool { false }
