@@ -64,7 +64,7 @@ pub(crate) fn project_ignore_copy(project_label: String, pending: usize) -> serd
 /// The arming offer and confirmation, assembled in the contributor core
 /// (`project_copy::arming_offer_copy`): the evidence and question, both
 /// confirmation bodies (K5's `body_with_backlog` for `include_backlog`) and
-/// Customize's table. DRAFT, NEEDS APPROVAL where that module says so.
+/// Customize's table. Approved 2026-10-06.
 #[tauri::command]
 pub(crate) fn arming_offer_copy(project_label: String, count: u32) -> serde_json::Value {
     serde_json::json!(trace_commons_contributor::project_copy::arming_offer_copy(

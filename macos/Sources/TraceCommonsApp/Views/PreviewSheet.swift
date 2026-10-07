@@ -1325,23 +1325,6 @@ private enum TranscriptMarkers {
     }
 }
 
-enum ScopeCopy {
-    /// The first words of each label carry the distinction, because that is
-    /// all most people read.
-    static func title(for wireName: String, options: [ConsentScope]) -> String {
-        switch wireName {
-        case "debugging_evaluation": return "Finding bugs and measuring agents"
-        case "benchmark_only", "benchmark_creation": return "Turn my traces into test cases"
-        case "ranking_training", "reward_model_training":
-            return "Train models that judge agent output"
-        case "model_training": return "Train coding models directly"
-        case "public_attribution": return "List my handle publicly as a contributor"
-        default:
-            return options.first(where: { $0.name == wireName })?.name
-                ?? wireName.replacingOccurrences(of: "_", with: " ")
-        }
-    }
-}
 
 
 

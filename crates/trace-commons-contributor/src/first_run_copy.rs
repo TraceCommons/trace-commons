@@ -7,8 +7,10 @@
 //! - No "Share automatically". The Sharing and per-folder rule choices are
 //!   `project_copy::contribution_mode_copy` (Ask me / Automatic / Never),
 //!   and a shell renders those.
-//! - No data-use scope title or description. Those stay in the core's consent
-//!   tables. That includes the handle line and its caption: they are the
+//! - No data-use scope title or description. Those are the core's consent
+//!   table, `daemon::enroll::consent_options`, which carries each scope's
+//!   `title` and `description`; every shell reads both from it. That
+//!   includes the handle line and its caption: they are the
 //!   `public_attribution` scope's title and description.
 //! - The "add your tool" caption names what recognition actually reads; the
 //!   tools it used to name are not read (owner decision, 2026-10-04), and a

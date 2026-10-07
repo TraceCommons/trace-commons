@@ -441,6 +441,9 @@ pub struct AdmissionCopy {
     pub prerequisite: &'static str,
     pub backend: &'static str,
     pub confirm: &'static str,
+    /// The tick that must be ticked before [`Self::confirm`] can be pressed
+    /// (#1146 `admission-preparation-overlay.tsx`). Approved 2026-10-06.
+    pub confirm_line: &'static str,
     pub cancel: &'static str,
     pub permission: &'static str,
     pub working: &'static str,
@@ -735,6 +738,7 @@ pub fn witness_copy() -> WitnessCopy {
             prerequisite: "IronWire must already route this agent to that backend and capture request bodies. Inference-body evidence also needs your separate permission in Settings.",
             backend: "NEAR AI backend name",
             confirm: "Prepare session",
+            confirm_line: "I understand and want to prepare this session.",
             cancel: "Cancel",
             permission: "Review inference-body permission",
             working: "Preparing this session…",
@@ -1025,7 +1029,7 @@ mod tests {
         let object = json.as_object().unwrap();
         assert_eq!(
             object.len(),
-            23,
+            24,
             "a field added to AdmissionCopy must be counted here, or a shell is handed \
              a sentence no test has read"
         );

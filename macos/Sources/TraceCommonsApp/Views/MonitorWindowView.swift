@@ -21,14 +21,15 @@ struct MonitorWindowView: View {
         case traces = "Traces"
 
         /// The raw value is an identity (scene storage restores the tab by
-        /// it); `title` is the word shown, marked for localisation.
+        /// it); `title` is the word shown, from the core's shell table.
         var id: String { rawValue }
 
         var title: String {
-            switch self {
-            case .home: String(localized: "Home", comment: "Monitor tab")
-            case .inference: String(localized: "Inference", comment: "Monitor tab")
-            case .traces: String(localized: "Traces", comment: "Monitor tab")
+            guard let shell = MonitorWords.table?.shell else { return "" }
+            return switch self {
+            case .home: shell.tabHome
+            case .inference: shell.tabInference
+            case .traces: shell.tabTraces
             }
         }
 
@@ -499,13 +500,13 @@ private struct MonitorMainPane<Content: View, Footer: View>: View {
                         GlassToolbarButton(MonitorShellWords.view, systemImage: "line.3.horizontal", expanded: viewMenu) {
                             viewMenu.toggle()
                         }
-                        GlassToolbarButton(MonitorShellWords.graph, systemImage: "chart.bar.xaxis", pressed: showsGraph) {
+                        GlassToolbarButton(MonitorShellWords.graphToggle(shown: showsGraph), systemImage: "chart.bar.xaxis", pressed: showsGraph) {
                             showsGraph.toggle()
                         }
-                        GlassToolbarButton(String(localized: "Map", comment: "Map pane toggle"), systemImage: "map", pressed: showsMap) {
+                        GlassToolbarButton(MonitorShellWords.mapToggle(shown: showsMap), systemImage: "map", pressed: showsMap) {
                             showsMap.toggle()
                         }
-                        GlassToolbarButton(String(localized: "Inspector", comment: "Inspector pane toggle"), systemImage: "sidebar.right", pressed: showsInspector) {
+                        GlassToolbarButton(MonitorShellWords.inspectorToggle(shown: showsInspector), systemImage: "sidebar.right", pressed: showsInspector) {
                             showsInspector.toggle()
                         }
                     }
@@ -514,7 +515,7 @@ private struct MonitorMainPane<Content: View, Footer: View>: View {
                     // Updates, Private AI and Compute are reachable, and a
                     // section that writes what first run asks draws the
                     // onboarding notice.
-                    GlassRoundButton(String(localized: "Settings", comment: "Settings button"), systemImage: "gearshape", small: true, action: onSettings)
+                    GlassRoundButton(MonitorWords.table?.settingsTitle ?? "", systemImage: "gearshape", small: true, action: onSettings)
                 }
                 // Clearance for the real traffic lights, not an origin.
                 .padding(.leading, GlassTokens.Space.windowControlsWidth - GlassTokens.Space.panePadding)
@@ -570,7 +571,7 @@ private struct MonitorMainPane<Content: View, Footer: View>: View {
                         EmptyView()
                     }
                     GlassSegmentedTabs(
-                        String(localized: "Monitor", comment: "Monitor tabs name"),
+                        MonitorWords.table?.shell.tabsLabel ?? "",
                         selection: Binding(
                             get: { MonitorWindowView.shownTab(tab, requiresOnboarding: model.requiresOnboarding) },
                             set: { tab = $0 }),
@@ -621,7 +622,7 @@ private struct MonitorMapPane: View {
                     center: .center, startRadius: 20, endRadius: 520)
                 map
                 GlassFloatingGroup {
-                    GlassSegmentedTabs(String(localized: "Map", comment: "Map view selector name"), selection: $mapTab, segments: segments, floating: true)
+                    GlassSegmentedTabs(MonitorWords.table?.shell.mapViewsLabel ?? "", selection: $mapTab, segments: segments, floating: true)
                         .padding(GlassTokens.Space.panePadding)
                 }
                 stateLine

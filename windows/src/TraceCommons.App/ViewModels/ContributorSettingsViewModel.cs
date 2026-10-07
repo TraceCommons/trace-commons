@@ -1310,6 +1310,19 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
         var grantedSet = new HashSet<string>(granted, StringComparer.Ordinal);
         foreach (ConsentOption option in options?.Scopes ?? new List<ConsentOption>())
         {
+            // Fail closed: a scope the core gave no title is not offered. One
+            // already granted is kept as it is, never revoked by a later
+            // write.
+            if (string.IsNullOrEmpty(option.Title))
+            {
+                if (!option.AlwaysOn && grantedSet.Contains(option.Name))
+                {
+                    _preservedNonDataScopes.Add(option.Name);
+                }
+
+                continue;
+            }
+
             var row = new ConsentScopeViewModel(option);
             if (!option.AlwaysOn)
             {

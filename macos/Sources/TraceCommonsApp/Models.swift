@@ -649,6 +649,11 @@ struct HistoryRollup: Decodable, Equatable {
 
 struct ConsentScope: Decodable, Identifiable, Equatable {
     let name: String
+    /// The scope's short bold label, from the core's consent table
+    /// (`daemon::enroll::consent_options`). Required: a list carrying a
+    /// scope without one does not decode, so nothing is offered under words
+    /// this shell made up (owner ruling, 2026-10-06).
+    let title: String
     let description: String
     let alwaysOn: Bool
     let grantsDataUse: Bool
@@ -656,7 +661,7 @@ struct ConsentScope: Decodable, Identifiable, Equatable {
     var id: String { name }
 
     enum CodingKeys: String, CodingKey {
-        case name, description
+        case name, title, description
         case alwaysOn = "always_on"
         case grantsDataUse = "grants_data_use"
     }

@@ -7,6 +7,8 @@ struct AdmissionPreparationView: View {
     @State private var working = false
     @State private var message = ""
     @State private var refused = false
+    /// #1146's tick: Prepare waits on it, in the core's words.
+    @State private var confirmed = false
     let entryID: String
 
     var body: some View {
@@ -23,12 +25,15 @@ struct AdmissionPreparationView: View {
                 .glassType(GlassTokens.TypeScale.caption)
                 .foregroundStyle(GlassColor.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
+            Toggle(copy.confirmLine, isOn: $confirmed)
+                .toggleStyle(GlassCheckboxStyle())
+                .disabled(working)
             HStack(alignment: .bottom, spacing: GlassTokens.Space.s4) {
                 GlassTextField(copy.backend, text: $backend, prompt: copy.backend, showsLabel: false)
                     .disabled(working)
                 Button(copy.confirm, action: prepare)
                     .buttonStyle(GlassButtonStyle(.glass))
-                    .disabled(working || backend.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.daemonSettings?.inferenceEvidenceEnabled != true)
+                    .disabled(!confirmed || working || backend.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.daemonSettings?.inferenceEvidenceEnabled != true)
             }
             if model.daemonSettings?.inferenceEvidenceEnabled != true {
                 SettingsLink { Text(copy.permission) }

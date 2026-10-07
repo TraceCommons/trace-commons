@@ -405,7 +405,7 @@ final class HistoryParityTests: XCTestCase {
         let flat = Self.flat(home)
         for needle in [
             "HistorySelection.record(for: row.submissionId, in: model.history)",
-            "Button(copy.viewSession, action: open)",
+            "Button(MonitorWords.table?.shell.open ?? copy.viewSession, action: open)",
             "case .withdraw: Button(copy.withdraw) { confirming = true }",
             "WithdrawalConfirmationView( status: SessionDetailView.withdrawalStatus(record, detail: detail), "
                 + "keepLabel: copy.keepContribution, inFlight: model.withdrawing.contains(record.submissionID), "
@@ -637,18 +637,17 @@ final class HistoryParityTests: XCTestCase {
         XCTAssertEqual(HistoryList.rows(rows, filter: .submitted).map(\.submissionId), ["s3"])
         XCTAssertEqual(HistoryList.Filter.allCases, [.all, .accepted, .submitted, .quarantined, .withdrawn])
 
-        let disclosure = try XCTUnwrap(ContributorDisclosureCopy.decode(fromJSON: TCCoreCopy.contributorDisclosureCopyJSON()))
-        let publicRun = try XCTUnwrap(PublicRunCopy.decode(fromJSON: TCPublicRun.copyJSON() ?? ""))
-        XCTAssertEqual(HistoryList.label(.all, disclosure: disclosure, publicRun: publicRun), publicRun.allContributions)
-        for filter in HistoryList.Filter.allCases where filter != .all {
-            XCTAssertEqual(HistoryList.label(filter, disclosure: disclosure, publicRun: publicRun),
-                           disclosure.historyUi.statusLabels[filter.rawValue])
-            XCTAssertNil(HistoryList.label(filter, disclosure: nil, publicRun: publicRun))
+        // Ron's #1146 filter words, from the core (owner ruling, 2026-10-06).
+        let shell = try XCTUnwrap(MonitorScreensCopy.decode(fromJSON: TCCoreCopy.monitorScreensCopyJSON())).shell
+        XCTAssertEqual(HistoryList.label(.all, shell: shell), "All")
+        XCTAssertEqual(HistoryList.label(.accepted, shell: shell), "In commons")
+        XCTAssertEqual(HistoryList.label(.quarantined, shell: shell), "Privacy review")
+        XCTAssertEqual(HistoryList.label(.withdrawn, shell: shell), "Withdrawn")
+        for filter in HistoryList.Filter.allCases {
+            XCTAssertNil(HistoryList.label(filter, shell: nil))
         }
-        XCTAssertNil(HistoryList.label(.all, disclosure: disclosure, publicRun: nil))
-        // Both sides nil would pass the equality above: the real exports
-        // label every filter, so the filter is drawn.
-        let labels = try XCTUnwrap(HistoryList.labels(disclosure: disclosure, publicRun: publicRun),
+        // The real export labels every filter, so the filter is drawn.
+        let labels = try XCTUnwrap(HistoryList.labels(shell: shell),
                                    "a filter label is missing from the core, and no filter is drawn")
         XCTAssertEqual(labels.count, HistoryList.Filter.allCases.count)
         XCTAssertFalse(labels.values.contains(where: \.isEmpty))

@@ -66,6 +66,10 @@ struct SkillLearningCopy: Decodable, Equatable {
     let rollingBack: String
     let rollbackDisclosure: String
     let rollbackIncomplete: String
+    /// The rollback's confirmation (owner ruling, 2026-10-06).
+    let rollbackConfirmTitle: String
+    let rollbackConfirmBody: String
+    let rollbackKeep: String
     let unavailable: String
 
     static func decode(fromJSON json: String) -> SkillLearningCopy? {

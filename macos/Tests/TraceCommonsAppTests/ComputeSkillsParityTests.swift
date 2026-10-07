@@ -1,4 +1,5 @@
 import XCTest
+import TCBridge
 @testable import TraceCommonsApp
 
 final class ComputeSkillsParityTests: XCTestCase {
@@ -272,5 +273,26 @@ final class ComputeSkillsParityTests: XCTestCase {
             "Button(ActionNoticeWords.coreDismissWord ?? ActionNoticeWords.dismissWord) { dismissedFailure = message }"))
         XCTAssertTrue(try Self.text("Views/SettingsView.swift").contains(
             "static let coreDismissWord = MonitorTracesCopy.decode(fromJSON: TCCoreCopy.monitorTracesCopyJSON())?.dismiss"))
+    }
+
+    /// A rollback asks first, in the core's words (owner ruling,
+    /// 2026-10-06): the panel's button only opens the confirmation, and
+    /// only its confirm rolls back.
+    func test_aSkillRollbackIsConfirmedFirst() throws {
+        let source = try Self.text("Views/SkillLearningView.swift")
+        let panel = try XCTUnwrap(source.range(of: "private struct InstalledSkillPanel: View"))
+        let body = String(source[panel.lowerBound...])
+        XCTAssertTrue(body.contains("Button(working ? copy.rollingBack : copy.rollback) {\n                confirmingRollback = true\n            }"))
+        for needle in ["title: copy.rollbackConfirmTitle, message: copy.rollbackConfirmBody",
+                       ".cancel(copy.rollbackKeep) { confirmingRollback = false }",
+                       ".destructive(copy.rollback) {"] {
+            XCTAssertTrue(body.contains(needle), "InstalledSkillPanel lacks \(needle)")
+        }
+        XCTAssertEqual(body.components(separatedBy: "model.rollbackSkill(from: record)").count - 1, 1,
+                       "only the confirmation rolls back")
+        let copy = try XCTUnwrap(SkillLearningCopy.decode(fromJSON: TCSkillLearning.copyJSON() ?? ""))
+        XCTAssertEqual(copy.rollbackConfirmTitle, "Roll back this skill?")
+        XCTAssertFalse(copy.rollbackConfirmBody.isEmpty)
+        XCTAssertNotEqual(copy.rollbackKeep, copy.rollback)
     }
 }

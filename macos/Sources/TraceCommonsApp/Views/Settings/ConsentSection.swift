@@ -108,7 +108,7 @@ struct ConsentSection: View {
         return Toggle(isOn: isOn) {
             VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
                 HStack(spacing: GlassTokens.Space.s2) {
-                    Text(ScopeCopy.title(for: scope.name, options: model.consentScopes))
+                    Text(scope.title)
                         .glassType(GlassTokens.TypeScale.bodyStrong)
                     if scope.alwaysOn {
                         GlassTag(SettingsLegacyWords.alwaysOn)

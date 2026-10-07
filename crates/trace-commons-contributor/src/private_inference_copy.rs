@@ -164,8 +164,9 @@ pub const OFFER_ASKED_ONCE: &str = "Either way, this is the only time you will b
 /// The settings section's heading.
 pub const SETTINGS_TITLE: &str = "Private AI on this computer";
 
-/// The settings switch.
-pub const SETTINGS_TOGGLE: &str = "Route AI requests through NEAR AI";
+/// The settings switch, in #1146's words (`private-ai-connection-panel.tsx`;
+/// owner ruling, 2026-10-06). Approved 2026-10-06.
+pub const SETTINGS_TOGGLE: &str = "Answer model calls on this computer";
 
 /// Changes are not deferred to a restart, and the line beneath the switch is
 /// what actually happened rather than what was asked for.
@@ -949,8 +950,11 @@ pub const HARNESS_PLAN_NO_CONFIG_PATH: &str = "This app could not work out where
 /// The next step is spelled the way the button that performs it is spelled --
 /// see [`CREDENTIAL_OBTAIN`] -- so a contributor reading this sentence is
 /// looking for words that exist somewhere on the screen.
+///
+/// Approved 2026-10-06: the button's words changed to #1146's, so this
+/// sentence did too.
 pub const HARNESS_NEEDS_CREDENTIAL: &str = "This computer would be the one answering this tool's calls, and no key \
-     is kept here to answer them with yet. Sign in with NEAR AI first, and \
+     is kept here to answer them with yet. Use Connect credential first, and \
      this tool can be connected after that.";
 
 /// The sentence for one tool's state, or the empty string.
@@ -1139,8 +1143,8 @@ pub fn harness_spend_line(micros: Option<u64>) -> String {
 ///
 /// Names the machine for the reason [`OFFER_TITLE`] does: what changes is
 /// what this computer holds, and that is the only part a contributor can go
-/// and check.
-pub const CREDENTIAL_TITLE: &str = "NEAR AI account";
+/// and check. #1146's word for what it holds (owner ruling, 2026-10-06).
+pub const CREDENTIAL_TITLE: &str = "NEAR AI credential";
 
 /// Why the card is there at all.
 ///
@@ -1151,7 +1155,7 @@ pub const CREDENTIAL_TITLE: &str = "NEAR AI account";
 pub const CREDENTIAL_WHAT: &str = "Sign in to use NEAR AI with your tools and check your balance.";
 
 /// Provider selector copy shared by every native shell.
-pub const CREDENTIAL_PROVIDER_LABEL: &str = "Sign-in method";
+pub const CREDENTIAL_PROVIDER_LABEL: &str = "Credential provider";
 pub const CREDENTIAL_PROVIDER_GITHUB: &str = "GitHub";
 pub const CREDENTIAL_PROVIDER_GOOGLE: &str = "Google";
 pub const CREDENTIAL_PROVIDER_NEAR: &str = "NEAR wallet";
@@ -1191,17 +1195,17 @@ pub const CREDENTIAL_COST: &str = "Sign in through your browser. The app creates
      You may be asked to allow access when the app starts.";
 
 /// The button that starts the ceremony.
-pub const CREDENTIAL_OBTAIN: &str = "Sign in with NEAR AI";
+pub const CREDENTIAL_OBTAIN: &str = "Connect credential";
 
 /// The button shown while one is running.
 ///
-/// Says what stops -- this computer's waiting -- and not "cancel the
-/// sign-in", which would suggest reaching into a browser tab this app does
-/// not control. Anything the contributor already finished over there stands.
-pub const CREDENTIAL_CANCEL: &str = "Stop waiting for the browser";
+/// #1146's words (owner ruling, 2026-10-06). What stops is this computer's
+/// waiting; anything the contributor already finished in the browser
+/// stands.
+pub const CREDENTIAL_CANCEL: &str = "Cancel sign-in";
 
 /// The button that removes a stored key from this machine.
-pub const CREDENTIAL_FORGET: &str = "Forget this key";
+pub const CREDENTIAL_FORGET: &str = "Forget local credential";
 
 /// What forgetting does, and the larger part it does not do.
 ///

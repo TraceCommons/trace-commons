@@ -3,7 +3,7 @@ import XCTest
 
 final class ConsentScopesSectionTests: XCTestCase {
     private func scope(_ name: String, alwaysOn: Bool = false, grants: Bool = true) -> ConsentScope {
-        ConsentScope(name: name, description: "", alwaysOn: alwaysOn, grantsDataUse: grants)
+        ConsentScope(name: name, title: name, description: "", alwaysOn: alwaysOn, grantsDataUse: grants)
     }
 
     /// The list sent is built from what the daemon reports, never from the
