@@ -223,8 +223,7 @@ pub struct ToolsCopy {
     /// `{tool}`: a tool's own row and a folder added for it both read
     /// Watch. The daemon watches one folder per tool, so Continue waits for
     /// one of them to say "I don't use it"; this says so beside the added
-    /// folder.
-    /// **DRAFT, NEEDS APPROVAL**
+    /// folder. Approved 2026-10-06.
     pub one_folder_per_tool: &'static str,
 }
 
