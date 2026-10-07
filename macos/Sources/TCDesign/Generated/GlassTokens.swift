@@ -308,7 +308,7 @@ public enum GlassTokens {
         public static let tile: CGFloat = 6
         public static let checkbox: CGFloat = 5
         public static let pill: CGFloat = 999
-        public static let menuPanel: CGFloat = 18
+        public static let menuPanel: CGFloat = 14
         public static let menuStatePill: CGFloat = 22
 
         /// Every radius token by its JSON name.
