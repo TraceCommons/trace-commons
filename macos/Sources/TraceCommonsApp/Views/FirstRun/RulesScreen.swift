@@ -268,6 +268,18 @@ enum RulesScreenLayout {
         }
     }
 
+    /// The retry beside `rules.unavailable`: the first run's own retry word,
+    /// the one Folders and Tools offer when discovery fails.
+    static func retryTitle(_ copy: FirstRunCopy) -> String {
+        copy.folders.retry
+    }
+
+    /// Continue waits for the folders: never while they are loading or
+    /// could not be read.
+    static func canContinue(projects: [ProjectRow]?) -> Bool {
+        projects != nil
+    }
+
     /// The folder as a row names it: its path, or its label without one.
     static func folder(_ project: ProjectRow) -> String {
         project.projectPath.isEmpty ? project.displayLabel : project.projectPath
@@ -287,6 +299,8 @@ struct RulesScreen: View {
 
     @State private var projects: [ProjectRow]?
     @State private var loadFailed = false
+    /// A read is in flight, so a second press of Retry does not start another.
+    @State private var loading = false
     @State private var sessions: [String: [PastSession]] = [:]
     /// Folders whose past sessions were refused: drawn as unavailable, not
     /// as an empty list beside card 1's count.
@@ -303,7 +317,7 @@ struct RulesScreen: View {
             state: $runner.state,
             footer: FirstRunFooter(
                 title: copy.frame.continueButton,
-                isEnabled: projects != nil,
+                isEnabled: RulesScreenLayout.canContinue(projects: projects),
                 action: { runner.state = FirstRunNavigation.next(runner.state) })
         ) {
             FirstRunTitle(light: copy.rules.titleLight, bold: copy.rules.titleBold)
@@ -367,8 +381,9 @@ struct RulesScreen: View {
                         .fixedSize(horizontal: false, vertical: true)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                Button(copy.folders.retry) { Task { await load() } }
+                Button(RulesScreenLayout.retryTitle(copy)) { Task { await load() } }
                     .buttonStyle(GlassButtonStyle(.secondary))
+                    .disabled(loading)
             }
         } else {
             HStack(spacing: GlassTokens.Space.s4) {
@@ -598,11 +613,14 @@ struct RulesScreen: View {
     // MARK: Loading
 
     /// The folders, then each folder's past sessions. The first folder opens,
-    /// as Ron's does. Folders that cannot be read say so, and Continue stays
-    /// disabled; a folder whose sessions are refused is drawn as unavailable
-    /// and lists nothing to tick.
+    /// as Ron's does. Folders that cannot be read say so with a retry, which
+    /// calls this again, and Continue stays disabled until they load; a
+    /// folder whose sessions are refused is drawn as unavailable and lists
+    /// nothing to tick.
     private func load() async {
-        guard projects == nil else { return }
+        guard projects == nil, !loading else { return }
+        loading = true
+        defer { loading = false }
         guard let all = await source.rulesProjects() else {
             loadFailed = true
             return
