@@ -15,6 +15,7 @@ const options = [
     description: "Required baseline use.",
     always_on: true,
     grants_data_use: true,
+    tag: "required",
   },
   {
     name: "research",
@@ -22,6 +23,7 @@ const options = [
     description: "Allow research use.",
     always_on: false,
     grants_data_use: true,
+    tag: "data use",
   },
   {
     name: "public_attribution",
@@ -29,6 +31,7 @@ const options = [
     description: "Allow public credit.",
     always_on: false,
     grants_data_use: false,
+    tag: "attribution only",
   },
 ];
 export const Ready: Story = {

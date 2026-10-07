@@ -54,6 +54,7 @@ const actions = {
   onPlan: () => Promise.resolve(),
   onCommit: () => Promise.resolve(),
   onCancel: () => {},
+  readUnavailable: "This couldn't be read just now. Nothing has changed. Try again in a moment.",
 };
 export const Connected: Story = {
   args: {

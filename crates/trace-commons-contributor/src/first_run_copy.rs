@@ -489,7 +489,7 @@ pub fn first_run_copy() -> FirstRunCopy {
             title_light: "How your data is ",
             title_bold: "used & permissioned.",
             eyebrow: "How your traces may be used",
-            required: "required",
+            required: crate::consent_copy::SCOPE_TAG_REQUIRED,
             all_optional: "All optional uses",
             optional_all_on: "{count} optional uses, all on",
             optional_all_off: "{count} optional uses, all off",

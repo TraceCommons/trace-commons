@@ -643,6 +643,34 @@ pub const AUTO_PATH_AUTOMATIC: &str = "Contribute automatically from projects th
 /// witness or the privacy scan sends a session somewhere before approval.
 pub const AUTO_PATH_ASK_FIRST: &str = "Review each session yourself. Nothing is contributed until you approve it, and you can set a project to contribute automatically later.";
 
+/// The short tag beside the floor scope (`consent_options`' `always_on`).
+/// One spelling, read by `consent_options` and the first-run Uses screen
+/// (`first_run_copy`'s `uses.required`).
+pub const SCOPE_TAG_REQUIRED: &str = "required";
+
+/// The tag beside a scope that permits a use of the traces
+/// (`grants_data_use`). Tauri's wording, moved into the core so every shell
+/// can draw it. Approved 2026-10-06.
+pub const SCOPE_TAG_DATA_USE: &str = "data use";
+
+/// The tag beside a scope that permits no use of the traces
+/// (`public_attribution`, an empty allowed-use set). Tauri's wording, moved
+/// into the core. Approved 2026-10-06.
+pub const SCOPE_TAG_ATTRIBUTION_ONLY: &str = "attribution only";
+
+/// The tag for a scope, from the two facts `consent_options` carries for
+/// it. The floor scope is required whatever use it grants.
+#[must_use]
+pub fn scope_tag(always_on: bool, grants_data_use: bool) -> &'static str {
+    if always_on {
+        SCOPE_TAG_REQUIRED
+    } else if grants_data_use {
+        SCOPE_TAG_DATA_USE
+    } else {
+        SCOPE_TAG_ATTRIBUTION_ONLY
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The Scrub check (K4 of #1118)
 // ---------------------------------------------------------------------------

@@ -72,13 +72,17 @@ pub fn consent_options() -> serde_json::Value {
                 .iter()
                 .find(|(n, _, _, _)| n == name)
                 .expect("every VALID_SCOPES entry has a DESCRIPTIONS row");
+            // VALID_SCOPES[0] is documented as the always-on floor scope.
+            let always_on = *name == VALID_SCOPES[0];
             json!({
                 "name": name,
                 "title": title,
                 "description": description,
-                // VALID_SCOPES[0] is documented as the always-on floor scope.
-                "always_on": *name == VALID_SCOPES[0],
+                "always_on": always_on,
                 "grants_data_use": grants_data_use,
+                // The short tag every shell draws beside the title, so none
+                // keeps its own.
+                "tag": crate::consent_copy::scope_tag(always_on, *grants_data_use),
             })
         })
         .collect();
@@ -328,6 +332,27 @@ mod tests {
             .find(|s| s["name"] == "public_attribution")
             .unwrap();
         assert_eq!(pa["grants_data_use"], false);
+    }
+
+    #[test]
+    fn consent_options_carries_each_scopes_tag() {
+        let v = consent_options();
+        let tags: Vec<(&str, &str)> = v["scopes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| (s["name"].as_str().unwrap(), s["tag"].as_str().unwrap()))
+            .collect();
+        assert_eq!(
+            tags,
+            [
+                ("debugging_evaluation", "required"),
+                ("benchmark_only", "data use"),
+                ("ranking_training", "data use"),
+                ("model_training", "data use"),
+                ("public_attribution", "attribution only"),
+            ]
+        );
     }
 
     #[test]

@@ -61,3 +61,29 @@ test("neither consent surface draws a scope's wire name as its label", () => {
     assert.ok(!source.includes("option.name.replaceAll"), path);
   }
 });
+
+test("each scope carries the core's tag, and an absent one is drawn as none", () => {
+  const options = parseConsentOptions({
+    scopes: [
+      scope("debugging_evaluation", { tag: "TAG OF debugging_evaluation" }),
+      scope("public_attribution"),
+      scope("benchmark_only", { tag: "" }),
+    ],
+  });
+  assert.deepEqual(
+    options.map((option) => [option.name, option.tag]),
+    [
+      ["debugging_evaluation", "TAG OF debugging_evaluation"],
+      // A daemon from before the tag: no tag, never one the shell made up.
+      ["public_attribution", null],
+      ["benchmark_only", null],
+    ],
+  );
+});
+
+test("a tag that is not a string is refused", () => {
+  assert.throws(
+    () => parseConsentOptions({ scopes: [scope("benchmark_only", { tag: 3 })] }),
+    /tag/,
+  );
+});

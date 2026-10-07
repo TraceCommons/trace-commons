@@ -110,6 +110,7 @@ pub(crate) fn handler<R: tauri::Runtime>()
         platform::open_system_settings,
         platform::quit_app,
         platform::quit_confirmation_copy,
+        platform::shell_status_copy,
         private_ai::cancel_private_ai_credential,
         private_ai::forget_private_ai_credential,
         private_ai::migrate_private_ai_credential,

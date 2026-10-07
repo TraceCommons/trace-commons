@@ -137,7 +137,7 @@ export function ConsentSettingsPanel({
                     <span>
                       <strong>
                         {option.title}
-                        {option.always_on ? " · required" : ""}
+                        {option.always_on && option.tag ? ` · ${option.tag}` : ""}
                       </strong>
                       <small>{option.description}</small>
                     </span>
