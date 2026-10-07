@@ -122,6 +122,19 @@ final class NativePasskeyCoordinatorTests: XCTestCase {
         XCTAssertNil(passkeys.nearAiConnected)
     }
 
+    /// The passkeys this Mac remembers, for P-7; an older daemon sends no
+    /// `remembered_name` and still decodes.
+    func testRememberedPasskeysDecodeAndOlderDaemonsStillDecode() throws {
+        let remembered = try JSONDecoder().decode(NativePasskeyState.self,
+            from: Data(#"{"state":"none","passkey_count":2,"remembered_name":"Home","near_ai_connected":null}"#.utf8))
+        XCTAssertEqual(remembered.passkeyCount, 2)
+        XCTAssertEqual(remembered.rememberedName, "Home")
+        let older = try JSONDecoder().decode(NativePasskeyState.self,
+            from: Data(#"{"state":"none","passkey_count":null,"near_ai_connected":null}"#.utf8))
+        XCTAssertNil(older.rememberedName)
+        XCTAssertNil(older.passkeyCount)
+    }
+
     func testTaskCancellationAndBusyCeremonyNeverComplete() async throws {
         let daemon = IdentityDaemonFixture()
         let provider = IdentityProviderFixture()

@@ -168,12 +168,27 @@ public struct NativeAccountSession: Decodable, Sendable, Equatable {
     }
 }
 
+/// `passkey_state`. `passkeyCount` and `rememberedName` are the passkeys
+/// this Mac remembers (created, added or used to sign in here), not the
+/// account's on the server, answered whatever `state` is: what Ron's P-7
+/// greets a returning person with. Null when the daemon cannot read its list
+/// or predates it.
 public struct NativePasskeyState: Decodable, Sendable, Equatable {
     public let state: String
     public let passkeyCount: Int?
+    /// The most recently used remembered passkey's name, when it has one.
+    public let rememberedName: String?
     public let nearAiConnected: Bool?
     enum CodingKeys: String, CodingKey {
-        case state, passkeyCount = "passkey_count", nearAiConnected = "near_ai_connected"
+        case state, passkeyCount = "passkey_count", rememberedName = "remembered_name"
+        case nearAiConnected = "near_ai_connected"
+    }
+
+    public init(state: String, passkeyCount: Int?, rememberedName: String?, nearAiConnected: Bool?) {
+        self.state = state
+        self.passkeyCount = passkeyCount
+        self.rememberedName = rememberedName
+        self.nearAiConnected = nearAiConnected
     }
 }
 

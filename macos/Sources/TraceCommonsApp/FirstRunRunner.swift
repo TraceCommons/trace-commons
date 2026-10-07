@@ -112,6 +112,14 @@ final class FirstRunRunner: ObservableObject {
     /// (`PasskeySheetOutcome.joinNotice`). Cleared when they are asked for
     /// again.
     @Published private(set) var passkeyOutcome: PasskeySheetOutcome?
+    /// The step the requested sheets open at: P-1 when Join asked, P-7 when
+    /// the first run opened for a returning person (`offerWelcomeBack`).
+    @Published private(set) var passkeyStart: PasskeySheetStep = .choose
+    /// The remembered passkey's name P-7 shows, when the daemon has one.
+    @Published private(set) var returningName: String?
+    /// Welcome back is offered once per first run: dismissed, it does not
+    /// come back when the daemon restarts or Join is shown again.
+    private var welcomeBackOffered = false
 
     /// Start ran `markComplete`: the first run is finished, and a passkey
     /// sheet that ends afterwards does not reopen Join.
@@ -242,8 +250,31 @@ final class FirstRunRunner: ObservableObject {
         return true
     }
 
-    /// Ask for the passkey sheets.
+    /// Ask for the passkey sheets, at P-1.
     func requestPasskey() {
+        passkeyStart = .choose
+        returningName = nil
+        passkeyOutcome = nil
+        passkeyDue = true
+    }
+
+    /// Ron's P-7 for a returning person (`FirstRunNavigation.opensWelcomeBack`):
+    /// asks the daemon which passkeys this Mac remembers and, if the rule
+    /// holds, opens the sheets at Welcome back with the remembered name. The
+    /// rule is checked again once the daemon answers, since Join (or an
+    /// enrolment the first status reported) can change meanwhile. Offered at
+    /// most once; its Sign in is the ordinary sign-in, and "Other sign-in
+    /// options" closes it and leaves Join as it was.
+    func offerWelcomeBack(from account: any PasskeyAccount) async {
+        guard !welcomeBackOffered, !passkeyDue,
+            FirstRunNavigation.mayOfferWelcomeBack(state, completed: completed)
+        else { return }
+        welcomeBackOffered = true
+        let passkeys = await account.passkeyState()
+        guard !passkeyDue, FirstRunNavigation.opensWelcomeBack(state, passkeys: passkeys, completed: completed)
+        else { return }
+        passkeyStart = .welcomeBack
+        returningName = passkeys?.rememberedName
         passkeyOutcome = nil
         passkeyDue = true
     }

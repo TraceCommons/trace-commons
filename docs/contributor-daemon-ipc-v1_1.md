@@ -6107,7 +6107,7 @@ key, tenant identity or secret-store reference.
 | `passkey_cancel` | `ceremony` | `{cancelled:true}` |
 | `account_bind` | none | `{outcome,binding_state}` |
 | `account_binding` | none | `{binding_state}` |
-| `passkey_state` | none | `{state,passkey_count,near_ai_connected}` |
+| `passkey_state` | none | `{state,passkey_count,remembered_name,near_ai_connected}` |
 | `account_sign_in` | `ingest_url?` | `{signed_in:true,expires_at}` |
 | `account_session_status` | none | `{state,signed_in,expires_at}` |
 | `account_sign_out` | none | `{signed_out:true}` |
@@ -6173,10 +6173,28 @@ complete result: `{"binding_state":"unbound"}`. Binding read values are
 `unbound|bound|closed|legacy`; `legacy` means no passkey-origin binding row,
 not proof of a NEAR AI connection. A signed-out binding read is unavailable,
 not `unbound`. `passkey_state.state` projects those labels, or `none` when
-signed out and `unknown` when unreadable. `passkey_count` is nullable until
-an authenticated source answers; `near_ai_connected` is nullable unless an
-authenticated identity fact establishes it. Never infer a count of zero or
-connected status from a missing binding row.
+signed out and `unknown` when unreadable. `near_ai_connected` is nullable
+unless an authenticated identity fact establishes it. Never infer connected
+status from a missing binding row.
+
+`passkey_count` and `remembered_name` are local facts, answered in every
+`state` including `none` and `unknown`: the passkeys **this Mac remembers**,
+not the account's passkeys on the server. The server cannot list an account's
+passkeys before authentication without telling anyone who asks whether the
+account exists, so the daemon keeps its own list (`remembered-passkeys.json`
+in the state directory, 0600): a record is written when a passkey is created,
+added, or used to sign in here, and holds the passkey's display name when this
+Mac learned one, the SHA-256 of the account id (for matching a later sign-in;
+never sent over IPC), and when it was last used. No credential material, no
+token, no credential id. At most four records are kept, most recent first.
+`passkey_count` is how many; `0` means none remembered here, not that the
+account has none. `remembered_name` is the most recent record's name, or null
+when it has none (a passkey first used here by signing in: the login answer
+carries no name). Both are null when the list cannot be read. Signing out
+keeps the list, since a returning person after sign-out is who the first
+run's "Welcome back" greets; removing this Mac's contributor state (`wipe`,
+the CLI's `logout`) clears it. Added in v1.1 additively; older shells ignore
+`remembered_name`.
 
 Native login is discoverable authentication: `user_handle` must contain the
 nonempty raw Apple user ID encoded as canonical base64url. A missing or empty
