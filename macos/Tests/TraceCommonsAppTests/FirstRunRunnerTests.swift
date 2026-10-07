@@ -39,9 +39,32 @@ final class RecordingFirstRunDaemon: FirstRunDaemon {
     }
 
     func enrollInvite(_ invite: String) async -> Bool { record(.enroll(invite)) }
-    func signInNearAI() async -> Bool { record(.signInNearAI) }
+    /// Called as the invite path's sign-in runs, to look at the runner then.
+    var duringSignIn: (() -> Void)?
+    func signInNearAI() async -> Bool {
+        duringSignIn?()
+        return record(.signInNearAI)
+    }
     var nearAIEnrolment: FirstRunNearAIEnrolment = .enrolled
-    func nearAILogin() async -> Bool { record(.nearAILogin) }
+    /// While true, `nearAILogin` waits like the browser sign-in until its
+    /// task is cancelled, then answers `loginAnswerOnCancel`.
+    var loginHolds = false
+    /// What a held login answers once cancelled: false as `AppModel`'s poll
+    /// does, or true for a sign-in that finished as the cancel arrived.
+    var loginAnswerOnCancel = false
+    /// What `cancelNearAILogin` answers: whether the daemon took the cancel.
+    var cancelAnswer = true
+    private(set) var cancels = 0
+    func nearAILogin() async -> Bool {
+        let answer = record(.nearAILogin)
+        guard loginHolds else { return answer }
+        while !Task.isCancelled { await Task.yield() }
+        return loginAnswerOnCancel
+    }
+    func cancelNearAILogin() async -> Bool {
+        cancels += 1
+        return cancelAnswer
+    }
     func enrollNearAI() async -> FirstRunNearAIEnrolment {
         log.append(.enrollNearAI)
         return nearAIEnrolment
@@ -524,6 +547,177 @@ final class FirstRunRunnerTests: XCTestCase {
         let copy = try XCTUnwrap(FirstRunCopy.decode(try XCTUnwrap(TCCoreCopy.firstRunCopyJSON())))
         let line = try XCTUnwrap(JoinScreenLayout.nearAINotice(runner.state, failure: runner.failure, copy: copy))
         XCTAssertEqual(line, TCNearAiEnroll.line(label: "near_ai_enroll_endpoint_refused") ?? copy.folders.enrollRefused)
+    }
+
+    /// With an invite, a near.ai sign-in that did not go through returns to
+    /// Join too (owner, 2026-10-07): the invite, its enrolment and every
+    /// other answer are kept, only the near.ai choice is cleared, and Join
+    /// says why in the core's sign-in line.
+    func test_aFailedSignInWithAnInviteReturnsToJoin() async throws {
+        let daemon = RecordingFirstRunDaemon()
+        daemon.failing = { $0 == .signInNearAI }
+        let state = onFolders()
+        let runner = FirstRunRunner(state: state, daemon: daemon)
+
+        await runner.commit(.leaveRoots)
+
+        let json = state.sessionRoots.settingsJSON()!
+        XCTAssertEqual(
+            daemon.log, [.startDaemon(settingsJSON: json), .lookupInvite("INVITE-1"), .enroll("INVITE-1"), .signInNearAI])
+        XCTAssertEqual(runner.failure, .signInFailed)
+        XCTAssertEqual(runner.state.step, .join)
+        XCTAssertEqual(runner.state.account, .none)
+        XCTAssertFalse(runner.state.signedIn)
+        XCTAssertEqual(runner.state.invite, state.invite)
+        XCTAssertEqual(runner.state.issuerHost, state.issuerHost)
+        XCTAssertEqual(runner.state.enrolledInvite, "INVITE-1")
+        XCTAssertEqual(runner.state.toolAnswers, state.toolAnswers)
+        XCTAssertTrue(runner.state.daemonStarted)
+        XCTAssertEqual(runner.state.startedSettingsJSON, json)
+        XCTAssertEqual(runner.lookup, RecordingFirstRunDaemon.validLookup)
+        let copy = try XCTUnwrap(FirstRunCopy.decode(try XCTUnwrap(TCCoreCopy.firstRunCopyJSON())))
+        XCTAssertEqual(
+            JoinScreenLayout.nearAINotice(runner.state, failure: runner.failure, copy: copy),
+            copy.folders.signInFailed)
+
+        // near.ai chosen again signs in to the enrolled invite's account;
+        // nothing is looked up, joined, or started twice.
+        runner.state = JoinScreenLayout.toggleNearAI(runner.state)
+        runner.state = JoinScreenLayout.forward(runner.state)
+        daemon.failing = { _ in false }
+        daemon.log = []
+        await runner.commit(.leaveRoots)
+        XCTAssertEqual(daemon.log, [.signInNearAI])
+        XCTAssertNil(runner.failure)
+        XCTAssertTrue(runner.state.signedIn)
+        XCTAssertEqual(runner.state.step, .uses)
+    }
+
+    /// The other invite failures are unchanged: a refused enroll stays on
+    /// the step with near.ai still chosen.
+    func test_aRefusedEnrollWithAnInviteStillKeepsTheStep() async {
+        let daemon = RecordingFirstRunDaemon()
+        daemon.failing = { $0 == .enroll("INVITE-1") }
+        let runner = FirstRunRunner(state: onFolders(), daemon: daemon)
+
+        await runner.commit(.leaveRoots)
+
+        XCTAssertEqual(runner.failure, .enrollFailed)
+        XCTAssertEqual(runner.state.step, .folders)
+        XCTAssertEqual(runner.state.account, .nearAI)
+        XCTAssertNil(runner.state.enrolledInvite)
+    }
+
+    /// Yields until `condition` holds, counting yields rather than waiting
+    /// on the clock.
+    private func yield(until condition: () -> Bool, file: StaticString = #filePath, line: UInt = #line) async {
+        for _ in 0..<100_000 where !condition() { await Task.yield() }
+        XCTAssertTrue(condition(), "never held", file: file, line: line)
+    }
+
+    /// A near.ai login waiting on the browser, from Folders, with no invite.
+    private func waitingOnTheBrowser(
+        _ daemon: RecordingFirstRunDaemon
+    ) async -> (runner: FirstRunRunner, commit: Task<Void, Never>, state: FirstRunState) {
+        var state = onFolders()
+        state.invite = ""
+        state.issuerHost = nil
+        state.account = .nearAI
+        daemon.loginHolds = true
+        let runner = FirstRunRunner(state: state, daemon: daemon)
+        XCTAssertFalse(runner.signInWaiting, "no Cancel before the sign-in runs")
+        let commit = Task { await runner.commit(.leaveRoots) }
+        await yield { runner.signInWaiting }
+        XCTAssertTrue(runner.isCommitting)
+        return (runner, commit, state)
+    }
+
+    /// Cancel ends the browser wait (owner, 2026-10-07): the daemon is told,
+    /// the person stays where they were with near.ai still chosen, nothing
+    /// is enrolled, Continue is back, and the next Continue signs in afresh.
+    func test_cancellingTheBrowserWaitKeepsTheStepAndTheChoice() async throws {
+        let daemon = RecordingFirstRunDaemon()
+        let (runner, commit, state) = await waitingOnTheBrowser(daemon)
+
+        await runner.cancelSignIn()
+        await commit.value
+
+        XCTAssertEqual(daemon.cancels, 1)
+        XCTAssertEqual(daemon.log, [.startDaemon(settingsJSON: state.sessionRoots.settingsJSON()!), .nearAILogin])
+        XCTAssertNil(runner.failure, "a cancel is the person's, not a failure")
+        XCTAssertFalse(runner.isCommitting, "Continue is enabled again")
+        XCTAssertFalse(runner.signInWaiting)
+        XCTAssertEqual(runner.state.step, .folders)
+        XCTAssertEqual(runner.state.account, .nearAI)
+        XCTAssertFalse(runner.state.nearAIEnrolled)
+        XCTAssertFalse(runner.state.signedIn)
+        XCTAssertFalse(runner.state.holdsEnrolment)
+
+        // A second Cancel with nothing waiting does nothing.
+        await runner.cancelSignIn()
+        XCTAssertEqual(daemon.cancels, 1)
+
+        // Continue starts a fresh sign-in.
+        daemon.loginHolds = false
+        daemon.log = []
+        await runner.commit(.leaveRoots)
+        XCTAssertEqual(daemon.log, [.nearAILogin, .enrollNearAI])
+        XCTAssertTrue(runner.state.nearAIEnrolled)
+        XCTAssertEqual(runner.state.step, .uses)
+    }
+
+    /// A sign-in that finishes as the cancel arrives still enrols nothing:
+    /// the person asked to stop.
+    func test_aLoginFinishingAsTheCancelArrivesEnrollsNothing() async {
+        let daemon = RecordingFirstRunDaemon()
+        daemon.loginAnswerOnCancel = true
+        let (runner, commit, _) = await waitingOnTheBrowser(daemon)
+
+        await runner.cancelSignIn()
+        await commit.value
+
+        XCTAssertFalse(daemon.log.contains(.enrollNearAI))
+        XCTAssertNil(runner.failure)
+        XCTAssertEqual(runner.state.step, .folders)
+        XCTAssertEqual(runner.state.account, .nearAI)
+        XCTAssertFalse(runner.state.nearAIEnrolled)
+    }
+
+    /// Fail closed: a cancel the daemon did not take still ends the wait
+    /// here, and says the sign-in did not finish, on the same step.
+    func test_aRefusedCancelStillEndsTheWaitAndSaysTheSignInFailed() async throws {
+        let daemon = RecordingFirstRunDaemon()
+        daemon.cancelAnswer = false
+        let (runner, commit, _) = await waitingOnTheBrowser(daemon)
+
+        await runner.cancelSignIn()
+        await commit.value
+
+        XCTAssertEqual(daemon.cancels, 1)
+        XCTAssertFalse(daemon.log.contains(.enrollNearAI))
+        XCTAssertEqual(runner.failure, .signInFailed)
+        XCTAssertFalse(runner.isCommitting)
+        XCTAssertFalse(runner.signInWaiting)
+        XCTAssertEqual(runner.state.step, .folders)
+        XCTAssertEqual(runner.state.account, .nearAI)
+        let copy = try XCTUnwrap(FirstRunCopy.decode(try XCTUnwrap(TCCoreCopy.firstRunCopyJSON())))
+        XCTAssertEqual(
+            FoldersScreenLayout.notice(for: runner.failure, copy: copy, onboarding: nil), copy.folders.signInFailed)
+    }
+
+    /// Only the browser wait offers Cancel: the invite path's sign-in is one
+    /// call with no browser.
+    func test_onlyTheBrowserWaitOffersCancel() async {
+        let daemon = RecordingFirstRunDaemon()
+        let runner = FirstRunRunner(state: onFolders(), daemon: daemon)
+        var waitingDuringSignIn: Bool?
+        daemon.duringSignIn = { waitingDuringSignIn = runner.signInWaiting }
+        await runner.commit(.leaveRoots)
+        XCTAssertTrue(daemon.log.contains(.signInNearAI))
+        XCTAssertEqual(waitingDuringSignIn, false)
+        XCTAssertFalse(runner.signInWaiting)
+        await runner.cancelSignIn()
+        XCTAssertEqual(daemon.cancels, 0)
     }
 
     func test_aDeadInviteReturnsToJoinWithAnswersKept() async {

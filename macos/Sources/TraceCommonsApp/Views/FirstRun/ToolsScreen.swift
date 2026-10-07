@@ -280,6 +280,9 @@ struct ToolsScreen: View {
                 title: copy.frame.continueButton,
                 isEnabled: canContinue,
                 busy: runner.isCommitting,
+                cancel: FoldersScreenLayout.signInCancel(waiting: runner.signInWaiting, copy: copy) {
+                    Task { await runner.cancelSignIn() }
+                },
                 action: { Task { await runner.commit(.leaveRoots) } }
             )
         ) {
