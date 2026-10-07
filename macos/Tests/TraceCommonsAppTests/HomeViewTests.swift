@@ -32,6 +32,27 @@ final class HomeViewTests: XCTestCase {
         XCTAssertTrue(window.contains("openTraces: { tab = .traces },"))
     }
 
+    /// P1: #1146's status card puts the dot beside both lines, so the
+    /// waiting line starts under the status words, never under the dot.
+    /// Every status word sets the shared guide, and so does the waiting
+    /// line; each history row keeps its own bottom rule (L14).
+    func test_theStatusLinesShareALeftEdgeAfterTheDot() throws {
+        let home = try HistoryParityTests.text("Views/Monitor/HomeViews.swift")
+        XCTAssertTrue(home.contains("VStack(alignment: .homeStatusText, spacing: GlassTokens.Space.s1) {"))
+        let status = try XCTUnwrap(home.range(of: "private func status(_ state: ScreenState) -> some View {"))
+        let statusEnd = try XCTUnwrap(home.range(of: "/// Ron's Missions card body:", range: status.upperBound..<home.endIndex))
+        let body = String(home[status.upperBound..<statusEnd.lowerBound])
+        let texts = body.components(separatedBy: "\n").filter { $0.trimmingCharacters(in: .whitespaces).hasPrefix("Text(") }
+        XCTAssertEqual(texts.count, 6)
+        XCTAssertEqual(body.components(separatedBy: ".alignmentGuide(.homeStatusText) { $0[.leading] }").count - 1,
+                       texts.count, "a status line starts at the dot")
+        XCTAssertTrue(home.contains(".foregroundStyle(GlassColor.textSecondary)\n"
+            + "                            .alignmentGuide(.homeStatusText) { $0[.leading] }"),
+                      "the waiting line starts under the dot")
+        XCTAssertTrue(home.contains(".overlay(alignment: .bottom) {\n            GlassHairline(GlassColor.hairline)"),
+                      "a history row lost its rule")
+    }
+
     /// One waiting number on Home: the stat tile reads the Traces store,
     /// the count the Traces badge shows.
     func test_homeReadsWaitingFromOneStore() throws {

@@ -94,7 +94,7 @@ struct ConsentSection: View {
                 .padding(.top, GlassTokens.Space.s4)
             ForEach(Array(scopes.enumerated()), id: \.element.id) { index, scope in
                 if index > 0 {
-                    Rectangle().fill(GlassColor.hairline).frame(height: 0.5).accessibilityHidden(true)
+                    GlassHairline(GlassColor.hairline)
                 }
                 row(scope, granted: granted)
             }

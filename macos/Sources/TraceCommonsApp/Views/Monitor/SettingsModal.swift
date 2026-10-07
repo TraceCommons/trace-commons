@@ -206,9 +206,9 @@ struct SettingsModal: View {
     private func rule(_ axis: Axis) -> some View {
         switch axis {
         case .horizontal:
-            Rectangle().fill(GlassTokens.Color.rule.color).frame(height: 0.5).accessibilityHidden(true)
+            GlassHairline(GlassTokens.Color.rule.color)
         case .vertical:
-            Rectangle().fill(GlassColor.ink(Self.navRuleInk)).frame(width: 0.5).accessibilityHidden(true)
+            GlassHairline(GlassColor.ink(Self.navRuleInk), axis: .vertical)
         }
     }
 

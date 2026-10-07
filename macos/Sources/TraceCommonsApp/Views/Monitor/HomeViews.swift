@@ -205,7 +205,10 @@ private struct HomeOverview: View {
         let state = state
         return GlassCard {
             HStack(spacing: GlassTokens.Space.s6) {
-                VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
+                // #1146 `home-view.tsx`: the dot is the two lines' sibling,
+                // so the second line starts under the first line's words,
+                // after the dot, never under the dot.
+                VStack(alignment: .homeStatusText, spacing: GlassTokens.Space.s1) {
                     status(state)
                         .glassType(GlassTokens.TypeScale.bodyStrong)
                     // Ron's #1146 second line: sessions waiting and how many
@@ -215,6 +218,7 @@ private struct HomeOverview: View {
                         Text(line)
                             .glassType(GlassTokens.TypeScale.label.weight(.regular))
                             .foregroundStyle(GlassColor.textSecondary)
+                            .alignmentGuide(.homeStatusText) { $0[.leading] }
                     }
                 }
                 .accessibilityElement(children: .combine)
@@ -242,22 +246,28 @@ private struct HomeOverview: View {
                     case .signedOut:
                         GlassStatusDot(.ask, ring: true)
                         Text(MonitorWords.signedOut)
+                            .alignmentGuide(.homeStatusText) { $0[.leading] }
                     case .unhealthy(let label):
                         GlassStatusDot(.outside, ring: true)
                         Text(HealthCopy.core(label: label, maxQueueEntries: nil).title)
+                            .alignmentGuide(.homeStatusText) { $0[.leading] }
                     case .watching(let tools):
                         GlassStatusDot(.on, ring: true)
                         Text(MonitorWords.table?.shell.watching(tools: tools) ?? FlowMapScene.pair(MonitorWords.watching, tools))
+                            .alignmentGuide(.homeStatusText) { $0[.leading] }
                     }
                 case .paused:
                     GlassStatusDot(.ask, ring: true)
                     Text(MonitorWords.paused)
+                        .alignmentGuide(.homeStatusText) { $0[.leading] }
                 case .coreDown:
                     GlassStatusDot(.outside, ring: true)
                     Text(store.failures["status"].flatMap { MonitorWords.table?.line(for: $0) } ?? "—")
+                        .alignmentGuide(.homeStatusText) { $0[.leading] }
                 case .loading, .unknown:
                     // No dot: unknown is never drawn as on, or as off.
                     Text("—").accessibilityLabel(MonitorWords.unknown)
+                        .alignmentGuide(.homeStatusText) { $0[.leading] }
                 }
         }
     }
@@ -365,7 +375,7 @@ private struct HomeCardRows<Item: Identifiable, Words: View, Tag: View>: View {
                 }
                 .padding(.top, index == 0 ? 0 : GlassTokens.Space.s3)
                 .overlay(alignment: .top) {
-                    if index > 0 { Rectangle().fill(GlassColor.hairline).frame(height: 0.5) }
+                    if index > 0 { GlassHairline(GlassColor.hairline) }
                 }
                 .accessibilityElement(children: .combine)
             }
@@ -581,7 +591,7 @@ private struct HistoryPage: View {
         }
         .padding(.top, first ? 0 : GlassTokens.Space.s9 - 2)
         .overlay(alignment: .top) {
-            if !first { Rectangle().fill(GlassColor.hairline).frame(height: 0.5) }
+            if !first { GlassHairline(GlassColor.hairline) }
         }
     }
 
@@ -782,7 +792,7 @@ private struct HistoryListRow: View {
                 .fill(selected ? GlassColor.ink(0.12) : Color.clear)
         )
         .overlay(alignment: .bottom) {
-            Rectangle().fill(GlassColor.hairline).frame(height: 0.5)
+            GlassHairline(GlassColor.hairline)
         }
         .accessibilityElement(children: .contain)
         .accessibilityAddTraits(selected ? .isSelected : [])
@@ -1138,8 +1148,8 @@ struct HistoryCommunityCard: View {
                             cell(words.acceptRate, HomeFormat.rate(community.acceptRate))
                         }
                         .padding(.vertical, GlassTokens.Space.s4)
-                        .overlay(alignment: .top) { Rectangle().fill(GlassColor.hairline).frame(height: 0.5) }
-                        .overlay(alignment: .bottom) { Rectangle().fill(GlassColor.hairline).frame(height: 0.5) }
+                        .overlay(alignment: .top) { GlassHairline(GlassColor.hairline) }
+                        .overlay(alignment: .bottom) { GlassHairline(GlassColor.hairline) }
                         if community.analyticsWithheld == true {
                             Text(words.analyticsWithheld)
                                 .glassType(GlassTokens.TypeScale.bodyStrong)
@@ -1211,7 +1221,7 @@ struct HistoryCreditCard: View {
                                HomeFormat.pendingFigure(rollup?.creditPending, credit: credit))
                     }
                     .padding(.top, GlassTokens.Space.s7)
-                    .overlay(alignment: .top) { Rectangle().fill(GlassColor.hairline).frame(height: 0.5) }
+                    .overlay(alignment: .top) { GlassHairline(GlassColor.hairline) }
                 }
                 if let condition {
                     Text(condition)
@@ -1492,4 +1502,13 @@ extension MonitorWords {
     static var window: String { table?.window ?? "" }
     static var approved: String { table?.approved ?? "" }
     static var unrecorded: String { table?.unrecorded ?? "" }
+}
+
+extension HorizontalAlignment {
+    private enum HomeStatusText: AlignmentID {
+        static func defaultValue(in context: ViewDimensions) -> CGFloat { context[.leading] }
+    }
+
+    /// The left edge of the Home status card's words, after its dot.
+    static let homeStatusText = HorizontalAlignment(HomeStatusText.self)
 }
