@@ -226,7 +226,7 @@ struct MonitorWindowView: View {
                             maxWidth: .infinity, minHeight: TracesGraphFooter.height,
                             maxHeight: TracesGraphFooter.height, alignment: .top)
                         .overlay(alignment: .top) {
-                            Rectangle().fill(GlassTokens.Color.rule.color).frame(height: 0.5)
+                            GlassHairline(GlassTokens.Color.rule.color)
                         }
                         .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
@@ -313,9 +313,9 @@ struct MonitorWindowView: View {
         // core's words.
         .environment(\.glassModalCloseLabel, MonitorWords.table?.close ?? "")
         // Ron's `useInspectorDemand`: a key that was not there before (an
-        // undo, a selected session, a folder's Submit all in flight, the
-        // arming or Private AI offer) opens the inspector, so none runs out
-        // of sight. A key going away closes nothing.
+        // undo, a selected session, a folder's Submit all in flight)
+        // opens the inspector, so none runs out of sight. A key going away
+        // closes nothing. The offers are drawn above the tree, not here.
         .onChange(of: demandKeys) { _, current in
             if InspectorDemand.opens(previous: lastDemand, current: current) { showsInspector = true }
             lastDemand = current
@@ -519,12 +519,12 @@ struct MonitorWindowView: View {
     /// Inference's dot: what the listener is doing, from the daemon's own
     /// report, never the switch. The switch says what was asked for; a
     /// switch that is on over a listener that refused to start, or is held,
-    /// is drawn as needing attention, not as on. Only the core's "clear"
-    /// tone is on. No report, or an unreported state, is no dot: unknown is
-    /// neither on nor off.
+    /// is drawn as not working, never as on. Only the core's "clear" tone
+    /// is on; every other is #1146's outside (red). No report, or an
+    /// unreported state, is no dot: unknown is neither on nor off.
     static func inferenceDot(_ state: PrivateInferenceState?, calls: PrivateInferenceCalls) -> GlassStatus? {
         guard let state, !state.label.isEmpty else { return nil }
-        return PrivateInferenceIndicator.status(PrivateInferenceSurface.tone(state, calls: calls))
+        return PrivateInferenceIndicator.dotStatus(PrivateInferenceSurface.tone(state, calls: calls))
     }
 
     /// The dot's text equivalent: the core's sentence for the same state.

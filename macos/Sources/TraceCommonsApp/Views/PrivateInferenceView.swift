@@ -33,6 +33,15 @@ enum PrivateInferenceIndicator {
         case .neutral: return .off
         }
     }
+
+    /// The Private AI dot (#1146 `flow-map.tsx` and `inference-inspector.tsx`):
+    /// on while the core's tone is clear, outside (red) for every other
+    /// tone, an unread one included. Drawn on the Inference tab, the map's
+    /// Private AI segment and the inspector's Status row, always beside or
+    /// behind the core's sentence for the same state.
+    static func dotStatus(_ tone: PrivateInferenceTone) -> GlassStatus {
+        tone.readsAsWorking ? .on : .outside
+    }
 }
 
 /// The Private AI switch, with the core's sentence on what turning it on

@@ -52,11 +52,9 @@ struct InferenceTabView: View {
                 // sign-in, balance and funding, in the main pane above the
                 // ledger (owner ruling on #1241). Drawn only while the daemon
                 // runs, which every one of them needs: the ledger is.
+                // The managed cards (O3) are drawn inside it, above the
+                // global heading.
                 InferenceAccountSection(store: store)
-                // Saved model accounts and managed sessions, which #1146 has
-                // no panel for, follow its page (owner ruling O3): accounts,
-                // then sessions, then their error notice.
-                ManagedSessionsSection()
                 // The stack-wide rule (ScreenState): a core that is down or a
                 // failed read is said in the core's words over the last page,
                 // never as the error's fixed label and never as current.
@@ -358,7 +356,9 @@ struct PrivateAIInspectorView: View {
                 GlassLegendCell(copy.inspectorNotConnected, value: counts.notConnected, status: .off)
             }
             VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
-                InspectorFactRow(label: copy.inspectorStatus, value: state.line, status: state.status)
+                // #1146: the Status dot is on while working, outside otherwise.
+                InspectorFactRow(label: copy.inspectorStatus, value: state.line,
+                                 status: Self.statusDot(store.privateAI?.state, calls: model.privateInferenceCalls))
                 InspectorFactRow(
                     label: copy.inspectorCredential,
                     value: CredentialSurface.stateLine(model.credentialStatus, copy: copy, calls: model.credentialCalls))
@@ -392,6 +392,13 @@ struct PrivateAIInspectorView: View {
         guard let rows else { return "—" }
         let connected = rows.filter(\.connected)
         return connected.isEmpty ? copy.inspectorNone : connected.map(\.name).joined(separator: ", ")
+    }
+
+    /// The Status row's dot (#1146 `inference-inspector.tsx`): on while the
+    /// listener is working, outside otherwise.
+    static func statusDot(_ state: DaemonData.PrivateInferenceState?, calls: PrivateInferenceCalls) -> GlassStatus {
+        PrivateInferenceIndicator.dotStatus(
+            PrivateInferenceSurface.tone(InferenceAccountSection.surfaceState(state), calls: calls))
     }
 }
 

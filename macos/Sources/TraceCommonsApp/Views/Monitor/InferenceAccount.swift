@@ -31,6 +31,12 @@ struct InferenceAccountSection: View {
                         label: copy.statRuntime,
                         value: Self.runtimeWord(store.privateAI?.state, copy: copy))
                 }
+                // Saved model accounts and managed sessions, which #1146
+                // has no panel for (owner ruling O3: in the main pane), come
+                // before the global heading, as on main: that heading says
+                // everything under it changes standard sessions, and the
+                // managed cards never do.
+                ManagedSessionsSection()
                 // The standard tool settings below are global; managed
                 // launches never edit them.
                 ManagedGlobalSettingsHeader()

@@ -264,11 +264,20 @@ final class InferenceParityTests: XCTestCase {
         XCTAssertFalse(source.contains("wallet?.commons ?? \"\""), "an absent word must not draw an unlabelled field")
     }
 
-    /// The window's Inference dot and the card map the tone one way.
+    /// The window's Inference dot, the map's Private AI segment and the
+    /// inspector's Status row take #1146's rule: on while working, outside
+    /// (red) for every other tone, never grey.
     func test_theDotReadsTheIndicator() throws {
         let window = try Self.text("Views/MonitorWindowView.swift")
         XCTAssertTrue(window.contains(
-            "return PrivateInferenceIndicator.status(PrivateInferenceSurface.tone(state, calls: calls))"))
+            "return PrivateInferenceIndicator.dotStatus(PrivateInferenceSurface.tone(state, calls: calls))"))
+        XCTAssertEqual(PrivateInferenceIndicator.dotStatus(.clear), .on)
+        for tone: PrivateInferenceTone in [.neutral, .held, .attention, .refused] {
+            XCTAssertEqual(PrivateInferenceIndicator.dotStatus(tone), .outside, "\(tone)")
+        }
+        let inspector = try Self.text("Views/Monitor/InferenceViews.swift")
+        XCTAssertTrue(inspector.contains(
+            "status: Self.statusDot(store.privateAI?.state, calls: model.privateInferenceCalls))"))
     }
 
     /// No write without the preview, and a first connect asks the exposure
@@ -419,12 +428,14 @@ final class InferenceParityTests: XCTestCase {
 
     /// P24: #1146's Private AI page order. The subtitle and the Inference
     /// access / Runtime pair lead, then the tools, the switch, sign-in,
-    /// balance and funding; the managed cards (no #1146 panel, O3) follow the
-    /// page, and the ledger follows them.
+    /// balance and funding, and the ledger follows the page. The managed
+    /// cards (no #1146 panel, O3) sit before the "Change global settings"
+    /// heading, never under it: the heading says everything below it changes
+    /// standard sessions, and the managed cards do not.
     func test_theMainPaneFollowsThePrivateAIPageOrder() throws {
         let account = try Self.text("Views/Monitor/InferenceAccount.swift")
         let order = ["Text(copy.subtitle)", "label: copy.statInferenceAccess,", "label: copy.statRuntime,",
-                     "ManagedGlobalSettingsHeader()", "eyebrow: copy.panelToolsEyebrow, title: copy.harnessesTitle,",
+                     "ManagedSessionsSection()", "ManagedGlobalSettingsHeader()", "eyebrow: copy.panelToolsEyebrow, title: copy.harnessesTitle,",
                      "HarnessListSection(copy: copy, titled: false)", "PrivateAISwitchCard(",
                      "GlassCard { CredentialSection(copy: copy, prominent: true) }", "PrivateAIBalanceCard(copy: copy)",
                      "GlassCard { FundingRow(copy: copy) }"]
@@ -436,10 +447,10 @@ final class InferenceParityTests: XCTestCase {
         }
         let views = try Self.text("Views/Monitor/InferenceViews.swift")
         let page = try XCTUnwrap(views.range(of: "InferenceAccountSection(store: store)"))
-        let managed = try XCTUnwrap(views.range(of: "ManagedSessionsSection()"))
         let ledger = try XCTUnwrap(views.range(of: "if let page = store.calls {"))
-        XCTAssertLessThan(page.lowerBound, managed.lowerBound, "the managed cards follow #1146's page")
-        XCTAssertLessThan(managed.lowerBound, ledger.lowerBound, "the ledger follows the managed cards")
+        XCTAssertLessThan(page.lowerBound, ledger.lowerBound, "the ledger follows the page")
+        XCTAssertFalse(views.contains("ManagedSessionsSection()"), "the managed cards are drawn under the global heading")
+        XCTAssertEqual(account.components(separatedBy: "ManagedSessionsSection()").count - 1, 1)
         XCTAssertFalse(views.contains("ManagedGlobalSettingsHeader()"), "the global heading sits over the tools it names")
     }
 
@@ -488,11 +499,22 @@ final class InferenceParityTests: XCTestCase {
         let views = try Self.text("Views/Monitor/InferenceViews.swift")
         for needle in ["GlassLegendCell(copy.inspectorConnected, value: counts.connected, status: .on)",
                        "GlassLegendCell(copy.inspectorNotConnected, value: counts.notConnected, status: .off)",
-                       "InspectorFactRow(label: copy.inspectorStatus, value: state.line, status: state.status)",
+                       "InspectorFactRow(label: copy.inspectorStatus, value: state.line,",
                        "label: copy.inspectorCredential,", "InspectorFactRow(label: copy.inspectorConnectedTools,",
                        "PrivateAIBalanceCard(copy: copy)", ".glassType(GlassTokens.TypeScale.heading.weight(.bold))"] {
             XCTAssertTrue(views.contains(needle), "InferenceViews.swift lacks \(needle)")
         }
+        // P25: #1146's legend cell is a fixed 28pt pill on one line, so
+        // "not connected" never wraps and grows past its neighbour.
+        let containers = try String(
+            contentsOf: GlassSurfaceRulesTests.root.deletingLastPathComponent()
+                .appendingPathComponent("TCDesign/Components/Containers.swift"), encoding: .utf8)
+        let cell = try XCTUnwrap(containers.range(of: "public struct GlassLegendCell"))
+        let cellBody = String(containers[cell.lowerBound...].prefix(1800))
+        XCTAssertTrue(cellBody.contains(".frame(height: GlassTokens.Size.controlLarge)"), "the cell grows with its label")
+        XCTAssertFalse(cellBody.contains(".frame(minHeight: GlassTokens.Size.controlLarge)"))
+        XCTAssertTrue(cellBody.contains(".lineLimit(1)"), "the label may wrap")
+        XCTAssertEqual(GlassTokens.Size.controlLarge, 28)
     }
 
     /// V1: the managed accounts header holds only the re-read link; Add and
@@ -586,8 +608,7 @@ final class InferenceParityTests: XCTestCase {
                        "    private var ledger: some View {\n"
                            + "        ScrollView {\n"
                            + "            VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {\n",
-                       "                InferenceAccountSection(store: store)\n",
-                       "                ManagedSessionsSection()\n"
+                       "                InferenceAccountSection(store: store)\n"
                            + "                // The stack-wide rule (ScreenState)"] {
             XCTAssertTrue(views.contains(needle), "InferenceViews.swift lacks \(needle)")
         }
