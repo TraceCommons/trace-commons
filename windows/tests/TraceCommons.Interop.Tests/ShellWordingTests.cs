@@ -91,7 +91,7 @@ public class ShellWordingTests
             { "TraceCommons.App/ViewModels/ContributorSettingsViewModel.cs", 15 },
             { "TraceCommons.App/ViewModels/HistoryViewModel.cs", 4 },
             { "TraceCommons.App/ViewModels/MainViewModel.cs", 18 },
-            { "TraceCommons.App/ViewModels/OnboardingViewModel.cs", 6 },
+            { "TraceCommons.App/ViewModels/OnboardingViewModel.cs", 2 },
             { "TraceCommons.App/ViewModels/PreviewSheetViewModel.cs", 10 },
             { "TraceCommons.App/ViewModels/QueueGroupViewModel.cs", 1 },
             { "TraceCommons.App/ViewModels/SessionRootsViewModel.cs", 2 },

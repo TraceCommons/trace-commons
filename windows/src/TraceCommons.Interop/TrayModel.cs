@@ -57,7 +57,7 @@ public sealed class TrayModel
     /// truncates or fails on overflow rather than telling anyone.
     /// </summary>
     public const int MaxTooltipLength = 127;
-    public const string DecisionCountUnavailable = "Decision count unavailable.";
+    public const string DecisionCountUnavailable = "Decisions owed unavailable";
 
     private TrayModel(TrayIconState state, int? decisionsOwed, string tooltip, string menuHeader)
     {

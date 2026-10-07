@@ -1152,10 +1152,15 @@ public sealed class PreviewSheetViewModel : INotifyPropertyChanged, IDisposable
             StillPresentCategories.Add(row);
         }
 
+        // The core's title for each scope (the disclosure bundle's
+        // consent_scope_titles); a scope it has no title for is not named.
         Permissions.Clear();
         foreach (string scope in summary.ConsentScopes)
         {
-            Permissions.Add(new PermissionRow(ConsentScopeViewModel.ScopeTitle(scope)));
+            if (ConsentScopeTitles.Title(scope) is { } title)
+            {
+                Permissions.Add(new PermissionRow(title));
+            }
         }
 
         Raise(nameof(WouldSendText));

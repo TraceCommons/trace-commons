@@ -778,25 +778,6 @@ public sealed class ConsentScopeViewModel : INotifyPropertyChanged
             PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(IsSelected)));
         }
     }
-
-    /// <summary>
-    /// The short bold label for a scope named on a preview summary.
-    /// </summary>
-    /// <remarks>
-    /// Only the preview sheet's permission rows still use this, because that
-    /// view model has no <c>consent_options</c> answer to read. Onboarding
-    /// and Settings read <see cref="ConsentOption.Title"/>, the core's own
-    /// words. Moving the preview onto the core's title is a follow-up.
-    /// </remarks>
-    public static string ScopeTitle(string wireName) => wireName switch
-    {
-        "debugging_evaluation" => "Finding bugs and measuring agents",
-        "benchmark_only" or "benchmark_creation" => "Turn my traces into test cases",
-        "ranking_training" or "reward_model_training" => "Train models that judge agent output",
-        "model_training" => "Train coding models directly",
-        "public_attribution" => "List my handle publicly as a contributor",
-        _ => wireName.Replace('_', ' '),
-    };
 }
 
 public sealed class ProjectViewModel : INotifyPropertyChanged
