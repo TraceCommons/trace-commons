@@ -107,7 +107,7 @@ export function MonitorShell({
   }, [demandKey]);
 
   return (
-    <Window className="h-screen" onClick={() => setViewMenu(false)}>
+    <Window floating className="h-screen" onClick={() => setViewMenu(false)}>
       <Pane
         className="flex min-w-[320px] flex-col overflow-hidden"
         style={
@@ -166,6 +166,7 @@ export function MonitorShell({
           className="flex-none overflow-auto px-4 py-4.5"
           style={{ width: "var(--tc-width-inspector)" }}
           aria-label="Inspector"
+          data-tauri-drag-region
         >
           <div className="tc-page mb-2.5 empty:hidden">
             <WaitingPrompts />

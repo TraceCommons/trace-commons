@@ -96,9 +96,9 @@ export function MonitorToolbar({
           </ToolbarIconButton>
         </span>
         <RoundButton label="Settings" className="ml-1.5" onClick={onSettings}>
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden="true">
-            <circle cx="12" cy="12" r="3" />
-            <path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1L7 17M17 7l2.1-2.1" />
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinejoin="round" aria-hidden="true">
+            <path d="M19.47 10.14 L21.90 10.59 L21.90 13.41 L19.47 13.86 L18.60 15.97 L20.00 18.00 L18.00 20.00 L15.97 18.60 L13.86 19.47 L13.41 21.90 L10.59 21.90 L10.14 19.47 L8.03 18.60 L6.00 20.00 L4.00 18.00 L5.40 15.97 L4.53 13.86 L2.10 13.41 L2.10 10.59 L4.53 10.14 L5.40 8.03 L4.00 6.00 L6.00 4.00 L8.03 5.40 L10.14 4.53 L10.59 2.10 L13.41 2.10 L13.86 4.53 L15.97 5.40 L18.00 4.00 L20.00 6.00 L18.60 8.03Z" />
+            <circle cx="12" cy="12" r="3.2" />
           </svg>
         </RoundButton>
       </div>

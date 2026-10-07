@@ -309,7 +309,7 @@ jobs:
       # signing authority. The cold-build cost is the price of that.
 
       - name: Build the CLI
-        run: cargo build --locked --release --bin trace-commons-contributor -p trace-commons-contributor --target x86_64-pc-windows-msvc
+        run: cargo build --locked --release --bin trace-commons-contributor --bin near-ai -p trace-commons-contributor --target x86_64-pc-windows-msvc
 
       # The WinUI desktop app, from here to the second signing pass below.
       #
@@ -417,7 +417,8 @@ jobs:
             "TraceCommons.exe",
             "TraceCommons.dll",
             "TraceCommons.Interop.dll",
-            "trace_commons_contributor_ffi.dll"
+            "trace_commons_contributor_ffi.dll",
+            "near-ai.exe"
           )
 
           $missing = @($allowlist | Where-Object {
@@ -430,7 +431,7 @@ jobs:
           $found = @(
             Get-ChildItem -Path $publishDir -Recurse -File |
               Where-Object { @(".exe", ".dll") -contains $_.Extension } |
-              Where-Object { $_.Name -like "TraceCommons*" -or $_.Name -like "trace_commons_*" } |
+              Where-Object { $_.Name -like "TraceCommons*" -or $_.Name -like "trace_commons_*" -or $_.Name -eq "near-ai.exe" } |
               ForEach-Object { $_.FullName.Substring($publishDir.Length + 1) } |
               Sort-Object
           )

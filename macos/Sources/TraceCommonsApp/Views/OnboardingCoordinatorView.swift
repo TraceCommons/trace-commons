@@ -1,247 +1,182 @@
+import AppKit
 import SwiftUI
+import TCBridge
+import TCDesign
+import TCShellCore
 
-/// Chains the existing onboarding screens into one first-run flow.
+/// Hosts Ron's first run (#1030): Quick setup (Join, Folders, Uses) and
+/// Custom setup (Join, Tools, Rules, Uses), one screen per step.
 ///
-/// Each screen already exists (`OnboardingWelcomeView`, `OnboardingRootsView`,
-/// `OnboardingConnectView`, `ConsentScopesView`, `OnboardingPrivacyScanView`,
-/// `OnboardingProjectsView`, `OnboardingDoneView`) and drives its own daemon
-/// call. This view owns only the sequencing between them and the one piece
-/// of state that must survive a screen change: the consent scopes chosen on
-/// the consent screen, which the screens after it must not discard if the
-/// contributor goes back to revisit them.
+/// Every decision is in `FirstRunState`, every daemon call in
+/// `FirstRunPlan`, run in order by one `FirstRunRunner` this view holds for
+/// the whole first run; the screens draw the state and commit it. This view
+/// owns only what spans the steps:
 ///
-/// ## The roots screen comes second, not first
+/// - the copy table, read once from the core (`tc_first_run_copy_json`). A
+///   table that will not decode shows no step at all: every word a step
+///   shows is the core's, and none is written here to fall back on. That
+///   is logged, label only, so a broken table is diagnosable;
+/// - the passkey sheets, mounted here exactly once, so a request the
+///   Folders or Tools commit raises presents on whichever step follows;
+/// - invite links (`PendingInvite`), which fill Join and bring it up, in a
+///   host that takes them (`takesInvites`).
 ///
-/// On a fresh install the daemon refuses to start until the session roots
-/// are declared (`AppModel.Startup.needsRoots`), and the roots screen is
-/// what clears that. It used to be rendered directly on that state, so the
-/// first thing a new contributor ever saw was "Which folders may this app
-/// watch?" -- a consent question asked before the screen that says what the
-/// app is and why it wants anything. Welcome now comes first on that path
-/// too; `Get started` goes to the roots screen while the daemon is still
-/// refusing and straight to Connect once it is running. The roots screen
-/// needs no daemon, so nothing about it changes by moving it.
+/// The daemon is not running on a fresh install: the core refuses to start
+/// it until the session roots are declared, and Folders or Tools is where
+/// they are. So the invite pasted on Join is looked up and joined, and the
+/// account chosen there signed in or created, only once that commit has
+/// started the daemon (`CommitPoint.leaveRoots`).
 ///
-/// Returning contributors whose folder declarations were lost repeat Welcome,
-/// folder consent, and the remaining setup. Existing enrollment remains valid.
+/// ## Resuming
 ///
-/// ## Call ordering (why `enroll` carries no scopes)
-///
-/// The contract's `enroll` entry (`docs/contributor-daemon-ipc-v1_1.md`)
-/// accepts an optional `scopes` array at enroll time. That would be the
-/// simpler wire sequence -- one call instead of two -- but it does not fit
-/// this product's fixed screen order: screen 2 (Connect, which fires
-/// `enroll`) comes *before* screen 3 (the actual consent decision). Asking
-/// `OnboardingConnectView` to somehow carry screen 3's answer backward in
-/// time is not an option, so this coordinator does the opposite: `enroll`
-/// runs with no `scopes` (the daemon then applies the floor scope,
-/// `debugging_evaluation`, only), and screen 3's `Continue` calls
-/// `set_consent_scopes` -- a separate, local-only, already-enrolled-only
-/// call built for exactly this -- to apply what the contributor actually
-/// chose. `set_consent_scopes` requires an existing enrollment, which
-/// `enroll` on screen 2 has, by this point, already established.
-///
-/// ## Atomicity: what is atomic, what is resumable
-///
-/// Each daemon call in this flow (`enroll`, `set_consent_scopes`,
-/// `acknowledge_near_ai_notice`, `set_project_mode`) is individually
-/// atomic: it either lands on the daemon or it visibly fails, and this
-/// coordinator does not advance past a failed one silently (see
-/// `advanceFromConsent`).
-///
-/// The onboarding *sequence* is deliberately NOT atomic -- there is no
-/// wire-level transaction spanning `enroll` through the Done screen, and
-/// there could not be one without a contract change this task is not
-/// permitted to make. What makes that safe is that the two states an
-/// interrupted contributor can be found in are told apart, not conflated:
-///
-/// - Not yet enrolled (`status.logged_in == false`): show onboarding from
-///   the top (`Welcome`).
-/// - Enrolled but onboarding not finished (`status.logged_in == true` and
-///   `AppModel.isOnboardingComplete == false`, a local marker this
-///   coordinator sets only when the Done screen's button is pressed): show
-///   onboarding resumed at the Consent screen -- `enroll` already ran, so
-///   there is nothing to redo there, but nothing past it is trustworthy
-///   yet.
-/// - Enrolled and onboarding finished: show the main window.
-///
-/// This is what keeps a crash or quit between `enroll` and Done from ever
-/// landing a contributor in the main window with an unset (floor-only)
-/// consent choice they never actually confirmed -- the forbidden outcome.
-/// `TraceCommonsAppMain`/`MainWindowView` is what reads `isOnboardingComplete`
-/// to make that branch; this view only needs `startAt` to know where in the
-/// sequence to resume.
+/// A host starts the first run at `startAt` (Join, unless it names another
+/// step). What an earlier first run left on the daemon is recorded
+/// (`OnboardingNavigation.initialState`): a running daemon is not started
+/// again, and an enrolment is the account (`recordEnrolment`), so its
+/// invite is not joined again, Join reads Continue, and Automatic is
+/// offered. The daemon's first status can arrive after this view is up, so
+/// the enrolment is recorded then too. Start's marker (the tenant's, or
+/// watching only's) is what tells "enrolled" from "set up".
 struct OnboardingCoordinatorView: View {
     @EnvironmentObject private var model: AppModel
-    var startAt: Step = .welcome
-    /// Called once the Done screen's button is pressed. The caller (not
-    /// this view) is responsible for calling `AppModel.markOnboardingComplete()`
-    /// and for whatever transition follows -- this view has no opinion on
-    /// what replaces it.
+    var startAt: Step
+    /// Told the step each time it changes, and once on appearing.
+    var onStep: ((Step) -> Void)?
+    /// Called once Start has finished the first run. The caller decides
+    /// what replaces this view.
     var onComplete: () -> Void
+    /// Whether this host takes invite links. One whose runner does not last
+    /// the whole first run leaves them parked for one that does.
+    var takesInvites: Bool
 
     typealias Step = OnboardingNavigation.Step
 
-    @State private var navigation: OnboardingNavigation
-    private var step: Step { navigation.step }
-    /// Names of optional scopes ticked on screen 3, kept here (not just
-    /// inside `ConsentScopesContent`) so a trip to screen 4 or 5 and back
-    /// does not lose the choice.
-    @State private var selectedScopes: Set<String> = []
-    @State private var consentSaveFailed = false
-    @State private var settingsUnavailable = false
-    /// Reference material for the welcome screen, presented as a sheet
-    /// rather than a step of its own -- it asks for no decision, and this
-    /// flow is one decision per screen.
-    @State private var showingWhatGetsRemoved = false
+    @State private var copy = TCCoreCopy.firstRunCopyJSON().flatMap(FirstRunCopy.decode)
+    /// Made on first appearing, since it runs its calls through the
+    /// environment's `AppModel`, and kept for the whole first run.
+    @State private var runner: FirstRunRunner?
 
-    init(startAt: Step = .welcome, onComplete: @escaping () -> Void) {
+    init(
+        startAt: Step = .join, onStep: ((Step) -> Void)? = nil, takesInvites: Bool = true,
+        onComplete: @escaping () -> Void
+    ) {
         self.startAt = startAt
+        self.onStep = onStep
+        self.takesInvites = takesInvites
         self.onComplete = onComplete
-        _navigation = State(initialValue: OnboardingNavigation(step: startAt))
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            if let previous = previousStep {
-                backBar(to: previous)
-            }
-            content
-        }
-        .disabled(navigation.consentSaveInProgress)
-        .sheet(isPresented: $showingWhatGetsRemoved) {
-            WhatGetsRemovedSheet()
-        }
-    }
-
-    /// Where Back goes from the current step, or nil on Welcome, which has
-    /// nothing before it.
-    ///
-    /// Every step after Welcome has one. Back used to exist on only two of
-    /// them (the scan and projects screens, both returning to consent), so
-    /// a contributor on Connect who wanted to re-read the welcome screen,
-    /// or on Done who wanted to ignore one more project, had no way there
-    /// except quitting. Back from Done returns to the projects screen, and
-    /// the scan screen is skipped on the way back exactly when it was
-    /// skipped on the way forward.
-    ///
-    /// Back from consent lands on Connect, where the device is by then
-    /// already enrolled; that screen says so and offers Continue rather
-    /// than a second enrolment (see `OnboardingConnectContent`).
-    private var previousStep: Step? {
-        step.previous(privacyScanConfigured: navigation.scanIncluded)
-    }
-
-    private func backBar(to previous: Step) -> some View {
-        HStack {
-            Button {
-                navigation.enter(previous)
-            } label: {
-                Label("Back", systemImage: "chevron.left")
-            }
-            .buttonStyle(.plain)
-            .foregroundStyle(.secondary)
-            .accessibilityLabel("Back to the previous step")
-            Spacer()
-        }
-        .padding(.horizontal, 24)
-        .padding(.top, 16)
-    }
-
-    @ViewBuilder
-    private var content: some View {
-        switch step {
-        case .welcome:
-            // `onWhatGetsRemoved` used to be left at its `= {}` default here,
-            // so the link on that screen was live, clickable and did nothing.
-            // None of these callbacks carry a default any more -- omitting
-            // one is a compile error rather than a silent dead control.
-            OnboardingWelcomeView(
-                onGetStarted: { navigation.enter(.afterWelcome(needsRoots: model.startup == .needsRoots)) },
-                onWhatGetsRemoved: { showingWhatGetsRemoved = true }
-            )
-
-        case .roots:
-            OnboardingRootsView(
-                configDirectory: model.configDirectory,
-                onStarted: { navigation.enter(.connect) }
-            )
-
-        case .connect:
-            let visit = navigation.connectVisit
-            OnboardingConnectView(onEnrolled: { navigation.enrolled(visit: visit) })
-
-        case .consent:
-            VStack(alignment: .leading, spacing: 8) {
-                if settingsUnavailable {
-                    Text("Watcher settings are still loading. Try Continue again once they are available.")
-                        .font(.callout)
-                }
-                if consentSaveFailed {
-                    Text("""
-                    Couldn't save your choices -- the watcher may not be running. \
-                    Check your connection and try again.
-                    """)
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, 24)
-                    .padding(.top, 16)
-                }
-                ConsentScopesView(onContinue: advanceFromConsent, initialSelection: selectedScopes)
-            }
-
-        case .privacyScan:
-            if model.daemonSettings?.nearAIConfigured == true {
-                OnboardingPrivacyScanView(onContinue: { navigation.enter(.projects) })
+        Group {
+            if let copy, let runner {
+                FirstRunSteps(
+                    copy: copy, runner: runner, onStep: onStep, takesInvites: takesInvites,
+                    onComplete: onComplete)
             } else {
-                VStack {
-                    Text("The extra privacy scan is no longer available.")
-                    Button("Continue") { navigation.enter(.projects) }
-                }
+                GlassSpinner(standalone: true)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
+        }
+        .onAppear {
+            if copy == nil { NSLog("trace-commons: first-run-copy-undecodable") }
+            guard runner == nil else { return }
+            let uses = copy?.uses
+            runner = FirstRunRunner(
+                state: OnboardingNavigation.initialState(
+                    startAt: startAt, daemonRunning: model.startup == .running, enrolled: model.status.loggedIn),
+                daemon: model,
+                finishedNotice: { refusal in uses.flatMap { UsesScreenLayout.finishedNotice(refusal, uses: $0) } })
+        }
+    }
+}
 
-        case .projects:
-            VStack {
-                if !navigation.scanIncluded {
-                    Text("The extra privacy scan was not included in this setup.")
-                        .font(.callout).foregroundStyle(.secondary)
-                }
-                OnboardingProjectsView(onContinue: { navigation.enter(.done) })
+/// The current step's screen, and what spans the steps.
+private struct FirstRunSteps: View {
+    @EnvironmentObject private var model: AppModel
+    let copy: FirstRunCopy
+    @ObservedObject var runner: FirstRunRunner
+    let onStep: ((OnboardingNavigation.Step) -> Void)?
+    let takesInvites: Bool
+    let onComplete: () -> Void
+
+    @ObservedObject private var pendingInvite = PendingInvite.shared
+    /// The account the passkey sheets complete with: the running daemon's.
+    /// Nil until it runs, which Join reads as "record the choice for later".
+    @State private var passkeyAccount: LivePasskeyAccount?
+    @State private var passkeyClient: DaemonClient?
+
+    var body: some View {
+        screen
+            .firstRunPasskeySheets(copy: copy, runner: runner, account: passkeyAccount)
+            .onChange(of: runner.state.step, initial: true) { _, step in onStep?(step) }
+            .onChange(of: runner.completed) { _, completed in
+                if completed { onComplete() }
             }
+            .onChange(of: model.startup, initial: true) { _, _ in refreshPasskeyAccount() }
+            .onChange(of: model.status.loggedIn, initial: true) { _, _ in recordEnrolment() }
+            // Not `onOpenURL`: a link can arrive before any window exists,
+            // so `AppDelegate` parks it and the first run collects it when
+            // it next appears, or at once while it is up.
+            .onAppear(perform: receivePendingInvite)
+            .onChange(of: pendingInvite.value) { _, _ in receivePendingInvite() }
+            .onChange(of: runner.isCommitting) { _, _ in
+                recordEnrolment()
+                receivePendingInvite()
+            }
+    }
 
-        case .done:
-            OnboardingDoneView(onFinish: onComplete)
+    @ViewBuilder private var screen: some View {
+        switch runner.state.step {
+        case .join:
+            JoinScreen(copy: copy, runner: runner, passkeyAccount: passkeyAccount)
+        case .folders:
+            FoldersScreen(copy: copy, runner: runner, installURL: copy.folders.installURL(for:))
+        case .tools:
+            ToolsScreen(copy: copy, runner: runner, installURL: copy.folders.installURL(for:))
+        case .rules:
+            RulesScreen(copy: copy, runner: runner, source: model)
+        case .uses:
+            UsesScreen(copy: copy, runner: runner)
         }
     }
 
-    /// Applies the chosen scopes via `set_consent_scopes` and only advances
-    /// once the daemon confirms it -- see the type comment's "Call
-    /// ordering" section for why this call, not `enroll`, is the one that
-    /// actually applies consent in this flow. A failure leaves the
-    /// contributor on this same screen with their ticks intact (`selected`
-    /// is local `@State` inside `ConsentScopesContent` until `onContinue`
-    /// fires, and re-entry seeds from `selectedScopes` either way), rather
-    /// than silently moving on with the floor-only scope `enroll` left in
-    /// place.
-    private func advanceFromConsent(_ selected: Set<String>) {
-        guard navigation.beginConsentSave(scanConfigured: model.daemonSettings?.nearAIConfigured) else {
-            settingsUnavailable = model.daemonSettings == nil
-            model.refreshAll()
-            return
+    /// One account per daemon client: a restarted daemon gets a new one.
+    /// Once there is one, a returning person is offered Welcome back (P-7);
+    /// the runner decides, and offers it at most once.
+    private func refreshPasskeyAccount() {
+        let client = model.passkeyClient
+        guard client !== passkeyClient else { return }
+        passkeyClient = client
+        passkeyAccount = client.map {
+            LivePasskeyAccount(client: $0, presentationAnchor: { NSApp.keyWindow ?? NSApp.mainWindow })
         }
-        settingsUnavailable = false
-        selectedScopes = selected
-        consentSaveFailed = false
-        let alwaysOn = model.consentScopes.filter(\.alwaysOn).map(\.name)
-        let scopes = Array(Set(alwaysOn).union(selected))
-        Task {
-            switch await model.setConsentScopes(scopes) {
-            case .succeeded:
-                navigation.finishConsentSave(succeeded: true)
-            case .failed:
-                navigation.finishConsentSave(succeeded: false)
-                consentSaveFailed = true
-            }
+        if let passkeyAccount {
+            Task { await runner.offerWelcomeBack(from: passkeyAccount) }
+        }
+    }
+
+    /// An enrolment the daemon reported after the runner was made. Not
+    /// during a commit: an enrol that commit runs records itself.
+    private func recordEnrolment() {
+        guard model.status.loggedIn, !runner.isCommitting else { return }
+        let recorded = OnboardingNavigation.recordEnrolment(runner.state)
+        if recorded != runner.state { runner.state = recorded }
+    }
+
+    private func receivePendingInvite() {
+        guard let invite = pendingInvite.value else { return }
+        switch OnboardingNavigation.receive(
+            invite: invite, in: runner.state, failure: runner.failure, isCommitting: runner.isCommitting,
+            hostTakesInvites: takesInvites, host: JoinScreen.defaultIssuerHost)
+        {
+        case .leaveParked:
+            return
+        case .discard:
+            _ = pendingInvite.take()
+        case .apply(let state, let failure):
+            _ = pendingInvite.take()
+            runner.state = state
+            runner.failure = failure
         }
     }
 }

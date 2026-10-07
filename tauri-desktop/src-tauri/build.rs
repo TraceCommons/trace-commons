@@ -2,6 +2,7 @@
 use std::{env, path::PathBuf, process::Command};
 
 const TAURI_COMMANDS: &[&str] = &[
+    "set_glass_regions",
     "core_status",
     "queue_outcome_line",
     "residual_secret_line",
@@ -94,8 +95,10 @@ const TAURI_COMMANDS: &[&str] = &[
     "request_notification_permission",
     "set_start_at_login",
     "open_system_settings",
+    "settings_ranges",
     "quit_app",
     "quit_confirmation_copy",
+    "shell_status_copy",
     "cancel_private_ai_credential",
     "forget_private_ai_credential",
     "migrate_private_ai_credential",
@@ -109,6 +112,9 @@ const TAURI_COMMANDS: &[&str] = &[
     "history_detail",
     "request_history_refresh",
     "account_session_status",
+    "account_contribution_status",
+    "account_contribution_copy",
+    "account_invite_redeem",
     "account_sign_in",
     "withdrawal_confirmation_prompt",
     "withdraw_history",

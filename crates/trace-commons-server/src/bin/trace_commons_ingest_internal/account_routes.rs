@@ -64,9 +64,11 @@ pub(crate) const UNBOUND_ACCOUNT_ROUTE_POLICY: &[(&str, &str, UnboundAccess)] = 
     &[
         // The app's state machine and the one way forward.
         ("GET", "/v1/account/binding", Allowed),
-        // Z2 S3: connect near.ai. The handlers refuse any account that is not
-        // `unbound` (`account_already_bound`), so a bound or closed account
-        // that reaches them gets nothing.
+        ("GET", "/v1/account/activity-missions/status", Refused),
+        // Z2 S3: connect near.ai. For an unbound account the handlers bind;
+        // a bound account (never gated) enrols a further device through the
+        // same routes; a legacy or closed account is refused
+        // (`account_already_bound`) and gets nothing.
         ("POST", "/v1/account/near-ai/provision/bind/start", Allowed),
         ("POST", "/v1/account/near-ai/provision/bind/finish", Allowed),
         // Answers `account_identity_unlinked` for an unbound account.
@@ -119,6 +121,13 @@ pub(crate) const UNBOUND_ACCOUNT_ROUTE_POLICY: &[(&str, &str, UnboundAccess)] = 
         (
             "POST",
             "/v1/account/traces/{submission_id}/withdraw",
+            Refused,
+        ),
+        // The pipeline withdrawal (versioned pipeline), an account route like
+        // the one above.
+        (
+            "POST",
+            "/v1/contributors/me/pipeline-submissions/{submission_id}/withdraw",
             Refused,
         ),
         (

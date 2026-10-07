@@ -21,9 +21,13 @@ import {
 import { useHistoryData } from "./hooks/use-history-data";
 import { useHistoryDetail } from "./hooks/use-history-detail";
 import { useHistoryWithdrawal } from "./hooks/use-history-withdrawal";
-import { useContributorDisclosureCopy } from "../../lib/tauri/use-contributor-copy";
+import {
+  useContributorDisclosureCopy,
+  useShellStatusLines,
+} from "../../lib/tauri/use-contributor-copy";
 
 export function HistoryPage() {
+  const lines = useShellStatusLines();
   const history = useHistoryData();
   const rollup = history.data?.rollup;
   const records = history.data?.history ?? [];
@@ -85,7 +89,7 @@ export function HistoryPage() {
         )}
         {history.state === "error" && (
           <p className="mt-3 mb-1 tc-body tc-text-tertiary">
-            History unavailable. Refresh after Rust core starts.
+            {lines.readUnavailable}
           </p>
         )}
         {history.state === "ready" && records.length === 0 && (

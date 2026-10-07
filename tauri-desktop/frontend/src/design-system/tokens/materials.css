@@ -56,8 +56,10 @@
   /* Hairlines (rows inside a list only; never around a container) */
   --tc-hairline: rgba(255, 255, 255, 0.07);
 
-  /* Popover / modal */
-  --tc-popover-fill: rgba(34, 36, 42, 0.78);
+  /* Popover / modal. Overlays float over other glass, so their fill is
+     near-opaque: the blur gives the material, the fill keeps what is
+     behind from reading through (Liquid Glass: no glass on glass). */
+  --tc-popover-fill: rgba(34, 36, 42, 0.94);
   --tc-popover-edge: inset 0 1px 0 rgba(255, 255, 255, 0.28), 0 24px 60px rgba(0, 0, 0, 0.5);
   --tc-scrim: rgba(0, 0, 0, 0.35);
 

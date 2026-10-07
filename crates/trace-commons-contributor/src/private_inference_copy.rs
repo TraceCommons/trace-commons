@@ -164,8 +164,9 @@ pub const OFFER_ASKED_ONCE: &str = "Either way, this is the only time you will b
 /// The settings section's heading.
 pub const SETTINGS_TITLE: &str = "Private AI on this computer";
 
-/// The settings switch.
-pub const SETTINGS_TOGGLE: &str = "Route AI requests through NEAR AI";
+/// The settings switch, in #1146's words (`private-ai-connection-panel.tsx`;
+/// owner ruling, 2026-10-06). Approved 2026-10-06.
+pub const SETTINGS_TOGGLE: &str = "Answer model calls on this computer";
 
 /// Changes are not deferred to a restart, and the line beneath the switch is
 /// what actually happened rather than what was asked for.
@@ -383,6 +384,57 @@ pub fn state_tone(label: &str) -> PrivateInferenceTone {
     }
 }
 
+/// Every runtime state label a daemon reports in
+/// `private_inference_state.state`, in the order a shell lists them.
+///
+/// Each one has its own sentence in [`state_line`]; the empty label
+/// (unreported) and a label this build does not know are not in the list,
+/// and are answered by [`STATE_UNREPORTED`] and [`STATE_UNKNOWN`].
+pub const STATE_LABELS: [&str; 10] = [
+    LABEL_OFF,
+    LABEL_STOPPING,
+    LABEL_RUNNING,
+    LABEL_RUNNING_NO_BACKENDS,
+    LABEL_RUNNING_ANSWERED_ELSEWHERE,
+    LABEL_RUNNING_DESTINATION_UNKNOWN,
+    LABEL_RUNNING_ELSEWHERE,
+    LABEL_PORT_IN_USE,
+    LABEL_START_FAILED,
+    LABEL_CRASHED,
+];
+
+/// One state label's sentence, and whether an indicator may paint that
+/// state as working: [`state_line`] and [`state_tone`]'s
+/// [`PrivateInferenceTone::reads_as_working`], carried together so a shell
+/// that renders a table looks the label up and never compares sentences.
+#[derive(Clone, Copy, Debug, serde::Serialize, PartialEq, Eq)]
+pub struct StateCopy {
+    pub line: &'static str,
+    pub working: bool,
+}
+
+/// [`StateCopy`] for every label in [`STATE_LABELS`], keyed by label.
+///
+/// A shell that holds this table answers a label it does not find with
+/// [`STATE_UNKNOWN`], not working, and an empty one with
+/// [`STATE_UNREPORTED`], not working -- what [`state_line`] and
+/// [`state_tone`] answer for both.
+#[must_use]
+pub fn state_copies() -> std::collections::BTreeMap<&'static str, StateCopy> {
+    STATE_LABELS
+        .into_iter()
+        .map(|label| {
+            (
+                label,
+                StateCopy {
+                    line: state_line(label),
+                    working: state_tone(label).reads_as_working(),
+                },
+            )
+        })
+        .collect()
+}
+
 /// Whether a shell should put the offer in front of the contributor.
 ///
 /// Two inputs and one rule, crossing the ABI for the reason the tone table
@@ -537,6 +589,16 @@ pub struct PrivateInferenceCopy {
     pub near_ai_enroll_working: &'static str,
     /// [`NEAR_AI_ENROLL_DONE`].
     pub near_ai_enroll_done: &'static str,
+    pub account_contribution_refresh: &'static str,
+    pub account_contribution_checking: &'static str,
+    pub account_contribution_unavailable: &'static str,
+    pub account_contribution_pending_credit: &'static str,
+    /// The account contribution card's heading and controls (approved
+    /// 2026-10-06), so no shell types its own.
+    pub account_contribution_heading: &'static str,
+    pub account_contribution_refresh_action: &'static str,
+    pub account_contribution_invite_code: &'static str,
+    pub account_contribution_redeem_action: &'static str,
     /// The ten refusals, in the daemon's order.
     pub near_ai_enroll_already_enrolled: &'static str,
     /// [`NEAR_AI_ENROLL_NO_SESSION_LINE`].
@@ -888,8 +950,11 @@ pub const HARNESS_PLAN_NO_CONFIG_PATH: &str = "This app could not work out where
 /// The next step is spelled the way the button that performs it is spelled --
 /// see [`CREDENTIAL_OBTAIN`] -- so a contributor reading this sentence is
 /// looking for words that exist somewhere on the screen.
+///
+/// Approved 2026-10-06: the button's words changed to #1146's, so this
+/// sentence did too.
 pub const HARNESS_NEEDS_CREDENTIAL: &str = "This computer would be the one answering this tool's calls, and no key \
-     is kept here to answer them with yet. Sign in with NEAR AI first, and \
+     is kept here to answer them with yet. Use Connect credential first, and \
      this tool can be connected after that.";
 
 /// The sentence for one tool's state, or the empty string.
@@ -1078,8 +1143,8 @@ pub fn harness_spend_line(micros: Option<u64>) -> String {
 ///
 /// Names the machine for the reason [`OFFER_TITLE`] does: what changes is
 /// what this computer holds, and that is the only part a contributor can go
-/// and check.
-pub const CREDENTIAL_TITLE: &str = "NEAR AI account";
+/// and check. #1146's word for what it holds (owner ruling, 2026-10-06).
+pub const CREDENTIAL_TITLE: &str = "NEAR AI credential";
 
 /// Why the card is there at all.
 ///
@@ -1090,7 +1155,7 @@ pub const CREDENTIAL_TITLE: &str = "NEAR AI account";
 pub const CREDENTIAL_WHAT: &str = "Sign in to use NEAR AI with your tools and check your balance.";
 
 /// Provider selector copy shared by every native shell.
-pub const CREDENTIAL_PROVIDER_LABEL: &str = "Sign-in method";
+pub const CREDENTIAL_PROVIDER_LABEL: &str = "Credential provider";
 pub const CREDENTIAL_PROVIDER_GITHUB: &str = "GitHub";
 pub const CREDENTIAL_PROVIDER_GOOGLE: &str = "Google";
 pub const CREDENTIAL_PROVIDER_NEAR: &str = "NEAR wallet";
@@ -1130,17 +1195,17 @@ pub const CREDENTIAL_COST: &str = "Sign in through your browser. The app creates
      You may be asked to allow access when the app starts.";
 
 /// The button that starts the ceremony.
-pub const CREDENTIAL_OBTAIN: &str = "Sign in with NEAR AI";
+pub const CREDENTIAL_OBTAIN: &str = "Connect credential";
 
 /// The button shown while one is running.
 ///
-/// Says what stops -- this computer's waiting -- and not "cancel the
-/// sign-in", which would suggest reaching into a browser tab this app does
-/// not control. Anything the contributor already finished over there stands.
-pub const CREDENTIAL_CANCEL: &str = "Stop waiting for the browser";
+/// #1146's words (owner ruling, 2026-10-06). What stops is this computer's
+/// waiting; anything the contributor already finished in the browser
+/// stands.
+pub const CREDENTIAL_CANCEL: &str = "Cancel sign-in";
 
 /// The button that removes a stored key from this machine.
-pub const CREDENTIAL_FORGET: &str = "Forget this key";
+pub const CREDENTIAL_FORGET: &str = "Forget local credential";
 
 /// What forgetting does, and the larger part it does not do.
 ///
@@ -1543,6 +1608,52 @@ pub fn group_control(pending: u64, contributable: Option<u64>) -> ContributionCo
         ContributionControl::None
     } else {
         ContributionControl::Contribute
+    }
+}
+
+/// A `list_projects` group's whole eligibility picture, computed once from
+/// `pending` and `contributable`.
+///
+/// Before this existed, every caller re-derived `eligible_count` and
+/// `withheld_count` from the same two numbers by hand: Tauri's
+/// `eligibility_group_copy` computed `contributable.unwrap_or(pending).
+/// min(pending)` and `pending.saturating_sub(eligible)` inline, and the
+/// macOS shell computed `pending - contributableCount` itself in Swift, with
+/// no `min` clamp at all -- a second, slightly different arithmetic for the
+/// same fact, safe only because the FFI's `tc_contribution_withheld_line`
+/// clamps a negative input to zero on its side of the ABI. One function now
+/// does this arithmetic, so both numbers are derived exactly once.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GroupEligibility {
+    /// How many of `pending` may actually be sent. Clamped to `pending`:
+    /// `contributable` is documented never to exceed it, but a caller
+    /// reading data from an older or mismatched daemon should not be able to
+    /// turn a clamp failure into a claim of more eligible sessions than
+    /// exist.
+    pub eligible_count: u64,
+    /// `pending` minus `eligible_count`, never negative.
+    pub withheld_count: u64,
+    /// Whether the group's submit control may be offered at all -- exactly
+    /// [`group_control`]'s answer for this `pending`/`contributable` pair.
+    pub can_contribute: bool,
+}
+
+/// Compute [`GroupEligibility`] from a `list_projects` row's `pending_count`
+/// and `contributable_count`.
+///
+/// `contributable`, like [`group_control`]'s parameter of the same name,
+/// must be `None` for an ABSENT `contributable_count` (an invited
+/// contributor, for whom every pending session is sendable) and
+/// `Some(0)` for a present count of zero -- never conflate the two, or an
+/// invited contributor's folder reads as having nothing eligible.
+#[must_use]
+pub fn group_eligibility(pending: u64, contributable: Option<u64>) -> GroupEligibility {
+    let eligible_count = contributable.unwrap_or(pending).min(pending);
+    GroupEligibility {
+        eligible_count,
+        withheld_count: pending.saturating_sub(eligible_count),
+        can_contribute: group_control(pending, contributable.map(|_| eligible_count))
+            == ContributionControl::Contribute,
     }
 }
 
@@ -2035,6 +2146,14 @@ pub fn private_inference_copy() -> PrivateInferenceCopy {
         near_ai_enroll_needs_login: NEAR_AI_ENROLL_NEEDS_LOGIN,
         near_ai_enroll_working: NEAR_AI_ENROLL_WORKING,
         near_ai_enroll_done: NEAR_AI_ENROLL_DONE,
+        account_contribution_refresh: crate::account_contribution::REFRESH_LINE,
+        account_contribution_checking: crate::account_contribution::CHECKING_LINE,
+        account_contribution_unavailable: crate::account_contribution::UNAVAILABLE_LINE,
+        account_contribution_pending_credit: crate::account_contribution::PENDING_CREDIT_LINE,
+        account_contribution_heading: crate::account_contribution::HEADING,
+        account_contribution_refresh_action: crate::account_contribution::REFRESH_ACTION,
+        account_contribution_invite_code: crate::account_contribution::INVITE_CODE_LABEL,
+        account_contribution_redeem_action: crate::account_contribution::REDEEM_ACTION,
         near_ai_enroll_already_enrolled: NEAR_AI_ENROLL_ALREADY_ENROLLED_LINE,
         near_ai_enroll_no_session: NEAR_AI_ENROLL_NO_SESSION_LINE,
         near_ai_enroll_endpoint_refused: NEAR_AI_ENROLL_ENDPOINT_REFUSED_LINE,
@@ -2438,7 +2557,8 @@ pub const NEAR_AI_ENROLL_NEEDS_LOGIN: &str = "Sign in to NEAR AI, then choose th
 pub const NEAR_AI_ENROLL_WORKING: &str = "Joining with your NEAR AI account...";
 
 /// After it lands.
-pub const NEAR_AI_ENROLL_DONE: &str = "This device is joined. You can contribute sessions now.";
+pub const NEAR_AI_ENROLL_DONE: &str =
+    "This device is joined. Check your contribution status before sending sessions.";
 
 /// `already_enrolled`. Not a failure a contributor caused or can fix by
 /// retrying, and it must not read as one.
@@ -2727,6 +2847,27 @@ pub use crate::daemon::private_inference::{
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Reviewed on #1162: the Scrub check's two hold labels used to fall
+    /// through to "Status unavailable", so every shell listed held sessions
+    /// that are still waiting as "N -- Status unavailable". Both share the
+    /// one line #1162 merged, which says the session is waiting and was not
+    /// sent.
+    #[test]
+    fn the_scrub_check_holds_have_waiting_lines_not_status_unavailable() {
+        use crate::daemon::second_look::{
+            REASON_SCRUB_CHECK_MANUAL, REASON_SECOND_LOOK_REVIEW_REQUIRED,
+        };
+        for label in [
+            REASON_SECOND_LOOK_REVIEW_REQUIRED,
+            REASON_SCRUB_CHECK_MANUAL,
+        ] {
+            let line = queue_outcome_line(label);
+            assert_eq!(line, "Waiting for review; not sent", "{label}");
+            assert!(line.contains("Waiting"), "{line}");
+            assert!(line.contains("not sent"), "{line}");
+        }
+    }
 
     /// The failure this surface exists to prevent, pinned.
     ///
@@ -3676,6 +3817,53 @@ mod tests {
         assert_eq!(group_control(0, Some(0)), ContributionControl::None);
     }
 
+    /// `group_eligibility` is the arithmetic every caller used to do by
+    /// hand: `eligible_count` clamped to `pending`, `withheld_count` the
+    /// non-negative remainder, and `can_contribute` exactly `group_control`'s
+    /// own answer.
+    #[test]
+    fn group_eligibility_computes_the_eligible_and_withheld_counts() {
+        assert_eq!(
+            group_eligibility(7, Some(3)),
+            GroupEligibility {
+                eligible_count: 3,
+                withheld_count: 4,
+                can_contribute: true,
+            }
+        );
+        // The question does not apply: every pending session is eligible,
+        // and nothing is withheld.
+        assert_eq!(
+            group_eligibility(7, None),
+            GroupEligibility {
+                eligible_count: 7,
+                withheld_count: 0,
+                can_contribute: true,
+            }
+        );
+        // Nothing sendable: no control offered, and the whole group is
+        // withheld.
+        assert_eq!(
+            group_eligibility(7, Some(0)),
+            GroupEligibility {
+                eligible_count: 0,
+                withheld_count: 7,
+                can_contribute: false,
+            }
+        );
+        // A `contributable` above `pending` is data this function does not
+        // trust blindly: `eligible_count` is clamped rather than exceeding
+        // `pending`, so `withheld_count` cannot go negative.
+        assert_eq!(
+            group_eligibility(3, Some(9)),
+            GroupEligibility {
+                eligible_count: 3,
+                withheld_count: 0,
+                can_contribute: true,
+            }
+        );
+    }
+
     /// The withheld line counts and says nothing else.
     ///
     /// Zero renders nothing -- there is no gap to explain -- and the sentence
@@ -4320,7 +4508,7 @@ mod tests {
         let fields = payload.as_object().expect("a JSON object");
         assert_eq!(
             fields.len(),
-            141,
+            149,
             "the payload's field count changed -- update the shells' decoders \
              and the tests that pin the set"
         );
@@ -4818,5 +5006,64 @@ mod tests {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod state_table_tests {
+    use super::*;
+
+    /// Every label a daemon can report is in the table, once, with its own
+    /// sentence: none falls through to the unknown or unreported line.
+    #[test]
+    fn the_state_table_names_every_reported_label_with_its_own_line() {
+        let table = state_copies();
+        assert_eq!(table.len(), STATE_LABELS.len());
+        assert_eq!(table.len(), 10);
+        for label in STATE_LABELS {
+            let copy = table[label];
+            assert_eq!(copy.line, state_line(label), "{label}");
+            assert_ne!(copy.line, STATE_UNKNOWN, "{label}");
+            assert_ne!(copy.line, STATE_UNREPORTED, "{label}");
+        }
+        // The states the daemon's own state machine reports are all here.
+        use crate::daemon::private_inference::PrivateInferenceState as State;
+        let running = State::Running { port: 1 };
+        let mut reported: Vec<&str> = [
+            State::Off,
+            State::Stopping { port: None },
+            State::RunningWithoutBackends { port: 1 },
+            State::RunningElsewhere { port: 1 },
+        ]
+        .iter()
+        .map(State::label)
+        .collect();
+        for authenticated in [Some(true), Some(false), None] {
+            reported.push(running.label_for(authenticated));
+        }
+        reported.extend([LABEL_PORT_IN_USE, LABEL_START_FAILED, LABEL_CRASHED]);
+        reported.sort_unstable();
+        let mut listed = STATE_LABELS.to_vec();
+        listed.sort_unstable();
+        assert_eq!(reported, listed);
+    }
+
+    /// Only `running` may be painted as working; the table says so for each
+    /// label rather than leaving a shell to infer it.
+    #[test]
+    fn only_running_is_working_in_the_state_table() {
+        for (label, copy) in state_copies() {
+            assert_eq!(copy.working, label == LABEL_RUNNING, "{label}");
+            assert_eq!(
+                copy.working,
+                state_tone(label).reads_as_working(),
+                "{label}"
+            );
+        }
+        let wire = serde_json::to_value(state_copies()[LABEL_RUNNING]).unwrap();
+        assert_eq!(
+            wire,
+            serde_json::json!({"line": STATE_RUNNING, "working": true})
+        );
     }
 }

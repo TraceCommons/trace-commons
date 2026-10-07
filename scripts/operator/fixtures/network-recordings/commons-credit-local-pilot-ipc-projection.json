@@ -1,0 +1,12 @@
+{
+  "capture_date": "2026-10-02",
+  "payload": {
+    "ipc_error": "unknown_method",
+    "readable": false
+  },
+  "payload_sha256": "e0dcd6bb68fd619a26bb3fef46d6063d724d32b04747a5f0b55063aec1ca8cdc",
+  "representation": "allowlisted_projection",
+  "schema_version": "trace_commons.anonymized_network_projection.v1",
+  "source_kind": "authorized_recording",
+  "source_surface": "commons_credit_ipc"
+}

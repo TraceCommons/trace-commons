@@ -1,6 +1,7 @@
 mod app;
 mod commands;
 mod credential_store_check;
+mod glass;
 mod ipc;
 #[cfg(test)]
 mod macos_signing;

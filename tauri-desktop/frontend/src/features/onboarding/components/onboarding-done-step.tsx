@@ -78,7 +78,21 @@ export function OnboardingDoneStep({
           </section>
         </div>
       ) : (
-        <p role="alert">Shared onboarding copy unavailable. Retry loading it.</p>
+        <div className="tc-alert flex flex-wrap items-center gap-2" role="alert">
+          <span>
+            {disclosure.isPending
+              ? "Loading the onboarding copy…"
+              : `Shared onboarding copy unavailable${disclosure.error ? ` (${disclosure.error.message})` : ""}. Retry loading it.`}
+          </span>
+          {disclosure.isPending ? null : (
+            <GlassButton
+              disabled={disclosure.isFetching}
+              onClick={() => void disclosure.refetch()}
+            >
+              {disclosure.isFetching ? "Retrying…" : "Retry"}
+            </GlassButton>
+          )}
+        </div>
       )}
       {onboarding.withdrawn && (
         <p className="m-0 mb-3 text-sm" role="status">

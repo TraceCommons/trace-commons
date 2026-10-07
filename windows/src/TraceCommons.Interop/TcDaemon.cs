@@ -280,6 +280,17 @@ public sealed class TcDaemon : IDisposable
     }
 
     /// <summary>
+    /// The core's quit prompt for this handle (<c>tc_quit_prompt_json</c>):
+    /// the hosting one while this daemon runs, the no-watcher one once
+    /// teardown has begun. Null only if the core could not produce one.
+    /// </summary>
+    public QuitPrompt? QuitPrompt() =>
+        WithHandle(
+            h => Interop.QuitPrompt.Parse(
+                NativeMethods.TakeOwnedString(NativeMethods.tc_quit_prompt_json(h))),
+            Interop.QuitPrompt.WithoutWatcher());
+
+    /// <summary>
     /// Registers <paramref name="handler"/>, invoked with each JSON event
     /// frame the daemon publishes, ON A RUST BACKGROUND THREAD. The handler
     /// must therefore marshal to the UI thread itself before touching

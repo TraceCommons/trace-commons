@@ -29,6 +29,7 @@ export {
   ButtonPrimary,
   ButtonSecondary,
   Checkbox,
+  CheckMark,
   CheckRow,
   Expander,
   FolderButton,

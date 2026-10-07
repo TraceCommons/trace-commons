@@ -1275,7 +1275,12 @@ pub const TITLE_MAX_CHARS: usize = 60;
 /// The session's title: the first non-empty line of its redacted opening
 /// prompt, cut at a word boundary to [`TITLE_MAX_CHARS`] with an ellipsis
 /// when cut. `None` when there is no task description.
-fn title_of(opening_prompt: &str) -> Option<String> {
+///
+/// `pub(crate)` so `daemon::queue::title_of` (K9) can apply the exact same
+/// cut/truncate rule to the queued title it builds from the raw transcript,
+/// rather than reimplementing it and risking the two definitions drifting
+/// apart.
+pub(crate) fn title_of(opening_prompt: &str) -> Option<String> {
     if opening_prompt == "No task description found." {
         return None;
     }
@@ -2231,9 +2236,11 @@ mod tests {
         // Moved again by `routing_metadata_included`: a new consent field
         // serializes into the envelope, so the digest changes while the
         // classification does not.
+        // Native source_session now carries the validated parent UUID; this
+        // changes envelope bytes while preserving the risk classification.
         assert_eq!(
             summary.envelope_digest,
-            "sha256:8d9b9d0b2f1c78be8875d79435cc21397da4a1366139df38d59dff046930d27c",
+            "sha256:2fb042e4cb4e82532b3d8a35d1d8cf2d27366e7700ab43d19cf9acb3f4eab027",
             "the digest for this fixture moved -- if that is an intentional \
              change to the redaction or envelope pipeline, recompute and \
              update this pin; if not, something changed what gets hashed"

@@ -12,6 +12,7 @@ mod css_contract;
 pub mod funding;
 pub mod history;
 pub mod insights;
+mod managed_sessions;
 pub mod mark;
 pub mod mission_drafts;
 pub mod onboarding;
@@ -1088,7 +1089,7 @@ impl App {
         label
     }
 
-    /// "Ask me first": Settings' call, unchanged -- `set_project_mode` with
+    /// "Ask me": Settings' call, unchanged -- `set_project_mode` with
     /// this project's id and `notify_only`. It also answers a rewording
     /// notice. A refusal changes nothing; the core's refusal line says so.
     fn ask_first_button(

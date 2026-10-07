@@ -2,16 +2,11 @@ import { useEffect, useState } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { ProjectAutoUploadDisclosure } from "../../../components/project-auto-upload-disclosure";
 import { ResponsiveOverlay } from "../../../components/responsive-overlay";
+import { useContributorDisclosureCopy } from "../../../lib/tauri/use-contributor-copy";
 import type { Project, ProjectMode } from "../api/projects-api";
 import { type ProjectModeFormValues, projectModeFormSchema } from "../forms";
 import { useController, useForm } from "react-hook-form";
 import { ButtonPrimary, GlassButton, Select } from "@/design-system";
-
-const labels: Record<ProjectMode, string> = {
-  notify_only: "Ask me first",
-  auto_upload: "Contribute automatically",
-  ignore: "Never offer this one",
-};
 
 type Confirmation = "auto_upload" | "ignore" | null;
 
@@ -31,6 +26,11 @@ export function ProjectModeField({
       ? project.mode
       : "notify_only";
   const [confirmation, setConfirmation] = useState<Confirmation>(null);
+  // Each mode's one name is the core's (`folder_mode_labels`), the words the
+  // other shells and screens use; nothing is named before it arrives.
+  const shared = useContributorDisclosureCopy();
+  const label = (value: ProjectMode) =>
+    shared.data?.folder_mode_labels[value] ?? "";
   const form = useForm<ProjectModeFormValues>({
     resolver: zodResolver(projectModeFormSchema),
     defaultValues: { mode: visibleMode },
@@ -75,13 +75,13 @@ export function ProjectModeField({
         value={mode.field.value}
         onBlur={mode.field.onBlur}
         onChange={(event) => change(event.target.value as ProjectMode)}
-        disabled={disabled || confirmation !== null}
+        disabled={disabled || confirmation !== null || !shared.data}
       >
-        <option value="notify_only">{labels.notify_only}</option>
+        <option value="notify_only">{label("notify_only")}</option>
         {allowAutoUpload && !project.is_unresolved_bucket && (
-          <option value="auto_upload">{labels.auto_upload}</option>
+          <option value="auto_upload">{label("auto_upload")}</option>
         )}
-        <option value="ignore">{labels.ignore}</option>
+        <option value="ignore">{label("ignore")}</option>
       </Select>
       <ResponsiveOverlay
         open={confirmation === "auto_upload"}
@@ -135,7 +135,7 @@ export function ProjectModeField({
             : `${project.pending_count} pending session${project.pending_count === 1 ? "" : "s"}`}{" "}
           will leave the review queue. Future sessions from this project will
           not be offered. Session files stay on this device. You can switch this
-          project back to Ask me first in Project settings.
+          project back to {label("notify_only")} in Project settings.
         </p>
       </ResponsiveOverlay>
     </>

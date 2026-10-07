@@ -3,6 +3,7 @@ import { ButtonPrimary, GlassButton, SectionRule, TertiaryLink } from "../../des
 import { settingsSections } from "./sections";
 import { RouteDisclosurePanel } from "../../components/route-disclosure";
 import { useCoreStatus } from "../../lib/tauri/use-core-status";
+import { useShellStatusLines } from "../../lib/tauri/use-contributor-copy";
 import { AuditPanel } from "./components/audit-panel";
 import { AutomaticGrantPanel } from "./components/automatic-grant-panel";
 import { BehaviorSettingsPanel } from "./components/behavior-settings-panel";
@@ -60,6 +61,7 @@ export function SettingsPage({
    */
   compute?: ReactNode;
 } = {}) {
+  const lines = useShellStatusLines();
   const settings = useSettings();
   const core = useCoreStatus();
   const daemon = useDaemonControl();
@@ -90,7 +92,7 @@ export function SettingsPage({
       )}
       {settings.state === "error" && (
         <p className="mt-3 mb-1 tc-body tc-text-tertiary">
-          Settings unavailable. Refresh after Rust core starts.
+          {lines.readUnavailable}
         </p>
       )}
       {core.data && (

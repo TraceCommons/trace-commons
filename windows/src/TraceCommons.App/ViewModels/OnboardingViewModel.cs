@@ -479,6 +479,12 @@ public sealed class OnboardingViewModel : INotifyPropertyChanged
         ConsentOptionsPayload? parsed = options.ResultAs<ConsentOptionsPayload>();
         foreach (ConsentOption scope in parsed?.Scopes ?? new List<ConsentOption>())
         {
+            // Fail closed: a scope the core gave no title is not offered.
+            if (string.IsNullOrEmpty(scope.Title))
+            {
+                continue;
+            }
+
             var row = new ConsentScopeViewModel(scope);
             if (scope.AlwaysOn)
             {
@@ -728,7 +734,7 @@ public enum OnboardingStep
     Done,
 }
 
-/// <summary>A scope row: the daemon's description, and a local short title.</summary>
+/// <summary>A scope row: the core's title and description.</summary>
 public sealed class ConsentScopeViewModel : INotifyPropertyChanged
 {
     private bool _isSelected;
@@ -740,7 +746,7 @@ public sealed class ConsentScopeViewModel : INotifyPropertyChanged
         Name = scope.Name;
         Description = scope.Description;
         AlwaysOn = scope.AlwaysOn;
-        Title = ScopeTitle(scope.Name);
+        Title = scope.Title ?? string.Empty;
         _isSelected = scope.AlwaysOn;
     }
 
@@ -774,14 +780,13 @@ public sealed class ConsentScopeViewModel : INotifyPropertyChanged
     }
 
     /// <summary>
-    /// The short bold label for a scope.
+    /// The short bold label for a scope named on a preview summary.
     /// </summary>
     /// <remarks>
-    /// <c>consent_options</c> carries the wire name and the description but
-    /// no human title, so every shell maps them and all of them must agree.
-    /// The fallback matters as much as the table: an operator who adds a
-    /// scope this build has never heard of still gets a readable row, with
-    /// the daemon's description beside it.
+    /// Only the preview sheet's permission rows still use this, because that
+    /// view model has no <c>consent_options</c> answer to read. Onboarding
+    /// and Settings read <see cref="ConsentOption.Title"/>, the core's own
+    /// words. Moving the preview onto the core's title is a follow-up.
     /// </remarks>
     public static string ScopeTitle(string wireName) => wireName switch
     {
@@ -831,7 +836,7 @@ public sealed class ProjectViewModel : INotifyPropertyChanged
     /// The line beneath the name: the mode for an ordinary row, and for the
     /// unresolvable bucket the note explaining why it can never be armed. The
     /// note REPLACES the mode rather than joining it, because "you'll always be
-    /// asked" already says what "Ask me first" says.
+    /// asked" already says what "Ask me" says.
     /// </summary>
     public string SubLine => WatchCopy.SubLineFor(IsUnresolvable, _mode);
 

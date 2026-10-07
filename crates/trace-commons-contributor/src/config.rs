@@ -19,7 +19,7 @@ use crate::witness::WitnessTrust;
 
 pub const CONTRIBUTOR_CONFIG_SCHEMA_VERSION: &str = "trace_commons.contributor_config.v1";
 
-const CONFIG_FILE: &str = "contributor.json";
+pub(crate) const CONFIG_FILE: &str = "contributor.json";
 const DEVICE_KEY_FILE: &str = "device.pk8";
 const RECEIPTS_FILE: &str = "receipts.jsonl";
 const NEAR_AI_NOTICE_MARKER_FILE: &str = "near-ai-notice-shown";
@@ -65,6 +65,10 @@ pub const LEGACY_INVITE_LINK_FILE: &str = "legacy-invite-link.json";
 /// without asking the issuer or the contributor. A hash, never the code.
 /// Swept by `wipe()`.
 pub const INVITE_SUBJECT_FILE: &str = "invite-subject.json";
+/// The passkeys used on this Mac, remembered for the first run's "Welcome
+/// back" (`daemon::remembered_passkeys`). Names and account hashes only.
+/// Survives sign-out; swept by `wipe()`.
+pub const REMEMBERED_PASSKEYS_FILE: &str = "remembered-passkeys.json";
 /// Name prefix of the per-entry redacted envelope files
 /// (`daemon::approved_envelope`). One file per previewed-and-approved queue
 /// entry, so they cannot be listed by name; `wipe()` sweeps them by prefix.
@@ -384,7 +388,112 @@ impl WitnessSettings {
             measurements,
         })
     }
+
+    /// Validate a witness entered through Settings and build the
+    /// `WitnessSettings` to save, or refuse with the same fixed label every
+    /// shell renders.
+    ///
+    /// This used to be two independent implementations -- Tauri's
+    /// `configure_witness_in` and the C ABI's `tc_witness_configure` -- each
+    /// checking the URL's shape, the signing address, and the pin list, and
+    /// each constructing the same struct by hand. A third shell would have
+    /// been a third copy. One function now does the checking and the
+    /// construction, so both callers can be a thin pass of their own inputs.
+    ///
+    /// `admission_evidence` is carried from the witness already configured
+    /// (if any), never from this input: it is a record of account-bound
+    /// admission being enabled elsewhere, not something a URL/address/pin
+    /// form sets.
+    ///
+    /// Order, and why: the URL and signing address are checked before the
+    /// pins because a malformed URL or address is the cheaper, more common
+    /// typo, and a shell showing one error at a time should show the first
+    /// field a contributor is likely to have gotten wrong. The pin list is
+    /// checked last because `trust()` -- parsing every entry, then requiring
+    /// at least one to have survived -- is the most expensive step.
+    ///
+    /// Returns `Err` on:
+    /// - [`ERR_WITNESS_URL_INVALID`]: `url` has no `https://`/`http://`
+    ///   scheme, or no host, or the host contains whitespace. Deliberately
+    ///   shallow -- a scheme and a host -- because the real check is the
+    ///   contributor's host allowlist, applied at submission time, and a
+    ///   second, weaker URL parser here would just be a second opinion.
+    /// - [`ERR_WITNESS_SIGNING_ADDRESS_INVALID`]: `signing_address` is empty
+    ///   after trimming.
+    /// - [`ERR_WITNESS_PIN_REQUIRED`]: `measurements` is empty after trimming
+    ///   and dropping blank entries. This call will not write an unpinned
+    ///   witness; see [`WitnessTrust::is_pinned`].
+    /// - [`ERR_WITNESS_PIN_MALFORMED`]: at least one entry survived trimming,
+    ///   but none of them parses into a measurement set this build can read.
+    pub fn configure(
+        admission_evidence: bool,
+        url: &str,
+        signing_address: &str,
+        measurements: impl IntoIterator<Item = String>,
+    ) -> Result<Self, &'static str> {
+        let url = url.trim();
+        if !witness_url_usable(url) {
+            return Err(ERR_WITNESS_URL_INVALID);
+        }
+        let signing_address = signing_address.trim();
+        if signing_address.is_empty() {
+            return Err(ERR_WITNESS_SIGNING_ADDRESS_INVALID);
+        }
+        let expected_measurements: Vec<String> = measurements
+            .into_iter()
+            .map(|entry| entry.trim().to_owned())
+            .filter(|entry| !entry.is_empty())
+            .collect();
+        if expected_measurements.is_empty() {
+            return Err(ERR_WITNESS_PIN_REQUIRED);
+        }
+        let settings = Self {
+            admission_evidence,
+            url: url.to_owned(),
+            signing_address: signing_address.to_owned(),
+            expected_measurements,
+        };
+        // Parsed before it is ever saved: a pin this build cannot read would
+        // otherwise be written and only discovered later, as a client
+        // silently refusing every submission.
+        match settings.trust() {
+            Ok(trust) if trust.is_pinned() => Ok(settings),
+            _ => Err(ERR_WITNESS_PIN_MALFORMED),
+        }
+    }
 }
+
+/// Whether a string is shaped like a witness base URL.
+///
+/// Deliberately shallow: a scheme and a host. The real check is the
+/// contributor's host allowlist, applied at submission time before any
+/// request is made, and duplicating a URL parser here would create a second,
+/// weaker opinion about what is reachable.
+fn witness_url_usable(url: &str) -> bool {
+    let url = url.trim();
+    let Some(rest) = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+    else {
+        return false;
+    };
+    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+    !host.is_empty() && !host.chars().any(char::is_whitespace)
+}
+
+/// [`WitnessSettings::configure`]'s refusal: the URL has no recognized
+/// scheme, no host, or a host containing whitespace.
+pub const ERR_WITNESS_URL_INVALID: &str = "witness-url-invalid";
+/// [`WitnessSettings::configure`]'s refusal: the signing address is empty
+/// after trimming.
+pub const ERR_WITNESS_SIGNING_ADDRESS_INVALID: &str = "witness-signing-address-invalid";
+/// [`WitnessSettings::configure`]'s refusal: no measurement entry survived
+/// trimming and dropping blanks. This call will not write an unpinned
+/// witness.
+pub const ERR_WITNESS_PIN_REQUIRED: &str = "witness-pin-required";
+/// [`WitnessSettings::configure`]'s refusal: at least one entry survived
+/// trimming, but none of them parses as a measurement set.
+pub const ERR_WITNESS_PIN_MALFORMED: &str = "witness-pin-malformed";
 
 /// `TRACE_COMMONS_WITNESS_URL`.
 pub const TRACE_COMMONS_WITNESS_URL: &str = "TRACE_COMMONS_WITNESS_URL";
@@ -706,6 +815,25 @@ pub struct Receipt {
     /// `#[serde(default)]` for the same reason as `approved_unattended`.
     #[serde(default)]
     pub approved_verdict: Option<String>,
+    /// The serialized size, in bytes, of the redacted envelope this receipt's
+    /// submission actually sent (K10) -- the witness's own
+    /// `envelope_bytes.len()` when a witnessed response carried the upload,
+    /// or `envelope::envelope_size` on the final, grant-stamped envelope
+    /// otherwise. Recorded once, at upload time, in `submit_loaded`: the
+    /// figure does not exist any earlier, because redaction and scope
+    /// stamping both still have to run.
+    ///
+    /// Not the raw session's size on disk (`QueueEntry::size_bytes`) and not
+    /// the estimate a preview showed before upload
+    /// (`QueueEntry::would_send_bytes`) -- this is the one number that
+    /// describes bytes that actually left the machine.
+    ///
+    /// `None` when the figure could not be measured (an unreadable envelope),
+    /// or when this receipt predates the field.
+    ///
+    /// `#[serde(default)]` for the same reason as `approved_unattended`.
+    #[serde(default)]
+    pub uploaded_bytes: Option<u64>,
 }
 
 /// The state directory's name under whichever per-user base the platform uses.
@@ -1039,6 +1167,7 @@ impl ConfigStore {
             IDENTITY_SWITCH_JOURNAL_FILE,
             LEGACY_INVITE_LINK_FILE,
             INVITE_SUBJECT_FILE,
+            REMEMBERED_PASSKEYS_FILE,
         ] {
             let path = self.dir.join(name);
             if path.exists() {
@@ -1063,6 +1192,7 @@ impl ConfigStore {
             IDENTITY_SWITCH_JOURNAL_FILE,
             LEGACY_INVITE_LINK_FILE,
             INVITE_SUBJECT_FILE,
+            REMEMBERED_PASSKEYS_FILE,
         ]
         .into_iter()
         .map(|name| format!(".{name}.tmp-"))
@@ -1614,6 +1744,7 @@ mod tests {
             status: "accepted".into(),
             approved_unattended: None,
             approved_verdict: None,
+            uploaded_bytes: None,
         };
         store.append_receipt(&r).unwrap();
         // Simulate a corrupt line.
@@ -1650,6 +1781,28 @@ mod tests {
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].approved_unattended, None);
         assert_eq!(loaded[0].approved_verdict, None);
+    }
+
+    /// K10: a receipts line written before `uploaded_bytes` existed must
+    /// still load.
+    #[test]
+    fn a_receipt_line_written_before_uploaded_bytes_existed_still_loads() {
+        let (_d, store) = store();
+        let old_line = serde_json::json!({
+            "submission_id": uuid::Uuid::new_v4(),
+            "session_hash": "sha256:aa",
+            "source": "claude-code",
+            "submitted_at": chrono::Utc::now(),
+            "status": "accepted",
+        });
+        std::fs::write(
+            store_path(&store, "receipts.jsonl"),
+            format!("{}\n", serde_json::to_string(&old_line).unwrap()),
+        )
+        .unwrap();
+        let loaded = store.load_receipts().unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].uploaded_bytes, None);
     }
 
     #[test]
@@ -1946,6 +2099,93 @@ mod tests {
 
         set_attestation_env(None);
         assert!(!inference_receipt_check_attestation_from_env());
+    }
+
+    // -----------------------------------------------------------------
+    // WitnessSettings::configure (K6 of #1173): one validator, used by
+    // Tauri's configure_witness and the C ABI's tc_witness_configure,
+    // instead of each shell checking the URL, the signing address and the
+    // pin list by hand.
+    // -----------------------------------------------------------------
+
+    fn valid_pin() -> String {
+        format!("mrtd={}", "ab".repeat(48))
+    }
+
+    #[test]
+    fn configure_builds_a_pinned_witness_from_valid_input() {
+        let settings =
+            WitnessSettings::configure(true, "https://witness.example", "0xab", vec![valid_pin()])
+                .expect("valid input configures");
+        assert!(settings.admission_evidence);
+        assert_eq!(settings.url, "https://witness.example");
+        assert_eq!(settings.signing_address, "0xab");
+        assert!(settings.trust().unwrap().is_pinned());
+    }
+
+    #[test]
+    fn configure_trims_surrounding_whitespace() {
+        let settings = WitnessSettings::configure(
+            false,
+            "  https://witness.example  ",
+            "  0xab  ",
+            vec![format!("  {}  ", valid_pin())],
+        )
+        .expect("valid input configures");
+        assert_eq!(settings.url, "https://witness.example");
+        assert_eq!(settings.signing_address, "0xab");
+        assert_eq!(settings.expected_measurements, vec![valid_pin()]);
+    }
+
+    #[test]
+    fn configure_refuses_a_url_with_no_scheme_or_host() {
+        for bad_url in ["witness.example", "https://", "https:// space.example"] {
+            assert_eq!(
+                WitnessSettings::configure(false, bad_url, "0xab", vec![valid_pin()]),
+                Err(ERR_WITNESS_URL_INVALID),
+                "{bad_url:?} should have been refused"
+            );
+        }
+    }
+
+    #[test]
+    fn configure_refuses_a_blank_signing_address() {
+        for bad_address in ["", "   "] {
+            assert_eq!(
+                WitnessSettings::configure(
+                    false,
+                    "https://witness.example",
+                    bad_address,
+                    vec![valid_pin()],
+                ),
+                Err(ERR_WITNESS_SIGNING_ADDRESS_INVALID)
+            );
+        }
+    }
+
+    #[test]
+    fn configure_will_not_write_an_unpinned_witness() {
+        // Empty, and entries that are blank after trimming: both collapse
+        // to no pin at all, and this call refuses to write one.
+        for measurements in [vec![], vec!["   ".to_owned(), String::new()]] {
+            assert_eq!(
+                WitnessSettings::configure(false, "https://witness.example", "0xab", measurements,),
+                Err(ERR_WITNESS_PIN_REQUIRED)
+            );
+        }
+    }
+
+    #[test]
+    fn configure_refuses_a_pin_this_build_cannot_parse() {
+        assert_eq!(
+            WitnessSettings::configure(
+                false,
+                "https://witness.example",
+                "0xab",
+                vec!["not-a-measurement".to_owned()],
+            ),
+            Err(ERR_WITNESS_PIN_MALFORMED)
+        );
     }
 
     // -----------------------------------------------------------------

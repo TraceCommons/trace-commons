@@ -154,6 +154,38 @@
   color: var(--tc-text-primary);
   font: var(--tc-text-body);
 }
+/* Floating panes: no frame and no backdrop around them. The window is
+   transparent (in the app), so the panes sit at its edge with only the gap
+   between them. With no scene behind them, each pane lays its glass over a
+   neutral dark base so it stays legible over any desktop. */
+.tc-window--floating {
+  padding: 0;
+  background: none;
+}
+.tc-window--floating .tc-pane {
+  background:
+    var(--tc-pane-fill),
+    var(--tc-pane-base);
+}
+.tc-window--floating .tc-map {
+  border-radius: var(--tc-radius-pane);
+}
+
+/* Native glass (the app on macOS): a material view sits under every
+   [data-glass] element, so panes drop their painted base and their
+   in-page blur and let it show through. Modals never do: the native
+   material sits under the whole page, so it cannot blur the panes a
+   modal covers, and a modal on it shows them through as if it were not
+   there. A modal keeps its own solid backing (Liquid Glass: no glass on
+   glass, and an overlay stays legible over whatever is behind it). */
+html.tc-native-glass .tc-window--floating .tc-pane {
+  background:
+    var(--tc-pane-fill),
+    var(--tc-glass-veil);
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+
 .tc-window--rim {
   border-radius: var(--tc-radius-window);
   border: var(--tc-rim-width) solid transparent;
@@ -231,7 +263,9 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 28px;
+  /* The top inset clears the window's traffic lights, which sit over the
+     panes' top edge in the app's overlay title bar. */
+  padding: 52px 28px 28px;
   background: var(--tc-modal-scrim);
   -webkit-backdrop-filter: var(--tc-modal-scrim-blur);
   backdrop-filter: var(--tc-modal-scrim-blur);
@@ -247,14 +281,17 @@
   max-height: 100%;
   box-sizing: border-box;
   overflow: hidden;
-  border-radius: var(--tc-radius-window);
-  border: var(--tc-rim-width) solid transparent;
+  /* The same glass as the panes: pane fill over the neutral base, specular
+     edges instead of a rim, so the modal reads as one more pane. The base
+     is near-opaque and stays in native glass, so nothing behind the
+     modal reads through it. */
+  border-radius: var(--tc-radius-pane);
   background:
-    var(--tc-modal-fill) padding-box,
-    var(--tc-rim-window) border-box;
+    var(--tc-pane-fill),
+    var(--tc-pane-base);
   -webkit-backdrop-filter: var(--tc-blur-window);
   backdrop-filter: var(--tc-blur-window);
-  box-shadow: var(--tc-modal-shadow);
+  box-shadow: var(--tc-pane-edge), var(--tc-modal-shadow);
   color: var(--tc-text-primary);
   font: var(--tc-text-body);
 }
@@ -875,6 +912,7 @@
   transition: background var(--tc-dur-fast) var(--tc-ease);
 }
 .tc-checkbox[aria-checked="true"],
+.tc-checkbox[data-checked="true"],
 .tc-checkbox[aria-checked="mixed"] {
   background: var(--tc-checkbox-on-fill);
 }

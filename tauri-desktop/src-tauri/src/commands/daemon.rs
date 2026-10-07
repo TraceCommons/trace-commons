@@ -46,44 +46,31 @@ pub(crate) fn redaction_summary_copy(
     redactions: std::collections::BTreeMap<String, u32>,
     distinct: Option<std::collections::BTreeMap<String, u32>>,
 ) -> serde_json::Value {
-    let (removed, still_present) = trace_commons_contributor::redaction_summary::rows(
+    serde_json::json!(trace_commons_contributor::redaction_summary::summary_copy(
         &redactions,
         &distinct.unwrap_or_default(),
-    );
-    serde_json::json!({
-        "removed": removed,
-        "still_present": still_present,
-    })
+    ))
 }
 
+/// The ignore-project words, assembled in the contributor core
+/// (`project_copy::ignore_project_copy`).
 #[tauri::command]
 pub(crate) fn project_ignore_copy(project_label: String, pending: usize) -> serde_json::Value {
-    use trace_commons_contributor::project_copy;
-
-    serde_json::json!({
-        "title": project_copy::ignore_project_title(&project_label),
-        "body": project_copy::ignore_project_body(pending),
-        "button": project_copy::IGNORE_PROJECT,
-        "tooltip": project_copy::IGNORE_PROJECT_TOOLTIP,
-    })
+    serde_json::json!(
+        trace_commons_contributor::project_copy::ignore_project_copy(&project_label, pending)
+    )
 }
 
+/// The arming offer and confirmation, assembled in the contributor core
+/// (`project_copy::arming_offer_copy`): the evidence and question, both
+/// confirmation bodies (K5's `body_with_backlog` for `include_backlog`) and
+/// Customize's table. Approved 2026-10-06.
 #[tauri::command]
 pub(crate) fn arming_offer_copy(project_label: String, count: u32) -> serde_json::Value {
-    use trace_commons_contributor::project_copy;
-
-    serde_json::json!({
-        "evidence": project_copy::arming_offer_evidence(&project_label, count),
-        "question": project_copy::arming_offer_question(&project_label),
-        "confirm": project_copy::ARMING_OFFER_CONFIRM,
-        "decline": project_copy::ARMING_OFFER_DECLINE,
-        "body": project_copy::ARMING_BODY,
-        // K5: the body for arming with the backlog (`include_backlog`), and
-        // Customize's copy for the picker and "Keep on this Mac". DRAFT,
-        // NEEDS APPROVAL; see `project_copy::customize_copy`.
-        "body_with_backlog": project_copy::ARMING_BODY_WITH_BACKLOG,
-        "customize": project_copy::customize_copy(),
-    })
+    serde_json::json!(trace_commons_contributor::project_copy::arming_offer_copy(
+        &project_label,
+        count
+    ))
 }
 
 #[tauri::command]
@@ -140,14 +127,18 @@ pub(crate) fn eligibility_group_copy(
     contributable: Option<u64>,
 ) -> serde_json::Value {
     use trace_commons_contributor::private_inference_copy::{
-        ContributionControl, group_control, group_withheld_line,
+        group_eligibility, group_withheld_line,
     };
 
-    let eligible = contributable.unwrap_or(pending).min(pending);
+    // The eligible/withheld arithmetic itself -- `min`-clamping `contributable`
+    // to `pending`, then the non-negative remainder -- used to live here.
+    // `group_eligibility` is now the one place it is computed; this file only
+    // chooses the words for its answer.
+    let eligibility = group_eligibility(pending, contributable);
     serde_json::json!({
-        "can_contribute": group_control(pending, contributable.map(|_| eligible)) == ContributionControl::Contribute,
-        "eligible_count": eligible,
-        "withheld_line": group_withheld_line(pending.saturating_sub(eligible)),
+        "can_contribute": eligibility.can_contribute,
+        "eligible_count": eligibility.eligible_count,
+        "withheld_line": group_withheld_line(eligibility.withheld_count),
     })
 }
 
@@ -355,4 +346,52 @@ pub(crate) async fn search_original(
         serde_json::json!({ "entry_id": entry_id, "needle": needle }),
     )
     .await
+}
+
+#[cfg(test)]
+mod account_limit_tests {
+    #[test]
+    fn account_limit_refusal_uses_core_copy() {
+        let line = super::queue_outcome_line("account_limit_reached".into());
+        assert_eq!(
+            line,
+            trace_commons_contributor::private_inference_copy::queue_outcome_line(
+                "account_limit_reached"
+            )
+        );
+        assert!(!line.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::eligibility_group_copy;
+
+    /// The eligible/withheld arithmetic itself now lives in the core's
+    /// `private_inference_copy::group_eligibility`; this pins that this
+    /// command's JSON shape (and the clamp/remainder values it reports)
+    /// did not change when the arithmetic moved out of this file.
+    #[test]
+    fn eligibility_group_copy_clamps_and_reports_the_withheld_line() {
+        let value = eligibility_group_copy(7, Some(3));
+        assert_eq!(value["can_contribute"], true);
+        assert_eq!(value["eligible_count"], 3);
+        assert_eq!(
+            value["withheld_line"],
+            "4 sessions here cannot be sent, so they are not included."
+        );
+
+        // An absent `contributable_count`: every pending session is
+        // sendable, and nothing is withheld.
+        let value = eligibility_group_copy(7, None);
+        assert_eq!(value["can_contribute"], true);
+        assert_eq!(value["eligible_count"], 7);
+        assert_eq!(value["withheld_line"], "");
+
+        // `contributable` above `pending` is clamped rather than producing
+        // a negative withheld count.
+        let value = eligibility_group_copy(3, Some(9));
+        assert_eq!(value["eligible_count"], 3);
+        assert_eq!(value["withheld_line"], "");
+    }
 }

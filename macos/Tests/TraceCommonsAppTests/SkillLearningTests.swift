@@ -5,6 +5,7 @@
 import AppKit
 import SwiftUI
 import TCBridge
+import TCShellCore
 import XCTest
 
 @testable import TraceCommonsApp
@@ -719,21 +720,27 @@ final class SkillLearningTests: XCTestCase {
             scheme: .dark
         )
         XCTAssertGreaterThan(detailImage.count, 1_000)
-        let rowWithSessionAction = try await capture(
-            HistoryRow(record: withdrawn, onOpen: {})
+        // The glass History inspector for the withdrawn row: before its
+        // record resolves it draws the status alone; once the app holds the
+        // record it composes the session detail, Skills included.
+        let row = try DaemonDataDecoding.decoder().decode(DaemonData.HistoryRow.self, from: Data(
+            #"{"submission_id":"\#(withdrawn.submissionID)","status":"withdrawn"}"#.utf8))
+        let unresolved = try await capture(
+            HistoryDetailInspector(row: row)
                 .frame(minHeight: 320, alignment: .top)
                 .environmentObject(model),
-            width: 760,
+            width: 420,
             scheme: .dark
         )
-        let rowWithoutSessionAction = try await capture(
-            HistoryRow(record: withdrawn)
+        model.setHistoryForTesting([withdrawn])
+        let resolved = try await capture(
+            HistoryDetailInspector(row: row)
                 .frame(minHeight: 320, alignment: .top)
                 .environmentObject(model),
-            width: 760,
+            width: 420,
             scheme: .dark
         )
-        XCTAssertNotEqual(rowWithSessionAction, rowWithoutSessionAction)
+        XCTAssertNotEqual(resolved, unresolved)
         try await waitUntil {
             !model.skillLearningState(for: withdrawn.submissionID).isWorking
         }

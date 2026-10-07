@@ -1,4 +1,5 @@
 import Foundation
+import TCBridge
 
 /// Every sentence this app says about withdrawal, in one file.
 ///
@@ -119,7 +120,8 @@ enum WithdrawalCopy {
     /// the cannot-be-recalled body in the coral text token and leave the
     /// rest as body copy.
     struct Confirmation {
-        let question: String
+        /// The heading. Nil where the core's prompt carries its own.
+        let question: String?
         /// Present only where the tier is ambiguous: says so, in this app's
         /// own words, before the canonical bodies it cannot choose between.
         let ambiguity: String?
@@ -129,13 +131,17 @@ enum WithdrawalCopy {
         /// Index into `bodies` of the one carrying the cannot-be-recalled
         /// clause, so the view can weight it. `nil` when none does.
         let gravest: Int?
-        let credit: String
+        /// The credit note. Nil where the core's prompt carries its own.
+        let credit: String?
         /// "Withdraw" where the outcome is unambiguous, "Withdraw anyway"
         /// where the contributor is being asked to accept a limit.
         let confirmLabel: String
     }
 
-    static func confirmation(for stage: Stage) -> Confirmation {
+    /// The confirmation for `stage`, or nil when it cannot be worded: the
+    /// unknown stage's words are the core's, and without them withdrawal is
+    /// not confirmable.
+    static func confirmation(for stage: Stage) -> Confirmation? {
         switch stage {
         case .notInTheCommons:
             return Confirmation(
@@ -158,12 +164,21 @@ enum WithdrawalCopy {
                 confirmLabel: "Withdraw anyway"
             )
         case .unknown:
+            // The core's prompt for a trace whose reach this machine cannot
+            // know (`withdraw::confirmation_prompt_unknown`, through
+            // `tc_withdrawal_confirmation_prompt_text`), the same text the
+            // other shells show: the question, what withdrawing does, that
+            // distributed copies cannot be recalled, and the credit note,
+            // as one block weighted as the gravest.
+            guard let prompt = TCCoreCopy.withdrawalConfirmationPrompt(), !prompt.isEmpty else {
+                return nil
+            }
             return Confirmation(
-                question: "Withdraw this trace?",
-                ambiguity: "This session may already have been distributed. Withdrawal cannot recall distributed copies.",
-                bodies: [canonicalCommonsDistributed],
+                question: nil,
+                ambiguity: nil,
+                bodies: [prompt],
                 gravest: 0,
-                credit: creditNote,
+                credit: nil,
                 confirmLabel: "Withdraw anyway"
             )
         }
@@ -275,24 +290,31 @@ enum WithdrawalCopyCheck {
         // A trace already in the commons may be either commons tier, so it
         // must never be shown only the gentler one.
         let commons = WithdrawalCopy.confirmation(for: .inTheCommons)
-        if !commons.bodies.contains(WithdrawalCopy.canonicalCommonsDistributed) {
+        if commons?.bodies.contains(WithdrawalCopy.canonicalCommonsDistributed) != true {
             problems.append("an accepted trace is not warned about distributed copies")
         }
-        if commons.ambiguity == nil {
+        if commons?.ambiguity == nil {
             problems.append("an accepted trace is shown a tier this app cannot know")
         }
 
         // ...and a trace that never entered the commons must not be told it
         // was excluded from exports it was never in.
         let outside = WithdrawalCopy.confirmation(for: .notInTheCommons)
-        if outside.bodies != [WithdrawalCopy.canonicalNotDistributed] {
+        if outside?.bodies != [WithdrawalCopy.canonicalNotDistributed] {
             problems.append("a not-yet-in-the-commons trace is shown the wrong tier")
         }
 
         // Every tier says the same thing about credit, and only that.
-        for stage in [WithdrawalCopy.Stage.notInTheCommons, .inTheCommons, .unknown]
-        where WithdrawalCopy.confirmation(for: stage).credit != WithdrawalCopy.creditNote {
+        for stage in [WithdrawalCopy.Stage.notInTheCommons, .inTheCommons]
+        where WithdrawalCopy.confirmation(for: stage)?.credit != WithdrawalCopy.creditNote {
             problems.append("a tier states something other than the verified credit note")
+        }
+
+        // A trace whose reach is unknown is shown the core's prompt, which
+        // must warn about distributed copies and carry the same credit note.
+        let unknown = WithdrawalCopy.confirmation(for: .unknown)?.bodies.first ?? ""
+        if !unknown.contains("recalled") || !unknown.contains(WithdrawalCopy.creditNote) {
+            problems.append("an unknown trace is not warned about distributed copies and credit")
         }
 
         // A failed withdrawal must lead with the fact that nothing happened,

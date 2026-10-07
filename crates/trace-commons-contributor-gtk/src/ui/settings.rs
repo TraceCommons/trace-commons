@@ -28,6 +28,10 @@ use super::style::{self, Tone, space};
 use crate::copy;
 use crate::copy::SourceTool;
 use crate::model::{Project, Settings, Status};
+use trace_commons_contributor::account_contribution::{
+    CHECKING_LINE, HEADING as CONTRIBUTION_HEADING, INVITE_CODE_LABEL, PENDING_CREDIT_LINE,
+    REDEEM_ACTION, REFRESH_ACTION, REFRESH_LINE, UNAVAILABLE_LINE,
+};
 use trace_commons_contributor::config::{ConfigStore, WitnessSettings};
 use trace_commons_contributor::witness::status::{WitnessStatus, WitnessTrustState};
 
@@ -203,6 +207,13 @@ pub struct SettingsView {
     inference_disable: gtk::Button,
     inference_saving: std::cell::Cell<bool>,
     inference_supported: std::cell::Cell<bool>,
+    contribution_status: gtk::Label,
+    contribution_refresh: gtk::Button,
+    invite_code: gtk::Entry,
+    invite_redeem: gtk::Button,
+    invite_attempt: RefCell<Option<(String, String)>>,
+    contribution_busy: std::cell::Cell<bool>,
+    contribution_scope: RefCell<Option<String>>,
     token_status: gtk::Label,
     token_storage_status: gtk::Label,
     token_capture: gtk::Button,
@@ -262,6 +273,26 @@ impl SettingsView {
         pause_button.set_halign(gtk::Align::Start);
         state_card.append(&pause_button);
         content.append(&state_card);
+
+        content.append(&style::section(CONTRIBUTION_HEADING));
+        let contribution_card = style::card(gtk::Orientation::Vertical, space::M);
+        let contribution_status = gtk::Label::builder()
+            .label(REFRESH_LINE)
+            .xalign(0.0)
+            .wrap(true)
+            .build();
+        contribution_card.append(&contribution_status);
+        let contribution_refresh = gtk::Button::with_label(REFRESH_ACTION);
+        contribution_card.append(&contribution_refresh);
+        let invite_code = gtk::Entry::builder()
+            .placeholder_text(INVITE_CODE_LABEL)
+            .visibility(false)
+            .build();
+        contribution_card.append(&invite_code);
+        let invite_redeem = gtk::Button::with_label(REDEEM_ACTION);
+        contribution_card.append(&invite_redeem);
+        style::append_body(&contribution_card, PENDING_CREDIT_LINE);
+        content.append(&contribution_card);
 
         // The Tools card. It is deliberately one concept: whether what a
         // tool sends is kept private on this machine. The port and the
@@ -708,6 +739,13 @@ impl SettingsView {
             inference_disable,
             inference_saving: std::cell::Cell::new(false),
             inference_supported: std::cell::Cell::new(false),
+            contribution_status,
+            contribution_refresh,
+            invite_code,
+            invite_redeem,
+            invite_attempt: RefCell::new(None),
+            contribution_busy: std::cell::Cell::new(false),
+            contribution_scope: RefCell::new(None),
             token_status,
             token_storage_status,
             token_capture,
@@ -724,6 +762,14 @@ impl SettingsView {
 }
 
 pub fn wire(app: &Rc<App>) {
+    let a = Rc::clone(app);
+    app.settings
+        .contribution_refresh
+        .connect_clicked(move |_| contribution_request(&a, false));
+    let a = Rc::clone(app);
+    app.settings
+        .invite_redeem
+        .connect_clicked(move |_| contribution_request(&a, true));
     let a = Rc::clone(app);
     app.settings.pause_button.connect_clicked(move |_| {
         let paused = a
@@ -964,6 +1010,13 @@ fn render_background(app: &Rc<App>) {
 }
 
 pub fn render_status(app: &Rc<App>, status: &Status) {
+    let scope = status.account_scope.clone();
+    if *app.settings.contribution_scope.borrow() != scope {
+        *app.settings.contribution_scope.borrow_mut() = scope;
+        app.settings.contribution_status.set_text(REFRESH_LINE);
+        app.settings.invite_code.set_text("");
+        *app.settings.invite_attempt.borrow_mut() = None;
+    }
     let hosting = app.worker.hosts_the_loop();
     let connection = if status.paused {
         "Paused. Nothing is being queued or sent."
@@ -1879,21 +1932,24 @@ fn audit_sentence(action: &str) -> &'static str {
 ///
 /// `auto_upload` is absent for the unresolvable bucket. `Policy` refuses it
 /// there in two independent places, so offering it invited a contributor to
-/// select "Contribute automatically" and have the daemon silently decline --
-/// believing they had armed something that cannot be armed. Silencing still
-/// works, so `ignore` stays.
+/// select "Automatic" and have the daemon silently decline -- believing they
+/// had armed something that cannot be armed. Silencing still works, so
+/// `ignore` stays.
+///
+/// Each display name is the core's one name for the mode
+/// (`project_copy::FOLDER_MODE_LABELS`), the word the pill and onboarding
+/// use too.
 ///
 /// Paired rather than positional, and lifted out here so the pairing is
 /// testable without a display. The old code carried the mapping twice, as
 /// hardcoded indices into a list assumed to be the same length for every
 /// row; one shorter row turns that into a control that sets the wrong mode.
 fn mode_choices(is_unresolved_bucket: bool) -> Vec<(&'static str, &'static str)> {
-    let mut choices: Vec<(&'static str, &'static str)> = vec![("Ask me first", "notify_only")];
-    if !is_unresolved_bucket {
-        choices.push(("Contribute automatically", "auto_upload"));
-    }
-    choices.push(("Never offer this one", "ignore"));
-    choices
+    trace_commons_contributor::project_copy::FOLDER_MODE_LABELS
+        .iter()
+        .filter(|(wire, _)| !(is_unresolved_bucket && *wire == "auto_upload"))
+        .map(|(wire, label)| (*label, *wire))
+        .collect()
 }
 
 fn render_projects(app: &Rc<App>, projects: &[Project]) {
@@ -1970,7 +2026,7 @@ fn render_projects(app: &Rc<App>, projects: &[Project]) {
         //
         // `auto_upload` is omitted for the unresolvable bucket. `Policy`
         // refuses it there in two independent places, so offering it invited
-        // a contributor to select "Contribute automatically" and have the
+        // a contributor to select "Automatic" and have the
         // daemon silently decline -- believing they had armed something that
         // cannot be armed. Silencing still works, so `Ignore` stays.
         //
@@ -4344,6 +4400,22 @@ mod tests {
         assert_eq!(wires, vec!["notify_only", "auto_upload", "ignore"]);
     }
 
+    /// Owner decision, 2026-10-02: each mode reads by the core's one name
+    /// (`project_copy::FOLDER_MODE_LABELS`), the same words the pill and
+    /// onboarding use, never a spelling typed here.
+    #[test]
+    fn each_mode_reads_by_the_cores_name() {
+        use trace_commons_contributor::project_copy::{FOLDER_MODE_LABELS, folder_mode_label};
+        let core: Vec<(&str, &str)> = FOLDER_MODE_LABELS
+            .iter()
+            .map(|(wire, label)| (*label, *wire))
+            .collect();
+        assert_eq!(mode_choices(false), core);
+        for (shown, wire) in mode_choices(true) {
+            assert_eq!(Some(shown), folder_mode_label(wire), "{wire}");
+        }
+    }
+
     #[test]
     fn a_position_yields_the_mode_that_position_shows() {
         // The defect this guards is silent: with a shorter list on one row, a
@@ -5275,4 +5347,73 @@ fn wire_token_storage(app: &Rc<App>) {
         });
         dialog.present();
     });
+}
+
+fn contribution_request(app: &Rc<App>, redeem: bool) {
+    let view = &app.settings;
+    if view.contribution_busy.replace(true) {
+        return;
+    }
+    let code = view.invite_code.text().to_string();
+    if redeem && code.trim().is_empty() {
+        view.contribution_busy.set(false);
+        return;
+    }
+    let Some(scope) = view.contribution_scope.borrow().clone() else {
+        view.contribution_busy.set(false);
+        return;
+    };
+    let params = if redeem {
+        let mut attempt = view.invite_attempt.borrow_mut();
+        if attempt
+            .as_ref()
+            .is_none_or(|(previous, _)| previous != &code)
+        {
+            *attempt = Some((code.clone(), uuid::Uuid::new_v4().to_string()));
+        }
+        serde_json::json!({"invite_code": code, "idempotency_key": attempt.as_ref().unwrap().1, "account_scope":scope})
+    } else {
+        serde_json::json!({"account_scope":scope})
+    };
+    view.contribution_status.set_text(CHECKING_LINE);
+    view.invite_code.set_sensitive(false);
+    view.invite_redeem.set_sensitive(false);
+    view.contribution_refresh.set_sensitive(false);
+    app.call(
+        if redeem {
+            "account_invite_redeem"
+        } else {
+            "account_contribution_status"
+        },
+        params,
+        move |app, result| {
+            let view = &app.settings;
+            view.contribution_busy.set(false);
+            view.invite_code.set_sensitive(true);
+            view.invite_redeem.set_sensitive(true);
+            view.contribution_refresh.set_sensitive(true);
+            if view.contribution_scope.borrow().as_ref() != Some(&scope) {
+                return;
+            }
+            match result {
+                Ok(value) => {
+                    if value.get("account_scope").and_then(|v| v.as_str()) != Some(scope.as_str()) {
+                        view.contribution_status.set_text(UNAVAILABLE_LINE);
+                        return;
+                    }
+                    view.contribution_status.set_text(
+                        value
+                            .get("line")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or(UNAVAILABLE_LINE),
+                    );
+                    if redeem {
+                        view.invite_code.set_text("");
+                        *view.invite_attempt.borrow_mut() = None;
+                    }
+                }
+                Err(_) => view.contribution_status.set_text(UNAVAILABLE_LINE),
+            }
+        },
+    );
 }

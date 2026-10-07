@@ -161,10 +161,18 @@ pub struct NearAiLoginPending {
 /// row, and a bind row's extra fields make it fail [`NearAiLoginPending`]'s
 /// `deny_unknown_fields`. The storage layer refuses to mix the two ceremonies
 /// before the preimage domains ever get the chance to.
+///
+/// `Enrol` is the same ceremony run by a session whose account is already
+/// `bound` (a further Mac signing in with a synced passkey): finish attaches
+/// the device only if the login's anchor is that account's own. The purpose is
+/// fixed at start from the binding state then, and finish refuses if the state
+/// no longer matches it, so a ceremony started as one never finishes as the
+/// other.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NearAiBindPurpose {
     Bind,
+    Enrol,
 }
 
 /// A NEAR AI bind ceremony between `bind/start` and `bind/finish` (Z2 native
@@ -228,6 +236,23 @@ pub const DEVICE_KEY_REGISTERED_ELSEWHERE: &str =
 /// [`DEVICE_KEY_REGISTERED_ELSEWHERE`] refusal.
 pub fn is_device_key_registered_elsewhere(error: &crate::error::DatabaseError) -> bool {
     matches!(error, crate::error::DatabaseError::Pool(label) if label == DEVICE_KEY_REGISTERED_ELSEWHERE)
+}
+
+/// An enrolment's login does not resolve to the session's own account.
+///
+/// Decided inside the account's own tenant, under RLS, so the check never
+/// reads another tenant: an anchor held by some other account and no anchor
+/// at all are the same refusal. Label-only, and the same value whatever the
+/// login resolves to elsewhere, because which account (if any) holds the
+/// login is exactly what must not be disclosed. Carried as
+/// `DatabaseError::Pool(NEAR_AI_ENROL_ACCOUNT_MISMATCH)`; test it with
+/// [`is_near_ai_enrol_account_mismatch`].
+pub const NEAR_AI_ENROL_ACCOUNT_MISMATCH: &str = "near_ai_enrol_account_mismatch";
+
+/// Whether an enrolment error is the named [`NEAR_AI_ENROL_ACCOUNT_MISMATCH`]
+/// refusal.
+pub fn is_near_ai_enrol_account_mismatch(error: &crate::error::DatabaseError) -> bool {
+    matches!(error, crate::error::DatabaseError::Pool(label) if label == NEAR_AI_ENROL_ACCOUNT_MISMATCH)
 }
 
 #[derive(Debug, Clone, serde::Serialize)]

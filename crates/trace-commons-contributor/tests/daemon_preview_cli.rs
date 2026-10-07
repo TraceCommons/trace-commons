@@ -1,6 +1,6 @@
 //! Covers the exact regression a fix-round review caught: `daemon preview
 //! <entry_id>` is the CLI's entry point onto `handle_local(&shared,
-//! "preview", ...)` (wired in `src/bin/trace-commons-contributor.rs`), which
+//! "preview", ...)` (wired in `src/cli.rs`), which
 //! now runs every method -- `"preview"` included -- through the real async
 //! dispatcher (`handle_request_async`, via a generic `block_on_ipc`), not the
 //! synchronous `handle_request`. The synchronous `handle_request` answers

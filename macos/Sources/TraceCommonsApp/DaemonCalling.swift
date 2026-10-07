@@ -1,5 +1,6 @@
 import Foundation
 import TCBridge
+import TCShellCore
 
 /// The whole of what `DaemonClient` needs from the daemon: issue one call,
 /// get one JSON frame back, and open a preview.
@@ -15,8 +16,11 @@ import TCBridge
 /// Deliberately not a wrapper with its own behaviour: it declares exactly
 /// `TCDaemon`'s existing signatures, so the conformance below is empty and
 /// there is nothing here that can drift from what the bridge actually does.
-protocol DaemonCalling: AnyObject {
-    func call(_ method: String, params paramsJSON: String) -> String
+///
+/// The `call` requirement itself lives in `TCShellCore.DaemonTransport`,
+/// which this refines, so C1's `LiveDaemonClient` runs over the same
+/// seam (and the same `TCDaemon`) as `DaemonClient` without a parallel one.
+protocol DaemonCalling: DaemonTransport {
     func openPreview(entryID: String) throws -> TCPreview
     /// A COUNT of `needle` in the PRE-redaction session, never content.
     /// `nil` when it could not be checked -- which is not the same as zero,

@@ -12,6 +12,7 @@ import { GrantVoidNotices } from "./grant-void-notices";
 import { useAccountQueryLifecycle } from "./hooks/use-account-query-lifecycle";
 import { useDaemonQueryEvents } from "./hooks/use-daemon-query-events";
 import { useDesktopEvents } from "./hooks/use-desktop-events";
+import { useNativeGlass } from "./hooks/use-native-glass";
 import { LegacyMigrationNotice } from "./legacy-migration-notice";
 import { QuitConfirmation } from "./quit-confirmation";
 import { ArmingRewordingNotices, GateHeldNotice } from "./switch-on-notices";
@@ -33,6 +34,7 @@ export function AppShell() {
   const tenantId = core.data?.daemon.tenant_id ?? null;
   const onboarding = useOnboardingCompletion(tenantId);
   const desktop = useDesktopEvents(refreshPrivateAiCredential);
+  useNativeGlass();
   const errors = [
     desktop.error,
     daemonEventError

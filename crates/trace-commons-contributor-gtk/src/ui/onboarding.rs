@@ -72,6 +72,10 @@ impl Step {
 #[derive(Clone, Debug, serde::Deserialize)]
 struct ScopeOption {
     name: String,
+    /// The core's title for the scope. Required, with no default: a list
+    /// carrying a scope without one does not parse, so no row is drawn under
+    /// words this shell made up (owner ruling, 2026-10-06).
+    title: String,
     #[serde(default)]
     description: String,
     #[serde(default)]
@@ -766,13 +770,9 @@ fn render_scopes(onboarding: &Rc<Onboarding>, scopes: &[ScopeOption]) {
             let text = gtk::Box::new(gtk::Orientation::Vertical, space::XXS);
             let title_label = gtk::Label::builder()
                 .label(if scope.always_on {
-                    format!(
-                        "{}  {}",
-                        copy::scope_title(&scope.name),
-                        copy::ONBOARD_ALWAYS_ON_TAG
-                    )
+                    format!("{}  {}", scope.title, copy::ONBOARD_ALWAYS_ON_TAG)
                 } else {
-                    copy::scope_title(&scope.name)
+                    scope.title.clone()
                 })
                 .xalign(0.0)
                 .wrap(true)
@@ -1061,10 +1061,10 @@ fn watch_page(app: &Rc<App>, onboarding: &Rc<Onboarding>) -> gtk::Box {
                         // Greying an ignored row is a colour change, not a
                         // size change, so `tc-neutral` rather than `tc-meta`.
                         row_label.add_css_class("tc-neutral");
-                        // The state line says what the row now is. The button
-                        // that produced it said "Ignore", so this says
-                        // "Ignored" -- one name for the mode, through the
-                        // whole flow.
+                        // The state line says what the row now is: the
+                        // mode's one name, the word the button that produced
+                        // it said -- one name for the mode, through the whole
+                        // flow.
                         row_state.set_label(copy::ONBOARD_WATCH_IGNORED);
                         app.call(
                             "set_project_mode",

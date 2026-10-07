@@ -1,4 +1,5 @@
 import SwiftUI
+import TCDesign
 import TCShellCore
 
 /// The tools on this computer, at the top of the destination.
@@ -6,23 +7,22 @@ import TCShellCore
 /// **This file authors no wording at all**, and must never start: every
 /// sentence is a field of `PrivateInferenceCopy`, every branch is the shared
 /// table's, and the only strings written here are IronWire's own values --
-/// a tool's name, its config path, the command it suggests -- rendered
-/// verbatim. It holds no entry in `ShellWordingTests`'s baseline and must
-/// not be given one.
+/// a tool's name, its config path, the command it suggests, its id --
+/// rendered verbatim or matched. It holds no entry in `ShellWordingTests`'s
+/// baseline and must not be given one.
 struct HarnessListSection: View {
     @EnvironmentObject private var model: AppModel
     let copy: PrivateInferenceCopy
 
     var body: some View {
-        VStack(alignment: .leading, spacing: TC.Space.l) {
-            Text(copy.harnessesTitle)
-                .font(TC.Font_.sectionTitle)
+        VStack(alignment: .leading, spacing: GlassTokens.Space.s6) {
+            GlassSectionRule(copy.harnessesTitle)
             // Says the choice is per tool AND that the list is what this app
             // knows how to look for. Without the second half a contributor
             // whose tool is missing concludes it cannot be connected.
             Text(copy.harnessesWhat)
-                .font(TC.Font_.body)
-                .foregroundStyle(.secondary)
+                .glassType(GlassTokens.TypeScale.body)
+                .foregroundStyle(GlassColor.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
             // What today's calls cost, and -- inseparably -- what that
             // figure leaves out. Both are drawn, or neither is: an amount
@@ -32,11 +32,12 @@ struct HarnessListSection: View {
                 model.harnesses, calls: model.harnessCalls)
             {
                 Text(spend)
-                    .font(TC.Font_.body)
+                    .glassType(GlassTokens.TypeScale.body)
+                    .foregroundStyle(GlassColor.textPrimary)
                     .fixedSize(horizontal: false, vertical: true)
                 Text(copy.harnessesSpendScope)
-                    .font(TC.Font_.meta)
-                    .foregroundStyle(.secondary)
+                    .glassType(GlassTokens.TypeScale.caption)
+                    .foregroundStyle(GlassColor.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
             // Why a connect control is not on offer. Drawn ONCE, here, and
@@ -50,12 +51,20 @@ struct HarnessListSection: View {
                 calls: model.credentialCalls)
             {
                 Text(notice)
-                    .font(TC.Font_.body)
+                    .glassType(GlassTokens.TypeScale.body)
+                    .foregroundStyle(GlassColor.textPrimary)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            if model.harnesses.harnesses.isEmpty {
+            // `.none` is "nothing is known": a list not read yet and a
+            // payload this build could not read both land there, and neither
+            // is a machine with no tools on it. The core's unknown word, not
+            // "none found".
+            if model.harnesses == HarnessList.none {
+                RouteDisclosureUnreadableGlassLine(line: nil)
+            } else if model.harnesses.harnesses.isEmpty {
                 Text(copy.harnessesNoneFound)
-                    .font(TC.Font_.body)
+                    .glassType(GlassTokens.TypeScale.body)
+                    .foregroundStyle(GlassColor.textPrimary)
                     .fixedSize(horizontal: false, vertical: true)
             } else {
                 ForEach(model.harnesses.harnesses) { row in
@@ -63,20 +72,21 @@ struct HarnessListSection: View {
                 }
             }
         }
-        .sheet(isPresented: exposureBinding) {
+        // Glass modals over the whole window, not stock sheets.
+        .glassModal(isPresented: exposureBinding) {
             HarnessExposureSheet(copy: copy)
         }
-        .sheet(isPresented: previewBinding) {
+        .glassModal(isPresented: previewBinding) {
             if let plan = model.harnessPreview {
                 HarnessPreviewSheet(plan: plan, copy: copy)
             }
         }
     }
 
-    /// Dismissing either sheet is the same as saying no. The exposure
-    /// question left unanswered connects nothing and records nothing; the
-    /// preview left unconfirmed writes nothing and the plan expires where it
-    /// was minted.
+    /// Dismissing either modal (Escape, or its cancel) is the same as
+    /// saying no. The exposure question left unanswered connects nothing and
+    /// records nothing; the preview left unconfirmed writes nothing and the
+    /// plan expires where it was minted.
     private var exposureBinding: Binding<Bool> {
         Binding(
             get: { model.harnessExposureRequest != nil },
@@ -99,107 +109,93 @@ private struct HarnessRowView: View {
 
     var body: some View {
         let state = HarnessSurface.state(row, calls: model.harnessCalls)
-        let tone = PrivateInferenceIndicator.palette(HarnessSurface.tone(state))
-        VStack(alignment: .leading, spacing: TC.Space.m) {
-            ViewThatFits(in: .horizontal) {
-                HStack(spacing: TC.Space.l) {
-                    toolHeading.fixedSize()
-                    Spacer(minLength: TC.Space.l)
-                    actionButton.fixedSize()
+        GlassCard(quiet: true) {
+            VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: GlassTokens.Space.s6) {
+                        toolHeading.fixedSize()
+                        Spacer(minLength: GlassTokens.Space.s6)
+                        actionButton.fixedSize()
+                    }
+                    VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
+                        toolHeading
+                        actionButton
+                    }
                 }
-                VStack(alignment: .leading, spacing: TC.Space.m) {
-                    toolHeading
-                    actionButton
+                // The one state that means a call arrived is the only one
+                // drawn as working, and the two that cannot be attributed say
+                // nothing rather than borrow a claim. A tool that is not on
+                // this machine is listed and says so, rather than borrowing a
+                // sentence about settings it does not have.
+                if let sentence = HarnessSurface.rowSentence(
+                    row, copy: copy, calls: model.harnessCalls)
+                {
+                    GlassStatusLabel(sentence, status: PrivateInferenceIndicator.status(HarnessSurface.tone(state)))
+                        .fixedSize(horizontal: false, vertical: true)
                 }
-            }
-            // The one state that means a call arrived is the only one drawn
-            // as working, and the two that cannot be attributed say nothing
-            // rather than borrow a claim. A tool that is not on this machine
-            // is listed and says so, rather than borrowing a sentence about
-            // settings it does not have.
-            if let sentence = HarnessSurface.rowSentence(
-                row, copy: copy, calls: model.harnessCalls)
-            {
-                Label(sentence, systemImage: tone.symbol)
-                    .font(TC.Font_.body)
-                    .foregroundStyle(tone.textColor)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            if let restart = HarnessSurface.restartSentence(row, state: state, copy: copy) {
-                Text(restart)
-                    .font(TC.Font_.meta)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            // When a call last arrived, assembled on the far side and empty
-            // when there is nothing to report -- which draws no line at all.
-            if let lastCall = HarnessSurface.lastCallSentence(row, calls: model.harnessCalls) {
-                Text(lastCall)
-                    .font(TC.Font_.meta)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            DisclosureGroup(isExpanded: $settingsExpanded) {
-                VStack(alignment: .leading, spacing: TC.Space.m) {
-                    if let path = row.configPath {
-                        Label(path, systemImage: "doc.text")
+                if let restart = HarnessSurface.restartSentence(row, state: state, copy: copy) {
+                    Text(restart)
+                        .glassType(GlassTokens.TypeScale.caption)
+                        .foregroundStyle(GlassColor.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                // When a call last arrived, assembled on the far side and
+                // empty when there is nothing to report -- which draws no
+                // line at all.
+                if let lastCall = HarnessSurface.lastCallSentence(row, calls: model.harnessCalls) {
+                    Text(lastCall)
+                        .glassType(GlassTokens.TypeScale.caption)
+                        .foregroundStyle(GlassColor.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                GlassExpander(copy.harnessPreviewTitle, isOpen: $settingsExpanded)
+                if settingsExpanded {
+                    VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
+                        if let path = row.configPath {
+                            Label(path, systemImage: "doc.text")
+                                .textSelection(.enabled)
+                        }
+                        Label(row.connectCommand, systemImage: "terminal")
                             .textSelection(.enabled)
                     }
-                    Label(row.connectCommand, systemImage: "terminal")
-                        .textSelection(.enabled)
+                    .glassType(GlassTokens.TypeScale.mono)
+                    .foregroundStyle(GlassColor.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
                 }
-                .font(TC.Font_.monoCode)
-                .foregroundStyle(TC.inkSecondary)
-                .fixedSize(horizontal: false, vertical: true)
-                .padding(.top, TC.Space.s)
-            } label: {
-                Text(copy.harnessPreviewTitle)
-                    .font(TC.Font_.meta)
-                    .foregroundStyle(TC.inkSecondary)
             }
         }
-        .padding(TC.Space.xl)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(TC.surfaceInset, in: RoundedRectangle(cornerRadius: TC.Radius.card))
     }
 
     private var toolHeading: some View {
-        HStack(spacing: TC.Space.m) {
-            Image(systemName: "terminal")
-                .font(TC.Font_.sectionTitle)
-                .foregroundStyle(TC.greenText)
-                .padding(TC.Space.m)
-                .background(TC.surface, in: RoundedRectangle(cornerRadius: TC.Radius.inset))
-                .accessibilityHidden(true)
+        HStack(spacing: GlassTokens.Space.s4) {
+            if let tool = HarnessToolArt.tool(harness: row.id) {
+                GlassToolTile(.tool(tool))
+            } else {
+                Image(systemName: "terminal")
+                    .glassGlyph(14)
+                    .foregroundStyle(GlassColor.accentText)
+                    .accessibilityHidden(true)
+            }
             Text(row.name)
-                .font(TC.Font_.cardTitle)
-                .foregroundStyle(TC.inkPrimary)
+                .glassType(GlassTokens.TypeScale.bodyStrong)
+                .foregroundStyle(GlassColor.textPrimary)
                 .fixedSize(horizontal: false, vertical: true)
         }
     }
 
     /// One button, or none. Which action it offers is the shared table's
     /// answer, so an uninstalled tool that still holds our line keeps the
-    /// control that removes it.
+    /// control that removes it. Connect is the only primary.
     @ViewBuilder
     private var actionButton: some View {
         if let action = HarnessSurface.action(row, calls: model.harnessCalls) {
-            if action == .connect {
-                harnessButton(action)
-                    .tcPrimaryAction()
-            } else {
-                harnessButton(action)
-                    .buttonStyle(.bordered)
+            Button(HarnessSurface.actionLabel(action, copy: copy)) {
+                model.beginHarnessAction(id: row.id, action: action)
             }
+            .buttonStyle(GlassButtonStyle(action == .connect ? .primary : .glass))
+            .accessibilityLabel(Text(row.name) + Text(verbatim: ": ") + Text(HarnessSurface.actionLabel(action, copy: copy)))
+            .disabled(model.harnessBusy)
         }
-    }
-
-    private func harnessButton(_ action: HarnessAction) -> some View {
-        Button(HarnessSurface.actionLabel(action, copy: copy)) {
-            model.beginHarnessAction(id: row.id, action: action)
-        }
-        .accessibilityLabel(Text(row.name) + Text(verbatim: ": ") + Text(HarnessSurface.actionLabel(action, copy: copy)))
-        .disabled(model.harnessBusy)
     }
 }
 
@@ -214,12 +210,37 @@ private struct HarnessPreviewSheet: View {
     let copy: PrivateInferenceCopy
 
     var body: some View {
-        VStack(alignment: .leading, spacing: TC.Space.m) {
-            Text(copy.harnessPreviewTitle).font(TC.Font_.sectionTitle)
+        GlassModal(
+            title: copy.harnessPreviewTitle, width: .narrow, actions: actions,
+            onCancel: { model.cancelHarnessPreview() }
+        ) {
+            GlassModalBody { details }
+        }
+    }
+
+    /// Saying no leaves the file with every value it has, which is what
+    /// its own words say. Confirm is absent for every outcome that is not
+    /// committable, so an empty plan can never be confirmed into nothing;
+    /// it is the default (Return) and waits on busy.
+    private var actions: [GlassModalAction] {
+        var actions: [GlassModalAction] = [
+            .cancel(copy.harnessPreviewCancel) { model.cancelHarnessPreview() },
+        ]
+        if HarnessSurface.canCommit(plan, calls: model.harnessCalls) {
+            actions.append(GlassModalAction(
+                copy.harnessPreviewConfirm, isDefault: true, isEnabled: !model.harnessBusy
+            ) { model.confirmHarnessPreview() })
+        }
+        return actions
+    }
+
+    @ViewBuilder
+    private var details: some View {
+        VStack(alignment: .leading, spacing: GlassTokens.Space.s6) {
             if let path = plan.path {
                 Text(path)
-                    .font(TC.Font_.monoCode)
-                    .foregroundStyle(.secondary)
+                    .glassType(GlassTokens.TypeScale.mono)
+                    .foregroundStyle(GlassColor.textSecondary)
                     .textSelection(.enabled)
             }
             // Every outcome that writes nothing says why. A file this app
@@ -229,12 +250,16 @@ private struct HarnessPreviewSheet: View {
             if let sentence = HarnessSurface.outcomeSentence(
                 plan, calls: model.harnessCalls)
             {
-                Text(sentence).font(TC.Font_.body).fixedSize(horizontal: false, vertical: true)
+                Text(sentence)
+                    .glassType(GlassTokens.TypeScale.body)
+                    .foregroundStyle(GlassColor.textPrimary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             // IronWire's own words for what would change, verbatim.
             ForEach(Array(plan.changes.enumerated()), id: \.offset) { _, change in
                 Text(change)
-                    .font(TC.Font_.monoCode)
+                    .glassType(GlassTokens.TypeScale.mono)
+                    .foregroundStyle(GlassColor.textPrimary)
                     .textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -244,35 +269,23 @@ private struct HarnessPreviewSheet: View {
             // control here that would take the slot over.
             if !plan.occupied.isEmpty {
                 Text(HarnessSurface.occupiedSentence(copy: copy))
-                    .font(TC.Font_.body)
+                    .glassType(GlassTokens.TypeScale.body)
+                    .foregroundStyle(GlassColor.textPrimary)
                     .fixedSize(horizontal: false, vertical: true)
                 ForEach(Array(plan.occupied.enumerated()), id: \.offset) { _, slot in
-                    VStack(alignment: .leading, spacing: TC.Space.micro) {
-                        Text(slot.slot).font(TC.Font_.monoCode)
+                    VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
+                        Text(slot.slot)
+                            .glassType(GlassTokens.TypeScale.mono)
+                            .foregroundStyle(GlassColor.textPrimary)
                         Text(slot.current)
-                            .font(TC.Font_.monoCode)
-                            .foregroundStyle(.secondary)
+                            .glassType(GlassTokens.TypeScale.mono)
+                            .foregroundStyle(GlassColor.textSecondary)
                             .textSelection(.enabled)
                     }
                 }
             }
-            HStack(spacing: TC.Space.s) {
-                Spacer(minLength: TC.Space.m)
-                // Saying no leaves the file with every value it has, which
-                // is what this button's own words say.
-                Button(copy.harnessPreviewCancel) { model.cancelHarnessPreview() }
-                    .keyboardShortcut(.cancelAction)
-                // Absent for every outcome that is not committable, so an
-                // empty plan can never be confirmed into nothing.
-                if HarnessSurface.canCommit(plan, calls: model.harnessCalls) {
-                    Button(copy.harnessPreviewConfirm) { model.confirmHarnessPreview() }
-                        .keyboardShortcut(.defaultAction)
-                        .disabled(model.harnessBusy)
-                }
-            }
         }
-        .padding(TC.Space.xl)
-        .frame(minWidth: 460)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -286,32 +299,62 @@ private struct HarnessExposureSheet: View {
     @EnvironmentObject private var model: AppModel
     let copy: PrivateInferenceCopy
 
+    /// Decline is the cancel (Escape); Accept is the default (Return) and
+    /// waits on busy.
     var body: some View {
-        VStack(alignment: .leading, spacing: TC.Space.m) {
-            Text(copy.offerTitle).font(TC.Font_.sectionTitle)
-            Text(copy.offerWhat).font(TC.Font_.body).fixedSize(horizontal: false, vertical: true)
-            Text(copy.offerExposure).font(TC.Font_.body)
-                .fixedSize(horizontal: false, vertical: true)
-            Text(copy.offerNoRepoint).font(TC.Font_.body)
-                .fixedSize(horizontal: false, vertical: true)
-            // `offerAskedOnce` is deliberately NOT shown here. It says "this
-            // is the only time you will be asked. The switch stays in
-            // Settings", and both halves are false on this surface: the
-            // harness gate is `connectNeedsExposure(listenerOn:)`, which is
-            // wider than `shouldOffer` on purpose so a connect after the kill
-            // switch asks again; and the switch now lives on this destination,
-            // with Settings holding only a pointer. It remains true on the
-            // first-run offer, which is the sentence's home.
-            HStack(spacing: TC.Space.s) {
-                Spacer(minLength: TC.Space.m)
-                Button(copy.offerDecline) { model.answerHarnessExposure(accepted: false) }
-                    .keyboardShortcut(.cancelAction)
-                Button(copy.offerAccept) { model.answerHarnessExposure(accepted: true) }
-                    .keyboardShortcut(.defaultAction)
-                    .disabled(model.harnessBusy)
-            }
+        GlassModal(
+            title: copy.offerTitle, width: .narrow,
+            actions: [
+                .cancel(copy.offerDecline) { model.answerHarnessExposure(accepted: false) },
+                GlassModalAction(copy.offerAccept, isDefault: true, isEnabled: !model.harnessBusy) {
+                    model.answerHarnessExposure(accepted: true)
+                },
+            ],
+            onCancel: { model.answerHarnessExposure(accepted: false) }
+        ) {
+            GlassModalBody { question }
         }
-        .padding(TC.Space.xl)
-        .frame(minWidth: 460)
+    }
+
+    private var question: some View {
+        VStack(alignment: .leading, spacing: GlassTokens.Space.s6) {
+            Text(copy.offerWhat)
+                .glassType(GlassTokens.TypeScale.body)
+                .foregroundStyle(GlassColor.textPrimary)
+                .fixedSize(horizontal: false, vertical: true)
+            Text(copy.offerExposure)
+                .glassType(GlassTokens.TypeScale.body)
+                .foregroundStyle(GlassColor.textPrimary)
+                .fixedSize(horizontal: false, vertical: true)
+            Text(copy.offerNoRepoint)
+                .glassType(GlassTokens.TypeScale.body)
+                .foregroundStyle(GlassColor.textPrimary)
+                .fixedSize(horizontal: false, vertical: true)
+            // The first-run offer's asked-once sentence is deliberately NOT
+            // shown here. It says "this is the only time you will be asked.
+            // The switch stays in Settings", and both halves are false on
+            // this surface: the harness gate is
+            // `connectNeedsExposure(listenerOn:)`, which is wider than
+            // `shouldOffer` on purpose so a connect after the kill switch
+            // asks again; and the switch now lives on this destination, with
+            // Settings holding only a pointer. It remains true on the
+            // first-run offer, which is the sentence's home.
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+/// IronWire's harness ids to the tools that have artwork, in one place:
+/// the flow map forwards here.
+enum HarnessToolArt {
+    static func tool(harness id: String) -> GlassTool? {
+        switch id {
+        case "claude", "claude-code": .claudeCode
+        case "codex": .codex
+        case "gemini", "gemini-cli": .geminiCLI
+        case "cline": .cline
+        case "opencode": .openCode
+        default: nil
+        }
     }
 }

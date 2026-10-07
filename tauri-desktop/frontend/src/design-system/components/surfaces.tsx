@@ -12,23 +12,35 @@ type DivProps = HTMLAttributes<HTMLDivElement>;
 
 /**
  * The scene the glass sits over, and the window's padding around its panes.
- * `rim` draws the gradient window rim; the app itself uses panes as the
- * outermost containment, so the rim is for mocks only.
+ * `floating` drops the backdrop and padding so the panes are the outermost
+ * containment and float as one unit (the app's transparent window); each
+ * pane then paints the scene behind its own glass. `rim` draws the gradient
+ * window rim, for mocks that show a chrome window.
  */
 export function Window({
   rim = false,
+  floating = false,
   className,
   ...props
-}: DivProps & { rim?: boolean }) {
+}: DivProps & { rim?: boolean; floating?: boolean }) {
   return (
     <div
-      className={cx("tc-root tc-window", rim && "tc-window--rim", className)}
+      className={cx(
+        "tc-root tc-window",
+        rim && "tc-window--rim",
+        floating && "tc-window--floating",
+        className,
+      )}
       {...props}
     />
   );
 }
 
-/** One blurred glass sheet. Panes are the only blurred layer. */
+/**
+ * One blurred glass sheet. Panes are the only blurred layer. `data-glass`
+ * marks it for the app's native glass, which sits under each marked
+ * element when the window supports it.
+ */
 export function Pane({
   padded = false,
   className,
@@ -36,6 +48,7 @@ export function Pane({
 }: DivProps & { padded?: boolean }) {
   return (
     <div
+      data-glass=""
       className={cx("tc-pane", padded && "tc-pane--padded", className)}
       {...props}
     />
@@ -57,6 +70,8 @@ const FOCUSABLE =
  * width at 450px, the width the FTUX flows use. `viewport` lifts it out of
  * its container to cover the whole window (confirmations raised from deep
  * inside a pane). `footer` holds the actions, below the scrolling body.
+ * A modal is never a native glass region: it keeps its own near-opaque
+ * backing, so what it covers never reads through it.
  */
 export function Modal({
   open,

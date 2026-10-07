@@ -1,3 +1,4 @@
+import { CheckMark } from "@/design-system";
 import type { CoreStatus } from "../../../lib/tauri/types";
 
 type ConnectionPanelProps = {
@@ -56,12 +57,7 @@ export function ConnectionPanel({ status, settings }: ConnectionPanelProps) {
             className="flex items-start gap-2.5 border-b border-tc-hairline py-3"
             key={key}
           >
-            <span
-              className={`mt-px grid h-4 w-4 shrink-0 place-items-center rounded-full border border-tc-hairline text-[10px] text-tc-secondary ${settings?.[key] === "watch" ? "border-tc-purple bg-tc-purple text-tc-on-accent" : ""}`}
-              aria-hidden="true"
-            >
-              {settings?.[key] === "watch" ? "✓" : "–"}
-            </span>
+            <CheckMark checked={settings?.[key] === "watch"} />
             <span>
               <strong>{label} sessions folder</strong>
               <small>{modeLabel(settings?.[key])}</small>
@@ -69,12 +65,7 @@ export function ConnectionPanel({ status, settings }: ConnectionPanelProps) {
           </div>
         ))}
         <div className="flex items-start gap-2.5 border-b border-tc-hairline py-3">
-          <span
-            className={`mt-px grid h-4 w-4 shrink-0 place-items-center rounded-full border border-tc-hairline text-[10px] text-tc-secondary ${settings?.near_ai_configured === true ? "border-tc-purple bg-tc-purple text-tc-on-accent" : ""}`}
-            aria-hidden="true"
-          >
-            {settings?.near_ai_configured === true ? "✓" : "–"}
-          </span>
+          <CheckMark checked={settings?.near_ai_configured === true} />
           <span>
             <strong>Extra privacy scan</strong>
             <small>

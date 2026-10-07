@@ -72,14 +72,16 @@ function FirstRunWindow({
   children: ReactNode;
 }) {
   return (
-    <Window className="h-screen justify-center">
+    <Window floating className="h-screen">
       <Pane
-        className="flex w-full max-w-[720px] flex-col overflow-hidden"
+        className="flex w-full flex-col overflow-hidden"
         data-tauri-drag-region
       >
-        <div className="min-h-0 flex-1 overflow-auto px-6 pt-10 pb-6">
-          <div className="tc-page mb-2.5">{notices}</div>
-          {children}
+        <div className="min-h-0 flex-1 overflow-auto px-6 pt-12 pb-6">
+          <div className="mx-auto max-w-[720px]">
+            <div className="tc-page mb-2.5">{notices}</div>
+            {children}
+          </div>
         </div>
       </Pane>
     </Window>
