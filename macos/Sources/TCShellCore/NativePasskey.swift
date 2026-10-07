@@ -178,16 +178,25 @@ public struct NativePasskeyState: Decodable, Sendable, Equatable {
     public let passkeyCount: Int?
     /// The most recently used remembered passkey's name, when it has one.
     public let rememberedName: String?
+    /// The name remembered for the signed-in account's own record, matched
+    /// by the daemon to the session's account, never the most recent
+    /// record's. Nil when signed out, when the record has no name, or from a
+    /// daemon that predates it.
+    public let signedInName: String?
     public let nearAiConnected: Bool?
     enum CodingKeys: String, CodingKey {
         case state, passkeyCount = "passkey_count", rememberedName = "remembered_name"
-        case nearAiConnected = "near_ai_connected"
+        case signedInName = "signed_in_name", nearAiConnected = "near_ai_connected"
     }
 
-    public init(state: String, passkeyCount: Int?, rememberedName: String?, nearAiConnected: Bool?) {
+    public init(
+        state: String, passkeyCount: Int?, rememberedName: String?, signedInName: String? = nil,
+        nearAiConnected: Bool?
+    ) {
         self.state = state
         self.passkeyCount = passkeyCount
         self.rememberedName = rememberedName
+        self.signedInName = signedInName
         self.nearAiConnected = nearAiConnected
     }
 }

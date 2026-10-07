@@ -1529,12 +1529,16 @@ extension DaemonData {
         public let passkeyCount: Int?
         /// The most recently used remembered passkey's name, if it has one.
         public let rememberedName: String?
+        /// The name remembered for the signed-in account's own record, never
+        /// the most recent record's; nil when signed out or unnamed.
+        public let signedInName: String?
         public let nearAiConnected: Bool?
 
         public enum CodingKeys: String, CodingKey {
             case state
             case passkeyCount = "passkey_count"
             case rememberedName = "remembered_name"
+            case signedInName = "signed_in_name"
             case nearAiConnected = "near_ai_connected"
         }
     }

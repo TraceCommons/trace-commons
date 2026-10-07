@@ -262,11 +262,11 @@ enum SampleDaemonData {
     static func passkeyState(_ set: Sample) -> String {
         switch set {
         case .empty:
-            return #"{"_sample":"hand-written","state":"none","passkey_count":0,"remembered_name":null,"near_ai_connected":null}"#
+            return #"{"_sample":"hand-written","state":"none","passkey_count":0,"remembered_name":null,"signed_in_name":null,"near_ai_connected":null}"#
         case .unknownCounts:
-            return #"{"_sample":"hand-written","state":"unknown","passkey_count":null,"remembered_name":null,"near_ai_connected":null}"#
+            return #"{"_sample":"hand-written","state":"unknown","passkey_count":null,"remembered_name":null,"signed_in_name":null,"near_ai_connected":null}"#
         default:
-            return #"{"_sample":"hand-written","state":"bound","passkey_count":1,"remembered_name":"SAMPLE passkey","near_ai_connected":true}"#
+            return #"{"_sample":"hand-written","state":"bound","passkey_count":1,"remembered_name":"SAMPLE passkey","signed_in_name":"SAMPLE passkey","near_ai_connected":true}"#
         }
     }
 
