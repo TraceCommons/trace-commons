@@ -758,6 +758,34 @@ final class JoinScreenTests: XCTestCase {
         // external-link glyph.
         XCTAssertFalse(source.contains("arrow.up.right.square"))
     }
+
+    /// Kristi's review of #1261: a near.ai sign-in or enrolment that did not
+    /// succeed returns the person here with the choice cleared, and Join
+    /// says why in the core's line the step said it in before. The line
+    /// goes once an account is answered again; no other failure shows it.
+    func test_joinSaysWhyNearAIWasCleared() throws {
+        let copy = try coreCopy()
+        let returned = FirstRunState()
+        XCTAssertEqual(
+            JoinScreenLayout.nearAINotice(returned, failure: .signInFailed, copy: copy), copy.folders.signInFailed)
+        XCTAssertEqual(
+            JoinScreenLayout.nearAINotice(
+                returned, failure: .nearAIEnrollFailed(label: "near_ai_enroll_commons_unreachable"), copy: copy),
+            TCNearAiEnroll.line(label: "near_ai_enroll_commons_unreachable"))
+        XCTAssertEqual(
+            JoinScreenLayout.nearAINotice(
+                returned, failure: .nearAIEnrollFailed(label: "a_label_with_no_line"), copy: copy),
+            TCNearAiEnroll.line(label: "a_label_with_no_line") ?? copy.folders.enrollRefused)
+        XCTAssertNil(JoinScreenLayout.nearAINotice(returned, failure: .inviteDead(label: "x"), copy: copy))
+        XCTAssertNil(JoinScreenLayout.nearAINotice(returned, failure: .startFailed, copy: copy))
+        XCTAssertNil(JoinScreenLayout.nearAINotice(returned, failure: nil, copy: copy))
+        for account in [AccountAnswer.nearAI, .watchOnly, .passkeyChosen] {
+            var chosen = returned
+            chosen.account = account
+            XCTAssertNil(JoinScreenLayout.nearAINotice(chosen, failure: .signInFailed, copy: copy), "\(account)")
+        }
+        XCTAssertTrue(try Self.source().contains("JoinScreenLayout.nearAINotice("))
+    }
 }
 
 /// A daemon that confirms nothing; Join's tests never commit.

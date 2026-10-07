@@ -90,6 +90,20 @@ enum JoinScreenLayout {
         return copy.nearAiText
     }
 
+    /// Why near.ai is no longer chosen: its login or enrolment did not
+    /// succeed and the commit returned here (`returnToJoin(afterNearAIFailure:)`).
+    /// The core's line the step would have said it in, shown only while no
+    /// account is answered; choosing again takes it down.
+    static func nearAINotice(_ state: FirstRunState, failure: FirstRunFailure?, copy: FirstRunCopy) -> String? {
+        guard state.account == .none else { return nil }
+        switch failure {
+        case .signInFailed?, .nearAIEnrollFailed?:
+            return FoldersScreenLayout.notice(for: failure, copy: copy, onboarding: nil)
+        default:
+            return nil
+        }
+    }
+
     /// An invite is held: pasted and found, or already enrolled.
     static func holdsInvite(_ state: FirstRunState) -> Bool {
         !state.invite.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || state.enrolledInvite != nil
@@ -365,6 +379,9 @@ struct JoinScreen: View {
             inviteCard
             passkeyCard
             nearAICard
+            if let notice = JoinScreenLayout.nearAINotice(runner.state, failure: runner.failure, copy: copy) {
+                GlassNotice(tone: .outside) { Text(notice) }
+            }
             if let notice = runner.passkeyOutcome?.joinNotice(copy) {
                 GlassNotice(tone: .ask) { Text(notice) }
             }

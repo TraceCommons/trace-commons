@@ -69,6 +69,20 @@ public enum FirstRunNavigation {
         return returned
     }
 
+    /// The near.ai login did not finish, or the enrolment through it was
+    /// refused (Kristi's review of #1261). With no Back on Folders or Tools,
+    /// staying there would retry the same sign-in at every Continue, so the
+    /// person goes back to Join with the near.ai choice cleared, to choose
+    /// again: near.ai, a passkey, or watch only. Every other answer is kept,
+    /// as after a dead invite, and the daemon is not started again. Clearing
+    /// the choice also means a near.ai session the daemon still keeps is
+    /// only reused once near.ai is chosen again.
+    public static func returnToJoin(afterNearAIFailure state: FirstRunState) -> FirstRunState {
+        var returned = returnToJoin(afterDeadInvite: state)
+        if returned.account == .nearAI { returned.account = .none }
+        return returned
+    }
+
     /// Whether the current step's Continue (or Start, on Uses) is enabled.
     ///
     /// - Join: an account answer, which may be "watch only".
@@ -76,7 +90,9 @@ public enum FirstRunNavigation {
     ///   one is not asked, spec rule 1), every added folder answered, no
     ///   tool watched in two rows, and a declaration the daemon would start
     ///   with.
-    /// - Rules: always; every choice there is optional.
+    /// - Rules: true here, since every choice there is optional; the
+    ///   screen itself holds Continue until its folders have loaded
+    ///   (`RulesScreenLayout.canContinue`), which this state cannot see.
     /// - Uses: the required use ticked, and something Start can do: finish
     ///   watching only, reopen a chosen passkey's sheets, or finish an
     ///   enrolment the daemon holds. With no required use known, Start stays
