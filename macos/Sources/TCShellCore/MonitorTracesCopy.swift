@@ -229,6 +229,11 @@ public struct MonitorInspectorCopy: MonitorWordTable {
     public let applyOutcomeOne: String
     public let applyOutcome: String
     public let cancel: String
+    /// The folder inspector's Decisions card: what is waiting there, and
+    /// Submit all with its eligible count.
+    public let waitingSessionsOne: String
+    public let waitingSessions: String
+    public let submitAllEligible: String
 
     enum CodingKeys: String, CodingKey, CaseIterable {
         case decisions
@@ -243,6 +248,9 @@ public struct MonitorInspectorCopy: MonitorWordTable {
         case applyOutcomeOne = "apply_outcome_one"
         case applyOutcome = "apply_outcome"
         case cancel
+        case waitingSessionsOne = "waiting_sessions_one"
+        case waitingSessions = "waiting_sessions"
+        case submitAllEligible = "submit_all_eligible"
     }
 
     public static var consumedFields: [String] { CodingKeys.allCases.map(\.rawValue) }

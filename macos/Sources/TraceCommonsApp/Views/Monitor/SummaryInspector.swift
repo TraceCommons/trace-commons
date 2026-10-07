@@ -11,8 +11,8 @@ import TCShellCore
 /// Every sentence is the core's (`summary_panel`, `counts`, `safeguards`,
 /// the screens table); every count is the core's, and one it did not give
 /// is a dash. Pending credit is shown only beside the commons' statement of
-/// what it waits on (D6). The health banners are not repeated here: the
-/// host draws them above every inspector, this one included.
+/// what it waits on (D6). The health banners are not repeated here: they
+/// are drawn above the Traces tree (owner, 2026-10-07).
 struct SummaryInspector: View {
     let traces: TracesStore
     let home: HomeStore
@@ -59,7 +59,7 @@ struct SummaryInspector: View {
                     GlassNotice(tone: .outside, title: table.line(for: failure)) { EmptyView() }
                 }
                 if let words {
-                    SummarySection(words.inspector.decisions) { decisions(words) }
+                    InspectorSection(words.inspector.decisions, collapsible: true) { decisions(words) }
                     statistics(words)
                 }
                 safeguards
@@ -75,23 +75,16 @@ struct SummaryInspector: View {
         .scrollIndicators(.never)
     }
 
+    /// Ron's `InspectorHeader`: "Summary" over the tools watched, projects
+    /// and sessions waiting, each only once the core has said it.
     private var header: some View {
-        VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
-            Text(MonitorWords.summary)
-                .glassType(GlassTokens.TypeScale.title)
-                .foregroundStyle(GlassColor.textPrimary)
-            if let words {
-                let sub = SummaryFacts.subline(
-                    words: words, destinations: traces.destinations, loaded: loaded,
+        InspectorHeader(
+            title: MonitorWords.summary,
+            sub: words.map {
+                SummaryFacts.subline(
+                    words: $0, destinations: traces.destinations, loaded: loaded,
                     folders: traces.tree.allFolders.count, sessions: sessions.count)
-                if !sub.isEmpty {
-                    Text(sub)
-                        .glassType(GlassTokens.TypeScale.caption)
-                        .foregroundStyle(GlassColor.textTertiary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
-        }
+            })
     }
 
     /// Waiting, worth a second look, contributed with its pending credit,
@@ -99,7 +92,8 @@ struct SummaryInspector: View {
     @ViewBuilder
     private func decisions(_ words: MonitorTracesCopy) -> some View {
         let fill = { (template: String, count: String) in FirstRunCopy.fill(template, ["count": count]) }
-        VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
+        // Ron's list: 8 between lines (`gap-2`).
+        VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
             SummaryDecisionLine(glyph: "tray", tone: .ask, text: fill(
                 words.summaryPanel.waitingForYou, SummaryFacts.waiting(traces.status)))
             SummaryDecisionLine(glyph: "exclamationmark.triangle", tone: .ask, text: fill(
@@ -143,8 +137,8 @@ struct SummaryInspector: View {
                 folders: traces.tree.allFolders, history: history, counts: words.counts)
             let tools = SummaryFacts.topTools(sessions: sessions, history: history, counts: words.counts)
             if !projects.isEmpty || !tools.isEmpty {
-                SummarySection(words.summaryPanel.statistics) {
-                    VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
+                InspectorSection(words.summaryPanel.statistics, collapsible: true) {
+                    VStack(alignment: .leading, spacing: GlassTokens.Space.s5) {
                         if !projects.isEmpty { SummaryStat(label: words.summaryPanel.topProjects, lines: projects) }
                         if !tools.isEmpty { SummaryStat(label: words.summaryPanel.topTools, lines: tools) }
                     }
@@ -182,27 +176,6 @@ struct SummaryInspector: View {
     }
 }
 
-/// A collapsible section of the Summary (Ron's `Section`).
-private struct SummarySection<Content: View>: View {
-    let title: String
-    let content: Content
-    @State private var open = true
-
-    init(_ title: String, @ViewBuilder content: () -> Content) {
-        self.title = title
-        self.content = content()
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
-            GlassExpander(title, isOpen: $open)
-            if open {
-                content.padding(.horizontal, GlassTokens.Space.s1)
-            }
-        }
-    }
-}
-
 /// One decision line: a glyph in its status colour, and the core's line.
 private struct SummaryDecisionLine: View {
     let glyph: String
@@ -210,7 +183,8 @@ private struct SummaryDecisionLine: View {
     let text: String
 
     var body: some View {
-        HStack(spacing: GlassTokens.Space.s3) {
+        // Ron's `DecisionLine`: the glyph in a 20 column, 10 before the line.
+        HStack(spacing: GlassTokens.Space.s5) {
             Image(systemName: glyph)
                 .glassGlyph(12, weight: .semibold)
                 .foregroundStyle(tone?.textColor ?? GlassColor.textTertiary)
@@ -234,14 +208,17 @@ private struct SummaryStat: View {
             Text(label)
                 .glassType(GlassTokens.TypeScale.caption)
                 .foregroundStyle(GlassColor.textTertiary)
-            ForEach(lines) { line in
-                VStack(alignment: .leading, spacing: 0) {
-                    Text(line.title)
-                        .glassType(GlassTokens.TypeScale.bodyStrong)
-                        .foregroundStyle(GlassColor.textPrimary)
-                    Text(line.sub)
-                        .glassType(GlassTokens.TypeScale.caption)
-                        .foregroundStyle(GlassColor.textTertiary)
+            // Ron's `Stat`: 2 under the label, 6 between its lines.
+            VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
+                ForEach(lines) { line in
+                    VStack(alignment: .leading, spacing: 0) {
+                        Text(line.title)
+                            .glassType(GlassTokens.TypeScale.bodyStrong)
+                            .foregroundStyle(GlassColor.textPrimary)
+                        Text(line.sub)
+                            .glassType(GlassTokens.TypeScale.caption)
+                            .foregroundStyle(GlassColor.textTertiary)
+                    }
                 }
             }
         }

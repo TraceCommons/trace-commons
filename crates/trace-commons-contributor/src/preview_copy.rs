@@ -307,6 +307,12 @@ pub struct MonitorInspectorCopy {
     pub apply_outcome_one: &'static str,
     pub apply_outcome: &'static str,
     pub cancel: &'static str,
+    /// The folder inspector's Decisions card (`waiting-project-folder.tsx`):
+    /// what is waiting there, one and then counted, and Submit all with the
+    /// eligible count.
+    pub waiting_sessions_one: &'static str,
+    pub waiting_sessions: &'static str,
+    pub submit_all_eligible: &'static str,
 }
 
 /// The summary inspector (`waiting-page.tsx`'s `SummaryInspector` and
@@ -537,6 +543,9 @@ pub fn monitor_traces_copy() -> MonitorTracesCopy {
             apply_outcome_one: "Apply one outcome to 1 eligible session.",
             apply_outcome: "Apply one outcome to {count} eligible sessions.",
             cancel: "Cancel",
+            waiting_sessions_one: "1 waiting session",
+            waiting_sessions: "{count} waiting sessions",
+            submit_all_eligible: "Submit all eligible ({count})",
         },
         summary_panel: MonitorSummaryCopy {
             tools_watched: "{count} of {total} tools watched",
@@ -1287,6 +1296,16 @@ mod tests {
     fn rons_counted_lines_hold_their_numbers() {
         let traces = monitor_traces_copy();
         assert_eq!(traces.tree.submit_count, "Submit \u{00b7} {count}");
+        // `waiting-project-folder.tsx`'s Decisions card.
+        assert_eq!(
+            traces.inspector.submit_all_eligible,
+            "Submit all eligible ({count})"
+        );
+        assert_eq!(
+            traces.inspector.waiting_sessions,
+            "{count} waiting sessions"
+        );
+        assert_eq!(traces.inspector.waiting_sessions_one, "1 waiting session");
         // `queue-status-panel.tsx`'s daily limit row and its held line.
         assert_eq!(
             monitor_screens_copy().safeguards.remaining,

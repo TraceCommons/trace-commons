@@ -90,20 +90,21 @@ struct SessionReviewCard: View {
             if let entry {
                 ScrollView {
                     VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
-                        Text(summary?.title ?? TracesTreeView.when(entry))
-                            .glassType(GlassTokens.TypeScale.title)
-                            .foregroundStyle(GlassColor.textPrimary)
-                            .lineLimit(3)
+                        // Ron's `InspectorHeader`: the session tile, the
+                        // folder it ran in, and "Session · tool".
+                        InspectorHeader(
+                            tile: .session, title: entry.projectLabel, sub: words.map { Self.headerSub(entry, words: $0) })
                         if let review {
+                            // Ron's review card ends with its buttons.
                             GlassCard(quiet: true) {
                                 VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
                                     preview(entry, review)
+                                    actions(entry)
                                 }
                                 .frame(maxWidth: .infinity, alignment: .leading)
                             }
                         }
                         keptLines(entry)
-                        actions(entry)
                     }
                 }
                 .scrollIndicators(.never)
@@ -399,40 +400,89 @@ struct SessionReviewCard: View {
 
     // MARK: Actions
 
-    /// Look inside, Dismiss, Keep and Contribute. The scrubbing caveat sits
-    /// directly above them, at reading weight, as the review sheet repeats
-    /// it at the commit.
+    /// Look inside, Dismiss and Contribute on one line, as Ron's review
+    /// ends (`waiting-review.tsx`): Look inside a link on the left, Dismiss
+    /// and Contribute on the right. No label wraps or shortens: a
+    /// Contribute label too long for the line ("Enroll to approve") moves
+    /// Look inside onto a line of its own above, rather than clip the one
+    /// button that sends. Native's Keep is a link on the line under them.
+    /// The scrubbing caveat sits directly above the buttons, at reading
+    /// weight, as the review sheet repeats it at the commit.
     @ViewBuilder
     private func actions(_ entry: DaemonData.QueueEntry) -> some View {
         let busy = store.acting.contains(entry.entryId)
         ScrubbingCaveatAtCommit()
         TracesRefusal(store: store, entryId: entry.entryId)
         if let words, let review {
-            HStack(spacing: GlassTokens.Space.s4) {
-                // The full read, on the legacy queue's entry for this same
-                // session. Absent, not disabled, when the legacy queue does
-                // not hold it: no sheet for another session.
-                if let legacy = QueueEntryBridge.legacyEntry(for: entry.entryId, in: model.awaitingDecision) {
-                    Button(review.lookInside) { previewing = legacy }
-                        .buttonStyle(GlassButtonStyle(.glass))
+            VStack(alignment: .trailing, spacing: GlassTokens.Space.s3) {
+                ViewThatFits(in: .horizontal) {
+                    // At least 4 before Dismiss, not the row's 8: the three
+                    // fit Ron's 300 inspector with a point to spare.
+                    HStack(spacing: 0) {
+                        lookInside(entry, review)
+                        Spacer(minLength: GlassTokens.Space.s2)
+                        HStack(spacing: GlassTokens.Space.s4) {
+                            dismiss(entry, words)
+                            contribute(entry, words)
+                        }
+                    }
+                    VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
+                        lookInside(entry, review)
+                        HStack(spacing: GlassTokens.Space.s4) {
+                            Spacer(minLength: 0)
+                            dismiss(entry, words)
+                            contribute(entry, words)
+                        }
+                    }
                 }
-                Button(words.dismissAction) { act(.dismiss, entry) }
-                    .buttonStyle(GlassButtonStyle(.glass))
                 Button(words.keep) { act(.keep, entry) }
-                    .buttonStyle(GlassButtonStyle(.glass))
-                Spacer(minLength: 0)
-                Button(Self.contributeLabel(
-                    enrolled: summary?.enrolled, eligibility: TracesStore.eligibility(entry),
-                    eligibilityReadable: store.inferenceCopy != nil, words: words)
-                ) { act(.contribute, entry) }
-                    .buttonStyle(GlassButtonStyle(.primary, small: true))
-                    .disabled(!armed(entry))
-                    // Why it is armed or not, in the core's words, as the
-                    // review sheet's Contribute says it.
-                    .help(consent == nil ? "" : TCConsentCopy.gateHelp(pinned: armed(entry)) ?? "")
+                    .buttonStyle(GlassButtonStyle(.link))
+                    .lineLimit(1)
+                    .fixedSize()
             }
+            .frame(maxWidth: .infinity, alignment: .trailing)
             .disabled(busy)
         }
+    }
+
+    /// The full read of this same session, always offered: the legacy
+    /// queue's entry when it holds one, otherwise the same entry carried
+    /// over (`QueueEntryBridge`).
+    private func lookInside(_ entry: DaemonData.QueueEntry, _ review: MonitorSessionReviewCopy) -> some View {
+        Button(review.lookInside) {
+            previewing = QueueEntryBridge.previewEntry(entry, in: model.awaitingDecision)
+        }
+        .buttonStyle(GlassButtonStyle(.link))
+        .lineLimit(1)
+        .fixedSize()
+    }
+
+    private func dismiss(_ entry: DaemonData.QueueEntry, _ words: MonitorTracesCopy) -> some View {
+        Button(words.dismissAction) { act(.dismiss, entry) }
+            .buttonStyle(GlassButtonStyle(.glass))
+            .lineLimit(1)
+            .fixedSize()
+    }
+
+    private func contribute(_ entry: DaemonData.QueueEntry, _ words: MonitorTracesCopy) -> some View {
+        Button(Self.contributeLabel(
+            enrolled: summary?.enrolled, eligibility: TracesStore.eligibility(entry),
+            eligibilityReadable: store.inferenceCopy != nil, words: words)
+        ) { act(.contribute, entry) }
+            .buttonStyle(GlassButtonStyle(.primary, small: true))
+            .lineLimit(1)
+            .fixedSize()
+            .disabled(!armed(entry))
+            // Why it is armed or not, in the core's words, as the review
+            // sheet's Contribute says it.
+            .help(consent == nil ? "" : TCConsentCopy.gateHelp(pinned: armed(entry)) ?? "")
+    }
+
+    /// "Session · <tool>" in the core's words, the tool the session
+    /// declares before the adapter that stored it.
+    static func headerSub(_ entry: DaemonData.QueueEntry, words: MonitorTracesCopy) -> String {
+        let tool = SourceKind(rawValue: entry.declaredSource ?? entry.source)?.displayName ?? entry.source
+        return FirstRunCopy.fill(words.inspector.sessionOf, ["tool": tool])
     }
 
     /// Contribute's label, Ron's order: not enrolled, then not eligible,
@@ -551,5 +601,26 @@ struct SessionReviewCard: View {
             rows.append(.init(words.personalInformation, labels.joined(separator: ", ")))
         }
         return rows
+    }
+}
+
+extension QueueEntryBridge {
+    /// The entry Look inside opens for `entry`: the legacy queue's own when
+    /// it holds the same session, otherwise the same session carried over
+    /// field for field. Never another session's: the id is the entry's.
+    /// A field the daemon did not report is the legacy entry's empty value,
+    /// which the preview sheet only displays.
+    static func previewEntry(_ entry: DaemonData.QueueEntry, in awaiting: [QueueEntry]) -> QueueEntry {
+        if let legacy = legacyEntry(for: entry.entryId, in: awaiting) { return legacy }
+        return QueueEntry(
+            entryID: entry.entryId, sessionHash: entry.sessionHash ?? "", source: entry.source,
+            declaredSource: entry.declaredSource, projectID: entry.projectId, projectLabel: entry.projectLabel,
+            projectPath: entry.projectPath ?? "", sessionPath: entry.sessionPath, sizeBytes: entry.sizeBytes ?? 0,
+            discoveredAt: entry.discoveredAt ?? entry.startedAt ?? Date(timeIntervalSince1970: 0),
+            state: QueueState(rawValue: entry.state) ?? .pending, reasonLabel: entry.reasonLabel,
+            attempts: entry.attempts ?? 0, subagentCount: entry.subagentCount,
+            subagentsDropped: entry.subagentsDropped, eligibility: entry.eligibility,
+            eligibilityReason: entry.eligibilityReason, attestation: entry.attestation,
+            attestationReason: entry.attestationReason, holdsCertificateRaw: entry.holdsCertificate)
     }
 }
