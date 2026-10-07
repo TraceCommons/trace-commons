@@ -47,6 +47,45 @@ struct FlowMapScene: Equatable {
         /// The inspection card: its detail line, and the node's accessible value.
         let detail: String
         var dim: Double = 1
+        /// The card's title when it is not the label (#1146: a tool's card
+        /// adds its folder count).
+        var title: String? = nil
+
+        var cardTitle: String { title ?? label }
+    }
+
+    /// What has been contributed from this machine, from History's rows
+    /// that left and still stand (#1146 `ToolNode.contributed`). Nil
+    /// counts while History has not been read: an unread record is never
+    /// said as nothing contributed.
+    struct Contributions: Equatable {
+        var total: Int?
+        var byTool: [SourceKind: Int] = [:]
+        var byFolder: [String: Int] = [:]
+
+        static let unread = Contributions(total: nil)
+
+        init(total: Int?, byTool: [SourceKind: Int] = [:], byFolder: [String: Int] = [:]) {
+            self.total = total
+            self.byTool = byTool
+            self.byFolder = byFolder
+        }
+
+        init(history: [DaemonData.HistoryRow]?) {
+            guard let history else {
+                self = .unread
+                return
+            }
+            let stand = history.filter { TracesGraphModel.contributedStatuses.contains($0.status ?? "") }
+            total = stand.count
+            for row in stand {
+                if let tool = row.source.flatMap(SourceKind.init(rawValue:)) { byTool[tool, default: 0] += 1 }
+                if let folder = row.projectId { byFolder[folder, default: 0] += 1 }
+            }
+        }
+
+        func tool(_ kind: SourceKind) -> Int? { total == nil ? nil : byTool[kind] ?? 0 }
+        func folder(_ id: String) -> Int? { total == nil ? nil : byFolder[id] ?? 0 }
     }
 
     struct Arc: Equatable {
@@ -135,7 +174,7 @@ struct FlowMapScene: Equatable {
     /// the commons: moving only when the gate is open and the core says
     /// that tool's sessions go there, dashed otherwise, and never for a
     /// tool that is off.
-    static func traces(_ tree: TracesTree, gate: CommonsGate) -> FlowMapScene {
+    static func traces(_ tree: TracesTree, gate: CommonsGate, contributed: Contributions = .unread) -> FlowMapScene {
         var scene = FlowMapScene()
         let tools = tree.tools
         let step = tools.count > 1 ? 460 / CGFloat(tools.count - 1) : 0
@@ -166,45 +205,57 @@ struct FlowMapScene: Equatable {
                     style: .quiet, dim: toolDim))
                 scene.nodes.append(Node(
                     id: "folder:\(folder.id)", kind: .folder(folder.mode), at: point, radius: 7,
-                    label: folder.label, detail: folderDetail(folder), dim: toolDim))
+                    label: folder.label, detail: folderDetail(folder, contributed: contributed.folder(folder.id)),
+                    dim: toolDim))
             }
             if tool.folders.count > shown.count {
                 scene.overflows.append(Overflow(at: CGPoint(x: 58, y: at.y + 118), count: tool.folders.count - shown.count))
             }
             scene.nodes.append(Node(
                 id: "tool:\(tool.id)", kind: .tool(TracesTreeView.glassTool(tool.kind), off: off), at: at, radius: 13,
-                label: tool.kind.displayName, detail: toolDetail(tool), dim: toolDim))
+                label: tool.kind.displayName, detail: toolDetail(tool), dim: toolDim, title: toolTitle(tool)))
         }
 
         let waiting = tools.reduce(0) { $0 + $1.waiting } + tree.unplaced.reduce(0) { $0 + $1.sessions.count }
         scene.nodes.insert(Node(
             id: "hub", kind: .hub, at: hubPoint, radius: 16,
-            label: MonitorWords.computer, detail: pair(MonitorWords.waiting, waiting)), at: 0)
-        // The armed count is the core's (`tool_destinations.folders.armed`),
-        // a dash when it did not say.
+            label: MonitorWords.computer,
+            detail: words?.hub(waiting: waiting, contributed: contributed.total) ?? pair(MonitorWords.waiting, waiting)),
+            at: 0)
         scene.nodes.append(Node(
             id: "library", kind: .library(active: flowing), at: libraryPoint, radius: 11,
             label: MonitorWords.commons,
-            detail: pair(ProjectCopy.modeChoiceLabel(.autoUpload), gate.destinations?.folders?.armed)))
+            detail: words?.library(contributed: contributed.total) ?? pair(MonitorWords.table?.contributed ?? "", contributed.total)))
         return scene
     }
 
-    static func toolDetail(_ tool: TracesTree.ToolNode) -> String {
-        var parts: [String] = []
-        switch tool.mode {
-        case .watch: parts.append(MonitorWords.watched)
-        case .off: parts.append(MonitorWords.off)
-        // Unset and unknown say nothing: neither is ever drawn as off.
-        case .unset, .unknown: break
-        }
-        parts.append(pair(MonitorWords.waiting, tool.waiting))
-        parts.append(pair(MonitorWords.folders, tool.folders.count))
-        return parts.joined(separator: " · ")
+    /// The flow map's words (#1146 `FlowMap`), from the core.
+    static var words: MonitorFlowMapCopy? { MonitorWords.table?.flowMap }
+
+    /// A tool's card title: its name and how many folders (#1146).
+    static func toolTitle(_ tool: TracesTree.ToolNode) -> String {
+        words?.toolTitle(tool: tool.kind.displayName, folders: tool.folders.count) ?? tool.kind.displayName
     }
 
-    static func folderDetail(_ folder: TracesTree.FolderNode) -> String {
-        [folder.mode.map(ProjectCopy.modeChoiceLabel) ?? "—", pair(MonitorWords.waiting, folder.sessions.count)]
-            .joined(separator: " · ")
+    /// A tool's card (#1146): what watching means, then what waits. Unset
+    /// is never said as off, and unknown is said as neither.
+    static func toolDetail(_ tool: TracesTree.ToolNode) -> String {
+        let state: MonitorFlowMapCopy.ToolState = switch tool.mode {
+        case .watch: .watched
+        case .off: .off
+        case .unset: .unset
+        case .unknown: .unknown
+        }
+        return words?.tool(state, waiting: tool.waiting) ?? pair(MonitorWords.waiting, tool.waiting)
+    }
+
+    /// A folder's card (#1146): its path, its rule in the core's mode
+    /// names, and its counts.
+    static func folderDetail(_ folder: TracesTree.FolderNode, contributed: Int? = nil) -> String {
+        words?.folder(
+            path: folder.path, rule: folder.mode.map(ProjectCopy.modeChoiceLabel),
+            waiting: folder.sessions.count, contributed: contributed)
+            ?? pair(MonitorWords.waiting, folder.sessions.count)
     }
 
     // MARK: Private AI
@@ -263,8 +314,10 @@ struct FlowMapScene: Equatable {
                 dim: row.installed ? 1 : 0.5))
         }
         let lamp = lamp(privateAI, answering: anyAnswering)
-        var detail = pair(MonitorWords.connected, connected)
-        if lamp == .unknown { detail += " · " + MonitorWords.unknown }
+        // #1146's credential card: how many tools are connected, in a
+        // sentence; unknown is said, never left to read as off.
+        var detail = words?.connected(tools: connected, sentence: true) ?? pair(MonitorWords.connected, connected)
+        if lamp == .unknown { detail += " " + MonitorWords.unknown }
         scene.nodes.insert(Node(
             id: "destination", kind: .destination(lamp), at: destinationPoint, radius: 26,
             label: destinationLabel, detail: detail), at: 0)

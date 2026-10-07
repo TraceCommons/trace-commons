@@ -233,6 +233,7 @@ pub const MONITOR_PLACEHOLDERS: &[&str] = &[
     "uploads",
     "megabytes",
     "amount",
+    "days",
 ];
 
 /// The Traces tree (`traces-tree.tsx`).
@@ -269,6 +270,11 @@ pub struct MonitorTreeCopy {
     pub dismiss_session_keep: &'static str,
     pub dismissing: &'static str,
     pub dismiss_session_failed: &'static str,
+    /// A session row's sub line after its size (Ron's `SessionRow`): a
+    /// session whose subagent transcripts were dropped to fit, and one with
+    /// nothing else to say.
+    pub session_trimmed: &'static str,
+    pub session_waiting: &'static str,
 }
 
 /// Counted lines the tree, the inspectors and the summary share.
@@ -507,6 +513,8 @@ pub fn monitor_traces_copy() -> MonitorTracesCopy {
             dismiss_session_keep: "Keep it",
             dismissing: "Dismissing\u{2026}",
             dismiss_session_failed: "Could not dismiss session.",
+            session_trimmed: "trimmed to fit",
+            session_waiting: "waiting",
         },
         counts: MonitorCountsCopy {
             sessions_waiting_one: "1 session waiting",
@@ -819,6 +827,79 @@ pub struct MonitorScreensCopy {
     /// 2026-10-06): the toolbar toggles, the graph's focus tips, Home's
     /// status lines and History's filters and empty states.
     pub shell: MonitorShellCopy,
+    /// The Traces graph footer's zoom, range and bar words (Ron's #1146
+    /// `TracesGraph`).
+    pub traces_graph: MonitorTracesGraphCopy,
+    /// The flow map's node cards and names (Ron's #1146 `FlowMap`).
+    pub flow_map: MonitorFlowMapCopy,
+}
+
+/// Ron's #1146 words for the Traces graph footer (`traces-graph.tsx`,
+/// `traces-model.ts`): the zoom and jump controls, the range pill and each
+/// bar's text equivalent. Where Ron pluralised, the singular is its own
+/// line.
+#[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
+pub struct MonitorTracesGraphCopy {
+    pub zoom_out: &'static str,
+    pub zoom_in: &'static str,
+    pub jump_to_now: &'static str,
+    /// The range pill at now: `{hours}` or `{days}` is the window's span.
+    pub last_hours: &'static str,
+    pub last_days: &'static str,
+    /// The range pill `{count}` whole windows back.
+    pub hours_back_one: &'static str,
+    pub hours_back: &'static str,
+    pub days_back_one: &'static str,
+    pub days_back: &'static str,
+    /// A bar's text equivalent: `{label}` is its day, `{count}` shared and
+    /// `{total}` kept.
+    pub bar: &'static str,
+}
+
+/// Ron's #1146 words for the flow map (`flow-map.tsx`): its accessible
+/// names, the node cards' sentences and the hint under a peeked card.
+/// Counted nouns are their own lines, singular apart, and fill `{label}`.
+#[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
+pub struct MonitorFlowMapCopy {
+    /// The map's accessible name, and its zoom controls'.
+    pub map_label: &'static str,
+    pub zoom_label: &'static str,
+    /// Under a card shown by hovering, not pinned.
+    pub hint: &'static str,
+    pub sessions_one: &'static str,
+    pub sessions: &'static str,
+    pub traces_one: &'static str,
+    pub traces: &'static str,
+    pub folders_one: &'static str,
+    pub folders: &'static str,
+    pub tools_one: &'static str,
+    pub tools: &'static str,
+    /// This computer's card: `{label}` is the sessions waiting, `{count}`
+    /// those contributed. DRAFT, NEEDS APPROVAL (#1146 parity, 2026-10-07).
+    pub hub: &'static str,
+    /// The library's card: `{label}` is the traces contributed. DRAFT,
+    /// NEEDS APPROVAL (#1146 parity, 2026-10-07).
+    pub library: &'static str,
+    /// A tool's card title: `{label}` is its folders.
+    pub tool_title: &'static str,
+    /// A watched tool, then what waits for it. DRAFT, NEEDS APPROVAL
+    /// (#1146 parity, 2026-10-07).
+    pub tool_watched: &'static str,
+    pub tool_waiting: &'static str,
+    pub tool_nothing_waiting: &'static str,
+    /// A tool that is off, and one the core has no declaration for. DRAFT,
+    /// NEEDS APPROVAL (#1146 parity, 2026-10-07).
+    pub tool_off: &'static str,
+    pub tool_unset: &'static str,
+    /// A folder's card: its rule, `{label}` the rule's name, and its
+    /// counts, `{label}` the sessions waiting.
+    pub folder_rule: &'static str,
+    pub folder_rule_unset: &'static str,
+    pub folder_counts: &'static str,
+    /// The Private AI destination's card and the line under its node:
+    /// `{label}` is the tools connected.
+    pub connected: &'static str,
+    pub connected_line: &'static str,
 }
 
 /// Ron's #1146 words for the monitor's toolbar, the Traces graph's focus
@@ -1042,6 +1123,46 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             tabs_label: "Monitor",
             map_views_label: "Map view",
         },
+        traces_graph: MonitorTracesGraphCopy {
+            zoom_out: "Zoom out",
+            zoom_in: "Zoom in",
+            jump_to_now: "Jump to now",
+            last_hours: "Last {hours} hours",
+            last_days: "Last {days} days",
+            hours_back_one: "{hours} hours, 1 window back",
+            hours_back: "{hours} hours, {count} windows back",
+            days_back_one: "{days} days, 1 window back",
+            days_back: "{days} days, {count} windows back",
+            bar: "{label}: {count} shared, {total} kept",
+        },
+        flow_map: MonitorFlowMapCopy {
+            map_label: "Flow map",
+            zoom_label: "Map zoom",
+            hint: "hover to peek \u{00b7} click to pin",
+            sessions_one: "1 session",
+            sessions: "{count} sessions",
+            traces_one: "1 trace",
+            traces: "{count} traces",
+            folders_one: "1 folder",
+            folders: "{count} folders",
+            tools_one: "1 tool",
+            tools: "{count} tools",
+            hub: "Sessions are recorded and scrubbed here. {label} waiting for you; \
+                {count} contributed.",
+            library: "{label} contributed from this machine. Folders set to contribute \
+                automatically send scrubbed sessions here; every other folder waits for you.",
+            tool_title: "{tool} \u{00b7} {label}",
+            tool_watched: "Watched: new sessions are recorded and scrubbed on this computer.",
+            tool_waiting: "{count} waiting for you.",
+            tool_nothing_waiting: "Nothing waiting.",
+            tool_off: "Not watched: nothing new is read from this tool.",
+            tool_unset: "No sessions folder set for this tool yet.",
+            folder_rule: "Rule: {label}.",
+            folder_rule_unset: "Rule: not set.",
+            folder_counts: "{label} waiting, {count} contributed.",
+            connected: "{label} connected.",
+            connected_line: "{label} connected",
+        },
     }
 }
 
@@ -1151,6 +1272,8 @@ mod tests {
             "/safeguards/",
             "/history_actions/",
             "/shell/",
+            "/traces_graph/",
+            "/flow_map/",
         ] {
             assert!(
                 words.iter().any(|(key, _)| key.starts_with(table)),
@@ -1290,6 +1413,40 @@ mod tests {
                 "{{{name}}} is documented but no string carries it"
             );
         }
+    }
+
+    /// Ron's #1146 graph footer and flow map words, verbatim, with his
+    /// numbers as holes and a singular of its own wherever he pluralised.
+    #[test]
+    fn the_graph_and_map_words_are_rons() {
+        let screens = monitor_screens_copy();
+        let graph = &screens.traces_graph;
+        assert_eq!(graph.zoom_out, "Zoom out");
+        assert_eq!(graph.jump_to_now, "Jump to now");
+        assert_eq!(graph.last_days, "Last {days} days");
+        assert!(!graph.days_back_one.contains("{count}"));
+        assert!(graph.days_back.contains("{count}") && graph.days_back.contains("{days}"));
+        assert!(!graph.hours_back_one.contains("{count}"));
+        assert!(graph.hours_back.contains("{count}") && graph.hours_back.contains("{hours}"));
+        assert_eq!(graph.bar, "{label}: {count} shared, {total} kept");
+        let map = &screens.flow_map;
+        for (key, word) in words_of(map) {
+            assert!(!word.trim().is_empty(), "{key} is empty");
+        }
+        for one in [
+            map.sessions_one,
+            map.traces_one,
+            map.folders_one,
+            map.tools_one,
+        ] {
+            assert!(!one.contains('{'), "{one}");
+        }
+        assert!(map.hub.contains("{label}") && map.hub.contains("{count}"));
+        assert!(map.library.starts_with("{label} contributed"));
+        assert!(map.tool_title.contains("{tool}"));
+        // The rule's names are the core's folder mode names, filled in.
+        assert!(map.folder_rule.contains("{label}"));
+        assert!(!map.folder_rule_unset.contains('{'));
     }
 
     #[test]

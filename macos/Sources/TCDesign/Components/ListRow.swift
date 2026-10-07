@@ -98,6 +98,9 @@ public struct GlassListRow: View {
     /// 2026-10-07: #1146 wins for theming).
     static let selectedSubInk = GlassRGBA(selectedInk.rgb, alpha: 0.8)
 
+    /// The watch switch's column, kept on every row (#1146 `38px`).
+    static let watchColumn: CGFloat = GlassTokens.Size.watchSwitchWidth
+
     /// The row's fill: the selection, or the faint hover fill under the
     /// pointer (#1146 `.tc-list-row:hover`), never over a selected row.
     static func fill(selected: Bool, hovering: Bool) -> GlassRGBA? {
@@ -177,15 +180,21 @@ public struct GlassListRow: View {
                 accessory
             }
 
-            if let watched {
-                Toggle(watchLabel, isOn: watched)
-                    .toggleStyle(GlassToggleStyle(.watch, showsLabel: false))
-                    // A switch the person cannot change here is disabled, so
-                    // assistive tech does not offer a control that does nothing.
-                    .disabled(watchDisabled)
-            } else {
-                Color.clear.frame(width: Self.watchColumn, height: 0)
+            // The switch's column is always kept (#1146 `.tc-list-row`'s
+            // `38px` track, a placeholder where a row has no switch), so a
+            // session's Review lines up with its folder's Submit.
+            Group {
+                if let watched {
+                    Toggle(watchLabel, isOn: watched)
+                        .toggleStyle(GlassToggleStyle(.watch, showsLabel: false))
+                        // A switch the person cannot change here is disabled, so
+                        // assistive tech does not offer a control that does nothing.
+                        .disabled(watchDisabled)
+                } else {
+                    Color.clear.accessibilityHidden(true)
+                }
             }
+            .frame(width: Self.watchColumn)
 
             Group {
                 // The kebab needs its own name: falling back to the row title

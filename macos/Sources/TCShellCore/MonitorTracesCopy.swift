@@ -163,6 +163,9 @@ public struct MonitorTreeCopy: MonitorWordTable {
     public let dismissSessionKeep: String
     public let dismissing: String
     public let dismissSessionFailed: String
+    /// A session row's sub line after its size: dropped to fit, or waiting.
+    public let sessionTrimmed: String
+    public let sessionWaiting: String
 
     enum CodingKeys: String, CodingKey, CaseIterable {
         case treeLabel = "tree_label"
@@ -184,6 +187,8 @@ public struct MonitorTreeCopy: MonitorWordTable {
         case dismissSessionKeep = "dismiss_session_keep"
         case dismissing
         case dismissSessionFailed = "dismiss_session_failed"
+        case sessionTrimmed = "session_trimmed"
+        case sessionWaiting = "session_waiting"
     }
 
     public static var consumedFields: [String] { CodingKeys.allCases.map(\.rawValue) }

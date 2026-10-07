@@ -110,8 +110,10 @@ final class TracesParityTests: XCTestCase {
         let inspector = try XCTUnwrap(tree.range(of: "struct PreviewSlot"))
         let treeBody = tree[treeView.lowerBound..<inspector.lowerBound]
         let failed = try XCTUnwrap(treeBody.range(of: "if case .failed(let error) = store.phase"))
-        let spinner = try XCTUnwrap(treeBody.range(of: "GlassSpinner(standalone: true)"))
-        XCTAssertLessThan(failed.lowerBound, spinner.lowerBound, "the core-down line precedes the spinner and the tree")
+        // #1146: a core-down alert, then "Reading local queue…" while loading.
+        XCTAssertTrue(treeBody.contains("GlassAlert(line)"))
+        let reading = try XCTUnwrap(treeBody.range(of: "store.words?.tree.readingQueue"))
+        XCTAssertLessThan(failed.lowerBound, reading.lowerBound, "the core-down line precedes the loading line and the tree")
     }
 
     func test_theCaveatAndTheCertificatesAreOnGlass() throws {

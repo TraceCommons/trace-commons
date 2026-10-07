@@ -353,6 +353,12 @@ public struct GlassBarGraph: View {
                     Text(bucket.label)
                         .glassType(thin ? GlassTokens.TypeScale.micro.weight(.regular) : GlassTokens.TypeScale.caption)
                         .foregroundStyle(Self.labelInk(hovered: hovered == bucket.id).color)
+                        // Never wrapped or cut ("Sat", "14:00"): centred on
+                        // its bar and free to run past it, as #1146's
+                        // `white-space: nowrap`, without widening the bar.
+                        .lineLimit(1)
+                        .fixedSize()
+                        .frame(width: 0)
                         .frame(minHeight: 12)
                 }
                 .onHover { hovered = $0 ? bucket.id : nil }
@@ -364,8 +370,9 @@ public struct GlassBarGraph: View {
 
     private func bar(_ value: Double, of maximum: Double, color: Color, top: Bool) -> some View {
         let height = value <= 0 ? 0 : max(3, value / maximum * 46)
+        // Shared stands on the axis and kept hangs from it (#1146
+        // `.tc-bar-graph__down { top: 50% }`), never from the track's foot.
         return VStack(spacing: 0) {
-            if !top { Spacer(minLength: 0) }
             UnevenRoundedRectangle(
                 topLeadingRadius: top ? 99 : 0,
                 bottomLeadingRadius: top ? 0 : 99,

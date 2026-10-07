@@ -211,20 +211,42 @@ public struct GlassRoundButton: View {
 /// pointer the control hover replaces its fill (#1146 `.tc-btn--pill-icon`).
 public struct GlassPillIconButton: View {
     private let label: String
-    private let systemImage: String
+    private let systemImage: String?
+    private let glyph: String?
+    private let ink: GlassRGBA?
     private let action: () -> Void
 
-    public init(_ label: String, systemImage: String, action: @escaping () -> Void) {
+    public init(_ label: String, systemImage: String, ink: GlassRGBA? = nil, action: @escaping () -> Void) {
         self.label = label
         self.systemImage = systemImage
+        self.glyph = nil
+        self.ink = ink
         self.action = action
+    }
+
+    /// A pill whose icon is a text glyph (#1146's graph controls: ‹ − + › ›|).
+    /// `label` names it; the glyph is never read.
+    public init(_ label: String, glyph: String, ink: GlassRGBA? = nil, action: @escaping () -> Void) {
+        self.label = label
+        self.systemImage = nil
+        self.glyph = glyph
+        self.ink = ink
+        self.action = action
+    }
+
+    @ViewBuilder
+    private var icon: some View {
+        if let systemImage {
+            Image(systemName: systemImage).glassGlyph(11, weight: .semibold)
+        } else {
+            Text(glyph ?? "").glassGlyph(14, weight: .medium)
+        }
     }
 
     public var body: some View {
         Button(action: action) {
-            Image(systemName: systemImage)
-                .glassGlyph(11, weight: .semibold)
-                .foregroundStyle(GlassColor.textPrimary)
+            icon
+                .foregroundStyle(ink?.color ?? GlassColor.textPrimary)
                 .frame(width: 30, height: GlassTokens.Size.control)
                 .glassSurface(.control, hover: GlassTokens.Color.controlHover)
         }
