@@ -89,6 +89,15 @@ final class RecordingFirstRunDaemon: FirstRunDaemon {
     func markComplete() async -> Bool { record(.markComplete) }
     func markWatchOnlyComplete() async -> Bool { record(.markWatchOnlyComplete) }
 
+    /// `unenroll` is not a plan call (`FirstRunCall`), so it is counted on
+    /// its own and leaves `log` as it was.
+    var unenrollCalls = 0
+    var unenrollSucceeds = true
+    func unenroll() async -> Bool {
+        unenrollCalls += 1
+        return unenrollSucceeds
+    }
+
     /// What each finished first run handed over, in order.
     var finished: [String?] = []
     func firstRunFinished(notice: String?) { finished.append(notice) }
@@ -390,6 +399,8 @@ final class FirstRunRunnerTests: XCTestCase {
         XCTAssertFalse(runner.passkeyDue)
         XCTAssertEqual(runner.state.account, AccountAnswer.none)
         XCTAssertEqual(runner.state.step, .uses, "a finished first run is not reopened")
+        await runner.pendingUnenroll?.value
+        XCTAssertEqual(daemon.unenrollCalls, 0, "a finished first run's enrollment is not dropped")
     }
 
     /// A daemon-reported enrolment recorded over an invite still in Join's

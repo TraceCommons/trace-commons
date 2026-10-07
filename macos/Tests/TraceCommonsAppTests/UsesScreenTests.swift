@@ -519,4 +519,5 @@ private final class StartDaemon: FirstRunDaemon {
     }
     func markComplete() async -> Bool { log.append(.markComplete); return true }
     func markWatchOnlyComplete() async -> Bool { log.append(.markWatchOnlyComplete); return true }
+    func unenroll() async -> Bool { false }
 }

@@ -3523,6 +3523,16 @@ extension AppModel: FirstRunDaemon {
         return isWatchOnlyComplete
     }
 
+    /// The daemon drops this Mac's enrollment (`unenroll`). Status is read
+    /// again, so `status.loggedIn` is false before watch only is marked.
+    func unenroll() async -> Bool {
+        guard case .success = await firstRunCall({ try $0.unenroll() }) else { return false }
+        if case .success(let fresh) = await firstRunCall({ try $0.status() }) {
+            publishIfChanged(\.status, fresh)
+        }
+        return true
+    }
+
     /// One blocking client call off the main actor. Nil without a daemon.
     private func firstRunCall<T>(_ work: @escaping (DaemonClient) throws -> T) async -> Result<T, Error>? {
         guard let client else { return nil }

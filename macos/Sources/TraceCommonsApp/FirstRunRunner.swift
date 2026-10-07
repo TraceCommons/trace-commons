@@ -55,6 +55,9 @@ protocol FirstRunDaemon: AnyObject {
     /// True only once the watch-only marker is actually written. It is keyed
     /// by the daemon's config directory, so without one this answers false.
     func markWatchOnlyComplete() async -> Bool
+    /// `unenroll`: true only once the daemon confirmed it dropped this
+    /// Mac's enrollment (or held none).
+    func unenroll() async -> Bool
     /// The first run is finished: the marker was just written. `notice` is
     /// the core's sentence for what the person must still be told (a
     /// refused grant), or nil. Called synchronously after the marker, before
@@ -143,6 +146,10 @@ final class FirstRunRunner: ObservableObject {
     /// for the retry that finishes on Ask me.
     @Published private(set) var refusedGrant: FirstRunFailure?
 
+    /// The `unenroll` a sign-out on Join started, while it runs. A commit
+    /// waits for it, so a new enrollment is never made and then dropped.
+    private(set) var pendingUnenroll: Task<Void, Never>?
+
     private let daemon: FirstRunDaemon
     /// The core's sentence for the refusal a finished first run carries
     /// (`UsesScreenLayout.finishedNotice`), from the host's copy.
@@ -173,6 +180,7 @@ final class FirstRunRunner: ObservableObject {
         guard !isCommitting else { return }
         isCommitting = true
         defer { isCommitting = false }
+        if let pending = pendingUnenroll { await pending.value }
         failure = nil
         refusedGrant = nil
         carriedRefusal = refusal
@@ -353,6 +361,24 @@ final class FirstRunRunner: ObservableObject {
         if outcome == .signedOut, !completed { state.step = .join }
         passkeyOutcome = outcome
         passkeyDue = false
+        if outcome == .signedOut, !completed, state.signedOutOfEnrolment {
+            pendingUnenroll = Task { await self.unenrollAfterSignOut() }
+        }
+    }
+
+    /// A sign-out on Join left the daemon holding an enrollment
+    /// (`signedOutOfEnrolment`): ask it to unenroll, so the person can
+    /// choose any account, or watch only, again. Only a confirmed unenroll
+    /// clears the mark; a refusal, or a daemon without the call, leaves it
+    /// held, which fails closed as before. A finished first run's
+    /// enrollment is never dropped here.
+    private func unenrollAfterSignOut() async {
+        defer { pendingUnenroll = nil }
+        guard state.signedOutOfEnrolment else { return }
+        guard await daemon.unenroll() else { return }
+        // Something may have enrolled meanwhile; only the mark this
+        // sign-out set is cleared.
+        if state.signedOutOfEnrolment { state.signedOutOfEnrolment = false }
     }
 
     /// The marker is written. No suspension point separates this from the

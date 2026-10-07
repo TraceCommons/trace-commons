@@ -314,13 +314,15 @@ enum JoinScreenLayout {
     /// claims an account that is not linked. `account_sign_out` has already
     /// ended the daemon's account session, the one near.ai holds too.
     ///
-    /// The daemon has no call that drops an enrolment, so one it holds --
-    /// this run's invite, near.ai's invite-free enrolment, a passkey Verify
-    /// bound, an earlier first run's --
-    /// may outlive the sign-out. It is cleared here and marked
-    /// (`signedOutOfEnrolment`), which fails closed: nothing that belongs to
-    /// an enrolment is sent for it, and it is not recorded as the account
-    /// again. Every other answer (tools, rules, uses) is kept.
+    /// An enrollment the daemon holds -- this run's invite, near.ai's
+    /// invite-free enrollment, a passkey Verify bound, an earlier first
+    /// run's -- outlives the sign-out until the daemon unenrolls. It is
+    /// cleared here and marked (`signedOutOfEnrolment`), which fails
+    /// closed: nothing that belongs to an enrollment is sent for it, and it
+    /// is not recorded as the account again. The runner then asks the
+    /// daemon to unenroll (`FirstRunRunner.unenrollAfterSignOut`) and clears
+    /// the mark once it confirms, which offers watch only again. Every other
+    /// answer (tools, rules, uses) is kept.
     static func signOut(_ state: FirstRunState) -> FirstRunState {
         var cleared = state
         if state.holdsEnrolment || state.enrolledInvite != nil || state.nearAIEnrolled || state.account == .enrolled {
