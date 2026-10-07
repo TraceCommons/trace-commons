@@ -30,10 +30,20 @@ public struct ProjectArmingCopy: Decodable, Equatable, Sendable {
     public let body: String
     /// The confirmation for arming with the backlog (`include_backlog`).
     public let bodyWithBacklog: String
+    /// Settings' confirmation before a mode is set to Automatic, in Ron's
+    /// #1146 words: its heading, the line under it, and its two buttons.
+    public let settingsQuestion: String
+    public let settingsDescription: String
+    public let settingsDecline: String
+    public let settingsConfirm: String
 
     enum CodingKeys: String, CodingKey {
         case evidence, question, confirm, decline, body
         case bodyWithBacklog = "body_with_backlog"
+        case settingsQuestion = "settings_question"
+        case settingsDescription = "settings_description"
+        case settingsDecline = "settings_decline"
+        case settingsConfirm = "settings_confirm"
     }
 
     /// Decode the payload, or nil if it will not parse or a field is empty.
@@ -45,7 +55,8 @@ public struct ProjectArmingCopy: Decodable, Equatable, Sendable {
         }
         let sentences = [
             copy.evidence, copy.question, copy.confirm, copy.decline, copy.body,
-            copy.bodyWithBacklog,
+            copy.bodyWithBacklog, copy.settingsQuestion, copy.settingsDescription,
+            copy.settingsDecline, copy.settingsConfirm,
         ]
         return sentences.contains(where: \.isEmpty) ? nil : copy
     }

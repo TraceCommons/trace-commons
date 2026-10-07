@@ -82,12 +82,13 @@ struct ProjectsSection: View {
         )) {
             if let project = armingCandidate, let copy = armingCopy(project) {
                 // Not `.destructive`: arming destroys nothing and is
-                // reversible from this same picker.
+                // reversible from this same picker. Ron's #1146 heading,
+                // line and buttons; the body is the arming disclosure.
                 GlassConfirmation(
-                    title: copy.question, message: copy.body,
+                    title: copy.settingsQuestion, message: copy.settingsDescription + "\n\n" + copy.body,
                     actions: [
-                        .cancel(copy.decline) { armingCandidate = nil },
-                        GlassModalAction(copy.confirm, isDefault: true) {
+                        .cancel(copy.settingsDecline) { armingCandidate = nil },
+                        GlassModalAction(copy.settingsConfirm, isDefault: true) {
                             model.setProjectMode(project, mode: .autoUpload)
                             armingCandidate = nil
                         },
