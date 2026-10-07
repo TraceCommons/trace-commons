@@ -184,6 +184,74 @@ final class FirstRunRunnerTests: XCTestCase {
         XCTAssertNil(runner.failure)
     }
 
+    /// Ron's P-7 (review of #1235 item 4): opening the first run on Join with
+    /// the daemon running, nobody signed in, and a passkey this Mac
+    /// remembers, the sheets open at Welcome back with the passkey's name.
+    /// "Other sign-in options" closes it, Join is as it was, and it is not
+    /// offered again in this first run; Create passkey on Join opens P-1.
+    func test_aReturningPersonIsOfferedWelcomeBackOnceAndCanDismissIt() async throws {
+        let copy = try XCTUnwrap(FirstRunCopy.decode(try XCTUnwrap(TCCoreCopy.firstRunCopyJSON())))
+        let join = FirstRunState(tier: .quick, step: .join, daemonStarted: true)
+        let daemon = RecordingFirstRunDaemon()
+        let runner = FirstRunRunner(state: join, daemon: daemon)
+        let account = PasskeySheetsTests.RecordingAccount()
+        account.passkeys = NativePasskeyState(
+            state: "none", passkeyCount: 1, rememberedName: "Home", nearAiConnected: nil)
+
+        await runner.offerWelcomeBack(from: account)
+        XCTAssertTrue(runner.passkeyDue)
+        XCTAssertEqual(runner.passkeyStart, .welcomeBack)
+        XCTAssertEqual(runner.returningName, "Home")
+        XCTAssertEqual(account.calls, ["passkeyState"])
+        XCTAssertEqual(daemon.log, [], "asking is not a first-run daemon call")
+
+        runner.finishPasskey(.closed, copy: copy)
+        XCTAssertFalse(runner.passkeyDue)
+        XCTAssertEqual(runner.state, join, "dismissing P-7 leaves Join as it was")
+        XCTAssertNil(runner.passkeyOutcome?.joinNotice(copy))
+
+        await runner.offerWelcomeBack(from: account)
+        XCTAssertFalse(runner.passkeyDue, "dismissed once, not offered again")
+        XCTAssertEqual(account.calls, ["passkeyState"])
+
+        runner.requestPasskey()
+        XCTAssertTrue(runner.passkeyDue)
+        XCTAssertEqual(runner.passkeyStart, .choose, "Create passkey on Join opens P-1")
+    }
+
+    /// No remembered passkey, or a person already signed in: Join opens as
+    /// it always did.
+    func test_welcomeBackIsNotOfferedToAnyoneElse() async {
+        for passkeys in [
+            NativePasskeyState(state: "none", passkeyCount: 0, rememberedName: nil, nearAiConnected: nil),
+            NativePasskeyState(state: "unbound", passkeyCount: 1, rememberedName: "Home", nearAiConnected: false),
+            NativePasskeyState(state: "unknown", passkeyCount: nil, rememberedName: nil, nearAiConnected: nil),
+        ] {
+            let runner = FirstRunRunner(
+                state: FirstRunState(tier: .quick, step: .join, daemonStarted: true), daemon: RecordingFirstRunDaemon())
+            let account = PasskeySheetsTests.RecordingAccount()
+            account.passkeys = passkeys
+            await runner.offerWelcomeBack(from: account)
+            XCTAssertFalse(runner.passkeyDue, passkeys.state)
+            XCTAssertEqual(runner.passkeyStart, .choose)
+        }
+    }
+
+    /// The daemon's answer can arrive after Join changed (an enrolment the
+    /// first status reported, or the person answering): the rule is checked
+    /// again on the state as it is then.
+    func test_welcomeBackIsRecheckedAfterTheDaemonAnswers() async {
+        let runner = FirstRunRunner(
+            state: FirstRunState(tier: .quick, step: .join, daemonStarted: true), daemon: RecordingFirstRunDaemon())
+        let account = PasskeySheetsTests.RecordingAccount()
+        account.passkeys = NativePasskeyState(
+            state: "none", passkeyCount: 1, rememberedName: "Home", nearAiConnected: nil)
+        account.onPasskeyState = { runner.state = OnboardingNavigation.recordEnrolment(runner.state) }
+        await runner.offerWelcomeBack(from: account)
+        XCTAssertEqual(runner.state.account, .enrolled)
+        XCTAssertFalse(runner.passkeyDue)
+    }
+
     /// The sheets are not awaited, so Start can run while they are open. A
     /// sign-out that ends them after Start leaves the finished first run
     /// where it is rather than reopening Join.

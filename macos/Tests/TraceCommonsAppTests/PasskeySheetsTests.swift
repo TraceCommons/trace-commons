@@ -46,10 +46,14 @@ final class PasskeySheetsTests: XCTestCase {
             return signOutAnswer
         }
 
-        var existing: Int? = 0
-        func existingPasskeys() async -> Int? {
-            calls.append("existingPasskeys")
-            return existing
+        var passkeys: NativePasskeyState? = NativePasskeyState(
+            state: "none", passkeyCount: 0, rememberedName: nil, nearAiConnected: nil)
+        /// Runs while the daemon is being asked, before it answers.
+        var onPasskeyState: (@MainActor () -> Void)?
+        func passkeyState() async -> NativePasskeyState? {
+            calls.append("passkeyState")
+            onPasskeyState?()
+            return passkeys
         }
     }
 
@@ -215,7 +219,7 @@ final class PasskeySheetsTests: XCTestCase {
         func bind() async -> PasskeyBindResult { .bound }
         func signOut() async -> PasskeyCallResult { .done }
         func cancel() { calls.append("cancel") }
-        func existingPasskeys() async -> Int? { 0 }
+        func passkeyState() async -> NativePasskeyState? { nil }
     }
 
     /// The daemon counts Unicode scalars, not grapheme clusters; the sheet
@@ -379,22 +383,53 @@ final class PasskeySheetsTests: XCTestCase {
         XCTAssertEqual(mounts, ["OnboardingCoordinatorView.swift"])
     }
 
-    /// Ron's P-7: a returning person, whose Mac already holds a passkey for
-    /// this account, opens at Welcome back. None, or a daemon that cannot
-    /// say, opens at P-1, which still offers "Use existing passkey".
-    func test_aReturningPasskeyOpensAtWelcomeBack() {
-        XCTAssertEqual(PasskeySheetModel.startStep(existingPasskeys: 1), .welcomeBack)
-        XCTAssertEqual(PasskeySheetModel.startStep(existingPasskeys: 3), .welcomeBack)
-        XCTAssertEqual(PasskeySheetModel.startStep(existingPasskeys: 0), .choose)
-        XCTAssertEqual(PasskeySheetModel.startStep(existingPasskeys: nil), .choose)
+    /// Ron's P-7 opens when the first run opens for a returning person
+    /// (`FirstRunRunner.offerWelcomeBack`), never from Create passkey: the
+    /// presenter opens the sheets at the runner's step, with the remembered
+    /// name, and no longer asks the daemon itself.
+    func test_theFirstRunPresenterOpensAtTheRunnersStepWithTheRememberedName() throws {
+        let source = try Self.source()
+        XCTAssertTrue(source.contains("start: runner.passkeyStart"))
+        XCTAssertTrue(source.contains("returningName: runner.returningName"))
+        XCTAssertFalse(source.contains("returningName: nil"))
+        XCTAssertFalse(source.contains("existingPasskeys"))
     }
 
-    /// The first-run presenter asks the daemon before it opens the sheets,
-    /// and opens them at the step that answer chooses.
-    func test_theFirstRunPresenterAsksForExistingPasskeys() throws {
+    /// P-7's only words beyond the core's are the remembered name; nothing
+    /// else about the account is on it.
+    func test_welcomeBackShowsTheNameAndOnlyTheName() throws {
         let source = try Self.source()
-        XCTAssertTrue(source.contains("await account.existingPasskeys()"))
-        XCTAssertTrue(source.contains("PasskeySheetModel.startStep(existingPasskeys:"))
+        let start = try XCTUnwrap(source.range(of: "private var welcomeBack: some View {"))
+        let end = try XCTUnwrap(source.range(of: "/// One popup in Ron's shape", range: start.upperBound..<source.endIndex))
+        let body = String(source[start.upperBound..<end.lowerBound])
+        XCTAssertTrue(body.contains("Text(returningName)"))
+        XCTAssertEqual(body.components(separatedBy: "Text(").count - 1, 1, "one Text: the name")
+        XCTAssertFalse(body.contains("account"))
+        XCTAssertFalse(body.contains("email"))
+    }
+
+    /// Welcome back's Sign in is the existing sign-in, through Verify.
+    func test_welcomeBackSignsInThroughVerify() async throws {
+        let copy = try coreCopy()
+        let account = RecordingAccount()
+        account.signInAnswer = .bound
+        let model = PasskeySheetModel(start: .welcomeBack, copy: copy.passkey, account: account)
+        await model.useExisting()
+        XCTAssertEqual(model.step, .verify)
+        account.bindAnswer = .enrolled
+        await model.verify()
+        XCTAssertEqual(model.outcome, .signedIn)
+        XCTAssertEqual(account.calls, ["signIn", "bind"])
+    }
+
+    /// "Other sign-in options" closes Welcome back without a call.
+    func test_otherSignInOptionsClosesWelcomeBack() throws {
+        let copy = try coreCopy()
+        let account = RecordingAccount()
+        let model = PasskeySheetModel(start: .welcomeBack, copy: copy.passkey, account: account)
+        model.close()
+        XCTAssertEqual(model.outcome, .closed)
+        XCTAssertEqual(account.calls, [])
     }
 
     /// Kristi's #1235 B1, decision (a): "Use existing passkey" signs in, and

@@ -1523,13 +1523,18 @@ extension DaemonData {
     public struct PasskeyState: Codable, Equatable, Sendable {
         /// `none`, `unknown`, or binding labels `unbound|bound|closed|legacy`.
         public let state: String
-        /// Neither count nor connection is inferred from a missing binding row.
+        /// The passkeys this Mac remembers, not the account's on the server;
+        /// null when the daemon cannot read its list. Connection is never
+        /// inferred from a missing binding row.
         public let passkeyCount: Int?
+        /// The most recently used remembered passkey's name, if it has one.
+        public let rememberedName: String?
         public let nearAiConnected: Bool?
 
         public enum CodingKeys: String, CodingKey {
             case state
             case passkeyCount = "passkey_count"
+            case rememberedName = "remembered_name"
             case nearAiConnected = "near_ai_connected"
         }
     }

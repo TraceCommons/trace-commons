@@ -141,12 +141,17 @@ private struct FirstRunSteps: View {
     }
 
     /// One account per daemon client: a restarted daemon gets a new one.
+    /// Once there is one, a returning person is offered Welcome back (P-7);
+    /// the runner decides, and offers it at most once.
     private func refreshPasskeyAccount() {
         let client = model.passkeyClient
         guard client !== passkeyClient else { return }
         passkeyClient = client
         passkeyAccount = client.map {
             LivePasskeyAccount(client: $0, presentationAnchor: { NSApp.keyWindow ?? NSApp.mainWindow })
+        }
+        if let passkeyAccount {
+            Task { await runner.offerWelcomeBack(from: passkeyAccount) }
         }
     }
 
