@@ -249,7 +249,18 @@ const FOLDER_ENTRY_BUDGET: usize = 65_536;
 /// of `.json` files is both an OpenCode export and a trajectory export --
 /// reports both, and the shell asks; a folder that fits none, or is not
 /// there, reports nothing, and the shell refuses it. Each row's `path` is
-/// the picked folder itself.
+/// the picked folder itself, except for a tool's home:
+///
+/// - A moved Claude Code or Codex home -- the folder `CLAUDE_CONFIG_DIR` or
+///   `CODEX_HOME` would name, holding `projects/` or `sessions/` -- is that
+///   tool, read at that subfolder as [`probe`] reads the conventional one,
+///   and only that tool: the config files beside the store are not exports.
+/// - One Claude Code project folder (flat `<uuid>.jsonl`) matches nothing.
+///   The adapter reads the `projects` folder above it, not one project, and
+///   the trajectory reader would refuse every file, so any row would offer
+///   a reading that yields nothing.
+/// - A tool's own config files ([`CONFIG_FILE_NAMES`]) are never counted
+///   as flat exports.
 ///
 /// Like everything in this module it reads directory entries and metadata
 /// only and never opens a file. It follows no symlink below the picked
@@ -258,6 +269,41 @@ const FOLDER_ENTRY_BUDGET: usize = 65_536;
 #[must_use]
 pub fn describe_folder(path: &Path) -> Vec<SourceCandidate> {
     if !path.is_dir() {
+        return Vec::new();
+    }
+    let row = |source: &str, at: PathBuf, tally: Tally| SourceCandidate {
+        source: source.to_string(),
+        path: at,
+        exists: true,
+        session_count: tally.count,
+        most_recent: tally.most_recent,
+        relocated_by_env: false,
+        answers_at: source_answers_at(source).map(str::to_string),
+    };
+    // A tool's home: its store is a subfolder, never followed through a
+    // symlink, as every walk below the picked folder is.
+    let homes: Vec<SourceCandidate> = [
+        (
+            SOURCE_CLAUDE_CODE,
+            "projects",
+            claude_code_layout as fn(&Path) -> Tally,
+        ),
+        (SOURCE_CODEX, "sessions", codex_layout),
+    ]
+    .into_iter()
+    .filter_map(|(source, store, layout)| {
+        let at = path.join(store);
+        if !std::fs::symlink_metadata(&at).is_ok_and(|m| m.is_dir()) {
+            return None;
+        }
+        let tally = layout(&at);
+        (tally.count > 0).then(|| row(source, at, tally))
+    })
+    .collect();
+    if !homes.is_empty() {
+        return homes;
+    }
+    if is_one_claude_code_project(path) {
         return Vec::new();
     }
     [
@@ -270,16 +316,37 @@ pub fn describe_folder(path: &Path) -> Vec<SourceCandidate> {
     ]
     .into_iter()
     .filter(|(_, tally)| tally.count > 0)
-    .map(|(source, tally)| SourceCandidate {
-        source: source.to_string(),
-        path: path.to_path_buf(),
-        exists: true,
-        session_count: tally.count,
-        most_recent: tally.most_recent,
-        relocated_by_env: false,
-        answers_at: source_answers_at(source).map(str::to_string),
-    })
+    .map(|(source, tally)| row(source, path.to_path_buf(), tally))
     .collect()
+}
+
+/// The config files a coding tool keeps beside its store: never an export,
+/// whatever their suffix.
+pub const CONFIG_FILE_NAMES: &[&str] = &[
+    "settings.json",
+    "settings.local.json",
+    "auth.json",
+    "config.json",
+    "history.jsonl",
+];
+
+/// Whether `root` is one Claude Code project folder: it holds `.jsonl`
+/// files directly, and every one is named `<uuid>.jsonl`, as Claude Code
+/// names a top-level session.
+fn is_one_claude_code_project(root: &Path) -> bool {
+    let mut tally = Tally::new();
+    let stems: Vec<String> = tally
+        .files(root, |name| name.ends_with(JSONL_SUFFIX))
+        .iter()
+        .filter_map(|e| e.file_name().to_str().map(str::to_owned))
+        .collect();
+    !stems.is_empty() && stems.iter().all(|name| is_claude_code_session_name(name))
+}
+
+/// `<uuid>.jsonl`, the hyphenated UUID Claude Code names a session by.
+fn is_claude_code_session_name(name: &str) -> bool {
+    name.strip_suffix(JSONL_SUFFIX)
+        .is_some_and(|stem| stem.len() == 36 && uuid::Uuid::try_parse(stem).is_ok())
 }
 
 /// One layout walk's running count, and what is left of its entry budget.
@@ -352,13 +419,9 @@ impl Tally {
 /// Claude Code names every top-level session: a `.jsonl` file two levels
 /// down is otherwise too common a shape to call a Claude Code store.
 fn claude_code_layout(root: &Path) -> Tally {
-    let is_session = |name: &str| {
-        name.strip_suffix(JSONL_SUFFIX)
-            .is_some_and(|stem| stem.len() == 36 && uuid::Uuid::try_parse(stem).is_ok())
-    };
     let mut tally = Tally::new();
     for project in tally.subdirs(root) {
-        for file in tally.files(&project.path(), is_session) {
+        for file in tally.files(&project.path(), is_claude_code_session_name) {
             tally.note(file.metadata().ok());
         }
     }
@@ -427,9 +490,11 @@ fn trajectory_layout(root: &Path) -> Tally {
     })
 }
 
-/// Regular files directly in `root` whose name satisfies `named`.
+/// Regular files directly in `root` whose name satisfies `named`, a tool's
+/// config files ([`CONFIG_FILE_NAMES`]) aside.
 fn flat_layout(root: &Path, named: impl Fn(&str) -> bool) -> Tally {
     let mut tally = Tally::new();
+    let named = |name: &str| named(name) && !CONFIG_FILE_NAMES.contains(&name);
     for file in tally.files(root, named) {
         tally.note(file.metadata().ok());
     }
@@ -950,6 +1015,68 @@ mod tests {
         let found = describe_folder(picked.path());
         assert_eq!(sources_of(&found), vec![SOURCE_OPENCODE, SOURCE_TRAJECTORY]);
         assert!(found.iter().all(|c| c.session_count == over as u64));
+    }
+
+    /// Kristi b#7: a moved Claude Code home (`settings.json` beside
+    /// `projects/`) is Claude Code, read at its `projects` folder as
+    /// `probe` reads the conventional one -- never an OpenCode or trajectory
+    /// export because of the config file beside it.
+    #[test]
+    fn describe_folder_recognises_a_moved_claude_code_home_at_its_projects_folder() {
+        let picked = Scratch::new("folder-claude-home");
+        std::fs::write(picked.path().join("settings.json"), b"{}").unwrap();
+        std::fs::write(picked.path().join("history.jsonl"), b"{}").unwrap();
+        write_session(
+            &picked.path().join("projects/-Users-someone-code-app"),
+            &format!("{A_UUID}.jsonl"),
+        );
+
+        let row = only(&describe_folder(picked.path()), SOURCE_CLAUDE_CODE);
+        assert_eq!(row.path, picked.path().join("projects"));
+        assert_eq!(row.session_count, 1);
+    }
+
+    /// Kristi b#7: a moved Codex home (`auth.json` and `history.jsonl`
+    /// beside `sessions/`) is Codex, read at its `sessions` folder.
+    #[test]
+    fn describe_folder_recognises_a_moved_codex_home_at_its_sessions_folder() {
+        let picked = Scratch::new("folder-codex-home");
+        std::fs::write(picked.path().join("auth.json"), b"{}").unwrap();
+        std::fs::write(picked.path().join("history.jsonl"), b"{}").unwrap();
+        std::fs::write(picked.path().join("config.json"), b"{}").unwrap();
+        write_session(
+            &picked.path().join("sessions/2026/08/20"),
+            "rollout-2026-08-20T10-00-00-abc.jsonl",
+        );
+
+        let row = only(&describe_folder(picked.path()), SOURCE_CODEX);
+        assert_eq!(row.path, picked.path().join("sessions"));
+        assert_eq!(row.session_count, 1);
+    }
+
+    /// Kristi b#7: one Claude Code project folder (flat `<uuid>.jsonl`) is
+    /// not a trajectory export -- the strict reader would refuse every file
+    /// -- and the Claude Code adapter reads the `projects` folder above it,
+    /// not one project. So it matches nothing, and the shell refuses it,
+    /// rather than offering a reading that yields nothing.
+    #[test]
+    fn describe_folder_offers_nothing_for_a_single_claude_code_project_folder() {
+        let picked = Scratch::new("folder-claude-project");
+        write_session(picked.path(), &format!("{A_UUID}.jsonl"));
+        write_session(picked.path(), "0e1d2c3b-4a59-4687-9b0a-1b2c3d4e5f60.jsonl");
+
+        assert_eq!(describe_folder(picked.path()), Vec::new());
+    }
+
+    /// A tool's own config files are not exports: a folder holding only
+    /// them matches neither flat layout.
+    #[test]
+    fn describe_folder_does_not_count_config_files_as_exports() {
+        let picked = Scratch::new("folder-config-only");
+        for name in ["settings.json", "auth.json", "config.json", "history.jsonl"] {
+            std::fs::write(picked.path().join(name), b"{}").unwrap();
+        }
+        assert_eq!(describe_folder(picked.path()), Vec::new());
     }
 
     #[test]
