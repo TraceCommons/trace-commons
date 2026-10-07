@@ -148,8 +148,9 @@ final class FirstRunRunner: ObservableObject {
     }
 
     /// Run the calls for `point`. Leaving the roots moves on to the next step
-    /// only when every call succeeded; a dead invite goes back to Join; any
-    /// other failure leaves the step where it is. Start always ends in
+    /// only when every call succeeded; a dead invite, or a near.ai login or
+    /// enrolment without an invite that did not succeed, goes back to Join;
+    /// any other failure leaves the step where it is. Start always ends in
     /// `markComplete` unless a call before the grant failed, and reports
     /// `completeFailed` when the marker was not written. `refusal` is one
     /// decided before Start (`UsesStart`); once the marker is written it is
@@ -209,7 +210,12 @@ final class FirstRunRunner: ObservableObject {
             guard await daemon.signInNearAI() else { return fail(.signInFailed) }
             state.signedIn = true
         case .nearAILogin:
-            guard await daemon.nearAILogin() else { return fail(.signInFailed) }
+            // No Back to leave a sign-in that keeps failing: back to Join,
+            // the choice cleared, which says why (`nearAINotice`).
+            guard await daemon.nearAILogin() else {
+                state = FirstRunNavigation.returnToJoin(afterNearAIFailure: state)
+                return fail(.signInFailed)
+            }
         case .enrollNearAI:
             switch await daemon.enrollNearAI() {
             case .enrolled:
@@ -217,6 +223,7 @@ final class FirstRunRunner: ObservableObject {
                 state.signedIn = true
                 state.signedOutOfEnrolment = false
             case .refused(let label):
+                state = FirstRunNavigation.returnToJoin(afterNearAIFailure: state)
                 return fail(.nearAIEnrollFailed(label: label))
             }
         case .openPasskeySheets:

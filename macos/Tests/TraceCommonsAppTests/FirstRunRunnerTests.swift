@@ -436,12 +436,49 @@ final class FirstRunRunnerTests: XCTestCase {
 
         XCTAssertEqual(daemon.log, [.startDaemon(settingsJSON: state.sessionRoots.settingsJSON()!), .nearAILogin])
         XCTAssertEqual(runner.failure, .signInFailed)
-        XCTAssertEqual(runner.state.step, .folders)
         XCTAssertFalse(runner.state.signedIn)
+        // Kristi's review of #1261: no Back, so a sign-in that did not finish
+        // returns to Join with the choice cleared, which says why.
+        XCTAssertEqual(runner.state.step, .join)
+        XCTAssertEqual(runner.state.account, .none)
+        XCTAssertEqual(runner.state.toolAnswers, state.toolAnswers)
+        XCTAssertTrue(runner.state.daemonStarted)
         let copy = try XCTUnwrap(FirstRunCopy.decode(try XCTUnwrap(TCCoreCopy.firstRunCopyJSON())))
         XCTAssertEqual(
-            FoldersScreenLayout.notice(for: runner.failure, copy: copy, onboarding: TCOnboardingCopy.load()),
+            JoinScreenLayout.nearAINotice(runner.state, failure: runner.failure, copy: copy),
             copy.folders.signInFailed)
+
+        // Choosing watch only there moves on with no near.ai call.
+        runner.state = JoinScreenLayout.forward(runner.state)
+        daemon.log = []
+        await runner.commit(.leaveRoots)
+        XCTAssertEqual(daemon.log, [])
+        XCTAssertNil(runner.failure)
+        XCTAssertEqual(runner.state.account, .watchOnly)
+        XCTAssertEqual(runner.state.step, .uses)
+    }
+
+    /// Choosing near.ai again on Join is what lets the next Continue sign in;
+    /// the commit that failed does not leave it chosen.
+    func test_nearAIIsTriedAgainOnlyWhenChosenAgain() async throws {
+        var state = onFolders()
+        state.invite = ""
+        state.issuerHost = nil
+        state.account = .nearAI
+        let daemon = RecordingFirstRunDaemon()
+        daemon.failing = { $0 == .nearAILogin }
+        let runner = FirstRunRunner(state: state, daemon: daemon)
+        await runner.commit(.leaveRoots)
+        XCTAssertEqual(runner.state.step, .join)
+
+        runner.state = JoinScreenLayout.toggleNearAI(runner.state)
+        runner.state = JoinScreenLayout.forward(runner.state)
+        daemon.failing = { _ in false }
+        daemon.log = []
+        await runner.commit(.leaveRoots)
+        XCTAssertEqual(daemon.log, [.nearAILogin, .enrollNearAI])
+        XCTAssertTrue(runner.state.nearAIEnrolled)
+        XCTAssertEqual(runner.state.step, .uses)
     }
 
     /// A refused enrolment says why in the core's own line for its label
@@ -460,11 +497,33 @@ final class FirstRunRunnerTests: XCTestCase {
         XCTAssertEqual(runner.failure, .nearAIEnrollFailed(label: "near_ai_enroll_commons_unreachable"))
         XCTAssertFalse(runner.state.nearAIEnrolled)
         XCTAssertFalse(runner.state.holdsEnrolment)
-        XCTAssertEqual(runner.state.step, .folders)
+        // Back on Join with the choice cleared (Kristi's review of #1261).
+        XCTAssertEqual(runner.state.step, .join)
+        XCTAssertEqual(runner.state.account, .none)
         let copy = try XCTUnwrap(FirstRunCopy.decode(try XCTUnwrap(TCCoreCopy.firstRunCopyJSON())))
-        let line = try XCTUnwrap(FoldersScreenLayout.notice(for: runner.failure, copy: copy, onboarding: nil))
+        let line = try XCTUnwrap(JoinScreenLayout.nearAINotice(runner.state, failure: runner.failure, copy: copy))
         XCTAssertEqual(line, TCNearAiEnroll.line(label: "near_ai_enroll_commons_unreachable"))
         XCTAssertFalse(line.contains("near_ai_enroll"))
+    }
+
+    /// The label the review names: provisioning refused on the server. The
+    /// line is the core's, or its enrol refusal when it has none.
+    func test_aRefusedEndpointReturnsToJoin() async throws {
+        var state = onFolders()
+        state.invite = ""
+        state.issuerHost = nil
+        state.account = .nearAI
+        let daemon = RecordingFirstRunDaemon()
+        daemon.nearAIEnrolment = .refused(label: "near_ai_enroll_endpoint_refused")
+        let runner = FirstRunRunner(state: state, daemon: daemon)
+
+        await runner.commit(.leaveRoots)
+
+        XCTAssertEqual(runner.state.step, .join)
+        XCTAssertEqual(runner.state.account, .none)
+        let copy = try XCTUnwrap(FirstRunCopy.decode(try XCTUnwrap(TCCoreCopy.firstRunCopyJSON())))
+        let line = try XCTUnwrap(JoinScreenLayout.nearAINotice(runner.state, failure: runner.failure, copy: copy))
+        XCTAssertEqual(line, TCNearAiEnroll.line(label: "near_ai_enroll_endpoint_refused") ?? copy.folders.enrollRefused)
     }
 
     func test_aDeadInviteReturnsToJoinWithAnswersKept() async {

@@ -344,13 +344,33 @@ final class RulesScreenTests: XCTestCase {
             .appendingPathComponent("Sources/TraceCommonsApp/Views/FirstRun/RulesScreen.swift")
         let source = try String(contentsOf: url, encoding: .utf8)
         // The retry sits in the unavailable branch and reads again.
-        let branch = try XCTUnwrap(source.range(of: "} else if loadFailed {"))
+        let branch = try XCTUnwrap(source.range(of: "case .failed:"))
         let rest = source[branch.upperBound...]
-        let end = try XCTUnwrap(rest.range(of: "} else {"))
+        let end = try XCTUnwrap(rest.range(of: "case .loading:"))
         let failed = rest[..<end.lowerBound]
         XCTAssertTrue(failed.contains("copy.rules.unavailable"))
         XCTAssertTrue(failed.contains("RulesScreenLayout.retryTitle(copy)"))
         XCTAssertTrue(failed.contains("await load()"))
         XCTAssertTrue(source.contains("isEnabled: RulesScreenLayout.canContinue(projects: projects)"))
+    }
+
+    /// Kristi's review of #1261: while "Try again" reads the folders again,
+    /// the screen shows the loading line, not the old failure with a live
+    /// retry beside it. A read that fails again shows the failure again.
+    func test_aRetryShowsLoadingNotTheOldFailure() throws {
+        XCTAssertEqual(RulesScreenLayout.phase(projects: nil, loadFailed: false, loading: true), .loading)
+        XCTAssertEqual(RulesScreenLayout.phase(projects: nil, loadFailed: true, loading: true), .loading)
+        XCTAssertEqual(RulesScreenLayout.phase(projects: nil, loadFailed: true, loading: false), .failed)
+        XCTAssertEqual(RulesScreenLayout.phase(projects: [], loadFailed: false, loading: false), .loaded([]))
+        // Before the first read starts, it reads as loading too.
+        XCTAssertEqual(RulesScreenLayout.phase(projects: nil, loadFailed: false, loading: false), .loading)
+
+        let url = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Sources/TraceCommonsApp/Views/FirstRun/RulesScreen.swift")
+        let source = try String(contentsOf: url, encoding: .utf8)
+        XCTAssertTrue(source.contains("RulesScreenLayout.phase(projects: projects, loadFailed: loadFailed, loading: loading)"))
+        // One read at a time: a second press while one runs does nothing.
+        XCTAssertTrue(source.contains("guard projects == nil, !loading else { return }"))
     }
 }
