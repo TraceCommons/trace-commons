@@ -1,8 +1,9 @@
 import SwiftUI
 
 /// A stat tile (#1146 `StatCard`): an eyebrow label over a bold tabular
-/// value, on a full card with 10/12 padding. Neither line wraps: the value
-/// truncates, the label stays on one line.
+/// value, on a full card with 10/12 padding. The value truncates; the
+/// label wraps at a space, never inside a word, as #1146's untruncated
+/// `tc-eyebrow` does ("CREDIT / PENDING", never "CREDIT PEN…").
 public struct GlassStatCard: View {
     private let label: String
     private let value: String
@@ -21,7 +22,9 @@ public struct GlassStatCard: View {
             Text(label)
                 .glassType(GlassTokens.TypeScale.eyebrow)
                 .foregroundStyle(GlassColor.textTertiary)
-                .lineLimit(1)
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
             Text(value)
                 .glassType(Self.valueType)
                 .monospacedDigit()

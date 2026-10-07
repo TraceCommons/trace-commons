@@ -536,6 +536,7 @@ public struct MonitorShellCopy: MonitorWordTable {
     public let focusNeedsSelection: String
     public let focusWholeMap: String
     public let focusTool: String
+    public let backToHome: String
     public let watchingToolsOne: String
     public let watchingTools: String
     public let waitingForYouOne: String
@@ -576,6 +577,7 @@ public struct MonitorShellCopy: MonitorWordTable {
         case focusNeedsSelection = "focus_needs_selection"
         case focusWholeMap = "focus_whole_map"
         case focusTool = "focus_tool"
+        case backToHome = "back_to_home"
         case watchingToolsOne = "watching_tools_one"
         case watchingTools = "watching_tools"
         case waitingForYouOne = "waiting_for_you_one"

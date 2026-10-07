@@ -330,6 +330,11 @@ struct MonitorWindowView: View {
             traces.showsIgnored = showsIgnored
         }
         .onChange(of: showsIgnored) { _, shows in traces.showsIgnored = shows }
+        // #1146 `MonitorShell`: picking Inference shows the map's Private AI
+        // view, picking Traces its Traces view; Home keeps the choice.
+        .onChange(of: tab) { _, picked in
+            if let view = Self.mapTab(for: picked) { mapTab = view }
+        }
         // The app's live client, re-attached whenever the daemon restarts
         // or start-up ends; with none, each store draws the core as down,
         // except while the daemon is still starting, when it is loading.
@@ -411,6 +416,16 @@ struct MonitorWindowView: View {
         guard let folder else { return nil }
         return tree.tools.first { $0.folders.contains { $0.id == folder.id } }?.kind
             ?? TracesTree.majorityTool(folder.sessions)
+    }
+
+    /// The map view a tab picks (#1146 sets it on Inference and Traces);
+    /// nil keeps the current one.
+    static func mapTab(for picked: Tab) -> MapTab? {
+        switch picked {
+        case .inference: .privateAI
+        case .traces: .traces
+        case .home: nil
+        }
     }
 
     /// The binoculars: focus the map on the selected tool, or back to the
@@ -659,7 +674,7 @@ private struct MonitorMainPane<Content: View, Footer: View>: View {
                     // 8pt under the tabs and under the breadcrumb (#1146
                     // `mb-2`, `pb-2`).
                     if let breadcrumb {
-                        GlassBreadcrumb(breadcrumb, backLabel: MonitorWindowView.Tab.home.title,
+                        GlassBreadcrumb(breadcrumb, backLabel: MonitorWords.table?.shell.backToHome ?? MonitorWindowView.Tab.home.title,
                                         onBack: breadcrumb.first?.action)
                             .padding(.horizontal, GlassTokens.Space.panePadding)
                             .padding(.top, GlassTokens.Space.s4)
@@ -750,7 +765,8 @@ private struct MonitorMapPane: View {
                 accessibilityName: FlowMapScene.words?.mapLabel ?? MonitorWindowView.Tab.traces.title, state: tracesState,
                 focus: scene.focusPoint(tool: focusTool))
         case .privateAI:
-            if let harnesses = inference.harnesses, let privateAILabel {
+            if model.harnesses != .none, let privateAILabel {
+                let harnesses = model.harnesses
                 FlowMapView(
                     scene: .privateAI(
                         harnesses, destinationLabel: privateAILabel,

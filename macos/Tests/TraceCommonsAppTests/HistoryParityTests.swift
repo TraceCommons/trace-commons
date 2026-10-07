@@ -102,7 +102,7 @@ final class HistoryParityTests: XCTestCase {
             ".init(copy.redactionVersion, detail.redactionPipelineVersion, mono: true)",
             "GlassEyebrowCard(copy.nextAction)", "status: index == confirmation.gravest ? .outside : .off",
             "Button(inFlight ? confirmation.busyLabel : confirmation.confirmLabel, action: onConfirm)",
-            ".buttonStyle(GlassButtonStyle(.primary))", "GlassWell {",
+            ".buttonStyle(GlassButtonStyle(.destructive))", "GlassWell {",
         ] {
             XCTAssertTrue(source.contains(needle), "SessionContributionOverview.swift lacks \(needle)")
         }
@@ -128,7 +128,7 @@ final class HistoryParityTests: XCTestCase {
             "Button(copy.withdraw) { confirming = true } .buttonStyle(GlassButtonStyle(.glass)) .frame(minHeight: 44)",
             "} else if confirming { WithdrawalConfirmationView(",
             "onConfirm: { model.withdraw(record) }",
-            ".buttonStyle(GlassButtonStyle(.primary)) .frame(minHeight: 44) .disabled(inFlight)",
+            ".buttonStyle(GlassButtonStyle(.destructive)) .frame(minHeight: 44) .disabled(inFlight)",
             "GlassStatusLabel(body, status: index == confirmation.gravest ? .outside : .off) "
                 + ".fontWeight(index == confirmation.gravest ? .semibold : nil)",
         ] {
@@ -410,8 +410,12 @@ final class HistoryParityTests: XCTestCase {
         for needle in [
             "HistorySelection.record(for: row.submissionId, in: model.history)",
             "Button(MonitorWords.table?.shell.open ?? copy.viewSession, action: open)",
-            "case .withdraw: Button(copy.withdraw) { confirming = true }",
-            "WithdrawalConfirmationView( status: SessionDetailView.withdrawalStatus(record, detail: detail), "
+            "case .withdraw: Button(copy.withdraw) { confirming = true } "
+                + ".buttonStyle(GlassButtonStyle(.destructive, small: true))",
+            // HH-2: #1146's confirmation is a glass modal over the window.
+            ".glassModal(isPresented: Binding(",
+            "WithdrawalConfirmationModal( status: SessionDetailView.withdrawalStatus(record, "
+                + "detail: model.sessionDetails[record.submissionID]), "
                 + "keepLabel: copy.keepContribution, inFlight: model.withdrawing.contains(record.submissionID), "
                 + "onKeep: { confirming = false }, onConfirm: { model.withdraw(record) } )",
             "WithdrawalOutcomeView(result: result)",

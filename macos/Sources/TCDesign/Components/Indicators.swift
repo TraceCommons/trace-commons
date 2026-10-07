@@ -206,6 +206,14 @@ public struct GlassToolTile: View {
         case tool(GlassTool), folder, session
         /// The "+" of an add box (the first run's "add your tool").
         case add
+        /// A folder tile marked with its name's first letter (#1146
+        /// `HistoryRow`: `project_label.slice(0, 1).toUpperCase()`).
+        case folderInitial(String)
+    }
+
+    /// A name's first letter, upper-cased; the folder mark for none.
+    public static func initial(_ name: String) -> String {
+        name.first.map { String($0).uppercased() } ?? folderMark
     }
 
     private let kind: Kind
@@ -217,7 +225,7 @@ public struct GlassToolTile: View {
     }
 
     /// The folder and session tiles' marks, as #1146 draws them.
-    static let folderMark = "dir"
+    public static let folderMark = "dir"
     static let sessionMark = "▤"
 
     public var body: some View {
@@ -245,6 +253,12 @@ public struct GlassToolTile: View {
             // glyph, hidden from assistive tech with the rest of the tile.
             case .folder:
                 Text(Self.folderMark)
+                    .glassGlyph(large ? 11 : 9, weight: .bold)
+                    .foregroundStyle(GlassTokens.Color.tileFolderInk.color)
+                    .frame(width: side, height: side)
+                    .background(RoundedRectangle(cornerRadius: radius, style: .continuous).fill(GlassTokens.Color.tileFolder.color))
+            case let .folderInitial(name):
+                Text(Self.initial(name))
                     .glassGlyph(large ? 11 : 9, weight: .bold)
                     .foregroundStyle(GlassTokens.Color.tileFolderInk.color)
                     .frame(width: side, height: side)

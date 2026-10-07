@@ -79,4 +79,71 @@ final class GlassParityRoundOneTests: XCTestCase {
             sentence: { _ in nil }, state: { _ in .unknown })
         XCTAssertEqual(empty.nodes.first?.sublabel, words.noneFound)
     }
+
+    /// INF-MAP-1: the Inference tab shows the map's Private AI view, the
+    /// Traces tab its Traces view, and Home keeps the choice (#1146).
+    func test_aTabPicksItsMapView() {
+        XCTAssertEqual(MonitorWindowView.mapTab(for: .inference), .privateAI)
+        XCTAssertEqual(MonitorWindowView.mapTab(for: .traces), .traces)
+        XCTAssertNil(MonitorWindowView.mapTab(for: .home))
+    }
+
+    /// The Inference inspector reads the same tool list as the Local tools
+    /// card and the map; a list not read is nil, never no tools.
+    func test_theInferenceInspectorReadsTheOneToolList() throws {
+        XCTAssertNil(PrivateAIInspectorView.rows(.none))
+        let source = try TracesParityTests.text("Views/Monitor/InferenceViews.swift")
+        XCTAssertFalse(source.contains("store.harnesses"), "the inspector reads a second tool list")
+        let window = try TracesParityTests.text("Views/MonitorWindowView.swift")
+        XCTAssertFalse(window.contains("inference.harnesses"), "the map reads a second tool list")
+    }
+
+    /// HH-4: a History row's tile is the folder's first letter (#1146).
+    func test_aHistoryTileIsTheFoldersInitial() {
+        XCTAssertEqual(GlassToolTile.initial("api"), "A")
+        XCTAssertEqual(GlassToolTile.initial("ébène"), "É")
+        XCTAssertEqual(GlassToolTile.initial(""), GlassToolTile.folderMark)
+    }
+
+    /// HH-1: the stat card's eyebrow wraps to a second line instead of
+    /// truncating ("CREDIT / PENDING", never "CREDIT PEN...").
+    func test_theStatEyebrowWraps() throws {
+        let source = try TracesParityTests.text("../TCDesign/Components/StatCard.swift")
+        let label = try XCTUnwrap(source.range(of: "Text(label)"))
+        let value = try XCTUnwrap(source.range(of: "Text(value)"))
+        let eyebrow = String(source[label.upperBound..<value.lowerBound])
+        XCTAssertTrue(eyebrow.contains(".lineLimit(2)"), eyebrow)
+        XCTAssertFalse(eyebrow.contains(".lineLimit(1)"), eyebrow)
+    }
+
+    /// HH-2: the withdrawal confirmation's footer is Keep it then Confirm
+    /// withdrawal (destructive, never the default), both disarmed while it
+    /// is in flight; without the core's words only Keep it is offered.
+    func test_theWithdrawalModalActions() {
+        let confirmation = WithdrawalCopy.Confirmation(
+            question: "Q", description: "D", ambiguity: nil, bodies: ["b"], gravest: 0, credit: nil,
+            confirmLabel: "Confirm", busyLabel: "Busy")
+        let idle = WithdrawalConfirmationModal.actions(
+            confirmation, keepLabel: "Keep", inFlight: false, keep: {}, confirm: {})
+        XCTAssertEqual(idle.map(\.title), ["Keep", "Confirm"])
+        XCTAssertEqual(idle.map(\.role), [.cancel, .destructive])
+        XCTAssertTrue(idle.allSatisfy(\.isEnabled))
+        XCTAssertFalse(idle.contains(where: \.isDefault))
+        let busy = WithdrawalConfirmationModal.actions(
+            confirmation, keepLabel: "Keep", inFlight: true, keep: {}, confirm: {})
+        XCTAssertEqual(busy.map(\.title), ["Keep", "Busy"])
+        XCTAssertFalse(busy.contains(where: \.isEnabled))
+        let unworded = WithdrawalConfirmationModal.actions(nil, keepLabel: "Keep", inFlight: false, keep: {}, confirm: {})
+        XCTAssertEqual(unworded.map(\.title), ["Keep"])
+    }
+
+    /// The first run's tool row shows a home-relative path, and only a
+    /// path under the home folder is shortened.
+    func test_aToolPathIsHomeRelative() {
+        XCTAssertEqual(ToolAnswerRowLayout.homeRelative("/Users/a/.claude/projects", home: "/Users/a"), "~/.claude/projects")
+        XCTAssertEqual(ToolAnswerRowLayout.homeRelative("/Users/a", home: "/Users/a"), "~")
+        XCTAssertEqual(ToolAnswerRowLayout.homeRelative("/Users/ab/x", home: "/Users/a"), "/Users/ab/x")
+        XCTAssertEqual(ToolAnswerRowLayout.homeRelative("/tmp/x", home: "/Users/a"), "/tmp/x")
+        XCTAssertEqual(UsesScreenLayout.checkCaptionIndent, 15 + GlassTokens.Space.s4)
+    }
 }

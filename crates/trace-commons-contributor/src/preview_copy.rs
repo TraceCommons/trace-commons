@@ -983,6 +983,8 @@ pub struct MonitorShellCopy {
     pub focus_needs_selection: &'static str,
     pub focus_whole_map: &'static str,
     pub focus_tool: &'static str,
+    /// The breadcrumb's icon-only back button's name.
+    pub back_to_home: &'static str,
     /// Home's status card: watching N tools.
     pub watching_tools_one: &'static str,
     pub watching_tools: &'static str,
@@ -1215,6 +1217,7 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             hide_inspector: "Hide the inspector",
             focus_needs_selection: "Select a tool, project or session first",
             focus_whole_map: "Back to the whole map",
+            back_to_home: "Back to Home",
             focus_tool: "Show {tool} in the map",
             watching_tools_one: "Watching 1 tool",
             watching_tools: "Watching {count} tools",

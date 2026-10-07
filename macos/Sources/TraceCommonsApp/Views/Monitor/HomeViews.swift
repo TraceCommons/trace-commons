@@ -757,6 +757,24 @@ private struct HistoryListRow: View {
                 below(copy)
             }
         }
+        // #1146's confirmation: a glass modal over the window, not a well
+        // under the row (owner: glass modal for confirmations).
+        .glassModal(isPresented: Binding(
+            get: {
+                confirming && control == .withdraw && record.flatMap { model.withdrawals[$0.submissionID] } == nil
+            },
+            set: { if !$0 { confirming = false } }
+        )) {
+            if let record, let copy = model.publicRunCopy {
+                WithdrawalConfirmationModal(
+                    status: SessionDetailView.withdrawalStatus(record, detail: model.sessionDetails[record.submissionID]),
+                    keepLabel: copy.keepContribution,
+                    inFlight: model.withdrawing.contains(record.submissionID),
+                    onKeep: { confirming = false },
+                    onConfirm: { model.withdraw(record) }
+                )
+            }
+        }
         .padding(.vertical, GlassTokens.Space.s7)
         .padding(.horizontal, GlassTokens.Space.s2)
         .background(
@@ -770,8 +788,9 @@ private struct HistoryListRow: View {
         .accessibilityAddTraits(selected ? .isSelected : [])
     }
 
+    /// #1146's tile: the folder's first letter.
     private var tile: some View {
-        GlassToolTile(.folder, large: true)
+        GlassToolTile(.folderInitial(row.projectLabel ?? ""), large: true)
             .frame(width: 38, alignment: .leading)
     }
 
@@ -846,8 +865,8 @@ private struct HistoryListRow: View {
         return HistoryList.rowWithdraw(record: record, detail: detail, result: result, account: model.accountSession)
     }
 
-    /// Open, and Withdraw (or what stands in its place) while no outcome or
-    /// confirmation is drawn under the row.
+    /// Open, and Withdraw (or what stands in its place) while no outcome is
+    /// drawn under the row.
     @ViewBuilder
     private func actions(_ copy: PublicRunCopy) -> some View {
         let result = record.flatMap { model.withdrawals[$0.submissionID] }
@@ -855,32 +874,24 @@ private struct HistoryListRow: View {
         Button(MonitorWords.table?.shell.open ?? copy.viewSession, action: open)
             .buttonStyle(GlassButtonStyle(.glass, small: true))
             .frame(minHeight: 44)
-        if result == nil, !confirming || control != .withdraw {
+        if result == nil {
             withdrawControl(control, copy: copy)
         }
     }
 
     /// What runs the row's full width under it: the withdrawal outcome and
-    /// Retry, the confirmation, and sign-in's progress and failure lines.
+    /// Retry, and sign-in's progress and failure lines. The confirmation is
+    /// a glass modal over the window (`WithdrawalConfirmationModal`).
     @ViewBuilder
     private func below(_ copy: PublicRunCopy) -> some View {
-        let detail = record.flatMap { model.sessionDetails[$0.submissionID] }
         let result = record.flatMap { model.withdrawals[$0.submissionID] }
         let control = control
-        if let record {
+        if record != nil {
             if let result {
                 if HistoryList.showsOutcome(result) {
                     WithdrawalOutcomeView(result: result)
                 }
                 withdrawControl(control, copy: copy)
-            } else if confirming, control == .withdraw {
-                WithdrawalConfirmationView(
-                    status: SessionDetailView.withdrawalStatus(record, detail: detail),
-                    keepLabel: copy.keepContribution,
-                    inFlight: model.withdrawing.contains(record.submissionID),
-                    onKeep: { confirming = false },
-                    onConfirm: { model.withdraw(record) }
-                )
             }
         }
         if control == .signIn, let words = MonitorWords.table?.historyActions {
@@ -895,8 +906,9 @@ private struct HistoryListRow: View {
     private func withdrawControl(_ control: HistoryList.RowWithdraw, copy: PublicRunCopy) -> some View {
         let words = MonitorWords.table?.historyActions
         switch control {
+        // #1146: Withdraw reads in the outside ink.
         case .withdraw: Button(copy.withdraw) { confirming = true }
-            .buttonStyle(GlassButtonStyle(.glass, small: true))
+            .buttonStyle(GlassButtonStyle(.destructive, small: true))
             .frame(minHeight: 44)
             .disabled(record.map { model.withdrawing.contains($0.submissionID) } ?? true)
         // Retry withdraws without asking again, as the legacy

@@ -306,6 +306,14 @@ struct PrivateAIInspectorView: View {
     let destinationLabel: String?
     @EnvironmentObject private var model: AppModel
 
+    /// The tools, from the one list the Local tools card and the Private AI
+    /// map read too (`AppModel.harnesses`, as #1146 reads one
+    /// `useHarnesses()`), so the pane, the inspector and the map never
+    /// disagree. `.none` is a list not read: nil, never "no tools".
+    static func rows(_ list: HarnessList) -> [HarnessRow]? {
+        list == .none ? nil : list.harnesses
+    }
+
     var body: some View {
         let copy = runningCopy
         ScrollView {
@@ -315,7 +323,7 @@ struct PrivateAIInspectorView: View {
                         .glassType(GlassTokens.TypeScale.heading.weight(.bold))
                         .foregroundStyle(GlassColor.textPrimary)
                         .accessibilityAddTraits(.isHeader)
-                    if let copy, let sub = Self.subLine(store.harnesses?.harnesses, copy: copy) {
+                    if let copy, let sub = Self.subLine(Self.rows(model.harnesses), copy: copy) {
                         Text(sub)
                             .glassType(GlassTokens.TypeScale.label.weight(.regular))
                             .foregroundStyle(GlassColor.textSecondary)
@@ -336,20 +344,18 @@ struct PrivateAIInspectorView: View {
     }
 
     private func summary(_ copy: PrivateInferenceCopy) -> some View {
-        let rows = store.harnesses?.harnesses
+        let rows = Self.rows(model.harnesses)
         let counts = Self.counts(rows)
         let state = PrivateAISwitchCard.stateLabel(
             state: InferenceAccountSection.surfaceState(store.privateAI?.state), copy: copy,
             calls: model.privateInferenceCalls)
         return VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
             // A list nobody could read is a dash in both cells, never zero.
-            // Side by side when both labels fit on one line, stacked
-            // otherwise: a legend label never wraps.
-            let connectedCell = GlassLegendCell(copy.inspectorConnected, value: counts.connected, status: .on)
-            let notConnectedCell = GlassLegendCell(copy.inspectorNotConnected, value: counts.notConnected, status: .off)
-            ViewThatFits(in: .horizontal) {
-                HStack(spacing: GlassTokens.Space.s3) { connectedCell; notConnectedCell }
-                VStack(spacing: GlassTokens.Space.s3) { connectedCell; notConnectedCell }
+            // Always side by side, two equal columns, as #1146's
+            // `.tc-legend` grid is.
+            HStack(spacing: GlassTokens.Space.s3) {
+                GlassLegendCell(copy.inspectorConnected, value: counts.connected, status: .on)
+                GlassLegendCell(copy.inspectorNotConnected, value: counts.notConnected, status: .off)
             }
             VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
                 InspectorFactRow(label: copy.inspectorStatus, value: state.line, status: state.status)
