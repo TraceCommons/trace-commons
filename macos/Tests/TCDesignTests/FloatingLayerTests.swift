@@ -10,15 +10,16 @@ final class FloatingLayerTests: XCTestCase {
         XCTAssertEqual(EnvironmentValues().glassLayer, .content)
     }
 
-    /// One place decides when a surface becomes Liquid Glass: the
-    /// `glassSurface` modifier. A component calling `glassEffect` itself
-    /// would skip the content-layer and Reduce Transparency checks.
-    func test_onlyTheSurfaceModifierAppliesLiquidGlass() throws {
+    /// No surface is Liquid Glass of its own: a floating surface is #1146's
+    /// painted tier over a blur, on every macOS (owner ruling, 2026-10-07),
+    /// and the `glassSurface` modifier is the one place that decides it. A
+    /// component calling `glassEffect` itself would skip that decision.
+    func test_noComponentAppliesLiquidGlassItself() throws {
         var callers: [String] = []
         for (name, text) in try Self.sources() where text.contains(".glassEffect(") {
             callers.append(name)
         }
-        XCTAssertEqual(callers, ["GlassStyle.swift"])
+        XCTAssertEqual(callers, [])
     }
 
     /// Controls go through `glassSurface`, so the same control is painted in

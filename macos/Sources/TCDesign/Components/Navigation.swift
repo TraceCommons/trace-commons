@@ -83,14 +83,18 @@ public struct GlassSegmentedTabs<Value: Hashable>: View {
                     .glassType(GlassTokens.TypeScale.label.weight(selected ? .semibold : .medium))
                     .foregroundStyle(Self.ink(selected: selected, hovering: hovered == segment.value, floating: floating))
                     .padding(.horizontal, floating ? 12 : 8)
+                    // The floating item is its label and 5pt above and
+                    // below (#1146 `.tc-segmented--floating` item).
+                    .padding(.vertical, floating ? 5 : 0)
                     .frame(maxWidth: floating ? nil : .infinity)
-                    .frame(minHeight: floating ? 24 : GlassTokens.Size.tab)
+                    .frame(minHeight: floating ? nil : GlassTokens.Size.tab)
                     .background {
                         // The press darkens the selected fill, or a wash
                         // behind an unselected label; never the label.
                         if selected {
                             if floating {
-                                Capsule().fill(GlassTokens.Color.controlSelected.color).glassPressedFill()
+                                // #1146's floating selection: a brighter fill, no edge.
+                                Capsule().fill(GlassTokens.Color.controlSelectedFloating.color).glassPressedFill()
                             } else {
                                 Capsule().fill(GlassTokens.Color.controlSelected.color)
                                     .glassPressedFill()

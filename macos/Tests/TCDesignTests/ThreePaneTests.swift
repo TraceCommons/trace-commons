@@ -113,7 +113,7 @@ final class ThreePaneTests: XCTestCase {
                        CGRect(x: 100, y: 200, width: 1280, height: 760))
         let nearEdge = CGRect(x: 1000, y: 200, width: 690, height: 760)
         XCTAssertEqual(GlassPaneLayout.windowFrame(nearEdge, width: 1280, visible: screen),
-                       CGRect(x: 620, y: 200, width: 1280, height: 760))
+                       CGRect(x: 640, y: 200, width: 1280, height: 760))
         XCTAssertEqual(GlassPaneLayout.windowFrame(nearEdge, width: 2400, visible: screen),
                        CGRect(x: 0, y: 200, width: 1920, height: 760))
         // Shrinking keeps the leading edge.

@@ -34,7 +34,7 @@ final class GlassMaterialTests: XCTestCase {
         let tail = backdrop[native.upperBound...].prefix(400)
         XCTAssertTrue(tail.contains("glassVeil") && tail.contains("paneFill"))
         let style = try String(contentsOf: url.appendingPathComponent("GlassStyle.swift"), encoding: .utf8)
-        XCTAssertTrue(style.contains(".glassEdge(tier.edge, in: shape)"))
+        XCTAssertTrue(style.contains(".glassEdge(edge ?? tier.edge, in: shape)"))
         XCTAssertFalse(style.contains("drawsOwnEdge"))
     }
 

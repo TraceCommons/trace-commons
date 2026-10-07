@@ -18,24 +18,17 @@ public struct GlassCard<Content: View>: View {
     }
 
     /// The hover fill: `cardHover` on an interactive card, none otherwise.
+    /// It replaces the card's gradient (#1146 `.tc-card--interactive:hover`).
     static func hoverFill(interactive: Bool) -> GlassRGBA? {
         interactive ? GlassTokens.Color.cardHover : nil
     }
 
     public var body: some View {
-        let radius = quiet ? GlassTokens.Radius.cardQuiet : GlassTokens.Radius.card
-        let padded = content
+        content
             .padding(.vertical, flush ? 0 : (quiet ? 10 : GlassTokens.Space.cardPaddingVertical))
             .padding(.horizontal, flush ? 0 : (quiet ? 12 : GlassTokens.Space.cardPaddingHorizontal))
             .frame(maxWidth: .infinity, alignment: .leading)
-        Group {
-            if let hover = Self.hoverFill(interactive: interactive) {
-                padded.glassHover(hover, in: RoundedRectangle(cornerRadius: radius, style: .continuous))
-            } else {
-                padded
-            }
-        }
-        .glassTier(quiet ? .cardQuiet : .card)
+            .glassTier(quiet ? .cardQuiet : .card, hover: Self.hoverFill(interactive: interactive))
     }
 }
 
@@ -149,7 +142,8 @@ public struct GlassLegendCell: View {
 }
 
 /// Label and value pairs, labels right-aligned in a 70pt column (the
-/// inspector's Path, Sessions, User).
+/// inspector's Path, Sessions, User), inset 6pt on each side (#1146
+/// `.tc-kv`).
 public struct GlassKeyValueList: View {
     public struct Item: Identifiable {
         public let label: String
@@ -190,8 +184,11 @@ public struct GlassKeyValueList: View {
                 .accessibilityElement(children: .combine)
             }
         }
+        .padding(.horizontal, Self.inset)
         .glassType(GlassTokens.TypeScale.label.weight(.regular))
     }
+
+    static let inset: CGFloat = 6
 }
 
 /// A grid row inside a flush card: hairline above, never around.
